@@ -20,6 +20,12 @@ service CapabilityCore {
   // Evaluate a policy decision for a tool invocation.
   rpc EvaluatePolicy(EvaluatePolicyRequest) returns (EvaluatePolicyResponse);
 
+  // Resolve the registry-owned binding of each named tool: the capability that
+  // governs it, its declared class and approval floor, and, for an MCP tool,
+  // its pinned definition digest and review state. This is the only source of
+  // an `mcp__` binding; a name the registry does not hold is simply absent.
+  rpc ResolveToolBindings(ResolveToolBindingsRequest) returns (ResolveToolBindingsResponse);
+
   // Validate that a skill bundle exists and is structurally promotable.
   rpc ValidateSkillBundle(ValidateSkillBundleRequest) returns (ValidateSkillBundleResponse);
 
@@ -28,6 +34,15 @@ service CapabilityCore {
 
   // Promote a skill to a new scope.
   rpc PromoteSkill(PromoteSkillRequest) returns (PromoteSkillResponse);
+
+  // List the skill bundles an org holds, optionally narrowed to some skills.
+  rpc ListSkillBundles(ListSkillBundlesRequest) returns (ListSkillBundlesResponse);
+
+  // Read one skill bundle manifest: its files, digests and sizes.
+  rpc GetSkillBundleManifest(GetSkillBundleManifestRequest) returns (SkillBundleManifest);
+
+  // Read one blob of a skill bundle by its sha256 digest.
+  rpc GetSkillBlob(GetSkillBlobRequest) returns (GetSkillBlobResponse);
 }
 
 message ListCapabilitiesRequest {
@@ -75,7 +90,7 @@ message CapabilityDetail {
   // Description for agent context.
   string description = 5;
 
-  // Risk flags: "safe", "read_only", "mutation", "dangerous".
+  // Risk level: "low", "medium", or "high"; capability-core rejects any other value.
   string risk_level = 6;
 
   // Whether full definition must be loaded on demand (progressive disclosure).
@@ -117,6 +132,18 @@ message CapabilityDetail {
   // model-kind only: declared residency label ("global", "eu", "norway").
   // Empty means undeclared.
   string residency = 17;
+
+  // Declared side-effect class of the capability, the strictest class of the
+  // tools it carries: "read", "sandbox_compute", "context_write",
+  // "external_write", "destructive", "owner_effect" or "unclassified". The
+  // vocabulary is closed and "unclassified" is the strictest, so an empty or
+  // unrecognised value is reported as "unclassified", never as a weaker class.
+  // Read-only: no request field sets it.
+  string side_effect_class = 18;
+
+  // Approval floor the class implies: "none", "ask" or "durable_owner".
+  // "owner_effect" always carries "durable_owner".
+  string approval_floor = 19;
 }
 
 // EvaluatePolicy — check whether a tool invocation is allowed.
@@ -141,6 +168,19 @@ message EvaluatePolicyRequest {
   // rejected until trusted identity/resource bindings are carried or resolved
   // by this contract. Empty, reserved, and unknown values fail closed.
   string scope = 5;
+
+  // The person the run acts for. Asserted by the execution-core service
+  // principal, which is the trust boundary: capability-core accepts it only from
+  // that principal and binds it into the signed decision. Empty means the
+  // caller does not assert one.
+  string user_id = 6;
+
+  // The tool being called, as the model named it. When present, the decision is
+  // made for this tool's registry binding (class, approval floor, review state)
+  // instead of the capability's ceiling, and the name is bound into the signed
+  // decision. An `mcp__` name resolves only from the registry and is denied when
+  // the registry does not hold it. Empty means a capability-level evaluation.
+  string tool_name = 7;
 }
 
 message EvaluatePolicyResponse {
@@ -166,6 +206,80 @@ message EvaluatePolicyResponse {
   // binds capability id/version, tenant, run, agent, scope, decision, reason,
   // and budget context; execution runtimes must verify it before dispatch.
   string decision_evidence = 6;
+
+  // Declared side-effect class the decision was made for: the evaluated tool's
+  // class, or the capability's ceiling when no tool was named. Same vocabulary
+  // as CapabilityDetail.side_effect_class.
+  string side_effect_class = 7;
+
+  // Approval floor the decision was made under: "none", "ask" or
+  // "durable_owner". Always at least what the class implies.
+  string approval_floor = 8;
+
+  // What produced the decision: "risk_level" (the capability's own risk),
+  // "approval_floor" (a class or floor raised it to ask), "tool_review" (the
+  // tool is not approved or is not in the registry), "capability_gate" (the
+  // capability is out of rollout, unavailable, out of scope or ungranted) or,
+  // only when TOOL_POLICY_ENFORCED is on, a stored per-tool policy:
+  // "tool_policy_never", "tool_policy_ask" or "tool_policy_allow".
+  string policy_source = 9;
+
+  // Pinned definition digest of the evaluated MCP tool, lower-case hex. Empty
+  // for a built-in tool and for a capability-level evaluation.
+  string tool_digest = 10;
+}
+
+// ResolveToolBindings — resolve the registry bindings of the named tools.
+message ResolveToolBindingsRequest {
+  // Tenant context; must match the verified tenant.
+  string org_id = 1;
+
+  // Run the bindings are resolved for, for audit correlation.
+  string run_id = 2;
+
+  // The person the run acts for; same trust rule as EvaluatePolicyRequest.user_id.
+  // A user caller may only name themselves.
+  string user_id = 3;
+
+  // Tool names as the model sees them, at most 256 per request.
+  repeated string tool_names = 4;
+}
+
+// The bindings the registry holds for the requested names.
+message ResolveToolBindingsResponse {
+  // One entry per requested name the registry holds. A name that is missing
+  // here has no binding and must not be dispatched.
+  repeated ToolBinding bindings = 1;
+}
+
+// ToolBinding is the registry's declaration of one tool: what governs it and
+// what it is allowed to be. It carries digests and classes, never a description
+// or a schema.
+message ToolBinding {
+  // The name the binding was resolved for.
+  string tool_name = 1;
+
+  // Capability whose policy governs the tool.
+  string capability_id = 2;
+
+  // Exact capability version; for an MCP tool it changes with the pinned digest.
+  string capability_version = 3;
+
+  // Declared side-effect class of this tool.
+  string side_effect_class = 4;
+
+  // Approval floor of this tool, never below what its class implies.
+  string approval_floor = 5;
+
+  // Pinned definition digest, lower-case hex; empty for a built-in tool.
+  string tool_digest = 6;
+
+  // MCP only: "approved", "pending" or "drifted"; empty for a built-in tool.
+  string review_state = 7;
+
+  // What the registry alone lets a call do today: "allow", "ask" or "deny". It
+  // does not include the per-call capability evaluation, which still applies.
+  string effective_policy = 8;
 }
 
 message ValidateSkillBundleRequest {
@@ -202,4 +316,52 @@ message PromoteSkillResponse {
   repeated string checks = 2;
   string reason = 3;
   CapabilityDetail capability = 4;
+}
+
+message ListSkillBundlesRequest {
+  // Empty lists every skill bundle of the caller's organization.
+  repeated string skill_ids = 1;
+}
+
+message ListSkillBundlesResponse {
+  repeated SkillBundleSummary bundles = 1;
+}
+
+message SkillBundleSummary {
+  string skill_id = 1;
+  string manifest_sha256 = 2;
+  int32 file_count = 3;
+  int64 total_bytes = 4;
+  string created_by = 5;
+  // RFC3339 timestamp of the upload that holds this bundle.
+  string created_at = 6;
+}
+
+message GetSkillBundleManifestRequest {
+  string skill_id = 1;
+}
+
+message SkillBundleManifest {
+  string skill_id = 1;
+  string manifest_sha256 = 2;
+  repeated SkillBundleFile files = 3;
+}
+
+message SkillBundleFile {
+  // Relative path inside the bundle, always with forward slashes.
+  string path = 1;
+  string sha256 = 2;
+  int64 size_bytes = 3;
+  bool executable = 4;
+  // True when the file is not UTF-8 text, so a reader returns metadata only.
+  bool binary = 5;
+}
+
+message GetSkillBlobRequest {
+  string skill_id = 1;
+  string sha256 = 2;
+}
+
+message GetSkillBlobResponse {
+  bytes content = 1;
 }

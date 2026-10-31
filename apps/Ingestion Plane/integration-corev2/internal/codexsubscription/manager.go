@@ -52,6 +52,10 @@ type Config struct {
 	// QueueTimeout bounds the wait for a concurrency slot (default 30s);
 	// past it the call is rate limited with RateLimitQueue.
 	QueueTimeout time.Duration
+	// WideReasoningEffort admits medium and xhigh beside low and high. It
+	// stays off until the Model Plane ladder is widened to match: with it off
+	// a request for either is rejected exactly as before.
+	WideReasoningEffort bool
 }
 
 // DeviceLogin is safe to return to the browser. The user code is short lived
@@ -208,6 +212,8 @@ type Manager struct {
 	runner            Runner
 	limiter           *invocationLimiter
 	now               func() time.Time
+	// wideReasoningEffort is Config.WideReasoningEffort; see acceptsReasoningEffort.
+	wideReasoningEffort bool
 
 	mu      sync.Mutex
 	pending map[string]pendingLogin
@@ -240,14 +246,15 @@ func NewManager(cfg Config, runner Runner) (*Manager, error) {
 		cfg.InvocationTimeout = 90 * time.Second
 	}
 	return &Manager{
-		enabled:           true,
-		home:              home,
-		loginTTL:          cfg.LoginTTL,
-		invocationTimeout: cfg.InvocationTimeout,
-		runner:            runner,
-		limiter:           newInvocationLimiter(cfg.MaxConcurrency, cfg.MaxConcurrencyPerConnection, cfg.QueueTimeout),
-		now:               func() time.Time { return time.Now().UTC() },
-		pending:           make(map[string]pendingLogin),
+		enabled:             true,
+		home:                home,
+		loginTTL:            cfg.LoginTTL,
+		invocationTimeout:   cfg.InvocationTimeout,
+		runner:              runner,
+		limiter:             newInvocationLimiter(cfg.MaxConcurrency, cfg.MaxConcurrencyPerConnection, cfg.QueueTimeout),
+		now:                 func() time.Time { return time.Now().UTC() },
+		pending:             make(map[string]pendingLogin),
+		wideReasoningEffort: cfg.WideReasoningEffort,
 	}, nil
 }
 
@@ -423,8 +430,12 @@ func (m *Manager) prepareInvocation(request InvokeRequest) (string, InvokeReques
 	if request.ReasoningEffort == "" {
 		request.ReasoningEffort = "low"
 	}
-	if request.ReasoningEffort != "low" && request.ReasoningEffort != "high" {
-		return "", InvokeRequest{}, fmt.Errorf("%w: reasoningEffort must be low or high", ErrInvalidRequest)
+	if !m.acceptsReasoningEffort(request.ReasoningEffort) {
+		choices := "low or high"
+		if m.wideReasoningEffort {
+			choices = "low, medium, high or xhigh"
+		}
+		return "", InvokeRequest{}, fmt.Errorf("%w: reasoningEffort must be %s", ErrInvalidRequest, choices)
 	}
 	request.ConnectionID = strings.TrimSpace(request.ConnectionID)
 	request.ServiceTier = strings.ToLower(strings.TrimSpace(request.ServiceTier))
@@ -436,6 +447,20 @@ func (m *Manager) prepareInvocation(request InvokeRequest) (string, InvokeReques
 		return "", InvokeRequest{}, err
 	}
 	return home, request, nil
+}
+
+// acceptsReasoningEffort admits the levels the broker has always forwarded to
+// Codex. Medium and xhigh are forwarded only when the wide switch is on, so a
+// broker that has not been widened rejects them exactly as it did before.
+func (m *Manager) acceptsReasoningEffort(effort string) bool {
+	switch effort {
+	case "low", "high":
+		return true
+	case "medium", "xhigh":
+		return m.wideReasoningEffort
+	default:
+		return false
+	}
 }
 
 // Logout removes the managed Codex login from the isolated connection home.

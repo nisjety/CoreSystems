@@ -21,6 +21,17 @@ import (
 
 const decisionProofType = "model-plane.capability-decision+jws"
 
+// decisionProofVersion is the claim set Sign writes. Version 2 binds the tool,
+// the user, the declared class and approval floor, the policy source and the
+// pinned tool digest to the decision, so evidence for one tool cannot be
+// replayed against another. capability-core always signs it, whatever the
+// rollout switch says; execution-core's verifier accepts "1" and "2" while its
+// TOOL_CLASS_GATE is off or shadow and only a build that predates the gate
+// refuses "2". So the safe order is execution-core first (gate off), then
+// capability-core: rolling capability-core first would have every tool call
+// refused by an execution-core that does not yet know the version.
+const decisionProofVersion = "2"
+
 type decisionProofHeader struct {
 	Alg string `json:"alg"`
 	Kid string `json:"kid"`
@@ -41,6 +52,15 @@ type decisionProofClaims struct {
 	Decision          string `json:"decision"`
 	Reason            string `json:"reason"`
 	BudgetContext     string `json:"budget_context"`
+	// Version 2 claims. They are always written, empty when the evaluation
+	// named no tool or asserted no user, so the signed bytes say what was and
+	// was not bound.
+	UserID          string `json:"user_id"`
+	ToolName        string `json:"tool_name"`
+	SideEffectClass string `json:"side_effect_class"`
+	ApprovalFloor   string `json:"approval_floor"`
+	PolicySource    string `json:"policy_source"`
+	ToolDigest      string `json:"tool_digest"`
 }
 
 type DecisionProofSigner struct {
@@ -94,7 +114,7 @@ func (s *DecisionProofSigner) Sign(claims decisionProofClaims) (string, error) {
 		return "", errors.New("capability decision proof signer is unavailable")
 	}
 	now := time.Now().Unix()
-	claims.Version = "1"
+	claims.Version = decisionProofVersion
 	claims.IssuedAt = now
 	claims.ExpiresAt = now + int64(s.ttl/time.Second)
 	header, err := json.Marshal(decisionProofHeader{Alg: "EdDSA", Kid: s.kid, Typ: decisionProofType})
@@ -132,6 +152,12 @@ func decisionProofClaimsFor(reqFields decisionProofRequest, response *decisionPr
 		Decision:          response.decision,
 		Reason:            response.reason,
 		BudgetContext:     response.budgetContext,
+		UserID:            reqFields.userID,
+		ToolName:          reqFields.toolName,
+		SideEffectClass:   response.sideEffectClass,
+		ApprovalFloor:     response.approvalFloor,
+		PolicySource:      response.policySource,
+		ToolDigest:        response.toolDigest,
 	}
 }
 
@@ -141,6 +167,8 @@ type decisionProofRequest struct {
 	agentID      string
 	orgID        string
 	scope        string
+	userID       string
+	toolName     string
 }
 
 type decisionProofResponse struct {
@@ -149,4 +177,8 @@ type decisionProofResponse struct {
 	budgetContext     string
 	decisionID        string
 	capabilityVersion string
+	sideEffectClass   string
+	approvalFloor     string
+	policySource      string
+	toolDigest        string
 }

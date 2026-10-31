@@ -1,0 +1,25 @@
+{
+  "id": "org-disabled-skips-before-the-transcript-is-read",
+  "category": "org_disabled",
+  "description": "The organization has switched memory off. The owner's own state is on, but the organization's policy refuses learning, so the review stops before reading the conversation or calling the model.",
+  "controls": {"learning_allowed": false, "reason": "org_disabled"},
+  "conversation": [
+    {"role": "user", "content": "Lag ukerapporten for prosjekt Nord: timer per person, avvik og neste steg."},
+    {"role": "assistant", "content": "Ukerapporten for Nord er laget etter oppsettet med timer, avvik og neste steg."},
+    {"role": "user", "content": "Samme oppsett for prosjekt Sør, takk."},
+    {"role": "assistant", "content": "Ukerapporten for Sør er laget etter samme oppsett."},
+    {"role": "user", "content": "Legg en kort oppsummering øverst i begge."},
+    {"role": "assistant", "content": "Oppsummering lagt øverst i begge rapportene."}
+  ],
+  "existing_skills": [],
+  "model_reply": "{\"skills\":[{\"name\":\"Ukerapport fra timelister\",\"description\":\"Lager ukerapport\",\"content\":\"Hent timer og avvik.\",\"trigger_keywords\":[\"ukerapport\"],\"confidence\":0.9,\"reason\":\"Gjentatt oppsett.\"}]}",
+  "model_stop_reason": "",
+  "run": {"event_type": "RUN_COMPLETED", "org_id": "org-1", "user_id": "user-1", "run_id": "run-1", "thread_id": "thread-1", "zdr": false},
+  "attempts": [{}],
+  "expect": {
+    "outcomes": ["org_policy"],
+    "model_calls": 0,
+    "transcript_reads": 0,
+    "proposal_count": 0
+  }
+}

@@ -17,7 +17,7 @@ The erasure saga no longer relies on one audit org plus a core-NATS flush.
 Migration 016 captures every active `user_org_memberships` organization in the
 operation transaction before Auth or local cleanup, then dispatches one stable
 child per org. A child is marked published only after an
-`AQENCIA_CONTROLPLANE` PubAck with non-zero sequence; the parent completes only
+`CONTROLPLANE` PubAck with non-zero sequence; the parent completes only
 when no unpublished child remains. A partial publish leaves the already-ACKed
 child immutable and resumes only the missing children.
 

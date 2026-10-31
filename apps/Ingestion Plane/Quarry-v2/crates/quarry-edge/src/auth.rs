@@ -724,7 +724,9 @@ pub async fn require_service_route_scope(req: Request, next: Next) -> Result<Res
         {
             claims.has_scope("scrape:read") || claims.has_scope("scrape:write")
         }
+        "/v1/audit/page" => claims.has_scope("scrape:read"),
         "/v1/search" => claims.has_scope("search:read"),
+        "/v1/map" => claims.has_scope("map:read"),
         "/v1/extract" => claims.has_scope("extract:read"),
         // Reading one artifact by id is part of the scrape/agent contract, not a
         // separate capability: `/v1/scrape` answers with
@@ -941,6 +943,8 @@ mod tests {
         }
         Router::new()
             .route("/v1/search", get(ok_handler))
+            .route("/v1/map", get(ok_handler))
+            .route("/v1/audit/page", get(ok_handler))
             .route("/v1/extract", get(ok_handler))
             .route("/v1/other", get(ok_handler))
             .route("/v1/artifacts", get(ok_handler))
@@ -966,6 +970,25 @@ mod tests {
             aud: Some("quarry".into()),
             scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
             zdr: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn bounded_audit_capture_requires_scrape_read_not_map_or_write() {
+        assert_eq!(
+            status_for(service_claims(&["scrape:read"]), "/v1/audit/page").await,
+            StatusCode::OK
+        );
+        for scopes in [
+            &[][..],
+            &["map:read"][..],
+            &["scrape:write"][..],
+            &["browser:execute"][..],
+        ] {
+            assert_eq!(
+                status_for(service_claims(scopes), "/v1/audit/page").await,
+                StatusCode::FORBIDDEN
+            );
         }
     }
 
@@ -1030,6 +1053,31 @@ mod tests {
             status_for(service_claims(&["scrape:read"]), "/v1/artifacts").await,
             StatusCode::FORBIDDEN
         );
+    }
+
+    #[tokio::test]
+    async fn map_service_scope_is_explicit_and_does_not_grant_other_routes() {
+        assert_eq!(
+            status_for(service_claims(&["map:read"]), "/v1/map").await,
+            StatusCode::OK
+        );
+        for scope in ["search:read", "scrape:read", "extract:read", "crawl:write"] {
+            assert_eq!(
+                status_for(service_claims(&[scope]), "/v1/map").await,
+                StatusCode::FORBIDDEN
+            );
+        }
+        for path in [
+            "/v1/search",
+            "/v1/extract",
+            "/v1/artifacts/art_01ABC",
+            "/v1/other",
+        ] {
+            assert_eq!(
+                status_for(service_claims(&["map:read"]), path).await,
+                StatusCode::FORBIDDEN
+            );
+        }
     }
 
     #[tokio::test]

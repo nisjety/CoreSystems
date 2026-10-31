@@ -79,6 +79,10 @@ export interface Capability {
     costClass?: CapabilityCostClassEnum;
     /** RFC3339 server-recorded health time; absent when unattested. */
     healthCheckedAt?: string;
+    /** Declared side-effect class, the strictest of the capability's tools; unclassified is the strictest. Read-only. */
+    readonly sideEffectClass?: CapabilitySideEffectClassEnum;
+    /** The least approval the class may be run under. Read-only. */
+    readonly approvalFloor?: CapabilityApprovalFloorEnum;
 }
 
 export const CapabilityStateEnum = {
@@ -104,6 +108,24 @@ export const CapabilityCostClassEnum = {
     Variable: 'variable'
 } as const;
 export type CapabilityCostClassEnum = typeof CapabilityCostClassEnum[keyof typeof CapabilityCostClassEnum];
+
+export const CapabilitySideEffectClassEnum = {
+    Read: 'read',
+    SandboxCompute: 'sandbox_compute',
+    ContextWrite: 'context_write',
+    ExternalWrite: 'external_write',
+    Destructive: 'destructive',
+    OwnerEffect: 'owner_effect',
+    Unclassified: 'unclassified'
+} as const;
+export type CapabilitySideEffectClassEnum = typeof CapabilitySideEffectClassEnum[keyof typeof CapabilitySideEffectClassEnum];
+
+export const CapabilityApprovalFloorEnum = {
+    None: 'none',
+    Ask: 'ask',
+    DurableOwner: 'durable_owner'
+} as const;
+export type CapabilityApprovalFloorEnum = typeof CapabilityApprovalFloorEnum[keyof typeof CapabilityApprovalFloorEnum];
 
 /**
  * Check if a given object implements the Capability interface.
@@ -137,6 +159,8 @@ export function CapabilityFromJSONTyped(json: any, ignoreDiscriminator: boolean)
         'executionMode': json['execution_mode'] == null ? undefined : json['execution_mode'],
         'costClass': json['cost_class'] == null ? undefined : json['cost_class'],
         'healthCheckedAt': json['health_checked_at'] == null ? undefined : json['health_checked_at'],
+        'sideEffectClass': json['side_effect_class'] == null ? undefined : json['side_effect_class'],
+        'approvalFloor': json['approval_floor'] == null ? undefined : json['approval_floor'],
     };
 }
 

@@ -66,7 +66,8 @@ pub struct AppState {
     /// Semantic retrieval backend (Data Plane v2 `retrieval_v2` → Qdrant).
     /// Powers `POST /v1/search/similar` (find-similar) directly, and is the
     /// same handle fused into the hybrid `search` provider above. `Some` when
-    /// `DATA_PLANE_URL` is configured; `None` makes find-similar return 501.
+    /// `QUARRY_EDGE__VECTOR_RETRIEVAL` is on and `DATA_PLANE_URL` is configured;
+    /// `None` makes find-similar return 501.
     pub vector_index: Option<Arc<dyn VectorIndex>>,
     /// W1 — operator-configured proxy pool name (from
     /// `QUARRY_PROXY_POOL`). Empty string means "no operator pool
@@ -79,15 +80,15 @@ pub struct AppState {
     /// search talks to SearXNG directly. `Some` when `SEARXNG_URL` is
     /// configured; `None` makes the image route return 501 with a hint.
     pub searxng_url: Option<String>,
-    /// Model Plane gateway URL (e.g. `http://model-gateway:8080`). When set,
-    /// `/v1/audio` proxies to `/v1/ai/speech` + `/v1/ai/transcribe`. When
-    /// unset, the route returns 501 Unsupported.
+    /// Model Plane gateway URL (e.g. `http://model-gateway:8080`). With
+    /// `QUARRY_EDGE__MODEL_AUDIO` on, `/v1/audio` proxies to `/v1/ai/speech` +
+    /// `/v1/ai/transcribe`. Otherwise, or when unset, the route returns 501 Unsupported.
     pub model_plane_url: Option<String>,
     /// Bearer token for the Model Plane gateway.
     pub model_plane_token: Option<String>,
     /// Best-effort Model Plane title enricher shared by every `PageRunner`
-    /// this edge builds (scrape, scrape/stream, internal run_page). `Some`
-    /// when `model_plane_url` is set and `page_title_enrich` is not `false`.
+    /// this edge builds (scrape, scrape/stream, internal run_page). `Some` only
+    /// when `QUARRY_EDGE__PAGE_TITLE_ENRICH` is on (QB-T17) and a model path exists.
     /// Holds the fingerprint-keyed title cache, so it must be process-wide,
     /// not per-request.
     pub page_title_enricher: Option<Arc<quarry_runtime::page_extract::PageTitleEnricher>>,
@@ -95,12 +96,16 @@ pub struct AppState {
     /// obtain bounded Model/Data Plane service tokens.
     pub service_token_provider: Option<quarry_runtime::service_tokens::SharedServiceTokenProvider>,
     /// Cycle 19 / cluster #18: Tavily-replacement answer pipeline.
-    /// Wired only when both a SearchProvider AND model_plane_url are
-    /// configured. `/v1/answer` returns 501 Unsupported otherwise.
+    /// Wired only when `QUARRY_EDGE__ANSWER_SYNTHESIS` is on (QB-T17), a SearchProvider
+    /// is configured and a model path exists. `/v1/answer` returns 501 Unsupported otherwise.
     pub answer_pipeline: Option<Arc<AnswerPipeline>>,
     /// INNH-8a: why `answer_pipeline` is `None` (the first closed gate), so a 501 on
     /// `/v1/answer` and `answer_reason` on `/v1/search` name the exact switch.
     pub answer_status: crate::answer_status::AnswerPipelineStatus,
+    /// Which Model Plane features this edge serves (QB-T17, see `model_plane_gate`). All off
+    /// unless switched on AND a model path exists. Routes read their own field before they
+    /// call the Model Plane.
+    pub model_plane: crate::model_plane_gate::ModelPlaneFeatures,
     /// Cycle 19 / cluster #16: own-corpus Tantivy index. Cloned cheaply
     /// (interior Arc). PageRunner's success path pushes new docs here.
     pub local_index: Option<TantivyLocalIndex>,

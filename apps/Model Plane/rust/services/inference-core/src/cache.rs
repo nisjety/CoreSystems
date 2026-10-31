@@ -74,7 +74,11 @@ impl PromptCache {
             hasher.update(&(scope.len() as u64).to_le_bytes());
             hasher.update(scope.as_bytes());
         }
+        // Length-prefixed like the identity scopes above: without it a model name could
+        // merge into the hint before it, and two different served models share an entry.
+        hasher.update(&(req.provider_hint.len() as u64).to_le_bytes());
         hasher.update(req.provider_hint.as_bytes());
+        hasher.update(&(req.model.len() as u64).to_le_bytes());
         hasher.update(req.model.as_bytes());
         for msg in &req.messages {
             hasher.update(msg.role.as_bytes());
@@ -84,6 +88,15 @@ impl PromptCache {
         }
         hasher.update(&req.temperature.to_le_bytes());
         hasher.update(&req.max_tokens.to_le_bytes());
+        // The thinking budget shapes the answer (a "quick" and a "deep" turn of the
+        // same prompt are different products), so a different budget must miss.
+        hasher.update(&req.thinking_budget_tokens.to_le_bytes());
+        // The canonical effort level is hashed separately from the budget: a
+        // level-driven adapter sends no budget at all, so the budget alone would
+        // leave `quick` and `deep` on the same key. The tag keeps "no level"
+        // distinct from every level, and a request with none hashes one constant
+        // byte, so legacy callers still share entries with each other.
+        hasher.update(&[req.reasoning_effort.map_or(0, |level| level as u8 + 1)]);
         // Response-shaping fields — a tool/schema change must miss the cache.
         for tool in &req.tools {
             hasher.update(tool.name.as_bytes());
@@ -188,13 +201,14 @@ impl PromptCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::effort::Level;
     use crate::provider::{ChatMessage, InferRequest, InferResponse};
 
     fn sample_request() -> InferRequest {
         InferRequest {
             request_id: "req-1".to_owned(),
             provider_hint: String::new(),
-            model: "claude-sonnet-4-20250514".to_owned(),
+            model: "claude-sonnet-5-5".to_owned(),
             messages: vec![ChatMessage {
                 compaction_summary: String::new(),
                 role: "user".to_owned(),
@@ -214,12 +228,77 @@ mod tests {
             compaction_summary: String::new(),
             request_id: "req-1".to_owned(),
             content: "Hi there!".to_owned(),
-            model_used: "claude-sonnet-4-20250514".to_owned(),
+            model_used: "claude-sonnet-5-5".to_owned(),
             stop_reason: "end_turn".to_owned(),
             input_tokens: 10,
             output_tokens: 5,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_different_thinking_budget_is_a_different_cache_entry() {
+        let cache = PromptCache::new(300);
+        let quick = InferRequest {
+            thinking_budget_tokens: 0,
+            ..sample_request()
+        };
+        let deep = InferRequest {
+            thinking_budget_tokens: 4096,
+            ..sample_request()
+        };
+        cache.put(&quick, &sample_response());
+        assert!(
+            cache.get(&deep).is_none(),
+            "a deep turn must not be served the quick turn's cached answer"
+        );
+        assert!(cache.get(&quick).is_some(), "the same budget still hits");
+    }
+
+    #[test]
+    fn a_different_effort_misses_the_cache() {
+        let cache = PromptCache::new(300);
+        let quick = InferRequest {
+            reasoning_effort: Some(Level::Low),
+            ..sample_request()
+        };
+        let deep = InferRequest {
+            reasoning_effort: Some(Level::High),
+            ..sample_request()
+        };
+        // Two distinct keys, not just two cache misses.
+        assert_ne!(PromptCache::cache_key(&quick), PromptCache::cache_key(&deep));
+        cache.put(&quick, &sample_response());
+        assert!(
+            cache.get(&deep).is_none(),
+            "a deep turn must not be served the quick turn's cached answer"
+        );
+        assert!(cache.get(&quick).is_some(), "the same effort still hits");
+    }
+
+    #[test]
+    fn no_effort_is_distinct_from_every_level() {
+        let unset = PromptCache::cache_key(&sample_request());
+        for level in Level::ALL {
+            let request = InferRequest {
+                reasoning_effort: Some(level),
+                ..sample_request()
+            };
+            assert_ne!(PromptCache::cache_key(&request), unset, "{level:?}");
+        }
+        // Every level keys differently from every other.
+        let mut keys: Vec<String> = Level::ALL
+            .into_iter()
+            .map(|level| {
+                PromptCache::cache_key(&InferRequest {
+                    reasoning_effort: Some(level),
+                    ..sample_request()
+                })
+            })
+            .collect();
+        keys.sort();
+        keys.dedup();
+        assert_eq!(keys.len(), Level::ALL.len());
     }
 
     #[test]
@@ -429,5 +508,22 @@ mod tests {
         cache.put(&split_one, &sample_response());
 
         assert!(cache.get(&split_two).is_none());
+    }
+
+    /// The model and the hint before it are length-prefixed too, so a model name that
+    /// starts where the hint ends cannot merge with it into one key.
+    #[test]
+    fn a_model_name_cannot_merge_into_the_provider_hint_before_it() {
+        let mut split_one = sample_request();
+        split_one.provider_hint = "claude-sonnet-5".to_owned();
+        split_one.model = "-5".to_owned();
+        let mut split_two = sample_request();
+        split_two.provider_hint = "claude-sonnet-5-".to_owned();
+        split_two.model = "5".to_owned();
+
+        assert_ne!(
+            PromptCache::cache_key(&split_one),
+            PromptCache::cache_key(&split_two)
+        );
     }
 }

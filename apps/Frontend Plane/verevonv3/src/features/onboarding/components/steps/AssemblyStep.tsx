@@ -1,4 +1,4 @@
-import { createMemo, For, Show } from "solid-js";
+import { createMemo, For, Show } from 'solid-js'
 import type { PlanRecommendation } from "@/features/onboarding/lib/api";
 import { Button } from "@/shared/ui/Button";
 

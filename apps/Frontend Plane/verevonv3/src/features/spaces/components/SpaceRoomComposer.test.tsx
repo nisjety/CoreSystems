@@ -38,7 +38,7 @@ type Handlers = {
   onMessage?: (event: { content: string }) => void
   onDone?: (event: Record<string, never>) => void
   onStopped?: (event: Record<string, never>) => void
-  onError?: (event: { code: string; message: string }) => void
+  onError?: (event: { code: string; message: string; feature?: string }) => void
 }
 
 /**
@@ -755,5 +755,23 @@ describe('SpaceRoomComposer — the room\u2019s own typing line', () => {
     fireEvent.input(textarea(), { target: { value: '   ' } })
     flush()
     expect(typed).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('SpaceRoomComposer — a zero-retention refusal names its feature', () => {
+  // The refusal names the feature by its key; the room words it, in the reader's language.
+  it('says which feature the refusal is about', async () => {
+    const stream = scriptedStream()
+    renderComposer()
+    await send('Søk etter noe')
+
+    stream.handlers().onError?.({
+      code: 'zdr_feature_not_supported',
+      message: 'This is not supported with zero data retention yet: web search and browsing.',
+      feature: 'web_search',
+    })
+
+    await waitFor(() => expect(document.body.textContent).toMatch(/websøk og nettlesing|web search and browsing/))
+    expect(document.body.textContent).not.toMatch(/this feature/)
   })
 })

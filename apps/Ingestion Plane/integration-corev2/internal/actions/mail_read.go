@@ -506,11 +506,12 @@ func (s *Service) graphMailPageURL(raw string) (string, error) {
 	return raw, nil
 }
 
-// finishGraphMailList adds nextPageToken beside the Graph `value`, and applies
-// the unread restriction locally: $search cannot take a $filter, so on the
-// search path (and on any replayed page whose origin is unknown) read messages
-// are dropped here. On the filter path every row is already unread and this
-// changes nothing.
+// finishGraphMailList adds nextPageToken beside the Graph `value`, or
+// moreAvailable when the next link is one this service would not hand back. It
+// also applies the unread restriction locally: $search cannot take a $filter,
+// so on the search path (and on any replayed page whose origin is unknown) read
+// messages are dropped here. On the filter path every row is already unread and
+// this changes nothing.
 func (s *Service) finishGraphMailList(result any, q mailQuery) any {
 	list, ok := result.(map[string]any)
 	if !ok {
@@ -519,6 +520,10 @@ func (s *Service) finishGraphMailList(result any, q mailQuery) any {
 	if next := stringFromAny(list["@odata.nextLink"]); next != "" {
 		if _, err := s.graphMailPageURL(next); err == nil {
 			list["nextPageToken"] = next
+		} else {
+			// The calendar and file listings report the same way: a cut-short list
+			// must not read as one that ended.
+			list["moreAvailable"] = true
 		}
 	}
 	if q.Unread {

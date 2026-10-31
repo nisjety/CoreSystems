@@ -6,6 +6,8 @@ use std::sync::Arc;
 
 use dashmap::{mapref::entry::Entry, DashMap};
 
+use crate::workspace_edit::WorkspaceLock;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RunOwner {
     org_id: String,
@@ -97,12 +99,26 @@ pub struct HydratedWorkspace {
     pub baseline: HashMap<String, String>,
 }
 
+/// One effect a scheduled Do run withheld instead of performing (WS20 S6). It keeps the
+/// tool name, a closed reason and the digest of the arguments, never the arguments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WithheldEffect {
+    pub tool: String,
+    pub reason_code: &'static str,
+    pub args_sha256: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct StateStore {
     runs: Arc<DashMap<String, RunSnapshot>>,
     owners: Arc<DashMap<String, RunOwner>>,
     leases: Arc<DashMap<String, SandboxLease>>,
     workspaces: Arc<DashMap<String, HydratedWorkspace>>,
+    /// One lock per run with a workspace, shared by its file tools and dropped with the workspace.
+    workspace_locks: Arc<DashMap<String, WorkspaceLock>>,
+    /// Scheduled Do runs with no one attached to answer an approval. Each run's
+    /// withheld effects accumulate here until its step takes them.
+    unattended: Arc<DashMap<String, Arc<std::sync::Mutex<Vec<WithheldEffect>>>>>,
 }
 
 impl StateStore {
@@ -124,6 +140,48 @@ impl StateStore {
 
     pub fn update(&self, snapshot: RunSnapshot) {
         self.runs.insert(snapshot.run_id.clone(), snapshot);
+    }
+
+    /// Mark a run unattended: no one is present to answer its approvals, so each
+    /// gated effect is withheld and recorded instead of paused (WS20 S6).
+    pub(crate) fn begin_unattended(&self, run_id: &str) {
+        self.unattended.insert(
+            run_id.to_owned(),
+            Arc::new(std::sync::Mutex::new(Vec::new())),
+        );
+    }
+
+    /// Record one withheld effect of an unattended run. Returns `false` for an attended
+    /// run, which keeps its own refusal path untouched.
+    pub(crate) fn withhold(&self, run_id: &str, effect: WithheldEffect) -> bool {
+        let Some(ledger) = self
+            .unattended
+            .get(run_id)
+            .map(|entry| Arc::clone(entry.value()))
+        else {
+            return false;
+        };
+        ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(effect);
+        true
+    }
+
+    /// Whether the run is unattended, so its gated effects are withheld, not paused.
+    pub(crate) fn is_unattended(&self, run_id: &str) -> bool {
+        self.unattended.contains_key(run_id)
+    }
+
+    /// End an unattended run's ledger and return what it withheld, in call order.
+    pub(crate) fn take_withheld(&self, run_id: &str) -> Vec<WithheldEffect> {
+        let Some((_, ledger)) = self.unattended.remove(run_id) else {
+            return Vec::new();
+        };
+        let mut effects = ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::mem::take(&mut *effects)
     }
 
     fn resume_if_status(&self, run_id: &str, expected: RunStatus) -> Option<u32> {
@@ -255,9 +313,22 @@ impl StateStore {
     /// nothing and does not try to re-upload or re-delete the directory.
     #[must_use]
     pub fn take_hydrated_workspace(&self, run_id: &str) -> Option<HydratedWorkspace> {
+        self.workspace_locks.remove(run_id);
         self.workspaces
             .remove(run_id)
             .map(|(_, workspace)| workspace)
+    }
+
+    /// The lock that serialises this run's workspace file tools: reads share it,
+    /// edits and puts take it exclusively. Created on first use. It sits beside the
+    /// workspace rather than on `HydratedWorkspace`, which `sandbox_lease` builds by literal.
+    #[must_use]
+    pub fn workspace_lock(&self, run_id: &str) -> WorkspaceLock {
+        self.workspace_locks
+            .entry(run_id.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::RwLock::new(())))
+            .value()
+            .clone()
     }
 }
 
@@ -431,5 +502,22 @@ mod tests {
         assert!(!store.authorizes("run-1", "org-a", "user-b"));
         assert!(!store.cache_verified_owner("run-1", "org-b", "user-b"));
         assert!(store.authorizes("run-1", "org-a", "user-a"));
+    }
+
+    #[test]
+    fn a_run_shares_one_workspace_lock_until_its_workspace_is_taken() {
+        let store = StateStore::new();
+        let first = store.workspace_lock("run-1");
+        assert!(Arc::ptr_eq(&first, &store.workspace_lock("run-1")));
+        assert!(!Arc::ptr_eq(&first, &store.workspace_lock("run-2")));
+        store.cache_hydrated_workspace(
+            "run-1",
+            HydratedWorkspace {
+                path: PathBuf::from("/tmp/ws-1"),
+                baseline: HashMap::new(),
+            },
+        );
+        assert!(store.take_hydrated_workspace("run-1").is_some());
+        assert!(!Arc::ptr_eq(&first, &store.workspace_lock("run-1")));
     }
 }

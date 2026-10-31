@@ -11,6 +11,7 @@ Name | Type
 `snippet` | string
 `rank` | number
 `provider` | string
+`score` | number
 
 ## Example
 
@@ -24,6 +25,7 @@ const example = {
   "snippet": null,
   "rank": null,
   "provider": null,
+  "score": null,
 } satisfies SearchResultItem
 
 console.log(example)

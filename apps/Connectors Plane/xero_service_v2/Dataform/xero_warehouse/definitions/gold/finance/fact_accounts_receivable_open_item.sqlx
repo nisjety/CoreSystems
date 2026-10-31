@@ -1,0 +1,59 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "Current Accounts Receivable open-item view from Xero invoices, credit notes and overpayments. It is document-current state, not a certified tenant-wide point-in-time aging report; amounts remain in transaction currency.",
+  assertions: {
+    nonNull: ["receivable_open_item_key", "tenant_id", "source_document_type", "source_document_id", "currency_code", "as_of_date"],
+    uniqueKey: ["receivable_open_item_key"]
+  }
+}
+
+WITH current_open_items AS (
+  SELECT *
+  FROM ${ref("dw_1_silver_xero", "fact_accounts_receivable_open_item")}
+  WHERE is_current_open_balance
+)
+
+SELECT
+  FARM_FINGERPRINT(open_item_key) AS receivable_open_item_key,
+  FARM_FINGERPRINT(tenant_id) AS company_key,
+  IF(contact_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(tenant_id, '|', contact_id))) AS customer_key,
+  FARM_FINGERPRINT(CAST(document_date AS STRING)) AS document_date_key,
+  IF(document_due_date IS NULL, NULL, FARM_FINGERPRINT(CAST(document_due_date AS STRING))) AS due_date_key,
+  FARM_FINGERPRINT(CAST(DATE(source_observed_at) AS STRING)) AS as_of_date_key,
+  FARM_FINGERPRINT(CONCAT(tenant_id, '|', currency_code)) AS currency_key,
+  tenant_id,
+  source_document_type,
+  source_document_id,
+  source_document_key,
+  reference_number,
+  contact_id AS customer_id,
+  contact_name AS customer_name,
+  document_date,
+  document_due_date,
+  DATE(source_observed_at) AS as_of_date,
+  currency_code,
+  source_exchange_rate,
+  source_amount_in_currency AS source_document_amount_in_currency,
+  unsigned_open_balance_in_currency,
+  open_balance_in_currency,
+  open_item_direction,
+  CASE
+    WHEN document_due_date IS NULL THEN NULL
+    ELSE GREATEST(DATE_DIFF(DATE(source_observed_at), document_due_date, DAY), 0)
+  END AS days_past_due,
+  CASE
+    WHEN document_due_date IS NULL THEN 'no_due_date'
+    WHEN document_due_date >= DATE(source_observed_at) THEN 'not_due'
+    WHEN DATE_DIFF(DATE(source_observed_at), document_due_date, DAY) <= 30 THEN '1_30_days'
+    WHEN DATE_DIFF(DATE(source_observed_at), document_due_date, DAY) <= 60 THEN '31_60_days'
+    WHEN DATE_DIFF(DATE(source_observed_at), document_due_date, DAY) <= 90 THEN '61_90_days'
+    ELSE '91_plus_days'
+  END AS age_bucket,
+  source_observed_at,
+  is_source_document_reconciled,
+  FALSE AS is_portfolio_snapshot_complete,
+  CAST(NULL AS NUMERIC) AS amount_nok,
+  FALSE AS is_nok_amount_available,
+  'xero' AS source_system
+FROM current_open_items

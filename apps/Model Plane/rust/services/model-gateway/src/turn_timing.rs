@@ -246,6 +246,13 @@ pub struct ProviderSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub first_token_ms: Option<u64>,
     pub attempts: u32,
+    /// Summed duration of the attempts that failed before the serving one.
+    #[serde(skip_serializing_if = "is_zero_ms")]
+    pub failed_attempts_ms: u64,
+    /// Time spent honoring a provider's retry-after before walking the
+    /// providers a second time.
+    #[serde(skip_serializing_if = "is_zero_ms")]
+    pub retry_wait_ms: u64,
     pub response_cache_hit: bool,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub upstream_ms: BTreeMap<String, u64>,
@@ -259,6 +266,8 @@ impl From<&ProviderTiming> for ProviderSummary {
             // inference-core reports 0 when no delta arrived.
             first_token_ms: (timing.first_token_ms > 0).then_some(timing.first_token_ms),
             attempts: timing.attempts,
+            failed_attempts_ms: timing.failed_attempts_ms,
+            retry_wait_ms: timing.retry_wait_ms,
             response_cache_hit: timing.response_cache_hit,
             // Upstream phase names are fixed identifiers. Anything else is
             // dropped rather than repeated into a log that must stay content-free.
@@ -270,6 +279,12 @@ impl From<&ProviderTiming> for ProviderSummary {
                 .collect(),
         }
     }
+}
+
+/// A turn that was never delayed by the provider keeps the record it always
+/// had: the wait fields are left out rather than reported as zero.
+fn is_zero_ms(ms: &u64) -> bool {
+    *ms == 0
 }
 
 fn is_phase_name(name: &str) -> bool {
@@ -1231,6 +1246,27 @@ mod tests {
     }
 
     #[test]
+    fn provider_summary_reports_wait_only_when_nonzero() {
+        let quiet = ProviderSummary::from(&ProviderTiming {
+            attempts: 1,
+            ..Default::default()
+        });
+        let quiet = serde_json::to_value(&quiet).unwrap();
+        assert!(quiet.get("failed_attempts_ms").is_none());
+        assert!(quiet.get("retry_wait_ms").is_none());
+
+        let waited = ProviderSummary::from(&ProviderTiming {
+            attempts: 2,
+            failed_attempts_ms: 1_200,
+            retry_wait_ms: 2_500,
+            ..Default::default()
+        });
+        let waited = serde_json::to_value(&waited).unwrap();
+        assert_eq!(waited["failed_attempts_ms"], 1_200);
+        assert_eq!(waited["retry_wait_ms"], 2_500);
+    }
+
+    #[test]
     fn the_span_list_is_bounded_and_counts_what_it_dropped() {
         let timing = TurnTiming::start("req");
         for index in 0..70 {
@@ -1513,6 +1549,8 @@ mod tests {
             "phases[].provider.provider_ms",
             "phases[].provider.first_token_ms",
             "phases[].provider.attempts",
+            "phases[].provider.failed_attempts_ms",
+            "phases[].provider.retry_wait_ms",
             "phases[].provider.response_cache_hit",
             "phases[].provider.upstream_ms",
         ]

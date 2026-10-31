@@ -315,7 +315,8 @@
 
 .brandWord {
 	color: #171717;
-	font-family: Manrope, var(--font-geist-sans), Arial, sans-serif;
+	font-family: var(--font-verevon);
+	font-synthesis: none;
 	font-size: 1.2rem;
 	font-weight: 900;
 	letter-spacing: 0;

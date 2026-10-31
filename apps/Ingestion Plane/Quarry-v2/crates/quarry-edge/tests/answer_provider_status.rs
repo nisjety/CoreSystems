@@ -336,6 +336,12 @@ async fn a_pipeline_that_is_not_wired_is_a_501_that_names_the_first_closed_gate(
             "model_client_init_failed",
             "QUARRY_EDGE__MODEL_PLANE_URL",
         ),
+        // The QB-T17 boot gate refused a switch that is on (no granted model-invoke row).
+        (
+            AnswerPipelineStatus::ModelPathRefused,
+            "model_path_refused",
+            "QUARRY_EDGE__ANSWER_SYNTHESIS",
+        ),
     ] {
         let edge = Edge::start(Mode::Closed(status)).await;
         for route in ["/v1/answer", "/v1/answer/stream"] {
@@ -367,6 +373,7 @@ async fn include_answer_without_a_pipeline_says_why_instead_of_a_silent_null() {
             AnswerPipelineStatus::ModelClientInitFailed,
             "model_client_init_failed",
         ),
+        (AnswerPipelineStatus::ModelPathRefused, "model_path_refused"),
     ] {
         let edge = Edge::start(Mode::Closed(status)).await;
         let (code, body) = edge
@@ -472,6 +479,8 @@ async fn a_model_plane_failure_keeps_its_502_and_gains_a_reason() {
         .post("/v1/answer", json!({ "query": query("fails") }))
         .await;
     assert_eq!(code, 502, "{body}");
+    // The wire name CONTRACTS.md and ERROR_REASONS.md promise, not the Rust identifier upper-cased.
+    assert_eq!(body["code"], "DRIVER_FAILED", "{body}");
     assert_eq!(body["reason"], "model_plane_error");
     let (code, body) = edge
         .post(
@@ -559,6 +568,50 @@ async fn include_answer_under_zdr_is_skipped_with_no_model_call_and_no_meter() {
         "the answer pipeline never starts"
     );
     assert!(edge.metered(usage_metrics::ANSWER_SYNTH).is_empty());
+}
+
+/// ADR-4: the model hop carries no ZDR posture, so a ZDR answer is refused BEFORE the pipeline
+/// starts. The gateway double sees no request, and neither search provider is asked.
+#[tokio::test]
+async fn a_zdr_answer_is_refused_before_the_pipeline_starts_and_nothing_reaches_the_model() {
+    let edge = Edge::start(wired(Mp::Answers)).await;
+    for route in ["/v1/answer", "/v1/answer/stream"] {
+        let (code, body) = edge
+            .post(route, json!({ "query": query("zdr-answer"), "zdr": true }))
+            .await;
+        assert_eq!(code, 403, "{route}: {body}");
+        assert_eq!(body["code"], "FORBIDDEN", "{route}");
+        assert_eq!(body["reason"], "zdr_unavailable", "{route}");
+        assert!(body["error"].as_str().unwrap().contains("ZDR"), "{route}: {body}");
+        assert!(body["hint"].as_str().unwrap().contains("ZDR"), "{route}: {body}");
+        assert!(!body.to_string().contains("capital of norway"), "{route}: the query stays out");
+    }
+    assert_eq!(edge.model_calls().await, 0, "the gateway double saw no request");
+    assert_eq!(edge.pipeline_search.calls(), 0, "no search, so no page fetch");
+    assert_eq!(edge.route_search.calls(), 0);
+    assert!(edge.metered(usage_metrics::ANSWER_SYNTH).is_empty());
+
+    // The same request without ZDR still runs: the refusal is the posture, not the route.
+    let (code, body) = edge
+        .post("/v1/answer", json!({ "query": query("not-zdr") }))
+        .await;
+    assert_eq!(code, 200, "{body}");
+    assert_eq!(edge.model_calls().await, 1);
+}
+
+/// A closed gate does not hide the ZDR fact: a ZDR caller is told 403 ZDR, not the deployment's
+/// 501, and learns nothing about which switches this edge has.
+#[tokio::test]
+async fn a_zdr_answer_is_refused_even_when_the_gate_is_closed() {
+    let edge = Edge::start(Mode::Closed(AnswerPipelineStatus::ModelPathRefused)).await;
+    for route in ["/v1/answer", "/v1/answer/stream"] {
+        let (code, body) = edge
+            .post(route, json!({ "query": query("zdr-closed-answer"), "zdr": true }))
+            .await;
+        assert_eq!(code, 403, "{route}: {body}");
+        assert_eq!(body["reason"], "zdr_unavailable", "{route}");
+        assert!(!body.to_string().contains("QUARRY_EDGE__ANSWER_SYNTHESIS"), "{body}");
+    }
 }
 
 #[tokio::test]

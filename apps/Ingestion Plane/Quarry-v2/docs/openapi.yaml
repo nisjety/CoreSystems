@@ -458,11 +458,19 @@ paths:
               $ref: '#/components/schemas/SearchRequest'
       responses:
         '200':
-          description: Ranked results (plus optional answer/context/facets)
+          description: Ranked results (plus optional answer/context/facets; score_kind and rerank when a rerank ran)
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/SearchResponse'
+        '400':
+          description: >-
+            Refused before any search runs. ZDR_REQUIRED: a service caller did not send zdr. SCORE_KIND_UNSUPPORTED:
+            score_kinds names a score kind this edge does not produce.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
         '429':
           description: Rate limited (structured retry envelope)
           content:
@@ -483,14 +491,17 @@ paths:
         Searches, reads the top pages and synthesizes one answer through the Model
         Plane, with the sources as citations. Metered as `quarry.answer.synth`, once
         per synthesis. Off until the operator turns it on: it needs
-        `QUARRY_EDGE__ANSWER_SYNTHESIS=1`, a search provider and
-        `QUARRY_EDGE__MODEL_PLANE_URL`, and a Model Plane that accepts the edge's
-        service token. When it is not available the response names the reason, see
-        `AnswerErrorBody`. The same pipeline serves `include_answer` on
+        `QUARRY_EDGE__ANSWER_SYNTHESIS=1` (decided by the Model Plane boot gate,
+        which refuses a switch that has no granted model path), a search provider
+        and `QUARRY_EDGE__MODEL_PLANE_URL`, and a Model Plane that accepts the
+        edge's service token. When it is not available the response names the
+        reason, see `AnswerErrorBody`. The same pipeline serves `include_answer` on
         `POST /v1/search`, which reports the same reasons as `answer_status` and
-        `answer_reason`. A zero data retention request runs with the ZDR posture
-        (no paid providers, no answer cache) and leaves a metadata-only tombstone
-        when that is switched on.
+        `answer_reason`. A zero data retention request (the body flag or the
+        token's floor) is refused with a 403, reason `zdr_unavailable`, before the
+        pipeline starts: the model hop carries no ZDR posture, so there is no
+        search, no page fetch and no Model Plane call. The refusal leaves a
+        metadata-only tombstone when that is switched on.
       tags:
       - search
       requestBody:
@@ -514,10 +525,21 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AnswerErrorBody'
+        '403':
+          description: >-
+            Zero data retention (the body flag or the token's floor): refused
+            before any work, `code` `FORBIDDEN`, `reason` `zdr_unavailable`. The
+            Model Plane hop carries no ZDR posture, so nothing is searched,
+            fetched or sent to a model.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnswerErrorBody'
         '501':
           description: >-
             The answer pipeline is not wired. `reason` is the first closed gate:
-            `synthesis_disabled`, `no_search_provider`, `no_model_plane_url` or
+            `synthesis_disabled`, `model_path_refused` (the switch is on and the
+            boot gate refused it), `no_model_plane_url`, `no_search_provider` or
             `model_client_init_failed`; `hint` names the exact setting.
           content:
             application/json:
@@ -549,9 +571,10 @@ paths:
         array), `event: delta` (`{"delta": text}`, repeated), then `event: done`
         (`{"answer", "cached"}`); `event: error` (`{"message", "reason"}`) on
         failure, where `reason` is the closed code of `AnswerErrorBody`. A warm
-        org-scoped answer-cache hit replays with no model call; a ZDR request
-        neither reads nor writes the cache. When the pipeline is not wired the
-        response is the same 501 as `/v1/answer`, not a stream. Metered as
+        org-scoped answer-cache hit replays with no model call. A ZDR request is
+        refused with the same JSON 403 as `/v1/answer` (reason `zdr_unavailable`),
+        not a stream. When the pipeline is not wired the response is the same 501
+        as `/v1/answer`, not a stream. Metered as
         `quarry.answer.synth` when an answer is produced.
       tags:
       - search
@@ -570,6 +593,12 @@ paths:
                 type: string
         '400':
           description: The query is empty
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnswerErrorBody'
+        '403':
+          description: Zero data retention; refused before the stream starts, `reason` `zdr_unavailable`
           content:
             application/json:
               schema:
@@ -6412,6 +6441,26 @@ components:
         facets:
           type: boolean
           default: false
+        zdr:
+          type: boolean
+          nullable: true
+          description: >-
+            Zero data retention for this search: the cache and the durable content events are bypassed. A user
+            of a ZDR organisation runs as ZDR whatever this says. A service caller (for example quarry-edge) must
+            send it: an omitted value is refused with ZDR_REQUIRED (400). A ZDR search makes no rerank call (the
+            rerank status is skipped, reason zdr).
+        score_kinds:
+          type: array
+          default: []
+          description: >-
+            The score kinds the caller accepts on the results. Empty (the default) means the order only: no score
+            reaches the wire. cross_encoder.v1 asks for the Data Plane's cross-encoder score on a reranked result
+            set, and the response then names the kind in score_kind. An unknown kind is refused with
+            SCORE_KIND_UNSUPPORTED (400).
+          items:
+            type: string
+            enum:
+            - cross_encoder.v1
     SearchResultItem:
       type: object
       required:
@@ -6432,6 +6481,12 @@ components:
           format: int32
         provider:
           type: string
+        score:
+          type: number
+          format: float
+          description: >-
+            The Data Plane cross-encoder's relevance score for this result. Present only when the request asked
+            for cross_encoder.v1 in score_kinds and the rerank was applied. Absent otherwise.
     FacetCount:
       type: object
       required:
@@ -6484,6 +6539,7 @@ components:
             the setting that fixes it.
           enum:
           - synthesis_disabled
+          - model_path_refused
           - no_search_provider
           - no_model_plane_url
           - model_client_init_failed
@@ -6512,6 +6568,48 @@ components:
             never a 403; a ZDR floor is not listed here.
           items:
             type: string
+        score_kind:
+          type: string
+          nullable: true
+          description: >-
+            The kind of the scores on results. Present only when the request asked for that kind in score_kinds
+            and the rerank was applied.
+          enum:
+          - cross_encoder.v1
+        rerank:
+          $ref: '#/components/schemas/RerankReport'
+    RerankReport:
+      type: object
+      description: >-
+        What the rerank step did for this search. The field is absent when no rerank step is wired in.
+        applied: the Data Plane's scores ordered the head of the results. skipped: the Data Plane was not asked,
+        and the reason says why (disabled, misconfigured, processor_unapproved, metering_unavailable, zdr,
+        sovereign, circuit_open, input_not_tenant, input_too_small, empty_query, or unknown for a Data Plane reason
+        Quarry does not name). degraded: it was asked and failed, so the results keep their input order, and the
+        reason says how (refused, contract, rate_limited, provider_rate_limited, provider_error, unreachable,
+        token_unavailable, timeout, no_scores). shadow: it was asked and its order was measured, but the results
+        keep their order and carry no score. Only applied and rerank-not-configured outcomes are cached.
+      required:
+      - status
+      properties:
+        status:
+          type: string
+          enum:
+          - applied
+          - skipped
+          - degraded
+          - shadow
+          - rerank-not-configured
+        reason:
+          type: string
+          nullable: true
+          description: >-
+            Why the status is skipped or degraded. For shadow it is would_apply when the Data Plane's order would have
+            reordered the head, and otherwise the reason the call would have been skipped or degraded. Absent for applied.
+        profile:
+          type: string
+          nullable: true
+          description: The rerank profile that ran, or would have run (web-v1).
     MapRequest:
       type: object
       required:
@@ -6778,17 +6876,23 @@ components:
             type: string
             description: >-
               A closed code, never provider text. `synthesis_disabled`: set
-              `QUARRY_EDGE__ANSWER_SYNTHESIS=1`. `no_search_provider`: configure a
+              `QUARRY_EDGE__ANSWER_SYNTHESIS=1`. `model_path_refused`: the switch is
+              on but the boot gate refused it (the cross-plane manifest row
+              `model-invoke` is not granted, or there is no service identity); read
+              the edge boot log. `no_search_provider`: configure a
               search provider. `no_model_plane_url`: set
               `QUARRY_EDGE__MODEL_PLANE_URL`. `model_client_init_failed`: the URL is
-              not a usable base URL, read the edge boot log. These four are 501
-              `UNSUPPORTED`. `model_plane_auth_refused`: 503 `UNAVAILABLE`, the
+              not a usable base URL, read the edge boot log. These five are 501
+              `UNSUPPORTED`. `zdr_unavailable`: 403 `FORBIDDEN`, zero data retention
+              (ADR-4), refused before any work. `model_plane_auth_refused`: 503 `UNAVAILABLE`, the
               Control Plane registry or the Model Plane gateway refuses quarry-edge
               (an owner decision, INNH-8b). `model_plane_rate_limited` and
               `model_plane_error`: the model call failed. `answer_search_failed`: the
               search or page-fetch step failed. Absent on a 400.
             enum:
             - synthesis_disabled
+            - zdr_unavailable
+            - model_path_refused
             - no_search_provider
             - no_model_plane_url
             - model_client_init_failed

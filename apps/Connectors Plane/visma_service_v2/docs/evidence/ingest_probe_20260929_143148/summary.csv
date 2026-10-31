@@ -1,0 +1,5 @@
+endpoint,window_days,pass,exit,status,records_in,written,bronze,pages,non_200,last_page,min_rate_remaining,max_page_ms,watermark
+sales_order_lines,,1,0,succeeded,67378,67378,67378,135,0,378,,652,2026-09-29 13:57:37.644+00
+sales_order_lines,,2,0,succeeded,1,1,67378,1,0,1,,428,2026-09-29 13:57:37.644+00
+suppliers,,1,0,succeeded,1273,1273,1273,13,0,73,14731,3256,2026-09-29 13:44:20.21+00
+suppliers,,2,0,succeeded,4,4,1273,1,0,4,14730,689,2026-09-29 13:44:20.21+00

@@ -437,6 +437,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "404":
           $ref: "#/components/responses/NotFound"
+        "422":
+          description: The scope is not available (error code scope_not_enabled)
 
   /v1/orchestration/runs/{run_id}/cancel:
     post:
@@ -1475,6 +1477,56 @@ components:
         decision_reason:
           type: string
           nullable: true
+        cause:
+          nullable: true
+          description: Why the approval was asked for. Null when the creator stated no cause.
+          allOf:
+            - $ref: "#/components/schemas/ApprovalCause"
+
+    ApprovalCause:
+      type: object
+      description: >-
+        Why an approval was asked for. An allowlisted projection: the tool arguments, the
+        call digest and the action key are never part of it.
+      properties:
+        code:
+          type: string
+          description: Closed cause code. A code this build does not know is reported as unclassified_gate.
+          enum:
+            - owner_effect_reserved
+            - consent_to_disclose
+            - risky_effect_under_ask
+            - provider_write
+            - capability_high_risk
+            - capability_policy_ask
+            - hook_ask
+            - browser_action_risk
+            - auto_posture_provider_write
+            - unclassified_gate
+        tool:
+          type: string
+          nullable: true
+          description: Tool the pause is on. Null for a gate that is not a tool call.
+        effect_class:
+          type: string
+          nullable: true
+          description: Declared side-effect class of the call, when the gate read one.
+        risk_category:
+          type: string
+          nullable: true
+          description: Browser risk category the proposed action was held under.
+        rule_id:
+          type: string
+          nullable: true
+          description: Standing rule that raised the pause, when one did.
+        scope_options:
+          type: array
+          description: Scopes the decider may grant. Only once is offered today.
+          items:
+            type: string
+        step_up_required:
+          type: boolean
+          description: True when granting needs a recent re-authentication.
 
     SubagentLineage:
       type: object
@@ -1536,6 +1588,13 @@ components:
         reason:
           type: string
           default: ""
+        scope:
+          type: string
+          description: >-
+            How far the decision reaches. Omitted means once. A standing scope is refused with
+            422 scope_not_enabled until grants exist.
+          enum: [once]
+          default: once
 
     Capability:
       type: object
@@ -1579,6 +1638,24 @@ components:
           type: string
           format: date-time
           description: Server-recorded health-attestation time; empty when health is not attested.
+        side_effect_class:
+          type: string
+          enum: [read, sandbox_compute, context_write, external_write, destructive, owner_effect, unclassified]
+          readOnly: true
+          description: >-
+            Declared side-effect class of the capability, the strictest class of
+            the tools it carries. The vocabulary is closed and unclassified is the
+            strictest, so a value the registry has not classified reads as
+            unclassified, never as a weaker class. Set only by the registry's seed
+            and observation paths; no request field sets it.
+        approval_floor:
+          type: string
+          enum: [none, ask, durable_owner]
+          readOnly: true
+          description: >-
+            The least approval the class may be run under. owner_effect always
+            carries durable_owner and unclassified always carries at least ask;
+            an empty or unrecognised floor reads as durable_owner, the strictest.
 
     TaskInput:
       type: object

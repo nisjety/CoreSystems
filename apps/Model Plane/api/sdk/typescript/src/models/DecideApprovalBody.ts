@@ -31,6 +31,12 @@ export interface DecideApprovalBody {
      * @memberof DecideApprovalBody
      */
     reason?: string;
+    /**
+     * How far the decision reaches. Omitted means once. A standing scope is refused with 422 scope_not_enabled until grants exist.
+     * @type {DecideApprovalBodyScopeEnum}
+     * @memberof DecideApprovalBody
+     */
+    scope?: DecideApprovalBodyScopeEnum;
 }
 
 
@@ -42,6 +48,14 @@ export const DecideApprovalBodyDecisionEnum = {
     Reject: 'reject'
 } as const;
 export type DecideApprovalBodyDecisionEnum = typeof DecideApprovalBodyDecisionEnum[keyof typeof DecideApprovalBodyDecisionEnum];
+
+/**
+ * @export
+ */
+export const DecideApprovalBodyScopeEnum = {
+    Once: 'once'
+} as const;
+export type DecideApprovalBodyScopeEnum = typeof DecideApprovalBodyScopeEnum[keyof typeof DecideApprovalBodyScopeEnum];
 
 
 /**
@@ -64,6 +78,7 @@ export function DecideApprovalBodyFromJSONTyped(json: any, ignoreDiscriminator: 
         
         'decision': json['decision'],
         'reason': json['reason'] == null ? undefined : json['reason'],
+        'scope': json['scope'] == null ? undefined : json['scope'],
     };
 }
 
@@ -80,6 +95,7 @@ export function DecideApprovalBodyToJSONTyped(value?: DecideApprovalBody | null,
         
         'decision': value['decision'],
         'reason': value['reason'],
+        'scope': value['scope'],
     };
 }
 

@@ -30,6 +30,9 @@ use crate::moderation::ToolProvenance;
 /// documented on `mp_events::subjects`' other event families.
 pub const EVENT_TYPE_TOOL_RESULT_SCREENING: &str = "TOOL_RESULT_SCREENING_FLAGGED";
 pub const EVENT_TYPE_SEMANTIC_SHADOW: &str = "TOOL_RESULT_SEMANTIC_SHADOW";
+/// One inline injection decision under `tighten` or `enforce` (WS26-S6): the mode, the
+/// outcome, the coverage, the category scores and whether the payload was withheld.
+pub const EVENT_TYPE_SEMANTIC_ENFORCED: &str = "TOOL_RESULT_SEMANTIC_ENFORCED";
 
 /// Build a security event envelope for one tool outcome's provenance, if and
 /// only if it is audit-worthy. Returns `None` for a clean/screened/
@@ -84,6 +87,9 @@ pub fn envelope_for(
             // that were screened, without the bytes ever leaving the
             // process — see module docs on why this is ZDR-safe.
             "content_hash": provenance.screening.content_hash,
+            // Rule ids name what fired, never the matched text: they are
+            // published on the same ZDR-safe channel as the hash.
+            "flags": provenance.screening.rule_ids,
         }),
         zdr,
     })
@@ -145,6 +151,72 @@ pub fn shadow_envelope_for(
     })
 }
 
+/// Build the envelope for one inline injection decision, if the decision says
+/// something: the classifier was asked (a verdict or an unavailable call), or the
+/// payload was withheld. A skipped decision stays silent, like a clean result. Nothing
+/// is published on a ZDR turn, as for the shadow pass.
+#[must_use]
+pub fn enforced_envelope_for(
+    screen: &crate::semantic_screening::InlineScreen,
+    org_id: &str,
+    user_id: &str,
+    run_id: &str,
+    tool_name: &str,
+    zdr: bool,
+) -> Option<Envelope> {
+    use crate::semantic_screening::InjectionOutcome;
+
+    let asked = !matches!(screen.outcome, InjectionOutcome::Skipped(_));
+    if zdr || !(asked || screen.withhold) {
+        return None;
+    }
+    if org_id.trim().is_empty() || run_id.trim().is_empty() {
+        return None;
+    }
+    let categories = match &screen.outcome {
+        InjectionOutcome::Completed(verdict) => json!({
+            "instruction_override": verdict.categories.instruction_override,
+            "role_impersonation": verdict.categories.role_impersonation,
+            "exfiltration_request": verdict.categories.exfiltration_request,
+            "tool_use_request": verdict.categories.tool_use_request,
+            "hidden_text": verdict.categories.hidden_text,
+        }),
+        InjectionOutcome::Skipped(_) | InjectionOutcome::Unavailable(_) => serde_json::Value::Null,
+    };
+    Some(Envelope {
+        event_id: new_ulid(),
+        event_type: EVENT_TYPE_SEMANTIC_ENFORCED.to_owned(),
+        schema_version: 1,
+        ts: Utc::now(),
+        producer: "model-gateway".to_owned(),
+        correlation_id: run_id.to_owned(),
+        causation_id: String::new(),
+        // Namespaced like the other two screening events, so the three kinds never
+        // collide on the same (run, tool, hash) triple.
+        idempotency_key: format!(
+            "security_enforced_{run_id}_{tool_name}_{}",
+            screen.screening.content_hash
+        ),
+        org_id: org_id.to_owned(),
+        user_id: user_id.to_owned(),
+        resource_ref: format!("run/{run_id}"),
+        payload: json!({
+            "tool": tool_name,
+            "trust_class": screen.trust.label(),
+            "mode": screen.mode.as_wire(),
+            "deterministic_posture": screen.deterministic.label(),
+            "screening_posture": screen.screening.posture.label(),
+            "outcome": screen.outcome.label(),
+            "coverage": screen.coverage.label(),
+            "withheld": screen.withhold,
+            "semantic_categories": categories,
+            // The hash and the closed labels above are the whole payload: no text.
+            "content_hash": screen.screening.content_hash,
+        }),
+        zdr,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,8 +229,21 @@ mod tests {
             screening: ScreeningOutcome {
                 posture,
                 content_hash: crate::moderation::content_hash(b"some payload"),
+                rule_ids: Vec::new(),
             },
         }
+    }
+
+    #[test]
+    fn a_flagged_event_carries_rule_ids_and_no_text() {
+        let mut p = provenance(TrustClass::ExternalWeb, ScreeningPosture::Flagged);
+        p.screening.rule_ids = vec!["injection.ignore_previous_instructions", "obfuscation.tag_block"];
+        let envelope = envelope_for(&p, "org-1", "user-1", "run-1", "web_fetch", false)
+            .expect("flagged result must be audited");
+        assert_eq!(
+            envelope.payload["flags"],
+            serde_json::json!(["injection.ignore_previous_instructions", "obfuscation.tag_block"])
+        );
     }
 
     #[test]
@@ -337,5 +422,95 @@ mod tests {
         )
         .unwrap();
         assert_ne!(deterministic.idempotency_key, shadow_env.idempotency_key);
+    }
+
+    // --- enforced_envelope_for ----------------------------------------------
+
+    fn inline_screen(
+        outcome: crate::semantic_screening::InjectionOutcome,
+        withhold: bool,
+    ) -> crate::semantic_screening::InlineScreen {
+        crate::semantic_screening::InlineScreen {
+            trust: TrustClass::ExternalWeb,
+            mode: crate::moderation::ScreeningMode::Tighten,
+            screening: ScreeningOutcome {
+                posture: ScreeningPosture::Flagged,
+                content_hash: crate::moderation::content_hash(b"some payload"),
+                rule_ids: vec![crate::semantic_screening::SEMANTIC_RULE_ID],
+            },
+            deterministic: ScreeningPosture::Clean,
+            outcome,
+            coverage: crate::semantic_screening::Coverage::Full,
+            withhold,
+        }
+    }
+
+    #[test]
+    fn an_enforced_event_carries_mode_outcome_coverage_and_no_text() {
+        use crate::semantic_screening::{InjectionCategories, InjectionOutcome, InjectionVerdict};
+        let verdict = InjectionVerdict {
+            flagged: true,
+            categories: InjectionCategories {
+                instruction_override: 0.9,
+                role_impersonation: 0.0,
+                exfiltration_request: 0.0,
+                tool_use_request: 0.1,
+                hidden_text: 0.0,
+            },
+        };
+        let screen = inline_screen(InjectionOutcome::Completed(verdict), false);
+        let envelope =
+            enforced_envelope_for(&screen, "org-1", "user-1", "run-1", "fetch_url", false)
+                .expect("a completed inline call is audited");
+        assert_eq!(envelope.event_type, EVENT_TYPE_SEMANTIC_ENFORCED);
+        assert_eq!(envelope.payload["mode"], "tighten");
+        assert_eq!(envelope.payload["outcome"], "completed");
+        assert_eq!(envelope.payload["coverage"], "full");
+        assert_eq!(envelope.payload["withheld"], false);
+        assert_eq!(envelope.payload["semantic_categories"]["instruction_override"], 0.9);
+        assert_eq!(
+            envelope.payload["content_hash"],
+            crate::moderation::content_hash(b"some payload")
+        );
+        assert!(!envelope.payload.to_string().contains("some payload"));
+    }
+
+    #[test]
+    fn a_skipped_inline_decision_is_silent_unless_the_payload_was_withheld() {
+        use crate::semantic_screening::{InjectionOutcome, InjectionSkipReason};
+        let skipped = inline_screen(
+            InjectionOutcome::Skipped(InjectionSkipReason::NotClean),
+            false,
+        );
+        assert!(
+            enforced_envelope_for(&skipped, "org-1", "user-1", "run-1", "fetch_url", false)
+                .is_none()
+        );
+        let withheld = inline_screen(
+            InjectionOutcome::Skipped(InjectionSkipReason::NotClean),
+            true,
+        );
+        let envelope = enforced_envelope_for(&withheld, "org-1", "user-1", "run-1", "fetch_url", false)
+            .expect("a withheld payload is always reported");
+        assert_eq!(envelope.payload["withheld"], true);
+        assert!(envelope.payload["semantic_categories"].is_null());
+    }
+
+    #[test]
+    fn no_inline_event_is_published_on_a_zdr_turn() {
+        use crate::semantic_screening::{InjectionOutcome, InjectionUnavailableReason};
+        let unavailable = inline_screen(
+            InjectionOutcome::Unavailable(InjectionUnavailableReason::Timeout),
+            true,
+        );
+        assert!(enforced_envelope_for(
+            &unavailable,
+            "org-1",
+            "user-1",
+            "run-1",
+            "fetch_url",
+            true
+        )
+        .is_none());
     }
 }

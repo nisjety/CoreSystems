@@ -8,6 +8,13 @@ import { normalizePrivacyTier, type PrivacyTier } from './privacy-tier'
 // run's telemetry. Normalized to camelCase, parse-defensively (snake_case OR
 // camelCase) like the rest of the API layer (see `orchestration-client`).
 
+/**
+ * Closed run-origin vocabulary (Model Plane WS20 S2, DEC-17). Mirrors
+ * mp-contracts::run_origin; a token outside it is never shown as an origin.
+ */
+export const RUN_ORIGINS = ['chat', 'schedule', 'trigger', 'api'] as const
+export type RunOrigin = (typeof RUN_ORIGINS)[number]
+
 /** Full run metadata as reported by session-core's RunService (via the gateway). */
 export type RunDetail = {
   runId: string
@@ -33,6 +40,12 @@ export type RunDetail = {
    * renders no claim at all rather than guessing one.
    */
   privacyTier?: PrivacyTier
+  /**
+   * Who started the run, from `metadata.origin`. An absent stamp reads as
+   * `chat` (runs from before the stamp existed); `undefined` only for a stamp
+   * outside the closed set, so the console shows no origin rather than a wrong one.
+   */
+  origin?: RunOrigin
   /** RFC3339 timestamps, when present. */
   createdAt?: string
   updatedAt?: string
@@ -78,6 +91,14 @@ function privacyTierFrom(raw: RawRun): unknown {
   return undefined
 }
 
+/** Read the run's origin stamp. Absent or null is a chat run; an unknown token is `undefined`. */
+function originFrom(raw: RawRun): RunOrigin | undefined {
+  const meta = raw.metadata
+  const stamp = meta && typeof meta === 'object' ? (meta as Record<string, unknown>).origin : undefined
+  if (stamp === undefined || stamp === null) return 'chat'
+  return RUN_ORIGINS.find((origin) => origin === stamp)
+}
+
 /** Normalize a model-gateway run object (snake_case) to our camelCase shape. */
 function normalizeRun(raw: RawRun): RunDetail | null {
   const runId = str(raw.run_id) ?? str(raw.runId) ?? str(raw.id)
@@ -100,6 +121,7 @@ function normalizeRun(raw: RawRun): RunDetail | null {
     // Unknown/garbage tier values degrade to undefined → neutral console UI,
     // never a fabricated claim.
     privacyTier: normalizePrivacyTier(raw.privacy_tier ?? raw.privacyTier ?? privacyTierFrom(raw)),
+    origin: originFrom(raw),
     createdAt: str(raw.created_at) ?? str(raw.createdAt),
     updatedAt: str(raw.updated_at) ?? str(raw.updatedAt),
   }

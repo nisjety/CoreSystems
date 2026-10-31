@@ -11,3 +11,11 @@ Run of 2026-10-31, lane D, worktree innh-lane-d. Continue from the tree: every s
 - [x] ZDR matrix rows `search` and `answer` (zdr_matrix.rs), goldens regenerated with QUARRY_UPDATE_GOLDEN=1, CRLF restored, rerun without it.
 - [x] Rust tests green in the lane container (counts in INNH-8-status.md); node tests green (51 pass, 12 todo that were already todo).
 - [x] Status file, depth file, local commit.
+
+## Fix pass 2026-10-31 (lane D; use the per-lane scratch folder `scratchpad/lane-d8`, the shared scratchpad collides across lanes)
+- [x] Merged main into innh/lane-d (14 conflicted files resolved), deleted the duplicate switch, status derived from the QB-T17 gate decision (`from_decision`), reason `model_path_refused`.
+- [x] `failed()` uses `wire_name()`; test asserts DRIVER_FAILED / RATE_LIMITED.
+- [x] `/v1/answer*` refused under ZDR (403 `zdr_unavailable`), matrix row `answer` Refused/Enforced, goldens regenerated, tests rewritten (zdr_claim_floor, zdr_tombstone, answer_provider_status).
+- [x] Docs: openapi, CONTRACTS, ERROR_REASONS, RUNBOOKS, SELF_HOST, TAVILY_PARITY, compose README, docs-contract test.
+- [x] Lane container: lib 733, bins 719, integration tests green (counts in INNH-8-status.md).
+- [ ] Open (depth file): the other review findings that are not blockers.

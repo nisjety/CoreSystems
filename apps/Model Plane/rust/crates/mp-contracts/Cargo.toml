@@ -7,7 +7,10 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
+serde = { workspace = true }
 serde_json = { workspace = true }
+blake3 = { workspace = true }
+sha2 = "0.10"
 prost = { workspace = true }
 prost-types = { workspace = true }
 tonic = { workspace = true }

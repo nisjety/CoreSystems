@@ -41,6 +41,8 @@ const renderTurn = (message: ChatTurn) =>
   ))
 
 const line = () => document.querySelector('.verevon-chat-processing-line')
+const lines = () =>
+  Array.from(document.querySelectorAll('.verevon-chat-processing-line')).map((node) => node.textContent)
 
 describe('AssistantMessage processing line', () => {
   it('reads EU, the provider and ZDR when the server stamped them', () => {
@@ -85,6 +87,49 @@ describe('AssistantMessage processing line', () => {
       servedBy: { residency: 'eu', privacyTier: 'eu_resident' },
     }))
     expect(line()).toBeNull()
+    unmount()
+  })
+
+  it('says how long the provider made the turn wait when that wait was noticeable', () => {
+    const { unmount } = renderTurn(baseTurn({
+      timing: {
+        serverMs: 9_000,
+        providerMs: 8_000,
+        orchestrationMs: 1_000,
+        phases: [{
+          phase: 'answer_stream',
+          startMs: 0,
+          endMs: 8_000,
+          provider: {
+            handlerMs: 7_900,
+            providerMs: 7_800,
+            attempts: 2,
+            responseCacheHit: false,
+            failedAttemptsMs: 1_200,
+            retryWaitMs: 4_300,
+          },
+        }],
+      },
+    }))
+    expect(lines()).toEqual(['ventet 4 s på leverandøren'])
+    unmount()
+  })
+
+  it('stays silent for a provider wait of two seconds or less', () => {
+    const { unmount } = renderTurn(baseTurn({
+      timing: {
+        serverMs: 3_000,
+        providerMs: 2_500,
+        orchestrationMs: 500,
+        phases: [{
+          phase: 'answer_stream',
+          startMs: 0,
+          endMs: 2_500,
+          provider: { handlerMs: 2_400, providerMs: 2_300, attempts: 2, responseCacheHit: false, retryWaitMs: 1_500 },
+        }],
+      },
+    }))
+    expect(lines()).toEqual([])
     unmount()
   })
 })

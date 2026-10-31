@@ -1,0 +1,93 @@
+# Local deployment of Ingestion Plane's Integration Core, without copying its
+# source or weakening tenant authentication. The :3026 callback matches the
+# existing Google client in project intergration-core. The base file does not
+# publish HTTP; the public overlay binds only loopback.
+name: studio-integration-local
+
+x-hardening: &hardening
+  init: true
+  read_only: true
+  tmpfs:
+    - /tmp
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
+services:
+  integration-postgres:
+    image: postgres:16.14-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: integration_user
+      POSTGRES_PASSWORD: ${INTEGRATION_LOCAL_DB_PASSWORD:?set a persistent local database credential}
+      POSTGRES_DB: integration
+    volumes:
+      - integration-postgres-data:/var/lib/postgresql/data
+    networks:
+      - integration-private
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U integration_user -d integration"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  integration-api:
+    <<: *hardening
+    build:
+      context: ../Ingestion Plane/integration-corev2
+      dockerfile: Dockerfile
+      target: api
+    restart: unless-stopped
+    environment:
+      PORT: "3026"
+      SERVICE_NAME: integration-corev2
+      ENVIRONMENT: local
+      DATABASE_URL: postgresql://integration_user:${INTEGRATION_LOCAL_DB_PASSWORD:?set a persistent local database credential}@integration-postgres:5432/integration
+      INTERNAL_API_KEY: ${INTEGRATION_LOCAL_INTERNAL_API_KEY:?set the existing Integration internal key}
+      AUTH_CORE_URL: http://auth-core:3011
+      AUTH_CORE_INTERNAL_API_KEY: ${INTEGRATION_LOCAL_AUTH_CORE_INTERNAL_API_KEY:?set the existing Auth internal key}
+      AUTH_CORE_JWKS_URL: http://auth-core:3011/api/convex-auth/jwks
+      PLANE_TOKEN_ISSUER: http://localhost:3011/api/convex-auth
+      INGESTION_AUTH_AUDIENCE: ingestion
+      ORG_CORE_URL: http://org-core:8080
+      ORG_CORE_SERVICE_TOKEN: ${INTEGRATION_LOCAL_ORG_SERVICE_TOKEN:?set the existing Org-scoped service token}
+      BILLING_CORE_URL: http://billing-core:3014
+      BILLING_CORE_SERVICE_TOKEN: ${INTEGRATION_LOCAL_BILLING_SERVICE_TOKEN:?set the existing Billing-scoped service token}
+      AUDIT_CORE_URL: http://audit-core:8187
+      AUDIT_CORE_SERVICE_TOKEN: ${INTEGRATION_LOCAL_AUDIT_SERVICE_TOKEN:?set the existing Audit-scoped service token}
+      INTEGRATION_PUBLIC_BASE_URL: http://localhost:3026
+      INTEGRATION_ALLOWED_RETURN_ORIGINS: http://localhost:5173
+      INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: ${INTEGRATION_LOCAL_VAULT_KEY:?set the existing Integration vault key}
+      INTEGRATION_PROVIDER_WRITE_ATTESTATION_KEYS_JSON: ${INTEGRATION_LOCAL_WRITE_ATTESTATION_KEYS_JSON:?set the existing trusted write-attestation keys}
+      GOOGLE_CLIENT_ID: ${INTEGRATION_LOCAL_GOOGLE_CLIENT_ID:?set the existing Google OAuth client ID}
+      GOOGLE_CLIENT_SECRET: ""
+      GOOGLE_CLIENT_SECRET_FILE: /run/secrets/google_client_secret
+      NATS_ENABLED: "false"
+    secrets:
+      - google_client_secret
+    depends_on:
+      integration-postgres:
+        condition: service_healthy
+    networks:
+      - integration-private
+      - inter-plane-bus
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3026/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+secrets:
+  google_client_secret:
+    file: ${INTEGRATION_LOCAL_GOOGLE_SECRET_FILE:?set a protected Google client secret file}
+
+volumes:
+  integration-postgres-data:
+
+networks:
+  integration-private:
+    internal: true
+  inter-plane-bus:
+    external: true

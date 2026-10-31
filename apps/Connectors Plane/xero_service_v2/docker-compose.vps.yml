@@ -1,0 +1,46 @@
+# VPS override for the onboarding service.
+#
+# Publishes the onboarding app at https://tools.aquatiq.com through the existing
+# Traefik (network `internal`, Cloudflare-fronted TLS). Replaces the old
+# aquatiq-tools-frontend on that host.
+#
+# Deploy from the repo root on the VPS:
+#   docker compose -f docker-compose.yml -f docker-compose.vps.yml up -d --build onboarding
+#
+# Then stop the old frontend so Traefik hands the route over:
+#   docker stop aquatiq-tools-frontend
+
+services:
+  onboarding:
+    # Join the Traefik network so it can reach this container.
+    networks:
+      - internal
+    environment:
+      # Container is served at the public HTTPS origin; override the local defaults.
+      XERO_REDIRECT_URI: https://tools.aquatiq.com/api/auth/callback
+      XERO_BFF_SECURE_COOKIES: "true"
+      # Inherited by the `xero` CLI child the BFF spawns for the Sync/Backfill
+      # buttons: PKCE auth against the shared store + write to the raw bucket.
+      XERO_AUTH_MODE: pkce
+      GCS_BUCKET: prj-dw-dev-raw
+      GOOGLE_APPLICATION_CREDENTIALS: /app/gcp-credentials.json
+    volumes:
+      # GCS service-account for the spawned sync (world-readable on host; uid 10002 reads it).
+      - /opt/aquatiq-integrations/shared/gcp-credentials.json:/app/gcp-credentials.json:ro
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: internal
+      # HTTPS router
+      traefik.http.routers.xero-onboarding.rule: Host(`tools.aquatiq.com`)
+      traefik.http.routers.xero-onboarding.entrypoints: websecure
+      traefik.http.routers.xero-onboarding.tls: "true"
+      # HTTP → HTTPS redirect (same middleware the other apps use)
+      traefik.http.routers.xero-onboarding-http.rule: Host(`tools.aquatiq.com`)
+      traefik.http.routers.xero-onboarding-http.entrypoints: web
+      traefik.http.routers.xero-onboarding-http.middlewares: redirect-to-https@file
+      # Traefik reaches the BFF on the container's 8080 over the internal network
+      traefik.http.services.xero-onboarding.loadbalancer.server.port: "8080"
+
+networks:
+  internal:
+    external: true

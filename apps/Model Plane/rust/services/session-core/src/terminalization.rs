@@ -5,6 +5,8 @@
 //! producers receive a stable receipt or a conflict, while the recovery loop
 //! may only record an observable unknown-outcome failure.
 
+use crate::continuation_crypto::DescriptorCipher;
+use crate::retention_receipt::{self, RetentionClass, RunRetention};
 use chrono::{DateTime, Utc};
 use mp_contracts::model_plane::v1 as pb;
 use mp_events::idempotency::derive_idempotency_hash;
@@ -20,7 +22,7 @@ const STEP_COMPLETED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.StepCo
 const RUN_TERMINAL_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.RunTerminal";
 const RECOVERY_FAILURE_CODE: &str = "outcome_unknown";
 const MANAGED_RECOVERY_LEASE_SECS: i64 = 60;
-const MANAGED_DEADLINE_SECS: i64 = 15 * 60;
+pub(crate) const MANAGED_DEADLINE_SECS: i64 = 15 * 60;
 const MANAGED_RECOVERY_BATCH: usize = 32;
 const ACTIVITY_RETRY_SECS: i64 = 60;
 const MAX_RUN_ID_BYTES: usize = 128;
@@ -32,6 +34,18 @@ const TERMINALIZE_SCOPE: &str = "session:terminalize";
 const HEARTBEAT_SCOPE: &str = "session:heartbeat";
 const MODEL_GATEWAY_PRINCIPAL: &str = "service:model-gateway";
 const EXECUTION_CORE_PRINCIPAL: &str = "service:execution-core";
+/// Build plan WS03 S8-0. Off by default; only the literal `true` turns it on (the strict
+/// parser the other durable-loop switches share). See [`approval_expiry_enabled`].
+const APPROVAL_EXPIRY_ENV: &str = "SESSION_CORE_RECOVERY_APPROVAL_EXPIRY_ENABLED";
+/// Build plan WS03 S8-4. Off by default; only the literal `true` turns it on. See
+/// [`park_recovery_enabled`] and [`park_recovery_active`].
+const PARK_RECOVERY_ENV: &str = "SESSION_CORE_PARK_RECOVERY_ENABLED";
+/// Build plan WS03 S8-B. Off by default; only the literal `true` turns it on. See
+/// [`crash_park_enabled`] and [`crash_park_active`].
+const CRASH_PARK_ENV: &str = "SESSION_CORE_CRASH_PARK_ENABLED";
+/// Build plan WS20 S1. Off by default; off keeps the receipt-only scheduled path. See
+/// [`scheduled_result_persist_enabled`].
+const SCHEDULED_RESULT_PERSIST_ENV: &str = "SESSION_CORE_SCHEDULED_RESULT_PERSIST";
 
 /// The only run-start values that may cross the durable boundary. For a ZDR
 /// caller every requester-controlled content field is replaced before SQL or
@@ -198,13 +212,17 @@ pub(crate) fn is_startable_source(source: pb::ManagedRunSource) -> bool {
 }
 
 /// Must stay in sync with the `failure_code` CHECK on
-/// `managed_run_terminalization_outbox` (migration 0015, widened by 0033). A
+/// `managed_run_terminalization_outbox` (migration 0015, widened by 0033 and
+/// 0069). A
 /// code missing here is rejected before any database access; one missing from
 /// the CHECK fails the write instead, so both lists move together.
 /// `outcome_unknown` is deliberately absent: it is set only by reconciliation,
 /// never submitted by a caller.
 const ALLOWED_FAILURE_CODES: &[&str] = &[
     "browser_failed",
+    "browser_permission_denied",
+    "browser_resource_exhausted",
+    "browser_timed_out",
     "dispatch_rejected",
     "dispatch_unreachable",
     "execution_failed",
@@ -441,6 +459,21 @@ struct ExistingManagedStart {
     agent_id: String,
     goal: String,
     mode: String,
+    retention_class: String,
+    waiver_ack_id: Option<String>,
+    waiver_connection_id: Option<String>,
+}
+
+/// A retry is the same start only if it carries the same receipt. A waiver
+/// token for one connection must never adopt a run that was started under
+/// another connection's waiver, or under no waiver at all.
+fn existing_retention_matches(existing: &ExistingManagedStart, retention: &RunRetention) -> bool {
+    RunRetention::from_storage(
+        &existing.retention_class,
+        existing.waiver_ack_id.clone(),
+        existing.waiver_connection_id.clone(),
+    )
+    .is_ok_and(|stored| stored == *retention)
 }
 
 fn existing_start_matches(
@@ -523,9 +556,10 @@ async fn insert_managed_run_started(
     request: &pb::StartManagedRunRequest,
     persisted: &ManagedStartPersistence,
     source: pb::ManagedRunSource,
-    zdr: bool,
+    retention: &RunRetention,
     now: DateTime<Utc>,
 ) -> Result<(), Status> {
+    let zdr = retention.class == RetentionClass::Zdr;
     let residency = super::grpc::configured_residency();
     // The thread was created only after verifying its signed Space decision.
     // Copy that durable, non-secret context here instead of trusting any
@@ -542,9 +576,11 @@ async fn insert_managed_run_started(
         Option<i64>,
     ) = sqlx::query_as(
         "INSERT INTO runs (id, thread_id, parent_run_id, agent_id, goal, mode, org_id, user_id, status, residency, created_at, updated_at,
-                          space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision)
+                          space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision,
+                          retention_class, waiver_ack_id, waiver_connection_id)
          SELECT $1, t.id, NULLIF($3, ''), $4, $5, $6, $7, $8, 'queued', $9, $10, $10,
-                t.space_id, t.space_decision_ref, t.recipient_audience_ref, t.recipient_audience_revision, t.recipient_audience_hash, t.privacy_policy_ref, t.resource_authorization_ref, t.authority_revision
+                t.space_id, t.space_decision_ref, t.recipient_audience_ref, t.recipient_audience_revision, t.recipient_audience_hash, t.privacy_policy_ref, t.resource_authorization_ref, t.authority_revision,
+                $11, $12, $13
          FROM threads AS t
          WHERE t.id = $2 AND t.org_id = $7 AND t.user_id = $8
          RETURNING space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision",
@@ -559,6 +595,9 @@ async fn insert_managed_run_started(
     .bind(&request.user_id)
     .bind(residency)
     .bind(now)
+    .bind(retention.class.as_str())
+    .bind(retention.ack_id())
+    .bind(retention.connection_id())
     .fetch_optional(&mut **transaction)
     .await
     .map_err(database_error)?
@@ -646,18 +685,53 @@ async fn insert_managed_run_started(
     .execute(&mut **transaction)
     .await
     .map_err(database_error)?;
+
+    // A waived run's start is audited durably, on the same transaction as the
+    // run, so the audit row exists if and only if the run does.
+    if let Some(body) = retention_receipt::run_started_zdr_waived_body(
+        retention,
+        run_id,
+        &request.org_id,
+        &request.user_id,
+        thread_id,
+        now,
+    ) {
+        retention_receipt::enqueue_run_started_zdr_waived(transaction, run_id, &body).await?;
+    }
     Ok(())
 }
 
-/// Atomically start a run and install its one terminalization obligation. The
-/// caller identity has already been validated and user-pinned by the gRPC
-/// boundary; this inner function never trusts a caller-provided identity.
+/// Start a run whose receipt is the one a bare ZDR flag or a persistent
+/// credential gives: no waiver. A caller that holds a waiver uses
+/// [`start_managed_run_with_retention_inner`].
 #[allow(clippy::result_large_err)]
 pub(crate) async fn start_managed_run_inner(
     pool: &PgPool,
     request: pb::StartManagedRunRequest,
     zdr: bool,
 ) -> Result<ManagedRunStart, Status> {
+    let retention = if zdr {
+        RunRetention::zdr()
+    } else {
+        RunRetention::persistent()
+    };
+    start_managed_run_with_retention_inner(pool, request, retention).await
+}
+
+/// Atomically start a run and install its one terminalization obligation. The
+/// caller identity has already been validated and user-pinned by the gRPC
+/// boundary; this inner function never trusts a caller-provided identity.
+///
+/// `retention` is the receipt the caller's verified claims give (see
+/// [`RunRetention::from_caller`]). It is recorded immutably on the run, and a
+/// child run must match its parent's receipt ([`RunRetention::inherit_from`]).
+#[allow(clippy::result_large_err)]
+pub(crate) async fn start_managed_run_with_retention_inner(
+    pool: &PgPool,
+    request: pb::StartManagedRunRequest,
+    retention: RunRetention,
+) -> Result<ManagedRunStart, Status> {
+    let zdr = retention.class == RetentionClass::Zdr;
     let source = validate_managed_start_request(&request, zdr)?;
     let persisted = managed_start_persistence(&request, zdr);
     let mut transaction = pool.begin().await.map_err(database_error)?;
@@ -679,7 +753,8 @@ pub(crate) async fn start_managed_run_inner(
     let existing: Option<ExistingManagedStart> = sqlx::query_as(
         "SELECT o.run_id, r.thread_id, r.created_at, o.configured_source,
                 o.configured_terminal_step_id, o.zdr, r.parent_run_id,
-                r.agent_id, r.goal, r.mode
+                r.agent_id, r.goal, r.mode,
+                r.retention_class, r.waiver_ack_id, r.waiver_connection_id
          FROM managed_run_terminalization_outbox AS o
          JOIN runs AS r ON r.id = o.run_id
          WHERE o.org_id = $1 AND o.user_id = $2 AND o.start_key = $3
@@ -692,7 +767,9 @@ pub(crate) async fn start_managed_run_inner(
     .await
     .map_err(database_error)?;
     if let Some(existing) = existing {
-        if !existing_start_matches(&existing, &request, zdr, source) {
+        if !existing_start_matches(&existing, &request, zdr, source)
+            || !existing_retention_matches(&existing, &retention)
+        {
             return Err(Status::already_exists(
                 "managed start key is bound to different immutable input",
             ));
@@ -708,6 +785,20 @@ pub(crate) async fn start_managed_run_inner(
     }
 
     let now = Utc::now();
+    // A child run takes its parent's receipt, and must be this caller's own run
+    // in this org. A ZDR start never names a parent (see managed_start_persistence).
+    let retention = if zdr || persisted.parent_run_id.is_empty() {
+        retention
+    } else {
+        let parent = retention_receipt::load_parent_retention(
+            &mut transaction,
+            &request.org_id,
+            &request.user_id,
+            &persisted.parent_run_id,
+        )
+        .await?;
+        retention.inherit_from(Some(&parent))?
+    };
     let thread_id = if persisted.create_metadata_thread {
         insert_zdr_thread(&mut transaction, &request.org_id, &request.user_id, now).await?
     } else {
@@ -721,7 +812,7 @@ pub(crate) async fn start_managed_run_inner(
         &request,
         &persisted,
         source,
-        zdr,
+        &retention,
         now,
     )
     .await?;
@@ -1010,6 +1101,11 @@ async fn transition_managed_run_terminal(
             "run terminal outcome is already assigned",
         ));
     }
+    // A terminal run never resumes, so its loop fold is dropped in the same
+    // transaction that ends it (build plan WS03 S4).
+    crate::loop_checkpoint::purge_run(transaction, run_id)
+        .await
+        .map_err(database_error)?;
 
     let plan_status = if matches!(outcome, ManagedOutcome::Completed) {
         "completed"
@@ -1026,7 +1122,52 @@ async fn transition_managed_run_terminal(
     .execute(&mut **transaction)
     .await
     .map_err(database_error)?;
+    // A scheduled run's fire learns its truthful terminal status in the same
+    // transaction that ends the run (build plan WS20 S1). Off: fires keep the
+    // status the sweeper wrote.
+    if scheduled_result_persist_enabled() {
+        settle_scheduled_fire(transaction, run_id, plan_status, now).await?;
+    }
     Ok(())
+}
+
+/// Link a scheduled run's fire row to the run and set its terminal status. The
+/// key is the run's own immutable schedule metadata, so only the fire that
+/// started this run is touched, and only while it has not settled yet.
+async fn settle_scheduled_fire(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: &str,
+    status: &str,
+    now: DateTime<Utc>,
+) -> Result<(), Status> {
+    sqlx::query(
+        "UPDATE cron_fires AS cf
+            SET status = $2, completed_at = $3, run_id = r.id, thread_id = r.thread_id
+           FROM runs r
+          WHERE r.id = $1
+            AND r.metadata->>'source' = 'scheduled_run'
+            AND cf.schedule_id = r.metadata->>'schedule_id'
+            AND cf.fire_key = r.metadata->>'fire_key'
+            AND cf.status IN ('pending', 'running')",
+    )
+    .bind(run_id)
+    .bind(status)
+    .bind(now)
+    .execute(&mut **transaction)
+    .await
+    .map_err(database_error)?;
+    Ok(())
+}
+
+/// Whether a scheduled run's answer is persisted into its thread and its fire
+/// records the run (build plan WS20 S1). Off by default; only the literal `true`
+/// turns it on, parsed by the strict switch the other durable-loop switches share.
+/// Session Core reads it here and in the scheduled-result RPC. Execution Core reads
+/// the same name, so both sides of one deploy agree.
+pub(crate) fn scheduled_result_persist_enabled() -> bool {
+    mp_contracts::loop_fold::switch_from(
+        std::env::var(SCHEDULED_RESULT_PERSIST_ENV).ok().as_deref(),
+    )
 }
 
 async fn apply_managed_terminal_outcome(
@@ -1311,6 +1452,13 @@ pub(crate) async fn heartbeat_managed_run_inner(
             "managed terminalization heartbeat could not renew; retry",
         ));
     }
+    // A heartbeat from a run the worker crash parked says its loop is alive after all: the park
+    // is not claimable until a grace period has passed without another one (WS03 S8-B).
+    if crash_park_active() {
+        crate::loop_checkpoint::push_crash_park(&mut transaction, &request.run_id)
+            .await
+            .map_err(database_error)?;
+    }
     transaction.commit().await.map_err(database_error)?;
     Ok(ManagedHeartbeat {
         renewed_until: Some(renewed_until),
@@ -1374,6 +1522,10 @@ impl DirectRunCompletion {
 pub(crate) struct CommittedDirectCompletion {
     pub completion: DirectRunCompletion,
     pub memory: Option<crate::grpc::AppendedMemory>,
+    /// The posture the mirror of `memory` must apply: the run's own receipt. The
+    /// caller of this RPC is the gateway's service credential, which never carries
+    /// a waiver, so its own posture cannot stand for the run's.
+    pub memory_retention: crate::grpc::MemoryRetention,
 }
 
 #[derive(FromRow)]
@@ -1421,13 +1573,15 @@ pub(crate) async fn complete_direct_run_with_message_inner(
     if thread.is_none() {
         return Err(Status::not_found("thread not found"));
     }
-    let run: Option<(String, String)> =
-        sqlx::query_as("SELECT status, thread_id FROM runs WHERE id = $1 FOR UPDATE")
-            .bind(&request.run_id)
-            .fetch_optional(&mut *transaction)
-            .await
-            .map_err(database_error)?;
-    let (run_status, run_thread_id) = run.ok_or_else(|| Status::not_found("run not found"))?;
+    let run: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT status, thread_id, retention_class FROM runs WHERE id = $1 FOR UPDATE",
+    )
+    .bind(&request.run_id)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(database_error)?;
+    let (run_status, run_thread_id, run_retention_class) =
+        run.ok_or_else(|| Status::not_found("run not found"))?;
     if run_thread_id != request.thread_id {
         return Err(Status::permission_denied(
             "the assistant message must go to the run's own thread",
@@ -1467,6 +1621,7 @@ pub(crate) async fn complete_direct_run_with_message_inner(
         return Ok(CommittedDirectCompletion {
             completion: result,
             memory: None,
+            memory_retention: crate::grpc::MemoryRetention::Durable,
         });
     }
     if obligation.state == "reconciliation_required" || obligation.state == "superseded" {
@@ -1474,6 +1629,7 @@ pub(crate) async fn complete_direct_run_with_message_inner(
         return Ok(CommittedDirectCompletion {
             completion: DirectRunCompletion::AlreadyTerminal,
             memory: None,
+            memory_retention: crate::grpc::MemoryRetention::Durable,
         });
     }
     if obligation.state == "processing" {
@@ -1490,6 +1646,7 @@ pub(crate) async fn complete_direct_run_with_message_inner(
         return Ok(CommittedDirectCompletion {
             completion: DirectRunCompletion::AlreadyTerminal,
             memory: None,
+            memory_retention: crate::grpc::MemoryRetention::Durable,
         });
     }
     if source_from_storage(&obligation.configured_source)? != source {
@@ -1505,6 +1662,15 @@ pub(crate) async fn complete_direct_run_with_message_inner(
             "a zero-retention run has no durable assistant message",
         ));
     }
+    // The answer's memories are mirrored under the run's receipt. A waived run's
+    // memories stay local: they never reach the external memory service (Z-17).
+    let memory_retention = match RetentionClass::from_storage(&run_retention_class) {
+        Some(RetentionClass::Persistent) => crate::grpc::MemoryRetention::Durable,
+        Some(RetentionClass::ZdrWaived) => crate::grpc::MemoryRetention::WaivedRun,
+        Some(RetentionClass::Zdr) | None => {
+            return Err(Status::internal("run retention receipt is invalid"));
+        }
+    };
 
     // An empty answer completes the run without a message, as the two-call
     // path did (the Gateway skipped the append and still recorded Completed).
@@ -1562,6 +1728,7 @@ pub(crate) async fn complete_direct_run_with_message_inner(
             message_sequence,
         },
         memory,
+        memory_retention,
     })
 }
 
@@ -1598,6 +1765,157 @@ async fn supersede_terminalized_obligations(pool: &PgPool) -> Result<u64, sqlx::
     Ok(result.rows_affected())
 }
 
+/// Whether an approval that has run past its `expires_at` stops sparing its run from
+/// recovery (build plan WS03 S8-0). Off by default.
+///
+/// Off: any `requested` or `granted`, unconsumed approval holds the recovery worker back from
+/// its run whatever `expires_at` says, exactly as committed. On: such an approval holds the run
+/// back only until it expires (one with no `expires_at` never does), or while a delivery worker
+/// holds a live lease on it; an expired, never-consumed one no longer does, so the run ends `outcome_unknown` at its deadline and its
+/// fold is purged by the unchanged terminal path. The one answer is bound into both copies of
+/// the clause (`claim_due_recovery` and `has_pending_approval`), so they cannot disagree.
+pub(crate) fn approval_expiry_enabled() -> bool {
+    // A test forces the answer for its own thread, so it does not race the tests that set the
+    // process environment. Compiled out of the binary.
+    #[cfg(test)]
+    if let Some(forced) = expiry_test_switch::forced() {
+        return forced;
+    }
+    mp_contracts::loop_fold::switch_from(std::env::var(APPROVAL_EXPIRY_ENV).ok().as_deref())
+}
+
+/// A per-thread override of [`approval_expiry_enabled`] for tests. It holds only for a test that
+/// runs its calls on its own thread (a `#[tokio::test]` is single-threaded), and restores the
+/// earlier value when the guard drops.
+#[cfg(test)]
+pub(crate) mod expiry_test_switch {
+    use std::cell::Cell;
+
+    thread_local! {
+        static FORCED: Cell<Option<bool>> = const { Cell::new(None) };
+    }
+
+    pub(crate) fn forced() -> Option<bool> {
+        FORCED.with(Cell::get)
+    }
+
+    pub(crate) struct Forced(Option<bool>);
+
+    impl Forced {
+        pub(crate) fn set(on: bool) -> Self {
+            Self(FORCED.with(|cell| cell.replace(Some(on))))
+        }
+    }
+
+    impl Drop for Forced {
+        fn drop(&mut self) {
+            FORCED.with(|cell| cell.set(self.0));
+        }
+    }
+}
+
+/// Whether session-core's side of parking is switched on (build plan WS03 S8-4). Off by
+/// default; only the literal `true` turns it on (the strict parser the other durable-loop
+/// switches share). Read it through [`park_recovery_active`], never by itself.
+pub(crate) fn park_recovery_enabled() -> bool {
+    // A test forces the answer for its own thread, so it does not race the tests that set the
+    // process environment. Compiled out of the binary.
+    #[cfg(test)]
+    if let Some(forced) = park_test_switch::forced() {
+        return forced;
+    }
+    mp_contracts::loop_fold::switch_from(std::env::var(PARK_RECOVERY_ENV).ok().as_deref())
+}
+
+/// Whether the park rules apply: the fold store is on AND park recovery is on. It is the one
+/// answer the store's park save and park claim and the recovery worker's spare of a parked fold
+/// all read. It is deliberately not coupled to [`approval_expiry_enabled`] (S8-0 is independent).
+///
+/// With it off, a park is stored and claimed exactly as committed, the store reports
+/// `park_accepted` false for every save, and the worker treats a parked fold like any other fold:
+/// it terminalizes the run at its ordinary deadline.
+pub(crate) fn park_recovery_active() -> bool {
+    crate::loop_checkpoint::enabled() && park_recovery_enabled()
+}
+
+/// A per-thread override of [`park_recovery_enabled`] for tests. It holds only for a test that
+/// runs its calls on its own thread (a `#[tokio::test]` is single-threaded), and restores the
+/// earlier value when the guard drops.
+#[cfg(test)]
+pub(crate) mod park_test_switch {
+    use std::cell::Cell;
+
+    thread_local! {
+        static FORCED: Cell<Option<bool>> = const { Cell::new(None) };
+    }
+
+    pub(crate) fn forced() -> Option<bool> {
+        FORCED.with(Cell::get)
+    }
+
+    pub(crate) struct Forced(Option<bool>);
+
+    impl Forced {
+        pub(crate) fn set(on: bool) -> Self {
+            Self(FORCED.with(|cell| cell.replace(Some(on))))
+        }
+    }
+
+    impl Drop for Forced {
+        fn drop(&mut self) {
+            FORCED.with(|cell| cell.set(self.0));
+        }
+    }
+}
+
+/// Whether the recovery worker may park a run whose loop died (build plan WS03 S8-B). Off by
+/// default; only the literal `true` turns it on. Read it through [`crash_park_active`].
+pub(crate) fn crash_park_enabled() -> bool {
+    // A test forces the answer for its own thread, so it does not race the tests that set the
+    // process environment. Compiled out of the binary.
+    #[cfg(test)]
+    if let Some(forced) = crash_test_switch::forced() {
+        return forced;
+    }
+    mp_contracts::loop_fold::switch_from(std::env::var(CRASH_PARK_ENV).ok().as_deref())
+}
+
+/// Whether crash parking applies: the park rules are active AND the crash switch is on. The one
+/// answer the worker's park of a dead loop, the round-fold thread stamp and the heartbeat's push
+/// of a crash park all read. With it off none of them runs and the worker is the committed one.
+pub(crate) fn crash_park_active() -> bool {
+    park_recovery_active() && crash_park_enabled()
+}
+
+/// A per-thread override of [`crash_park_enabled`] for tests, with the same scope as
+/// [`park_test_switch`].
+#[cfg(test)]
+pub(crate) mod crash_test_switch {
+    use std::cell::Cell;
+
+    thread_local! {
+        static FORCED: Cell<Option<bool>> = const { Cell::new(None) };
+    }
+
+    pub(crate) fn forced() -> Option<bool> {
+        FORCED.with(Cell::get)
+    }
+
+    pub(crate) struct Forced(Option<bool>);
+
+    impl Forced {
+        pub(crate) fn set(on: bool) -> Self {
+            Self(FORCED.with(|cell| cell.replace(Some(on))))
+        }
+    }
+
+    impl Drop for Forced {
+        fn drop(&mut self) {
+            FORCED.with(|cell| cell.set(self.0));
+        }
+    }
+}
+
 async fn claim_due_recovery(pool: &PgPool) -> Result<Option<ClaimedRecovery>, sqlx::Error> {
     let lease_token = new_lease_token();
     let lease_token_hash = hash_lease_token(&lease_token);
@@ -1620,6 +1938,11 @@ async fn claim_due_recovery(pool: &PgPool) -> Result<Option<ClaimedRecovery>, sq
                       AND a.org_id = o.org_id
                       AND a.user_id = o.user_id
                       AND a.status IN ('requested', 'granted')
+                      AND a.consumed_at IS NULL
+                      AND (NOT $3::bool OR a.expires_at IS NULL OR a.expires_at > now()
+                           OR EXISTS (SELECT 1 FROM approval_delivery_outbox AS d
+                                      WHERE d.approval_id = a.id AND d.state = 'processing'
+                                        AND d.lease_expires_at > now()))
                )
              ORDER BY o.deadline_at ASC, o.created_at ASC
              FOR UPDATE SKIP LOCKED
@@ -1637,6 +1960,7 @@ async fn claim_due_recovery(pool: &PgPool) -> Result<Option<ClaimedRecovery>, sq
     )
     .bind(lease_token_hash)
     .bind(MANAGED_RECOVERY_LEASE_SECS)
+    .bind(approval_expiry_enabled())
     .fetch_optional(pool)
     .await?;
     Ok(row.map(|row| ClaimedRecovery { row, lease_token }))
@@ -1648,11 +1972,17 @@ async fn has_pending_approval(
 ) -> Result<bool, Status> {
     sqlx::query_scalar(
         "SELECT EXISTS(
-             SELECT 1 FROM approvals
-             WHERE run_id = $1 AND status IN ('requested', 'granted')
+             SELECT 1 FROM approvals AS a
+             WHERE a.run_id = $1 AND a.status IN ('requested', 'granted')
+               AND a.consumed_at IS NULL
+               AND (NOT $2::bool OR a.expires_at IS NULL OR a.expires_at > now()
+                    OR EXISTS (SELECT 1 FROM approval_delivery_outbox AS d
+                               WHERE d.approval_id = a.id AND d.state = 'processing'
+                                 AND d.lease_expires_at > now()))
          )",
     )
     .bind(run_id)
+    .bind(approval_expiry_enabled())
     .fetch_one(&mut **transaction)
     .await
     .map_err(database_error)
@@ -1677,6 +2007,98 @@ async fn release_recovery_for_activity(
     .await
     .map_err(database_error)?;
     Ok(())
+}
+
+/// The moment a parked fold's recovery obligation is next due (build plan WS03 S8-4): the earlier
+/// of the end of the park's wait (`updated_at`, the park save's age, plus the wait `$2`) and
+/// `$3` seconds from now, so a long wait is looked at again every deadline period and a wait that
+/// ends sooner is not overshot. A row only when the fold is a park (`parked`, or `resuming` under
+/// a continuation's claim) whose wait has NOT run out; `FOR UPDATE` takes the fold's lock after
+/// the run's and the obligation's, the order every other writer takes them in.
+const PARK_SPARE_HORIZON_SQL: &str =
+    "SELECT LEAST(updated_at + make_interval(secs => $2), now() + make_interval(secs => $3))
+       FROM run_loop_checkpoints
+      WHERE run_id = $1 AND kind = 'park' AND state IN ('parked','resuming')
+        AND updated_at + make_interval(secs => $2) > now()
+      FOR UPDATE";
+
+/// Hand a spared run's obligation back, open and due at the horizon, its lease cleared.
+const PARK_SPARE_SQL: &str = "UPDATE managed_run_terminalization_outbox
+        SET state = 'open', deadline_at = $2, next_attempt_at = $2,
+            lease_owner = NULL, lease_token_hash = NULL, lease_expires_at = NULL,
+            updated_at = now()
+      WHERE run_id = $1 AND state = 'processing'";
+
+/// Whether the run's fold is a park, whatever its wait (read after [`spare_parked_run`] spared
+/// nothing, to tell a run that is ended because its park ran out from any other recovery).
+const PARK_HELD_SQL: &str = "SELECT EXISTS (
+        SELECT 1 FROM run_loop_checkpoints
+         WHERE run_id = $1 AND kind = 'park' AND state IN ('parked','resuming'))";
+
+/// Spare a run whose fold is a park still inside its wait: its obligation goes back to `open`,
+/// due at the horizon, and the caller commits and ends the pass without a terminal write.
+/// `Ok(false)` leaves everything as it was.
+#[allow(clippy::cast_precision_loss)]
+async fn spare_parked_run(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: &str,
+    ttl_secs: i64,
+) -> Result<bool, Status> {
+    let horizon: Option<DateTime<Utc>> = sqlx::query_scalar(PARK_SPARE_HORIZON_SQL)
+        .bind(run_id)
+        .bind(ttl_secs as f64)
+        .bind(MANAGED_DEADLINE_SECS as f64)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(database_error)?;
+    let Some(horizon) = horizon else {
+        return Ok(false);
+    };
+    sqlx::query(PARK_SPARE_SQL)
+        .bind(run_id)
+        .bind(horizon)
+        .execute(&mut **transaction)
+        .await
+        .map_err(database_error)?;
+    Ok(true)
+}
+
+/// Park the active round fold of the run the worker holds, if the store takes it (build plan
+/// WS03 S8-B). `Ok(true)`: the run was dealt with and the caller commits without ending it: parked
+/// and handed back to its obligation like any park, or left alone because a writer holds its
+/// thread (its producer is alive and finishing). `Ok(false)`: nothing was written and the run
+/// takes the committed path, which is also what a missing fold key does.
+async fn try_crash_park(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: &str,
+    now: DateTime<Utc>,
+) -> Result<bool, Status> {
+    let Ok(cipher) = DescriptorCipher::from_env() else {
+        tracing::warn!(
+            run_id,
+            "crash parking is on but the fold key is unavailable; the run is ended as committed"
+        );
+        return Ok(false);
+    };
+    match crate::loop_checkpoint::park_crashed(transaction, &cipher, run_id).await? {
+        crate::loop_checkpoint::CrashPark::Parked(seq) => {
+            spare_parked_run(transaction, run_id, crate::loop_checkpoint::park_ttl_seconds())
+                .await?;
+            metrics::counter!("mp_session_managed_runs_crash_parked_total").increment(1);
+            tracing::warn!(run_id, seq, "managed run parked after producer loss");
+            Ok(true)
+        }
+        crate::loop_checkpoint::CrashPark::Busy => {
+            release_recovery_for_activity(transaction, run_id, now).await?;
+            metrics::counter!("mp_session_managed_runs_crash_park_busy_total").increment(1);
+            Ok(true)
+        }
+        crate::loop_checkpoint::CrashPark::Refused(reason) => {
+            metrics::counter!("mp_session_managed_runs_crash_park_refused_total", "reason" => reason)
+                .increment(1);
+            Ok(false)
+        }
+    }
 }
 
 async fn recover_claimed_terminalization(
@@ -1707,6 +2129,40 @@ async fn recover_claimed_terminalization(
         transaction.commit().await.map_err(database_error)?;
         return Ok(false);
     }
+    // A run parked for a continuation (WS03 S8-4) is not an abandoned run: it is spared until
+    // its wait runs out, counted from the park save, and then ended through the path below, the
+    // same one any lost producer takes. Only a `park` fold is spared; an active, paused or
+    // closed one takes the path below at once, as committed.
+    let mut park_ran_out = false;
+    if park_recovery_active() {
+        if spare_parked_run(
+            &mut transaction,
+            &claim.row.run_id,
+            crate::loop_checkpoint::park_ttl_seconds(),
+        )
+        .await?
+        {
+            transaction.commit().await.map_err(database_error)?;
+            metrics::counter!("mp_session_managed_terminalizations_spared_parked_total")
+                .increment(1);
+            return Ok(false);
+        }
+        park_ran_out = sqlx::query_scalar(PARK_HELD_SQL)
+            .bind(&claim.row.run_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(database_error)?;
+        // A loop that died leaving an active round fold is parked instead of ended, when a
+        // continuation could resume it (WS03 S8-B). Anything the store will not park takes the
+        // path below, as committed.
+        if !park_ran_out
+            && crash_park_enabled()
+            && try_crash_park(&mut transaction, &claim.row.run_id, now).await?
+        {
+            transaction.commit().await.map_err(database_error)?;
+            return Ok(false);
+        }
+    }
     let source = source_from_storage(&obligation.configured_source)?;
     let step_id = canonical_terminal_step(source)
         .ok_or_else(|| Status::internal("managed terminalization source is invalid"))?;
@@ -1727,6 +2183,9 @@ async fn recover_claimed_terminalization(
     .await?;
     transaction.commit().await.map_err(database_error)?;
     metrics::counter!("mp_session_managed_terminalizations_recovered_total").increment(1);
+    if park_ran_out {
+        metrics::counter!("mp_session_managed_parks_expired_total").increment(1);
+    }
     tracing::warn!(
         run_id = %receipt.run_id,
         receipt_id = %receipt.receipt_id,
@@ -1773,11 +2232,345 @@ pub(crate) async fn run_recovery_worker(pool: PgPool) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::{approval_expiry_enabled, expiry_test_switch, APPROVAL_EXPIRY_ENV};
+    use super::{
+        park_recovery_active, park_recovery_enabled, park_test_switch, PARK_RECOVERY_ENV,
+    };
     use super::{
         authorize_direct_completion, authorize_terminalization_source, canonical_terminal_step,
         is_startable_source, validate_terminal_outcome, ManagedOutcome,
     };
     use mp_contracts::model_plane::v1 as pb;
+
+    /// The production text of this file (everything before its own `mod tests`), with LF line
+    /// endings whatever the working tree has.
+    fn production_source() -> String {
+        let all = include_str!("terminalization.rs").replace("\r\n", "\n");
+        let marker = concat!("#[cfg(test)]\n", "mod tests {");
+        let end = all.find(marker).expect("the unit test module");
+        all[..end].to_owned()
+    }
+
+    /// One whole top-level `async fn` of `source`: from its signature to the next closing brace
+    /// at column zero.
+    fn function_text<'a>(source: &'a str, signature: &str) -> Option<&'a str> {
+        let start = source.find(signature)?;
+        let end = source[start..].find("\n}\n")?;
+        Some(&source[start..start + end + 2])
+    }
+
+    /// `text` with every run of whitespace collapsed to one space.
+    fn squash(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// The clause both copies of the approval spare carry, for the bind position `n`.
+    fn expiry_clause(n: u32) -> String {
+        format!(
+            "AND (NOT ${n}::bool OR a.expires_at IS NULL OR a.expires_at > now() \
+             OR EXISTS (SELECT 1 FROM approval_delivery_outbox AS d \
+             WHERE d.approval_id = a.id AND d.state = 'processing' \
+             AND d.lease_expires_at > now()))"
+        )
+    }
+
+    /// What is wrong with how `source` carries the S8-0 expiry clause: each of the two copies of
+    /// the approval spare (the due-recovery candidate query, bind 3, and the in-transaction
+    /// re-check, bind 2) holds the whole clause, and binds the one switch read.
+    fn expiry_clause_violations(source: &str) -> Vec<String> {
+        let mut violations = Vec::new();
+        for (signature, n) in [
+            ("async fn claim_due_recovery(", 3_u32),
+            ("async fn has_pending_approval(", 2_u32),
+        ] {
+            let Some(body) = function_text(source, signature) else {
+                violations.push(format!("{signature} is not in the source"));
+                continue;
+            };
+            if !squash(body).contains(&expiry_clause(n)) {
+                violations.push(format!(
+                    "{signature} does not carry the expiry and live-delivery clause bound as ${n}"
+                ));
+            }
+            if body.matches(".bind(approval_expiry_enabled())").count() != 1 {
+                violations.push(format!(
+                    "{signature} must bind approval_expiry_enabled() exactly once"
+                ));
+            }
+        }
+        // The variable is named once, and read once, by the one switch fn.
+        if source.matches(APPROVAL_EXPIRY_ENV).count() != 1
+            || source.matches("std::env::var(APPROVAL_EXPIRY_ENV)").count() != 1
+        {
+            violations.push("the switch's variable is not named and read exactly once".to_owned());
+        }
+        violations
+    }
+
+    #[test]
+    fn the_expiry_clause_is_bound_in_both_copies() {
+        let source = production_source();
+        assert_eq!(
+            expiry_clause_violations(&source),
+            Vec::<String>::new(),
+            "both copies of the approval spare must carry the same bound clause"
+        );
+
+        // The control: each mutation takes the clause out of ONE copy and must be seen.
+        let claim = function_text(&source, "async fn claim_due_recovery(").expect("claim copy");
+        let recheck =
+            function_text(&source, "async fn has_pending_approval(").expect("re-check copy");
+        for (what, mutated) in [
+            (
+                "the clause is dropped from the candidate query",
+                source.replacen(claim, &claim.replacen("NOT $3::bool", "NOT FALSE", 1), 1),
+            ),
+            (
+                "the clause is dropped from the re-check",
+                source.replacen(
+                    recheck,
+                    &recheck.replacen("NOT $2::bool", "NOT FALSE", 1),
+                    1,
+                ),
+            ),
+            (
+                "the live-delivery lease is dropped from the re-check",
+                source.replacen(
+                    recheck,
+                    &recheck.replacen("d.lease_expires_at > now()", "FALSE", 1),
+                    1,
+                ),
+            ),
+            (
+                "the candidate query stops binding the switch",
+                source.replacen(
+                    claim,
+                    &claim.replacen(".bind(approval_expiry_enabled())", "", 1),
+                    1,
+                ),
+            ),
+            (
+                "the re-check stops binding the switch",
+                source.replacen(
+                    recheck,
+                    &recheck.replacen(".bind(approval_expiry_enabled())", "", 1),
+                    1,
+                ),
+            ),
+        ] {
+            assert_ne!(mutated, source, "{what}: the mutation changed nothing");
+            assert!(
+                !expiry_clause_violations(&mutated).is_empty(),
+                "{what}: the guard did not flag it"
+            );
+        }
+    }
+
+    /// The switch is off unless the process says `true`, and a test's forced answer is
+    /// restored when its guard drops, so one test cannot leak its choice into another.
+    #[test]
+    fn the_expiry_switch_is_off_by_default_and_a_forced_answer_is_restored() {
+        if std::env::var_os(APPROVAL_EXPIRY_ENV).is_none() {
+            assert!(!approval_expiry_enabled(), "off by default");
+        }
+        let before = approval_expiry_enabled();
+        {
+            let _on = expiry_test_switch::Forced::set(true);
+            assert!(approval_expiry_enabled());
+            {
+                let _off = expiry_test_switch::Forced::set(false);
+                assert!(!approval_expiry_enabled());
+            }
+            assert!(
+                approval_expiry_enabled(),
+                "the inner guard restored the outer one"
+            );
+        }
+        assert_eq!(
+            approval_expiry_enabled(),
+            before,
+            "the outer guard restored it"
+        );
+    }
+
+    /// Park recovery is off unless the process says `true`, it is ACTIVE only with the fold store
+    /// on as well, and a test's forced answer is restored when its guard drops (WS03 S8-4).
+    #[test]
+    fn park_recovery_is_off_by_default_and_active_only_with_the_store_on() {
+        use crate::loop_checkpoint::test_switch as store_switch;
+        if std::env::var_os(PARK_RECOVERY_ENV).is_none() {
+            assert!(!park_recovery_enabled(), "off by default");
+        }
+        let before = park_recovery_enabled();
+        let _store_off = store_switch::Forced::set(false);
+        {
+            let _on = park_test_switch::Forced::set(true);
+            assert!(park_recovery_enabled());
+            assert!(!park_recovery_active(), "the fold store is off");
+        }
+        let _store_on = store_switch::Forced::set(true);
+        {
+            let _on = park_test_switch::Forced::set(true);
+            assert!(park_recovery_active());
+            {
+                let _off = park_test_switch::Forced::set(false);
+                assert!(!park_recovery_enabled());
+                assert!(!park_recovery_active(), "park recovery is off");
+            }
+            assert!(park_recovery_active(), "the inner guard restored the outer one");
+        }
+        assert_eq!(park_recovery_enabled(), before, "the outer guard restored it");
+        // Not coupled to the approval-expiry switch (S8-0): that one changes nothing here.
+        let _park = park_test_switch::Forced::set(true);
+        for expiry in [false, true] {
+            let _expiry = expiry_test_switch::Forced::set(expiry);
+            assert!(park_recovery_active(), "expiry forced {expiry}");
+        }
+    }
+
+    /// The text of the `const NAME: &str = "..";` item of `source` that starts at `head`, from
+    /// the head to its closing `";`; empty when it is not there.
+    fn const_text(source: &str, head: &str) -> String {
+        source.find(head).map_or_else(String::new, |start| {
+            let rest = &source[start..];
+            rest[..rest.find("\";").map_or(rest.len(), |end| end + 2)].to_owned()
+        })
+    }
+
+    /// What is wrong with how `source` carries the S8-4 park spare: the switch is read in one
+    /// place, the spare sits after the approval spare and before the terminal write, it is gated
+    /// on the active switch, and its two statements keep their predicates.
+    fn park_spare_violations(source: &str) -> Vec<String> {
+        let mut violations = Vec::new();
+        let flat = squash(source);
+        if source.matches("PARK_RECOVERY_ENV").count() != 2
+            || source.matches("std::env::var(PARK_RECOVERY_ENV)").count() != 1
+        {
+            violations.push("the park switch's variable is not named and read exactly once".to_owned());
+        }
+        if !flat.contains(
+            "pub(crate) fn park_recovery_active() -> bool { crate::loop_checkpoint::enabled() && park_recovery_enabled() }",
+        ) {
+            violations.push("park_recovery_active is not the store switch AND park recovery".to_owned());
+        }
+        let Some(body) = function_text(source, "async fn recover_claimed_terminalization(") else {
+            violations.push("the recovery worker is not in the source".to_owned());
+            return violations;
+        };
+        let place = |needle: &str| body.find(needle);
+        match (
+            place("has_pending_approval("),
+            place("if park_recovery_active() {"),
+            place("spare_parked_run("),
+            place("apply_managed_terminal_outcome("),
+        ) {
+            (Some(approval), Some(gate), Some(spare), Some(terminal))
+                if approval < gate && gate < spare && spare < terminal => {}
+            _ => violations.push(
+                "the park spare must follow the approval spare, sit behind `if park_recovery_active() {` and come before apply_managed_terminal_outcome".to_owned(),
+            ),
+        }
+        for (what, needle) in [
+            ("the spare is called once", "spare_parked_run("),
+            ("the gate is read once", "park_recovery_active()"),
+        ] {
+            if body.matches(needle).count() != 1 {
+                violations.push(format!("{what}: {needle} must appear exactly once in the worker"));
+            }
+        }
+        let horizon = squash(&const_text(source, "const PARK_SPARE_HORIZON_SQL"));
+        for needed in [
+            "SELECT LEAST(updated_at + make_interval(secs => $2), now() + make_interval(secs => $3))",
+            "WHERE run_id = $1 AND kind = 'park' AND state IN ('parked','resuming')",
+            "AND updated_at + make_interval(secs => $2) > now()",
+            "FOR UPDATE",
+        ] {
+            if !horizon.contains(needed) {
+                violations.push(format!("the horizon statement lost `{needed}`"));
+            }
+        }
+        let spare = squash(&const_text(source, "const PARK_SPARE_SQL"));
+        for needed in [
+            "SET state = 'open', deadline_at = $2, next_attempt_at = $2,",
+            "lease_owner = NULL, lease_token_hash = NULL, lease_expires_at = NULL",
+            "WHERE run_id = $1 AND state = 'processing'",
+        ] {
+            if !spare.contains(needed) {
+                violations.push(format!("the spare statement lost `{needed}`"));
+            }
+        }
+        violations
+    }
+
+    #[test]
+    fn the_park_spare_follows_the_approval_spare_and_precedes_the_terminal_write() {
+        let source = production_source();
+        assert_eq!(
+            park_spare_violations(&source),
+            Vec::<String>::new(),
+            "the park spare is wired as designed"
+        );
+        let worker = function_text(&source, "async fn recover_claimed_terminalization(")
+            .expect("the worker");
+        let reorder = |worker: &str| {
+            let spare_at = worker.find("    // A run parked for a continuation").expect("the park block");
+            let end = worker.find("    let source = source_from_storage(").expect("the terminal path");
+            let block = &worker[spare_at..end];
+            let mut moved = worker.replacen(block, "", 1);
+            let tail_at = moved
+                .find("    transaction.commit().await.map_err(database_error)?;\n    metrics::counter!(\"mp_session_managed_terminalizations_recovered_total\")")
+                .expect("the commit after the write");
+            moved.insert_str(tail_at, block);
+            moved
+        };
+        for (what, mutated) in [
+            (
+                "the spare moved after the terminal write",
+                source.replacen(worker, &reorder(worker), 1),
+            ),
+            (
+                "the gate dropped",
+                source.replacen(
+                    worker,
+                    &worker.replacen("if park_recovery_active() {", "if true {", 1),
+                    1,
+                ),
+            ),
+            (
+                "the horizon statement spares a paused fold too",
+                source.replacen("AND kind = 'park' AND state IN ('parked','resuming')\n        AND updated_at", "AND state IN ('parked','resuming')\n        AND updated_at", 1),
+            ),
+            (
+                "the horizon statement spares a park whose wait ran out",
+                source.replacen("AND updated_at + make_interval(secs => $2) > now()\n      FOR UPDATE", "FOR UPDATE", 1),
+            ),
+            (
+                "the switch is read twice",
+                source.replacen(
+                    "mp_contracts::loop_fold::switch_from(std::env::var(PARK_RECOVERY_ENV).ok().as_deref())",
+                    "mp_contracts::loop_fold::switch_from(std::env::var(PARK_RECOVERY_ENV).ok().as_deref()) || std::env::var(PARK_RECOVERY_ENV).is_ok()",
+                    1,
+                ),
+            ),
+        ] {
+            assert_ne!(mutated, source, "{what}: the mutation changed nothing");
+            assert!(
+                !park_spare_violations(&mutated).is_empty(),
+                "{what}: the guard did not flag it"
+            );
+        }
+    }
+
+    #[test]
+    fn scheduled_result_persist_is_off_by_default_and_only_literal_true_enables() {
+        use super::{scheduled_result_persist_enabled, SCHEDULED_RESULT_PERSIST_ENV};
+        if std::env::var_os(SCHEDULED_RESULT_PERSIST_ENV).is_none() {
+            assert!(!scheduled_result_persist_enabled(), "off by default");
+        }
+        assert!(mp_contracts::loop_fold::switch_from(Some("true")));
+        assert!(!mp_contracts::loop_fold::switch_from(Some("1")));
+        assert!(!mp_contracts::loop_fold::switch_from(Some("yes")));
+    }
 
     #[test]
     fn source_selects_a_server_owned_canonical_terminal_step() {
@@ -1851,6 +2644,88 @@ mod tests {
             validate_terminal_outcome(pb::TerminalOutcome::Failed, "outcome_unknown").is_err(),
             "outcome_unknown is set by reconciliation only, never submitted by a caller"
         );
+    }
+
+    /// Gateway keeps the classified browser failure instead of collapsing it to
+    /// `browser_failed`, so each specific code must clear the allowlist too.
+    #[test]
+    fn the_classified_browser_failure_codes_are_allowlisted() {
+        for code in [
+            "browser_failed",
+            "browser_permission_denied",
+            "browser_resource_exhausted",
+            "browser_timed_out",
+        ] {
+            assert_eq!(
+                validate_terminal_outcome(pb::TerminalOutcome::Failed, code)
+                    .unwrap_or_else(|error| panic!("{code} must be allowlisted: {error}")),
+                ManagedOutcome::Failed(code)
+            );
+        }
+        assert!(
+            validate_terminal_outcome(
+                pb::TerminalOutcome::Failed,
+                "browser_agent_permission_denied"
+            )
+            .is_err(),
+            "the gateway's internal classification is not a durable code"
+        );
+    }
+
+    /// The allowlist and the CHECK move together: every allowlisted code, plus
+    /// the reconciliation-only `outcome_unknown`, is in migration 0069, and its
+    /// revert restores exactly the 0033 list.
+    #[test]
+    fn migration_0069_check_matches_the_allowlist_and_its_revert_restores_0033() {
+        let up = include_str!("../migrations/0069_browser_failure_codes.sql");
+        let down = include_str!("../migrations/revert/0069_browser_failure_codes.down.sql");
+        // Only the CHECK clause counts: the revert's comment names the new codes.
+        let check = |sql: &'static str| {
+            sql.split_once("CHECK (")
+                .expect("the migration re-adds the CHECK")
+                .1
+        };
+        let (up_check, down_check) = (check(up), check(down));
+        let quoted = |code: &str| format!("'{code}'");
+        for code in super::ALLOWED_FAILURE_CODES
+            .iter()
+            .copied()
+            .chain(["outcome_unknown"])
+        {
+            assert!(up_check.contains(&quoted(code)), "0069 must accept {code}");
+        }
+        for code in [
+            "browser_failed",
+            "dispatch_rejected",
+            "dispatch_unreachable",
+            "execution_failed",
+            "inference_failed",
+            "outcome_unknown",
+            "provider_timeout",
+            "provider_unavailable",
+        ] {
+            assert!(
+                down_check.contains(&quoted(code)),
+                "the revert must keep {code}"
+            );
+        }
+        for code in [
+            "browser_permission_denied",
+            "browser_resource_exhausted",
+            "browser_timed_out",
+        ] {
+            assert!(
+                !down_check.contains(&quoted(code)),
+                "the revert must drop {code}"
+            );
+        }
+        for sql in [up, down] {
+            assert!(sql.contains(
+                "DROP CONSTRAINT IF EXISTS managed_run_terminalization_outbox_failure_code_check"
+            ));
+            assert!(sql
+                .contains("ADD CONSTRAINT managed_run_terminalization_outbox_failure_code_check"));
+        }
     }
 
     #[test]
@@ -2055,5 +2930,1507 @@ mod tests {
                 "{why}"
             );
         }
+    }
+}
+
+/// Build plan WS03 S7c-A2: the recovery race a spent click would otherwise lose.
+/// WRITTEN, NOT RUN by the author: it needs the disposable-Postgres harness
+/// (scripts/tests/session-core-db-tests.sh), which the lead runs. Its path starts
+/// with `terminalization::spent_click_db_tests::`, so the harness filter
+/// `terminalization` selects it.
+///
+/// While a granted loop approval is unconsumed, the recovery worker will not
+/// terminalize its run (it holds the run back). Consuming the approval lifts that
+/// hold, so a click spent after a long human pause (an hour here) would leave the
+/// run recoverable at once, ahead of the executor about to run it. A spend-only
+/// consume renews the obligation in its own transaction and so closes the gap; the
+/// executor's own full consume deliberately does not, which is the control.
+#[cfg(test)]
+mod spent_click_db_tests {
+    use super::*;
+    use crate::orchestration_store as approvals;
+    use base64::Engine as _;
+
+    const FINGERPRINT: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    async fn scratch_pool() -> Option<PgPool> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            assert!(
+                std::env::var_os("REQUIRE_CONTRACT").is_none() && std::env::var_os("CI").is_none(),
+                "DATABASE_URL must name a scratch Postgres when REQUIRE_CONTRACT or CI is set"
+            );
+            eprintln!("skipping: DATABASE_URL unset");
+            return None;
+        };
+        let database = url
+            .rsplit('/')
+            .next()
+            .and_then(|tail| tail.split('?').next())
+            .unwrap_or_default();
+        assert!(
+            database.contains("test"),
+            "these tests write rows: DATABASE_URL must name a scratch database whose name contains \"test\""
+        );
+        let pool = PgPool::connect(&url)
+            .await
+            .expect("scratch Postgres is reachable");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("session-core migrations apply in order");
+        // The retained descriptor is encrypted: the process needs its key.
+        std::env::set_var(
+            "SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY",
+            base64::engine::general_purpose::STANDARD.encode([7_u8; 32]),
+        );
+        Some(pool)
+    }
+
+    struct Paused {
+        org: String,
+        user: String,
+        run_id: String,
+        approval_id: String,
+    }
+
+    /// A persistent managed run (started through the real start path, so its
+    /// obligation is the real one) paused on a GRANTED, unconsumed loop approval
+    /// whose obligation fell due an hour ago: the shape of a click made after a
+    /// long human pause.
+    async fn paused_for_an_hour(pool: &PgPool, tag: &str) -> Paused {
+        let sfx = new_ulid();
+        let (org, user, thread) = (
+            format!("sc-org-{tag}-{sfx}"),
+            "u1".to_owned(),
+            format!("sc-t-{tag}-{sfx}"),
+        );
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id, created_at)
+             VALUES ($1, $1, $2, $3, now())",
+        )
+        .bind(&thread)
+        .bind(&org)
+        .bind(&user)
+        .execute(pool)
+        .await
+        .expect("thread seeded");
+        let run_id = start_managed_run_with_retention_inner(
+            pool,
+            pb::StartManagedRunRequest {
+                thread_id: thread,
+                parent_run_id: String::new(),
+                agent_id: "general-v1".to_owned(),
+                goal: "spent click goal".to_owned(),
+                mode: "execute".to_owned(),
+                org_id: org.clone(),
+                user_id: user.clone(),
+                start_key: format!("sc-{tag}-{sfx}"),
+                terminal_source: pb::ManagedRunSource::ExecutionAgent as i32,
+            },
+            RunRetention::persistent(),
+        )
+        .await
+        .expect("the run starts")
+        .run_id;
+
+        let approval_id = format!("appr_{}", new_ulid());
+        let descriptor = serde_json::json!({
+            "version": 1,
+            "run_id": run_id,
+            "org_id": org,
+            "user_id": user,
+            "step_id": "tool_1_call-1",
+            "action_kind": "tool_call",
+            "action_fingerprint": FINGERPRINT,
+            "tool_name": "shell",
+            "input": {"command": "echo approved"},
+            "permission_mode": "ask",
+            "offered": {
+                "tools": [{"name": "shell", "description": "run", "parameters_json": "{}"}],
+                "authority": {
+                    "mode": "ask", "plan_mode": false, "autonomy_rung": "", "space_id": "",
+                    "min_privacy_tier": 0, "provider_hint": "", "max_rounds": 4,
+                    "tool_names": ["shell"], "digest": "unchecked-in-this-test"
+                }
+            }
+        });
+        approvals::request_approval(
+            pool,
+            &approval_id,
+            &run_id,
+            None,
+            "tool_call",
+            &user,
+            &org,
+            &user,
+            "",
+            &serde_json::json!({}),
+            Some(&descriptor),
+            Some(Utc::now() + chrono::Duration::hours(2)),
+            "loop",
+        )
+        .await
+        .expect("request approval")
+        .expect("inserted");
+        approvals::decide_approval(pool, &approval_id, &org, Some(&user), "granted", &user, "ok")
+            .await
+            .expect("grant");
+        // The human took an hour: the obligation fell due while the approval waited.
+        sqlx::query(
+            "UPDATE managed_run_terminalization_outbox
+             SET deadline_at = now() - interval '1 hour', next_attempt_at = now() - interval '1 hour'
+             WHERE run_id = $1",
+        )
+        .bind(&run_id)
+        .execute(pool)
+        .await
+        .expect("age the obligation");
+        Paused {
+            org,
+            user,
+            run_id,
+            approval_id,
+        }
+    }
+
+    /// `claim_due_recovery` looks at every run in the database. Push every other
+    /// live obligation (and every other expired lease) a day out, so the answer
+    /// is about the run under test only. Scratch database only.
+    async fn isolate(pool: &PgPool, keep_run_id: &str) {
+        sqlx::query(
+            "UPDATE managed_run_terminalization_outbox
+             SET deadline_at = now() + interval '1 day',
+                 lease_expires_at = CASE WHEN lease_expires_at IS NULL THEN NULL
+                                         ELSE now() + interval '1 day' END
+             WHERE run_id <> $1 AND state IN ('open', 'processing')",
+        )
+        .bind(keep_run_id)
+        .execute(pool)
+        .await
+        .expect("isolate the other obligations");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn a_spent_click_is_not_recovered_before_the_executor_heartbeats() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+
+        // The click: a spend-only consume (the gateway's) of an hour-old pause.
+        let spent = paused_for_an_hour(&pool, "spend").await;
+        isolate(&pool, &spent.run_id).await;
+        assert!(
+            claim_due_recovery(&pool).await.expect("claim").is_none(),
+            "premise: the unconsumed granted approval holds the run back"
+        );
+        let won = approvals::consume_approval_spend_only(
+            &pool,
+            &spent.approval_id,
+            &spent.org,
+            &spent.run_id,
+            &spent.user,
+            "",
+            "claim-a",
+        )
+        .await
+        .expect("consume")
+        .expect("outcome");
+        assert!(won.consumed);
+        assert!(
+            claim_due_recovery(&pool).await.expect("claim").is_none(),
+            "the renewal moved the deadline: nothing is due for the spent run"
+        );
+
+        // The control: the same seed consumed with the executor's full consume is
+        // recoverable at once (it deliberately renews nothing), which proves the
+        // assertion above is the renewal's doing and not an artefact of the seed.
+        let control = paused_for_an_hour(&pool, "full").await;
+        isolate(&pool, &control.run_id).await;
+        assert!(approvals::consume_approval(
+            &pool,
+            &control.approval_id,
+            &control.org,
+            &control.run_id,
+            &control.user,
+            "",
+            "claim-a",
+        )
+        .await
+        .expect("consume")
+        .expect("outcome")
+        .consumed);
+        let claimed = claim_due_recovery(&pool)
+            .await
+            .expect("claim")
+            .expect("a full consume leaves the run recoverable");
+        assert_eq!(claimed.row.run_id, control.run_id);
+    }
+}
+
+/// Build plan WS03 S8-0: an approval that has run past its `expires_at` no longer holds the
+/// recovery worker back from its run, behind SESSION_CORE_RECOVERY_APPROVAL_EXPIRY_ENABLED.
+/// WRITTEN, NOT RUN by the author: it needs the disposable-Postgres harness
+/// (scripts/tests/session-core-db-tests.sh), which the lead runs. Its path starts with
+/// `terminalization::park_recovery_db_tests::`, so the harness filter `terminalization`
+/// selects it.
+///
+/// Each test forces the switch for its own thread (`expiry_test_switch`), so none of them
+/// depends on, or sets, the process environment. The database is shared, so each scenario
+/// first pushes every other live obligation a day out (`isolate`): the answer is then about
+/// the run under test alone. Scratch database only.
+#[cfg(test)]
+mod park_recovery_db_tests {
+    use super::*;
+    use crate::loop_checkpoint::test_support::{fold_rows, seed_fold};
+    use crate::orchestration_store as approvals;
+
+    async fn scratch_pool() -> Option<PgPool> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            assert!(
+                std::env::var_os("REQUIRE_CONTRACT").is_none() && std::env::var_os("CI").is_none(),
+                "DATABASE_URL must name a scratch Postgres when REQUIRE_CONTRACT or CI is set"
+            );
+            eprintln!("skipping: DATABASE_URL unset");
+            return None;
+        };
+        let database = url
+            .rsplit('/')
+            .next()
+            .and_then(|tail| tail.split('?').next())
+            .unwrap_or_default();
+        assert!(
+            database.contains("test"),
+            "these tests write rows: DATABASE_URL must name a scratch database whose name contains \"test\""
+        );
+        let pool = PgPool::connect(&url)
+            .await
+            .expect("scratch Postgres is reachable");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("session-core migrations apply in order");
+        Some(pool)
+    }
+
+    /// Push every other live obligation (and every other expired lease) a day out.
+    async fn isolate(pool: &PgPool, keep_run_id: &str) {
+        sqlx::query(
+            "UPDATE managed_run_terminalization_outbox
+             SET deadline_at = now() + interval '1 day',
+                 next_attempt_at = now() + interval '1 day',
+                 lease_expires_at = CASE WHEN lease_expires_at IS NULL THEN NULL
+                                         ELSE now() + interval '1 day' END
+             WHERE run_id <> $1 AND state IN ('open', 'processing')",
+        )
+        .bind(keep_run_id)
+        .execute(pool)
+        .await
+        .expect("isolate the other obligations");
+    }
+
+    struct Seeded {
+        run_id: String,
+    }
+
+    /// A persistent managed run (started through the real start path, so its obligation is the
+    /// real one) that holds a paused fold and ONE unconsumed `requested` approval whose
+    /// `expires_at` is `expires_in_secs` from now (negative: already past; `None`: no expiry),
+    /// with its obligation overdue by an hour.
+    async fn paused_with_approval(
+        pool: &PgPool,
+        tag: &str,
+        expires_in_secs: Option<i64>,
+    ) -> Seeded {
+        let sfx = new_ulid();
+        let (org, user, thread) = (
+            format!("pr-org-{tag}-{sfx}"),
+            "u1".to_owned(),
+            format!("pr-t-{tag}-{sfx}"),
+        );
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id, created_at)
+             VALUES ($1, $1, $2, $3, now())",
+        )
+        .bind(&thread)
+        .bind(&org)
+        .bind(&user)
+        .execute(pool)
+        .await
+        .expect("thread seeded");
+        let run_id = start_managed_run_with_retention_inner(
+            pool,
+            pb::StartManagedRunRequest {
+                thread_id: thread,
+                parent_run_id: String::new(),
+                agent_id: "general-v1".to_owned(),
+                goal: "approval expiry goal".to_owned(),
+                mode: "execute".to_owned(),
+                org_id: org.clone(),
+                user_id: user.clone(),
+                start_key: format!("pr-{tag}-{sfx}"),
+                terminal_source: pb::ManagedRunSource::ExecutionAgent as i32,
+            },
+            RunRetention::persistent(),
+        )
+        .await
+        .expect("the run starts")
+        .run_id;
+
+        let approval_id = format!("appr_{}", new_ulid());
+        // A cold approval (no continuation mode, no descriptor): this test is about the
+        // recovery worker's reading of `expires_at`, not about how the approval is resumed.
+        approvals::request_approval(
+            pool,
+            &approval_id,
+            &run_id,
+            None,
+            "tool_call",
+            &user,
+            &org,
+            &user,
+            "",
+            &serde_json::json!({}),
+            None,
+            expires_in_secs.map(|secs| Utc::now() + chrono::Duration::seconds(secs)),
+            "",
+        )
+        .await
+        .expect("request approval")
+        .expect("inserted");
+        seed_fold(pool, &run_id, "pause", &approval_id, "", None)
+            .await
+            .expect("the paused fold is stored");
+        make_due(pool, &run_id).await;
+        Seeded { run_id }
+    }
+
+    /// The obligation fell due an hour ago.
+    async fn make_due(pool: &PgPool, run_id: &str) {
+        sqlx::query(
+            "UPDATE managed_run_terminalization_outbox
+             SET deadline_at = now() - interval '1 hour', next_attempt_at = now() - interval '1 hour'
+             WHERE run_id = $1",
+        )
+        .bind(run_id)
+        .execute(pool)
+        .await
+        .expect("age the obligation");
+    }
+
+    /// A delivery worker holds (or held) a lease on the run's approval: `lease_secs` from now,
+    /// negative for a lease that has already lapsed.
+    async fn delivery_lease(pool: &PgPool, run_id: &str, lease_secs: i64) {
+        sqlx::query(
+            "INSERT INTO approval_delivery_outbox
+                 (delivery_id, approval_id, run_id, org_id, user_id, state, attempts,
+                  lease_owner, lease_token_hash, lease_expires_at, processing_at)
+             SELECT $2, a.id, a.run_id, a.org_id, a.user_id, 'processing', 1,
+                    'approval-delivery-worker', repeat('0', 64),
+                    now() + make_interval(secs => $3), now()
+               FROM approvals AS a WHERE a.run_id = $1",
+        )
+        .bind(run_id)
+        .bind(format!("approval_delivery_{}", new_ulid()))
+        .bind(lease_secs as f64)
+        .execute(pool)
+        .await
+        .expect("delivery lease seeded");
+    }
+
+    async fn run_status(pool: &PgPool, run_id: &str) -> String {
+        sqlx::query_scalar("SELECT status FROM runs WHERE id = $1")
+            .bind(run_id)
+            .fetch_one(pool)
+            .await
+            .expect("run status")
+    }
+
+    /// `(state, failure_code)` of the run's terminalization obligation.
+    async fn obligation(pool: &PgPool, run_id: &str) -> (String, Option<String>) {
+        sqlx::query_as(
+            "SELECT state, failure_code FROM managed_run_terminalization_outbox WHERE run_id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(pool)
+        .await
+        .expect("obligation")
+    }
+
+    /// How many RUN_TERMINAL receipts the run holds in the event log (the run's own terminal
+    /// event, whichever outcome it carries): the assertion that a run has at most one.
+    async fn terminal_receipts(pool: &PgPool, run_id: &str) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM events WHERE run_id = $1 AND type_url = $2")
+            .bind(run_id)
+            .bind(RUN_TERMINAL_TYPE_URL)
+            .fetch_one(pool)
+            .await
+            .expect("count the terminal receipts")
+    }
+
+    /// The `receipt_id` the obligation points at (`None` until a terminal receipt is written).
+    async fn obligation_receipt(pool: &PgPool, run_id: &str) -> Option<String> {
+        sqlx::query_scalar(
+            "SELECT receipt_id FROM managed_run_terminalization_outbox WHERE run_id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(pool)
+        .await
+        .expect("obligation receipt")
+    }
+
+    /// Grant the run's one (cold) approval, as production does while it is still unexpired
+    /// (which queues its delivery row), then let it run past its `expires_at`.
+    async fn grant_then_expire(pool: &PgPool, run_id: &str) {
+        let (approval_id, org, user): (String, String, String) =
+            sqlx::query_as("SELECT id, org_id, user_id FROM approvals WHERE run_id = $1")
+                .bind(run_id)
+                .fetch_one(pool)
+                .await
+                .expect("the run's approval");
+        approvals::decide_approval(pool, &approval_id, &org, Some(&user), "granted", &user, "ok")
+            .await
+            .expect("grant");
+        sqlx::query("UPDATE approvals SET expires_at = now() - interval '1 hour' WHERE id = $1")
+            .bind(&approval_id)
+            .execute(pool)
+            .await
+            .expect("let the granted approval expire");
+    }
+
+    /// The delivery row a grant queued is claimed by a delivery worker: its lease runs
+    /// `lease_secs` from now (negative: it has already lapsed).
+    async fn set_delivery_lease(pool: &PgPool, run_id: &str, lease_secs: i64) {
+        let updated = sqlx::query(
+            "UPDATE approval_delivery_outbox
+             SET state = 'processing', attempts = 1,
+                 lease_owner = 'approval-delivery-worker', lease_token_hash = repeat('0', 64),
+                 lease_expires_at = now() + make_interval(secs => $2), processing_at = now()
+             WHERE run_id = $1",
+        )
+        .bind(run_id)
+        .bind(lease_secs as f64)
+        .execute(pool)
+        .await
+        .expect("delivery lease set");
+        assert_eq!(updated.rows_affected(), 1, "premise: one queued delivery row");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn an_expired_never_consumed_approval_no_longer_spares_the_run() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let seeded = paused_with_approval(&pool, "expired", Some(-3600)).await;
+        isolate(&pool, &seeded.run_id).await;
+        assert_eq!(fold_rows(&pool, &seeded.run_id).await, 1, "premise: a fold");
+
+        // Switch off (the default): the committed sparing. The expired approval holds the
+        // run back from the candidate query, and the worker's whole pass leaves it alone.
+        {
+            let _off = expiry_test_switch::Forced::set(false);
+            assert!(
+                claim_due_recovery(&pool).await.expect("claim").is_none(),
+                "off: an expired approval still spares the run, as committed"
+            );
+            assert_eq!(recover_due_terminalizations(&pool).await.expect("pass"), 0);
+            assert_eq!(fold_rows(&pool, &seeded.run_id).await, 1);
+            assert!(!is_terminal_run_status(
+                &run_status(&pool, &seeded.run_id).await
+            ));
+            assert_eq!(
+                terminal_receipts(&pool, &seeded.run_id).await,
+                0,
+                "off: no terminal receipt is written"
+            );
+        }
+
+        // Switch on, but the re-check (the second copy of the clause) read with the switch
+        // off: the run is claimed (the candidate query lets it through), then spared by the
+        // re-check and handed back to its obligation. Each copy answers on its own.
+        {
+            let _on = expiry_test_switch::Forced::set(true);
+            let claim = claim_due_recovery(&pool)
+                .await
+                .expect("claim")
+                .expect("on: the expired approval no longer holds the run back");
+            assert_eq!(claim.row.run_id, seeded.run_id);
+            let _off = expiry_test_switch::Forced::set(false);
+            assert!(
+                !recover_claimed_terminalization(&pool, claim)
+                    .await
+                    .expect("recheck"),
+                "the re-check with the switch off still spares the run"
+            );
+            assert_eq!(obligation(&pool, &seeded.run_id).await.0, "open");
+            assert_eq!(fold_rows(&pool, &seeded.run_id).await, 1);
+            assert_eq!(terminal_receipts(&pool, &seeded.run_id).await, 0);
+        }
+
+        // Switch on: the run ends outcome_unknown at its deadline and its fold is purged by
+        // the unchanged terminal path.
+        make_due(&pool, &seeded.run_id).await;
+        isolate(&pool, &seeded.run_id).await;
+        {
+            let _on = expiry_test_switch::Forced::set(true);
+            assert_eq!(
+                recover_due_terminalizations(&pool).await.expect("pass"),
+                1,
+                "on: exactly this run is recovered"
+            );
+        }
+        assert_eq!(run_status(&pool, &seeded.run_id).await, "failed");
+        let (state, failure) = obligation(&pool, &seeded.run_id).await;
+        assert_eq!(state, "reconciliation_required");
+        assert_eq!(failure.as_deref(), Some(RECOVERY_FAILURE_CODE));
+        assert_eq!(
+            fold_rows(&pool, &seeded.run_id).await,
+            0,
+            "the fold is purged with the run"
+        );
+        assert!(
+            obligation_receipt(&pool, &seeded.run_id).await.is_some(),
+            "the obligation records the receipt it wrote"
+        );
+        assert_eq!(
+            terminal_receipts(&pool, &seeded.run_id).await,
+            1,
+            "exactly one RUN_TERMINAL receipt"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn an_unexpired_or_live_delivery_approval_still_spares() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let _on = expiry_test_switch::Forced::set(true);
+
+        // An approval that has not expired yet, an approval with no expiry at all, and an
+        // expired one a delivery worker holds a live lease on: each still holds its run back,
+        // both at the candidate query and across the worker's whole pass.
+        for (tag, expires_in, lease) in [
+            ("future", Some(3600), None),
+            ("noexpiry", None, None),
+            ("leased", Some(-3600), Some(600)),
+        ] {
+            let seeded = paused_with_approval(&pool, tag, expires_in).await;
+            if let Some(lease_secs) = lease {
+                delivery_lease(&pool, &seeded.run_id, lease_secs).await;
+            }
+            isolate(&pool, &seeded.run_id).await;
+            assert!(
+                claim_due_recovery(&pool).await.expect("claim").is_none(),
+                "{tag}: the approval still spares the run"
+            );
+            assert_eq!(recover_due_terminalizations(&pool).await.expect("pass"), 0);
+            assert!(!is_terminal_run_status(
+                &run_status(&pool, &seeded.run_id).await
+            ));
+            assert_eq!(
+                fold_rows(&pool, &seeded.run_id).await,
+                1,
+                "{tag}: fold kept"
+            );
+        }
+
+        // The control: the same expired approval whose delivery lease has LAPSED no longer
+        // spares its run, so the three assertions above are the clause's doing.
+        let lapsed = paused_with_approval(&pool, "lapsed", Some(-3600)).await;
+        delivery_lease(&pool, &lapsed.run_id, -600).await;
+        isolate(&pool, &lapsed.run_id).await;
+        let claimed = claim_due_recovery(&pool)
+            .await
+            .expect("claim")
+            .expect("an expired approval with a lapsed delivery lease is recoverable");
+        assert_eq!(claimed.row.run_id, lapsed.run_id);
+    }
+
+    /// The live-delivery-lease branch of the SECOND copy of the clause (`has_pending_approval`,
+    /// the re-check inside `recover_claimed_terminalization`). Every sparing case in the test
+    /// above is stopped by `claim_due_recovery`'s candidate query first, so none reaches it.
+    /// Here the worker WINS the claim while the delivery lease has lapsed, and a delivery
+    /// worker then takes a live lease before the re-check reads: only the re-check can spare
+    /// the run now.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn a_delivery_lease_taken_after_the_claim_spares_the_run_at_the_recheck() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let _on = expiry_test_switch::Forced::set(true);
+        // A granted approval (so its delivery row exists, as in production) that has since
+        // expired, whose delivery lease has lapsed: the candidate query lets the run through.
+        let seeded = paused_with_approval(&pool, "racelease", Some(3600)).await;
+        grant_then_expire(&pool, &seeded.run_id).await;
+        set_delivery_lease(&pool, &seeded.run_id, -600).await;
+        isolate(&pool, &seeded.run_id).await;
+        let claim = claim_due_recovery(&pool)
+            .await
+            .expect("claim")
+            .expect("an expired approval with a lapsed delivery lease does not hold the run back");
+        assert_eq!(claim.row.run_id, seeded.run_id);
+
+        // The race: a delivery worker takes a live lease after the claim.
+        set_delivery_lease(&pool, &seeded.run_id, 600).await;
+        assert!(
+            !recover_claimed_terminalization(&pool, claim)
+                .await
+                .expect("recheck"),
+            "the re-check sees the live delivery lease and spares the run"
+        );
+        assert_eq!(
+            obligation(&pool, &seeded.run_id).await,
+            ("open".to_owned(), None),
+            "the obligation is handed back to its retry"
+        );
+        assert!(!is_terminal_run_status(
+            &run_status(&pool, &seeded.run_id).await
+        ));
+        assert_eq!(fold_rows(&pool, &seeded.run_id).await, 1, "fold kept");
+        assert_eq!(terminal_receipts(&pool, &seeded.run_id).await, 0);
+
+        // The control: once that lease lapses too, the same run is recovered, so the sparing
+        // above was the live lease's doing and not a stuck obligation.
+        set_delivery_lease(&pool, &seeded.run_id, -600).await;
+        make_due(&pool, &seeded.run_id).await;
+        isolate(&pool, &seeded.run_id).await;
+        assert_eq!(
+            recover_due_terminalizations(&pool).await.expect("pass"),
+            1,
+            "with the lease lapsed the run is recovered"
+        );
+        assert_eq!(terminal_receipts(&pool, &seeded.run_id).await, 1);
+    }
+
+    // -- Build plan WS03 S8-4: the worker spares a parked fold until its wait runs out ---------
+    //
+    // WRITTEN, NOT RUN by the author (the lead runs them through the disposable-Postgres
+    // harness). They force the fold store and park recovery for their own thread, read the wait
+    // from `park_ttl_seconds()` rather than assuming it, and age a park by rewriting its
+    // `updated_at` (the park's age, the anchor of its wait).
+
+    use crate::loop_checkpoint::test_support::cipher;
+    use crate::loop_checkpoint::test_switch as store_switch;
+    use mp_contracts::loop_fold::park_ref;
+
+    /// A persistent managed run, started through the real start path (so its obligation is the
+    /// real one), with no fold yet. Returns the run id.
+    async fn started_run(pool: &PgPool, tag: &str) -> String {
+        let sfx = new_ulid();
+        let (org, user, thread) = (
+            format!("pk-org-{tag}-{sfx}"),
+            "u1".to_owned(),
+            format!("pk-t-{tag}-{sfx}"),
+        );
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id, created_at)
+             VALUES ($1, $1, $2, $3, now())",
+        )
+        .bind(&thread)
+        .bind(&org)
+        .bind(&user)
+        .execute(pool)
+        .await
+        .expect("thread seeded");
+        start_managed_run_with_retention_inner(
+            pool,
+            pb::StartManagedRunRequest {
+                thread_id: thread,
+                parent_run_id: String::new(),
+                agent_id: "general-v1".to_owned(),
+                goal: "park recovery goal".to_owned(),
+                mode: "execute".to_owned(),
+                org_id: org.clone(),
+                user_id: user.clone(),
+                start_key: format!("pk-{tag}-{sfx}"),
+                terminal_source: pb::ManagedRunSource::ExecutionAgent as i32,
+            },
+            RunRetention::persistent(),
+        )
+        .await
+        .expect("the run starts")
+        .run_id
+    }
+
+    /// A started run holding a PARK fold, saved through the real store under the park rules
+    /// (their switches forced on for this call only), whose age is `age_secs` and whose
+    /// obligation fell due an hour ago.
+    #[allow(clippy::cast_precision_loss)]
+    async fn parked(pool: &PgPool, tag: &str, age_secs: i64) -> Seeded {
+        let run_id = started_run(pool, tag).await;
+        {
+            let _store = store_switch::Forced::set(true);
+            let _park = park_test_switch::Forced::set(true);
+            let until = Utc::now() + chrono::Duration::seconds(3600);
+            seed_fold(
+                pool,
+                &run_id,
+                "park",
+                &park_ref(&run_id, 1),
+                "provider_exhausted",
+                Some(until),
+            )
+            .await
+            .expect("the park is stored under the park rules");
+        }
+        sqlx::query(
+            "UPDATE run_loop_checkpoints SET updated_at = now() - make_interval(secs => $2)
+              WHERE run_id = $1",
+        )
+        .bind(&run_id)
+        .bind(age_secs as f64)
+        .execute(pool)
+        .await
+        .expect("age the park");
+        make_due(pool, &run_id).await;
+        Seeded { run_id }
+    }
+
+    /// `(state, deadline in seconds from now, next attempt in seconds from now, lease cleared)`
+    /// of the run's obligation.
+    async fn obligation_timing(pool: &PgPool, run_id: &str) -> (String, f64, f64, bool) {
+        sqlx::query_as(
+            "SELECT state,
+                    EXTRACT(EPOCH FROM (deadline_at - now()))::float8,
+                    EXTRACT(EPOCH FROM (next_attempt_at - now()))::float8,
+                    lease_owner IS NULL AND lease_token_hash IS NULL AND lease_expires_at IS NULL
+               FROM managed_run_terminalization_outbox WHERE run_id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(pool)
+        .await
+        .expect("obligation timing")
+    }
+
+    async fn fold_state_of(pool: &PgPool, run_id: &str) -> Option<String> {
+        crate::loop_checkpoint::test_support::fold_state(pool, run_id).await
+    }
+
+    /// The worker claims the run's obligation and runs its recheck: `Ok(true)` when it ended the
+    /// run, `Ok(false)` when it spared it.
+    async fn worker_pass_on(pool: &PgPool, run_id: &str) -> bool {
+        make_due(pool, run_id).await;
+        isolate(pool, run_id).await;
+        let claim = claim_due_recovery(pool)
+            .await
+            .expect("claim")
+            .expect("the run's obligation is due");
+        assert_eq!(claim.row.run_id, run_id);
+        recover_claimed_terminalization(pool, claim)
+            .await
+            .expect("the recheck")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn a_parked_fold_is_spared_until_the_ttl_then_terminalized_once() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let _store = store_switch::Forced::set(true);
+        let _park = park_test_switch::Forced::set(true);
+        let ttl = crate::loop_checkpoint::park_ttl_seconds();
+
+        // Early in its wait: spared, and the obligation is handed back due at `now + 900 s`
+        // (the deadline period), the nearer of the two ends.
+        let early = parked(&pool, "early", 600).await;
+        assert!(
+            !worker_pass_on(&pool, &early.run_id).await,
+            "a park inside its wait is spared"
+        );
+        let (state, deadline, next, lease_cleared) = obligation_timing(&pool, &early.run_id).await;
+        assert_eq!(state, "open");
+        assert!(lease_cleared, "the lease is cleared");
+        let period = MANAGED_DEADLINE_SECS as f64;
+        for (what, secs) in [("deadline", deadline), ("next attempt", next)] {
+            assert!(
+                secs > period - 60.0 && secs <= period,
+                "{what} is a deadline period from now, not the wait's end: {secs}"
+            );
+        }
+        assert!(!is_terminal_run_status(&run_status(&pool, &early.run_id).await));
+        assert_eq!(fold_rows(&pool, &early.run_id).await, 1, "the park is kept");
+        assert_eq!(terminal_receipts(&pool, &early.run_id).await, 0);
+        // Not due again yet: a whole pass leaves it alone.
+        assert_eq!(recover_due_terminalizations(&pool).await.expect("pass"), 0);
+
+        // Near the end of its wait: the horizon is the wait's end, which is sooner than a
+        // deadline period, so the obligation is not parked past it.
+        let near = parked(&pool, "near", ttl - 120).await;
+        assert!(!worker_pass_on(&pool, &near.run_id).await);
+        let (state, deadline, next, _cleared) = obligation_timing(&pool, &near.run_id).await;
+        assert_eq!(state, "open");
+        for (what, secs) in [("deadline", deadline), ("next attempt", next)] {
+            assert!(
+                secs > 60.0 && secs <= 120.0,
+                "{what} is the end of the wait, about two minutes away: {secs}"
+            );
+        }
+        assert_eq!(fold_rows(&pool, &near.run_id).await, 1);
+
+        // A park a continuation has claimed (resuming) is spared inside its wait too.
+        let resuming = parked(&pool, "resuming", 600).await;
+        sqlx::query(
+            "UPDATE run_loop_checkpoints SET park_until = now() - interval '1 second' WHERE run_id = $1",
+        )
+        .bind(&resuming.run_id)
+        .execute(&pool)
+        .await
+        .expect("make the park due");
+        crate::loop_checkpoint::claim(&pool, &cipher(), &resuming.run_id, "", "token-a")
+            .await
+            .expect("a continuation claims the due park");
+        assert_eq!(fold_state_of(&pool, &resuming.run_id).await.as_deref(), Some("resuming"));
+        assert!(!worker_pass_on(&pool, &resuming.run_id).await);
+        assert_eq!(obligation_timing(&pool, &resuming.run_id).await.0, "open");
+        assert_eq!(fold_rows(&pool, &resuming.run_id).await, 1);
+        assert_eq!(terminal_receipts(&pool, &resuming.run_id).await, 0);
+
+        // Past its wait: the run ends outcome_unknown through the unchanged path, the fold is
+        // purged with it, and the run has exactly one terminal receipt.
+        let over = parked(&pool, "over", ttl + 60).await;
+        isolate(&pool, &over.run_id).await;
+        assert_eq!(
+            recover_due_terminalizations(&pool).await.expect("pass"),
+            1,
+            "exactly this run is recovered"
+        );
+        assert_eq!(run_status(&pool, &over.run_id).await, "failed");
+        let (state, failure) = obligation(&pool, &over.run_id).await;
+        assert_eq!(state, "reconciliation_required");
+        assert_eq!(failure.as_deref(), Some(RECOVERY_FAILURE_CODE));
+        assert_eq!(fold_rows(&pool, &over.run_id).await, 0, "the fold is purged");
+        assert!(obligation_receipt(&pool, &over.run_id).await.is_some());
+        assert_eq!(terminal_receipts(&pool, &over.run_id).await, 1);
+        // A second pass finds nothing to end: still one receipt.
+        isolate(&pool, &over.run_id).await;
+        assert_eq!(recover_due_terminalizations(&pool).await.expect("pass"), 0);
+        assert_eq!(terminal_receipts(&pool, &over.run_id).await, 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn park_recovery_off_is_the_committed_worker() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let ttl = crate::loop_checkpoint::park_ttl_seconds();
+
+        // Park recovery off, the store on: a park inside its wait is an ordinary overdue run.
+        // Store off, park recovery on: the same (the rules need both).
+        for (what, store_on, park_on) in [
+            ("park recovery off", true, false),
+            ("the fold store off", false, true),
+            ("both off", false, false),
+        ] {
+            let seeded = parked(&pool, "off", 600).await;
+            isolate(&pool, &seeded.run_id).await;
+            let _store = store_switch::Forced::set(store_on);
+            let _park = park_test_switch::Forced::set(park_on);
+            assert!(
+                worker_pass_on(&pool, &seeded.run_id).await,
+                "{what}: a park inside its wait is not spared"
+            );
+            assert_eq!(run_status(&pool, &seeded.run_id).await, "failed", "{what}");
+            assert_eq!(obligation(&pool, &seeded.run_id).await.0, "reconciliation_required", "{what}");
+            assert_eq!(fold_rows(&pool, &seeded.run_id).await, 0, "{what}: the fold is purged");
+            assert_eq!(terminal_receipts(&pool, &seeded.run_id).await, 1, "{what}");
+        }
+
+        // With both on, the control: the same park IS spared, so the three above are the
+        // switches' doing.
+        let _store = store_switch::Forced::set(true);
+        let _park = park_test_switch::Forced::set(true);
+        let spared = parked(&pool, "control", 600).await;
+        assert!(!worker_pass_on(&pool, &spared.run_id).await);
+        assert_eq!(fold_rows(&pool, &spared.run_id).await, 1);
+        assert!(ttl > 600, "premise: the wait is longer than the park's age");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn an_active_or_paused_fold_is_never_spared_by_the_park_branch() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let _store = store_switch::Forced::set(true);
+        let _park = park_test_switch::Forced::set(true);
+
+        for kind in ["round", "pre_effect", "pause", "closed park"] {
+            let run_id = started_run(&pool, "kinds").await;
+            match kind {
+                "closed park" => {
+                    seed_fold(
+                        &pool,
+                        &run_id,
+                        "park",
+                        &park_ref(&run_id, 1),
+                        "provider_exhausted",
+                        Some(Utc::now() + chrono::Duration::seconds(3600)),
+                    )
+                    .await
+                    .expect("a park");
+                    crate::loop_checkpoint::close(&pool, &run_id, 1, "park_not_taken")
+                        .await
+                        .expect("close");
+                }
+                "pause" => {
+                    seed_fold(&pool, &run_id, "pause", "appr_never", "", None)
+                        .await
+                        .expect("a pause fold with no approval row");
+                }
+                other => {
+                    seed_fold(&pool, &run_id, other, "", "", None)
+                        .await
+                        .expect("an active fold");
+                }
+            }
+            assert_eq!(fold_rows(&pool, &run_id).await, 1, "{kind}: premise: a fold");
+            assert!(
+                worker_pass_on(&pool, &run_id).await,
+                "{kind}: the park branch leaves it to the committed path"
+            );
+            assert_eq!(run_status(&pool, &run_id).await, "failed", "{kind}");
+            assert_eq!(fold_rows(&pool, &run_id).await, 0, "{kind}: purged by the unchanged path");
+            assert_eq!(terminal_receipts(&pool, &run_id).await, 1, "{kind}");
+        }
+    }
+
+    /// A continuation claims the park while the worker holds the run's obligation, at both ends
+    /// of the wait. The run row's lock orders them: inside the wait the park is spared whoever is
+    /// first, and past it the run ends exactly once and the claimant's fence is refused.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn a_claim_racing_the_worker_never_double_terminalizes() {
+        use crate::loop_checkpoint::test_support::fold_for;
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let _store = store_switch::Forced::set(true);
+        let _park = park_test_switch::Forced::set(true);
+        let ttl = crate::loop_checkpoint::park_ttl_seconds();
+
+        for (what, age_secs, wait_over) in [("inside the wait", 600, false), ("past the wait", ttl + 60, true)] {
+            let seeded = parked(&pool, "race", age_secs).await;
+            sqlx::query(
+                "UPDATE run_loop_checkpoints SET park_until = now() - interval '1 second' WHERE run_id = $1",
+            )
+            .bind(&seeded.run_id)
+            .execute(&pool)
+            .await
+            .expect("make the park due");
+            isolate(&pool, &seeded.run_id).await;
+            let claim = claim_due_recovery(&pool)
+                .await
+                .expect("claim")
+                .expect("the obligation is due");
+            assert_eq!(claim.row.run_id, seeded.run_id);
+
+            let key = cipher();
+            let (worker, claimed) = tokio::join!(
+                recover_claimed_terminalization(&pool, claim),
+                crate::loop_checkpoint::claim(&pool, &key, &seeded.run_id, "", "token-a"),
+            );
+            let ended = worker.expect("the worker's pass");
+            assert_eq!(ended, wait_over, "{what}");
+            if wait_over {
+                // Exactly one end. The claimant either won before it (and its fold went with the
+                // run) or lost to it; either way the run is over and its fence is refused.
+                match claimed {
+                    Ok(won) => assert_eq!(won.kind, "park", "{what}"),
+                    Err(lost) => assert_eq!(lost.message(), "loop_checkpoint_run_ended", "{what}"),
+                }
+                assert_eq!(run_status(&pool, &seeded.run_id).await, "failed", "{what}");
+                assert_eq!(fold_rows(&pool, &seeded.run_id).await, 0, "{what}");
+                let fold = fold_for(&seeded.run_id);
+                let fence = crate::loop_checkpoint::save(
+                    &pool,
+                    &cipher(),
+                    crate::loop_checkpoint::SaveInput {
+                        run_id: &seeded.run_id,
+                        expected_seq: 1,
+                        kind: "pre_effect",
+                        fold: &fold,
+                        authority_digest: "auth-1",
+                        pause_ref: "",
+                        park_reason: "",
+                        park_until: None,
+                    },
+                )
+                .await
+                .expect_err("a fence on an ended run");
+                assert_eq!(fence.message(), "loop_checkpoint_run_ended", "{what}");
+            } else {
+                // Inside the wait the claim wins (the park is due) and the park is spared.
+                assert_eq!(claimed.expect("the due park is claimed").kind, "park", "{what}");
+                assert!(!is_terminal_run_status(&run_status(&pool, &seeded.run_id).await), "{what}");
+                assert_eq!(fold_state_of(&pool, &seeded.run_id).await.as_deref(), Some("resuming"));
+                assert_eq!(fold_rows(&pool, &seeded.run_id).await, 1, "{what}");
+            }
+            assert_eq!(terminal_receipts(&pool, &seeded.run_id).await, i64::from(wait_over), "{what}");
+        }
+    }
+
+    // --- crash park (WS03 S8-B) ---------------------------------------------------------------
+    //
+    // The recovery worker parks the active round fold a dead loop left, instead of ending the run,
+    // only when a continuation could resume it. Every test turns the three switches it needs on
+    // for its own thread; the database is shared, so each scenario isolates its run first.
+
+    use crate::loop_checkpoint::test_support::{
+        crash_parkable_fold, crash_parkable_value, digest_and_bytes, plant_round_fold,
+        seed_crash_fold,
+    };
+
+    struct CrashSwitches {
+        _store: store_switch::Forced,
+        _park: park_test_switch::Forced,
+        _crash: crash_test_switch::Forced,
+    }
+
+    fn crash_switches(park: bool, crash: bool) -> CrashSwitches {
+        CrashSwitches {
+            _store: store_switch::Forced::set(true),
+            _park: park_test_switch::Forced::set(park),
+            _crash: crash_test_switch::Forced::set(crash),
+        }
+    }
+
+    /// A started run under `retention`, with no fold yet.
+    async fn started_run_as(pool: &PgPool, tag: &str, retention: RunRetention) -> String {
+        let sfx = new_ulid();
+        let (org, user) = (format!("cp-org-{tag}-{sfx}"), "u1".to_owned());
+        let thread_id = if retention.class == RetentionClass::Zdr {
+            String::new()
+        } else {
+            let thread = format!("cp-t-{tag}-{sfx}");
+            sqlx::query(
+                "INSERT INTO threads (id, session_key, org_id, user_id, created_at)
+                 VALUES ($1, $1, $2, $3, now())",
+            )
+            .bind(&thread)
+            .bind(&org)
+            .bind(&user)
+            .execute(pool)
+            .await
+            .expect("thread seeded");
+            thread
+        };
+        start_managed_run_with_retention_inner(
+            pool,
+            pb::StartManagedRunRequest {
+                thread_id,
+                parent_run_id: String::new(),
+                agent_id: "general-v1".to_owned(),
+                goal: "crash park goal".to_owned(),
+                mode: "execute".to_owned(),
+                org_id: org,
+                user_id: user,
+                start_key: format!("cp-{tag}-{sfx}"),
+                terminal_source: pb::ManagedRunSource::ExecutionAgent as i32,
+            },
+            retention,
+        )
+        .await
+        .expect("the run starts")
+        .run_id
+    }
+
+    /// A persistent run holding the active round fold a crash-parkable loop leaves (stamped with
+    /// its thread position by the real save, so the switches are set before this is called).
+    async fn crashed_run(pool: &PgPool, tag: &str) -> String {
+        let run_id = started_run_as(pool, tag, RunRetention::persistent()).await;
+        assert_eq!(seed_crash_fold(pool, &run_id, "round").await, 1);
+        run_id
+    }
+
+    async fn run_thread(pool: &PgPool, run_id: &str) -> String {
+        sqlx::query_scalar("SELECT thread_id FROM runs WHERE id = $1")
+            .bind(run_id)
+            .fetch_one(pool)
+            .await
+            .expect("the run's thread")
+    }
+
+    async fn add_message(pool: &PgPool, run_id: &str, role: &str) {
+        sqlx::query("INSERT INTO messages (id, thread_id, role, content) VALUES ($1, $2, $3, 'text')")
+            .bind(format!("cp-m-{}", new_ulid()))
+            .bind(run_thread(pool, run_id).await)
+            .bind(role)
+            .execute(pool)
+            .await
+            .expect("a message lands on the thread");
+    }
+
+    /// `(kind, state, park_reason, seq, seconds until park_until, seconds since updated_at)`.
+    async fn fold_row(
+        pool: &PgPool,
+        run_id: &str,
+    ) -> (String, String, Option<String>, i64, Option<f64>, f64) {
+        sqlx::query_as(
+            "SELECT kind, state, park_reason, seq,
+                    EXTRACT(EPOCH FROM (park_until - now()))::float8,
+                    EXTRACT(EPOCH FROM (now() - updated_at))::float8
+               FROM run_loop_checkpoints WHERE run_id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(pool)
+        .await
+        .expect("the fold row")
+    }
+
+    async fn heartbeat(pool: &PgPool, run_id: &str) {
+        let beat = heartbeat_managed_run_inner(
+            pool,
+            pb::HeartbeatManagedRunRequest {
+                run_id: run_id.to_owned(),
+                source: pb::ManagedRunSource::ExecutionAgent as i32,
+            },
+        )
+        .await
+        .expect("heartbeat");
+        assert!(!beat.already_terminal);
+    }
+
+    async fn set_park_until(pool: &PgPool, run_id: &str, secs_from_now: f64) {
+        sqlx::query(
+            "UPDATE run_loop_checkpoints SET park_until = now() + make_interval(secs => $2)
+              WHERE run_id = $1",
+        )
+        .bind(run_id)
+        .bind(secs_from_now)
+        .execute(pool)
+        .await
+        .expect("move park_until");
+    }
+
+    async fn saved_events(pool: &PgPool, run_id: &str, seq: i64) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM events WHERE run_id = $1 AND resource_ref = $2")
+            .bind(run_id)
+            .bind(format!("run:{run_id}:loop_checkpoint:{seq}:CHECKPOINT_SAVED"))
+            .fetch_one(pool)
+            .await
+            .expect("count the save events")
+    }
+
+    /// The run was ended by the committed path: failed `outcome_unknown`, its fold purged, one
+    /// terminal receipt.
+    async fn assert_ended_as_committed(pool: &PgPool, run_id: &str, what: &str) {
+        assert_eq!(run_status(pool, run_id).await, "failed", "{what}");
+        let (state, failure) = obligation(pool, run_id).await;
+        assert_eq!(state, "reconciliation_required", "{what}");
+        assert_eq!(failure.as_deref(), Some(RECOVERY_FAILURE_CODE), "{what}");
+        assert_eq!(fold_rows(pool, run_id).await, 0, "{what}: the fold is purged");
+        assert_eq!(terminal_receipts(pool, run_id).await, 1, "{what}");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn recover_parks_a_crashed_run_is_parked_not_ended_and_a_continuation_claims_it() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let _on = crash_switches(true, true);
+        let run_id = crashed_run(&pool, "crash").await;
+        let (kind, state, ..) = fold_row(&pool, &run_id).await;
+        assert_eq!((kind.as_str(), state.as_str()), ("round", "active"), "premise");
+
+        // The worker finds the overdue run with an active round fold: it parks it.
+        assert!(!worker_pass_on(&pool, &run_id).await, "parked, not ended");
+        let (kind, state, reason, seq, until, age) = fold_row(&pool, &run_id).await;
+        assert_eq!((kind.as_str(), state.as_str()), ("park", "parked"));
+        assert_eq!(reason.as_deref(), Some("crash_interrupted"));
+        assert_eq!(seq, 2, "re-sealed one seq above the fold the loop left");
+        let until = until.expect("a resume time");
+        assert!(until > 800.0 && until <= 900.0, "due after the grace period: {until}");
+        assert!(age < 60.0, "the park's age is now, the anchor of its wait: {age}");
+        assert!(!is_terminal_run_status(&run_status(&pool, &run_id).await));
+        assert_eq!(terminal_receipts(&pool, &run_id).await, 0);
+        assert_eq!(saved_events(&pool, &run_id, 2).await, 1, "one CHECKPOINT_SAVED for the park");
+        let (obligation_state, deadline, next, lease_cleared) =
+            obligation_timing(&pool, &run_id).await;
+        assert_eq!(obligation_state, "open");
+        assert!(lease_cleared);
+        let period = MANAGED_DEADLINE_SECS as f64;
+        assert!(deadline > period - 60.0 && deadline <= period, "{deadline}");
+        assert!(next > period - 60.0 && next <= period, "{next}");
+
+        // Not claimable before the grace has passed.
+        let early = crate::loop_checkpoint::claim(&pool, &cipher(), &run_id, "", "tok-a")
+            .await
+            .expect_err("a crash park is not due yet");
+        assert_eq!(early.message(), "park_not_due");
+
+        // A heartbeat of a loop that is alive pushes the park on, when crash parking is on, and
+        // never moves its age.
+        set_park_until(&pool, &run_id, 60.0).await;
+        {
+            let _off = crash_test_switch::Forced::set(false);
+            heartbeat(&pool, &run_id).await;
+            assert!(fold_row(&pool, &run_id).await.4.expect("until") < 120.0, "off: no push");
+        }
+        heartbeat(&pool, &run_id).await;
+        let (.., until, age) = fold_row(&pool, &run_id).await;
+        assert!(until.expect("until") > 800.0, "on: pushed a grace period on");
+        assert!(age < 120.0, "the heartbeat leaves the park's age alone: {age}");
+
+        // Once due, a continuation claims it: the park fold, pending park 1, the route keys.
+        set_park_until(&pool, &run_id, -1.0).await;
+        let claimed = crate::loop_checkpoint::claim(&pool, &cipher(), &run_id, "", "tok-a")
+            .await
+            .expect("the due crash park is claimed");
+        assert_eq!(claimed.kind, "park");
+        assert_eq!(claimed.seq, 2);
+        let fold: mp_contracts::loop_fold::LoopFoldV1 =
+            serde_json::from_slice(&claimed.fold).expect("a fold");
+        let pending = fold.pending.as_ref().expect("pending");
+        assert_eq!(pending.kind, mp_contracts::loop_fold::PauseKind::Park);
+        assert_eq!(pending.pause_ref, park_ref(&run_id, 1));
+        assert_eq!(mp_contracts::loop_fold::parks_in(&fold), 1);
+        assert_eq!(mp_contracts::loop_fold::route_model_in(&fold), Some("model-x"));
+        assert_eq!(fold_state_of(&pool, &run_id).await.as_deref(), Some("resuming"));
+        // A claimed park is a continuation's: a heartbeat leaves its time alone.
+        let before = fold_row(&pool, &run_id).await.4;
+        heartbeat(&pool, &run_id).await;
+        assert!(fold_row(&pool, &run_id).await.4 <= before.map(|secs| secs + 1.0));
+
+        // An unclaimed crash park ends outcome_unknown once its wait has run out.
+        let stale = crashed_run(&pool, "ttl").await;
+        assert!(!worker_pass_on(&pool, &stale).await, "parked");
+        let ttl = crate::loop_checkpoint::park_ttl_seconds();
+        sqlx::query(
+            "UPDATE run_loop_checkpoints SET updated_at = now() - make_interval(secs => $2)
+              WHERE run_id = $1",
+        )
+        .bind(&stale)
+        .bind((ttl + 60) as f64)
+        .execute(&pool)
+        .await
+        .expect("age the park");
+        assert!(worker_pass_on(&pool, &stale).await, "past its wait: ended");
+        assert_ended_as_committed(&pool, &stale, "ttl").await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn recover_parks_crash_park_off_is_the_committed_worker() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        for (what, park_on, crash_on) in [
+            ("crash park off", true, false),
+            ("park recovery off", false, true),
+            ("both off", false, false),
+        ] {
+            let _switches = crash_switches(park_on, crash_on);
+            let run_id = crashed_run(&pool, "off").await;
+            assert!(worker_pass_on(&pool, &run_id).await, "{what}: the run is ended");
+            assert_ended_as_committed(&pool, &run_id, what).await;
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn recover_parks_a_fold_no_continuation_could_resume_is_not_parked() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let _on = crash_switches(true, true);
+        // An expired approval no longer spares the run, so the crash park's own check sees it.
+        let _expiry = expiry_test_switch::Forced::set(true);
+
+        for case in [
+            "no executor markers",
+            "a pre_effect fold",
+            "a message after the fold",
+            "an open approval",
+            "an effect after the fold",
+            "an open reservation",
+            "a zero-retention run",
+            "a waived run",
+        ] {
+            let run_id = match case {
+                "a zero-retention run" | "a waived run" => {
+                    let retention = if case == "a zero-retention run" {
+                        RunRetention::zdr()
+                    } else {
+                        RunRetention::waived("ack-1", "conn-1")
+                    };
+                    let run_id = started_run_as(&pool, "refuse", retention).await;
+                    let (bytes, digest) = crash_parkable_fold(&run_id);
+                    plant_round_fold(&pool, &run_id, &bytes, &digest).await;
+                    run_id
+                }
+                "no executor markers" => {
+                    let run_id = started_run_as(&pool, "refuse", RunRetention::persistent()).await;
+                    let mut value = crash_parkable_value(&run_id);
+                    for key in ["route_model", "route_connection_id", "child_ceiling"] {
+                        value["extensions"].as_object_mut().unwrap().remove(key);
+                    }
+                    let (bytes, digest) = digest_and_bytes(&value);
+                    crate::loop_checkpoint::save(
+                        &pool,
+                        &cipher(),
+                        crate::loop_checkpoint::SaveInput {
+                            run_id: &run_id,
+                            expected_seq: 0,
+                            kind: "round",
+                            fold: &bytes,
+                            authority_digest: &digest,
+                            pause_ref: "",
+                            park_reason: "",
+                            park_until: None,
+                        },
+                    )
+                    .await
+                    .expect("stored");
+                    run_id
+                }
+                "a pre_effect fold" => {
+                    let run_id = started_run_as(&pool, "refuse", RunRetention::persistent()).await;
+                    seed_crash_fold(&pool, &run_id, "pre_effect").await;
+                    run_id
+                }
+                other => {
+                    let run_id = crashed_run(&pool, "refuse").await;
+                    match other {
+                        "a message after the fold" => add_message(&pool, &run_id, "assistant").await,
+                        "an open approval" => {
+                            let (org, user): (String, String) = sqlx::query_as(
+                                "SELECT org_id, user_id FROM runs WHERE id = $1",
+                            )
+                            .bind(&run_id)
+                            .fetch_one(&pool)
+                            .await
+                            .expect("owner");
+                            approvals::request_approval(
+                                &pool,
+                                &format!("appr_{}", new_ulid()),
+                                &run_id,
+                                None,
+                                "tool_call",
+                                &user,
+                                &org,
+                                &user,
+                                "",
+                                &serde_json::json!({}),
+                                None,
+                                Some(Utc::now() - chrono::Duration::seconds(3600)),
+                                "",
+                            )
+                            .await
+                            .expect("request approval")
+                            .expect("inserted");
+                        }
+                        "an effect after the fold" => {
+                            sqlx::query(
+                                "INSERT INTO session_tool_audit_intents
+                                     (run_id, action_id, request_id, tool, data_category, zdr, status)
+                                 VALUES ($1, 'a-1', 'r-1', 'code_interpreter', 'cat', false, 'completed')",
+                            )
+                            .bind(&run_id)
+                            .execute(&pool)
+                            .await
+                            .expect("a ledger row newer than the fold");
+                        }
+                        _ => {
+                            sqlx::query(
+                                "INSERT INTO session_tool_audit_intents
+                                     (run_id, action_id, request_id, tool, data_category, zdr, status, reserved_at)
+                                 VALUES ($1, 'a-1', 'r-1', 'code_interpreter', 'cat', false, 'reserved',
+                                         now() - interval '1 hour')",
+                            )
+                            .bind(&run_id)
+                            .execute(&pool)
+                            .await
+                            .expect("an open reservation older than the fold");
+                        }
+                    }
+                    run_id
+                }
+            };
+            assert!(worker_pass_on(&pool, &run_id).await, "{case}: the run is ended, not parked");
+            assert_ended_as_committed(&pool, &run_id, case).await;
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn recover_parks_a_thread_held_by_a_writer_leaves_the_run_alone() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let _on = crash_switches(true, true);
+        let run_id = crashed_run(&pool, "busy").await;
+        let thread = run_thread(&pool, &run_id).await;
+
+        // An answer append holds the thread: the producer is alive and finishing, so the worker
+        // neither parks nor ends the run, and does not wait for the lock.
+        let mut writer = pool.begin().await.expect("a writer's transaction");
+        sqlx::query("SELECT id FROM threads WHERE id = $1 FOR UPDATE")
+            .bind(&thread)
+            .execute(&mut *writer)
+            .await
+            .expect("the writer takes the thread");
+        assert!(!worker_pass_on(&pool, &run_id).await, "left alone");
+        let (kind, state, ..) = fold_row(&pool, &run_id).await;
+        assert_eq!((kind.as_str(), state.as_str()), ("round", "active"));
+        assert!(!is_terminal_run_status(&run_status(&pool, &run_id).await));
+        assert_eq!(obligation(&pool, &run_id).await.0, "open");
+        assert_eq!(terminal_receipts(&pool, &run_id).await, 0);
+        writer.commit().await.expect("the writer commits");
+
+        // With the thread free again the same run is parked.
+        assert!(!worker_pass_on(&pool, &run_id).await);
+        assert_eq!(fold_row(&pool, &run_id).await.0, "park");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn recover_parks_a_crash_park_is_not_claimed_once_its_thread_moved() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let _on = crash_switches(true, true);
+
+        // A message that lands after the park: the claim closes the fold and refuses, and the
+        // run is then ended by the committed path, never continued into a second answer.
+        let run_id = crashed_run(&pool, "moved").await;
+        assert!(!worker_pass_on(&pool, &run_id).await, "parked");
+        set_park_until(&pool, &run_id, -1.0).await;
+        add_message(&pool, &run_id, "assistant").await;
+        let refused = crate::loop_checkpoint::claim(&pool, &cipher(), &run_id, "", "tok-a")
+            .await
+            .expect_err("the thread moved");
+        assert_eq!(refused.message(), "loop_checkpoint_not_claimable");
+        assert_eq!(fold_state_of(&pool, &run_id).await.as_deref(), Some("closed"));
+        assert!(worker_pass_on(&pool, &run_id).await, "a closed fold is not spared");
+        assert_ended_as_committed(&pool, &run_id, "moved").await;
+
+        // An append in flight is waited for by nobody: the claim is refused and rolls back, so
+        // the park is exactly as it was and can be claimed once the thread is free.
+        let held = crashed_run(&pool, "held").await;
+        assert!(!worker_pass_on(&pool, &held).await, "parked");
+        set_park_until(&pool, &held, -1.0).await;
+        let thread = run_thread(&pool, &held).await;
+        let mut writer = pool.begin().await.expect("a writer's transaction");
+        sqlx::query("SELECT id FROM threads WHERE id = $1 FOR UPDATE")
+            .bind(&thread)
+            .execute(&mut *writer)
+            .await
+            .expect("the writer takes the thread");
+        let busy = crate::loop_checkpoint::claim(&pool, &cipher(), &held, "", "tok-a")
+            .await
+            .expect_err("the thread is held");
+        assert_eq!(busy.message(), "loop_checkpoint_claim_held");
+        assert_eq!(fold_state_of(&pool, &held).await.as_deref(), Some("parked"));
+        writer.commit().await.expect("the writer commits");
+        let won = crate::loop_checkpoint::claim(&pool, &cipher(), &held, "", "tok-a")
+            .await
+            .expect("claimed once the thread is free");
+        assert_eq!(won.kind, "park");
     }
 }

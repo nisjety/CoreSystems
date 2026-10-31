@@ -1,0 +1,28 @@
+{
+  "endpoint_name": "vat_zones",
+  "bigquery_table": "visma_vat_zones",
+  "primary_key": "id",
+  "source": "erp_rest",
+  "api_method": "get_vat_zones",
+  "api_endpoint": "/v1/vatzone",
+  "pagination_profile": "finance_page_number",
+  "modified_field": null,
+  "merge_type": "replace",
+  "sync_pattern": "full_refresh_upsert",
+  "validation_fields": [
+    "id",
+    "description"
+  ],
+  "notes": "VAT zone master data for geographical tax rules, keyed by id. Full refresh only: VatZoneDto has no timestamp fields and VatZoneQueryParameters only supports pageNumber/pageSize, so incremental sync is impossible — each sync fully replaces the table. Counts are small. Customers are assigned to VAT zones (one_to_many).",
+  "datamart": {
+    "ready": false,
+    "query_file": "config/queries/vat_zone.graphql",
+    "root_field": "vatZones",
+    "type_name": "VatZone",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "fallback_source": "erp_rest",
+    "join_normalizer": "normalize_vat_zone"
+  }
+}

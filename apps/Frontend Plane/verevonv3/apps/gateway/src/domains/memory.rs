@@ -31,7 +31,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::{get, patch},
+    routing::{get, patch, post},
     Extension, Json, Router,
 };
 use reqwest::Method;
@@ -47,7 +47,13 @@ use crate::{
 
 pub(crate) fn router(state: AppState) -> Router<AppState> {
     Router::new()
-        .route("/api/v1/memory", get(list_memory))
+        .route("/api/v1/memory", get(list_memory).post(remember_memory))
+        // Static segments win over `{id}`, so these never reach the delete route.
+        .route(
+            "/api/v1/memory/controls",
+            get(get_memory_controls).put(set_memory_controls),
+        )
+        .route("/api/v1/memory/reset", post(reset_memory))
         .route(
             "/api/v1/memory/{id}",
             patch(correct_memory).delete(delete_memory),
@@ -239,6 +245,134 @@ impl OriginalOutcome {
     }
 }
 
+/// One user-bound hop to model-gateway's `/v1/memories/*` surface. Org and user
+/// come from the verified session on the far side; nothing here picks them.
+async fn forward_memory(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    method: Method,
+    path: &str,
+    body: Option<Value>,
+) -> axum::response::Response {
+    let token = model_token(state, user, headers).await;
+    let session_token = session_token(state, user, headers).await;
+    let url = format!("{}{path}", state.model_gateway_url);
+    let (status, body) = proxy_model_json_with_session(
+        state,
+        method,
+        &url,
+        body,
+        token.as_deref(),
+        session_token.as_deref(),
+        user,
+    )
+    .await;
+    (status, body).into_response()
+}
+
+/// The user's memory state (on / paused / off) and the decision taken from it.
+async fn get_memory_controls(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    forward_memory(
+        &state,
+        &user,
+        &headers,
+        Method::GET,
+        "/v1/memories/controls",
+        None,
+    )
+    .await
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct SetControlsBody {
+    pub(crate) state: String,
+}
+
+/// Only `state` is forwarded: a client cannot name another user or org here.
+pub(crate) async fn set_memory_controls(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(body): Json<SetControlsBody>,
+) -> impl IntoResponse {
+    forward_memory(
+        &state,
+        &user,
+        &headers,
+        Method::PUT,
+        "/v1/memories/controls",
+        Some(json!({ "state": body.state })),
+    )
+    .await
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct ResetBody {
+    #[serde(default)]
+    pub(crate) confirm: bool,
+}
+
+/// Irreversible: `confirm` is passed through exactly as sent, so an absent
+/// field is refused by model-gateway rather than defaulted here.
+pub(crate) async fn reset_memory(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(body): Json<ResetBody>,
+) -> impl IntoResponse {
+    forward_memory(
+        &state,
+        &user,
+        &headers,
+        Method::POST,
+        "/v1/memories/reset",
+        Some(json!({ "confirm": body.confirm })),
+    )
+    .await
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RememberBody {
+    /// A thread the caller owns; `IndexMemory` only uses it to prove ownership.
+    pub(crate) thread_id: String,
+    pub(crate) content: String,
+}
+
+/// "Husk dette" — saves one fact the user chose, through the same write path
+/// the correct flow uses. A paused or off memory refuses it (409
+/// `memory_not_enabled`), so the button never claims a save that did not happen.
+pub(crate) async fn remember_memory(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(body): Json<RememberBody>,
+) -> impl IntoResponse {
+    let thread_id = body.thread_id.trim();
+    let content = body.content.trim();
+    if thread_id.is_empty() || content.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "thread_id and content are required"})),
+        )
+            .into_response();
+    }
+    forward_memory(
+        &state,
+        &user,
+        &headers,
+        Method::POST,
+        "/v1/memories",
+        Some(json!({ "thread_id": thread_id, "content": content })),
+    )
+    .await
+}
+
 pub(crate) async fn delete_memory(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -267,9 +401,16 @@ pub(crate) async fn delete_memory(
 
 #[cfg(test)]
 mod tests {
-    use super::OriginalOutcome;
-    use axum::http::StatusCode;
+    use super::{
+        get_memory_controls, remember_memory, reset_memory, set_memory_controls, OriginalOutcome,
+        RememberBody, ResetBody, SetControlsBody,
+    };
+    use axum::{extract::State, http::StatusCode, response::IntoResponse, Extension, Json};
     use serde_json::json;
+    use wiremock::{
+        matchers::{method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
 
     #[test]
     fn a_confirmed_delete_is_the_only_removal() {
@@ -304,5 +445,202 @@ mod tests {
             OriginalOutcome::of_delete(StatusCode::FORBIDDEN, &json!({ "deleted": true }));
         assert_eq!(refused, OriginalOutcome::NotRemoved);
         assert_eq!(failed.as_str(), "not_removed");
+    }
+
+    fn member() -> crate::middleware::AuthenticatedUser {
+        crate::middleware::AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.test".to_owned(),
+            user_name: "Memory User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    /// Token minting and model-gateway stood in by local mocks; model-gateway
+    /// answers `status` with `reply` on `verb route`.
+    async fn upstreams(
+        verb: &str,
+        route: &str,
+        status: u16,
+        reply: serde_json::Value,
+    ) -> (MockServer, MockServer, crate::config::AppState) {
+        let auth_core = MockServer::start().await;
+        for audience in ["model-plane", "session-core"] {
+            Mock::given(method("GET"))
+                .and(path(format!("/api/{audience}/token")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "token": format!("{audience}-test-token"),
+                    "expiresInSeconds": 300,
+                })))
+                .mount(&auth_core)
+                .await;
+        }
+        let model_gateway = MockServer::start().await;
+        Mock::given(method(verb))
+            .and(path(route))
+            .respond_with(ResponseTemplate::new(status).set_body_json(reply))
+            .mount(&model_gateway)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth_core.uri();
+        state.model_gateway_url = model_gateway.uri();
+        (auth_core, model_gateway, state)
+    }
+
+    async fn forwarded(model_gateway: &MockServer, route: &str) -> Vec<serde_json::Value> {
+        model_gateway
+            .received_requests()
+            .await
+            .expect("model-gateway requests are recorded")
+            .into_iter()
+            .filter(|request| request.url.path() == route)
+            .map(|request| {
+                serde_json::from_slice(&request.body).unwrap_or(serde_json::Value::Null)
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn controls_read_is_a_user_bound_get_to_model_gateway() {
+        let (_auth, model_gateway, state) = upstreams(
+            "GET",
+            "/v1/memories/controls",
+            200,
+            json!({ "state": "paused", "reason": "user_paused" }),
+        )
+        .await;
+        let response = get_memory_controls(
+            State(state),
+            Extension(member()),
+            axum::http::HeaderMap::new(),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            forwarded(&model_gateway, "/v1/memories/controls").await.len(),
+            1
+        );
+    }
+
+    /// Only `state` crosses: a client-supplied user or org id is dropped before
+    /// the hop, so a user can only ever set their own state.
+    #[tokio::test]
+    async fn setting_the_state_forwards_only_the_state() {
+        let (_auth, model_gateway, state) = upstreams(
+            "PUT",
+            "/v1/memories/controls",
+            200,
+            json!({ "state": "off" }),
+        )
+        .await;
+        let body: SetControlsBody = serde_json::from_value(
+            json!({ "state": "off", "user_id": "user-2", "org_id": "org-2" }),
+        )
+        .expect("extra fields are ignored");
+        let response = set_memory_controls(
+            State(state),
+            Extension(member()),
+            axum::http::HeaderMap::new(),
+            Json(body),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            forwarded(&model_gateway, "/v1/memories/controls").await,
+            vec![json!({ "state": "off" })]
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_without_confirm_is_forwarded_as_false_not_defaulted_true() {
+        let (_auth, model_gateway, state) = upstreams(
+            "POST",
+            "/v1/memories/reset",
+            400,
+            json!({ "error": { "code": "confirm_required" } }),
+        )
+        .await;
+        let body: ResetBody = serde_json::from_value(json!({})).expect("confirm is optional");
+        let response = reset_memory(
+            State(state),
+            Extension(member()),
+            axum::http::HeaderMap::new(),
+            Json(body),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            forwarded(&model_gateway, "/v1/memories/reset").await,
+            vec![json!({ "confirm": false })]
+        );
+    }
+
+    #[tokio::test]
+    async fn remember_surfaces_a_paused_refusal_instead_of_a_save() {
+        let (_auth, _model_gateway, state) = upstreams(
+            "POST",
+            "/v1/memories",
+            409,
+            json!({ "error": { "code": "memory_not_enabled", "details": { "reason": "user_paused" } } }),
+        )
+        .await;
+        let response = remember_memory(
+            State(state),
+            Extension(member()),
+            axum::http::HeaderMap::new(),
+            Json(RememberBody {
+                thread_id: "thread-1".to_owned(),
+                content: "Jeg heter Ima".to_owned(),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn remember_trims_and_refuses_empty_content_without_a_hop() {
+        let (_auth, model_gateway, state) =
+            upstreams("POST", "/v1/memories", 200, json!({ "memory_id": "m1" })).await;
+        let refused = remember_memory(
+            State(state.clone()),
+            Extension(member()),
+            axum::http::HeaderMap::new(),
+            Json(RememberBody {
+                thread_id: "thread-1".to_owned(),
+                content: "   ".to_owned(),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        assert!(forwarded(&model_gateway, "/v1/memories").await.is_empty());
+
+        let saved = remember_memory(
+            State(state),
+            Extension(member()),
+            axum::http::HeaderMap::new(),
+            Json(RememberBody {
+                thread_id: "thread-1".to_owned(),
+                content: "  Jeg heter Ima  ".to_owned(),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(saved.status(), StatusCode::OK);
+        assert_eq!(
+            forwarded(&model_gateway, "/v1/memories").await,
+            vec![json!({ "thread_id": "thread-1", "content": "Jeg heter Ima" })]
+        );
     }
 }

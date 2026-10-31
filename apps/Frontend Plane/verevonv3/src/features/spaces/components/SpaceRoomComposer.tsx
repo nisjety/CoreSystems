@@ -462,7 +462,7 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
               errorCode: event.code,
               // Known codes get the room's own words; an unknown one keeps the
               // server's message rather than a generic line that hides it.
-              errorMessage: translateApiError({ code: event.code }, i18n.tr, {
+              errorMessage: translateApiError({ code: event.code, feature: event.feature }, i18n.tr, {
                 no: event.message,
                 en: event.message,
               }),

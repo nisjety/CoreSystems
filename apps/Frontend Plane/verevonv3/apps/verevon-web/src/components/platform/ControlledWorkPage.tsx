@@ -159,12 +159,9 @@ export function ControlledWorkPage() {
 
 							<div className="mt-10 flex flex-wrap items-center gap-x-8 gap-y-5">
 								<ArrowButton href="#forslag">Prøv beslutningskortet</ArrowButton>
-								<a
-									className="font-geist text-[0.92rem] font-light text-verevon-j-text/62 underline-offset-4 transition-colors hover:text-verevon-j-text hover:underline focus-visible:text-verevon-j-text focus-visible:outline-none"
-									href="#grenser"
-								>
+								<ArrowButton href="#grenser" variant="muted">
 									Se grensene
-								</a>
+								</ArrowButton>
 							</div>
 						</div>
 

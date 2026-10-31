@@ -13,6 +13,7 @@ import (
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/lease"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/snapshot"
+	"github.com/triodelab/model-plane/services/sandbox-manager/internal/threadworkspace"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/workspace"
 )
 
@@ -64,6 +65,38 @@ func (s *MemoryLeaseStore) Create(_ context.Context, scopeID, scopeType, orgID, 
 	s.mu.Lock()
 	s.byID[id] = cloneLease(l)
 	s.mu.Unlock()
+	return cloneLease(l), nil
+}
+
+// AcquireThread is the in-memory counterpart of lease.Store.AcquireThread: the
+// same user, org and thread yield the same live lease, with its expiry slid
+// forward rather than a second lease minted.
+func (s *MemoryLeaseStore) AcquireThread(_ context.Context, threadID, orgID, ownerID, backendID string, ttl time.Duration) (*lease.Lease, error) {
+	if ownerID == "" {
+		return nil, lease.ErrThreadLeaseOwnerRequired
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	expires := s.nowFn().Add(ttl)
+	for _, l := range s.byID {
+		if l.ScopeType == "thread" && l.ScopeID == threadID && l.OrgID == orgID && l.OwnerID == ownerID &&
+			l.State != mpv1.SandboxLifecycleState_DESTROYED {
+			if expires.After(l.ExpiresAt) {
+				l.ExpiresAt = expires
+			}
+			return cloneLease(l), nil
+		}
+	}
+	id, err := s.newID()
+	if err != nil {
+		return nil, err
+	}
+	l := &lease.Lease{
+		ID: id, ScopeID: threadID, ScopeType: "thread", OrgID: orgID, OwnerID: ownerID,
+		Endpoint: "sandbox://" + id, BackendID: backendID,
+		State: mpv1.SandboxLifecycleState_SCRATCH, ExpiresAt: expires, CreatedAt: s.nowFn(),
+	}
+	s.byID[id] = cloneLease(l)
 	return cloneLease(l), nil
 }
 
@@ -342,4 +375,68 @@ func (s *MemoryWorkspaceStore) Promote(_ context.Context, orgID, spaceID, runID 
 		}
 	}
 	return conflicts, nil
+}
+
+// MemoryThreadWorkspaceStore is the in-memory per-thread workspace. It applies
+// threadworkspace.PlanChanges, so its compare-and-swap and quota rules are the
+// durable store's by construction. Only this package's tests build one: in
+// ephemeral development the thread RPCs are refused, as the process registry's
+// are, rather than served from state a restart discards.
+type MemoryThreadWorkspaceStore struct {
+	mu      sync.Mutex
+	threads map[string]*memoryThread
+}
+
+type memoryThread struct {
+	files    map[string]threadworkspace.File
+	revision int64
+}
+
+// NewMemoryThreadWorkspaceStore constructs an empty MemoryThreadWorkspaceStore.
+func NewMemoryThreadWorkspaceStore() *MemoryThreadWorkspaceStore {
+	return &MemoryThreadWorkspaceStore{threads: make(map[string]*memoryThread)}
+}
+
+func threadRowKey(orgID, ownerID, threadID string) string {
+	return orgID + "\x00" + ownerID + "\x00" + threadID
+}
+
+func (s *MemoryThreadWorkspaceStore) Get(_ context.Context, orgID, ownerID, threadID string) (threadworkspace.Snapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, ok := s.threads[threadRowKey(orgID, ownerID, threadID)]
+	if !ok {
+		return threadworkspace.Snapshot{}, nil
+	}
+	files := make([]threadworkspace.File, 0, len(t.files))
+	for _, f := range t.files {
+		files = append(files, f)
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	return threadworkspace.Snapshot{Files: files, Revision: t.revision}, nil
+}
+
+func (s *MemoryThreadWorkspaceStore) Apply(_ context.Context, orgID, ownerID, threadID string, changes []threadworkspace.Change, deletions []threadworkspace.Deletion, limits threadworkspace.Limits) (threadworkspace.Result, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := threadRowKey(orgID, ownerID, threadID)
+	t, ok := s.threads[key]
+	if !ok {
+		t = &memoryThread{files: make(map[string]threadworkspace.File)}
+		s.threads[key] = t
+	}
+	plan, err := threadworkspace.PlanChanges(t.files, changes, deletions, limits)
+	if err != nil {
+		return threadworkspace.Result{}, err
+	}
+	for _, f := range plan.Upserts {
+		t.files[f.Path] = f
+	}
+	for _, p := range plan.Deletes {
+		delete(t.files, p)
+	}
+	if plan.Changed() {
+		t.revision++
+	}
+	return threadworkspace.Result{Conflicts: plan.Conflicts, Revision: t.revision, FileCount: plan.FileCount, TotalBytes: plan.TotalBytes}, nil
 }

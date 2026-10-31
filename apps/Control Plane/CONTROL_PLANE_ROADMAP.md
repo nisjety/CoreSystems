@@ -117,7 +117,7 @@ The production-readiness program remains in the MVP phase. Enterprise readiness 
 
 19. **Durable multi-org GDPR fanout and scoped Data consumer — source/isolated complete**
     - User Core migration 016 transactionally snapshots all active organization recipients before Auth/local cleanup and creates one deterministic child per org.
-    - Parent completion is gated on a valid `AQENCIA_CONTROLPLANE` PubAck for every child; per-child retries, terminal state, lag, health degradation, and evidence-preserving bounded requeue are durable.
+    - Parent completion is gated on a valid `CONTROLPLANE` PubAck for every child; per-child retries, terminal state, lag, health degradation, and evidence-preserving bounded requeue are durable.
     - Documents API binds one fixed explicit-ACK durable with a dedicated principal, NAKs transient failures, and requires a DLQ PubAck before ACKing poison/exhausted source messages.
     - Embedded JetStream ACL proof denies Documents request forgery and topology administration. GDPR subjects are never copied to the legacy token broker.
     - Changed User GDPR files measure 80.8% and Documents GDPR measures 84.2%; full tests/vet and targeted race gates pass. Coordinated credential injection and live rollout remain operational.

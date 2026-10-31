@@ -1,0 +1,93 @@
+# Local Studio subset. Always merge AFTER this plane's docker-compose.yml.
+# Integration's existing encrypted grants remain on their dedicated volume;
+# this is not a replacement provider database or a second Integration instance.
+services:
+  integration-postgres:
+    image: postgres:16.14-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: integration_user
+      POSTGRES_PASSWORD: ${INTEGRATION_LOCAL_DB_PASSWORD:?existing database credential required}
+      POSTGRES_DB: integration
+    volumes: [integration-postgres-data:/var/lib/postgresql/data]
+    networks: [integration-private]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U integration_user -d integration']
+      interval: 10s
+      timeout: 5s
+      retries: 6
+  integration-api:
+    image: studio-integration-local-integration-api
+    # Do not inherit a whole provider .env into the container. The launcher
+    # validates and projects the approved values and mounted secrets only.
+    env_file: !reset []
+    environment: !override
+      PORT: '3026'
+      SERVICE_NAME: integration-corev2
+      ENVIRONMENT: local
+      DATABASE_URL: postgresql://integration_user:${INTEGRATION_LOCAL_DB_PASSWORD:?existing database credential required}@integration-postgres:5432/integration
+      INTERNAL_API_KEY: ${INTEGRATION_LOCAL_INTERNAL_API_KEY:?existing internal key required}
+      AUTH_CORE_URL: http://auth-core:3011
+      AUTH_CORE_INTERNAL_API_KEY: ${INTEGRATION_LOCAL_AUTH_CORE_INTERNAL_API_KEY:?existing auth key required}
+      AUTH_CORE_JWKS_URL: http://auth-core:3011/api/convex-auth/jwks
+      PLANE_TOKEN_ISSUER: http://localhost:3011/api/convex-auth
+      INGESTION_AUTH_AUDIENCE: ingestion
+      ORG_CORE_URL: http://org-core:8080
+      ORG_CORE_SERVICE_TOKEN: ${INTEGRATION_LOCAL_ORG_SERVICE_TOKEN:?existing org credential required}
+      BILLING_CORE_URL: http://billing-core:3014
+      BILLING_CORE_SERVICE_TOKEN: ${INTEGRATION_LOCAL_BILLING_SERVICE_TOKEN:?existing billing credential required}
+      AUDIT_CORE_URL: http://audit-core:8187
+      AUDIT_CORE_SERVICE_TOKEN: ${INTEGRATION_LOCAL_AUDIT_SERVICE_TOKEN:?existing audit credential required}
+      INTEGRATION_PUBLIC_BASE_URL: http://localhost:3026
+      INTEGRATION_ALLOWED_RETURN_ORIGINS: http://localhost:5173
+      INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: ${INTEGRATION_LOCAL_VAULT_KEY:?existing vault key required}
+      INTEGRATION_PROVIDER_WRITE_ATTESTATION_KEYS_JSON: ${INTEGRATION_LOCAL_WRITE_ATTESTATION_KEYS_JSON:?existing attestation keys required}
+      GOOGLE_CLIENT_ID: ${INTEGRATION_LOCAL_GOOGLE_CLIENT_ID:?existing Google client required}
+      GOOGLE_CLIENT_SECRET: ''
+      GOOGLE_CLIENT_SECRET_FILE: /run/secrets/google_client_secret
+      NATS_ENABLED: 'false'
+    secrets: [google_client_secret]
+    depends_on: !override
+      integration-postgres: {condition: service_healthy}
+    networks: !override [integration-private, inter-plane-bus]
+    ports: !override ['127.0.0.1:3026:3026']
+    init: true
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+  quarry-edge:
+    image: studio-quarry-edge:discovery
+    environment:
+      QUARRY_EDGE_AUTH_DEV_BYPASS: '0'
+      QUARRY_EDGE__CROSS_PLANE_AUTH_DEV_BYPASS: '0'
+      AUTH_CORE_AUDIENCE_OPTIONAL: '0'
+      # No running Data/Model Plane in this local subset. Do not pretend a
+      # successful capture is a durable Data Plane receipt or AI analysis.
+      QUARRY_EDGE__MODEL_PLANE_URL: ''
+      QUARRY_EDGE__DATA_PLANE_URL: ''
+      QUARRY_EDGE__DATA_PLANE_INGEST_URL: ''
+      QUARRY_EDGE__DATAPLANE_NATS_URL: ''
+      QUARRY_EDGE__CAS_BUCKET: ''
+      AWS_ACCESS_KEY_ID: ''
+      AWS_SECRET_ACCESS_KEY: ''
+  imports-api: {profiles: [full-ingestion]}
+  shipping-core: {profiles: [full-ingestion]}
+  integration-finspo-worker: {profiles: [full-ingestion]}
+  integration-email-worker: {profiles: [full-ingestion]}
+  integration-webhook-normalizer: {profiles: [full-ingestion]}
+  finspo-api: {profiles: [full-ingestion]}
+  anbud-api: {profiles: [full-ingestion]}
+  autocomplete-sonic: {profiles: [full-ingestion]}
+  autocomplete-core: {profiles: [full-ingestion]}
+  qdrant: {profiles: [full-ingestion]}
+secrets:
+  google_client_secret:
+    file: ${INTEGRATION_LOCAL_GOOGLE_SECRET_FILE:?existing protected Google secret required}
+volumes:
+  integration-postgres-data:
+    external: true
+    name: studio-integration-local_integration-postgres-data
+networks:
+  integration-private:
+    internal: true

@@ -9,6 +9,11 @@
 // strings are migrated into this module incrementally. This is the seam — not a
 // claim that every string in the app already routes through it.
 
+// Limits the refusal sentences quote; the numbers live in
+// features/chat/lib/attachment-policy.ts.
+type AttachmentLimits = { maxFileBytes: number; maxTotalBytes: number; maxImages: number }
+const megabytes = (bytes: number) => `${Math.round((bytes / 1_048_576) * 10) / 10} MB`
+
 export const no = {
   leads: {
     title: 'Leads',
@@ -43,5 +48,23 @@ export const no = {
       sted: 'Sted',
       ansatte: 'Ansatte',
     },
+  },
+  attachments: {
+    refusal: {
+      unsupported_type: (name: string) =>
+        `«${name}» ble ikke lagt ved: filtypen støttes ikke. Bruk bilde (PNG, JPEG, WebP, GIF) eller PDF, DOCX, XLSX, PPTX, TXT, MD, CSV, JSON eller HTML.`,
+      too_large: (name: string, limits: AttachmentLimits) =>
+        `«${name}» ble ikke lagt ved: for stor. Maks ${megabytes(limits.maxFileBytes)} per fil og ${megabytes(limits.maxTotalBytes)} samlet.`,
+      route_unsupported: (name: string) =>
+        `«${name}» ble ikke lagt ved: ChatGPT-abonnementet tar ikke imot bilder. Velg en annen modell for å bruke bilder.`,
+      do_images_unsupported: (name: string) =>
+        `«${name}» ble ikke lagt ved: Utfør kan ikke bruke bilder ennå. Bytt til Spør for å analysere bildet.`,
+      too_many_images: (name: string, limits: AttachmentLimits) =>
+        `«${name}» ble ikke lagt ved: bare ${limits.maxImages} bilde kan analyseres per melding.`,
+      zdr_refused: (name: string) =>
+        `«${name}» ble ikke lagt ved: midlertidig samtale tar ikke imot bilder.`,
+    },
+    notSent:
+      'Bildet ble ikke sendt: ChatGPT-abonnementet tar ikke imot bilder. Fjern bildet eller velg en annen modell. Ingenting ble sendt.',
   },
 } as const

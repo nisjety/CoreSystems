@@ -1,0 +1,6 @@
+config {
+  type: "declaration",
+  schema: "staging_xero_sensitive",
+  name: "extended_records",
+  description: "Restricted staging for Xero Bank Feeds, Finance and Identity responses. Populated only when XERO_SENSITIVE_DATASET is configured."
+}

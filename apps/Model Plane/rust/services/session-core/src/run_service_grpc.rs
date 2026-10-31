@@ -20,6 +20,7 @@
 #![allow(clippy::result_large_err)]
 
 use chrono::Utc;
+use mp_contracts::loop_fold::ParkReason;
 use mp_contracts::model_plane::v1::{
     self as pb,
     run_service_server::{RunService, RunServiceServer},
@@ -42,7 +43,7 @@ use crate::orchestration_grpc::json_to_struct;
 /// `space_membership_revocations` (migration 0032, populated by
 /// `space_membership_nats.rs`). A row with a null `space_id` never matches
 /// the revocation join, so unscoped runs/threads are unaffected.
-async fn authorize_run_owner(
+pub(crate) async fn authorize_run_owner(
     pool: &PgPool,
     caller: &VerifiedIdentity,
     run_id: &str,
@@ -186,6 +187,27 @@ struct RunRow {
     updated_at: i64,
     steps_completed: i64,
     checkpoint_index: i64,
+    /// The run's retention receipt. A fold is only ever resumable for `persistent`.
+    retention_class: String,
+    /// Who owns the run. It decides who may read `park_reason`; it is never put on
+    /// the wire.
+    owner_user_id: String,
+    /// The durable loop fold's state, from a LEFT JOIN: `None` when the run has no
+    /// fold. The fold's content and digests are never selected.
+    fold_state: Option<String>,
+    /// How the fold was last saved (`round`, `pre_effect`, `pause`, `park`). Unlike
+    /// the state, it survives a claim, so a parked fold whose resume lease lapsed
+    /// still reads as parked.
+    fold_kind: Option<String>,
+    /// Whether a `resuming` fold's lease has lapsed; `None` without a fold.
+    fold_claim_expired: Option<bool>,
+    /// The closed park token of a parked fold.
+    fold_park_reason: Option<String>,
+    /// For a `pause` fold only (`None` for every other kind and without a fold):
+    /// whether the approval the pause is keyed by (its `pause_ref`) has been
+    /// consumed. A stage-one continuation consumes it and leaves the fold in
+    /// place, so a consumed pause fold is stale: nothing can continue from it.
+    fold_pause_consumed: Option<bool>,
 }
 
 /// The deliberately content-free run/thread projection used only by Control's
@@ -292,6 +314,9 @@ fn project_scheduled_step_authority(
         step_index: req.step_index,
         idempotency_key,
         run_status: row.run_status,
+        // The contract fields (WS20-S5) are not read from the run's metadata yet: empty means
+        // "no contract" to every consumer, which is today's behaviour.
+        ..Default::default()
     })
 }
 
@@ -377,15 +402,87 @@ const RUN_SELECT: &str = "SELECT
             SELECT COUNT(*)
             FROM checkpoints c
             WHERE c.run_id = r.id
-        ), 0)::bigint AS checkpoint_index
-     FROM runs r";
+        ), 0)::bigint AS checkpoint_index,
+        r.retention_class,
+        r.user_id AS owner_user_id,
+        lc.state AS fold_state,
+        lc.kind AS fold_kind,
+        (lc.claim_expires_at < now()) AS fold_claim_expired,
+        lc.park_reason AS fold_park_reason,
+        CASE WHEN lc.kind = 'pause' THEN EXISTS (
+            SELECT 1 FROM approvals ap
+            WHERE ap.org_id = r.org_id
+              AND ap.user_id = r.user_id
+              AND ap.run_id = r.id
+              AND ap.idempotency_key = lc.pause_ref
+              AND ap.consumed_at IS NOT NULL
+        ) END AS fold_pause_consumed
+     FROM runs r
+     LEFT JOIN run_loop_checkpoints lc ON lc.run_id = r.id";
+
+/// Whether a durable loop fold is in a state a continuation can claim: paused for
+/// an approval, parked, or `resuming` under a lease that has lapsed. It mirrors
+/// the claim gate in `loop_checkpoint::claim` and deliberately ignores the pause
+/// reference, which a reader does not hold. An `active` fold is never claimable.
+fn fold_is_claimable(state: Option<&str>, claim_expired: bool) -> bool {
+    match state {
+        Some("paused" | "parked") => true,
+        Some("resuming") => claim_expired,
+        _ => false,
+    }
+}
+
+/// Whether `viewer` may read a run's `park_reason`. Reading the run's status is not
+/// enough: the reason can reveal a delegated-credential window, so it goes only to
+/// the run's owner and to a service principal (model-gateway reads it as one). A
+/// person who can read a system-owned run through the org-wide read, or a Space
+/// peer who can list a thread's runs, gets `resumable` but no reason.
+fn may_read_park_reason(viewer: &VerifiedIdentity, owner_user_id: &str) -> bool {
+    viewer.is_service()
+        || (!owner_user_id.is_empty() && viewer.user_id() == Some(owner_user_id))
+}
 
 #[allow(clippy::cast_sign_loss)]
-fn row_to_detail(row: RunRow) -> pb::RunDetail {
+fn row_to_detail(row: RunRow, store_enabled: bool, viewer: &VerifiedIdentity) -> pb::RunDetail {
     // The derived counters are non-negative by construction (MAX over a
     // non-negative ordinal, COUNT(*)), so the unsigned cast cannot wrap.
     let steps_completed = u32::try_from(row.steps_completed).unwrap_or(u32::MAX);
     let checkpoint_index = u32::try_from(row.checkpoint_index).unwrap_or(u32::MAX);
+
+    // Resumable only while the store is on, the run is persistent and not ended,
+    // and its fold is claimable. A zero-retention or waived run is never resumable,
+    // even if a fold row exists for it.
+    //
+    // And a pause fold whose approval has been consumed is not resumable: the
+    // continuation that consumed it ran from the approval's own descriptor and
+    // left the fold behind, and the approval cannot be consumed again.
+    let resumable = store_enabled
+        && row.retention_class == "persistent"
+        && !is_terminal(&row.status)
+        && fold_is_claimable(
+            row.fold_state.as_deref(),
+            row.fold_claim_expired.unwrap_or(false),
+        )
+        && !(row.fold_kind.as_deref() == Some("pause") && row.fold_pause_consumed == Some(true));
+    // The reason follows the fold's kind, not its state: a claim moves a parked
+    // fold to `resuming` but leaves the kind and the reason, so a parked run whose
+    // resume lease lapsed still says why it was parked.
+    //
+    // Only a closed token is ever emitted: the column is written through `save`,
+    // which refuses anything else, but the read side does not trust that, so a
+    // value that got in some other way reads as no reason rather than reaching the
+    // wire. And only a caller who may read it gets it (see `may_read_park_reason`).
+    let park_reason = if resumable
+        && row.fold_kind.as_deref() == Some("park")
+        && may_read_park_reason(viewer, &row.owner_user_id)
+    {
+        row.fold_park_reason
+            .as_deref()
+            .and_then(ParkReason::parse)
+            .map_or_else(String::new, |reason| reason.as_str().to_owned())
+    } else {
+        String::new()
+    };
 
     pb::RunDetail {
         run_id: row.id,
@@ -411,6 +508,8 @@ fn row_to_detail(row: RunRow) -> pb::RunDetail {
             nanos: 0,
         }),
         metadata: json_to_struct(&row.metadata),
+        resumable,
+        park_reason,
     }
 }
 
@@ -478,7 +577,11 @@ impl RunService for RunServiceImpl {
 
             let row =
                 row.ok_or_else(|| Status::not_found(format!("run not found: {}", req.run_id)))?;
-            Ok(Response::new(row_to_detail(row)))
+            Ok(Response::new(row_to_detail(
+                row,
+                crate::loop_checkpoint::enabled(),
+                &caller,
+            )))
         }
         .await;
         record_metrics("get_run", started, result.is_ok());
@@ -526,6 +629,9 @@ impl RunService for RunServiceImpl {
             org_id,
             goal,
             status,
+            // The contract body, digest and expiry (WS20-S5) are not served yet: empty means
+            // "no contract".
+            ..Default::default()
         }))
     }
 
@@ -655,10 +761,11 @@ impl RunService for RunServiceImpl {
                 .map_err(|e| Status::internal(e.to_string()))?;
 
             let has_more = i64::try_from(rows.len()).unwrap_or(i64::MAX) > limit;
+            let store_enabled = crate::loop_checkpoint::enabled();
             let runs: Vec<pb::RunDetail> = rows
                 .into_iter()
                 .take(usize::try_from(limit).unwrap_or(usize::MAX))
-                .map(row_to_detail)
+                .map(|row| row_to_detail(row, store_enabled, &caller))
                 .collect();
             Ok(Response::new(pb::ListRunsResponse { runs, has_more }))
         }
@@ -742,10 +849,11 @@ impl RunService for RunServiceImpl {
                 .map_err(|e| Status::internal(e.to_string()))?;
 
             let has_more = i64::try_from(rows.len()).unwrap_or(i64::MAX) > limit;
+            let store_enabled = crate::loop_checkpoint::enabled();
             let runs: Vec<pb::RunDetail> = rows
                 .into_iter()
                 .take(usize::try_from(limit).unwrap_or(usize::MAX))
-                .map(row_to_detail)
+                .map(|row| row_to_detail(row, store_enabled, &caller))
                 .collect();
 
             Ok(Response::new(pb::ListRunsResponse { runs, has_more }))
@@ -843,6 +951,12 @@ impl RunService for RunServiceImpl {
                 }));
             };
 
+            // A cancelled run never resumes, so its loop fold is dropped in this
+            // transaction (build plan WS03 S4).
+            crate::loop_checkpoint::purge_run(&mut tx, &run_id)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+
             let receipt_id = new_ulid();
             let now = Utc::now();
             let idempotency_key = format!("run_cancelled:{run_id}");
@@ -907,18 +1021,17 @@ impl RunService for RunServiceImpl {
             if !caller.is_service() {
                 caller.authorize_user(&req.user_id)?;
             }
-            let (authorized,): (bool,) = sqlx::query_as(
-                "SELECT EXISTS(SELECT 1 FROM runs WHERE id = $1 AND org_id = $2 AND user_id = $3)",
+            // Owner decision 17: the owner's run answers `authorized` only when the caller's posture is
+            // the run's receipt. A posture mismatch is a typed refusal, not a `false`, so the caller
+            // reports why. A run that is not the caller's answers `false` without the receipt being read.
+            let authorized = crate::retention_receipt::run_owner_matches(
+                &self.pool,
+                &caller,
+                &req.run_id,
+                &req.org_id,
+                &req.user_id,
             )
-            .bind(&req.run_id)
-            .bind(&req.org_id)
-            .bind(&req.user_id)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|error| {
-                tracing::error!(%error, "durable run ownership lookup failed");
-                Status::unavailable("run ownership unavailable")
-            })?;
+            .await?;
             Ok(Response::new(pb::ResolveRunOwnerResponse { authorized }))
         }
         .await;
@@ -1178,8 +1291,15 @@ mod tests {
             updated_at: 1_700_000_050,
             steps_completed: 3,
             checkpoint_index: 2,
+            retention_class: "persistent".to_owned(),
+            owner_user_id: "owner_1".to_owned(),
+            fold_state: None,
+            fold_kind: None,
+            fold_claim_expired: None,
+            fold_park_reason: None,
+            fold_pause_consumed: None,
         };
-        let detail = row_to_detail(row);
+        let detail = row_to_detail(row, false, &owner_viewer());
         assert_eq!(detail.run_id, "run_01");
         assert_eq!(detail.thread_id, "thr_01");
         assert_eq!(detail.parent_run_id, "");
@@ -1208,13 +1328,1227 @@ mod tests {
             updated_at: 2,
             steps_completed: 0,
             checkpoint_index: 0,
+            retention_class: "persistent".to_owned(),
+            owner_user_id: "owner_1".to_owned(),
+            fold_state: None,
+            fold_kind: None,
+            fold_claim_expired: None,
+            fold_park_reason: None,
+            fold_pause_consumed: None,
         };
-        let detail = row_to_detail(row);
+        let detail = row_to_detail(row, false, &owner_viewer());
         assert_eq!(detail.parent_run_id, "run_parent");
         assert_eq!(detail.final_output, "the answer");
         assert_eq!(detail.error, "");
         // Null JSONB metadata maps to no Struct rather than an empty one.
         assert!(detail.metadata.is_none());
+        // A run with no fold is not resumable and names no park reason.
+        assert!(!detail.resumable);
+        assert_eq!(detail.park_reason, "");
+    }
+
+    fn fold_row(
+        status: &str,
+        retention_class: &str,
+        fold_state: Option<&str>,
+        fold_kind: Option<&str>,
+        fold_claim_expired: Option<bool>,
+        fold_park_reason: Option<&str>,
+    ) -> RunRow {
+        RunRow {
+            id: "run_f".to_owned(),
+            thread_id: "thr_f".to_owned(),
+            parent_run_id: None,
+            agent_id: "general-v1".to_owned(),
+            status: status.to_owned(),
+            mode: "execute".to_owned(),
+            goal: "g".to_owned(),
+            final_output: None,
+            error: None,
+            metadata: serde_json::Value::Null,
+            created_at: 1,
+            updated_at: 2,
+            steps_completed: 0,
+            checkpoint_index: 0,
+            retention_class: retention_class.to_owned(),
+            owner_user_id: "owner_1".to_owned(),
+            fold_state: fold_state.map(str::to_owned),
+            fold_kind: fold_kind.map(str::to_owned),
+            fold_claim_expired,
+            fold_park_reason: fold_park_reason.map(str::to_owned),
+            fold_pause_consumed: None,
+        }
+    }
+
+    /// The run owner `fold_row` builds its rows for.
+    fn owner_viewer() -> VerifiedIdentity {
+        VerifiedIdentity::user_for_test("org_1", "owner_1")
+    }
+
+    #[test]
+    fn loop_checkpoint_resumable_is_true_only_for_a_claimable_persistent_unended_fold_while_the_switch_is_on(
+    ) {
+        // (fold state, fold kind, claim lapsed, claimable). The stored reason is
+        // supplied for every park-kind row, as the database holds it: a claim moves
+        // the state to `resuming` but leaves the kind and the reason in place.
+        let folds: [(Option<&str>, Option<&str>, Option<bool>, bool); 11] = [
+            (None, None, None, false),
+            (Some("active"), Some("round"), Some(false), false),
+            (Some("paused"), Some("pause"), Some(false), true),
+            (Some("parked"), Some("park"), Some(false), true),
+            (Some("resuming"), Some("park"), Some(false), false),
+            (Some("resuming"), Some("park"), Some(true), true),
+            (Some("resuming"), Some("pause"), Some(true), true),
+            (Some("resuming"), Some("park"), None, false),
+            (Some("closed"), Some("park"), Some(false), false),
+            (Some("active"), Some("park"), Some(true), false),
+            (Some("resuming"), None, Some(true), true),
+        ];
+        for store_enabled in [false, true] {
+            for retention in ["persistent", "zdr", "zdr_waived"] {
+                for status in ["queued", "running", "awaiting_approval", "completed", "failed", "cancelled"] {
+                    for (state, kind, expired, claimable) in folds {
+                        let reason = (kind == Some("park")).then_some("provider_exhausted");
+                        let detail = row_to_detail(
+                            fold_row(status, retention, state, kind, expired, reason),
+                            store_enabled,
+                            &owner_viewer(),
+                        );
+                        let expected = store_enabled
+                            && retention == "persistent"
+                            && !matches!(status, "completed" | "failed" | "cancelled")
+                            && claimable;
+                        let case =
+                            format!("{store_enabled} {retention} {status} {state:?} {kind:?} {expired:?}");
+                        assert_eq!(detail.resumable, expected, "{case}");
+                        let expected_reason = if expected && kind == Some("park") {
+                            "provider_exhausted"
+                        } else {
+                            ""
+                        };
+                        assert_eq!(detail.park_reason, expected_reason, "{case}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn loop_checkpoint_a_paused_fold_is_resumable_with_no_park_reason() {
+        // A stray park reason on a pause-kind row is never surfaced.
+        let detail = row_to_detail(
+            fold_row(
+                "awaiting_approval",
+                "persistent",
+                Some("paused"),
+                Some("pause"),
+                Some(false),
+                Some("credential_window"),
+            ),
+            true,
+            &owner_viewer(),
+        );
+        assert!(detail.resumable);
+        assert_eq!(detail.park_reason, "");
+    }
+
+    #[test]
+    fn loop_checkpoint_a_parked_fold_keeps_its_reason_after_its_resume_lease_lapses() {
+        // claim() moves a parked fold to `resuming` and leaves kind and reason in
+        // place. Once that lease lapses the run is resumable again, and it must
+        // still say why it was parked: the reason follows the kind, not the state.
+        let lapsed = row_to_detail(
+            fold_row(
+                "running",
+                "persistent",
+                Some("resuming"),
+                Some("park"),
+                Some(true),
+                Some("credential_window"),
+            ),
+            true,
+            &owner_viewer(),
+        );
+        assert!(lapsed.resumable);
+        assert_eq!(lapsed.park_reason, "credential_window");
+
+        // While the lease is live the run is not resumable and names no reason.
+        let live = row_to_detail(
+            fold_row(
+                "running",
+                "persistent",
+                Some("resuming"),
+                Some("park"),
+                Some(false),
+                Some("credential_window"),
+            ),
+            true,
+            &owner_viewer(),
+        );
+        assert!(!live.resumable);
+        assert_eq!(live.park_reason, "");
+    }
+
+    #[test]
+    fn loop_checkpoint_a_park_reason_outside_the_closed_set_is_never_surfaced() {
+        // The column is written only through `save`, which refuses anything but a
+        // closed token. The read side does not rely on that: a value that got in some
+        // other way (an old build, a manual write) is dropped, not copied to the wire.
+        for stored in [
+            "free text about a user",
+            "token=abc",
+            "CREDENTIAL_WINDOW",
+            "credential_window ",
+            " credential_window",
+            "",
+        ] {
+            let detail = row_to_detail(
+                fold_row(
+                    "running",
+                    "persistent",
+                    Some("parked"),
+                    Some("park"),
+                    Some(false),
+                    Some(stored),
+                ),
+                true,
+                &owner_viewer(),
+            );
+            assert!(detail.resumable, "{stored:?}: the run is still resumable");
+            assert_eq!(detail.park_reason, "", "{stored:?}");
+        }
+        for reason in ParkReason::ALL {
+            let detail = row_to_detail(
+                fold_row(
+                    "running",
+                    "persistent",
+                    Some("parked"),
+                    Some("park"),
+                    Some(false),
+                    Some(reason.as_str()),
+                ),
+                true,
+                &owner_viewer(),
+            );
+            assert_eq!(detail.park_reason, reason.as_str());
+        }
+    }
+
+    #[test]
+    fn loop_checkpoint_park_reason_is_read_only_by_the_owner_or_a_service() {
+        // park_reason can reveal a delegated-credential window, so reading a run's
+        // status is not enough to read it. resumable is not secret: model-gateway
+        // reads it as a service caller and a peer's UI may show a resume button.
+        let parked = |owner: &str| {
+            let mut row = fold_row(
+                "running",
+                "persistent",
+                Some("parked"),
+                Some("park"),
+                Some(false),
+                Some("credential_window"),
+            );
+            row.owner_user_id = owner.to_owned();
+            row
+        };
+        let viewers: [(&str, &str, VerifiedIdentity, bool); 6] = [
+            ("the owner", "owner_1", owner_viewer(), true),
+            (
+                "another member of the org",
+                "owner_1",
+                VerifiedIdentity::user_for_test("org_1", "peer_1"),
+                false,
+            ),
+            (
+                "a service principal",
+                "owner_1",
+                VerifiedIdentity::service_for_test("org_1", &["session:read"], false),
+                true,
+            ),
+            (
+                "a person reading a system run",
+                "service:orchestrator-core",
+                VerifiedIdentity::user_for_test("org_1", "peer_1"),
+                false,
+            ),
+            (
+                "the owning workload reading its own system run",
+                "service:orchestrator-core",
+                VerifiedIdentity::service_for_test_as(
+                    "org_1",
+                    "service:orchestrator-core",
+                    &["session:read"],
+                    false,
+                ),
+                true,
+            ),
+            (
+                "a person whose id is empty",
+                "",
+                VerifiedIdentity::user_for_test("org_1", ""),
+                false,
+            ),
+        ];
+        for (who, owner, viewer, sees_reason) in &viewers {
+            let detail = row_to_detail(parked(owner), true, viewer);
+            assert!(detail.resumable, "{who}: resumable is never blanked");
+            let expected = if *sees_reason { "credential_window" } else { "" };
+            assert_eq!(detail.park_reason, expected, "{who}");
+        }
+    }
+
+    #[test]
+    fn loop_checkpoint_fold_is_claimable_matches_the_claim_gate() {
+        // The claim gate in loop_checkpoint::claim: paused or parked, or resuming
+        // with a lapsed lease. The stale-active branch is gone, so active is never
+        // claimable however old.
+        assert!(fold_is_claimable(Some("paused"), false));
+        assert!(fold_is_claimable(Some("parked"), false));
+        assert!(fold_is_claimable(Some("resuming"), true));
+        assert!(!fold_is_claimable(Some("resuming"), false));
+        assert!(!fold_is_claimable(Some("active"), false));
+        assert!(!fold_is_claimable(Some("active"), true));
+        assert!(!fold_is_claimable(Some("closed"), true));
+        assert!(!fold_is_claimable(None, false));
+        assert!(!fold_is_claimable(Some("unknown-state"), true));
+    }
+
+    #[test]
+    fn loop_checkpoint_run_select_projects_no_fold_content() {
+        for forbidden in ["ciphertext", "fold_digest", "authority_digest", "claim_token_hash"] {
+            assert!(
+                !RUN_SELECT.contains(forbidden),
+                "RUN_SELECT must not project {forbidden}"
+            );
+        }
+        // What it does project from the fold is the content-free flag inputs.
+        for allowed in ["lc.state", "lc.kind", "lc.claim_expires_at", "lc.park_reason"] {
+            assert!(RUN_SELECT.contains(allowed), "{allowed}");
+        }
+        // The Space branch of ListRuns appends a plain JOIN right after the FROM,
+        // so the LEFT JOIN must be part of the shared projection and come first.
+        assert!(RUN_SELECT.trim_end().ends_with("LEFT JOIN run_loop_checkpoints lc ON lc.run_id = r.id"));
+    }
+
+    // ------------------------------------------------------------------
+    // S7c-A3 (D5): a pause fold whose approval has been consumed is not resumable.
+    //
+    // A stage-1 continuation consumes the pause's approval and no longer closes the
+    // pause fold, so the fold stays `paused` and claimable although no continuation
+    // can use it any more. The predicate below stops `RunDetail.resumable`
+    // advertising it. `resumable` stays readable by every reader (it is a boolean
+    // and never reaches a browser); `park_reason` stays owner-or-service.
+    // ------------------------------------------------------------------
+
+    fn consumed_pause(consumed: Option<bool>) -> RunRow {
+        let mut row = fold_row(
+            "awaiting_approval",
+            "persistent",
+            Some("paused"),
+            Some("pause"),
+            Some(false),
+            None,
+        );
+        row.fold_pause_consumed = consumed;
+        row
+    }
+
+    #[test]
+    fn a_pause_fold_whose_approval_was_consumed_is_not_resumable() {
+        for state in [("paused", Some(false)), ("resuming", Some(true))] {
+            let mut row = fold_row(
+                "awaiting_approval",
+                "persistent",
+                Some(state.0),
+                Some("pause"),
+                state.1,
+                None,
+            );
+            row.fold_pause_consumed = Some(true);
+            let detail = row_to_detail(row, true, &owner_viewer());
+            assert!(
+                !detail.resumable,
+                "{state:?}: a consumed pause approval leaves nothing a continuation can use"
+            );
+            assert_eq!(detail.park_reason, "");
+        }
+        // The same answer for every reader: it is not blanked for one and shown to
+        // another, and it never turns true for a peer or a service.
+        for viewer in [
+            owner_viewer(),
+            VerifiedIdentity::user_for_test("org_1", "someone_else"),
+            VerifiedIdentity::service_for_test("org_1", &["session:read"], false),
+        ] {
+            let detail = row_to_detail(consumed_pause(Some(true)), true, &viewer);
+            assert!(!detail.resumable);
+        }
+    }
+
+    #[test]
+    fn a_pause_fold_with_an_unconsumed_approval_stays_resumable() {
+        // The probe says unconsumed, or says nothing (no approval row matched, which
+        // is the gateway's old behaviour: a wrong key costs a fallback, never safety).
+        for consumed in [Some(false), None] {
+            let detail = row_to_detail(consumed_pause(consumed), true, &owner_viewer());
+            assert!(detail.resumable, "{consumed:?}");
+            assert_eq!(detail.park_reason, "");
+        }
+        // Every reader sees the boolean.
+        for viewer in [
+            VerifiedIdentity::user_for_test("org_1", "someone_else"),
+            VerifiedIdentity::service_for_test("org_1", &["session:read"], false),
+        ] {
+            assert!(row_to_detail(consumed_pause(Some(false)), true, &viewer).resumable);
+        }
+        // The old gates still apply on top: a switch that is off, an ended run, a
+        // zero-retention run and a live lease are not resumable whatever the probe says.
+        assert!(!row_to_detail(consumed_pause(Some(false)), false, &owner_viewer()).resumable);
+        let mut ended = consumed_pause(Some(false));
+        ended.status = "completed".to_owned();
+        assert!(!row_to_detail(ended, true, &owner_viewer()).resumable);
+        let mut zdr = consumed_pause(Some(false));
+        zdr.retention_class = "zdr".to_owned();
+        assert!(!row_to_detail(zdr, true, &owner_viewer()).resumable);
+        let mut leased = consumed_pause(Some(false));
+        leased.fold_state = Some("resuming".to_owned());
+        leased.fold_claim_expired = Some(false);
+        assert!(!row_to_detail(leased, true, &owner_viewer()).resumable);
+    }
+
+    #[test]
+    fn a_park_fold_ignores_the_consumed_approval_rule() {
+        // The probe is only ever computed for a pause fold, but the rule must not
+        // depend on that: whatever it carries, a park fold is judged by the old gate.
+        for consumed in [None, Some(false), Some(true)] {
+            let mut row = fold_row(
+                "awaiting_approval",
+                "persistent",
+                Some("parked"),
+                Some("park"),
+                Some(false),
+                Some("provider_exhausted"),
+            );
+            row.fold_pause_consumed = consumed;
+            let detail = row_to_detail(row, true, &owner_viewer());
+            assert!(detail.resumable, "{consumed:?}");
+            assert_eq!(detail.park_reason, "provider_exhausted", "{consumed:?}");
+        }
+        // A round or pre-effect fold or no fold at all is judged by the old gate too.
+        for kind in [Some("round"), Some("pre_effect"), None] {
+            let mut row = fold_row("running", "persistent", Some("resuming"), kind, Some(true), None);
+            row.fold_pause_consumed = Some(true);
+            assert!(row_to_detail(row, true, &owner_viewer()).resumable, "{kind:?}");
+        }
+        // The park-reason rule is the one it always was: owner or service only.
+        let mut parked = fold_row(
+            "awaiting_approval",
+            "persistent",
+            Some("parked"),
+            Some("park"),
+            Some(false),
+            Some("credential_window"),
+        );
+        parked.fold_pause_consumed = Some(false);
+        let peer = VerifiedIdentity::user_for_test("org_1", "someone_else");
+        let detail = row_to_detail(parked, true, &peer);
+        assert!(detail.resumable);
+        assert_eq!(detail.park_reason, "", "a peer still gets no reason");
+    }
+
+    #[test]
+    fn run_select_keeps_its_shape_with_the_consumed_probe() {
+        let sql = RUN_SELECT.split_whitespace().collect::<Vec<_>>().join(" ");
+        let probe = "CASE WHEN lc.kind = 'pause' THEN EXISTS ( SELECT 1 FROM approvals ap \
+                     WHERE ap.org_id = r.org_id AND ap.user_id = r.user_id AND ap.run_id = r.id \
+                     AND ap.idempotency_key = lc.pause_ref AND ap.consumed_at IS NOT NULL ) \
+                     END AS fold_pause_consumed";
+        assert!(sql.contains(probe), "{sql}");
+        // It is a column of the projection, before the FROM, and the shared LEFT JOIN
+        // is still the last line, so the Space branch's appended JOIN still composes.
+        assert!(sql.find("END AS fold_pause_consumed").unwrap() < sql.find("FROM runs r").unwrap());
+        assert!(RUN_SELECT.trim_end().ends_with("LEFT JOIN run_loop_checkpoints lc ON lc.run_id = r.id"));
+        // The alias `ap` is the probe's alone: the aliases r, lc, e, c, t and st are
+        // taken by the projection and by the appended Space and system-run clauses.
+        let source = include_str!("run_service_grpc.rs").replace("\r\n", "\n");
+        let production = &source[..source.find("\n#[cfg(test)]\nmod tests {").expect("tests marker")];
+        assert_eq!(production.matches("approvals ap").count(), 1);
+        assert_eq!(RUN_SELECT.matches("ap.").count(), 5, "the five predicates of the probe");
+        // It reads only a flag and still projects no fold content.
+        for forbidden in ["ciphertext", "fold_digest", "authority_digest", "claim_token_hash"] {
+            assert!(!RUN_SELECT.contains(forbidden), "{forbidden}");
+        }
+        // Scoped by org, user and run so the user-led unique index can serve it, and
+        // the probe is confined to a pause fold by the CASE.
+        for scoped in ["ap.org_id = r.org_id", "ap.user_id = r.user_id", "ap.run_id = r.id"] {
+            assert!(RUN_SELECT.contains(scoped), "{scoped}");
+        }
+        // The pause approval is keyed by the pause reference (run id and step id).
+        assert!(RUN_SELECT.contains("ap.idempotency_key = lc.pause_ref"));
+        // Composes with the Space branch's appended JOIN, which names t and st only.
+        let composed = format!("{RUN_SELECT} JOIN threads t ON t.id = r.thread_id WHERE t.org_id = $5");
+        assert!(composed.contains("LEFT JOIN run_loop_checkpoints lc ON lc.run_id = r.id JOIN threads t"));
+    }
+
+    /// Turns the fold store on for one test and off again afterwards, even when
+    /// the test panics. Tests that hold it run with `--test-threads=1`.
+    struct StoreOn;
+
+    impl StoreOn {
+        fn new() -> Self {
+            std::env::set_var("SESSION_CORE_LOOP_CHECKPOINT_ENABLED", "true");
+            Self
+        }
+    }
+
+    impl Drop for StoreOn {
+        fn drop(&mut self) {
+            std::env::remove_var("SESSION_CORE_LOOP_CHECKPOINT_ENABLED");
+        }
+    }
+
+    async fn get_run_as(pool: &PgPool, run_id: &str, org: &str, user: &str) -> pb::RunDetail {
+        RunServiceImpl::new(pool.clone())
+            .get_run(identity_request(
+                pb::GetRunRequest {
+                    run_id: run_id.to_owned(),
+                },
+                VerifiedIdentity::user_for_test(org, user),
+            ))
+            .await
+            .expect("get run")
+            .into_inner()
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres; sets the fold store switch, so run with --test-threads=1"]
+    async fn loop_checkpoint_get_run_reports_a_parked_fold_as_resumable_with_its_reason() {
+        use crate::loop_checkpoint::test_support::{cipher, scratch_pool, seed_fold, seed_run};
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let _on = StoreOn::new();
+        let until = chrono::Utc::now() + chrono::Duration::hours(1);
+
+        // Paused for an approval: resumable, and no park reason.
+        let (paused, org, user) = seed_run(&pool, "persistent").await;
+        seed_fold(&pool, &paused, "pause", "appr_1", "", None)
+            .await
+            .expect("pause fold");
+        let detail = get_run_as(&pool, &paused, &org, &user).await;
+        assert!(detail.resumable);
+        assert_eq!(detail.park_reason, "");
+
+        // Parked: resumable, with the stored closed token.
+        let (parked, org, user) = seed_run(&pool, "persistent").await;
+        seed_fold(&pool, &parked, "park", "appr_1", "provider_exhausted", Some(until))
+            .await
+            .expect("park fold");
+        let detail = get_run_as(&pool, &parked, &org, &user).await;
+        assert!(detail.resumable);
+        assert_eq!(detail.park_reason, "provider_exhausted");
+
+        // The listing carries the same flag, through the same projection.
+        let thread_id: String = sqlx::query_scalar("SELECT thread_id FROM runs WHERE id = $1")
+            .bind(&parked)
+            .fetch_one(&pool)
+            .await
+            .expect("thread");
+        let listed = RunServiceImpl::new(pool.clone())
+            .list_runs(identity_request(
+                pb::ListRunsRequest {
+                    thread_id,
+                    limit: 10,
+                    ..Default::default()
+                },
+                VerifiedIdentity::user_for_test(&org, &user),
+            ))
+            .await
+            .expect("list runs")
+            .into_inner();
+        assert_eq!(listed.runs.len(), 1);
+        assert!(listed.runs[0].resumable);
+        assert_eq!(listed.runs[0].park_reason, "provider_exhausted");
+
+        // Resuming under a live lease: someone holds it, so it is not resumable.
+        let (resuming, org, user) = seed_run(&pool, "persistent").await;
+        seed_fold(&pool, &resuming, "park", "appr_1", "credential_window", Some(until))
+            .await
+            .expect("park fold");
+        crate::loop_checkpoint::claim(&pool, &cipher(), &resuming, "appr_1", "token-a")
+            .await
+            .expect("claim");
+        let detail = get_run_as(&pool, &resuming, &org, &user).await;
+        assert!(!detail.resumable);
+        assert_eq!(detail.park_reason, "");
+        // Once the lease lapses it is resumable again.
+        sqlx::query(
+            "UPDATE run_loop_checkpoints SET claim_expires_at = now() - interval '1 second' WHERE run_id = $1",
+        )
+        .bind(&resuming)
+        .execute(&pool)
+        .await
+        .expect("lapse the lease");
+        let detail = get_run_as(&pool, &resuming, &org, &user).await;
+        assert!(detail.resumable);
+        assert_eq!(detail.park_reason, "credential_window");
+
+        // An active fold belongs to a loop that is still running: not resumable.
+        let (active, org, user) = seed_run(&pool, "persistent").await;
+        seed_fold(&pool, &active, "round", "", "", None)
+            .await
+            .expect("round fold");
+        assert!(!get_run_as(&pool, &active, &org, &user).await.resumable);
+
+        // A row that outlived its run (written before the end-of-run guard) is not
+        // resumable either.
+        let (ended, org, user) = seed_run(&pool, "persistent").await;
+        seed_fold(&pool, &ended, "pause", "appr_1", "", None)
+            .await
+            .expect("pause fold");
+        crate::loop_checkpoint::test_support::end_run_without_purge(&pool, &ended).await;
+        assert!(!get_run_as(&pool, &ended, &org, &user).await.resumable);
+
+        // Switch off: nothing is resumable, whatever the stores hold.
+        drop(_on);
+        let detail = get_run_as(&pool, &parked, &org_of(&pool, &parked).await, "u1").await;
+        assert!(!detail.resumable);
+        assert_eq!(detail.park_reason, "");
+    }
+
+    async fn org_of(pool: &PgPool, run_id: &str) -> String {
+        sqlx::query_scalar("SELECT org_id FROM runs WHERE id = $1")
+            .bind(run_id)
+            .fetch_one(pool)
+            .await
+            .expect("org")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres; sets the fold store switch, so run with --test-threads=1"]
+    async fn loop_checkpoint_get_run_never_reports_a_zdr_run_as_resumable() {
+        use crate::loop_checkpoint::test_support::{scratch_pool, seed_run};
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let _on = StoreOn::new();
+        for retention in ["zdr", "zdr_waived"] {
+            let (run_id, org, user) = seed_run(&pool, retention).await;
+            // `save` refuses these runs, so the row is inserted directly to prove the
+            // read side is closed on its own: the fold is never reported.
+            sqlx::query(
+                "INSERT INTO run_loop_checkpoints
+                    (run_id, org_id, user_id, seq, kind, state, pause_ref, park_reason, park_until,
+                     authority_digest, segment_no, ciphertext, fold_digest)
+                 VALUES ($1, $2, $3, 1, 'park', 'parked', 'appr_1', 'provider_exhausted',
+                         now() + interval '1 hour', 'auth-1', 1, 'not-a-real-fold', repeat('a', 64))",
+            )
+            .bind(&run_id)
+            .bind(&org)
+            .bind(&user)
+            .execute(&pool)
+            .await
+            .expect("insert a fold for a non-persistent run");
+
+            let detail = get_run_as(&pool, &run_id, &org, &user).await;
+            assert!(!detail.resumable, "{retention}");
+            assert_eq!(detail.park_reason, "", "{retention}");
+        }
+    }
+
+    /// A loop approval for `run_id` keyed by `idempotency_key` (the pause
+    /// reference of a fold), granted, with a retained descriptor so it can be
+    /// consumed. Needs the descriptor key in the environment.
+    async fn granted_pause_approval(
+        pool: &PgPool,
+        run_id: &str,
+        org: &str,
+        user: &str,
+        idempotency_key: &str,
+    ) -> String {
+        use base64::Engine as _;
+        std::env::set_var(
+            "SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY",
+            base64::engine::general_purpose::STANDARD.encode([7_u8; 32]),
+        );
+        let id = format!("appr_{}", mp_ids::new_ulid());
+        let descriptor = serde_json::json!({
+            "version": 1,
+            "run_id": run_id,
+            "org_id": org,
+            "user_id": user,
+            "step_id": "tool_1_call-1",
+            "action_kind": "tool_call",
+            "action_fingerprint": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "tool_name": "shell",
+            "input": {"command": "echo approved"},
+            "permission_mode": "ask",
+            "offered": {
+                "tools": [{"name": "shell", "description": "run", "parameters_json": "{}"}],
+                "authority": {
+                    "mode": "ask", "plan_mode": false, "autonomy_rung": "", "space_id": "",
+                    "min_privacy_tier": 0, "provider_hint": "", "max_rounds": 4,
+                    "tool_names": ["shell"], "digest": "unchecked-in-this-test"
+                }
+            }
+        });
+        crate::orchestration_store::request_approval(
+            pool,
+            &id,
+            run_id,
+            None,
+            "tool_call",
+            user,
+            org,
+            user,
+            idempotency_key,
+            &serde_json::json!({}),
+            Some(&descriptor),
+            Some(chrono::Utc::now() + chrono::Duration::minutes(30)),
+            "loop",
+        )
+        .await
+        .expect("request approval")
+        .expect("inserted");
+        crate::orchestration_store::decide_approval(pool, &id, org, Some(user), "granted", user, "ok")
+            .await
+            .expect("grant");
+        id
+    }
+
+    /// The Space branch of `ListRuns` appends a plain JOIN to the shared projection.
+    /// Its decision token cannot be forged here, so this composes the same SQL and
+    /// reads the row the same way, to prove the probe resolves under that JOIN.
+    async fn space_branch_row(pool: &PgPool, run_id: &str, org: &str) -> RunRow {
+        sqlx::query_as::<_, RunRow>(&format!(
+            "{RUN_SELECT} JOIN threads t ON t.id = r.thread_id \
+             WHERE t.org_id = $1 AND r.id = $2"
+        ))
+        .bind(org)
+        .bind(run_id)
+        .fetch_one(pool)
+        .await
+        .expect("the Space-branch shape resolves the probe")
+    }
+
+    // S7c-A3 (D5). WRITTEN, NOT RUN by the author (disposable Postgres, lead).
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres; sets the fold store switch, so run with --test-threads=1"]
+    async fn loop_checkpoint_a_stale_pause_fold_after_a_stage_one_continuation_reads_not_resumable() {
+        use crate::loop_checkpoint::test_support::{scratch_pool, seed_fold, seed_run};
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let _on = StoreOn::new();
+        let until = chrono::Utc::now() + chrono::Duration::hours(1);
+
+        // The paused run: a pause fold keyed by run:step and the approval keyed the same.
+        let (run_id, org, user) = seed_run(&pool, "persistent").await;
+        let pause_ref = format!("{run_id}:step-1");
+        seed_fold(&pool, &run_id, "pause", &pause_ref, "", None)
+            .await
+            .expect("pause fold");
+        let approval = granted_pause_approval(&pool, &run_id, &org, &user, &pause_ref).await;
+        let thread_id: String = sqlx::query_scalar("SELECT thread_id FROM runs WHERE id = $1")
+            .bind(&run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("thread");
+        let list_thread = |pool: PgPool, thread_id: String, org: String, user: String| async move {
+            RunServiceImpl::new(pool)
+                .list_runs(identity_request(
+                    pb::ListRunsRequest {
+                        thread_id,
+                        limit: 10,
+                        ..Default::default()
+                    },
+                    VerifiedIdentity::user_for_test(&org, &user),
+                ))
+                .await
+                .expect("list runs")
+                .into_inner()
+        };
+
+        // Granted and unconsumed: resumable on every read path.
+        assert!(get_run_as(&pool, &run_id, &org, &user).await.resumable);
+        let listed = list_thread(pool.clone(), thread_id.clone(), org.clone(), user.clone()).await;
+        assert!(listed.runs[0].resumable);
+        assert_eq!(
+            space_branch_row(&pool, &run_id, &org).await.fold_pause_consumed,
+            Some(false)
+        );
+
+        // A stage-one continuation consumes the approval and leaves the fold in place.
+        assert!(
+            crate::orchestration_store::consume_approval(
+                &pool, &approval, &org, &run_id, &user, "", "claim-a"
+            )
+            .await
+            .expect("consume")
+            .expect("outcome")
+            .consumed
+        );
+        let state: String = sqlx::query_scalar("SELECT state FROM run_loop_checkpoints WHERE run_id = $1")
+            .bind(&run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("fold state");
+        assert_eq!(state, "paused", "the stale fold is still there and still claimable by state");
+
+        // Now no read path advertises it.
+        let detail = get_run_as(&pool, &run_id, &org, &user).await;
+        assert!(!detail.resumable);
+        assert_eq!(detail.park_reason, "");
+        let listed = list_thread(pool.clone(), thread_id, org.clone(), user.clone()).await;
+        assert!(!listed.runs[0].resumable);
+        let space_row = space_branch_row(&pool, &run_id, &org).await;
+        assert_eq!(space_row.fold_pause_consumed, Some(true));
+        assert!(!row_to_detail(space_row, true, &VerifiedIdentity::user_for_test(&org, &user)).resumable);
+
+        // A consumed approval under another key does not mark a pause fold keyed
+        // differently: the pairing is the pause reference, run and user.
+        let (other_run, other_org, other_user) = seed_run(&pool, "persistent").await;
+        seed_fold(&pool, &other_run, "pause", &format!("{other_run}:step-9"), "", None)
+            .await
+            .expect("pause fold");
+        let unrelated =
+            granted_pause_approval(&pool, &other_run, &other_org, &other_user, "some-other-key").await;
+        assert!(
+            crate::orchestration_store::consume_approval(
+                &pool, &unrelated, &other_org, &other_run, &other_user, "", "claim-a"
+            )
+            .await
+            .expect("consume")
+            .expect("outcome")
+            .consumed
+        );
+        assert!(get_run_as(&pool, &other_run, &other_org, &other_user).await.resumable);
+
+        // A park fold is judged by the old gate, whatever approvals the run has consumed.
+        let (parked, parked_org, parked_user) = seed_run(&pool, "persistent").await;
+        let park_ref = format!("{parked}:step-2");
+        seed_fold(&pool, &parked, "park", &park_ref, "provider_exhausted", Some(until))
+            .await
+            .expect("park fold");
+        let keyed = granted_pause_approval(&pool, &parked, &parked_org, &parked_user, &park_ref).await;
+        assert!(
+            crate::orchestration_store::consume_approval(
+                &pool, &keyed, &parked_org, &parked, &parked_user, "", "claim-a"
+            )
+            .await
+            .expect("consume")
+            .expect("outcome")
+            .consumed
+        );
+        let detail = get_run_as(&pool, &parked, &parked_org, &parked_user).await;
+        assert!(detail.resumable);
+        assert_eq!(detail.park_reason, "provider_exhausted");
+    }
+
+    async fn park_reason_from_get_run(
+        service: &RunServiceImpl,
+        run_id: &str,
+        caller: VerifiedIdentity,
+    ) -> (bool, String) {
+        let detail = service
+            .get_run(identity_request(
+                pb::GetRunRequest {
+                    run_id: run_id.to_owned(),
+                },
+                caller,
+            ))
+            .await
+            .expect("get run")
+            .into_inner();
+        (detail.resumable, detail.park_reason)
+    }
+
+    async fn park_reason_from_list_system_runs(
+        service: &RunServiceImpl,
+        org: &str,
+        run_id: &str,
+        caller: VerifiedIdentity,
+    ) -> (bool, String) {
+        let listed = service
+            .list_system_runs(identity_request(
+                pb::ListSystemRunsRequest {
+                    org_id: org.to_owned(),
+                    limit: 50,
+                    ..Default::default()
+                },
+                caller,
+            ))
+            .await
+            .expect("list system runs")
+            .into_inner();
+        let run = listed
+            .runs
+            .into_iter()
+            .find(|run| run.run_id == run_id)
+            .expect("the maintenance run is listed");
+        (run.resumable, run.park_reason)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres; sets the fold store switch, so run with --test-threads=1"]
+    async fn loop_checkpoint_park_reason_reaches_only_the_owner_and_a_service() {
+        use crate::loop_checkpoint::test_support::{scratch_pool, seed_fold};
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let _on = StoreOn::new();
+        let until = chrono::Utc::now() + chrono::Duration::hours(1);
+        let service = RunServiceImpl::new(pool.clone());
+
+        // A parked run the owner (a person) can read: the owner sees the reason, a
+        // service sees it, and a service-less peer cannot reach the run at all.
+        let (owned, org, owner) =
+            crate::loop_checkpoint::test_support::seed_run(&pool, "persistent").await;
+        seed_fold(&pool, &owned, "park", "appr_1", "credential_window", Some(until))
+            .await
+            .expect("park fold");
+        let got = park_reason_from_get_run(
+            &service,
+            &owned,
+            VerifiedIdentity::user_for_test(&org, &owner),
+        )
+        .await;
+        assert_eq!(got, (true, "credential_window".to_owned()), "the owner");
+        let got = park_reason_from_get_run(
+            &service,
+            &owned,
+            VerifiedIdentity::service_for_test(&org, &["session:read"], false),
+        )
+        .await;
+        assert_eq!(got, (true, "credential_window".to_owned()), "a service");
+
+        // A maintenance run is system-owned and org-readable, so a peer can read its
+        // status. The peer is told it is resumable and is not told why it is parked.
+        let sfx = new_ulid();
+        let (maint_org, thread_id, run_id) = (
+            format!("pr-org-{sfx}"),
+            format!("pr-t-{sfx}"),
+            format!("pr-r-{sfx}"),
+        );
+        seed_system_thread_and_run(
+            &pool,
+            &maint_org,
+            &thread_id,
+            &run_id,
+            None,
+            "nightly maintenance",
+        )
+        .await;
+        seed_fold(&pool, &run_id, "park", "appr_1", "credential_window", Some(until))
+            .await
+            .expect("park fold");
+        let peer = || VerifiedIdentity::user_for_test(&maint_org, "pr-peer");
+        let service_caller =
+            || VerifiedIdentity::service_for_test(&maint_org, &["session:read"], false);
+
+        assert_eq!(
+            park_reason_from_get_run(&service, &run_id, peer()).await,
+            (true, String::new()),
+            "GetRun, a peer"
+        );
+        assert_eq!(
+            park_reason_from_get_run(&service, &run_id, service_caller()).await,
+            (true, "credential_window".to_owned()),
+            "GetRun, a service"
+        );
+        assert_eq!(
+            park_reason_from_list_system_runs(&service, &maint_org, &run_id, peer()).await,
+            (true, String::new()),
+            "ListSystemRuns, a peer"
+        );
+        assert_eq!(
+            park_reason_from_list_system_runs(&service, &maint_org, &run_id, service_caller())
+                .await,
+            (true, "credential_window".to_owned()),
+            "ListSystemRuns, a service"
+        );
+        // The ListRuns Space-peer branch runs the same per-row projection; it needs a
+        // Control read decision to reach, so the row-level cases are covered by the
+        // `loop_checkpoint_park_reason_is_read_only_by_the_owner_or_a_service` unit test.
+    }
+
+    // -- Build plan WS03 S8-4 (tests only): RunDetail of a park row, and cancel (P9) --------------
+    //
+    // `RunDetail` and `CancelRun` are NOT changed by S8-4: these tests pin what they already do
+    // with a park row under the park rules. The database ones are WRITTEN, NOT RUN by the author
+    // (the lead runs them through the disposable-Postgres harness; `--test-threads=1`).
+
+    /// A park row reads the same through `RunDetail` whatever the park switch says: it is
+    /// resumable while its fold is claimable (before it is due as well), and the reason follows
+    /// the viewer rule. Nothing in the row projection reads the park-recovery switch.
+    #[test]
+    fn a_park_row_reads_the_same_whatever_the_park_switch_says() {
+        use crate::terminalization::park_test_switch;
+        let read = |state: &str, claim_expired: Option<bool>, viewer: &VerifiedIdentity| {
+            let row = fold_row(
+                "running",
+                "persistent",
+                Some(state),
+                Some("park"),
+                claim_expired,
+                Some("provider_exhausted"),
+            );
+            let detail = row_to_detail(row, true, viewer);
+            (detail.resumable, detail.park_reason)
+        };
+        let peer = VerifiedIdentity::user_for_test("org_1", "someone_else");
+        let rows = |on: bool| {
+            let _park = park_test_switch::Forced::set(on);
+            [
+                read("parked", Some(false), &owner_viewer()),
+                read("parked", Some(false), &peer),
+                read("resuming", Some(false), &owner_viewer()),
+                read("resuming", Some(true), &owner_viewer()),
+                read("closed", Some(false), &owner_viewer()),
+            ]
+        };
+        let on = rows(true);
+        assert_eq!(on, rows(false), "the park switch changes nothing in the projection");
+        assert_eq!(
+            on,
+            [
+                (true, "provider_exhausted".to_owned()),
+                (true, String::new()),
+                (false, String::new()),
+                (true, "provider_exhausted".to_owned()),
+                (false, String::new()),
+            ]
+        );
+    }
+
+    /// A managed (obligation-carrying) persistent run for a fresh owner: its run id, org and user.
+    async fn started_managed_run(pool: &PgPool, tag: &str) -> (String, String, String) {
+        let sfx = new_ulid();
+        let (thread_id, org, user) = (
+            format!("pk-t-{tag}-{sfx}"),
+            format!("pk-org-{tag}-{sfx}"),
+            "u1".to_owned(),
+        );
+        sqlx::query("INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, $3)")
+            .bind(&thread_id)
+            .bind(&org)
+            .bind(&user)
+            .execute(pool)
+            .await
+            .expect("seed thread");
+        let started = crate::terminalization::start_managed_run_inner(
+            pool,
+            pb::StartManagedRunRequest {
+                thread_id,
+                agent_id: "managed-agent".to_owned(),
+                goal: "g".to_owned(),
+                mode: "execute".to_owned(),
+                org_id: org.clone(),
+                user_id: user.clone(),
+                start_key: format!("pk-start-{tag}-{sfx}"),
+                terminal_source: pb::ManagedRunSource::ExecutionAgent as i32,
+                ..Default::default()
+            },
+            false,
+        )
+        .await
+        .expect("start managed run");
+        (started.run_id, org, user)
+    }
+
+    async fn cancel_as_owner(
+        pool: &PgPool,
+        run_id: &str,
+        org: &str,
+        user: &str,
+    ) -> pb::CancelRunResponse {
+        RunServiceImpl::new(pool.clone())
+            .cancel_run(identity_request(
+                pb::CancelRunRequest {
+                    run_id: run_id.to_owned(),
+                    reason: "test".to_owned(),
+                },
+                VerifiedIdentity::user_for_test(org, user),
+            ))
+            .await
+            .expect("cancel run")
+            .into_inner()
+    }
+
+    async fn count_events(pool: &PgPool, run_id: &str, event_type: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE run_id = $1 AND event_type = $2")
+            .bind(run_id)
+            .bind(event_type)
+            .fetch_one(pool)
+            .await
+            .expect("count events")
+    }
+
+    async fn obligation_state(pool: &PgPool, run_id: &str) -> String {
+        sqlx::query_scalar(
+            "SELECT state FROM managed_run_terminalization_outbox WHERE run_id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(pool)
+        .await
+        .expect("obligation state")
+    }
+
+    /// A park stored through the real save under the park rules, then made due.
+    async fn due_park(pool: &PgPool, run_id: &str) {
+        use crate::loop_checkpoint::test_support::seed_fold;
+        seed_fold(
+            pool,
+            run_id,
+            "park",
+            &mp_contracts::loop_fold::park_ref(run_id, 1),
+            "provider_exhausted",
+            Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+        )
+        .await
+        .expect("a park under the park rules");
+        sqlx::query(
+            "UPDATE run_loop_checkpoints SET park_until = now() - interval '1 second' WHERE run_id = $1",
+        )
+        .bind(run_id)
+        .execute(pool)
+        .await
+        .expect("make the park due");
+    }
+
+    /// P9: a cancel ends a parked run in its own transaction (status, purge and receipt), the
+    /// obligation is superseded by the next worker pass, and nothing ends the run twice.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres; sets the fold store switch, so run with --test-threads=1"]
+    async fn cancel_purges_a_parked_fold_and_the_worker_supersedes_its_obligation() {
+        use crate::loop_checkpoint::test_support::{cipher, fold_rows, scratch_pool};
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let _store = crate::loop_checkpoint::test_switch::Forced::set(true);
+        let _park = crate::terminalization::park_test_switch::Forced::set(true);
+        let (run_id, org, user) = started_managed_run(&pool, "cancel-park").await;
+        due_park(&pool, &run_id).await;
+        assert_eq!(fold_rows(&pool, &run_id).await, 1, "premise: a parked fold");
+        assert_eq!(obligation_state(&pool, &run_id).await, "open", "premise: an open obligation");
+        let before = get_run_as(&pool, &run_id, &org, &user).await;
+        assert!(before.resumable, "premise: the park is resumable");
+        assert_eq!(before.park_reason, "provider_exhausted");
+
+        let cancelled = cancel_as_owner(&pool, &run_id, &org, &user).await;
+        assert!(cancelled.cancelled);
+
+        // One transaction: the status, the purge and the receipt are all there.
+        let status: String = sqlx::query_scalar("SELECT status FROM runs WHERE id = $1")
+            .bind(&run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("status");
+        assert_eq!(status, "cancelled");
+        assert_eq!(fold_rows(&pool, &run_id).await, 0, "the park went with the run");
+        assert_eq!(count_events(&pool, &run_id, "RUN_CANCELLED").await, 1);
+        let receipt_row: Option<(String,)> =
+            sqlx::query_as("SELECT id FROM events WHERE run_id = $1 AND event_type = 'RUN_CANCELLED'")
+                .bind(&run_id)
+                .fetch_optional(&pool)
+                .await
+                .expect("receipt");
+        assert_eq!(receipt_row.map(|(id,)| id), Some(cancelled.receipt_id.clone()));
+
+        // The cancel does not touch the obligation: the next worker pass supersedes it, and
+        // writes no terminal receipt of its own.
+        assert_eq!(obligation_state(&pool, &run_id).await, "open");
+        crate::terminalization::recover_due_terminalizations(&pool)
+            .await
+            .expect("a worker pass");
+        assert_eq!(obligation_state(&pool, &run_id).await, "superseded");
+        assert_eq!(
+            count_events(&pool, &run_id, "RUN_TERMINAL").await,
+            0,
+            "a cancelled run has no terminal receipt from recovery"
+        );
+
+        // A later continue finds no park and no run to resume; a later cancel is idempotent.
+        let claim = crate::loop_checkpoint::claim(&pool, &cipher(), &run_id, "", "token-a")
+            .await
+            .expect_err("a cancelled run is not claimable");
+        assert_eq!(claim.message(), "loop_checkpoint_run_ended");
+        let after = get_run_as(&pool, &run_id, &org, &user).await;
+        assert!(!after.resumable);
+        assert_eq!(after.park_reason, "");
+        let again = cancel_as_owner(&pool, &run_id, &org, &user).await;
+        assert!(!again.cancelled);
+        assert_eq!(again.receipt_id, cancelled.receipt_id);
+        assert_eq!(count_events(&pool, &run_id, "RUN_CANCELLED").await, 1);
+    }
+
+    /// A cancel that arrives while a continuation holds the park (it has claimed it, or has
+    /// fenced it): the run ends, the fold goes, and the continuation's next write is refused.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres; sets the fold store switch, so run with --test-threads=1"]
+    async fn cancel_during_a_park_resume_ends_the_run_and_its_fence_is_refused() {
+        use crate::loop_checkpoint::test_support::{cipher, fold_for, fold_rows, fold_state, scratch_pool};
+        use crate::loop_checkpoint::{claim, save, SaveInput};
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let _store = crate::loop_checkpoint::test_switch::Forced::set(true);
+        let _park = crate::terminalization::park_test_switch::Forced::set(true);
+        let write = |kind: &'static str, expected_seq: i64, run_id: String| {
+            let pool = pool.clone();
+            async move {
+                let fold = fold_for(&run_id);
+                save(
+                    &pool,
+                    &cipher(),
+                    SaveInput {
+                        run_id: &run_id,
+                        expected_seq,
+                        kind,
+                        fold: &fold,
+                        authority_digest: "auth-1",
+                        pause_ref: "",
+                        park_reason: "",
+                        park_until: None,
+                    },
+                )
+                .await
+            }
+        };
+
+        // Before the fence: the resume has claimed the park, and the run is cancelled.
+        let (run_id, org, user) = started_managed_run(&pool, "cancel-claimed").await;
+        due_park(&pool, &run_id).await;
+        let claimed = claim(&pool, &cipher(), &run_id, "", "token-a")
+            .await
+            .expect("the resume claims the due park");
+        assert_eq!(fold_state(&pool, &run_id).await.as_deref(), Some("resuming"));
+        assert!(cancel_as_owner(&pool, &run_id, &org, &user).await.cancelled);
+        assert_eq!(fold_rows(&pool, &run_id).await, 0, "the claimed park went with the run");
+        let fence = write("pre_effect", claimed.seq, run_id.clone())
+            .await
+            .expect_err("the fence of a cancelled run is refused");
+        assert_eq!(fence.message(), "loop_checkpoint_run_ended");
+        assert_eq!(fold_rows(&pool, &run_id).await, 0, "the refused fence wrote nothing");
+
+        // After the fence: the fold is active (no longer a park), and the cancel still ends the run.
+        let (run_id, org, user) = started_managed_run(&pool, "cancel-fenced").await;
+        due_park(&pool, &run_id).await;
+        let claimed = claim(&pool, &cipher(), &run_id, "", "token-a")
+            .await
+            .expect("the resume claims the due park");
+        let fenced = write("pre_effect", claimed.seq, run_id.clone())
+            .await
+            .expect("the fence at the claimed seq wins");
+        assert_eq!(fenced.seq, claimed.seq + 1);
+        assert!(!fenced.park_accepted, "a fence is not a park");
+        assert_eq!(fold_state(&pool, &run_id).await.as_deref(), Some("active"));
+        assert!(cancel_as_owner(&pool, &run_id, &org, &user).await.cancelled);
+        assert_eq!(fold_rows(&pool, &run_id).await, 0);
+        let round = write("round", fenced.seq, run_id.clone())
+            .await
+            .expect_err("the loop's next fold on a cancelled run is refused");
+        assert_eq!(round.message(), "loop_checkpoint_run_ended");
+        assert_eq!(count_events(&pool, &run_id, "RUN_CANCELLED").await, 1);
     }
 
     // -- resolve_thread_owner ------------------------------------------------

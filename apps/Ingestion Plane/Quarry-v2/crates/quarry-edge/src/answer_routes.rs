@@ -9,6 +9,9 @@
 //!   sources matched or no fetches succeeded — clients see a typed shape
 //!   rather than an error envelope)
 //! - `400` for empty queries
+//! - `403 Forbidden` with `reason: zdr_unavailable` under effective Zero Data Retention (the body
+//!   flag or the token's floor). The Model Plane hop carries no ZDR posture (ADR-4), so a ZDR
+//!   request is refused BEFORE the pipeline starts: no search, no page fetch, no model call
 //! - `501 Unsupported` when no answer pipeline is configured on the edge. INNH-8a: the body
 //!   carries `reason`, the FIRST closed gate (`synthesis_disabled`, `no_search_provider`,
 //!   `no_model_plane_url`, `model_client_init_failed`), and a `hint` that names the exact switch
@@ -67,6 +70,25 @@ fn not_configured(reason: AnswerReason) -> axum::response::Response {
         .into_response()
 }
 
+/// 403 for a ZDR request. Nothing has run: the Model Plane hop has no ZDR posture (ADR-4), so
+/// the query and page text must not leave for it.
+fn zdr_refused() -> axum::response::Response {
+    let reason = AnswerReason::ZdrUnavailable;
+    (
+        StatusCode::FORBIDDEN,
+        Json(
+            serde_json::to_value(ErrorBody {
+                error: "answer synthesis is not available under ZDR (zero data retention)".into(),
+                code: quarry_core::error::ErrorCode::Forbidden.wire_name().into(),
+                hint: Some(reason.hint().into()),
+                reason: Some(reason.as_str()),
+            })
+            .unwrap(),
+        ),
+    )
+        .into_response()
+}
+
 /// The response for a failed `AnswerPipeline::answer`. A refused service token is a 503 with a
 /// fixed message (the model gateway's own text stays out); every other failure keeps the status
 /// its error code always had and gains the closed `reason`.
@@ -92,7 +114,7 @@ fn failed(e: quarry_core::error::QuarryError) -> axum::response::Response {
         Json(
             serde_json::to_value(ErrorBody {
                 error: e.message,
-                code: format!("{:?}", e.code).to_uppercase(),
+                code: e.code.wire_name().to_string(),
                 hint: None,
                 reason: Some(reason.as_str()),
             })
@@ -145,6 +167,13 @@ async fn answer_run(
             ),
         )
             .into_response();
+    }
+
+    // ADR-4: refused before the pipeline starts, so a ZDR request makes no search, no page fetch
+    // and no model call (the gateway double sees 0 requests). Ahead of the gate so a ZDR caller
+    // never learns the deployment's model path.
+    if claims.effective_zdr(req.zdr.unwrap_or(false)) {
+        return zdr_refused();
     }
 
     let pipeline = match answer_status::gate(&state) {
@@ -233,6 +262,11 @@ pub async fn answer_stream(
         &claims.org_id,
         crate::zdr_tombstone::Kind::Answer,
     ));
+    // ADR-4: same refusal as `/v1/answer`, before any work. The tombstone still records the status.
+    if claims.effective_zdr(req.zdr.unwrap_or(false)) {
+        tombstone.status(StatusCode::FORBIDDEN.as_u16());
+        return zdr_refused();
+    }
     let pipeline = match answer_status::gate(&state) {
         Ok(pipeline) => pipeline.clone(),
         Err(reason) => {
@@ -398,6 +432,58 @@ fn _type_check_marker(_a: AnswerResult) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// QB-T17: with `QUARRY_EDGE__ANSWER_SYNTHESIS` off there is no pipeline, so `/v1/answer` answers
+    /// 501 and says which switch turns it on (the hint is what an operator reads at the 501).
+    #[tokio::test]
+    async fn answer_without_a_pipeline_names_the_switch() {
+        use crate::test_support::{claims_for_org, test_state, StubDriver};
+
+        let state = test_state(StubDriver::ok());
+        let request: AnswerHttpRequest =
+            serde_json::from_value(serde_json::json!({ "query": "rust async" })).unwrap();
+
+        let response = answer(
+            State(state),
+            Extension(claims_for_org("org_answer")),
+            Json(request),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        let body = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("QUARRY_EDGE__ANSWER_SYNTHESIS"), "{body}");
+    }
+
+    /// The `code` of an error body is the wire name CONTRACTS.md and ERROR_REASONS.md promise
+    /// (`DRIVER_FAILED`, `RATE_LIMITED`), never the Rust identifier upper-cased (`DRIVERFAILED`).
+    #[tokio::test]
+    async fn a_failure_body_carries_the_wire_name_of_its_error_code() {
+        use quarry_core::error::{ErrorCode, QuarryError};
+        use quarry_runtime::answer::{MODEL_HOP, MODEL_HOP_KEY};
+
+        for (code, status, wire, reason) in [
+            (ErrorCode::DriverFailed, 502, "DRIVER_FAILED", "model_plane_error"),
+            (ErrorCode::RateLimited, 429, "RATE_LIMITED", "model_plane_rate_limited"),
+            (ErrorCode::Timeout, 504, "TIMEOUT", "model_plane_error"),
+        ] {
+            let error = QuarryError::new(code, "x")
+                .with_details(serde_json::json!({ MODEL_HOP_KEY: MODEL_HOP }));
+            let response = failed(error);
+            assert_eq!(response.status().as_u16(), status, "{wire}");
+            let body = axum::body::to_bytes(response.into_body(), 1 << 16)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["code"], wire);
+            assert_eq!(body["reason"], reason);
+            assert_eq!(body["code"], code.wire_name());
+        }
+    }
 
     #[test]
     fn http_request_decodes_minimal_shape() {

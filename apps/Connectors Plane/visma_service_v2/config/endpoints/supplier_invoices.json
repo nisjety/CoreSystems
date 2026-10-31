@@ -1,0 +1,41 @@
+{
+  "endpoint_name": "supplier_invoices",
+  "bigquery_table": "visma_supplier_invoices",
+  "primary_key": [
+    "documentType",
+    "referenceNumber"
+  ],
+  "source": "erp_rest",
+  "api_method": "get_supplier_invoices",
+  "api_endpoint": "/v1/supplierInvoice",
+  "pagination_profile": "finance_page_number",
+  "modified_field": "lastModifiedDateTime",
+  "merge_type": "upsert",
+  "sync_pattern": "incremental_upsert",
+  "validation_fields": [
+    "documentType",
+    "referenceNumber",
+    "lastModifiedDateTime"
+  ],
+  "datamart": {
+    "ready": false,
+    "pilot_override": false,
+    "query_file": "config/queries/supplier_invoice.graphql",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "fallback_source": "erp_rest",
+    "root_field": "apInvoices",
+    "type_name": "APInvoice"
+  },
+  "default_query": {
+    "expandAttachment": "true",
+    "expandLandedCosts": "true",
+    "expandApproval": "true",
+    "expandNote": "true",
+    "expandLinePrebookAccounts": "true"
+  },
+  "notes": "Key is (documentType, referenceNumber): referenceNumber alone collides. Full fetch of 11,512 documents: 11,509 distinct referenceNumbers, 11,512 distinct pairs (Invoice 10,813, DebitAdj 679, CreditAdj 20).",
+  "tier": 1,
+  "open_set": true
+}

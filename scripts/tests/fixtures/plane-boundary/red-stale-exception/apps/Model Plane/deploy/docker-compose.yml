@@ -1,0 +1,4 @@
+services:
+  model-api:
+    environment:
+      DATABASE_URL: postgres://model@postgres:5432/session_core

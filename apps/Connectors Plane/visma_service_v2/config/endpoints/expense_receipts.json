@@ -1,0 +1,18 @@
+{
+  "endpoint_name": "expense_receipts",
+  "bigquery_table": "visma_expense_receipts",
+  "primary_key": "internalId",
+  "source": "erp_rest",
+  "enabled": true,
+  "api_method": "get_expense_receipts",
+  "api_endpoint": "/v1/expenseReceipt",
+  "pagination_profile": "none",
+  "modified_field": null,
+  "merge_type": "upsert",
+  "sync_pattern": "full_refresh_upsert",
+  "validation_fields": ["internalId"],
+  "background_mode": "none",
+  "background_poll_secs": 5,
+  "background_timeout_secs": 1800,
+  "notes": "The synchronous read answers 500 'Execution Timeout Expired' even at pageSize=2, and the Swagger lists no paging parameters for it (only date, dateCondition, inventory, project, claimedBy, projectTask, invoiceable, status, customer). Read through the background API instead. Key `internalId` is taken from the Swagger DTO and is unproven until a run returns rows. Stored raw for later Dataform mapping."
+}

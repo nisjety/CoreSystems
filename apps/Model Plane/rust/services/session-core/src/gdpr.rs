@@ -155,9 +155,12 @@ pub struct PurgeSummary {
     pub threads: u64,
     pub hook_configs: u64,
     pub agent_skills: u64,
+    pub skill_revisions: u64,
     pub agent_memory: u64,
     pub user_memory_controls: u64,
     pub forgotten_memory_ids: u64,
+    pub memory_control_events: u64,
+    pub org_learning_policy_mirror: u64,
     pub finetune_jobs: u64,
     pub dream_runs: u64,
     pub session_audit_outbox: u64,
@@ -196,9 +199,12 @@ impl PurgeSummary {
             + self.threads
             + self.hook_configs
             + self.agent_skills
+            + self.skill_revisions
             + self.agent_memory
             + self.user_memory_controls
             + self.forgotten_memory_ids
+            + self.memory_control_events
+            + self.org_learning_policy_mirror
             + self.finetune_jobs
             + self.dream_runs
             + self.session_audit_outbox
@@ -230,6 +236,14 @@ pub async fn purge_organization_data(
 ) -> anyhow::Result<PurgeSummary> {
     let mut tx: Transaction<'_, Postgres> = pool.begin().await?;
     let mut summary = PurgeSummary::default();
+
+    // The loop's sealed folds are erased with the org's runs, before them.
+    sqlx::query(
+        "DELETE FROM run_loop_checkpoints WHERE run_id IN (SELECT id FROM runs WHERE org_id = $1)",
+    )
+    .bind(org_id)
+    .execute(&mut *tx)
+    .await?;
 
     // `runs` children with no cascade — must go before `runs`.
     summary.checkpoints = sqlx::query(
@@ -385,6 +399,15 @@ pub async fn purge_organization_data(
         .await?
         .rows_affected();
 
+    // After the skills, not before: deleting a skill row writes a `deleted`
+    // revision holding its text (agent_skills_revision_trg), and that revision
+    // must be erased with the rest.
+    summary.skill_revisions = sqlx::query("DELETE FROM skill_revisions WHERE org_id = $1")
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
     // RETURNING, not just a row count: each row has a semantic twin on
     // letta-bridge keyed by the same id, and once this statement commits there
     // is nothing left in Postgres to find that twin by. `owner` is the user_id
@@ -412,6 +435,10 @@ pub async fn purge_organization_data(
     summary.forgotten_memory_ids = sqlx::query("DELETE FROM forgotten_memory_ids WHERE org_id = $1")
         .bind(org_id).execute(&mut *tx).await?.rows_affected();
     summary.user_memory_controls = sqlx::query("DELETE FROM user_memory_controls WHERE org_id = $1")
+        .bind(org_id).execute(&mut *tx).await?.rows_affected();
+    summary.memory_control_events = sqlx::query("DELETE FROM memory_control_events WHERE org_id = $1")
+        .bind(org_id).execute(&mut *tx).await?.rows_affected();
+    summary.org_learning_policy_mirror = sqlx::query("DELETE FROM org_learning_policy_mirror WHERE org_id = $1")
         .bind(org_id).execute(&mut *tx).await?.rows_affected();
 
     summary.finetune_jobs = sqlx::query("DELETE FROM finetune_jobs WHERE org_id = $1")
@@ -620,9 +647,12 @@ mod tests {
             threads: 1,
             hook_configs: 1,
             agent_skills: 1,
+            skill_revisions: 1,
             agent_memory: 1,
             user_memory_controls: 1,
             forgotten_memory_ids: 1,
+            memory_control_events: 1,
+            org_learning_policy_mirror: 1,
             finetune_jobs: 1,
             dream_runs: 1,
             session_audit_outbox: 1,
@@ -638,7 +668,7 @@ mod tests {
         };
         assert_eq!(
             summary.total(),
-            25,
+            28,
             "total() must count only Postgres rows; semantic-tier counts belong \
              to erasure_is_complete(), not to this sum"
         );
@@ -672,6 +702,7 @@ mod tests {
         };
 
         let checkpoints = pos("DELETE FROM checkpoints");
+        let loop_checkpoints = pos("DELETE FROM run_loop_checkpoints");
         let subagent_edges = pos("DELETE FROM subagent_edges");
         let todos = pos("DELETE FROM todos");
         let plan_steps = pos("DELETE FROM plan_steps");
@@ -688,6 +719,7 @@ mod tests {
         let runs = pos("DELETE FROM runs WHERE org_id = $1");
         let threads = pos("DELETE FROM threads WHERE org_id = $1");
 
+        assert!(loop_checkpoints < runs, "loop folds must be purged before runs");
         assert!(checkpoints < runs, "checkpoints must be purged before runs");
         assert!(
             subagent_edges < runs,
@@ -737,5 +769,10 @@ mod tests {
             "events' run_id sweep must run while runs still exist"
         );
         assert!(runs < threads, "runs must be purged before threads");
+        assert!(
+            pos("DELETE FROM agent_skills WHERE org_id = $1")
+                < pos("DELETE FROM skill_revisions WHERE org_id = $1"),
+            "deleting a skill writes a revision holding its text, so the revisions are purged after the skills"
+        );
     }
 }

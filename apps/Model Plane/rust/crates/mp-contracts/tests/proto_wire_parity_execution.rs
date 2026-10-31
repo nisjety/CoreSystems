@@ -104,3 +104,340 @@ fn a_response_without_the_fields_has_no_typed_failure() {
     assert_eq!(decoded.retry_after_ms, None);
     assert_eq!(decoded.resets_at, "");
 }
+
+// ---- RunAgentResponse.park_reason (field 11, build plan WS03 S8) ----
+
+/// A run that parked after two rounds: status "parked", its earliest resume time in
+/// `resets_at` (field 8) and the closed reason in field 11. No failure code, no final
+/// output. Pinned so the field number cannot drift unseen between the Rust writer and the
+/// Go readers; the same bytes are pinned in the Go test of the same name.
+const PARKED_WIRE_HEX: &str = "0a067061726b656418024214323032362d30392d32365430313a32313a30305a5a1270726f76696465725f657868617573746564";
+
+fn parked(park_reason: &str) -> RunAgentResponse {
+    RunAgentResponse {
+        status: "parked".to_owned(),
+        rounds_executed: 2,
+        resets_at: "2026-09-26T01:21:00Z".to_owned(),
+        park_reason: park_reason.to_owned(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_parked_response_encodes_park_reason_as_field_11() {
+    assert_eq!(
+        hex(&parked("provider_exhausted").encode_to_vec()),
+        PARKED_WIRE_HEX
+    );
+    // Field 11, wire type 2: key byte 0x5a. The reason is the last field written.
+    let wire = unhex(PARKED_WIRE_HEX);
+    assert!(
+        wire.windows(2).any(|pair| pair == [0x5a, 0x12]),
+        "park_reason (field 11) is a length-delimited string"
+    );
+}
+
+#[test]
+fn the_parked_golden_bytes_decode_and_a_response_without_the_field_is_not_parked() {
+    let decoded = RunAgentResponse::decode(unhex(PARKED_WIRE_HEX).as_slice()).expect("decode");
+    assert_eq!(decoded.status, "parked");
+    assert_eq!(decoded.park_reason, "provider_exhausted");
+    assert_eq!(decoded.resets_at, "2026-09-26T01:21:00Z");
+    assert_eq!(decoded.failure_code, "");
+    assert_eq!(decoded.final_output, "");
+    // A response written before the field existed has no park reason, so an older
+    // execution-core is never read as having parked.
+    let before = RunAgentResponse::decode(
+        failed("subscription_usage_limit", None, "").encode_to_vec().as_slice(),
+    )
+    .expect("decode");
+    assert_eq!(before.park_reason, "");
+    // An unset reason is not on the wire at all: the key byte and the length byte are
+    // two bytes, and the reason's eighteen.
+    assert_eq!(
+        parked("").encode_to_vec().len() + 2 + "provider_exhausted".len(),
+        unhex(PARKED_WIRE_HEX).len()
+    );
+}
+
+// ---- SaveLoopCheckpointResponse.park_accepted (field 2, build plan WS03 S8) ----
+
+/// The store's answer to a park save: seq 7 (field 1) and park_accepted true (field 2).
+/// execution-core reads field 2 to know whether the park was durably accepted; a store
+/// that predates the field sends only field 1, and the executor must read that as false.
+#[test]
+fn a_save_response_carries_park_accepted_as_field_2() {
+    use mp_contracts::model_plane::v1::SaveLoopCheckpointResponse;
+    let accepted = SaveLoopCheckpointResponse {
+        seq: 7,
+        park_accepted: true,
+    };
+    assert_eq!(hex(&accepted.encode_to_vec()), "08071001");
+    let old_store = SaveLoopCheckpointResponse::decode(unhex("0807").as_slice()).expect("decode");
+    assert_eq!(old_store.seq, 7);
+    assert!(!old_store.park_accepted, "an absent field reads as not accepted");
+    // A save that was not a park accepted nothing: false is not on the wire.
+    let plain = SaveLoopCheckpointResponse {
+        seq: 7,
+        park_accepted: false,
+    };
+    assert_eq!(hex(&plain.encode_to_vec()), "0807");
+}
+
+// ---- RunAgentRequest.run_context (field 18, build plan WS02 S4) ----
+
+/// A run that carries instructions, a memory block and a status. Pinned so the
+/// field number and the nested numbers cannot drift unseen between the Rust
+/// writer and the Go readers.
+const RUN_CONTEXT_WIRE_HEX: &str = "0a0272319201160a0942652062726965662e1a016d22060a0408011001";
+
+fn run_with_context() -> mp_contracts::model_plane::v1::RunAgentRequest {
+    use mp_contracts::model_plane::v1::{
+        RunAgentRequest, RunContext, RunContextPart, RunContextState, RunContextStatus,
+    };
+    RunAgentRequest {
+        run_id: "r1".to_owned(),
+        run_context: Some(RunContext {
+            authored_instructions: "Be brief.".to_owned(),
+            memory_block: "m".to_owned(),
+            status: Some(RunContextStatus {
+                instructions: Some(RunContextPart {
+                    state: RunContextState::Included as i32,
+                    included: 1,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_run_context_encodes_to_the_golden_bytes() {
+    assert_eq!(hex(&run_with_context().encode_to_vec()), RUN_CONTEXT_WIRE_HEX);
+}
+
+#[test]
+fn the_run_context_golden_bytes_decode_and_an_absent_context_stays_absent() {
+    use mp_contracts::model_plane::v1::RunAgentRequest;
+    let decoded = RunAgentRequest::decode(unhex(RUN_CONTEXT_WIRE_HEX).as_slice()).expect("decode");
+    let context = decoded.run_context.expect("field 18 present");
+    assert_eq!(context.authored_instructions, "Be brief.");
+    assert_eq!(context.memory_block, "m");
+    assert_eq!(context.status.expect("status").instructions.expect("part").included, 1);
+    // A request written before the field existed has no context (today's behaviour).
+    let before = RunAgentRequest { run_id: "r1".to_owned(), ..Default::default() };
+    let decoded = RunAgentRequest::decode(before.encode_to_vec().as_slice()).expect("decode");
+    assert!(decoded.run_context.is_none());
+}
+
+// ---- RunAgentResponse.usage (field 9, build plan WS02 S3) ----
+
+/// A completed run after three rounds: tokens with both cache legs, the serving
+/// provider and the model. Pinned so field 9 and the nested numbers cannot drift
+/// unseen between the Rust writer and the Go readers; the same bytes are pinned in
+/// the Go test of the same name.
+const USAGE_WIRE_HEX: &str = "0a09636f6d706c6574656418034a2b08b00910d40218a006206428033209616e7468726f7069633a11636c617564652d736f6e6e65742d352d35";
+/// A run that spent nothing: the message is present and empty (`4a00`), which is
+/// not the same fact as no message at all.
+const ZERO_USAGE_WIRE_HEX: &str = "0a09636f6d706c6574656418034a00";
+
+fn with_usage(usage: Option<mp_contracts::model_plane::v1::RunUsage>) -> RunAgentResponse {
+    RunAgentResponse {
+        status: "completed".to_owned(),
+        rounds_executed: 3,
+        usage,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_run_usage_encodes_to_the_golden_bytes() {
+    use mp_contracts::model_plane::v1::RunUsage;
+    let spent = with_usage(Some(RunUsage {
+        input_tokens: 1200,
+        output_tokens: 340,
+        cache_read_input_tokens: 800,
+        cache_creation_input_tokens: 100,
+        inference_rounds: 3,
+        provider_used: "anthropic".to_owned(),
+        model_used: "claude-sonnet-5-5".to_owned(),
+        // No legs adds no bytes: the bytes of a run without them are unchanged.
+        legs: Vec::new(),
+    }));
+    assert_eq!(hex(&spent.encode_to_vec()), USAGE_WIRE_HEX);
+    // Field 9, wire type 2: key byte 0x4a.
+    assert!(unhex(USAGE_WIRE_HEX).contains(&0x4a));
+}
+
+#[test]
+fn the_usage_golden_bytes_decode_and_zero_spend_is_not_absence() {
+    let decoded = RunAgentResponse::decode(unhex(USAGE_WIRE_HEX).as_slice()).expect("decode");
+    let usage = decoded.usage.expect("field 9 present");
+    assert_eq!((usage.input_tokens, usage.output_tokens), (1200, 340));
+    assert_eq!(
+        (usage.cache_read_input_tokens, usage.cache_creation_input_tokens),
+        (800, 100)
+    );
+    assert_eq!(usage.inference_rounds, 3);
+    assert_eq!(usage.provider_used, "anthropic");
+    assert_eq!(usage.model_used, "claude-sonnet-5-5");
+
+    let zero = RunAgentResponse::decode(unhex(ZERO_USAGE_WIRE_HEX).as_slice()).expect("decode");
+    assert_eq!(
+        zero.usage,
+        Some(mp_contracts::model_plane::v1::RunUsage::default()),
+        "a run that spent nothing reports so"
+    );
+    assert_eq!(
+        hex(&with_usage(Some(Default::default())).encode_to_vec()),
+        ZERO_USAGE_WIRE_HEX
+    );
+    // A response written before the field existed has no usage, so an older
+    // execution-core is never read as having spent nothing.
+    let before = RunAgentResponse::decode(with_usage(None).encode_to_vec().as_slice())
+        .expect("decode");
+    assert!(before.usage.is_none());
+}
+
+/// The same run with its spend split in two legs (`RunUsage.legs`, field 8, each a
+/// `RunUsageLeg`): provider, model, tokens, both cache legs and rounds. Pinned
+/// with the Go test of the same name, so the leg numbers cannot drift unseen.
+const USAGE_WITH_LEGS_WIRE_HEX: &str = "0a09636f6d706c6574656418034a7008b00910d40218a006206428033209616e7468726f7069633a11636c617564652d736f6e6e65742d352d35422b0a09616e7468726f7069631211636c617564652d736f6e6e65742d352d3518e80720ac0228a0063064380242160a066f70656e616912056770742d3518c80120283801";
+
+fn usage_with_two_legs() -> mp_contracts::model_plane::v1::RunUsage {
+    use mp_contracts::model_plane::v1::{RunUsage, RunUsageLeg};
+    RunUsage {
+        input_tokens: 1200,
+        output_tokens: 340,
+        cache_read_input_tokens: 800,
+        cache_creation_input_tokens: 100,
+        inference_rounds: 3,
+        provider_used: "anthropic".to_owned(),
+        model_used: "claude-sonnet-5-5".to_owned(),
+        legs: vec![
+            RunUsageLeg {
+                provider_used: "anthropic".to_owned(),
+                model_used: "claude-sonnet-5-5".to_owned(),
+                input_tokens: 1000,
+                output_tokens: 300,
+                cache_read_input_tokens: 800,
+                cache_creation_input_tokens: 100,
+                inference_rounds: 2,
+            },
+            RunUsageLeg {
+                provider_used: "openai".to_owned(),
+                model_used: "gpt-5".to_owned(),
+                input_tokens: 200,
+                output_tokens: 40,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                inference_rounds: 1,
+            },
+        ],
+    }
+}
+
+#[test]
+fn a_run_usage_with_legs_encodes_to_the_golden_bytes_and_decodes_back() {
+    let response = with_usage(Some(usage_with_two_legs()));
+    assert_eq!(hex(&response.encode_to_vec()), USAGE_WITH_LEGS_WIRE_HEX);
+
+    let decoded =
+        RunAgentResponse::decode(unhex(USAGE_WITH_LEGS_WIRE_HEX).as_slice()).expect("decode");
+    let usage = decoded.usage.expect("field 9 present");
+    assert_eq!(usage, usage_with_two_legs());
+    assert_eq!(usage.legs.len(), 2, "legs are repeated field 8, in order");
+    assert_eq!(usage.legs[1].model_used, "gpt-5");
+    assert_eq!(
+        usage.legs.iter().map(|leg| leg.input_tokens).sum::<u64>(),
+        usage.input_tokens,
+        "the legs sum to the totals"
+    );
+    // The legs-free golden still decodes, with none: an executor without legs.
+    let old = RunAgentResponse::decode(unhex(USAGE_WIRE_HEX).as_slice()).expect("decode");
+    assert!(old.usage.expect("usage").legs.is_empty());
+}
+
+// ---- RunAgentRequest.attachments (field 20, build plan WS08-S6) ----
+
+/// A run that carries one file: id `a`, name `a.csv`, three bytes `1,2`, kind file.
+/// Field 20 is a repeated message (key bytes `a201`); the nested numbers are those of
+/// `RunAttachment`, shared with `ExecuteStepRequest.attachments` (field 12).
+const RUN_ATTACHMENT_WIRE_HEX: &str =
+    "0a027231a201130a0161 1205612e637376 2003 3203312c32 3801";
+
+fn run_with_attachment() -> mp_contracts::model_plane::v1::RunAgentRequest {
+    use mp_contracts::model_plane::v1::{RunAgentRequest, RunAttachment, RunAttachmentKind};
+    RunAgentRequest {
+        run_id: "r1".to_owned(),
+        attachments: vec![RunAttachment {
+            id: "a".to_owned(),
+            name: "a.csv".to_owned(),
+            size_bytes: 3,
+            content: b"1,2".to_vec(),
+            kind: RunAttachmentKind::File as i32,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_run_attachment_encodes_to_the_golden_bytes() {
+    assert_eq!(
+        hex(&run_with_attachment().encode_to_vec()),
+        RUN_ATTACHMENT_WIRE_HEX.replace(' ', "")
+    );
+}
+
+#[test]
+fn the_attachment_golden_bytes_decode_and_an_absent_list_stays_empty() {
+    use mp_contracts::model_plane::v1::{RunAgentRequest, RunAttachmentKind};
+    let wire = RUN_ATTACHMENT_WIRE_HEX.replace(' ', "");
+    let decoded = RunAgentRequest::decode(unhex(&wire).as_slice()).expect("decode");
+    assert_eq!(decoded.attachments.len(), 1, "field 20 present");
+    let attachment = &decoded.attachments[0];
+    assert_eq!((attachment.id.as_str(), attachment.name.as_str()), ("a", "a.csv"));
+    assert_eq!(attachment.content, b"1,2");
+    assert_eq!(attachment.kind, RunAttachmentKind::File as i32);
+    // A request with none adds no bytes: it is what an executor that predates the field reads
+    // and writes, so an empty list is today's behaviour.
+    let before = RunAgentRequest { run_id: "r1".to_owned(), ..Default::default() };
+    assert_eq!(hex(&before.encode_to_vec()), "0a027231");
+    let decoded = RunAgentRequest::decode(before.encode_to_vec().as_slice()).expect("decode");
+    assert!(decoded.attachments.is_empty());
+}
+
+// ---- RunAgentRequest.reasoning_effort (field 21, build plan WS11 S8) ----
+
+/// A run at the High level. Field 21 is a varint enum: key `a801` (21 << 3, two bytes), then
+/// `ReasoningEffort::High` = 4. Unspecified is proto3's default and is not written, so a
+/// request that predates the field keeps its bytes.
+const RUN_REASONING_EFFORT_WIRE_HEX: &str = "a80104";
+
+#[test]
+fn a_run_reasoning_effort_encodes_to_the_golden_bytes() {
+    use mp_contracts::model_plane::v1::{ReasoningEffort, RunAgentRequest};
+    let run = RunAgentRequest {
+        reasoning_effort: ReasoningEffort::High as i32,
+        ..Default::default()
+    };
+    assert_eq!(hex(&run.encode_to_vec()), RUN_REASONING_EFFORT_WIRE_HEX);
+}
+
+#[test]
+fn the_reasoning_effort_golden_bytes_decode_and_an_absent_level_stays_unspecified() {
+    use mp_contracts::model_plane::v1::{ReasoningEffort, RunAgentRequest};
+    let decoded =
+        RunAgentRequest::decode(unhex(RUN_REASONING_EFFORT_WIRE_HEX).as_slice()).expect("decode");
+    assert_eq!(decoded.reasoning_effort, ReasoningEffort::High as i32, "field 21 present");
+    // A request without the field adds no bytes: it is what an executor that predates the field
+    // reads and writes, so the default level is today's behaviour.
+    let before = RunAgentRequest { run_id: "r1".to_owned(), ..Default::default() };
+    assert_eq!(hex(&before.encode_to_vec()), "0a027231");
+    let decoded = RunAgentRequest::decode(before.encode_to_vec().as_slice()).expect("decode");
+    assert_eq!(decoded.reasoning_effort, ReasoningEffort::Unspecified as i32);
+}

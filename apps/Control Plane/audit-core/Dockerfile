@@ -29,7 +29,10 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /audit-core ./cmd/server && \
     CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /nats-provisioner ./cmd/nats-provisioner && \
     CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /control-event-bridge ./cmd/control-event-bridge && \
-    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /nats-consumer-migrate ./cmd/nats-consumer-migrate
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /nats-consumer-migrate ./cmd/nats-consumer-migrate && \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /nats-namespace-migrate ./cmd/nats-namespace-migrate && \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /audit-verify ./cmd/audit-verify && \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /siem-exporter ./cmd/siem-exporter
 
 FROM alpine:3.22
 ARG SOURCE_REVISION=unverified
@@ -43,6 +46,9 @@ COPY --chown=appuser:appgroup --from=builder /audit-core /usr/local/bin/audit-co
 COPY --chown=appuser:appgroup --from=builder /nats-provisioner /usr/local/bin/nats-provisioner
 COPY --chown=appuser:appgroup --from=builder /control-event-bridge /usr/local/bin/control-event-bridge
 COPY --chown=appuser:appgroup --from=builder /nats-consumer-migrate /usr/local/bin/nats-consumer-migrate
+COPY --chown=appuser:appgroup --from=builder /nats-namespace-migrate /usr/local/bin/nats-namespace-migrate
+COPY --chown=appuser:appgroup --from=builder /audit-verify /usr/local/bin/audit-verify
+COPY --chown=appuser:appgroup --from=builder /siem-exporter /usr/local/bin/siem-exporter
 EXPOSE 8187 9091
 USER appuser
 ENTRYPOINT ["audit-core"]

@@ -17,6 +17,10 @@ const mockResolveCanonicalTokenContext = jest.fn();
 jest.mock('./plane-token-membership', () => ({
   resolveCanonicalTokenContext: mockResolveCanonicalTokenContext,
 }));
+const mockReadFreshStepUp = jest.fn();
+jest.mock('./step-up.controller', () => ({
+  readFreshStepUp: mockReadFreshStepUp,
+}));
 const mockResolveInteractiveRetentionPosture = jest.fn();
 // Only the interactive posture is replaced; the organization-binding check stays
 // the real one (these registries are `allowAnyOrg`, which it lets through
@@ -49,6 +53,7 @@ describe('ModelPlaneTokenController secure ZDR issuance', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    mockReadFreshStepUp.mockResolvedValue(undefined);
     // Default: normal retention, as if org-core resolved a brand-new/
     // non-ZDR org. Individual tests override when they need to exercise the
     // zdr:true or org-core-outage paths.
@@ -69,6 +74,43 @@ describe('ModelPlaneTokenController secure ZDR issuance', () => {
     } else {
       process.env.PLANE_SERVICE_PRINCIPALS_FILE = originalRegistryFile;
     }
+  });
+
+  it('carries a recent step-up proof into the minted token only while the session still has one', async () => {
+    mockGetSession.mockResolvedValue({
+      user: { id: 'user-a', email: 'user-a@example.test' },
+      session: { id: 'session-a', activeOrganizationId: 'org-a' },
+    });
+    mockResolveCanonicalTokenContext.mockResolvedValue({
+      orgId: 'org-a',
+      role: 'member',
+    });
+    const tokenService = {
+      issueModelPlaneToken: jest.fn().mockReturnValue({ token: 'stepped-up' }),
+    };
+    const controller = new ModelPlaneTokenController(
+      tokenService as never,
+      availableAudit() as never,
+    );
+    const request = { headers: { cookie: 'session=test' } } as never;
+
+    mockReadFreshStepUp.mockResolvedValueOnce({
+      at: 1_800_000_000,
+      method: 'password',
+    });
+    await controller.getToken(request);
+    expect(mockReadFreshStepUp).toHaveBeenLastCalledWith('session-a');
+    expect(tokenService.issueModelPlaneToken).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        stepUp: { at: 1_800_000_000, method: 'password' },
+      }),
+    );
+
+    await controller.getToken(request);
+    const [claims] = tokenService.issueModelPlaneToken.mock.calls.at(-1) as [
+      Record<string, unknown>,
+    ];
+    expect(claims).not.toHaveProperty('stepUp');
   });
 
   it('resolves the org interactive retention posture via org-core and stamps it into the minted user token', async () => {

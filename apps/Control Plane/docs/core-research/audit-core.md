@@ -14,7 +14,7 @@ The final release render removes Audit's developer `env_file`, disables token fa
 ## 2026-07-15 Control-shared GDPR topology detail (superseded by final addendum above)
 
 The deployment-only provisioner now includes the GDPR request, Documents DLQ,
-and ownership receipt subjects in `AQENCIA_CONTROLPLANE` and converges the fixed
+and ownership receipt subjects in `CONTROLPLANE` and converges the fixed
 `documents-api-gdpr-erasure-v1` explicit-ACK consumer (`MaxDeliver=20`). The
 broker config grants User Core only the request subject and grants Documents API
 only consumer-info/ACK for that durable, its private inbox/delivery subject, the

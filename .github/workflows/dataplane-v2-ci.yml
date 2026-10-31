@@ -321,6 +321,11 @@ jobs:
         run: bash tests/scripts/contextual-retrieval-config-contract-test.sh
       - name: Prove the contract can fail
         run: bash tests/scripts/contextual-retrieval-config-contract-test.sh --self-test
+      # CR-T15: RERANK_INPUT_INCLUDE_CONTEXT is one default in compose, .env.example and the code, and the
+      # retrieval-quality harness reads the same name. The Rust side (the join, the request body, the cache key) runs in the
+      # workspace test step above.
+      - name: Rerank input switch defaults to off and the harness reads the same name
+        run: bash tests/scripts/rerank-input-contract-test.sh
 
   # CR-T9b: the background LLM budget is read by two services (embedding-engine and graph-index)
   # from the same four variables and measured as one figure. Both compose blocks, .env.example and
@@ -355,6 +360,26 @@ jobs:
         run: bash scripts/check-eval-contract.sh --self-test
       - name: Shell contract (study, variant cell, evidence, records, nightly switches) against a stand-in for docker
         run: bash tests/scripts/eval-harness-contract-test.sh
+
+  # QB-T08: Quarry option B (POST /v1/rerank) is dark by default, and its contract is one. The compose
+  # defaults equal the code defaults, the OpenAPI, the runbook and the status record agree, the matrix
+  # encodes the service rows and their statuses, the isolated stack's quarry-edge row equals the committed
+  # row, and the read-only pre-flight cannot issue a mutating command.
+  web-rerank-contract:
+    name: web rerank is dark by default and its contract holds (compose, OpenAPI, runbook, matrix, registry)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Compose, code defaults, OpenAPI, runbook and pre-flight agree
+        run: bash tests/scripts/web-rerank-compose-contract-test.sh
+      - name: Prove the contract can fail
+        run: bash tests/scripts/web-rerank-compose-contract-test.sh --self-test
+      - name: Matrix rows encode their expected statuses, and the isolated quarry-edge row is the committed row
+        run: |
+          bash tests/scripts/auth-regression-matrix-test.sh
+          bash tests/scripts/isolated-registry-parity-test.sh
+      - name: The read-only pre-flight issues no mutating command and echoes no credential
+        run: bash scripts/qb-preflight.sh --self-test
 
   docker-smoke:
     name: Docker Compose Smoke Test

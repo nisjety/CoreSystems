@@ -238,6 +238,50 @@ describe('streamFailurePresentation for ChatGPT-subscription refusals', () => {
       .toBe('Do is not switched on for the ChatGPT subscription. Choose Ask, or pick another model to use Do. No model was used.')
   })
 
+  it('says the approved plan\'s authority is gone, in both languages, with no retry and never the server text', () => {
+    // What model-gateway sends when no live grant is held for the thread: a
+    // restart, the 24 h lapse, or a thread it never granted.
+    const operatorEnglish = 'No live plan grant is held for this thread (plan_grant_unavailable); nothing was run.'
+    const shown = streamFailurePresentation('plan_grant_unavailable', operatorEnglish, norwegian, utc)
+    expect(shown).toEqual({
+      message: 'Fullmakten er ikke lenger aktiv (utløpt eller tjenesten ble startet på nytt). Velg Utfør, be agenten lage planen på nytt, og godkjenn den. Ingenting ble kjørt.',
+      unsaved: true,
+      unavailable: false,
+      action: 'none',
+    })
+    expect(shown.message).not.toContain('plan grant')
+    const inEnglish = streamFailurePresentation('plan_grant_unavailable', operatorEnglish, english, utc)
+    expect(inEnglish).toEqual({
+      message: 'The authority is no longer active (it expired or the service restarted). Choose Do, ask the agent to make the plan again, and approve it. Nothing was run.',
+      unsaved: true,
+      unavailable: false,
+      action: 'none',
+    })
+    expect(inEnglish.message).not.toContain('plan grant')
+    // The wording does not depend on what the server wrote.
+    expect(streamFailurePresentation('plan_grant_unavailable', '', english, utc).message).toBe(inEnglish.message)
+  })
+
+  it('says running an approved plan is switched off on this deployment, in both languages, with no retry and never the server text', () => {
+    const operatorEnglish = 'Plan execution is disabled (PLAN_EXECUTE_ENABLED is off).'
+    const shown = streamFailurePresentation('plan_execute_disabled', operatorEnglish, norwegian, utc)
+    expect(shown).toEqual({
+      message: 'Kjøring av godkjent plan er slått av i denne installasjonen. Ingenting ble kjørt.',
+      unsaved: true,
+      unavailable: false,
+      action: 'none',
+    })
+    expect(shown.message).not.toContain('PLAN_EXECUTE')
+    const inEnglish = streamFailurePresentation('plan_execute_disabled', operatorEnglish, english, utc)
+    expect(inEnglish).toEqual({
+      message: 'Running an approved plan is switched off on this deployment. Nothing was run.',
+      unsaved: true,
+      unavailable: false,
+      action: 'none',
+    })
+    expect(inEnglish.message).not.toContain('PLAN_EXECUTE')
+  })
+
   it('translates a conversation that is too long, and offers no retry of the same turn', () => {
     const operatorEnglish = 'This conversation is too long for the selected model, even after compacting it. Start a new thread, or choose a model with a larger context window.'
     expect(streamFailurePresentation('prompt_too_long', operatorEnglish, norwegian, utc)).toEqual({

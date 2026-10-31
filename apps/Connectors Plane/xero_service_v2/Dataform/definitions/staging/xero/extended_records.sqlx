@@ -1,0 +1,6 @@
+config {
+  type: "declaration",
+  schema: "dw_staging_xero",
+  name: "extended_records",
+  description: "Lossless current records and dated snapshots from Xero Assets, Projects, Bank Feeds, Identity and Finance. Populated by etl/xero/extended.py. Grain: tenant_id, endpoint, record_id."
+}

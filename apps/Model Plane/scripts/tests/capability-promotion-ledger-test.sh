@@ -12,14 +12,16 @@ trap 'rm -rf "$TMP_DIR"' EXIT
   exit 1
 }
 
-header="$(head -n 1 "$LEDGER")"
+# The ledger is checked out with CRLF on Windows (no eol attribute). Strip CR so the
+# header and the ID columns compare the same way on every checkout.
+header="$(head -n 1 "$LEDGER" | tr -d '\r')"
 expected_header=$'capability_id\tstate\tsource_revision\tcandidate_ref\tlive_evidence_ref\trollback_ref\texpires_at\treviewer\tnotes'
 [[ "$header" == "$expected_header" ]] || {
   echo "capability promotion ledger header drifted" >&2
   exit 1
 }
 
-awk -F '\t' '
+tr -d '\r' < "$LEDGER" | awk -F '\t' '
   NR == 1 { next }
   NF != 9 { printf "invalid ledger column count at line %d\n", NR; exit 1 }
   $1 !~ /^cap\.[a-z0-9_.-]+$/ { printf "invalid capability id at line %d\n", NR; exit 1 }
@@ -29,7 +31,7 @@ awk -F '\t' '
   ($2 == "live_proven" || $2 == "allowlisted") && ($4 == "-" || $5 == "-" || $7 == "-") { printf "live row has incomplete evidence at line %d\n", NR; exit 1 }
   $2 == "allowlisted" && $6 == "-" { printf "allowlisted row has no rollback evidence at line %d\n", NR; exit 1 }
   { print $1 }
-' "$LEDGER" | sort >"$TMP_DIR/ledger.ids"
+' | sort >"$TMP_DIR/ledger.ids"
 
 rg -o "'cap\.[A-Za-z0-9_.-]+" "$MIGRATIONS" --glob '*.sql' |
   awk -F: '{ print $NF }' | tr -d "'" | sort -u >"$TMP_DIR/migration.ids"

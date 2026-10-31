@@ -418,6 +418,9 @@ const PENDING_FEATURES: &[&str] = &[
     // agent attachment to a person's live run is refused for a ZDR run (WS8.F).
     "job_error_urls",
     "agent_attach",
+    // INNH-8: `/v1/answer` and `/v1/answer/stream` are refused under ZDR (ADR-4), because the Model
+    // Plane hop carries no ZDR posture. The catalogue has no key for answer synthesis.
+    "answer_synthesis",
 ];
 
 fn refusals_named_by_the_matrix() -> (BTreeSet<&'static str>, BTreeSet<&'static str>) {

@@ -315,6 +315,7 @@ func authContextMiddleware() gin.HandlerFunc {
 				return
 			}
 			c.Set("user_id", delegation.UserID)
+			c.Set("org_id", delegation.OrgID)
 			c.Set("user_email", delegation.Email)
 			c.Set("user_name", delegation.Name)
 			c.Set("service_principal", credential.Principal)

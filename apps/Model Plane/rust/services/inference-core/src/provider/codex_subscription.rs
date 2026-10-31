@@ -13,10 +13,11 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
-use tracing::warn;
+use tracing::{info, warn};
 
 use chrono::{DateTime, Utc};
 
+use super::effort::{self, Family, Level, Resolved};
 use super::{
     ChatMessage, InferChunk, InferRequest, InferResponse, ModelFamily, ModelInfo, PrivacyTier,
     ProviderCapabilities, ProviderError, ProviderRouter, ProviderTiming, Residency,
@@ -130,6 +131,18 @@ impl CodexSubscriptionProvider {
             )));
         }
         let (messages, output_schema) = super::codex_subscription_tools::prepare(req)?;
+        let resolved = codex_resolved_effort(req);
+        if let Some(resolved) = resolved {
+            info!(
+                request_id = %req.request_id,
+                model = %req.model,
+                wire = ?resolved.wire,
+                requested = resolved.requested.as_str(),
+                applied = resolved.applied.as_str(),
+                clamped = resolved.clamped(),
+                "effort_resolved"
+            );
+        }
         Ok(BrokerRequest {
             organization_id: &req.org_id,
             user_id: &req.user_id,
@@ -139,8 +152,8 @@ impl CodexSubscriptionProvider {
             messages,
             output_schema,
             max_tokens: req.max_tokens,
-            reasoning_effort: codex_reasoning_effort(req.thinking_budget_tokens),
-            service_tier: codex_service_tier(&req.model, req.thinking_budget_tokens, req.prefer_priority_service_tier),
+            reasoning_effort: codex_reasoning_effort(resolved),
+            service_tier: codex_service_tier(&req.model, resolved, req.prefer_priority_service_tier),
         })
     }
 
@@ -149,22 +162,47 @@ impl CodexSubscriptionProvider {
     }
 }
 
-/// Codex models otherwise choose their own default reasoning effort (medium
-/// for most subscription models). Normal and quick chat should favor latency;
-/// only the gateway's explicit deep profile asks Codex for heavier reasoning.
-fn codex_reasoning_effort(thinking_budget_tokens: i32) -> &'static str {
-    if thinking_budget_tokens > 1_024 {
-        "high"
-    } else {
-        "low"
-    }
+/// The level this request asks for: the ladder level when the caller set one,
+/// else the legacy thinking budget. The broker takes only low and high, so a
+/// budget above the quick budget has always meant high; the ladder's medium
+/// step is not used for it, which keeps every legacy budget on the value it
+/// had before.
+fn codex_requested_level(req: &InferRequest) -> Option<Level> {
+    req.reasoning_effort
+        .or_else(|| match effort::from_legacy_budget(req.thinking_budget_tokens) {
+            Some(Level::Low) => Some(Level::Low),
+            Some(_) => Some(Level::High),
+            None => None,
+        })
 }
 
-/// Quick opts into priority through its profile. A source reviewer may also
-/// request priority explicitly while retaining high reasoning effort. Both
-/// paths stay on the same subscription connection and allowed model.
-fn codex_service_tier(model: &str, thinking_budget_tokens: i32, prefer_priority: bool) -> Option<&'static str> {
-    if thinking_budget_tokens != 1_024 && !prefer_priority {
+/// The requested level clamped into what the broker accepts (low or high).
+fn codex_resolved_effort(req: &InferRequest) -> Option<Resolved> {
+    effort::resolve(
+        codex_requested_level(req),
+        effort::support(Family::Codex, &req.model),
+    )
+}
+
+/// Codex models otherwise choose their own default reasoning effort (medium
+/// for most subscription models). Normal and quick chat should favor latency;
+/// only a request for heavier reasoning asks Codex for high.
+fn codex_reasoning_effort(resolved: Option<Resolved>) -> &'static str {
+    resolved.map_or("low", |resolved| resolved.applied.as_str())
+}
+
+/// Quick opts into priority through its profile, which resolves to low. A
+/// request that asked for no effort stays low without priority. A source
+/// reviewer may also request priority explicitly while retaining high
+/// reasoning effort. Both paths stay on the same subscription connection and
+/// allowed model.
+fn codex_service_tier(
+    model: &str,
+    resolved: Option<Resolved>,
+    prefer_priority: bool,
+) -> Option<&'static str> {
+    let quick = resolved.is_some_and(|resolved| resolved.applied == Level::Low);
+    if !quick && !prefer_priority {
         return None;
     }
     match model {
@@ -887,6 +925,7 @@ impl CodexSubscriptionProvider {
                 cheap: false,
                 privacy_tier: PrivacyTier::classify(&caps),
                 residency_label: caps.residency.as_str().to_owned(),
+                effort_levels: Vec::new(),
             })
             .collect()
     }
@@ -1002,19 +1041,114 @@ mod tests {
 
     #[test]
     fn maps_gateway_effort_to_codex_reasoning_effort() {
-        assert_eq!(codex_reasoning_effort(0), "low");
-        assert_eq!(codex_reasoning_effort(1_024), "low");
-        assert_eq!(codex_reasoning_effort(4_096), "high");
+        assert_eq!(codex_reasoning_effort(resolved_for_budget("gpt-6-astra", 0)), "low");
+        assert_eq!(codex_reasoning_effort(resolved_for_budget("gpt-6-astra", 1_024)), "low");
+        assert_eq!(codex_reasoning_effort(resolved_for_budget("gpt-6-astra", 4_096)), "high");
+    }
+
+    fn effort_request(model: &str) -> InferRequest {
+        InferRequest {
+            model: model.to_owned(),
+            ..InferRequest::default()
+        }
+    }
+
+    fn resolved_for_budget(model: &str, thinking_budget_tokens: i32) -> Option<Resolved> {
+        codex_resolved_effort(&InferRequest {
+            thinking_budget_tokens,
+            ..effort_request(model)
+        })
+    }
+
+    fn resolved_for_level(model: &str, level: Level) -> Option<Resolved> {
+        codex_resolved_effort(&InferRequest {
+            reasoning_effort: Some(level),
+            ..effort_request(model)
+        })
+    }
+
+    #[test]
+    fn every_level_clamps_into_low_or_high() {
+        // Read the ladder through effort::support, as production does, so the
+        // expectations hold with INFERENCE_CORE_CODEX_WIDE_EFFORT on or off.
+        // effort.rs wide_codex_clamp_keeps_medium_and_xhigh pins the wide ladder.
+        let wide = effort::support(Family::Codex, "gpt-6-astra")
+            .levels
+            .contains(&Level::XHigh);
+        let expected = [
+            (Level::Minimal, "low", true),
+            (Level::Low, "low", false),
+            (Level::Medium, if wide { "medium" } else { "low" }, !wide),
+            (Level::High, "high", false),
+            (Level::XHigh, if wide { "xhigh" } else { "high" }, !wide),
+            (Level::Max, if wide { "xhigh" } else { "high" }, true),
+        ];
+        for (level, wire, clamped) in expected {
+            let resolved = resolved_for_level("gpt-6-astra", level);
+            assert_eq!(codex_reasoning_effort(resolved), wire, "{level:?}");
+            assert_eq!(resolved.expect("resolved").wire, effort::Wire::CodexEffort);
+            assert_eq!(resolved.expect("resolved").clamped(), clamped, "{level:?}");
+        }
+    }
+
+    #[test]
+    fn legacy_budgets_map_identically() {
+        // The wire value and the tier each budget produced before the ladder.
+        let legacy = [
+            (0, "low", None),
+            (1_024, "low", Some("priority")),
+            (2_048, "high", None),
+            (4_096, "high", None),
+        ];
+        for (budget, wire, tier) in legacy {
+            let resolved = resolved_for_budget("gpt-6-astra", budget);
+            assert_eq!(codex_reasoning_effort(resolved), wire, "budget {budget}");
+            assert_eq!(
+                codex_service_tier("gpt-6-astra", resolved, false),
+                tier,
+                "budget {budget}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_level_wins_over_the_legacy_budget() {
+        let resolved = codex_resolved_effort(&InferRequest {
+            reasoning_effort: Some(Level::Low),
+            thinking_budget_tokens: 4_096,
+            ..effort_request("gpt-6-astra")
+        });
+        assert_eq!(codex_reasoning_effort(resolved), "low");
+    }
+
+    #[test]
+    fn quick_keeps_priority_tier_only_on_the_five_models() {
+        for model in ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"] {
+            let quick = resolved_for_level(model, Level::Low);
+            assert_eq!(codex_service_tier(model, quick, false), Some("priority"), "{model}");
+        }
+        let quick = resolved_for_level("gpt-5.3-codex-spark", Level::Low);
+        assert_eq!(codex_service_tier("gpt-5.3-codex-spark", quick, false), None);
+    }
+
+    #[test]
+    fn standard_is_low_without_priority() {
+        let standard = resolved_for_budget("gpt-6-astra", 0);
+        assert!(standard.is_none());
+        assert_eq!(codex_reasoning_effort(standard), "low");
+        assert_eq!(codex_service_tier("gpt-6-astra", standard, false), None);
     }
 
     #[test]
     fn enables_priority_only_when_requested_on_compatible_models() {
-        assert_eq!(codex_service_tier("gpt-6-astra", 1_024, false), Some("priority"));
-        assert_eq!(codex_service_tier("gpt-5.6-luna", 1_024, false), Some("priority"));
-        assert_eq!(codex_service_tier("gpt-5.6-terra", 4_096, true), Some("priority"));
-        assert_eq!(codex_service_tier("gpt-6-astra", 0, false), None);
-        assert_eq!(codex_service_tier("gpt-6-astra", 4_096, false), None);
-        assert_eq!(codex_service_tier("gpt-5.3-codex-spark", 1_024, true), None);
+        let quick = resolved_for_level("gpt-6-astra", Level::Low);
+        let deep = resolved_for_level("gpt-5.6-terra", Level::High);
+        assert_eq!(codex_service_tier("gpt-6-astra", quick, false), Some("priority"));
+        assert_eq!(codex_service_tier("gpt-5.6-luna", quick, false), Some("priority"));
+        assert_eq!(codex_service_tier("gpt-5.6-terra", deep, true), Some("priority"));
+        assert_eq!(codex_service_tier("gpt-6-astra", None, false), None);
+        assert_eq!(codex_service_tier("gpt-6-astra", deep, false), None);
+        assert_eq!(codex_service_tier("gpt-5.3-codex-spark", quick, true), None);
     }
 
     #[test]

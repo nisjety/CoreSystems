@@ -86,11 +86,15 @@ type Decision struct {
 	DeletionScope             string   `json:"deletion_scope"`
 	// ImportSourceType is present only for the import action family. It binds a
 	// durable connector intent without turning Control into a connector owner.
-	ImportSourceType  string    `json:"import_source_type,omitempty"`
-	ZeroDataRetention bool      `json:"zero_data_retention"`
-	IssuedAt          time.Time `json:"issued_at"`
-	ExpiresAt         time.Time `json:"expires_at"`
-	Nonce             string    `json:"nonce"`
+	ImportSourceType string `json:"import_source_type,omitempty"`
+	// ContractDigest and ContractExpiresAt bind a scheduled step to its stored
+	// consent contract. Both are omitted on every decision issued without one.
+	ContractDigest    string     `json:"contract_digest,omitempty"`
+	ContractExpiresAt *time.Time `json:"contract_expires_at,omitempty"`
+	ZeroDataRetention bool       `json:"zero_data_retention"`
+	IssuedAt          time.Time  `json:"issued_at"`
+	ExpiresAt         time.Time  `json:"expires_at"`
+	Nonce             string     `json:"nonce"`
 }
 
 type DecisionExpectation struct {

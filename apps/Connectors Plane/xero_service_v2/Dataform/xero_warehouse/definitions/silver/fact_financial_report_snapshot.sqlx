@@ -1,0 +1,14 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Historical Xero financial-report snapshots at tenant, report run, and report type grain.",
+  assertions: { nonNull: ["tenant_id", "report_snapshot_id", "report_snapshot_key"], uniqueKey: ["report_snapshot_key"] }
+}
+
+SELECT CONCAT(tenant_id, '|', record_id) AS report_snapshot_key,
+       tenant_id, record_id AS report_snapshot_id, report, report_id,
+       report_type, report_name, report_titles, report_date,
+       report_from, report_to, run_id, contact_id, report_params,
+       report_parameter_hash, report_updated_utc,
+       first_seen_at, synced_at
+FROM ${ref("dw_bronze_xero", "xero_report_snapshots")}

@@ -583,6 +583,8 @@ export function authorizePlaneServiceTokenExchange(
     requestedScopes.length === 0 ||
     !allowedScopes ||
     requestedScopes.some((scope) => !allowedScopes.includes(scope)) ||
+    // An exchange never mints a write; writes mint on the attested internal-token path.
+    requestedScopes.some((scope) => scope.endsWith(':write')) ||
     reason.length < 3 ||
     reason.length > 500
   ) {

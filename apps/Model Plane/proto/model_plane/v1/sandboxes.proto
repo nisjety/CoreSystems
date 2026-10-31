@@ -88,6 +88,24 @@ service SandboxManager {
 
   // Health check.
   rpc Health(SandboxHealthRequest) returns (SandboxHealthResponse);
+
+  // --- WS22-S1 per-thread workspace (DEC-23) ---
+  //
+  // Files that outlive a single run, owned by one user's thread lease. Every
+  // one of these is gated by SANDBOX_MANAGER_THREAD_WORKSPACE and is a case in
+  // internal/authz/authz.go's method switch in the same commit, for the reason
+  // recorded above ActivateLease.
+
+  // Read every file a thread's lease can see, with the current revision.
+  rpc GetThreadWorkspace(GetThreadWorkspaceRequest) returns (GetThreadWorkspaceResponse);
+
+  // Apply per-path changes and deletes, each compare-and-swapped on its
+  // base_hash. A conflicting path is reported and never overwritten.
+  rpc ApplyThreadWorkspaceChanges(ApplyThreadWorkspaceChangesRequest) returns (ApplyThreadWorkspaceChangesResponse);
+
+  // Erase a thread's rows and its object-store prefix. Declared here, implemented
+  // with the retention sweeper (WS22-S5); until then it refuses every caller.
+  rpc DeleteThreadWorkspace(DeleteThreadWorkspaceRequest) returns (DeleteThreadWorkspaceResponse);
 }
 
 // Lifecycle of one sandbox lease. SCRATCH is the only state in which no
@@ -129,6 +147,10 @@ message AcquireLeaseRequest {
   // Backup, Egress, CredentialMode). Carried alongside the signature so
   // the verifier can recompute and compare the digest.
   string capability_claims_json = 7;
+
+  // Set by a ZDR org. A thread-scoped lease is refused outright under ZDR:
+  // nothing is hydrated, uploaded or written for it (WS22-S1, DEC-23 D8).
+  bool zdr = 8;
 }
 
 message AcquireLeaseResponse {
@@ -654,4 +676,95 @@ message ReadProcessOutputResponse {
   string end_reason = 7;
   // Whether more chunks follow this page.
   bool has_more = 8;
+}
+
+// --- WS22-S1 per-thread workspace (DEC-23) ---
+
+// One file in a thread's workspace.
+message ThreadWorkspaceEntry {
+  // Path relative to the workspace root.
+  string path = 1;
+
+  // "sha256:<hex>" CAS key of this path's current content.
+  string content_hash = 2;
+
+  // Size of the current content, in bytes.
+  int64 size_bytes = 3;
+}
+
+// Read a thread's workspace through its lease.
+message GetThreadWorkspaceRequest {
+  // Thread lease whose workspace to read.
+  string lease_id = 1;
+
+  // Caller's asserted backend id; must match the lease's pinned backend.
+  string backend_id = 2;
+}
+
+// The thread's files at one revision.
+message GetThreadWorkspaceResponse {
+  // Every file the thread holds, ordered by path.
+  repeated ThreadWorkspaceEntry entries = 1;
+
+  // Advanced by every apply that changed at least one file.
+  int64 revision = 2;
+}
+
+// A path the caller removed, with the hash it believed the path had.
+message ThreadDeletedPath {
+  // Path relative to the workspace root.
+  string path = 1;
+
+  // The content hash the caller last saw here. Empty means the caller believed
+  // the path did not exist, so the delete is a conflict if it does.
+  string base_hash = 2;
+}
+
+// Apply a batch of thread workspace changes through the lease.
+message ApplyThreadWorkspaceChangesRequest {
+  // Thread lease to write through.
+  string lease_id = 1;
+
+  // Caller's asserted backend id; must match the lease's pinned backend.
+  string backend_id = 2;
+
+  // Files created or rewritten. Each base_hash is what the caller last saw.
+  repeated WorkspaceChangedFile changes = 3;
+
+  // Files removed.
+  repeated ThreadDeletedPath deleted = 4;
+}
+
+// The outcome of one batch.
+message ApplyThreadWorkspaceChangesResponse {
+  // Paths whose current content no longer matches the caller's base_hash.
+  // Never overwritten; every other path in the same batch still applies.
+  repeated string conflicting_paths = 1;
+
+  // Revision after the batch.
+  int64 revision = 2;
+
+  // Files held after the batch.
+  int64 file_count = 3;
+
+  // Bytes held after the batch.
+  int64 total_bytes = 4;
+}
+
+// Erase one thread's workspace.
+message DeleteThreadWorkspaceRequest {
+  // Thread whose workspace to erase.
+  string thread_id = 1;
+
+  // Organization that owns the thread.
+  string org_id = 2;
+}
+
+// What the erase removed.
+message DeleteThreadWorkspaceResponse {
+  // Rows removed.
+  int64 files_deleted = 1;
+
+  // Object-store prefix whose blobs were removed.
+  string object_prefix = 2;
 }

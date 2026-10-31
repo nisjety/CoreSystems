@@ -1,0 +1,8 @@
+{
+  "schema": "relevance-calibration-v1",
+  "score_kind": "cross_encoder.v1",
+  "state": "unfitted",
+  "knots": null,
+  "fitted_from": null,
+  "note": "UNFITTED. The knots come from the QB-T14 judged web-result run: labels (G-OPS-LABEL) and three repeated live /v1/rerank runs, written to apps/Ingestion Plane/Quarry-v2/lab/evals/web-rerank-baseline.json under calibration. Until a fitted table is committed here, VEREVON_RELEVANCE_CROSS_ENCODER_SCORES is refused at boot and Quarry is not asked for cross-encoder scores."
+}

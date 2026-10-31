@@ -1,4 +1,5 @@
 import { ApiError } from '@/shared/api/http'
+import { approvalFallbackLine, approvalReason } from '@/shared/approvals/approval-copy'
 import {
   cancelRun,
   decideApproval,
@@ -51,24 +52,16 @@ export function pendingApprovals(approvals: readonly Approval[]): Approval[] {
 /**
  * One readable line for what is being asked, without inventing detail.
  *
- * Model Plane fills `detail` for some approval kinds and not others; when it
- * says nothing we say the honest generic thing rather than dressing the kind
- * up as a description of the action.
+ * The server states why the pause was raised as a cause code, and the shared approval copy
+ * words it in the reader's language. An approval with no cause says the honest generic thing
+ * rather than dressing its kind up as a description of the action.
  */
 export function describeApproval(
   approval: Approval,
   tr: (no: string, en: string) => string,
 ): string {
-  const detail = approval.detail?.trim()
-  if (detail) return detail
-  const kind = approval.kind?.trim()
-  if (kind) {
-    return tr(`Agenten ber om å få utføre «${kind}».`, `The agent is asking to run “${kind}”.`)
-  }
-  return tr(
-    'Agenten venter på godkjenning før den fortsetter.',
-    'The agent is waiting for approval before it continues.',
-  )
+  const i18n = { tr }
+  return approvalReason(approval, i18n) ?? approvalFallbackLine(i18n)
 }
 
 function isRefusal(error: unknown): boolean {

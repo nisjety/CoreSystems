@@ -1,0 +1,4 @@
+endpoint,file
+expense_transactions,config/endpoints/expense_transactions.json
+project_tasks,config/endpoints/project_tasks.json
+project_transactions,config/endpoints/project_transactions.json

@@ -101,11 +101,13 @@ Edge config flags (`crates/quarry-edge/src/config.rs`):
 Setting none of the search providers leaves `/v1/search` and `/v1/answer`
 returning 501 Unsupported with a clear hint in the response body. Since INNH-8a the
 body also carries a closed `reason` that names the first closed gate
-(`synthesis_disabled`, `no_search_provider`, `no_model_plane_url`,
+(`synthesis_disabled`, `model_path_refused` when the switch is on but the QB-T17
+boot gate refused it, `no_search_provider`, `no_model_plane_url`,
 `model_client_init_failed`), `include_answer` reports `answer_status` and
 `answer_reason` instead of a silent `answer: null`, and a Model Plane that refuses
-the edge is a 503 `model_plane_auth_refused`. Enablement: `docs/RUNBOOKS.md`,
-"Answer synthesis".
+the edge is a 503 `model_plane_auth_refused`. A zero data retention request is
+refused with a 403 (`zdr_unavailable`) before any work, because the model hop has
+no ZDR posture. Enablement: `docs/RUNBOOKS.md`, "Answer synthesis".
 
 ## Out of Scope (deferred)
 

@@ -67,7 +67,7 @@ func TestG7Loop_FiltersAndPersistsAcrossTheWholeChain(t *testing.T) {
 	upserter := &fakeUpserter{protected: map[string]bool{}}
 
 	reviewer := llmreviewer.NewReviewer(inferer, "test-model", "org-42")
-	sink := skillsink.NewSessionCoreSink(upserter, "org-42")
+	sink := skillsink.NewSessionCoreSink(upserter, "org-42", "user-42", "run-42", "thread-42")
 	existing := []learning.ExistingSkill{
 		{Name: "Runbook", Origin: learning.OriginUser}, // human-authored — protected
 	}
@@ -106,7 +106,7 @@ func TestG7Loop_SinkProvenanceSkipIsNotCountedNorError(t *testing.T) {
 	upserter := &fakeUpserter{protected: map[string]bool{"Cache Tips": true}}
 
 	reviewer := llmreviewer.NewReviewer(inferer, "m", "org-1")
-	sink := skillsink.NewSessionCoreSink(upserter, "org-1")
+	sink := skillsink.NewSessionCoreSink(upserter, "org-1", "user-1", "run-1", "thread-1")
 
 	n, err := learning.RunReview(context.Background(), "transcript", nil, reviewer, sink)
 	if err != nil {
@@ -127,7 +127,7 @@ func TestG7Loop_NothingRetainablePersistsZero(t *testing.T) {
 	upserter := &fakeUpserter{}
 
 	reviewer := llmreviewer.NewReviewer(inferer, "m", "org-1")
-	sink := skillsink.NewSessionCoreSink(upserter, "org-1")
+	sink := skillsink.NewSessionCoreSink(upserter, "org-1", "user-1", "run-1", "thread-1")
 
 	n, err := learning.RunReview(context.Background(), "transcript", nil, reviewer, sink)
 	if err != nil {

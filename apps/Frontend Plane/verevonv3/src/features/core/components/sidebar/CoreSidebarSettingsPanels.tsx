@@ -1,6 +1,7 @@
 import { useLocation } from '@solidjs/router'
 import {
   Brain,
+  BrainCircuit,
   Building2,
   CalendarClock,
   CheckCircle2,
@@ -50,6 +51,7 @@ const settingsSidebarSections: SettingsLinkSection[] = [
   { id: 'org-security', label: 'Org security', icon: ShieldCheck, href: '/settings/org-security' },
   { id: 'integrations', label: 'Integrations', icon: Plug, href: '/settings/integrations' },
   { id: 'router-policy', label: 'Router policy', icon: Route, href: '/settings/router-policy' },
+  { id: 'model-access', label: 'Modelltilgang', icon: BrainCircuit, href: '/settings/model-access' },
   { id: 'finetune', label: 'Fine-tune jobs', icon: TestTubeDiagonal, href: '/settings/finetune' },
   { id: 'mcp', label: 'MCP-servere', icon: ServerCog, href: '/settings/mcp' },
   { id: 'skills', label: 'Ferdigheter', icon: Sparkles, href: '/settings/skills' },
@@ -80,7 +82,7 @@ export function AccountExpandedSidebarPanel(props: { onCollapse: () => void }) {
   )
 }
 
-export function SettingsExpandedSidebarPanel(props: { onCollapse: () => void }) {
+export function SettingsExpandedSidebarPanel(props: { modelAccessEnabled: boolean; onCollapse: () => void }) {
   const i18n = useI18n()
   const location = useLocation()
   const activeSectionId = () => getSettingsActiveSectionId(location.pathname)
@@ -93,8 +95,11 @@ export function SettingsExpandedSidebarPanel(props: { onCollapse: () => void }) 
 
       <SettingsSectionLinks
         ariaLabel={i18n.tr('Innstillingsseksjoner', 'Settings sections')}
+        // Model access is listed only while the gateway reports the admin switch on (CoreSidebar reads it).
         sections={localizedSettingsSections(i18n).filter(
-          (section) => section.id !== 'platform-users' || hasPlatformAdminAccess(getSession()),
+          (section) =>
+            (section.id !== 'platform-users' || hasPlatformAdminAccess(getSession())) &&
+            (section.id !== 'model-access' || props.modelAccessEnabled),
         )}
         activeSectionId={activeSectionId()}
       />
@@ -269,6 +274,8 @@ function settingsSectionLabel(id: string, fallback: string, i18n: ReturnType<typ
       return i18n.tr('Integrasjoner', 'Integrations')
     case 'router-policy':
       return i18n.tr('Router-policy', 'Router policy')
+    case 'model-access':
+      return i18n.tr('Modelltilgang', 'Model access')
     case 'finetune':
       return i18n.tr('Finjusteringsjobber', 'Fine-tune jobs')
     case 'mcp':

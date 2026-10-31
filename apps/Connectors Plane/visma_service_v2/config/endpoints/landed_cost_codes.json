@@ -1,0 +1,28 @@
+{
+  "endpoint_name": "landed_cost_codes",
+  "bigquery_table": "visma_landed_cost_codes",
+  "primary_key": "landedCostCodeId",
+  "source": "erp_rest",
+  "api_method": "get_landed_cost_codes",
+  "api_endpoint": "/v1/landedCostCode",
+  "pagination_profile": "finance_page_number",
+  "modified_field": null,
+  "merge_type": "upsert",
+  "sync_pattern": "full_refresh_upsert",
+  "validation_fields": [
+    "landedCostCodeId",
+    "description",
+    "landedCostType"
+  ],
+  "datamart": {
+    "ready": false,
+    "query_file": "config/queries/landed_cost_code.graphql",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "fallback_source": "erp_rest",
+    "tenant_overrides": {
+      "33f319b9-4d57-11ee-960c-025417856183": false
+    }
+  }
+}

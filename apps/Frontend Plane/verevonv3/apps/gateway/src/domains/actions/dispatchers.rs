@@ -55,8 +55,12 @@ use crate::domains::integrations::providers::start_connect_session as start_inte
 use crate::domains::knowledge::documents::create_document;
 use crate::domains::knowledge::products::{extract_products, summarize_products};
 use crate::domains::knowledge::sync::register_sharepoint;
+use crate::domains::learning::{decide_proposal, undo_entry, LearningDecisionBody};
 use crate::domains::mcp::{delete_server as delete_mcp_server, share_server as share_mcp_server};
-use crate::domains::memory::delete_memory;
+use crate::domains::memory::{
+    delete_memory, remember_memory, reset_memory, set_memory_controls, RememberBody, ResetBody,
+    SetControlsBody,
+};
 use crate::domains::monitoring::{check_now, CheckRequest};
 use crate::domains::orchestration::{
     cancel_run as cancel_orchestration_run, decide_approval as decide_orchestration_approval,
@@ -71,6 +75,7 @@ use crate::domains::orgs::members::{
     invite_member as invite_org_member, remove_member as remove_org_member,
     update_member_role as update_org_member_role,
 };
+use crate::domains::orgs::model_entitlement::put_model_entitlement;
 use crate::domains::orgs::quotas::set_quota as set_org_quota;
 use crate::domains::orgs::settings::update_org_settings;
 use crate::domains::orgs::switch::switch_active_org;
@@ -3464,6 +3469,167 @@ pub(super) async fn dispatch_memory_delete(
     owner_json_response_to_envelope("memory.delete", user, status, payload)
 }
 
+// The three memory actions below reuse memory.rs's handlers for the same reason
+// as memory.delete: the cookie-derived tokens and the user-bound hop stay in one
+// place, and the browser never names whose memory it changes.
+pub(super) async fn dispatch_memory_set_state(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let requested = ticket_string(input, "state");
+    if !matches!(requested, "on" | "paused" | "off") {
+        return ticket_bad_request("memory.set_state requires state of on, paused, or off");
+    }
+    let response = set_memory_controls(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        Json(SetControlsBody {
+            state: requested.to_owned(),
+        }),
+    )
+    .await
+    .into_response();
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope("memory.set_state", user, status, payload)
+}
+
+pub(super) async fn dispatch_memory_reset(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    // An erase that cannot be undone needs the literal `true`, not a truthy value.
+    if input.get("confirm").and_then(Value::as_bool) != Some(true) {
+        return ticket_bad_request("memory.reset requires confirm: true");
+    }
+    let response = reset_memory(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        Json(ResetBody { confirm: true }),
+    )
+    .await
+    .into_response();
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope("memory.reset", user, status, payload)
+}
+
+pub(super) async fn dispatch_memory_remember(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let thread_id = ticket_string(input, "threadId");
+    let content = ticket_string(input, "content");
+    if thread_id.is_empty() || content.trim().is_empty() {
+        return ticket_bad_request("memory.remember requires 'threadId' and non-empty 'content'");
+    }
+    let response = remember_memory(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        Json(RememberBody {
+            thread_id: thread_id.to_owned(),
+            content: content.to_owned(),
+        }),
+    )
+    .await
+    .into_response();
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope("memory.remember", user, status, payload)
+}
+
+// The learning actions reuse learning.rs's handlers, as the memory actions reuse
+// memory.rs's: the owner is the verified session, and the browser never names whose
+// proposal it decides or whose change it undoes.
+pub(super) async fn dispatch_learning_accept_skill(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    dispatch_learning_decision(
+        "learning.accept_skill",
+        "accept",
+        state,
+        user,
+        headers,
+        input,
+    )
+    .await
+}
+
+pub(super) async fn dispatch_learning_reject_skill(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    dispatch_learning_decision(
+        "learning.reject_skill",
+        "reject",
+        state,
+        user,
+        headers,
+        input,
+    )
+    .await
+}
+
+async fn dispatch_learning_decision(
+    action_id: &str,
+    decision: &str,
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let skill_id = ticket_string(input, "skillId");
+    if skill_id.is_empty() {
+        return ticket_bad_request(&format!("{action_id} requires a non-empty 'skillId'"));
+    }
+    let response = decide_proposal(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        PathExtractor(skill_id.to_owned()),
+        Json(LearningDecisionBody {
+            decision: decision.to_owned(),
+        }),
+    )
+    .await
+    .into_response();
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope(action_id, user, status, payload)
+}
+
+pub(super) async fn dispatch_learning_undo(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let entry_id = ticket_string(input, "entryId");
+    if entry_id.is_empty() {
+        return ticket_bad_request("learning.undo requires a non-empty 'entryId'");
+    }
+    let response = undo_entry(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        PathExtractor(entry_id.to_owned()),
+    )
+    .await
+    .into_response();
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope("learning.undo", user, status, payload)
+}
+
 pub(super) async fn dispatch_settings_update_me(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -4372,6 +4538,32 @@ pub(super) async fn dispatch_org_set_quota(
     owner_json_response_to_envelope("org.set_quota", user, status, resp)
 }
 
+pub(super) async fn dispatch_org_set_model_entitlement(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let org_id = ticket_string(input, "orgId");
+    if org_id.is_empty() {
+        return ticket_bad_request("org.set_model_entitlement requires a non-empty 'orgId'");
+    }
+    // Everything but the org id is the PUT body. The headers carry the session
+    // cookie the ZDR write guard needs to read the catalogue as this admin: the
+    // action goes through the same guard as the route, not around it.
+    let mut body = input.as_object().cloned().unwrap_or_default();
+    body.remove("orgId");
+    let (status, Json(resp)) = put_model_entitlement(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        PathExtractor(org_id.to_owned()),
+        Json(Value::Object(body)),
+    )
+    .await;
+    owner_json_response_to_envelope("org.set_model_entitlement", user, status, resp)
+}
+
 pub(super) async fn dispatch_org_update_instructions(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -4444,6 +4636,40 @@ pub(super) async fn dispatch_org_update_support_ai_mode(
     )
     .await;
     owner_json_response_to_envelope("org.update_support_ai_mode", user, status, resp)
+}
+
+pub(super) async fn dispatch_org_update_agent_learning_policy(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let org_id = ticket_string(input, "orgId");
+    let memory = input.get("memory").filter(|value| !value.is_null());
+    let learning_review = input.get("learningReview").filter(|value| !value.is_null());
+    if org_id.is_empty() || (memory.is_none() && learning_review.is_none()) {
+        return ticket_bad_request(
+            "org.update_agent_learning_policy requires 'orgId' and memory and/or learningReview",
+        );
+    }
+    // The settings route validates the values; the action only names the fields it
+    // forwards, so no other key reaches org-core through it.
+    let mut policy = serde_json::Map::new();
+    if let Some(memory) = memory {
+        policy.insert("memory".to_owned(), memory.clone());
+    }
+    if let Some(learning_review) = learning_review {
+        policy.insert("learningReview".to_owned(), learning_review.clone());
+    }
+    let (status, Json(resp)) = update_org_settings(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        PathExtractor(org_id.to_owned()),
+        Json(json!({ "agentLearningPolicy": policy })),
+    )
+    .await;
+    owner_json_response_to_envelope("org.update_agent_learning_policy", user, status, resp)
 }
 
 pub(super) async fn dispatch_membership_invite_member(
@@ -4626,6 +4852,14 @@ pub(super) async fn dispatch_chat_queue_invocation_input(
     }
     if let Some(space_ref) = input.get("spaceRef") {
         body.insert("spaceRef".to_owned(), space_ref.clone());
+    }
+    // The send's receipt: Model Gateway stores the message under it and names it in the answer.
+    // Passed as the one opaque string the contract allows; the owner checks its shape again.
+    if let Some(client_message_id) = input.get("clientMessageId").and_then(Value::as_str) {
+        body.insert(
+            "client_message_id".to_owned(),
+            Value::String(client_message_id.to_owned()),
+        );
     }
     let response = queue_chat_invocation_input(
         StateExtractor(state.clone()),

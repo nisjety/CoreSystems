@@ -67,10 +67,14 @@ func Authorize(principal authctx.Principal, method string, request any) error {
 		"/model_plane.v1.SandboxManager/RegisterProcess",
 		"/model_plane.v1.SandboxManager/UpdateProcessState",
 		"/model_plane.v1.SandboxManager/AppendProcessOutput",
-		"/model_plane.v1.SandboxManager/ReconcileProcesses":
+		"/model_plane.v1.SandboxManager/ReconcileProcesses",
+		// WS22-S1 thread workspace writes, listed with their RPCs for the same reason.
+		"/model_plane.v1.SandboxManager/ApplyThreadWorkspaceChanges",
+		"/model_plane.v1.SandboxManager/DeleteThreadWorkspace":
 		required = ScopeWrite
 	case "/model_plane.v1.SandboxManager/Health",
 		"/model_plane.v1.SandboxManager/GetWorkspaceManifest",
+		"/model_plane.v1.SandboxManager/GetThreadWorkspace",
 		// S4.2 process registry reads.
 		"/model_plane.v1.SandboxManager/GetProcess",
 		"/model_plane.v1.SandboxManager/ListProcesses",

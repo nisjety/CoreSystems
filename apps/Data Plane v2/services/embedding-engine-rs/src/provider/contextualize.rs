@@ -714,6 +714,10 @@ impl Contextualizer {
             // background contextualization: no subscription connection, normal tier.
             subscription_connection_id: String::new(),
             prefer_priority_service_tier: false,
+            // Fields the inference contract added after this literal was written
+            // (the reasoning level and the prompt-tier plan): unset, which is what
+            // every caller that predates them implied.
+            ..Default::default()
         };
         let mut request = tonic::Request::new(request);
         request.set_timeout(timeout);

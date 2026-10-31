@@ -13,6 +13,32 @@ help_output="$($COMMAND --help)"
 grep -q "read-only" <<<"$help_output"
 grep -q "credential" <<<"$help_output"
 
+# Fail closed when rg is missing: the preflight must block before any Docker
+# probe rather than report the release evidence as recorded. The only external
+# the script runs before that gate is dirname, so PATH holds a shim for it. The
+# shim execs the real binary by absolute path, because a copied or linked binary
+# cannot load its runtime libraries from a PATH that contains nothing else.
+rg_absent_bin="$(mktemp -d)"
+trap 'rm -rf "$rg_absent_bin"' EXIT
+printf '#!/bin/sh\nexec "%s" "$@"\n' "$(command -v dirname)" >"$rg_absent_bin/dirname"
+chmod +x "$rg_absent_bin/dirname"
+
+set +e
+rg_absent_output="$(PATH="$rg_absent_bin" "$BASH" "$COMMAND" 2>&1)"
+rg_absent_status=$?
+set -e
+
+[[ "$rg_absent_status" -eq 2 ]] || {
+  echo "expected preflight to block without rg (status 2), got $rg_absent_status" >&2
+  printf '%s\n' "$rg_absent_output" >&2
+  exit 1
+}
+grep -q "BLOCKED rg: command is unavailable" <<<"$rg_absent_output"
+if grep -Eq '^(CHECKED|CONFIG|AUTHZ|EVIDENCE) ' <<<"$rg_absent_output"; then
+  echo "preflight probed the stack before the rg gate" >&2
+  exit 1
+fi
+
 set +e
 output="$($COMMAND 2>&1)"
 status=$?

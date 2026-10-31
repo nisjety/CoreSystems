@@ -18,6 +18,7 @@ import (
 
 	"github.com/triodelab/controlplane/audit-core/internal/events"
 	"github.com/triodelab/controlplane/audit-core/internal/store"
+	"github.com/triodelab/controlplane/audit-core/internal/verifier"
 )
 
 type API struct {
@@ -33,6 +34,10 @@ type eventStore interface {
 	SummariseUsage(context.Context, string, time.Time, time.Time) ([]store.UsageSummary, error)
 	InsertAuditFromSource(context.Context, *events.AuditEvent, string) (bool, error)
 	InsertUsageFromSource(context.Context, *events.UsageEvent, string) (bool, error)
+	ComplianceEvents(context.Context, store.ComplianceFilter) (store.CompliancePage, error)
+	ComplianceManifest(context.Context, string, time.Time, time.Time) (store.ComplianceManifest, error)
+	ComplianceKeys(context.Context, string) ([]store.ComplianceKey, error)
+	VerifyOrg(context.Context, string, verifier.Options) (verifier.Report, error)
 }
 
 type ConsumerReadiness struct {
@@ -113,6 +118,7 @@ func (a *API) Mount(r chi.Router) {
 		r.Get("/usage", a.listUsage)
 		r.Post("/usage", a.ingestUsage)
 		r.Get("/usage/summary", a.summariseUsage)
+		a.mountCompliance(r)
 	})
 }
 

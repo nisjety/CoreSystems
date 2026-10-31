@@ -13,9 +13,13 @@ use mp_contracts::model_plane::v1::{
     orchestration_event,
     run_service_client::RunServiceClient,
     run_service_server::{RunService, RunServiceServer},
-    AcknowledgeApprovalDeliveryRequest, AcknowledgeApprovalDeliveryResponse, Approval,
-    ApprovalState, AttachSubagentRequest, AttachSubagentResponse, CancelRunRequest,
+    AcknowledgeApprovalDeliveryRequest, AcknowledgeApprovalDeliveryResponse,
+    AnswerRunQuestionRequest, AnswerRunQuestionResponse, Approval, ApprovalState,
+    AttachSubagentRequest, AttachSubagentResponse, CancelRunRequest,
+    CreateRunQuestionRequest, CreateRunQuestionResponse, ListRunQuestionsRequest,
+    ListRunQuestionsResponse, QuestionItem, QuestionOption, QuestionState, RunQuestion,
     CancelRunResponse, ClaimApprovalDeliveriesRequest, ClaimApprovalDeliveriesResponse,
+    ConsumeApprovalRequest, ConsumeApprovalResponse,
     CreateApprovalRequest, CreateApprovalResponse, DecideApprovalRequest, DecideApprovalResponse,
     GetApprovalContinuationRequest, GetApprovalContinuationResponse, GetApprovalRequest,
     GetApprovalResponse, GetPlanRequest, GetPlanResponse, GetRunRequest,
@@ -52,6 +56,9 @@ use wiremock::{
     matchers::{method, path},
     Mock, MockServer, ResponseTemplate,
 };
+
+#[path = "support/offline_downstreams.rs"]
+mod offline_downstreams;
 
 type MockEventStream =
     Pin<Box<dyn futures::Stream<Item = Result<OrchestrationEvent, Status>> + Send>>;
@@ -202,6 +209,12 @@ struct CaptureState {
     decide_approval: CapturedTransition,
     lineage_thread_id: Arc<Mutex<Option<String>>>,
     stream_run_id: Arc<Mutex<Option<String>>>,
+    /// `(run_id, org_id)` of the last `ListRunQuestions` call.
+    list_questions: Arc<Mutex<Option<(String, String)>>>,
+    /// The last `AnswerRunQuestion` request.
+    answer_question: Arc<Mutex<Option<AnswerRunQuestionRequest>>>,
+    /// Every question RPC that reached the double, to prove a refused caller never did.
+    question_calls: Arc<AtomicUsize>,
 }
 
 struct MockOrchestration {
@@ -457,6 +470,9 @@ impl OrchestrationCoreService for MockOrchestration {
             Some((request.run_id.clone(), request.step_id.clone()));
         Ok(Response::new(ListApprovalsResponse {
             approvals: vec![Approval {
+                consumed_at: None,
+                continuation_mode: String::new(),
+                cause: None,
                 id: "appr-1".into(),
                 run_id: request.run_id,
                 step_id: request.step_id,
@@ -481,6 +497,9 @@ impl OrchestrationCoreService for MockOrchestration {
         let request = request.into_inner();
         Ok(Response::new(OrgPendingApprovalsResponse {
             approvals: vec![Approval {
+                consumed_at: None,
+                continuation_mode: String::new(),
+                cause: None,
                 id: "appr-pending-1".into(),
                 run_id: "run-1".into(),
                 step_id: String::new(),
@@ -510,6 +529,9 @@ impl OrchestrationCoreService for MockOrchestration {
         *self.state.get_approval_id.lock().unwrap() = Some(request.approval_id.clone());
         Ok(Response::new(GetApprovalResponse {
             approval: Some(Approval {
+                consumed_at: None,
+                continuation_mode: String::new(),
+                cause: None,
                 id: request.approval_id,
                 run_id: "run-1".into(),
                 step_id: "step-1".into(),
@@ -534,6 +556,9 @@ impl OrchestrationCoreService for MockOrchestration {
         let request = request.into_inner();
         Ok(Response::new(CreateApprovalResponse {
             approval: Some(Approval {
+                consumed_at: None,
+                continuation_mode: String::new(),
+                cause: None,
                 id: "appr-mock".into(),
                 run_id: request.run_id,
                 step_id: request.step_id,
@@ -551,11 +576,24 @@ impl OrchestrationCoreService for MockOrchestration {
         }))
     }
 
+    async fn consume_approval(
+        &self,
+        _: TonicRequest<ConsumeApprovalRequest>,
+    ) -> Result<Response<ConsumeApprovalResponse>, Status> {
+        Err(Status::unimplemented("consume_approval not needed in test"))
+    }
+
     async fn decide_approval(
         &self,
         request: TonicRequest<DecideApprovalRequest>,
     ) -> Result<Response<DecideApprovalResponse>, Status> {
         let request = request.into_inner();
+        // An id that starts with `appr-loop` stands for a loop-owned approval.
+        let continuation_mode = if request.approval_id.starts_with("appr-loop") {
+            "loop".to_owned()
+        } else {
+            String::new()
+        };
         *self.state.decide_approval.lock().unwrap() = Some((
             request.approval_id.clone(),
             request.decision,
@@ -564,6 +602,9 @@ impl OrchestrationCoreService for MockOrchestration {
         ));
         Ok(Response::new(DecideApprovalResponse {
             approval: Some(Approval {
+                consumed_at: None,
+                continuation_mode,
+                cause: None,
                 id: request.approval_id,
                 run_id: "run-1".into(),
                 step_id: "step-1".into(),
@@ -672,6 +713,57 @@ impl OrchestrationCoreService for MockOrchestration {
         ))
     }
 
+    async fn create_run_question(
+        &self,
+        _: TonicRequest<CreateRunQuestionRequest>,
+    ) -> Result<Response<CreateRunQuestionResponse>, Status> {
+        Err(Status::unimplemented(
+            "the gateway serves no question create route",
+        ))
+    }
+
+    async fn list_run_questions(
+        &self,
+        request: TonicRequest<ListRunQuestionsRequest>,
+    ) -> Result<Response<ListRunQuestionsResponse>, Status> {
+        self.state.question_calls.fetch_add(1, Ordering::SeqCst);
+        let request = request.into_inner();
+        *self.state.list_questions.lock().unwrap() =
+            Some((request.run_id.clone(), request.org_id.clone()));
+        Ok(Response::new(ListRunQuestionsResponse {
+            questions: vec![scripted_question("q-1", &request.run_id, QuestionState::Requested)],
+        }))
+    }
+
+    /// The question id picks the outcome: each typed refusal Session Core can give.
+    async fn answer_run_question(
+        &self,
+        request: TonicRequest<AnswerRunQuestionRequest>,
+    ) -> Result<Response<AnswerRunQuestionResponse>, Status> {
+        self.state.question_calls.fetch_add(1, Ordering::SeqCst);
+        let request = request.into_inner();
+        *self.state.answer_question.lock().unwrap() = Some(request.clone());
+        match request.question_id.as_str() {
+            "q-missing" => Err(Status::not_found("question_not_found")),
+            "q-expired" => Err(Status::failed_precondition("question_expired")),
+            "q-done" => Err(Status::already_exists("question_already_answered")),
+            "q-bad" => Err(Status::invalid_argument(
+                "invalid_answer: answers[0].option_ids[0]: unknown_option",
+            )),
+            _ => Ok(Response::new(AnswerRunQuestionResponse {
+                question: Some(scripted_question(
+                    &request.question_id,
+                    "run-1",
+                    if request.skip {
+                        QuestionState::Skipped
+                    } else {
+                        QuestionState::Answered
+                    },
+                )),
+            })),
+        }
+    }
+
     async fn record_orchestration_event(
         &self,
         _: TonicRequest<mp_contracts::model_plane::v1::RecordOrchestrationEventRequest>,
@@ -707,6 +799,49 @@ impl OrchestrationCoreService for MockOrchestration {
     }
 }
 
+/// A stored question as Session Core would hand it back: one single-choice item.
+fn scripted_question(id: &str, run_id: &str, state: QuestionState) -> RunQuestion {
+    RunQuestion {
+        id: id.into(),
+        run_id: run_id.into(),
+        thread_id: "thread-1".into(),
+        step_id: "step-1".into(),
+        org_id: "org-1".into(),
+        user_id: "user-1".into(),
+        state: state as i32,
+        delivery: "next_turn".into(),
+        items: vec![QuestionItem {
+            id: "scope".into(),
+            kind: "single".into(),
+            prompt: "Which branch?".into(),
+            options: vec![
+                QuestionOption {
+                    id: "main".into(),
+                    label: "main".into(),
+                    description: String::new(),
+                },
+                QuestionOption {
+                    id: "feature".into(),
+                    label: "A feature branch".into(),
+                    description: "New work".into(),
+                },
+            ],
+            allow_other: false,
+        }],
+        requested_at: Some(prost_types::Timestamp {
+            seconds: 1_790_000_000,
+            nanos: 0,
+        }),
+        expires_at: Some(prost_types::Timestamp {
+            seconds: 1_790_086_400,
+            nanos: 0,
+        }),
+        answered_at: None,
+        answers: Vec::new(),
+        answered_message_id: String::new(),
+    }
+}
+
 async fn spawn_orchestration_mock(
     svc: MockOrchestration,
 ) -> OrchestrationCoreServiceClient<tonic::transport::Channel> {
@@ -730,7 +865,7 @@ async fn spawn_orchestration_mock(
 fn make_state(
     orchestration_client: OrchestrationCoreServiceClient<tonic::transport::Channel>,
 ) -> AppState {
-    let mut state = AppState::new();
+    let mut state = offline_downstreams::offline_state();
     state.orchestration_client = orchestration_client;
     state
 }
@@ -753,13 +888,16 @@ impl RunService for MockRunOwner {
         // Only `plan_approval` resolves a run's thread through this route
         // today: the plan-gate tests need it to say which conversation the
         // run belongs to. Any other run is not this mock's to describe.
+        // `run-owned` is still in plan mode; `run-executed` has already left it.
         let request = request.into_inner();
-        if request.run_id != "run-owned" {
+        if !matches!(request.run_id.as_str(), "run-owned" | "run-executed") {
             return Err(Status::not_found("run not found"));
         }
+        let mode = if request.run_id == "run-owned" { "plan" } else { "execute" };
         Ok(Response::new(RunDetail {
             run_id: request.run_id,
             thread_id: "thread-1".into(),
+            mode: mode.into(),
             ..Default::default()
         }))
     }
@@ -820,7 +958,7 @@ impl RunService for MockRunOwner {
         }
         let request = request.into_inner();
         Ok(Response::new(ResolveRunOwnerResponse {
-            authorized: request.run_id == "run-owned"
+            authorized: matches!(request.run_id.as_str(), "run-owned" | "run-executed")
                 && request.org_id == "org-owner"
                 && request.user_id == "owner-user",
         }))
@@ -890,7 +1028,7 @@ async fn run_owner_state(
 ) -> (AppState, Arc<DynPublisher>, Arc<AtomicUsize>) {
     let publisher = Arc::new(DynPublisher::InMemory(InMemoryPublisher::new()));
     let cancel_calls = Arc::new(AtomicUsize::new(0));
-    let mut state = AppState::new();
+    let mut state = offline_downstreams::offline_state();
     state.publisher = publisher.clone();
     state.run_client = spawn_run_owner_mock(MockRunOwner {
         cancel_bearer: format!("Bearer {owner_session_token}"),
@@ -1067,6 +1205,39 @@ async fn decide_approval_grant_succeeds_without_a_continuation_dispatcher() {
 
 #[tokio::test]
 #[serial_test::serial]
+async fn decide_approval_grant_of_a_loop_owned_approval_reports_awaiting_continue() {
+    let _auth = AuthFixture::start().await;
+    let tokens = AuthFixture::user_tokens("org-1", "user-1");
+    let (mock, _capture) = MockOrchestration::new();
+    let app = build_router(make_state(spawn_orchestration_mock(mock).await), None);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/orchestration/approvals/appr-loop-1/decide")
+        .header(AUTHORIZATION, format!("Bearer {}", tokens.model))
+        .header(
+            "x-session-authorization",
+            format!("Bearer {}", tokens.session),
+        )
+        .header(
+            "x-execution-authorization",
+            format!("Bearer {}", tokens.execution),
+        )
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"decision":"approve"}"#))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json["continuation_delivery"], "awaiting_continue",
+        "a loop-owned approval is consumed by the loop, not delivered by the worker, body={json}"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
 async fn decide_approval_reject_has_no_continuation_delivery_field() {
     let _auth = AuthFixture::start().await;
     let tokens = AuthFixture::user_tokens("org-1", "user-1");
@@ -1214,6 +1385,13 @@ impl OrchestrationCoreService for OrgScopedMock {
         };
         Ok(Response::new(GetApprovalResponse { approval }))
     }
+    async fn consume_approval(
+        &self,
+        _: TonicRequest<ConsumeApprovalRequest>,
+    ) -> Result<Response<ConsumeApprovalResponse>, Status> {
+        Err(Status::unimplemented("consume_approval not needed in test"))
+    }
+
     async fn decide_approval(
         &self,
         request: TonicRequest<DecideApprovalRequest>,
@@ -1298,6 +1476,24 @@ impl OrchestrationCoreService for OrgScopedMock {
     ) -> Result<Response<Self::StreamRunEventsStream>, Status> {
         Err(Status::unimplemented("not needed in this test"))
     }
+    async fn create_run_question(
+        &self,
+        _: TonicRequest<CreateRunQuestionRequest>,
+    ) -> Result<Response<CreateRunQuestionResponse>, Status> {
+        Err(Status::unimplemented("not needed in this test"))
+    }
+    async fn list_run_questions(
+        &self,
+        _: TonicRequest<ListRunQuestionsRequest>,
+    ) -> Result<Response<ListRunQuestionsResponse>, Status> {
+        Err(Status::unimplemented("not needed in this test"))
+    }
+    async fn answer_run_question(
+        &self,
+        _: TonicRequest<AnswerRunQuestionRequest>,
+    ) -> Result<Response<AnswerRunQuestionResponse>, Status> {
+        Err(Status::unimplemented("not needed in this test"))
+    }
     async fn record_orchestration_event(
         &self,
         _: TonicRequest<RecordOrchestrationEventRequest>,
@@ -1310,6 +1506,9 @@ impl OrchestrationCoreService for OrgScopedMock {
 
 fn owned_approval(state: ApprovalState) -> Approval {
     Approval {
+        consumed_at: None,
+        continuation_mode: String::new(),
+        cause: None,
         id: "appr-owned".into(),
         run_id: "run-owned".into(),
         step_id: String::new(),
@@ -1651,13 +1850,10 @@ async fn plan_gate_harness() -> PlanGateHarness {
     let (mock, capture) = MockOrchestration::new();
     let (mut state, _publisher, _cancel_calls) = run_owner_state(&owner.session).await;
     state.orchestration_client = spawn_orchestration_mock(mock).await;
-    // The grant's durable half (`set_run_mode`) goes to session-core. Point it
-    // at a port nothing listens on, so the test never reaches a real service
-    // that happens to be running on the default local port; the route reports
-    // `persisted: false` and still answers.
-    state.session_client = mp_contracts::model_plane::v1::session_core_client::SessionCoreClient::new(
-        tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy(),
-    );
+    // The grant's durable half (`set_run_mode`) goes to session-core, which this
+    // harness does not serve: `offline_state` leaves it an offline double, so the
+    // test never reaches a real service that happens to be running on the default
+    // local port; the route reports `persisted: false` and still answers.
     let plan_mode = state.plan_mode.clone();
     PlanGateHarness {
         app: build_router(state, None),
@@ -1715,6 +1911,25 @@ async fn approving_a_plan_checks_it_decides_it_with_the_edits_and_only_then_gran
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["granted_rung"], "workspace_write");
     assert_eq!(body["plan"]["id"], "plan-7");
+    // The grant states when it lapses (WS14 S2a), so the client knows how long the rung it
+    // just granted lasts: exactly what the store holds for this org and thread, within the
+    // grant's 24 hour ceiling and not in the past.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock is after the epoch")
+        .as_secs() as i64;
+    let expires = body["grant_expires_at_unix"]
+        .as_i64()
+        .expect("grant_expires_at_unix is an integer");
+    assert!(
+        expires > now && expires <= now + 86_400,
+        "the expiry is within the grant's ceiling: {expires} vs now {now}"
+    );
+    assert_eq!(
+        Some(expires),
+        harness.plan_mode.grant_expires_at("org-owner", "thread-1"),
+        "it is exactly what the store holds"
+    );
 
     // The plan was looked at BEFORE it was decided.
     assert_eq!(
@@ -1800,6 +2015,108 @@ async fn a_plan_that_is_not_this_runs_conversation_is_refused_before_anything_is
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(harness.capture.transition_plan.lock().unwrap().is_none());
+}
+
+/// The three bearers of a user, minted the way `AuthFixture::user_tokens` mints them, with the given
+/// retention claims. The middleware verifies them like any other token.
+fn user_tokens_with_retention(
+    org_id: &str,
+    user_id: &str,
+    zdr: bool,
+    org_zdr: bool,
+    waiver: Option<serde_json::Value>,
+) -> UserTokens {
+    let now = token_now();
+    let claims = |audience: &str| {
+        let mut payload = serde_json::json!({
+            "sub": user_id,
+            "iss": TEST_AUTH_ISSUER,
+            "aud": audience,
+            "exp": now + 300,
+            "nbf": now - 5,
+            "org_id": org_id,
+            "user_id": user_id,
+            "principal_type": "user",
+            "zdr": zdr,
+            "org_zdr": org_zdr,
+        });
+        if let Some(waiver) = &waiver {
+            payload["zdr_waiver"] = waiver.clone();
+        }
+        payload
+    };
+    UserTokens {
+        model: encode_test_token(&claims("model-gateway")),
+        session: encode_test_token(&claims("session-core")),
+        execution: encode_test_token(&claims("execution-core")),
+    }
+}
+
+/// Owner decision 17: a ZDR credential is refused at the gateway before any plan is read or decided,
+/// and the refusal is typed. The counting double sees no call.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_zdr_credential_is_refused_before_any_plan_is_read_or_decided() {
+    let harness = plan_gate_harness().await;
+    let tokens = user_tokens_with_retention("org-owner", "owner-user", true, true, None);
+    let (status, body) = post_plan_approval(
+        &harness,
+        "run-owned",
+        &tokens,
+        serde_json::json!({
+            "decision": "approve",
+            "granted_rung": "workspace_write",
+            "justification": "writes the report into the workspace",
+            "plan_id": "plan-7",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{body}");
+    assert_eq!(
+        body["error"]["code"], "zdr_durable_mutation_forbidden",
+        "{body}"
+    );
+    assert!(
+        harness.capture.plan_calls.lock().unwrap().is_empty(),
+        "no plan was read or decided for a ZDR credential"
+    );
+    assert!(harness.capture.transition_plan.lock().unwrap().is_none());
+    assert_eq!(
+        harness.plan_mode.granted_rung("org-owner", "thread-1"),
+        None
+    );
+}
+
+/// Owner decision 17: a valid waiver is not refused at the gateway. Session Core checks it against the
+/// receipt of the run it would advance, so the decision reaches the owner check and the plan is decided
+/// here only because the stub accepts it. The receipt check itself is pinned in Session Core's tests.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_waiver_is_not_refused_at_the_gateway_so_session_core_checks_its_receipt() {
+    let harness = plan_gate_harness().await;
+    let waiver = serde_json::json!({
+        "version": 1,
+        "provider": mp_contracts::agentic_subscription::PROVIDER_ID,
+        "connection": "conn-1",
+    });
+    let tokens = user_tokens_with_retention("org-owner", "owner-user", false, true, Some(waiver));
+    let (status, body) = post_plan_approval(
+        &harness,
+        "run-owned",
+        &tokens,
+        serde_json::json!({
+            "decision": "approve",
+            "granted_rung": "workspace_write",
+            "justification": "writes the report into the workspace",
+            "plan_id": "plan-7",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        *harness.capture.plan_calls.lock().unwrap(),
+        vec!["get_plan".to_owned(), "transition_plan".to_owned()]
+    );
 }
 
 #[tokio::test]
@@ -1968,4 +2285,1022 @@ async fn approving_without_a_structured_plan_is_still_the_plain_rung_grant() {
         harness.plan_mode.granted_rung("org-owner", "thread-1"),
         Some(mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite)
     );
+}
+
+// ---------------------------------------------------------------------------
+// WS14 S3: run questions. Dark: no producer exists yet, so these routes read and
+// answer questions that a later slice (or a direct RPC) creates. A question is its
+// own store, never an approval: an answer cannot grant authority.
+// ---------------------------------------------------------------------------
+
+struct QuestionHarness {
+    app: axum::Router,
+    capture: CaptureState,
+}
+
+async fn question_harness() -> QuestionHarness {
+    let (mock, capture) = MockOrchestration::new();
+    let app = build_router(make_state(spawn_orchestration_mock(mock).await), None);
+    QuestionHarness { app, capture }
+}
+
+async fn question_call(
+    harness: &QuestionHarness,
+    method: &str,
+    uri: &str,
+    tokens: &UserTokens,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(AUTHORIZATION, format!("Bearer {}", tokens.model))
+        .header(
+            "x-session-authorization",
+            format!("Bearer {}", tokens.session),
+        );
+    let body = match body {
+        Some(body) => {
+            builder = builder.header("content-type", "application/json");
+            Body::from(body.to_string())
+        }
+        None => Body::empty(),
+    };
+    let response = harness
+        .app
+        .clone()
+        .oneshot(builder.body(body).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|_| serde_json::Value::String(String::from_utf8_lossy(&bytes).into_owned()));
+    (status, json)
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn run_question_the_list_route_scopes_the_org_to_the_callers_credential() {
+    let _auth = AuthFixture::start().await;
+    let harness = question_harness().await;
+    let tokens = AuthFixture::user_tokens("org-1", "user-1");
+    let (status, body) = question_call(
+        &harness,
+        "GET",
+        "/v1/orchestration/runs/run-9/questions?org_id=org-forged",
+        &tokens,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        *harness.capture.list_questions.lock().unwrap(),
+        Some(("run-9".into(), "org-1".into())),
+        "the org is the verified claim's, never a query value"
+    );
+    let question = &body["questions"][0];
+    assert_eq!(question["id"], "q-1");
+    assert_eq!(question["state"], "requested");
+    assert_eq!(question["delivery"], "next_turn");
+    assert_eq!(question["items"][0]["kind"], "single");
+    assert_eq!(question["items"][0]["options"][1]["description"], "New work");
+    assert_eq!(question["items"][0]["options"][0]["description"], serde_json::Value::Null);
+    assert_eq!(question["answered_at"], serde_json::Value::Null);
+    assert!(
+        question.get("org_id").is_none() && question.get("user_id").is_none(),
+        "the owner's own ids stay off the wire"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn run_question_an_answer_is_forwarded_with_the_callers_org_and_returns_the_question() {
+    let _auth = AuthFixture::start().await;
+    let harness = question_harness().await;
+    let tokens = AuthFixture::user_tokens("org-1", "user-1");
+    let (status, body) = question_call(
+        &harness,
+        "POST",
+        "/v1/orchestration/questions/q-7/answer",
+        &tokens,
+        Some(serde_json::json!({
+            "answers": [{"item_id": "scope", "option_ids": ["main"]}],
+            "org_id": "org-forged",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["question"]["id"], "q-7");
+    assert_eq!(body["question"]["state"], "answered");
+    let sent = harness
+        .capture
+        .answer_question
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the answer reached Session Core");
+    assert_eq!(sent.question_id, "q-7");
+    assert_eq!(sent.org_id, "org-1", "the org is the verified claim's");
+    assert!(!sent.skip);
+    assert_eq!(sent.answers.len(), 1);
+    assert_eq!(sent.answers[0].item_id, "scope");
+    assert_eq!(sent.answers[0].option_ids, vec!["main".to_owned()]);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn run_question_a_skip_is_forwarded_as_a_skip() {
+    let _auth = AuthFixture::start().await;
+    let harness = question_harness().await;
+    let tokens = AuthFixture::user_tokens("org-1", "user-1");
+    let (status, body) = question_call(
+        &harness,
+        "POST",
+        "/v1/orchestration/questions/q-7/answer",
+        &tokens,
+        Some(serde_json::json!({"skip": true, "answered_message_id": "msg-forged"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["question"]["state"], "skipped");
+    let sent = harness.capture.answer_question.lock().unwrap().clone().unwrap();
+    assert!(sent.skip && sent.answers.is_empty());
+    assert_eq!(
+        sent.answered_message_id, "",
+        "the message that carries an answer is never taken from the caller"
+    );
+}
+
+/// Each refusal Session Core can give has its own status and a typed body.
+#[tokio::test]
+#[serial_test::serial]
+async fn run_question_each_refusal_maps_to_its_typed_error() {
+    let _auth = AuthFixture::start().await;
+    let harness = question_harness().await;
+    let tokens = AuthFixture::user_tokens("org-1", "user-1");
+    for (question, status, code) in [
+        ("q-missing", StatusCode::NOT_FOUND, "question_not_found"),
+        ("q-expired", StatusCode::GONE, "question_expired"),
+        ("q-done", StatusCode::CONFLICT, "question_already_answered"),
+        ("q-bad", StatusCode::UNPROCESSABLE_ENTITY, "invalid_answer"),
+    ] {
+        let (got, body) = question_call(
+            &harness,
+            "POST",
+            &format!("/v1/orchestration/questions/{question}/answer"),
+            &tokens,
+            Some(serde_json::json!({"skip": true})),
+        )
+        .await;
+        assert_eq!(got, status, "{question}: {body}");
+        assert_eq!(body["error"]["code"], code, "{question}: {body}");
+        assert!(
+            body["error"]["message"].as_str().is_some_and(|m| !m.is_empty()),
+            "{question}: a message rides every typed error"
+        );
+        assert!(body["error"]["details"].is_object(), "{question}: {body}");
+    }
+    let (_, body) = question_call(
+        &harness,
+        "POST",
+        "/v1/orchestration/questions/q-bad/answer",
+        &tokens,
+        Some(serde_json::json!({"skip": true})),
+    )
+    .await;
+    assert_eq!(
+        body["error"]["details"],
+        serde_json::json!({"field": "answers[0].option_ids[0]", "reason": "unknown_option"}),
+        "an invalid answer names the field and the reason"
+    );
+}
+
+/// A ZDR credential is refused with the typed durable-mutation refusal before Session Core is
+/// asked anything, on both routes.
+#[tokio::test]
+#[serial_test::serial]
+async fn run_question_a_zdr_credential_is_refused_before_anything_is_asked() {
+    let _auth = AuthFixture::start().await;
+    let harness = question_harness().await;
+    let tokens = user_tokens_with_retention("org-1", "user-1", true, true, None);
+    let (status, body) = question_call(
+        &harness,
+        "GET",
+        "/v1/orchestration/runs/run-1/questions",
+        &tokens,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{body}");
+    assert_eq!(body["error"]["code"], "zdr_durable_mutation_forbidden", "{body}");
+    let (status, body) = question_call(
+        &harness,
+        "POST",
+        "/v1/orchestration/questions/q-1/answer",
+        &tokens,
+        Some(serde_json::json!({"skip": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{body}");
+    assert_eq!(body["error"]["code"], "zdr_durable_mutation_forbidden", "{body}");
+    assert_eq!(
+        harness.capture.question_calls.load(Ordering::SeqCst),
+        0,
+        "no question RPC was made for a ZDR credential"
+    );
+}
+
+/// A waived run counts as ZDR for every new durable store (DEC-32), so a waived credential is refused
+/// too, as a route mismatch, and Session Core is never asked.
+#[tokio::test]
+#[serial_test::serial]
+async fn run_question_a_waived_credential_is_refused_before_anything_is_asked() {
+    let _auth = AuthFixture::start().await;
+    let harness = question_harness().await;
+    let waiver = serde_json::json!({
+        "version": 1,
+        "provider": mp_contracts::agentic_subscription::PROVIDER_ID,
+        "connection": "conn-1",
+    });
+    let tokens = user_tokens_with_retention("org-1", "user-1", false, true, Some(waiver));
+    let (status, body) = question_call(
+        &harness,
+        "GET",
+        "/v1/orchestration/runs/run-1/questions",
+        &tokens,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"]["code"], "zdr_waiver_route_mismatch", "{body}");
+    let (status, body) = question_call(
+        &harness,
+        "POST",
+        "/v1/orchestration/questions/q-1/answer",
+        &tokens,
+        Some(serde_json::json!({"skip": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(
+        harness.capture.question_calls.load(Ordering::SeqCst),
+        0,
+        "no question RPC was made for a waived credential"
+    );
+}
+
+/// An answer is information, never a grant: the answer route shares no path with an approval, and
+/// answering a question decides nothing.
+#[tokio::test]
+#[serial_test::serial]
+async fn run_question_an_answer_never_touches_an_approval() {
+    let _auth = AuthFixture::start().await;
+    let harness = question_harness().await;
+    let tokens = AuthFixture::user_tokens("org-1", "user-1");
+    let (status, _) = question_call(
+        &harness,
+        "POST",
+        "/v1/orchestration/questions/q-7/answer",
+        &tokens,
+        Some(serde_json::json!({"skip": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        harness.capture.decide_approval.lock().unwrap().is_none(),
+        "answering a question decided no approval"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// WS04 S4: the durable plan grant. Session Core is the double below: it records
+// what `SetRunMode` writes and answers `ThreadAutonomy.GetThreadGrant` from it,
+// as the two RPCs of the real service share one table. Two gateway replicas are
+// two `AppState`s over the one double.
+// ---------------------------------------------------------------------------
+
+use mp_contracts::model_plane::v1::{
+    thread_autonomy_client::ThreadAutonomyClient,
+    thread_autonomy_server::{ThreadAutonomy, ThreadAutonomyServer},
+    GetThreadGrantRequest, GetThreadGrantResponse, SetRunModeRequest, SetRunModeResponse,
+};
+
+#[derive(Clone, Debug)]
+struct RecordedGrant {
+    org_id: String,
+    thread_id: String,
+    rung: i32,
+    plan_id: String,
+    expires_at: i64,
+}
+
+/// How the double's `GetThreadGrant` misbehaves, for the tests of a failed read.
+#[derive(Clone, Copy, Debug)]
+enum GrantReadFailure {
+    /// Answers this status code (a transient `Unavailable`, `Unimplemented` from an older
+    /// Session Core, a refusal).
+    Status(tonic::Code),
+    /// Never answers: the gateway's own 5 s bound is what ends the read.
+    Hang,
+}
+
+/// How many `SetRunMode` calls still fail. `usize::MAX` fails every one.
+const FAIL_EVERY_SET_RUN_MODE: usize = usize::MAX;
+
+#[derive(Clone, Default)]
+struct SessionCoreDouble {
+    grant: Arc<Mutex<Option<RecordedGrant>>>,
+    /// Only the calls that succeeded.
+    set_run_mode_calls: Arc<Mutex<Vec<SetRunModeRequest>>>,
+    /// Every call, failed or not.
+    set_run_mode_attempts: Arc<AtomicUsize>,
+    /// How many of the next `SetRunMode` calls fail with `set_run_mode_failure_code`.
+    set_run_mode_failures: Arc<AtomicUsize>,
+    set_run_mode_failure_code: Arc<Mutex<Option<tonic::Code>>>,
+    get_grant_failure: Arc<Mutex<Option<GrantReadFailure>>>,
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock is after the epoch")
+        .as_secs() as i64
+}
+
+impl SessionCoreDouble {
+    fn set_run_mode(
+        &self,
+        request: TonicRequest<SetRunModeRequest>,
+    ) -> Result<Response<SetRunModeResponse>, Status> {
+        if request.metadata().get("authorization").is_none() {
+            return Err(Status::unauthenticated("verified session credential required"));
+        }
+        self.set_run_mode_attempts.fetch_add(1, Ordering::SeqCst);
+        let failures = self.set_run_mode_failures.load(Ordering::SeqCst);
+        if failures > 0 {
+            if failures != FAIL_EVERY_SET_RUN_MODE {
+                self.set_run_mode_failures.fetch_sub(1, Ordering::SeqCst);
+            }
+            let code = self
+                .set_run_mode_failure_code
+                .lock()
+                .unwrap()
+                .unwrap_or(tonic::Code::Unavailable);
+            return Err(Status::new(code, "session-core is restarting"));
+        }
+        let request = request.into_inner();
+        self.set_run_mode_calls.lock().unwrap().push(request.clone());
+        if request.granted_rung != 0 {
+            *self.grant.lock().unwrap() = Some(RecordedGrant {
+                org_id: request.org_id.clone(),
+                thread_id: "thread-1".to_owned(),
+                rung: request.granted_rung,
+                plan_id: request.approved_plan_id.clone(),
+                expires_at: unix_now() + 86_400,
+            });
+        }
+        Ok(Response::new(SetRunModeResponse {
+            run_id: request.run_id,
+            mode: request.mode,
+            granted_rung: request.granted_rung,
+        }))
+    }
+}
+
+#[tonic::async_trait]
+impl ThreadAutonomy for SessionCoreDouble {
+    async fn get_thread_grant(
+        &self,
+        request: TonicRequest<GetThreadGrantRequest>,
+    ) -> Result<Response<GetThreadGrantResponse>, Status> {
+        if request.metadata().get("authorization").is_none() {
+            return Err(Status::unauthenticated("verified session credential required"));
+        }
+        let failure = *self.get_grant_failure.lock().unwrap();
+        match failure {
+            Some(GrantReadFailure::Status(code)) => {
+                return Err(Status::new(code, "the grant read failed"));
+            }
+            Some(GrantReadFailure::Hang) => std::future::pending::<()>().await,
+            None => {}
+        }
+        let request = request.into_inner();
+        let answer = match self.grant.lock().unwrap().clone() {
+            Some(grant)
+                if grant.org_id == request.org_id
+                    && grant.thread_id == request.thread_id
+                    && grant.expires_at > unix_now() =>
+            {
+                GetThreadGrantResponse {
+                    granted_rung: grant.rung,
+                    justification: String::new(),
+                    approved_plan_id: grant.plan_id,
+                    expires_at: Some(prost_types::Timestamp {
+                        seconds: grant.expires_at,
+                        nanos: 0,
+                    }),
+                }
+            }
+            _ => GetThreadGrantResponse::default(),
+        };
+        Ok(Response::new(answer))
+    }
+}
+
+/// Only `SessionCore.SetRunMode` of the real service's surface; every other method answers
+/// UNIMPLEMENTED. A hand-built tonic service rather than the 32-method trait, so the double
+/// is the two RPCs this slice reads and writes and nothing else.
+impl tonic::server::NamedService for SessionCoreDouble {
+    const NAME: &'static str = "model_plane.v1.SessionCore";
+}
+
+impl<B> tonic::codegen::Service<tonic::codegen::http::Request<B>> for SessionCoreDouble
+where
+    B: tonic::codegen::Body + Send + 'static,
+    B::Error: Into<tonic::codegen::StdError> + Send + 'static,
+{
+    type Response = tonic::codegen::http::Response<tonic::body::BoxBody>;
+    type Error = std::convert::Infallible;
+    type Future = tonic::codegen::BoxFuture<Self::Response, Self::Error>;
+
+    fn poll_ready(
+        &mut self,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: tonic::codegen::http::Request<B>) -> Self::Future {
+        match req.uri().path() {
+            "/model_plane.v1.SessionCore/SetRunMode" => {
+                struct SetRunModeSvc(SessionCoreDouble);
+                impl tonic::server::UnaryService<SetRunModeRequest> for SetRunModeSvc {
+                    type Response = SetRunModeResponse;
+                    type Future = tonic::codegen::BoxFuture<Response<Self::Response>, Status>;
+                    fn call(&mut self, request: TonicRequest<SetRunModeRequest>) -> Self::Future {
+                        let double = self.0.clone();
+                        Box::pin(async move { double.set_run_mode(request) })
+                    }
+                }
+                let double = self.clone();
+                Box::pin(async move {
+                    let mut grpc =
+                        tonic::server::Grpc::new(tonic::codec::ProstCodec::default());
+                    Ok(grpc.unary(SetRunModeSvc(double), req).await)
+                })
+            }
+            _ => Box::pin(async move {
+                Ok(tonic::codegen::http::Response::builder()
+                    .status(200)
+                    .header("grpc-status", "12")
+                    .header("content-type", "application/grpc")
+                    .body(tonic::codegen::empty_body())
+                    .expect("an UNIMPLEMENTED response"))
+            }),
+        }
+    }
+}
+
+async fn spawn_session_core_double(
+    double: &SessionCoreDouble,
+) -> (
+    mp_contracts::model_plane::v1::session_core_client::SessionCoreClient<tonic::transport::Channel>,
+    ThreadAutonomyClient<tonic::transport::Channel>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind session-core double");
+    let addr = listener.local_addr().expect("session-core double addr");
+    let served = double.clone();
+    tokio::spawn(async move {
+        Server::builder()
+            .add_service(served.clone())
+            .add_service(ThreadAutonomyServer::new(served))
+            .serve_with_incoming(TcpListenerStream::new(listener))
+            .await
+            .ok();
+    });
+    let channel = Endpoint::from_shared(format!("http://{addr}"))
+        .expect("session-core double endpoint")
+        .connect()
+        .await
+        .expect("connect session-core double");
+    (
+        mp_contracts::model_plane::v1::session_core_client::SessionCoreClient::new(channel.clone()),
+        ThreadAutonomyClient::new(channel),
+    )
+}
+
+struct DurableGrantHarness {
+    /// Replica A, the one the approval is posted to.
+    app: axum::Router,
+    publisher: Arc<DynPublisher>,
+    capture: CaptureState,
+    plan_mode_a: model_gateway::coordinator::PlanModeStore,
+    /// Replica B: another gateway process over the same Session Core. It saw no approval.
+    replica_b: AppState,
+    double: SessionCoreDouble,
+    owner: UserTokens,
+    _auth: AuthFixture,
+}
+
+async fn durable_grant_harness(durable: bool) -> DurableGrantHarness {
+    let auth = AuthFixture::start().await;
+    let owner = AuthFixture::user_tokens("org-owner", "owner-user");
+    let double = SessionCoreDouble::default();
+    let (session_client, grant_client) = spawn_session_core_double(&double).await;
+    let configured = || {
+        let store = model_gateway::coordinator::PlanModeStore::default();
+        if durable {
+            store
+                .with_durable_grant_enabled(true)
+                .with_durable_grant_client(grant_client.clone())
+        } else {
+            store
+        }
+    };
+
+    let (mock, capture) = MockOrchestration::new();
+    let (mut state_a, publisher, _cancel_calls) = run_owner_state(&owner.session).await;
+    state_a.orchestration_client = spawn_orchestration_mock(mock).await;
+    state_a.session_client = session_client.clone();
+    state_a.plan_mode = configured();
+    let plan_mode_a = state_a.plan_mode.clone();
+
+    let mut replica_b = AppState::new();
+    replica_b.session_client = session_client;
+    replica_b.plan_mode = configured();
+
+    DurableGrantHarness {
+        app: build_router(state_a, None),
+        publisher,
+        capture,
+        plan_mode_a,
+        replica_b,
+        double,
+        owner,
+        _auth: auth,
+    }
+}
+
+async fn post_durable_approval(
+    harness: &DurableGrantHarness,
+    run_id: &str,
+    tokens: &UserTokens,
+) -> (StatusCode, serde_json::Value) {
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("/v1/runs/{run_id}/plan-approval"))
+        .header(AUTHORIZATION, format!("Bearer {}", tokens.model))
+        .header("x-session-authorization", format!("Bearer {}", tokens.session))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "decision": "approve",
+                "granted_rung": "workspace_write",
+                "justification": "writes the report into the workspace",
+                "plan_id": "plan-7",
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let response = harness.app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+}
+
+/// The slice's point: approve on replica A, and a run started on replica B reads the rung and
+/// the approved plan from Session Core. Neither replica's memory holds the grant, the lifecycle
+/// event follows the run's durable mode, and the expiry the client is told is the stored one.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_plan_approved_on_one_replica_is_read_by_a_run_started_on_another() {
+    let harness = durable_grant_harness(true).await;
+    let (status, body) = post_durable_approval(&harness, "run-owned", &harness.owner).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["persisted"], true, "{body}");
+    assert_eq!(body["was_in_plan_mode"], true, "the run's durable mode was plan: {body}");
+
+    // The approval named its plan to Session Core, in the same call that granted the rung.
+    let calls = harness.double.set_run_mode_calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].approved_plan_id, "plan-7");
+    assert_eq!(calls[0].mode, "execute");
+
+    // The expiry is the stored one, read back after the write.
+    let expires = body["grant_expires_at_unix"]
+        .as_i64()
+        .expect("a durable grant states when it lapses");
+    let now = unix_now();
+    assert!(expires > now && expires <= now + 86_401, "{expires} vs {now}");
+
+    // Replica A kept no copy: the memory half is unused with the switch on.
+    assert_eq!(harness.plan_mode_a.granted_rung("org-owner", "thread-1"), None);
+    assert_eq!(harness.plan_mode_a.take_approved_plan("org-owner", "thread-1"), None);
+
+    // Replica B, which never saw the approval, reads the rung and the plan from Session Core.
+    assert_eq!(harness.replica_b.plan_mode.granted_rung("org-owner", "thread-1"), None);
+    let grant = model_gateway::session_flow::thread_grant(
+        &harness.replica_b,
+        "org-owner",
+        "thread-1",
+        &harness.owner.session,
+    )
+    .await
+    .expect("the grant reads on another replica");
+    assert_eq!(
+        grant.rung,
+        Some(mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite)
+    );
+    assert_eq!(grant.approved_plan_id.as_deref(), Some("plan-7"));
+    assert_eq!(grant.expires_at_unix, Some(expires));
+
+    // The grant is the thread's own, and the org's: another thread or org reads no grant.
+    for (org, thread) in [("org-other", "thread-1"), ("org-owner", "thread-2")] {
+        let other = model_gateway::session_flow::thread_grant(
+            &harness.replica_b,
+            org,
+            thread,
+            &harness.owner.session,
+        )
+        .await
+        .expect("the read answers");
+        assert_eq!(other, model_gateway::session_flow::ThreadGrant::default(), "({org}, {thread})");
+    }
+
+    // The lifecycle event was published, once, by the replica that took the approval.
+    let events = harness.publisher.drain();
+    let exited: Vec<_> = events
+        .iter()
+        .filter(|(_, envelope)| envelope.event_type == "RUN_PLAN_MODE_EXITED")
+        .collect();
+    assert_eq!(exited.len(), 1, "{events:?}");
+}
+
+/// `was_in_plan_mode` is the durable run row's answer, so a run that already left plan mode
+/// reports false and publishes nothing, whichever replica is asked.
+#[tokio::test]
+#[serial_test::serial]
+async fn was_in_plan_mode_is_the_durable_runs_answer_not_this_replicas_memory() {
+    let harness = durable_grant_harness(true).await;
+    let (status, body) = post_durable_approval(&harness, "run-executed", &harness.owner).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["was_in_plan_mode"], false, "{body}");
+    assert!(
+        harness
+            .publisher
+            .drain()
+            .iter()
+            .all(|(_, envelope)| envelope.event_type != "RUN_PLAN_MODE_EXITED"),
+        "no exit event for a run that was not in plan mode"
+    );
+    // The grant itself is still recorded: approving is granting, whatever the run's mode was.
+    assert_eq!(harness.double.set_run_mode_calls.lock().unwrap().len(), 1);
+}
+
+/// With the switch off the approval is the one it always was: the grant lives in this replica's
+/// memory with its in-memory expiry, and Session Core is told no plan id.
+#[tokio::test]
+#[serial_test::serial]
+async fn with_the_switch_off_the_grant_stays_in_memory_and_session_core_is_told_no_plan() {
+    let harness = durable_grant_harness(false).await;
+    let (status, body) = post_durable_approval(&harness, "run-owned", &harness.owner).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        harness.plan_mode_a.granted_rung("org-owner", "thread-1"),
+        Some(mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite)
+    );
+    assert_eq!(
+        Some(body["grant_expires_at_unix"].as_i64().expect("an expiry")),
+        harness.plan_mode_a.grant_expires_at("org-owner", "thread-1")
+    );
+    assert_eq!(
+        harness.plan_mode_a.take_approved_plan("org-owner", "thread-1"),
+        Some("plan-7".to_owned())
+    );
+    let calls = harness.double.set_run_mode_calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].approved_plan_id, "", "the request is the one it always was");
+    // A replica with no reader configured cannot read a grant: the memory half is per replica.
+    let unread = model_gateway::session_flow::thread_grant(
+        &harness.replica_b,
+        "org-owner",
+        "thread-1",
+        &harness.owner.session,
+    )
+    .await
+    .expect_err("no reader is configured while the switch is off");
+    assert_eq!(unread.code(), tonic::Code::Unavailable);
+}
+
+/// A zero-retention credential records no grant, durable or not: the gateway refuses it before
+/// any plan is read and Session Core is never called.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_zdr_credential_records_no_durable_grant() {
+    let harness = durable_grant_harness(true).await;
+    let tokens = user_tokens_with_retention("org-owner", "owner-user", true, true, None);
+    let (status, body) = post_durable_approval(&harness, "run-owned", &tokens).await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{body}");
+    assert_eq!(body["error"]["code"], "zdr_durable_mutation_forbidden", "{body}");
+    assert!(harness.double.set_run_mode_calls.lock().unwrap().is_empty());
+    assert!(harness.double.grant.lock().unwrap().is_none());
+    assert!(harness.capture.plan_calls.lock().unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// WS04 S4 review fixes: the approval's durable write is retried and, if it still fails, the
+// grant stays on the approving replica; a failed read of the grant is an error, not "no grant";
+// the exit event follows the run's durable mode OR this replica's flag.
+// ---------------------------------------------------------------------------
+
+/// Defect 1: SetRunMode fails twice with a transient `Unavailable`, the approval retries it, and
+/// the third attempt records the grant. The answer is `persisted: true`, the grant is Session
+/// Core's, and this replica keeps no copy.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_approval_whose_durable_write_fails_twice_is_retried_and_persists() {
+    let harness = durable_grant_harness(true).await;
+    harness.double.set_run_mode_failures.store(2, Ordering::SeqCst);
+    let (status, body) = post_durable_approval(&harness, "run-owned", &harness.owner).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["persisted"], true, "{body}");
+    assert_eq!(harness.double.set_run_mode_attempts.load(Ordering::SeqCst), 3);
+    assert_eq!(harness.double.set_run_mode_calls.lock().unwrap().len(), 1);
+    assert!(harness.double.grant.lock().unwrap().is_some(), "Session Core recorded the grant");
+    assert!(body["grant_expires_at_unix"].as_i64().is_some(), "{body}");
+    assert_eq!(
+        harness.plan_mode_a.granted_rung("org-owner", "thread-1"),
+        None,
+        "a durable grant leaves no copy in this replica's memory"
+    );
+}
+
+/// Defect 1: SetRunMode never succeeds. The plan is already APPROVED and cannot be approved
+/// again, so the approving replica keeps the grant in its own memory and keeps honouring it,
+/// the answer says `persisted: false`, and the plan is not rolled back. The retry is bounded:
+/// the first attempt and three retries, then it gives up.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_approval_whose_durable_write_always_fails_keeps_the_grant_on_this_replica() {
+    let harness = durable_grant_harness(true).await;
+    harness
+        .double
+        .set_run_mode_failures
+        .store(FAIL_EVERY_SET_RUN_MODE, Ordering::SeqCst);
+    let started = std::time::Instant::now();
+    let (status, body) = post_durable_approval(&harness, "run-owned", &harness.owner).await;
+    let waited = started.elapsed();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["persisted"], false, "the answer is honest about it: {body}");
+    assert_eq!(
+        harness.double.set_run_mode_attempts.load(Ordering::SeqCst),
+        4,
+        "the first attempt and three retries"
+    );
+    assert!(
+        waited >= std::time::Duration::from_millis(1_300),
+        "the backoff waited 100, 300 and 900 ms: {waited:?}"
+    );
+    assert!(waited < std::time::Duration::from_secs(10), "and it is bounded: {waited:?}");
+    assert!(harness.double.grant.lock().unwrap().is_none(), "Session Core holds nothing");
+
+    // The plan moved to APPROVED and stayed there (it is not rolled back).
+    assert_eq!(
+        *harness.capture.plan_calls.lock().unwrap(),
+        vec!["get_plan".to_owned(), "transition_plan".to_owned()]
+    );
+    // This replica keeps the grant, with its plan, and states when it lapses.
+    assert_eq!(
+        harness.plan_mode_a.granted_rung("org-owner", "thread-1"),
+        Some(mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite)
+    );
+    assert_eq!(
+        harness.plan_mode_a.peek_approved_plan("org-owner", "thread-1"),
+        Some("plan-7".to_owned())
+    );
+    assert_eq!(
+        body["grant_expires_at_unix"].as_i64(),
+        harness.plan_mode_a.grant_expires_at("org-owner", "thread-1"),
+        "{body}"
+    );
+    // Another replica has no such copy: only the approving replica honours it.
+    assert_eq!(harness.replica_b.plan_mode.granted_rung("org-owner", "thread-1"), None);
+}
+
+/// A refusal is not retried: it would only be refused again. And it is not a reason to keep the
+/// grant in memory either (WS04 S4 second review, defect 0): a grant Session Core said no to is
+/// not one this replica may honour. The plan stays APPROVED and the answer says `persisted:
+/// false`.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_refused_durable_write_is_not_retried_and_keeps_no_grant() {
+    for code in [
+        tonic::Code::PermissionDenied,
+        tonic::Code::FailedPrecondition,
+        tonic::Code::InvalidArgument,
+        tonic::Code::NotFound,
+        tonic::Code::Unauthenticated,
+    ] {
+        let harness = durable_grant_harness(true).await;
+        harness
+            .double
+            .set_run_mode_failures
+            .store(FAIL_EVERY_SET_RUN_MODE, Ordering::SeqCst);
+        *harness.double.set_run_mode_failure_code.lock().unwrap() = Some(code);
+        let (status, body) = post_durable_approval(&harness, "run-owned", &harness.owner).await;
+        assert_eq!(status, StatusCode::OK, "{code:?}: {body}");
+        assert_eq!(body["persisted"], false, "{code:?}: {body}");
+        assert_eq!(harness.double.set_run_mode_attempts.load(Ordering::SeqCst), 1, "{code:?}");
+        assert_eq!(
+            harness.plan_mode_a.granted_rung("org-owner", "thread-1"),
+            None,
+            "{code:?}: a refused grant is not kept in memory"
+        );
+        assert_eq!(harness.plan_mode_a.peek_approved_plan("org-owner", "thread-1"), None, "{code:?}");
+        assert_eq!(body["grant_expires_at_unix"], serde_json::Value::Null, "{code:?}: {body}");
+    }
+}
+
+/// The waiver of zero retention for one connection, as the issuer mints it.
+fn waived_owner_tokens() -> UserTokens {
+    let waiver = serde_json::json!({
+        "version": 1,
+        "provider": mp_contracts::agentic_subscription::PROVIDER_ID,
+        "connection": "conn-1",
+    });
+    user_tokens_with_retention("org-owner", "owner-user", false, true, Some(waiver))
+}
+
+/// WS04 S4 second review, defect 1. Session Core refuses a `SetRunMode` that states a grant when
+/// the credential is waived, and that refusal used to take the run's mode update down with it,
+/// so every waived approval left the run in plan mode (and in production, the switch is off).
+/// The gateway sends the mode change alone: no rung, no justification, no plan id. The run
+/// leaves plan mode, no grant is claimed durable (`persisted: false`), and the approving replica
+/// keeps the grant in memory, with the switch off and on.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_waived_approval_updates_the_run_mode_and_states_no_durable_grant() {
+    for durable in [false, true] {
+        let harness = durable_grant_harness(durable).await;
+        let tokens = waived_owner_tokens();
+        let (status, body) = post_durable_approval(&harness, "run-owned", &tokens).await;
+        assert_eq!(status, StatusCode::OK, "durable={durable}: {body}");
+        assert_eq!(body["persisted"], false, "durable={durable}: the grant is not durable: {body}");
+
+        let calls = harness.double.set_run_mode_calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1, "durable={durable}: the mode update was made once");
+        assert_eq!(calls[0].run_id, "run-owned");
+        assert_eq!(calls[0].mode, "execute", "durable={durable}: the run leaves plan mode");
+        assert_eq!(calls[0].granted_rung, 0, "durable={durable}: no grant is stated");
+        assert_eq!(calls[0].justification, "", "durable={durable}");
+        assert_eq!(calls[0].approved_plan_id, "", "durable={durable}");
+        assert!(harness.double.grant.lock().unwrap().is_none(), "durable={durable}: nothing on the thread");
+
+        assert_eq!(
+            harness.plan_mode_a.granted_rung("org-owner", "thread-1"),
+            Some(mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite),
+            "durable={durable}: the approving replica keeps the grant in memory"
+        );
+        assert_eq!(
+            body["grant_expires_at_unix"].as_i64(),
+            harness.plan_mode_a.grant_expires_at("org-owner", "thread-1"),
+            "durable={durable}: {body}"
+        );
+        assert_eq!(harness.replica_b.plan_mode.granted_rung("org-owner", "thread-1"), None);
+    }
+}
+
+/// An ordinary (not waived) approval is unchanged: the grant is stated to Session Core, which
+/// records it, with the switch off (no plan id) and on (the plan id).
+#[tokio::test]
+#[serial_test::serial]
+async fn a_non_waived_approval_states_its_grant_to_session_core() {
+    for (durable, plan_id) in [(false, ""), (true, "plan-7")] {
+        let harness = durable_grant_harness(durable).await;
+        let (status, body) = post_durable_approval(&harness, "run-owned", &harness.owner).await;
+        assert_eq!(status, StatusCode::OK, "durable={durable}: {body}");
+        let calls = harness.double.set_run_mode_calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].granted_rung,
+            mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite as i32,
+            "durable={durable}"
+        );
+        assert_eq!(calls[0].justification, "writes the report into the workspace");
+        assert_eq!(calls[0].approved_plan_id, plan_id, "durable={durable}");
+        assert_eq!(calls[0].mode, "execute");
+        assert_eq!(body["persisted"], true, "durable={durable}: {body}");
+    }
+}
+
+/// With the switch off the approval is not retried at all: one attempt, as it always was.
+#[tokio::test]
+#[serial_test::serial]
+async fn with_the_switch_off_the_durable_write_is_attempted_once() {
+    let harness = durable_grant_harness(false).await;
+    harness
+        .double
+        .set_run_mode_failures
+        .store(FAIL_EVERY_SET_RUN_MODE, Ordering::SeqCst);
+    let (status, body) = post_durable_approval(&harness, "run-owned", &harness.owner).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["persisted"], false, "{body}");
+    assert_eq!(harness.double.set_run_mode_attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        harness.plan_mode_a.granted_rung("org-owner", "thread-1"),
+        Some(mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite),
+        "the in-memory grant, as ever"
+    );
+}
+
+/// Defect 0: every way the read of the grant can fail is an error the run start must treat as
+/// unreadable. The double answers `Unavailable`, `Unimplemented` (an older Session Core with no
+/// ThreadAutonomy service) and a refusal; an answer of "no grant" is the only `Ok` with no rung.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_failed_grant_read_is_an_error_and_only_an_ok_answer_is_no_grant() {
+    let harness = durable_grant_harness(true).await;
+    for code in [
+        tonic::Code::Unavailable,
+        tonic::Code::Unimplemented,
+        tonic::Code::PermissionDenied,
+        tonic::Code::Internal,
+    ] {
+        *harness.double.get_grant_failure.lock().unwrap() = Some(GrantReadFailure::Status(code));
+        let error = model_gateway::session_flow::thread_grant(
+            &harness.replica_b,
+            "org-owner",
+            "thread-1",
+            &harness.owner.session,
+        )
+        .await
+        .expect_err("a failing read is an error, never a grant with no rung");
+        assert_eq!(error.code(), code);
+    }
+    *harness.double.get_grant_failure.lock().unwrap() = None;
+    let none = model_gateway::session_flow::thread_grant(
+        &harness.replica_b,
+        "org-owner",
+        "thread-1",
+        &harness.owner.session,
+    )
+    .await
+    .expect("an answer of no grant is Ok");
+    assert_eq!(none, model_gateway::session_flow::ThreadGrant::default());
+    assert!(!none.read_failed);
+}
+
+/// Defect 0: a Session Core that never answers ends at the gateway's own bound as
+/// `DeadlineExceeded`, which the run start treats like any other failed read. Time is paused,
+/// so the 5 s bound costs nothing.
+#[tokio::test(start_paused = true)]
+#[serial_test::serial]
+async fn a_grant_read_that_never_answers_ends_at_its_bound() {
+    let double = SessionCoreDouble::default();
+    *double.get_grant_failure.lock().unwrap() = Some(GrantReadFailure::Hang);
+    let (_session_client, grant_client) = spawn_session_core_double(&double).await;
+    let mut state = AppState::new();
+    state.plan_mode = model_gateway::coordinator::PlanModeStore::default()
+        .with_durable_grant_enabled(true)
+        .with_durable_grant_client(grant_client);
+    let error = model_gateway::session_flow::thread_grant(&state, "org-owner", "thread-1", "token")
+        .await
+        .expect_err("a read that never answers is an error");
+    assert_eq!(error.code(), tonic::Code::DeadlineExceeded);
+}
+
+/// Defect 3a, over HTTP: the run entered plan mode on THIS replica but the durable
+/// SetRunMode(plan) was best-effort and failed, so the run row still says `execute`. The
+/// durable write of the grant happens anyway, so the exit event, the only one carrying the
+/// rung, the justification and the plan id, must be published.
+#[tokio::test]
+#[serial_test::serial]
+async fn the_exit_event_is_published_when_only_this_replica_knew_the_run_was_in_plan_mode() {
+    let harness = durable_grant_harness(true).await;
+    model_gateway::coordinator::handle_enter_plan_mode(
+        &harness.plan_mode_a,
+        &InMemoryPublisher::new(),
+        mp_contracts::model_plane::v1::EnterPlanModeRequest {
+            request_id: "req-enter".to_owned(),
+            org_id: "org-owner".to_owned(),
+            run_id: "run-executed".to_owned(),
+            session_id: "thread-1".to_owned(),
+            rationale: "entered here, the durable write failed".to_owned(),
+            ttl_seconds: 600,
+        },
+    )
+    .await
+    .expect("plan mode is entered on this replica");
+    let (status, body) = post_durable_approval(&harness, "run-executed", &harness.owner).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["was_in_plan_mode"], true, "this replica's flag counts: {body}");
+    let events = harness.publisher.drain();
+    let exited: Vec<_> = events
+        .iter()
+        .filter(|(_, envelope)| envelope.event_type == "RUN_PLAN_MODE_EXITED")
+        .collect();
+    assert_eq!(exited.len(), 1, "{events:?}");
+    assert_eq!(exited[0].1.payload["granted_rung"], "workspace_write");
+    assert_eq!(exited[0].1.payload["plan_id"], "plan-7");
 }

@@ -407,3 +407,83 @@ func TestPostgresLedger_CostBasisRoundTrip(t *testing.T) {
 		t.Fatalf("subscription tokens counted against max_tokens: %v", err)
 	}
 }
+
+// TestPostgresLedger_CacheMissReasonRoundTrip pins migration 0011: a reason
+// survives the round trip, no reason is stored as NULL, subscription turns stay
+// out of the cache figures, and the reasons group per day/model/provider.
+func TestPostgresLedger_CacheMissReasonRoundTrip(t *testing.T) {
+	dsn := os.Getenv("COST_CORE_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("COST_CORE_TEST_DATABASE_URL not set; skipping Postgres integration test")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	pool, err := Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	applyMigration(ctx, t, pool)
+	applyMigration(ctx, t, pool)
+
+	org := "itest-cachemiss-" + time.Now().Format("150405.000")
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM cost_entries WHERE org_id = $1`, org)
+	})
+
+	store, err := New(pool)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	for key, e := range map[string]ledger.Entry{
+		"hit":   {InputTokens: 1000, CacheReadInputTokens: 700, CostBasis: ledger.CostBasisMetered},
+		"miss1": {InputTokens: 1000, CacheMissReason: ledger.CacheMissTTLExpired, CostBasis: ledger.CostBasisMetered},
+		"miss2": {InputTokens: 1000, CacheMissReason: ledger.CacheMissTTLExpired, CostBasis: ledger.CostBasisMetered},
+		"sub":   {InputTokens: 1000, CacheReadInputTokens: 900, CacheMissReason: ledger.CacheMissNoBaseline, CostBasis: ledger.CostBasisSubscription},
+	} {
+		e.OrgID, e.UserID, e.Model, e.ProviderUsed, e.IdempotencyKey = org, "u1", "claude", "anthropic", key
+		if err := store.RecordEntry(ctx, e); err != nil {
+			t.Fatalf("record %s: %v", key, err)
+		}
+	}
+
+	entries, err := store.ListEntries(ctx, ledger.AggregateFilter{OrgID: org}, 10)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	// The store writes each idempotency key org-scoped and hashed
+	// (scopedIdempotencyKey), so look the rows up by the key it wrote.
+	reasons := map[string]string{}
+	for _, e := range entries {
+		reasons[e.IdempotencyKey] = e.CacheMissReason
+	}
+	if len(reasons) != 4 || reasons[scopedIdempotencyKey(org, "hit")] != "" ||
+		reasons[scopedIdempotencyKey(org, "miss1")] != ledger.CacheMissTTLExpired ||
+		reasons[scopedIdempotencyKey(org, "sub")] != ledger.CacheMissNoBaseline {
+		t.Fatalf("reasons did not round trip: %v", reasons)
+	}
+
+	buckets, err := store.UsageAnalytics(ctx, ledger.AggregateFilter{OrgID: org})
+	if err != nil {
+		t.Fatalf("analytics: %v", err)
+	}
+	var read, reported int64
+	for _, b := range buckets {
+		read += b.CacheReadInputTokens
+		reported += b.CacheReportedInputTokens
+	}
+	if read != 700 || reported != 3000 {
+		t.Fatalf("cache sums = %d/%d, want 700/3000 with the subscription turn excluded", read, reported)
+	}
+
+	misses, err := store.CacheMissAnalytics(ctx, ledger.AggregateFilter{OrgID: org})
+	if err != nil {
+		t.Fatalf("cache miss analytics: %v", err)
+	}
+	if len(misses) != 1 || misses[0].Reason != ledger.CacheMissTTLExpired || misses[0].Requests != 2 {
+		t.Fatalf("miss breakdown = %+v, want one ttl_expired bucket of 2", misses)
+	}
+}

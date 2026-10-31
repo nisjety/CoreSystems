@@ -55,6 +55,11 @@ fn expected() -> Vec<(&'static str, Failure)> {
             },
         ),
         ("provider_zdr_unavailable", Failure::ZdrUnavailable),
+        // A model the organization has not been granted is a refusal of the organization's binding:
+        // PERMISSION_DENIED, terminal, never retried into another route.
+        ("provider_model_not_entitled", Failure::Auth),
+        // The entitlement could not be resolved (UNAVAILABLE): a wait, never an answer either way.
+        ("provider_entitlement_unavailable", transient.clone()),
         (
             "provider_residency_violation",
             Failure::ResidencyUnavailable,
@@ -274,11 +279,13 @@ fn every_kind_the_golden_lists_is_one_the_client_has_met() {
     .map(str::to_owned)
     .collect();
     // The kinds the client does not name are decoded by their code, on purpose:
-    // the three subscription refusals other than the usage limit.
+    // the three subscription refusals other than the usage limit and the two model entitlement kinds.
     let by_code_only: BTreeSet<String> = listed.difference(&named_by_the_client).cloned().collect();
     assert_eq!(
         by_code_only,
         [
+            "model_entitlement_unavailable",
+            "model_not_entitled",
             "subscription_bad_request",
             "subscription_reauth_required",
             "subscription_upstream_unavailable"

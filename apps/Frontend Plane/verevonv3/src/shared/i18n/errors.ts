@@ -12,6 +12,16 @@
 // code that has neither an entry nor a reasoned internal-only exemption, so the
 // table cannot drift. A code answered by status class (401, 403, 429, no network)
 // needs no entry; everything else falls back to the caller's own sentence.
+// The zero-retention refusals of the Model Plane catalogue are the exception:
+// their words live with the catalogue (shared/api/zdr-refusals.ts), so this seam
+// renders them from there. The model-entitlement refusals do the same
+// (shared/api/model-entitlement-refusals.ts).
+
+import { isModelEntitlementCode, modelEntitlementPresentation } from '@/shared/api/model-entitlement-refusals'
+import { en as enStrings } from './en'
+import { no as noStrings } from './no'
+
+import { isZdrRefusalCode, zdrRefusalPresentation } from '@/shared/api/zdr-refusals'
 
 type ErrorCopy = {
   no: string
@@ -27,6 +37,7 @@ type ApiErrorLike =
       retryAfterSeconds?: number | null
       blockReason?: string | null
       resumable?: boolean
+      feature?: string | null
     }
   | null
   | undefined
@@ -324,6 +335,30 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     no: 'Adressen ser ikke ut som en offentlig nettside. Sjekk lenken og prøv igjen.',
     en: 'The address does not look like a public web page. Check the link and try again.',
   },
+  invalid_allowed_domains: {
+    no: 'Listen over tillatte nettsteder er ikke gyldig. Sjekk domenene og prøv igjen.',
+    en: 'The list of allowed sites is not valid. Check the domains and try again.',
+  },
+  browser_grant_invalid: {
+    no: 'Nettlesertilgangen for denne kjøringen er ikke gyldig. Start kjøringen på nytt.',
+    en: 'The browser access for this run is not valid. Start the run again.',
+  },
+  invalid_destination_id: {
+    no: 'Mottakeren er ikke gyldig. Sjekk valget og prøv igjen.',
+    en: 'The destination is not valid. Check the choice and try again.',
+  },
+  invalid_skill_decision: {
+    no: 'Avgjørelsen kunne ikke leses. Velg godta eller avvis og prøv igjen.',
+    en: 'The decision could not be read. Choose accept or reject and try again.',
+  },
+  scope_not_enabled: {
+    no: 'Bare en avgjørelse for dette ene kallet er tilgjengelig.',
+    en: 'Only a decision for this one call is available.',
+  },
+  body_too_large: {
+    no: 'Policyen er for stor. Kort den ned og prøv igjen.',
+    en: 'The policy is too large. Shorten it and try again.',
+  },
   invalid_crawl_request: {
     no: 'Gjennomgangen kunne ikke startes med disse innstillingene. Sjekk adressen og innstillingene, og prøv igjen.',
     en: 'The crawl could not be started with these settings. Check the address and the settings, and try again.',
@@ -367,6 +402,10 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   plan_upgrade_required: { no: 'Oppgrader planen din for å fortsette.', en: 'Upgrade your plan to continue.' },
   entitlement_required: { no: 'Denne funksjonen er ikke inkludert i planen din.', en: 'This feature is not included in your plan.' },
 
+  // A local refusal, thrown by the chat client before anything is sent: the
+  // ChatGPT-subscription route carries no images (shared/api/chat-client.ts).
+  attachments_not_sent: { no: noStrings.attachments.notSent, en: enStrings.attachments.notSent },
+
   // The org Zero Data Retention switch (gateway `orgs/settings.rs`), refused
   // when no AI provider has a recorded zero-retention attestation, or when that
   // cannot be checked. The same two codes come back from the settings page and
@@ -376,6 +415,29 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   zdr_no_attested_provider: {
     no: 'Zero Data Retention kan ikke slås på ennå: ingen AI-leverandør har en registrert nullbevaringsgodkjenning. Fortsett uten, og slå det på i innstillingene når en leverandør er godkjent.',
     en: 'Zero Data Retention cannot be turned on yet: no AI provider has a recorded zero-retention attestation. Carry on without it, and turn it on in the settings once a provider is attested.',
+  },
+  // The org model-access policy (gateway `orgs/model_entitlement.rs`, org-core
+  // `modelentitlement`): the refusals of an admin save. A member's refusal to use a
+  // model is a catalogue code, rendered below from its own module.
+  revision_conflict: {
+    no: 'Modelltilgangen ble endret av noen andre. Last inn på nytt og gjør endringen igjen.',
+    en: 'Model access was changed by someone else. Reload and make the change again.',
+  },
+  invalid_model_policy: {
+    no: 'Modelltilgangen er ikke gyldig. Sjekk modell-ID-ene, effektnivået og personvernnivået.',
+    en: 'The model access policy is not valid. Check the model ids, the effort level and the privacy tier.',
+  },
+  model_policy_leaves_no_zdr_model: {
+    no: 'Denne modelltilgangen ville latt en rolle stå uten modell med nullbevaringsgodkjenning, og Zero Data Retention er på. Tillat minst én godkjent modell.',
+    en: 'This model access would leave a role with no zero-retention attested model while Zero Data Retention is on. Allow at least one attested model.',
+  },
+  model_policy_guard_unavailable: {
+    no: 'Kunne ikke kontrollere modelltilgangen mot Zero Data Retention akkurat nå, så ingenting ble lagret. Prøv igjen om litt.',
+    en: 'Model access could not be checked against Zero Data Retention right now, so nothing was saved. Try again shortly.',
+  },
+  zdr_models_not_entitled: {
+    no: 'Zero Data Retention kan ikke slås på: modelltilgangen tillater ingen modell med nullbevaringsgodkjenning. Endre modelltilgangen først.',
+    en: 'Zero Data Retention cannot be turned on: the model access allows no zero-retention attested model. Change the model access first.',
   },
   zdr_gate_unavailable: {
     no: 'Kunne ikke kontrollere hvilke leverandører som har registrert ZDR-godkjenning, så Zero Data Retention kan ikke slås på akkurat nå. Prøv igjen om litt, eller fortsett uten og slå det på senere.',
@@ -722,9 +784,79 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     no: 'Hentingen av nettsiden mislyktes. Prøv på nytt, eller fortsett uten forhåndsvisning.',
     en: 'Fetching the website failed. Try again, or continue without a preview.',
   },
+  preview_unavailable: {
+    no: 'Vi kunne ikke lese en trygg forhåndsvisning av nettsiden. Prøv på nytt, eller fortsett uten forhåndsvisning.',
+    en: 'We could not read a safe preview of the website. Try again, or continue without a preview.',
+  },
+  no_org_number: {
+    no: 'Organisasjonen har ikke organisasjonsnummer ennå. Legg det inn i organisasjonsinnstillingene, og prøv igjen.',
+    en: 'The organization has no organisation number yet. Add it in the organization settings, and try again.',
+  },
   invalid_checkout_request: {
     no: 'Betalingen kunne ikke startes med disse opplysningene. Sjekk dem og prøv igjen.',
     en: 'The payment could not be started with these details. Check them and try again.',
+  },
+
+  // Marketing, Visibility and Algolia setup (gateway `domains/marketing.rs`, `domains/integrations/algolia.rs`,
+  // `domains/integrations/providers.rs`). The panels answer a 409 conflict by their own code; these are the refusals
+  // the gateway sends before a request reaches the marketing core.
+  algolia_unavailable: {
+    no: 'Algolia-oppsettet er utilgjengelig. Sjekk tilgangene i arbeidsområdet og oppsettet hos leverandøren, og prøv igjen.',
+    en: 'The Algolia setup is unavailable. Check the workspace permissions and the provider setup, and try again.',
+  },
+  invalid_provider: {
+    no: 'Leverandøren er ikke gyldig. Velg en av leverandørene i listen.',
+    en: 'The provider is not valid. Choose one of the providers in the list.',
+  },
+  control_session_unavailable: {
+    no: 'Innloggingsøkten kunne ikke bekreftes akkurat nå. Prøv igjen om litt.',
+    en: 'Your session could not be confirmed right now. Try again shortly.',
+    retryable: true,
+  },
+  dns_verification_retired: {
+    no: 'DNS-verifisering i Studio er avviklet. Koble til kontoen hos den aktuelle leverandøren i stedet.',
+    en: 'DNS verification in Studio has been retired. Connect the account at the relevant provider instead.',
+  },
+  invalid_marketing_request: {
+    no: 'Markedsføringsforespørselen er ikke gyldig. Velg en gyldig operasjon og et registrert nettsted, og prøv igjen.',
+    en: 'The marketing request is not valid. Choose a valid operation and a registered website, and try again.',
+  },
+  invalid_task_assignee: {
+    no: 'Den valgte personen er ikke et nåværende medlem av arbeidsområdet. Velg et nåværende medlem.',
+    en: 'The chosen person is not a current member of the workspace. Choose a current member.',
+  },
+  marketing_admin_required: {
+    no: 'Bare en administrator i arbeidsområdet kan styre integrasjoner. Be en administrator gjøre endringen.',
+    en: 'Only a workspace administrator can manage integrations. Ask an administrator to make the change.',
+  },
+  marketing_json_required: {
+    no: 'Forespørselen hadde feil format. Last siden på nytt og prøv igjen.',
+    en: 'The request had the wrong format. Reload the page and try again.',
+  },
+  marketing_route_not_found: {
+    no: 'Denne markedsføringsfunksjonen støttes ikke. Last siden på nytt, og kontakt support hvis det vedvarer.',
+    en: 'This marketing function is not supported. Reload the page, and contact support if it persists.',
+  },
+  marketing_same_origin_required: {
+    no: 'Forespørselen ble avvist fordi den ikke kom fra denne appen. Last siden på nytt og prøv igjen.',
+    en: 'The request was refused because it did not come from this app. Reload the page and try again.',
+  },
+  marketing_scope_unavailable: {
+    no: 'Markedsføring er ikke tilgjengelig i det aktive arbeidsområdet. Bytt arbeidsområde, eller spør en administrator.',
+    en: 'Marketing is not available in the active workspace. Switch workspace, or ask an administrator.',
+  },
+  marketing_source_unavailable: {
+    no: 'Markedsføringsdataene er midlertidig utilgjengelige. Prøv igjen om litt.',
+    en: 'The marketing data is temporarily unavailable. Try again shortly.',
+    retryable: true,
+  },
+  visibility_route_not_found: {
+    no: 'Leadresultater hører til i Leads, ikke i Synlighet. Åpne dem der.',
+    en: 'Lead outcomes belong in Leads, not in Visibility. Open them there.',
+  },
+  visibility_workspace_not_configured: {
+    no: 'Synlighet er ikke satt opp for det aktive arbeidsområdet. Kontakt support.',
+    en: 'Visibility is not set up for the active workspace. Contact support.',
   },
 
   // Session, settings and integrations (gateway `middleware.rs`, `settings/*.rs`, `navbar.rs`, `upstream.rs`).
@@ -841,6 +973,18 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     no: 'Grensen for hva nettleseren kan bruke i denne kjøringen er nådd. Start en ny kjøring.',
     en: 'The limit on what the browser may use in this run has been reached. Start a new run.',
   },
+  // Tender matching: the core's answers and the gateway's own refusals.
+  // (`rate_limited` is intentionally not repeated: the entry above is shared.)
+  timeout: { no: 'Søket tok for lang tid. Prøv igjen.', en: 'The search took too long. Try again.' },
+  not_configured: { no: 'Anbud er ikke koblet til i dette miljøet.', en: 'Tender search is not connected in this environment.' },
+  tender_service_misconfigured: { no: 'Anbud-tjenesten er ikke riktig satt opp. Kontakt support.', en: 'The tender service is not set up correctly. Contact support.' },
+  payload_too_large: { no: 'Profilen er for stor.', en: 'The profile is too large.' },
+  validation_failed: { no: 'Sjekk profilen: noen felt er ikke gyldige.', en: 'Check the profile: some fields are not valid.' },
+  bad_request: { no: 'Forespørselen er ikke gyldig.', en: 'The request is not valid.' },
+  not_found: { no: 'Kunngjøringen finnes ikke lenger i lageret.', en: 'This notice is no longer in the store.' },
+  unsupported_notice: { no: 'Formatet på kunngjøringen støttes ikke.', en: 'This notice format is not supported.' },
+  unreadable_notice: { no: 'Kunngjøringen kunne ikke leses.', en: 'The notice could not be read.' },
+  not_an_opportunity: { no: 'Dette er en tildeling, ikke et anbud du kan by på.', en: 'This is an award, not a tender you can bid on.' },
 }
 
 /**
@@ -939,6 +1083,32 @@ function describe(
   const kind = errorKind(like, code)
   const retryAfterSeconds =
     typeof like?.retryAfterSeconds === 'number' && like.retryAfterSeconds >= 1 ? Math.ceil(like.retryAfterSeconds) : null
+
+  // A zero-retention refusal of the Model Plane catalogue: its own words, with
+  // the feature it names (an ApiError carries it) and the next step. A message
+  // the SPA wrote itself (LocalizedError) still wins.
+  if (code && isZdrRefusalCode(code) && !(err instanceof LocalizedError)) {
+    const shown = zdrRefusalPresentation(code, typeof like?.feature === 'string' ? like.feature : null, tr)
+    return {
+      code,
+      kind,
+      message: shown.next === null ? shown.message : `${shown.message} ${shown.next}`,
+      resumable: like?.resumable === true,
+      retryAfterSeconds,
+    }
+  }
+  // A model-entitlement refusal of the Model Plane catalogue: its own words and
+  // the next step. The reason and model refine it only where a caller has them.
+  if (code && isModelEntitlementCode(code) && !(err instanceof LocalizedError)) {
+    const shown = modelEntitlementPresentation(code, tr)
+    return {
+      code,
+      kind,
+      message: shown.next === null ? shown.message : `${shown.message} ${shown.next}`,
+      resumable: like?.resumable === true,
+      retryAfterSeconds,
+    }
+  }
 
   let copy: ErrorCopy | undefined
   if (err instanceof LocalizedError) copy = err.copy

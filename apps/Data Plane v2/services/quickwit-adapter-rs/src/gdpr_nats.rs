@@ -17,7 +17,7 @@
 //! at `control-shared-nats`, under the narrowly-scoped `quickwit-adapter-gdpr`
 //! identity — never this crate's own Data-Plane-local `NATS_URL` connection
 //! (that broker, reached via `nats-connection-rs`'s `DATAPLANE_NATS_TOKEN`
-//! auth, does not host `AQENCIA_CONTROLPLANE`, and its token-only auth model
+//! auth, does not host `CONTROLPLANE`, and its token-only auth model
 //! is not the shared broker's username/password scheme anyway). This mirrors
 //! documents-api-go's and session-core's dual-client split: one client for
 //! this crate's own plane-local domain events (`stream.rs`), a second,
@@ -40,7 +40,7 @@ use tracing::{error, info, warn};
 
 use crate::gdpr::{parse_erasure_event, purge_organization_data};
 
-const STREAM_NAME: &str = "AQENCIA_CONTROLPLANE";
+const STREAM_NAME: &str = "CONTROLPLANE";
 const SUBJECT: &str = "verevon.gdpr.erasure.requested";
 const DURABLE_NAME: &str = "quickwit-adapter-gdpr-erasure-v1";
 
@@ -76,7 +76,7 @@ pub async fn run(
     // cannot mutate JetStream topology. `get_stream` (rather than
     // constructing a `Stream` handle locally) is required by this crate's
     // async-nats 0.49.1 API to look up the consumer below, and itself needs
-    // `$JS.API.STREAM.INFO.AQENCIA_CONTROLPLANE` publish permission on the
+    // `$JS.API.STREAM.INFO.CONTROLPLANE` publish permission on the
     // `quickwit-adapter-gdpr` identity — see the report for this build.
     let stream = js.get_stream(STREAM_NAME).await?;
     let consumer: PullConsumer = stream

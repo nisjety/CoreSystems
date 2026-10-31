@@ -1,7 +1,7 @@
 // Package subscribers wires NATS topics to session-core's cache + republish
 // pipeline. G34-followup: subscribe to the canonical "thing changed"
 // subjects published by user-core / org-core / billing-core on the LOCAL
-// controlplane-nats bus (bare names — the aqencia.controlplane.* prefix is
+// controlplane-nats bus (bare names — the controlplane.* prefix is
 // a separate, shared-bus-only convention; these subjects are never mirrored
 // onto it), invalidate the Redis cache for the affected user/org pair, and
 // re-publish `app.session.entitlements_changed` on the shared bus (via

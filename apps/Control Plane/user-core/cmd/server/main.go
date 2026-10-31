@@ -380,6 +380,8 @@ func main() {
 	aclRepo := users.NewAclRepository(db)
 	httpServer := httpserver.NewServer(userService, aclRepo, sharedPublisher, redisClient, httpPort)
 	httpServer.SetSpaceRepository(spaces.NewRepository(db))
+	// WS20-S4: stored-consent schedule contracts. Strict literal true; off by default.
+	httpServer.SetScheduleContractsEnabled(os.Getenv("SCHEDULE_CONTRACT_ENABLED") == "true")
 	httpServer.SetAuthInternalCredential(serviceCredential)
 	// Personal inbound-mail alias (chat-wave2 mail-task spec). The service is
 	// always wired; every route stays 503 on its own until

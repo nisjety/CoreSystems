@@ -1,0 +1,23 @@
+{
+  "local_hosts": [
+    "localhost",
+    "127.0.0.1"
+  ],
+  "planes": {
+    "Control Plane": {
+      "db_hosts": [
+        "controlplane-postgres"
+      ]
+    },
+    "Model Plane": {
+      "db_hosts": [
+        "postgres"
+      ]
+    }
+  },
+  "shared_hosts": {
+    "legacy-monolith-db": "fixture: a shared host that no plane owns"
+  },
+  "db_exceptions": [],
+  "manifest_exceptions": []
+}

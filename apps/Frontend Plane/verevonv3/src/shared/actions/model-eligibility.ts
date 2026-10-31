@@ -1,4 +1,5 @@
 import type { ActionId } from '@/shared/actions/action-registry'
+import { MODEL_ACCESS } from '@/shared/actions/model-access'
 
 /**
  * Model eligibility is an execution claim, not a UI preference. An action is
@@ -123,16 +124,11 @@ import type { ActionId } from '@/shared/actions/action-registry'
  * with no new gap introduced. `cargo check` clean; gateway `domains::chat`
  * (19/19) and a full `domains::` sweep (307/307) both pass with the fix.
  */
-const MODEL_EXECUTABLE_ACTION_IDS = new Set<ActionId>([
-  'tickets.create',
-  'inbox.follow_conversation',
-  'inbox.set_csat_preference',
-  'chat.save_thread_snapshot',
-  'inbox.review_ai_action',
-  'org.mark_exported',
-  'org.acknowledge_deletion',
-  'chat.submit_feedback',
-])
+// Derived from the `eligible` flags in model-access.ts (WS24-S5): the flag is the
+// allowlist, and this file is the evidence behind each entry above.
+const MODEL_EXECUTABLE_ACTION_IDS: ReadonlySet<ActionId> = new Set(
+  (Object.keys(MODEL_ACCESS) as ActionId[]).filter((id) => MODEL_ACCESS[id].eligible),
+)
 
 export function isModelExecutableAction(actionId: string): actionId is ActionId {
   return MODEL_EXECUTABLE_ACTION_IDS.has(actionId as ActionId)

@@ -8,9 +8,10 @@
 #
 #   usage-envelopes.v2.json
 #       Real signed envelopes built by usage-ledger-rs and read by the REAL Go verifier and
-#       consumer of data-orchestrator-go.
+#       consumer of data-orchestrator-go, and by the web rerank route's contract tests (QB-M).
 #         generated: services/usage-ledger-rs/tests/fixtures/
 #         read:      services/data-orchestrator-go/testdata/
+#                    services/retrieval-engine-rs/tests/fixtures/contracts/usage-ledger-v2/
 #         regenerate: UPDATE_USAGE_FIXTURE=1 cargo test -p usage-ledger-rs --test envelope_fixture
 #
 #   forwarder-record-request.golden.json
@@ -77,6 +78,15 @@ go_fixture="$ROOT/services/data-orchestrator-go/testdata/usage-envelopes.v2.json
 if check_pinned "$rust_fixture" && check_pinned "$go_fixture"; then
     same_bytes "$rust_fixture" "$go_fixture" || true
     same_bytes "$rust_fixture.sha256" "$go_fixture.sha256" || true
+fi
+
+# 1b. The same envelope fixture, vendored into the retrieval-engine tree (QB-M): the web route's
+# contract tests read it through their own pin, so a route that drifts from the ledger's events
+# fails in its own build context.
+route_copy="$ROOT/services/retrieval-engine-rs/tests/fixtures/contracts/usage-ledger-v2/usage-envelopes.v2.json"
+if check_pinned "$rust_fixture" && check_pinned "$route_copy"; then
+    same_bytes "$rust_fixture" "$route_copy" || true
+    same_bytes "$rust_fixture.sha256" "$route_copy.sha256" || true
 fi
 
 # 2. The forwarder golden: data-orchestrator-go generates it; cost-core vendors a copy (CR-T4).

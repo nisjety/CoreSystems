@@ -399,6 +399,35 @@ describe('parseInline — bare URL autolinking', () => {
   })
 })
 
+// A `[text](target)` target is model-authored: only http, https and mailto become a link.
+describe('parseInline — markdown link targets', () => {
+  it('keeps a safe markdown link as a real link', () => {
+    const nodes = renderInline('[Kilde](https://example.com/a)')
+    const link = nodes.find((node): node is Element => node instanceof Element && node.tagName === 'A')
+    expect(link?.getAttribute('href')).toBe('https://example.com/a')
+    expect(link?.textContent).toBe('Kilde')
+  })
+
+  it.each([
+    '[klikk](javascript:alert)',
+    '[klikk](JaVaScRiPt:alert)',
+    '[klikk](java\tscript:alert)',
+    '[klikk](data:text/html,hei)',
+    '[klikk](file:///etc/passwd)',
+    '[klikk](blob:https://example.com/x)',
+    '[klikk](vbscript:msgbox)',
+    '[klikk](//evil.example.com)',
+    '[klikk](/innstillinger)',
+  ])('renders an unsafe target %s as inert text, never an anchor', (markdown) => {
+    const nodes = renderInline(markdown)
+    expect(nodes.some((node) => node instanceof Element && node.tagName === 'A')).toBe(false)
+    const blocked = nodes.find((node): node is Element => node instanceof Element && node.classList.contains('verevon-chat-link-blocked'))
+    expect(blocked?.tagName).toBe('SPAN')
+    expect(blocked?.textContent).toBe('klikk')
+    expect(blocked?.getAttribute('title')).toBeTruthy()
+  })
+})
+
 // §3.2: "- [ ]" / "- [x]" rendered as plain bullets, with no way to tell a
 // task list from an ordinary one.
 describe('parseMarkdownBlocks — task lists', () => {

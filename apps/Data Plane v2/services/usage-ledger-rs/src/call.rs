@@ -153,6 +153,36 @@ impl CallUsage {
         }
     }
 
+    /// A web rerank call (QB-M): one provider call that scored `documents` candidates. The
+    /// count is the candidates. The billed quantity is the provider's own search units when it
+    /// reports them. When it does not, no units are invented: the event carries no `units`, and
+    /// it is marked estimated, because the candidate count is then the only measure of the call.
+    /// A reranker bills search units, not tokens, so every token count is zero. `call_id` is the
+    /// producer's deterministic key for this call, as for [`CallUsage::estimated`].
+    pub fn rerank(
+        call_id: &str,
+        model_used: &str,
+        provider_used: &str,
+        documents: u64,
+        search_units: Option<u64>,
+    ) -> Self {
+        Self {
+            request_id: call_id.trim().to_owned(),
+            model_used: model_used.to_owned(),
+            provider_used: provider_used.to_owned(),
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            items: documents,
+            units: search_units,
+            basis: if search_units.is_some() {
+                CallBasis::Reported
+            } else {
+                CallBasis::Unreported
+            },
+        }
+    }
+
     /// Billed units that are not tokens (a reranker's search units).
     #[must_use]
     pub fn with_units(mut self, units: u64) -> Self {
@@ -274,5 +304,84 @@ mod tests {
             (24, 900, 0)
         );
         assert!(call.is_metered());
+    }
+
+    /// A web rerank call (QB-M): the candidates it scored are its count, and the units it bills
+    /// are the provider's own search units when the provider reports them.
+    #[test]
+    fn a_rerank_call_counts_its_candidates_and_carries_the_units_the_provider_billed() {
+        let call = CallUsage::rerank(
+            "rerank:org-a:rr-request-0001:0123",
+            "Cohere-rerank-v4.0-pro",
+            "azure-cohere",
+            10,
+            Some(3),
+        );
+        assert_eq!(call.basis(), CallBasis::Reported);
+        assert_eq!(call.items, 10, "the candidates scored");
+        assert_eq!(call.units, Some(3), "the provider's billed search units");
+        assert_eq!(
+            (
+                call.input_tokens,
+                call.output_tokens,
+                call.cache_read_tokens
+            ),
+            (0, 0, 0),
+            "a reranker bills search units, not tokens"
+        );
+        assert!(call.is_metered());
+    }
+
+    #[test]
+    fn a_rerank_call_without_reported_units_is_unreported_and_invents_no_units() {
+        let call = CallUsage::rerank(
+            "rerank:org-a:rr-request-0002:0456",
+            "Cohere-rerank-v4.0-pro",
+            "azure-cohere",
+            10,
+            None,
+        );
+        assert_eq!(call.basis(), CallBasis::Unreported);
+        assert_eq!(
+            call.units, None,
+            "no units were reported, so none are invented"
+        );
+        assert_eq!(call.items, 10);
+        assert!(call.is_metered(), "the call happened: it is counted");
+    }
+
+    #[test]
+    fn a_rerank_event_bills_the_reported_units_exactly_with_the_candidates_as_its_count() {
+        use crate::{Feature, UsageBuilder};
+        let mut builder = UsageBuilder::new(Feature::WebRerank, "org-a", false).unwrap();
+        builder.push(CallUsage::rerank(
+            "k-1",
+            "Cohere-rerank-v4.0-pro",
+            "azure-cohere",
+            10,
+            Some(3),
+        ));
+        let event = &builder.build()[0];
+        assert_eq!(event.feature, "web-rerank");
+        assert_eq!(event.event_type, "rerank");
+        assert_eq!((event.count, event.units), (10, Some(3)));
+        assert_eq!((event.cost_basis, event.estimated), ("metered", false));
+        assert_eq!((event.input_tokens, event.output_tokens), (0, 0));
+    }
+
+    #[test]
+    fn a_rerank_event_without_reported_units_is_estimated_and_still_counts_its_candidates() {
+        use crate::{Feature, UsageBuilder};
+        let mut builder = UsageBuilder::new(Feature::WebRerank, "org-a", false).unwrap();
+        builder.push(CallUsage::rerank(
+            "k-2",
+            "Cohere-rerank-v4.0-pro",
+            "azure-cohere",
+            10,
+            None,
+        ));
+        let event = &builder.build()[0];
+        assert_eq!((event.count, event.units), (10, None));
+        assert_eq!((event.cost_basis, event.estimated), ("estimated", true));
     }
 }

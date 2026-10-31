@@ -18,6 +18,79 @@ func validScheduledRunIntent() ScheduledRunIntent {
 	}
 }
 
+const validScheduledContractDigest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+
+func contractBoundRunIntent(expiresAt time.Time) ScheduledRunIntent {
+	intent := validScheduledRunIntent()
+	intent.ContractDigest = validScheduledContractDigest
+	intent.ContractExpiresAt = expiresAt
+	return intent
+}
+
+func TestIssueScheduledRunExecutionDecisionBindsContractDigestAndExpiry(t *testing.T) {
+	evidence := validPersonalThreadEvidence()
+	evidence.ScheduleFireEntitled = true
+	now := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC)
+	expiresAt := now.Add(time.Hour)
+
+	legacy, err := IssueScheduledRunExecutionDecision(evidence, validScheduledRunIntent(), "thread-1", "decision-1", "nonce-1", now)
+	if err != nil {
+		t.Fatalf("legacy execution decision: %v", err)
+	}
+	if legacy.ActionSchemaHash != "sha256:space-scheduled-run-execute-v1" || legacy.ContractDigest != "" || legacy.ContractExpiresAt != nil {
+		t.Fatalf("a schedule without a contract must keep the v1 binding: %#v", legacy)
+	}
+
+	bound, err := IssueScheduledRunExecutionDecision(evidence, contractBoundRunIntent(expiresAt), "thread-1", "decision-1", "nonce-1", now)
+	if err != nil {
+		t.Fatalf("contract-bound execution decision: %v", err)
+	}
+	if bound.ActionSchemaHash != "sha256:space-scheduled-run-execute-v2" {
+		t.Fatalf("contract-bound execution must use schema v2: %q", bound.ActionSchemaHash)
+	}
+	if bound.ContractDigest != validScheduledContractDigest || bound.ContractExpiresAt == nil || !bound.ContractExpiresAt.Equal(expiresAt) {
+		t.Fatalf("contract digest and expiry must be carried on the decision: %#v", bound)
+	}
+	if bound.PayloadDigest == legacy.PayloadDigest {
+		t.Fatal("the contract must change the execution payload digest")
+	}
+}
+
+func TestIssueScheduledRunDecisionsRefuseExpiredContract(t *testing.T) {
+	evidence := validPersonalThreadEvidence()
+	evidence.ScheduleFireEntitled = true
+	now := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC)
+	expired := contractBoundRunIntent(now)
+
+	if _, err := IssueScheduledRunExecutionDecision(evidence, expired, "thread-1", "decision-1", "nonce-1", now); err == nil {
+		t.Fatal("an expired contract must not authorize a scheduled-run execution")
+	}
+	if _, err := IssueScheduledRunDecision(evidence, expired, "decision-1", "nonce-1", now); err == nil {
+		t.Fatal("an expired contract must not authorize scheduled-run preparation")
+	}
+}
+
+func TestIssueScheduledRunPreparationDoesNotBindContract(t *testing.T) {
+	evidence := validPersonalThreadEvidence()
+	evidence.ScheduleFireEntitled = true
+	now := time.Date(2026, 8, 14, 0, 0, 0, 0, time.UTC)
+
+	legacy, err := IssueScheduledRunDecision(evidence, validScheduledRunIntent(), "decision-1", "nonce-1", now)
+	if err != nil {
+		t.Fatalf("legacy preparation decision: %v", err)
+	}
+	prepared, err := IssueScheduledRunDecision(evidence, contractBoundRunIntent(now.Add(time.Hour)), "decision-1", "nonce-1", now)
+	if err != nil {
+		t.Fatalf("live-contract preparation decision: %v", err)
+	}
+	if prepared.ActionSchemaHash != "sha256:space-scheduled-run-v1" || prepared.ContractDigest != "" || prepared.ContractExpiresAt != nil {
+		t.Fatalf("preparation must stay on the v1 binding: %#v", prepared)
+	}
+	if prepared.PayloadDigest != legacy.PayloadDigest {
+		t.Fatal("preparation payload digest must not depend on the contract")
+	}
+}
+
 func TestIssueScheduledRunDecisionBindsOneTaskAndDeterministicThread(t *testing.T) {
 	evidence := validPersonalThreadEvidence()
 	evidence.ScheduleFireEntitled = true

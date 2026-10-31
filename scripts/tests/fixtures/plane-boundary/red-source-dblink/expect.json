@@ -1,0 +1,7 @@
+{
+  "exit": 1,
+  "contains": [
+    "dblink",
+    "cross-database link"
+  ]
+}

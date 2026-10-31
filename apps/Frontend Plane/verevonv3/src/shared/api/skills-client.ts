@@ -26,6 +26,19 @@ export interface Skill {
   scope?: 'org' | 'user'
   owner_user_id?: string
   shared_with?: string[]
+  /**
+   * Where the skill came from: `background_review` is a skill Verevon learned from
+   * one of its owner's conversations; `user` is one a person wrote.
+   */
+  origin?: 'user' | 'background_review'
+  /**
+   * A learned skill starts `proposed`, is used only once its owner accepts it, and is
+   * `rejected` if the owner declines. Every other skill is `accepted`.
+   */
+  review_state?: 'proposed' | 'accepted' | 'rejected'
+  /** The run a learned skill was distilled from, and why it was proposed. */
+  source_run_id?: string
+  proposal_reason?: string
   created_at?: string
   updated_at?: string
 }
@@ -61,6 +74,13 @@ export function createSkill(
     content: string
     trigger_keywords?: string[]
     enabled?: boolean
+    /**
+     * `org` with `promoted_from` copies a skill an admin was shared (accepted, from a
+     * member) into the organization. The server checks that the source is visible to
+     * the caller; the copy is a new skill and the source is left as it was.
+     */
+    scope?: 'org'
+    promoted_from?: string
   },
 ): Promise<{ id: string }> {
   return requestJson<{ id: string }>('/api/v1/skills', {

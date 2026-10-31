@@ -1,5 +1,5 @@
 import { createQuery } from '@tanstack/solid-query'
-import type { Accessor } from 'solid-js'
+import { type Accessor } from 'solid-js'
 import type { OnboardingGatewayActions } from '@/features/onboarding/lib/actions'
 
 export const onboardingQueryKeys = {

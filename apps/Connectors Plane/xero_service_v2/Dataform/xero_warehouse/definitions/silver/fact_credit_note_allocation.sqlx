@@ -1,0 +1,34 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Credit-note allocations at tenant and allocation ID grain; unresolved invoice links remain visible.",
+  assertions: { nonNull: ["tenant_id", "allocation_id", "allocation_key"], uniqueKey: ["allocation_key"] }
+}
+
+SELECT CONCAT(a.tenant_id, '|', a.allocation_id) AS allocation_key,
+       a.tenant_id, a.allocation_id, a.credit_note_id, c.credit_note_key,
+       c.credit_note_type, c.status AS credit_note_status,
+       c.is_deleted AS is_credit_note_deleted, c.is_voided AS is_credit_note_voided,
+       c.currency_code AS credit_note_currency_code,
+       a.invoice_id, a.invoice_number, i.invoice_key,
+       i.invoice_type, i.status AS invoice_status, i.is_deleted AS is_invoice_deleted,
+       i.is_voided AS is_invoice_voided, i.currency_code AS invoice_currency_code,
+       a.invoice_id IS NULL OR i.invoice_key IS NULL AS is_invoice_unresolved,
+       i.invoice_key IS NOT NULL AND
+         i.invoice_type IS DISTINCT FROM IF(c.credit_note_type = 'ACCRECCREDIT', 'ACCREC', 'ACCPAY')
+         AS is_invoice_type_mismatch,
+       i.invoice_key IS NOT NULL AND
+         (c.currency_code IS NULL OR i.currency_code IS NULL OR
+          c.currency_code != i.currency_code) AS is_currency_mismatch,
+       a.synced_at IS NOT NULL AND c.synced_at IS NOT NULL
+         AND a.synced_at = c.synced_at AS is_observed_with_credit_note,
+       a.is_deleted AS source_is_deleted,
+       a.is_deleted IS NOT NULL AND SAFE_CAST(a.is_deleted AS BOOL) IS NULL AS is_deletion_flag_unknown,
+       COALESCE(SAFE_CAST(a.is_deleted AS BOOL), FALSE) AS is_deleted,
+       a.allocation_date, a.allocated_amount AS source_allocated_amount,
+       a.synced_at
+FROM ${ref("dw_bronze_xero", "xero_credit_note_allocations")} AS a
+LEFT JOIN ${ref("fact_credit_note")} AS c
+  ON a.tenant_id = c.tenant_id AND a.credit_note_id = c.credit_note_id
+LEFT JOIN ${ref("fact_invoice")} AS i
+  ON a.tenant_id = i.tenant_id AND a.invoice_id = i.invoice_id

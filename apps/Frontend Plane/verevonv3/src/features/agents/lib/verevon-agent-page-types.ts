@@ -1,5 +1,5 @@
 import type { LucideProps } from '@/shared/icons'
-import type { Component } from 'solid-js'
+import { type Component } from 'solid-js'
 import type {
   AgentFeatureId,
   AgentRoleId,

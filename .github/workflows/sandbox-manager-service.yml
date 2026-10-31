@@ -1,0 +1,81 @@
+name: Sandbox Manager (Go) CI
+
+# Model Plane's sandbox-manager (apps/Model Plane/go/services/sandbox-manager)
+# had no CI workflow of any kind: its lease, workspace, snapshot, process and
+# redaction tests ran only when someone remembered to run them locally. The
+# module pulls two local replace targets (../../gen and ../../pkg/authctx), so
+# the trigger covers those paths too; a change there can break this build.
+#
+# GOWORK=off: the Model Plane go/ directory carries a go.work, but this service
+# builds per module with its replace directives (WS22 slices add dependencies
+# with GOWORK=off), so CI does the same.
+#
+# The integration job runs the -tags integration suites (testcontainers
+# Postgres and MinIO) on ubuntu-latest, which ships Docker.
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'apps/Model Plane/go/services/sandbox-manager/**'
+      - 'apps/Model Plane/go/gen/**'
+      - 'apps/Model Plane/go/pkg/authctx/**'
+      - '.github/workflows/sandbox-manager-service.yml'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'apps/Model Plane/go/services/sandbox-manager/**'
+      - 'apps/Model Plane/go/gen/**'
+      - 'apps/Model Plane/go/pkg/authctx/**'
+      - '.github/workflows/sandbox-manager-service.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      GOWORK: off
+    defaults:
+      run:
+        working-directory: 'apps/Model Plane/go/services/sandbox-manager'
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.25'
+          cache-dependency-path: 'apps/Model Plane/go/services/sandbox-manager/go.sum'
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Run tests
+        run: go test ./...
+
+  integration:
+    runs-on: ubuntu-latest
+    env:
+      GOWORK: off
+    defaults:
+      run:
+        working-directory: 'apps/Model Plane/go/services/sandbox-manager'
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.25'
+          cache-dependency-path: 'apps/Model Plane/go/services/sandbox-manager/go.sum'
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Run integration tests
+        run: go test -tags integration ./internal/...

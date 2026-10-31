@@ -7,6 +7,8 @@ import {
   type ChatCostBasis,
   type ChatTurnTiming,
   type ChatVerificationEvent,
+  type EffortLevel,
+  type EffortProfile,
   type RecalledMemory,
 } from '@/shared/api/chat-client'
 import {
@@ -133,8 +135,12 @@ export type Citation = {
    * organisasjonskunnskap" / "Kilder: kun nett" receipt badge and lets the
    * Kilder tab defensively flag a citation whose family disagrees with the
    * turn's active `retrievalScope`.
+   *
+   * `'connector'` (WS23 S6) is a mail message, file or calendar item from one
+   * of the person's connected accounts. The gateway sends its title and a
+   * metadata line only, never body text, so the card shows those and nothing more.
    */
-  origin?: 'web' | 'knowledge'
+  origin?: 'web' | 'knowledge' | 'connector'
 }
 
 export type GeneratedFile = {
@@ -234,9 +240,12 @@ export const LOW_CONFIDENCE_ANSWER_THRESHOLD = 0.75
  *  - `reconnect`: renew the ChatGPT sign-in first, then try again.
  *  - `wait`: the refusing service accepts calls again at a known instant; the
  *    retry control stays disabled until then and never fires by itself.
- *  - `none`: sending the same turn again cannot help, so no retry is offered.
+ *  - `open_integrations`: review the connection the turn used (a zero-retention
+ *    refusal: the reader's own ChatGPT connection), then try again.
+ *  - `none`: sending the same turn again cannot help, so no retry is offered
+ *    (a model or a setting has to change first).
  */
-export type StreamFailureAction = 'retry' | 'reconnect' | 'wait' | 'none'
+export type StreamFailureAction = 'retry' | 'reconnect' | 'wait' | 'open_integrations' | 'none'
 
 /**
  * One conversation turn as the chat renders it.
@@ -389,6 +398,17 @@ export type ChatTurn = {
    */
   planMode?: boolean
   /**
+   * This turn ran the plan the person had approved (WS14 S2a): an EXECUTING run
+   * under the grant the Model Plane holds for the thread, not a planning one.
+   *
+   * Session-only, like the armed state that produced it: set by `sendContent`
+   * when it sent the turn as an execute turn, never read back from server
+   * metadata and not part of the local thread record. It makes the Work surface
+   * treat the turn as a run (steps, run id, effect class) even though
+   * `planMode` is false.
+   */
+  executeGranted?: boolean
+  /**
    * The rung a person granted this run, once they approved its plan. Absent
    * means no grant has been made — never "granted everything".
    */
@@ -473,9 +493,10 @@ export type ChatStatus = 'idle' | 'streaming' | 'error'
  * A message the user typed while a run was streaming.
  *
  * Session-only and deliberately not persisted: the durable record of the message
- * is written by the Model Plane at enqueue time, on the thread itself. This is
- * only the live status of a delivery in flight, which is meaningless after a
- * reload — by then it either arrived (and is in the transcript) or it did not.
+ * is written by the Model Plane on the thread itself (before it is delivered,
+ * with send receipts on). This is only the live status of a delivery in flight,
+ * which is meaningless after a reload — by then it either arrived (and is in the
+ * transcript) or it did not.
  */
 export type QueuedInput = {
   id: string
@@ -483,10 +504,24 @@ export type QueuedInput = {
   /**
    * `pending` — accepted, not yet handed to the agent.
    * `delivered` — the agent has it (the `queued_input` SSE event arrived).
+   * `resent` — the run ended without taking it, so it went out again as an
+   * ordinary turn under the same `clientMessageId`: the transcript holds it once.
    * `refused` — it was not accepted, and `note` says why. Never silent.
    */
-  state: 'pending' | 'delivered' | 'refused'
+  state: 'pending' | 'delivered' | 'resent' | 'refused'
   note?: string
+  /**
+   * The id the send was named with. The gateway stores the message under it and
+   * names it in the delivery event, so a delivery is matched to its message by id
+   * (text is the fallback for a gateway that sends no ids).
+   */
+  clientMessageId?: string
+  /**
+   * The gateway accepted the message (and, with receipts on, stored it). Only an
+   * accepted message that the run never took is resent when the run ends: one
+   * that was refused or never reached the gateway is not.
+   */
+  accepted?: boolean
 }
 
 export type ChatState = {
@@ -502,23 +537,61 @@ export type ChatState = {
   queuedInputs: QueuedInput[]
 }
 
-export type StreamAttachment = {
-  data_base64: string
-  kind: 'image'
-  mime_type: string
+export type StreamAttachment =
+  | {
+      data_base64: string
+      kind: 'image'
+      mime_type: string
+    }
+  /**
+   * A document's own bytes, for the code sandbox to read (read-only, under
+   * `attachments/`). Sent only when the server declares `modes.sandbox_files`;
+   * the document's text is inlined into the turn as before, so a server that
+   * stages nothing loses nothing.
+   */
+  | {
+      data_base64: string
+      kind: 'file'
+      mime_type: string
+      name: string
+    }
+
+/**
+ * The client's pointer to the plan grant the Model Plane holds for a thread
+ * (WS14 S2a), set when the person approves a plan.
+ *
+ * Session-only: never written to local storage, a thread snapshot or the
+ * server, and it carries no authority. The gateway's grant is the authority and
+ * decides whether an execute turn runs; this only remembers that one was given,
+ * for which thread and rung, so the composer can offer the "run the approved
+ * plan" pill and the controller can refuse to send an execute turn on a thread
+ * the grant was not made for.
+ */
+export type ThreadPlanGrant = {
+  threadId: string
+  rung: AutonomyRung
+  /** The structured plan that was approved, when the turn proposed one. */
+  planId?: string
+  /** The plan card's turn: where a refusal or an expiry is explained. */
+  turnId: string
+  approvedAtMs: number
+  /** When the gateway's grant lapses, when it said so; absent for an older gateway. */
+  expiresAtMs?: number
 }
 
 export type SendOptions = {
   sourceScope?: import('@/shared/actions/chat-source-scope').ChatSourceScope
   /** See `ChatInvokeRequest.retrievalScope`. Per-turn, unlike `sourceScope`. */
   retrievalScope?: import('@/shared/actions/chat-source-scope').RetrievalScope
+  /** See `ChatInvokeRequest.connectorScope`. Per-turn, like `retrievalScope`. */
+  connectorScope?: string[]
   actions?: ChatAction[]
   /** Explicit provider route for a connected user-owned model subscription. */
   provider?: string
   /** Opaque Integration Core connection id; never a ChatGPT token. */
   subscriptionConnectionId?: string
   /** Reasoning effort from the composer's response-mode selector. */
-  effort?: 'quick' | 'deep'
+  effort?: EffortProfile | EffortLevel
   /**
    * Response-style dial from composer settings — how much prose the answer
    * spends, independent of `effort`'s thinking budget.
@@ -541,6 +614,20 @@ export type SendOptions = {
   displayAttachments?: ChatTurnAttachment[]
   generateImage?: boolean
   appendUser?: boolean
+  /**
+   * The id this send is named with (the receipt the transcript dedupes on). Minted
+   * by `sendContent` for an ordinary send; carried here only by a send that
+   * repeats an earlier one, a queued message the run never took, so both land as
+   * one transcript row. Never set for a zero-retention turn, a regenerate or an
+   * edited resubmit.
+   */
+  clientMessageId?: string
+  /**
+   * This send is a queued message going out again as an ordinary turn. Its
+   * mid-run strip entry stays on screen, as "resent", instead of being cleared
+   * with the previous run's strip.
+   */
+  resendOfQueued?: boolean
   tools?: ComposerToolId[]
   /**
    * Temporary chat (Zero Data Retention): the request opts the whole turn
@@ -563,6 +650,13 @@ export type SendOptions = {
    */
   regenerated?: boolean
   editResubmit?: boolean
+  /**
+   * A REQUEST that this send runs the approved plan. Set only by the composer
+   * submit, from the armed state, and re-validated by `sendContent`, which is
+   * the authority boundary: a send that fails any check goes out as an ordinary
+   * turn. Regenerate, edit-resubmit, continue-generation and retry never set it.
+   */
+  executeGranted?: boolean
   /**
    * Minimum privacy tier requested for this turn (Venice-style tiering).
    * Only set when the user explicitly picked a tiered catalog model; omitted

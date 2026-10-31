@@ -76,7 +76,7 @@ rg -n "VEREVON_NATS_TOKEN" \
 
 1. Required broker and provisioner: start `control-shared-nats`, then run the
    local-only `audit-nats-provisioner`. Require healthy broker monitoring and
-   successful creation/convergence of `AQENCIA_CONTROLPLANE`, local Control
+   successful creation/convergence of `CONTROLPLANE`, local Control
    streams, and fixed durables. Stop if it reports an incompatible resource.
    It must not connect to Model or Application.
 2. Extra-plane topology and credentials: add the Model/Application runtime,

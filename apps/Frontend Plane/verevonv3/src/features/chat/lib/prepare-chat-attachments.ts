@@ -1,9 +1,12 @@
-import { extractChatDocument } from '@/shared/api/chat-client'
+import { extractChatDocument, getAttachmentPolicy } from '@/shared/api/chat-client'
 import { objectUrlToDataUrl, parseDataUrl } from '@/shared/lib/blob-data'
+import { ATTACHMENT_MAX_FILE_BYTES } from './attachment-policy'
 import type { PendingChatAttachment } from './pending-chat-launch'
 
 /** Read every attachment before clearing the draft or starting inference. */
 export async function prepareChatAttachments(attachments: PendingChatAttachment[]): Promise<PendingChatAttachment[]> {
+  // What the server declares it will read; today's constant until it declares one.
+  const maxFileBytes = getAttachmentPolicy()?.maxFileBytes ?? ATTACHMENT_MAX_FILE_BYTES
   const prepared: PendingChatAttachment[] = []
   let total = 0
   for (const file of attachments) {
@@ -15,7 +18,7 @@ export async function prepareChatAttachments(attachments: PendingChatAttachment[
     // pre-populated value skips the pdf/docx branch below outright.
     let extractedText: string | undefined = file.extractedText
     try {
-      if (file.size > 1_000_000) throw new Error('too large')
+      if (file.size > maxFileBytes) throw new Error('too large')
       url = file.url.startsWith('blob:') ? await objectUrlToDataUrl(file.url) : file.url
       const response = await fetch(url)
       if (!response.ok) throw new Error('unreadable')
@@ -35,9 +38,13 @@ export async function prepareChatAttachments(attachments: PendingChatAttachment[
         if (total > 120_000) throw new Error('too long')
       }
     } catch {
-      throw new Error(`Kunne ikke lese hele «${file.name}». Utkastet er beholdt. Prøv igjen; hvis det fortsatt feiler, velg en lesbar fil under 1 MB og 60 000 tegn (maks. 120 000 tegn samlet).`)
+      throw new Error(`Kunne ikke lese hele «${file.name}». Utkastet er beholdt. Prøv igjen; hvis det fortsatt feiler, velg en lesbar fil under ${formatMegabytes(maxFileBytes)} og 60 000 tegn (maks. 120 000 tegn samlet).`)
     }
     prepared.push({ ...file, url, extractedText })
   }
   return prepared
+}
+
+function formatMegabytes(bytes: number): string {
+  return `${(bytes / 1_000_000).toLocaleString('nb-NO', { maximumFractionDigits: 1 })} MB`
 }

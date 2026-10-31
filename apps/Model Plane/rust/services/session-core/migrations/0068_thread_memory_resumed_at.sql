@@ -1,0 +1,16 @@
+-- Per-thread resume watermark (build plan WS07, D1-570).
+--
+-- A user who resumes (paused or off back to on) has `extract_after` moved to now, so
+-- nothing said while memory was held is mined afterwards (0039, memory_control::set_state).
+-- A thread set off and back to inherit had no such watermark: the extractors filtered on
+-- the user's watermark and on the thread's current mode only, so every message written
+-- while the thread was off was mined as soon as the thread was set back to inherit.
+--
+-- update_thread_presentation sets this column on the off -> inherit transition only, to
+-- the database clock at that moment. The extraction gate and the Dreaming readers then
+-- refuse every message created at or before it. The column holds a timestamp, never
+-- content. NULL is every thread that has not been resumed, so nothing changes for it.
+--
+-- Additive: a nullable column with no default, a catalog-only change, and no backfill.
+-- The reversal is in revert/0068_thread_memory_resumed_at.down.sql.
+ALTER TABLE threads ADD COLUMN IF NOT EXISTS memory_resumed_at TIMESTAMPTZ NULL;

@@ -1,0 +1,94 @@
+{
+  "version": 1,
+  "status": "unmeasured",
+  "note": "Baselines are filled from three runs of chat-transcript-performance.spec.ts on the second dev server (see section 21.5 of VEREVON_CHAT_WORKSPACE_IMPLEMENTATION_PLAN.md). A null is not a budget: with PERF_ENFORCE=1 the spec fails on any null in `budget` instead of passing it. Copy a baseline number into `budget` (with headroom) to enforce it.",
+  "workload": {
+    "coldOpenTurns": 200,
+    "streamParagraphs": 20,
+    "frameRateHz": 40,
+    "wordsPerDelta": 6,
+    "shimLatencyMs": 30
+  },
+  "proposedTargets": {
+    "source": "build plan C8 / WS09 D5, on a 300-turn fixture after S2 and S3; the measured baseline replaces them",
+    "p95FrameGapMs": 50,
+    "domNodes": 30000,
+    "allTurnsMountedMs": 1500,
+    "heapGrowthMb": 150,
+    "sealedBlockMountsPerToken": 0,
+    "answerRegionMountsPerToken": 0
+  },
+  "structuralBaseline": {
+    "source": "ChatMessages.render-budget.test.tsx and use-chat-controller.stream-churn.test.ts, measured 2026-10-21 in jsdom (counts, not times)",
+    "markdown": {
+      "tokens": 84,
+      "finalBlocks": 19,
+      "sealedBlockMounts": 803,
+      "parseCallsPerToken": 1,
+      "parsedCharsPerToken": "whole message"
+    },
+    "assistantMessage": {
+      "tokens": 84,
+      "answerRegionMounts": 84,
+      "parseCallsPerToken": 2
+    },
+    "controller": {
+      "deltas": 160,
+      "transcriptSetItemsPerDelta": 1,
+      "storagesWritten": 2,
+      "traceRowsPerDelta": 1,
+      "taskStepArrayReplacementsPerDelta": 1
+    }
+  },
+  "baseline": {
+    "coldOpen": {
+      "allTurnsMountedMs": null,
+      "composerReadyMs": null,
+      "domNodes": null,
+      "heapUsedMb": null,
+      "longTaskTotalMs": null
+    },
+    "streaming": {
+      "p95FrameGapMs": null,
+      "maxFrameGapMs": null,
+      "longTaskTotalMs": null,
+      "transcriptSetItemCount": null,
+      "transcriptSetItemBytes": null,
+      "mutationRecords": null,
+      "domNodesAdded": null
+    },
+    "streamingControl": {
+      "p95FrameGapMs": null,
+      "maxFrameGapMs": null,
+      "longTaskTotalMs": null,
+      "transcriptSetItemCount": null,
+      "transcriptSetItemBytes": null,
+      "mutationRecords": null,
+      "domNodesAdded": null
+    },
+    "requests": {
+      "total": null,
+      "duplicateGetCount": null,
+      "sequentialWaves": null
+    }
+  },
+  "budget": {
+    "coldOpen": {
+      "allTurnsMountedMs": null,
+      "domNodes": null,
+      "heapUsedMb": null
+    },
+    "streaming": {
+      "p95FrameGapMs": null,
+      "transcriptSetItemCount": null
+    },
+    "streamingControl": {
+      "p95FrameGapMs": null
+    },
+    "requests": {
+      "total": null,
+      "duplicateGetCount": null,
+      "sequentialWaves": null
+    }
+  }
+}

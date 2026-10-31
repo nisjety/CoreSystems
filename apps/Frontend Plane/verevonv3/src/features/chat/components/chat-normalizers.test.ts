@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { cancelledRunTurn, humanizeToolName, mergeServerTurnsWithCachedMetadata, messageToTurn, missingSearchResultStep, normalizeCitation, readBrowseWebPreference, summarizeToolArgs, transcriptTurnToChatTurn, turnsToTranscript, upsertCitation } from './chat-normalizers'
+import { cachedTurnsBeforeWindow, cancelledRunTurn, humanizeToolName, mergeServerTurnsWithCachedMetadata, messageToTurn, missingSearchResultStep, normalizeCitation, readBrowseWebPreference, summarizeToolArgs, transcriptTurnToChatTurn, turnsToTranscript, upsertCitation } from './chat-normalizers'
 import type { RunDetail } from '@/shared/api/runs-client'
 import type { ChatTurn, Citation } from './chat-types'
 
@@ -416,5 +416,63 @@ describe('mergeServerTurnsWithCachedMetadata (resumable tail, §3b)', () => {
       turn({ id: 'a1', role: 'assistant', content: 'answer', status: 'error' }),
     ]
     expect(mergeServerTurnsWithCachedMetadata(server, failed).at(1)?.status).toBe('error')
+  })
+})
+
+describe('WS09 S9 partial windows', () => {
+  const CITATION = { id: 'src-1', title: 'Rapport', url: 'https://example.test/rapport', snippet: '' }
+  const turn = (overrides: Partial<ChatTurn>): ChatTurn => ({
+    id: 'id',
+    role: 'user',
+    content: 'q',
+    createdAt: '',
+    streaming: false,
+    tools: [],
+    attachments: [],
+    ...overrides,
+  })
+
+  it('gives a window turn the metadata of its own id or words, never of the cached turn at its position', () => {
+    const window = [
+      turn({ id: 'srv-u', content: 'Recent question' }),
+      turn({ id: 'srv-a', role: 'assistant', content: 'Recent answer' }),
+    ]
+    const cached = [
+      turn({ id: 'old-u', content: 'Old question' }),
+      turn({ id: 'old-a', role: 'assistant', content: 'Old answer', citations: [CITATION] }),
+    ]
+    // Positionally aligned, the old answer would lend its citation to the recent one.
+    expect(mergeServerTurnsWithCachedMetadata(window, cached, { partial: true }).at(1)?.citations).toBeUndefined()
+    expect(mergeServerTurnsWithCachedMetadata(window, cached).at(1)?.citations).toEqual([CITATION])
+  })
+
+  it('matches a window turn by its words when its id differs', () => {
+    const window = [turn({ id: 'srv-a', role: 'assistant', content: 'The same answer' })]
+    const cached = [turn({ id: 'local-a', role: 'assistant', content: 'The same answer', confidence: 0.8 })]
+    expect(mergeServerTurnsWithCachedMetadata(window, cached, { partial: true })[0]).toMatchObject({
+      id: 'srv-a',
+      confidence: 0.8,
+    })
+  })
+
+  it('keeps the cached turns before the first one the window shares, and nothing else', () => {
+    const cached = [
+      turn({ id: 'c0', content: 'Zero' }),
+      turn({ id: 'c1', role: 'assistant', content: 'One' }),
+      turn({ id: 'c2', content: 'Two' }),
+      turn({ id: 'c3', role: 'assistant', content: 'Three' }),
+    ]
+    const window = [
+      turn({ id: 'c2', content: 'Two' }),
+      turn({ id: 'c3', role: 'assistant', content: 'Three' }),
+      turn({ id: 'w4', content: 'Four' }),
+    ]
+    expect(cachedTurnsBeforeWindow(window, cached).map((item) => item.id)).toEqual(['c0', 'c1'])
+  })
+
+  it('keeps no cached turn when the snapshot does not reach the window, or starts inside it', () => {
+    const cached = [turn({ id: 'c0', content: 'Zero' }), turn({ id: 'c1', role: 'assistant', content: 'One' })]
+    expect(cachedTurnsBeforeWindow([turn({ id: 'w5', content: 'Five' })], cached)).toEqual([])
+    expect(cachedTurnsBeforeWindow([turn({ id: 'c0', content: 'Zero' })], cached)).toEqual([])
   })
 })

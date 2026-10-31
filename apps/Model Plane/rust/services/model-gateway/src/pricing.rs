@@ -10,7 +10,10 @@
 //! gateway emits a null cost rather than a fabricated one.
 //!
 //! Matching mirrors cost-core's resolver: exact key, else the longest model key
-//! that is a prefix of the reported name, else the mandatory `default` row.
+//! that is a prefix of the reported name, else the mandatory `default` row. The
+//! default row is the ledger's fallback, not a price for the model: a call that
+//! only the default row matches is reported as unpriced, so the stream states
+//! no cost rather than a confident wrong one.
 //!
 //! Only metered calls are priced. A call served by the user's own `ChatGPT`
 //! subscription ([`CostBasis::Subscription`]) is never priced from API list
@@ -96,6 +99,88 @@ fn is_subscription_provider(provider: &str) -> bool {
     SUBSCRIPTION_PROVIDERS
         .iter()
         .any(|id| provider.eq_ignore_ascii_case(id))
+}
+
+/// The token counts of one call, as the provider reported them. Both cache
+/// legs are already counted inside `input_tokens` (see
+/// [`PricingCache::cost_usd`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TokenLegs {
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_input_tokens: i64,
+    pub cache_creation_input_tokens: i64,
+}
+
+/// Where a [`Priced`] figure came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PriceSource {
+    /// The catalogue lists the model under its own key.
+    Exact,
+    /// The longest catalogue key that prefixes the reported model name.
+    Prefix,
+    /// Only the catalogue's `default` row matched: the model's price is unknown.
+    Default,
+    /// The call was served by a subscription: no per-token price applies.
+    Subscription,
+    /// There is no catalogue to price against.
+    Unavailable,
+}
+
+/// A call's cost split by what was billed. The four parts sum to the call's
+/// total for any counts where the cache legs fit inside `input_tokens`, as a
+/// provider reports them.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CategoryCost {
+    /// Uncached input tokens at the full input rate.
+    pub input_usd: f64,
+    pub cache_read_usd: f64,
+    pub cache_write_usd: f64,
+    pub output_usd: f64,
+}
+
+impl CategoryCost {
+    #[must_use]
+    pub fn total(&self) -> f64 {
+        self.input_usd + self.cache_read_usd + self.cache_write_usd + self.output_usd
+    }
+
+    #[must_use]
+    pub fn plus(self, other: Self) -> Self {
+        Self {
+            input_usd: self.input_usd + other.input_usd,
+            cache_read_usd: self.cache_read_usd + other.cache_read_usd,
+            cache_write_usd: self.cache_write_usd + other.cache_write_usd,
+            output_usd: self.output_usd + other.output_usd,
+        }
+    }
+}
+
+/// The price of one call. `usd` is `None` when the model's price is unknown
+/// (`source` says why), never a figure borrowed from the `default` row. A
+/// subscription call has `usd: Some(0.0)` and no categories: nothing was
+/// billed per token, and a meter must not count the zero as spend.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Priced {
+    pub usd: Option<f64>,
+    pub by_category: Option<CategoryCost>,
+    pub source: PriceSource,
+}
+
+impl Priced {
+    const SUBSCRIPTION: Self = Self {
+        usd: Some(0.0),
+        by_category: None,
+        source: PriceSource::Subscription,
+    };
+
+    const fn unpriced(source: PriceSource) -> Self {
+        Self {
+            usd: None,
+            by_category: None,
+            source,
+        }
+    }
 }
 
 /// Cache-leg prices for one model, as multiples of its base input rate. Both
@@ -199,17 +284,39 @@ impl PricingCache {
         }
     }
 
-    /// Compute the USD cost for an inference. Returns `None` when no catalogue
-    /// is available (pricing disabled, or cost-core unreachable with a cold
-    /// cache) so the caller can emit a null `cost_usd` instead of faking one.
+    /// Price one call. A subscription call is never priced from API list
+    /// prices. A metered call is priced against the catalogue row that matches
+    /// its model; when only the `default` row matches, or there is no catalogue
+    /// (pricing disabled, or cost-core unreachable with a cold cache), `usd` is
+    /// `None` so the caller emits a null cost instead of a fabricated one.
     ///
-    /// `cache_read_input_tokens` and `cache_creation_input_tokens` are the
-    /// same cache legs already folded into `input_tokens` (see
-    /// `inference-core`'s `total_input_tokens` and `openai_cache_tokens`):
-    /// pass 0 for a request that reported no cache usage, which reproduces
-    /// the pre-cache-pricing result exactly. Each leg is re-priced at the
-    /// model's [`cache_rates`]: a read below the input rate, and a write at
-    /// the input rate unless the model bills cache writes (GPT-5.6 and later).
+    /// The cache legs in `legs` are the same ones already folded into
+    /// `input_tokens` (see `inference-core`'s `total_input_tokens` and
+    /// `openai_cache_tokens`): pass 0 for a request that reported no cache
+    /// usage, which reproduces the pre-cache-pricing result exactly. Each leg
+    /// is re-priced at the model's [`cache_rates`]: a read below the input
+    /// rate, and a write at the input rate unless the model bills cache writes
+    /// (GPT-5.6 and later).
+    pub async fn priced(&self, basis: CostBasis, model: &str, legs: TokenLegs) -> Priced {
+        if basis == CostBasis::Subscription {
+            return Priced::SUBSCRIPTION;
+        }
+        self.ensure_fresh().await;
+        let inner = self.inner.read().await;
+        price(&inner.rates, model, legs)
+    }
+
+    /// The catalogue as of now, for a caller that prices from a synchronous
+    /// context. One refresh here, then [`RateSnapshot::priced`] never waits.
+    pub async fn snapshot(&self) -> RateSnapshot {
+        self.ensure_fresh().await;
+        let inner = self.inner.read().await;
+        RateSnapshot {
+            rates: Arc::from(inner.rates.clone()),
+        }
+    }
+
+    /// The USD cost of a metered call: [`Self::priced`]'s `usd`.
     pub async fn cost_usd(
         &self,
         model: &str,
@@ -218,25 +325,20 @@ impl PricingCache {
         cache_read_input_tokens: i64,
         cache_creation_input_tokens: i64,
     ) -> Option<f64> {
-        self.ensure_fresh().await;
-        let inner = self.inner.read().await;
-        if inner.rates.is_empty() {
-            return None;
-        }
-        let rate = lookup(&inner.rates, model)?;
-        Some(cost_from_rate(
-            rate,
-            cache_rates(model),
+        self.cost_usd_for(
+            CostBasis::Metered,
+            model,
             input_tokens,
             output_tokens,
             cache_read_input_tokens,
             cache_creation_input_tokens,
-        ))
+        )
+        .await
     }
 
-    /// [`Self::cost_usd`] for a call made on `basis`. A subscription call is
-    /// never priced from API list prices: its cost is a known `Some(0.0)`,
-    /// not the unavailable `None`, whatever tokens it reports.
+    /// [`Self::priced`]'s `usd` for a call made on `basis`: a subscription
+    /// call's cost is a known `Some(0.0)`, not the unavailable `None`,
+    /// whatever tokens it reports.
     pub async fn cost_usd_for(
         &self,
         basis: CostBasis,
@@ -246,19 +348,18 @@ impl PricingCache {
         cache_read_input_tokens: i64,
         cache_creation_input_tokens: i64,
     ) -> Option<f64> {
-        match basis {
-            CostBasis::Subscription => Some(0.0),
-            CostBasis::Metered => {
-                self.cost_usd(
-                    model,
-                    input_tokens,
-                    output_tokens,
-                    cache_read_input_tokens,
-                    cache_creation_input_tokens,
-                )
-                .await
-            }
-        }
+        self.priced(
+            basis,
+            model,
+            TokenLegs {
+                input_tokens,
+                output_tokens,
+                cache_read_input_tokens,
+                cache_creation_input_tokens,
+            },
+        )
+        .await
+        .usd
     }
 
     /// Refresh the catalogue from cost-core when it is empty or past the TTL. A
@@ -300,6 +401,49 @@ impl PricingCache {
     }
 }
 
+/// A frozen copy of the catalogue that prices without waiting. A relay that
+/// maps events in a synchronous closure takes one per run and prices every
+/// round against it.
+#[derive(Clone)]
+pub struct RateSnapshot {
+    rates: Arc<[Rate]>,
+}
+
+impl RateSnapshot {
+    /// [`PricingCache::priced`] against this snapshot.
+    #[must_use]
+    pub fn priced(&self, basis: CostBasis, model: &str, legs: TokenLegs) -> Priced {
+        if basis == CostBasis::Subscription {
+            return Priced::SUBSCRIPTION;
+        }
+        price(&self.rates, model, legs)
+    }
+}
+
+/// Price a metered call against the catalogue. The `default` row prices
+/// nothing: a model only it matches has an unknown price.
+fn price(rates: &[Rate], model: &str, legs: TokenLegs) -> Priced {
+    let (rate, source) = match lookup(rates, model) {
+        None => return Priced::unpriced(PriceSource::Unavailable),
+        Some(Lookup::Default) => return Priced::unpriced(PriceSource::Default),
+        Some(Lookup::Exact(rate)) => (rate, PriceSource::Exact),
+        Some(Lookup::Prefix(rate)) => (rate, PriceSource::Prefix),
+    };
+    let cache = cache_rates(model);
+    Priced {
+        usd: Some(cost_from_rate(
+            rate,
+            cache,
+            legs.input_tokens,
+            legs.output_tokens,
+            legs.cache_read_input_tokens,
+            legs.cache_creation_input_tokens,
+        )),
+        by_category: Some(cost_categories(rate, cache, legs)),
+        source,
+    }
+}
+
 /// Price a token breakdown against a resolved rate. Pure and synchronous so
 /// the cache-tier discount formula is unit-testable without the async
 /// HTTP-backed catalogue (`PricingCache::cost_usd` is the async wrapper that
@@ -319,26 +463,61 @@ fn cost_from_rate(
     cache_read_input_tokens: i64,
     cache_creation_input_tokens: i64,
 ) -> f64 {
-    // Token counts comfortably fit in u32; the u32→f64 conversion is
-    // lossless (avoids clippy::cast_precision_loss on a raw i64 cast).
-    let input = f64::from(u32::try_from(input_tokens.max(0)).unwrap_or(u32::MAX));
-    let output = f64::from(u32::try_from(output_tokens.max(0)).unwrap_or(u32::MAX));
-    let cache_read = f64::from(u32::try_from(cache_read_input_tokens.max(0)).unwrap_or(u32::MAX));
-    let cache_write =
-        f64::from(u32::try_from(cache_creation_input_tokens.max(0)).unwrap_or(u32::MAX));
-    input / 1_000_000.0 * rate.input_per_million
-        + output / 1_000_000.0 * rate.output_per_million
+    let input = tokens_f64(input_tokens);
+    let output = tokens_f64(output_tokens);
+    let cache_read = tokens_f64(cache_read_input_tokens);
+    let cache_write = tokens_f64(cache_creation_input_tokens);
+    input / 1_000_000.0 * rate.input_per_million + output / 1_000_000.0 * rate.output_per_million
         - cache_read / 1_000_000.0 * rate.input_per_million * (1.0 - cache.read)
         + cache_write / 1_000_000.0 * rate.input_per_million * (cache.write - 1.0)
 }
 
+/// A token count as f64. Counts comfortably fit in u32; the u32→f64
+/// conversion is lossless (avoids clippy::cast_precision_loss on a raw i64
+/// cast).
+fn tokens_f64(tokens: i64) -> f64 {
+    f64::from(u32::try_from(tokens.max(0)).unwrap_or(u32::MAX))
+}
+
+/// The same price as [`cost_from_rate`], split by what was billed: uncached
+/// input at the full rate, each cache leg at its own rate, and output. The
+/// uncached input is `input - read - write`, saturating at zero.
+fn cost_categories(rate: &Rate, cache: CacheRates, legs: TokenLegs) -> CategoryCost {
+    let uncached = legs
+        .input_tokens
+        .max(0)
+        .saturating_sub(legs.cache_read_input_tokens.max(0))
+        .saturating_sub(legs.cache_creation_input_tokens.max(0))
+        .max(0);
+    let input_rate = rate.input_per_million / 1_000_000.0;
+    CategoryCost {
+        input_usd: tokens_f64(uncached) * input_rate,
+        cache_read_usd: tokens_f64(legs.cache_read_input_tokens) * input_rate * cache.read,
+        cache_write_usd: tokens_f64(legs.cache_creation_input_tokens) * input_rate * cache.write,
+        output_usd: tokens_f64(legs.output_tokens) * rate.output_per_million / 1_000_000.0,
+    }
+}
+
+/// How a model name matched the catalogue.
+enum Lookup<'a> {
+    Exact(&'a Rate),
+    Prefix(&'a Rate),
+    /// Only the mandatory `default` row: the ledger's fallback, not the
+    /// model's price.
+    Default,
+}
+
 /// Resolve a model name to a rate: exact key, else the longest prefix key, else
 /// the `default` row.
-fn lookup<'a>(rates: &'a [Rate], model: &str) -> Option<&'a Rate> {
+fn lookup<'a>(rates: &'a [Rate], model: &str) -> Option<Lookup<'a>> {
     let key = model.trim().to_lowercase();
     if !key.is_empty() {
         if let Some(rate) = rates.iter().find(|r| r.model == key) {
-            return Some(rate);
+            return Some(if key == DEFAULT_MODEL_KEY {
+                Lookup::Default
+            } else {
+                Lookup::Exact(rate)
+            });
         }
         let mut best: Option<&Rate> = None;
         let mut best_len = 0usize;
@@ -351,11 +530,14 @@ fn lookup<'a>(rates: &'a [Rate], model: &str) -> Option<&'a Rate> {
                 best_len = rate.model.len();
             }
         }
-        if best.is_some() {
-            return best;
+        if let Some(rate) = best {
+            return Some(Lookup::Prefix(rate));
         }
     }
-    rates.iter().find(|r| r.model == DEFAULT_MODEL_KEY)
+    rates
+        .iter()
+        .find(|r| r.model == DEFAULT_MODEL_KEY)
+        .map(|_| Lookup::Default)
 }
 
 #[cfg(test)]
@@ -520,12 +702,197 @@ mod tests {
     #[test]
     fn exact_and_prefix_and_default() {
         let r = rates();
-        assert_eq!(lookup(&r, "gpt-4o-mini").unwrap().model, "gpt-4o-mini");
-        assert_eq!(
-            lookup(&r, "claude-sonnet-4-6").unwrap().model,
-            "claude-sonnet"
+        assert!(
+            matches!(lookup(&r, "gpt-4o-mini"), Some(Lookup::Exact(rate)) if rate.model == "gpt-4o-mini")
         );
-        assert_eq!(lookup(&r, "totally-unknown").unwrap().model, "default");
+        assert!(
+            matches!(lookup(&r, "claude-sonnet-4-6"), Some(Lookup::Prefix(rate)) if rate.model == "claude-sonnet")
+        );
+        assert!(matches!(
+            lookup(&r, "totally-unknown"),
+            Some(Lookup::Default)
+        ));
+        // The default row's own key is not a model: it resolves as the fallback.
+        assert!(matches!(lookup(&r, "default"), Some(Lookup::Default)));
+        assert!(matches!(lookup(&r, "  "), Some(Lookup::Default)));
+        assert!(lookup(&r[1..], "totally-unknown").is_none());
+    }
+
+    #[tokio::test]
+    async fn unknown_model_is_unpriced_not_default_priced() {
+        let cache = PricingCache::new(None, reqwest::Client::new());
+        cache.inner.write().await.rates = rates();
+        let legs = TokenLegs {
+            input_tokens: 1_000,
+            output_tokens: 500,
+            ..TokenLegs::default()
+        };
+
+        let unknown = cache
+            .priced(
+                CostBasis::Metered,
+                "a-model-the-catalogue-does-not-list",
+                legs,
+            )
+            .await;
+        assert_eq!(unknown, Priced::unpriced(PriceSource::Default));
+        for model in ["", "  ", "default"] {
+            let got = cache.priced(CostBasis::Metered, model, legs).await;
+            assert_eq!(got.usd, None, "{model:?}");
+            assert_eq!(got.source, PriceSource::Default, "{model:?}");
+        }
+        assert_eq!(
+            cache
+                .cost_usd_for(CostBasis::Metered, "gpt-5.6-terra", 1_000, 500, 0, 0)
+                .await,
+            None,
+            "the thin wrapper agrees: no default-row cost"
+        );
+
+        let want = 1_000.0 / 1_000_000.0 * 0.15 + 500.0 / 1_000_000.0 * 0.60;
+        let exact = cache.priced(CostBasis::Metered, "gpt-4o-mini", legs).await;
+        assert_eq!(exact.source, PriceSource::Exact);
+        assert!((exact.usd.unwrap() - want).abs() < 1e-12);
+        let prefix = cache
+            .priced(CostBasis::Metered, "claude-sonnet-4-6", legs)
+            .await;
+        assert_eq!(prefix.source, PriceSource::Prefix);
+        assert!(prefix.usd.is_some() && prefix.by_category.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_cold_catalogue_is_unavailable_and_a_subscription_is_a_known_zero() {
+        let cache = PricingCache::new(None, reqwest::Client::new());
+        let legs = TokenLegs {
+            input_tokens: 10,
+            ..TokenLegs::default()
+        };
+        assert_eq!(
+            cache.priced(CostBasis::Metered, "gpt-4o-mini", legs).await,
+            Priced::unpriced(PriceSource::Unavailable)
+        );
+        let subscription = cache
+            .priced(CostBasis::Subscription, "gpt-5.6-terra", legs)
+            .await;
+        assert_eq!(subscription.usd, Some(0.0));
+        assert_eq!(subscription.by_category, None);
+        assert_eq!(subscription.source, PriceSource::Subscription);
+    }
+
+    #[test]
+    fn category_costs_sum_to_total() {
+        let rate = Rate {
+            model: "claude-sonnet".into(),
+            input_per_million: 3.0,
+            output_per_million: 15.0,
+        };
+        // (input, output, cache read, cache write): the legs always fit inside
+        // the input, as a provider reports them.
+        let counts = [
+            (0, 0, 0, 0),
+            (1_000, 500, 0, 0),
+            (8_520, 42, 8_000, 0),
+            (2_000, 50, 1_024, 512),
+            (2_000, 50, 0, 512),
+            (2_000, 50, 2_000, 0),
+            (1_566, 2, 1_408, 0),
+            (4_000_000, 90_000, 1_000_000, 2_500_000),
+        ];
+        for model in [
+            "claude-sonnet-4-6",
+            "gpt-4o-mini",
+            "gpt-5.2",
+            "gpt-5.6",
+            "gpt-5.6-terra",
+        ] {
+            for (input, output, read, write) in counts {
+                let legs = TokenLegs {
+                    input_tokens: input,
+                    output_tokens: output,
+                    cache_read_input_tokens: read,
+                    cache_creation_input_tokens: write,
+                };
+                let cache = cache_rates(model);
+                let total = cost_from_rate(&rate, cache, input, output, read, write);
+                let parts = cost_categories(&rate, cache, legs);
+                assert!(
+                    (parts.total() - total).abs() < 1e-9,
+                    "{model} {legs:?}: parts {parts:?} sum to {}, total {total}",
+                    parts.total()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn category_costs_split_by_what_was_billed() {
+        let rate = Rate {
+            model: "default".into(),
+            input_per_million: 3.0,
+            output_per_million: 15.0,
+        };
+        let parts = cost_categories(
+            &rate,
+            cache_rates("gpt-5.6"),
+            TokenLegs {
+                input_tokens: 2_000,
+                output_tokens: 50,
+                cache_read_input_tokens: 1_024,
+                cache_creation_input_tokens: 512,
+            },
+        );
+        let want = CategoryCost {
+            input_usd: 464.0 / 1_000_000.0 * 3.0,
+            cache_read_usd: 1_024.0 / 1_000_000.0 * 3.0 * 0.1,
+            cache_write_usd: 512.0 / 1_000_000.0 * 3.0 * 1.25,
+            output_usd: 50.0 / 1_000_000.0 * 15.0,
+        };
+        for (got, want) in [
+            (parts.input_usd, want.input_usd),
+            (parts.cache_read_usd, want.cache_read_usd),
+            (parts.cache_write_usd, want.cache_write_usd),
+            (parts.output_usd, want.output_usd),
+        ] {
+            assert!((got - want).abs() < 1e-12, "got {parts:?}, want {want:?}");
+        }
+        // Legs larger than the input saturate the uncached part at zero
+        // instead of going negative.
+        let over = cost_categories(
+            &rate,
+            cache_rates("claude-sonnet-4-6"),
+            TokenLegs {
+                input_tokens: 100,
+                cache_read_input_tokens: 80,
+                cache_creation_input_tokens: 80,
+                ..TokenLegs::default()
+            },
+        );
+        assert_eq!(over.input_usd, 0.0);
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_prices_like_the_cache() {
+        let cache = PricingCache::new(None, reqwest::Client::new());
+        cache.inner.write().await.rates = rates();
+        let snapshot = cache.snapshot().await;
+        let legs = TokenLegs {
+            input_tokens: 8_520,
+            output_tokens: 42,
+            cache_read_input_tokens: 8_000,
+            cache_creation_input_tokens: 0,
+        };
+        for (basis, model) in [
+            (CostBasis::Metered, "claude-sonnet-4-6"),
+            (CostBasis::Metered, "gpt-4o-mini"),
+            (CostBasis::Metered, "gpt-5.6-terra"),
+            (CostBasis::Subscription, "gpt-5.6-terra"),
+        ] {
+            assert_eq!(
+                snapshot.priced(basis, model, legs),
+                cache.priced(basis, model, legs).await,
+                "{basis:?} {model}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -569,14 +936,26 @@ mod tests {
         assert_eq!(price(CostBasis::Subscription).await, Some(0.0));
 
         cache.inner.write().await.rates = rates();
-        let metered = price(CostBasis::Metered)
-            .await
-            .expect("priced against the default row");
-        assert!(metered > 0.0, "a metered call is priced: {metered}");
+        assert!(
+            price(CostBasis::Metered).await.is_none(),
+            "only the default row matches this model: it has no price"
+        );
         assert_eq!(
             price(CostBasis::Subscription).await,
             Some(0.0),
             "the default row's list price must never reach a subscription call"
         );
+        let metered = cache
+            .cost_usd_for(
+                CostBasis::Metered,
+                "claude-sonnet-4-6",
+                1_800,
+                120,
+                1_024,
+                256,
+            )
+            .await
+            .expect("a listed model is priced");
+        assert!(metered > 0.0, "a metered call is priced: {metered}");
     }
 }

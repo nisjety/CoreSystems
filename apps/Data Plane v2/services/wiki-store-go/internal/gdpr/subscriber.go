@@ -26,7 +26,7 @@ const DurableConsumerName = "wiki-store-org-erasure"
 // documents-api-go's, conversation-core-go's, and quarry-control's org-purge
 // consumers bind against. Provisioned by
 // apps/Control Plane/audit-core/internal/provisioner.
-const controlSharedStream = "AQENCIA_CONTROLPLANE"
+const controlSharedStream = "CONTROLPLANE"
 
 // StartSubscriber binds wiki-store-go's pre-provisioned durable JetStream
 // push consumer (DurableConsumerName, on controlSharedStream) and purges an
@@ -45,7 +45,7 @@ const controlSharedStream = "AQENCIA_CONTROLPLANE"
 // found". This client library (nats.go) resolves a durable push
 // subscription via CONSUMER.INFO + the consumer's own deliver subject; it
 // never calls STREAM.INFO, so wiki-store-gdpr's control-shared-nats grant
-// does not need $JS.API.STREAM.INFO.AQENCIA_CONTROLPLANE (that permission is
+// does not need $JS.API.STREAM.INFO.CONTROLPLANE (that permission is
 // only required for client libraries whose Context/JetStream initialization
 // path calls get_stream/GetStream before resolving the consumer — see
 // Model Plane session-core's async-nats 0.49.1 consumer for that case).

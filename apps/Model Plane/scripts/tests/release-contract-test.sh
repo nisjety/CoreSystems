@@ -7,7 +7,7 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 
 APPLICATION_IMAGES=(
   model-gateway session-core inference-core execution-core orchestrator-core
-  capability-core sandbox-manager browser-broker letta-bridge cost-core bridge-core
+  capability-core sandbox-manager browser-broker letta-bridge cost-core bridge-core nats-provisioner
 )
 INFRASTRUCTURE_IMAGES=(
   postgres nats minio dragonfly temporal temporal-ui otel-collector
@@ -71,6 +71,7 @@ make_artifact_fixture() {
   done
   printf 'key\tpartition\nAUTH_CORE_ISSUER\tpublic\nAUTH_CORE_JWKS_URL\tpublic\n' >"$artifact/config-policy.tsv"
   printf 'AZURE_OPENAI_ZDR_CONFIRMED\tpublic\nMODEL_POSTGRES_PASSWORD\tsecret\n' >>"$artifact/config-policy.tsv"
+  printf 'AZURE_OPENAI_ZDR_RESOURCE_ID\tpublic\nAZURE_OPENAI_ZDR_DIGEST\tpublic\n' >>"$artifact/config-policy.tsv"
   printf 'SOURCE_REVISION\tartifact\nBUILD_DATE\tartifact\n' >>"$artifact/config-policy.tsv"
   printf 'AUTH_CORE_ISSUER=https://auth.release.example/api/convex-auth\nAUTH_CORE_JWKS_URL=https://jwks.release.example/keys/model-plane\nAZURE_OPENAI_ZDR_CONFIRMED=false\n' \
     >"$artifact/runtime-public-policy.env"
@@ -235,6 +236,39 @@ done
 reset_count="$(grep -Fc 'build: !reset null' "$ROOT_DIR/deploy/docker-compose.release.yml")"
 test "$reset_count" -eq "${#services[@]}"
 
+# A base-compose service that builds from source but has no `build: !reset null`
+# overlay entry would be rebuilt on the production host instead of running the
+# signed image, so the two sets must match by name, not only by count.
+compose_services_with() {
+  # $1 compose file, $2 awk regex for the service-level key to look for
+  awk -v key="$2" '
+    { sub(/\r$/, "") }
+    /^services:[[:space:]]*$/ { in_services = 1; next }
+    in_services && /^[^[:space:]#]/ { in_services = 0 }
+    in_services && /^  [[:alnum:]_-]+:[[:space:]]*$/ { name = $1; sub(/:$/, "", name); next }
+    in_services && name != "" && $0 ~ key { print name; name = "" }
+  ' "$1" | LC_ALL=C sort -u
+}
+overlay_build_omissions() {
+  local base_builds overlay_resets
+  base_builds="$(compose_services_with "$1" '^    build:')"
+  overlay_resets="$(compose_services_with "$2" '^    build: !reset null[[:space:]]*$')"
+  comm -23 <(printf '%s\n' "$base_builds") <(printf '%s\n' "$overlay_resets")
+}
+omitted="$(overlay_build_omissions "$ROOT_DIR/deploy/docker-compose.yml" "$ROOT_DIR/deploy/docker-compose.release.yml")"
+if [[ -n "$omitted" ]]; then
+  echo "release overlay has no build reset for: $omitted" >&2
+  exit 1
+fi
+grep -qx 'nats-provisioner' <(compose_services_with "$ROOT_DIR/deploy/docker-compose.release.yml" '^    build: !reset null[[:space:]]*$')
+seeded_overlay="$TMP_DIR/overlay-with-omission.yml"
+awk '
+  /^  nats-provisioner:/ { skip = 1; next }
+  skip && /^  [[:alnum:]_-]+:/ { skip = 0 }
+  !skip { print }
+' "$ROOT_DIR/deploy/docker-compose.release.yml" >"$seeded_overlay"
+test "$(overlay_build_omissions "$ROOT_DIR/deploy/docker-compose.yml" "$seeded_overlay")" = "nats-provisioner"
+
 for image in "${INFRASTRUCTURE_IMAGES[@]}"; do
   env_name="$(printf '%s_RELEASE_IMAGE' "$image" | tr '[:lower:]-' '[:upper:]_')"
   grep -F "image: \${${env_name}:?" "$ROOT_DIR/deploy/docker-compose.release.yml" >/dev/null
@@ -242,7 +276,7 @@ done
 grep -F 'image: ${POSTGRES_RELEASE_IMAGE:?' "$ROOT_DIR/deploy/docker-compose.release.yml" | \
   test "$(wc -l | tr -d '[:space:]')" -eq 2
 pull_never_count="$(grep -Ec '^[[:space:]]+pull_policy: never$' "$ROOT_DIR/deploy/docker-compose.release.yml")"
-test "$pull_never_count" -eq 21
+test "$pull_never_count" -eq 22
 
 revision="0123456789abcdef0123456789abcdef01234567"
 dry_run="$TMP_DIR/dry-run"
@@ -385,6 +419,25 @@ if "$ROOT_DIR/scripts/release-artifact.sh" validate-runtime-config \
   echo "release runtime policy accepted ZDR confirmation without provider attestation" >&2
   exit 1
 fi
+# Attestation fields alone are a ZDR claim: inference-core grants ZDR from them
+# without the legacy boolean, so the release gate must apply to them too.
+{
+  cat "$artifact/runtime-public-policy.env"
+  printf 'AZURE_OPENAI_ZDR_RESOURCE_ID=/subscriptions/a/openai-x\n'
+} >"$TMP_DIR/runtime-attestation-only-policy.env"
+if "$ROOT_DIR/scripts/release-artifact.sh" validate-runtime-config \
+  "$runtime_env" "$artifact/config-policy.tsv" \
+  "$TMP_DIR/runtime-attestation-only-policy.env" "$artifact/compatibility-gates.env" \
+  >"$TMP_DIR/runtime-attestation-only.out" 2>&1; then
+  echo "release runtime policy accepted a ZDR attestation field without passed gates" >&2
+  exit 1
+fi
+grep -F 'ZDR provider confirmation requires passed compatibility gates' \
+  "$TMP_DIR/runtime-attestation-only.out" >/dev/null || {
+  echo "release runtime policy rejected an attestation-only ZDR claim for the wrong reason" >&2
+  cat "$TMP_DIR/runtime-attestation-only.out" >&2
+  exit 1
+}
 printf 'UNAPPROVED_OVERRIDE=value\n' >>"$runtime_env"
 if "$ROOT_DIR/scripts/release-artifact.sh" validate-runtime-config "$runtime_env" \
   "$artifact/config-policy.tsv" "$artifact/runtime-public-policy.env" \

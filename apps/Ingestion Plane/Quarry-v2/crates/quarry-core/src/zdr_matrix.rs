@@ -180,13 +180,17 @@ pub const ROWS: &[Row] = &[
     Row {
         id: "answer",
         routes: &["/v1/answer", "/v1/answer/stream"],
-        treatment: Treatment::Honored,
+        treatment: Treatment::Refused {
+            code: "FORBIDDEN",
+            feature: "answer_synthesis",
+        },
         status: Status::Enforced,
         enforced_by: &[
-            "zdr_claim_floor::answer_runs_as_zdr_for_a_zdr_org_user_and_as_before_otherwise",
-            "zdr_claim_floor::answer_stream_runs_as_zdr_for_a_zdr_org_user_and_as_before_otherwise",
+            "zdr_claim_floor::answer_is_refused_for_a_zdr_org_user_and_runs_as_before_otherwise",
+            "zdr_claim_floor::answer_stream_is_refused_for_a_zdr_org_user_and_runs_as_before_otherwise",
+            "answer_provider_status::a_zdr_answer_is_refused_before_the_pipeline_starts_and_nothing_reaches_the_model",
         ],
-        basis: "the answer pipeline runs with the effective ZDR posture: no paid providers, no durable search event, no answer cache. The model hop carries no ZDR posture (ADR-4), so a ZDR answer still sends the page text to the Model Plane: the same open gap as search_suggest, an owner decision with INNH-8b (include_answer on /v1/search does not do this: it is skipped under ZDR)",
+        basis: "answer_routes::answer_run and ::answer_stream refuse a request under effective ZDR (the body flag or the token's floor) with a 403 FORBIDDEN, reason zdr_unavailable, before the deployment's gate, the answer cache and the pipeline start: no search, no page fetch and no Model Plane call, because the model hop carries no ZDR posture (ADR-4) and would take the query and the page text. A refused ZDR run leaves only a metadata-only tombstone (outcome refused). include_answer on /v1/search is not refused: it is answered answer_status skipped_zdr, with the search itself run under ZDR and no model call",
         log: Log::Unverified,
     },
     Row {
@@ -212,6 +216,17 @@ pub const ROWS: &[Row] = &[
         status: Status::Enforced,
         enforced_by: &[],
         basis: "map_routes::map touches no cache, artifact store, index or event sink",
+        log: Log::Unverified,
+    },
+    Row {
+        id: "audit_page",
+        routes: &["/v1/audit/page"],
+        treatment: Treatment::Inert {
+            reason: "fetches robots and one page and returns bounded evidence; nothing is stored",
+        },
+        status: Status::Enforced,
+        enforced_by: &[],
+        basis: "audit_page::capture touches no cache, artifact store, index or event sink",
         log: Log::Unverified,
     },
     Row {
@@ -594,6 +609,7 @@ pub const ROWS: &[Row] = &[
 /// table cannot make quietly.
 pub const MUST_STAY_REFUSED: &[&str] = &[
     "durable_jobs",
+    "answer",
     "agent_persistent_profile",
     "agent_resume",
     "scrape_record_read",

@@ -339,7 +339,7 @@ mod tests {
             duration_sec: 1.0,
             skills_used: vec!["bash".into()],
             cost_usd: 0.01,
-            model: "claude-sonnet-4-20250514".into(),
+            model: "claude-sonnet-5-5".into(),
             created_at_unix: 0,
         }
     }

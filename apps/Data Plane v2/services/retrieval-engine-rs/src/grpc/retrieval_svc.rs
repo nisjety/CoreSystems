@@ -208,6 +208,12 @@ impl RetrievalService for RetrievalSvc {
                     return;
                 }
             };
+            // The stream's trailer has no metadata to carry a notice, so a reduced answer is refused
+            // here rather than delivered without its notice (Z-41).
+            if let Some(refusal) = stream_refusal(resp.notice.as_ref()) {
+                let _ = tx.send(Err(refusal)).await;
+                return;
+            }
             for c in resp.candidates.iter() {
                 let frame = RetrievalChunk {
                     payload: Some(retrieval_chunk::Payload::Candidate(Candidate {
@@ -349,9 +355,9 @@ impl RetrievalService for RetrievalSvc {
             zdr_mode: resp.zdr_mode,
             low_confidence: resp.low_confidence,
             context_pack,
-            retrieval_metadata: retrieval_metadata(
-                &resp.suggested_next_tools,
-                &resp.zdr_actions_applied,
+            retrieval_metadata: with_notice(
+                retrieval_metadata(&resp.suggested_next_tools, &resp.zdr_actions_applied),
+                resp.notice.as_ref(),
             ),
         });
         let burst = std::env::var("DPV2_RATE_LIMIT_PER_ORG_BURST")
@@ -713,8 +719,127 @@ fn grpc_to_pipeline(req: RetrieveRequest) -> Result<PipelineReq, &'static str> {
         agent_id: req.agent_id,
         admin_read_all: false,
         service_principal: false,
+        service_id: None,
         space_scope: None,
     })
+}
+
+/// The refusal a streamed retrieval answers with when its answer is reduced (Z-41). The stream's
+/// trailer has no metadata field, so the notice cannot ride it. Before Z-41 this request failed
+/// outright, so refusing it keeps the stream fail closed rather than silently lexical.
+fn stream_refusal(notice: Option<&crate::pipeline::types::RetrievalNotice>) -> Option<Status> {
+    notice.map(|notice| Status::failed_precondition(format!("{}: {}", notice.code, notice.message)))
+}
+
+/// Adds the typed notice to `retrieval_metadata` as `notice: {code, message}`, so a reduced answer
+/// says so on the primary transport too (Z-41). The Struct is created when the notice is the only
+/// entry. Without a notice the metadata is returned untouched, so an ordinary answer stays identical.
+fn with_notice(
+    metadata: Option<prost_types::Struct>,
+    notice: Option<&crate::pipeline::types::RetrievalNotice>,
+) -> Option<prost_types::Struct> {
+    let Some(notice) = notice else {
+        return metadata;
+    };
+    let text = |value: &str| prost_types::Value {
+        kind: Some(prost_types::value::Kind::StringValue(value.to_owned())),
+    };
+    let body = prost_types::Struct {
+        fields: [
+            ("code".to_string(), text(&notice.code)),
+            ("message".to_string(), text(&notice.message)),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let mut fields = metadata.map(|md| md.fields).unwrap_or_default();
+    fields.insert(
+        "notice".to_string(),
+        prost_types::Value {
+            kind: Some(prost_types::value::Kind::StructValue(body)),
+        },
+    );
+    Some(prost_types::Struct { fields })
+}
+
+#[cfg(test)]
+mod notice_metadata_tests {
+    use super::with_notice;
+    use crate::pipeline::types::RetrievalNotice;
+
+    fn notice() -> RetrievalNotice {
+        RetrievalNotice {
+            code: "zdr_dense_unavailable".to_owned(),
+            message: "Semantic search was not used for this answer.".to_owned(),
+        }
+    }
+
+    /// Reads the notice back the way a client decodes it, field by field.
+    fn decoded(md: &prost_types::Struct) -> (String, String) {
+        let Some(prost_types::Value {
+            kind: Some(prost_types::value::Kind::StructValue(body)),
+        }) = md.fields.get("notice")
+        else {
+            panic!(
+                "notice missing or not a struct: {:?}",
+                md.fields.get("notice")
+            );
+        };
+        let text = |key: &str| match body.fields.get(key).and_then(|v| v.kind.as_ref()) {
+            Some(prost_types::value::Kind::StringValue(value)) => value.clone(),
+            other => panic!("{key} is not a string: {other:?}"),
+        };
+        (text("code"), text("message"))
+    }
+
+    #[test]
+    fn a_notice_is_carried_as_a_struct_on_the_unary_response() {
+        let md = with_notice(None, Some(&notice())).expect("the notice populates the metadata");
+        let (code, message) = decoded(&md);
+        assert_eq!(code, "zdr_dense_unavailable");
+        assert_eq!(message, "Semantic search was not used for this answer.");
+    }
+
+    #[test]
+    fn a_notice_keeps_the_existing_metadata_entries() {
+        let existing = prost_types::Struct {
+            fields: [(
+                "zdr_actions_applied".to_string(),
+                prost_types::Value {
+                    kind: Some(prost_types::value::Kind::StringValue(
+                        "zdr_dense_skipped_unattested".to_owned(),
+                    )),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let md = with_notice(Some(existing), Some(&notice())).expect("populated");
+        assert!(md.fields.contains_key("zdr_actions_applied"));
+        assert_eq!(decoded(&md).0, "zdr_dense_unavailable");
+    }
+
+    #[test]
+    fn a_reduced_answer_is_refused_on_the_stream_with_its_code() {
+        assert!(super::stream_refusal(None).is_none());
+        let refusal = super::stream_refusal(Some(&notice())).expect("a reduced answer is refused");
+        assert_eq!(refusal.code(), tonic::Code::FailedPrecondition);
+        assert!(
+            refusal.message().starts_with("zdr_dense_unavailable: "),
+            "{}",
+            refusal.message()
+        );
+    }
+
+    #[test]
+    fn an_ordinary_answer_keeps_its_metadata_untouched() {
+        assert!(with_notice(None, None).is_none());
+        let existing = prost_types::Struct {
+            fields: Default::default(),
+        };
+        let kept = with_notice(Some(existing.clone()), None).expect("unchanged");
+        assert_eq!(kept, existing);
+    }
 }
 
 #[cfg(test)]

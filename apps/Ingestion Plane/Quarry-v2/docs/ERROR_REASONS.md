@@ -219,15 +219,17 @@ These come from `POST /v1/answer`, `POST /v1/answer/stream` (as `reason` in the 
 | reason | status and code | meaning | what a caller does |
 |---|---|---|---|
 | `synthesis_disabled` | 501 `UNSUPPORTED` | `QUARRY_EDGE__ANSWER_SYNTHESIS` is not on (the default) | the operator sets it; use plain `/v1/search` meanwhile |
+| `model_path_refused` | 501 `UNSUPPORTED` | the switch is on but the QB-T17 boot gate refused it: the manifest row `model-invoke` is not granted (or there is no service identity); the feature stays off and no Model Plane call is made | the operator needs the cross-plane grant (owner decision INNH-8b); the boot log names the refusal |
+| `zdr_unavailable` | 403 `FORBIDDEN` | zero data retention (the body flag or the token's floor): the model hop carries no ZDR posture (ADR-4), so `/v1/answer` and `/v1/answer/stream` refuse the request before any search, fetch or model call | not retryable under ZDR; use `/v1/search` or `/v1/scrape`, which run under ZDR without a model |
 | `no_search_provider` | 501 `UNSUPPORTED` | no search provider is configured | the operator configures `SEARXNG_URL`, `BRAVE_SEARCH_KEY` or `SERPER_KEY` |
 | `no_model_plane_url` | 501 `UNSUPPORTED` | `QUARRY_EDGE__MODEL_PLANE_URL` is unset or blank | the operator sets it |
 | `model_client_init_failed` | 501 `UNSUPPORTED` | the URL is set but the Model Plane client could not be built from it | the operator fixes the URL; the edge boot log has the cause |
 | `model_plane_auth_refused` | 503 `UNAVAILABLE` | the pipeline is wired but Auth Core refused to mint the edge's Model Plane token, or the gateway answered 401 or 403 to it | not the caller's token and not retryable by the caller; the operator needs the cross-plane grant (owner decision INNH-8b) |
-| `model_plane_rate_limited` | 429 `RATE_LIMITED` | the mint was rate limited | retry later |
+| `model_plane_rate_limited` | 429 `RATE_LIMITED` | Auth Core rate limited the edge's service-token mint (the edge's call, not the caller's own quota) | retry later |
 | `model_plane_error` | 502 `DRIVER_FAILED` | the Model Plane call failed | retry later |
 | `answer_search_failed` | the status of the error | the search or page-fetch half failed before a model was asked | retry later |
 
-On `POST /v1/search` the status of an answer is `answer_status`: `ok`, `no_sources`, `skipped_zdr` (ZDR: nothing was sent to a model) or `unavailable` (with `answer_reason` from the table). A missing answer is never a failed search.
+On `POST /v1/search` the status of an answer is `answer_status`: `ok`, `no_sources`, `skipped_zdr` (ZDR: nothing was sent to a model) or `unavailable` (with `answer_reason` from the table, never `zdr_unavailable`: ZDR is `skipped_zdr` there). A missing answer is never a failed search. The `code` in an error body is the wire name of the error code (`DRIVER_FAILED`, `RATE_LIMITED`, `FORBIDDEN`).
 
 ## 403 `FORBIDDEN`: an action an agent may not take (WS9.B, D2-012)
 

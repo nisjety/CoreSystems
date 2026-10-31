@@ -7,6 +7,7 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
+mp-content-safety = { path = "../../crates/mp-content-safety" }
 mp-contracts = { path = "../../crates/mp-contracts" }
 mp-events = { path = "../../crates/mp-events" }
 mp-ids = { path = "../../crates/mp-ids" }
@@ -48,5 +49,6 @@ reqwest = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 serial_test = "3"
 tower = { version = "0.5", features = ["util"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 wiremock = "0.6"
 rsa = { version = "0.9", features = ["pem"] }

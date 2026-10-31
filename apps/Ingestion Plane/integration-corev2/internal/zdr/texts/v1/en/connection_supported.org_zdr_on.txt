@@ -1,0 +1,7 @@
+title: This connection supports ZDR
+continue: Close
+cancel: Close
+
+Your organisation has Zero Data Retention (ZDR) turned on, and this connection is registered with Verevon as ZDR-approved. Chats run with the connection keep ZDR.
+
+The registration applies only to this connection. It changes if the basis for it changes.

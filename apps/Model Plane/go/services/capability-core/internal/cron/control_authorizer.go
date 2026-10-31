@@ -17,15 +17,19 @@ import (
 )
 
 const (
-	controlDecisionVersion    = "v2"
-	controlCreateAction       = "model.cron.create"
-	controlCreateAudience     = "model-plane-capability-core"
-	controlCreateSchema       = "sha256:space-cron-create-v1"
-	controlFireAction         = "model.cron.fire"
-	controlFireAudience       = "model-plane-capability-core"
-	controlFireSchema         = "sha256:space-cron-fire-v1"
-	controlScheduledRunAction = "model.schedule.run"
-	controlScheduledRunSchema = "sha256:space-scheduled-run-v1"
+	controlDecisionVersion = "v2"
+	controlCreateAction    = "model.cron.create"
+	controlCreateAudience  = "model-plane-capability-core"
+	controlCreateSchema    = "sha256:space-cron-create-v1"
+	// controlCreateContractSchema is the create schema once a stored-consent
+	// contract is bound. The v1 schema stays byte-identical for contract-free creates.
+	controlCreateContractSchema = "sha256:space-cron-create-v2"
+	controlContractMaxClass     = "read"
+	controlFireAction           = "model.cron.fire"
+	controlFireAudience         = "model-plane-capability-core"
+	controlFireSchema           = "sha256:space-cron-fire-v1"
+	controlScheduledRunAction   = "model.schedule.run"
+	controlScheduledRunSchema   = "sha256:space-scheduled-run-v1"
 )
 
 // ControlFireAuthorizer is Capability Core's narrow client for the Control
@@ -179,6 +183,19 @@ type CreateIntent struct {
 	ScheduleID     string
 	TemplateDigest string
 	IdempotencyKey string
+	// ContractDigest and ContractExpiresAt are empty for a contract-free create.
+	// When set, Control's payload digest must bind them or the decision is refused.
+	ContractDigest    string
+	ContractExpiresAt string
+}
+
+// createSchemaFor is the action schema Control must have signed for this intent:
+// the contract-free v1 shape, or the v2 shape once a contract is bound.
+func createSchemaFor(intent CreateIntent) string {
+	if intent.ContractDigest != "" {
+		return controlCreateContractSchema
+	}
+	return controlCreateSchema
 }
 
 // ScheduleCreateBinding is the verified, non-secret projection that becomes
@@ -208,7 +225,7 @@ func (v *ControlDecisionVerifier) VerifyScheduleCreate(token string, intent Crea
 	}
 	if decision.OrgID != intent.OrgID || decision.SpaceRef != intent.SpaceRef || decision.SubjectID != intent.SubjectID ||
 		decision.ServiceAudience != controlCreateAudience || decision.ActionID != controlCreateAction ||
-		decision.ActionSchemaHash != controlCreateSchema || decision.IdempotencyKey != intent.IdempotencyKey {
+		decision.ActionSchemaHash != createSchemaFor(intent) || decision.IdempotencyKey != intent.IdempotencyKey {
 		return ScheduleCreateBinding{}, fmt.Errorf("Control schedule create decision target does not match intent")
 	}
 	if decision.ZeroDataRetention || !now.Before(decision.ExpiresAt) || decision.IssuedAt.After(now.Add(time.Minute)) || !hasPermission(decision.Permissions, "cron:create") {
@@ -324,6 +341,12 @@ func validateCreateIntent(intent CreateIntent) error {
 	if !strings.HasPrefix(intent.TemplateDigest, "sha256:") || len(intent.TemplateDigest) != len("sha256:")+64 {
 		return fmt.Errorf("schedule create template digest is invalid")
 	}
+	if (intent.ContractDigest == "") != (intent.ContractExpiresAt == "") {
+		return fmt.Errorf("schedule create contract digest and expiry must be set together")
+	}
+	if intent.ContractDigest != "" && (!strings.HasPrefix(intent.ContractDigest, "sha256:") || len(intent.ContractDigest) != len("sha256:")+64) {
+		return fmt.Errorf("schedule create contract digest is invalid")
+	}
 	return nil
 }
 
@@ -427,13 +450,21 @@ func expectedScheduledRunPayloadDigest(decision controlDecision, intent FireInte
 func expectedCreatePayloadDigest(decision controlDecision, intent CreateIntent) string {
 	hash := sha256.New()
 	hash.Write([]byte("model.cron.create\x00v1\x00"))
-	for _, field := range []struct{ name, value string }{
+	fields := []struct{ name, value string }{
 		{"org_id", decision.OrgID}, {"user_id", decision.SubjectID}, {"space_id", decision.SpaceRef},
 		{"schedule_id", intent.ScheduleID}, {"template_digest", intent.TemplateDigest},
 		{"recipient_audience_ref", decision.RecipientAudienceRef}, {"recipient_audience_hash", decision.RecipientAudienceHash},
 		{"privacy_policy_ref", decision.PrivacyPolicyRef}, {"resource_authorization_ref", decision.ResourceAuthorizationRef},
-		{"action_schema_hash", controlCreateSchema}, {"idempotency_key", intent.IdempotencyKey},
-	} {
+		{"action_schema_hash", createSchemaFor(intent)}, {"idempotency_key", intent.IdempotencyKey},
+	}
+	if intent.ContractDigest != "" {
+		fields = append(fields,
+			struct{ name, value string }{"contract_digest", intent.ContractDigest},
+			struct{ name, value string }{"contract_expires_at", intent.ContractExpiresAt},
+			struct{ name, value string }{"contract_max_class", controlContractMaxClass},
+		)
+	}
+	for _, field := range fields {
 		hash.Write([]byte(field.name))
 		hash.Write([]byte{0})
 		var length [8]byte

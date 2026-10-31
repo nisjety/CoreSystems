@@ -93,12 +93,75 @@ pub const fn sovereign_required_from_privacy_tier(min_privacy_tier: i32) -> Opti
     }
 }
 
+/// The `zdr_mode` a retrieval request carries to the Data Plane, for one turn.
+///
+/// * `waived`: `reject`. A waived turn sends org knowledge to the personal account, so
+///   restricted documents are dropped before the context reaches the model. The turn is
+///   filtered, not made ephemeral: a waived run is persisted like a normal run.
+/// * `zdr`: `ephemeral`, the mode a ZDR claim has always meant.
+/// * neither: `disabled`.
+///
+/// It always names a mode, and never leaves the field absent. The module's rule is that the API
+/// cannot express "send nothing". `disabled` is what the Data Plane takes an absent `zdr_mode` to
+/// mean, so sending it says the same thing on the wire.
+///
+/// A turn that is both (the resolver never produces one) takes `reject`: when a waiver is present,
+/// egress to the personal account is the risk the mode exists for.
+#[must_use]
+pub const fn data_plane_zdr_mode(zdr: bool, waived: bool) -> &'static str {
+    if waived {
+        "reject"
+    } else if zdr {
+        "ephemeral"
+    } else {
+        "disabled"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        effective_sovereign_required, sovereign_required_from_privacy_tier, PRIVACY_TIER_SOVEREIGN,
-        SOVEREIGN_REQUIRED_WITHOUT_SIGNAL,
+        data_plane_zdr_mode, effective_sovereign_required, sovereign_required_from_privacy_tier,
+        PRIVACY_TIER_SOVEREIGN, SOVEREIGN_REQUIRED_WITHOUT_SIGNAL,
     };
+
+    /// A waived turn must filter restricted documents before anything leaves the
+    /// Data Plane. Without this mode it runs as `disabled`, and the restricted
+    /// documents it retrieves go to the personal account.
+    #[test]
+    fn a_waived_turn_is_filtered_to_reject() {
+        assert_eq!(data_plane_zdr_mode(false, true), "reject");
+    }
+
+    /// A ZDR turn keeps the mode a ZDR claim has always meant, and a persistent
+    /// turn says so on the wire instead of sending nothing.
+    #[test]
+    fn a_zdr_turn_is_ephemeral_and_a_persistent_turn_is_disabled() {
+        assert_eq!(data_plane_zdr_mode(true, false), "ephemeral");
+        assert_eq!(data_plane_zdr_mode(false, false), "disabled");
+    }
+
+    /// Every value is one of the three the Data Plane parses (`ZdrMode::from_str`
+    /// in retrieval-engine-rs), for every combination of inputs.
+    #[test]
+    fn every_value_is_one_the_data_plane_parses() {
+        for zdr in [false, true] {
+            for waived in [false, true] {
+                let mode = data_plane_zdr_mode(zdr, waived);
+                assert!(
+                    ["disabled", "reject", "ephemeral"].contains(&mode),
+                    "zdr={zdr} waived={waived} produced `{mode}`"
+                );
+            }
+        }
+    }
+
+    /// The resolver never produces both, but a caller that passes both gets the
+    /// filtering mode: the egress to the personal account is the risk it exists for.
+    #[test]
+    fn a_turn_that_is_both_zdr_and_waived_takes_the_filtering_mode() {
+        assert_eq!(data_plane_zdr_mode(true, true), "reject");
+    }
 
     /// The property the whole module exists to hold. A signed sovereign claim
     /// is a floor, so no caller-declared value may lower it — including the

@@ -1,10 +1,16 @@
 # 0002 — The "Used by AI?" audit trail never reached audit-core
 
 **Date:** 2026-10-06 (read on the developer stack; the first stuck row is from 2026-09-04)
-**Status:** Cause proven. The broker side is fixed and deployed (2026-10-05). The
-publisher fix, the requeue function and the new metrics are built and tested and **not
-deployed**. The 4,992 stuck rows are **not replayed**. Delivery of those rows is not
-proven until the replay below has run and a fresh read shows them in `audit_events`.
+**Status:** Cause proven. The broker side is fixed and deployed (2026-10-05). On the
+2026-10-06 reads the publisher fix, the requeue function and the new metrics were built and
+tested and **not deployed**. They are in the repository at WS01-S2 (commit `7b1d27fb9`); no
+dated read of a running session-core after 2026-10-06 is recorded here, so their deployed
+state is unknown. No replay of the 4,992 stuck rows is recorded. The outbox alert rules are
+in the repository (WS01-S1, `apps/Control Plane/observability/rules/audit-delivery.rules.yml`),
+not yet seen firing on a running Prometheus. Delivery of those rows is not proven until the
+replay below has run and a fresh read shows them in `audit_events`, and the section 6
+re-verification in `docs/compliance/evidence/trust-claims-pending-reverification.md` has
+passed on that stack. Until then this record describes what is built, not what is delivered.
 **Evidence:** `docs/compliance/evidence/live-reads-audit-delivery-2026-10-06.txt`
 (read-only reads, each block names its command), and
 `docs/compliance/evidence/live-reads-trust-claims-2026-10-03.txt` BLOCK 3 for the first
@@ -144,7 +150,8 @@ Tests (all fail on the defect, all apply the real rules):
    docker exec model-plane-nats-1 wget -qO- 'http://127.0.0.1:8222/jsz?streams=true&consumers=true&config=true'
    ```
 
-2. **Build and deploy `session-core` only** (through the launcher, by the orchestrator). It
+2. **Build and deploy `session-core` only** (`scripts/rebuild-service.sh session-core`, which tags the
+   running image for rollback first; or through the launcher, by the orchestrator). It
    applies migration 43 on start. Do this before any replay: the old build publishes a
    reservation on the wrong subject and audit-core would dead-letter all 2,477 of them.
 3. **Verify the deploy** (read-only):
@@ -163,6 +170,11 @@ Tests (all fail on the defect, all apply the real rules):
 4. Replay (next section).
 
 ## Replay of the stuck rows
+
+The order of operations, the gates and the proof script (`scripts/tests/audit-delivery-proof.sh`) are in
+`docs/runbooks/audit-delivery-replay.md`. The 10-row canary needs no gate; the large replay waits for the Space role
+gate on `GET /api/v1/audit` or for the owner's recorded acceptance, because it makes every stored event readable by every
+org member until that gate exists. The SQL below is the same procedure, kept for the record.
 
 Read first (read-only), expect 2,515 and 2,477, all `no stream found for given subject`:
 
@@ -283,9 +295,16 @@ published.
    lists the model bus. Both converge on the same stream today, and a test guards the drift, but the
    copy of the provisioner password in the Control Plane should be removed, or the launcher should
    fail when the two copies differ.
-2. An alert rule on `mp_session_audit_outbox_terminal_by_subject > 0` and on
-   `increase(mp_session_audit_outbox_terminal_total[10m]) > 0`. The repository holds no Model Plane
-   alert rules file, so none was added.
+2. Alert rules for `mp_session_audit_outbox_terminal_by_subject > 0` and
+   `increase(mp_session_audit_outbox_terminal_total[10m]) > 0` are in the repository:
+   `ModelAuditOutboxTerminalRows` and `ModelAuditOutboxTerminalIncreasing` in
+   `apps/Control Plane/observability/rules/audit-delivery.rules.yml` (WS01-S1; runbook
+   `apps/Model Plane/docs/runbooks/audit-delivery-alerts.md`). Whether the running Prometheus
+   loads and fires them is not read here.
 3. audit-core already counts `authority_mismatch`; an alert on it would have caught root cause 2.
+   The alert is `ControlAuditCoreAuthorityMismatch` in
+   `apps/Control Plane/observability/rules/audit-core.rules.yml` (WS06-S0). Its expression has
+   no bus filter, so it counts refusals on every bus. It is not in the WS01-S1 file, and whether
+   it is loaded is not read here.
 4. Re-read the trust claim `audit-trail-not-verified-end-to-end` only after the final read above
    passes (`docs/compliance/evidence/trust-claims-pending-reverification.md`, section 6).

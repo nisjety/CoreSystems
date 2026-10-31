@@ -170,6 +170,15 @@ export REAL_AUTHORITY_ORG_TOKEN=$(openssl rand -hex 32)
 export REAL_AUTHORITY_BILLING_TOKEN=$(openssl rand -hex 32)
 export REAL_AUTHORITY_PLANE_PRINCIPALS_JSON=$(printf '%s' \
   '{"retrieval-engine":{"credential":"'"$CONTROL_POLICY_SERVICE_API_KEY"'","audiences":["control-policy"],"orgIds":[],"allowAnyOrg":true,"scopes":["data:authorization:decide"],"scopesByAudience":{"control-policy":["data:authorization:decide"]}},"embedding-engine":{"credential":"'"$MODEL_PLANE_EMBEDDING_INFERENCE_SERVICE_API_KEY"'","audiences":["inference-core"],"orgIds":[],"allowAnyOrg":true,"scopes":["inference:invoke"],"scopesByAudience":{"inference-core":["inference:invoke"]}},"browser-fixture-seeder":{"credential":"'"$REAL_AUTHORITY_PERSISTENCE_SERVICE_API_KEY"'","audiences":["data-plane"],"orgIds":[],"allowAnyOrg":true,"allowPersistentData":true,"scopes":["documents:write","org:data:write_all"],"scopesByAudience":{"data-plane":["documents:write","org:data:write_all"]}}}')
+# QB-T08: the quarry-edge row is GENERATED from the committed principal policy, never typed here. The
+# generator copies every authority field of the committed row and adds only this disposable credential,
+# and it refuses an allowAnyOrg row. The parity contract is tests/scripts/isolated-registry-parity-test.sh.
+# Two statements per value, so a failing generator stops the run (export would hide its status).
+REAL_AUTHORITY_QUARRY_EDGE_CREDENTIAL=$(openssl rand -hex 32)
+export REAL_AUTHORITY_QUARRY_EDGE_CREDENTIAL
+REAL_AUTHORITY_PLANE_PRINCIPALS_JSON=$(node "$ROOT/tests/scripts/isolated-plane-principals.mjs" merge \
+  "$ROOT/../Control Plane/config/plane-service-principals.json" quarry-edge REAL_AUTHORITY_QUARRY_EDGE_CREDENTIAL)
+export REAL_AUTHORITY_PLANE_PRINCIPALS_JSON
 export REAL_AUTHORITY_USER_CREDENTIALS_JSON=$(printf '%s' \
   '[{"principal":"verevon-gateway","audience":"user-core","token":"'"$REAL_AUTHORITY_GATEWAY_TOKEN"'","scopes":["users:read:self","users:write:self"]},{"principal":"retrieval-engine","audience":"user-core","token":"'"$REAL_AUTHORITY_RETRIEVAL_TOKEN"'","scopes":["authz:read"]}]')
 

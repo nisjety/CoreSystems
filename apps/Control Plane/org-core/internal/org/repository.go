@@ -18,7 +18,7 @@ type orgScanner interface {
 	Scan(dest ...any) error
 }
 
-// scanOrg scans the 14 standard org columns into an Organization.
+// scanOrg scans the standard org columns, the website last, into an Organization.
 // Column order must match all SELECT statements in this file.
 func scanOrg(row orgScanner) (Organization, error) {
 	var org Organization
@@ -39,6 +39,8 @@ func scanOrg(row orgScanner) (Organization, error) {
 		&org.OrgNumber,
 		&org.VerificationStatus,
 		&brregRaw,
+		&org.WebsiteURL,
+		&org.WebsiteUpdatedAt,
 	)
 	if err != nil {
 		return Organization{}, err
@@ -125,7 +127,7 @@ func (r *Repository) Ping(ctx context.Context) error {
 func (r *Repository) GetOrganization(ctx context.Context, id string) (*Organization, error) {
 	const q = `
 SELECT id, name, COALESCE(slug, ''), plan, status, COALESCE(primary_domain, ''), COALESCE(region, 'eu'), COALESCE(default_locale, 'nb-NO'), metadata, created_at, updated_at,
-       org_number, COALESCE(verification_status, 'unverified'), brreg_data
+       org_number, COALESCE(verification_status, 'unverified'), brreg_data, website_url, website_updated_at
 FROM organizations
 WHERE id = $1 AND deleted_at IS NULL`
 
@@ -145,6 +147,20 @@ WHERE id = $1 AND deleted_at IS NULL`
 		return nil, fmt.Errorf("query org: %w", err)
 	}
 	return out, nil
+}
+
+// SetWebsite records the organisation's website and when it was recorded.
+func (r *Repository) SetWebsite(ctx context.Context, orgID, website string) error {
+	return r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE organizations SET website_url = $2, website_updated_at = NOW(), updated_at = NOW() WHERE id = $1 AND deleted_at IS NULL`, orgID, website)
+		if err != nil {
+			return fmt.Errorf("update website: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
 }
 
 func (r *Repository) UpsertOrganization(ctx context.Context, org Organization) error {
@@ -429,6 +445,54 @@ func (r *Repository) SetSupportAIMode(ctx context.Context, orgID, mode, changedB
 		}
 		return nil
 	})
+}
+
+// SetAgentLearningPolicy stores the organization's memory and learning-review
+// policy under metadata.agentLearning. A nil field keeps the stored value (or
+// the default when none is stored), so the admin can change one row at a time;
+// the revision rises on every write so a reader can tell two policies apart.
+// The values are validated by the service.
+func (r *Repository) SetAgentLearningPolicy(ctx context.Context, orgID string, memory, learningReview *string, changedBy string) error {
+	const q = `
+UPDATE organizations
+SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{agentLearning}', jsonb_build_object(
+        'memory', COALESCE($2::text, metadata -> 'agentLearning' ->> 'memory', 'allow'),
+        'learningReview', COALESCE($3::text, metadata -> 'agentLearning' ->> 'learningReview', 'disabled'),
+        'revision', COALESCE(CASE WHEN jsonb_typeof(metadata -> 'agentLearning' -> 'revision') = 'number'
+                                  THEN (metadata -> 'agentLearning' ->> 'revision')::numeric::bigint END, 0) + 1,
+        'updatedAt', $4::text,
+        'updatedBy', $5::text), true),
+    updated_at = NOW()
+WHERE id = $1 AND deleted_at IS NULL`
+	return r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, q, orgID, memory, learningReview, time.Now().UTC().Format(time.RFC3339), changedBy)
+		if err != nil {
+			return fmt.Errorf("update agent learning policy: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
+}
+
+// GetAgentLearningPolicy reads metadata.agentLearning straight from the table
+// and returns it normalised: an absent policy is the defaults, a malformed one
+// is the strictest reading (see normalizeAgentLearningPolicy). Soft-deleted
+// organizations read as not found. RLS-scoped like GetOrganization.
+func (r *Repository) GetAgentLearningPolicy(ctx context.Context, id string) (AgentLearningPolicy, error) {
+	const q = `SELECT metadata -> 'agentLearning' FROM organizations WHERE id = $1 AND deleted_at IS NULL`
+	var raw []byte
+	err := r.db.WithOrgScope(ctx, id, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, q, id).Scan(&raw)
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return AgentLearningPolicy{}, ErrNotFound
+		}
+		return AgentLearningPolicy{}, fmt.Errorf("query agent learning policy: %w", err)
+	}
+	return normalizeAgentLearningPolicy(raw), nil
 }
 
 func (r *Repository) ClaimPlanChangeOutbox(ctx context.Context, limit int) ([]PlanChangeOutboxRow, error) {
@@ -949,7 +1013,7 @@ func (r *Repository) ListOrganizations(ctx context.Context, limit, offset int) (
 	}
 	const q = `
 SELECT id, name, COALESCE(slug, ''), plan, status, COALESCE(primary_domain, ''), COALESCE(region, 'eu'), COALESCE(default_locale, 'nb-NO'), metadata, created_at, updated_at,
-       org_number, COALESCE(verification_status, 'unverified'), brreg_data
+       org_number, COALESCE(verification_status, 'unverified'), brreg_data, website_url, website_updated_at
 FROM organizations
 WHERE deleted_at IS NULL
 ORDER BY created_at DESC
@@ -979,7 +1043,7 @@ LIMIT $1 OFFSET $2`
 func (r *Repository) ListUserOrganizations(ctx context.Context, userID string) ([]Organization, error) {
 	const q = `
 SELECT o.id, o.name, COALESCE(o.slug, ''), o.plan, o.status, COALESCE(o.primary_domain, ''), COALESCE(o.region, 'eu'), COALESCE(o.default_locale, 'nb-NO'), o.metadata, o.created_at, o.updated_at,
-       o.org_number, COALESCE(o.verification_status, 'unverified'), o.brreg_data
+       o.org_number, COALESCE(o.verification_status, 'unverified'), o.brreg_data, o.website_url, o.website_updated_at
 FROM organizations o
 INNER JOIN organization_members om ON o.id = om.org_id
 WHERE om.user_id = $1
@@ -1051,7 +1115,7 @@ DO UPDATE SET role = EXCLUDED.role, invited_email = EXCLUDED.invited_email, upda
 func (r *Repository) GetOrganizationByTenant(ctx context.Context, provider, tenantID string) (*Organization, error) {
 	const q = `
 SELECT o.id, o.name, COALESCE(o.slug, ''), o.plan, o.status, COALESCE(o.primary_domain, ''), COALESCE(o.region, 'eu'), COALESCE(o.default_locale, 'nb-NO'), o.metadata, o.created_at, o.updated_at,
-       o.org_number, COALESCE(o.verification_status, 'unverified'), o.brreg_data
+       o.org_number, COALESCE(o.verification_status, 'unverified'), o.brreg_data, o.website_url, o.website_updated_at
 FROM organizations o
 INNER JOIN org_tenant_links otl ON otl.org_id = o.id
 WHERE otl.provider = $1

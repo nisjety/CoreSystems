@@ -1,0 +1,113 @@
+{
+ "count": 10,
+ "findings": [
+  {
+   "macro": "warn!",
+   "path": "apps/Model Plane/rust/services/execution-core/src/provenance.rs",
+   "reasons": [
+    "name:text"
+   ],
+   "review": "logs the tool name and the byte length of the payload, not the payload",
+   "sha256": "32d62b9df5de09c2e8a329d2be316593ca6676d33731bd59d3b22318e629186a",
+   "text": "warn ! ( tool = tool_name , bytes = text . len ( ) , limit = SCREENING_MAX_BYTES , \"tool payload exceeds the screening size bound; degrading to read-only rather than scanning a partial payload\" )"
+  },
+  {
+   "macro": "info!",
+   "path": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+   "reasons": [
+    "name:answer"
+   ],
+   "review": "logs the stored character count and a truncation boolean, not the delegated answer",
+   "sha256": "5dad60065b072e936577d9ad9a2dd0f4563262e676c8b59db22ede150376fd9f",
+   "text": "info ! ( child_run_id , stored_chars = stored , truncated = usize :: try_from ( stored ) . unwrap_or ( usize :: MAX ) < answer . chars ( ) . count ( ) , \"run_agent: delegated answer recorded on the child run\" )"
+  },
+  {
+   "macro": "warn!",
+   "path": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+   "reasons": [
+    "name:content"
+   ],
+   "review": "logs counts and a has-text boolean of the concluding round, not its content",
+   "sha256": "c554595727e67f20662a9783ee938951ad3d744e2d84bd657e3b2a5e7ccb6f4d",
+   "text": "warn ! ( run_id = % req . run_id , depth = ctx . depth , tool_calls = response . tool_calls . len ( ) , has_text = ! response . content . trim ( ) . is_empty ( ) , \"run_agent: a concluding round proposed tool calls although none were offered; \\\n                 they are not dispatched\" )"
+  },
+  {
+   "macro": "warn!",
+   "path": "apps/Model Plane/rust/services/model-gateway/src/moderation.rs",
+   "reasons": [
+    "name:text"
+   ],
+   "review": "logs the byte length of the screened payload and the bound, never the payload",
+   "sha256": "a2544bdb2cf4abe00a6b149083e6f770e033acda0c5174fd4f4afb96c7d2411d",
+   "text": "warn ! ( bytes = text . len ( ) , limit = SCREENING_MAX_BYTES , \"tool payload exceeds the screening size bound; degrading to read-only rather than scanning a partial payload\" )"
+  },
+  {
+   "macro": "debug!",
+   "path": "apps/Model Plane/rust/services/model-gateway/src/quarry.rs",
+   "reasons": [
+    "name:text"
+   ],
+   "review": "logs the URL and a character count of the rendered text, not the text",
+   "sha256": "8458bdd7e8340b17e3f069447d69aa930358f69f50b702f6fa9f97a750daf0f1",
+   "text": "debug ! ( % url , chars = rendered . text . chars ( ) . count ( ) , \"rendered retry recovered readable text\" )"
+  },
+  {
+   "macro": "info!",
+   "path": "apps/Model Plane/rust/services/model-gateway/src/result_validation.rs",
+   "reasons": [
+    "name:content"
+   ],
+   "review": "logs a word count of the candidate response and the range bounds, not the response",
+   "sha256": "5218ae6da911b4321e326c50571d34abcac1b561886343e3ffb8aa9979b7c1c6",
+   "text": "info ! ( request_id = % request . request_id , attempt , words = range . count ( & response . content ) , minimum = range . minimum , maximum = range . maximum , source_review_failed = ! source_failure . is_empty ( ) , \"answer candidate failed result validation\" )"
+  },
+  {
+   "macro": "debug!",
+   "path": "apps/Model Plane/rust/services/model-gateway/src/semantic_screening.rs",
+   "reasons": [
+    "name:text"
+   ],
+   "review": "logs the byte length of the shadow-screened payload and the bound, never the payload",
+   "sha256": "09a03459111c05741fa217ff1a845ff5f60de1c5199501c6687c47a6d9ae3ed3",
+   "text": "debug ! ( bytes = text . len ( ) , limit = crate :: moderation :: SCREENING_MAX_BYTES , \"semantic shadow pass: payload exceeds the shared screening size bound\" )"
+  },
+  {
+   "macro": "info!",
+   "path": "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+   "reasons": [
+    "name:content",
+    "name:text"
+   ],
+   "review": "logs character counts of the model and accepted sections, not their text",
+   "sha256": "2b38e3c1b01f20b47ded04d852f6caf5931690d98c4484b94aa4fab3d255f4e0",
+   "text": "info ! ( % request_id , model_chars = content . chars ( ) . count ( ) , accepted_chars = before . as_deref ( ) . map_or ( 0 , | text | text . chars ( ) . count ( ) ) , \"dated-post revision answered with its section alone; splicing it into the accepted document\" )"
+  },
+  {
+   "macro": "debug!",
+   "path": "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+   "reasons": [
+    "name:content"
+   ],
+   "review": "logs token counts and the character count of the completion, not the completion",
+   "sha256": "92f8727532f78c580b4eff57b9cb43bb15995a8e71ab8b19e01420f9d9aedd76",
+   "text": "debug ! ( % request_id , output_tokens = resp . output_tokens , output_chars = resp . content . chars ( ) . count ( ) , completion_signal = phase_finished , cache_read_input_tokens = resp . cache_read_input_tokens , cache_creation_input_tokens = resp . cache_creation_input_tokens , \"tool selection finished; starting streamed answer\" )"
+  },
+  {
+   "macro": "debug!",
+   "path": "apps/Model Plane/rust/services/session-core/src/dream_extractor.rs",
+   "reasons": [
+    "name:content"
+   ],
+   "review": "logs a character count and boolean probes of the extraction output, not the output",
+   "sha256": "6b2389e657f869d2b14240ecca01eb28354101f0c485c0cf7ae8929efdf4f6b7",
+   "text": "debug ! ( % thread_id , answer_chars = response . content . chars ( ) . count ( ) , looks_like_json = response . content . trim_start ( ) . starts_with ( [ '{' , '`' ] ) , mentions_memories = response . content . contains ( \"\\\"memories\\\"\" ) , \"dreaming extraction produced no storable memory\" )"
+  }
+ ],
+ "scope": [
+  "apps/Model Plane/rust/services/model-gateway/src",
+  "apps/Model Plane/rust/services/execution-core/src",
+  "apps/Model Plane/rust/services/inference-core/src",
+  "apps/Model Plane/rust/services/session-core/src"
+ ],
+ "version": 1
+}

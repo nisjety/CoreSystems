@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
+import { render } from '@/test/render'
+import { cleanup, screen, waitFor } from '@solidjs/testing-library'
+import { fireEvent } from '@/test/fire-event'
 import { createRouter, memoryHistory } from '@solidjs/router'
 import type { JSX } from '@solidjs/web'
 import { flush } from 'solid-js'
@@ -71,6 +73,21 @@ describe('StudioPage', () => {
     flush()
 
     expect(screen.getByDisplayValue('Text note 1')).toBeTruthy()
+  })
+
+  it('runs the Studio demo without session or persistence requests', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({}))
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderWithRouter(() => <StudioPage section="canvas" mode="demo" />)
+
+    await waitFor(() => {
+      expect(screen.getByText(/Lokal Studio-demo · ingen konto eller API/)).toBeTruthy()
+    })
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect((screen.getByRole('button', { name: 'Send til utkast' }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole('button', { name: 'Lagre' }) as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('saves the loaded Studio project before exporting it to a Social draft', async () => {

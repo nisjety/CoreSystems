@@ -1,0 +1,1290 @@
+{
+  "contract": "model-entitlement.matrix",
+  "version": 1,
+  "description": "The model entitlement matrix (ADR-0005, WS10): what org-core resolves for a caller, which models a policy permits, how a route is pruned, and when an unreadable answer refuses. Authored data, not generated: it is the specification each side's own real function is tested against. Rows with kind resolve, permit, route and shape are evaluated by org-core's modelentitlement package; rows evaluated by mp-contracts (permit, route, availability, refusal, shape) are evaluated by Model Plane's matcher once WS10-S3 lands. The copy under apps/Control Plane/org-core/internal/modelentitlement/testdata is vendored byte for byte, and org-core's test fails when the two differ. Change a row deliberately, in both places.",
+  "vocabulary": {
+    "kinds": [
+      "resolve",
+      "permit",
+      "route",
+      "availability",
+      "refusal",
+      "shape"
+    ],
+    "evaluators": [
+      "org-core",
+      "mp-contracts"
+    ],
+    "states": [
+      "none",
+      "org",
+      "role",
+      "member_not_found"
+    ],
+    "layers": [
+      "org_default",
+      "role_override"
+    ],
+    "reasons": [
+      "not_in_allow_list",
+      "explicitly_denied",
+      "no_entitled_route",
+      "member_not_found",
+      "deployment_allowlist"
+    ],
+    "required_rows": [
+      "r_refusal_is_content_free",
+      "z_policy_has_no_content",
+      "z_policy_survives_zdr_toggle",
+      "z_zdr_token_pinned_denied",
+      "z_zdr_org_policy_strips_all_attested",
+      "z_entitlement_unavailable_under_zdr_refuses"
+    ]
+  },
+  "rows": [
+    {
+      "id": "r_no_policy_is_none",
+      "kind": "resolve",
+      "evaluated_by": [
+        "org-core"
+      ],
+      "note": "An organisation that never wrote a policy is explicitly unrestricted.",
+      "input": {
+        "set": {
+          "revision": 0
+        },
+        "caller": {
+          "user_id": "u-member",
+          "role": "member"
+        }
+      },
+      "expect": {
+        "state": "none",
+        "revision": 0,
+        "role": "member",
+        "can_manage": false,
+        "policy": null,
+        "sources": []
+      }
+    },
+    {
+      "id": "r_org_default_applies_to_a_member",
+      "kind": "resolve",
+      "evaluated_by": [
+        "org-core"
+      ],
+      "note": "A member with no override gets the organisation default.",
+      "input": {
+        "set": {
+          "revision": 7,
+          "org_default": {
+            "allow_mode": "listed",
+            "allow": [
+              "gpt-5-mini",
+              "provider:anthropic"
+            ],
+            "deny": [
+              "claude-opus-4-8"
+            ],
+            "max_effort": "high",
+            "defaults": {
+              "chat": {
+                "model": "gpt-5-mini",
+                "effort": "medium"
+              }
+            }
+          },
+          "roles": {
+            "admin": {
+              "allow_mode": "all",
+              "allow": [],
+              "deny": [
+                "gpt-5"
+              ]
+            },
+            "viewer": {
+              "allow_mode": "listed",
+              "allow": [
+                "gpt-5-mini"
+              ],
+              "deny": [],
+              "max_effort": "low"
+            }
+          }
+        },
+        "caller": {
+          "user_id": "u-member",
+          "role": "member"
+        }
+      },
+      "expect": {
+        "state": "org",
+        "revision": 7,
+        "role": "member",
+        "can_manage": false,
+        "policy": {
+          "allow_mode": "listed",
+          "allow": [
+            "gpt-5-mini",
+            "provider:anthropic"
+          ],
+          "deny": [
+            "claude-opus-4-8"
+          ],
+          "max_effort": "high",
+          "defaults": {
+            "chat": {
+              "model": "gpt-5-mini",
+              "effort": "medium"
+            }
+          }
+        },
+        "sources": [
+          {
+            "layer": "org_default"
+          }
+        ]
+      }
+    },
+    {
+      "id": "r_role_override_replaces_org_default",
+      "kind": "resolve",
+      "evaluated_by": [
+        "org-core"
+      ],
+      "note": "The override is a complete policy: nothing of the organisation default (its deny list, its ceiling, its defaults) carries over.",
+      "input": {
+        "set": {
+          "revision": 7,
+          "org_default": {
+            "allow_mode": "listed",
+            "allow": [
+              "gpt-5-mini",
+              "provider:anthropic"
+            ],
+            "deny": [
+              "claude-opus-4-8"
+            ],
+            "max_effort": "high",
+            "defaults": {
+              "chat": {
+                "model": "gpt-5-mini",
+                "effort": "medium"
+              }
+            }
+          },
+          "roles": {
+            "admin": {
+              "allow_mode": "all",
+              "allow": [],
+              "deny": [
+                "gpt-5"
+              ]
+            },
+            "viewer": {
+              "allow_mode": "listed",
+              "allow": [
+                "gpt-5-mini"
+              ],
+              "deny": [],
+              "max_effort": "low"
+            }
+          }
+        },
+        "caller": {
+          "user_id": "u-viewer",
+          "role": "viewer"
+        }
+      },
+      "expect": {
+        "state": "role",
+        "revision": 7,
+        "role": "viewer",
+        "can_manage": false,
+        "policy": {
+          "allow_mode": "listed",
+          "allow": [
+            "gpt-5-mini"
+          ],
+          "deny": [],
+          "max_effort": "low"
+        },
+        "sources": [
+          {
+            "layer": "role_override",
+            "role": "viewer"
+          }
+        ]
+      }
+    },
+    {
+      "id": "r_admin_override_can_manage",
+      "kind": "resolve",
+      "evaluated_by": [
+        "org-core"
+      ],
+      "note": "An admin holds an override and can manage the policy.",
+      "input": {
+        "set": {
+          "revision": 7,
+          "org_default": {
+            "allow_mode": "listed",
+            "allow": [
+              "gpt-5-mini",
+              "provider:anthropic"
+            ],
+            "deny": [
+              "claude-opus-4-8"
+            ],
+            "max_effort": "high",
+            "defaults": {
+              "chat": {
+                "model": "gpt-5-mini",
+                "effort": "medium"
+              }
+            }
+          },
+          "roles": {
+            "admin": {
+              "allow_mode": "all",
+              "allow": [],
+              "deny": [
+                "gpt-5"
+              ]
+            },
+            "viewer": {
+              "allow_mode": "listed",
+              "allow": [
+                "gpt-5-mini"
+              ],
+              "deny": [],
+              "max_effort": "low"
+            }
+          }
+        },
+        "caller": {
+          "user_id": "u-admin",
+          "role": "admin"
+        }
+      },
+      "expect": {
+        "state": "role",
+        "revision": 7,
+        "role": "admin",
+        "can_manage": true,
+        "policy": {
+          "allow_mode": "all",
+          "allow": [],
+          "deny": [
+            "gpt-5"
+          ]
+        },
+        "sources": [
+          {
+            "layer": "role_override",
+            "role": "admin"
+          }
+        ]
+      }
+    },
+    {
+      "id": "r_owner_can_manage",
+      "kind": "resolve",
+      "evaluated_by": [
+        "org-core"
+      ],
+      "note": "An owner with no override gets the default and can manage.",
+      "input": {
+        "set": {
+          "revision": 7,
+          "org_default": {
+            "allow_mode": "listed",
+            "allow": [
+              "gpt-5-mini",
+              "provider:anthropic"
+            ],
+            "deny": [
+              "claude-opus-4-8"
+            ],
+            "max_effort": "high",
+            "defaults": {
+              "chat": {
+                "model": "gpt-5-mini",
+                "effort": "medium"
+              }
+            }
+          },
+          "roles": {
+            "admin": {
+              "allow_mode": "all",
+              "allow": [],
+              "deny": [
+                "gpt-5"
+              ]
+            },
+            "viewer": {
+              "allow_mode": "listed",
+              "allow": [
+                "gpt-5-mini"
+              ],
+              "deny": [],
+              "max_effort": "low"
+            }
+          }
+        },
+        "caller": {
+          "user_id": "u-owner",
+          "role": "owner"
+        }
+      },
+      "expect": {
+        "state": "org",
+        "revision": 7,
+        "role": "owner",
+        "can_manage": true,
+        "policy": {
+          "allow_mode": "listed",
+          "allow": [
+            "gpt-5-mini",
+            "provider:anthropic"
+          ],
+          "deny": [
+            "claude-opus-4-8"
+          ],
+          "max_effort": "high",
+          "defaults": {
+            "chat": {
+              "model": "gpt-5-mini",
+              "effort": "medium"
+            }
+          }
+        },
+        "sources": [
+          {
+            "layer": "org_default"
+          }
+        ]
+      }
+    },
+    {
+      "id": "r_role_names_fold_case",
+      "kind": "resolve",
+      "evaluated_by": [
+        "org-core"
+      ],
+      "note": "A member role is compared lower-cased and trimmed.",
+      "input": {
+        "set": {
+          "revision": 7,
+          "org_default": {
+            "allow_mode": "listed",
+            "allow": [
+              "gpt-5-mini",
+              "provider:anthropic"
+            ],
+            "deny": [
+              "claude-opus-4-8"
+            ],
+            "max_effort": "high",
+            "defaults": {
+              "chat": {
+                "model": "gpt-5-mini",
+                "effort": "medium"
+              }
+            }
+          },
+          "roles": {
+            "admin": {
+              "allow_mode": "all",
+              "allow": [],
+              "deny": [
+                "gpt-5"
+              ]
+            },
+            "viewer": {
+              "allow_mode": "listed",
+              "allow": [
+                "gpt-5-mini"
+              ],
+              "deny": [],
+              "max_effort": "low"
+            }
+          }
+        },
+        "caller": {
+          "user_id": "u-admin",
+          "role": " Admin "
+        }
+      },
+      "expect": {
+        "state": "role",
+        "revision": 7,
+        "role": "admin",
+        "can_manage": true,
+        "policy": {
+          "allow_mode": "all",
+          "allow": [],
+          "deny": [
+            "gpt-5"
+          ]
+        },
+        "sources": [
+          {
+            "layer": "role_override",
+            "role": "admin"
+          }
+        ]
+      }
+    },
+    {
+      "id": "r_roles_only_policy_leaves_other_roles_unrestricted",
+      "kind": "resolve",
+      "evaluated_by": [
+        "org-core"
+      ],
+      "note": "An override for one role does not restrict the others when there is no organisation default.",
+      "input": {
+        "set": {
+          "revision": 2,
+          "roles": {
+            "viewer": {
+              "allow_mode": "listed",
+              "allow": [
+                "gpt-5-mini"
+              ],
+              "deny": [],
+              "max_effort": "low"
+            }
+          }
+        },
+        "caller": {
+          "user_id": "u-member",
+          "role": "member"
+        }
+      },
+      "expect": {
+        "state": "none",
+        "revision": 2,
+        "role": "member",
+        "can_manage": false,
+        "policy": null,
+        "sources": []
+      }
+    },
+    {
+      "id": "r_non_member_gets_nothing",
+      "kind": "resolve",
+      "evaluated_by": [
+        "org-core"
+      ],
+      "note": "A named user who is not an active member of an organisation with a policy is allow-listed to nothing.",
+      "input": {
+        "set": {
+          "revision": 7,
+          "org_default": {
+            "allow_mode": "listed",
+            "allow": [
+              "gpt-5-mini",
+              "provider:anthropic"
+            ],
+            "deny": [
+              "claude-opus-4-8"
+            ],
+            "max_effort": "high",
+            "defaults": {
+              "chat": {
+                "model": "gpt-5-mini",
+                "effort": "medium"
+              }
+            }
+          },
+          "roles": {
+            "admin": {
+              "allow_mode": "all",
+              "allow": [],
+              "deny": [
+                "gpt-5"
+              ]
+            },
+            "viewer": {
+              "allow_mode": "listed",
+              "allow": [
+                "gpt-5-mini"
+              ],
+              "deny": [],
+              "max_effort": "low"
+            }
+          }
+        },
+        "caller": {
+          "user_id": "u-stranger",
+          "role": ""
+        }
+      },
+      "expect": {
+        "state": "member_not_found",
+        "revision": 7,
+        "role": "",
+        "can_manage": false,
+        "policy": {
+          "allow_mode": "listed",
+          "allow": [],
+          "deny": []
+        },
+        "sources": []
+      }
+    },
+    {
+      "id": "r_non_member_without_any_policy_is_unrestricted",
+      "kind": "resolve",
+      "evaluated_by": [
+        "org-core"
+      ],
+      "note": "No policy was ever written, so a lagging membership projection cannot lock anyone out.",
+      "input": {
+        "set": {
+          "revision": 0
+        },
+        "caller": {
+          "user_id": "u-stranger",
+          "role": ""
+        }
+      },
+      "expect": {
+        "state": "none",
+        "revision": 0,
+        "role": "",
+        "can_manage": false,
+        "policy": null,
+        "sources": []
+      }
+    },
+    {
+      "id": "r_service_call_gets_org_default_only",
+      "kind": "resolve",
+      "evaluated_by": [
+        "org-core"
+      ],
+      "note": "A call with no user id gets the organisation default; role overrides are about people.",
+      "input": {
+        "set": {
+          "revision": 7,
+          "org_default": {
+            "allow_mode": "listed",
+            "allow": [
+              "gpt-5-mini",
+              "provider:anthropic"
+            ],
+            "deny": [
+              "claude-opus-4-8"
+            ],
+            "max_effort": "high",
+            "defaults": {
+              "chat": {
+                "model": "gpt-5-mini",
+                "effort": "medium"
+              }
+            }
+          },
+          "roles": {
+            "admin": {
+              "allow_mode": "all",
+              "allow": [],
+              "deny": [
+                "gpt-5"
+              ]
+            },
+            "viewer": {
+              "allow_mode": "listed",
+              "allow": [
+                "gpt-5-mini"
+              ],
+              "deny": [],
+              "max_effort": "low"
+            }
+          }
+        },
+        "caller": {
+          "user_id": "",
+          "role": ""
+        }
+      },
+      "expect": {
+        "state": "org",
+        "revision": 7,
+        "role": "",
+        "can_manage": false,
+        "policy": {
+          "allow_mode": "listed",
+          "allow": [
+            "gpt-5-mini",
+            "provider:anthropic"
+          ],
+          "deny": [
+            "claude-opus-4-8"
+          ],
+          "max_effort": "high",
+          "defaults": {
+            "chat": {
+              "model": "gpt-5-mini",
+              "effort": "medium"
+            }
+          }
+        },
+        "sources": [
+          {
+            "layer": "org_default"
+          }
+        ]
+      }
+    },
+    {
+      "id": "r_service_call_without_org_default_is_none",
+      "kind": "resolve",
+      "evaluated_by": [
+        "org-core"
+      ],
+      "note": "A call with no user id and no organisation default is unrestricted.",
+      "input": {
+        "set": {
+          "revision": 2,
+          "roles": {
+            "viewer": {
+              "allow_mode": "listed",
+              "allow": [
+                "gpt-5-mini"
+              ],
+              "deny": [],
+              "max_effort": "low"
+            }
+          }
+        },
+        "caller": {
+          "user_id": "",
+          "role": ""
+        }
+      },
+      "expect": {
+        "state": "none",
+        "revision": 2,
+        "role": "",
+        "can_manage": false,
+        "policy": null,
+        "sources": []
+      }
+    },
+    {
+      "id": "z_policy_survives_zdr_toggle",
+      "kind": "resolve",
+      "evaluated_by": [
+        "org-core",
+        "mp-contracts"
+      ],
+      "note": "The resolution has no ZDR input: the same set resolves to the same answer with the organisation's ZDR posture on or off.",
+      "input": {
+        "set": {
+          "revision": 7,
+          "org_default": {
+            "allow_mode": "listed",
+            "allow": [
+              "gpt-5-mini",
+              "provider:anthropic"
+            ],
+            "deny": [
+              "claude-opus-4-8"
+            ],
+            "max_effort": "high",
+            "defaults": {
+              "chat": {
+                "model": "gpt-5-mini",
+                "effort": "medium"
+              }
+            }
+          },
+          "roles": {
+            "admin": {
+              "allow_mode": "all",
+              "allow": [],
+              "deny": [
+                "gpt-5"
+              ]
+            },
+            "viewer": {
+              "allow_mode": "listed",
+              "allow": [
+                "gpt-5-mini"
+              ],
+              "deny": [],
+              "max_effort": "low"
+            }
+          }
+        },
+        "caller": {
+          "user_id": "u-member",
+          "role": "member"
+        },
+        "zdr": [
+          false,
+          true
+        ]
+      },
+      "expect": {
+        "state": "org",
+        "revision": 7,
+        "role": "member",
+        "can_manage": false,
+        "policy": {
+          "allow_mode": "listed",
+          "allow": [
+            "gpt-5-mini",
+            "provider:anthropic"
+          ],
+          "deny": [
+            "claude-opus-4-8"
+          ],
+          "max_effort": "high",
+          "defaults": {
+            "chat": {
+              "model": "gpt-5-mini",
+              "effort": "medium"
+            }
+          }
+        },
+        "sources": [
+          {
+            "layer": "org_default"
+          }
+        ]
+      }
+    },
+    {
+      "id": "p_deny_wins_over_allow",
+      "kind": "permit",
+      "evaluated_by": [
+        "org-core",
+        "mp-contracts"
+      ],
+      "note": "A model on both lists is denied.",
+      "input": {
+        "policy": {
+          "allow_mode": "listed",
+          "allow": [
+            "gpt-5"
+          ],
+          "deny": [
+            "gpt-5"
+          ]
+        },
+        "model": "gpt-5",
+        "provider": "openai"
+      },
+      "expect": {
+        "permitted": false,
+        "reason": "explicitly_denied"
+      }
+    },
+    {
+      "id": "p_listed_mode_denies_unlisted",
+      "kind": "permit",
+      "evaluated_by": [
+        "org-core",
+        "mp-contracts"
+      ],
+      "note": "In listed mode a model that is not on the allow list is refused.",
+      "input": {
+        "policy": {
+          "allow_mode": "listed",
+          "allow": [
+            "gpt-5-mini"
+          ],
+          "deny": []
+        },
+        "model": "gpt-5",
+        "provider": "openai"
+      },
+      "expect": {
+        "permitted": false,
+        "reason": "not_in_allow_list"
+      }
+    },
+    {
+      "id": "p_all_mode_permits_unlisted",
+      "kind": "permit",
+      "evaluated_by": [
+        "org-core",
+        "mp-contracts"
+      ],
+      "note": "In all mode everything the deny list does not name is permitted.",
+      "input": {
+        "policy": {
+          "allow_mode": "all",
+          "allow": [],
+          "deny": [
+            "gpt-5"
+          ]
+        },
+        "model": "gpt-5-mini",
+        "provider": "openai"
+      },
+      "expect": {
+        "permitted": true,
+        "reason": ""
+      }
+    },
+    {
+      "id": "p_match_is_exact_not_prefix",
+      "kind": "permit",
+      "evaluated_by": [
+        "org-core",
+        "mp-contracts"
+      ],
+      "note": "An entry is an exact id: gpt-5 does not admit gpt-5-mini.",
+      "input": {
+        "policy": {
+          "allow_mode": "listed",
+          "allow": [
+            "gpt-5"
+          ],
+          "deny": []
+        },
+        "model": "gpt-5-mini",
+        "provider": "openai"
+      },
+      "expect": {
+        "permitted": false,
+        "reason": "not_in_allow_list"
+      }
+    },
+    {
+      "id": "p_match_ignores_case",
+      "kind": "permit",
+      "evaluated_by": [
+        "org-core",
+        "mp-contracts"
+      ],
+      "note": "Model ids compare case-insensitively.",
+      "input": {
+        "policy": {
+          "allow_mode": "listed",
+          "allow": [
+            "gpt-5-mini"
+          ],
+          "deny": []
+        },
+        "model": "GPT-5-Mini",
+        "provider": "openai"
+      },
+      "expect": {
+        "permitted": true,
+        "reason": ""
+      }
+    },
+    {
+      "id": "p_provider_selector_allows",
+      "kind": "permit",
+      "evaluated_by": [
+        "org-core",
+        "mp-contracts"
+      ],
+      "note": "provider:<id> admits every model of that provider.",
+      "input": {
+        "policy": {
+          "allow_mode": "listed",
+          "allow": [
+            "provider:anthropic"
+          ],
+          "deny": []
+        },
+        "model": "claude-sonnet-4-5",
+        "provider": "anthropic"
+      },
+      "expect": {
+        "permitted": true,
+        "reason": ""
+      }
+    },
+    {
+      "id": "p_provider_selector_denies",
+      "kind": "permit",
+      "evaluated_by": [
+        "org-core",
+        "mp-contracts"
+      ],
+      "note": "provider:<id> in the deny list refuses every model of that provider, even in all mode.",
+      "input": {
+        "policy": {
+          "allow_mode": "all",
+          "allow": [],
+          "deny": [
+            "provider:openai"
+          ]
+        },
+        "model": "gpt-5-mini",
+        "provider": "openai"
+      },
+      "expect": {
+        "permitted": false,
+        "reason": "explicitly_denied"
+      }
+    },
+    {
+      "id": "p_provider_selector_needs_a_provider",
+      "kind": "permit",
+      "evaluated_by": [
+        "org-core",
+        "mp-contracts"
+      ],
+      "note": "With no provider known a selector matches nothing.",
+      "input": {
+        "policy": {
+          "allow_mode": "listed",
+          "allow": [
+            "provider:anthropic"
+          ],
+          "deny": []
+        },
+        "model": "claude-sonnet-4-5",
+        "provider": ""
+      },
+      "expect": {
+        "permitted": false,
+        "reason": "not_in_allow_list"
+      }
+    },
+    {
+      "id": "p_glob_entries_are_inert",
+      "kind": "permit",
+      "evaluated_by": [
+        "org-core",
+        "mp-contracts"
+      ],
+      "note": "A stored pattern is a literal id, never a wildcard.",
+      "input": {
+        "policy": {
+          "allow_mode": "listed",
+          "allow": [
+            "gpt-*"
+          ],
+          "deny": []
+        },
+        "model": "gpt-5",
+        "provider": "openai"
+      },
+      "expect": {
+        "permitted": false,
+        "reason": "not_in_allow_list"
+      }
+    },
+    {
+      "id": "route_skips_a_denied_cell_and_uses_an_allowed_one",
+      "kind": "route",
+      "evaluated_by": [
+        "org-core",
+        "mp-contracts"
+      ],
+      "note": "The chain moves past a denied rung to an allowed one.",
+      "input": {
+        "zdr": false,
+        "pinned": false,
+        "policy": {
+          "allow_mode": "listed",
+          "allow": [
+            "gpt-5-mini"
+          ],
+          "deny": []
+        },
+        "candidates": [
+          {
+            "model": "gpt-5",
+            "provider": "openai",
+            "attested": true
+          },
+          {
+            "model": "gpt-5-mini",
+            "provider": "openai",
+            "attested": true
+          }
+        ]
+      },
+      "expect": {
+        "entitled": [
+          "gpt-5-mini"
+        ],
+        "reason": ""
+      }
+    },
+    {
+      "id": "route_with_every_rung_denied_has_no_entitled_route",
+      "kind": "route",
+      "evaluated_by": [
+        "org-core",
+        "mp-contracts"
+      ],
+      "note": "When the policy denies every candidate the refusal is no_entitled_route.",
+      "input": {
+        "zdr": false,
+        "pinned": false,
+        "policy": {
+          "allow_mode": "listed",
+          "allow": [
+            "other-model"
+          ],
+          "deny": []
+        },
+        "candidates": [
+          {
+            "model": "gpt-5",
+            "provider": "openai",
+            "attested": true
+          },
+          {
+            "model": "gpt-5-mini",
+            "provider": "openai",
+            "attested": true
+          }
+        ]
+      },
+      "expect": {
+        "entitled": [],
+        "reason": "no_entitled_route"
+      }
+    },
+    {
+      "id": "z_zdr_token_pinned_denied",
+      "kind": "route",
+      "evaluated_by": [
+        "org-core",
+        "mp-contracts"
+      ],
+      "note": "A ZDR token that pins a model the policy denies is refused with the entitlement reason, named before any ZDR refusal.",
+      "input": {
+        "zdr": true,
+        "pinned": true,
+        "policy": {
+          "allow_mode": "all",
+          "allow": [],
+          "deny": [
+            "gpt-5"
+          ]
+        },
+        "candidates": [
+          {
+            "model": "gpt-5",
+            "provider": "openai",
+            "attested": true
+          }
+        ]
+      },
+      "expect": {
+        "entitled": [],
+        "reason": "explicitly_denied"
+      }
+    },
+    {
+      "id": "z_zdr_org_policy_strips_all_attested",
+      "kind": "route",
+      "evaluated_by": [
+        "org-core",
+        "mp-contracts"
+      ],
+      "note": "A policy that leaves no attested model for a ZDR token yields no_entitled_route: the unattested model it allows is never substituted.",
+      "input": {
+        "zdr": true,
+        "pinned": false,
+        "policy": {
+          "allow_mode": "listed",
+          "allow": [
+            "unattested-model"
+          ],
+          "deny": []
+        },
+        "candidates": [
+          {
+            "model": "attested-a",
+            "provider": "openai",
+            "attested": true
+          },
+          {
+            "model": "attested-b",
+            "provider": "anthropic",
+            "attested": true
+          },
+          {
+            "model": "unattested-model",
+            "provider": "other",
+            "attested": false
+          }
+        ]
+      },
+      "expect": {
+        "entitled": [],
+        "reason": "no_entitled_route"
+      }
+    },
+    {
+      "id": "z_entitlement_unavailable_under_zdr_refuses",
+      "kind": "availability",
+      "evaluated_by": [
+        "mp-contracts"
+      ],
+      "note": "Under enforce an answer that cannot be read and was never seen refuses, ZDR included. It never falls back to an unrestricted route.",
+      "input": {
+        "mode": "enforce",
+        "zdr": true,
+        "fetch": "failed",
+        "last_answer": null
+      },
+      "expect": {
+        "decision": "refuse",
+        "code": "model_entitlement_unavailable",
+        "http_status": 503,
+        "retryable": true
+      }
+    },
+    {
+      "id": "a_restrictive_answer_is_served_stale_for_900_seconds",
+      "kind": "availability",
+      "evaluated_by": [
+        "mp-contracts"
+      ],
+      "note": "A refresh that fails inside the bound serves the last answer; a restrictive one is held longer on purpose.",
+      "input": {
+        "mode": "enforce",
+        "zdr": false,
+        "fetch": "failed",
+        "last_answer": {
+          "restricted": true,
+          "age_seconds": 899
+        }
+      },
+      "expect": {
+        "decision": "use_last_answer"
+      }
+    },
+    {
+      "id": "a_restrictive_answer_past_900_seconds_refuses",
+      "kind": "availability",
+      "evaluated_by": [
+        "mp-contracts"
+      ],
+      "note": "Past the bound the restrictive answer is no longer served.",
+      "input": {
+        "mode": "enforce",
+        "zdr": false,
+        "fetch": "failed",
+        "last_answer": {
+          "restricted": true,
+          "age_seconds": 901
+        }
+      },
+      "expect": {
+        "decision": "refuse",
+        "code": "model_entitlement_unavailable",
+        "http_status": 503,
+        "retryable": true
+      }
+    },
+    {
+      "id": "a_unrestricted_answer_past_120_seconds_refuses",
+      "kind": "availability",
+      "evaluated_by": [
+        "mp-contracts"
+      ],
+      "note": "An unrestricted answer is held for a shorter bound, so a revocation is not hidden behind a long-lived open answer.",
+      "input": {
+        "mode": "enforce",
+        "zdr": false,
+        "fetch": "failed",
+        "last_answer": {
+          "restricted": false,
+          "age_seconds": 121
+        }
+      },
+      "expect": {
+        "decision": "refuse",
+        "code": "model_entitlement_unavailable",
+        "http_status": 503,
+        "retryable": true
+      }
+    },
+    {
+      "id": "r_refusal_is_content_free",
+      "kind": "refusal",
+      "evaluated_by": [
+        "mp-contracts"
+      ],
+      "note": "A refusal body names the model and the reason and carries no prompt, message or other content.",
+      "input": {
+        "model": "gpt-5",
+        "reason": "explicitly_denied"
+      },
+      "expect": {
+        "http_status": 403,
+        "code": "model_not_entitled",
+        "body_keys": [
+          "action",
+          "code",
+          "details",
+          "message",
+          "retryable"
+        ],
+        "details_keys": [
+          "model",
+          "reason"
+        ]
+      }
+    },
+    {
+      "id": "z_policy_has_no_content",
+      "kind": "shape",
+      "evaluated_by": [
+        "org-core",
+        "mp-contracts"
+      ],
+      "note": "A policy holds mode, model ids, an effort rung, a privacy tier and per-surface defaults, and nothing else.",
+      "input": {
+        "subject": "policy"
+      },
+      "expect": {
+        "keys": [
+          "allow",
+          "allow_mode",
+          "defaults",
+          "deny",
+          "max_effort",
+          "min_privacy_tier"
+        ],
+        "surface_default_keys": [
+          "effort",
+          "model"
+        ]
+      }
+    },
+    {
+      "id": "z_resolution_has_no_content",
+      "kind": "shape",
+      "evaluated_by": [
+        "org-core",
+        "mp-contracts"
+      ],
+      "note": "A resolution holds the state, the revision, the caller's role and the policy, and nothing else.",
+      "input": {
+        "subject": "resolution"
+      },
+      "expect": {
+        "keys": [
+          "can_manage",
+          "policy",
+          "revision",
+          "role",
+          "sources",
+          "state"
+        ],
+        "source_keys": [
+          "layer",
+          "role"
+        ]
+      }
+    }
+  ]
+}

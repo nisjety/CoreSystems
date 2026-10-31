@@ -1,0 +1,7 @@
+vsv2.local_bronze_record	t	t	f	5	6964
+vsv2.sync_page_metric	t	f	t	3	12502
+vsv2.sync_run	t	f	t	3	993
+vsv2.sync_checkpoint	t	f	t	3	98
+vsv2.local_bronze_snapshot	t	f	f	3	0
+vsv2.endpoint_capability	t	f	f	0	0
+vsv2.endpoint_flags	t	f	f	0	0

@@ -1,0 +1,42 @@
+{
+  "accepted": [
+    {
+      "ephemeral": false,
+      "restricts_egress": false,
+      "value": "disabled"
+    },
+    {
+      "ephemeral": false,
+      "restricts_egress": true,
+      "value": "reject"
+    },
+    {
+      "ephemeral": true,
+      "restricts_egress": true,
+      "value": "ephemeral"
+    }
+  ],
+  "contract": "retrieve-v1",
+  "default_when_absent": "disabled",
+  "field": "zdr_mode",
+  "refused_examples": [
+    "off",
+    "on",
+    "none",
+    "true",
+    "false",
+    "null",
+    "",
+    "zdr",
+    "Disabled",
+    "DISABLED",
+    "Reject",
+    "REJECT",
+    "Ephemeral",
+    "EPHEMERAL",
+    " disabled",
+    "disabled "
+  ],
+  "sovereign_required_when_absent": true,
+  "text_rerank_when_mode_mix_rerank_is_false": false
+}

@@ -1,0 +1,44 @@
+config {
+  type: "table",
+  schema: "visma_bronze",
+  name: "visma_project_budgets",
+  description: "Bronze: Project cost budget line items from Visma Global API.",
+  tags: ["bronze", "visma"]
+}
+
+SELECT
+  s.last_run_id AS `syncId`,
+  s.updated_at AS `syncedAt`,
+  s.first_seen_at AS `firstSyncedAt`,
+  s.updated_at AS `refreshedAt`,
+  CAST(NULL AS INT64) AS `seenInFullScopeRuns`,
+  CAST(NULL AS INT64) AS `consecutiveMissingFullRuns`,
+  s.deleted_at IS NOT NULL AS `isDeleted`,
+  s.deleted_at AS `deletedAt`,
+  s.tenant_id AS `tenantId`,
+  CAST(NULL AS STRING) AS `syncBatch`,
+  tenant.tenant_name AS `organizationName`,
+  ${bronze.str("accountGroupID")} AS `accountGroupID`,
+  ${bronze.float("actualAmount")} AS `actualAmount`,
+  ${bronze.float("actualQty")} AS `actualQty`,
+  ${bronze.float("committedAmount")} AS `committedAmount`,
+  ${bronze.float("committedInvoicedAmount")} AS `committedInvoicedAmount`,
+  ${bronze.float("committedInvoicedQty")} AS `committedInvoicedQty`,
+  ${bronze.float("committedOpenAmount")} AS `committedOpenAmount`,
+  ${bronze.float("committedOpenQty")} AS `committedOpenQty`,
+  ${bronze.float("committedQty")} AS `committedQty`,
+  ${bronze.float("committedReceivedQty")} AS `committedReceivedQty`,
+  ${bronze.str("description")} AS `description`,
+  ${bronze.str("inventoryNumber")} AS `inventoryNumber`,
+  ${bronze.str("metadata")} AS `metadata`,
+  ${bronze.float("originalBudgetAmount")} AS `originalBudgetAmount`,
+  ${bronze.float("originalBudgetQty")} AS `originalBudgetQty`,
+  ${bronze.str("projectID")} AS `projectID`,
+  ${bronze.str("projectTaskID")} AS `projectTaskID`,
+  ${bronze.float("rate")} AS `rate`,
+  ${bronze.float("revisedBudgetAmount")} AS `revisedBudgetAmount`,
+  ${bronze.float("revisedBudgetQty")} AS `revisedBudgetQty`,
+  ${bronze.str("type")} AS `type`,
+  ${bronze.str("uom")} AS `uom`
+FROM ${ref("dw_staging_visma", "project_budgets")} AS s
+LEFT JOIN ${ref("visma_tenants")} AS tenant ON tenant.tenant_id = s.tenant_id

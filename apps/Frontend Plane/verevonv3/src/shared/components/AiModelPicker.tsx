@@ -1,9 +1,11 @@
 import { createEffect, createMemo, createSignal, For, Show, untrack } from 'solid-js'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import {
+  getModelEntitlementMeta,
   groupChatModels,
   isExpensiveModel,
   listModels,
+  selectionIsStale,
   verevonModeById,
   VEREVON_MODES,
   type ModelInfo,
@@ -110,7 +112,30 @@ export function AiModelPicker(props: {
       ?? current.label
   })
 
+  // A selection the organisation's policy no longer offers would be refused on
+  // send, so it is replaced when the catalogue says so, and the person is told.
+  // The meta is read after the catalogue answers, which is what sets it.
+  const entitlementMeta = createMemo(() => {
+    models()
+    return getModelEntitlementMeta()
+  })
+  const [policyResetModel, setPolicyResetModel] = createSignal<string | null>(null)
+  createEffect(
+    () => ({ catalogue: models() ?? [], meta: entitlementMeta(), current: selected() }),
+    (state) => {
+      if (!selectionIsStale(state.current, state.catalogue, state.meta)) return
+      const label = selectedLabel()
+      const preferred = state.meta?.defaultModel
+        ? flatModels().find((model) => model.id === state.meta?.defaultModel)
+        : undefined
+      if (preferred) chooseCatalogModel(preferred)
+      else choose(DEFAULT_AI_MODEL_SELECTION)
+      setPolicyResetModel(label)
+    },
+  )
+
   function choose(selection: AiModelSelection): void {
+    setPolicyResetModel(null)
     const next = selection.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER
       ? { ...selection, subscriptionConnectionId: untrack(activeSubscription)?.id }
       : selection
@@ -144,6 +169,16 @@ export function AiModelPicker(props: {
         <span>{selectedLabel()}</span>
         <ChevronDown class={cn('dashboard-composer-model-button__chevron', open() && 'dashboard-composer-model-button__chevron--open')} aria-hidden="true" />
       </button>
+      <Show when={policyResetModel()}>
+        {(modelName) => (
+          <p class="verevon-ai-model-picker__notice" role="status">
+            {i18n.tr(
+              `Organisasjonen din tillater ikke lenger ${modelName()}. Modellen er byttet.`,
+              `Your organisation no longer allows ${modelName()}. The model was changed.`,
+            )}
+          </p>
+        )}
+      </Show>
       <Show when={open()}>
         <div class="dashboard-composer-model-menu verevon-popover verevon-ai-model-picker__menu">
           <div class="dashboard-composer-model-catalog" role="region" aria-label={i18n.tr('Tilgjengelige AI-modeller', 'Available AI models')} tabindex={0}>

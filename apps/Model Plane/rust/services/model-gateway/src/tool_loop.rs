@@ -15,9 +15,11 @@ use std::fmt::Write as _;
 use chrono::{Datelike, Utc};
 use mp_contracts::dataplane::retrieval_v2::RetrieveRequest;
 use mp_contracts::model_plane::v1::{
-    ChatMessage, FinalizeToolActionRequest, InferRequest, ReserveToolActionRequest,
-    SearchMemoryRequest, ToolCall, ToolDefinition,
+    ChatMessage, FinalizeToolActionRequest, InferRequest, PromptTierPlan,
+    ReserveToolActionRequest, SearchMemoryRequest, SkillBundleSummary, SkillMount, ToolCall,
+    ToolDefinition,
 };
+use mp_contracts::office_verification::{OfficeKind, OfficeVerification, VerificationLevel};
 use mp_events::publisher::EventPublisher;
 use serde_json::Value;
 
@@ -32,6 +34,10 @@ use crate::{
     sse_events::ChatEvent,
     state::AppState,
 };
+
+// Declared here, as sse.rs declares its own helpers, so this slice stays inside the files it owns.
+#[path = "connector_reads.rs"]
+pub mod connector_reads;
 
 /// Default max tool rounds before forcing a final, tool-free answer.
 ///
@@ -175,6 +181,14 @@ const TOOL_PHASE_OVERFLOW_NOTICE: &str =
      to call never ran. Answer with what you can actually support, state plainly which part you \
      could not verify, and suggest a new thread for anything that needs a lookup — do not \
      present an unverified answer as confirmed.";
+
+/// Told to the model when enforcement ended the tool phase at the run's spend ceiling (WS27-S6). It
+/// names the cause, so a half-finished lookup is not mistaken for a completed one.
+const RUN_CEILING_NOTICE: &str =
+    "NOTE: the tool phase ended early because this run reached its spend ceiling, not because the \
+     available information was sufficient. Tools you intended to call never ran. Answer with what \
+     you can actually support, state plainly which part you could not verify, and suggest asking \
+     again for anything that needs a lookup — do not present an unverified answer as confirmed.";
 
 /// Cap on a single tool result inlined into the loop's context.
 ///
@@ -342,6 +356,55 @@ fn artifact_id_of(outcome: &ToolOutcome) -> Option<String> {
         })
 }
 
+/// Envelope key of a knowledge-search result whose retrieval answered in a reduced form (Z-41b). Its value is
+/// `{code, wording_key}`, both written from the catalogue in `retrieval_metadata`.
+const RETRIEVAL_NOTICE_KEY: &str = "retrieval_notice";
+
+/// The `retrieval_notice` event a tool result carries, when its retrieval answered in a reduced form (Z-41b).
+///
+/// Only a knowledge-search result can carry one, and only one written by the restrictive-turn branch of that
+/// arm. The turn emits the event where it emits the result, through the same sink, so a resumed stream
+/// replays it like every other frame.
+pub(crate) fn retrieval_notice_events(outcome: &ToolOutcome) -> Vec<ChatEvent> {
+    if outcome.name != "knowledge_search" || outcome.error.is_some() {
+        return Vec::new();
+    }
+    let Some(notice) = serde_json::from_str::<Value>(&outcome.output)
+        .ok()
+        .and_then(|envelope| envelope.get(RETRIEVAL_NOTICE_KEY).cloned())
+        .and_then(|entry| entry.get("code").and_then(Value::as_str).map(str::to_owned))
+        .and_then(|code| crate::retrieval_metadata::notice_for_code(&code))
+    else {
+        return Vec::new();
+    };
+    vec![ChatEvent::RetrievalNotice { notice }]
+}
+
+/// What the model is told when a knowledge search fails (Z-41b): the status code and, for a refused
+/// restrictive retrieval, the turn's typed notice code. Never the Data Plane's own sentence: it is English
+/// written for an operator, and on a refused retrieval it words the turn's retention posture, which only a
+/// typed notice may state. A transient failure keeps the phrase `tool_retry` reads, so the retry the
+/// dispatcher makes on it is the one it always made.
+fn knowledge_search_failure(status: &tonic::Status, data_plane_mode: Option<&str>) -> String {
+    if crate::retrieval::dense_unavailable_refusal(status).is_some() {
+        // The turn's mode decides what it may be told, as for a reduced answer: a waived turn only that it was
+        // reduced, a persistent turn nothing at all, so it falls through to the plain failure below.
+        let notice = crate::retrieval_metadata::notice_for_code(
+            crate::retrieval_metadata::ZDR_DENSE_UNAVAILABLE,
+        )
+        .and_then(|notice| crate::retrieval_metadata::notice_for_mode(notice, data_plane_mode));
+        if let Some(notice) = notice {
+            return format!("knowledge_search refused: {}", notice.code);
+        }
+    }
+    let code = status.code();
+    if crate::tool_retry::is_transient_tool_failure(status.message()) {
+        format!("knowledge_search failed: {code:?} (temporarily unavailable)")
+    } else {
+        format!("knowledge_search failed: {code:?}")
+    }
+}
+
 /// Harvests `artifact`/`attachment` events from a tool outcome and returns a
 /// compact, model-facing replacement for its output.
 ///
@@ -437,6 +500,9 @@ fn authored_artifact_events(
 /// Keep the displayed result factual and concise while retaining the complete
 /// tool contract for the next model decision.
 fn public_tool_output(outcome: &ToolOutcome, source_checked: bool, norwegian: bool) -> String {
+    if outcome.error.is_none() && outcome.name == mp_contracts::provider_reads::READ_TOOL_NAME {
+        return connector_reads::public_summary(&outcome.output);
+    }
     if outcome.error.is_none() && source_checked {
         return if norwegian { "Utkastet er klart for gjennomgang i Resultat." }
             else { "The draft is ready for review in Result." }.to_owned();
@@ -562,12 +628,87 @@ fn code_interpreter_events(outcome: &ToolOutcome) -> (Vec<ChatEvent>, Option<Str
         "stderr": truncate_chars(stderr, MAX_TOOL_OUTPUT_CHARS),
         "exit_code": exit_code,
         "files_delivered": listed,
-    })
-    .to_string();
-    summary.push_str(
+    });
+    let repair = add_office_checks(&payload, &mut summary);
+    let mut text = summary.to_string();
+    text.push_str(
         "\nThese files were delivered to the user as downloadable artifacts, which already appear as download cards below your message — the user can click them right now. Confirm what you produced in plain text (e.g. \"Fil lagret: name.xlsx (N bytes), tilgjengelig for nedlasting nedenfor.\"); NEVER write a markdown link, a bare URL, or a \"sandbox:/\" path for one of these files — no such link exists and it will not work.",
     );
-    (events, Some(summary))
+    if repair {
+        text.push_str(OFFICE_REPAIR_SENTENCE);
+    }
+    (events, Some(text))
+}
+
+/// Appended when a delivered file failed the structural check. The model must
+/// repair and re-run before calling the file ready, and must not overstate what
+/// the check proves.
+const OFFICE_REPAIR_SENTENCE: &str = " One or more files failed the structural Office check, so they will probably not open correctly in Office. Regenerate each failed file with code_interpreter, fix the reported problem, and run it again before you tell the user it is ready. The check only reads the file's structure: never describe a checked file as verified in Office.";
+
+/// Adds the Office check results to the summary the model reads, as text: a
+/// verdict and its messages per file, and a count of files not checked. The
+/// report's bytes never reach the prompt. Returns true when a file failed. The
+/// key is absent when the verifier did not run, so the summary is unchanged by
+/// default.
+fn add_office_checks(payload: &Value, summary: &mut Value) -> bool {
+    let reports = payload
+        .get("verification")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let unchecked = payload
+        .get("verification_unchecked")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let mut lines = Vec::new();
+    let mut failed = false;
+    for element in &reports {
+        let name = element
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("output")
+            .to_owned();
+        let Some(kind) = OfficeKind::from_file_name(&name) else {
+            continue;
+        };
+        let report = OfficeVerification::from_untrusted_json(&element.to_string(), &name, kind)
+            .unwrap_or_else(|_| {
+                OfficeVerification::skipped(&name, kind, "the verifier's report could not be read")
+            });
+        failed |= report.level == VerificationLevel::Failed;
+        lines.push(office_check_line(&report));
+    }
+    if unchecked > 0 {
+        lines.push(format!(
+            "{unchecked} Office file(s) were not structurally checked: too large to return, or past the check limit."
+        ));
+    }
+    if !lines.is_empty() {
+        summary["office_checks"] = serde_json::json!(lines);
+    }
+    failed
+}
+
+fn office_check_line(report: &OfficeVerification) -> String {
+    let verdict = match report.level {
+        VerificationLevel::Passed => {
+            "structure looks intact (advisory: this does not prove Office opens it)"
+        }
+        VerificationLevel::Warnings => "passed with warnings",
+        VerificationLevel::Failed => "FAILED the structural check",
+        VerificationLevel::Skipped => "not checked",
+    };
+    let findings: Vec<&str> = report
+        .checks
+        .iter()
+        .take(3)
+        .map(|check| check.message.as_str())
+        .collect();
+    if findings.is_empty() {
+        format!("{}: {verdict}", report.name)
+    } else {
+        format!("{}: {verdict} ({})", report.name, findings.join("; "))
+    }
 }
 
 fn inline_tool_action_id(run_id: &str, call_id: &str) -> String {
@@ -598,6 +739,22 @@ fn arg_bool(args_json: &str, key: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The `recall_memory` tool result. A search that left the user's own memory out
+/// (`skip_reason`, set when they paused or switched it off, or their org
+/// disabled it) must not read as an empty one: the model would tell the person
+/// nothing is remembered about them. Org-owned entries the search still returned
+/// ride along as `items`.
+fn recall_memory_output(items: Vec<serde_json::Value>, skip_reason: &str) -> String {
+    if skip_reason.is_empty() {
+        return serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_owned());
+    }
+    let mut output = serde_json::json!({ "memory": "unavailable", "reason": skip_reason });
+    if !items.is_empty() {
+        output["items"] = serde_json::Value::Array(items);
+    }
+    output.to_string()
+}
+
 /// Inline chat tools execute without the execution-core approval workflow, so
 /// only read-only, side-effect-free tools may pass this gate. MCP tools are
 /// deliberately denied here: their remote side effects are unverifiable and
@@ -607,13 +764,16 @@ fn arg_bool(args_json: &str, key: &str) -> bool {
 ///
 /// Routing this surface through `ExecuteStep` is intentionally not attempted
 /// here: the inline loop has no established execution-run/permission-mode
-/// continuation contract, and execution-core's capability policy rejects
-/// dynamic MCP names until capability-core provides a durable binding. A
+/// continuation contract, and a registered MCP tool is bound only through
+/// execution-core's per-run registry lookup (`TOOL_CLASS_GATE`), which this loop
+/// never reads: it classifies by this list alone, not by a declared class. A
 /// direct gateway proxy would therefore be an authority bypass; fail closed
-/// until those two contracts exist.
+/// until the inline loop has a continuation contract of its own.
 #[must_use]
 pub(crate) fn inline_tool_allowed(name: &str) -> bool {
-    !matches!(name, "save_memory" | "browser_agent")
+    // A provider write leaves through execution-core's approval path. The Ask loop reads a connected
+    // account and never writes one (WS23-S5).
+    !matches!(name, "save_memory" | "browser_agent" | "execute_provider_action")
         && !name.starts_with("mcp__")
         && name != "mcp_call"
         && name != "mcp_catalog"
@@ -2204,7 +2364,7 @@ fn knowledge_search_request(
     org_id: &str,
     query: &str,
     top_k: i32,
-    zdr: bool,
+    zdr_mode: Option<String>,
     sovereign_required: bool,
 ) -> RetrieveRequest {
     RetrieveRequest {
@@ -2214,7 +2374,7 @@ fn knowledge_search_request(
         // Data Plane derives the viewer from the verified bearer. Caller-supplied
         // identity in the message is deliberately absent.
         user_id: None,
-        zdr_mode: crate::retrieval::data_plane_zdr_mode(zdr),
+        zdr_mode,
         // Always populated. Data Plane v2 reads an absent `sovereign_required`
         // as `true` (fail-closed), which its Azure-hosted embedding provider
         // cannot satisfy, so leaving this off is what made every
@@ -2282,7 +2442,7 @@ fn builtin_argument_problem(
     None
 }
 
-fn with_authorization<T>(value: T, bearer: &str) -> tonic::Request<T> {
+pub(crate) fn with_authorization<T>(value: T, bearer: &str) -> tonic::Request<T> {
     let mut request = tonic::Request::new(value);
     if bearer.is_empty() {
         return request;
@@ -2331,6 +2491,67 @@ fn normalize_tool_query(query: &str) -> String {
         .join(" ")
 }
 
+/// The screening decision for one external tool result: the provenance the model is
+/// shown, and whether the payload is withheld from it.
+struct ExternalScreen {
+    provenance: crate::moderation::ToolProvenance,
+    withheld: bool,
+}
+
+/// Screen one external tool result. With `CONTENT_SAFETY_SEMANTIC_INLINE` on, a turn
+/// with a delegated inference bearer and a call budget goes through
+/// [`screen_external_inline`] (WS26-S6). Every other turn takes the framed path
+/// unchanged, so the switch off is byte-identical to before.
+#[allow(clippy::too_many_arguments)]
+async fn assess_external_payload(
+    state: &AppState,
+    tool_name: &str,
+    text: &str,
+    capability_bearer: Option<&str>,
+    inference_bearer: &str,
+    org_id: &str,
+    user_id: &str,
+    run_id: &str,
+    zdr: bool,
+    classifier_budget: Option<&crate::semantic_screening::ClassifierBudget>,
+) -> ExternalScreen {
+    match classifier_budget {
+        Some(budget)
+            if !inference_bearer.trim().is_empty()
+                && crate::semantic_screening::inline_enabled() =>
+        {
+            screen_external_inline(
+                state,
+                tool_name,
+                text,
+                capability_bearer,
+                inference_bearer,
+                org_id,
+                user_id,
+                run_id,
+                zdr,
+                budget,
+            )
+            .await
+        }
+        _ => ExternalScreen {
+            provenance: assess_external_payload_framed(
+                state,
+                tool_name,
+                text,
+                capability_bearer,
+                inference_bearer,
+                org_id,
+                user_id,
+                run_id,
+                zdr,
+            )
+            .await,
+            withheld: false,
+        },
+    }
+}
+
 /// [`crate::moderation::ToolProvenance::assess`] plus the out-of-band semantic
 /// shadow pass, for the three arms that ingest untrusted external page text:
 /// `web_search`, `fetch_url` and `browser_agent`.
@@ -2355,7 +2576,7 @@ fn normalize_tool_query(query: &str) -> String {
 /// stricter, because an absent capability bearer fails closed to screening
 /// always on.
 #[allow(clippy::too_many_arguments)]
-async fn assess_external_payload(
+async fn assess_external_payload_framed(
     state: &AppState,
     tool_name: &str,
     text: &str,
@@ -2400,6 +2621,119 @@ async fn assess_external_payload(
     )
     .await;
     provenance
+}
+
+/// The inline injection pass for one external result (WS26-S6). One capability-core
+/// read decides the mode. `frame` hands the payload to the same sampled shadow pass as
+/// before, on that read. `tighten` and `enforce` run the inline classifier under the
+/// loop's call budget, and `enforce` may withhold the payload from the model.
+#[allow(clippy::too_many_arguments)]
+async fn screen_external_inline(
+    state: &AppState,
+    tool_name: &str,
+    text: &str,
+    capability_bearer: Option<&str>,
+    inference_bearer: &str,
+    org_id: &str,
+    user_id: &str,
+    run_id: &str,
+    zdr: bool,
+    budget: &crate::semantic_screening::ClassifierBudget,
+) -> ExternalScreen {
+    let (deterministic, defense) = crate::moderation::screen_tool_payload_with_policy(
+        text,
+        &state.screening_semaphore,
+        &state.http_client,
+        &state.capability_core_base_url,
+        capability_bearer,
+    )
+    .await;
+    let trust = crate::moderation::TrustClass::classify(tool_name);
+    if defense.mode == crate::moderation::ScreeningMode::Frame {
+        let provenance = crate::moderation::ToolProvenance {
+            trust,
+            screening: deterministic,
+        };
+        // The shadow handle is dropped on purpose: the task detaches, and the turn
+        // never waits on it, as in `assess_external_payload_framed`.
+        let _shadow = crate::semantic_screening::spawn_semantic_shadow(
+            tool_name,
+            text,
+            &provenance,
+            state.screening_semaphore.clone(),
+            state.http_client.clone(),
+            state.capability_core_base_url.clone(),
+            capability_bearer.map(str::to_owned),
+            crate::semantic_screening::GrpcContentSafetyClassifier {
+                client: state.inference_client.clone(),
+                bearer: inference_bearer.to_owned(),
+                org_id: org_id.to_owned(),
+                request_id: run_id.to_owned(),
+            },
+            state.publisher.clone(),
+            org_id,
+            user_id,
+            run_id,
+            zdr,
+            crate::semantic_screening::semantic_sample_rate(),
+        );
+        return ExternalScreen {
+            provenance,
+            withheld: false,
+        };
+    }
+    let classifier = crate::semantic_screening::GrpcInjectionClassifier {
+        client: state.inference_client.clone(),
+        bearer: inference_bearer.to_owned(),
+        org_id: org_id.to_owned(),
+        request_id: format!("screen:{run_id}"),
+        model: crate::semantic_screening::injection_model().to_owned(),
+    };
+    let screen = crate::semantic_screening::enforce_screen(
+        text,
+        trust,
+        deterministic,
+        zdr,
+        defense.mode,
+        defense.fail_mode,
+        budget,
+        crate::semantic_screening::semantic_deadline(),
+        &state.screening_semaphore,
+        &classifier,
+    )
+    .await;
+    if let Some(envelope) =
+        crate::security_events::enforced_envelope_for(&screen, org_id, user_id, run_id, tool_name, zdr)
+    {
+        let publisher = state.publisher.clone();
+        let subject = mp_events::subjects::security_subject(org_id);
+        tokio::spawn(async move {
+            if let Err(error) = publisher.publish(&subject, &envelope).await {
+                tracing::warn!(%error, "semantic enforcement event not published");
+            }
+        });
+    }
+    ExternalScreen {
+        provenance: crate::moderation::ToolProvenance {
+            trust,
+            screening: screen.screening,
+        },
+        withheld: screen.withhold,
+    }
+}
+
+/// `mp_gateway_tool_screening_total`: one count per tool result the security audit sees, by trust
+/// class and screening posture. Counted where the audit decides rather than inside
+/// [`assess_external_payload`] alone, so an external result that no screening pass saw shows as
+/// `not-applicable` instead of being absent. Labels come from closed `label()` matches, so the
+/// series cannot grow with request data, and the counter carries no content.
+fn record_tool_screening(provenance: &crate::moderation::ToolProvenance) {
+    metrics::counter!(
+        "mp_gateway_tool_screening_total",
+        "trust" => provenance.trust.label(),
+        "posture" => provenance.screening.posture.label(),
+    )
+    .increment(1);
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -2454,13 +2788,320 @@ pub async fn dispatch_tool(
     // Space-scoped turn (see `auth::VerifiedSandboxBearer`). Read by exactly
     // one arm, `code_interpreter`, and only when `space_id` is set.
     sandbox_bearer: Option<&VerifiedSandboxBearer>,
+    // The turn's Data Plane retrieval mode (`TurnPosture::data_plane_mode`): `ephemeral` for a ZDR turn,
+    // `reject` for a waived one, none for a persistent one. Threaded rather than derived from `zdr`, which
+    // cannot say a turn is waived, so a waived caller would silently lose `reject` (Z-41b).
+    data_plane_mode: Option<String>,
 ) -> ToolOutcome {
     dispatch_tool_with_cost(
         state, run_id, org_id, user_id, thread_id, space_id, prompt_contents,
         conversation, data_plane_bearer, execution_bearer, inference_bearer,
         session_bearer, capability_bearer, zdr, sovereign_required,
         allow_paid_providers, call, ingestion_bearer, sandbox_bearer, None,
+        data_plane_mode, &crate::turn_attachments::ValidatedAttachments::none(), &[], None, None,
     ).await
+}
+
+/// Lowercase hex SHA-256 of `bytes`, the spelling a bundle manifest records.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    use std::fmt::Write as _;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .fold(String::new(), |mut hex, byte| {
+            write!(hex, "{byte:02x}").expect("writing to a String");
+            hex
+        })
+}
+
+/// `skill_file`: one bounded read of one file of a skill's bundle (WS19-S7).
+///
+/// Every refusal that needs no I/O comes first (the switch, the name, the path,
+/// the credential), so a bad call costs no capability-core read. The path is
+/// checked against the bundle's own manifest, so only a file the bundle holds can
+/// be read, and bytes whose digest differs from the manifest are refused.
+async fn skill_file_outcome(
+    state: &AppState,
+    enabled: bool,
+    org_id: &str,
+    user_id: &str,
+    capability_bearer: Option<&str>,
+    call: &ToolCall,
+) -> ToolOutcome {
+    use mp_contracts::model_plane::v1::{GetSkillBlobRequest, GetSkillBundleManifestRequest};
+    use mp_contracts::skill_bundle::{read_piece, validate_bundle_path, OffsetRefusal, Piece};
+
+    let answer = |output: String| ToolOutcome {
+        call_id: call.id.clone(),
+        name: call.name.clone(),
+        provenance: crate::moderation::ToolProvenance::unscreened(&call.name, &output),
+        output,
+        error: None,
+    };
+    if !enabled {
+        return err_outcome(call, "skill_file is not enabled on this deployment");
+    }
+    let name = arg_str(&call.arguments_json, "skill");
+    if name.trim().is_empty() {
+        return err_outcome(
+            call,
+            "skill_file requires the skill's 'name' as shown in its block",
+        );
+    }
+    let path = arg_str(&call.arguments_json, "path");
+    let listing = path.trim().is_empty();
+    if !listing {
+        if let Err(refusal) = validate_bundle_path(&path) {
+            return err_outcome(
+                call,
+                format!("skill_file refused this path: {}", refusal.detail()),
+            );
+        }
+    }
+    let Ok(offset) = usize::try_from(arg_i64(&call.arguments_json, "offset").unwrap_or(0)) else {
+        return err_outcome(call, "skill_file's offset must be zero or more");
+    };
+    let Some(bearer) = capability_bearer.filter(|bearer| !bearer.trim().is_empty()) else {
+        return err_outcome(call, "skill_file requires a verified capability credential");
+    };
+    let Some(skill) =
+        crate::skills::usable_skill_named(&state.skills, org_id, &state.ownership, user_id, &name)
+    else {
+        return answer(crate::skills::render_bundle_status(
+            "not_found",
+            &name,
+            "no skill by that name is available to this user; use a skill name exactly as its block shows it",
+        ));
+    };
+    let manifest = match state
+        .capability_client
+        .clone()
+        .get_skill_bundle_manifest(with_authorization(
+            GetSkillBundleManifestRequest {
+                skill_id: skill.id.clone(),
+            },
+            bearer,
+        ))
+        .await
+    {
+        Ok(response) => response.into_inner(),
+        Err(status) if status.code() == tonic::Code::NotFound => {
+            return answer(crate::skills::render_bundle_status(
+                "no_bundle",
+                &skill.name,
+                "this skill has no bundle; its instructions are all there is",
+            ));
+        }
+        Err(status) => {
+            tracing::warn!(code = ?status.code(), %org_id, "skill_file: bundle manifest read failed");
+            return err_outcome(
+                call,
+                "skill_file could not read this skill's bundle right now",
+            );
+        }
+    };
+    if listing {
+        return answer(crate::skills::render_bundle_listing(
+            &skill.name,
+            &manifest.files,
+        ));
+    }
+    let Some(file) = manifest.files.iter().find(|file| file.path == path) else {
+        return answer(crate::skills::render_bundle_status(
+            "not_found",
+            &skill.name,
+            "this bundle has no file at that path; call again without a path to list its files",
+        ));
+    };
+    if file.binary {
+        return answer(crate::skills::render_bundle_binary(&skill.name, file));
+    }
+    let bytes = match state
+        .capability_client
+        .clone()
+        .get_skill_blob(with_authorization(
+            GetSkillBlobRequest {
+                skill_id: skill.id.clone(),
+                sha256: file.sha256.clone(),
+            },
+            bearer,
+        ))
+        .await
+    {
+        Ok(response) => response.into_inner().content,
+        Err(status) => {
+            tracing::warn!(code = ?status.code(), %org_id, "skill_file: bundle blob read failed");
+            return err_outcome(call, "skill_file could not read this file right now");
+        }
+    };
+    if sha256_hex(&bytes) != file.sha256 {
+        return err_outcome(
+            call,
+            "skill_file refused this file: its stored bytes do not match the digest in the bundle manifest",
+        );
+    }
+    match read_piece(&bytes, offset) {
+        Ok(Piece::Text {
+            content,
+            next_offset,
+        }) => answer(crate::skills::render_bundle_text(
+            &skill.name,
+            &file.path,
+            offset,
+            &content,
+            next_offset,
+            bytes.len(),
+        )),
+        Ok(Piece::Binary) => answer(crate::skills::render_bundle_binary(&skill.name, file)),
+        Err(OffsetRefusal::PastEnd) => {
+            err_outcome(call, "skill_file's offset is past the end of this file")
+        }
+        Err(OffsetRefusal::NotCharBoundary) => err_outcome(
+            call,
+            "skill_file's offset falls inside a character; pass the next_offset from the previous read",
+        ),
+    }
+}
+
+/// The switch for the `/skills` mount of a turn's skill bundles (WS19-S8). Read here, in the
+/// gateway, and only the literal `true` enables it: a bundle is named in a request only while it
+/// is on, and execution-core honours the field only when it is present.
+const SKILL_BUNDLE_MOUNT_ENV: &str = "SKILL_BUNDLE_MOUNT_ENABLED";
+
+/// Most bundles one turn mounts. The gateway injects at most three skills a turn.
+const MAX_SKILL_MOUNTS: usize = 3;
+
+/// Mount names execution-core refuses, because the sandbox already gives them a meaning. Kept in
+/// step with `skill_mounts::RESERVED_NAMES` there, so a skill that would be refused takes no name.
+const RESERVED_MOUNT_NAMES: [&str; 2] = ["skills", "attachments"];
+
+/// Whether `raw` (the value of [`SKILL_BUNDLE_MOUNT_ENV`], if set) is the literal on-word.
+#[must_use]
+fn skill_bundle_mounts_enabled_from(raw: Option<&str>) -> bool {
+    raw == Some("true")
+}
+
+fn skill_bundle_mounts_enabled() -> bool {
+    skill_bundle_mounts_enabled_from(std::env::var(SKILL_BUNDLE_MOUNT_ENV).ok().as_deref())
+}
+
+/// The directory a skill's bundle is mounted under: its name, lowercased, with every run of other
+/// characters turned into one `-`, at most 48 bytes. `None` when nothing is left, or when the name
+/// is reserved, so a skill never takes a name that would refuse the whole call.
+#[must_use]
+fn mount_name_for(skill_name: &str) -> Option<String> {
+    let mut name = String::new();
+    for character in skill_name.trim().chars() {
+        if character.is_ascii_alphanumeric() {
+            name.push(character.to_ascii_lowercase());
+        } else if !name.is_empty() && !name.ends_with('-') {
+            name.push('-');
+        }
+    }
+    name.truncate(48);
+    while name.ends_with('-') {
+        name.pop();
+    }
+    if name.is_empty() || RESERVED_MOUNT_NAMES.contains(&name.as_str()) {
+        return None;
+    }
+    Some(name)
+}
+
+/// Whether `value` is a lowercase hex SHA-256, the spelling every digest in a bundle uses.
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// The mounts for the turn's skills that have a bundle, in injection order, at most
+/// [`MAX_SKILL_MOUNTS`]. Only the skills the turn matched can appear: `matched` is the turn's own
+/// record and `bundles` is capability-core's answer about those skills, so a bundle the turn did not
+/// match is never mounted, whatever the model asked for.
+#[must_use]
+fn skill_mounts_from_bundles(
+    matched: &[(String, String)],
+    bundles: &[SkillBundleSummary],
+) -> Vec<SkillMount> {
+    let mut mounts: Vec<SkillMount> = Vec::new();
+    for (skill_id, skill_name) in matched {
+        if mounts.len() == MAX_SKILL_MOUNTS {
+            break;
+        }
+        let Some(bundle) = bundles.iter().find(|bundle| &bundle.skill_id == skill_id) else {
+            continue;
+        };
+        let Some(name) = mount_name_for(skill_name) else {
+            continue;
+        };
+        if !is_sha256_hex(&bundle.manifest_sha256) || mounts.iter().any(|mount| mount.name == name) {
+            continue;
+        }
+        mounts.push(SkillMount {
+            skill_id: skill_id.clone(),
+            name,
+            manifest_sha256: bundle.manifest_sha256.clone(),
+        });
+    }
+    mounts
+}
+
+/// The `/skills` mounts a turn's `code_interpreter` calls carry (WS19-S8): the bundles of the skills
+/// the turn injected, read once for the turn from the record the gateway wrote before the loop
+/// started. Empty while the switch is off (no call is made), under zero retention, without a
+/// capability credential, or when no injected skill has a bundle.
+///
+/// Advisory like the rest of skill injection: a failed read costs the mounts, never the turn.
+async fn skill_mounts_for_turn(
+    state: &AppState,
+    request_id: &str,
+    org_id: &str,
+    user_id: &str,
+    capability_bearer: Option<&str>,
+    zdr: bool,
+) -> Vec<SkillMount> {
+    use mp_contracts::model_plane::v1::{GetSkillRequest, ListSkillBundlesRequest};
+
+    if zdr || !skill_bundle_mounts_enabled() {
+        return Vec::new();
+    }
+    let Some(bearer) = capability_bearer.filter(|bearer| !bearer.trim().is_empty()) else {
+        return Vec::new();
+    };
+    let Some(record) = crate::chat_turn_registry::global().lookup(request_id) else {
+        return Vec::new();
+    };
+    if record.org_id != org_id || record.user_id != user_id {
+        return Vec::new();
+    }
+    let mut matched: Vec<(String, String)> = Vec::new();
+    for skill_id in &record.skill_ids {
+        let request = GetSkillRequest {
+            request_id: String::new(),
+            org_id: org_id.to_owned(),
+            skill_id: skill_id.clone(),
+        };
+        let found = crate::skills::handle_get_skill(&state.skills, request, &state.ownership, user_id)
+            .ok()
+            .and_then(|response| response.skill);
+        if let Some(skill) = found {
+            matched.push((skill.id, skill.name));
+        }
+    }
+    if matched.is_empty() {
+        return Vec::new();
+    }
+    let skill_ids: Vec<String> = matched.iter().map(|(id, _)| id.clone()).collect();
+    let request = with_authorization(ListSkillBundlesRequest { skill_ids }, bearer);
+    match state.capability_client.clone().list_skill_bundles(request).await {
+        Ok(response) => skill_mounts_from_bundles(&matched, &response.into_inner().bundles),
+        Err(status) => {
+            tracing::warn!(code = ?status.code(), %org_id, "skill mounts: bundle listing failed");
+            Vec::new()
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -2485,6 +3126,16 @@ async fn dispatch_tool_with_cost(
     ingestion_bearer: Option<&VerifiedIngestionBearer>,
     sandbox_bearer: Option<&VerifiedSandboxBearer>,
     cost_bearer: Option<&str>,
+    data_plane_mode: Option<String>,
+    // The turn's validated attached files; read by `code_interpreter` only.
+    attachments: &crate::turn_attachments::ValidatedAttachments,
+    // The `/skills` mounts of the turn's matched skills; read by `code_interpreter` only (WS19-S8).
+    skill_mounts: &[SkillMount],
+    // The loop's call budget for the inline injection pass (WS26-S6). `None` where no
+    // inline pass can run: a direct dispatch, or a web call with no inference bearer.
+    classifier_budget: Option<&crate::semantic_screening::ClassifierBudget>,
+    // The turn's connected-account selection, when the connected-app read is offered (WS23-S5).
+    connector: Option<&connector_reads::ConnectorTurn>,
 ) -> ToolOutcome {
     if !inline_tool_allowed(&call.name) {
         return err_outcome(
@@ -2567,6 +3218,8 @@ async fn dispatch_tool_with_cost(
                 &language,
                 &code,
                 files_in.as_ref(),
+                attachments.run_attachments(),
+                skill_mounts,
             )
             .await
             {
@@ -2867,62 +3520,25 @@ async fn dispatch_tool_with_cost(
             // belongs to it.
             match state
                 .quarry
-                .search_with_options(&query, limit, &intent, org_id, zdr, &options)
+                .search_reply(&query, limit, &intent, org_id, zdr, &options)
                 .await
             {
-                Ok(results) => {
-                    let items: Vec<serde_json::Value> = results
+                Ok(reply) => {
+                    // Each hit carries the rerank report the edge sent for this search, so the
+                    // relevance gate can say in its coverage line what the reranker did. The keys
+                    // and the rule for omitting each one live with the projection, in
+                    // `crate::quarry::web_search_item`.
+                    let items: Vec<serde_json::Value> = reply
+                        .results
                         .iter()
-                        .map(|r| {
-                            let mut item = serde_json::json!({
-                                "url": r.url, "title": r.title, "snippet": r.snippet
-                            });
-                            // Quarry's semantic reranker scores only the leading
-                            // `top_n` hits, so ABSENT and ZERO mean different
-                            // things: unjudged vs judged-irrelevant. `score` has
-                            // already flattened `None` to 0.0 by this point (it
-                            // feeds a non-optional proto field), so emitting it
-                            // unconditionally would tell `relevance::assess`
-                            // that every unjudged hit scored zero — worse than
-                            // sending nothing, because the gate would trust it.
-                            // Omitting zero keeps the distinction: a real 0.0
-                            // simply falls through to the lexical + domain
-                            // signals, which is the correct treatment for a hit
-                            // the reranker never looked at.
-                            if r.score > 0.0 {
-                                item["score"] = serde_json::json!(r.score);
-                            }
-                            // The reranker's matched passages, and the position
-                            // the caller actually received the hit at. Both are
-                            // omitted when empty for the same reason as `score`:
-                            // an empty list and a `0` rank are "the provider said
-                            // nothing", not "nothing matched" and "ranked first".
-                            if !r.highlights.is_empty() {
-                                item["highlights"] = serde_json::json!(r.highlights);
-                            }
-                            if r.rank > 0 {
-                                item["rank"] = serde_json::json!(r.rank);
-                            }
-                            // Which of the edge's federated engines actually
-                            // returned this URL for this query. Omitted when
-                            // empty on the same principle as `score` above: an
-                            // absent list means the edge said nothing about
-                            // engines (it does not populate the field yet), not
-                            // that exactly one engine found the page — and
-                            // `relevance` scores an absent list as no signal
-                            // rather than as disagreement.
-                            if !r.engines.is_empty() {
-                                item["engines"] = serde_json::json!(r.engines);
-                            }
-                            item
-                        })
+                        .map(|r| crate::quarry::web_search_item(r, reply.rerank.as_ref()))
                         .collect();
                     let output = serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_owned());
                     // Untruncated: web_search returns short structured hits
                     // (url/title/snippet), never a page body, so there is no
                     // separate pre-truncation step to screen ahead of —
                     // `output` here already IS the complete payload.
-                    let provenance = assess_external_payload(
+                    let ExternalScreen { provenance, withheld } = assess_external_payload(
                         state,
                         &call.name,
                         &output,
@@ -2931,9 +3547,37 @@ async fn dispatch_tool_with_cost(
                         org_id,
                         user_id,
                         run_id,
-                        zdr,
+                        // A ZDR or waived turn carries a Data Plane retention mode and sends no derived
+                        // content-safety pass to a processor.
+                        zdr || data_plane_mode.is_some(),
+                        classifier_budget,
                     )
                     .await;
+                    if withheld {
+                        return ToolOutcome {
+                            call_id: call.id.clone(),
+                            name: call.name.clone(),
+                            output: crate::semantic_screening::withheld_output(&call.name, &provenance, None),
+                            provenance,
+                            error: None,
+                        };
+                    }
+                    // Over the inline bound, the hits are parked whole when extended parking is
+                    // on; the handle is the model's way to read the rest by `result_query`.
+                    let output = match park_extended_result(
+                        state,
+                        org_id,
+                        user_id,
+                        external_parking_allowed(zdr || data_plane_mode.is_some()),
+                        &call.name,
+                        crate::tool_result_handles::ResultKind::Json,
+                        &output,
+                        MAX_TOOL_OUTPUT_CHARS,
+                        &provenance,
+                    ) {
+                        Some(handle) => handle.to_model_json(),
+                        None => output,
+                    };
                     ToolOutcome {
                         call_id: call.id.clone(),
                         name: call.name.clone(),
@@ -3036,7 +3680,7 @@ async fn dispatch_tool_with_cost(
                     // `MAX_FETCH_CHARS` head is exactly the middle-of-payload
                     // gap this closes: an injection planted past the first
                     // 4,000 characters must still be seen.
-                    let provenance = assess_external_payload(
+                    let ExternalScreen { provenance, withheld } = assess_external_payload(
                         state,
                         &call.name,
                         &body,
@@ -3045,14 +3689,51 @@ async fn dispatch_tool_with_cost(
                         org_id,
                         user_id,
                         run_id,
-                        zdr,
+                        zdr || data_plane_mode.is_some(),
+                        classifier_budget,
                     )
                     .await;
-                    let out = serde_json::json!({
-                        "final_url": r.final_url,
-                        "title": r.title,
-                        "content": truncate_chars(&body, MAX_FETCH_CHARS),
-                    });
+                    if withheld {
+                        return ToolOutcome {
+                            call_id: call.id.clone(),
+                            name: call.name.clone(),
+                            output: crate::semantic_screening::withheld_output(
+                                &call.name,
+                                &provenance,
+                                Some(r.final_url.as_str()),
+                            ),
+                            provenance,
+                            error: None,
+                        };
+                    }
+                    // Under `RESULT_HANDLES_EXTENDED` the complete screened page is parked, so
+                    // the part past the cut is reachable by `result_query` range. The first
+                    // 4,000 characters stay inline either way.
+                    let head = truncate_chars(&body, MAX_FETCH_CHARS);
+                    let parked = park_extended_result(
+                        state,
+                        org_id,
+                        user_id,
+                        external_parking_allowed(zdr || data_plane_mode.is_some()),
+                        &call.name,
+                        crate::tool_result_handles::ResultKind::Text,
+                        &body,
+                        MAX_FETCH_CHARS,
+                        &provenance,
+                    );
+                    let out = match parked {
+                        Some(handle) => serde_json::json!({
+                            "final_url": r.final_url,
+                            "title": r.title,
+                            "content": head,
+                            "handle": handle.to_model_value(),
+                        }),
+                        None => serde_json::json!({
+                            "final_url": r.final_url,
+                            "title": r.title,
+                            "content": head,
+                        }),
+                    };
                     ToolOutcome {
                         call_id: call.id.clone(),
                         name: call.name.clone(),
@@ -3112,7 +3793,7 @@ async fn dispatch_tool_with_cost(
                             // browser drove a live untrusted page, so a
                             // planted instruction past MAX_FETCH_CHARS must
                             // still be caught.
-                            let provenance = assess_external_payload(
+                            let ExternalScreen { provenance, withheld } = assess_external_payload(
                                 state,
                                 &call.name,
                                 content,
@@ -3121,9 +3802,23 @@ async fn dispatch_tool_with_cost(
                                 org_id,
                                 user_id,
                                 run_id,
-                                zdr,
+                                zdr || data_plane_mode.is_some(),
+                                classifier_budget,
                             )
                             .await;
+                            if withheld {
+                                return ToolOutcome {
+                                    call_id: call.id.clone(),
+                                    name: call.name.clone(),
+                                    output: crate::semantic_screening::withheld_output(
+                                        &call.name,
+                                        &provenance,
+                                        (!target_url.is_empty()).then_some(target_url.as_str()),
+                                    ),
+                                    provenance,
+                                    error: None,
+                                };
+                            }
                             let out = serde_json::json!({
                                 "content": truncate_chars(content, MAX_FETCH_CHARS),
                                 "confidence": v.get("confidence").cloned().unwrap_or(serde_json::Value::Null),
@@ -3172,8 +3867,9 @@ async fn dispatch_tool_with_cost(
                 .await
             {
                 Ok(resp) => {
+                    let resp = resp.into_inner();
+                    let skip_reason = resp.skip_reason;
                     let items: Vec<serde_json::Value> = resp
-                        .into_inner()
                         .entries
                         .iter()
                         .map(|e| {
@@ -3192,7 +3888,7 @@ async fn dispatch_tool_with_cost(
                     // so this hashes the assembled, already-truncated JSON —
                     // a known, documented residual gap versus fetch_url's
                     // screen-before-truncate ordering.
-                    let output = serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_owned());
+                    let output = recall_memory_output(items, &skip_reason);
                     ToolOutcome {
                         call_id: call.id.clone(),
                         name: call.name.clone(),
@@ -3252,6 +3948,10 @@ async fn dispatch_tool_with_cost(
                     space_id: String::new(),
                     space_read_decision_ref: String::new(),
                     space_read_decision_token: String::new(),
+                    include_inactive: false,
+                    // Unpaged (WS09-S8): the whole conversation in sequence order.
+                    limit: 0,
+                    before_message_id: String::new(),
                 },
                 session_bearer,
             );
@@ -3311,6 +4011,7 @@ async fn dispatch_tool_with_cost(
                     // reported as disabled rather than as missing, and that
                     // distinction is only available if it comes back.
                     enabled_only: false,
+                    for_user_id: String::new(),
                 },
                 session_bearer,
             );
@@ -3320,7 +4021,15 @@ async fn dispatch_tool_with_cost(
                 .list_agent_skills(request)
                 .await
             {
-                Ok(response) => response.into_inner().skills,
+                // A proposal is not a skill yet: the caller's own undecided
+                // ones are listed too (everything was asked for), and must read
+                // as absent rather than as "disabled".
+                Ok(response) => response
+                    .into_inner()
+                    .skills
+                    .into_iter()
+                    .filter(crate::skills::owner_accepted)
+                    .collect::<Vec<_>>(),
                 Err(error) => {
                     tracing::warn!(%error, %org_id, "reattach_skill: skill read failed");
                     return err_outcome(
@@ -3340,6 +4049,36 @@ async fn dispatch_tool_with_cost(
                 error: None,
             }
         }
+        // Read one file of a skill's bundle (WS19-S7). The bundle's files are not in
+        // the prompt: the skill block only says a bundle exists, and the model asks
+        // for the file it needs. Read-only and org-scoped: the skill is resolved in
+        // this org's catalogue under the injection path's visibility rule, and every
+        // bundle read carries the verified capability credential.
+        "skill_file" => {
+            skill_file_outcome(
+                state,
+                mp_contracts::skill_bundle::enabled(),
+                org_id,
+                user_id,
+                capability_bearer,
+                call,
+            )
+            .await
+        }
+        // The connected-account read (WS23-S5): offered only on a turn the person selected accounts for, and
+        // refused here again whenever the turn does not admit it.
+        mp_contracts::provider_reads::READ_TOOL_NAME => {
+            connector_reads::read_outcome(
+                state,
+                connector,
+                zdr,
+                !space_id.is_empty(),
+                ingestion_bearer,
+                capability_bearer,
+                call,
+            )
+            .await
+        }
         // Knowledge-base RAG — searches the org's OWN ingested documents via
         // Data Plane v2 retrieval (canonical owner). org-scoped: `org_id` is the
         // verified request org, never model input, so a tool call can't read
@@ -3355,7 +4094,8 @@ async fn dispatch_tool_with_cost(
             let top_k = i32::try_from(arg_i64(&call.arguments_json, "top_k").unwrap_or(5))
                 .unwrap_or(5)
                 .clamp(1, 20);
-            let request = knowledge_search_request(org_id, &query, top_k, zdr, sovereign_required);
+            let request =
+                knowledge_search_request(org_id, &query, top_k, data_plane_mode.clone(), sovereign_required);
             let request = match crate::retrieval::authorize(tonic::Request::new(request), bearer) {
                 Ok(request) => request,
                 Err(error) => {
@@ -3436,20 +4176,55 @@ async fn dispatch_tool_with_cost(
                                 serde_json::json!(metadata.zdr_actions_applied),
                             );
                         }
+                        // A reduced answer's notice (Z-41b) travels with the result to the turn, which
+                        // emits it as a typed event (`retrieval_notice_events`). The turn's mode decides what it
+                        // may state: a persistent turn is never told its answer was reduced, and a waived turn
+                        // only that it was, under the generic code.
+                        if let Some(notice) = metadata.notice.and_then(|notice| {
+                            crate::retrieval_metadata::notice_for_mode(
+                                notice,
+                                data_plane_mode.as_deref(),
+                            )
+                        }) {
+                            object.insert(
+                                RETRIEVAL_NOTICE_KEY.to_owned(),
+                                serde_json::json!({
+                                    "code": notice.code,
+                                    "wording_key": notice.wording_key,
+                                }),
+                            );
+                        }
                     }
                     let output =
                         serde_json::to_string(&envelope).unwrap_or_else(|_| "{}".to_owned());
+                    let provenance =
+                        crate::moderation::ToolProvenance::unscreened(&call.name, &output);
+                    let output = match park_extended_result(
+                        state,
+                        org_id,
+                        user_id,
+                        external_parking_allowed(zdr || data_plane_mode.is_some()),
+                        &call.name,
+                        crate::tool_result_handles::ResultKind::Json,
+                        &output,
+                        MAX_TOOL_OUTPUT_CHARS,
+                        &provenance,
+                    ) {
+                        Some(handle) => handle.to_model_json(),
+                        None => output,
+                    };
                     ToolOutcome {
                         call_id: call.id.clone(),
                         name: call.name.clone(),
-                        provenance: crate::moderation::ToolProvenance::unscreened(
-                            &call.name, &output,
-                        ),
+                        provenance,
                         output,
                         error: None,
                     }
                 }
-                Err(e) => err_outcome(call, format!("knowledge_search failed: {}", e.message())),
+                Err(e) => err_outcome(
+                    call,
+                    knowledge_search_failure(&e, data_plane_mode.as_deref()),
+                ),
             }
         }
         // Data Plane v2's typed retrieval endpoints — the ones
@@ -3482,7 +4257,7 @@ async fn dispatch_tool_with_cost(
                     org_id,
                     &query,
                     arg_i64(&call.arguments_json, "limit"),
-                    zdr,
+                    data_plane_mode.clone(),
                 )
                 .await,
             )
@@ -3714,7 +4489,18 @@ async fn dispatch_tool_with_cost(
                 Ok(query) => query,
                 Err(message) => return err_outcome(call, message),
             };
-            let slice = match crate::tool_result_handles::apply_query(&resolved.payload, &query) {
+            let slice = match resolved.kind {
+                crate::tool_result_handles::ResultKind::Json => {
+                    crate::tool_result_handles::apply_query(&resolved.payload, &query)
+                }
+                crate::tool_result_handles::ResultKind::Text => {
+                    crate::tool_result_handles::apply_text_query(
+                        resolved.payload.as_str().unwrap_or_default(),
+                        &query,
+                    )
+                }
+            };
+            let slice = match slice {
                 Ok(slice) => slice,
                 Err(message) => return err_outcome(call, message),
             };
@@ -3753,16 +4539,7 @@ async fn dispatch_tool_with_cost(
                     &content,
                     version,
                 );
-                // Classified from the ORIGINAL tool that produced the parked
-                // payload (`resolved.capability_id`), not from "result_query"
-                // itself — a handle produced by an untrusted source must
-                // still read as untrusted on every later read-back. See
-                // `verevon_read_outcome`'s docs: today every parked payload
-                // is org-internal, so this is the cheap path; a future
-                // caller parking third-party content MUST screen it before
-                // parking, not here.
-                let provenance =
-                    crate::moderation::ToolProvenance::unscreened(&resolved.capability_id, &output);
+                let provenance = read_back_provenance(&resolved, &output);
                 return ToolOutcome {
                     call_id: call.id.clone(),
                     name: call.name.clone(),
@@ -3772,8 +4549,7 @@ async fn dispatch_tool_with_cost(
                 };
             }
             let output = truncate_chars(&slice.to_string(), MAX_TOOL_OUTPUT_CHARS);
-            let provenance =
-                crate::moderation::ToolProvenance::unscreened(&resolved.capability_id, &output);
+            let provenance = read_back_provenance(&resolved, &output);
             ToolOutcome {
                 call_id: call.id.clone(),
                 name: call.name.clone(),
@@ -3813,12 +4589,6 @@ fn handle_or_inline_output(
     };
     let size_bytes = output.len();
     let payload = crate::tool_result_handles::unwrap_mcp_content(&parsed);
-    let expires_at = chrono::Utc::now()
-        .checked_add_signed(
-            chrono::Duration::from_std(crate::tool_result_handles::HANDLE_TTL)
-                .unwrap_or_else(|_| chrono::Duration::seconds(900)),
-        )
-        .map(|at| at.to_rfc3339());
     state
         .tool_results
         .insert(
@@ -3827,9 +4597,84 @@ fn handle_or_inline_output(
             capability_id,
             payload,
             size_bytes,
-            expires_at,
+            handle_expires_at(),
         )
         .to_model_json()
+}
+
+/// The instant a handle parked now stops resolving, in RFC3339.
+fn handle_expires_at() -> Option<String> {
+    chrono::Utc::now()
+        .checked_add_signed(
+            chrono::Duration::from_std(crate::tool_result_handles::HANDLE_TTL)
+                .unwrap_or_else(|_| chrono::Duration::seconds(900)),
+        )
+        .map(|at| at.to_rfc3339())
+}
+
+/// Whether an external result may be parked under a handle at all: the
+/// `RESULT_HANDLES_EXTENDED` switch is on and the turn keeps no content. A
+/// ZDR or waived turn never parks, because a handle would hold the result in
+/// gateway memory past the turn.
+fn external_parking_allowed(zdr_or_waived: bool) -> bool {
+    !zdr_or_waived && crate::tool_result_handles::extended_enabled()
+}
+
+/// Park a result over `threshold` characters under a handle and return it, or
+/// return `None` so the caller keeps its existing bound. Nothing is parked when
+/// `may_park` is false, when the content reached the model unscreened, or when
+/// the payload cannot be held in the form `kind` names.
+#[allow(clippy::too_many_arguments)]
+fn park_extended_result(
+    state: &AppState,
+    org_id: &str,
+    user_id: &str,
+    may_park: bool,
+    capability_id: &str,
+    kind: crate::tool_result_handles::ResultKind,
+    text: &str,
+    threshold: usize,
+    provenance: &crate::moderation::ToolProvenance,
+) -> Option<crate::tool_result_handles::ToolResultHandle> {
+    use crate::tool_result_handles::{ParkedResult, ResultKind};
+
+    if !may_park
+        || text.chars().count() <= threshold
+        || crate::tool_result_handles::screening_skipped(provenance)
+    {
+        return None;
+    }
+    let payload = match kind {
+        ResultKind::Text => Value::String(text.to_owned()),
+        ResultKind::Json => serde_json::from_str::<Value>(text).ok()?,
+    };
+    let parked = ParkedResult {
+        payload,
+        kind,
+        size_bytes: text.len(),
+    };
+    Some(state.tool_results.insert_external(
+        org_id,
+        user_id,
+        capability_id,
+        parked,
+        handle_expires_at(),
+        provenance.clone(),
+    ))
+}
+
+/// The provenance a `result_query` read reports. A handle parked with a
+/// screening verdict replays that verdict and trust label on every read, so an
+/// injection-flagged page stays flagged however many ranges are read back. The
+/// classification follows the tool that produced the payload, never the bytes
+/// of the read. A handle with no verdict is org-internal and reads as unscreened.
+fn read_back_provenance(
+    resolved: &crate::tool_result_handles::ResolvedResult,
+    output: &str,
+) -> crate::moderation::ToolProvenance {
+    resolved.provenance.clone().unwrap_or_else(|| {
+        crate::moderation::ToolProvenance::unscreened(&resolved.capability_id, output)
+    })
 }
 
 /// Parse a `result_query` call's arguments into a validated
@@ -3841,7 +4686,9 @@ fn handle_or_inline_output(
 fn parse_handle_query(
     arguments_json: &str,
 ) -> Result<crate::tool_result_handles::HandleQuery, String> {
-    use crate::tool_result_handles::{Aggregate, AggregateOp, FilterOp, HandleQuery, RowFilter};
+    use crate::tool_result_handles::{
+        Aggregate, AggregateOp, FilterOp, HandleQuery, RowFilter, TextRange,
+    };
 
     let select = arg_value(arguments_json, "select")
         .and_then(|value| value.as_array().cloned())
@@ -3892,6 +4739,19 @@ fn parse_handle_query(
     let offset =
         usize::try_from(arg_i64(arguments_json, "offset").unwrap_or(0).max(0)).unwrap_or(0);
     let limit = usize::try_from(arg_i64(arguments_json, "limit").unwrap_or(0).max(0)).unwrap_or(0);
+    let range = match arg_value(arguments_json, "range") {
+        Some(Value::Object(window)) => {
+            let read = |key: &str| {
+                usize::try_from(window.get(key).and_then(Value::as_i64).unwrap_or(0).max(0))
+                    .unwrap_or(0)
+            };
+            Some(TextRange {
+                offset: read("offset"),
+                length: read("length"),
+            })
+        }
+        _ => None,
+    };
 
     Ok(HandleQuery {
         select,
@@ -3899,6 +4759,7 @@ fn parse_handle_query(
         aggregate,
         offset,
         limit,
+        range,
     })
 }
 
@@ -3973,6 +4834,12 @@ async fn dispatch_audited_tool(
     // When set, the call (all of its attempts) stops here and fails. Only a
     // read in a source-bound phase gets one; see `stops_at_validation_deadline`.
     read_deadline: Option<tokio::time::Instant>,
+    data_plane_mode: Option<String>,
+    attachments: &crate::turn_attachments::ValidatedAttachments,
+    skill_mounts: &[SkillMount],
+    classifier_budget: Option<&crate::semantic_screening::ClassifierBudget>,
+    // The turn's connected-account selection, when the connected-app read is offered (WS23-S5).
+    connector: Option<&connector_reads::ConnectorTurn>,
 ) -> Result<ToolOutcome, &'static str> {
     if session_bearer.is_empty() {
         return Err("tool audit credential unavailable");
@@ -3992,6 +4859,8 @@ async fn dispatch_audited_tool(
         tool: call.name.clone(),
         data_category: crate::audit::tool_data_category(&call.name).to_owned(),
         zdr,
+        // The gateway's read-only loop supplies no class or digest.
+        ..Default::default()
     };
     state
         .session_client
@@ -4036,6 +4905,11 @@ async fn dispatch_audited_tool(
                 ingestion_bearer,
                 sandbox_bearer,
                 cost_bearer,
+                data_plane_mode.clone(),
+                attachments,
+                skill_mounts,
+                classifier_budget,
+                connector,
             )
             .await;
             let should_retry = attempt < crate::tool_retry::MAX_TOOL_ATTEMPTS
@@ -4080,6 +4954,7 @@ async fn dispatch_audited_tool(
         } else {
             "completed".to_owned()
         },
+        ..Default::default()
     };
     state
         .session_client
@@ -4172,6 +5047,18 @@ pub(crate) async fn dispatch_web_tool_audited(
         None,
         // Research bounds its own pipeline; there is no draft deadline here.
         None,
+        // Web tools only (see this function's doc): no Data Plane retrieval is reachable from this path.
+        // Its callers are persistent or ZDR (deep research is refused on a waived turn at the stream entry),
+        // so the mode is the ZDR one or none, and the derived content-safety pass follows `zdr`.
+        crate::retrieval::data_plane_zdr_mode(zdr, false),
+        // Web tools only: code_interpreter, the sole reader of attached files, is
+        // unreachable from this path.
+        &crate::turn_attachments::ValidatedAttachments::none(),
+        // Web tools only: no skill bundle is mounted from this path either.
+        &[],
+        None,
+        // Web tools only: the connected-app read is never reached from this path.
+        None,
     )
     .await
 }
@@ -4212,7 +5099,7 @@ pub const MAX_READ_ARTIFACT_CHARS: usize = 24_000;
 /// A task-scoped source boundary, also enforced against the final offered tool
 /// set before dispatch. Calculation runs in the existing networkless sandbox.
 pub fn conversation_tool_allowed(name: &str) -> bool {
-    matches!(name, "create_artifact" | "read_artifact" | "update_artifact" | "count_words" | "code_interpreter" | "reattach_context")
+    matches!(name, "create_artifact" | "read_artifact" | "update_artifact" | "count_words" | "code_interpreter" | "reattach_context" | "skill_file")
 }
 
 /// The public-web-search half of the retrieval-scope tool buckets
@@ -4236,6 +5123,10 @@ const ORG_CLASS_TOOLS: &[&str] = &[
     "result_query",
 ];
 
+/// The connected-account half: a connected account is read only under `RetrievalScope::Auto` (WS23-S5,
+/// DEC-26), so a source-filtered turn never sees the read.
+const CONNECTOR_CLASS_TOOLS: &[&str] = &[mp_contracts::provider_reads::READ_TOOL_NAME];
+
 /// Whether `name` may be offered under a per-turn `RetrievalScope`
 /// (chat-wave2 scope spec §2.3), the same enforcement chokepoint
 /// `conversation_tool_allowed` uses: `tool_defs.retain(...)` right after
@@ -4247,14 +5138,29 @@ pub fn tool_allowed_for_retrieval_scope(name: &str, scope: crate::normalize::Ret
     use crate::normalize::RetrievalScope;
     match scope {
         RetrievalScope::Auto => true,
-        RetrievalScope::KnowledgeOnly => !WEB_CLASS_TOOLS.contains(&name),
-        RetrievalScope::WebOnly => !ORG_CLASS_TOOLS.contains(&name),
+        RetrievalScope::KnowledgeOnly => {
+            !WEB_CLASS_TOOLS.contains(&name) && !CONNECTOR_CLASS_TOOLS.contains(&name)
+        }
+        RetrievalScope::WebOnly => {
+            !ORG_CLASS_TOOLS.contains(&name) && !CONNECTOR_CLASS_TOOLS.contains(&name)
+        }
     }
 }
 
 fn tools_for_artifact_state(tools: &[ToolDefinition], has_artifacts: bool) -> Vec<ToolDefinition> {
     tools.iter().filter(|tool| has_artifacts || !matches!(tool.name.as_str(), "read_artifact" | "update_artifact"))
         .cloned().collect()
+}
+
+/// The connected-account read's place in a turn's tool set (WS23-S5). A client's copy of the name is
+/// dropped, and the server's own definition is added last, so the cached prefix holds. It is added only on
+/// a turn that [`connector_reads::offered`] admits.
+fn tools_for_connector_scope(mut tools: Vec<ToolDefinition>, offered: bool) -> Vec<ToolDefinition> {
+    tools.retain(|tool| tool.name != mp_contracts::provider_reads::READ_TOOL_NAME);
+    if offered {
+        tools.push(connector_reads::tool_definition());
+    }
+    tools
 }
 
 /// Whether a loaded history carries a compaction marker — the gate for
@@ -4271,7 +5177,7 @@ pub fn history_was_compacted(messages: &[ChatMessage]) -> bool {
 
 #[must_use]
 pub fn builtin_tool_defs() -> Vec<ToolDefinition> {
-    vec![
+    let mut defs = vec![
         ToolDefinition {
             name: "count_words".to_owned(),
             description: "Count words locally in one or more complete prose bodies. Use this instead of code_interpreter for word counts. Submit all requested pieces together in one call; exclude separate headings, subject/preview and internal source notes. Reuse the exact counted prose in the deliverable. This only counts words; it does not verify facts, style or formatting.".to_owned(),
@@ -4286,6 +5192,11 @@ pub fn builtin_tool_defs() -> Vec<ToolDefinition> {
             name: "reattach_skill".to_owned(),
             description: "Read one of this organization's skill instructions back IN FULL. Use it when a skill block in your context ends with a truncation marker, or when a rule you are about to follow looks cut off — acting on half an instruction is worse than pausing to read the rest. Give the skill's name exactly as it appears in the block.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"name":{"type":"string","description":"The skill's name, exactly as shown in its block"}},"required":["name"]}"#.to_owned(),
+        },
+        ToolDefinition {
+            name: "skill_file".to_owned(),
+            description: "Read one file from a skill's bundle: the scripts, templates and reference documents that a skill's instructions point to. Use it when a skill block says its bundle has files and the instructions name one you need. Give the skill's name exactly as it appears in its block. Omit the path to list the bundle's files. Give a path to read that file: a long file comes back in pieces of up to 32 KiB, and the result says where the next piece starts. This reads files only; it never runs them.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"skill":{"type":"string","description":"The skill's name, exactly as shown in its block"},"path":{"type":"string","description":"A file path inside the bundle, as the listing shows it. Omit to list the files."},"offset":{"type":"integer","minimum":0,"description":"Byte offset to start reading from: the next_offset of the previous read. Defaults to 0."}},"required":["skill"]}"#.to_owned(),
         },
         ToolDefinition {
             name: "web_search".to_owned(),
@@ -4304,7 +5215,7 @@ pub fn builtin_tool_defs() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "code_interpreter".to_owned(),
-            description: "Run Python 3 (or POSIX sh) in an isolated sandbox and return stdout/stderr plus any FILES the code wrote. This is the tool for exact computation and for producing real documents: use it for arithmetic and large-number math, date arithmetic, statistics, parsing and data transformation, and for GENERATING files the user can download — .xlsx via openpyxl or xlsxwriter (write formulas as strings such as \"=SUM(B2:B9)\" so the sheet keeps live formulas, and make a native Excel chart with openpyxl.chart or xlsxwriter's add_chart; neither library calculates a formula, so compute any figure you quote in Python as well), .docx via python-docx, .pptx via python-pptx (to put a chart on a slide, draw it with matplotlib and add the PNG with add_picture), .pdf via reportlab (pypdf reads and merges existing PDFs), charts and images as PNG via matplotlib (headless: plt.savefig, never plt.show) and Pillow, plus csv/json/html/md. Write files to the current working directory and they are returned to the user automatically as downloadable artifacts, appearing as download cards BELOW your message the moment this call returns (a PNG also shows inline in the message); do not base64 them yourself, and NEVER write a markdown link, a bare URL, or a \"sandbox:/\" path to reference one — none of those resolve to anything and the user cannot open them. Just confirm in plain text what you produced. Available libraries: numpy, pandas, matplotlib, openpyxl, xlsxwriter, python-docx, reportlab, pypdf, Pillow, python-pptx, lxml. The sandbox has NO network access and a hard ~30s timeout, so never attempt downloads or long jobs here (use web_search/fetch_url for the web). Prefer this over doing arithmetic in your head whenever the exact value matters.".to_owned(),
+            description: "Run Python 3 (or POSIX sh) in an isolated sandbox and return stdout/stderr plus any FILES the code wrote. This is the tool for exact computation and for producing real documents: use it for arithmetic and large-number math, date arithmetic, statistics, parsing and data transformation, and for GENERATING files the user can download — .xlsx via openpyxl or xlsxwriter (write formulas as strings such as \"=SUM(B2:B9)\" so the sheet keeps live formulas, and make a native Excel chart with openpyxl.chart or xlsxwriter's add_chart; neither library calculates a formula, so compute any figure you quote in Python as well), .docx via python-docx, .pptx via python-pptx (to put a chart on a slide, draw it with matplotlib and add the PNG with add_picture), .pdf via reportlab (pypdf reads and merges existing PDFs), charts and images as PNG via matplotlib (headless: plt.savefig, never plt.show) and Pillow, plus csv/json/html/md. Write files to the current working directory and they are returned to the user automatically as downloadable artifacts, appearing as download cards BELOW your message the moment this call returns (a PNG also shows inline in the message); do not base64 them yourself, and NEVER write a markdown link, a bare URL, or a \"sandbox:/\" path to reference one — none of those resolve to anything and the user cannot open them. Just confirm in plain text what you produced. Available libraries: numpy, pandas, matplotlib, openpyxl, xlsxwriter, python-docx, reportlab, pypdf, Pillow, python-pptx, lxml. The sandbox has NO network access and a hard time limit of about two minutes, so never attempt downloads or long jobs here (use web_search/fetch_url for the web). Prefer this over doing arithmetic in your head whenever the exact value matters.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"language":{"type":"string","enum":["python","sh"],"description":"Runtime; defaults to python"},"code":{"type":"string","description":"Source to execute. print() what you want to read back; write files to the working directory to hand them to the user."},"files_in":{"type":"array","description":"Optional input files to place in the working directory before running.","items":{"type":"object","properties":{"name":{"type":"string","description":"Flat filename, no directories"},"content_b64":{"type":"string","description":"Base64 file contents"}},"required":["name","content_b64"]}}},"required":["code"]}"#.to_owned(),
         },
         ToolDefinition {
@@ -4419,7 +5330,25 @@ pub fn builtin_tool_defs() -> Vec<ToolDefinition> {
             description: "List the organization's own social campaigns with name, goal, status, target platforms, and start/end dates. Use this for 'what campaigns are running', 'what was our Q3 campaign', or when the user asks how a named campaign is set up. Do NOT use it for the individual posts inside a campaign (use social_list_posts) or for connected accounts (use social_list_accounts). Read-only: creating or changing a campaign requires the approval-gated agentic path.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"status":{"type":"string","enum":["draft","active","completed","archived"],"description":"Optional status filter. Omit for all statuses."},"limit":{"type":"integer","description":"Max campaigns to return, 1-100 (default 25)"}}}"#.to_owned(),
         },
-    ]
+    ];
+    advertise_text_range(&mut defs, crate::tool_result_handles::extended_enabled());
+    defs
+}
+
+/// Adds the character `range` argument to `result_query` when extended parking
+/// is on, so a parked page can be read by window. With the switch off the
+/// advertised schema is exactly what it was.
+fn advertise_text_range(defs: &mut [ToolDefinition], enabled: bool) {
+    if !enabled {
+        return;
+    }
+    for def in defs.iter_mut().filter(|def| def.name == "result_query") {
+        def.parameters_json = def.parameters_json.replacen(
+            r#"{"type":"object","properties":{"#,
+            r#"{"type":"object","properties":{"range":{"type":"object","description":"For a parked text result, such as a fetched page: the window to read, as offset and length in characters. At most 4000 characters a read. Omit to read from the start.","properties":{"offset":{"type":"integer"},"length":{"type":"integer"}}},"#,
+            1,
+        );
+    }
 }
 
 /// Frame a round of tool outcomes as a context message appended to the
@@ -4610,6 +5539,55 @@ pub struct ToolRounds {
     pub document_tool_failures: u32,
     /// Web citations emitted this turn (Sources-tab entries from `web_search`).
     pub web_citations: u32,
+    /// The provider calls of this phase that the turn's usage counts, in the order
+    /// they ran: each tool-decision round, then each artifact check. Priced by the
+    /// caller, which holds the catalogue. A call that failed reports no tokens and
+    /// is absent.
+    pub usage: Vec<crate::usage_meter::CallUsage>,
+}
+
+/// The usage of one provider call the tool phase made, as the provider reported
+/// it. The basis is the route's, or the serving provider's once it has answered.
+pub(crate) fn metered_call(
+    phase: crate::usage_meter::CallPhase,
+    response: &mp_contracts::model_plane::v1::InferResponse,
+    model: &str,
+    provider_hint: &str,
+    subscription_connection_id: &str,
+) -> crate::usage_meter::CallUsage {
+    crate::usage_meter::CallUsage {
+        phase,
+        model: if response.model_used.trim().is_empty() {
+            model.to_owned()
+        } else {
+            response.model_used.clone()
+        },
+        provider: response.provider_used.clone(),
+        basis: crate::pricing::CostBasis::of_route(provider_hint, subscription_connection_id)
+            .served_by(&response.provider_used),
+        input: i64::from(response.input_tokens),
+        output: i64::from(response.output_tokens),
+        cache_read: i64::from(response.cache_read_input_tokens),
+        cache_write: i64::from(response.cache_creation_input_tokens),
+    }
+}
+
+/// Records one provider call the tool phase made and streams the turn's running total after it, when the
+/// turn's sink records calls: it streams usage progress or tracks a run ceiling (WS27-S6). The call is
+/// priced only then, so a turn with neither reads the catalogue no more often than it did before.
+pub(crate) async fn stream_call_usage(
+    state: &AppState,
+    sink: &crate::sse_events::RichEventSink,
+    call: &crate::usage_meter::CallUsage,
+) {
+    if !sink.records_calls() {
+        return;
+    }
+    let priced = state
+        .pricing
+        .priced(call.basis, &call.model, call.legs())
+        .await;
+    sink.record_call(call, &priced).await;
 }
 
 /// Keep tool selection from drafting an answer that this phase discards. This
@@ -5164,6 +6142,7 @@ pub async fn run_forced_web_search(
     session_bearer: &str,
     capability_bearer: Option<&str>,
     zdr: bool,
+    data_plane_mode: Option<String>,
     base_messages: Vec<ChatMessage>,
     query: &str,
     sink: Option<&crate::sse_events::RichEventSink>,
@@ -5178,6 +6157,7 @@ pub async fn run_forced_web_search(
         session_bearer,
         capability_bearer,
         zdr,
+        data_plane_mode,
         // No requested model reaches this entry point, and an unknown tier is a
         // denied tier.
         "",
@@ -5211,6 +6191,7 @@ pub async fn run_forced_web_search_for_model(
     session_bearer: &str,
     capability_bearer: Option<&str>,
     zdr: bool,
+    data_plane_mode: Option<String>,
     requested_model: &str,
     base_messages: Vec<ChatMessage>,
     query: &str,
@@ -5280,6 +6261,18 @@ pub async fn run_forced_web_search_for_model(
         None,
         None,
         // Runs before any source-bound phase has started its deadline.
+        None,
+        // The turn's own retention mode: a waived turn's derived pass is skipped (`reject`), a ZDR turn's
+        // too (`ephemeral`), and a persistent turn runs it as it always did (none).
+        data_plane_mode,
+        // A forced `web_search` only: no sandbox call is reachable from here.
+        &crate::turn_attachments::ValidatedAttachments::none(),
+        // A forced web search mounts no skill bundle.
+        &[],
+        // No inline pass here: the forced search passes an empty inference bearer, and
+        // `assess_external_payload` runs the inline pass only with one.
+        None,
+        // A forced web search reads no connected account.
         None,
     )
     .await?;
@@ -5354,6 +6347,8 @@ pub async fn run_forced_web_search_for_model(
         tool_failures: u32::from(!forced_search_succeeded),
         document_tool_failures: 0,
         web_citations,
+        // A web lookup, not a model call: the search client bills no tokens.
+        usage: Vec::new(),
     })
 }
 
@@ -5689,6 +6684,79 @@ fn grounding_label(grounded: Option<&grounding::GroundedSource>) -> String {
     }
 }
 
+/// The RERANK sentence of the relevance gate's coverage header, from the rerank report the Quarry edge
+/// put on each hit. `None` for a report the gate does not name, so the header is unchanged for it.
+fn rerank_gate_sentence(status: &str, reason: Option<&str>, any_scored: bool) -> Option<String> {
+    match status {
+        "applied" if any_scored => Some(
+            "RERANK: applied. Each hit the reranker scored carries its calibrated relevance; the hits \
+             it did not score are judged on their words alone."
+                .to_owned(),
+        ),
+        "applied" => Some(
+            "RERANK: applied to the order, but no scores reached this gate, so every hit is judged \
+             on its words alone."
+                .to_owned(),
+        ),
+        "skipped" => Some(format!(
+            "RERANK: skipped ({}). The search engine's order stands, and every hit is judged on its \
+             words alone.",
+            skipped_reason_words(reason)
+        )),
+        "degraded" => Some(format!(
+            "RERANK: failed ({}). The search engine's order stands, and every hit is judged on its \
+             words alone.",
+            failed_reason_words(reason)
+        )),
+        "shadow" => Some(
+            "RERANK: measured only (shadow mode). The search engine's order stands, and every hit is \
+             judged on its words alone."
+                .to_owned(),
+        ),
+        _ => None,
+    }
+}
+
+/// Why the reranker was not called, in words the model can repeat. The vocabulary is Quarry's closed
+/// set; an unnamed reason is said to be unnamed rather than guessed at.
+fn skipped_reason_words(reason: Option<&str>) -> &'static str {
+    match reason {
+        Some("zdr") => "zero data retention is on for this search, so the reranker was not called",
+        Some("disabled") => "the reranker is switched off",
+        Some("sovereign") => "a sovereign-data rule keeps this search away from the reranker",
+        Some("input_not_tenant") => "the search is not run for a tenant organisation",
+        Some("input_too_small") => "there were too few results to rerank",
+        Some("circuit_open") => "the reranker is paused after repeated failures",
+        _ => "the edge gave no reason",
+    }
+}
+
+/// Why the reranker was called and failed, in words the model can repeat.
+fn failed_reason_words(reason: Option<&str>) -> &'static str {
+    match reason {
+        Some("timeout") => "the reranker did not answer in time",
+        Some("provider_error") => "the reranker returned an error",
+        _ => "the reranker failed",
+    }
+}
+
+/// The status and reason of the rerank report the edge put on the hits of one `web_search` output.
+/// Every hit of one search carries the same report, so the first hit is read. `None` when no hit
+/// carries one, as with a legacy edge.
+fn rerank_report_of(outcome: &ToolOutcome) -> Option<(String, Option<String>)> {
+    if outcome.name != "web_search" || outcome.error.is_some() {
+        return None;
+    }
+    let items = serde_json::from_str::<Vec<Value>>(&outcome.output).ok()?;
+    let first = items.first()?;
+    let status = first.get("rerank_status")?.as_str()?.to_owned();
+    let reason = first
+        .get("rerank_reason")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    Some((status, reason))
+}
+
 /// Rewrite a gated result set into the text the model reads.
 ///
 /// Filtering has to be VISIBLE. A silently shortened result list makes the model
@@ -5714,6 +6782,7 @@ fn gated_web_search_output(
     citations: &(Vec<usize>, Vec<(usize, String)>),
     fallback_used: bool,
     grounded: &BTreeMap<usize, grounding::GroundedSource>,
+    rerank_line: Option<&str>,
 ) -> String {
     let (citable, withheld) = citations;
     let found = hits.len();
@@ -5730,6 +6799,9 @@ fn gated_web_search_output(
          the citable hits do not contain the answer, say so or search again with a more specific \
          query — do not fall back to a set-aside hit.\n"
     );
+    if let Some(line) = rerank_line {
+        let _ = writeln!(out, "{line}\n");
+    }
     if fallback_used {
         let _ = writeln!(
             out,
@@ -5841,6 +6913,8 @@ struct ScoredWebSearch {
     verdicts: Vec<relevance::Verdict>,
     kept: Vec<usize>,
     fallback_used: bool,
+    /// The RERANK sentence for the coverage header, when the edge reported a rerank step.
+    rerank_line: Option<String>,
 }
 
 /// Score a parsed `web_search` result set. `None` when the outcome is not a
@@ -5876,11 +6950,16 @@ fn score_web_search_outcome(question: &str, outcome: &ToolOutcome) -> Option<Sco
         .filter_map(|(index, keep)| keep.then_some(index))
         .take(MAX_WEB_CITATIONS)
         .collect();
+    let rerank_line = rerank_report_of(outcome).and_then(|(status, reason)| {
+        let any_scored = hits.iter().any(|hit| hit.provider_score.is_some());
+        rerank_gate_sentence(&status, reason.as_deref(), any_scored)
+    });
     Some(ScoredWebSearch {
         hits,
         verdicts,
         kept,
         fallback_used: mask.fallback_used,
+        rerank_line,
     })
 }
 
@@ -6067,6 +7146,7 @@ fn finish_web_search_gate(
         &split,
         scored.fallback_used,
         grounded,
+        scored.rerank_line.as_deref(),
     );
     WebSearchGate {
         found: scored.hits.len(),
@@ -6188,15 +7268,17 @@ async fn gate_and_ground_web_search_outcome(
     if let Some(answer) = &instant {
         // Structured, and at INFO: a short-circuit that turns out to be wrong has
         // to be diagnosable from the logs alone — which source, which label, which
-        // value, which period, and which question term tied them together.
+        // value and which period. The question, and the term that tied the fact to
+        // it, are the user's words: they are counted here, never printed, whatever
+        // the ZDR posture.
         tracing::info!(
             source = %answer.url,
             fact_label = %answer.figure.label,
             fact_value = %answer.figure.value,
             fact_period = %answer.figure.period,
             subject = answer.subject,
-            entity = %answer.entity,
-            question = %question,
+            entity_chars = answer.entity.chars().count(),
+            question_chars = question.chars().count(),
             hits_set_aside = scored.hits.len().saturating_sub(1),
             "instant answer: an authoritative structured fact ended the search"
         );
@@ -6211,7 +7293,7 @@ async fn gate_and_ground_web_search_outcome(
         tracing::debug!(
             found = gate.found,
             kept = gate.kept,
-            query = %question,
+            query_chars = question.chars().count(),
             "web search: relevance gate set hits aside"
         );
     }
@@ -6262,6 +7344,7 @@ pub async fn run_tool_rounds(
     session_bearer: &str,
     capability_bearer: Option<&str>,
     zdr: bool,
+    data_plane_mode: Option<String>,
     // Jurisdiction posture for this turn's Data Plane retrievals — the axis
     // `zdr` does not cover. Resolved by the caller from its signed `sovereign`
     // claim and `min_privacy_tier` below (`mp_contracts::dataplane_posture`),
@@ -6298,6 +7381,7 @@ pub async fn run_tool_rounds(
         capability_bearer,
         None,
         zdr,
+        data_plane_mode,
         sovereign_required,
         min_privacy_tier,
         model,
@@ -6313,6 +7397,9 @@ pub async fn run_tool_rounds(
         ingestion_bearer,
         sandbox_bearer,
         sink,
+        &crate::vision::parts::ImageParts::none(),
+        // No caller of this entry point holds a composed plan to name.
+        None,
     )
     .await
 }
@@ -6346,6 +7433,7 @@ pub async fn run_tool_rounds_for_model(
     capability_bearer: Option<&str>,
     cost_bearer: Option<&str>,
     zdr: bool,
+    data_plane_mode: Option<String>,
     sovereign_required: bool,
     min_privacy_tier: i32,
     // The model the tool-DECISION rounds run on, substitutions included.
@@ -6360,15 +7448,136 @@ pub async fn run_tool_rounds_for_model(
     ingestion_bearer: Option<&VerifiedIngestionBearer>,
     sandbox_bearer: Option<&VerifiedSandboxBearer>,
     sink: Option<&crate::sse_events::RichEventSink>,
+    // The turn's images (WS08-S4): carried on every round's request, never altered here.
+    images: &crate::vision::parts::ImageParts,
+    // The composer's stable-order plan of the prompt's standing blocks (WS02-S9), named on the
+    // tool-decision requests while it still describes their head. `None` names none.
+    prompt_tiers: Option<PromptTierPlan>,
+) -> Result<ToolRounds, &'static str> {
+    run_tool_rounds_for_model_with_attachments(
+        state,
+        request_id,
+        run_id,
+        org_id,
+        user_id,
+        thread_id,
+        space_id,
+        data_plane_bearer,
+        execution_bearer,
+        inference_bearer,
+        session_bearer,
+        capability_bearer,
+        cost_bearer,
+        zdr,
+        data_plane_mode,
+        sovereign_required,
+        min_privacy_tier,
+        model,
+        requested_model,
+        provider_hint,
+        subscription_connection_id,
+        base_messages,
+        tools,
+        tool_choice,
+        ingestion_bearer,
+        sandbox_bearer,
+        sink,
+        &crate::turn_attachments::ValidatedAttachments::none(),
+        images,
+        prompt_tiers,
+    )
+    .await
+}
+
+/// [`run_tool_rounds_for_model`] for a turn whose attached files are staged into
+/// `code_interpreter` (WS08-S5). The files are validated request state: the model
+/// is told what `attachments/` holds, and every `code_interpreter` call carries
+/// them to Execution Core read-only, whatever its own arguments say.
+///
+/// # Errors
+///
+/// As [`run_tool_rounds_for_model`].
+#[allow(clippy::too_many_arguments)] // cohesive loop entry — all are request context
+pub async fn run_tool_rounds_for_model_with_attachments(
+    state: &AppState,
+    request_id: &str,
+    run_id: &str,
+    org_id: &str,
+    user_id: &str,
+    thread_id: &str,
+    space_id: &str,
+    data_plane_bearer: Option<&VerifiedBearer>,
+    execution_bearer: Option<&VerifiedExecutionBearer>,
+    inference_bearer: &str,
+    session_bearer: &str,
+    capability_bearer: Option<&str>,
+    cost_bearer: Option<&str>,
+    zdr: bool,
+    data_plane_mode: Option<String>,
+    sovereign_required: bool,
+    min_privacy_tier: i32,
+    // The model the tool-DECISION rounds run on, substitutions included.
+    model: &str,
+    // The model the USER selected, for the paid-provider entitlement only.
+    requested_model: &str,
+    provider_hint: &str,
+    subscription_connection_id: &str,
+    base_messages: Vec<ChatMessage>,
+    tools: Vec<ToolDefinition>,
+    tool_choice: String,
+    ingestion_bearer: Option<&VerifiedIngestionBearer>,
+    sandbox_bearer: Option<&VerifiedSandboxBearer>,
+    sink: Option<&crate::sse_events::RichEventSink>,
+    attachments: &crate::turn_attachments::ValidatedAttachments,
+    images: &crate::vision::parts::ImageParts,
+    prompt_tiers: Option<PromptTierPlan>,
 ) -> Result<ToolRounds, &'static str> {
     // Resolved ONCE for the whole turn rather than per call: the entitlement is a
     // property of the turn, and a value re-derived per round is a value that can
     // disagree with itself mid-turn.
     let allow_paid_providers = paid_providers_allowed(requested_model, zdr);
+    // The turn's `/skills` mounts, read once for the turn (WS19-S8). The model names none of them.
+    let skill_mounts =
+        skill_mounts_for_turn(state, request_id, org_id, user_id, capability_bearer, zdr).await;
+    // A turn with attached files tells the model, in the tool's own description,
+    // where `code_interpreter` finds them. Only that tool, only on such a turn:
+    // every other turn offers the unchanged definition.
+    let mut tools = tools;
+    if !attachments.is_empty() {
+        for tool in tools.iter_mut().filter(|tool| tool.name == "code_interpreter") {
+            tool.description.push_str(crate::turn_attachments::TOOL_DESCRIPTION_LINE);
+        }
+        let (files, bytes) = attachments.summary();
+        tracing::info!(%request_id, files, bytes, "attached files staged for code_interpreter");
+    }
+    // The connected-account read is offered on a turn the person selected accounts for (WS23-S5). The
+    // selection rides on the live sink, as the turn's clock does, so a caller without a sink offers nothing.
+    let connector_turn = sink.and_then(crate::sse_events::RichEventSink::connector_turn);
+    let connector_offered = connector_reads::offered(
+        connector_reads::enabled(),
+        zdr,
+        !space_id.is_empty(),
+        connector_turn,
+    );
+    let tools = tools_for_connector_scope(tools, connector_offered);
+    let connector_turn = connector_turn.filter(|_| connector_offered);
     // The turn's clock rides on the live sink; a caller without one (tests,
     // other routes) times nothing.
     let timing = sink.and_then(crate::sse_events::RichEventSink::timing);
+    // The plan names the leading messages of the prompt as composed. Keep that head as it was
+    // handed in, so each decision request can check the plan still describes what it sends.
+    let composed_head: Vec<ChatMessage> = match &prompt_tiers {
+        Some(plan) => base_messages
+            .iter()
+            .take((plan.stable_messages as usize) + (plan.context_messages as usize))
+            .cloned()
+            .collect(),
+        None => Vec::new(),
+    };
     let mut messages = base_messages;
+    // The images name a message by index, so the rounds may only append to the
+    // prompt: checked when the loop ends.
+    let prefix_len = messages.len();
     let mut resolved_model: Option<String> = None;
     let mut last_round_tools: Vec<ToolDefinition> = Vec::new();
     let mut any_tool_succeeded = false;
@@ -6376,6 +7585,8 @@ pub async fn run_tool_rounds_for_model(
     let mut tool_failures: u32 = 0;
     let mut document_tool_failures: u32 = 0;
     let mut web_citations: u32 = 0;
+    // Every provider call this phase makes that the turn's usage counts.
+    let mut usage: Vec<crate::usage_meter::CallUsage> = Vec::new();
     let mut events = match sink {
         Some(sink) => ToolEvents::Live(sink),
         None => ToolEvents::Buffered(Vec::new()),
@@ -6411,6 +7622,10 @@ pub async fn run_tool_rounds_for_model(
     // Keep genuine conversation requests separate from runtime tool context,
     // which the legacy inference envelope also represents as user messages.
     let mut review_messages = messages.clone();
+    // After the review copy: the note is runtime context, not something the user wrote.
+    if !attachments.is_empty() {
+        messages.push(ChatMessage { role: "system".into(), content: attachments.sandbox_note(), ..Default::default() });
+    }
     if let Some(context) = &source_context {
         messages.push(ChatMessage { role: "system".into(), content: crate::source_facts::SCOPE_RULES.into(), ..Default::default() });
         messages.push(ChatMessage { role: "system".into(), content: "Preserve the scope of source decisions and conditions. In a plan, treat EVERY table cell as a factual assertion: copy the named work owner and completion criterion from the source; put only explicitly stated predecessors in the dependency column. A completion criterion is not automatically a prerequisite for starting that task. Do not add an approval step, approver, sign-off, authority to confirm a gate, current approval status or deadline for a decision unless stated. If a dependency, approver or decision date is missing, mark it unspecified or clearly propose an option. A target date for an outcome is not a date on which its decision has been taken or must be taken. A role responsible for doing work is not automatically authorized to approve it. Unknown approval status means not documented, not that approval has not happened. A requirement covering all technical errors must not silently become only blocking errors. Use concise task rows and short assumptions/risks; do not repeat the table as a separate gate list that introduces new authorities or dependencies. Include every requested detail without adding unsupported facts.".into(), ..Default::default() });
@@ -6485,6 +7700,11 @@ pub async fn run_tool_rounds_for_model(
     // At most once per turn, before the first model round: a new note's
     // source or a scoped revision's document (`sole_artifact_prefetch`).
     let mut sole_artifact_prefetched = false;
+    // The inline injection pass's call budget for the whole turn (WS26-S6). It sits
+    // above the rounds, so the cap holds across every round, not per round.
+    let classifier_budget = crate::semantic_screening::ClassifierBudget::new(
+        crate::semantic_screening::semantic_max_calls_per_run(),
+    );
     // Rounds that reached the model, for the turn's timing spans.
     let mut rounds_started: u32 = 0;
 
@@ -6525,7 +7745,8 @@ pub async fn run_tool_rounds_for_model(
         // message is never a candidate for this round's own payload clearing,
         // and so a message that landed before the first inference still reaches
         // the model's first look at the turn.
-        let queued = state.queued_inputs.drain(request_id);
+        let drained = state.queued_inputs.drain_receipted(request_id);
+        let queued: Vec<String> = drained.iter().map(|message| message.text.clone()).collect();
         if queued.is_empty() && scoped_revision_complete { break; }
         if !queued.is_empty() {
             scoped_revision_complete = false;
@@ -6548,8 +7769,31 @@ pub async fn run_tool_rounds_for_model(
             // acceptance, and what the client cannot otherwise know is when the
             // agent actually saw it.
             events
-                .push(ChatEvent::QueuedInput { messages: queued })
+                .push(if crate::queued_input::send_receipts_enabled() {
+                    ChatEvent::QueuedInputReceipted {
+                        messages: queued,
+                        ids: drained
+                            .iter()
+                            .map(|message| message.client_message_id.clone())
+                            .collect(),
+                    }
+                } else {
+                    ChatEvent::QueuedInput { messages: queued }
+                })
                 .await;
+        }
+
+        // Enforcement ends the tool phase at the round boundary once the run has reached its spend
+        // ceiling (WS27-S6): no further round starts, and the answer still streams. The model is told
+        // why the lookups stopped, as it is when a round fails.
+        if sink.is_some_and(crate::sse_events::RichEventSink::run_ceiling_stops_tool_phase) {
+            messages.push(ChatMessage {
+                compaction_summary: String::new(),
+                role: "user".to_owned(),
+                content: RUN_CEILING_NOTICE.to_owned(),
+                name: String::new(),
+            });
+            break;
         }
 
         // Read/update have no valid target until a first artifact exists.
@@ -6644,12 +7888,19 @@ pub async fn run_tool_rounds_for_model(
             // Every round is a fresh decision: inference-core's response cache must
             // not replay an earlier identical draft (a quick retry, or back-to-back
             // runs of the same brief), so the round opts out like the review does.
+            // Named only while the messages it counts are still the composed head (`plan_for`).
+            let decision_tiers =
+                crate::prompt_context::plan_for(prompt_tiers.as_ref(), &composed_head, &decision_messages);
+            // The thread's prompt-cache routing key, from its ids alone. Empty without a thread.
+            let cache_scope_key =
+                mp_contracts::prompt_tier::cache_scope_key(org_id, thread_id).unwrap_or_default();
             let mut decision = with_authorization(
                 InferRequest {
                     // A source-bound plan has many authority/dependency distinctions.
                     // Spend reasoning before drafting to avoid slower private repair
                     // rounds and keep the existing high-effort review independent.
                     thinking_budget_tokens: 0,
+                    reasoning_effort: 0,
                     prefer_priority_service_tier: priority_project_author,
                     request_id: request_id.to_owned(),
                     org_id: org_id.to_owned(),
@@ -6670,9 +7921,15 @@ pub async fn run_tool_rounds_for_model(
                     min_residency: String::new(),
                     // The broker proposes calls as data; the gateway owns execution.
                     subscription_connection_id: subscription_connection_id.to_owned(),
+                    // The composer's plan of the standing blocks, named only while it still describes
+                    // this request's head (`plan_for`); none for a legacy-order or ZDR prompt.
+                    prompt_tiers: decision_tiers,
+                    cache_scope_key,
+                    image_parts: Vec::new(),
                 },
                 inference_bearer,
             );
+            crate::vision::parts::attach(decision.get_mut(), images);
             decision.metadata_mut().insert("cache-control", "no-store".parse().expect("static metadata"));
             let infer = client.infer(decision);
             // Timed from just before the call is awaited. A Stop, the deadline or a
@@ -6779,6 +8036,19 @@ pub async fn run_tool_rounds_for_model(
             (resp, Some(round))
         };
 
+        // The round's tokens are the provider's own counts. The route guard above has
+        // already accepted the answer, so a round a wrong provider answered is not billed.
+        let round_usage = metered_call(
+            crate::usage_meter::CallPhase::ToolRound,
+            &resp,
+            model,
+            provider_hint,
+            subscription_connection_id,
+        );
+        if let Some(sink) = sink {
+            stream_call_usage(state, sink, &round_usage).await;
+        }
+        usage.push(round_usage);
         let truncated_call_was_finish = resp.tool_calls.last().is_some_and(|call| call.name == FINISH_TOOL_PHASE);
         let finish_proposed = resp.tool_calls.iter().any(|call| call.name == FINISH_TOOL_PHASE);
         let phase_finished = take_tool_phase_signal(&mut resp.tool_calls);
@@ -6970,16 +8240,35 @@ pub async fn run_tool_rounds_for_model(
             // an earlier round's own, never-durably-committed review.
             let prior_review = before.as_deref()
                 .and_then(|_| state.artifact_review_base.prior_review(thread_id, &resolved_id));
+            // Every review or repair candidate that answered is a billed overhead call. It is
+            // kept even when the check is cut short, because its tokens were spent.
+            let check_usage: std::sync::Mutex<Vec<crate::usage_meter::CallUsage>> = std::sync::Mutex::new(Vec::new());
             let checked = crate::source_validation::check_artifact(settings, source_context.as_ref(), &request, &turn_question,
                 before.as_deref(), prior_review.as_ref(), &content, |request| {
                     let mut client = state.inference_client.clone();
                     // Classified by the id the review/repair code minted.
                     let call = check_clock.as_ref().map(|clock| clock.call(&request.request_id));
                     let request = with_authorization(request, inference_bearer);
+                    let check_usage = &check_usage;
                     async move {
                         let response = crate::result_validation::infer_candidate(&mut client, request).await;
                         if let Some(call) = call {
                             call.finish_response(&response);
+                        }
+                        if let Ok(answered) = &response {
+                            let overhead = metered_call(
+                                crate::usage_meter::CallPhase::Overhead,
+                                answered,
+                                model,
+                                provider_hint,
+                                subscription_connection_id,
+                            );
+                            if let Some(sink) = sink {
+                                stream_call_usage(state, sink, &overhead).await;
+                            }
+                            if let Ok(mut recorded) = check_usage.lock() {
+                                recorded.push(overhead);
+                            }
                         }
                         response
                     }
@@ -7019,6 +8308,7 @@ pub async fn run_tool_rounds_for_model(
                     Some(_) => "failed",
                 });
             }
+            usage.extend(check_usage.into_inner().unwrap_or_default());
             let (content, review) = checked?;
             if let Some(timing) = timing {
                 timing.mark(crate::turn_timing::Mark::FirstValidated);
@@ -7092,6 +8382,12 @@ pub async fn run_tool_rounds_for_model(
         }
         let offered_tools = &round_tools;
         let dispatch_started = timing.map(crate::turn_timing::TurnTiming::now_ms);
+        // A shared reference, so each per-call future copies it rather than moving the turn's value.
+        let data_plane_mode_ref = &data_plane_mode;
+        // The same, for the turn's classifier budget: each per-call future copies the reference.
+        let classifier_budget_ref = &classifier_budget;
+        // The same, for the turn's skill mounts: each per-call future copies the reference.
+        let skill_mounts_ref = &skill_mounts;
         let dispatched = futures::future::join_all(prepared.into_iter().map(
             |(call, is_duplicate, is_truncated)| async move {
                 if !offered_tools.iter().any(|tool| tool.name == call.name) {
@@ -7142,6 +8438,11 @@ pub async fn run_tool_rounds_for_model(
                     sandbox_bearer,
                     cost_bearer,
                     validation_deadline.filter(|_| stops_at_validation_deadline(&call.name)),
+                    data_plane_mode_ref.clone(),
+                    attachments,
+                    skill_mounts_ref,
+                    Some(classifier_budget_ref),
+                    connector_turn,
                 )
                 .await
             },
@@ -7248,8 +8549,8 @@ pub async fn run_tool_rounds_for_model(
                                 fact_value = %answer.figure.value,
                                 fact_period = %answer.figure.period,
                                 subject = answer.subject,
-                                entity = %answer.entity,
-                                question = %turn_question,
+                                entity_chars = answer.entity.chars().count(),
+                                question_chars = turn_question.chars().count(),
                                 "instant answer: a curated statistics lookup ended the search"
                             );
                             outcome.output =
@@ -7306,6 +8607,15 @@ pub async fn run_tool_rounds_for_model(
                     error: outcome.error.clone(),
                 })
                 .await;
+            // A connected-account read's sources, and its parking for `result_query`, once the result is shown
+            // (WS23-S5). The parking happens off ZDR only, as it always does.
+            for source in connector_reads::settle(&mut outcome, state, org_id, user_id, zdr) {
+                events.push(source).await;
+            }
+            // A reduced knowledge search says so to the user at the point its result is shown (Z-41b).
+            for notice_event in retrieval_notice_events(&outcome) {
+                events.push(notice_event).await;
+            }
             // A model-chosen web_search must populate the Sources tab exactly
             // like the forced pre-loop path does — the citations are what let
             // the user (and the verification step) see what grounded the answer.
@@ -7351,6 +8661,7 @@ pub async fn run_tool_rounds_for_model(
             {
                 sole_revision_source_read = true;
             }
+            record_tool_screening(&outcome.provenance);
             // Security audit (§5): fire-and-forget, exactly like
             // `implicit_feedback`'s call site — a missing NATS connection
             // must never fail or slow the turn the model is waiting on.
@@ -7425,6 +8736,7 @@ pub async fn run_tool_rounds_for_model(
     if pending_checked_document(&turn_question, source_context.is_some(), document_written_for_instruction) {
         return Err(crate::result_validation::VALIDATION_FAILED);
     }
+    debug_assert!(messages.len() >= prefix_len, "the tool rounds only append to the prompt");
     Ok(ToolRounds {
         messages,
         events: events.into_buffer(),
@@ -7436,12 +8748,48 @@ pub async fn run_tool_rounds_for_model(
         tool_failures,
         document_tool_failures,
         web_citations,
+        usage,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mp_contracts::model_plane::v1 as mpv1;
+
+    /// Every tool result the audit sees is counted under its trust class and posture, so an external
+    /// result that no screening pass saw appears as `not-applicable` rather than going missing.
+    #[test]
+    fn tool_screening_counts_every_result_by_trust_class_and_posture() {
+        use crate::moderation::{ScreeningOutcome, ScreeningPosture, ToolProvenance, TrustClass};
+
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let flagged = ToolProvenance {
+            trust: TrustClass::ExternalWeb,
+            screening: ScreeningOutcome {
+                posture: ScreeningPosture::Flagged,
+                content_hash: crate::moderation::content_hash(b"page"),
+                rule_ids: vec!["injection.ignore_previous_instructions"],
+            },
+        };
+        metrics::with_local_recorder(&recorder, || {
+            record_tool_screening(&flagged);
+            record_tool_screening(&ToolProvenance::unscreened("mcp__srv__create_order", "ok"));
+            record_tool_screening(&ToolProvenance::unscreened("knowledge_search", "hits"));
+        });
+        let rendered = handle.render();
+        for series in [
+            r#"mp_gateway_tool_screening_total{trust="external-web",posture="flagged"} 1"#,
+            r#"mp_gateway_tool_screening_total{trust="third-party-mcp",posture="not-applicable"} 1"#,
+            r#"mp_gateway_tool_screening_total{trust="org-internal",posture="not-applicable"} 1"#,
+        ] {
+            assert!(
+                rendered.lines().any(|line| line == series),
+                "{series} is not counted once:\n{rendered}"
+            );
+        }
+    }
 
     #[test]
     fn checked_single_post_revision_finishes_but_mixed_requests_keep_the_tool_path() {
@@ -7929,6 +9277,7 @@ mod tests {
                 }),
                 offset: 0,
                 limit: 0,
+                range: None,
             },
         )
         .expect("count over a row payload must succeed");
@@ -7973,6 +9322,7 @@ mod tests {
             &call,
             None,
             None,
+            crate::retrieval::data_plane_zdr_mode(true, false),
         )
         .await;
 
@@ -8143,6 +9493,7 @@ mod tests {
             &call,
             None,
             None,
+            None,
         )
         .await;
 
@@ -8192,6 +9543,7 @@ mod tests {
             false,
             false,
             &call,
+            None,
             None,
             None,
         )
@@ -8247,6 +9599,7 @@ mod tests {
             &call,
             None,
             None,
+            None,
         )
         .await;
 
@@ -8292,6 +9645,7 @@ mod tests {
             false,
             false,
             &call,
+            None,
             None,
             None,
         )
@@ -8353,7 +9707,7 @@ mod tests {
         for (args, should_fail) in [("{}", false), (r#"{"id":"missing"}"#, true)] {
             let call = tool_call("read_artifact", args);
             let outcome = dispatch_tool(&state, "run", "org", "user", "thread", "", &[], "",
-                None, None, "", "", None, false, false, false, &call, None, None).await;
+                None, None, "", "", None, false, false, false, &call, None, None, None).await;
             assert_eq!(outcome.error.is_some(), should_fail);
             if !should_fail { assert!(outcome.output.contains("No artifacts")); }
         }
@@ -8368,10 +9722,10 @@ mod tests {
         assert!(!offered.iter().any(|tool| matches!(tool.name.as_str(), "read_artifact" | "update_artifact")));
         let create = tool_call("create_artifact", r#"{"id":"brief","kind":"document","title":"Brief","content":"Validated draft."}"#);
         let outcome = dispatch_tool(&state, "run", "org", "user", "thread", "", &[], "",
-            None, None, "", "", None, false, false, false, &create, None, None).await;
+            None, None, "", "", None, false, false, false, &create, None, None, None).await;
         assert!(outcome.error.is_none(), "{:?}", outcome.error);
         let sole_read = dispatch_tool(&state, "run", "org", "user", "thread", "", &[], "",
-            None, None, "", "", None, false, false, false, &tool_call("read_artifact", "{}"), None, None).await;
+            None, None, "", "", None, false, false, false, &tool_call("read_artifact", "{}"), None, None, None).await;
         assert!(sole_read.error.is_none());
         assert!(sole_read.output.contains("Validated draft."));
         assert!(!sole_read.output.contains("Call read_artifact again"));
@@ -8381,10 +9735,10 @@ mod tests {
         assert!(!other_thread.iter().any(|tool| tool.name == "read_artifact"));
         let second = tool_call("create_artifact", r#"{"id":"note","kind":"document","title":"Note","content":"Second document."}"#);
         let outcome = dispatch_tool(&state, "run", "org", "user", "thread", "", &[], "",
-            None, None, "", "", None, false, false, false, &second, None, None).await;
+            None, None, "", "", None, false, false, false, &second, None, None, None).await;
         assert!(outcome.error.is_none(), "{:?}", outcome.error);
         let listing = dispatch_tool(&state, "run", "org", "user", "thread", "", &[], "",
-            None, None, "", "", None, false, false, false, &tool_call("read_artifact", "{}"), None, None).await;
+            None, None, "", "", None, false, false, false, &tool_call("read_artifact", "{}"), None, None, None).await;
         assert!(listing.error.is_none());
         assert!(listing.output.contains("'brief'") && listing.output.contains("'note'"));
         assert!(!listing.output.contains("Validated draft."));
@@ -8407,7 +9761,7 @@ mod tests {
             r#"{"id":"salgsrapport-uke37","kind":"document","title":"Salgsrapport uke 37","content":"v1 content"}"#,
         );
         let outcome = dispatch_tool(&state, "run", "org", "user", "thread", "", &[], "",
-            None, None, "", "", None, false, false, false, &first, None, None).await;
+            None, None, "", "", None, false, false, false, &first, None, None, None).await;
         assert!(outcome.error.is_none(), "{:?}", outcome.error);
         assert_eq!(state.artifact_versions.current_version("thread", "salgsrapport-uke37"), Some(1));
 
@@ -8418,7 +9772,7 @@ mod tests {
             r#"{"id":"salgsrapportuke37","kind":"document","title":"Salgsrapport uke 37 (oppdatert)","content":"v2 content"}"#,
         );
         let outcome = dispatch_tool(&state, "run", "org", "user", "thread", "", &[], "",
-            None, None, "", "", None, false, false, false, &second, None, None).await;
+            None, None, "", "", None, false, false, false, &second, None, None, None).await;
         assert!(outcome.error.is_none(), "{:?}", outcome.error);
 
         assert_eq!(
@@ -8444,7 +9798,7 @@ mod tests {
             r#"{"id":"sales-report-q3","kind":"document","title":"Sales Report Q3","content":"v1 content"}"#,
         );
         let outcome = dispatch_tool(&state, "run", "org", "user", "thread", "", &[], "",
-            None, None, "", "", None, false, false, false, &first, None, None).await;
+            None, None, "", "", None, false, false, false, &first, None, None, None).await;
         assert!(outcome.error.is_none(), "{:?}", outcome.error);
         assert_eq!(state.artifact_versions.current_version("thread", "sales-report-q3"), Some(1));
 
@@ -8456,7 +9810,7 @@ mod tests {
             r#"{"id":"new-id","title":"Sales Report Q3","content":"v2 content"}"#,
         );
         let outcome = dispatch_tool(&state, "run", "org", "user", "thread", "", &[], "",
-            None, None, "", "", None, false, false, false, &second, None, None).await;
+            None, None, "", "", None, false, false, false, &second, None, None, None).await;
         assert!(outcome.error.is_none(), "the title match must resolve the update instead of refusing it: {:?}", outcome.error);
 
         assert_eq!(
@@ -8484,9 +9838,9 @@ mod tests {
         assert_eq!((call.id.as_str(), call.name.as_str()), (SOLE_ARTIFACT_PREFETCH_READ_ID, "read_artifact"));
         assert_eq!(serde_json::from_str::<Value>(&call.arguments_json).unwrap(), serde_json::json!({ "id": "plan" }));
         let prefetched = dispatch_tool(&state, "run", "org", "user", "thread", "", &[], "",
-            None, None, "", "", None, false, false, false, &call, None, None).await;
+            None, None, "", "", None, false, false, false, &call, None, None, None).await;
         let own_read = dispatch_tool(&state, "run", "org", "user", "thread", "", &[], "",
-            None, None, "", "", None, false, false, false, &tool_call("read_artifact", "{}"), None, None).await;
+            None, None, "", "", None, false, false, false, &tool_call("read_artifact", "{}"), None, None, None).await;
         assert_eq!(prefetched.output, "Current content of artifact 'plan' (v2):\n\n# Plan\n\nTask A.");
         assert_eq!(prefetched.output, own_read.output, "the model's own read returns the same text");
         // The same result lines, under a header of its own.
@@ -8607,9 +9961,9 @@ mod tests {
             let call = sole_artifact_prefetch(on, store, &thread, &readable, true, "new note")
                 .unwrap_or_else(|| panic!("{chars}: a document that fits whole is prefetched"));
             let prefetched = dispatch_tool(&state, "run", "org", "user", &thread, "", &[], "",
-                None, None, "", "", None, false, false, false, &call, None, None).await;
+                None, None, "", "", None, false, false, false, &call, None, None, None).await;
             let explicit = dispatch_tool(&state, "run", "org", "user", &thread, "", &[], "",
-                None, None, "", "", None, false, false, false, &tool_call("read_artifact", r#"{"id":"rapport"}"#), None, None).await;
+                None, None, "", "", None, false, false, false, &tool_call("read_artifact", r#"{"id":"rapport"}"#), None, None, None).await;
             assert_eq!(prefetched.output, explicit.output, "{chars}: the prefetch is the ordinary read");
             for (via, outcome, shown) in [
                 ("the prefetch", &prefetched, format_gateway_read_context(std::slice::from_ref(&prefetched))),
@@ -8633,7 +9987,7 @@ mod tests {
         store.seed_persisted("thread-long", "rapport", "Rapport", &document_of(MAX_READ_ARTIFACT_CHARS + 1), 1);
         assert!(sole_artifact_prefetch(on, store, "thread-long", &readable, true, "new note").is_none());
         let cut = dispatch_tool(&state, "run", "org", "user", "thread-long", "", &[], "",
-            None, None, "", "", None, false, false, false, &tool_call("read_artifact", "{}"), None, None).await;
+            None, None, "", "", None, false, false, false, &tool_call("read_artifact", "{}"), None, None, None).await;
         assert!(cut.output.contains("[Only the first part of this artifact is shown"));
         assert!(!read_whole_artifact(&cut));
 
@@ -8642,7 +9996,7 @@ mod tests {
         let long_id = "a".repeat(2_000);
         store.seed_persisted("thread-id", &long_id, "Rapport", &document_of(MAX_READ_ARTIFACT_CHARS), 1);
         let framed = dispatch_tool(&state, "run", "org", "user", "thread-id", "", &[], "",
-            None, None, "", "", None, false, false, false, &tool_call("read_artifact", "{}"), None, None).await;
+            None, None, "", "", None, false, false, false, &tool_call("read_artifact", "{}"), None, None, None).await;
         assert!(!framed.output.contains("[Only the first part of this artifact is shown"));
         assert!(!read_whole_artifact(&framed), "text the model did not see is never counted as read");
         assert!(format_tool_context(std::slice::from_ref(&framed)).contains("[truncated"));
@@ -8834,6 +10188,7 @@ mod tests {
             &call,
             None,
             None,
+            None,
         )
         .await;
 
@@ -8871,6 +10226,7 @@ mod tests {
             false,
             false,
             &call,
+            None,
             None,
             None,
         )
@@ -8915,6 +10271,7 @@ mod tests {
             &call,
             None,
             None,
+            None,
         )
         .await;
 
@@ -8953,6 +10310,7 @@ mod tests {
             &call,
             None,
             None,
+            None,
         )
         .await;
         let error = outcome.error.expect("direct MCP must be denied");
@@ -8985,6 +10343,7 @@ mod tests {
             false,
             false,
             &tool_call(crate::runtime_registries::MCP_CATALOG_TOOL_NAME, "{}"),
+            None,
             None,
             None,
         )
@@ -9056,7 +10415,7 @@ mod tests {
     #[test]
     fn knowledge_search_always_declares_a_sovereignty_posture() {
         for sovereign in [false, true] {
-            let request = knowledge_search_request("org", "query", 5, false, sovereign);
+            let request = knowledge_search_request("org", "query", 5, None, sovereign);
             assert_eq!(
                 request.sovereign_required,
                 Some(sovereign),
@@ -9067,7 +10426,7 @@ mod tests {
 
     #[test]
     fn knowledge_search_is_claim_scoped_and_zdr_aware() {
-        let request = knowledge_search_request("org-from-claims", "query", 7, true, false);
+        let request = knowledge_search_request("org-from-claims", "query", 7, Some("ephemeral".to_owned()), false);
 
         assert_eq!(request.org_id, "org-from-claims");
         assert_eq!(request.query, "query");
@@ -9102,12 +10461,156 @@ mod tests {
         assert!(out.ends_with('…'));
     }
 
+    /// A paused user's recall says memory is off, with the reason, instead of
+    /// an empty list; a normal search keeps its array shape.
+    #[test]
+    fn recall_memory_reports_paused_not_empty() {
+        let paused: serde_json::Value =
+            serde_json::from_str(&recall_memory_output(Vec::new(), "user_paused")).unwrap();
+        assert_eq!(
+            paused,
+            serde_json::json!({ "memory": "unavailable", "reason": "user_paused" })
+        );
+
+        let org_row = serde_json::json!({ "topic": "POLICY", "content": "Invoices close on the 5th.", "score": 0.9 });
+        let with_org: serde_json::Value =
+            serde_json::from_str(&recall_memory_output(vec![org_row.clone()], "user_off")).unwrap();
+        assert_eq!(with_org["memory"], "unavailable");
+        assert_eq!(with_org["reason"], "user_off");
+        assert_eq!(with_org["items"], serde_json::json!([org_row.clone()]));
+
+        assert_eq!(recall_memory_output(Vec::new(), ""), "[]");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&recall_memory_output(vec![org_row.clone()], ""))
+                .unwrap(),
+            serde_json::json!([org_row])
+        );
+    }
+
+    /// Ask turns still cannot save: the memory state gate does not lift the
+    /// boundary between the two loops. `save_memory` stays refused here and has
+    /// no dispatch arm; the write path lives in execution-core's governed loop.
+    #[test]
+    fn inline_tool_allowed_still_refuses_save_memory() {
+        assert!(!inline_tool_allowed("save_memory"));
+        let source = include_str!("tool_loop.rs");
+        let production = &source[..source.find("#[cfg(test)]").expect("test module")];
+        assert!(
+            !production.contains("\"save_memory\" =>"),
+            "the inline loop must not grow a save_memory dispatch arm"
+        );
+    }
+
     #[test]
     fn inline_loop_rejects_side_effects_that_require_governed_agentic_approval() {
         assert!(!inline_tool_allowed("save_memory"));
         assert!(!inline_tool_allowed("browser_agent"));
         assert!(inline_tool_allowed("web_search"));
         assert!(inline_tool_allowed("knowledge_search"));
+    }
+
+    /// The question and the search query are the user's own words, and a log line
+    /// is retained wherever it lands, whatever the ZDR posture. So a tracing field
+    /// counts them (`question_chars`) and never formats them. A name inside a longer
+    /// identifier, such as `query_chars`, is a different field and is not matched.
+    #[test]
+    fn tracing_counts_the_question_and_query_text_and_never_formats_it() {
+        // Both shapes of a formatted field, `name = %value` and the shorthand `%name`.
+        fn formats(line: &str, name: &str) -> bool {
+            let ident = |c: char| c.is_alphanumeric() || c == '_';
+            line.match_indices(name).any(|(at, _)| {
+                let before = &line[..at];
+                let after = &line[at + name.len()..];
+                if before.ends_with(ident) || after.starts_with(ident) {
+                    return false;
+                }
+                let assigned = after
+                    .trim_start()
+                    .strip_prefix('=')
+                    .is_some_and(|rest| rest.trim_start().starts_with(['%', '?']));
+                before.ends_with(['%', '?']) || assigned
+            })
+        }
+        // The scan must see the shapes it forbids, or it proves nothing.
+        assert!(formats("        question = %question,", "question"));
+        assert!(formats("            query = %question,", "query"));
+        assert!(formats("    %turn_question,", "turn_question"));
+        assert!(!formats("        question_chars = question.chars().count(),", "question"));
+        assert!(!formats("    let turn_question = build();", "turn_question"));
+
+        // `include_str!` reads this file. The production part ends where the test module
+        // starts, since the first `#[cfg(test)]` sits above the dispatcher.
+        let source = include_str!("tool_loop.rs");
+        let production = &source[..source.find("\nmod tests {").expect("test module")];
+        for line in production.lines().filter(|line| !line.trim_start().starts_with("//")) {
+            for name in ["question", "turn_question", "query"] {
+                assert!(
+                    !formats(line, name),
+                    "`{name}` is the user's text: count it, never format it: {}",
+                    line.trim()
+                );
+            }
+        }
+    }
+
+    /// The Ask loop's read arms and the admission contract must name the same reads
+    /// (WS24-S5). A read the loop answers that the contract does not list is an
+    /// unadmitted read; a contract read with no arm is a tool the model is promised
+    /// and cannot reach. `knowledge_search` is the one arm that is not an action: it
+    /// is retrieval, governed by the retrieval scope, so it is exempt by name only.
+    #[test]
+    fn every_ask_read_in_the_admission_contract_has_a_dispatch_arm_and_every_verevon_read_arm_is_in_the_contract() {
+        let contract: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/agent-action-admission.json"))
+                .expect("the vendored admission contract parses");
+        let contract_reads: std::collections::BTreeSet<String> = contract["rows"]
+            .as_array()
+            .expect("the contract has rows")
+            .iter()
+            .filter(|row| row["access"] == "read")
+            .filter_map(|row| row["executor"]["ask"].as_str().map(str::to_owned))
+            .collect();
+        assert!(!contract_reads.is_empty(), "the contract lists no Ask reads");
+
+        // The Ask loop's read arms run from its knowledge search to the artifact result query.
+        // Searched in the whole file: an arm pattern never occurs in test code, and the first
+        // `#[cfg(test)]` sits above the dispatcher.
+        let source = include_str!("tool_loop.rs");
+        let graph = source
+            .find("        \"knowledge_graph_search\" => {")
+            .expect("the knowledge graph arm");
+        let start = source[..graph]
+            .rfind("        \"knowledge_search\" => {")
+            .expect("the Ask loop knowledge search arm");
+        let end = start
+            + source[start..]
+                .find("        \"result_query\" => {")
+                .expect("the result query arm");
+
+        let mut arm_reads = std::collections::BTreeSet::new();
+        for line in source[start..end].lines() {
+            let Some(head) = line.strip_prefix("        \"") else { continue };
+            let Some((patterns, _)) = head.split_once("=>") else { continue };
+            for name in patterns.split('"').map(str::trim) {
+                // Dotted names are the Console's aliases of the same arm; the contract keys on the model's name.
+                if !name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
+                    arm_reads.insert(name.to_owned());
+                }
+            }
+        }
+
+        for name in &contract_reads {
+            assert!(
+                arm_reads.contains(name),
+                "the admission contract lists the read `{name}`, which has no dispatch arm in the Ask loop"
+            );
+        }
+        for name in &arm_reads {
+            assert!(
+                name == "knowledge_search" || contract_reads.contains(name),
+                "the Ask loop answers `{name}`, which the admission contract does not list"
+            );
+        }
     }
 
     /// THE guard for this whole surface: `dispatch_tool`'s final arm is
@@ -9166,6 +10669,7 @@ mod tests {
                     &call,
                     None,
                     None,
+                    crate::retrieval::data_plane_zdr_mode(true, false),
                 );
                 let error =
                     match tokio::time::timeout(std::time::Duration::from_secs(2), dispatch).await {
@@ -9203,7 +10707,7 @@ mod tests {
         let state = crate::state::AppState::new();
         let call = tool_call("count_words", r#"{"texts":["Blå lampe, 16 cm. #Kontor","Don't re-write this."]}"#);
         let outcome = dispatch_tool(&state, "run", "org", "user", "thread", "", &[], "",
-            None, None, "", "", None, true, false, false, &call, None, None).await;
+            None, None, "", "", None, true, false, false, &call, None, None, crate::retrieval::data_plane_zdr_mode(true, false)).await;
         assert!(outcome.error.is_none());
         let output: serde_json::Value = serde_json::from_str(&outcome.output).unwrap();
         assert_eq!(output["counts"], serde_json::json!([5, 3]));
@@ -9352,6 +10856,7 @@ mod tests {
             &call,
             None,
             None,
+            crate::retrieval::data_plane_zdr_mode(true, false),
         )
         .await;
         assert!(outcome.output.is_empty(), "a failed read returns no output");
@@ -9386,6 +10891,7 @@ mod tests {
             &call,
             None,
             None,
+            crate::retrieval::data_plane_zdr_mode(true, false),
         )
         .await;
         let error = outcome.error.expect("missing bearer must error");
@@ -9602,6 +11108,263 @@ mod tests {
         }
     }
 
+    /// One knowledge search through the real dispatch, against a Data Plane double, on a turn of the given
+    /// retention posture (`waived` is a persistent turn on one connection, which sends `reject`). Returns the
+    /// outcome and every `zdr_mode` the double received.
+    async fn knowledge_search_on_turn(
+        reply: crate::retrieval::notice_double::Reply,
+        zdr: bool,
+        waived: bool,
+    ) -> (ToolOutcome, Vec<Option<String>>) {
+        use crate::retrieval::notice_double::NoticeDouble;
+        let double = NoticeDouble::new(reply);
+        let seen = double.clone();
+        let mut state = crate::state::AppState::new();
+        state.retrieval_client = double.client().await;
+        let bearer = crate::auth::VerifiedDataPlaneBearer::for_test("signed-user-jwt");
+        let call = tool_call("knowledge_search", r#"{"query":"refund policy"}"#);
+        let outcome = dispatch_tool(
+            &state,
+            "run_test",
+            "org_test",
+            "user_test",
+            "thread_test",
+            "",
+            &[],
+            "",
+            Some(&bearer),
+            None,
+            "",
+            "",
+            None,
+            zdr,
+            false,
+            false,
+            &call,
+            None,
+            None,
+            crate::retrieval::data_plane_zdr_mode(zdr, waived),
+        )
+        .await;
+        (outcome, seen.modes())
+    }
+
+    /// A knowledge search on a ZDR turn, answered in text search only because no ZDR-approved query embedding
+    /// route is attached, reaches the turn as exactly one typed `retrieval_notice`, and the model sees the same
+    /// typed code, never the Data Plane's sentence.
+    #[tokio::test]
+    async fn a_reduced_knowledge_search_on_a_zdr_turn_surfaces_one_typed_notice() {
+        let (outcome, modes) = knowledge_search_on_turn(
+            crate::retrieval::notice_double::Reply::Degraded,
+            true,
+            false,
+        )
+        .await;
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        assert_eq!(modes, vec![Some("ephemeral".to_owned())]);
+        let events = retrieval_notice_events(&outcome);
+        assert_eq!(events.len(), 1, "one notice per reduced result");
+        assert!(
+            matches!(&events[0], ChatEvent::RetrievalNotice { notice } if notice.code == "zdr_dense_unavailable"),
+            "{events:?}"
+        );
+        assert_eq!(events[0].name(), "retrieval_notice");
+        assert!(
+            outcome.output.contains("zdr_dense_unavailable"),
+            "{}",
+            outcome.output
+        );
+        assert!(
+            !outcome.output.contains("Semantic search was not used"),
+            "the Data Plane sentence stays behind: {}",
+            outcome.output
+        );
+    }
+
+    /// The same reduced result on a persistent turn carries no notice, in the event or in the envelope the
+    /// model reads. A persistent turn is never told its answer was reduced under zero retention.
+    #[tokio::test]
+    async fn a_reduced_knowledge_search_on_a_persistent_turn_carries_no_notice() {
+        let (outcome, modes) = knowledge_search_on_turn(
+            crate::retrieval::notice_double::Reply::Degraded,
+            false,
+            false,
+        )
+        .await;
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        assert_eq!(modes, vec![None]);
+        assert!(retrieval_notice_events(&outcome).is_empty());
+        assert!(
+            !outcome.output.contains("retrieval_notice"),
+            "{}",
+            outcome.output
+        );
+    }
+
+    /// A waived turn keeps `reject` through the dispatch, and a reduced result on it is told under the generic
+    /// code, never the zero-retention one: the turn is persistent for its connection.
+    #[tokio::test]
+    async fn a_waived_knowledge_search_keeps_reject_and_states_only_a_reduction() {
+        let (outcome, modes) = knowledge_search_on_turn(
+            crate::retrieval::notice_double::Reply::Degraded,
+            false,
+            true,
+        )
+        .await;
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        assert_eq!(modes, vec![Some("reject".to_owned())]);
+        assert!(
+            matches!(
+                retrieval_notice_events(&outcome).as_slice(),
+                [ChatEvent::RetrievalNotice { notice }] if notice.code == "retrieval_reduced"
+            ),
+            "{}",
+            outcome.output
+        );
+        assert!(
+            !outcome.output.contains("zdr_dense_unavailable"),
+            "a waived turn is never told zero retention applied: {}",
+            outcome.output
+        );
+    }
+
+    /// A refused knowledge search on a ZDR turn tells the model the typed code and nothing the Data Plane wrote.
+    #[tokio::test]
+    async fn a_refused_knowledge_search_on_a_zdr_turn_tells_the_model_only_the_typed_code() {
+        let (outcome, modes) =
+            knowledge_search_on_turn(crate::retrieval::notice_double::Reply::Refused, true, false)
+                .await;
+        assert_eq!(modes, vec![Some("ephemeral".to_owned())]);
+        assert_eq!(
+            outcome.error.as_deref(),
+            Some("knowledge_search refused: zdr_dense_unavailable")
+        );
+        assert!(outcome.output.is_empty(), "{}", outcome.output);
+    }
+
+    /// The same refusal on a waived turn says only that the answer was reduced, and on a persistent turn nothing of
+    /// the refusal: the Data Plane's sentence reaches neither.
+    #[tokio::test]
+    async fn a_refused_knowledge_search_states_what_the_turns_mode_allows() {
+        let (waived, _) =
+            knowledge_search_on_turn(crate::retrieval::notice_double::Reply::Refused, false, true)
+                .await;
+        assert_eq!(
+            waived.error.as_deref(),
+            Some("knowledge_search refused: retrieval_reduced")
+        );
+        let (persistent, _) = knowledge_search_on_turn(
+            crate::retrieval::notice_double::Reply::Refused,
+            false,
+            false,
+        )
+        .await;
+        assert_eq!(
+            persistent.error.as_deref(),
+            Some("knowledge_search failed: FailedPrecondition")
+        );
+        for outcome in [&waived, &persistent] {
+            let text = outcome.error.as_deref().unwrap_or_default();
+            assert!(!text.contains("Semantic search"), "{text}");
+            assert!(!text.contains("zero data retention"), "{text}");
+        }
+    }
+
+    /// The model is not given the Data Plane's text on any failure, and the dispatcher's retry decision on the
+    /// failure is the one it made on the text it used to read.
+    #[test]
+    fn a_knowledge_search_failure_keeps_the_retry_decision_and_drops_the_text() {
+        use tonic::{Code, Status};
+        for (status, retried) in [
+            (
+                Status::unavailable("error trying to connect: connection refused"),
+                true,
+            ),
+            (Status::deadline_exceeded("operation timed out"), true),
+            (Status::resource_exhausted("429 too many requests"), true),
+            (
+                Status::internal("embedding provider returned empty vector"),
+                false,
+            ),
+            (Status::invalid_argument("org_id is required"), false),
+            (
+                Status::permission_denied("invalid Space retrieval decision"),
+                false,
+            ),
+            (Status::new(Code::Unknown, "transport error"), true),
+        ] {
+            let before = format!("knowledge_search failed: {}", status.message());
+            let after = knowledge_search_failure(&status, None);
+            assert_eq!(
+                crate::tool_retry::is_transient_tool_failure(&after),
+                retried,
+                "{status:?} -> {after}"
+            );
+            assert_eq!(
+                crate::tool_retry::is_transient_tool_failure(&before),
+                crate::tool_retry::is_transient_tool_failure(&after),
+                "{status:?}"
+            );
+            assert!(
+                !after.contains(status.message()),
+                "the Data Plane's text stays behind: {after}"
+            );
+        }
+    }
+
+    /// An ordinary knowledge search on a ZDR turn, which the Data Plane did not reduce, carries no notice.
+    #[tokio::test]
+    async fn an_ordinary_zdr_knowledge_search_is_unchanged() {
+        let (outcome, _) = knowledge_search_on_turn(
+            crate::retrieval::notice_double::Reply::Ordinary,
+            true,
+            false,
+        )
+        .await;
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        assert!(retrieval_notice_events(&outcome).is_empty());
+        assert!(
+            !outcome.output.contains("retrieval_notice"),
+            "{}",
+            outcome.output
+        );
+    }
+
+    /// Only a successful knowledge search can carry the event. A reason this gateway does not word is reported
+    /// as a reduction, never dropped.
+    #[test]
+    fn only_a_successful_knowledge_search_carries_the_notice_event() {
+        let envelope = |code: &str| {
+            format!(r#"{{"results":[],"retrieval_notice":{{"code":"{code}","wording_key":"x"}}}}"#)
+        };
+        let mut outcome = ToolOutcome {
+            call_id: "call-1".to_owned(),
+            name: "web_search".to_owned(),
+            output: envelope("zdr_dense_unavailable"),
+            error: None,
+            provenance: crate::moderation::ToolProvenance::unscreened("web_search", ""),
+        };
+        assert!(
+            retrieval_notice_events(&outcome).is_empty(),
+            "not a knowledge search"
+        );
+        outcome.name = "knowledge_search".to_owned();
+        assert_eq!(retrieval_notice_events(&outcome).len(), 1);
+        outcome.output = envelope("some_future_reason");
+        assert!(
+            matches!(
+                retrieval_notice_events(&outcome).as_slice(),
+                [ChatEvent::RetrievalNotice { notice }] if notice.code == "retrieval_reduced"
+            ),
+            "an unknown reason is still a reduction"
+        );
+        outcome.error = Some("knowledge_search failed".to_owned());
+        assert!(
+            retrieval_notice_events(&outcome).is_empty(),
+            "a failed search says nothing"
+        );
+    }
+
     #[test]
     fn duplicate_signature_catches_exact_repeat_fetch_url() {
         let first = duplicate_call_signature(&tool_call(
@@ -9760,6 +11523,7 @@ mod tests {
             tool_failures: 0,
             document_tool_failures: 0,
             web_citations: 0,
+            usage: Vec::new(),
         };
         assert_eq!(rounds.resolved_model.as_deref(), Some("claude-sonnet-4-6"));
     }
@@ -10005,6 +11769,7 @@ mod tests {
             screening: crate::moderation::ScreeningOutcome {
                 posture: crate::moderation::ScreeningPosture::Flagged,
                 content_hash: crate::moderation::content_hash(b"whatever was scanned"),
+                rule_ids: Vec::new(),
             },
         };
         let outcomes = vec![outcome_with("fetch_url", "page text", provenance)];
@@ -10025,6 +11790,7 @@ mod tests {
             screening: crate::moderation::ScreeningOutcome {
                 posture: crate::moderation::ScreeningPosture::Degraded,
                 content_hash: crate::moderation::content_hash(b"oversized or contended payload"),
+                rule_ids: Vec::new(),
             },
         };
         let outcomes = vec![outcome_with("browser_agent", "scraped text", provenance)];
@@ -10047,6 +11813,7 @@ mod tests {
             screening: crate::moderation::ScreeningOutcome {
                 posture: crate::moderation::ScreeningPosture::Flagged,
                 content_hash: crate::moderation::content_hash(hostile_output.as_bytes()),
+                rule_ids: Vec::new(),
             },
         };
         let outcomes = vec![outcome_with("fetch_url", hostile_output, provenance)];
@@ -10541,7 +12308,7 @@ mod tests {
         for name in ["web_search", "fetch_url", "knowledge_search", "knowledge_graph_search", "knowledge_wiki_search", "inbox_search", "inbox_get_conversation", "result_query", "mcp_call", "action_execute", "browser_agent"] {
             assert!(!conversation_tool_allowed(name), "{name} escaped source restriction");
         }
-        for name in ["create_artifact", "read_artifact", "update_artifact", "code_interpreter", "reattach_context"] {
+        for name in ["create_artifact", "read_artifact", "update_artifact", "code_interpreter", "reattach_context", "skill_file"] {
             assert!(conversation_tool_allowed(name));
         }
     }
@@ -11044,6 +12811,72 @@ mod tests {
 
     /// A prefix with no JSON object at all (a plain error string, say) must
     /// still fall through to "untouched" rather than panicking on the `find`.
+    /// The Office check reaches the model as text: a verdict and its messages per
+    /// file, the count of files not checked, and a repair instruction when a file
+    /// failed. The report's bytes and the file's base64 never enter the summary,
+    /// and a result without a report is unchanged.
+    #[test]
+    fn code_interpreter_summary_carries_verification_and_no_base64() {
+        let base64_body = "QUFBQUFBQUFBQQ".repeat(400);
+        let with_report = serde_json::json!({
+            "stdout": "",
+            "stderr": "",
+            "exit_code": 0,
+            "files": [{
+                "name": "deck.docx",
+                "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "bytes": 4096,
+                "content_b64": base64_body,
+            }],
+            "verification": [{
+                "name": "deck.docx",
+                "kind": "docx",
+                "level": "failed",
+                "checks": [{
+                    "id": "container",
+                    "level": "failed",
+                    "message": "the file is not a readable zip package",
+                }],
+                "stats": {},
+            }],
+            "verification_unchecked": 2,
+        })
+        .to_string();
+        let (_events, summary) =
+            tool_artifact_events(&outcome_for("code_interpreter", with_report), None);
+        let summary = summary.expect("a summary for delivered files");
+        assert!(
+            summary.contains(
+                "deck.docx: FAILED the structural check (the file is not a readable zip package)"
+            ),
+            "{summary}"
+        );
+        assert!(summary.contains("2 Office file(s) were not structurally checked"));
+        assert!(summary.contains("Regenerate each failed file"));
+        assert!(
+            !summary.contains("QUFBQUFBQUFBQQ"),
+            "file bytes must never reach the model"
+        );
+
+        let without_report = serde_json::json!({
+            "stdout": "",
+            "stderr": "",
+            "exit_code": 0,
+            "files": [{
+                "name": "deck.docx",
+                "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "bytes": 4096,
+                "content_b64": "QUFB",
+            }],
+        })
+        .to_string();
+        let (_events, summary) =
+            tool_artifact_events(&outcome_for("code_interpreter", without_report), None);
+        let summary = summary.expect("a summary for delivered files");
+        assert!(!summary.contains("office_checks"), "{summary}");
+        assert!(!summary.contains("Regenerate each failed file"));
+    }
+
     #[test]
     fn code_interpreter_output_with_no_json_object_is_untouched() {
         let outcome = outcome_for(
@@ -11449,6 +13282,76 @@ mod tests {
             "web_search",
             serde_json::to_string(&items).expect("serialize hits"),
         )
+    }
+
+    // --- the rerank report in the coverage line (QB-T12) ----------------------
+
+    /// A skipped rerank is named in the gate header with its reason, so the model does not read
+    /// the search engine's order as a reranked one.
+    #[test]
+    fn a_skipped_rerank_is_named_in_the_gate_header_with_its_reason() {
+        let sentence =
+            rerank_gate_sentence("skipped", Some("zdr"), false).expect("a skipped rerank is named");
+        assert!(sentence.starts_with("RERANK: skipped"), "{sentence}");
+        assert!(sentence.contains("zero data retention"), "{sentence}");
+        assert!(sentence.contains("judged on its words alone"), "{sentence}");
+    }
+
+    #[test]
+    fn a_failed_rerank_is_named_as_failed_and_not_as_skipped() {
+        let sentence = rerank_gate_sentence("degraded", Some("timeout"), false)
+            .expect("a failed rerank is named");
+        assert!(sentence.starts_with("RERANK: failed"), "{sentence}");
+        assert!(sentence.contains("did not answer in time"), "{sentence}");
+        assert!(!sentence.contains("RERANK: skipped"), "{sentence}");
+    }
+
+    #[test]
+    fn an_applied_rerank_says_whether_any_score_reached_the_gate() {
+        let without = rerank_gate_sentence("applied", None, false).expect("applied is named");
+        assert!(without.contains("no scores reached this gate"), "{without}");
+        let with = rerank_gate_sentence("applied", None, true).expect("applied is named");
+        assert!(with.contains("calibrated"), "{with}");
+    }
+
+    #[test]
+    fn a_report_the_gate_does_not_name_adds_no_sentence() {
+        assert_eq!(
+            rerank_gate_sentence("rerank-not-configured", None, false),
+            None
+        );
+        assert_eq!(rerank_gate_sentence("partial", None, true), None);
+    }
+
+    /// End to end through the gate: a report on the hits reaches the model-facing header.
+    #[test]
+    fn the_gate_header_carries_the_rerank_report_the_hits_arrived_with() {
+        let mut outcome = web_search_outcome(&[(
+            "https://www.met.no/vaer/oslo",
+            "Været i Oslo",
+            "Værvarsel for Oslo i dag.",
+        )]);
+        let mut items: Vec<Value> = serde_json::from_str(&outcome.output).expect("items");
+        items[0]["rerank_status"] = serde_json::json!("skipped");
+        items[0]["rerank_reason"] = serde_json::json!("zdr");
+        outcome.output = serde_json::to_string(&items).expect("serialize");
+        let _ = gate_web_search_outcome("været i Oslo", &mut outcome);
+        assert!(
+            outcome.output.contains("RERANK: skipped"),
+            "{}",
+            outcome.output
+        );
+    }
+
+    #[test]
+    fn a_gate_header_without_a_rerank_report_is_unchanged() {
+        let mut outcome = web_search_outcome(&[(
+            "https://www.met.no/vaer/oslo",
+            "Været i Oslo",
+            "Værvarsel for Oslo i dag.",
+        )]);
+        let _ = gate_web_search_outcome("været i Oslo", &mut outcome);
+        assert!(!outcome.output.contains("RERANK"), "{}", outcome.output);
     }
 
     // --- fetch-then-answer wiring -------------------------------------------
@@ -12452,6 +14355,94 @@ mod tests {
 
     /// A turn with no durable thread has no history to recover. Saying so beats
     /// returning an empty result the model would read as "there was nothing".
+    /// `skill_file` refuses a path that climbs out of the bundle before any read,
+    /// and says which rule it broke.
+    #[tokio::test]
+    async fn skill_file_refuses_traversal() {
+        let state = crate::state::AppState::new();
+        let outcome = skill_file_outcome(
+            &state,
+            true,
+            "org_test",
+            "user_test",
+            Some("capability-bearer"),
+            &tool_call(
+                "skill_file",
+                r#"{"skill":"Deploy Runbook","path":"../secret.env"}"#,
+            ),
+        )
+        .await;
+        let error = outcome.error.unwrap_or_default();
+        assert!(
+            error.contains("'..'"),
+            "expected the traversal reason, got {error:?}"
+        );
+    }
+
+    /// With the switch off the tool says so, before any skill is resolved.
+    #[tokio::test]
+    async fn skill_file_says_so_while_its_switch_is_off() {
+        let state = crate::state::AppState::new();
+        let outcome = skill_file_outcome(
+            &state,
+            false,
+            "org_test",
+            "user_test",
+            Some("capability-bearer"),
+            &tool_call("skill_file", r#"{"skill":"Deploy Runbook"}"#),
+        )
+        .await;
+        let error = outcome.error.unwrap_or_default();
+        assert!(error.contains("not enabled"), "{error:?}");
+    }
+
+    /// Every bundle read carries the verified capability credential. Without one
+    /// nothing is read, because an unauthenticated read would look like "no bundle".
+    #[tokio::test]
+    async fn skill_file_without_a_credential_reads_nothing() {
+        let state = crate::state::AppState::new();
+        let outcome = skill_file_outcome(
+            &state,
+            true,
+            "org_test",
+            "user_test",
+            None,
+            &tool_call("skill_file", r#"{"skill":"Deploy Runbook"}"#),
+        )
+        .await;
+        let error = outcome.error.unwrap_or_default();
+        assert!(
+            error.contains("verified capability credential"),
+            "{error:?}"
+        );
+    }
+
+    /// A skill outside this org's catalogue reads no bundle and is reported as absent.
+    #[tokio::test]
+    async fn skill_file_for_an_unknown_skill_reads_nothing() {
+        let state = crate::state::AppState::new();
+        let outcome = skill_file_outcome(
+            &state,
+            true,
+            "org_test",
+            "user_test",
+            Some("capability-bearer"),
+            &tool_call("skill_file", r#"{"skill":"Deploy Runbook"}"#),
+        )
+        .await;
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        let output: serde_json::Value = serde_json::from_str(&outcome.output).expect("valid JSON");
+        assert_eq!(output["status"], "not_found");
+    }
+
+    #[test]
+    fn sha256_hex_is_the_spelling_the_manifest_records() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
     #[tokio::test]
     async fn reattach_context_without_a_thread_says_so() {
         let state = crate::state::AppState::new();
@@ -12475,6 +14466,7 @@ mod tests {
             &tool_call("reattach_context", "{}"),
             None,
             None,
+            crate::retrieval::data_plane_zdr_mode(true, false),
         )
         .await;
         let error = outcome.error.unwrap_or_default();
@@ -12512,6 +14504,7 @@ mod tests {
             &tool_call("reattach_context", "{}"),
             None,
             None,
+            crate::retrieval::data_plane_zdr_mode(true, false),
         )
         .await;
         let error = outcome.error.clone().unwrap_or_default();
@@ -12706,6 +14699,7 @@ mod tests {
             &tool_call("knowledge_search", "{}"),
             None,
             None,
+            crate::retrieval::data_plane_zdr_mode(true, false),
         )
         .await;
         let error = outcome.error.unwrap_or_default();
@@ -12713,5 +14707,753 @@ mod tests {
             error.contains("was NOT called"),
             "validation must run before the arm's own credential check: {error}"
         );
+    }
+
+    /// The inline loop and execution-core's loop stay separate (postmortem 0001):
+    /// this one refuses side effects by `inline_tool_allowed`, and must never start
+    /// reading the registry's declared classes, or a mis-declared `read` would let
+    /// an MCP tool run here with no approval workflow around it. The needles are
+    /// built at run time so this test does not contain what it forbids.
+    #[test]
+    fn the_inline_loop_ignores_the_registry_classes() {
+        let source = include_str!("tool_loop.rs");
+        let code: String = source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for needle in [
+            ["tool", "_class"].concat(),
+            ["Resolve", "ToolBindings"].concat(),
+            ["Tool", "ClassGate"].concat(),
+        ] {
+            let mentions = code.matches(needle.as_str()).count();
+            // The test module names each needle once, in the array above, split.
+            assert_eq!(mentions, 0, "tool_loop.rs mentions `{needle}`");
+        }
+    }
+
+    /// A page of `chars` ASCII characters with the screening verdict the fetch
+    /// arm would have recorded on the complete body.
+    fn screened_page(
+        posture: crate::moderation::ScreeningPosture,
+        chars: usize,
+    ) -> (String, crate::moderation::ToolProvenance) {
+        let page: String = (0..chars)
+            .map(|i| char::from(b'a' + u8::try_from(i % 26).unwrap_or(0)))
+            .collect();
+        let provenance = crate::moderation::ToolProvenance {
+            trust: crate::moderation::TrustClass::ExternalWeb,
+            screening: crate::moderation::ScreeningOutcome {
+                posture,
+                content_hash: crate::moderation::content_hash(page.as_bytes()),
+                rule_ids: Vec::new(),
+            },
+        };
+        (page, provenance)
+    }
+
+    #[tokio::test]
+    async fn a_fetched_page_over_the_cut_is_readable_by_range() {
+        use crate::moderation::ScreeningPosture;
+        use crate::tool_result_handles::{HandleQuery, ResultKind, TextRange};
+
+        let state = crate::state::AppState::new();
+        let (page, provenance) = screened_page(ScreeningPosture::Clean, 10_000);
+
+        let handle = park_extended_result(
+            &state,
+            "org",
+            "user",
+            true,
+            "fetch_url",
+            ResultKind::Text,
+            &page,
+            MAX_FETCH_CHARS,
+            &provenance,
+        )
+        .expect("a page past the cut is parked");
+        assert_eq!(handle.kind, ResultKind::Text);
+
+        let resolved = state
+            .tool_results
+            .resolve("org", "user", &handle.handle_id)
+            .expect("the handle resolves for the user that fetched it");
+        let window = crate::tool_result_handles::apply_text_query(
+            resolved.payload.as_str().unwrap_or_default(),
+            &HandleQuery {
+                range: Some(TextRange {
+                    offset: 4_000,
+                    length: 4_000,
+                }),
+                ..HandleQuery::default()
+            },
+        )
+        .expect("a range read of a text result");
+        assert_eq!(window["returned_chars"], 4_000);
+        assert_eq!(window["has_more"], true);
+        assert_eq!(window["text"], &page[4_000..8_000]);
+    }
+
+    #[tokio::test]
+    async fn an_injection_flagged_page_stays_flagged_on_every_read_back() {
+        use crate::moderation::{ScreeningPosture, TrustClass};
+        use crate::tool_result_handles::ResultKind;
+
+        let state = crate::state::AppState::new();
+        let (page, mut provenance) = screened_page(ScreeningPosture::Flagged, 10_000);
+        provenance.screening.rule_ids = vec!["injection_marker"];
+        let handle = park_extended_result(
+            &state,
+            "org",
+            "user",
+            true,
+            "fetch_url",
+            ResultKind::Text,
+            &page,
+            MAX_FETCH_CHARS,
+            &provenance,
+        )
+        .expect("parked");
+
+        // Two separate read-backs, as two `result_query` ranges would be.
+        for _ in 0..2 {
+            let resolved = state
+                .tool_results
+                .resolve("org", "user", &handle.handle_id)
+                .expect("resolves");
+            let replayed = read_back_provenance(&resolved, "a slice of the page");
+            assert_eq!(replayed.screening.posture, ScreeningPosture::Flagged);
+            assert_eq!(replayed.screening.rule_ids, vec!["injection_marker"]);
+            assert_eq!(replayed.trust, TrustClass::ExternalWeb);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_zdr_fetch_is_never_parked() {
+        use crate::moderation::ScreeningPosture;
+        use crate::tool_result_handles::ResultKind;
+
+        let state = crate::state::AppState::new();
+        let (page, provenance) = screened_page(ScreeningPosture::Clean, 10_000);
+
+        // A ZDR or waived turn never gets the switch, whatever it is set to.
+        assert!(!external_parking_allowed(true));
+        let parked = park_extended_result(
+            &state,
+            "org",
+            "user",
+            external_parking_allowed(true),
+            "fetch_url",
+            ResultKind::Text,
+            &page,
+            MAX_FETCH_CHARS,
+            &provenance,
+        );
+        assert!(parked.is_none());
+        assert!(state.tool_results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_colleague_cannot_read_another_users_page_handle() {
+        use crate::moderation::ScreeningPosture;
+        use crate::tool_result_handles::ResultKind;
+
+        let state = crate::state::AppState::new();
+        let (page, provenance) = screened_page(ScreeningPosture::Clean, 10_000);
+        let handle = park_extended_result(
+            &state,
+            "org",
+            "user_a",
+            true,
+            "fetch_url",
+            ResultKind::Text,
+            &page,
+            MAX_FETCH_CHARS,
+            &provenance,
+        )
+        .expect("parked");
+
+        assert!(state
+            .tool_results
+            .resolve("org", "user_a", &handle.handle_id)
+            .is_some());
+        assert!(state
+            .tool_results
+            .resolve("org", "user_b", &handle.handle_id)
+            .is_none());
+        assert!(state
+            .tool_results
+            .resolve("org_b", "user_a", &handle.handle_id)
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn an_external_page_with_no_real_scan_is_never_parked() {
+        use crate::moderation::ScreeningPosture;
+        use crate::tool_result_handles::ResultKind;
+
+        let state = crate::state::AppState::new();
+        for posture in [
+            ScreeningPosture::NotApplicable,
+            ScreeningPosture::PolicyDisabled,
+        ] {
+            let (page, provenance) = screened_page(posture, 10_000);
+            let parked = park_extended_result(
+                &state,
+                "org",
+                "user",
+                true,
+                "fetch_url",
+                ResultKind::Text,
+                &page,
+                MAX_FETCH_CHARS,
+                &provenance,
+            );
+            assert!(parked.is_none(), "{posture:?} must stay inline");
+        }
+        assert!(state.tool_results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_result_within_the_cut_or_not_queryable_stays_inline() {
+        use crate::moderation::ScreeningPosture;
+        use crate::tool_result_handles::ResultKind;
+
+        let state = crate::state::AppState::new();
+        let (short, provenance) = screened_page(ScreeningPosture::Clean, MAX_FETCH_CHARS);
+        assert!(park_extended_result(
+            &state,
+            "org",
+            "user",
+            true,
+            "fetch_url",
+            ResultKind::Text,
+            &short,
+            MAX_FETCH_CHARS,
+            &provenance,
+        )
+        .is_none());
+
+        // A JSON handle over text that does not parse could promise no query surface.
+        let (unparseable, provenance) = screened_page(ScreeningPosture::Clean, 10_000);
+        assert!(park_extended_result(
+            &state,
+            "org",
+            "user",
+            true,
+            "web_search",
+            ResultKind::Json,
+            &unparseable,
+            MAX_TOOL_OUTPUT_CHARS,
+            &provenance,
+        )
+        .is_none());
+        assert!(state.tool_results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_oversized_web_search_result_parks_as_a_queryable_json_handle() {
+        use crate::moderation::ScreeningPosture;
+        use crate::tool_result_handles::{FilterOp, HandleQuery, ResultKind, RowFilter};
+
+        let state = crate::state::AppState::new();
+        let text = oversized_rows_json();
+        let (_, provenance) = screened_page(ScreeningPosture::Clean, 1);
+        let handle = park_extended_result(
+            &state,
+            "org",
+            "user",
+            true,
+            "web_search",
+            ResultKind::Json,
+            &text,
+            MAX_TOOL_OUTPUT_CHARS,
+            &provenance,
+        )
+        .expect("parked");
+        assert_eq!(handle.row_count, Some(400));
+
+        let resolved = state
+            .tool_results
+            .resolve("org", "user", &handle.handle_id)
+            .expect("resolves");
+        let slice = crate::tool_result_handles::apply_query(
+            &resolved.payload,
+            &HandleQuery {
+                filter: Some(RowFilter {
+                    field: "id".to_owned(),
+                    op: FilterOp::Eq,
+                    value: serde_json::json!(7),
+                }),
+                ..HandleQuery::default()
+            },
+        )
+        .expect("row query");
+        assert_eq!(slice["matched_rows"], 1);
+    }
+
+    #[test]
+    fn the_range_argument_is_advertised_only_when_extended_parking_is_on() {
+        let untouched = builtin_tool_defs();
+        let mut off = builtin_tool_defs();
+        advertise_text_range(&mut off, false);
+        for (before, after) in untouched.iter().zip(off.iter()) {
+            assert_eq!(before.parameters_json, after.parameters_json);
+        }
+
+        let mut on = builtin_tool_defs();
+        advertise_text_range(&mut on, true);
+        let mut seen = 0;
+        for def in on.iter().filter(|def| def.name == "result_query") {
+            seen += 1;
+            let schema: Value = serde_json::from_str(&def.parameters_json).expect("json schema");
+            assert_eq!(
+                schema["properties"]["range"]["properties"]["length"]["type"],
+                "integer"
+            );
+        }
+        assert!(seen > 0, "result_query is advertised");
+    }
+
+    /// The inference core a decision-round test serves. It keeps every `Infer` request and
+    /// answers each with no tool call, which ends the tool phase after its first decision.
+    /// The loop makes no other RPC, so every other method refuses.
+    #[derive(Default)]
+    struct RecordingCore(std::sync::Arc<std::sync::Mutex<Vec<mpv1::InferRequest>>>);
+
+    type RecordedInferStream = std::pin::Pin<
+        Box<dyn futures::Stream<Item = Result<mpv1::InferChunk, tonic::Status>> + Send>,
+    >;
+    type RecordedVideoStream = std::pin::Pin<
+        Box<
+            dyn futures::Stream<
+                    Item = Result<mpv1::StreamVideoGenerationContentResponse, tonic::Status>,
+                > + Send,
+        >,
+    >;
+
+    #[tonic::async_trait]
+    impl mpv1::inference_core_server::InferenceCore for RecordingCore {
+        type InferStreamStream = RecordedInferStream;
+        type StreamVideoGenerationContentStream = RecordedVideoStream;
+
+        async fn infer(
+            &self,
+            request: tonic::Request<mpv1::InferRequest>,
+        ) -> Result<tonic::Response<mpv1::InferResponse>, tonic::Status> {
+            self.0.lock().expect("recorded requests").push(request.into_inner());
+            Ok(tonic::Response::new(mpv1::InferResponse {
+                model_used: "mock".to_owned(),
+                stop_reason: "end_turn".to_owned(),
+                ..Default::default()
+            }))
+        }
+
+        async fn infer_stream(
+            &self,
+            _: tonic::Request<mpv1::InferRequest>,
+        ) -> Result<tonic::Response<RecordedInferStream>, tonic::Status> {
+            Err(tonic::Status::unimplemented("infer_stream"))
+        }
+        async fn create_embedding(
+            &self,
+            _: tonic::Request<mpv1::CreateEmbeddingRequest>,
+        ) -> Result<tonic::Response<mpv1::CreateEmbeddingResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("create_embedding"))
+        }
+        async fn get_model_access(
+            &self,
+            _: tonic::Request<mpv1::GetModelAccessRequest>,
+        ) -> Result<tonic::Response<mpv1::GetModelAccessResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("get_model_access"))
+        }
+        async fn list_models(
+            &self,
+            _: tonic::Request<mpv1::ListModelsRequest>,
+        ) -> Result<tonic::Response<mpv1::ListModelsResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("list_models"))
+        }
+        async fn synthesize_speech(
+            &self,
+            _: tonic::Request<mpv1::SynthesizeSpeechRequest>,
+        ) -> Result<tonic::Response<mpv1::SynthesizeSpeechResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("synthesize_speech"))
+        }
+        async fn transcribe_speech(
+            &self,
+            _: tonic::Request<mpv1::TranscribeSpeechRequest>,
+        ) -> Result<tonic::Response<mpv1::TranscribeSpeechResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("transcribe_speech"))
+        }
+        async fn list_speech_voices(
+            &self,
+            _: tonic::Request<mpv1::ListSpeechVoicesRequest>,
+        ) -> Result<tonic::Response<mpv1::ListSpeechVoicesResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("list_speech_voices"))
+        }
+        async fn translate_text(
+            &self,
+            _: tonic::Request<mpv1::TranslateTextRequest>,
+        ) -> Result<tonic::Response<mpv1::TranslateTextResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("translate_text"))
+        }
+        async fn batch_translate_text(
+            &self,
+            _: tonic::Request<mpv1::BatchTranslateTextRequest>,
+        ) -> Result<tonic::Response<mpv1::BatchTranslateTextResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("batch_translate_text"))
+        }
+        async fn detect_text_language(
+            &self,
+            _: tonic::Request<mpv1::DetectTextLanguageRequest>,
+        ) -> Result<tonic::Response<mpv1::DetectTextLanguageResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("detect_text_language"))
+        }
+        async fn list_translation_languages(
+            &self,
+            _: tonic::Request<mpv1::ListTranslationLanguagesRequest>,
+        ) -> Result<tonic::Response<mpv1::ListTranslationLanguagesResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("list_translation_languages"))
+        }
+        async fn generate_image(
+            &self,
+            _: tonic::Request<mpv1::GenerateImageRequest>,
+        ) -> Result<tonic::Response<mpv1::GenerateImageResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("generate_image"))
+        }
+        async fn analyze_image(
+            &self,
+            _: tonic::Request<mpv1::AnalyzeImageRequest>,
+        ) -> Result<tonic::Response<mpv1::AnalyzeImageResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("analyze_image"))
+        }
+        async fn extract_image_text(
+            &self,
+            _: tonic::Request<mpv1::ExtractImageTextRequest>,
+        ) -> Result<tonic::Response<mpv1::ExtractImageTextResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("extract_image_text"))
+        }
+        async fn analyze_document(
+            &self,
+            _: tonic::Request<mpv1::AnalyzeDocumentRequest>,
+        ) -> Result<tonic::Response<mpv1::AnalyzeDocumentResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("analyze_document"))
+        }
+        async fn analyze_language(
+            &self,
+            _: tonic::Request<mpv1::AnalyzeLanguageRequest>,
+        ) -> Result<tonic::Response<mpv1::AnalyzeLanguageResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("analyze_language"))
+        }
+        async fn create_realtime_session(
+            &self,
+            _: tonic::Request<mpv1::CreateRealtimeSessionRequest>,
+        ) -> Result<tonic::Response<mpv1::CreateRealtimeSessionResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("create_realtime_session"))
+        }
+        async fn create_video_generation_job(
+            &self,
+            _: tonic::Request<mpv1::CreateVideoGenerationJobRequest>,
+        ) -> Result<tonic::Response<mpv1::CreateVideoGenerationJobResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("create_video_generation_job"))
+        }
+        async fn get_video_generation_job(
+            &self,
+            _: tonic::Request<mpv1::GetVideoGenerationJobRequest>,
+        ) -> Result<tonic::Response<mpv1::GetVideoGenerationJobResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("get_video_generation_job"))
+        }
+        async fn stream_video_generation_content(
+            &self,
+            _: tonic::Request<mpv1::StreamVideoGenerationContentRequest>,
+        ) -> Result<tonic::Response<RecordedVideoStream>, tonic::Status> {
+            Err(tonic::Status::unimplemented("stream_video_generation_content"))
+        }
+    }
+
+    /// Serves `core` on a loopback port and returns a client connected to it.
+    async fn serve_recording_core(
+        core: RecordingCore,
+    ) -> mpv1::inference_core_client::InferenceCoreClient<tonic::transport::Channel> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the recording core");
+        let addr = listener.local_addr().expect("recording core address");
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(mpv1::inference_core_server::InferenceCoreServer::new(core))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .ok();
+        });
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+            .expect("recording core endpoint")
+            .connect()
+            .await
+            .expect("connect to the recording core");
+        mpv1::inference_core_client::InferenceCoreClient::new(channel)
+    }
+
+    /// The first decision request a tool loop sends for `base_messages` with the plan
+    /// `prompt_tiers`. The decision round proposes no call, so the loop ends there.
+    async fn first_decision_request(
+        base_messages: Vec<ChatMessage>,
+        prompt_tiers: Option<mpv1::PromptTierPlan>,
+    ) -> mpv1::InferRequest {
+        let core = RecordingCore::default();
+        let sent = core.0.clone();
+        let mut state = crate::state::AppState::new();
+        state.inference_client = serve_recording_core(core).await;
+        let tools = vec![ToolDefinition {
+            name: "fetch_url".to_owned(),
+            description: "Fetch a page.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+        }];
+        let rounds = run_tool_rounds_for_model(
+            &state,
+            "req-decision",
+            "run-decision",
+            "org_test",
+            "user_test",
+            "thread_test",
+            "",
+            None,
+            None,
+            "",
+            "",
+            None,
+            None,
+            false,
+            None,
+            false,
+            0,
+            "gpt-4o-mini",
+            "",
+            "openai",
+            "",
+            base_messages,
+            tools,
+            "auto".to_owned(),
+            None,
+            None,
+            None,
+            &crate::vision::parts::ImageParts::none(),
+            prompt_tiers,
+        )
+        .await;
+        assert!(rounds.is_ok(), "the decision round ends the tool phase without an error");
+        let mut sent = sent.lock().expect("recorded requests");
+        assert!(!sent.is_empty(), "the decision round reached the inference core");
+        sent.swap_remove(0)
+    }
+
+    /// A standing head of two system blocks and one user turn, as the composer leaves it.
+    fn composed_turn_head() -> Vec<ChatMessage> {
+        vec![
+            ChatMessage {
+                role: "system".to_owned(),
+                content: "standing text".to_owned(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "system".to_owned(),
+                content: "authored instructions".to_owned(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "user".to_owned(),
+                content: "hello".to_owned(),
+                ..Default::default()
+            },
+        ]
+    }
+
+    #[tokio::test]
+    async fn a_decision_round_carries_the_composed_plan_while_its_head_is_intact() {
+        let plan = mpv1::PromptTierPlan {
+            stable_messages: 1,
+            context_messages: 1,
+        };
+        let request = Box::pin(first_decision_request(composed_turn_head(), Some(plan))).await;
+        let sent = request
+            .prompt_tiers
+            .map(|plan| (plan.stable_messages, plan.context_messages));
+        assert_eq!(sent, Some((1, 1)));
+    }
+
+    #[tokio::test]
+    async fn a_decision_round_sends_no_plan_when_the_caller_passes_none() {
+        let request = Box::pin(first_decision_request(composed_turn_head(), None)).await;
+        assert_eq!(request.prompt_tiers, None);
+    }
+
+    #[tokio::test]
+    async fn a_plan_that_counts_a_non_system_message_is_not_sent() {
+        let mut head = composed_turn_head();
+        head[0].role = "user".to_owned();
+        let plan = mpv1::PromptTierPlan {
+            stable_messages: 1,
+            context_messages: 0,
+        };
+        let request = Box::pin(first_decision_request(head, Some(plan))).await;
+        assert_eq!(request.prompt_tiers, None);
+    }
+}
+
+#[cfg(test)]
+mod connector_scope_tests {
+    use super::*;
+    use mp_contracts::provider_reads::{read_tool_parameters_json, READ_TOOL_NAME};
+
+    fn client_copy() -> ToolDefinition {
+        ToolDefinition {
+            name: READ_TOOL_NAME.to_owned(),
+            description: "a client's own description".to_owned(),
+            parameters_json: r#"{"type":"object"}"#.to_owned(),
+        }
+    }
+
+    #[test]
+    fn the_loop_drops_a_client_copy_and_offers_only_the_offered_read() {
+        let other = ToolDefinition {
+            name: "count_words".to_owned(),
+            description: String::new(),
+            parameters_json: "{}".to_owned(),
+        };
+        let closed = tools_for_connector_scope(vec![client_copy(), other.clone()], false);
+        assert!(closed.iter().all(|tool| tool.name != READ_TOOL_NAME));
+        let open = tools_for_connector_scope(vec![client_copy(), other], true);
+        let reads: Vec<&ToolDefinition> = open
+            .iter()
+            .filter(|tool| tool.name == READ_TOOL_NAME)
+            .collect();
+        assert_eq!(reads.len(), 1, "one read, the server's own");
+        assert_eq!(reads[0].parameters_json, read_tool_parameters_json());
+        assert_eq!(
+            open.last().map(|tool| tool.name.as_str()),
+            Some(READ_TOOL_NAME),
+            "the read is appended last"
+        );
+    }
+
+    #[test]
+    fn connector_read_is_allowed_only_under_auto() {
+        use crate::normalize::RetrievalScope;
+        assert!(tool_allowed_for_retrieval_scope(READ_TOOL_NAME, RetrievalScope::Auto));
+        assert!(!tool_allowed_for_retrieval_scope(
+            READ_TOOL_NAME,
+            RetrievalScope::KnowledgeOnly
+        ));
+        assert!(!tool_allowed_for_retrieval_scope(
+            READ_TOOL_NAME,
+            RetrievalScope::WebOnly
+        ));
+    }
+
+    #[test]
+    fn inline_loop_still_denies_mcp_and_writes() {
+        for name in [
+            "mcp__github__create_issue",
+            "mcp__srv__a__b",
+            "mcp_call",
+            "mcp_catalog",
+            "save_memory",
+            "browser_agent",
+            "execute_provider_action",
+        ] {
+            assert!(!inline_tool_allowed(name), "{name} must stay out of the Ask loop");
+        }
+        assert!(
+            inline_tool_allowed(READ_TOOL_NAME),
+            "the one connected-account read is dispatchable"
+        );
+    }
+}
+
+#[cfg(test)]
+mod skill_mount_tests {
+    use super::*;
+
+    const DIGEST_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const DIGEST_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn bundle(skill_id: &str, digest: &str) -> SkillBundleSummary {
+        SkillBundleSummary {
+            skill_id: skill_id.to_owned(),
+            manifest_sha256: digest.to_owned(),
+            file_count: 2,
+            total_bytes: 10,
+            created_by: "admin".to_owned(),
+            created_at: "2026-10-01T00:00:00Z".to_owned(),
+        }
+    }
+
+    fn matched(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(id, name)| ((*id).to_owned(), (*name).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn skill_mounts_come_from_matched_skills_only() {
+        let turn = matched(&[("skill-a", "Deploy Runbook")]);
+        // skill-c has a bundle, but the turn did not match it, so it is never mounted.
+        let bundles = [bundle("skill-c", DIGEST_B), bundle("skill-a", DIGEST_A)];
+        assert_eq!(
+            skill_mounts_from_bundles(&turn, &bundles),
+            vec![SkillMount {
+                skill_id: "skill-a".to_owned(),
+                name: "deploy-runbook".to_owned(),
+                manifest_sha256: DIGEST_A.to_owned(),
+            }]
+        );
+        assert!(skill_mounts_from_bundles(&turn, &[bundle("skill-c", DIGEST_B)]).is_empty());
+    }
+
+    #[test]
+    fn a_mount_name_is_a_slug_and_a_reserved_name_is_never_mounted() {
+        assert_eq!(mount_name_for("Deploy Runbook!!").as_deref(), Some("deploy-runbook"));
+        assert_eq!(mount_name_for("  Budget_2026  ").as_deref(), Some("budget-2026"));
+        assert_eq!(mount_name_for("Skills"), None);
+        assert_eq!(mount_name_for("Attachments"), None);
+        assert_eq!(mount_name_for("!!!"), None);
+        let long = "a".repeat(80);
+        assert_eq!(mount_name_for(&long).map(|name| name.len()), Some(48));
+    }
+
+    #[test]
+    fn mounts_are_capped_deduplicated_and_digest_checked() {
+        let turn = matched(&[
+            ("s1", "Docx"),
+            ("s2", "Docx"),
+            ("s3", "Xlsx"),
+            ("s4", "Pdf"),
+            ("s5", "Slides"),
+        ]);
+        let bundles = [
+            bundle("s1", DIGEST_A),
+            bundle("s2", DIGEST_B),
+            bundle("s3", DIGEST_B),
+            bundle("s4", DIGEST_B),
+            bundle("s5", DIGEST_A),
+        ];
+        let names: Vec<String> = skill_mounts_from_bundles(&turn, &bundles)
+            .into_iter()
+            .map(|mount| mount.name)
+            .collect();
+        // The second "Docx" repeats a name and is skipped; the cap of three ends the list.
+        assert_eq!(names, ["docx", "xlsx", "pdf"]);
+        let malformed = [bundle("s1", "not-a-digest")];
+        assert!(skill_mounts_from_bundles(&matched(&[("s1", "Docx")]), &malformed).is_empty());
+    }
+
+    #[test]
+    fn the_switch_is_read_strictly() {
+        assert!(skill_bundle_mounts_enabled_from(Some("true")));
+        for raw in [None, Some(""), Some("True"), Some(" true"), Some("1"), Some("yes")] {
+            assert!(!skill_bundle_mounts_enabled_from(raw), "{raw:?}");
+        }
     }
 }

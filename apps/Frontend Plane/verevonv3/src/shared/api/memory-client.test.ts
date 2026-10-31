@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { correctMemory, deleteMemory, listMemories } from './memory-client'
+import {
+  correctMemory,
+  deleteMemory,
+  getMemoryControls,
+  listMemories,
+  rememberMemory,
+  resetMemory,
+  setMemoryState,
+} from './memory-client'
 
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -181,5 +189,134 @@ describe('correctMemory', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ memory_id: 'mem_2', deleted: false, original: 'removed' })))
     const result = await correctMemory('mem_1', 'thread-1', 'x')
     expect(result).toMatchObject({ deleted: false, original: 'not_removed' })
+  })
+})
+
+describe('memory controls', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('reads the state and the decision taken from it', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        state: 'paused',
+        reason: 'user_paused',
+        use_allowed: false,
+        generation_allowed: false,
+        org_memory_policy: 'allow',
+        hidden_rows: 0,
+        updated_at: '2026-10-24T10:00:00Z',
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const controls = await getMemoryControls()
+
+    expect((fetchMock.mock.calls[0] as [string])[0]).toBe('/api/v1/memory/controls')
+    expect(controls).toEqual({
+      state: 'paused',
+      reason: 'user_paused',
+      useAllowed: false,
+      generationAllowed: false,
+      orgMemoryPolicy: 'allow',
+      hiddenRows: 0,
+      updatedAt: '2026-10-24T10:00:00Z',
+    })
+  })
+
+  it('never reads an unknown state as on, or a missing flag as allowed', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ state: 'dormant', reason: 'new_reason' })))
+
+    const controls = await getMemoryControls()
+
+    expect(controls.state).toBeNull()
+    expect(controls.reason).toBe('unknown')
+    expect(controls.useAllowed).toBe(false)
+    expect(controls.generationAllowed).toBe(false)
+  })
+
+  it('sends only the state with PUT', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ state: 'off', reason: 'user_off', hidden_rows: 3 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const controls = await setMemoryState('off')
+
+    const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(path).toBe('/api/v1/memory/controls')
+    expect(init.method).toBe('PUT')
+    expect(JSON.parse(String(init.body))).toEqual({ state: 'off' })
+    expect(controls).toMatchObject({ state: 'off', hiddenRows: 3 })
+  })
+
+  it('surfaces a refusal instead of pretending the state changed', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue(
+          jsonResponse({ error: { code: 'memory_controls_unavailable', message: 'zero data retention' } }, 409),
+        ),
+    )
+
+    await expect(setMemoryState('paused')).rejects.toThrow('zero data retention')
+  })
+})
+
+describe('resetMemory', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('always sends confirm: true and reports what was erased', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({ durable_deleted: 4, semantic_unconfirmed: 1, degraded: true, degradation_reason: 'LETTA' }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await resetMemory()
+
+    const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(path).toBe('/api/v1/memory/reset')
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(String(init.body))).toEqual({ confirm: true })
+    expect(result).toEqual({
+      durableDeleted: 4,
+      semanticUnconfirmed: 1,
+      degraded: true,
+      degradationReason: 'LETTA',
+    })
+  })
+})
+
+describe('rememberMemory', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('posts the thread and content and returns the new id', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ memory_id: 'mem_9', degraded: false }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const saved = await rememberMemory('thread-1', 'Jeg heter Ima')
+
+    const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(path).toBe('/api/v1/memory')
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(String(init.body))).toEqual({ threadId: 'thread-1', content: 'Jeg heter Ima' })
+    expect(saved).toEqual({ memoryId: 'mem_9' })
+  })
+
+  it('rejects while memory is paused', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue(
+          jsonResponse({ error: { code: 'memory_not_enabled', message: 'memory_not_enabled:user_paused' } }, 409),
+        ),
+    )
+
+    await expect(rememberMemory('thread-1', 'x')).rejects.toThrow('memory_not_enabled')
   })
 })

@@ -12,7 +12,7 @@ import (
 // A failed upsert surfaces in the review consumer's retry log, so its error
 // must not quote the generated skill.
 func TestPersist_RpcErrorNamesPositionNotSkill(t *testing.T) {
-	sink := NewSessionCoreSink(&fakeUpserter{err: errors.New("rpc down")}, "org1")
+	sink := NewSessionCoreSink(&fakeUpserter{err: errors.New("rpc down")}, "org1", "user-1", "run-1", "thread-1")
 	_, err := sink.Persist(context.Background(), []learning.SkillCandidate{
 		{Name: "Quote for customer-secret-7731", Content: "c"},
 	})

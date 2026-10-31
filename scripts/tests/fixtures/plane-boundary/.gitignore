@@ -1,0 +1,2 @@
+# The root .gitignore ignores .env*; these fixtures need their .env.example files tracked.
+!.env.example

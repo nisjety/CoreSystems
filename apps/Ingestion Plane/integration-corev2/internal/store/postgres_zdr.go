@@ -259,6 +259,22 @@ func (r *PostgresRepository) InsertConnectionZDRAcknowledgement(ctx context.Cont
 		if record.Digest != in.Digest {
 			return ErrConflict
 		}
+		// The connection is read again in a statement of its own. The lock statement above read the
+		// connection from the snapshot taken before the record lock was granted, so a removal that
+		// committed while this insert waited (a removal revokes under that same lock) is visible only
+		// here. This read takes no lock: locking the connection row here would invert the removal's
+		// lock order and could deadlock.
+		var removedAt *time.Time
+		err = q.QueryRow(ctx, `SELECT deleted_at FROM integration_connections WHERE id = $1`, in.ConnectionID).Scan(&removedAt)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("re-read connection for zdr acknowledgement: %w", err)
+		}
+		if removedAt != nil {
+			return ErrNotFound
+		}
 		id := strings.TrimSpace(in.ID)
 		if id == "" {
 			id = "zdrack_" + uuid.NewString()
@@ -327,13 +343,103 @@ func (r *PostgresRepository) RevokeConnectionZDRAcknowledgements(ctx context.Con
 	if at.IsZero() {
 		at = time.Now().UTC()
 	}
-	rows, err := r.pool.Query(ctx, `
-		UPDATE integration_connection_zdr_acknowledgements
-		SET revoked_at = $2, revoke_reason = $3
-		WHERE connection_id = $1 AND revoked_at IS NULL
-		RETURNING `+zdrAcknowledgementColumnList, connectionID, at.UTC(), reason)
+	var revoked []ConnectionZDRAcknowledgement
+	err := r.inTransaction(ctx, func(q zdrQuerier) error {
+		// Lock the record exclusively, as ApplyConnectionZDRAssessment does. An acknowledgement
+		// insert holds the record shared until it commits, so this waits for an insert in flight and
+		// then revokes its row; a later insert finds the connection removed and refuses.
+		if err := lockConnectionZDRRecord(ctx, q, connectionID); err != nil {
+			return err
+		}
+		rows, err := q.Query(ctx, `
+			UPDATE integration_connection_zdr_acknowledgements
+			SET revoked_at = $2, revoke_reason = $3
+			WHERE connection_id = $1 AND revoked_at IS NULL
+			RETURNING `+zdrAcknowledgementColumnList, connectionID, at.UTC(), reason)
+		if err != nil {
+			return fmt.Errorf("revoke zdr acknowledgements: %w", err)
+		}
+		revoked, err = collectZDRAcknowledgements(rows)
+		return err
+	})
 	if err != nil {
-		return nil, fmt.Errorf("revoke zdr acknowledgements: %w", err)
+		return nil, err
 	}
-	return collectZDRAcknowledgements(rows)
+	return revoked, nil
+}
+
+// lockConnectionZDRRecord takes the connection's record row exclusively when it has one. A
+// connection with no record has no acknowledgement that could race with it.
+func lockConnectionZDRRecord(ctx context.Context, q zdrQuerier, connectionID string) error {
+	var locked string
+	err := q.QueryRow(ctx, `SELECT connection_id FROM integration_connection_zdr WHERE connection_id = $1 FOR UPDATE`, connectionID).Scan(&locked)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("lock connection zdr record: %w", err)
+	}
+	return nil
+}
+
+func (r *PostgresRepository) PurgeOrganizationConnectionZDR(ctx context.Context, organizationID string) (ConnectionZDRPurgeResult, error) {
+	organizationID = strings.TrimSpace(organizationID)
+	if organizationID == "" {
+		return ConnectionZDRPurgeResult{}, invalidZDR("organization id is required")
+	}
+	var result ConnectionZDRPurgeResult
+	err := r.inTransaction(ctx, func(q zdrQuerier) error {
+		// The records go first: deleting a record takes its row lock, so an acknowledgement insert
+		// that holds it shared finishes before this runs, and any later insert finds no record.
+		recordTag, err := q.Exec(ctx, `
+			DELETE FROM integration_connection_zdr AS z
+			USING integration_connections AS c
+			WHERE c.id = z.connection_id AND c.organization_id = $1`, organizationID)
+		if err != nil {
+			return fmt.Errorf("purge connection zdr records: %w", err)
+		}
+		ackTag, err := q.Exec(ctx, `
+			DELETE FROM integration_connection_zdr_acknowledgements
+			WHERE organization_id = $1`, organizationID)
+		if err != nil {
+			return fmt.Errorf("purge zdr acknowledgements: %w", err)
+		}
+		result = ConnectionZDRPurgeResult{Records: int(recordTag.RowsAffected()), Acknowledgements: int(ackTag.RowsAffected())}
+		return nil
+	})
+	if err != nil {
+		return ConnectionZDRPurgeResult{}, err
+	}
+	return result, nil
+}
+
+func (r *PostgresRepository) ListOrganizationConnectionZDRAcknowledgements(ctx context.Context, organizationID string, limit int) (ConnectionZDRAcknowledgementList, error) {
+	organizationID = strings.TrimSpace(organizationID)
+	if organizationID == "" {
+		return ConnectionZDRAcknowledgementList{}, invalidZDR("organization id is required")
+	}
+	if limit < 1 {
+		return ConnectionZDRAcknowledgementList{}, invalidZDR("limit must be at least 1")
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT `+zdrAcknowledgementColumnList+`
+		FROM integration_connection_zdr_acknowledgements
+		WHERE organization_id = $1
+		ORDER BY acknowledged_at DESC, id ASC
+		LIMIT $2`, organizationID, limit)
+	if err != nil {
+		return ConnectionZDRAcknowledgementList{}, fmt.Errorf("list organisation zdr acknowledgements: %w", err)
+	}
+	items, err := collectZDRAcknowledgements(rows)
+	if err != nil {
+		return ConnectionZDRAcknowledgementList{}, err
+	}
+	var active, revoked int64
+	if err := r.pool.QueryRow(ctx, `
+		SELECT count(*) FILTER (WHERE revoked_at IS NULL), count(*) FILTER (WHERE revoked_at IS NOT NULL)
+		FROM integration_connection_zdr_acknowledgements
+		WHERE organization_id = $1`, organizationID).Scan(&active, &revoked); err != nil {
+		return ConnectionZDRAcknowledgementList{}, fmt.Errorf("count organisation zdr acknowledgements: %w", err)
+	}
+	return ConnectionZDRAcknowledgementList{Items: items, Active: int(active), Revoked: int(revoked)}, nil
 }

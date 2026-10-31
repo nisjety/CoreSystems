@@ -9,6 +9,7 @@ import * as memoryClient from '@/shared/api/memory-client'
 import {
   __resetPlanDraftsForTests,
   AnswerRegion,
+  AssistantMessage,
   DiffView,
   MemoryRecallNotice,
   PlanApprovalControl,
@@ -722,6 +723,50 @@ describe('QueuedInputStrip', () => {
         .querySelector('.verevon-chat-queued-item')
         ?.getAttribute('data-state'),
     ).toBe('delivered')
+    unmount()
+  })
+})
+
+describe('a pending approval in the transcript', () => {
+  const turn = (): ChatTurn => ({
+    id: 'asst-1',
+    role: 'assistant',
+    content: 'Jeg trenger godkjenning.',
+    createdAt: '2026-10-22T08:00:00.000Z',
+    streaming: false,
+    tools: [],
+    attachments: [],
+    pendingApprovals: [{ id: 'a1', kind: 'APPROVAL_KIND_TOOL_CALL' }],
+  })
+  const message = (docked: { approvals: boolean; plan: boolean } | undefined) =>
+    render(() => (
+      <AssistantMessage
+        copied={false}
+        message={turn()}
+        onBranch={() => {}}
+        onCopy={() => {}}
+        onFeedback={() => Promise.resolve(true)}
+        onRegenerate={() => {}}
+        onApprovalDecision={() => {}}
+        onApprovePlan={() => {}}
+        onViewSteps={() => {}}
+        docked={docked}
+      />
+    ))
+
+  it('keeps the full card where nothing is docked', () => {
+    const { container, unmount } = message(undefined)
+    expect(container.querySelector('.verevon-chat-approval__approve')).not.toBeNull()
+    expect(container.querySelector('.verevon-chat-docked-pointer')).toBeNull()
+    unmount()
+  })
+
+  it('points at the dock instead of repeating the buttons it holds', () => {
+    const { container, unmount } = message({ approvals: true, plan: false })
+    expect(container.querySelector('.verevon-chat-approval__approve')).toBeNull()
+    expect(container.querySelector('.verevon-chat-docked-pointer')?.textContent).toMatch(
+      /Venter på svar, se over skrivefeltet|Waiting for an answer, see above the composer/,
+    )
     unmount()
   })
 })

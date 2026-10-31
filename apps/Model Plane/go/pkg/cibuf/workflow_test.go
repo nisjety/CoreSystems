@@ -78,6 +78,18 @@ func TestBufWorkflowJob(t *testing.T) {
 		if !job.RunsCommand("baseline.binpb") {
 			t.Error("buf breaking must reference baseline.binpb image")
 		}
+		// The path contains a space: an unquoted path is split into two
+		// arguments and buf then lints nothing (found 2026-10: the gate had
+		// never run).
+		if !job.RunsCommand("\"apps/Model Plane/proto\"") {
+			t.Error("buf commands must quote the path apps/Model Plane/proto")
+		}
+		if !job.RunsCommand("\"apps/Model Plane/proto/baseline.binpb\"") {
+			t.Error("the baseline image path must be quoted")
+		}
+		if !job.RunsCommand("buf-lint-ratchet.py") {
+			t.Error("buf lint must run through the ratchet (scripts/gates/buf-lint-ratchet.py)")
+		}
 		found = true
 	}
 	if !found {

@@ -1,4 +1,4 @@
-export { deriveConversationNodes } from './derive'
+export { deriveConversationNodes, nodeKey } from './derive'
 export type { PlanApprovalStatus } from './derive'
 export { createConversationNodeRegistry } from './registry'
 export type { ConversationNodeRegistry } from './registry'
@@ -6,6 +6,7 @@ export type {
   AnswerState,
   ConversationNode,
   ConversationNodeContext,
+  ConversationNodeEntry,
   ConversationNodeDefinition,
   ConversationNodeKind,
 } from './types'

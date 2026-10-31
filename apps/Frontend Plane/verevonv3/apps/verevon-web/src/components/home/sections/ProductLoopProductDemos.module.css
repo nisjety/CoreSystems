@@ -1,0 +1,41 @@
+.controls {
+	opacity: 1;
+	transition: opacity 180ms ease;
+}
+
+@media (hover: hover) {
+	.controls {
+		opacity: 0;
+		pointer-events: none;
+	}
+
+	.card:hover .controls,
+	.card:focus-within .controls {
+		opacity: 1;
+		pointer-events: auto;
+	}
+}
+
+.timeline {
+	appearance: none;
+	height: 4px;
+	border-radius: 999px;
+	cursor: pointer;
+}
+
+.timeline::-webkit-slider-thumb {
+	appearance: none;
+	width: 12px;
+	height: 12px;
+	border: 2px solid #1d1d1b;
+	border-radius: 50%;
+	background: #fff;
+}
+
+.timeline::-moz-range-thumb {
+	width: 9px;
+	height: 9px;
+	border: 2px solid #1d1d1b;
+	border-radius: 50%;
+	background: #fff;
+}

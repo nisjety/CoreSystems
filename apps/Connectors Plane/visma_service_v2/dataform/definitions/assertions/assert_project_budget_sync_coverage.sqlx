@@ -1,0 +1,28 @@
+config {
+  type: "assertion",
+  schema: "visma_assertions",
+  name: "assert_project_budget_sync_coverage",
+  description: "Regression tripwire for the project_budgets sync (fixed 2026-06-05, when controller/api path + duplicate-class + Bug-E + validator required-fields bugs left this endpoint returning 0 rows). Fails if any tenant carries material GL-derived project P&L in the model but has ZERO projectBudget coverage — i.e. the projectBudget sync has broken or gone stale for that tenant. Per-project divergences (untagged-GL like acct 3047/4410) are NOT failures here; inspect them via BI_ProjectBudgetRecon WHERE recon_status = 'amount_divergent'.",
+  tags: ["assertion", "project", "finance", "recon"]
+}
+
+WITH per_tenant AS (
+  SELECT
+    tenant_id,
+    ANY_VALUE(entity_name)                     AS entity_name,
+    SUM(model_income + model_expense)          AS model_pnl,
+    SUM(budget_income + budget_expense)         AS budget_pnl,
+    COUNTIF(in_budget)                          AS budget_projects
+  FROM ${ref("visma_datamart", "BI_ProjectBudgetRecon")}
+  GROUP BY tenant_id
+)
+
+SELECT
+  tenant_id,
+  entity_name,
+  model_pnl,
+  budget_pnl,
+  budget_projects
+FROM per_tenant
+WHERE model_pnl > 100000
+  AND (budget_projects = 0 OR budget_pnl = 0)

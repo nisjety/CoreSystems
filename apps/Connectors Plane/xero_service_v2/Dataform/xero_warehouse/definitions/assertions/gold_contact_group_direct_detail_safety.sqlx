@@ -1,0 +1,11 @@
+config {
+  type: "assertion",
+  name: "xero_gold_contact_group_direct_detail_safety",
+  schema: "dw_1_silver_xero_assertions",
+  description: "Gold contact-group direct-detail evidence may only be reported when the retained same-run scalar reconciliation passed."
+}
+
+SELECT tenant_id, contact_group_id, direct_detail_source_run_id
+FROM ${ref("xero_gold_common", "dim_contact_group")}
+WHERE has_direct_detail_evidence
+  AND is_direct_detail_reconciled IS NOT TRUE

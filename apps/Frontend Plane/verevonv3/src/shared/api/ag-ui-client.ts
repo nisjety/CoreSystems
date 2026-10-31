@@ -17,6 +17,7 @@
 //! is live and independent of this file.
 
 import {
+  AttachmentsNotSentError,
   buildChatWireBody,
   type ChatInvokeRequest,
   type ChatStreamHandlers,
@@ -190,6 +191,12 @@ export function toAgUiEvent(event: VerevonUiEvent): AgUiEvent | null {
       return { ...base, type: 'CUSTOM', name: event.type, value: event }
     case 'run.error':
       return { ...base, type: 'RUN_ERROR', runId: event.runId, requestId: event.requestId, code: event.code, message: event.message }
+    // Lifecycle cues are Verevon's own projection; AG-UI names none for them yet.
+    case 'usage.progress':
+    case 'lifecycle.retry':
+    case 'lifecycle.compaction':
+    case 'lifecycle.context':
+      return null
     case 'unknown':
       return null
   }
@@ -673,11 +680,21 @@ export async function streamAgentUi(
 ): Promise<void> {
   let connError: unknown
 
+  let body: string
+  try {
+    body = JSON.stringify(buildAgentRunInputBody(request))
+  } catch (err) {
+    // Refused locally before any request, the same way streamChat refuses it.
+    if (!(err instanceof AttachmentsNotSentError)) throw err
+    handlers.onRunError?.({ type: 'RUN_ERROR', message: err.message, code: err.code })
+    return
+  }
+
   await readSseStream(
     '/api/v1/ag-ui/stream',
     {
       method: 'POST',
-      body: JSON.stringify(buildAgentRunInputBody(request)),
+      body,
       signal,
       lastEventId,
     },

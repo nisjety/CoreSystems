@@ -13,10 +13,10 @@ use axum::{
 use chrono::Utc;
 use futures::Stream;
 use mp_contracts::model_plane::v1::{
-    orchestration_event, ApprovalKind, ApprovalState, ChatMessage, ContextSegment,
-    GetContextAssemblyRequest, InferRequest, OrchestrationEvent, PlanState, RunAgentRequest,
-    RunAgentResponse, StreamRunEventsRequest, SubagentRole, TodoState, ToolDefinition,
-    VerificationStatus,
+    orchestration_event, ApprovalKind, ApprovalState, CancelRunRequest, ChatMessage,
+    ContextSegment, GetContextAssemblyRequest, InferRequest, OrchestrationEvent, PlanState,
+    RunAgentRequest, RunAgentResponse, StreamRunEventsRequest, SubagentRole, TodoState,
+    ToolDefinition, VerificationStatus,
 };
 use mp_events::{envelope::Envelope, publisher::EventPublisher, subjects};
 use mp_ids::new_ulid;
@@ -25,9 +25,17 @@ use serde_json::{json, Value};
 use tokio_stream::{wrappers::ReceiverStream, StreamExt as _};
 use tracing::info;
 
+// Declared here, not in lib.rs, so this slice stays inside its owned files.
+#[path = "cache_telemetry.rs"]
+pub mod cache_telemetry;
+
+// Declared here for the same reason: WS15 S2's counts-only context frames.
+#[path = "lifecycle_events.rs"]
+pub mod lifecycle_events;
+
 use crate::{
     auth::{
-        Claims, VerifiedCapabilityBearer, VerifiedCostBearer,
+        Claims, VerifiedBrowserBearer, VerifiedCapabilityBearer, VerifiedCostBearer,
         VerifiedDataPlaneBearer as VerifiedBearer, VerifiedExecutionBearer,
         VerifiedInferenceBearer, VerifiedIngestionBearer, VerifiedSandboxBearer,
         VerifiedSessionBearer as VerifiedModelBearer,
@@ -55,17 +63,29 @@ pub struct SseChunk {
 /// meant the eleventh exit path would leak whichever one its author forgot, and
 /// a leaked queue entry accepts a message no loop will ever drain: the user is
 /// told their message was delivered and it never arrives.
+///
+/// A message that was accepted but never taken by the loop (the run ended between two
+/// round boundaries) is the same lie told once, so it is counted and logged here, by count
+/// only: the text is the user's.
 fn finish_stream_registrations(
     cancels: &crate::cancel_registry::CancelRegistry,
     queued_inputs: &crate::queued_input::QueuedInputRegistry,
     request_id: &str,
 ) {
     cancels.finish(request_id);
-    queued_inputs.finish(request_id);
+    let undelivered = queued_inputs.finish(request_id);
+    if undelivered > 0 {
+        metrics::counter!("queued_input_undelivered_total").increment(undelivered as u64);
+        tracing::warn!(
+            %request_id,
+            undelivered,
+            "the run ended with queued messages the loop never took"
+        );
+    }
 }
 
 #[allow(clippy::result_large_err)]
-fn authenticated_session_request<T>(
+pub(crate) fn authenticated_session_request<T>(
     value: T,
     bearer: &VerifiedModelBearer,
 ) -> Result<tonic::Request<T>, tonic::Status> {
@@ -97,6 +117,189 @@ type HttpJsonError = (StatusCode, Json<Value>);
 
 /// One-shot SSE stream that emits a single structured error and closes.
 /// Used to reject a duplicate in-flight stream (chat-parity §1 idempotency).
+/// The switch that lets a Do turn carry attachments (WS08-S6). Opt-in: only the literal `true`
+/// enables it, so a typo or an unset variable keeps today's behaviour.
+const DO_ATTACHMENTS_VAR: &str = "CHAT_DO_ATTACHMENTS_ENABLED";
+
+fn do_attachments_enabled() -> bool {
+    do_attachments_enabled_with(&|key| std::env::var(key).ok())
+}
+
+fn do_attachments_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    get(DO_ATTACHMENTS_VAR).is_some_and(|value| value.trim() == "true")
+}
+
+/// The switch that lets a scoped thread's follow-up turns retrieve under the Space decision the BFF
+/// attaches to `space_append_context` (WS18-S2). Opt-in: only the literal `true` enables it. Off, a
+/// follow-up reads no retrieval decision and keeps today's unscoped retrieval. The BFF's own switch
+/// cannot stand in for this one, because an absent token and an empty one both decode to "".
+const SPACE_APPEND_RETRIEVAL_VAR: &str = "MODEL_GATEWAY_SPACE_APPEND_RETRIEVAL";
+
+fn space_append_retrieval_enabled() -> bool {
+    space_append_retrieval_enabled_with(&|key| std::env::var(key).ok())
+}
+
+fn space_append_retrieval_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    get(SPACE_APPEND_RETRIEVAL_VAR).is_some_and(|value| value == "true")
+}
+
+/// The Space retrieval decision a turn's grounding is scoped by. A scoped thread's first message
+/// carries `space_context`; a later one carries `space_append_context`, which is read only while the
+/// switch is on. An empty token is the BFF's FORBIDDEN answer, which `retrieval::scoped_retrieval_token`
+/// suppresses rather than letting the search run organisation-wide.
+fn space_retrieval_decision<'a>(
+    space_context: Option<&'a crate::session_flow::ThreadSpaceContext>,
+    space_append_context: Option<&'a crate::session_flow::ThreadSpaceContext>,
+    append_enabled: bool,
+) -> Option<&'a str> {
+    let context = if append_enabled {
+        space_context.or(space_append_context)
+    } else {
+        space_context
+    };
+    context.map(|context| context.retrieval_decision_token.as_str())
+}
+
+/// The attachments a Do run carries, as `RunAttachment`s: files (staged read-only for the
+/// run's `code_interpreter` calls) and images (parts of every inference round), decoded once,
+/// measured and hashed, files first. Nothing is dropped: an attachment that cannot be carried
+/// refuses the turn with a typed code. `model_reads_images` is what the catalogue said about
+/// the picked model (`None` = unknown).
+///
+/// # Errors
+/// The typed refusal for the first attachment that cannot be carried, for a zero-retention or
+/// waived turn (`persistence_free`), or for an image the picked model does not read.
+fn do_run_attachments(
+    attachments: &[crate::vision::InvokeAttachment],
+    persistence_free: bool,
+    model_reads_images: Option<bool>,
+) -> Result<Vec<mp_contracts::model_plane::v1::RunAttachment>, crate::attachment_policy::AttachmentRefusal> {
+    use crate::attachment_policy::{AttachmentCode, AttachmentRefusal, IMAGE_MIMES};
+    use base64::Engine as _;
+    use mp_contracts::model_plane::v1::RunAttachmentKind;
+
+    let refuse = |code: AttachmentCode, message: &str| AttachmentRefusal {
+        code,
+        message: message.to_owned(),
+    };
+    if attachments.is_empty() {
+        return Ok(Vec::new());
+    }
+    if persistence_free {
+        return Err(refuse(
+            AttachmentCode::MediaUnsupported,
+            "Attachments are not read on a zero-retention turn.",
+        ));
+    }
+    let mut carried =
+        crate::turn_attachments::ValidatedAttachments::from_invoke(attachments, true, false)?
+            .run_attachments()
+            .to_vec();
+    for (index, attachment) in attachments.iter().enumerate() {
+        if !crate::vision::parts::has_images(std::slice::from_ref(attachment)) {
+            continue;
+        }
+        if model_reads_images == Some(false) {
+            return Err(refuse(
+                AttachmentCode::MediaUnsupported,
+                "The selected model cannot read images in a Do turn. Pick a model that reads images or send the message in Ask mode.",
+            ));
+        }
+        let mime = attachment
+            .mime_type
+            .as_deref()
+            .unwrap_or_default()
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        if !IMAGE_MIMES.contains(&mime.as_str()) {
+            return Err(refuse(
+                AttachmentCode::MediaUnsupported,
+                "Images must be PNG, JPEG, WebP or GIF.",
+            ));
+        }
+        let content = attachment
+            .data_base64
+            .as_deref()
+            .filter(|data| !data.is_empty())
+            .map(|data| data.rsplit(',').next().unwrap_or(data))
+            .and_then(|payload| base64::engine::general_purpose::STANDARD.decode(payload).ok())
+            .filter(|content| !content.is_empty())
+            .ok_or_else(|| {
+                refuse(
+                    AttachmentCode::EncodingInvalid,
+                    "An attached image could not be read as sent.",
+                )
+            })?;
+        carried.push(mp_contracts::model_plane::v1::RunAttachment {
+            id: format!("att-{index}"),
+            // Never a path: images are not staged, and the name is not shown to the model.
+            name: format!("image-{index}"),
+            mime,
+            size_bytes: content.len() as u64,
+            sha256: mp_contracts::attachments::sha256_hex(&content),
+            content,
+            kind: RunAttachmentKind::Image as i32,
+        });
+    }
+    Ok(carried)
+}
+
+/// The files an Ask turn carries to `code_interpreter` (WS08-S5), judged and hashed before any run
+/// exists, so a refusal leaves none behind. An agentic turn's files ride the Do run instead, so it
+/// stages none here. Empty with the switch off, and for a turn that carries no file.
+///
+/// # Errors
+/// The typed refusal of the first file that cannot be staged, or of any file on a zero-retention or
+/// waived turn (`persistence_free`).
+fn ask_turn_attachments(
+    attachments: &[crate::vision::InvokeAttachment],
+    agentic: bool,
+    staging_enabled: bool,
+    persistence_free: bool,
+) -> Result<crate::turn_attachments::ValidatedAttachments, crate::attachment_policy::AttachmentRefusal> {
+    if agentic {
+        return Ok(crate::turn_attachments::ValidatedAttachments::none());
+    }
+    crate::turn_attachments::ValidatedAttachments::from_invoke(attachments, staging_enabled, persistence_free)
+}
+
+/// The kind inference-core declares for a turn whose picked model cannot read the image it carries
+/// (`PROVIDER_ERROR_VISION_UNSUPPORTED`). It is the trailer value, and the code the frame and the run
+/// end under. A literal, because the two services share no crate: the test
+/// `the_vision_refusal_is_spelled_as_inference_core_declares_it` pins the two spellings together.
+const VISION_UNSUPPORTED: &str = "vision_unsupported";
+
+/// What the client is told when the picked model cannot read the image the turn carries.
+const VISION_UNSUPPORTED_MESSAGE: &str = "The selected model cannot read images. Pick a model that reads images, or remove the image and send the message again.";
+
+/// What the client is told when the turn carries files that no `code_interpreter` can read on it.
+const FILES_NEED_CODE_TOOL_MESSAGE: &str = "The attached files cannot be read on this turn, because the code tool is not offered for it. Remove the files and send the message again.";
+
+/// The typed refusal of an image turn whose picked model cannot read the image, read from the trailer
+/// inference-core sets on it: the code, the sentence, and that a retry cannot succeed. Exactly that
+/// kind is recognised. Any other kind, and a missing trailer, is `None` and keeps the mapping it had.
+fn vision_unsupported_refusal(status: &tonic::Status) -> Option<(&'static str, &'static str, bool)> {
+    let kind = status
+        .metadata()
+        .get(crate::compaction::PROVIDER_ERROR_KIND_TRAILER)?
+        .to_str()
+        .ok()?;
+    (kind == VISION_UNSUPPORTED).then_some((VISION_UNSUPPORTED, VISION_UNSUPPORTED_MESSAGE, false))
+}
+
+/// The catalogue a vision check asks inference-core for: the turn's own provider, so a vision model of
+/// another provider cannot stand in for the picked one. An empty hint leaves the request as it was,
+/// the unfiltered default.
+fn vision_catalogue_request(provider_hint: &str) -> mp_contracts::model_plane::v1::ListModelsRequest {
+    mp_contracts::model_plane::v1::ListModelsRequest {
+        provider: provider_hint.to_owned(),
+        ..Default::default()
+    }
+}
+
 fn error_stream(
     request_id: &str,
     code: &str,
@@ -114,6 +317,43 @@ fn error_stream(
         let _ = tx.send(Ok(sse)).await;
     });
     Sse::new(ReceiverStream::new(rx))
+}
+
+/// A typed zero-data-retention refusal as the stream's terminal `error` frame:
+/// the catalogue's code, English fallback, retry flag, action and, when the code
+/// takes one, the feature.
+fn zdr_error_stream(
+    request_id: &str,
+    refusal: mp_contracts::zdr_refusal::Refusal,
+) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
+    let evt = crate::sse_events::ChatEvent::ZdrError { refusal };
+    let sse = evt.to_sse(request_id);
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(1);
+    tokio::spawn(async move {
+        let _ = tx.send(Ok(sse)).await;
+    });
+    Sse::new(ReceiverStream::new(rx))
+}
+
+/// A typed zero-data-retention refusal raised after the run was prepared (Z-41b). The run is terminalized under
+/// the refusal's own code, exactly as [`prepared_direct_failure_stream`] does for its failures, and the stream's
+/// terminal frame is the typed refusal. If the terminal state cannot be recorded the client is told so instead,
+/// as every prepared failure says.
+async fn prepared_zdr_refusal_stream(
+    state: &AppState,
+    run: &crate::session_flow::SessionRun,
+    bearer: &VerifiedModelBearer,
+    request_id: &str,
+    refusal: mp_contracts::zdr_refusal::Refusal,
+) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
+    let terminalized = terminalize_prepared_failure(state, run, bearer, refusal.code()).await;
+    if terminalized {
+        return zdr_error_stream(request_id, refusal);
+    }
+    let message = refusal.message();
+    let (code, message, retryable) =
+        prepared_failure_report(refusal.code(), &message, refusal.retryable(), false);
+    error_stream(request_id, code, message, retryable)
 }
 
 /// Fail a direct-inference turn after `StartRun` without leaving its durable
@@ -475,6 +715,22 @@ async fn emit_and_buffer(
     *seq += 1;
 }
 
+/// Emit a WS15 lifecycle frame, buffered like every other frame, or nothing at all while
+/// `MODEL_GATEWAY_LIFECYCLE_EVENTS` is off: a flag-off stream is the stream it was before.
+async fn emit_lifecycle(
+    tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+    buffers: &crate::stream_buffer::StreamBufferStore,
+    buffer_key: &str,
+    seq: &mut u64,
+    features: &[String],
+    req_id: &str,
+    event: crate::sse_events::ChatEvent,
+) {
+    if mp_contracts::lifecycle_notice::enabled() {
+        emit_and_buffer(tx, buffers, buffer_key, seq, features, req_id, event).await;
+    }
+}
+
 /// Emit the turn's `turn_timing` frame (Q14), once: just before its terminal
 /// `done`, `error` or `stopped` frame, while the stream is still open.
 /// Buffered like every other frame, so a resumed stream replays it, and gated
@@ -560,15 +816,18 @@ mod subscription_route_tests {
     use super::*;
     #[test]
     fn auxiliary_calls_preserve_subscription_identity_and_privacy() {
+        // The turn's own route is a connection route, and a connection route is never ZDR downstream
+        // (the resolver refuses a ZDR token on it, and a waiver is persistent for its connection), so
+        // the turn carries `zdr: false` and the auxiliary call inherits exactly that.
         let route = InferRequest { model:"gpt-5.6-terra".into(), provider_hint:"openai-codex-subscription".into(),
-            subscription_connection_id:"connection".into(), min_privacy_tier:2, min_residency:"eu".into(), zdr:true, ..Default::default() };
+            subscription_connection_id:"connection".into(), min_privacy_tier:2, min_residency:"eu".into(), zdr:false, ..Default::default() };
         let scoped = subscription_scoped_request(InferRequest {model:"gpt-4o-mini".into(),..Default::default()}, &route);
         assert_eq!(scoped.model,route.model);
         assert_eq!(scoped.provider_hint,route.provider_hint);
         assert_eq!(scoped.subscription_connection_id,route.subscription_connection_id);
         assert_eq!(scoped.min_privacy_tier,route.min_privacy_tier);
         assert_eq!(scoped.min_residency,route.min_residency);
-        assert!(scoped.zdr);
+        assert!(!scoped.zdr, "the auxiliary call takes the connection turn's posture, never ZDR");
         let ordinary=subscription_scoped_request(InferRequest {model:"gpt-4o-mini".into(),..Default::default()}, &InferRequest::default());
         assert_eq!(ordinary.model,"gpt-4o-mini");
     }
@@ -625,6 +884,60 @@ mod subscription_route_tests {
 }
 
 #[cfg(test)]
+mod aux_model_tests {
+    use super::*;
+
+    #[test]
+    fn aux_model_from_is_trimmed_and_blank_or_unset_keeps_the_default() {
+        assert_eq!(aux_model_from(None), "gpt-4o-mini");
+        assert_eq!(aux_model_from(Some("")), "gpt-4o-mini");
+        assert_eq!(aux_model_from(Some(" \t ")), "gpt-4o-mini");
+        assert_eq!(aux_model_from(Some("claude-haiku-5-5")), "claude-haiku-5-5");
+        assert_eq!(aux_model_from(Some("  claude-haiku-5-5\n")), "claude-haiku-5-5");
+    }
+
+    #[test]
+    fn aux_model_reaches_the_title_follow_up_and_judge_requests() {
+        // A metered turn: all three auxiliary calls run on the resolved model, each
+        // under its own request-id suffix.
+        let metered = InferRequest {
+            model: "claude-sonnet-5-5".into(),
+            ..Default::default()
+        };
+        let snippets = vec!["A retrieved passage.".to_owned()];
+        let requests = [
+            title_request(&metered, "req-1", "org-1", "question", "answer"),
+            follow_ups_request(&metered, "req-1", "org-1", "question", "answer"),
+            verification_judge_request(&metered, "req-1", "org-1", "question", "answer", &snippets, false),
+        ];
+        let ids: Vec<&str> = requests.iter().map(|request| request.request_id.as_str()).collect();
+        assert_eq!(ids, ["req-1-title", "req-1-follow-ups", "req-1-verify"]);
+        for request in &requests {
+            assert_eq!(request.model, aux_model(), "{} runs on the auxiliary model", request.request_id);
+        }
+        // The judge inherits the turn's retention posture; the title and the
+        // follow-ups only ever carry non-ZDR exchange content.
+        assert!(verification_judge_request(&metered, "req-1", "org-1", "question", "answer", &snippets, true).zdr);
+        assert!(!requests[0].zdr && !requests[1].zdr && !requests[2].zdr);
+
+        // On a subscription turn the auxiliary calls keep the turn's own model whatever
+        // the setting says: they must never spend another provider's quota.
+        let subscription = InferRequest {
+            model: "gpt-5.6-terra".into(),
+            provider_hint: "openai-codex-subscription".into(),
+            subscription_connection_id: "connection".into(),
+            ..Default::default()
+        };
+        assert_eq!(title_request(&subscription, "req-2", "org-1", "question", "answer").model, "gpt-5.6-terra");
+        assert_eq!(follow_ups_request(&subscription, "req-2", "org-1", "question", "answer").model, "gpt-5.6-terra");
+        assert_eq!(
+            verification_judge_request(&subscription, "req-2", "org-1", "question", "answer", &snippets, false).model,
+            "gpt-5.6-terra"
+        );
+    }
+}
+
+#[cfg(test)]
 mod agent_route_tests {
     use super::*;
     use prost::Message as _;
@@ -642,7 +955,7 @@ mod agent_route_tests {
     /// The request body a turn sends: same inputs every time, only the route
     /// and plan mode vary.
     fn build(route: &AgentRoute, plan_mode: bool) -> RunAgentRequest {
-        build_with_budget(route, plan_mode, crate::run_budget::RunBudget::default())
+        build_with_budget(route, plan_mode, crate::run_budget::RunBudget::default(), Vec::new())
     }
 
     /// [`build`] with the run budget the caller resolved.
@@ -650,6 +963,7 @@ mod agent_route_tests {
         route: &AgentRoute,
         plan_mode: bool,
         budget: crate::run_budget::RunBudget,
+        connector_scope: Vec<String>,
     ) -> RunAgentRequest {
         build_run_agent_request(
             &run(),
@@ -671,6 +985,10 @@ mod agent_route_tests {
             None,
             route,
             budget,
+            None,
+            None,
+            Vec::new(),
+            connector_scope,
         )
     }
 
@@ -780,7 +1098,7 @@ mod agent_route_tests {
             max_rounds: 10,
             max_subagents: 3,
         };
-        let with_budget = build_with_budget(&route, true, budget);
+        let with_budget = build_with_budget(&route, true, budget, Vec::new());
         assert_eq!(with_budget.max_rounds, 10);
         assert_eq!(with_budget.max_subagents, 3);
 
@@ -804,7 +1122,7 @@ mod agent_route_tests {
         };
         let budget_of = |route: &AgentRoute| {
             let budget = crate::run_budget::resolve_run_budget(route.is_pinned(), &env);
-            build_with_budget(route, true, budget)
+            build_with_budget(route, true, budget, Vec::new())
         };
 
         let on_route = budget_of(&AgentRoute::for_turn(&normalized(
@@ -830,6 +1148,158 @@ mod agent_route_tests {
             assert_eq!((budget.max_rounds, budget.max_subagents), (4, 0));
         }
     }
+
+    /// The pure builder sends no level, on any route or plan mode: `resolved_run_agent_request`
+    /// sets it for a fresh run, so this request is the one it was before the level existed.
+    #[test]
+    fn the_pure_builder_sends_no_level() {
+        let pinned = AgentRoute::for_turn(&normalized(Some("chatgpt-codex"), Some("conn_1")));
+        for route in [AgentRoute::default(), pinned] {
+            for plan_mode in [false, true] {
+                assert_eq!(
+                    build(&route, plan_mode).reasoning_effort,
+                    0,
+                    "plan_mode {plan_mode}"
+                );
+            }
+        }
+    }
+
+    /// A selection is refused, typed, wherever a connected account could not be read: zero retention, a
+    /// Space, a source filter that leaves connected accounts out. An empty selection is never a refusal.
+    #[test]
+    fn connector_scope_refused_in_space_zdr_and_web_only() {
+        use super::{connector_selection, ConnectorSelectionRefusal as Refused};
+        let selected = vec!["conn_1".to_owned()];
+        assert_eq!(
+            connector_selection(Some(&selected), true, false, true),
+            Err(Refused::ZeroRetention)
+        );
+        assert_eq!(
+            connector_selection(Some(&selected), false, true, true),
+            Err(Refused::Space)
+        );
+        assert_eq!(
+            connector_selection(Some(&selected), false, false, false),
+            Err(Refused::SourceFilter)
+        );
+        assert_eq!(
+            connector_selection(Some(&selected), false, false, true),
+            Ok(selected.clone())
+        );
+        let none: Vec<String> = Vec::new();
+        assert_eq!(connector_selection(Some(&none), true, true, false), Ok(Vec::new()));
+        assert_eq!(connector_selection(None, true, true, false), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn connector_selection_is_deduplicated_and_bounded() {
+        use super::{connector_selection, ConnectorSelectionRefusal as Refused};
+        let repeated = vec!["conn_1".to_owned(), "conn_1".to_owned()];
+        assert_eq!(
+            connector_selection(Some(&repeated), false, false, true),
+            Ok(vec!["conn_1".to_owned()])
+        );
+        let eight: Vec<String> = (0..8).map(|n| format!("conn_{n}")).collect();
+        assert_eq!(connector_selection(Some(&eight), false, false, true), Ok(eight.clone()));
+        let nine: Vec<String> = (0..9).map(|n| format!("conn_{n}")).collect();
+        assert_eq!(
+            connector_selection(Some(&nine), false, false, true),
+            Err(Refused::Malformed)
+        );
+        let long = "x".repeat(129);
+        for bad in ["a/b", "a?b=1", "a b", "", long.as_str()] {
+            let selected = vec![bad.to_owned()];
+            assert_eq!(
+                connector_selection(Some(&selected), false, false, true),
+                Err(Refused::Malformed),
+                "{bad:?}"
+            );
+        }
+    }
+
+    /// The selection reaches the run request only when one was made, and names the same connections.
+    #[test]
+    fn a_selection_reaches_the_run_request_only_when_made() {
+        let route = AgentRoute::default();
+        assert!(build(&route, false).connector_scope.is_none());
+        let selected = vec!["conn_1".to_owned(), "conn_2".to_owned()];
+        let request = build_with_budget(
+            &route,
+            false,
+            crate::run_budget::RunBudget::default(),
+            selected.clone(),
+        );
+        assert_eq!(
+            request.connector_scope.map(|scope| scope.connection_ids),
+            Some(selected)
+        );
+    }
+}
+
+/// The most connected accounts one turn may select (build plan WS23 S4).
+const MAX_CONNECTOR_SCOPE: usize = 8;
+
+/// Why a turn's connected-account selection is refused before any run or model call (build plan
+/// WS23 S4). Each refusal has its own typed answer on the stream, given where `invoke_stream_sse`
+/// checks the selection.
+#[derive(Debug, PartialEq, Eq)]
+enum ConnectorSelectionRefusal {
+    /// A connected account holds personal data, which a zero-retention turn never reads.
+    ZeroRetention,
+    /// A Space room reads no connected account (DEC-06).
+    Space,
+    /// The turn's source filter, or its conversation-only mode, leaves connected accounts out.
+    SourceFilter,
+    /// Not a short list of well-formed connection ids.
+    Malformed,
+}
+
+/// The connection ids a turn selected (build plan WS23 S4), with duplicates removed in order. An
+/// absent or empty selection selects none and is never refused. A selection is refused when the turn
+/// is zero-retention, in a Space, or keeps the organisation and web sources out, and when it names
+/// more than `MAX_CONNECTOR_SCOPE` ids or one that is not a connection id.
+fn connector_selection(
+    selected: Option<&[String]>,
+    zdr: bool,
+    space: bool,
+    all_sources: bool,
+) -> Result<Vec<String>, ConnectorSelectionRefusal> {
+    let mut ids: Vec<String> = Vec::new();
+    for id in selected.unwrap_or(&[]) {
+        if !ids.contains(id) {
+            ids.push(id.clone());
+            // Past the cap the selection is refused whatever else it holds, so stop counting.
+            if ids.len() > MAX_CONNECTOR_SCOPE {
+                break;
+            }
+        }
+    }
+    if ids.is_empty() {
+        return Ok(ids);
+    }
+    if zdr {
+        return Err(ConnectorSelectionRefusal::ZeroRetention);
+    }
+    if space {
+        return Err(ConnectorSelectionRefusal::Space);
+    }
+    if !all_sources {
+        return Err(ConnectorSelectionRefusal::SourceFilter);
+    }
+    if ids.len() > MAX_CONNECTOR_SCOPE || !ids.iter().all(|id| is_connection_id(id)) {
+        return Err(ConnectorSelectionRefusal::Malformed);
+    }
+    Ok(ids)
+}
+
+/// A connection id as Integration Core issues it: 1 to 128 ASCII letters, digits, `_` or `-`.
+fn is_connection_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 pub async fn invoke_stream_sse(
@@ -843,7 +1313,8 @@ pub async fn invoke_stream_sse(
     cost_bearer: Option<Extension<VerifiedCostBearer>>,
     ingestion_bearer: Option<Extension<VerifiedIngestionBearer>>,
     sandbox_bearer: Option<Extension<VerifiedSandboxBearer>>,
-    axum::Json(req): axum::Json<InvokeRequest>,
+    browser_bearer: Option<Extension<VerifiedBrowserBearer>>,
+    axum::Json(mut req): axum::Json<InvokeRequest>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let request_id = new_ulid();
     // The turn's clock starts with its id, so admission shares the origin of
@@ -856,10 +1327,15 @@ pub async fn invoke_stream_sse(
         timing.fail();
         error_stream(request_id, code, message, retryable)
     };
+    // A typed ZDR refusal ends the turn the same way, and is counted the same way.
+    let zdr_refusal_stream = |request_id: &str, refusal: mp_contracts::zdr_refusal::Refusal| {
+        timing.fail();
+        zdr_error_stream(request_id, refusal)
+    };
     // Resolve the model the SAME way as the unary path (DEFAULT_MODEL env), not
     // the literal "default" — providers have no deployment named "default", so
     // sending it 404s and exhausts the chain (live-verified bug).
-    let model = req
+    let mut model = req
         .model
         .clone()
         .map(|m| m.trim().to_owned())
@@ -873,6 +1349,7 @@ pub async fn invoke_stream_sse(
     let cost_bearer = cost_bearer.map(|Extension(bearer)| bearer);
     let ingestion_bearer = ingestion_bearer.map(|Extension(bearer)| bearer);
     let sandbox_bearer = sandbox_bearer.map(|Extension(bearer)| bearer);
+    let browser_bearer = browser_bearer.map(|Extension(bearer)| bearer);
     let features = req.features.clone();
     let conversation_only = features.iter().any(|f| f == "conversation_only");
     if conversation_only && (req.deep_research || req.generate_image
@@ -909,13 +1386,89 @@ pub async fn invoke_stream_sse(
         return error_stream(&request_id, "source_scope_conflict",
             "Org-knowledge-only turns can't run web research. Switch to Kunnskap + nett or Kun nett to use Dyp research.", false);
     }
-    // A token that says ZDR cannot be served on the user's own subscription
-    // connection, and the persistence-free branch below has no route to give
-    // it: refuse first, typed, before normalisation, a run, a budget read or
-    // any model call. The token's own claim decides, never the body's flag
-    // (`normalize` has no claims). See `zdr_precheck`.
-    if let Some(refusal) = crate::zdr_precheck::refuse_subscription_under_token_zdr(&claims, &req) {
-        return error_stream(&request_id, refusal.code, refusal.message, refusal.retryable);
+    // The turn's posture, decided once through the resolver before normalisation, a run, a budget
+    // read or any model call (see `zdr_posture`). A ZDR token on the user's own connection is
+    // refused, typed, with no route to give it; a waiver is honoured only on the connection it
+    // names; every other combination follows the posture matrix. The token's claims decide, never
+    // the body's flag alone.
+    let requested_route = crate::zdr_posture::Route::named(
+        req.provider.as_deref(),
+        req.subscription_connection_id.as_deref(),
+        req.zdr,
+    );
+    let turn_posture = match crate::zdr_posture::decide_for(&claims, &requested_route) {
+        Ok(turn_posture) => turn_posture,
+        Err(refusal) => return zdr_refusal_stream(&request_id, refusal),
+    };
+    // The connected accounts the person selected (build plan WS23 S4), checked before any run or model
+    // call. An empty selection selects nothing and is never refused.
+    let connector_ids = match connector_selection(
+        req.connector_scope.as_deref(),
+        turn_posture.zdr(),
+        req.space_context
+            .as_ref()
+            .or(req.space_append_context.as_ref())
+            .is_some_and(|context| !context.space_id.is_empty()),
+        retrieval_scope.is_auto() && !conversation_only,
+    ) {
+        Ok(ids) => ids,
+        Err(ConnectorSelectionRefusal::ZeroRetention) => {
+            return zdr_refusal_stream(
+                &request_id,
+                mp_contracts::zdr_refusal::Refusal::feature_not_supported("connector_read"),
+            );
+        }
+        Err(ConnectorSelectionRefusal::Space) => {
+            return error_stream(
+                &request_id,
+                "scope_not_available_in_space",
+                "Connected apps are not available in a Space room.",
+                false,
+            );
+        }
+        Err(ConnectorSelectionRefusal::SourceFilter) => {
+            return error_stream(
+                &request_id,
+                "source_scope_conflict",
+                "Connected apps can't be used with a knowledge-only or web-only source filter, or in a conversation-only turn. Switch the source filter back to Kunnskap + nett to use them.",
+                false,
+            );
+        }
+        Err(ConnectorSelectionRefusal::Malformed) => {
+            return error_stream(
+                &request_id,
+                "connector_scope_invalid",
+                "Select at most eight connected apps, each named by its connection id.",
+                false,
+            );
+        }
+    };
+    let attachment_policy = crate::attachment_policy::AttachmentPolicy::from_env();
+    // A waiver names one connection. Deep research, image generation and a vision turn (AnalyzeImage)
+    // call the platform chain, which a waived turn must never reach, so they are refused before any run.
+    // An execute turn (WS14 S2a) runs an executing loop under a stored plan grant; a waived turn keeps
+    // no such state to run under, so it is refused the same way (the ZDR token is refused by
+    // `zdr_features::refusal`). Under the attachment contract every attachment counts, not only an image.
+    if turn_posture.is_waived()
+        && (req.deep_research
+            || req.generate_image
+            || req.execute_granted
+            || crate::vision::select_image(&req.attachments).is_some()
+            || (attachment_policy.enabled() && !req.attachments.is_empty()))
+    {
+        return zdr_refusal_stream(&request_id, mp_contracts::zdr_refusal::Refusal::WAIVER_ROUTE_MISMATCH);
+    }
+    // The attachment contract, before normalisation (which refuses a subscription turn that carries
+    // attachments in a generic code) and before any run or model call. A ZDR turn skips it: the ZDR
+    // refusal of an attachment comes first and keeps its catalogue code.
+    if !turn_posture.zdr() {
+        let route = crate::attachment_policy::AttachmentRoute::named(
+            req.provider.as_deref(),
+            req.subscription_connection_id.as_deref(),
+        );
+        if let Err(refusal) = attachment_policy.validate(&req.attachments, route) {
+            return error_stream(&request_id, refusal.code.as_str(), &refusal.message, false);
+        }
     }
     // Normalize and validate BEFORE branching: an unknown tier numeric must
     // fail closed on both the durable and the persistence-free path, and the
@@ -930,6 +1483,22 @@ pub async fn invoke_stream_sse(
     ) {
         Ok(normalized) => normalized,
         Err((_, Json(error))) => {
+            // A typed refusal (a ZDR turn on the subscription route, for one)
+            // keeps its catalogue code, action and feature.
+            if let Some(refusal) = mp_contracts::zdr_refusal::Refusal::from_body(&error) {
+                return zdr_refusal_stream(&request_id, refusal);
+            }
+            // A model the caller may not use (today the deployment allowlist)
+            // arrives nested, `{"error": {code, message, ...}}`. Its code, text
+            // and retry flag are the frame's; the flat shape below stays as it was.
+            if let Some(refusal) = mp_contracts::model_entitlement::Refusal::from_body(&error) {
+                return error_stream(
+                    &request_id,
+                    refusal.code(),
+                    &refusal.message(),
+                    refusal.retryable(),
+                );
+            }
             let message = error
                 .get("error")
                 .and_then(Value::as_str)
@@ -945,10 +1514,42 @@ pub async fn invoke_stream_sse(
             return error_stream(&request_id, code, message, false);
         }
     };
+    // The organisation's model policy, asked of inference-core before a run, a
+    // thread or a message exists: a refused turn is the stream's one `error`
+    // frame and leaves nothing behind, and the ZDR branch below is under the
+    // same policy as the durable one.
+    match crate::model_access::admit(
+        &state.inference_client,
+        authenticated_inference_request((), &inference_bearer).metadata(),
+        &org_id,
+        &model,
+        &normalized.provider_hint,
+    )
+    .await
+    {
+        Ok(admitted) => {
+            if let Some(default) = admitted.model.clone() {
+                model = default;
+            }
+            admitted.clamp_effort(&mut req.effort, crate::thinking::ladder_enabled());
+        }
+        Err(refusal) => {
+            return error_stream(
+                &request_id,
+                refusal.code(),
+                &refusal.message(),
+                refusal.retryable(),
+            );
+        }
+    }
     // Caller's privacy floor as the wire numeric (0 = UNSPECIFIED). Captured
     // once here so every derived call site threads it without re-deriving.
     let min_privacy_tier_wire = crate::normalize::min_privacy_tier_wire(&normalized);
-    let effective_zdr = claims.effective_zdr(req.zdr);
+    let effective_zdr = turn_posture.zdr();
+    // The Data Plane retrieval mode of this turn: ephemeral, reject for a waived turn, or absent.
+    let data_plane_mode = turn_posture.data_plane_mode();
+    // How the answer's content is retained, stated on its usage frame (a waived turn says so).
+    let retention_class = turn_posture.retention_class();
     // Jurisdiction posture for every Data Plane retrieval this turn makes, the
     // counterpart to `effective_zdr` above. Derived once, from the two things
     // that can honestly speak for the axis: the token's signed `sovereign`
@@ -974,23 +1575,14 @@ pub async fn invoke_stream_sse(
     // event, stream-buffer, idempotency, memory, cache, artifact, or tool write.
     // Plain inference and optional read-only Data grounding remain usable.
     if effective_zdr {
-        if !req.attachments.is_empty()
-            || req.generate_image
-            // Deep research runs every search and page read through the AUDITED
-            // tool path (session-core reserve → run → finalize), and this branch
-            // has no run to audit against. Rejecting is the honest outcome:
-            // degrading would answer a "Dyp research" request with a plain
-            // ungrounded completion and no indication the research never ran,
-            // which is precisely the lie `crate::deep_research` exists to stop.
-            || req.deep_research
-            || features.iter().any(|feature| feature == "agentic")
-        {
-            return error_stream(
-                &request_id,
-                "zdr_feature_not_supported",
-                "ZDR currently supports plain chat and read-only grounding only",
-                false,
-            );
+        // What the persistence-free path can do for this request is decided field
+        // by field in `zdr_features`. A request for something it cannot do is
+        // refused with its catalogue code and feature, before any model call, and
+        // nothing it asked for is dropped. Deep research in particular is refused
+        // rather than degraded: degrading would answer a research request with a
+        // plain ungrounded completion and no sign the research never ran.
+        if let Some(refusal) = crate::zdr_features::refusal(&req) {
+            return zdr_refusal_stream(&request_id, refusal);
         }
         let grounding = if !conversation_only
             && retrieval_scope != crate::normalize::RetrievalScope::WebOnly
@@ -1004,18 +1596,26 @@ pub async fn invoke_stream_sse(
                     false,
                 );
             };
-            crate::retrieval::retrieve(
+            // A ZDR retrieval the Data Plane refused for want of a ZDR-approved route is the typed refusal of
+            // this turn, not an empty grounding: nothing has been sent to a model yet (Z-41b).
+            match crate::retrieval::retrieve_checked(
                 &state,
                 bearer,
                 &org_id,
                 &req.content,
-                true,
+                data_plane_mode.clone(),
                 sovereign_retrieval,
-                req.space_context
-                    .as_ref()
-                    .map(|context| context.retrieval_decision_token.as_str()),
+                space_retrieval_decision(
+                    req.space_context.as_ref(),
+                    req.space_append_context.as_ref(),
+                    space_append_retrieval_enabled(),
+                ),
             )
             .await
+            {
+                Ok(grounding) => grounding,
+                Err(refusal) => return zdr_refusal_stream(&request_id, refusal),
+            }
         } else {
             None
         };
@@ -1066,6 +1666,7 @@ pub async fn invoke_stream_sse(
             &normalized.provider_hint,
             &normalized.subscription_connection_id,
         );
+        let settings = zdr_turn_settings(&state, &req);
         return zdr_direct_stream(
             state,
             request_id,
@@ -1076,6 +1677,7 @@ pub async fn invoke_stream_sse(
             grounding,
             min_privacy_tier_wire,
             route,
+            settings,
             inference_bearer,
         )
         .await;
@@ -1118,6 +1720,20 @@ pub async fn invoke_stream_sse(
         );
     }
 
+    // The turn's run ceiling (WS27-S6): the caps the request and the org set, resolved the way the
+    // budget gate above resolves them. The tracker exists only when a switch acts on it, and its
+    // frames carry the ceiling only with the progress stream they ride on.
+    let run_ceiling = crate::sse_events::run_ceiling::CeilingTracker::for_turn(
+        crate::sse_events::run_ceiling::RunCeiling::resolve(
+            normalized.max_cost_usd,
+            normalized.max_tokens,
+            org_limits.max_cost_usd,
+            org_limits.max_tokens,
+        ),
+        run_ceiling_warn_switch() && usage_progress_switch(),
+        run_ceiling_enforce_switch(),
+    );
+
     // Resolve the harness profile → approval posture. Recorded on the opened
     // envelope so the run loop and operator surfaces agree (HARNESS_PHASE1 §1).
     //
@@ -1146,7 +1762,9 @@ pub async fn invoke_stream_sse(
     {
         tracing::warn!(error = %e, "failed to publish STREAM_OPENED");
     }
-    gateway_metrics::stream_opened();
+    // One unit of `gateway_active_streams`, owned by the producer task spawned below (see
+    // `ActiveStreamGuard`). An early return before that task exists drops it at once.
+    let active_stream = gateway_metrics::ActiveStreamGuard::open();
 
     let publisher = state.publisher.clone();
     let stream_buffers = state.stream_buffers.clone();
@@ -1170,8 +1788,10 @@ pub async fn invoke_stream_sse(
     // client `idempotency_key` mid-flight) is rejected so a double-click /
     // retry never spawns a second generation; a completed key replays its
     // cached answer; the guard releases the claim when the stream ends (Drop),
-    // so a later regenerate is free to run.
-    let idem_guard = match req
+    // so a later regenerate is free to run. With `MODEL_GATEWAY_SHARED_IDEMPOTENCY` on, a
+    // duplicate that finds the key held by another request attaches to that request's stream
+    // instead (`attach_to_original`); with it off nothing below reads Redis.
+    let mut idem_guard = match req
         .idempotency_key
         .as_deref()
         .map(str::trim)
@@ -1183,6 +1803,16 @@ pub async fn invoke_stream_sse(
                 return replay_cached_stream(v, request_id);
             }
             crate::idempotency_registry::Claim::InFlight => {
+                // The original is on this replica, which only the shared claim can name.
+                if let Some(store) = crate::idempotency_registry::shared_store().await {
+                    if let Some(original) =
+                        crate::idempotency_registry::lookup_shared(&store, &org_id, &user_id, key)
+                            .await
+                    {
+                        timing.hand_off("idempotent_attach");
+                        return attach_to_original(&state, &org_id, &user_id, &original).await;
+                    }
+                }
                 return error_stream(
                     &request_id,
                     "duplicate_in_flight",
@@ -1210,7 +1840,21 @@ pub async fn invoke_stream_sse(
                     true,
                 );
             }
-            crate::idempotency_registry::Claim::Proceed(g) => Some(g),
+            crate::idempotency_registry::Claim::Proceed(mut guard) => {
+                if let Some(store) = crate::idempotency_registry::shared_store().await {
+                    if let crate::idempotency_registry::SharedAttempt::Attach(original) = guard
+                        .claim_shared(&store, &request_id, &state.stream_buffers, &buffer_key)
+                        .await
+                    {
+                        // The local claim is released here, so a retry after the original
+                        // ends is decided by the shared record alone.
+                        drop(guard);
+                        timing.hand_off("idempotent_attach");
+                        return attach_to_original(&state, &org_id, &user_id, &original).await;
+                    }
+                }
+                Some(guard)
+            }
         },
         None => None,
     };
@@ -1237,6 +1881,124 @@ pub async fn invoke_stream_sse(
             );
         }
     }
+    // An execute turn (WS14 S2a) is refused here, before any durable run exists, when the
+    // gateway's execute switch, or the approval-resume switch it is coupled to, is off
+    // (`plan_execute_disabled`) or its own shape is wrong
+    // (`invalid_request`). Nothing below has run: no run is prepared and nothing is dispatched.
+    // Whether a live grant exists is decided later, for the run's own thread
+    // (`resolve_autonomy_rung` in `spawn_run_dispatch`).
+    if let Some((code, message)) = execute_refusal(
+        &req,
+        agentic_requested,
+        state.plan_mode.execute_enabled(),
+        state.plan_mode.approval_resume_enabled(),
+    ) {
+        return error_stream(&request_id, code, message, false);
+    }
+    // Images as parts of the turn (WS08-S4), decided before any run exists. With the switch off
+    // this is empty and the vision diversion below decides, as it always did. A Do turn with an
+    // image is refused here rather than silently losing its tools to that diversion.
+    let wants_image_parts = crate::vision::parts::enabled()
+        && crate::vision::parts::has_images(&req.attachments);
+    // A Do turn's attachments (WS08-S6) are carried by the run itself, so with their switch on
+    // the Ask-side refusal of a Do turn with an image does not apply to it.
+    let carries_do_attachments = agentic_requested && do_attachments_enabled();
+    // Whether the picked model reads images, from inference-core's catalogue; `None` when it
+    // cannot be read. Asked only when an image rides as a part of an Ask turn or of a Do run.
+    // Not knowing is the caller's to weigh: an Ask turn falls back to the vision diversion, a
+    // Do turn goes on and inference-core refuses a round no provider can serve
+    // (`vision_unsupported`) rather than dropping the image.
+    let picked_model_reads_images = if crate::vision::parts::has_images(&req.attachments)
+        && !effective_zdr
+        && ((wants_image_parts && !agentic_requested) || carries_do_attachments)
+    {
+        match state
+            .inference_client
+            .clone()
+            .list_models(authenticated_inference_request(
+                // The turn's own provider: a vision model of another provider does not stand in for it.
+                vision_catalogue_request(&provider_hint),
+                &inference_bearer,
+            ))
+            .await
+        {
+            Ok(listed) => Some(crate::vision::parts::route_reads_images(
+                &listed.into_inner().models,
+                &model,
+            )),
+            Err(error) => {
+                tracing::warn!(%error, request_id = %request_id, "model catalogue unavailable; images keep their fallback");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let reads_images = wants_image_parts
+        && !agentic_requested
+        && !effective_zdr
+        && picked_model_reads_images.unwrap_or(false);
+    let image_parts = match crate::vision::parts::admit(
+        wants_image_parts,
+        agentic_requested && !carries_do_attachments,
+        effective_zdr,
+        &req.attachments,
+        reads_images,
+    ) {
+        Ok(image_parts) => image_parts,
+        Err(refusal) => return error_stream(&request_id, refusal.code, &refusal.message, false),
+    };
+    if !image_parts.is_empty() {
+        let (images, bytes) = image_parts.summary();
+        tracing::info!(request_id = %request_id, images, bytes, "images ride as parts of the turn");
+    }
+    // The attachments a Do run carries: judged and hashed here, before any run exists, so a
+    // refusal leaves no run behind. Empty (and nothing is read) with the switch off.
+    let do_attachments = if carries_do_attachments && !req.attachments.is_empty() {
+        match do_run_attachments(
+            &req.attachments,
+            effective_zdr || retention_class.is_some(),
+            picked_model_reads_images,
+        ) {
+            Ok(list) => list,
+            Err(refusal) => {
+                return error_stream(&request_id, refusal.code.as_str(), &refusal.message, false);
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    if !do_attachments.is_empty() {
+        tracing::info!(request_id = %request_id, attachments = do_attachments.len(), "attachments ride the Do run");
+    }
+    // The files an Ask turn carries to `code_interpreter` (WS08-S5), judged here before any run exists.
+    // Empty with the switch off, and on an agentic turn, whose files ride the Do run above.
+    let staged = match ask_turn_attachments(
+        &req.attachments,
+        agentic_requested,
+        crate::turn_attachments::sandbox_staging_enabled(),
+        effective_zdr || retention_class.is_some(),
+    ) {
+        Ok(staged) => staged,
+        Err(refusal) => {
+            return error_stream(&request_id, refusal.code.as_str(), &refusal.message, false);
+        }
+    };
+    // The vision answer and image generation carry no tools, so no `code_interpreter` reads a file on
+    // them. Refused here, before the run, rather than answered without the file.
+    if !staged.is_empty()
+        && (req.generate_image
+            || (image_parts.is_empty()
+                && do_attachments.is_empty()
+                && crate::vision::select_image(&req.attachments).is_some()))
+    {
+        return error_stream(
+            &request_id,
+            crate::attachment_policy::AttachmentCode::MediaUnsupported.as_str(),
+            FILES_NEED_CODE_TOOL_MESSAGE,
+            false,
+        );
+    }
 
     // Start keys are durable Session Core metadata. Keep the raw browser/API
     // retry identifier in the in-memory idempotency guard only; persist its
@@ -1258,7 +2020,7 @@ pub async fn invoke_stream_sse(
         mp_contracts::model_plane::v1::ManagedRunSource::GatewayDirect
     };
     let admitted_ms = timing.close(crate::turn_timing::Phase::Admission, 0);
-    let session_run = match crate::session_flow::prepare_managed_run_authenticated(
+    let session_run = match crate::session_flow::prepare_managed_run_authenticated_with_receipt(
         &state,
         req.thread_id.as_deref(),
         req.session_key.as_deref(),
@@ -1283,6 +2045,13 @@ pub async fn invoke_stream_sse(
             crate::normalize::RetrievalScope::WebOnly => "web_only",
             crate::normalize::RetrievalScope::Auto => unreachable!("excluded by is_auto() above"),
         }),
+        crate::session_flow::send_receipt_id(
+            crate::queued_input::send_receipts_enabled(),
+            effective_zdr,
+            req.regenerated,
+            req.edited_resubmit,
+            req.idempotency_key.as_deref(),
+        ),
     )
     .await
     {
@@ -1297,6 +2066,9 @@ pub async fn invoke_stream_sse(
             );
         }
     };
+    if let Some(guard) = idem_guard.as_mut() {
+        guard.record_run(&session_run.run_id, &session_run.thread_id);
+    }
     if session_run.already_started {
         return error_stream(
             &request_id,
@@ -1337,8 +2109,11 @@ pub async fn invoke_stream_sse(
 
     // chat-parity §2: multimodal vision input. If an image is attached, route
     // the turn through inference-core AnalyzeImage (the vision owner) with the
-    // user message as the prompt and stream the analysis as the answer.
-    if let Some(image) = crate::vision::select_image(&req.attachments) {
+    // user message as the prompt and stream the analysis as the answer. A turn whose images ride
+    // as parts (WS08-S4) never takes this: it keeps its history, tools and memory.
+    if let Some(image) = crate::vision::select_image(&req.attachments)
+        .filter(|_| image_parts.is_empty() && do_attachments.is_empty())
+    {
         timing.hand_off("vision");
         return vision_stream(
             state.clone(),
@@ -1427,21 +2202,58 @@ pub async fn invoke_stream_sse(
             org_id,
             user_id,
             model,
-            req.content.clone(),
+            // The goal the executor receives: redacted under the same policy the Ask turn's model
+            // input is, so a Do run opens no new egress of raw PII to the executor.
+            if pii_redaction_required {
+                crate::moderation::redact_pii(&req.content).0
+            } else {
+                req.content.clone()
+            },
             features,
             agentic_tools,
             effective_zdr,
+            retention_class,
             min_privacy_tier_wire,
             posture.to_owned(),
             req.plan_mode,
+            req.execute_granted,
             execution_bearer,
             data_plane_bearer,
             model_bearer,
             inference_bearer,
             agentic_space_id,
             sandbox_bearer,
+            // The Do turn's browser bearer, forwarded only on a run that keeps no ZDR (WS21-S2).
+            browser_bearer,
             agentic_route,
             idem_guard,
+            None,
+            // An ordinary turn is never a pre-consumed continuation.
+            ApprovalSpend::NotSpent,
+            // Off builds no request, so a run is exactly what it was before the switch.
+            crate::run_context::RunContextRequest::for_turn(
+                crate::run_context::RunContextMode::from_env(),
+                || authored_layers(&state, &req),
+                sovereign_retrieval,
+                // The memory search carries what an Ask turn's would: the user's text,
+                // PII-redacted when the org's policy requires it (see `user_content`
+                // below), so a run opens no new egress of raw PII.
+                || {
+                    if pii_redaction_required {
+                        crate::moderation::redact_pii(&req.content).0
+                    } else {
+                        req.content.clone()
+                    }
+                },
+            ),
+            do_attachments,
+            connector_ids,
+            // The run's effort level (WS11-S8): the turn's clamped profile, through the same
+            // derivation the chat turn uses. 0 with MODEL_GATEWAY_EFFORT_LADDER off.
+            crate::thinking::run_level(
+                req.effort.as_deref().unwrap_or_default(),
+                crate::thinking::ladder_enabled(),
+            ),
         );
     }
 
@@ -1522,6 +2334,12 @@ pub async fn invoke_stream_sse(
     // A summary written this turn, persisted with the answer so later turns
     // send the same bytes instead of summarising the same head again.
     let head_summary = recent_thread.head_summary;
+    // What load-time compaction did, sent once the stream is open.
+    let load_frames: Vec<crate::sse_events::ChatEvent> = recent_thread
+        .compaction
+        .map(lifecycle_events::CompactionFacts::event)
+        .into_iter()
+        .collect();
     let recent_thread_messages = recent_thread.messages;
     // The context block repeats recent history the prompt already carries as
     // messages. With the dedup option those repeats are left out.
@@ -1618,18 +2436,37 @@ pub async fn invoke_stream_sse(
         // Bearer presence already verified above.
         match data_plane_bearer.as_ref() {
             Some(bearer) => {
-                crate::retrieval::retrieve(
+                // The run is already prepared, so a refusal terminalizes it under the refusal's own code. A
+                // waived turn's restrictive retrieval refused for want of a ZDR-approved route is said as
+                // that refusal, never as an answer from an empty grounding (Z-41b).
+                match crate::retrieval::retrieve_checked(
                     &state,
                     bearer,
                     &org_id,
                     &req.content,
-                    effective_zdr,
+                    data_plane_mode.clone(),
                     sovereign_retrieval,
-                    req.space_context
-                        .as_ref()
-                        .map(|context| context.retrieval_decision_token.as_str()),
+                    space_retrieval_decision(
+                        req.space_context.as_ref(),
+                        req.space_append_context.as_ref(),
+                        space_append_retrieval_enabled(),
+                    ),
                 )
                 .await
+                {
+                    Ok(grounding) => grounding,
+                    Err(refusal) => {
+                        timing.fail();
+                        return prepared_zdr_refusal_stream(
+                            &state,
+                            &session_run,
+                            &model_bearer,
+                            &request_id,
+                            refusal,
+                        )
+                        .await;
+                    }
+                }
             }
             None => None,
         }
@@ -1640,18 +2477,37 @@ pub async fn invoke_stream_sse(
         // missing credential here must never break plain chat.
         match data_plane_bearer.as_ref() {
             Some(bearer) => {
-                crate::retrieval::retrieve(
+                // A restrictive turn's refusal is the typed refusal here as well, never an ungrounded answer (Z-41b).
+                // The run is already prepared, so it is terminalized under the refusal's code, as the explicit branch
+                // above does. A persistent turn cannot be refused, so its behaviour is unchanged.
+                match crate::retrieval::retrieve_checked(
                     &state,
                     bearer,
                     &org_id,
                     &req.content,
-                    effective_zdr,
+                    data_plane_mode.clone(),
                     sovereign_retrieval,
-                    req.space_context
-                        .as_ref()
-                        .map(|context| context.retrieval_decision_token.as_str()),
+                    space_retrieval_decision(
+                        req.space_context.as_ref(),
+                        req.space_append_context.as_ref(),
+                        space_append_retrieval_enabled(),
+                    ),
                 )
                 .await
+                {
+                    Ok(grounding) => grounding,
+                    Err(refusal) => {
+                        timing.fail();
+                        return prepared_zdr_refusal_stream(
+                            &state,
+                            &session_run,
+                            &model_bearer,
+                            &request_id,
+                            refusal,
+                        )
+                        .await;
+                    }
+                }
             }
             None => None,
         }
@@ -1674,7 +2530,12 @@ pub async fn invoke_stream_sse(
         .as_ref()
         .map(|payload| payload.zdr_actions_applied.as_slice())
     {
-        if crate::retrieval_metadata::retention_posture_conflict(!effective_zdr, actions) {
+        // A waived turn is persistent for its connection by design, and its restricted documents are
+        // filtered (`reject`), so ZDR actions on it are the expected outcome rather than a conflict.
+        if crate::retrieval_metadata::retention_posture_conflict(
+            !effective_zdr && retention_class.is_none(),
+            actions,
+        ) {
             tracing::warn!(
                 request_id = %request_id,
                 org_id = %org_id,
@@ -1752,15 +2613,21 @@ pub async fn invoke_stream_sse(
     let SkillContext {
         blocks: skill_context,
         requested_ids: requested_skill_ids,
+        skills_truncated,
+        skills_dropped,
+        skill_file_offered,
     } = if conversation_only || retrieval_scope == crate::normalize::RetrievalScope::WebOnly { SkillContext::default() } else { fetch_skill_context(
         &state,
         &model_bearer,
+        capability_bearer.as_ref().map(VerifiedCapabilityBearer::as_str),
         &org_id,
         &user_id,
         &req.content,
         &req.skill_ids,
     )
     .await };
+    // Counts only: the skill guidance that was cut to its budget, sent after the compaction frame.
+    let skills_frame = lifecycle_events::skills_truncated(skills_truncated, skills_dropped);
     // Remember which skills this turn injected, keyed by the request_id the SPA
     // already has. A thumbs-up has to credit the skills that actually shaped the
     // answer, and the client must not be trusted to name them — so the mapping
@@ -1775,6 +2642,12 @@ pub async fn invoke_stream_sse(
         &requested_skill_ids,
         MAX_INJECTED_SKILLS,
     );
+    // Shared turn record (off by default): lets a rating on another replica
+    // resolve this turn. A waived turn stays in this process, as it does for
+    // every other shared store.
+    if !turn_posture.is_waived() {
+        crate::chat_turn_registry::mirror_chat_turn(&state, &req_id, &org_id, &user_id);
+    }
     // Implicit dissatisfaction: did this turn signal that the PREVIOUS answer
     // missed? Runs here because everything it needs is resolved — verified
     // org/user, the thread, and the skills recorded for this turn just above —
@@ -1790,6 +2663,8 @@ pub async fn invoke_stream_sse(
         &user_id,
         &session_run.run_id,
         &session_run.thread_id,
+        // The decided posture of THIS turn: a ZDR turn (explicit or from its org) or a waived one.
+        turn_posture.zdr() || turn_posture.is_waived(),
     );
     if !skill_context.is_empty() {
         let joined = skill_context.join("\n\n");
@@ -1897,6 +2772,9 @@ pub async fn invoke_stream_sse(
             if builtin.name == "reattach_context" && !thread_was_compacted {
                 continue;
             }
+            if builtin.name == "skill_file" && !skill_file_offered {
+                continue;
+            }
             if !defs.iter().any(|d| d.name == builtin.name) {
                 defs.push(builtin);
             }
@@ -1968,7 +2846,38 @@ pub async fn invoke_stream_sse(
     // never warns about a tool this turn cannot call. Guidance is context, not
     // history: it goes with the system blocks.
     prompt.user_supplied_args = crate::tool_loop::user_supplied_args_notice(&tool_defs);
-    let mut messages = prompt.render(cache_options.prompt_order());
+    // The stable order names the standing blocks it leads with: the leading Stable and Context
+    // messages. Their plan goes to the calls below on a non-ZDR turn only, and the composed head is
+    // kept so each later call can check that the plan still describes the messages it sends.
+    let (mut messages, standing) = prompt.render_planned(cache_options.prompt_order());
+    let prompt_tiers = standing
+        .filter(|_| !effective_zdr)
+        .and_then(crate::prompt_context::wire_plan);
+    let composed_head: Vec<ChatMessage> = match &prompt_tiers {
+        Some(plan) => messages
+            .iter()
+            .take((plan.stable_messages as usize) + (plan.context_messages as usize))
+            .cloned()
+            .collect(),
+        None => Vec::new(),
+    };
+    // The images belong to the user turn this prompt ends with; from here the prompt only grows.
+    let image_parts = image_parts.bind(&messages);
+    // The files reach the model only through `code_interpreter`. A turn that stages files but offers no
+    // such tool is refused on the prepared run, before anything is registered or spawned.
+    if !staged.is_empty() && !tool_defs.iter().any(|tool| tool.name == "code_interpreter") {
+        timing.fail();
+        return prepared_direct_failure_stream(
+            &state,
+            &session_run,
+            &model_bearer,
+            &request_id,
+            crate::attachment_policy::AttachmentCode::MediaUnsupported.as_str(),
+            FILES_NEED_CODE_TOOL_MESSAGE,
+            false,
+        )
+        .await;
+    }
 
     // chat-parity §4: register this stream so POST /v1/invoke/{id}/cancel can
     // stop it cooperatively. `cancels` is moved into the task to finish() on end.
@@ -1976,9 +2885,12 @@ pub async fn invoke_stream_sse(
     // /v1/orchestration/runs/{id}/cancel) stops it the same way.
     let cancels = state.cancels.clone();
     let cancel_flag = cancels.register_run(&request_id, &org_id, &user_id, &session_run.run_id);
+    // A Stop that lands on another replica reaches this stream over the run-control bus; the
+    // subscription is in place before `connected`. Nothing happens with the bus off.
+    state.run_control.attach(&cancels, &state.queued_inputs, &request_id, &session_run.run_id).await;
     // Accept mid-run input for this stream. The thread id is recorded HERE, from
     // the prepared run, so the enqueue endpoint never has to trust a
-    // client-supplied thread — see `queued_input::enqueue_for`.
+    // client-supplied thread — see `queued_input::enqueue_checked`.
     let queued_inputs = state.queued_inputs.clone();
     queued_inputs.register(&request_id, &org_id, &user_id, &session_run.thread_id, conversation_only, retrieval_scope);
 
@@ -2008,10 +2920,12 @@ pub async fn invoke_stream_sse(
     // owns, never sending the answer to an external engine unasked.
     let verify_bearer = data_plane_bearer.clone();
     let verify_sovereign = sovereign_retrieval;
-    let verify_space_decision = req
-        .space_context
-        .as_ref()
-        .map(|context| context.retrieval_decision_token.clone());
+    let verify_space_decision = space_retrieval_decision(
+        req.space_context.as_ref(),
+        req.space_append_context.as_ref(),
+        space_append_retrieval_enabled(),
+    )
+    .map(str::to_owned);
     let verify_web_allowed =
         crate::verification::may_escalate_to_web(tool_defs.iter().map(|tool| &tool.name));
     let structured_output_schema = req.structured_output_schema.clone().unwrap_or_default();
@@ -2028,6 +2942,9 @@ pub async fn invoke_stream_sse(
     // spinner for the entire phase and then dumped everything at once.
     timing.close(crate::turn_timing::Phase::Context, prepared_ms);
     tokio::spawn(async move {
+        // Owns the gauge unit: it drops when this task ends on any path, so a stop, a cancel, a
+        // client disconnect or a panic cannot leave the stream counted.
+        let _active_stream = active_stream;
         // Keep tool writes private until the assistant message is durable.
         let committed_artifacts = session_state.artifact_versions.clone();
         let artifact_base = committed_artifacts.fork_thread(&session_thread_id);
@@ -2080,6 +2997,9 @@ pub async fn invoke_stream_sse(
         if client_connected {
             timing.mark(crate::turn_timing::Mark::Connected);
         }
+        for event in load_frames.into_iter().chain(skills_frame) {
+            emit_lifecycle(&tx, &stream_buffers, &buffer_key, &mut seq, &features, &req_id, event).await;
+        }
 
         if let Some(payload) = grounding.clone().filter(|g| !g.is_empty()) {
             let event = crate::sse_events::ChatEvent::Grounding { grounding: payload };
@@ -2091,6 +3011,21 @@ pub async fn invoke_stream_sse(
                 &features,
                 &req_id,
                 event,
+            )
+            .await;
+        }
+        // A reduced answer says so before it streams (Z-41b). Buffered like every frame, so a resumed stream
+        // replays it. Emitted even when the grounding is empty: an answer from text search that found nothing is
+        // still an answer from text search only.
+        if let Some(notice) = grounding.as_ref().and_then(|payload| payload.notice) {
+            emit_and_buffer(
+                &tx,
+                &stream_buffers,
+                &buffer_key,
+                &mut seq,
+                &features,
+                &req_id,
+                crate::sse_events::ChatEvent::RetrievalNotice { notice },
             )
             .await;
         }
@@ -2165,6 +3100,13 @@ pub async fn invoke_stream_sse(
             req_id.clone(),
         )
         .with_timing(timing.clone())
+        // The turn's connector selection reaches the Ask loop's read tool (WS23-S5).
+        .with_connector_turn(crate::tool_loop::connector_reads::ConnectorTurn::new(
+            connector_ids.clone(),
+            retrieval_scope.is_auto() && !conversation_only,
+        ))
+        .with_usage_progress(usage_progress_switch())
+        .with_run_ceiling(run_ceiling)
         .buffering(stream_buffers.clone(), buffer_key.clone(), seq);
 
         // Grounding's citations were already sent on the wire above (chat-
@@ -2324,6 +3266,8 @@ pub async fn invoke_stream_sse(
         // (population, prices, news, recent years) gets a guaranteed up-front
         // search; every other query keeps web_search in the loop's tool set
         // and the model decides whether the answer needs fresh data.
+        // Every provider call of the tool phase that the turn's usage counts.
+        let mut tool_usage: Vec<crate::usage_meter::CallUsage> = Vec::new();
         if web_search_signal
             && !deep_research_ran
             && tool_defs.iter().any(|tool| tool.name == "web_search")
@@ -2342,6 +3286,8 @@ pub async fn invoke_stream_sse(
                     .as_ref()
                     .map(VerifiedCapabilityBearer::as_str),
                 effective_zdr,
+                // The turn's own retention mode: a waived turn's derived content-safety pass stays off.
+                data_plane_mode.clone(),
                 // The model the USER asked for, never a substitution: it is the
                 // tier signal for the paid-provider grant and for the page-read
                 // budget. No substitution has happened at this point — this runs
@@ -2383,6 +3329,7 @@ pub async fn invoke_stream_sse(
             turn_evidence.tool_failures += forced.tool_failures;
             turn_evidence.web_citations += forced.web_citations;
             messages = forced.messages;
+            tool_usage.extend(forced.usage);
             // web_search deliberately STAYS in the loop. It used to be
             // withheld here, which capped a forced turn at exactly one search:
             // when the first query missed the figure — "hvor mange innbyggere
@@ -2409,7 +3356,11 @@ pub async fn invoke_stream_sse(
         let mut document_tool_failures: u32 = 0;
         if !tool_defs.is_empty() {
             seq = sink.sync_cursor(seq).await;
-            let rounds = crate::tool_loop::run_tool_rounds_for_model(
+            // The research and forced-search passes above may have rewritten the head of the prompt,
+            // so the plan goes to the tool rounds only while it still describes that head.
+            let rounds_tiers =
+                crate::prompt_context::plan_for(prompt_tiers.as_ref(), &composed_head, &messages);
+            let rounds = crate::tool_loop::run_tool_rounds_for_model_with_attachments(
                 &session_state,
                 &req_id,
                 &session_run_for_terminal.run_id,
@@ -2436,6 +3387,7 @@ pub async fn invoke_stream_sse(
                     .as_ref()
                     .map(VerifiedCostBearer::as_str),
                 effective_zdr,
+                data_plane_mode.clone(),
                 sovereign_retrieval,
                 min_privacy_tier_wire,
                 &model_clone,
@@ -2448,6 +3400,9 @@ pub async fn invoke_stream_sse(
                 ingestion_bearer.as_ref(),
                 sandbox_bearer.as_ref(),
                 Some(&sink),
+                &staged,
+                &image_parts,
+                rounds_tiers,
             )
             .await;
             seq = sink.sync_cursor(seq).await;
@@ -2526,6 +3481,7 @@ pub async fn invoke_stream_sse(
             turn_evidence.web_citations += rounds.web_citations;
             document_tool_failures = rounds.document_tool_failures;
             messages = rounds.messages;
+            tool_usage.extend(rounds.usage);
             last_round_tools = rounds.last_round_tools;
             // Intent modes retain their resolved model. A subscription remains
             // pinned to the selected model and connection throughout the turn.
@@ -2536,13 +3492,22 @@ pub async fn invoke_stream_sse(
             }
         }
 
-        // Extended-thinking budget, derived server-side from the client's
-        // effort profile (never a client-supplied raw budget). `standard`/unset
-        // yields 0, which is byte-identical to the pre-existing request.
-        let thinking_budget_tokens = crate::thinking::budget_tokens(
+        // Reasoning request, derived server-side from the client's effort
+        // profile (never a client-supplied raw budget). `standard`/unset yields
+        // none, which is byte-identical to the pre-existing request. With the
+        // ladder off this is the legacy token budget; on, a level and no budget.
+        let thinking_plan = crate::thinking::plan(
             req.effort.as_deref().unwrap_or_default(),
             answer_token_budget(),
+            crate::thinking::ladder_enabled(),
         );
+        // The answer sends the plan only while the messages it sends still lead with the composed head.
+        let answer_tiers =
+            crate::prompt_context::plan_for(prompt_tiers.as_ref(), &composed_head, &messages);
+        // The thread's prompt-cache routing key, from its ids alone. Empty without a thread.
+        let cache_scope_key =
+            mp_contracts::prompt_tier::cache_scope_key(&org_clone, &session_thread_id)
+                .unwrap_or_default();
         let mut grpc_req = InferRequest {
             request_id: req_id.clone(),
             org_id: org_clone.clone(),
@@ -2559,9 +3524,13 @@ pub async fn invoke_stream_sse(
             // micro-calls (title, follow-ups, compaction summary) keep their
             // own posture because they carry only already-persisted text.
             min_privacy_tier: min_privacy_tier_wire,
-            thinking_budget_tokens,
+            thinking_budget_tokens: thinking_plan.budget_tokens,
+            reasoning_effort: thinking_plan.effort_wire(),
+            prompt_tiers: answer_tiers,
+            cache_scope_key,
             ..Default::default()
         };
+        crate::vision::parts::attach(&mut grpc_req, &image_parts);
         // Read before any retry rewrites the request: on a subscription route
         // the turn is never priced from API list prices, including an
         // artifact turn whose synthetic answer names no serving provider.
@@ -2569,6 +3538,11 @@ pub async fn invoke_stream_sse(
             &grpc_req.provider_hint,
             &grpc_req.subscription_connection_id,
         );
+        // Advisory cache-miss classification (WS02-S2): digest the leading
+        // system messages now, before any retry rewrites the request. A ZDR
+        // turn is never observed, so no digest of its prompt is kept.
+        let cache_prefix = (!effective_zdr)
+            .then(|| cache_telemetry::PrefixDigest::of(&grpc_req.messages));
 
         // No response cache is consulted here, deliberately. A prompt-keyed
         // answer cache used to sit at exactly this point and was removed
@@ -2656,6 +3630,8 @@ pub async fn invoke_stream_sse(
         // word-range candidates time their own calls below.
         let mut answer_call = (artifact_completion.is_none() && word_range.is_none())
             .then(|| timing.call(crate::turn_timing::Phase::AnswerStream));
+        // A synthetic artifact answer makes no provider call, so it adds no call to the turn.
+        let answer_provider_call = artifact_completion.is_none();
         let mut length_retries: usize = 0;
         let stream: Option<std::pin::Pin<Box<dyn Stream<Item = Result<mp_contracts::model_plane::v1::InferChunk, tonic::Status>> + Send>>> =
         if let Some((summary, mut receipt)) = artifact_completion {
@@ -2803,12 +3779,16 @@ pub async fn invoke_stream_sse(
             } else {
                 crate::compaction::drop_oldest_group
             };
+            let before_shed = grpc_req.messages.len();
+            // Shedding moves the images' message: they follow it, and a turn whose image message
+            // was itself shed fails like any other prompt that stays too long.
             if length_retries >= MAX_CONTEXT_LENGTH_RETRIES
                 || !shed(
                     &mut grpc_req.messages,
                     CONTEXT_LENGTH_DROP_GROUP,
                     CONTEXT_LENGTH_KEEP_TAIL,
                 )
+                || !crate::vision::parts::rebase(&mut grpc_req, &image_parts)
             {
                 tracing::error!(
                     error = %error,
@@ -2847,6 +3827,12 @@ pub async fn invoke_stream_sse(
                 finish_stream_registrations(&cancels, &queued_inputs, &req_id);
                 return;
             }
+            // The shed rewrote the list: the plan holds only if the head it counts survived it.
+            grpc_req.prompt_tiers = crate::prompt_context::plan_for(
+                prompt_tiers.as_ref(),
+                &composed_head,
+                &grpc_req.messages,
+            );
             length_retries += 1;
             tracing::warn!(
                 request_id = %req_id,
@@ -2854,6 +3840,16 @@ pub async fn invoke_stream_sse(
                 remaining_messages = grpc_req.messages.len(),
                 "provider rejected the prompt as too long; retrying with older history dropped"
             );
+            emit_lifecycle(
+                &tx,
+                &stream_buffers,
+                &buffer_key,
+                &mut seq,
+                &features,
+                &req_id,
+                lifecycle_events::history_shed(before_shed.saturating_sub(grpc_req.messages.len())),
+            )
+            .await;
         }};
 
         let Some(mut grpc_stream) = stream else {
@@ -2912,6 +3908,9 @@ pub async fn invoke_stream_sse(
                 seq,
                 &timing,
                 head_summary.as_ref(),
+                retention_class,
+                &tool_usage,
+                &sink,
             )
             .await;
             finish_stream_registrations(&cancels, &queued_inputs, &req_id);
@@ -3195,6 +4194,17 @@ pub async fn invoke_stream_sse(
                     } else {
                         chunk.model_used.clone()
                     };
+                    // The answer as the turn's usage counts it; a synthetic answer made no call.
+                    let answer_call = answer_provider_call.then(|| crate::usage_meter::CallUsage {
+                        phase: crate::usage_meter::CallPhase::Answer,
+                        model: model_used.clone(),
+                        provider: provider_used.clone(),
+                        basis: cost_basis,
+                        input: i64::from(input_tokens),
+                        output: i64::from(output_tokens),
+                        cache_read: i64::from(cache_read_tokens),
+                        cache_write: i64::from(cache_creation_tokens),
+                    });
                     let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
                     // inference-core sets this ONLY when the provider connection
                     // broke before any proper termination signal arrived — a
@@ -3294,7 +4304,8 @@ pub async fn invoke_stream_sse(
                     // whole stream and carried on this final chunk. `None` for
                     // providers that report no logprobs (Anthropic).
                     let certainty = model_certainty(chunk.token_confidence.as_ref());
-                    let answer_budget = truncation_budget(cost_basis);
+                    let answer_budget =
+                        truncation_budget(cost_basis, thinking_plan.allowance_tokens);
                     let mut weak_retrieval = grounding.as_ref().is_some_and(|g| g.low_confidence);
                     let mut confidence = crate::confidence::score_with_retrieval_confidence(
                         &assistant_output,
@@ -3364,7 +4375,7 @@ pub async fn invoke_stream_sse(
                                 bearer,
                                 &org_clone,
                                 query,
-                                effective_zdr,
+                                data_plane_mode.clone(),
                                 verify_sovereign,
                                 verify_space_decision.as_deref(),
                             )
@@ -3395,6 +4406,7 @@ pub async fn invoke_stream_sse(
                                         &snippets,
                                         &inference_bearer,
                                         effective_zdr,
+                                        &sink,
                                     )
                                     .await;
                                     timing.provider_interval(judge_started, 1);
@@ -3475,6 +4487,7 @@ pub async fn invoke_stream_sse(
                                     .as_ref()
                                     .map(VerifiedCapabilityBearer::as_str),
                                 effective_zdr,
+                                data_plane_mode.clone(),
                                 Vec::new(),
                                 query,
                                 Some(&sink),
@@ -3508,6 +4521,7 @@ pub async fn invoke_stream_sse(
                                     &snippets,
                                     &inference_bearer,
                                     effective_zdr,
+                                    &sink,
                                 )
                                 .await;
                                 timing.provider_interval(judge_started, 1);
@@ -3551,6 +4565,7 @@ pub async fn invoke_stream_sse(
                                 output_tokens.try_into().unwrap_or(i32::MAX),
                                 &inference_bearer,
                                 effective_zdr,
+                                &sink,
                             )
                             .await;
                             // One call per sample; a failed sample ends the set.
@@ -3731,43 +4746,46 @@ pub async fn invoke_stream_sse(
                             crate::session_flow::DirectAnswer {
                                 content: &assistant_output,
                                 agent_name: session_agent_name.as_deref(),
-                                metadata: crate::session_flow::with_head_summary(
-                                    crate::session_flow::with_compaction_summary(
-                                        crate::session_flow::with_result_receipt(
-                                            crate::session_flow::turn_evidence_metadata(
-                                                session_grounding.as_ref(),
-                                                &sink.recorded_citations(),
-                                                &sink.recorded_artifacts(),
-                                                // Scored, and where applicable verified, just
-                                                // above — so the durable turn carries the same
-                                                // number the stream reported, and a reader who
-                                                // opens this thread on another device sees why.
-                                                crate::session_flow::TurnQuality {
-                                                    confidence,
-                                                    verification: verification_decision
-                                                        .should_verify()
-                                                        .then(|| {
-                                                            crate::session_flow::TurnVerification {
-                                                                verdict: verdict.as_str(),
-                                                                kb_citations: evidence.kb_citations,
-                                                                web_citations: evidence
-                                                                    .web_citations,
-                                                                web_allowed: verify_web_allowed,
-                                                            }
-                                                        }),
-                                                },
+                                metadata: crate::compaction::stamp_generation(
+                                    crate::session_flow::with_head_summary(
+                                        crate::session_flow::with_compaction_summary(
+                                            crate::session_flow::with_result_receipt(
+                                                crate::session_flow::turn_evidence_metadata(
+                                                    session_grounding.as_ref(),
+                                                    &sink.recorded_citations(),
+                                                    &sink.recorded_artifacts(),
+                                                    // Scored, and where applicable verified, just
+                                                    // above — so the durable turn carries the same
+                                                    // number the stream reported, and a reader who
+                                                    // opens this thread on another device sees why.
+                                                    crate::session_flow::TurnQuality {
+                                                        confidence,
+                                                        verification: verification_decision
+                                                            .should_verify()
+                                                            .then(|| {
+                                                                crate::session_flow::TurnVerification {
+                                                                    verdict: verdict.as_str(),
+                                                                    kb_citations: evidence.kb_citations,
+                                                                    web_citations: evidence
+                                                                        .web_citations,
+                                                                    web_allowed: verify_web_allowed,
+                                                                }
+                                                            }),
+                                                    },
+                                                ),
+                                                result_receipt
+                                                    .lock()
+                                                    .ok()
+                                                    .and_then(|receipt| receipt.clone())
+                                                    .as_ref(),
                                             ),
-                                            result_receipt
-                                                .lock()
-                                                .ok()
-                                                .and_then(|receipt| receipt.clone())
-                                                .as_ref(),
+                                            &chunk.compaction_summary,
+                                            effective_zdr,
                                         ),
-                                        &chunk.compaction_summary,
+                                        head_summary.as_ref().map(|new| &new.record),
                                         effective_zdr,
                                     ),
                                     head_summary.as_ref(),
-                                    effective_zdr,
                                 ),
                             },
                             &req_id,
@@ -3999,15 +5017,49 @@ pub async fn invoke_stream_sse(
                         cache_creation_tokens,
                         cost_basis,
                     );
+                    // Read only now: the verification pass above records its judge and resample
+                    // calls, and a read before it would leave them out of the rows and the total.
+                    let overhead = sink.overhead_usage();
+                    // Under the switch, every call of the turn other than its answer gets a ledger row
+                    // of its own and the chat rows name the run, so the run endpoint sums the turn.
+                    if turn_usage_complete_switch() {
+                        let calls: Vec<&crate::usage_meter::CallUsage> =
+                            tool_usage.iter().chain(overhead.iter()).collect();
+                        for row in turn_call_rows(
+                            &req_id,
+                            &session_run_for_terminal.run_id,
+                            &org_clone,
+                            &user_clone,
+                            min_privacy_tier_wire,
+                            &calls,
+                        ) {
+                            if let Err(e) = publisher
+                                .publish(&subjects::usage_subject(&org_clone), &row)
+                                .await
+                            {
+                                tracing::warn!(error = %e, "failed to publish a turn call's USAGE_ENVELOPE");
+                            }
+                        }
+                        usage_envelope.payload["run_id"] = json!(session_run_for_terminal.run_id);
+                    }
                     // A summary as of now, beside the unchanged `latency_ms`.
                     usage_envelope.payload["timing"] = timing.summary();
+                    if let Some(reason) = cache_telemetry::miss_reason_for_turn(
+                        cache_prefix.filter(|_| cost_basis != crate::pricing::CostBasis::Subscription),
+                        &org_clone,
+                        &session_thread_id,
+                        &model_used,
+                        input_tokens,
+                        cache_read_tokens,
+                    ) {
+                        usage_envelope.payload["cache_miss_reason"] = reason.into();
+                    }
                     if let Err(e) = publisher
                         .publish(&subjects::usage_subject(&org_clone), &usage_envelope)
                         .await
                     {
                         tracing::warn!(error = %e, "failed to publish USAGE_ENVELOPE");
                     }
-                    gateway_metrics::stream_closed();
 
                     info!(
                         request_id = %req_id,
@@ -4029,16 +5081,9 @@ pub async fn invoke_stream_sse(
                     // prices (`CostBasis`). Phase 7 B6 — confidence is a heuristic
                     // answer-quality score over the real completion (grounded =
                     // carried citations).
-                    let cost_usd = pricing
-                        .cost_usd_for(
-                            cost_basis,
-                            &model_used,
-                            i64::from(input_tokens),
-                            i64::from(output_tokens),
-                            i64::from(cache_read_tokens),
-                            i64::from(cache_creation_tokens),
-                        )
-                        .await;
+                    // The turn's total: every call of the tool phase, the overhead calls and the answer.
+                    let turn = turn_usage(&pricing, &tool_usage, &overhead, answer_call.clone()).await;
+                    let cost_usd = frame_cost_usd(&turn);
                     // Evidence is COUNTED, not a boolean: tool successes/failures
                     // and web citations were accumulated as the turn ran, and KB
                     // citations + session-core assembly grounding join here. The
@@ -4109,14 +5154,46 @@ pub async fn invoke_stream_sse(
                         )
                         .await;
                     }
+                    // The answer call's progress frame comes just before the usage frame that closes the turn,
+                    // and states the same total. A turn whose answer made no provider call has none.
+                    if answer_call.is_some() && sink.streams_usage_progress() {
+                        // The answer is not in the sink's tally until this frame, so its ceiling is
+                        // read from the turn's total, which counts every call the turn made.
+                        let turn_metered = crate::sse_events::metered_tokens_of(
+                            tool_usage
+                                .iter()
+                                .chain(overhead.iter())
+                                .chain(answer_call.iter()),
+                        );
+                        emit_and_buffer(
+                            &tx,
+                            &stream_buffers,
+                            &buffer_key,
+                            &mut seq,
+                            &features,
+                            &req_id,
+                            crate::sse_events::ChatEvent::UsageProgress {
+                                phase: crate::usage_meter::CallPhase::Answer,
+                                snapshot: turn,
+                                ceiling: sink.run_ceiling_at_turn_end(&turn, turn_metered),
+                            },
+                        )
+                        .await;
+                    }
                     let usage_event = crate::sse_events::ChatEvent::Usage {
-                        input_tokens,
-                        output_tokens,
+                        cache_read_tokens: saturating_u32(turn.cache_read),
+                        cache_write_tokens: saturating_u32(turn.cache_write),
+                        input_tokens: saturating_u32(turn.input),
+                        output_tokens: saturating_u32(turn.output),
                         cost_usd,
-                        cost_basis: Some(cost_basis),
+                        cost_basis: turn.basis,
                         latency_ms,
                         confidence,
                         served_by,
+                        retention_class,
+                        calls: turn.calls,
+                        unpriced_calls: turn.unpriced_calls,
+                        cost_by_category: turn.by_category,
                     };
                     emit_and_buffer(
                         &tx,
@@ -4438,9 +5515,6 @@ const MAX_THREAD_CONTEXT_MESSAGES: usize = 24;
 /// the retained summary takes the slot the dropped head used to occupy and the
 /// prompt still carries at most [`MAX_THREAD_CONTEXT_MESSAGES`] messages.
 const COMPACTED_TAIL_MESSAGES: usize = MAX_THREAD_CONTEXT_MESSAGES - 1;
-/// Ceiling on the tier-2 summarization call. It runs before the stream opens, so
-/// a slow summarizer must degrade to truncation rather than delay first byte.
-const COMPACTION_SUMMARY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
 /// Retries allowed after a provider rejects the prompt for length. Matches the
 /// reference implementation's allowance: enough to recover a turn that is merely
 /// over the line, few enough that a prompt which can never fit fails fast.
@@ -4470,6 +5544,11 @@ const MAX_REQUESTED_SKILLS: usize = 4;
 struct SkillContext {
     blocks: Vec<String>,
     requested_ids: Vec<String>,
+    /// Blocks shortened, and blocks left out, to fit the context budget.
+    skills_truncated: usize,
+    skills_dropped: usize,
+    /// A skill this turn injected has a bundle, so `skill_file` is worth offering (WS19-S7).
+    skill_file_offered: bool,
 }
 const DEFAULT_CONTEXT_ASSEMBLY_TOKENS: u32 = 4096;
 const MIN_CONTEXT_ASSEMBLY_TOKENS: u32 = 512;
@@ -4519,10 +5598,18 @@ fn answer_token_budget() -> i32 {
 /// it. The subscription broker does not (Codex takes no output cap) and
 /// counts reasoning inside its output tokens, so on that route the check gets
 /// no budget (0) and a long answer is not scored as truncated.
-fn truncation_budget(cost_basis: crate::pricing::CostBasis) -> u32 {
+///
+/// `reasoning_allowance` is what the effort level may add to the ceiling (0
+/// without a level): reasoning tokens count toward `output_tokens`, so a
+/// ceiling that ignored them would score every Deep answer as cut off.
+fn truncation_budget(cost_basis: crate::pricing::CostBasis, reasoning_allowance: i32) -> u32 {
     match cost_basis {
         crate::pricing::CostBasis::Subscription => 0,
-        crate::pricing::CostBasis::Metered => u32::try_from(answer_token_budget()).unwrap_or(0),
+        crate::pricing::CostBasis::Metered => u32::try_from(crate::thinking::raised_ceiling(
+            answer_token_budget(),
+            reasoning_allowance,
+        ))
+        .unwrap_or(0),
     }
 }
 
@@ -4775,6 +5862,33 @@ async fn load_context_assembly_messages(
     )
 }
 
+/// Whether the thread's own persona toggle is on, for an agent run's authored
+/// instructions. It is carried by the same context-assembly response an Ask turn
+/// reads; the assembly text is not used here, and no Data Plane credential is
+/// delegated, so the read costs no retrieval. Open when the read fails, like an
+/// Ask turn whose assembly is unavailable.
+pub(crate) async fn load_thread_persona_enabled(
+    state: &AppState,
+    thread_id: &str,
+    run_id: &str,
+    goal: &str,
+    bearer: &VerifiedModelBearer,
+    sovereign_required: bool,
+) -> bool {
+    load_context_assembly_messages(
+        state,
+        thread_id,
+        run_id,
+        goal,
+        goal,
+        bearer,
+        None,
+        sovereign_required,
+    )
+    .await
+    .1
+}
+
 /// Segment kinds that carry actual Data Plane evidence, as opposed to identity,
 /// goals or conversation history.
 ///
@@ -4938,7 +6052,9 @@ struct RecentThread {
     messages: Vec<ChatMessage>,
     /// Set only in token-budget mode, when this turn wrote a new summary; the
     /// answer's persisted metadata carries it so later turns can reuse it.
-    head_summary: Option<crate::compaction::StoredHeadSummary>,
+    head_summary: Option<crate::compaction::NewHeadSummary>,
+    /// What compacting the loaded history did, when it did anything.
+    compaction: Option<lifecycle_events::CompactionFacts>,
 }
 
 /// How much of the about-to-be-discarded head is used as the memory query.
@@ -5033,7 +6149,8 @@ async fn fetch_compaction_memory_directive(
 /// summarizer is bounded on and for the same reason: memory is advisory
 /// context, and a slow memory backend must cost the turn nothing but the
 /// recall, never a visible hang.
-const MEMORY_PREFETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(400);
+pub(crate) const MEMORY_PREFETCH_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(400);
 
 /// What one turn's memory prefetch actually injected, for the
 /// `memory_recall` SSE indicator. `None` = nothing recalled, no event.
@@ -5097,8 +6214,11 @@ async fn fetch_chat_memory_context(
     .await;
     let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
-    let recalled = match response {
-        Ok(Ok(resp)) => resp.into_inner().entries,
+    let (recalled, skip_reason) = match response {
+        Ok(Ok(resp)) => {
+            let resp = resp.into_inner();
+            (resp.entries, resp.skip_reason)
+        }
         Ok(Err(error)) => {
             tracing::warn!(%error, "chat memory prefetch failed; continuing without memory");
             record_memory_prefetch_outcome("error");
@@ -5122,6 +6242,12 @@ async fn fetch_chat_memory_context(
         .filter(|content| !content.trim().is_empty())
         .collect();
     if entries.is_empty() {
+        // Memory switched off by the user or the org is not "nothing to recall":
+        // the operator sees it as its own outcome.
+        if let Some(outcome) = skipped_prefetch_outcome(&skip_reason) {
+            record_memory_prefetch_outcome(outcome);
+            return (Vec::new(), None);
+        }
         record_memory_prefetch_outcome("empty");
         return (Vec::new(), None);
     }
@@ -5139,8 +6265,52 @@ async fn fetch_chat_memory_context(
 
 /// Outcome labels for [`MEMORY_PREFETCH_OUTCOME_METRIC`]. Kept as one closed
 /// list so a dashboard can assert the labels sum to the turn count.
-pub(crate) const MEMORY_PREFETCH_OUTCOMES: &[&str] =
-    &["hit", "empty", "timeout", "error", "no_credential"];
+pub(crate) const MEMORY_PREFETCH_OUTCOMES: &[&str] = &[
+    "hit",
+    "empty",
+    "timeout",
+    "error",
+    "no_credential",
+    "skipped_paused",
+    "skipped_off",
+    "skipped_org_policy",
+];
+
+/// The outcome label for a `SearchMemoryResponse.skip_reason` (the closed
+/// `MemoryControls.reason` tokens session-core returns), or `None` when the
+/// user's memory was used. `zdr` has no label: a ZDR turn never prefetches.
+pub(crate) fn skipped_prefetch_outcome(skip_reason: &str) -> Option<&'static str> {
+    match skip_reason {
+        "user_paused" => Some("skipped_paused"),
+        "user_off" => Some("skipped_off"),
+        "org_disabled" | "policy_unavailable" => Some("skipped_org_policy"),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod memory_prefetch_skip_tests {
+    use super::*;
+
+    /// Every closed skip token a user's or org's switch can produce maps to a
+    /// label the metric declares, and a used or unknown token maps to none.
+    #[test]
+    fn skip_reasons_map_to_declared_outcome_labels() {
+        for (reason, label) in [
+            ("user_paused", "skipped_paused"),
+            ("user_off", "skipped_off"),
+            ("org_disabled", "skipped_org_policy"),
+            ("policy_unavailable", "skipped_org_policy"),
+        ] {
+            let outcome = skipped_prefetch_outcome(reason).expect("a skip reason has a label");
+            assert_eq!(outcome, label);
+            assert!(MEMORY_PREFETCH_OUTCOMES.contains(&outcome));
+        }
+        for reason in ["", "zdr", "something_new"] {
+            assert_eq!(skipped_prefetch_outcome(reason), None, "{reason:?}");
+        }
+    }
+}
 
 /// Why this is a metric and not a user-facing notice.
 ///
@@ -5158,7 +6328,7 @@ pub(crate) const MEMORY_PREFETCH_OUTCOMES: &[&str] =
 /// product.
 const MEMORY_PREFETCH_OUTCOME_METRIC: &str = "mp_gateway_chat_memory_prefetch_total";
 
-fn record_memory_prefetch_outcome(outcome: &'static str) {
+pub(crate) fn record_memory_prefetch_outcome(outcome: &'static str) {
     debug_assert!(
         MEMORY_PREFETCH_OUTCOMES.contains(&outcome),
         "unlisted memory-prefetch outcome label"
@@ -5240,6 +6410,10 @@ async fn load_recent_thread_messages(
             space_id: String::new(),
             space_read_decision_ref: String::new(),
             space_read_decision_token: String::new(),
+            include_inactive: false,
+            // Unpaged (WS09-S8): the whole conversation in sequence order.
+            limit: 0,
+            before_message_id: String::new(),
         },
         bearer,
     ) {
@@ -5249,11 +6423,15 @@ async fn load_recent_thread_messages(
             return RecentThread {
                 messages: Vec::new(),
                 head_summary: None,
+                compaction: None,
             };
         }
     };
     // The newest summary an earlier turn persisted, read only in budget mode.
     let mut stored_summary: Option<crate::compaction::StoredHeadSummary> = None;
+    // How many times earlier turns summarised this thread's head, from the
+    // same record; a record without one counts as 0.
+    let mut stored_generation = 0u64;
     // `message_id` is carried alongside each turn only as far as the pin
     // resolution below; `ChatMessage` (what the provider sees) has no field for
     // our identifiers and must not gain one.
@@ -5282,6 +6460,8 @@ async fn load_recent_thread_messages(
                         crate::session_flow::persisted_head_summary(message.metadata.as_ref())
                     {
                         stored_summary = Some(stored);
+                        stored_generation =
+                            crate::compaction::persisted_generation(message.metadata.as_ref());
                     }
                 }
                 crate::compaction::IdentifiedMessage {
@@ -5330,6 +6510,7 @@ async fn load_recent_thread_messages(
             thread_id,
             loaded,
             stored_summary.as_ref(),
+            stored_generation,
             pinned_message_ids,
             bearer,
             summarizer,
@@ -5402,6 +6583,7 @@ async fn load_recent_thread_messages(
     //
     // This also protects native-off and provider-fallback routes. Native
     // compaction separately handles large inputs below the message-count cap.
+    let mut compaction = None;
     if let Some(head) = run_local_compaction
         .then(|| {
             crate::compaction::plan_head_summary(
@@ -5414,13 +6596,20 @@ async fn load_recent_thread_messages(
     {
         let transcript = crate::compaction::render_head_transcript(&messages, head);
         let summary =
-            summarize_head(state, org_id, thread_id, &transcript, bearer, summarizer).await;
+            summarize_head(state, org_id, thread_id, 0, &transcript, bearer, summarizer).await;
+        compaction = lifecycle_events::compaction_facts(
+            false,
+            Some(head),
+            messages.len(),
+            summary.as_deref(),
+        );
         messages = crate::compaction::apply_head_summary(messages, head, summary.as_deref());
     }
 
     RecentThread {
         messages,
         head_summary: None,
+        compaction,
     }
 }
 
@@ -5430,6 +6619,9 @@ async fn summarize_head(
     state: &AppState,
     org_id: &str,
     thread_id: &str,
+    // The generation this compaction would persist as; 0 where nothing is
+    // persisted (the message-count path).
+    generation: u64,
     transcript: &str,
     bearer: &VerifiedModelBearer,
     summarizer: &SummarizerContext<'_>,
@@ -5442,12 +6634,15 @@ async fn summarize_head(
     } else {
         fetch_compaction_memory_directive(state, org_id, thread_id, transcript, bearer).await
     };
+    // The bracket opens after the memory read so that what it times is the
+    // bounded call below.
+    let mut tx = crate::compaction::CompactionTx::begin(thread_id, generation);
     // Bounded because this runs BEFORE the stream opens: an unbounded
     // summarization call would reintroduce the dead spinner that moving the
     // tool phase into the stream task just removed. On timeout we take the
     // truncation fallback, which is exactly the pre-compaction behaviour.
-    let summary = tokio::time::timeout(
-        COMPACTION_SUMMARY_TIMEOUT,
+    let answer = tokio::time::timeout(
+        crate::compaction::COMPACTION_SUMMARY_TIMEOUT,
         direct_infer(
             state,
             &format!("{}-compaction", summarizer.request_id),
@@ -5464,13 +6659,29 @@ async fn summarize_head(
             summarizer.inference_bearer,
         ),
     )
-    .await
-    // A timeout and a provider error are the same outcome here — no summary
-    // — and compaction is best-effort by contract, so both collapse to
-    // `None` and take the truncation fallback.
-    .map_err(|_| ())
-    .and_then(|result| result.map_err(|_| ()))
-    .ok();
+    .await;
+    // A timeout and a provider error are the same outcome for the prompt — no
+    // summary — and compaction is best-effort by contract, so both take the
+    // truncation fallback; the bracket keeps them apart. A fresh bracket
+    // cannot refuse a close, so the results are not read.
+    let summary = match answer {
+        Err(_) => {
+            let _ = tx.abort(crate::compaction::CompactionAbort::Timeout);
+            None
+        }
+        Ok(Err(_)) => {
+            let _ = tx.abort(crate::compaction::CompactionAbort::ProviderError);
+            None
+        }
+        Ok(Ok(answer)) if answer.content.trim().is_empty() => {
+            let _ = tx.abort(crate::compaction::CompactionAbort::EmptySummary);
+            Some(answer.content)
+        }
+        Ok(Ok(answer)) => {
+            let _ = tx.commit(&crate::compaction::summary_digest(&answer.content));
+            Some(answer.content)
+        }
+    };
     if summary.is_none() {
         tracing::warn!(
             %thread_id,
@@ -5492,6 +6703,7 @@ async fn budget_compacted_thread(
     thread_id: &str,
     loaded: Vec<crate::compaction::IdentifiedMessage>,
     stored: Option<&crate::compaction::StoredHeadSummary>,
+    stored_generation: u64,
     pinned_message_ids: &[String],
     bearer: &VerifiedModelBearer,
     summarizer: &SummarizerContext<'_>,
@@ -5507,17 +6719,37 @@ async fn budget_compacted_thread(
         "token-budget compaction planned"
     );
     let Some(head) = plan.head else {
+        let compaction = lifecycle_events::compaction_facts(plan.reused, None, 0, None);
         return RecentThread {
             messages: plan.messages,
             head_summary: None,
+            compaction,
         };
     };
+    let reused = plan.reused;
+    let total = plan.messages.len();
     let transcript = crate::compaction::render_head_transcript(&plan.messages, head);
-    let summary = summarize_head(state, org_id, thread_id, &transcript, bearer, summarizer).await;
-    let head_summary = summary.as_deref().and_then(|summary| plan.record(summary));
+    let generation = stored_generation + 1;
+    let summary = summarize_head(
+        state,
+        org_id,
+        thread_id,
+        generation,
+        &transcript,
+        bearer,
+        summarizer,
+    )
+    .await;
+    let head_summary = summary
+        .as_deref()
+        .and_then(|summary| plan.record(summary))
+        .map(|record| crate::compaction::NewHeadSummary { record, generation });
+    let compaction =
+        lifecycle_events::compaction_facts(reused, Some(head), total, summary.as_deref());
     RecentThread {
         messages: crate::compaction::apply_head_summary(plan.messages, head, summary.as_deref()),
         head_summary,
+        compaction,
     }
 }
 
@@ -5530,6 +6762,7 @@ async fn budget_compacted_thread(
 async fn fetch_skill_context(
     state: &AppState,
     bearer: &VerifiedModelBearer,
+    capability_bearer: Option<&str>,
     org_id: &str,
     user_id: &str,
     query: &str,
@@ -5543,11 +6776,12 @@ async fn fetch_skill_context(
     // §G7 read path: pull this org's LEARNED skills (session-core agent_skills)
     // into the match cache, re-pulling once the cached copy goes stale so an
     // operator's edit or deletion lands without a gateway restart.
-    if !state.skills.is_org_loaded(org_id) {
+    if !state.skills.is_loaded(org_id, user_id) {
         if let Ok(request) = authenticated_session_request(
             ListAgentSkillsRequest {
                 org_id: org_id.to_owned(),
                 enabled_only: true,
+                for_user_id: String::new(),
             },
             bearer,
         ) {
@@ -5557,26 +6791,17 @@ async fn fetch_skill_context(
                 .list_agent_skills(request)
                 .await
             {
-                Ok(resp) => {
-                    let pulled = resp.into_inner().skills;
-                    // Ownership (SKILL-1) rides alongside the match cache: computed
-                    // from the same pull, before `pulled` is consumed below.
-                    state.ownership.replace_org_kind(
-                        org_id,
-                        crate::ownership::KIND_SKILL,
-                        crate::skills::skill_ownership_entries(&pulled),
-                    );
-                    // replace_learned, not a bare upsert loop: on a re-pull the
-                    // cache must also FORGET skills the operator deleted, or a
-                    // removed skill keeps steering answers indefinitely.
-                    state.skills.replace_learned(
-                        org_id,
-                        pulled
-                            .into_iter()
-                            .map(crate::skills::agent_skill_to_skill)
-                            .collect(),
-                    );
-                }
+                // refresh_learned, not a bare upsert loop: on a re-pull the
+                // cache must also FORGET skills the operator deleted, or a
+                // removed skill keeps steering answers indefinitely. The pull is
+                // this caller's, so it replaces only this caller's share, and
+                // ownership (SKILL-1) is recorded from the same pull.
+                Ok(resp) => state.skills.refresh_learned(
+                    &state.ownership,
+                    org_id,
+                    user_id,
+                    resp.into_inner().skills,
+                ),
                 Err(error) => {
                     tracing::warn!(%error, %org_id, "list_agent_skills failed; matching disk-loaded skills only");
                 }
@@ -5615,12 +6840,24 @@ async fn fetch_skill_context(
             }
         }
     }
-    // Bounded by SIZE as well as count — see `skills::fit_skill_blocks`.
-    let fitted = crate::skills::fit_skill_blocks(
+    // A skill with a bundle says so in its block; the bundle's files are read on demand (WS19-S7).
+    let skill_ids: Vec<String> = chosen.iter().map(|s| s.id.clone()).collect();
+    let bundles = skill_bundle_summaries(state, capability_bearer, org_id, &skill_ids).await;
+    // Bounded by SIZE as well as count — see `skills::fit_skill_blocks_with_footers`.
+    let fitted = crate::skills::fit_skill_blocks_with_footers(
         chosen
             .into_iter()
             .filter(|s| !s.body.trim().is_empty())
-            .map(|s| crate::skills::format_skill_block(&s))
+            .map(|s| {
+                let footer = bundles
+                    .iter()
+                    .find(|bundle| bundle.skill_id == s.id)
+                    .map(|bundle| {
+                        crate::skills::bundle_footer(&s.name, bundle.file_count, bundle.total_bytes)
+                    })
+                    .unwrap_or_default();
+                (crate::skills::format_skill_block(&s), footer)
+            })
             .collect(),
     );
     if fitted.truncated > 0 || fitted.dropped > 0 {
@@ -5635,6 +6872,47 @@ async fn fetch_skill_context(
     SkillContext {
         blocks: fitted.blocks,
         requested_ids,
+        skills_truncated: fitted.truncated,
+        skills_dropped: fitted.dropped,
+        skill_file_offered: !bundles.is_empty(),
+    }
+}
+
+/// The bundles of the skills a turn injected (WS19-S7). Asked only while
+/// `SKILL_FILE_TOOL_ENABLED` is on, so the switch off makes no extra call. Advisory
+/// like the rest of skill injection: a failed read costs the footers and the tool,
+/// never the turn.
+async fn skill_bundle_summaries(
+    state: &AppState,
+    capability_bearer: Option<&str>,
+    org_id: &str,
+    skill_ids: &[String],
+) -> Vec<mp_contracts::model_plane::v1::SkillBundleSummary> {
+    use mp_contracts::model_plane::v1::ListSkillBundlesRequest;
+
+    let Some(bearer) = capability_bearer.filter(|bearer| !bearer.trim().is_empty()) else {
+        return Vec::new();
+    };
+    if skill_ids.is_empty() || !mp_contracts::skill_bundle::enabled() {
+        return Vec::new();
+    }
+    let request = crate::tool_loop::with_authorization(
+        ListSkillBundlesRequest {
+            skill_ids: skill_ids.to_vec(),
+        },
+        bearer,
+    );
+    match state
+        .capability_client
+        .clone()
+        .list_skill_bundles(request)
+        .await
+    {
+        Ok(response) => response.into_inner().bundles,
+        Err(error) => {
+            tracing::warn!(%error, %org_id, "list_skill_bundles failed; skills injected without bundle footers");
+            Vec::new()
+        }
     }
 }
 
@@ -6178,6 +7456,7 @@ async fn mark_run_plan_mode(state: &AppState, org_id: &str, run_id: &str, sessio
         org_id: org_id.to_owned(),
         granted_rung: 0,
         justification: String::new(),
+        approved_plan_id: String::new(),
     };
     let mut durable_request = tonic::Request::new(durable);
     let Ok(authorization) = format!("Bearer {session_bearer}").parse() else {
@@ -6204,14 +7483,6 @@ fn temporal_awareness_message() -> ChatMessage {
     }
 }
 
-/// ADR-0003's non-empty check: trims and treats blank as absent, the same
-/// rule every layer of the authored-instruction hierarchy already applies to
-/// its own field.
-fn non_empty_trimmed(value: &str) -> Option<&str> {
-    let trimmed = value.trim();
-    (!trimmed.is_empty()).then_some(trimmed)
-}
-
 /// Composes ADR-0003's authored-instruction hierarchy — platform (deployment
 /// env config) → org → Space → per-agent persona — into one system message,
 /// replacing `agent_persona_message`'s old mention-only firing with
@@ -6224,6 +7495,10 @@ fn non_empty_trimmed(value: &str) -> Option<&str> {
 /// (`agent_persona_message`'s own text, including its "you are currently
 /// answering as" framing) — only its firing condition (mention-gated) stays
 /// as-is; it is simply the last section here instead of the sole message.
+///
+/// The text itself is composed by `run_context::compose_authored_instructions`,
+/// the one composer an Ask turn and an agent run share; this wraps it in the
+/// system message an Ask turn sends.
 ///
 /// `None` only when platform, org, Space, persona, and agent are ALL empty —
 /// preserving today's silent-no-message behavior for a deployment/org/Space
@@ -6240,59 +7515,35 @@ fn non_empty_trimmed(value: &str) -> Option<&str> {
 /// like every other layer here — only the per-thread *toggle* is
 /// ZDR-blocked (`update_thread_presentation` rejects ZDR callers outright,
 /// enforced in session-core, not here).
-fn authored_instructions_message(
+pub(crate) fn authored_instructions_message(
     state: &AppState,
     req: &InvokeRequest,
     persona_enabled: bool,
 ) -> Option<ChatMessage> {
-    let mut sections: Vec<String> = Vec::new();
-
-    if let Some(platform) = non_empty_trimmed(&state.platform_instructions) {
-        sections.push(platform.to_owned());
-    }
-    if let Some(org) = req.org_instructions.as_deref().and_then(non_empty_trimmed) {
-        sections.push(format!(
-            "--- Organization instructions (may add to, but must not override, the platform instructions above) ---\n{org}"
-        ));
-    }
-    if let Some(space) = req
-        .space_instructions
-        .as_deref()
-        .and_then(non_empty_trimmed)
-    {
-        sections.push(format!(
-            "--- Space instructions (may add to, but must not override, the platform or organization instructions above) ---\n{space}"
-        ));
-    }
-    // Persona spec — the user layer, subordinate to org/Space but still
-    // ahead of an explicitly-summoned Space agent's own character (the next
-    // section): a mentioned agent's persona still wins on that turn, mirroring
-    // today's org/Space precedent (persona.md §6.3, owner ruling: "an
-    // explicitly summoned agent wins").
-    if persona_enabled {
-        if let Some(persona) = req
-            .persona_instructions
-            .as_deref()
-            .and_then(non_empty_trimmed)
-        {
-            sections.push(format!(
-                "--- Your personal instructions (may add to, but must not override, the platform, organization or Space instructions above) ---\n{persona}"
-            ));
+    let layers = authored_layers(state, req);
+    crate::run_context::compose_authored_instructions(&layers, persona_enabled).map(|content| {
+        ChatMessage {
+            compaction_summary: String::new(),
+            role: "system".to_owned(),
+            content,
+            name: String::new(),
         }
-    }
-    if let Some(persona) = agent_persona_message(req) {
-        sections.push(persona.content);
-    }
-
-    if sections.is_empty() {
-        return None;
-    }
-    Some(ChatMessage {
-        compaction_summary: String::new(),
-        role: "system".to_owned(),
-        content: sections.join("\n\n"),
-        name: String::new(),
     })
+}
+
+/// The authored layers one request carries: the deployment's platform text and
+/// the org, Space, persona and mentioned-agent text the BFF resolved onto it.
+pub(crate) fn authored_layers(
+    state: &AppState,
+    req: &InvokeRequest,
+) -> crate::run_context::AuthoredLayers {
+    crate::run_context::AuthoredLayers {
+        platform: state.platform_instructions.clone(),
+        org: req.org_instructions.clone(),
+        space: req.space_instructions.clone(),
+        persona: req.persona_instructions.clone(),
+        agent: agent_persona_message(req).map(|message| message.content),
+    }
 }
 
 /// Persona for a turn addressed to a Space agent by `@` mention
@@ -6397,7 +7648,13 @@ async fn run_infer_fallback(
     // The turn's clock: the fallback call is the turn's answer call.
     timing: &crate::turn_timing::TurnTiming,
     // A compaction summary written this turn, persisted with the answer.
-    head_summary: Option<&crate::compaction::StoredHeadSummary>,
+    head_summary: Option<&crate::compaction::NewHeadSummary>,
+    // How the answer's content is retained, stated on its usage frame.
+    retention_class: Option<crate::sse_events::RetentionClass>,
+    // The tool phase's provider calls, which the fallback answer's total includes.
+    tool_usage: &[crate::usage_meter::CallUsage],
+    // The turn's sink: the fallback answer's frame states the turn's run ceiling through it (WS27-S6).
+    sink: &crate::sse_events::RichEventSink,
 ) {
     let publisher = state.publisher.clone();
     let buffers = state.stream_buffers.clone();
@@ -6407,11 +7664,15 @@ async fn run_infer_fallback(
     // envelope so the fallback stamps the same provenance as the live stream.
     let min_privacy_tier = grpc_req.min_privacy_tier;
     let fallback_zdr = grpc_req.zdr;
+    let reasoning_allowance = crate::thinking::allowance_for_wire(grpc_req.reasoning_effort);
     let subscription_route = !grpc_req.subscription_connection_id.trim().is_empty();
     let route_cost_basis = crate::pricing::CostBasis::of_route(
         &grpc_req.provider_hint,
         &grpc_req.subscription_connection_id,
     );
+    // Advisory cache-miss classification (WS02-S2); never for a ZDR turn.
+    let cache_prefix =
+        (!fallback_zdr).then(|| cache_telemetry::PrefixDigest::of(&grpc_req.messages));
     let answer_call = timing.call(crate::turn_timing::Phase::AnswerStream);
     let result = state
         .inference_client
@@ -6594,7 +7855,7 @@ async fn run_infer_fallback(
             let confidence = crate::confidence::score_with_retrieval_confidence(
                 &resp.content,
                 output_tokens,
-                truncation_budget(cost_basis),
+                truncation_budget(cost_basis, reasoning_allowance),
                 evidence,
                 grounding.as_ref().is_some_and(|g| g.low_confidence),
                 model_certainty(resp.token_confidence.as_ref()),
@@ -6610,22 +7871,25 @@ async fn run_infer_fallback(
                     // The fallback path runs no tool loop, so retrieval grounding
                     // is the only evidence it can have — and it runs no
                     // verification pass either, so there is no verdict to record.
-                    metadata: crate::session_flow::with_head_summary(
-                        crate::session_flow::with_compaction_summary(
-                            crate::session_flow::turn_evidence_metadata(
-                                grounding,
-                                &[],
-                                &[],
-                                crate::session_flow::TurnQuality {
-                                    confidence,
-                                    verification: None,
-                                },
+                    metadata: crate::compaction::stamp_generation(
+                        crate::session_flow::with_head_summary(
+                            crate::session_flow::with_compaction_summary(
+                                crate::session_flow::turn_evidence_metadata(
+                                    grounding,
+                                    &[],
+                                    &[],
+                                    crate::session_flow::TurnQuality {
+                                        confidence,
+                                        verification: None,
+                                    },
+                                ),
+                                &resp.compaction_summary,
+                                fallback_zdr,
                             ),
-                            &resp.compaction_summary,
+                            head_summary.map(|new| &new.record),
                             fallback_zdr,
-                        ),
+                            ),
                         head_summary,
-                        fallback_zdr,
                     ),
                 },
                 request_id,
@@ -6823,34 +8087,90 @@ async fn run_infer_fallback(
                 cache_creation_tokens,
                 cost_basis,
             );
+            // Under the switch, the tool phase's calls get ledger rows of their own and the row names the run.
+            if turn_usage_complete_switch() {
+                let calls: Vec<&crate::usage_meter::CallUsage> = tool_usage.iter().collect();
+                for row in turn_call_rows(
+                    request_id,
+                    &run.run_id,
+                    org_id,
+                    user_id,
+                    min_privacy_tier,
+                    &calls,
+                ) {
+                    if let Err(e) = publisher
+                        .publish(&subjects::usage_subject(org_id), &row)
+                        .await
+                    {
+                        tracing::warn!(error = %e, "failed to publish a turn call's USAGE_ENVELOPE");
+                    }
+                }
+                usage.payload["run_id"] = json!(run.run_id);
+            }
             usage.payload["timing"] = timing.summary();
+            if let Some(reason) = cache_telemetry::miss_reason_for_turn(
+                cache_prefix.filter(|_| cost_basis != crate::pricing::CostBasis::Subscription),
+                org_id,
+                &thread_id,
+                &model_used,
+                input_tokens,
+                cache_read_tokens,
+            ) {
+                usage.payload["cache_miss_reason"] = reason.into();
+            }
             let _ = publisher
                 .publish(&subjects::usage_subject(org_id), &usage)
                 .await;
-            gateway_metrics::stream_closed();
 
             // chat-parity §17: opt-in usage event (real tokens + latency).
             // Phase 7 B5 — price cost_usd off cost-core's catalogue (same
             // source as the durable ledger); `None` only when unreachable, and
             // never a list price on a subscription turn.
             // Phase 7 B6 — confidence is the heuristic answer-quality score.
-            let cost_usd = state
-                .pricing
-                .cost_usd_for(
-                    cost_basis,
-                    &model_used,
-                    i64::from(input_tokens),
-                    i64::from(output_tokens),
-                    i64::from(cache_read_tokens),
-                    i64::from(cache_creation_tokens),
+            // The turn's total: the tool phase's calls and this answer, which made one call.
+            let answer_usage = crate::usage_meter::CallUsage {
+                phase: crate::usage_meter::CallPhase::Answer,
+                model: model_used.clone(),
+                provider: resp.provider_used.clone(),
+                basis: cost_basis,
+                input: i64::from(input_tokens),
+                output: i64::from(output_tokens),
+                cache_read: i64::from(cache_read_tokens),
+                cache_write: i64::from(cache_creation_tokens),
+            };
+            let turn =
+                turn_usage(&state.pricing, tool_usage, &[], Some(answer_usage.clone())).await;
+            let cost_usd = frame_cost_usd(&turn);
+            // The fallback answer is a provider call of its own, so it gets the progress frame the
+            // stream's answer gets, just before the usage frame that carries the same total.
+            if usage_progress_switch() {
+                // The answer is the turn's last call, so its ceiling is read from the turn's total.
+                let turn_metered = crate::sse_events::metered_tokens_of(
+                    tool_usage.iter().chain(std::iter::once(&answer_usage)),
+                );
+                emit_and_buffer(
+                    tx,
+                    &buffers,
+                    &buffer_key,
+                    &mut seq,
+                    features,
+                    request_id,
+                    crate::sse_events::ChatEvent::UsageProgress {
+                        phase: crate::usage_meter::CallPhase::Answer,
+                        snapshot: turn,
+                        ceiling: sink.run_ceiling_at_turn_end(&turn, turn_metered),
+                    },
                 )
                 .await;
+            }
             // Scored above, before the persist.
             let usage_event = crate::sse_events::ChatEvent::Usage {
-                input_tokens,
-                output_tokens,
+                cache_read_tokens: saturating_u32(turn.cache_read),
+                cache_write_tokens: saturating_u32(turn.cache_write),
+                input_tokens: saturating_u32(turn.input),
+                output_tokens: saturating_u32(turn.output),
                 cost_usd,
-                cost_basis: Some(cost_basis),
+                cost_basis: turn.basis,
                 latency_ms,
                 confidence,
                 // From the unary response this fallback answered with, under
@@ -6860,6 +8180,10 @@ async fn run_infer_fallback(
                     &resp.residency,
                     min_privacy_tier,
                 ),
+                retention_class,
+                calls: turn.calls,
+                unpriced_calls: turn.unpriced_calls,
+                cost_by_category: turn.by_category,
             };
             // Buffered like the chunks around it, so a resumed fallback turn
             // replays its tokens, latency, confidence and cost basis too.
@@ -6925,9 +8249,14 @@ async fn run_infer_fallback(
                         crate::subscription_failure::SUBSCRIPTION_ROUTE_UNAVAILABLE,
                     ))
                 });
-            let terminal_code = subscription_failure
-                .as_ref()
-                .map_or("inference_unavailable", |failure| failure.code);
+            // A refusal the picked model declared for an image it cannot read is the turn's own answer,
+            // not an outage: the run ends under that code, and so does the frame (below).
+            let vision_refusal = vision_unsupported_refusal(&e);
+            let terminal_code = match (&subscription_failure, vision_refusal) {
+                (Some(failure), _) => failure.code,
+                (None, Some((code, _, _))) => code,
+                (None, None) => "inference_unavailable",
+            };
             let mut seq = first_seq;
             if let Err(error) = crate::session_flow::terminalize_direct_inference_run_authenticated(
                 state,
@@ -6960,7 +8289,6 @@ async fn run_infer_fallback(
             let _ = publisher
                 .publish(&subjects::stream_subject("closed"), &close)
                 .await;
-            gateway_metrics::stream_closed();
             // chat-parity §20: structured error — stable `code` + `retryable`
             // so the client can branch (the `message` field is preserved for
             // back-compat with existing error handlers).
@@ -6972,10 +8300,26 @@ async fn run_infer_fallback(
                         crate::subscription_failure::FailureContext::Answer,
                     ),
                 ),
-                None => crate::sse_events::ChatEvent::Error {
-                    code: "model_plane_unavailable".to_owned(),
-                    message: e.message().to_owned(),
-                    retryable: true,
+                None => match mp_contracts::model_entitlement::Refusal::from_status(&e) {
+                    // The organisation's policy refused the model at
+                    // inference-core: the frame names that, not an outage.
+                    Some(refusal) => crate::sse_events::ChatEvent::Error {
+                        code: refusal.code().to_owned(),
+                        message: refusal.message(),
+                        retryable: refusal.retryable(),
+                    },
+                    None => match vision_refusal {
+                        Some((code, message, retryable)) => crate::sse_events::ChatEvent::Error {
+                            code: code.to_owned(),
+                            message: message.to_owned(),
+                            retryable,
+                        },
+                        None => crate::sse_events::ChatEvent::Error {
+                            code: "model_plane_unavailable".to_owned(),
+                            message: e.message().to_owned(),
+                            retryable: true,
+                        },
+                    },
                 },
             };
             // Buffered like every other terminal frame: a client that resumed
@@ -7203,7 +8547,48 @@ pub async fn invoke_resume_sse(
         .get("last-event-id")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok());
+    resume_stream_for(
+        &state,
+        &claims.org_id,
+        &claims.user_id,
+        &request_id,
+        after_seq,
+    )
+    .await
+}
 
+/// A duplicate send whose idempotency key another request already holds: serve that request's
+/// buffered stream from its first frame, so both clients see the same frames and no second run
+/// starts. When the original is no longer resumable (its buffer was evicted, or Redis lost it)
+/// the duplicate gets an error that names the original request id and starts nothing.
+async fn attach_to_original(
+    state: &AppState,
+    org_id: &str,
+    user_id: &str,
+    original: &crate::idempotency_registry::SharedClaimValue,
+) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
+    match resume_stream_for(state, org_id, user_id, &original.request_id, None).await {
+        Ok(stream) => stream,
+        Err(_) => error_stream(
+            &original.request_id,
+            "duplicate_in_flight",
+            "the original request for this idempotency_key is no longer resumable",
+            false,
+        ),
+    }
+}
+
+/// The replay-and-tail of a buffered chat stream for one verified caller, shared by the resume
+/// route and by a duplicate send that attaches to the original run
+/// (`MODEL_GATEWAY_SHARED_IDEMPOTENCY`). The caller's identity, never the request id alone,
+/// addresses the buffer.
+async fn resume_stream_for(
+    state: &AppState,
+    org_id: &str,
+    user_id: &str,
+    request_id: &str,
+    after_seq: Option<u64>,
+) -> Result<Sse<ReceiverStream<Result<Event, Infallible>>>, HttpJsonError> {
     // Address the buffer through the CALLER's verified identity, never the
     // bare request id. A request id is not a secret — it ships in the
     // `connected` event, every chunk, and the cancel URL — so keying on it
@@ -7214,24 +8599,26 @@ pub async fn invoke_resume_sse(
     // (sse.rs:272), and for a service principal acting for a user the two
     // differ — reading with `sub` would miss every such stream and resume
     // would fail silently rather than loudly.
-    let buffer_key =
-        crate::stream_buffer::scoped_stream_key(&claims.org_id, &claims.user_id, &request_id);
+    let buffer_key = crate::stream_buffer::scoped_stream_key(org_id, user_id, request_id);
 
     let replay = state
         .stream_buffers
         .replay_after(&buffer_key, after_seq)
         .await;
-    // Whether the ORIGINAL producer is still running in this process, bound to
-    // the same verified caller as the buffer key. A stream that has buffered
-    // nothing yet — a first tool call, source review or repair can run for a
+    // Whether the ORIGINAL producer is still running, in this process or (run-control bus on)
+    // on another replica, bound to the same verified caller as the buffer key. A stream that
+    // has buffered nothing yet — a first tool call, source review or repair can run for a
     // long time before its first progress frame — is still resumable while its
     // producer runs. Answering 404 there told a reloaded browser its answer was
     // gone while the server went on to publish it.
-    let cancels = state.cancels.clone();
-    let (live_org, live_user) = (claims.org_id.clone(), claims.user_id.clone());
-    let live_request = request_id.clone();
-    let producer_live = move || cancels.is_live_for(&live_request, &live_org, &live_user);
-    if !replay.found && !producer_live() {
+    let mut producer_live = crate::run_control::ProducerLiveness::new(
+        state.cancels.clone(),
+        state.run_control.clone(),
+        request_id,
+        org_id,
+        user_id,
+    );
+    if !replay.found && !producer_live.is_live().await {
         return Err((
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "stream not resumable; restart the request" })),
@@ -7239,7 +8626,7 @@ pub async fn invoke_resume_sse(
     }
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
-    let req_id = request_id.clone();
+    let req_id = request_id.to_owned();
     let tail_key = buffer_key.clone();
     let buffers = state.stream_buffers.clone();
     tokio::spawn(async move {
@@ -7296,14 +8683,15 @@ pub async fn invoke_resume_sse(
         let is_terminal = |frame: &crate::stream_buffer::BufferedEvent| {
             matches!(frame.event.as_str(), "error" | "stopped")
         };
-        let mut terminal_at: Option<std::time::Instant> = None;
+        // Tokio's clock, so the windows below can be run on a paused one in tests.
+        let mut terminal_at: Option<tokio::time::Instant> = None;
 
         // Highest seq forwarded so far — the cursor for the tail below.
         let mut cursor = after_seq;
         for frame in replay.deltas {
             cursor = Some(cursor.map_or(frame.seq, |c| c.max(frame.seq)));
             if is_terminal(&frame) {
-                terminal_at.get_or_insert_with(std::time::Instant::now);
+                terminal_at.get_or_insert_with(tokio::time::Instant::now);
             }
             if send_frame(frame).await.is_err() {
                 return;
@@ -7338,8 +8726,8 @@ pub async fn invoke_resume_sse(
         const TAIL_INACTIVITY_LIMIT: std::time::Duration = std::time::Duration::from_secs(120);
         const TAIL_MAX: std::time::Duration = std::time::Duration::from_secs(15 * 60);
         const TERMINAL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
-        let tail_started = std::time::Instant::now();
-        let mut last_progress = std::time::Instant::now();
+        let tail_started = tokio::time::Instant::now();
+        let mut last_progress = tokio::time::Instant::now();
         loop {
             tokio::time::sleep(TAIL_POLL).await;
             if tx.is_closed() {
@@ -7347,13 +8735,13 @@ pub async fn invoke_resume_sse(
             }
             // Sampled BEFORE the read: a producer seen finished here wrote its
             // last frame before it unregistered, so the read below has it.
-            let live = producer_live();
+            let live = producer_live.is_live().await;
             let tail = buffers.replay_after(&tail_key, cursor).await;
             for frame in tail.deltas {
                 cursor = Some(cursor.map_or(frame.seq, |c| c.max(frame.seq)));
-                last_progress = std::time::Instant::now();
+                last_progress = tokio::time::Instant::now();
                 if is_terminal(&frame) {
-                    terminal_at.get_or_insert_with(std::time::Instant::now);
+                    terminal_at.get_or_insert_with(tokio::time::Instant::now);
                 }
                 if send_frame(frame).await.is_err() {
                     return;
@@ -7510,6 +8898,10 @@ async fn read_latest_assistant(
             space_id: String::new(),
             space_read_decision_ref: String::new(),
             space_read_decision_token: String::new(),
+            include_inactive: false,
+            // Unpaged (WS09-S8): the whole conversation in sequence order.
+            limit: 0,
+            before_message_id: String::new(),
         },
         bearer,
     )
@@ -7528,7 +8920,80 @@ async fn read_latest_assistant(
         .map(|m| m.content)
 }
 
-/// Direct inference used only by the persistence-free ZDR response path.
+/// What one persistence-free model call answered with. The content goes only to
+/// the caller and is never stored; the rest is what the call that served it
+/// reported about where and how the answer was processed.
+#[derive(Debug)]
+struct DirectAnswer {
+    content: String,
+    /// The served model, or the requested one when the provider named none.
+    model_used: String,
+    /// Registry id of the deployment that served the answer; empty when none did.
+    provider_used: String,
+    /// Residency that deployment declares (`global`, `eu` or `norway`); empty
+    /// when it declares none.
+    residency: String,
+    input_tokens: u32,
+    output_tokens: u32,
+    /// Prompt tokens the provider read from its cache, and wrote to it, for this
+    /// call; zero where it reports none. Counts only.
+    cache_read_tokens: u32,
+    cache_write_tokens: u32,
+}
+
+impl DirectAnswer {
+    /// The answer a served response carries. A negative token count from a
+    /// malformed response is zero, never a wrapped value.
+    fn from_response(
+        response: mp_contracts::model_plane::v1::InferResponse,
+        requested_model: &str,
+    ) -> Self {
+        Self {
+            content: response.content,
+            model_used: if response.model_used.is_empty() {
+                requested_model.to_owned()
+            } else {
+                response.model_used
+            },
+            provider_used: response.provider_used,
+            residency: response.residency,
+            input_tokens: u32::try_from(response.input_tokens).unwrap_or(0),
+            output_tokens: u32::try_from(response.output_tokens).unwrap_or(0),
+            cache_read_tokens: u32::try_from(response.cache_read_input_tokens).unwrap_or(0),
+            cache_write_tokens: u32::try_from(response.cache_creation_input_tokens).unwrap_or(0),
+        }
+    }
+}
+
+/// What a ZDR answer states about its own cost (WS27-S5, DEC-18): numbers only. It
+/// is priced for the one stream that states it and written nowhere, so a ZDR turn
+/// still has no ledger row and no usage envelope.
+#[derive(Debug, Clone, Copy)]
+struct StatedCost {
+    /// The answer's cost in USD; `None` when its model's price is unknown.
+    usd: Option<f64>,
+    basis: crate::pricing::CostBasis,
+    /// The parts of `usd`, present exactly when `usd` is a priced total.
+    by_category: Option<crate::pricing::CategoryCost>,
+}
+
+/// The privacy floor a persistence-free turn enforced: the caller's own minimum
+/// raised to ZDR-contractual. The call goes with `zdr` set, and inference-core
+/// serves only providers with a verified ZDR contract under it, so an answer that
+/// came back met that tier. A value outside the enum expresses no caller minimum
+/// (normalize refuses such a value before this branch).
+fn zdr_enforced_floor(min_privacy_tier: i32) -> i32 {
+    let caller = if (0..=4).contains(&min_privacy_tier) {
+        min_privacy_tier
+    } else {
+        0
+    };
+    caller.max(mp_contracts::model_plane::v1::PrivacyTier::ZdrContractual as i32)
+}
+
+/// Direct inference for the thread-compaction summary: one user message, the
+/// answer token budget and no thinking budget. The persistence-free ZDR answer
+/// calls `direct_infer_turn` with the turn's own settings instead.
 ///
 /// Governed agent runs deliberately never call this as a substitute for an
 /// uncertain execution outcome: doing so would bypass their approval/tool
@@ -7545,7 +9010,52 @@ async fn direct_infer(
     zdr: bool,
     min_privacy_tier: i32,
     inference_bearer: &VerifiedInferenceBearer,
-) -> Result<String, tonic::Status> {
+) -> Result<DirectAnswer, tonic::Status> {
+    direct_infer_turn(
+        state,
+        request_id,
+        org_id,
+        model,
+        provider_hint,
+        subscription_connection_id,
+        vec![ChatMessage {
+            compaction_summary: String::new(),
+            role: "user".to_owned(),
+            content: content.to_owned(),
+            name: String::new(),
+        }],
+        answer_token_budget(),
+        crate::thinking::Plan::NONE,
+        String::new(),
+        temperature,
+        zdr,
+        min_privacy_tier,
+        inference_bearer,
+    )
+    .await
+}
+
+/// One model call of the persistence-free path with the given messages, token
+/// ceiling and reasoning plan. The ZDR answer and the compaction summarizer both
+/// come through here or through `direct_infer`, which fixes those three to what
+/// they always were.
+#[allow(clippy::too_many_arguments)]
+async fn direct_infer_turn(
+    state: &AppState,
+    request_id: &str,
+    org_id: &str,
+    model: &str,
+    provider_hint: &str,
+    subscription_connection_id: &str,
+    messages: Vec<ChatMessage>,
+    max_tokens: i32,
+    thinking: crate::thinking::Plan,
+    structured_output_schema: String,
+    temperature: f32,
+    zdr: bool,
+    min_privacy_tier: i32,
+    inference_bearer: &VerifiedInferenceBearer,
+) -> Result<DirectAnswer, tonic::Status> {
     let mut client = state.inference_client.clone();
     client
         .infer(authenticated_inference_request(
@@ -7555,16 +9065,16 @@ async fn direct_infer(
                 model: model.to_owned(),
                 provider_hint: provider_hint.to_owned(),
                 subscription_connection_id: subscription_connection_id.to_owned(),
-                messages: vec![ChatMessage {
-                    compaction_summary: String::new(),
-                    role: "user".to_owned(),
-                    content: content.to_owned(),
-                    name: String::new(),
-                }],
+                messages,
                 temperature,
-                // Agentic fallback still produces the answer the user reads.
-                max_tokens: answer_token_budget(),
-                structured_output_schema: String::new(),
+                // The caller's own ceiling (already capped by the ZDR turn), so
+                // the answer never asks for more than the turn was allowed.
+                max_tokens,
+                // Extended thinking, derived from the caller's effort profile
+                // (none when none was asked for): a legacy budget, or a level.
+                thinking_budget_tokens: thinking.budget_tokens,
+                reasoning_effort: thinking.effort_wire(),
+                structured_output_schema,
                 // GDPR ZDR: honor the run's Zero-Data-Retention flag on the agentic
                 // fallback inference (was hardcoded false, ignoring the run's ZDR).
                 zdr,
@@ -7576,11 +9086,12 @@ async fn direct_infer(
             inference_bearer,
         ))
         .await
-        .map(|response| response.into_inner().content)
+        .map(|response| DirectAnswer::from_response(response.into_inner(), model))
 }
 
-/// Model for the thread-title summarization: a **pinned** cheap non-reasoning
-/// model, deliberately *not* the `verevon-budget` tier it used to name.
+/// Model for the auxiliary calls (the thread title, the follow-up chips and the
+/// source judge): a **pinned** cheap non-reasoning model, deliberately *not* the
+/// `verevon-budget` tier it used to name.
 ///
 /// A tier is the wrong dependency for a micro-call with a fixed token budget.
 /// `verevon-budget` is resolved by inference-core's intent layer, which re-routes
@@ -7599,10 +9110,14 @@ async fn direct_infer(
 /// only the `verevon-*` names as modes), so the budget below is honest and the
 /// behaviour no longer depends on how much the user happened to type.
 ///
-/// `gpt-4o-mini` specifically: inference-core's designated cheap fallback
-/// (`intent::CHEAP_FALLBACK`), always in the deployed chat roster, and already
-/// the model behind every title this feature has ever actually shown.
-const TITLE_MODEL: &str = "gpt-4o-mini";
+/// `gpt-4o-mini` is the default: inference-core's designated cheap fallback
+/// (`intent::CHEAP_FALLBACK`), and the model behind every title this feature has
+/// shown. A deployment whose inference chain does not serve it sets
+/// `MODEL_GATEWAY_AUX_MODEL` to a model the chain does serve (see [`aux_model`]).
+/// Without that, all three calls fail on every turn and their output is dropped.
+const AUX_MODEL_DEFAULT: &str = "gpt-4o-mini";
+/// The operator setting that replaces [`AUX_MODEL_DEFAULT`] for all three calls.
+const AUX_MODEL_VAR: &str = "MODEL_GATEWAY_AUX_MODEL";
 /// Hard ceiling on the title inference. The title arrives after the answer is
 /// already on screen, but it still holds the terminal `done` frame back — so a
 /// slow summarizer must degrade to "no title" rather than a visible stall.
@@ -7612,7 +9127,7 @@ const TITLE_MODEL: &str = "gpt-4o-mini";
 /// and the broken calls were never timing out — they returned *early* and
 /// empty. Raising this would push `done` later for every user and buy nothing.
 const TITLE_GENERATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
-/// Output budget for a 3–6 word title. Honest now that [`TITLE_MODEL`] spends
+/// Output budget for a 3–6 word title. Honest now that the auxiliary model spends
 /// its budget on visible text instead of hidden reasoning: 24 tokens is
 /// live-proven sufficient — it is the budget that produced the titles that did
 /// work, on the same model this now pins.
@@ -7625,17 +9140,16 @@ const TITLE_ANSWER_SNIPPET_CHARS: usize = 2000;
 /// How much of the user question the title prompt sees.
 const TITLE_QUESTION_SNIPPET_CHARS: usize = 1000;
 
-/// Same pinned-model/timeout/snippet posture as [`TITLE_MODEL`] and friends — a
-/// composer suggestion never justifies a premium model or a visible stall
-/// either, and it was starved by the same tier indirection: on a short exchange
-/// this call also resolved to reasoning-model `gpt-5-nano` and came back HTTP
-/// 200 with no content, so the chips silently never rendered.
-const FOLLOW_UPS_MODEL: &str = "gpt-4o-mini";
+// Same pinned-model/timeout/snippet posture as the title call — a composer
+// suggestion never justifies a premium model or a visible stall either, and it
+// was starved by the same tier indirection: on a short exchange this call also
+// resolved to reasoning-model `gpt-5-nano` and came back HTTP 200 with no
+// content, so the chips silently never rendered.
 /// Also left at 4s: measured at ~1.4s on the pinned model, and — like the title
 /// above — the broken calls returned early and empty rather than timing out.
 const FOLLOW_UPS_GENERATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
 /// Output budget for up to 3 short questions, one per line. Live-proven at this
-/// value on [`FOLLOW_UPS_MODEL`] (three full Norwegian suggestions), and honest
+/// value on the pinned model (three full Norwegian suggestions), and honest
 /// now that no part of it is spent on hidden reasoning tokens.
 const FOLLOW_UPS_MAX_TOKENS: i32 = 96;
 /// Longest sanitized suggestion emitted to clients, in characters.
@@ -7653,11 +9167,10 @@ const FOLLOW_UPS_QUESTION_SNIPPET_CHARS: usize = 1000;
 /// not).
 const FOLLOW_UPS_MIN_CONFIDENCE: f64 = 0.15;
 
-/// Same pinned-cheap-model posture as the title and follow-up calls: judging
-/// whether five snippets back one claim is not work that justifies a premium
-/// model, and a tier indirection here would resolve to a reasoning model that
-/// returns empty (the failure that silently broke both of those).
-const VERIFICATION_JUDGE_MODEL: &str = "gpt-4o-mini";
+// Same pinned-cheap-model posture as the title and follow-up calls: judging
+// whether five snippets back one claim is not work that justifies a premium
+// model, and a tier indirection here would resolve to a reasoning model that
+// returns empty (the failure that silently broke both of those).
 /// The judge holds the turn's `usage` frame back, so it must degrade to "not
 /// confirmed" rather than stall. One word out of a short prompt lands well
 /// inside this.
@@ -7665,6 +9178,65 @@ const VERIFICATION_JUDGE_TIMEOUT: std::time::Duration = std::time::Duration::fro
 /// One word. Budgeted a little above it so a model that insists on punctuation
 /// or a leading space still emits the word itself.
 const VERIFICATION_JUDGE_MAX_TOKENS: i32 = 8;
+
+/// The model the auxiliary calls use. It is read from the environment once per
+/// process, so every auxiliary call in the process agrees on it and the
+/// environment is not consulted on each request.
+fn aux_model() -> &'static str {
+    static MODEL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    MODEL
+        .get_or_init(|| aux_model_from(std::env::var(AUX_MODEL_VAR).ok().as_deref()))
+        .as_str()
+}
+
+/// The model a raw `MODEL_GATEWAY_AUX_MODEL` value selects: the trimmed value, or
+/// [`AUX_MODEL_DEFAULT`] when it is unset or blank. Kept free of the environment
+/// so the parsing can be tested directly.
+fn aux_model_from(value: Option<&str>) -> String {
+    value
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .unwrap_or(AUX_MODEL_DEFAULT)
+        .to_owned()
+}
+
+/// The source judge's request: one classification over the snippets, carried on
+/// the turn's subscription when it has one, as every auxiliary call is.
+fn verification_judge_request(
+    route: &InferRequest,
+    request_id: &str,
+    org_id: &str,
+    question: &str,
+    answer: &str,
+    snippets: &[String],
+    zdr: bool,
+) -> InferRequest {
+    subscription_scoped_request(
+        InferRequest {
+            request_id: format!("{request_id}-verify"),
+            org_id: org_id.to_owned(),
+            model: aux_model().to_owned(),
+            provider_hint: String::new(),
+            messages: vec![ChatMessage {
+                compaction_summary: String::new(),
+                role: "user".to_owned(),
+                content: crate::verification::entailment_prompt(question, answer, snippets),
+                name: String::new(),
+            }],
+            // A classification, not a composition: the same snippets must
+            // produce the same verdict twice.
+            temperature: 0.0,
+            max_tokens: VERIFICATION_JUDGE_MAX_TOKENS,
+            structured_output_schema: String::new(),
+            // Carries the answer and retrieved source text, so it inherits
+            // the turn's retention posture rather than assuming the title
+            // path's non-ZDR shortcut.
+            zdr,
+            ..Default::default()
+        },
+        route,
+    )
+}
 
 /// Ask whether the retrieved sources actually back the answer.
 ///
@@ -7683,6 +9255,7 @@ async fn judge_sources(
     snippets: &[String],
     inference_bearer: &VerifiedInferenceBearer,
     zdr: bool,
+    sink: &crate::sse_events::RichEventSink,
 ) -> crate::verification::SourceVerdict {
     use crate::verification::SourceVerdict;
     if snippets.is_empty() {
@@ -7692,34 +9265,25 @@ async fn judge_sources(
     let response = tokio::time::timeout(
         VERIFICATION_JUDGE_TIMEOUT,
         client.infer(authenticated_inference_request(
-            subscription_scoped_request(InferRequest {
-                request_id: format!("{request_id}-verify"),
-                org_id: org_id.to_owned(),
-                model: VERIFICATION_JUDGE_MODEL.to_owned(),
-                provider_hint: String::new(),
-                messages: vec![ChatMessage {
-                    compaction_summary: String::new(),
-                    role: "user".to_owned(),
-                    content: crate::verification::entailment_prompt(question, answer, snippets),
-                    name: String::new(),
-                }],
-                // A classification, not a composition: the same snippets must
-                // produce the same verdict twice.
-                temperature: 0.0,
-                max_tokens: VERIFICATION_JUDGE_MAX_TOKENS,
-                structured_output_schema: String::new(),
-                // Carries the answer and retrieved source text, so it inherits
-                // the turn's retention posture rather than assuming the title
-                // path's non-ZDR shortcut.
-                zdr,
-                ..Default::default()
-            }, route),
+            verification_judge_request(route, request_id, org_id, question, answer, snippets, zdr),
             inference_bearer,
         )),
     )
     .await;
     match response {
-        Ok(Ok(resp)) => crate::verification::parse_verdict(&resp.into_inner().content),
+        Ok(Ok(resp)) => {
+            let resp = resp.into_inner();
+            let call = crate::tool_loop::metered_call(
+                crate::usage_meter::CallPhase::Overhead,
+                &resp,
+                &route.model,
+                &route.provider_hint,
+                &route.subscription_connection_id,
+            );
+            crate::tool_loop::stream_call_usage(state, sink, &call).await;
+            sink.record_overhead(call);
+            crate::verification::parse_verdict(&resp.content)
+        }
         Ok(Err(error)) => {
             tracing::debug!(%error, %request_id, "source judge failed; treating as unconfirmed");
             SourceVerdict::Unrelated
@@ -7751,6 +9315,7 @@ async fn resample_answer(
     max_tokens: i32,
     inference_bearer: &VerifiedInferenceBearer,
     zdr: bool,
+    sink: &crate::sse_events::RichEventSink,
 ) -> Vec<String> {
     let mut samples = Vec::new();
     for index in 0..crate::verification::SELF_CONSISTENCY_SAMPLES {
@@ -7781,7 +9346,21 @@ async fn resample_answer(
         request.metadata_mut().insert("cache-control", "no-store".parse().expect("static metadata"));
         let response = tokio::time::timeout(VERIFICATION_JUDGE_TIMEOUT, client.infer(request)).await;
         match response {
-            Ok(Ok(resp)) => samples.push(resp.into_inner().content),
+            Ok(Ok(resp)) => {
+                let resp = resp.into_inner();
+                // Recorded as each draw answers: a failed draw ends the set, but the draws
+                // that answered before it were billed.
+                let call = crate::tool_loop::metered_call(
+                    crate::usage_meter::CallPhase::Overhead,
+                    &resp,
+                    model,
+                    &route.provider_hint,
+                    &route.subscription_connection_id,
+                );
+                crate::tool_loop::stream_call_usage(state, sink, &call).await;
+                sink.record_overhead(call);
+                samples.push(resp.content);
+            }
             _ => {
                 tracing::debug!(%request_id, "resample failed; skipping self-consistency");
                 return Vec::new();
@@ -7789,6 +9368,41 @@ async fn resample_answer(
         }
     }
     samples
+}
+
+/// The thread-title request: one bounded, non-streaming user turn on the
+/// auxiliary model, carried on the turn's subscription when it has one.
+fn title_request(
+    route: &InferRequest,
+    request_id: &str,
+    org_id: &str,
+    user_content: &str,
+    assistant_answer: &str,
+) -> InferRequest {
+    subscription_scoped_request(
+        InferRequest {
+            request_id: format!("{request_id}-title"),
+            org_id: org_id.to_owned(),
+            model: aux_model().to_owned(),
+            provider_hint: String::new(),
+            messages: vec![ChatMessage {
+                compaction_summary: String::new(),
+                role: "user".to_owned(),
+                content: thread_title_prompt(user_content, assistant_answer),
+                name: String::new(),
+            }],
+            // Low temperature: titles should be consistent in style across
+            // threads, not creative.
+            temperature: 0.2,
+            max_tokens: TITLE_MAX_TOKENS,
+            structured_output_schema: String::new(),
+            // The call site skips title generation entirely for ZDR turns;
+            // this request only ever carries non-ZDR exchange content.
+            zdr: false,
+            ..Default::default()
+        },
+        route,
+    )
 }
 
 /// Summarize a thread's first exchange into a short sidebar title.
@@ -7809,27 +9423,7 @@ async fn generate_thread_title(
     let response = tokio::time::timeout(
         TITLE_GENERATION_TIMEOUT,
         client.infer(authenticated_inference_request(
-            subscription_scoped_request(InferRequest {
-                request_id: format!("{request_id}-title"),
-                org_id: org_id.to_owned(),
-                model: TITLE_MODEL.to_owned(),
-                provider_hint: String::new(),
-                messages: vec![ChatMessage {
-                    compaction_summary: String::new(),
-                    role: "user".to_owned(),
-                    content: thread_title_prompt(user_content, assistant_answer),
-                    name: String::new(),
-                }],
-                // Low temperature: titles should be consistent in style across
-                // threads, not creative.
-                temperature: 0.2,
-                max_tokens: TITLE_MAX_TOKENS,
-                structured_output_schema: String::new(),
-                // The call site skips title generation entirely for ZDR turns;
-                // this request only ever carries non-ZDR exchange content.
-                zdr: false,
-                ..Default::default()
-            }, route),
+            title_request(route, request_id, org_id, user_content, assistant_answer),
             inference_bearer,
         )),
     )
@@ -7846,7 +9440,7 @@ async fn generate_thread_title(
             if content.trim().is_empty() {
                 tracing::warn!(
                     %request_id,
-                    model = TITLE_MODEL,
+                    model = aux_model(),
                     max_tokens = TITLE_MAX_TOKENS,
                     "thread title inference succeeded but returned empty content"
                 );
@@ -7877,6 +9471,40 @@ fn thread_title_prompt(user_content: &str, assistant_answer: &str) -> String {
     )
 }
 
+/// The follow-up suggestion request: one bounded, non-streaming user turn on the
+/// auxiliary model, carried on the turn's subscription when it has one.
+fn follow_ups_request(
+    route: &InferRequest,
+    request_id: &str,
+    org_id: &str,
+    user_content: &str,
+    assistant_answer: &str,
+) -> InferRequest {
+    subscription_scoped_request(
+        InferRequest {
+            request_id: format!("{request_id}-follow-ups"),
+            org_id: org_id.to_owned(),
+            model: aux_model().to_owned(),
+            provider_hint: String::new(),
+            messages: vec![ChatMessage {
+                compaction_summary: String::new(),
+                role: "user".to_owned(),
+                content: follow_ups_prompt(user_content, assistant_answer),
+                name: String::new(),
+            }],
+            temperature: 0.4,
+            max_tokens: FOLLOW_UPS_MAX_TOKENS,
+            structured_output_schema: String::new(),
+            // The call site never reaches here for a ZDR turn (ZDR takes
+            // `zdr_direct_stream`); this request only ever carries
+            // non-ZDR exchange content.
+            zdr: false,
+            ..Default::default()
+        },
+        route,
+    )
+}
+
 /// Generate 2-3 short follow-up questions the user might ask next, in the
 /// conversation's own language. Same posture as [`generate_thread_title`]:
 /// a single bounded, non-streaming, trace-free inference call — no
@@ -7896,26 +9524,7 @@ async fn generate_follow_ups(
     let response = tokio::time::timeout(
         FOLLOW_UPS_GENERATION_TIMEOUT,
         client.infer(authenticated_inference_request(
-            subscription_scoped_request(InferRequest {
-                request_id: format!("{request_id}-follow-ups"),
-                org_id: org_id.to_owned(),
-                model: FOLLOW_UPS_MODEL.to_owned(),
-                provider_hint: String::new(),
-                messages: vec![ChatMessage {
-                    compaction_summary: String::new(),
-                    role: "user".to_owned(),
-                    content: follow_ups_prompt(user_content, assistant_answer),
-                    name: String::new(),
-                }],
-                temperature: 0.4,
-                max_tokens: FOLLOW_UPS_MAX_TOKENS,
-                structured_output_schema: String::new(),
-                // The call site never reaches here for a ZDR turn (ZDR takes
-                // `zdr_direct_stream`); this request only ever carries
-                // non-ZDR exchange content.
-                zdr: false,
-                ..Default::default()
-            }, route),
+            follow_ups_request(route, request_id, org_id, user_content, assistant_answer),
             inference_bearer,
         )),
     )
@@ -7929,7 +9538,7 @@ async fn generate_follow_ups(
             if content.trim().is_empty() {
                 tracing::warn!(
                     %request_id,
-                    model = FOLLOW_UPS_MODEL,
+                    model = aux_model(),
                     max_tokens = FOLLOW_UPS_MAX_TOKENS,
                     "follow-up suggestion inference succeeded but returned empty content"
                 );
@@ -8100,6 +9709,137 @@ fn is_emoji_like(c: char) -> bool {
     )
 }
 
+/// What a ZDR turn sends besides the user's message, and the limits it answers
+/// under. The persistence-free path honors the instructions the rest of the chat
+/// honors (platform, organisation, Space and persona instructions, the mentioned
+/// agent's persona, and whose organisation and user the model acts for), the
+/// verbosity directive, the caller's own token ceiling, and the thinking budget
+/// of its effort profile. A request for anything it cannot honor is refused by
+/// `zdr_features` before this is built.
+pub(crate) struct ZdrTurnSettings {
+    /// One system message, or none when there is nothing to say.
+    pub(crate) system: Option<String>,
+    /// The answer's token ceiling: the caller's own `max_tokens` when it is lower.
+    pub(crate) max_tokens: i32,
+    /// The reasoning request of the turn's effort profile, from the same
+    /// derivation as the streamed chat path (`thinking::plan`).
+    pub(crate) thinking: crate::thinking::Plan,
+    /// The caller's structured-output schema, sent with the turn ("" when none).
+    pub(crate) structured_output_schema: String,
+}
+
+impl ZdrTurnSettings {
+    /// The messages of the one model call: the system message when there is one,
+    /// then the user's message.
+    pub(crate) fn messages(&self, content: &str) -> Vec<ChatMessage> {
+        let mut messages = Vec::with_capacity(2);
+        if let Some(system) = &self.system {
+            messages.push(ChatMessage {
+                compaction_summary: String::new(),
+                role: "system".to_owned(),
+                content: system.clone(),
+                name: String::new(),
+            });
+        }
+        messages.push(ChatMessage {
+            compaction_summary: String::new(),
+            role: "user".to_owned(),
+            content: content.to_owned(),
+            name: String::new(),
+        });
+        messages
+    }
+}
+
+/// The settings of one ZDR turn, from the request and the state's platform
+/// instructions. Persona is on for the turn: a ZDR turn has no thread, so the
+/// per-thread override is unknown, and the global switch was applied upstream.
+pub(crate) fn zdr_turn_settings(state: &AppState, req: &InvokeRequest) -> ZdrTurnSettings {
+    zdr_turn_settings_with(state, req, crate::thinking::ladder_enabled())
+}
+
+/// [`zdr_turn_settings`] with the effort-ladder switch passed in, so the ZDR
+/// derivation can be compared with the streamed path's without the process
+/// environment.
+fn zdr_turn_settings_with(
+    state: &AppState,
+    req: &InvokeRequest,
+    ladder_on: bool,
+) -> ZdrTurnSettings {
+    let mut sections: Vec<String> = Vec::new();
+    if let Some(identity) = crate::zdr_features::identity_framing(req) {
+        sections.push(identity);
+    }
+    if let Some(authored) = authored_instructions_message(state, req, true) {
+        sections.push(authored.content);
+    }
+    if let Some(directive) = req.verbosity.as_deref().and_then(crate::verbosity::directive) {
+        sections.push(directive.to_owned());
+    }
+    let ceiling = answer_token_budget();
+    let max_tokens = req
+        .max_tokens
+        .and_then(|cap| i32::try_from(cap).ok())
+        .map_or(ceiling, |cap| cap.clamp(1, ceiling));
+    ZdrTurnSettings {
+        system: (!sections.is_empty()).then(|| sections.join("\n\n")),
+        max_tokens,
+        thinking: crate::thinking::plan(
+            req.effort.as_deref().unwrap_or_default(),
+            max_tokens,
+            ladder_on,
+        ),
+        structured_output_schema: req.structured_output_schema.clone().unwrap_or_default(),
+    }
+}
+
+/// The switch that states a ZDR answer's cost in-stream (WS27-S5). Opt-in: only the
+/// literal `true` enables it. Off, a ZDR answer's usage frame states no cost and no
+/// cache count, exactly as it did before the switch existed.
+const ZDR_STREAM_COST_VAR: &str = "MODEL_GATEWAY_ZDR_STREAM_COST";
+
+fn zdr_stream_cost_enabled() -> bool {
+    zdr_stream_cost_enabled_with(&|key| std::env::var(key).ok())
+}
+
+fn zdr_stream_cost_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    get(ZDR_STREAM_COST_VAR).is_some_and(|value| value.trim() == "true")
+}
+
+/// The cost a ZDR answer states, priced from its own counts and the model that served
+/// it. The basis is the route's, settled by the provider that answered, as the durable
+/// path settles it. The catalogue is read and the figure returned; nothing is stored or
+/// published.
+async fn zdr_stated_cost(
+    state: &AppState,
+    route: &crate::zdr_precheck::ConnectionRoute,
+    answer: &DirectAnswer,
+) -> StatedCost {
+    let basis = crate::pricing::CostBasis::of_route(
+        &route.provider_hint,
+        &route.subscription_connection_id,
+    )
+    .served_by(&answer.provider_used);
+    let priced = state
+        .pricing
+        .priced(
+            basis,
+            &answer.model_used,
+            crate::pricing::TokenLegs {
+                input_tokens: i64::from(answer.input_tokens),
+                output_tokens: i64::from(answer.output_tokens),
+                cache_read_input_tokens: i64::from(answer.cache_read_tokens),
+                cache_creation_input_tokens: i64::from(answer.cache_write_tokens),
+            },
+        )
+        .await;
+    StatedCost {
+        usd: priced.usd,
+        basis,
+        by_category: priced.by_category,
+    }
+}
+
 /// Persistence-free SSE response for Zero Data Retention requests. It emits
 /// only response bytes to the current client connection and never touches the
 /// durable stream/session/event/cache seams used by the normal chat path.
@@ -8121,16 +9861,24 @@ async fn zdr_direct_stream(
     // not serve a connection without ZDR support under a ZDR request, refuses
     // it rather than the default chain quietly serving the turn.
     route: crate::zdr_precheck::ConnectionRoute,
+    // The instructions, verbosity, token ceiling and thinking budget the turn
+    // answers under (`zdr_turn_settings`).
+    settings: ZdrTurnSettings,
     inference_bearer: VerifiedInferenceBearer,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
-    let answer = match direct_infer(
+    let messages = settings.messages(&content);
+    let started = std::time::Instant::now();
+    let answer = match direct_infer_turn(
         &state,
         &request_id,
         &org_id,
         &model,
         &route.provider_hint,
         &route.subscription_connection_id,
-        &content,
+        messages,
+        settings.max_tokens,
+        settings.thinking,
+        settings.structured_output_schema.clone(),
         0.7,
         true,
         min_privacy_tier,
@@ -8150,8 +9898,10 @@ async fn zdr_direct_stream(
                 reason = status.message(),
                 "zdr turn on a user connection refused by inference-core"
             );
-            let refusal = crate::zdr_precheck::ZdrRefusal::CONNECTION_NOT_SUPPORTED;
-            return error_stream(&request_id, refusal.code, refusal.message, refusal.retryable);
+            return zdr_error_stream(
+                &request_id,
+                mp_contracts::zdr_refusal::Refusal::CONNECTION_NOT_SUPPORTED,
+            );
         }
         // `FailedPrecondition` is the ZDR attestation gate, not an outage:
         // inference-core skipped every provider because none has an
@@ -8167,11 +9917,22 @@ async fn zdr_direct_stream(
                 reason = status.message(),
                 "temporary chat refused: no provider deployment is attested for zero data retention"
             );
+            return zdr_error_stream(&request_id, mp_contracts::zdr_refusal::Refusal::UNAVAILABLE);
+        }
+        // A model the organisation's policy does not allow, refused by
+        // inference-core's own check (PERMISSION_DENIED, or UNAVAILABLE for an
+        // unreadable policy; never the precondition arms above). It keeps its
+        // catalogue code instead of the generic inference failure.
+        Err(status)
+            if mp_contracts::model_entitlement::Refusal::from_status(&status).is_some() =>
+        {
+            let refusal = mp_contracts::model_entitlement::Refusal::from_status(&status)
+                .expect("checked by the guard");
             return error_stream(
                 &request_id,
-                "zdr_unavailable",
-                "Temporary chat is unavailable: no model deployment is attested for zero                  data retention. An operator must confirm a no-retention contract before                  this mode can be used.",
-                false,
+                refusal.code(),
+                &refusal.message(),
+                refusal.retryable(),
             );
         }
         Err(status) => {
@@ -8180,16 +9941,86 @@ async fn zdr_direct_stream(
                 code = ?status.code(),
                 "ephemeral inference failed"
             );
-            return error_stream(
+            return zdr_error_stream(
                 &request_id,
-                "zdr_inference_failed",
-                "The ephemeral inference request failed",
-                true,
+                mp_contracts::zdr_refusal::Refusal::INFERENCE_FAILED,
             );
         }
     };
+    let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    // Off, the catalogue is not read at all: no price is looked up and none is stated.
+    let stated_cost = if zdr_stream_cost_enabled() {
+        Some(zdr_stated_cost(&state, &route, &answer).await)
+    } else {
+        None
+    };
+    zdr_answer_stream(
+        request_id,
+        grounding,
+        features,
+        min_privacy_tier,
+        answer,
+        stated_cost,
+        latency_ms,
+    )
+}
+
+/// The persistence-free answer as its SSE stream: the grounding and citation
+/// frames the turn carries, the answer in chunks, one `usage` frame with the
+/// answer's provenance and counts, then `done`. Every frame is gated as its
+/// durable counterpart is.
+fn zdr_answer_stream(
+    request_id: String,
+    grounding: Option<crate::retrieval::Grounding>,
+    features: Vec<String>,
+    min_privacy_tier: i32,
+    answer: DirectAnswer,
+    stated_cost: Option<StatedCost>,
+    latency_ms: u64,
+) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
+    // The answer's provenance as the serving call stated it, floored at the ZDR
+    // tier the call was made under. It carries counts and provenance only, never
+    // content. The cost and the cache counts it was priced from are stated only when
+    // the cost switch priced this answer; persisting a ZDR turn's cost is DEF-Z-06b.
+    let (cost_usd, cost_basis, cache_read_tokens, cache_write_tokens, cost_by_category) =
+        match stated_cost {
+            Some(stated) => (
+                stated.usd,
+                Some(stated.basis),
+                answer.cache_read_tokens,
+                answer.cache_write_tokens,
+                stated.by_category,
+            ),
+            None => (None, None, 0, 0, None),
+        };
+    let usage = crate::sse_events::ChatEvent::Usage {
+        cache_read_tokens,
+        cache_write_tokens,
+        input_tokens: answer.input_tokens,
+        output_tokens: answer.output_tokens,
+        cost_usd,
+        cost_basis,
+        latency_ms,
+        confidence: None,
+        served_by: crate::sse_events::ServedBy::stamped(
+            &answer.provider_used,
+            &answer.residency,
+            zdr_enforced_floor(min_privacy_tier),
+        ),
+        retention_class: Some(crate::sse_events::RetentionClass::Zdr),
+        // The one call a ZDR turn makes. A cost that is not stated is a call the total does not cover.
+        calls: 1,
+        unpriced_calls: u32::from(cost_usd.is_none()),
+        cost_by_category,
+    };
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
+        // A reduced answer says so before anything else it streams (Z-41b). Control: a ZDR answer's client is told
+        // whatever it opted into, and a turn without a notice streams exactly as it always did.
+        if let Some(notice) = grounding.as_ref().and_then(|payload| payload.notice) {
+            let event = crate::sse_events::ChatEvent::RetrievalNotice { notice };
+            let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+        }
         if let Some(payload) = grounding.filter(|g| !g.is_empty()) {
             let event = crate::sse_events::ChatEvent::Grounding {
                 grounding: payload.clone(),
@@ -8218,12 +10049,12 @@ async fn zdr_direct_stream(
         }
 
         let mut sequence = 0_u64;
-        for piece in chunk_for_stream(&answer, 48) {
+        for piece in chunk_for_stream(&answer.content, 48) {
             let chunk = SseChunk {
                 request_id: request_id.clone(),
                 delta: piece,
                 done: false,
-                model_used: model.clone(),
+                model_used: answer.model_used.clone(),
                 input_tokens: 0,
                 output_tokens: 0,
             };
@@ -8240,13 +10071,19 @@ async fn zdr_direct_stream(
             }
             sequence += 1;
         }
+        // One usage frame per answer, before `done` and under the same `usage`
+        // opt-in the durable path applies: a client that did not ask for usage
+        // never sees it.
+        if usage.should_emit(&features) {
+            let _ = tx.send(Ok(usage.to_sse(&request_id))).await;
+        }
         let done = SseChunk {
             request_id: request_id.clone(),
             delta: String::new(),
             done: true,
-            model_used: model,
-            input_tokens: 0,
-            output_tokens: 0,
+            model_used: answer.model_used,
+            input_tokens: answer.input_tokens,
+            output_tokens: answer.output_tokens,
         };
         let _ = tx
             .send(Ok(Event::default()
@@ -8300,7 +10137,9 @@ fn authenticated_run_agent_request(
     session_bearer: &VerifiedModelBearer,
     inference_bearer: &VerifiedInferenceBearer,
     sandbox_bearer: Option<&VerifiedSandboxBearer>,
+    browser_bearer: Option<&VerifiedBrowserBearer>,
 ) -> Result<tonic::Request<RunAgentRequest>, tonic::Status> {
+    let zdr = request.zdr;
     let authorization = format!("Bearer {}", execution_bearer.as_str())
         .parse()
         .map_err(|_| tonic::Status::unauthenticated("malformed verified user credential"))?;
@@ -8343,6 +10182,18 @@ fn authenticated_run_agent_request(
                 })?,
         );
     }
+    // Conditional like the sandbox credential, and never on a zero-retention run: no browser
+    // credential is forwarded for one, and execution-core would refuse it there (WS21-S2).
+    if let Some(browser_bearer) = browser_bearer.filter(|_| !zdr) {
+        request.metadata_mut().insert(
+            "x-browser-authorization",
+            format!("Bearer {}", browser_bearer.as_str())
+                .parse()
+                .map_err(|_| {
+                    tonic::Status::unauthenticated("malformed verified browser credential")
+                })?,
+        );
+    }
     Ok(request)
 }
 
@@ -8381,11 +10232,21 @@ fn authenticated_run_agent_request(
 /// proceeds on ordinary conversation history alone, exactly as it did before
 /// plan-gate existed — this must never block or fail an otherwise-ready
 /// dispatch, and "no plan context" is always the safe outcome.
+///
+/// # Durable grants
+///
+/// With the durable grant switch on (`durable_grant` is `Some`, WS04 S4) the plan id comes
+/// from the grant the caller read from Session Core for this run start, and nothing is taken
+/// out of memory. The read does not spend the plan: the claim below is still the single-use
+/// guard, a compare-and-swap in Session Core, so of two runs that start together on two
+/// replicas exactly one wins it, and a later run that reads the same grant finds the plan no
+/// longer approved and proceeds without it.
 async fn approved_plan_context(
     state: &AppState,
     org_id: &str,
     thread_id: &str,
     bearer: &VerifiedModelBearer,
+    durable_grant: Option<&crate::session_flow::ThreadGrant>,
 ) -> Option<String> {
     let source = GrpcApprovedPlanSource {
         state,
@@ -8393,7 +10254,122 @@ async fn approved_plan_context(
         org_id,
         thread_id,
     };
-    approved_plan_block_for(&state.plan_mode, &source, org_id, thread_id).await
+    match durable_grant {
+        Some(grant) => {
+            let plan_id = grant.approved_plan_id.as_deref()?;
+            approved_plan_block_for_id(plan_id, true, &source, org_id, thread_id).await
+        }
+        None => approved_plan_block_for(&state.plan_mode, &source, org_id, thread_id).await,
+    }
+}
+
+/// The thread's grant from Session Core for one run start (WS04 S4, the durable grant
+/// switch on). Never fails, and never mistakes a failed read for "no grant": an `Ok` answer
+/// is the grant (or the absence of one) Session Core stated, and any error (a timeout, a
+/// transient `Unavailable`, `Unimplemented` from an older Session Core, a refusal) is
+/// [`ThreadGrant::unreadable`](crate::session_flow::ThreadGrant::unreadable). A grant may
+/// well exist that this read could not see, so [`resolve_autonomy_rung`] refuses an execute
+/// turn (`plan_grant_unavailable`) and states the NARROWEST rung to any other run, rather than
+/// the unstated one that would silently widen it past what the human granted.
+async fn durable_thread_grant(
+    state: &AppState,
+    org_id: &str,
+    thread_id: &str,
+    bearer: &VerifiedModelBearer,
+) -> crate::session_flow::ThreadGrant {
+    let read = crate::session_flow::thread_grant(state, org_id, thread_id, bearer.as_str()).await;
+    with_local_fallback(
+        grant_from_read(read, org_id, thread_id),
+        &state.plan_mode,
+        org_id,
+        thread_id,
+    )
+}
+
+/// The one grant a durable-switch replica may hold in memory: the one an approval taken HERE
+/// could not record in Session Core (`plan_approval` keeps it when `SetRunMode` fails after
+/// its retries, so the approving replica keeps honouring what the human approved). A read that
+/// failed is not an answer (the run then fails closed, see [`resolve_autonomy_rung`]). Session
+/// Core's grant stands unless this copy is NARROWER: an older, broader durable grant must not
+/// outlive a newer narrower approval whose write failed here, and a tie keeps Session Core's
+/// grant as stated. The durable path records nothing else in memory, so anything found here is
+/// exactly such a fallback.
+fn with_local_fallback(
+    grant: crate::session_flow::ThreadGrant,
+    store: &crate::coordinator::PlanModeStore,
+    org_id: &str,
+    thread_id: &str,
+) -> crate::session_flow::ThreadGrant {
+    if grant.read_failed {
+        return grant;
+    }
+    let Some(rung) = store.granted_rung(org_id, thread_id) else {
+        return grant;
+    };
+    if let Some(durable) = grant.rung {
+        if mp_contracts::autonomy::rank(rung) >= mp_contracts::autonomy::rank(durable) {
+            return grant;
+        }
+    }
+    tracing::info!(
+        org_id,
+        thread_id,
+        rung = mp_contracts::autonomy::label(rung),
+        session_core_rung = grant.rung.map(mp_contracts::autonomy::label),
+        "plan grant taken from this replica's memory: the approval's write failed here and session-core holds no grant or a wider one"
+    );
+    crate::session_flow::ThreadGrant {
+        rung: Some(rung),
+        approved_plan_id: store.peek_approved_plan(org_id, thread_id),
+        expires_at_unix: store.grant_expires_at(org_id, thread_id),
+        read_failed: false,
+    }
+}
+
+/// What one read of the thread's grant means for the run start. Pure apart from the log line
+/// and the counter: an `Ok` is passed through, an error is an unreadable grant, said once in
+/// the log by status code only (the message can carry upstream text) and counted in
+/// `plan_grant_read_failed_total`.
+fn grant_from_read(
+    read: Result<crate::session_flow::ThreadGrant, tonic::Status>,
+    org_id: &str,
+    thread_id: &str,
+) -> crate::session_flow::ThreadGrant {
+    match read {
+        Ok(grant) => {
+            if let Some(rung) = grant.rung {
+                tracing::info!(
+                    org_id,
+                    thread_id,
+                    rung = mp_contracts::autonomy::label(rung),
+                    has_plan = grant.approved_plan_id.is_some(),
+                    "plan grant read from session-core for the run start"
+                );
+            }
+            grant
+        }
+        Err(status) => {
+            tracing::warn!(
+                code = ?status.code(),
+                org_id,
+                thread_id,
+                "plan grant could not be read from session-core; the run starts at the narrowest rung and an execute turn is refused"
+            );
+            metrics::counter!("plan_grant_read_failed_total").increment(1);
+            crate::session_flow::ThreadGrant::unreadable()
+        }
+    }
+}
+
+/// Whether a run asks for the plan approved with its thread's grant
+/// ([`approved_plan_context`]). Pure.
+///
+/// A plan-mode run has no authority to consume a plan with yet. A continuation
+/// (`resuming`) takes its goal and authority from the run it continues, which
+/// were fixed when that run paused, so it never takes the thread's single-use
+/// grant: the grant stays pending for the next ordinary run of the thread.
+fn plan_context_wanted(plan_mode: bool, resuming: bool) -> bool {
+    !plan_mode && !resuming
 }
 
 /// The two orchestration calls a run start makes for the plan approved with its
@@ -8489,16 +10465,41 @@ async fn approved_plan_block_for(
     thread_id: &str,
 ) -> Option<String> {
     let plan_id = store.take_approved_plan(org_id, thread_id)?;
-    let plan = source.plan(&plan_id).await?;
+    approved_plan_block_for_id(&plan_id, false, source, org_id, thread_id).await
+}
+
+/// [`approved_plan_block_for`] for a plan id that is already known. `durable` says the id
+/// came from the thread's durable grant, which keeps naming the plan after a run has claimed
+/// it: a plan that is no longer approved is then the ordinary state of every later run of
+/// the thread for the day the grant lasts, not a warning.
+async fn approved_plan_block_for_id(
+    plan_id: &str,
+    durable: bool,
+    source: &impl ApprovedPlanSource,
+    org_id: &str,
+    thread_id: &str,
+) -> Option<String> {
+    let plan = source.plan(plan_id).await?;
     if !approved_plan_is_for(&plan, thread_id) {
-        tracing::warn!(
-            plan_id = %plan_id,
-            state = plan.state,
-            org_id,
-            thread_id,
-            "plan-gate: the plan approved with this grant is no longer an approved plan of this \
-             conversation; the run proceeds without it"
-        );
+        if durable {
+            tracing::debug!(
+                plan_id,
+                state = plan.state,
+                org_id,
+                thread_id,
+                "plan-gate: the plan named by the durable grant is not approved any more; the run \
+                 proceeds without it"
+            );
+        } else {
+            tracing::warn!(
+                plan_id,
+                state = plan.state,
+                org_id,
+                thread_id,
+                "plan-gate: the plan approved with this grant is no longer an approved plan of this \
+                 conversation; the run proceeds without it"
+            );
+        }
         return None;
     }
     if !source.claim(&plan).await {
@@ -8606,6 +10607,163 @@ fn latest_proposed_plan(
         .find(|p| p.state == PlanState::Proposed as i32)
 }
 
+/// The typed code of an execute turn (`execute_granted`) that has no live plan grant to run
+/// under: the run is refused and terminalized (`dispatch_rejected`), and execution-core is
+/// never called (WS14 S2a). It travels as the message of the `failed_precondition` status
+/// [`resolve_autonomy_rung`] returns, and as the code of the SSE `error` event.
+const PLAN_GRANT_UNAVAILABLE: &str = "plan_grant_unavailable";
+
+/// The typed code of an execute turn refused because the gateway's execute switch is off
+/// (`MODEL_GATEWAY_PLAN_EXECUTE_ENABLED`, read once by the plan store). Refused before any
+/// run exists, so there is nothing to terminalize.
+const PLAN_EXECUTE_DISABLED: &str = "plan_execute_disabled";
+
+/// The rung a dispatched run states, resolved in ONE place for every non-resume dispatch
+/// (WS14 S2a). Pure over the grant store.
+///
+/// * Plan mode is READ_ONLY, whatever grant exists and whatever else the request says: plan
+///   mode always wins.
+/// * An EXECUTE turn (`execute_granted`) fails closed: it takes the rung of the thread's live
+///   grant, and without one (none recorded, expired, another org's, another thread's) it is
+///   `failed_precondition` with [`PLAN_GRANT_UNAVAILABLE`]. It is never run with no stated
+///   rung: an unstated rung is the least constrained a chat run can have, and a gateway
+///   restart (the grant lives in memory) must not turn "run the plan I approved" into that.
+/// * Every other run keeps the legacy rule exactly: the thread's grant when there is one,
+///   else UNSPECIFIED ("no graded constraint stated"), so eval-lab and every existing
+///   agentic caller are unchanged.
+///
+/// The key is `(verified org, run.thread_id)`: the thread session-core resolved and
+/// owner-verified for this run, never the request's own thread id, so a request cannot ask
+/// whether a grant exists for a thread it does not own.
+///
+/// `durable_grant` is where the thread's grant comes from (WS04 S4). `None` is the in-memory
+/// store, as ever. `Some` is the grant the caller read from Session Core for this run start
+/// (the durable grant switch is on): the store is then not asked at all. A grant Session Core
+/// said is absent behaves as above, but a read that FAILED (`ThreadGrant::read_failed`) is not
+/// "absent": an execute turn is refused the same way, and any other run states READ_ONLY, the
+/// narrowest rung the ladder has (`mp_contracts::autonomy::rank`), never the unstated one that
+/// would silently widen it past what the human granted.
+#[allow(clippy::result_large_err)]
+fn resolve_autonomy_rung(
+    store: &crate::coordinator::PlanModeStore,
+    org_id: &str,
+    thread_id: &str,
+    plan_mode: bool,
+    execute_granted: bool,
+    durable_grant: Option<&crate::session_flow::ThreadGrant>,
+) -> Result<i32, tonic::Status> {
+    use mp_contracts::model_plane::v1::AutonomyRung;
+    if plan_mode {
+        return Ok(AutonomyRung::ReadOnly as i32);
+    }
+    let granted = match durable_grant {
+        Some(grant) if grant.read_failed => {
+            // The read failed, so a grant may exist that was not seen: fail closed, never
+            // "no grant". An execute turn is refused; any other run is held to the narrowest rung.
+            return if execute_granted {
+                Err(tonic::Status::failed_precondition(PLAN_GRANT_UNAVAILABLE))
+            } else {
+                Ok(AutonomyRung::ReadOnly as i32)
+            };
+        }
+        Some(grant) => grant.rung,
+        None => store.granted_rung(org_id, thread_id),
+    };
+    if execute_granted {
+        return granted
+            .map(|rung| rung as i32)
+            .ok_or_else(|| tonic::Status::failed_precondition(PLAN_GRANT_UNAVAILABLE));
+    }
+    Ok(dispatch_autonomy_rung(false, false, granted))
+}
+
+/// The approval posture an execute turn runs under (WS14 S2a, the posture ratchet). Pure.
+///
+/// An execute turn whose live grant is `danger_full_access` runs under the ASK posture: every
+/// effectful call pauses for a per-call approval, so the widest rung is never also an
+/// unattended one. Any lower rung keeps the posture the turn already had, and any other turn
+/// (not an execute turn) is untouched whatever rung its thread holds. It only ever TIGHTENS:
+/// a posture that is already `ask` stays `ask`.
+fn execute_permission_mode(permission_mode: &str, execute_granted: bool, rung: i32) -> &str {
+    use mp_contracts::model_plane::v1::AutonomyRung;
+    if execute_granted && rung == AutonomyRung::DangerFullAccess as i32 {
+        crate::profile::ApprovalPosture::Ask.as_permission_mode()
+    } else {
+        permission_mode
+    }
+}
+
+/// What is wrong with an execute request's own shape, or `None`. Pure; checked before any run
+/// exists. An execute turn needs the `agentic` feature (it is an executing run), no
+/// `plan_mode` (plan mode is read-only and the two are exclusive) and a `thread_id` (the
+/// grant is the thread's; a new thread has none). A request without `execute_granted` has
+/// no problem here whatever else it says.
+fn execute_request_problem(req: &InvokeRequest, agentic: bool) -> Option<&'static str> {
+    if !req.execute_granted {
+        return None;
+    }
+    if !agentic {
+        return Some("execute_granted needs the agentic feature");
+    }
+    if req.plan_mode {
+        return Some("execute_granted and plan_mode are mutually exclusive");
+    }
+    if req.thread_id.as_deref().map_or(true, |id| id.trim().is_empty()) {
+        return Some("execute_granted needs the thread of the approved plan (thread_id)");
+    }
+    None
+}
+
+/// Why an execute turn is refused before any run exists, as the `(code, message)` of the SSE
+/// `error` event (never retryable), or `None`. Pure. The switches come first: with the execute
+/// switch off, or with the approval-resume switch off, every execute turn gets the same code
+/// whatever its shape; with both on, a malformed request is `invalid_request`.
+///
+/// The approval-resume switch (`/continue` on) is a prerequisite because the posture ratchet
+/// runs the widest rung under `ask`: its first risky call pauses for a per-call approval, and
+/// with `/continue` off that click resumes nothing (`continue_disabled`) while spending the
+/// approval, so the run would strand. Turn the execute switch on after the approval-resume
+/// flip, off before rolling it back.
+fn execute_refusal(
+    req: &InvokeRequest,
+    agentic: bool,
+    execute_enabled: bool,
+    approval_resume_enabled: bool,
+) -> Option<(&'static str, &'static str)> {
+    if !req.execute_granted {
+        return None;
+    }
+    if !execute_enabled {
+        return Some((
+            PLAN_EXECUTE_DISABLED,
+            "Running an approved plan is switched off on this server.",
+        ));
+    }
+    if !approval_resume_enabled {
+        return Some((
+            PLAN_EXECUTE_DISABLED,
+            "Running an approved plan needs approvals to resume, which is switched off on this server.",
+        ));
+    }
+    execute_request_problem(req, agentic).map(|problem| ("invalid_request", problem))
+}
+
+/// The `(code, message)` of the SSE `error` event for a dispatch the gateway rejected before
+/// calling execution-core. An execute turn without a live grant is the typed
+/// [`PLAN_GRANT_UNAVAILABLE`]; every other rejection keeps the generic `agent_dispatch_rejected`
+/// it always had. Content-free: the message states no plan, thread or run.
+fn dispatch_rejection_event(status: &tonic::Status) -> (&'static str, &'static str) {
+    if status.code() == tonic::Code::FailedPrecondition && status.message() == PLAN_GRANT_UNAVAILABLE
+    {
+        (
+            PLAN_GRANT_UNAVAILABLE,
+            "No live plan grant exists for this conversation: it expired or the service restarted. Plan again and approve the plan.",
+        )
+    } else {
+        ("agent_dispatch_rejected", "The agent run could not be accepted.")
+    }
+}
+
 /// Start dispatch of a prepared run to Execution Core's governed agent driver.
 ///
 /// A successfully created task only proves that the client RPC has been
@@ -8627,18 +10785,40 @@ fn spawn_run_dispatch(
     min_privacy_tier_wire: i32,
     permission_mode: &str,
     plan_mode: bool,
+    // WS14 S2a: this is an execute turn. It takes its rung from the thread's live grant or
+    // is refused (`resolve_autonomy_rung`); `false` for every other dispatch, a resume's
+    // included.
+    execute_granted: bool,
     execution_bearer: &VerifiedExecutionBearer,
     data_plane_bearer: &VerifiedBearer,
     session_bearer: &VerifiedModelBearer,
     inference_bearer: &VerifiedInferenceBearer,
     space_id: &str,
     sandbox_bearer: Option<&VerifiedSandboxBearer>,
+    browser_bearer: Option<&VerifiedBrowserBearer>,
     // plan-gate §2.4: the plan approved together with this thread's grant,
     // pre-formatted, when one is waiting and this run is not itself in plan
     // mode. `None` for every run that predates plan-gate or has no approved
     // plan to consume.
     approved_plan_context: Option<&str>,
     route: &AgentRoute,
+    resume: Option<mp_contracts::model_plane::v1::AgentResume>,
+    // The composed run context (build plan WS02 S6); `None` with the switch off, for a
+    // continuation and for every request built before it existed.
+    run_context: Option<mp_contracts::model_plane::v1::RunContext>,
+    // The attachments of a Do turn (build plan WS08-S6); empty for every other dispatch.
+    attachments: Vec<mp_contracts::model_plane::v1::RunAttachment>,
+    // The connected accounts the person selected (WS23-S4); empty for every other dispatch.
+    connector_scope: Vec<String>,
+    // What the run's rounds cost, published by the task itself the moment the executor
+    // answers (build plan WS02 S3), so a follower that has given up cannot lose it.
+    usage_ledger: AgentUsageLedger,
+    // The thread's grant as Session Core holds it (build plan WS04 S4), read once for this
+    // run start; `None` with the durable grant switch off, and the in-memory store decides.
+    durable_grant: Option<&crate::session_flow::ThreadGrant>,
+    // The run's effort level (WS11-S8), from `thinking::run_level` on the turn's clamped
+    // profile; 0 with the ladder off, and for every continuation.
+    run_effort: i32,
 ) -> Result<tokio::task::JoinHandle<Result<RunAgentResponse, tonic::Status>>, tonic::Status> {
     let mut execution_client = state.execution_client.clone();
     // The graded authority execution-core enforces PER CALL.
@@ -8655,14 +10835,42 @@ fn spawn_run_dispatch(
     // graded constraint stated" and falls back to the posture gates that
     // governed this path before the ladder existed. Inventing a wider rung
     // here would manufacture an authority no human granted.
-    let autonomy_rung = if plan_mode {
-        mp_contracts::model_plane::v1::AutonomyRung::ReadOnly as i32
-    } else {
-        state
-            .plan_mode
-            .granted_rung(org_id, &run.thread_id)
-            .unwrap_or(mp_contracts::model_plane::v1::AutonomyRung::Unspecified) as i32
-    };
+    //
+    // A continuation (`resume` present) states NO rung: its authority is the one
+    // the run paused with, and the executor refuses a request that states a wider
+    // rung only after it has consumed the single-use approval. The thread's grant
+    // may have widened since the pause, so it is not read for a resume
+    // (`dispatch_autonomy_rung`).
+    //
+    // An EXECUTE turn (`execute_granted`, WS14 S2a) is resolved through the same function and
+    // fails closed: no live grant means `plan_grant_unavailable` and no `RunAgent` call at
+    // all, never an unstated rung. The grant is read here, for `run.thread_id`: the thread
+    // session-core resolved and owner-verified for this run.
+    let rung = resolve_autonomy_rung(
+        &state.plan_mode,
+        org_id,
+        &run.thread_id,
+        plan_mode,
+        execute_granted,
+        durable_grant,
+    )?;
+    // The granted rung as `resolved_run_agent_request` takes it: the rung the store held
+    // (UNSPECIFIED is "none"). Plan mode and a resume still decide the rung that is sent
+    // (`dispatch_autonomy_rung`), so every request but an execute turn is byte-identical.
+    let granted = mp_contracts::model_plane::v1::AutonomyRung::try_from(rung)
+        .ok()
+        .filter(|rung| *rung != mp_contracts::model_plane::v1::AutonomyRung::Unspecified);
+    // The posture ratchet: an execute turn at the widest rung asks for a per-call approval.
+    let ratcheted = execute_permission_mode(permission_mode, execute_granted, rung);
+    if ratcheted != permission_mode {
+        tracing::info!(
+            run_id = %run.run_id,
+            from = permission_mode,
+            to = ratcheted,
+            "execute turn at the widest rung runs under the ask posture"
+        );
+    }
+    let permission_mode = ratcheted;
     // The run's round and delegation budget, resolved here from the server's
     // own environment and the route the gateway pinned (never from the
     // request). Defaults to the 4 rounds and unspecified subagents this site
@@ -8675,7 +10883,7 @@ fn spawn_run_dispatch(
         max_subagents = budget.max_subagents,
         "RunAgent budget resolved"
     );
-    let run_agent_req = build_run_agent_request(
+    let run_agent_req = resolved_run_agent_request(
         run,
         org_id,
         user_id,
@@ -8686,11 +10894,16 @@ fn spawn_run_dispatch(
         min_privacy_tier_wire,
         permission_mode,
         plan_mode,
-        autonomy_rung,
+        granted,
         space_id,
         approved_plan_context,
         route,
         budget,
+        resume,
+        run_context,
+        attachments,
+        connector_scope,
+        run_effort,
     );
     let run_agent_req = authenticated_run_agent_request(
         run_agent_req,
@@ -8699,12 +10912,19 @@ fn spawn_run_dispatch(
         session_bearer,
         inference_bearer,
         sandbox_bearer,
+        browser_bearer,
     )?;
     Ok(tokio::spawn(async move {
-        execution_client
+        let result = execution_client
             .run_agent(run_agent_req)
             .await
-            .map(tonic::Response::into_inner)
+            .map(tonic::Response::into_inner);
+        // A failed, paused or parked invocation spent what it spent, and each dispatch
+        // (this request id) reports its own tally once.
+        if let Some(usage) = result.as_ref().ok().and_then(|r| r.usage.as_ref()) {
+            usage_ledger.publish(usage).await;
+        }
+        result
     }))
 }
 
@@ -8748,6 +10968,86 @@ impl AgentRoute {
     }
 }
 
+/// The rung a dispatched run states, from what the gateway knows. Pure.
+///
+/// Plan mode is READ_ONLY (a narrowing is always allowed, even on a resume). A
+/// continuation states nothing: UNSPECIFIED means "not stated" to execution-core,
+/// which then runs the continuation under the rung the run paused with, so the
+/// thread's grant (which an approved plan may have widened since the pause) cannot
+/// make the executor refuse after the single-use consume. Any other run states the
+/// rung its thread was granted, or UNSPECIFIED when there is none.
+fn dispatch_autonomy_rung(
+    plan_mode: bool,
+    resuming: bool,
+    granted: Option<mp_contracts::model_plane::v1::AutonomyRung>,
+) -> i32 {
+    use mp_contracts::model_plane::v1::AutonomyRung;
+    if plan_mode {
+        AutonomyRung::ReadOnly as i32
+    } else if resuming {
+        AutonomyRung::Unspecified as i32
+    } else {
+        granted.unwrap_or(AutonomyRung::Unspecified) as i32
+    }
+}
+
+/// [`build_run_agent_request`] with the rung resolved by [`dispatch_autonomy_rung`]:
+/// the one place a dispatch's request is made, so the tests see what really leaves. It is
+/// also where a fresh run's effort level is set, from `run_effort`.
+#[allow(clippy::too_many_arguments)] // cohesive: the immutable request fields
+fn resolved_run_agent_request(
+    run: &crate::session_flow::SessionRun,
+    org_id: &str,
+    user_id: &str,
+    model: &str,
+    content: &str,
+    tools: &[ToolDefinition],
+    zdr: bool,
+    min_privacy_tier_wire: i32,
+    permission_mode: &str,
+    plan_mode: bool,
+    granted: Option<mp_contracts::model_plane::v1::AutonomyRung>,
+    space_id: &str,
+    approved_plan_context: Option<&str>,
+    route: &AgentRoute,
+    budget: crate::run_budget::RunBudget,
+    resume: Option<mp_contracts::model_plane::v1::AgentResume>,
+    run_context: Option<mp_contracts::model_plane::v1::RunContext>,
+    attachments: Vec<mp_contracts::model_plane::v1::RunAttachment>,
+    connector_scope: Vec<String>,
+    run_effort: i32,
+) -> RunAgentRequest {
+    let autonomy_rung = dispatch_autonomy_rung(plan_mode, resume.is_some(), granted);
+    // A continuation segment carries only what its own request sends, and it sends no level:
+    // only a fresh run carries the turn's.
+    let fresh = resume.is_none();
+    let request = build_run_agent_request(
+        run,
+        org_id,
+        user_id,
+        model,
+        content,
+        tools,
+        zdr,
+        min_privacy_tier_wire,
+        permission_mode,
+        plan_mode,
+        autonomy_rung,
+        space_id,
+        approved_plan_context,
+        route,
+        budget,
+        resume,
+        run_context,
+        attachments,
+        connector_scope,
+    );
+    RunAgentRequest {
+        reasoning_effort: if fresh { run_effort } else { 0 },
+        ..request
+    }
+}
+
 /// The unauthenticated `RunAgentRequest` for one prepared run. Pure, so what
 /// reaches execution-core is testable without a gRPC channel.
 ///
@@ -8771,6 +11071,10 @@ fn build_run_agent_request(
     approved_plan_context: Option<&str>,
     route: &AgentRoute,
     budget: crate::run_budget::RunBudget,
+    resume: Option<mp_contracts::model_plane::v1::AgentResume>,
+    run_context: Option<mp_contracts::model_plane::v1::RunContext>,
+    attachments: Vec<mp_contracts::model_plane::v1::RunAttachment>,
+    connector_scope: Vec<String>,
 ) -> RunAgentRequest {
     RunAgentRequest {
         run_id: run.run_id.clone(),
@@ -8831,6 +11135,27 @@ fn build_run_agent_request(
         // byte-identical to what was sent before these fields existed.
         provider_hint: route.provider_hint.clone(),
         subscription_connection_id: route.subscription_connection_id.clone(),
+        // What the gateway composed for this run (`run_context::prepare`): data only, it
+        // changes neither `mode` nor the rung above. Absent (the switch off, a
+        // continuation) = today's behaviour.
+        run_context,
+        // A continuation segment carries its resume; every other run sends none.
+        resume,
+        // What the person attached to a Do turn, validated and hashed by the gateway
+        // (`do_run_attachments`); empty with `CHAT_DO_ATTACHMENTS_ENABLED` off, for a
+        // turn without attachments and for a continuation.
+        attachments,
+        // The connected accounts the person selected (WS23-S4), sent only when there are some: an
+        // empty selection is absent on the wire, as it was before the field existed.
+        connector_scope: (!connector_scope.is_empty()).then(|| {
+            mp_contracts::model_plane::v1::ConnectorScope {
+                connection_ids: connector_scope,
+            }
+        }),
+        // The run's effort level (WS11-S8). Unspecified here: `resolved_run_agent_request` sets
+        // it for a fresh run, so this builder's bytes stay as they were. execution-core uses it
+        // only with EXECUTION_CORE_RUN_EFFORT on.
+        reasoning_effort: mp_contracts::model_plane::v1::ReasoningEffort::Unspecified as i32,
     }
 }
 
@@ -8839,6 +11164,9 @@ enum AgenticRunOutcome {
     Completed,
     Failed,
     AwaitingApproval,
+    /// The executor parked the run (WS03 S8-A): a typed, recoverable stop saved as a durable
+    /// park; the run stays open and is resumed through the park form of `/continue`.
+    Parked,
     Unknown,
 }
 
@@ -8876,8 +11204,39 @@ fn classify_agentic_run_outcome(status: &str) -> AgenticRunOutcome {
         // Execution Core deliberately uses this non-terminal status after it
         // has persisted the approval record. Gateway must preserve that pause.
         "awaiting_approval" => AgenticRunOutcome::AwaitingApproval,
+        // Non-terminal too (WS03 S8-A): the run is parked, nothing was appended and no
+        // receipt was written. Read only with a park reason this build knows
+        // ([`run_parked_event`]); otherwise the stream treats it as an unknown status.
+        "parked" => AgenticRunOutcome::Parked,
         _ => AgenticRunOutcome::Unknown,
     }
+}
+
+/// The `run_parked` frame of a run the executor parked (WS03 S8-A), sent on the owner's turn
+/// stream: the run, this request, the status, the closed park reason and when the run can be
+/// resumed (`resume_after`, the executor's `resets_at`, RFC 3339, or `null` when it is not a
+/// readable time). Ids, a closed token and a timestamp only. `None` when the response names
+/// no park reason this build knows: the stream then answers as for an unknown status.
+fn run_parked_event(request_id: &str, run_id: &str, response: &RunAgentResponse) -> Option<Event> {
+    let reason = mp_contracts::loop_fold::ParkReason::parse(&response.park_reason)?;
+    let resume_after = chrono::DateTime::parse_from_rfc3339(response.resets_at.trim())
+        .ok()
+        .map(|at| {
+            at.with_timezone(&Utc)
+                .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
+        });
+    Some(
+        Event::default().event("run_parked").data(
+            json!({
+                "run_id": run_id,
+                "request_id": request_id,
+                "status": "parked",
+                "reason": reason.as_str(),
+                "resume_after": resume_after,
+            })
+            .to_string(),
+        ),
+    )
 }
 
 /// Only these gRPC codes prove the remote execution boundary rejected the
@@ -8960,6 +11319,10 @@ const AGENTIC_EVENT_DRAIN_GRACE: std::time::Duration = std::time::Duration::from
 /// the longest. See [`with_keep_alive`].
 const AGENTIC_KEEP_ALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// How often a Do stream checks whether its client stopped it. The check is a flag read, so a
+/// Stop is seen within this much of the click, at no cost to the run.
+const AGENTIC_STOP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// The deadline for one run: pure, the environment arrives as `lookup` (compare
 /// `run_budget::resolve_run_budget`). `pinned_to_subscription` is
 /// [`AgentRoute::is_pinned`].
@@ -8999,7 +11362,8 @@ fn agent_dispatch_unavailable_event(request_id: &str, run_id: &str) -> Event {
 }
 
 /// What the agent dispatch task came back with: Execution Core's response or
-/// the transport status, or the join error of a task that did not finish.
+/// the transport status, or the join error of a task that did not finish. A
+/// dispatch the client stopped is aborted, so its join error is a cancelled one.
 type DispatchJoin = Result<Result<RunAgentResponse, tonic::Status>, tokio::task::JoinError>;
 
 /// The run was still going when the follow deadline passed. Nothing was
@@ -9063,6 +11427,15 @@ fn agentic_run_events(
 /// dropped, which detaches the task rather than aborting it, so the run goes
 /// on in Execution Core and writes its answer to the thread. When the dispatch
 /// result and the deadline are both ready at one poll, the result wins.
+///
+/// A Stop is the client's own: `stop` is the stream's cancel flag, set by the
+/// cancel route, by a durable cancel of the run or by a peer's Stop over the
+/// bus. It is read on a short tick inside the same loop, and then the dispatch
+/// is aborted. That drops the call to Execution Core, which is what stops the
+/// run's loop, and the follow returns at once: the answer is no longer wanted,
+/// so the tail is not drained. The order is the dispatch result, then the stop,
+/// then the deadline, so a run that finished in the same poll keeps its answer
+/// and a Stop that lands at the deadline is still a Stop.
 async fn follow_agentic_run<S>(
     events: S,
     mut dispatch: tokio::task::JoinHandle<Result<RunAgentResponse, tonic::Status>>,
@@ -9070,6 +11443,7 @@ async fn follow_agentic_run<S>(
     drain_grace: std::time::Duration,
     step_frame: impl Fn(&OrchestrationEvent) -> Option<Event>,
     tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+    stop: &std::sync::atomic::AtomicBool,
 ) -> Result<DispatchJoin, DeadlineExpired>
 where
     S: Stream<Item = Result<OrchestrationEvent, tonic::Status>>,
@@ -9077,12 +11451,23 @@ where
     tokio::pin!(events);
     let deadline = tokio::time::sleep_until(deadline_at);
     tokio::pin!(deadline);
+    let mut stop_poll = tokio::time::interval(AGENTIC_STOP_POLL_INTERVAL);
+    stop_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut tail_open = true;
 
     let joined = loop {
         tokio::select! {
             biased;
             joined = &mut dispatch => break joined,
+            _ = stop_poll.tick() => {
+                if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    // Aborting drops the call to Execution Core. A dispatch that finished
+                    // meanwhile keeps its own result: aborting a finished task changes
+                    // nothing, and the await hands that result back.
+                    dispatch.abort();
+                    return Ok((&mut dispatch).await);
+                }
+            }
             () = &mut deadline => return Err(DeadlineExpired),
             next = events.next(), if tail_open => match next {
                 Some(Ok(event)) => {
@@ -9156,6 +11541,27 @@ fn with_keep_alive(
     out_rx
 }
 
+/// Leaves a stopped agentic run cancelled in Session Core, as the durable cancel route does
+/// (`cancel_run` in `http_routes`): the same `RunService.CancelRun`, with the same metadata-only
+/// reason. It is idempotent, so a run that is already terminal answers `false`. A failure is the
+/// caller's to log, and the run then stays for session-core's recovery.
+#[allow(clippy::result_large_err)]
+async fn cancel_stopped_agentic_run(
+    state: &AppState,
+    run_id: &str,
+    bearer: &VerifiedModelBearer,
+) -> Result<bool, tonic::Status> {
+    let request = authenticated_session_request(
+        CancelRunRequest {
+            run_id: run_id.to_owned(),
+            reason: "user_requested".to_owned(),
+        },
+        bearer,
+    )?;
+    let response = state.run_client.clone().cancel_run(request).await?;
+    Ok(response.into_inner().cancelled)
+}
+
 /// Agentic run stream for the one already-prepared durable Session Core run.
 ///
 /// Execution Core owns agent progression, tool dispatch, approvals, assistant
@@ -9175,9 +11581,13 @@ fn agentic_run_stream(
     features: Vec<String>,
     tools: Vec<ToolDefinition>,
     zdr: bool,
+    retention_class: Option<crate::sse_events::RetentionClass>,
     min_privacy_tier_wire: i32,
     permission_mode: String,
     plan_mode: bool,
+    // An execute turn (WS14 S2a): the run takes the thread's live plan grant or is refused,
+    // typed, before execution-core is called. `false` for a continuation and every other turn.
+    execute_granted: bool,
     execution_bearer: VerifiedExecutionBearer,
     data_plane_bearer: VerifiedBearer,
     model_bearer: VerifiedModelBearer,
@@ -9187,10 +11597,31 @@ fn agentic_run_stream(
     // governed agent loop needs it too, not only the inline ExecuteStep path).
     space_id: String,
     sandbox_bearer: Option<VerifiedSandboxBearer>,
+    // The browser bearer of a Do turn that may be offered the browser tools (WS21-S2). `None` for
+    // every continuation, which never forwards one, and for every turn with the switch off.
+    browser_bearer: Option<VerifiedBrowserBearer>,
     // The inference route this run is pinned to; empty for every turn that is
     // not on the ChatGPT subscription (see `AgentRoute`).
     route: AgentRoute,
     idem_guard: Option<crate::idempotency_registry::CommitGuard>,
+    // A continuation segment (build plan WS03 S3). `None` for every turn.
+    resume: Option<mp_contracts::model_plane::v1::AgentResume>,
+    // Whether the gateway itself consumed the continuation's approval before this stream
+    // opened (build plan WS03 S7c). `NotSpent` for every turn but a pre-consumed
+    // continuation; it is the gateway's own knowledge, never read from the resume.
+    spend: ApprovalSpend,
+    // The run context to compose for this run (build plan WS02 S6): `None` with
+    // `MODEL_GATEWAY_RUN_CONTEXT` off and for every continuation.
+    run_context_request: Option<crate::run_context::RunContextRequest>,
+    // The validated attachments of a Do turn (build plan WS08-S6): files for the sandbox and
+    // images for every round. Empty with `CHAT_DO_ATTACHMENTS_ENABLED` off and for a continuation.
+    attachments: Vec<mp_contracts::model_plane::v1::RunAttachment>,
+    // The connected accounts the person selected (WS23-S4), checked by the handler; empty for a
+    // continuation.
+    connector_scope: Vec<String>,
+    // The run's effort level (WS11-S8), from `thinking::run_level` at the launch; 0 for a
+    // continuation and with the ladder off.
+    run_effort: i32,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
@@ -9198,29 +11629,98 @@ fn agentic_run_stream(
         let start = std::time::Instant::now();
         let run_id = run.run_id.clone();
         let thread_id = run.thread_id.clone();
+        // A continuation of a paused run (any stage, spent or not): its dispatch failures
+        // are told apart from an ordinary run's below.
+        let continuing = resume.is_some();
+        // A park continue (WS03 S8-A): the resume of a PARKED run, which spends no approval.
+        // The gateway never terminalizes it: every failure below is a `park_continue` frame
+        // (or the bare `agent_dispatch_unavailable`) and the run stays parked until the
+        // executor resumes it or session-core's park TTL ends it. Computed once, here, so no
+        // dispatch arm is guarded by the resume itself.
+        let parking = resume.as_ref().is_some_and(|r| r.mode == "park");
+
+        // A Stop reaches this run while it is followed: the cancel route, a durable cancel of the
+        // run and a peer's Stop over the bus all find the entry made here. It is in place before
+        // `connected`, so a Stop never misses a stream the client has been told is running. A Do
+        // run takes no mid-run input, so the queue is not registered. A ZDR turn never reaches
+        // this function (`invoke_stream_sse` takes `zdr_direct_stream` first). The guard releases
+        // the entry on every exit of this task, so no exit below calls `finish`.
+        let cancel_flag = state
+            .cancels
+            .register_run(&request_id, &org_id, &user_id, &run_id);
+        let _registration = state.cancels.hold(&request_id);
+        state
+            .run_control
+            .attach(&state.cancels, &state.queued_inputs, &request_id, &run_id)
+            .await;
 
         // The prepared run exists — surface its ids so the SPA can drive durable
-        // observation (GET /v1/runs/{run_id}/events) and approvals.
-        let connected = json!({
-            "ok": true,
-            "run_id": run_id,
-            "thread_id": thread_id,
-            "request_id": request_id,
-        });
+        // observation (GET /v1/runs/{run_id}/events) and approvals. After a gateway
+        // pre-consume the frame also says the click is spent.
+        let connected = connected_payload(&run_id, &thread_id, &request_id, spend);
         let _ = tx
             .send(Ok(Event::default()
                 .event("connected")
                 .data(connected.to_string())))
             .await;
 
+        // The run's context: the instructions an Ask turn would carry, and with `full`
+        // the thread's recent turns and recalled memory. Composed after `connected`
+        // so the client already holds the run's ids while the reads happen, and
+        // never for a continuation, which resumes the run's own context.
+        let run_context = match &run_context_request {
+            Some(request) if !continuing => Some(
+                crate::run_context::prepare(
+                    &state,
+                    request,
+                    &crate::run_context::RunFacts {
+                        goal: &content,
+                        zdr,
+                        waived: matches!(
+                            retention_class,
+                            Some(crate::sse_events::RetentionClass::ZdrWaived { .. })
+                        ),
+                        space_scoped: !space_id.is_empty(),
+                        pinned_route: route.is_pinned(),
+                    },
+                    &run,
+                    &org_id,
+                    &model_bearer,
+                )
+                .await,
+            ),
+            _ => None,
+        };
+
         // plan-gate §2.4: a run that is itself in plan mode has no authority
-        // to consume a plan with yet. Any other run asks the store whether an
-        // approval with a plan is waiting for this thread — an in-memory
-        // lookup that answers "no" without an RPC in the common case.
-        let plan_context = if plan_mode {
-            None
+        // to consume a plan with yet, and a continuation takes its goal and
+        // authority from the run it continues, so it leaves the thread's grant
+        // for the next ordinary run (`plan_context_wanted`). Any other run asks
+        // the store whether an approval with a plan is waiting for this thread —
+        // an in-memory lookup that answers "no" without an RPC in the common case.
+        //
+        // With the durable grant switch on (WS04 S4) the grant is read from Session Core
+        // instead, once, for the rung and the plan together, so a run started on a replica
+        // that never saw the approval carries it. The read is wanted exactly when the plan
+        // context is: a plan-mode run states READ_ONLY and a continuation states no rung.
+        let durable_grant = if state.plan_mode.durable_grant_enabled()
+            && plan_context_wanted(plan_mode, resume.is_some())
+        {
+            Some(durable_thread_grant(&state, &org_id, &thread_id, &model_bearer).await)
         } else {
-            approved_plan_context(&state, &org_id, &thread_id, &model_bearer).await
+            None
+        };
+        let plan_context = if plan_context_wanted(plan_mode, resume.is_some()) {
+            approved_plan_context(
+                &state,
+                &org_id,
+                &thread_id,
+                &model_bearer,
+                durable_grant.as_ref(),
+            )
+            .await
+        } else {
+            None
         };
 
         // Construct the authenticated request before reporting the run as
@@ -9238,18 +11738,68 @@ fn agentic_run_stream(
             min_privacy_tier_wire,
             &permission_mode,
             plan_mode,
+            execute_granted,
             &execution_bearer,
             &data_plane_bearer,
             &model_bearer,
             &inference_bearer,
             &space_id,
             sandbox_bearer.as_ref(),
+            browser_bearer.as_ref(),
             plan_context.as_deref(),
             &route,
+            resume.clone(),
+            run_context,
+            attachments,
+            connector_scope,
+            AgentUsageLedger {
+                publisher: state.publisher.clone(),
+                enabled: agent_usage_envelope_enabled(&|key| std::env::var(key).ok()),
+                run_id: run.run_id.clone(),
+                request_id: request_id.clone(),
+                org_id: org_id.clone(),
+                user_id: user_id.clone(),
+                model: model.clone(),
+                // A waived turn is persistent for its connection but belongs to a
+                // zero-retention org: it leaves no ledger row either.
+                zdr: zdr || retention_class.is_some(),
+                route: route.clone(),
+                min_privacy_tier: min_privacy_tier_wire,
+                start,
+            },
+            durable_grant.as_ref(),
+            run_effort,
         ) {
             Ok(dispatch) => dispatch,
             Err(error) => {
                 tracing::warn!(%error, run_id = %run.run_id, "RunAgent request construction rejected before dispatch");
+                if parking {
+                    // A park continue skipped the pre-consume check (it spends nothing), so a
+                    // credential that is not valid metadata is answered here. Nothing was
+                    // claimed, started or published; the run stays parked.
+                    let _ = tx
+                        .send(Ok(park_refusal_event(
+                            &request_id,
+                            &run.run_id,
+                            "continue_refused",
+                        )))
+                        .await;
+                    return;
+                }
+                if spend.is_spent() {
+                    // The click is already spent and nothing was sent. The gateway never
+                    // terminalizes a pre-consumed continuation: the run's renewed recovery
+                    // window ends it, and the client is told not to post the continue again.
+                    let _ = tx
+                        .send(Ok(continue_refusal_event(
+                            &request_id,
+                            &run.run_id,
+                            "continue_refused",
+                            spend,
+                        )))
+                        .await;
+                    return;
+                }
                 let terminalized =
                     crate::session_flow::terminalize_agent_dispatch_rejection_authenticated(
                         &state,
@@ -9271,9 +11821,12 @@ fn agentic_run_stream(
                             .publisher
                             .publish(&subjects::run_event_subject(&run.run_id), &failed)
                             .await;
+                        // An execute turn with no live grant is the typed
+                        // `plan_grant_unavailable`; any other rejection keeps its generic code.
+                        let (code, message) = dispatch_rejection_event(&error);
                         let event = crate::sse_events::ChatEvent::Error {
-                            code: "agent_dispatch_rejected".to_owned(),
-                            message: "The agent run could not be accepted.".to_owned(),
+                            code: code.to_owned(),
+                            message: message.to_owned(),
                             retryable: false,
                         };
                         let _ = tx.send(Ok(event.to_sse(&request_id))).await;
@@ -9310,8 +11863,11 @@ fn agentic_run_stream(
         // deadline ends it otherwise. Failure to tail events cannot decide the
         // run outcome, so it never returns early or manufactures a terminal SSE
         // frame.
-        let deadline =
-            resolve_agentic_run_deadline(route.is_pinned(), &|key| std::env::var(key).ok());
+        // A park continue runs on the route the executor rebuilds from the park (always a
+        // pinned one), so it is followed for as long as a pinned run is.
+        let deadline = resolve_agentic_run_deadline(route.is_pinned() || parking, &|key| {
+            std::env::var(key).ok()
+        });
         let followed_at = std::time::Instant::now();
         let dispatch_result = follow_agentic_run(
             agentic_run_events(&state, &run.run_id, &model_bearer),
@@ -9324,6 +11880,7 @@ fn agentic_run_stream(
                     .map(|step| step.to_sse(&request_id))
             },
             &tx,
+            &cancel_flag,
         )
         .await;
         tracing::info!(
@@ -9334,6 +11891,44 @@ fn agentic_run_stream(
             outcome = if dispatch_result.is_ok() { "resolved" } else { "deadline" },
             "agentic run followed"
         );
+
+        // A park continue the executor did not start (WS03 S8-A): intercepted HERE, before the
+        // dispatch match, so the match keeps its committed arms. The gateway never terminalizes
+        // a park continue: the run stays parked. RUN_STARTED is already on the run subject, so
+        // the attempt is closed there by one event ([`park_dispatch_run_event`]), and the
+        // client gets one final `park_continue` frame that never says `approval_spent`. A
+        // follow deadline and a join error keep the committed arms below.
+        let dispatch_result = match park_dispatch_of(parking, dispatch_result) {
+            ParkDispatch::Refused(status) => {
+                let failure = classify_continue_dispatch_failure(&status);
+                tracing::warn!(
+                    code = ?status.code(),
+                    ?failure,
+                    run_id = %run.run_id,
+                    "RunAgent of a park continue did not start; the run stays parked"
+                );
+                let park_closing = build_stream_envelope(
+                    &request_id,
+                    park_dispatch_run_event(&failure),
+                    &org_id,
+                    &user_id,
+                    &model,
+                );
+                let _ = state
+                    .publisher
+                    .publish(&subjects::run_event_subject(&run.run_id), &park_closing)
+                    .await;
+                let _ = tx
+                    .send(Ok(park_refusal_event(
+                        &request_id,
+                        &run.run_id,
+                        park_frame_token(&failure),
+                    )))
+                    .await;
+                return;
+            }
+            ParkDispatch::Pass(result) => result,
+        };
 
         // An absent response after the deadline is ambiguous: the remote
         // server may have accepted the run even if this client never received
@@ -9353,11 +11948,57 @@ fn agentic_run_stream(
                     .publish(&subjects::run_event_subject(&run.run_id), &degraded)
                     .await;
                 let _ = tx
-                    .send(Ok(agent_dispatch_unavailable_event(
-                        &request_id,
-                        &run.run_id,
-                    )))
+                    .send(Ok(dispatch_unknown_event(spend, &request_id, &run.run_id)))
                     .await;
+                return;
+            }
+            // The client stopped the run: its cancel flag is set and `follow_agentic_run` aborted
+            // the dispatch, so the call to Execution Core is dropped and the run's loop stops with
+            // it. The answer, and with it the run's usage, never arrives, so a stopped run's usage
+            // is not ledgered. A park continue is stopped the same way, the one exception to the
+            // park regime, which never terminalizes: a Stop is the user's explicit choice. The
+            // client gets the terminal `stopped` frame the Ask path sends, and Session Core is
+            // asked to leave the run cancelled. A failure is logged by its code, never a second
+            // frame.
+            Ok(Err(join_error))
+                if join_error.is_cancelled()
+                    && cancel_flag.load(std::sync::atomic::Ordering::Relaxed) =>
+            {
+                tracing::info!(
+                    %request_id,
+                    run_id = %run.run_id,
+                    "the client stopped an agentic run; its dispatch was aborted"
+                );
+                let stopped = crate::sse_events::ChatEvent::Stopped {
+                    reason: "client cancelled".to_owned(),
+                };
+                let _ = tx.send(Ok(stopped.to_sse(&request_id))).await;
+                match cancel_stopped_agentic_run(&state, &run_id, &model_bearer).await {
+                    Ok(true) => {
+                        // Session Core wrote the RUN_CANCELLED receipt in the same transaction; the
+                        // run subject closes the attempt with that event, as the other exits do.
+                        let cancelled = build_stream_envelope(
+                            &request_id,
+                            "RUN_CANCELLED",
+                            &org_id,
+                            &user_id,
+                            &model,
+                        );
+                        let _ = state
+                            .publisher
+                            .publish(&subjects::run_event_subject(&run_id), &cancelled)
+                            .await;
+                    }
+                    Ok(false) => tracing::info!(
+                        run_id = %run_id,
+                        "a stopped agentic run was already terminal in Session Core"
+                    ),
+                    Err(status) => tracing::warn!(
+                        run_id = %run_id,
+                        code = ?status.code(),
+                        "Session Core did not record the stop of an agentic run"
+                    ),
+                }
                 return;
             }
             Ok(Err(join_error)) => {
@@ -9374,9 +12015,50 @@ fn agentic_run_stream(
                     .publish(&subjects::run_event_subject(&run.run_id), &degraded)
                     .await;
                 let _ = tx
-                    .send(Ok(agent_dispatch_unavailable_event(
+                    .send(Ok(dispatch_unknown_event(spend, &request_id, &run.run_id)))
+                    .await;
+                return;
+            }
+            // A continuation the gateway itself pre-consumed (build plan WS03 S7c): the
+            // click is spent, so none of the arms below, which assume an approval a
+            // retry can still use, apply. The gateway NEVER terminalizes it: a refusal can
+            // be `continuation_already_consumed` while another segment of the run is
+            // still live, and an executor that cannot be reached is left to the run's
+            // renewed recovery window. Every frame is final (not retryable), names the
+            // run and says `approval_spent`; the client follows the run.
+            //
+            // RUN_STARTED is already on the run subject, so the attempt is closed there
+            // too, by an event that says what happened and nothing more
+            // ([`spent_dispatch_run_event`]): an executor refusal is the attempt-level
+            // `RUN_CONTINUE_REFUSED` (this attempt started no segment; the run itself is
+            // not marked), an unreachable or unknown outcome keeps the run-level
+            // `RUN_DISPATCH_DEGRADED`. Published once, after the click is known spent
+            // (this arm is the spent regime), and a failed publish changes nothing the
+            // client sees.
+            Ok(Ok(Err(status))) if spend.is_spent() => {
+                let failure = classify_continue_dispatch_failure(&status);
+                tracing::warn!(
+                    code = ?status.code(),
+                    ?failure,
+                    run_id = %run.run_id,
+                    "RunAgent of a pre-consumed continuation did not start; the approval is spent"
+                );
+                let closing = build_stream_envelope(
+                    &request_id,
+                    spent_dispatch_run_event(&failure),
+                    &org_id,
+                    &user_id,
+                    &model,
+                );
+                let _ = state
+                    .publisher
+                    .publish(&subjects::run_event_subject(&run.run_id), &closing)
+                    .await;
+                let _ = tx
+                    .send(Ok(continue_failure_event(
                         &request_id,
                         &run.run_id,
+                        &failure,
                     )))
                     .await;
                 return;
@@ -9422,6 +12104,38 @@ fn agentic_run_stream(
                         let _ = tx.send(Ok(event.to_sse(&request_id))).await;
                     }
                 }
+                return;
+            }
+            // A continuation the gateway did NOT pre-consume, refused by the executor
+            // with `FailedPrecondition`, `Aborted` or `NotFound` (or a zero-retention
+            // trailer on another code): a refused or replayed segment is a typed refusal,
+            // never a degraded dispatch. It is not terminalized (a replayed released step
+            // can be refused while another segment of the run is still live) and it says
+            // nothing of the spend: the executor may have consumed the approval before it
+            // refused, so the client re-reads the approval before any retry. The
+            // `InvalidArgument`, `Unauthenticated` and `PermissionDenied` refusals took
+            // the confirmed-rejection arm above.
+            Ok(Ok(Err(status)))
+                if continuing
+                    && !spend.is_spent()
+                    && matches!(
+                        classify_continue_dispatch_failure(&status),
+                        ContinueDispatchFailure::Refused(_)
+                    ) =>
+            {
+                let token = match classify_continue_dispatch_failure(&status) {
+                    ContinueDispatchFailure::Refused(token) => token,
+                    _ => "continue_refused",
+                };
+                tracing::warn!(code = ?status.code(), refusal = token, run_id = %run.run_id, "Execution Core refused a continuation");
+                let _ = tx
+                    .send(Ok(continue_refusal_event(
+                        &request_id,
+                        &run.run_id,
+                        token,
+                        spend,
+                    )))
+                    .await;
                 return;
             }
             // Never connected, so nothing is running anywhere: terminalize the
@@ -9488,10 +12202,7 @@ fn agentic_run_stream(
                     .publish(&subjects::run_event_subject(&run.run_id), &degraded)
                     .await;
                 let _ = tx
-                    .send(Ok(agent_dispatch_unavailable_event(
-                        &request_id,
-                        &run.run_id,
-                    )))
+                    .send(Ok(dispatch_unknown_event(spend, &request_id, &run.run_id)))
                     .await;
                 return;
             }
@@ -9504,12 +12215,10 @@ fn agentic_run_stream(
         // this is the reader, so the field is a signal rather than a value
         // nobody consumes.
         //
-        // A log line and nothing user-facing, deliberately. The clearing notice
-        // already tells the MODEL what happened and how to re-fetch, and a
-        // second banner telling the USER their agent ran low on room would be
-        // noise they cannot act on. What operators need is the correlation
-        // between "this run compacted" and "this answer was thin", which is a
-        // log/metrics question.
+        // The client hears it as a counts-only `compaction` frame (WS15-D1, which
+        // reversed the earlier log-only decision): a thin answer built on cleared
+        // tool results is otherwise unexplained. The log line stays for the
+        // correlation between "this run compacted" and "this answer was thin".
         if response.compaction_triggered {
             tracing::info!(
                 %request_id,
@@ -9517,6 +12226,11 @@ fn agentic_run_stream(
                 status = %response.status,
                 "agentic run compacted its prompt to stay within the context window"
             );
+            if mp_contracts::lifecycle_notice::enabled() {
+                let _ = tx
+                    .send(Ok(lifecycle_events::tool_results_cleared().to_sse(&request_id)))
+                    .await;
+            }
         }
 
         match classify_agentic_run_outcome(&response.status) {
@@ -9559,8 +12273,12 @@ fn agentic_run_stream(
                 // `emit_subscription_failure`, which would terminalize a second
                 // time: the frame is built directly, and the explanation is
                 // persisted so the thread is honest on reload.
-                let event = match agent_subscription_failure(&response, !route.provider_hint.is_empty())
-                {
+                // A park continue is resumed on the pinned route of its park (the gateway states
+                // none), so its typed failure is worded as a pinned run's.
+                let event = match agent_subscription_failure(
+                    &response,
+                    !route.provider_hint.is_empty() || parking,
+                ) {
                     Some(failure) => {
                         tracing::warn!(
                             run_id = %run.run_id,
@@ -9590,18 +12308,45 @@ fn agentic_run_stream(
                                 );
                             }
                         }
-                        crate::sse_events::ChatEvent::subscription_error(&failure, message)
+                        // The failure keeps its code and text after a spend; only the retry
+                        // the frame offers is withdrawn ([`subscription_run_end_event`]).
+                        subscription_run_end_event(
+                            &request_id,
+                            &run.run_id,
+                            &failure,
+                            message,
+                            spend,
+                        )
                     }
-                    None => crate::sse_events::ChatEvent::Error {
-                        code: "agent_run_failed".to_owned(),
-                        message: "The governed agent run failed.".to_owned(),
-                        retryable: true,
-                    },
+                    None => run_end_error_event(
+                        &request_id,
+                        &run.run_id,
+                        "agent_run_failed",
+                        "The governed agent run failed.",
+                        spend,
+                    ),
                 };
-                let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+                let _ = tx.send(Ok(event)).await;
                 return;
             }
-            AgenticRunOutcome::Unknown => {
+            // A parked run (WS03 S8-A), for every turn: non-terminal, nothing appended, no
+            // receipt. The run subject is told RUN_PARKED and the owner's stream gets the
+            // `run_parked` frame. A park reason this build does not know is an unknown status.
+            AgenticRunOutcome::Parked
+                if run_parked_event(&request_id, &run.run_id, &response).is_some() =>
+            {
+                let parked =
+                    build_stream_envelope(&request_id, "RUN_PARKED", &org_id, &user_id, &model);
+                let _ = state
+                    .publisher
+                    .publish(&subjects::run_event_subject(&run.run_id), &parked)
+                    .await;
+                if let Some(frame) = run_parked_event(&request_id, &run.run_id, &response) {
+                    let _ = tx.send(Ok(frame)).await;
+                }
+                return;
+            }
+            AgenticRunOutcome::Parked | AgenticRunOutcome::Unknown => {
                 tracing::error!(status = %response.status, run_id = %run.run_id, "Execution Core returned an unknown agent run status");
                 let degraded = build_stream_envelope(
                     &request_id,
@@ -9614,12 +12359,14 @@ fn agentic_run_stream(
                     .publisher
                     .publish(&subjects::run_event_subject(&run.run_id), &degraded)
                     .await;
-                let event = crate::sse_events::ChatEvent::Error {
-                    code: "agent_run_state_unknown".to_owned(),
-                    message: "The agent returned an unsupported lifecycle state.".to_owned(),
-                    retryable: true,
-                };
-                let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+                let event = run_end_error_event(
+                    &request_id,
+                    &run.run_id,
+                    "agent_run_state_unknown",
+                    "The agent returned an unsupported lifecycle state.",
+                    spend,
+                );
+                let _ = tx.send(Ok(event)).await;
                 return;
             }
             AgenticRunOutcome::Completed => {}
@@ -9674,12 +12421,14 @@ fn agentic_run_stream(
                 .publisher
                 .publish(&subjects::run_event_subject(&run.run_id), &degraded)
                 .await;
-            let event = crate::sse_events::ChatEvent::Error {
-                code: "agent_run_output_unavailable".to_owned(),
-                message: "The completed agent run did not provide an answer.".to_owned(),
-                retryable: true,
-            };
-            let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+            let event = run_end_error_event(
+                &request_id,
+                &run.run_id,
+                "agent_run_output_unavailable",
+                "The completed agent run did not provide an answer.",
+                spend,
+            );
+            let _ = tx.send(Ok(event)).await;
             return;
         };
 
@@ -9703,22 +12452,32 @@ fn agentic_run_stream(
             }
         }
         // Phase 7 B6 — emit the quality signal for the agentic run so the Agent
-        // Run Console's confidence column goes live. Token-level cost is not
-        // available at this layer (the run records 0 tokens here; its real
-        // per-inference cost is captured by execution-core's usage envelopes →
-        // the cost-core ledger / cost dashboard), so cost_usd stays null rather
-        // than a fabricated 0. Confidence is scored over the run's final answer.
+        // Run Console's confidence column goes live. The tokens are the ones
+        // execution-core summed over the run's rounds and its delegates' (zero from
+        // an executor that predates the field). Their price is not known at this
+        // layer, so cost_usd stays null rather than a fabricated 0. The ledger rows
+        // are not published here: `AgentUsageLedger::publish` publishes them from the
+        // dispatch task itself, the moment the executor answers, because this stream
+        // may have given up at its deadline long before. Confidence is scored over the run's
+        // final answer.
         let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
         // HONESTY_CONTRACT: `grounded` reflects whether a knowledge_search call
         // in this run actually returned org knowledge (execution-core's
         // `run_agent` sets it from a real "status": "ok" tool outcome, not a
         // guess) — see agent.rs::knowledge_search_found_grounding.
+        let run_usage = response.usage.clone().unwrap_or_default();
         let usage_event = crate::sse_events::ChatEvent::Usage {
-            input_tokens: 0,
-            output_tokens: 0,
+            cache_read_tokens: saturating_u32(run_usage.cache_read_input_tokens),
+            cache_write_tokens: saturating_u32(run_usage.cache_creation_input_tokens),
+            input_tokens: saturating_u32(run_usage.input_tokens),
+            output_tokens: saturating_u32(run_usage.output_tokens),
             cost_usd: None,
-            // Nor its basis: execution-core's own envelopes carry both.
+            // Nor its basis: no price is established here.
             cost_basis: None,
+            // Every round of the run is a call whose price is not established here.
+            calls: run_usage.inference_rounds,
+            unpriced_calls: run_usage.inference_rounds,
+            cost_by_category: None,
             latency_ms,
             confidence: crate::confidence::score(
                 &final_text,
@@ -9726,11 +12485,13 @@ fn agentic_run_stream(
                 1024,
                 crate::confidence::Evidence::from_grounded_flag(response.grounded),
             ),
-            // No final chunk and no provider response reaches this layer:
-            // `RunAgentResponse` carries no provenance, and the rounds were
-            // served inside execution-core. Nothing is stamped rather than
-            // guessed from the route, so a run states no residency at all.
+            // No final chunk and no provider response reaches this layer: the
+            // rounds were served inside execution-core, and its `RunUsage` names
+            // the provider and model but not their residency. Nothing is stamped
+            // rather than guessed from the route, so a run states no residency at
+            // all.
             served_by: None,
+            retention_class,
         };
         if usage_event.should_emit(&features) {
             let _ = tx.send(Ok(usage_event.to_sse(&request_id))).await;
@@ -9846,6 +12607,294 @@ fn build_usage_envelope(
     }
 }
 
+/// Switch for the agentic run's ledger row (build plan WS02 S3). Only the literal
+/// `true` enables it, and it is read per run, so a restart is not needed to turn
+/// it off. Off by default: the cost-core ledger enqueues billing for a metered
+/// entry, so enabling it starts billing Do runs, which waits on Control confirming
+/// the attribution (DEC-18).
+const AGENT_USAGE_ENVELOPE_ENV: &str = "MODEL_GATEWAY_AGENT_USAGE_ENVELOPE";
+
+fn agent_usage_envelope_enabled(lookup: &dyn Fn(&str) -> Option<String>) -> bool {
+    lookup(AGENT_USAGE_ENVELOPE_ENV).as_deref() == Some("true")
+}
+
+/// Switch for a chat turn's own ledger rows (WS27 S2): one row for each tool-decision round
+/// and overhead call, and the run id on every chat row. Only the literal `true` enables it,
+/// and it is read per turn, so a restart is not needed to turn it off.
+const TURN_USAGE_COMPLETE_ENV: &str = "MODEL_GATEWAY_TURN_USAGE_COMPLETE";
+
+fn turn_usage_complete_enabled(lookup: &dyn Fn(&str) -> Option<String>) -> bool {
+    lookup(TURN_USAGE_COMPLETE_ENV).as_deref() == Some("true")
+}
+
+/// The switch as this process's environment states it. Both turn paths read it through here, so
+/// the handler itself reads no environment.
+fn turn_usage_complete_switch() -> bool {
+    turn_usage_complete_enabled(&|key| std::env::var(key).ok())
+}
+
+/// Switch for the `usage_progress` frames (WS27 S3): one for each provider call a turn makes,
+/// streamed while the turn runs. Only the literal `true` enables it, and it is read per turn, so a
+/// restart is not needed to turn it off.
+const USAGE_PROGRESS_ENV: &str = "MODEL_GATEWAY_USAGE_PROGRESS";
+
+fn usage_progress_enabled(lookup: &dyn Fn(&str) -> Option<String>) -> bool {
+    lookup(USAGE_PROGRESS_ENV).as_deref() == Some("true")
+}
+
+/// The switch as this process's environment states it. The turn's sink and the fallback answer read
+/// it through here, so the handler itself reads no environment.
+fn usage_progress_switch() -> bool {
+    usage_progress_enabled(&|key| std::env::var(key).ok())
+}
+
+/// The run ceiling's two switches as this process's environment states them (WS27-S6). The turn reads
+/// them once, when it resolves its ceiling, so the handler itself reads no environment.
+fn run_ceiling_warn_switch() -> bool {
+    crate::sse_events::run_ceiling::warn_enabled(&|key| std::env::var(key).ok())
+}
+
+fn run_ceiling_enforce_switch() -> bool {
+    crate::sse_events::run_ceiling::enforce_enabled(&|key| std::env::var(key).ok())
+}
+
+/// The turn's usage as one meter: every call of the tool phase, the overhead calls beside the
+/// answer, then the answer when it made a provider call of its own. The catalogue is read once,
+/// so every call is priced against the same rates.
+async fn turn_usage(
+    pricing: &crate::pricing::PricingCache,
+    tool_calls: &[crate::usage_meter::CallUsage],
+    overhead: &[crate::usage_meter::CallUsage],
+    answer: Option<crate::usage_meter::CallUsage>,
+) -> crate::usage_meter::Snapshot {
+    let rates = pricing.snapshot().await;
+    let mut meter = crate::usage_meter::UsageMeter::default();
+    for call in tool_calls.iter().chain(overhead) {
+        meter.record(call, &rates.priced(call.basis, &call.model, call.legs()));
+    }
+    match answer {
+        Some(call) => meter.record(&call, &rates.priced(call.basis, &call.model, call.legs())),
+        None => meter.snapshot(),
+    }
+}
+
+/// The cost a usage frame states: the metered total, `0.0` for a turn the subscription carried
+/// (older clients read that field), or null when a metered call's price is unknown.
+fn frame_cost_usd(turn: &crate::usage_meter::Snapshot) -> Option<f64> {
+    turn.cost_usd
+        .or_else(|| (turn.basis == Some(crate::pricing::CostBasis::Subscription)).then_some(0.0))
+}
+
+/// The ledger rows of a turn's calls other than its answer, one per call and stamped with the
+/// turn's run, so cost-core's run endpoint sums the whole turn. A tool-decision round is keyed
+/// `-r{n}` and an overhead call `-o{n}`, so a retry keys every row identically.
+fn turn_call_rows(
+    request_id: &str,
+    run_id: &str,
+    org_id: &str,
+    user_id: &str,
+    min_privacy_tier: i32,
+    calls: &[&crate::usage_meter::CallUsage],
+) -> Vec<Envelope> {
+    let mut rounds = 0usize;
+    let mut overhead = 0usize;
+    let mut rows = Vec::new();
+    for call in calls {
+        let (tag, index) = match call.phase {
+            crate::usage_meter::CallPhase::ToolRound => {
+                rounds += 1;
+                ('r', rounds)
+            }
+            crate::usage_meter::CallPhase::Overhead => {
+                overhead += 1;
+                ('o', overhead)
+            }
+            // The answer keeps its own row, and the agent's rounds are another path's.
+            crate::usage_meter::CallPhase::Answer | crate::usage_meter::CallPhase::AgentRound => {
+                continue;
+            }
+        };
+        let mut row = build_usage_envelope(
+            request_id,
+            org_id,
+            user_id,
+            &call.model,
+            ledger_tokens(call.input),
+            ledger_tokens(call.output),
+            // Per-call latency is not measured; the turn's latency rides on its answer row.
+            0,
+            min_privacy_tier,
+            call.provider.clone(),
+            // No residency is reported for a call other than the answer, and none is guessed.
+            String::new(),
+            ledger_tokens(call.cache_read),
+            ledger_tokens(call.cache_write),
+            call.basis,
+        );
+        row.idempotency_key = format!("{request_id}-USAGE_ENVELOPE-{tag}{index}");
+        row.payload["run_id"] = json!(run_id);
+        rows.push(row);
+    }
+    rows
+}
+
+/// A token count as a ledger field: a negative count is nothing, an overflowing one the maximum.
+fn ledger_tokens(tokens: i64) -> u32 {
+    u32::try_from(tokens.max(0)).unwrap_or(u32::MAX)
+}
+
+fn saturating_u32(tokens: u64) -> u32 {
+    u32::try_from(tokens).unwrap_or(u32::MAX)
+}
+
+/// The idempotency key of the `leg_index`th ledger row of a dispatch. The first
+/// leg keeps the name a single-leg run always had, `{request_id}-AGENT_USAGE`, so it
+/// can never collide with a gateway turn's `{request_id}-USAGE_ENVELOPE` for the
+/// same request; a later leg of the same dispatch appends its position. The legs
+/// are in provider-then-model order, so a retry of the same tally keys every leg
+/// as the first publish did.
+fn agent_usage_idempotency_key(request_id: &str, leg_index: usize) -> String {
+    if leg_index == 0 {
+        format!("{request_id}-AGENT_USAGE")
+    } else {
+        format!("{request_id}-AGENT_USAGE-{leg_index}")
+    }
+}
+
+/// The ledger row of one leg of one dispatch of an agentic run: a `USAGE_ENVELOPE`
+/// (the one event type cost-core accepts) carrying the run's id. The leg is what
+/// one provider and model served, so the row is priced under that model and
+/// that provider's basis. The route is the one the executor reported; the
+/// gateway's own model stands in for a leg whose rounds named none.
+#[allow(clippy::too_many_arguments)] // the ids and the route beside the leg
+fn build_agent_usage_envelope(
+    request_id: &str,
+    run_id: &str,
+    org_id: &str,
+    user_id: &str,
+    model: &str,
+    route: &AgentRoute,
+    min_privacy_tier: i32,
+    latency_ms: u64,
+    leg_index: usize,
+    leg: &mp_contracts::model_plane::v1::RunUsageLeg,
+) -> Envelope {
+    let model_used = if leg.model_used.is_empty() {
+        model
+    } else {
+        &leg.model_used
+    };
+    let cost_basis = crate::pricing::CostBasis::of_route(
+        &route.provider_hint,
+        &route.subscription_connection_id,
+    )
+    .served_by(&leg.provider_used);
+    let mut envelope = build_usage_envelope(
+        request_id,
+        org_id,
+        user_id,
+        model_used,
+        saturating_u32(leg.input_tokens),
+        saturating_u32(leg.output_tokens),
+        latency_ms,
+        min_privacy_tier,
+        leg.provider_used.clone(),
+        // The executor does not report residency, and none is guessed.
+        String::new(),
+        saturating_u32(leg.cache_read_input_tokens),
+        saturating_u32(leg.cache_creation_input_tokens),
+        cost_basis,
+    );
+    envelope.idempotency_key = agent_usage_idempotency_key(request_id, leg_index);
+    envelope.payload["run_id"] = json!(run_id);
+    envelope
+}
+
+/// The legs a dispatch publishes, in provider-then-model order whatever order the
+/// executor sent them in. An executor that sent totals and no legs is one leg; a
+/// leg that served no round has nothing to bill and is dropped before the
+/// positions are counted.
+fn agent_usage_legs(
+    usage: &mp_contracts::model_plane::v1::RunUsage,
+) -> Vec<mp_contracts::model_plane::v1::RunUsageLeg> {
+    let mut legs: Vec<_> = if usage.legs.is_empty() {
+        vec![mp_contracts::model_plane::v1::RunUsageLeg {
+            provider_used: usage.provider_used.clone(),
+            model_used: usage.model_used.clone(),
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_read_input_tokens: usage.cache_read_input_tokens,
+            cache_creation_input_tokens: usage.cache_creation_input_tokens,
+            inference_rounds: usage.inference_rounds,
+        }]
+    } else {
+        usage.legs.clone()
+    };
+    legs.retain(|leg| leg.inference_rounds > 0);
+    legs.sort_by(|a, b| {
+        (&a.provider_used, &a.model_used).cmp(&(&b.provider_used, &b.model_used))
+    });
+    legs
+}
+
+/// What the dispatch task needs to put its run's usage on the ledger itself.
+///
+/// The task publishes, not the stream that follows it: the follower gives up at
+/// its deadline and detaches the task, which then runs on and returns the full
+/// tally to nobody. A run that outlives the follower is the longest and dearest
+/// one, so the ledger row cannot depend on the follower still waiting.
+struct AgentUsageLedger {
+    publisher: std::sync::Arc<crate::state::DynPublisher>,
+    enabled: bool,
+    run_id: String,
+    request_id: String,
+    org_id: String,
+    user_id: String,
+    model: String,
+    zdr: bool,
+    route: AgentRoute,
+    min_privacy_tier: i32,
+    start: std::time::Instant,
+}
+
+impl AgentUsageLedger {
+    /// Publish one row per leg of the run's usage when `enabled` (the switch) and the
+    /// run is not zero-retention (a waived run counts as zero-retention). A run that
+    /// spent no round has no leg and so publishes nothing. Best effort, like the
+    /// gateway turn's own envelope: a failed publish is logged and changes nothing the
+    /// client sees, and one leg's failure does not stop the next. Content-free: ids,
+    /// counts and the serving route.
+    async fn publish(&self, usage: &mp_contracts::model_plane::v1::RunUsage) {
+        // A zero-retention envelope would be refused by the ledger anyway; it is
+        // not built, so nothing about the run leaves the gateway.
+        if self.zdr || !self.enabled {
+            return;
+        }
+        let latency_ms = u64::try_from(self.start.elapsed().as_millis()).unwrap_or(u64::MAX);
+        for (index, leg) in agent_usage_legs(usage).iter().enumerate() {
+            let envelope = build_agent_usage_envelope(
+                &self.request_id,
+                &self.run_id,
+                &self.org_id,
+                &self.user_id,
+                &self.model,
+                &self.route,
+                self.min_privacy_tier,
+                latency_ms,
+                index,
+                leg,
+            );
+            if let Err(error) = self
+                .publisher
+                .publish(&subjects::usage_subject(&self.org_id), &envelope)
+                .await
+            {
+                tracing::warn!(%error, run_id = %self.run_id, leg = index, "failed to publish the agent run's usage envelope");
+            }
+        }
+    }
+}
+
 fn orchestration_event_to_sse(event: &OrchestrationEvent) -> Option<Event> {
     let payload = event_payload_value(event)?;
     let event_name = match event.event.as_ref()? {
@@ -9867,6 +12916,12 @@ fn orchestration_event_to_sse(event: &OrchestrationEvent) -> Option<Event> {
         orchestration_event::Event::ApprovalContinuationVerified(_) => {
             "approval_continuation_verified"
         }
+        orchestration_event::Event::RunParked(_) => "run_parked",
+        orchestration_event::Event::RunResumed(_) => "run_resumed",
+        // The question events reach the chat stream as the user_question
+        // ChatEvent (WS14-S4), not as a raw orchestration event. They get no named
+        // arm so the SSE taxonomy generator, which counts named arms, stays in step.
+        _ => return None,
     };
     let data = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_owned());
     Some(Event::default().event(event_name).data(data))
@@ -10043,6 +13098,13 @@ fn orchestration_event_to_step_update(
                 status.to_owned(),
             )
         }
+        // A park and its resume are not steps of the chat timeline: the owner's turn
+        // stream carries its own `run_parked` frame (WS03 S8), and the run console reads
+        // the raw orchestration events.
+        Event::RunParked(_)
+        | Event::RunResumed(_)
+        | Event::QuestionAsked(_)
+        | Event::QuestionAnswered(_) => return None,
     };
     Some(crate::sse_events::ChatEvent::StepUpdate {
         id,
@@ -10202,6 +13264,20 @@ fn event_payload_value(event: &OrchestrationEvent) -> Option<Value> {
                 object.insert("verification_reason".to_owned(), json!(v.reason));
             }
         }
+        // Ids and a segment number only: the park reason is never broadcast.
+        orchestration_event::Event::RunParked(payload) => {
+            object.insert("run_id".to_owned(), json!(payload.run_id));
+        }
+        orchestration_event::Event::RunResumed(payload) => {
+            object.insert("run_id".to_owned(), json!(payload.run_id));
+            object.insert(
+                "resumed_segment".to_owned(),
+                json!(payload.resumed_segment),
+            );
+        }
+        // Never forwarded raw (see the name map), so there is nothing to project.
+        orchestration_event::Event::QuestionAsked(_)
+        | orchestration_event::Event::QuestionAnswered(_) => {}
     }
 
     Some(Value::Object(object))
@@ -10273,6 +13349,11 @@ fn publish_implicit_dissatisfaction(
     user_id: &str,
     run_id: &str,
     thread_id: &str,
+    // Whether THIS turn ran under zero retention or a waiver. It is stored with the turn, so the turn
+    // after it can refuse the signal about it, and it refuses its own signal too: the evidence is this
+    // turn's message, and a learning review would send a private run's content to a processor that is
+    // not the user's own account (D-B).
+    private_turn: bool,
 ) {
     use crate::dissatisfaction::{classify, TurnContext};
 
@@ -10290,6 +13371,7 @@ fn publish_implicit_dissatisfaction(
         &req.content,
         run_id,
         skill_ids,
+        private_turn,
     ) else {
         return;
     };
@@ -10305,8 +13387,15 @@ fn publish_implicit_dissatisfaction(
         return;
     }
 
-    let envelopes =
-        crate::implicit_feedback::envelopes_for(&signals, &previous, org_id, user_id, req.zdr);
+    // The signal attaches to the PREVIOUS run, so the previous answer's posture decides it as much as
+    // this turn's does: a private answer that a persistent turn complains about is not recorded either.
+    let envelopes = crate::implicit_feedback::envelopes_for(
+        &signals,
+        &previous,
+        org_id,
+        user_id,
+        private_turn || previous.private_run,
+    );
     if envelopes.is_empty() {
         return;
     }
@@ -10331,12 +13420,13 @@ fn publish_implicit_dissatisfaction(
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_persona_message, agent_subscription_failure, authored_instructions_message,
-        build_stream_envelope,
-        build_usage_envelope, classify_agentic_run_outcome, dispatch_never_reached_execution_core,
-        approved_plan_is_for, format_approved_plan_block, is_confirmed_agent_dispatch_rejection,
+        agent_persona_message, agent_subscription_failure, approved_plan_is_for,
+        authored_instructions_message, build_stream_envelope, build_usage_envelope,
+        classify_agentic_run_outcome, dispatch_never_reached_execution_core,
+        format_approved_plan_block, frame_cost_usd, is_confirmed_agent_dispatch_rejection,
         latest_proposed_plan, orchestration_event_to_step_update, sanitize_follow_up_suggestions,
-        sanitize_thread_title, stream_ended_with_no_content, AgenticRunOutcome, PlanState,
+        sanitize_thread_title, stream_ended_with_no_content, turn_call_rows, turn_usage,
+        turn_usage_complete_enabled, usage_progress_enabled, AgenticRunOutcome, PlanState,
     };
     use crate::http_routes::InvokeRequest;
     use crate::state::AppState;
@@ -10479,7 +13569,7 @@ mod tests {
 
     // ── plan-gate: an approval is spent by exactly one run ──
 
-    use super::{approved_plan_block_for, ApprovedPlanSource};
+    use super::{approved_plan_block_for, plan_context_wanted, ApprovedPlanSource};
     use std::sync::Mutex;
 
     /// An orchestration fake that records the calls a run start makes.
@@ -10622,6 +13712,115 @@ mod tests {
         assert!(source.calls().is_empty());
     }
 
+    /// The grant belongs to the thread, not to the continuation that passes it by. A
+    /// continuation asks for nothing, so the grant stays pending and the next ordinary run of
+    /// the thread is handed the plan, and claims it, exactly once. The gate itself is pinned by
+    /// `a_continuation_never_takes_the_threads_approved_plan` in `continue_run_tests`.
+    #[tokio::test]
+    async fn a_continuation_leaves_the_grant_for_the_next_ordinary_run() {
+        let store = granted_store("plan_a");
+        let source = FakePlanSource::new(Some(approved_plan_with_a_step()), true);
+        // The gate's answer for a continuation, as `agentic_run_stream` applies it: no request.
+        if plan_context_wanted(false, true) {
+            let _ = approved_plan_block_for(&store, &source, "org-1", "thread-1").await;
+        }
+        assert!(source.calls().is_empty(), "a continuation reads neither the grant nor the plan");
+        let block = approved_plan_block_for(&store, &source, "org-1", "thread-1")
+            .await
+            .expect("the next ordinary run of the thread is handed the approved plan");
+        assert!(block.contains("1. Draft the email"), "{block}");
+        assert_eq!(source.calls(), vec!["plan:plan_a", "claim:plan_a"]);
+        assert_eq!(
+            store.granted_rung("org-1", "thread-1"),
+            Some(mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite)
+        );
+    }
+
+    /// Session Core's plan as two replicas see it: readable by all, claimable once. Before the
+    /// claim it is `APPROVED`; after it, `EXECUTING`, as the compare-and-swap leaves it.
+    struct SharedPlanSource {
+        claimed: std::sync::atomic::AtomicBool,
+        claims_attempted: std::sync::atomic::AtomicUsize,
+    }
+
+    impl SharedPlanSource {
+        fn new() -> Self {
+            Self {
+                claimed: std::sync::atomic::AtomicBool::new(false),
+                claims_attempted: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl ApprovedPlanSource for SharedPlanSource {
+        async fn plan(&self, _plan_id: &str) -> Option<mp_contracts::model_plane::v1::Plan> {
+            let mut plan = approved_plan_with_a_step();
+            if self.claimed.load(std::sync::atomic::Ordering::SeqCst) {
+                plan.state = PlanState::Executing as i32;
+            }
+            Some(plan)
+        }
+
+        async fn claim(&self, _plan: &mp_contracts::model_plane::v1::Plan) -> bool {
+            self.claims_attempted
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.claimed
+                .compare_exchange(
+                    false,
+                    true,
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                )
+                .is_ok()
+        }
+    }
+
+    /// The durable grant names the plan and never spends it (WS04 S4): two runs starting on two
+    /// replicas read the same grant, exactly one wins the claim and is handed the plan, and a
+    /// run that starts afterwards reads the same grant, finds the plan already claimed and is
+    /// handed nothing without trying to claim it again.
+    #[tokio::test]
+    async fn a_durable_grant_names_the_plan_and_the_claim_alone_decides_which_run_gets_it() {
+        use super::approved_plan_block_for_id;
+        let source = SharedPlanSource::new();
+        let (first, second) = tokio::join!(
+            approved_plan_block_for_id("plan_a", true, &source, "org-1", "thread-1"),
+            approved_plan_block_for_id("plan_a", true, &source, "org-1", "thread-1"),
+        );
+        assert_eq!(
+            usize::from(first.is_some()) + usize::from(second.is_some()),
+            1,
+            "exactly one of two concurrent starts is handed the plan"
+        );
+        assert!(
+            first.or(second).expect("the winner").contains("1. Draft the email"),
+        );
+        assert!(
+            approved_plan_block_for_id("plan_a", true, &source, "org-1", "thread-1")
+                .await
+                .is_none(),
+            "a later run reads the same grant and finds the plan spent"
+        );
+        assert!(
+            source.claims_attempted.load(std::sync::atomic::Ordering::SeqCst) <= 2,
+            "the later run did not try to claim a plan that is no longer approved"
+        );
+    }
+
+    /// A plan that is not an approved plan of the run's thread is never claimed, durable or not.
+    #[tokio::test]
+    async fn a_durable_grant_never_claims_a_plan_of_another_thread() {
+        use super::approved_plan_block_for_id;
+        let source = FakePlanSource::new(
+            Some(plan_of("plan_a", PlanState::Approved, "another-thread")),
+            true,
+        );
+        assert!(approved_plan_block_for_id("plan_a", true, &source, "org-1", "thread-1")
+            .await
+            .is_none());
+        assert_eq!(source.calls(), vec!["plan:plan_a"], "it must not be claimed");
+    }
+
     #[tokio::test]
     async fn durable_artifact_kind_survives_restart_and_stale_history_without_text_sniffing() {
         use prost_types::{value::Kind, ListValue, Struct, Value};
@@ -10751,6 +13950,36 @@ mod tests {
     // `#[tokio::test]` here rather than the plain `#[test]` every other
     // function in this module uses, matching `trajectory.rs`'s precedent for
     // tests that touch `AppState`.
+
+    /// The persistence-free path derives the same reasoning request as the
+    /// streamed path from the same profile, and with the ladder off it is the
+    /// legacy budget and no level.
+    #[tokio::test]
+    async fn zdr_turn_honors_the_effort_level() {
+        let state = state_with_platform_instructions("");
+        for profile in ["quick", "deep", "standard", "xhigh", "wat"] {
+            let req = invoke_request(serde_json::json!({ "effort": profile }));
+            for ladder_on in [false, true] {
+                let settings = super::zdr_turn_settings_with(&state, &req, ladder_on);
+                assert_eq!(
+                    settings.thinking,
+                    crate::thinking::plan(profile, settings.max_tokens, ladder_on),
+                    "{profile} ladder_on={ladder_on}"
+                );
+            }
+        }
+        let deep = invoke_request(serde_json::json!({ "effort": "deep" }));
+        let on = super::zdr_turn_settings_with(&state, &deep, true).thinking;
+        assert_eq!(on.effort, mp_contracts::model_plane::v1::ReasoningEffort::High);
+        assert_eq!(on.budget_tokens, 0);
+        let off = super::zdr_turn_settings_with(&state, &deep, false).thinking;
+        assert_eq!(off.effort, mp_contracts::model_plane::v1::ReasoningEffort::Unspecified);
+        // A caller cap below the ceiling is what the legacy budget is sized
+        // against: `deep` does not fit 2048 with headroom and steps down.
+        let capped = invoke_request(serde_json::json!({ "effort": "deep", "max_tokens": 2048 }));
+        let stepped = super::zdr_turn_settings_with(&state, &capped, false).thinking;
+        assert_eq!(stepped.budget_tokens, 1_024);
+    }
 
     #[tokio::test]
     async fn no_authored_instructions_message_when_every_layer_is_empty() {
@@ -11221,6 +14450,225 @@ mod tests {
         assert!(env.resource_ref.contains("req-ABC"));
     }
 
+    /// Rates for the turn tests: `mock` at 1 and 2 USD per million input and output tokens.
+    async fn turn_test_pricing(server: &wiremock::MockServer) -> crate::pricing::PricingCache {
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/pricing"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "rates": [
+                    { "model": "default", "input_per_million": 3.0, "output_per_million": 15.0 },
+                    { "model": "mock", "input_per_million": 1.0, "output_per_million": 2.0 },
+                ],
+            })))
+            .mount(server)
+            .await;
+        crate::pricing::PricingCache::new(Some(server.uri()), reqwest::Client::new())
+    }
+
+    fn turn_call(
+        phase: crate::usage_meter::CallPhase,
+        model: &str,
+        basis: crate::pricing::CostBasis,
+        input: i64,
+        output: i64,
+    ) -> crate::usage_meter::CallUsage {
+        crate::usage_meter::CallUsage {
+            phase,
+            model: model.to_owned(),
+            provider: String::new(),
+            basis,
+            input,
+            output,
+            cache_read: 0,
+            cache_write: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_turn_totals_every_call_it_made_once() {
+        use crate::pricing::CostBasis::Metered;
+        use crate::usage_meter::CallPhase::{Answer, Overhead, ToolRound};
+        let server = wiremock::MockServer::start().await;
+        let pricing = turn_test_pricing(&server).await;
+        let rounds = [turn_call(ToolRound, "mock", Metered, 1_000, 100)];
+        let overhead = [turn_call(Overhead, "mock", Metered, 500, 50)];
+        let turn = turn_usage(
+            &pricing,
+            &rounds,
+            &overhead,
+            Some(turn_call(Answer, "mock", Metered, 42, 7)),
+        )
+        .await;
+        assert_eq!((turn.calls, turn.unpriced_calls), (3, 0));
+        assert_eq!((turn.input, turn.output), (1_542, 157));
+        let want = (1_542.0 * 1.0 + 157.0 * 2.0) / 1_000_000.0;
+        let cost = frame_cost_usd(&turn).expect("every call is priced");
+        assert!((cost - want).abs() < 1e-12, "got {cost}, want {want}");
+        let parts = turn.by_category.expect("a priced total states its parts");
+        assert!((parts.total() - want).abs() < 1e-12);
+    }
+
+    #[tokio::test]
+    async fn one_unpriced_call_nulls_the_turn_total_and_is_counted() {
+        use crate::pricing::CostBasis::Metered;
+        use crate::usage_meter::CallPhase::{Answer, ToolRound};
+        let server = wiremock::MockServer::start().await;
+        let pricing = turn_test_pricing(&server).await;
+        let rounds = [turn_call(ToolRound, "mock", Metered, 1_000, 100)];
+        let turn = turn_usage(
+            &pricing,
+            &rounds,
+            &[],
+            Some(turn_call(Answer, "a-model-the-catalogue-does-not-list", Metered, 42, 7)),
+        )
+        .await;
+        assert_eq!((turn.calls, turn.unpriced_calls), (2, 1));
+        assert_eq!(frame_cost_usd(&turn), None, "never a partial sum");
+        assert_eq!(turn.by_category, None);
+    }
+
+    #[tokio::test]
+    async fn a_subscription_turn_keeps_its_zero_cost_and_states_no_breakdown() {
+        use crate::pricing::CostBasis::Subscription;
+        use crate::usage_meter::CallPhase::Answer;
+        let server = wiremock::MockServer::start().await;
+        let pricing = turn_test_pricing(&server).await;
+        let turn = turn_usage(
+            &pricing,
+            &[],
+            &[],
+            Some(turn_call(Answer, "mock", Subscription, 42, 7)),
+        )
+        .await;
+        assert_eq!((turn.calls, turn.unpriced_calls), (1, 0));
+        assert_eq!(frame_cost_usd(&turn), Some(0.0), "included in the subscription, read as 0.0");
+        assert_eq!(turn.by_category, None);
+    }
+
+    #[tokio::test]
+    async fn an_answer_that_made_no_call_adds_nothing_to_the_turn() {
+        let server = wiremock::MockServer::start().await;
+        let pricing = turn_test_pricing(&server).await;
+        let turn = turn_usage(&pricing, &[], &[], None).await;
+        assert_eq!((turn.calls, turn.input, turn.output), (0, 0, 0));
+        assert_eq!(frame_cost_usd(&turn), None);
+    }
+
+    #[tokio::test]
+    async fn overhead_calls_are_recorded_once() {
+        use crate::pricing::CostBasis::Metered;
+        use crate::usage_meter::CallPhase::{Answer, Overhead, ToolRound};
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let sink = crate::sse_events::RichEventSink::new(tx, Vec::new(), "req-overhead".to_owned());
+        // The site that made the call names its phase wrongly; the sink corrects it.
+        sink.record_overhead(turn_call(ToolRound, "mock", Metered, 500, 50));
+        let recorded = sink.overhead_usage();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].phase, Overhead);
+        let server = wiremock::MockServer::start().await;
+        let pricing = turn_test_pricing(&server).await;
+        let turn = turn_usage(
+            &pricing,
+            &[],
+            &recorded,
+            Some(turn_call(Answer, "mock", Metered, 42, 7)),
+        )
+        .await;
+        assert_eq!(turn.calls, 2, "the overhead call and the answer, each once");
+    }
+
+    /// A judge or resample call the verification pass records reaches the turn's frame and its
+    /// ledger row under its own key, with its own tokens and price.
+    #[tokio::test]
+    async fn a_recorded_overhead_call_reaches_the_frame_and_its_row() {
+        use crate::pricing::CostBasis::Metered;
+        use crate::usage_meter::CallPhase::{Answer, Overhead};
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let sink = crate::sse_events::RichEventSink::new(tx, Vec::new(), "req-judge".to_owned());
+        sink.record_overhead(turn_call(Overhead, "mock", Metered, 500, 50));
+        let overhead = sink.overhead_usage();
+        let server = wiremock::MockServer::start().await;
+        let pricing = turn_test_pricing(&server).await;
+        let turn = turn_usage(
+            &pricing,
+            &[],
+            &overhead,
+            Some(turn_call(Answer, "mock", Metered, 42, 7)),
+        )
+        .await;
+        assert_eq!((turn.calls, turn.input, turn.output), (2, 542, 57));
+        let want = (542.0 * 1.0 + 57.0 * 2.0) / 1_000_000.0;
+        let cost = frame_cost_usd(&turn).expect("both calls are priced");
+        assert!((cost - want).abs() < 1e-12, "got {cost}, want {want}");
+
+        let calls: Vec<&crate::usage_meter::CallUsage> = overhead.iter().collect();
+        let rows = turn_call_rows("req-judge", "run-judge", "org_test", "user_test", 0, &calls);
+        assert_eq!(rows.len(), 1, "the overhead call has a row of its own");
+        assert_eq!(rows[0].idempotency_key, "req-judge-USAGE_ENVELOPE-o1");
+        assert_eq!(rows[0].payload["input_tokens"], 500);
+        assert_eq!(rows[0].payload["output_tokens"], 50);
+    }
+
+    #[test]
+    fn the_turn_switch_is_on_only_for_the_literal_true() {
+        let with = |value: Option<&str>| {
+            let value = value.map(str::to_owned);
+            turn_usage_complete_enabled(&|key| {
+                assert_eq!(key, "MODEL_GATEWAY_TURN_USAGE_COMPLETE");
+                value.clone()
+            })
+        };
+        assert!(with(Some("true")));
+        for off in [None, Some(""), Some("1"), Some("TRUE"), Some(" true"), Some("false")] {
+            assert!(!with(off), "{off:?} must not enable it");
+        }
+    }
+
+    #[test]
+    fn the_usage_progress_switch_is_on_only_for_the_literal_true() {
+        let with = |value: Option<&str>| {
+            let value = value.map(str::to_owned);
+            usage_progress_enabled(&|key| {
+                assert_eq!(key, "MODEL_GATEWAY_USAGE_PROGRESS");
+                value.clone()
+            })
+        };
+        assert!(with(Some("true")));
+        for off in [None, Some(""), Some("1"), Some("TRUE"), Some(" true"), Some("false")] {
+            assert!(!with(off), "{off:?} must not enable it");
+        }
+    }
+
+    #[test]
+    fn call_rows_are_keyed_per_round_and_per_overhead_call_and_name_the_run() {
+        use crate::pricing::CostBasis::Metered;
+        use crate::usage_meter::CallPhase::{Answer, Overhead, ToolRound};
+        let first = turn_call(ToolRound, "mock", Metered, 1_000, 100);
+        let second = turn_call(ToolRound, "mock", Metered, 900, 90);
+        let check = turn_call(Overhead, "mock", Metered, 500, 50);
+        let answer = turn_call(Answer, "mock", Metered, 42, 7);
+        let rows = turn_call_rows(
+            "req-rows",
+            "run-rows",
+            "org_test",
+            "user_test",
+            0,
+            &[&first, &second, &check, &answer],
+        );
+        let keys: Vec<&str> = rows.iter().map(|row| row.idempotency_key.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "req-rows-USAGE_ENVELOPE-r1",
+                "req-rows-USAGE_ENVELOPE-r2",
+                "req-rows-USAGE_ENVELOPE-o1",
+            ],
+            "the answer keeps its own row and is not listed here"
+        );
+        assert!(rows.iter().all(|row| row.payload["run_id"] == "run-rows"));
+        assert_eq!(rows[0].payload["input_tokens"], 1_000);
+    }
+
     #[test]
     fn usage_envelope_correlation_id_equals_request_id() {
         let env = build_usage_envelope(
@@ -11340,6 +14788,285 @@ mod tests {
         assert!(env.payload.get("cost_usd").is_none());
     }
 
+    fn leg(
+        provider: &str,
+        model: &str,
+        input: u64,
+        output: u64,
+        cache_read: u64,
+        cache_creation: u64,
+        rounds: u32,
+    ) -> mp_contracts::model_plane::v1::RunUsageLeg {
+        mp_contracts::model_plane::v1::RunUsageLeg {
+            provider_used: provider.to_owned(),
+            model_used: model.to_owned(),
+            input_tokens: input,
+            output_tokens: output,
+            cache_read_input_tokens: cache_read,
+            cache_creation_input_tokens: cache_creation,
+            inference_rounds: rounds,
+        }
+    }
+
+    /// One leg: a run served by one provider and model throughout.
+    fn run_usage() -> mp_contracts::model_plane::v1::RunUsage {
+        let only = leg("anthropic", "claude-served", 4_200, 380, 3_000, 500, 4);
+        mp_contracts::model_plane::v1::RunUsage {
+            input_tokens: only.input_tokens,
+            output_tokens: only.output_tokens,
+            cache_read_input_tokens: only.cache_read_input_tokens,
+            cache_creation_input_tokens: only.cache_creation_input_tokens,
+            inference_rounds: only.inference_rounds,
+            provider_used: only.provider_used.clone(),
+            model_used: only.model_used.clone(),
+            legs: vec![only],
+        }
+    }
+
+    /// Two legs: an unpinned run that fell back to another model on a later round.
+    fn two_leg_run_usage() -> mp_contracts::model_plane::v1::RunUsage {
+        let (a, b) = (
+            leg("anthropic", "claude-served", 4_200, 380, 3_000, 500, 4),
+            leg("azure-openai", "gpt-fallback", 900, 60, 0, 0, 1),
+        );
+        mp_contracts::model_plane::v1::RunUsage {
+            input_tokens: a.input_tokens + b.input_tokens,
+            output_tokens: a.output_tokens + b.output_tokens,
+            cache_read_input_tokens: a.cache_read_input_tokens,
+            cache_creation_input_tokens: a.cache_creation_input_tokens,
+            inference_rounds: a.inference_rounds + b.inference_rounds,
+            provider_used: a.provider_used.clone(),
+            model_used: a.model_used.clone(),
+            legs: vec![a, b],
+        }
+    }
+
+    /// The ledger row of an agentic run is the one cost-core already accepts, named
+    /// apart from a gateway turn's, and it carries the run.
+    #[test]
+    fn an_agent_usage_envelope_names_the_run_and_cannot_collide_with_a_turns() {
+        let usage = run_usage();
+        let env = super::build_agent_usage_envelope(
+            "req-DO",
+            "run-7",
+            "org-1",
+            "user-1",
+            "gateway-model",
+            &super::AgentRoute::default(),
+            0,
+            9_000,
+            0,
+            &usage.legs[0],
+        );
+        assert_eq!(
+            env.event_type, "USAGE_ENVELOPE",
+            "the one type cost-core decodes"
+        );
+        assert_eq!(env.producer, "model-gateway", "the one producer it allows");
+        assert_eq!(env.idempotency_key, "req-DO-AGENT_USAGE");
+        assert_eq!(env.correlation_id, "req-DO");
+        assert!(!env.zdr);
+        assert_eq!(env.payload["run_id"], "run-7");
+        assert_eq!(env.payload["request_id"], "req-DO");
+        assert_eq!(
+            env.payload["model"], "claude-served",
+            "the model that served the rounds"
+        );
+        assert_eq!(env.payload["provider_used"], "anthropic");
+        assert_eq!(env.payload["input_tokens"], 4_200);
+        assert_eq!(env.payload["output_tokens"], 380);
+        assert_eq!(env.payload["cache_read_input_tokens"], 3_000);
+        assert_eq!(env.payload["cache_creation_input_tokens"], 500);
+        assert_eq!(env.payload["cost_basis"], "metered");
+        // No price is established here: cost-core prices it.
+        assert!(env.payload.get("cost_usd").is_none());
+        let turn = build_usage_envelope(
+            "req-DO",
+            "org-1",
+            "user-1",
+            "gateway-model",
+            1,
+            1,
+            1,
+            0,
+            String::new(),
+            String::new(),
+            0,
+            0,
+            crate::pricing::CostBasis::Metered,
+        );
+        assert_ne!(env.idempotency_key, turn.idempotency_key);
+    }
+
+    #[test]
+    fn an_agent_usage_envelope_falls_back_to_the_gateway_model_and_marks_a_subscription_run() {
+        let mut usage = run_usage();
+        usage.legs[0].model_used = String::new();
+        usage.legs[0].provider_used = "openai-codex-subscription".to_owned();
+        let env = super::build_agent_usage_envelope(
+            "req-DO",
+            "run-7",
+            "org-1",
+            "user-1",
+            "gateway-model",
+            &super::AgentRoute::default(),
+            0,
+            1,
+            0,
+            &usage.legs[0],
+        );
+        assert_eq!(env.payload["model"], "gateway-model");
+        assert_eq!(
+            env.payload["cost_basis"], "subscription",
+            "the provider that served decides, so list prices never apply"
+        );
+    }
+
+    /// The legs a dispatch publishes: ordered by provider then model whatever order
+    /// the executor sent them in, one for totals-only usage, none for no spend.
+    #[test]
+    fn the_legs_of_a_dispatch_are_ordered_and_a_legless_usage_is_one_leg() {
+        let mut shuffled = two_leg_run_usage();
+        shuffled.legs.reverse();
+        let ordered: Vec<_> = super::agent_usage_legs(&shuffled)
+            .iter()
+            .map(|leg| (leg.provider_used.clone(), leg.model_used.clone()))
+            .collect();
+        assert_eq!(
+            ordered,
+            [
+                ("anthropic".to_owned(), "claude-served".to_owned()),
+                ("azure-openai".to_owned(), "gpt-fallback".to_owned())
+            ],
+            "the key of a leg never depends on the executor's order"
+        );
+
+        let mut totals_only = run_usage();
+        totals_only.legs.clear();
+        let legs = super::agent_usage_legs(&totals_only);
+        assert_eq!(legs.len(), 1);
+        assert_eq!(legs[0].input_tokens, 4_200);
+        assert_eq!(legs[0].model_used, "claude-served");
+
+        assert!(
+            super::agent_usage_legs(&mp_contracts::model_plane::v1::RunUsage::default())
+                .is_empty()
+        );
+        let mut idle_leg = run_usage();
+        idle_leg.legs[0].inference_rounds = 0;
+        assert!(
+            super::agent_usage_legs(&idle_leg).is_empty(),
+            "a leg that served no round is not a row"
+        );
+    }
+
+    async fn published_agent_usage(
+        enabled: bool,
+        zdr: bool,
+        usage: &mp_contracts::model_plane::v1::RunUsage,
+    ) -> Vec<(String, mp_events::envelope::Envelope)> {
+        let publisher = std::sync::Arc::new(crate::state::DynPublisher::InMemory(
+            mp_events::publisher::InMemoryPublisher::new(),
+        ));
+        super::AgentUsageLedger {
+            publisher: publisher.clone(),
+            enabled,
+            run_id: "run-7".to_owned(),
+            request_id: "req-DO".to_owned(),
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+            model: "gateway-model".to_owned(),
+            zdr,
+            route: super::AgentRoute::default(),
+            min_privacy_tier: 0,
+            start: std::time::Instant::now(),
+        }
+        .publish(usage)
+        .await;
+        publisher.drain()
+    }
+
+    /// The row is published once, on the org's usage subject, and only when the
+    /// switch is on, the run is not zero-retention and a round was spent.
+    #[tokio::test]
+    async fn an_agent_usage_envelope_is_published_only_when_every_condition_holds() {
+        let usage = run_usage();
+        let published = published_agent_usage(true, false, &usage).await;
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].0, "mp.v1.usage.org-1");
+        assert!(published[0].1.payload["latency_ms"].is_u64());
+
+        assert!(
+            published_agent_usage(false, false, &usage).await.is_empty(),
+            "the switch is off"
+        );
+        assert!(
+            published_agent_usage(true, true, &usage).await.is_empty(),
+            "a zero-retention run leaves no ledger row"
+        );
+        assert!(
+            published_agent_usage(true, true, &two_leg_run_usage())
+                .await
+                .is_empty(),
+            "nor does it leave one per leg"
+        );
+        let idle = mp_contracts::model_plane::v1::RunUsage::default();
+        assert!(
+            published_agent_usage(true, false, &idle).await.is_empty(),
+            "a run that spent no round has nothing to bill"
+        );
+    }
+
+    /// Two legs are two rows, each priced under its own model and provider, keyed by
+    /// position so a retry of the same tally cannot publish a row twice.
+    #[tokio::test]
+    async fn two_legs_publish_two_envelopes_each_under_its_own_model() {
+        let usage = two_leg_run_usage();
+        let published = published_agent_usage(true, false, &usage).await;
+        assert_eq!(published.len(), 2);
+        let (first, second) = (&published[0].1, &published[1].1);
+        assert_eq!(first.idempotency_key, "req-DO-AGENT_USAGE");
+        assert_eq!(second.idempotency_key, "req-DO-AGENT_USAGE-1");
+        assert_eq!(first.payload["model"], "claude-served");
+        assert_eq!(first.payload["provider_used"], "anthropic");
+        assert_eq!(first.payload["input_tokens"], 4_200);
+        assert_eq!(first.payload["cache_read_input_tokens"], 3_000);
+        assert_eq!(second.payload["model"], "gpt-fallback");
+        assert_eq!(second.payload["provider_used"], "azure-openai");
+        assert_eq!(second.payload["input_tokens"], 900);
+        assert_eq!(second.payload["cache_read_input_tokens"], 0);
+        for env in [first, second] {
+            assert_eq!(env.payload["run_id"], "run-7");
+            assert_eq!(env.payload["request_id"], "req-DO");
+        }
+
+        // The same tally, legs in the other order, keys every leg the same way.
+        let mut flipped = two_leg_run_usage();
+        flipped.legs.reverse();
+        let again = published_agent_usage(true, false, &flipped).await;
+        let keyed = |rows: &[(String, mp_events::envelope::Envelope)]| {
+            rows.iter()
+                .map(|(_, env)| (env.idempotency_key.clone(), env.payload["model"].clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(keyed(&again), keyed(&published));
+    }
+
+    #[test]
+    fn the_agent_usage_switch_is_strict_and_defaults_off() {
+        let with = |value: Option<&'static str>| {
+            super::agent_usage_envelope_enabled(&|key| {
+                assert_eq!(key, "MODEL_GATEWAY_AGENT_USAGE_ENVELOPE");
+                value.map(str::to_owned)
+            })
+        };
+        assert!(!with(None));
+        for value in ["", "1", "True", "TRUE", "on", "yes", " true", "false"] {
+            assert!(!with(Some(value)), "{value:?} must not enable it");
+        }
+        assert!(with(Some("true")));
+    }
+
     /// Real subscription token counts must not start scoring long answers as
     /// cut off: that broker enforces no output cap, and its output count
     /// includes reasoning. Metered routes keep the real answer budget.
@@ -11351,8 +15078,9 @@ mod tests {
         let answer = "Oslo har omtrent 720 000 innbyggere.";
         let long = u32::try_from(answer_token_budget()).unwrap() + 1_000;
         let none = Evidence::default();
-        let scored = |tokens, basis| score(answer, tokens, truncation_budget(basis), none);
-        assert_eq!(truncation_budget(CostBasis::Subscription), 0);
+        let scored = |tokens, basis| score(answer, tokens, truncation_budget(basis, 0), none);
+        assert_eq!(truncation_budget(CostBasis::Subscription, 0), 0);
+        assert_eq!(truncation_budget(CostBasis::Subscription, 4_096), 0);
         assert_eq!(
             scored(long, CostBasis::Subscription),
             scored(0, CostBasis::Metered),
@@ -11362,6 +15090,18 @@ mod tests {
             scored(long, CostBasis::Metered) < scored(0, CostBasis::Metered),
             "a metered answer at its budget is still penalized as truncated"
         );
+    }
+
+    /// Reasoning tokens count toward `output_tokens`, so a Deep answer that
+    /// spent its allowance must not be scored as cut off by the answer ceiling.
+    #[test]
+    fn truncation_budget_includes_the_allowance() {
+        use super::{answer_token_budget, truncation_budget};
+        use crate::pricing::CostBasis;
+        let ceiling = u32::try_from(answer_token_budget()).unwrap();
+        assert_eq!(truncation_budget(CostBasis::Metered, 0), ceiling);
+        assert_eq!(truncation_budget(CostBasis::Metered, 4_096), ceiling + 4_096);
+        assert!(truncation_budget(CostBasis::Metered, 16_384) <= 32_768);
     }
 
     #[test]
@@ -11795,6 +15535,7 @@ mod tests {
             &super::VerifiedModelBearer::for_test("session-token"),
             &super::VerifiedInferenceBearer::for_test("inference-token"),
             None,
+            None,
         )
         .expect("build execution request");
 
@@ -11844,6 +15585,7 @@ mod tests {
             &super::VerifiedModelBearer::for_test("session-token"),
             &super::VerifiedInferenceBearer::for_test("inference-token"),
             Some(&super::VerifiedSandboxBearer::for_test("sandbox-token")),
+            None,
         )
         .expect("build execution request");
 
@@ -11853,6 +15595,47 @@ mod tests {
                 .get("x-sandbox-authorization")
                 .and_then(|value| value.to_str().ok()),
             Some("Bearer sandbox-token")
+        );
+    }
+
+    #[test]
+    fn execution_dispatch_forwards_the_browser_bearer_only_when_present_and_not_zdr() {
+        let dispatch = |zdr: bool, browser: Option<&super::VerifiedBrowserBearer>| {
+            super::authenticated_run_agent_request(
+                super::RunAgentRequest {
+                    zdr,
+                    ..super::RunAgentRequest::default()
+                },
+                &super::VerifiedExecutionBearer::for_test("execution-token"),
+                &super::VerifiedBearer::for_test("data-token"),
+                &super::VerifiedModelBearer::for_test("session-token"),
+                &super::VerifiedInferenceBearer::for_test("inference-token"),
+                None,
+                browser,
+            )
+            .expect("build execution request")
+        };
+        let header = |request: &tonic::Request<super::RunAgentRequest>| {
+            request
+                .metadata()
+                .get("x-browser-authorization")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        };
+        let browser = super::VerifiedBrowserBearer::for_test("browser-token");
+        assert_eq!(
+            header(&dispatch(false, Some(&browser))).as_deref(),
+            Some("Bearer browser-token")
+        );
+        assert_eq!(
+            header(&dispatch(false, None)),
+            None,
+            "an absent browser bearer is no header at all"
+        );
+        assert_eq!(
+            header(&dispatch(true, Some(&browser))),
+            None,
+            "a zero-retention run never carries one"
         );
     }
 
@@ -12051,6 +15834,44 @@ mod tests {
             "still not a code-based rejection — the two classifiers stay distinct"
         );
     }
+
+    /// A Do turn hands its executor the goal the org's PII policy allows: the chat text redacted
+    /// exactly as an Ask turn's model input is, and the raw text when the policy is off. The
+    /// call's goal argument is checked by name, since that one argument is the whole redaction.
+    #[test]
+    fn agentic_goal_is_redacted_when_pii_policy_on() {
+        let source = include_str!("sse.rs").replace("\r\n", "\n");
+        let from = source
+            .find("pub async fn invoke_stream_sse(")
+            .expect("the invoke handler is in this file");
+        let invoke = &source[from..];
+        let call = invoke
+            .find("return agentic_run_stream(")
+            .expect("the agentic stream call");
+        let args_end = invoke[call..]
+            .find("agentic_tools,")
+            .expect("the call's tools argument follows the goal");
+        let args = invoke[call..call + args_end]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let args = args
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            args.contains(
+                "model, if pii_redaction_required { crate::moderation::redact_pii(&req.content).0 } \
+                 else { req.content.clone() }, features,"
+            ),
+            "the goal is redacted under the org policy: {args}"
+        );
+
+        let (redacted, count) = crate::moderation::redact_pii("write to alice@example.com");
+        assert_eq!(count, 1);
+        assert!(!redacted.contains("alice@example.com"), "{redacted}");
+    }
 }
 
 /// How an agentic run is followed (`follow_agentic_run`), on tokio's paused
@@ -12068,7 +15889,7 @@ mod agentic_follow_tests {
     use super::{
         agent_dispatch_unavailable_event, follow_agentic_run, resolve_agentic_run_deadline,
         with_keep_alive, DeadlineExpired, DispatchJoin, AGENTIC_EVENT_DRAIN_GRACE,
-        AGENTIC_KEEP_ALIVE_INTERVAL, AGENTIC_RUN_DEADLINE_ENV,
+        AGENTIC_KEEP_ALIVE_INTERVAL, AGENTIC_RUN_DEADLINE_ENV, AGENTIC_STOP_POLL_INTERVAL,
     };
     use axum::response::{
         sse::{Event, Sse},
@@ -12222,6 +16043,16 @@ mod agentic_follow_tests {
         dispatch: Dispatch,
         deadline: Duration,
     ) -> Followed {
+        follow_stoppable(tail, dispatch, deadline, &AtomicBool::new(false)).await
+    }
+
+    /// [`follow`], with the client's stop flag in the caller's hands.
+    async fn follow_stoppable(
+        tail: impl Stream<Item = Result<OrchestrationEvent, tonic::Status>>,
+        dispatch: Dispatch,
+        deadline: Duration,
+        stop: &AtomicBool,
+    ) -> Followed {
         let started = Instant::now();
         let forwarded = Arc::new(Mutex::new(Vec::new()));
         let recorder = forwarded.clone();
@@ -12237,6 +16068,7 @@ mod agentic_follow_tests {
                 Some(Event::default().event("step_update").data(id))
             },
             &tx,
+            stop,
         )
         .await;
         let elapsed = started.elapsed();
@@ -12442,6 +16274,98 @@ mod agentic_follow_tests {
         }
     }
 
+    /// Dropping the future of a dispatch is what stops Execution Core's loop, so the flag this sets
+    /// is the proof that the abort reached the call.
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// A dispatch that never answers on its own, and a flag that says whether its future was dropped.
+    fn dispatch_held_open() -> (Dispatch, Arc<AtomicBool>) {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = DropFlag(dropped.clone());
+        let handle = tokio::spawn(async move {
+            let _guard = guard;
+            std::future::pending::<()>().await;
+            Ok(completed())
+        });
+        (handle, dropped)
+    }
+
+    /// Sets `stop` after `after`, as the client's Stop does.
+    fn stop_after(stop: Arc<AtomicBool>, after: Duration) {
+        tokio::spawn(async move {
+            tokio::time::sleep(after).await;
+            stop.store(true, Ordering::SeqCst);
+        });
+    }
+
+    /// A follow that ended because its dispatch was aborted: the join error is a cancelled one.
+    fn was_stopped(result: &Result<DispatchJoin, DeadlineExpired>) -> bool {
+        matches!(result, Ok(Err(join)) if join.is_cancelled())
+    }
+
+    /// A Stop aborts the dispatch and ends the follow within one tick of the click. The run's
+    /// answer is not wanted, so the tail is not drained either: the follow ends at the Stop, not
+    /// at the Stop plus the drain grace.
+    #[tokio::test(start_paused = true)]
+    async fn a_stop_aborts_the_dispatch_and_ends_the_follow_within_one_tick() {
+        let (dispatch, dropped) = dispatch_held_open();
+        let stop = Arc::new(AtomicBool::new(false));
+        stop_after(stop.clone(), secs(2));
+        let run = follow_stoppable(open_tail(Vec::new()), dispatch, secs(120), &stop).await;
+
+        assert!(
+            was_stopped(&run.result),
+            "the dispatch was aborted: {:?}",
+            run.result
+        );
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the call to Execution Core was dropped with it"
+        );
+        assert!(
+            run.elapsed >= secs(2),
+            "ended before the click: {:?}",
+            run.elapsed
+        );
+        assert!(
+            run.elapsed <= secs(2) + AGENTIC_STOP_POLL_INTERVAL + SLACK,
+            "ended more than one tick after the click: {:?}",
+            run.elapsed
+        );
+    }
+
+    /// A Stop that is already set when the follow starts is read before a deadline that has
+    /// passed: the run is stopped, not reported as expired.
+    #[tokio::test(start_paused = true)]
+    async fn a_stop_is_read_before_an_expired_deadline() {
+        let (dispatch, dropped) = dispatch_held_open();
+        let stop = AtomicBool::new(true);
+        let run = follow_stoppable(open_tail(Vec::new()), dispatch, Duration::ZERO, &stop).await;
+
+        assert!(was_stopped(&run.result), "{:?}", run.result);
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    /// A run that finished before the Stop keeps its answer: the dispatch is polled first, so a
+    /// result that is ready at the poll wins over a stop that is also set.
+    #[tokio::test(start_paused = true)]
+    async fn a_run_that_finished_before_the_stop_keeps_its_answer() {
+        let dispatch: Dispatch = tokio::spawn(async { Ok(completed()) });
+        while !dispatch.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        let stop = AtomicBool::new(true);
+        let run = follow_stoppable(open_tail(Vec::new()), dispatch, secs(120), &stop).await;
+
+        assert_eq!(expect_response(run.result).status, "completed");
+    }
+
     fn lookup(value: Option<&str>) -> impl Fn(&str) -> Option<String> + '_ {
         move |key| {
             assert_eq!(key, AGENTIC_RUN_DEADLINE_ENV, "reads only its own variable");
@@ -12576,5 +16500,6188 @@ mod agentic_follow_tests {
         drop(out);
         tokio::time::sleep(Duration::from_millis(1)).await;
         assert!(tx.is_closed(), "the pump must drop its hold on the stream task's channel");
+    }
+}
+
+#[cfg(test)]
+mod zdr_provenance_tests {
+    use super::{zdr_answer_stream, zdr_enforced_floor, DirectAnswer, StatedCost};
+    use axum::response::IntoResponse;
+    use mp_contracts::model_plane::v1::InferResponse;
+    use serde_json::Value;
+
+    /// The answer a served ZDR call reports, as inference-core returns it: the
+    /// content, the deployment that served it, its residency and token counts.
+    fn served(content: &str) -> InferResponse {
+        InferResponse {
+            content: content.to_owned(),
+            model_used: "gpt-4.1-eu-deploy".to_owned(),
+            provider_used: "azure-openai".to_owned(),
+            residency: "eu".to_owned(),
+            input_tokens: 42,
+            output_tokens: 7,
+            ..Default::default()
+        }
+    }
+
+    /// Every SSE frame of a finished stream, in order, as (event name, JSON data).
+    async fn frames(stream: impl IntoResponse) -> Vec<(String, Value)> {
+        let body = axum::body::to_bytes(stream.into_response().into_body(), usize::MAX)
+            .await
+            .expect("the stream body reads");
+        let text = String::from_utf8(body.to_vec()).expect("SSE is UTF-8");
+        text.split("\n\n")
+            .filter(|frame| !frame.trim().is_empty())
+            .map(|frame| {
+                let mut name = String::new();
+                let mut data = String::new();
+                for line in frame.lines() {
+                    if let Some(event) = line.strip_prefix("event: ") {
+                        name = event.to_owned();
+                    } else if let Some(payload) = line.strip_prefix("data: ") {
+                        data.push_str(payload);
+                    }
+                }
+                (
+                    name,
+                    serde_json::from_str(&data).expect("each frame carries JSON"),
+                )
+            })
+            .collect()
+    }
+
+    /// The stream of one answer, with the opt-in features and privacy floor the
+    /// request carried.
+    async fn stream_of(
+        answer: DirectAnswer,
+        features: &[&str],
+        min_privacy_tier: i32,
+        latency_ms: u64,
+    ) -> Vec<(String, Value)> {
+        frames(zdr_answer_stream(
+            "req-zdr".to_owned(),
+            None,
+            features
+                .iter()
+                .map(|feature| (*feature).to_owned())
+                .collect(),
+            min_privacy_tier,
+            answer,
+            None,
+            latency_ms,
+        ))
+        .await
+    }
+
+    /// A grounding that carries only what the notice tests need.
+    fn grounding_with_notice(
+        notice: Option<crate::retrieval_metadata::RetrievalNotice>,
+    ) -> crate::retrieval::Grounding {
+        crate::retrieval::Grounding {
+            mode: "hybrid".to_owned(),
+            query: "refund policy".to_owned(),
+            notice,
+            ..Default::default()
+        }
+    }
+
+    fn zdr_notice() -> crate::retrieval_metadata::RetrievalNotice {
+        crate::retrieval_metadata::notice_for_code("zdr_dense_unavailable")
+            .expect("the ZDR notice is catalogued")
+    }
+
+    /// A reduced ZDR answer says so before its first answer chunk, to a client that opted into no feature family.
+    /// Mutation: dropping the emission in `zdr_answer_stream` fails here.
+    #[tokio::test]
+    async fn a_reduced_zdr_answer_says_so_before_it_streams() {
+        let answer = DirectAnswer::from_response(served("SECRET-ANSWER-2 hei"), "requested-model");
+        let out = frames(zdr_answer_stream(
+            "req-zdr".to_owned(),
+            Some(grounding_with_notice(Some(zdr_notice()))),
+            Vec::new(),
+            0,
+            answer,
+            None,
+            12,
+        ))
+        .await;
+        let names: Vec<&str> = out.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| **name == "retrieval_notice")
+                .count(),
+            1,
+            "one notice per reduced answer: {names:?}"
+        );
+        let notice_at = names
+            .iter()
+            .position(|name| *name == "retrieval_notice")
+            .expect("the notice streams");
+        let first_chunk = names
+            .iter()
+            .position(|name| *name == "chunk")
+            .expect("the answer streams");
+        assert!(notice_at < first_chunk, "the notice comes first: {names:?}");
+        let payload = &out[notice_at].1;
+        assert_eq!(payload["code"], "zdr_dense_unavailable", "{payload}");
+        assert_eq!(
+            payload["wording_key"], "retrieval.zdr_dense_unavailable",
+            "{payload}"
+        );
+        assert_eq!(payload["request_id"], "req-zdr", "{payload}");
+        assert!(!payload.to_string().contains("SECRET-ANSWER"), "{payload}");
+    }
+
+    /// A ZDR answer that was not reduced streams exactly as before: no notice frame, with or without a grounding.
+    #[tokio::test]
+    async fn a_zdr_answer_without_a_notice_streams_no_notice() {
+        for grounding in [None, Some(grounding_with_notice(None))] {
+            let answer = DirectAnswer::from_response(served("plain answer"), "requested-model");
+            let out = frames(zdr_answer_stream(
+                "req-zdr".to_owned(),
+                grounding,
+                Vec::new(),
+                0,
+                answer,
+                None,
+                12,
+            ))
+            .await;
+            assert!(
+                out.iter().all(|(name, _)| name != "retrieval_notice"),
+                "{out:?}"
+            );
+        }
+    }
+
+    /// The durable turn's notice takes a place in the stream's cursor, so a client that resumes replays it.
+    /// Mutation: a notice that is not buffered is lost to every resumed stream.
+    #[tokio::test]
+    async fn a_durable_turns_notice_is_buffered_so_a_resumed_stream_replays_it() {
+        let buffers = crate::stream_buffer::StreamBufferStore::new();
+        let key = crate::stream_buffer::scoped_stream_key("org-1", "user-1", "req-r");
+        let (tx, mut live) = tokio::sync::mpsc::channel::<
+            Result<axum::response::sse::Event, std::convert::Infallible>,
+        >(8);
+        let mut seq = 0_u64;
+        super::emit_and_buffer(
+            &tx,
+            &buffers,
+            &key,
+            &mut seq,
+            &[],
+            "req-r",
+            crate::sse_events::ChatEvent::RetrievalNotice {
+                notice: zdr_notice(),
+            },
+        )
+        .await;
+        assert!(
+            live.try_recv().is_ok(),
+            "the live stream carries the notice"
+        );
+        assert_eq!(seq, 1, "the notice takes one place in the cursor");
+        let replay = buffers.replay_after(&key, None).await;
+        assert!(replay.found, "the buffer holds the stream");
+        let events: Vec<&str> = replay
+            .deltas
+            .iter()
+            .map(|buffered| buffered.event.as_str())
+            .collect();
+        assert_eq!(events, vec!["retrieval_notice"]);
+    }
+
+    /// The only usage frame of a stream; a failure names every frame it has.
+    fn usage_of(frames: &[(String, Value)]) -> &Value {
+        let usage: Vec<&Value> = frames
+            .iter()
+            .filter(|(name, _)| name.as_str() == "usage")
+            .map(|(_, data)| data)
+            .collect();
+        assert_eq!(usage.len(), 1, "one usage frame per answer: {frames:?}");
+        usage[0]
+    }
+
+    #[tokio::test]
+    async fn a_zdr_answer_ends_with_one_usage_frame_that_names_its_provider_and_no_content() {
+        let answer =
+            DirectAnswer::from_response(served("SECRET-ANSWER-7731 hei"), "requested-model");
+        let frames = stream_of(answer, &["usage"], 0, 730).await;
+
+        let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names.last().copied(), Some("done"), "{names:?}");
+        assert_eq!(
+            names[names.len() - 2],
+            "usage",
+            "usage comes right before done: {names:?}"
+        );
+        assert!(
+            names[..names.len() - 2].iter().all(|name| *name == "chunk"),
+            "{names:?}"
+        );
+
+        let usage = usage_of(&frames);
+        assert_eq!(usage["provider_used"], "azure-openai");
+        assert_eq!(usage["residency"], "eu");
+        assert_eq!(usage["privacy_tier"], "zdr_contractual");
+        assert_eq!(usage["retention_class"], "zdr");
+        assert_eq!(usage["input_tokens"], 42);
+        assert_eq!(usage["output_tokens"], 7);
+        assert_eq!(usage["latency_ms"], 730);
+        // The cost switch is off here, so this stream states no cost.
+        assert!(usage["cost_usd"].is_null(), "{usage}");
+        // Counts and provenance only: nothing the answer said reaches this frame.
+        assert!(!usage.to_string().contains("SECRET-ANSWER"), "{usage}");
+        let mut keys: Vec<&str> = usage
+            .as_object()
+            .expect("usage is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "calls",
+                "confidence",
+                "cost_usd",
+                "input_tokens",
+                "latency_ms",
+                "output_tokens",
+                "privacy_tier",
+                "provider_used",
+                "residency",
+                "retention_class",
+                "unpriced_calls",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_answer_and_done_name_the_model_that_served_it_and_count_its_tokens() {
+        let answer = DirectAnswer::from_response(served("Hei"), "requested-model");
+        let frames = stream_of(answer, &["usage"], 0, 5).await;
+
+        let chunks: Vec<&Value> = frames
+            .iter()
+            .filter(|(name, _)| name.as_str() == "chunk")
+            .map(|(_, data)| data)
+            .collect();
+        assert!(!chunks.is_empty(), "{frames:?}");
+        for chunk in chunks {
+            assert_eq!(chunk["model_used"], "gpt-4.1-eu-deploy");
+        }
+        let (name, done) = frames.last().expect("a done frame");
+        assert_eq!(name.as_str(), "done");
+        assert_eq!(done["done"], true);
+        assert_eq!(done["model_used"], "gpt-4.1-eu-deploy");
+        assert_eq!(done["input_tokens"], 42);
+        assert_eq!(done["output_tokens"], 7);
+    }
+
+    #[tokio::test]
+    async fn the_usage_frame_is_gated_by_the_usage_feature_as_its_durable_counterpart_is() {
+        let answer = DirectAnswer::from_response(served("Hei"), "requested-model");
+        let frames = stream_of(answer, &["citations"], 0, 5).await;
+        assert!(
+            frames.iter().all(|(name, _)| name.as_str() != "usage"),
+            "{frames:?}"
+        );
+        assert_eq!(frames.last().map(|(name, _)| name.as_str()), Some("done"));
+    }
+
+    #[tokio::test]
+    async fn the_stamped_tier_is_the_zdr_floor_raised_by_the_callers_floor_and_never_lower() {
+        let global = DirectAnswer::from_response(
+            InferResponse {
+                residency: "global".to_owned(),
+                ..served("Hei")
+            },
+            "requested-model",
+        );
+        let frames = stream_of(global, &["usage"], 0, 5).await;
+        assert_eq!(usage_of(&frames)["privacy_tier"], "zdr_contractual");
+
+        let norway = DirectAnswer::from_response(
+            InferResponse {
+                residency: "norway".to_owned(),
+                ..served("Hei")
+            },
+            "requested-model",
+        );
+        let frames = stream_of(norway, &["usage"], 4, 5).await;
+        assert_eq!(usage_of(&frames)["privacy_tier"], "sovereign");
+    }
+
+    #[tokio::test]
+    async fn a_zdr_answer_that_names_no_serving_provider_states_none_and_keeps_its_retention() {
+        let unnamed = DirectAnswer::from_response(
+            InferResponse {
+                provider_used: String::new(),
+                residency: String::new(),
+                ..served("Hei")
+            },
+            "requested-model",
+        );
+        let frames = stream_of(unnamed, &["usage"], 0, 5).await;
+        let usage = usage_of(&frames);
+        for key in ["provider_used", "residency", "privacy_tier"] {
+            assert!(usage.get(key).is_none(), "{key} must be omitted: {usage}");
+        }
+        assert_eq!(usage["retention_class"], "zdr");
+    }
+
+    #[test]
+    fn the_direct_answer_takes_what_the_served_response_reports() {
+        let answer = DirectAnswer::from_response(served("Hei"), "requested-model");
+        assert_eq!(answer.content, "Hei");
+        assert_eq!(answer.model_used, "gpt-4.1-eu-deploy");
+        assert_eq!(answer.provider_used, "azure-openai");
+        assert_eq!(answer.residency, "eu");
+        assert_eq!((answer.input_tokens, answer.output_tokens), (42, 7));
+
+        // A provider that names no served model is answered by the requested
+        // one, as the durable path does.
+        let unnamed = DirectAnswer::from_response(
+            InferResponse {
+                model_used: String::new(),
+                ..served("Hei")
+            },
+            "requested-model",
+        );
+        assert_eq!(unnamed.model_used, "requested-model");
+
+        // A negative count from a malformed response is zero, never a wrapped value.
+        let negative = DirectAnswer::from_response(
+            InferResponse {
+                input_tokens: -5,
+                output_tokens: -1,
+                ..served("Hei")
+            },
+            "requested-model",
+        );
+        assert_eq!((negative.input_tokens, negative.output_tokens), (0, 0));
+
+        // The cache legs are carried as the provider reports them; a negative one is zero.
+        let cached = DirectAnswer::from_response(
+            InferResponse {
+                cache_read_input_tokens: 900,
+                cache_creation_input_tokens: -3,
+                ..served("Hei")
+            },
+            "requested-model",
+        );
+        assert_eq!(
+            (cached.cache_read_tokens, cached.cache_write_tokens),
+            (900, 0)
+        );
+    }
+
+    /// With the cost switch off, a cached answer's usage frame states no cost and no cache
+    /// count: the counts are carried, not stated, as before the switch existed.
+    #[tokio::test]
+    async fn a_zdr_usage_frame_states_no_cost_and_no_cache_count_while_the_switch_is_off() {
+        let answer = DirectAnswer::from_response(
+            InferResponse {
+                cache_read_input_tokens: 30,
+                cache_creation_input_tokens: 12,
+                ..served("Hei")
+            },
+            "requested-model",
+        );
+        let frames = stream_of(answer, &["usage"], 0, 5).await;
+        let usage = usage_of(&frames);
+        assert!(usage["cost_usd"].is_null(), "{usage}");
+        for key in ["cost_basis", "cache_read_tokens", "cache_write_tokens"] {
+            assert!(usage.get(key).is_none(), "{key} must be omitted: {usage}");
+        }
+    }
+
+    /// An answer priced under the cost switch states its cost, the basis and the cache counts
+    /// it was priced from, and nothing beside it: one usage frame between the chunks and done,
+    /// no envelope-like frame, and no content in the frame. A second usage frame, or a figure
+    /// that is not the priced one, fails here.
+    #[tokio::test]
+    async fn zdr_usage_states_cost_but_publishes_no_envelope() {
+        let answer = DirectAnswer::from_response(
+            InferResponse {
+                cache_read_input_tokens: 30,
+                cache_creation_input_tokens: 12,
+                ..served("SECRET-ANSWER-9 hei")
+            },
+            "requested-model",
+        );
+        let stated = StatedCost {
+            usd: Some(0.0042),
+            basis: crate::pricing::CostBasis::Metered,
+            by_category: None,
+        };
+        let out = frames(zdr_answer_stream(
+            "req-zdr".to_owned(),
+            None,
+            vec!["usage".to_owned()],
+            0,
+            answer,
+            Some(stated),
+            9,
+        ))
+        .await;
+
+        let usage = usage_of(&out);
+        assert_eq!(usage["cost_usd"], 0.0042, "{usage}");
+        assert_eq!(usage["cost_basis"], "metered", "{usage}");
+        assert_eq!(usage["cache_read_tokens"], 30, "{usage}");
+        assert_eq!(usage["cache_write_tokens"], 12, "{usage}");
+        assert_eq!(usage["retention_class"], "zdr", "{usage}");
+        let names: Vec<&str> = out.iter().map(|(name, _)| name.as_str()).collect();
+        assert!(
+            names
+                .iter()
+                .all(|name| matches!(*name, "chunk" | "usage" | "done")),
+            "a priced answer adds no frame beside its answer: {names:?}"
+        );
+        assert!(!usage.to_string().contains("SECRET-ANSWER"), "{usage}");
+    }
+
+    /// An unknown price is stated as a null cost with its basis, never as a figure.
+    #[tokio::test]
+    async fn a_zdr_answer_whose_price_is_unknown_states_no_figure() {
+        let answer = DirectAnswer::from_response(served("Hei"), "requested-model");
+        let stated = StatedCost {
+            usd: None,
+            basis: crate::pricing::CostBasis::Metered,
+            by_category: None,
+        };
+        let out = frames(zdr_answer_stream(
+            "req-zdr".to_owned(),
+            None,
+            vec!["usage".to_owned()],
+            0,
+            answer,
+            Some(stated),
+            9,
+        ))
+        .await;
+        let usage = usage_of(&out);
+        assert!(usage["cost_usd"].is_null(), "{usage}");
+        assert_eq!(usage["cost_basis"], "metered", "{usage}");
+    }
+
+    /// The cost switch is on only for the literal `true`, surrounding whitespace aside.
+    #[test]
+    fn zdr_stream_cost_is_on_only_for_the_literal_true() {
+        let on = |raw: &'static str| super::zdr_stream_cost_enabled_with(&|_| Some(raw.to_owned()));
+        assert!(on("true"));
+        assert!(on(" true\n"));
+        for off in ["", "TRUE", "True", "1", "on", "yes", "enabled", "false"] {
+            assert!(!on(off), "{off:?} must not enable the switch");
+        }
+        assert!(
+            !super::zdr_stream_cost_enabled_with(&|_| None),
+            "unset is off"
+        );
+    }
+
+    #[test]
+    fn a_zdr_turn_enforces_zdr_contractual_or_the_callers_higher_floor() {
+        assert_eq!(zdr_enforced_floor(0), 3);
+        assert_eq!(zdr_enforced_floor(1), 3);
+        assert_eq!(zdr_enforced_floor(2), 3);
+        assert_eq!(zdr_enforced_floor(3), 3);
+        assert_eq!(zdr_enforced_floor(4), 4);
+        // A value outside the enum expresses no caller minimum: only the ZDR
+        // floor applies.
+        assert_eq!(zdr_enforced_floor(99), 3);
+        assert_eq!(zdr_enforced_floor(-1), 3);
+    }
+}
+
+/// The body of a continuation request. There is no brief field: the continuation's
+/// brief is built from the run's recorded step events, which is a follow-up. A
+/// client cannot author what the model is told about earlier results.
+#[derive(serde::Deserialize)]
+pub(crate) struct ContinueRunRequest {
+    pub approval_id: String,
+    pub claim_token: String,
+}
+
+/// The two checks that need nothing but the switch and the caller's credential, so
+/// they can run before the run, the approval or any upstream is read: the route is
+/// on, and the turn keeps state. A waived or ZDR turn is refused here with the same
+/// `not_resumable` a finished run gets. It is its own function so the early refusal
+/// in [`continue_run`] and the pure [`continue_preflight`] cannot disagree.
+fn continue_turn_gate(enabled: bool, persistent: bool) -> Result<(), (StatusCode, &'static str)> {
+    if !enabled {
+        return Err((StatusCode::CONFLICT, "continue_disabled"));
+    }
+    if !persistent {
+        return Err((StatusCode::CONFLICT, "not_resumable"));
+    }
+    Ok(())
+}
+
+/// The checks a continuation makes before any work starts, as a pure function so
+/// each refusal is testable. Returns the status and the closed code.
+///
+/// `approval_consumed` is the approval's `consumed_at`: every consumed approval is
+/// refused, for every caller. That includes a retry with the same claim token. A
+/// same-claim replay on stage 1 can run the approved call again when the effect
+/// ledger is off, so a retry is not a recovery path; what recovers a continuation
+/// that died after its consume is the park window or an unknown-outcome closer.
+/// This read is not the only guard: two concurrent continues can both pass it, so
+/// the executor also refuses a same-claim replay unless the effect ledger fences it.
+/// `persistent` is [`continue_turn_is_persistent`].
+fn continue_preflight(
+    enabled: bool,
+    run_status: &str,
+    approval_matches_run: bool,
+    approval_granted: bool,
+    continuation_mode: &str,
+    approval_consumed: bool,
+    persistent: bool,
+) -> Result<(), (StatusCode, &'static str)> {
+    continue_turn_gate(enabled, persistent)?;
+    if matches!(run_status, "completed" | "failed" | "cancelled") {
+        return Err((StatusCode::CONFLICT, "not_resumable"));
+    }
+    if !approval_matches_run {
+        return Err((StatusCode::NOT_FOUND, "approval_not_found"));
+    }
+    if !approval_granted {
+        return Err((StatusCode::CONFLICT, "approval_not_granted"));
+    }
+    if approval_consumed {
+        return Err((StatusCode::CONFLICT, "continuation_already_consumed"));
+    }
+    if continuation_mode != "loop" {
+        return Err((StatusCode::CONFLICT, "not_resumable"));
+    }
+    Ok(())
+}
+
+/// Whether a `/continue` caller is a persistent turn: not ZDR, not waived, and a
+/// credential the resolver accepts. A waiver is an exception for one connection's
+/// inference and nothing else, so a waived run keeps no fold and its approval is
+/// never consumed. [`crate::zdr_posture::continuation_gate`] lets a waiver
+/// through because a cold approval's decision must still work, so the stricter
+/// answer lives here, at the one route that consumes an approval.
+fn continue_turn_is_persistent(claims: &Claims) -> bool {
+    matches!(
+        crate::zdr_posture::decide_for(claims, &crate::zdr_posture::Route::plain(false)),
+        Ok(crate::zdr_posture::TurnPosture::Persistent)
+    )
+}
+
+/// The early refusal in [`continue_run`], over the caller's claims and the switch,
+/// so "a non-persistent turn is refused before any work" is testable at the handler
+/// boundary and the handler cannot quietly stop calling it (a source test in
+/// `zdr_posture` requires the call).
+///
+/// [`crate::zdr_posture::continuation_gate`] lets a waiver through (a cold approval's
+/// decision must still work), but a waived run keeps no state to continue. Only with
+/// the switch on: with it off the route answers exactly as it always did
+/// (`continue_preflight` says `continue_disabled`, after the owner checks).
+fn continue_persistent_gate(
+    switch_on: bool,
+    claims: &Claims,
+) -> Result<(), (StatusCode, &'static str)> {
+    if switch_on {
+        continue_turn_gate(true, continue_turn_is_persistent(claims))
+    } else {
+        Ok(())
+    }
+}
+
+/// The posture a `/continue` request states. A placeholder: the executor runs the
+/// continuation under the mode the run paused with and ignores this one.
+const CONTINUE_PERMISSION_MODE: &str = "ask";
+
+/// The resume a `/continue` carries. The brief is not client-authored (see
+/// [`ContinueRunRequest`]); the executor derives the segment number from the step
+/// that paused (a literal here once gave every continuation of one run the same step
+/// ids) and ignores this field, so it is 0.
+///
+/// `mode` is the stage the gateway asks for, chosen by [`resume_mode_for`] and by
+/// nothing else. It is a hint: the executor decides the stage at claim time. There is
+/// no other field to fill, and no attestation that the gateway consumed the approval.
+fn continue_resume(
+    approval_id: &str,
+    claim_token: &str,
+    mode: &'static str,
+) -> mp_contracts::model_plane::v1::AgentResume {
+    mp_contracts::model_plane::v1::AgentResume {
+        mode: mode.to_owned(),
+        approval_id: approval_id.to_owned(),
+        claim_token: claim_token.to_owned(),
+        brief: String::new(),
+        segment_no: 0,
+        ..Default::default()
+    }
+}
+
+fn continue_error(status: StatusCode, code: &str) -> (StatusCode, Json<Value>) {
+    debug_assert!(
+        CONTINUE_HTTP_REFUSALS.contains(&(code, status)),
+        "{code} with {status} is not in the closed continue HTTP vocabulary"
+    );
+    (
+        status,
+        Json(json!({ "error": { "code": code, "message": code.replace('_', " ") } })),
+    )
+}
+
+// ---- The gateway's pre-consume of a continuation: the pure building blocks (build plan
+// WS03 S7c-A4) and their wiring in `continue_run` and `agentic_run_stream` (S7c-B1).
+// With the resume switch on, `continue_run` consumes the approval itself, spend only,
+// in one detached task together with the launch of the run; with it off none of this
+// is reached but the frame builders the stream asks for its failures. None of the items
+// names a segment number or an env var: the stage is `resume_mode_for`'s, the switch is
+// read once through `loop_resume_enabled`, and the segment number is the builder's.
+
+/// The HTTP refusals the continue route relays, each with the status it is sent
+/// with. The BFF relays all of them except `continue_incomplete` (its own guard
+/// preempts it) and `missing_bearer` (which it maps to `unauthorized`). Every other
+/// HTTP answer of the route keeps `grpc_status_to_http`'s body. Closed and
+/// test-pinned; the BFF's and the SPA's lists are scanned against this one.
+pub(crate) const CONTINUE_HTTP_REFUSALS: &[(&str, StatusCode)] = &[
+    ("continue_disabled", StatusCode::CONFLICT),
+    ("not_resumable", StatusCode::CONFLICT),
+    ("continue_incomplete", StatusCode::BAD_REQUEST),
+    ("missing_bearer", StatusCode::UNAUTHORIZED),
+    ("approval_not_found", StatusCode::NOT_FOUND),
+    ("approval_not_granted", StatusCode::CONFLICT),
+    ("approval_expired", StatusCode::CONFLICT),
+    ("approval_not_resumable", StatusCode::CONFLICT),
+    ("continuation_already_consumed", StatusCode::CONFLICT),
+    ("continue_unavailable", StatusCode::SERVICE_UNAVAILABLE),
+];
+
+/// The messages the executor's refusals of a continuation carry, exactly. A status
+/// whose message is in this list is a typed refusal the gateway can name; any other
+/// message is never echoed and becomes `continue_refused`. A new executor refusal
+/// token needs a row here. The last three (`park_not_restorable`,
+/// `park_route_unavailable`, `park_not_due`) are the executor's refusals of the
+/// resume of a PARKED run (WS03 S8); the executor builds them from S8-6 on.
+pub(crate) const CONTINUE_EXECUTOR_MESSAGE_TOKENS: &[&str] = &[
+    "continue_disabled",
+    "resume_incomplete",
+    "continuation_already_consumed",
+    "approval_not_granted",
+    "approval_expired",
+    "approval_not_resumable",
+    "approval_action_mismatch",
+    "approval_snapshot_mismatch",
+    "not_releasable",
+    "authority_widened",
+    "authority_space_mismatch",
+    "authority_route_mismatch",
+    "continue_space_scope_unsupported",
+    "continue_in_progress",
+    "resume_checkpoint_unavailable",
+    "not_resumable",
+    "resume_forbidden",
+    "park_not_restorable",
+    "park_route_unavailable",
+    "park_not_due",
+];
+
+/// The `code` of an `error` frame of a continuation that is a refusal or a failed
+/// dispatch of the continuation itself: the executor's message tokens, the two codes
+/// derived from the gRPC code or the zero-retention trailer (`approval_not_found`,
+/// `durable_mutation_forbidden`), and the three the gateway makes (`continue_refused`,
+/// `continue_unreachable`, `continue_outcome_unknown`). Closed and test-pinned.
+///
+/// A frame carries `approval_spent: true` only when the gateway itself consumed the
+/// approval; without it the frame says the executor refused and the approval state is
+/// unknown. `continue_unreachable` and `continue_outcome_unknown` exist only with it.
+///
+/// The three park tokens (`park_not_restorable`, `park_route_unavailable`,
+/// `park_not_due`) are the executor's refusals of the resume of a parked run (WS03 S8).
+/// A park continue never spends an approval, so a frame carrying one never has
+/// `approval_spent`.
+pub(crate) const CONTINUE_FRAME_REFUSALS: &[&str] = &[
+    "continue_disabled",
+    "resume_incomplete",
+    "continuation_already_consumed",
+    "approval_not_granted",
+    "approval_expired",
+    "approval_not_resumable",
+    "approval_action_mismatch",
+    "approval_snapshot_mismatch",
+    "not_releasable",
+    "authority_widened",
+    "authority_space_mismatch",
+    "authority_route_mismatch",
+    "continue_space_scope_unsupported",
+    "continue_in_progress",
+    "resume_checkpoint_unavailable",
+    "not_resumable",
+    "resume_forbidden",
+    "park_not_restorable",
+    "park_route_unavailable",
+    "park_not_due",
+    "approval_not_found",
+    "durable_mutation_forbidden",
+    "continue_refused",
+    "continue_unreachable",
+    "continue_outcome_unknown",
+];
+
+/// How long the gateway waits for its own consume of the approval. A consume that
+/// has not answered by then is ambiguous (the server may have committed), so the
+/// caller ends in `continue_unavailable` and nothing is launched. A constant, not an
+/// environment variable.
+const PRECONSUME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The stage a continuation asks the executor for. `loop` (the in-place resume) only
+/// when the gateway's resume switch is on AND the run's recorded fold says it can be
+/// resumed (`RunDetail.resumable`); anything else asks for the committed stage,
+/// `segment`. The session-core checkpoint switch is not read here: with it off no
+/// fold is written and `resumable` is false, so it reaches this function through the
+/// flag. The hint is advisory. The executor decides at claim time, and a wrong hint
+/// costs a fallback to the committed stage, never a refusal.
+///
+/// `resume_enabled` is the one read of the switch that the caller makes
+/// ([`mp_contracts::loop_fold::loop_resume_enabled`]); this function reads no
+/// environment.
+///
+/// `parking` (WS03 S8-A) is the park form of `/continue` (an exactly empty approval id,
+/// accepted only with the gateway's parking switch on): it always asks for `park`, the resume
+/// of the run's current parked fold. The caller refuses it with `continue_disabled` when the
+/// resume switch is off.
+fn resume_mode_for(resume_enabled: bool, resumable: bool, parking: bool) -> &'static str {
+    if parking {
+        "park"
+    } else if resume_enabled && resumable {
+        "loop"
+    } else {
+        "segment"
+    }
+}
+
+/// Whether the gateway itself spent the approval before it opened the stream. Only
+/// the pre-consume path is `SpentByGateway`, and it is set only after a consume that
+/// was won; it is local knowledge, never read from the executor or from the resume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApprovalSpend {
+    NotSpent,
+    SpentByGateway,
+}
+
+impl ApprovalSpend {
+    const fn is_spent(self) -> bool {
+        matches!(self, Self::SpentByGateway)
+    }
+}
+
+/// The spend state a continuation will have, from the one read of the resume switch:
+/// with it on the gateway pre-consumes, with it off it does not.
+fn approval_spend_for(resume_enabled: bool) -> ApprovalSpend {
+    if resume_enabled {
+        ApprovalSpend::SpentByGateway
+    } else {
+        ApprovalSpend::NotSpent
+    }
+}
+
+/// The gateway's own consume of the approval a continuation names, behind a trait so
+/// the sequencing and the detach can be tested against a fake instead of a live gRPC
+/// server.
+///
+/// `Send + Sync` are supertraits on purpose: the consume and the launch run inside one
+/// `tokio::spawn`ed task ([`spawn_consume_then_launch`]) that holds `&Self` across an
+/// await, and that future is `Send` only if `Self: Sync`. Declaring them here carries
+/// them to every implementation and every `C: ApprovalConsumer` bound.
+trait ApprovalConsumer: Send + Sync {
+    /// Consume the approval for the spend only. `Ok(true)` only when THIS call won the
+    /// single-use compare-and-set; `Ok(false)` when the approval was already consumed,
+    /// by whichever claim (the same token included). Anything else is the status the
+    /// consume failed with.
+    fn consume(
+        &self,
+        request: mp_contracts::model_plane::v1::ConsumeApprovalRequest,
+    ) -> impl std::future::Future<Output = Result<bool, tonic::Status>> + Send;
+}
+
+/// Wait for the consume's answer for at most [`PRECONSUME_TIMEOUT`], and read from it
+/// the one thing the gateway uses: whether the consume was won. A consume that has
+/// not answered by then is `DeadlineExceeded`, which the caller treats as ambiguous
+/// (the server may have committed). It is its own function so the bound is testable
+/// without a socket.
+async fn consume_within_bound<F>(rpc: F) -> Result<bool, tonic::Status>
+where
+    F: std::future::Future<
+        Output = Result<
+            tonic::Response<mp_contracts::model_plane::v1::ConsumeApprovalResponse>,
+            tonic::Status,
+        >,
+    >,
+{
+    match tokio::time::timeout(PRECONSUME_TIMEOUT, rpc).await {
+        Ok(Ok(response)) => Ok(response.into_inner().consumed),
+        Ok(Err(status)) => Err(status),
+        Err(_elapsed) => Err(tonic::Status::deadline_exceeded(
+            "the approval consume did not answer in time",
+        )),
+    }
+}
+
+/// [`ApprovalConsumer`] over the run's own session credential: the credential the
+/// executor later receives as its session bearer, so the gateway's consume and the
+/// executor's replay of it are made by one identity. It owns a clone of the
+/// orchestration client (a tonic client over a channel, `Send + Sync`) and of the
+/// bearer (`Arc<str>`, `Send + Sync`), so it satisfies the spawn bounds. The bearer is
+/// never logged.
+struct GrpcApprovalConsumer {
+    client: mp_contracts::model_plane::v1::orchestration_core_service_client::OrchestrationCoreServiceClient<
+        tonic::transport::Channel,
+    >,
+    bearer: VerifiedModelBearer,
+}
+
+impl GrpcApprovalConsumer {
+    fn new(
+        client: mp_contracts::model_plane::v1::orchestration_core_service_client::OrchestrationCoreServiceClient<
+            tonic::transport::Channel,
+        >,
+        bearer: VerifiedModelBearer,
+    ) -> Self {
+        Self { client, bearer }
+    }
+}
+
+impl ApprovalConsumer for GrpcApprovalConsumer {
+    async fn consume(
+        &self,
+        request: mp_contracts::model_plane::v1::ConsumeApprovalRequest,
+    ) -> Result<bool, tonic::Status> {
+        let request = authenticated_session_request(request, &self.bearer)?;
+        let mut client = self.client.clone();
+        consume_within_bound(client.consume_approval(request)).await
+    }
+}
+
+/// The one `ConsumeApprovalRequest` the gateway builds: the approval, the verified
+/// org, the run and the claim token as the client sent it, and `omit_call: true`, so
+/// session-core neither decrypts nor returns the approved call and renews the run's
+/// recovery deadline in the winning transaction. The step and the action fingerprint
+/// are not the gateway's to state; the executor's own consume states what it needs.
+fn preconsume_request(
+    org_id: &str,
+    run_id: &str,
+    approval_id: &str,
+    claim_token: &str,
+) -> mp_contracts::model_plane::v1::ConsumeApprovalRequest {
+    mp_contracts::model_plane::v1::ConsumeApprovalRequest {
+        approval_id: approval_id.to_owned(),
+        org_id: org_id.to_owned(),
+        run_id: run_id.to_owned(),
+        step_id: String::new(),
+        action_fingerprint: String::new(),
+        claim_token: claim_token.to_owned(),
+        omit_call: true,
+    }
+}
+
+/// Whether the `RunAgent` request of a continuation can be built from the credentials
+/// its launch will carry: the one local, deterministic failure the launch has
+/// (`authenticated_run_agent_request`, whose only failure is a bearer that is not valid
+/// gRPC metadata). It is asked BEFORE the gateway consumes the approval, so that a
+/// request that can never be sent does not spend the click. The request's content does
+/// not matter to it (the failure depends on the four credentials alone, and a
+/// continuation states no sandbox credential), so it builds an empty one.
+///
+/// The launch still builds the real request and still refuses after a spend if that ever
+/// fails ([`agentic_run_stream`]): this is a pre-check, not a replacement.
+#[allow(clippy::result_large_err)]
+fn run_agent_request_is_buildable(
+    execution_bearer: &VerifiedExecutionBearer,
+    data_plane_bearer: &VerifiedBearer,
+    session_bearer: &VerifiedModelBearer,
+    inference_bearer: &VerifiedInferenceBearer,
+) -> Result<(), tonic::Status> {
+    authenticated_run_agent_request(
+        RunAgentRequest::default(),
+        execution_bearer,
+        data_plane_bearer,
+        session_bearer,
+        inference_bearer,
+        None,
+        None,
+    )
+    .map(|_| ())
+}
+
+/// The stream of a continuation refused before the gateway consumed anything: one
+/// `continue_refused` frame, not retryable, naming the run, WITHOUT `approval_spent`
+/// (nothing was spent and nothing was sent to the executor). No `connected` frame
+/// precedes it: the run was never prepared for a stream. It is queued in a channel of
+/// one and the sender dropped, so it needs no task.
+fn unbuildable_continuation_stream(run_id: &str) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(1);
+    let _ = tx.try_send(Ok(continue_refusal_event(
+        &new_ulid(),
+        run_id,
+        "continue_refused",
+        ApprovalSpend::NotSpent,
+    )));
+    Sse::new(ReceiverStream::new(rx))
+}
+
+/// Why a continuation does not proceed past its consume. `Closed` is one of the
+/// route's closed HTTP refusals ([`CONTINUE_HTTP_REFUSALS`]). `Status` is a
+/// `PermissionDenied` or `Unauthenticated` answer, which the handler passes to
+/// `grpc_status_to_http` so it reads exactly as the owner check's does.
+#[derive(Debug)]
+enum PreconsumeRefusal {
+    Closed(StatusCode, &'static str),
+    Status(tonic::Status),
+}
+
+/// The pure map from the consume's answer to "proceed" or the refusal. Only
+/// `Ok(true)` proceeds. `Ok(false)` is a lost consume: 409
+/// `continuation_already_consumed`, the same token included. `NotFound` is 404
+/// `approval_not_found`. A `FailedPrecondition` whose message is one of the three
+/// closed approval tokens is 409 with that code, any other is 409 `not_resumable`.
+/// `InvalidArgument` is 400 `continue_incomplete`. `PermissionDenied` and
+/// `Unauthenticated` keep their status. Every other code (`Unavailable`,
+/// `DeadlineExceeded`, `Internal`, `Unknown`, `Cancelled`, `Aborted`, and any code
+/// added later) is 503 `continue_unavailable`: ambiguous by definition, because the
+/// consume may have committed. The upstream message of a closed code is never echoed.
+///
+/// A zero-retention catalogue refusal (recognised by its trailer, whatever the code it
+/// travels with) is the one exception to the code table: session-core refused the
+/// caller before it consumed anything, so it keeps its typed body, as the owner check's
+/// does, and is not folded into `not_resumable` or into the ambiguous 503.
+#[allow(clippy::result_large_err)]
+fn preconsume_refusal(outcome: Result<bool, tonic::Status>) -> Result<(), PreconsumeRefusal> {
+    match outcome {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(PreconsumeRefusal::Closed(
+            StatusCode::CONFLICT,
+            "continuation_already_consumed",
+        )),
+        Err(status) if mp_contracts::zdr_refusal::Refusal::from_status(&status).is_some() => {
+            Err(PreconsumeRefusal::Status(status))
+        }
+        Err(status) => {
+            // The closed status code only (never the message): the mapped refusal below
+            // folds every ambiguous code into one 503, and an operator needs to tell them
+            // apart (the first live /continue was refused with no way to see why).
+            tracing::warn!(grpc_code = ?status.code(), "the approval consume answered an error");
+            Err(match status.code() {
+            tonic::Code::NotFound => {
+                PreconsumeRefusal::Closed(StatusCode::NOT_FOUND, "approval_not_found")
+            }
+            tonic::Code::FailedPrecondition => PreconsumeRefusal::Closed(
+                StatusCode::CONFLICT,
+                match status.message() {
+                    "approval_not_granted" => "approval_not_granted",
+                    "approval_expired" => "approval_expired",
+                    "approval_not_resumable" => "approval_not_resumable",
+                    _ => "not_resumable",
+                },
+            ),
+            tonic::Code::InvalidArgument => {
+                PreconsumeRefusal::Closed(StatusCode::BAD_REQUEST, "continue_incomplete")
+            }
+            tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => {
+                PreconsumeRefusal::Status(status)
+            }
+            _ => PreconsumeRefusal::Closed(StatusCode::SERVICE_UNAVAILABLE, "continue_unavailable"),
+            })
+        }
+    }
+}
+
+/// The sequencing unit: consume, and only a consume that was won launches. `launch`
+/// is called at most once, strictly after the consume's answer, and not at all for a
+/// lost or failed consume. It is pure sequencing: it does not detach (see
+/// [`spawn_consume_then_launch`]), so it is testable with a plain `&C`.
+#[allow(clippy::result_large_err)]
+async fn consume_then_launch<C: ApprovalConsumer, T>(
+    consumer: &C,
+    request: mp_contracts::model_plane::v1::ConsumeApprovalRequest,
+    launch: impl FnOnce() -> T,
+) -> Result<T, PreconsumeRefusal> {
+    preconsume_refusal(consumer.consume(request).await)?;
+    Ok(launch())
+}
+
+/// Consume and launch as ONE detached task: the only `tokio::spawn` of the
+/// pre-consume flow. A client that disconnects while the consume is in flight drops
+/// the returned receiver, never the task, so a consume that was won is always
+/// followed by the launch (the launch sends the request to the executor and the
+/// stream task ignores a closed client channel). The caller awaits the receiver for
+/// the stream, or for the refusal; a receiver that is gone is ignored.
+///
+/// `C: ApprovalConsumer` carries `Send + Sync` (the task holds `&C` across an await),
+/// and the launch closure must own everything it uses: it is moved into the task.
+/// `T` is the stream the launch builds.
+fn spawn_consume_then_launch<C, T>(
+    consumer: C,
+    request: mp_contracts::model_plane::v1::ConsumeApprovalRequest,
+    launch: impl FnOnce() -> T + Send + 'static,
+) -> tokio::sync::oneshot::Receiver<Result<T, PreconsumeRefusal>>
+where
+    C: ApprovalConsumer + 'static,
+    T: Send + 'static,
+{
+    let (answer, receiver) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let outcome = consume_then_launch(&consumer, request, launch).await;
+        // A caller that disconnected is not an error: the launch has happened.
+        let _ = answer.send(outcome);
+    });
+    receiver
+}
+
+/// How the dispatch of a continuation to the executor failed, in the terms of the
+/// frames the client reads. The gateway never terminalizes on any of them: a refused
+/// continuation can be `continuation_already_consumed` while another segment of the
+/// same run is still live, and an unreachable or unknown outcome is left to the
+/// run's recovery deadline. A spent continuation says so on the run subject too
+/// ([`spent_dispatch_run_event`]): a refusal closes its attempt there with
+/// `RUN_CONTINUE_REFUSED`, the other two keep `RUN_DISPATCH_DEGRADED`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContinueDispatchFailure {
+    /// The executor refused, with this closed token ([`CONTINUE_FRAME_REFUSALS`]).
+    Refused(&'static str),
+    /// The connection was never made, so the request provably never left this process.
+    Unreachable,
+    /// Any other outcome: the continuation may be running.
+    Unknown,
+}
+
+/// The pure map from the status `RunAgent` failed with to what the client is told.
+///
+/// In this order: a zero-retention refusal (keyed on its catalogue code in the trailer,
+/// never on its message) is `durable_mutation_forbidden` for the durable-mutation code
+/// and `continue_refused` for any other; `NotFound` is `approval_not_found`; the five
+/// codes the executor refuses a continuation with are the closed token their message
+/// is, exactly, and `continue_refused` for any message not in
+/// [`CONTINUE_EXECUTOR_MESSAGE_TOKENS`] (an unlisted message is never echoed); a
+/// connect-phase failure is unreachable; everything else is unknown.
+///
+/// This map is SPEND-AGNOSTIC: it names what happened, not what the caller does about it.
+/// What `agentic_run_stream` does with the answer depends on whether the gateway itself
+/// consumed the approval, and the two regimes differ for three of the five carrier
+/// codes:
+/// - a continuation the gateway PRE-CONSUMED (the click is spent) takes every answer of
+///   this map as a typed frame with `approval_spent: true` and is never terminalized,
+///   including for `InvalidArgument`, `Unauthenticated` and `PermissionDenied`;
+/// - a continuation it did NOT pre-consume keeps the committed confirmed-rejection arm
+///   for those three codes (terminalization and `agent_dispatch_rejected`), which comes
+///   BEFORE the typed-refusal arm, so only `FailedPrecondition`, `Aborted`, `NotFound`
+///   and a zero-retention trailer on another code reach this map there. A caller that
+///   applies this map to a continuation without checking the spend first would turn a
+///   confirmed rejection into a refusal that terminalizes nothing.
+///
+/// The tests `the_dispatch_arms_of_a_continuation_are_spent_then_confirmed_then_typed_then_the_committed_ones`
+/// (the arm order) and the handler-level `continue_preconsume_test` (one case per regime)
+/// pin both.
+fn classify_continue_dispatch_failure(status: &tonic::Status) -> ContinueDispatchFailure {
+    use mp_contracts::zdr_refusal::Refusal;
+    if let Some(refusal) = Refusal::from_status(status) {
+        return ContinueDispatchFailure::Refused(
+            if refusal == Refusal::DURABLE_MUTATION_FORBIDDEN {
+                "durable_mutation_forbidden"
+            } else {
+                "continue_refused"
+            },
+        );
+    }
+    match status.code() {
+        tonic::Code::NotFound => return ContinueDispatchFailure::Refused("approval_not_found"),
+        tonic::Code::FailedPrecondition
+        | tonic::Code::Aborted
+        | tonic::Code::InvalidArgument
+        | tonic::Code::PermissionDenied
+        | tonic::Code::Unauthenticated => {
+            return ContinueDispatchFailure::Refused(
+                CONTINUE_EXECUTOR_MESSAGE_TOKENS
+                    .iter()
+                    .copied()
+                    .find(|token| *token == status.message())
+                    .unwrap_or("continue_refused"),
+            );
+        }
+        _ => {}
+    }
+    if dispatch_never_reached_execution_core(status) {
+        ContinueDispatchFailure::Unreachable
+    } else {
+        ContinueDispatchFailure::Unknown
+    }
+}
+
+/// The `error` frame of a refused or failed continuation: the closed token as code and
+/// as a plain message, never retryable, naming the run. Only when the gateway itself
+/// spent the approval does it carry `approval_spent: true`; without it the frame
+/// means the executor refused and the approval state is unknown to the gateway, so
+/// the client re-reads the approval before any retry. `token` is in
+/// [`CONTINUE_FRAME_REFUSALS`]. The extra fields are additive: a client that does not
+/// read them sees an ordinary `error` frame.
+fn continue_refusal_event(
+    request_id: &str,
+    run_id: &str,
+    token: &'static str,
+    spend: ApprovalSpend,
+) -> Event {
+    debug_assert!(
+        CONTINUE_FRAME_REFUSALS.contains(&token),
+        "{token} is not in the closed continue frame vocabulary"
+    );
+    let event = crate::sse_events::ChatEvent::Error {
+        code: token.to_owned(),
+        message: token.replace('_', " "),
+        retryable: false,
+    };
+    let mut payload = event.payload(request_id);
+    payload["run_id"] = json!(run_id);
+    if spend.is_spent() {
+        payload["approval_spent"] = json!(true);
+    }
+    Event::default()
+        .event(event.name())
+        .data(payload.to_string())
+}
+
+/// The frame for a failed dispatch of a continuation the gateway pre-consumed (the
+/// spent regime): a refusal is its closed token, an unreachable executor is
+/// `continue_unreachable`, anything else is `continue_outcome_unknown`. All are not
+/// retryable and say `approval_spent`, because the click is gone whichever way the
+/// dispatch failed; the client follows the run and never posts the continue again.
+fn continue_failure_event(
+    request_id: &str,
+    run_id: &str,
+    failure: &ContinueDispatchFailure,
+) -> Event {
+    let token = match *failure {
+        ContinueDispatchFailure::Refused(token) => token,
+        ContinueDispatchFailure::Unreachable => "continue_unreachable",
+        ContinueDispatchFailure::Unknown => "continue_outcome_unknown",
+    };
+    continue_refusal_event(request_id, run_id, token, ApprovalSpend::SpentByGateway)
+}
+
+/// The frame for a dispatch whose outcome the gateway cannot state. With nothing
+/// spent it is the committed `agent_dispatch_unavailable` (retryable, the run may be
+/// going); after a pre-consume a retry would be a 409 and the click is gone, so it is
+/// `continue_outcome_unknown`, not retryable, with `approval_spent`.
+fn dispatch_unknown_event(spend: ApprovalSpend, request_id: &str, run_id: &str) -> Event {
+    match spend {
+        ApprovalSpend::NotSpent => agent_dispatch_unavailable_event(request_id, run_id),
+        ApprovalSpend::SpentByGateway => {
+            continue_refusal_event(request_id, run_id, "continue_outcome_unknown", spend)
+        }
+    }
+}
+
+/// The codes of the `error` frames of one run-end family, the ones that follow the
+/// executor's ANSWER to a dispatch (not its refusal): the run ended failed
+/// (`agent_run_failed`), it ended in a status the gateway does not know
+/// (`agent_run_state_unknown`), or it completed and no answer could be read
+/// (`agent_run_output_unavailable`). After a pre-consume they are final and say
+/// `approval_spent` ([`run_end_error_event`]); the SPA contract lists the same three
+/// (`CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES`) and the BFF test pins the lists equal.
+///
+/// The typed subscription failures of a run that ended on one are the other family
+/// ([`CONTINUE_SPENT_SUBSCRIPTION_FRAMES`]); between them they are every `error` frame
+/// `agentic_run_stream` can send after the executor's answer.
+pub(crate) const CONTINUE_SPENT_RUN_END_FRAMES: &[&str] = &[
+    "agent_run_failed",
+    "agent_run_state_unknown",
+    "agent_run_output_unavailable",
+];
+
+/// The codes of the typed ChatGPT-subscription failure frame of a run that ended on one
+/// (`agent_subscription_failure`): a spent usage limit, an expired sign-in, and the rest
+/// of the closed set `subscription_failure::known_code` admits. After a pre-consume the
+/// frame keeps its code and text and becomes final ([`subscription_run_end_event`]); the
+/// SPA contract lists the same seven (`CHAT_RUN_CONTINUE_SPENT_SUBSCRIPTION_FRAMES`) and
+/// the BFF test pins the lists equal. A test below pins this list to the codes of
+/// `subscription_failure.rs`, so a code added there is not left a retryable frame after
+/// a spend.
+pub(crate) const CONTINUE_SPENT_SUBSCRIPTION_FRAMES: &[&str] = &[
+    "subscription_usage_limit",
+    "subscription_reauth_required",
+    "subscription_upstream_unavailable",
+    "subscription_bad_request",
+    "rate_limited",
+    "subscription_route_unavailable",
+    "prompt_too_long",
+];
+
+/// The `error` frame of a run the executor answered with a failure or without an answer:
+/// `agent_run_failed` (the run ended failed), `agent_run_state_unknown` (an unsupported
+/// status) or `agent_run_output_unavailable` (completed, nothing to say).
+///
+/// With nothing spent by the gateway it is exactly the committed frame: retryable, no
+/// run id, no `approval_spent`; so are the frames of every ordinary run. After a
+/// pre-consume the click is gone and a retry would be a 409, so the same code and text
+/// are not retryable, name the run and say `approval_spent`, like every other failure
+/// frame of a spent continuation. The gateway never terminalizes it either way: the
+/// executor owns the run's end.
+fn run_end_error_event(
+    request_id: &str,
+    run_id: &str,
+    code: &'static str,
+    message: &str,
+    spend: ApprovalSpend,
+) -> Event {
+    debug_assert!(
+        CONTINUE_SPENT_RUN_END_FRAMES.contains(&code),
+        "{code} is not one of the run-end frames of a continuation"
+    );
+    let event = crate::sse_events::ChatEvent::Error {
+        code: code.to_owned(),
+        message: message.to_owned(),
+        retryable: !spend.is_spent(),
+    };
+    if !spend.is_spent() {
+        return event.to_sse(request_id);
+    }
+    let mut payload = event.payload(request_id);
+    payload["run_id"] = json!(run_id);
+    payload["approval_spent"] = json!(true);
+    Event::default()
+        .event(event.name())
+        .data(payload.to_string())
+}
+
+/// The `error` frame of a run that ended on a typed ChatGPT-subscription failure (a spent
+/// usage limit, an expired sign-in): the committed frame, built by the one constructor every
+/// path uses, so its code, its text and its timing fields (`retry_after_ms`, `resets_at`,
+/// `retry_at`) are the failure's own.
+///
+/// With nothing spent by the gateway it is that frame BYTE for byte: retryable as the code
+/// says, no run id, no `approval_spent`. After a pre-consume the click is gone and a retry
+/// of the continue would be a 409, so only three fields change: `retryable` is false, the
+/// run is named and `approval_spent` is true. The code and the text stay, because they
+/// explain WHY the run ended and a person still needs that; what the frame no longer says
+/// is that trying the same click again is the way out. The gateway never terminalizes the
+/// run either way: execution-core ended it with its own receipt.
+fn subscription_run_end_event(
+    request_id: &str,
+    run_id: &str,
+    failure: &crate::subscription_failure::SubscriptionFailure,
+    message: String,
+    spend: ApprovalSpend,
+) -> Event {
+    debug_assert!(
+        CONTINUE_SPENT_SUBSCRIPTION_FRAMES.contains(&failure.code),
+        "{} is not one of the subscription failure frames of a continuation",
+        failure.code
+    );
+    let event = crate::sse_events::ChatEvent::subscription_error(failure, message);
+    if !spend.is_spent() {
+        return event.to_sse(request_id);
+    }
+    let mut payload = event.payload(request_id);
+    payload["retryable"] = json!(false);
+    payload["run_id"] = json!(run_id);
+    payload["approval_spent"] = json!(true);
+    Event::default()
+        .event(event.name())
+        .data(payload.to_string())
+}
+
+/// The run-subject event type that closes the attempt of a SPENT continuation whose
+/// `RunAgent` did not start a segment. `RUN_STARTED` is published before the dispatch
+/// result, so without it observers of `mp.v1.run.{run_id}.event` would see a started run
+/// that nothing closes until session-core recovery ends it, about 15 minutes after the
+/// spend.
+///
+/// - An executor refusal is `RUN_CONTINUE_REFUSED`: this ATTEMPT started no segment. It is
+///   attempt-level and not terminal, and it is NOT `RUN_DISPATCH_DEGRADED`: a refusal can
+///   be `continuation_already_consumed` while another segment of the run is live, and a
+///   run-level mark would call that live run degraded. Nor is it `RUN_FAILED` or
+///   `RUN_COMPLETED`: the gateway never ends the run it spent the click of.
+/// - An unreachable executor or an unknown outcome keeps `RUN_DISPATCH_DEGRADED`, as it
+///   always did: the continuation may be running, and degraded is the honest run-level
+///   word for "outcome unknown".
+///
+/// Every consumer of the run subject reads the type string and ignores one it does not
+/// know, so the new type changes no metric and ends nothing; it exists for an observer who
+/// reads the subject and wants to know the attempt is over.
+fn spent_dispatch_run_event(failure: &ContinueDispatchFailure) -> &'static str {
+    match failure {
+        ContinueDispatchFailure::Refused(_) => "RUN_CONTINUE_REFUSED",
+        ContinueDispatchFailure::Unreachable | ContinueDispatchFailure::Unknown => {
+            "RUN_DISPATCH_DEGRADED"
+        }
+    }
+}
+
+// ---- The park continue (build plan WS03 S8-A, S8-7): the resume of a PARKED run through the
+// one `/continue` route. It spends no approval and the gateway never terminalizes it: the run
+// stays parked until the executor resumes it, or session-core's park TTL ends it.
+
+/// The checks a park continue makes before anything is sent, as a pure function: the route is
+/// on and the turn keeps state ([`continue_turn_gate`]), the run has not ended, and the run is
+/// recorded as parked and resumable (`RunDetail.resumable` and a non-empty
+/// `RunDetail.park_reason`, which session-core shows the run's owner). No approval is read.
+fn park_preflight(
+    enabled: bool,
+    run_status: &str,
+    resumable: bool,
+    parked: bool,
+    persistent: bool,
+) -> Result<(), (StatusCode, &'static str)> {
+    continue_turn_gate(enabled, persistent)?;
+    if matches!(run_status, "completed" | "failed" | "cancelled") {
+        return Err((StatusCode::CONFLICT, "not_resumable"));
+    }
+    if !resumable || !parked {
+        return Err((StatusCode::CONFLICT, "not_resumable"));
+    }
+    Ok(())
+}
+
+/// The `error` frame of a park continue that did not start: the closed token as code and as a
+/// plain message, never retryable, naming the run, and the closed additive marker
+/// `park_continue: true`. It NEVER says `approval_spent`: a park continue spends no approval.
+/// `token` is in [`CONTINUE_FRAME_REFUSALS`].
+fn park_refusal_event(request_id: &str, run_id: &str, token: &'static str) -> Event {
+    debug_assert!(
+        CONTINUE_FRAME_REFUSALS.contains(&token),
+        "{token} is not in the closed continue frame vocabulary"
+    );
+    let event = crate::sse_events::ChatEvent::Error {
+        code: token.to_owned(),
+        message: token.replace('_', " "),
+        retryable: false,
+    };
+    let mut payload = event.payload(request_id);
+    payload["run_id"] = json!(run_id);
+    payload["park_continue"] = json!(true);
+    Event::default()
+        .event(event.name())
+        .data(payload.to_string())
+}
+
+/// The run-subject event that closes the attempt of a park continue the executor did not start.
+/// A refusal, and an executor that was never reached, are the attempt-level
+/// `RUN_CONTINUE_REFUSED` (nothing was claimed or started); an unknown outcome keeps the
+/// run-level `RUN_DISPATCH_DEGRADED`. Neither ends the run.
+fn park_dispatch_run_event(failure: &ContinueDispatchFailure) -> &'static str {
+    match failure {
+        ContinueDispatchFailure::Refused(_) | ContinueDispatchFailure::Unreachable => {
+            "RUN_CONTINUE_REFUSED"
+        }
+        ContinueDispatchFailure::Unknown => "RUN_DISPATCH_DEGRADED",
+    }
+}
+
+/// The token of the frame of a park continue the executor did not start: a refusal is its
+/// closed token, an unreachable executor `continue_unreachable`, anything else
+/// `continue_outcome_unknown`.
+fn park_frame_token(failure: &ContinueDispatchFailure) -> &'static str {
+    match *failure {
+        ContinueDispatchFailure::Refused(token) => token,
+        ContinueDispatchFailure::Unreachable => "continue_unreachable",
+        ContinueDispatchFailure::Unknown => "continue_outcome_unknown",
+    }
+}
+
+/// What [`park_dispatch_of`] makes of a dispatch result: the executor's refusal of a park
+/// continue, or the result untouched.
+enum ParkDispatch<R> {
+    Refused(tonic::Status),
+    Pass(R),
+}
+
+/// Takes the executor's refusal (`Ok(Ok(Err(status)))`) of a PARK continue out of the dispatch
+/// result before `agentic_run_stream`'s dispatch match sees it, so that match keeps its
+/// committed arms. Everything else (a park's answer, a follow deadline, a join error, and every
+/// result of a run that is not a park continue) passes untouched.
+#[allow(clippy::type_complexity)]
+fn park_dispatch_of<T, J, D>(
+    parking: bool,
+    result: Result<Result<Result<T, tonic::Status>, J>, D>,
+) -> ParkDispatch<Result<Result<Result<T, tonic::Status>, J>, D>> {
+    match result {
+        Ok(Ok(Err(status))) if parking => ParkDispatch::Refused(status),
+        other => ParkDispatch::Pass(other),
+    }
+}
+
+/// The payload of the `connected` frame: the ids of the prepared run, so a client can
+/// follow it. With nothing spent it is exactly the committed payload; after a
+/// pre-consume it adds `approval_spent: true`, so a client knows from the first frame
+/// that it must never post the continue again, whatever frames follow.
+fn connected_payload(
+    run_id: &str,
+    thread_id: &str,
+    request_id: &str,
+    spend: ApprovalSpend,
+) -> Value {
+    let mut payload = json!({
+        "ok": true,
+        "run_id": run_id,
+        "thread_id": thread_id,
+        "request_id": request_id,
+    });
+    if spend.is_spent() {
+        payload["approval_spent"] = json!(true);
+    }
+    payload
+}
+
+/// `POST /v1/orchestration/runs/{run_id}/continue` (build plan WS03 S3): continue a
+/// run that paused for a granted approval, as a fresh segment of the SAME run.
+///
+/// The invoke path refuses a run that is already started (`managed_run_already_started`).
+/// This is the one caller that legitimately reuses a started run, and it does so
+/// only after the owner, the approval and the switch are checked here, and after
+/// the approval is consumed exactly once. The segment's tools and authority come from
+/// the pause's retained snapshot, never from this request.
+///
+/// Who consumes depends on `EXECUTION_LOOP_RESUME_ENABLED`, read once through
+/// [`mp_contracts::loop_fold::loop_resume_enabled`]. Off: execution-core consumes, as it
+/// always did, and the route is the committed one. On: this gateway consumes first (spend
+/// only, with the user's session bearer) in one detached task that also launches the run,
+/// so a client that disconnects cannot spend the click without the run being sent; only a
+/// consume this request won launches, every other answer is a closed HTTP refusal, and
+/// execution-core's own consume is then a same-claim replay (accepted only with the effect
+/// ledger on: the switches are one coupled flip, see the failure matrix of the build plan).
+pub(crate) async fn continue_run(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    model_bearer: VerifiedModelBearer,
+    inference_bearer: VerifiedInferenceBearer,
+    execution_bearer: Option<Extension<VerifiedExecutionBearer>>,
+    data_plane_bearer: Option<Extension<VerifiedBearer>>,
+    axum::extract::Path(run_id): axum::extract::Path<String>,
+    axum::Json(req): axum::Json<ContinueRunRequest>,
+) -> Result<Sse<ReceiverStream<Result<Event, Infallible>>>, (StatusCode, Json<Value>)> {
+    crate::zdr_posture::continuation_gate(&claims)?;
+    // A waived or ZDR turn is refused before the body, the run or the approval is
+    // read: `continuation_gate` above lets a waiver through (a cold approval's
+    // decision must still work), but a waived run keeps no state to continue.
+    continue_persistent_gate(
+        mp_contracts::loop_fold::continue_after_approval_enabled(),
+        &claims,
+    )
+    .map_err(|(status, code)| continue_error(status, code))?;
+    // The park form (WS03 S8-A): an EXACTLY empty approval id, accepted only with this
+    // service's parking switch on, resumes the run's current parked fold. With the switch off
+    // it is the committed 400, and so is a blank id that is not empty.
+    let parking = req.approval_id.is_empty() && mp_contracts::loop_fold::loop_parking_enabled();
+    if (!parking && req.approval_id.trim().is_empty()) || req.claim_token.trim().is_empty() {
+        return Err(continue_error(StatusCode::BAD_REQUEST, "continue_incomplete"));
+    }
+    let (Some(Extension(execution_bearer)), Some(Extension(data_plane_bearer))) =
+        (execution_bearer, data_plane_bearer)
+    else {
+        return Err(continue_error(StatusCode::UNAUTHORIZED, "missing_bearer"));
+    };
+    crate::session_flow::require_durable_run_owner_with_token(
+        &state,
+        &run_id,
+        &claims.org_id,
+        &claims.user_id,
+        model_bearer.as_str(),
+    )
+    .await
+    .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?;
+
+    let detail = state
+        .run_client
+        .clone()
+        .get_run(authenticated_session_request(
+            mp_contracts::model_plane::v1::GetRunRequest {
+                run_id: run_id.clone(),
+            },
+            &model_bearer,
+        )
+        .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?)
+        .await
+        .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?
+        .into_inner();
+    if parking {
+        // A park continue names no approval, so none is read: the run's own record says
+        // whether it is parked and resumable.
+        park_preflight(
+            mp_contracts::loop_fold::continue_after_approval_enabled(),
+            &detail.status,
+            detail.resumable,
+            !detail.park_reason.is_empty(),
+            continue_turn_is_persistent(&claims),
+        )
+        .map_err(|(status, code)| continue_error(status, code))?;
+    } else {
+        let approval = state
+            .orchestration_client
+            .clone()
+            .get_approval(authenticated_session_request(
+                mp_contracts::model_plane::v1::GetApprovalRequest {
+                    approval_id: req.approval_id.clone(),
+                    // Scoped to the verified org, never a client value.
+                    org_id: claims.org_id.clone(),
+                },
+                &model_bearer,
+            )
+            .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?)
+            .await
+            .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?
+            .into_inner()
+            .approval;
+        let granted = mp_contracts::model_plane::v1::ApprovalState::Granted as i32;
+        let (matches_run, is_granted, mode, consumed) = match approval.as_ref() {
+            Some(approval) => (
+                approval.run_id == run_id,
+                approval.state == granted,
+                approval.continuation_mode.clone(),
+                approval.consumed_at.is_some(),
+            ),
+            None => (false, false, String::new(), false),
+        };
+        continue_preflight(
+            mp_contracts::loop_fold::continue_after_approval_enabled(),
+            &detail.status,
+            matches_run,
+            is_granted,
+            &mode,
+            consumed,
+            continue_turn_is_persistent(&claims),
+        )
+        .map_err(|(status, code)| continue_error(status, code))?;
+    }
+
+    // The resume switch is read ONCE, here. It decides the stage the gateway asks for
+    // (`loop` only for a run whose pause is recorded as resumable), whether the gateway
+    // consumes the approval itself before it opens the stream, and what the stream will
+    // say about the spend. With it off nothing below differs from the route as it was.
+    let resume_enabled = mp_contracts::loop_fold::loop_resume_enabled();
+    let mode = resume_mode_for(resume_enabled, detail.resumable, parking);
+    // A park resume needs the executor's resume path, which this switch also gates.
+    if parking && !resume_enabled {
+        return Err(continue_error(StatusCode::CONFLICT, "continue_disabled"));
+    }
+    // From here on `resume_enabled` means "an approval continuation the gateway may
+    // pre-consume". A park continue spends no approval, so it skips the pre-check below (a
+    // construction failure of its request is answered by the stream, with a `park_continue`
+    // frame), is launched as NotSpent and never reaches the consume.
+    let resume_enabled = resume_enabled && !parking;
+
+    // The gateway is about to spend the click. The one local failure its launch can still
+    // have, a credential that is not valid metadata, is checked BEFORE the consume, so a
+    // request that can never be sent does not spend anything: the client is told
+    // `continue_refused` with nothing spent and the approval stays usable. The launch builds
+    // the real request later and still handles a failure there after a spend. With the
+    // switch off none of this runs.
+    if resume_enabled {
+        if let Err(error) = run_agent_request_is_buildable(
+            &execution_bearer,
+            &data_plane_bearer,
+            &model_bearer,
+            &inference_bearer,
+        ) {
+            tracing::warn!(%error, run_id = %run_id, "continuation refused before the consume: its RunAgent request cannot be built");
+            return Ok(unbuildable_continuation_stream(&run_id));
+        }
+    }
+
+    // The run already exists: reuse it under its own managed obligation, so one
+    // terminal receipt covers the whole run (decision recorded in the build plan).
+    let run = crate::session_flow::SessionRun {
+        thread_id: detail.thread_id.clone(),
+        run_id: run_id.clone(),
+        org_id: claims.org_id.clone(),
+        already_started: true,
+        terminal_source: mp_contracts::model_plane::v1::ManagedRunSource::ExecutionAgent,
+    };
+    let resume = continue_resume(&req.approval_id, &req.claim_token, mode);
+
+    // What the pre-consume needs, built from clones BEFORE the launch closure takes
+    // ownership of the state and the bearers.
+    let consumer =
+        GrpcApprovalConsumer::new(state.consume_client.clone(), model_bearer.clone());
+    let preconsume = preconsume_request(
+        &claims.org_id,
+        &run_id,
+        &req.approval_id,
+        &req.claim_token,
+    );
+    let (org_id, user_id) = (claims.org_id.clone(), claims.user_id.clone());
+
+    // The ONE launch: it owns everything it uses, so it can run in a detached task. The
+    // spend is computed INSIDE it, so it is claimed only when the closure runs: at once
+    // with the switch off (where it says `NotSpent`), or after a won consume with it on.
+    // A lost or refused consume never reaches it and so never claims `approval_spent`.
+    let launch = move || {
+        agentic_run_stream(
+            state,
+            run,
+            new_ulid(),
+            org_id,
+            user_id,
+            String::new(),
+            detail.goal,
+            Vec::new(),
+            Vec::new(),
+            false,
+            None,
+            0,
+            CONTINUE_PERMISSION_MODE.to_owned(),
+            false,
+            // A continuation is never an execute turn: its authority is the pause's.
+            false,
+            execution_bearer,
+            data_plane_bearer,
+            model_bearer,
+            inference_bearer,
+            String::new(),
+            None,
+            // A continuation never forwards a browser bearer (WS21-S2).
+            None,
+            AgentRoute::default(),
+            None,
+            Some(resume),
+            approval_spend_for(resume_enabled),
+            // A continuation resumes the run's own context.
+            None,
+            // And re-requests its attachments rather than carrying them (v1).
+            Vec::new(),
+            Vec::new(),
+            // A continuation carries no effort level (WS11-S8).
+            0,
+        )
+    };
+    if !resume_enabled {
+        return Ok(launch());
+    }
+
+    // The gateway spends the click itself, in one detached task together with the
+    // launch: a client that disconnects while the consume is in flight cannot spend an
+    // approval without the run being sent. Only a consume THIS request won launches.
+    match spawn_consume_then_launch(consumer, preconsume, launch).await {
+        Ok(Ok(stream)) => Ok(stream),
+        Ok(Err(PreconsumeRefusal::Closed(status, code))) => {
+            tracing::warn!(run_id = %run_id, refusal = code, "continuation not started: the approval consume was refused");
+            Err(continue_error(status, code))
+        }
+        Ok(Err(PreconsumeRefusal::Status(status))) => {
+            tracing::warn!(run_id = %run_id, code = ?status.code(), "continuation not started: the approval consume was refused");
+            Err(crate::http_routes::grpc_status_to_http(&status))
+        }
+        Err(_task_gone) => {
+            tracing::error!(run_id = %run_id, "the approval consume task ended without an answer");
+            Err(continue_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "continue_unavailable",
+            ))
+        }
+    }
+}
+
+#[cfg(test)]
+mod continue_run_tests {
+    use super::*;
+    use mp_contracts::agentic_subscription::PROVIDER_ID;
+
+    /// A user token as Auth Core mints it, decoded by the same serde path the middleware uses.
+    fn token(zdr: bool, org_zdr: Option<bool>, waiver: Option<Value>) -> Claims {
+        let mut payload = json!({
+            "sub": "user-1",
+            "iss": "https://auth.test/model",
+            "aud": "model-gateway",
+            "exp": 4_102_444_800_i64,
+            "nbf": 1_700_000_000_i64,
+            "org_id": "org-1",
+            "user_id": "user-1",
+            "principal_type": "user",
+            "zdr": zdr,
+        });
+        if let Some(org_zdr) = org_zdr {
+            payload["org_zdr"] = json!(org_zdr);
+        }
+        if let Some(waiver) = waiver {
+            payload["zdr_waiver"] = waiver;
+        }
+        serde_json::from_value(payload).expect("a minted token's payload is valid Claims")
+    }
+
+    /// The checks with every other input fine: the one under test is the argument that varies.
+    fn preflight(
+        enabled: bool,
+        run_status: &str,
+        matches_run: bool,
+        granted: bool,
+        mode: &str,
+        consumed: bool,
+        persistent: bool,
+    ) -> Result<(), (StatusCode, &'static str)> {
+        continue_preflight(enabled, run_status, matches_run, granted, mode, consumed, persistent)
+    }
+
+    #[test]
+    fn a_continuation_is_refused_while_the_switch_is_off() {
+        assert_eq!(
+            preflight(false, "running", true, true, "loop", false, true),
+            Err((StatusCode::CONFLICT, "continue_disabled"))
+        );
+    }
+
+    #[test]
+    fn a_finished_run_is_not_resumable() {
+        for status in ["completed", "failed", "cancelled"] {
+            assert_eq!(
+                preflight(true, status, true, true, "loop", false, true),
+                Err((StatusCode::CONFLICT, "not_resumable")),
+                "{status}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_granted_loop_approval_of_this_run_continues() {
+        assert_eq!(
+            preflight(true, "running", false, true, "loop", false, true),
+            Err((StatusCode::NOT_FOUND, "approval_not_found"))
+        );
+        assert_eq!(
+            preflight(true, "running", true, false, "loop", false, true),
+            Err((StatusCode::CONFLICT, "approval_not_granted"))
+        );
+        assert_eq!(
+            preflight(true, "running", true, true, "", false, true),
+            Err((StatusCode::CONFLICT, "not_resumable")),
+            "a cold approval belongs to the delivery worker"
+        );
+        assert_eq!(
+            preflight(true, "running", true, true, "loop", false, true),
+            Ok(())
+        );
+    }
+
+    /// Every consumed approval is refused at the gateway, for every caller: a
+    /// second `/continue` with another claim, and a retry with the same one. A
+    /// same-claim replay on stage 1 can run the call again when the ledger is off,
+    /// so the retry is not a recovery path; the recovery of a crash after the
+    /// consume is the park window or an unknown outcome.
+    #[test]
+    fn a_consumed_approval_is_refused_with_409() {
+        assert_eq!(
+            preflight(true, "running", true, true, "loop", true, true),
+            Err((StatusCode::CONFLICT, "continuation_already_consumed"))
+        );
+        // Not a not-found or a not-granted: those still say what they always said.
+        assert_eq!(
+            preflight(true, "running", false, true, "loop", true, true),
+            Err((StatusCode::NOT_FOUND, "approval_not_found"))
+        );
+        assert_eq!(
+            preflight(true, "running", true, false, "loop", true, true),
+            Err((StatusCode::CONFLICT, "approval_not_granted"))
+        );
+    }
+
+    /// A waived or ZDR turn keeps no durable state, so it is refused before any
+    /// lookup or upstream call. The shared `continuation_gate` lets a waiver
+    /// through (a cold approval's decision must still work), so this check lives
+    /// here and nowhere else.
+    #[test]
+    fn a_non_persistent_turn_is_refused_before_any_work() {
+        assert_eq!(
+            preflight(true, "running", true, true, "loop", false, false),
+            Err((StatusCode::CONFLICT, "not_resumable"))
+        );
+        // Refused before the run, the approval or its state is read: even an
+        // approval that does not exist is not looked up for such a turn.
+        assert_eq!(
+            preflight(true, "running", false, false, "", false, false),
+            Err((StatusCode::CONFLICT, "not_resumable"))
+        );
+        // The switch off still answers first: nothing else is said about a disabled route.
+        assert_eq!(
+            preflight(false, "running", true, true, "loop", false, false),
+            Err((StatusCode::CONFLICT, "continue_disabled"))
+        );
+    }
+
+    #[test]
+    fn only_a_persistent_credential_is_a_persistent_continue_turn() {
+        let persistent = token(false, Some(false), None);
+        assert!(continue_turn_is_persistent(&persistent));
+        assert!(
+            continue_turn_is_persistent(&token(false, None, None)),
+            "a token that states no org posture is an ordinary persistent one"
+        );
+        let waived = token(
+            false,
+            Some(true),
+            Some(json!({"version": 1, "provider": PROVIDER_ID, "connection": "conn-1"})),
+        );
+        assert!(
+            !continue_turn_is_persistent(&waived),
+            "a waiver is for one connection's inference, not for a durable continuation"
+        );
+        assert!(!continue_turn_is_persistent(&token(true, Some(true), None)));
+        // A credential the resolver refuses is not persistent either.
+        assert!(!continue_turn_is_persistent(&token(false, Some(true), None)));
+    }
+
+    /// The segment number is the executor's to derive from the step that paused.
+    /// The gateway sends 0, never a literal: the old literal 2 gave every
+    /// continuation of one run the same step prefix.
+    #[test]
+    fn the_gateway_leaves_the_segment_number_to_the_executor() {
+        for mode in ["segment", "loop"] {
+            let resume = continue_resume("appr_1", "claim-1", mode);
+            assert_eq!(
+                resume.segment_no, 0,
+                "the executor derives the number; 0 says so, in either stage (mode {mode})"
+            );
+        }
+        let resume = continue_resume("appr_1", "claim-1", "segment");
+        assert_eq!(resume.mode, "segment");
+        assert_eq!(resume.approval_id, "appr_1");
+        assert_eq!(resume.claim_token, "claim-1");
+        assert!(resume.brief.is_empty(), "a brief is never client-authored");
+    }
+
+    /// The early refusal, as `continue_run` calls it: a waived or ZDR turn is
+    /// refused before anything else is read, and only while the switch is on.
+    #[test]
+    fn a_non_persistent_turn_is_refused_at_the_handler_boundary() {
+        let persistent = token(false, Some(false), None);
+        let waived = token(
+            false,
+            Some(true),
+            Some(json!({"version": 1, "provider": PROVIDER_ID, "connection": "conn-1"})),
+        );
+        let zdr = token(true, Some(true), None);
+
+        // A waived token's `zdr` flag is false: only the persistence check refuses it.
+        assert_eq!(
+            continue_persistent_gate(true, &waived),
+            Err((StatusCode::CONFLICT, "not_resumable"))
+        );
+        assert_eq!(
+            continue_persistent_gate(true, &zdr),
+            Err((StatusCode::CONFLICT, "not_resumable"))
+        );
+        assert_eq!(continue_persistent_gate(true, &persistent), Ok(()));
+        // With the switch off the route answers exactly as it always did: this gate
+        // says nothing, and `continue_preflight` says `continue_disabled`.
+        assert_eq!(continue_persistent_gate(false, &waived), Ok(()));
+        assert_eq!(continue_persistent_gate(false, &persistent), Ok(()));
+    }
+
+    /// `continue_run` must call the helper the test above pins, before the body, the
+    /// run or the approval is read. A handler that stopped calling it would pass
+    /// every pure test and refuse nothing.
+    #[test]
+    fn continue_run_calls_the_persistent_gate_before_it_reads_anything() {
+        let source = include_str!("sse.rs");
+        let body = source
+            .split("pub(crate) async fn continue_run(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n#[cfg(test)]").next())
+            .expect("continue_run is in this file");
+        let gate = body
+            .find("continue_persistent_gate(")
+            .expect("continue_run calls continue_persistent_gate");
+        for later in ["req.approval_id.trim()", "require_durable_run_owner", ".get_run(", ".get_approval("] {
+            let at = body.find(later).unwrap_or_else(|| panic!("{later} is in continue_run"));
+            assert!(gate < at, "the gate must come before {later}");
+        }
+    }
+
+    /// The `RunAgentRequest` a `/continue` sends to execution-core, as a pure function
+    /// of what the gateway reads (the run, the verified caller, the run's goal, the
+    /// thread's current grant and the run budget). Everything else is a neutral
+    /// placeholder: the continuation's tools and authority are the pause's retained
+    /// snapshot, and a request that states anything wider than the pause is refused by
+    /// the executor after the single-use consume. `granted` is passed so the test can
+    /// show it makes no difference.
+    ///
+    /// It calls the same [`resolved_run_agent_request`] the dispatch uses, with the
+    /// arguments `continue_run` hands `agentic_run_stream` (the neutral literals, and
+    /// `CONTINUE_PERMISSION_MODE`, which both share). It lives here, not in the
+    /// handler, because the handler's request is built inside the spawned stream.
+    fn continue_run_agent_request(
+        run: &crate::session_flow::SessionRun,
+        org_id: &str,
+        user_id: &str,
+        goal: &str,
+        resume: mp_contracts::model_plane::v1::AgentResume,
+        granted: Option<mp_contracts::model_plane::v1::AutonomyRung>,
+        budget: crate::run_budget::RunBudget,
+    ) -> RunAgentRequest {
+        resolved_run_agent_request(
+            run,
+            org_id,
+            user_id,
+            "",
+            goal,
+            &[],
+            false,
+            0,
+            CONTINUE_PERMISSION_MODE,
+            false,
+            granted,
+            "",
+            None,
+            &AgentRoute::default(),
+            budget,
+            Some(resume),
+            None,
+            Vec::new(),
+            Vec::new(),
+            0,
+        )
+    }
+
+    /// One dispatch's request with the given resume and turn level, through the same
+    /// [`resolved_run_agent_request`] a dispatch uses.
+    fn request_at_level(
+        resume: Option<mp_contracts::model_plane::v1::AgentResume>,
+        run_effort: i32,
+    ) -> RunAgentRequest {
+        resolved_run_agent_request(
+            &continue_run_record(),
+            "org-1",
+            "user-1",
+            "gpt-5.6-terra",
+            "research the Q3 numbers",
+            &[],
+            false,
+            0,
+            "ask",
+            false,
+            None,
+            "",
+            None,
+            &AgentRoute::default(),
+            crate::run_budget::RunBudget::default(),
+            resume,
+            None,
+            Vec::new(),
+            Vec::new(),
+            run_effort,
+        )
+    }
+
+    /// A fresh run carries the level its turn asked for.
+    #[test]
+    fn a_fresh_do_run_carries_the_turn_level() {
+        assert_eq!(request_at_level(None, 4).reasoning_effort, 4);
+    }
+
+    /// A continuation segment carries only what its own request sends, and it sends no level,
+    /// whatever its turn asked for.
+    #[test]
+    fn a_continuation_carries_no_level() {
+        let resume = continue_resume("appr_1", "claim-1", "segment");
+        assert_eq!(request_at_level(Some(resume), 4).reasoning_effort, 0);
+    }
+
+    fn continue_run_record() -> crate::session_flow::SessionRun {
+        crate::session_flow::SessionRun {
+            thread_id: "thread-1".to_owned(),
+            run_id: "run-1".to_owned(),
+            org_id: "org-1".to_owned(),
+            already_started: true,
+            terminal_source: mp_contracts::model_plane::v1::ManagedRunSource::ExecutionAgent,
+        }
+    }
+
+    fn continue_request_for(
+        granted: Option<mp_contracts::model_plane::v1::AutonomyRung>,
+        budget: crate::run_budget::RunBudget,
+    ) -> RunAgentRequest {
+        continue_run_agent_request(
+            &continue_run_record(),
+            "org-1",
+            "user-1",
+            "the run's goal",
+            continue_resume("appr_1", "claim-1", "segment"),
+            granted,
+            budget,
+        )
+    }
+
+    /// The request a real `/continue` builds states no rung, whatever the thread's
+    /// grant is now. The authority of a continuation is the pause's, and
+    /// execution-core refuses a request that states a WIDER rung than the pause only
+    /// after the single-use consume, which spends the click and strands the run. The
+    /// grant can legitimately be equal to, wider than or narrower than the rung the
+    /// run paused with (an approved plan can widen the thread's grant after the
+    /// pause), so the gateway cannot state it at all.
+    #[test]
+    fn a_real_continue_states_no_rung_whatever_the_threads_grant_is() {
+        use mp_contracts::model_plane::v1::AutonomyRung as Rung;
+        for granted in [
+            None,
+            Some(Rung::Unspecified),
+            Some(Rung::ReadOnly),
+            Some(Rung::WorkspaceWrite),
+            Some(Rung::DangerFullAccess),
+        ] {
+            let req = continue_request_for(granted, crate::run_budget::RunBudget::default());
+            assert_eq!(
+                req.autonomy_rung,
+                Rung::Unspecified as i32,
+                "grant {granted:?}: the stated authority comes from the paused snapshot"
+            );
+        }
+    }
+
+    /// Everything else a `/continue` states is a neutral placeholder the executor
+    /// reads as "not stated": mode `ask`, no floor, no Space, no route, not plan
+    /// mode, not ZDR, the default 4 rounds, and the resume it was built with.
+    #[test]
+    fn a_real_continue_states_only_neutral_placeholders() {
+        let req = continue_request_for(
+            Some(mp_contracts::model_plane::v1::AutonomyRung::DangerFullAccess),
+            crate::run_budget::RunBudget::default(),
+        );
+        assert_eq!(req.max_rounds, 4);
+        assert_eq!(req.mode, "ask");
+        assert!(!req.plan_mode);
+        assert!(!req.zdr);
+        assert_eq!(req.min_privacy_tier, 0);
+        assert_eq!(req.space_id, "");
+        assert_eq!(req.provider_hint, "");
+        assert_eq!(req.subscription_connection_id, "");
+        assert!(req.tools.is_empty(), "the tools are the pause's, never the request's");
+        assert_eq!(req.goal, "the run's goal");
+        assert_eq!(req.run_id, "run-1");
+        let resume = req.resume.expect("a continuation carries its resume");
+        assert_eq!(resume.segment_no, 0);
+        assert_eq!(resume.approval_id, "appr_1");
+        assert_eq!(resume.claim_token, "claim-1");
+    }
+
+    /// The rung rule for every other run is unchanged: plan mode is read-only, and a
+    /// plain run states the rung its thread was granted.
+    #[test]
+    fn only_a_resume_gives_up_the_threads_grant() {
+        use mp_contracts::model_plane::v1::AutonomyRung as Rung;
+        let granted = Some(Rung::WorkspaceWrite);
+        assert_eq!(
+            dispatch_autonomy_rung(false, false, granted),
+            Rung::WorkspaceWrite as i32,
+            "a plain run states its thread's grant"
+        );
+        assert_eq!(dispatch_autonomy_rung(false, false, None), Rung::Unspecified as i32);
+        assert_eq!(
+            dispatch_autonomy_rung(true, false, granted),
+            Rung::ReadOnly as i32,
+            "plan mode is read-only, grant or not"
+        );
+        assert_eq!(
+            dispatch_autonomy_rung(false, true, granted),
+            Rung::Unspecified as i32,
+            "a resume states nothing: the pause's authority applies"
+        );
+        assert_eq!(
+            dispatch_autonomy_rung(true, true, granted),
+            Rung::ReadOnly as i32,
+            "a request may always NARROW: plan mode stays read-only"
+        );
+    }
+
+    /// The text of `agentic_run_stream`'s plan-context gate: the code from the binding of
+    /// `plan_context` to the dispatch that follows it. Comment lines are dropped, so a
+    /// mention of the gate in a comment cannot stand in for the gate itself.
+    fn plan_context_gate() -> String {
+        let source = include_str!("sse.rs").replace("\r\n", "\n");
+        let code: String = source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let from = code
+            .find("let plan_context = ")
+            .expect("agentic_run_stream binds plan_context");
+        let rest = &code[from..];
+        let to = rest
+            .find("spawn_run_dispatch(")
+            .expect("plan_context is bound before the dispatch");
+        rest[..to].to_owned()
+    }
+
+    /// A continuation never asks for the thread's approved plan. Its goal and authority are
+    /// the pause's, and the plan is a single-use grant for the next ordinary run of the
+    /// thread: a `/continue` that took it would spend the grant on the wrong run.
+    #[test]
+    fn a_continuation_never_takes_the_threads_approved_plan() {
+        assert!(
+            !plan_context_wanted(false, true),
+            "a continuation asks for no plan context, so the grant stays pending"
+        );
+        assert!(
+            !plan_context_wanted(true, true),
+            "a plan-mode continuation asks for none either"
+        );
+        // The grant is reached from this run only through `approved_plan_context`, and that
+        // request sits behind the decision, exactly once.
+        let gate = plan_context_gate();
+        let decision = gate
+            .find("if plan_context_wanted(plan_mode, resume.is_some()) {")
+            .expect("the plan context is requested only behind plan_context_wanted");
+        let request = gate
+            .find("approved_plan_context(")
+            .expect("an ordinary run still requests the plan context");
+        assert!(decision < request, "the request comes after the decision: {gate}");
+        assert_eq!(gate.matches("approved_plan_context(").count(), 1, "{gate}");
+        assert!(
+            !gate.contains("take_approved_plan"),
+            "the store is read only inside approved_plan_context: {gate}"
+        );
+    }
+
+    /// An ordinary run is handed its thread's plan exactly as before: without a resume the
+    /// rule is the one it always was (`!plan_mode`), and the request is still made.
+    #[test]
+    fn an_ordinary_run_still_takes_the_threads_approved_plan() {
+        for plan_mode in [false, true] {
+            assert_eq!(
+                plan_context_wanted(plan_mode, false),
+                !plan_mode,
+                "without a resume the rule is the one it always was (plan_mode {plan_mode})"
+            );
+        }
+        let gate = plan_context_gate();
+        assert!(
+            gate.contains("&model_bearer,
+                durable_grant.as_ref(),
+            )
+            .await"),
+            "the ordinary request is unchanged: {gate}"
+        );
+    }
+
+    /// `continue_run` builds its request through the function the tests above use,
+    /// and fixes the posture literal it shares with it.
+    #[test]
+    fn continue_run_builds_its_request_the_way_the_tests_see_it() {
+        let source = include_str!("sse.rs");
+        let body = source
+            .split("pub(crate) async fn continue_run(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n#[cfg(test)]").next())
+            .expect("continue_run is in this file");
+        assert!(body.contains("continue_resume("), "continue_run builds its resume with continue_resume");
+        assert!(
+            body.contains("CONTINUE_PERMISSION_MODE"),
+            "the posture literal is shared with the request builder"
+        );
+        assert!(!body.contains("segment_no"), "the segment number is continue_resume's alone");
+    }
+
+    /// The posture matrix through the handler's own functions. `/continue` decides its turn
+    /// from the caller's one bearer with no route (`Route::plain(false)`), so for every bearer of
+    /// every enforcement row of `tests/fixtures/zdr-posture-matrix.json` the early gate and the
+    /// preflight serve it exactly when it is a persistent credential: not ZDR, its org not ZDR, no
+    /// waiver. A waived bearer's `zdr` claim is false, so a check written as "not ZDR" would serve
+    /// it; the matrix has waived bearers, and this fails if one is served.
+    #[test]
+    fn every_enforcement_row_of_the_matrix_is_continued_only_for_a_persistent_bearer() {
+        const MATRIX: &str = include_str!("../tests/fixtures/zdr-posture-matrix.json");
+        let matrix: Value = serde_json::from_str(MATRIX).expect("the vendored matrix is JSON");
+        let (mut served, mut waived_refused) = (0_usize, 0_usize);
+        for row in matrix["enforcement_rows"]
+            .as_array()
+            .expect("rows are an array")
+        {
+            let id = row["id"].as_str().unwrap_or("?");
+            let bearers = row["inputs"]["bearers"]
+                .as_array()
+                .expect("bearers are an array");
+            for bearer in bearers {
+                let waiver = (!bearer["waiver"].is_null()).then(|| bearer["waiver"].clone());
+                let claims = token(
+                    bearer["zdr"].as_bool().expect("every bearer states zdr"),
+                    bearer["org_zdr"].as_bool(),
+                    waiver.clone(),
+                );
+                let persistent =
+                    bearer["zdr"] == false && bearer["org_zdr"] != true && waiver.is_none();
+                assert_eq!(
+                    continue_turn_is_persistent(&claims),
+                    persistent,
+                    "{id}: {bearer}"
+                );
+                assert_eq!(
+                    continue_persistent_gate(true, &claims).is_ok(),
+                    persistent,
+                    "{id}: the early gate must serve a persistent bearer and no other"
+                );
+                // Everything else fine: the persistence of the turn alone decides the preflight.
+                let turn = continue_turn_is_persistent(&claims);
+                assert_eq!(
+                    preflight(true, "running", true, true, "loop", false, turn).is_ok(),
+                    persistent,
+                    "{id}: the preflight must serve a persistent bearer and no other"
+                );
+                if persistent {
+                    served += 1;
+                } else if waiver.is_some() && bearer["zdr"] == false {
+                    waived_refused += 1;
+                }
+            }
+            // Where the row and /continue name the same turn (one bearer, no ZDR asked for), the
+            // matrix's own decision says the same.
+            if bearers.len() == 1 && row["inputs"]["route"]["explicit_zdr"] != true {
+                let claims = token(
+                    bearers[0]["zdr"].as_bool().expect("zdr"),
+                    bearers[0]["org_zdr"].as_bool(),
+                    (!bearers[0]["waiver"].is_null()).then(|| bearers[0]["waiver"].clone()),
+                );
+                match row["expect"]["decision"].as_str() {
+                    Some("persistent") => assert!(continue_turn_is_persistent(&claims), "{id}"),
+                    Some("zdr" | "waived") => {
+                        assert!(!continue_turn_is_persistent(&claims), "{id}")
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(
+            served >= 3 && waived_refused >= 2,
+            "served {served}, waived refused {waived_refused}"
+        );
+    }
+
+    // ---- S7c-A4: the pieces of the gateway's pre-consume, tested one at a time: the
+    // pure maps, the sequencing, the detach and the consumer over a real transport.
+    // `continue_run` wires them (S7c-B1) behind `EXECUTION_LOOP_RESUME_ENABLED`; with
+    // the switch off the route answers as the tests above pin, and the handler-level
+    // scenarios are in `tests/continue_preconsume_test.rs`. ----
+
+    /// The production text of this file: everything before this test module, line
+    /// endings normalised. Test items that quote a name cannot stand in for it.
+    fn production_text() -> String {
+        let source = include_str!("sse.rs").replace("\r\n", "\n");
+        source
+            .split("\n#[cfg(test)]\nmod continue_run_tests {")
+            .next()
+            .expect("the test module is in this file")
+            .to_owned()
+    }
+
+    /// The text of one item of the production text, from `header` to the first
+    /// line that is exactly `terminator` (`"\n}\n"` for a free function,
+    /// `"\n    }\n"` for a method). The scans below name items; they never scan the
+    /// whole file, which legitimately uses `.tool_name`, `.step_id` and
+    /// `.authority` elsewhere.
+    fn item_text(header: &str, terminator: &str) -> String {
+        let source = production_text();
+        let from = source
+            .find(header)
+            .unwrap_or_else(|| panic!("`{header}` is in the production text"));
+        let rest = &source[from..];
+        let to = rest
+            .find(terminator)
+            .unwrap_or_else(|| panic!("`{header}` ends with {terminator:?}"));
+        rest[..to].to_owned()
+    }
+
+    fn assert_distinct(items: &[&str]) {
+        let set: std::collections::BTreeSet<&str> = items.iter().copied().collect();
+        assert_eq!(set.len(), items.len(), "a duplicate in {items:?}");
+    }
+
+    /// The gateway's pre-consume must go to session-core's own `OrchestrationCoreService`
+    /// (`consume_client`): the client behind `orchestration_client` is orchestrator-core (Go),
+    /// which proxies the approval reads and decisions but answers ConsumeApproval with
+    /// Unimplemented. The first live /continue (2026-10-19) was refused as continue_unavailable
+    /// for exactly that reason, and every double used in the tests answered the consume, so no
+    /// test could have seen it.
+    #[test]
+    fn the_pre_consume_uses_the_session_core_client_not_orchestrator_core() {
+        let source = production_text();
+        let build = source
+            .split("GrpcApprovalConsumer::new(")
+            .nth(1)
+            .expect("continue_run builds the consumer");
+        let args: String = build.chars().take(80).collect();
+        assert!(
+            args.contains("state.consume_client"),
+            "the consumer is built from state.consume_client, found: {args}"
+        );
+        assert!(!args.contains("orchestration_client"));
+        let state = include_str!("state.rs").replace("\r\n", "\n");
+        assert!(
+            state.matches("consume_client").count() >= 5,
+            "AppState declares, builds and overrides consume_client in new() and in both from_env branches"
+        );
+        assert!(
+            state.contains("\"SESSION_CORE_URL\",\n            \"SESSION_CORE_ADDR\",\n            \"http://localhost:9091\",\n        )?);\n        let orchestration_client"),
+            "from_env points consume_client at the session endpoint"
+        );
+    }
+
+    #[test]
+    fn resume_mode_for_picks_loop_only_when_enabled_and_resumable() {
+        for (enabled, resumable, expected) in [
+            (true, true, "loop"),
+            (true, false, "segment"),
+            (false, true, "segment"),
+            (false, false, "segment"),
+        ] {
+            assert_eq!(
+                resume_mode_for(enabled, resumable, false),
+                expected,
+                "switch {enabled}, resumable {resumable}"
+            );
+        }
+    }
+
+    #[test]
+    fn approval_spend_for_is_spent_only_on_the_pre_consume_path() {
+        assert_eq!(approval_spend_for(true), ApprovalSpend::SpentByGateway);
+        assert_eq!(approval_spend_for(false), ApprovalSpend::NotSpent);
+        assert!(ApprovalSpend::SpentByGateway.is_spent());
+        assert!(!ApprovalSpend::NotSpent.is_spent());
+    }
+
+    /// The three vocabularies are closed lists with the sizes the design states, no
+    /// duplicates, and the frame list is exactly the executor's message tokens plus
+    /// the two code-derived tokens plus the three the gateway makes itself.
+    #[test]
+    fn the_continue_vocabularies_have_the_designed_shape() {
+        let http: Vec<&str> = CONTINUE_HTTP_REFUSALS.iter().map(|(code, _)| *code).collect();
+        assert_eq!(http.len(), 10, "{http:?}");
+        assert_distinct(&http);
+        assert_eq!(CONTINUE_EXECUTOR_MESSAGE_TOKENS.len(), 20);
+        assert_distinct(CONTINUE_EXECUTOR_MESSAGE_TOKENS);
+        assert_eq!(CONTINUE_FRAME_REFUSALS.len(), 25);
+        assert_distinct(CONTINUE_FRAME_REFUSALS);
+
+        let mut expected: Vec<&str> = CONTINUE_EXECUTOR_MESSAGE_TOKENS.to_vec();
+        expected.extend([
+            // Derived from the gRPC code or the ZDR trailer, never from a message.
+            "approval_not_found",
+            "durable_mutation_forbidden",
+            // Made by the gateway itself.
+            "continue_refused",
+            "continue_unreachable",
+            "continue_outcome_unknown",
+        ]);
+        expected.sort_unstable();
+        let mut frames: Vec<&str> = CONTINUE_FRAME_REFUSALS.to_vec();
+        frames.sort_unstable();
+        assert_eq!(frames, expected);
+
+        for token in CONTINUE_FRAME_REFUSALS.iter().chain(http.iter()) {
+            assert!(
+                !token.is_empty()
+                    && token.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'),
+                "{token:?} is a closed snake_case token"
+            );
+        }
+    }
+
+    /// The HTTP list states each code with the status it is sent with, and the three
+    /// statuses of the codes the BFF relays are the ones the BFF's own list pins.
+    #[test]
+    fn the_http_refusals_carry_the_statuses_the_route_sends() {
+        let find = |code: &str| {
+            CONTINUE_HTTP_REFUSALS
+                .iter()
+                .find(|(c, _)| *c == code)
+                .map_or_else(|| panic!("{code} is in CONTINUE_HTTP_REFUSALS"), |(_, status)| *status)
+        };
+        for code in [
+            "continue_disabled",
+            "not_resumable",
+            "approval_not_granted",
+            "approval_expired",
+            "approval_not_resumable",
+            "continuation_already_consumed",
+        ] {
+            assert_eq!(find(code), StatusCode::CONFLICT, "{code}");
+        }
+        assert_eq!(find("continue_incomplete"), StatusCode::BAD_REQUEST);
+        assert_eq!(find("missing_bearer"), StatusCode::UNAUTHORIZED);
+        assert_eq!(find("approval_not_found"), StatusCode::NOT_FOUND);
+        assert_eq!(find("continue_unavailable"), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// Every `(StatusCode::X, "code")` pair a route function states is in the HTTP
+    /// list with the same status. Scope: `continue_turn_gate`, `continue_preflight`
+    /// and the body of `continue_run`, by name; the handler's other literals are not
+    /// scanned. (The consume map is checked in its own test below.)
+    #[test]
+    fn the_continue_vocabularies_are_closed() {
+        let pairs = |text: &str| -> Vec<(String, String)> {
+            let mut found = Vec::new();
+            let mut rest = text;
+            while let Some(at) = rest.find("StatusCode::") {
+                rest = &rest[at + "StatusCode::".len()..];
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_uppercase() || *c == '_')
+                    .collect();
+                let after = rest[name.len()..].trim_start();
+                if let Some(after) = after.strip_prefix(',') {
+                    if let Some(code) = after.trim_start().strip_prefix('"') {
+                        if let Some(end) = code.find('"') {
+                            found.push((name, code[..end].to_owned()));
+                        }
+                    }
+                }
+            }
+            found
+        };
+        let continue_run_body = production_text()
+            .split("pub(crate) async fn continue_run(")
+            .nth(1)
+            .expect("continue_run is in this file")
+            .to_owned();
+        let mut scanned = Vec::new();
+        scanned.extend(pairs(&item_text("fn continue_turn_gate(", "\n}\n")));
+        scanned.extend(pairs(&item_text("fn continue_preflight(", "\n}\n")));
+        scanned.extend(pairs(&item_text("fn park_preflight(", "\n}\n")));
+        scanned.extend(pairs(&continue_run_body));
+        assert!(scanned.len() >= 8, "the scan found only {scanned:?}");
+        for (status_name, code) in &scanned {
+            let listed = CONTINUE_HTTP_REFUSALS
+                .iter()
+                .find(|(c, _)| c == code)
+                .unwrap_or_else(|| panic!("`{code}` is sent by the route but not in CONTINUE_HTTP_REFUSALS"));
+            assert_eq!(
+                listed.1.canonical_reason().map(str::to_ascii_uppercase),
+                Some(status_name.replace('_', " ")),
+                "`{code}` is listed with another status than the route sends"
+            );
+        }
+    }
+
+    // ---- the consumer, its request and the map of its answers ----
+
+    /// What a refusal of the consume says to the HTTP caller, if it is a closed one.
+    #[allow(clippy::needless_pass_by_value)]
+    fn closed(refusal: Result<(), PreconsumeRefusal>) -> Option<(StatusCode, &'static str)> {
+        match refusal {
+            Err(PreconsumeRefusal::Closed(status, code)) => Some((status, code)),
+            _ => None,
+        }
+    }
+
+    const EVERY_CODE: [tonic::Code; 17] = [
+        tonic::Code::Ok,
+        tonic::Code::Cancelled,
+        tonic::Code::Unknown,
+        tonic::Code::InvalidArgument,
+        tonic::Code::DeadlineExceeded,
+        tonic::Code::NotFound,
+        tonic::Code::AlreadyExists,
+        tonic::Code::PermissionDenied,
+        tonic::Code::ResourceExhausted,
+        tonic::Code::FailedPrecondition,
+        tonic::Code::Aborted,
+        tonic::Code::OutOfRange,
+        tonic::Code::Unimplemented,
+        tonic::Code::Internal,
+        tonic::Code::Unavailable,
+        tonic::Code::DataLoss,
+        tonic::Code::Unauthenticated,
+    ];
+
+    #[test]
+    fn the_preconsume_request_spends_without_reading_the_call() {
+        let request = preconsume_request("org-1", "run-1", "appr-1", "claim-1");
+        assert_eq!(request.org_id, "org-1");
+        assert_eq!(request.run_id, "run-1");
+        assert_eq!(request.approval_id, "appr-1");
+        assert_eq!(request.claim_token, "claim-1");
+        assert!(request.omit_call, "the gateway spends; it never holds the approved call");
+        assert!(request.step_id.is_empty(), "the gateway states no step");
+        assert!(request.action_fingerprint.is_empty(), "the gateway states no fingerprint");
+    }
+
+    /// Only a consume that THIS call won proceeds. An approval already consumed is a
+    /// 409 whatever the claim: another click's, and the same token again (the replay
+    /// that the executor accepts is the executor's, never the gateway's).
+    #[test]
+    fn a_consume_that_did_not_win_is_a_409_before_any_stream_opens() {
+        assert!(matches!(preconsume_refusal(Ok(true)), Ok(())));
+        assert_eq!(
+            closed(preconsume_refusal(Ok(false))),
+            Some((StatusCode::CONFLICT, "continuation_already_consumed"))
+        );
+    }
+
+    /// Every answer of the consume maps to one closed HTTP code, and the code is in
+    /// the closed list with that status. The codes that carry an upstream message are
+    /// mapped from the message only when it is one of the three closed tokens.
+    #[test]
+    fn a_consume_refusal_maps_to_its_closed_http_code() {
+        let status = |code: tonic::Code, message: &str| tonic::Status::new(code, message);
+        let mapped = |code: tonic::Code, message: &str| {
+            closed(preconsume_refusal(Err(status(code, message))))
+        };
+        assert_eq!(
+            mapped(tonic::Code::NotFound, "approval not found"),
+            Some((StatusCode::NOT_FOUND, "approval_not_found"))
+        );
+        for token in ["approval_not_granted", "approval_expired", "approval_not_resumable"] {
+            assert_eq!(
+                mapped(tonic::Code::FailedPrecondition, token),
+                Some((StatusCode::CONFLICT, token)),
+                "{token}"
+            );
+        }
+        assert_eq!(
+            mapped(tonic::Code::FailedPrecondition, "some other precondition"),
+            Some((StatusCode::CONFLICT, "not_resumable"))
+        );
+        assert_eq!(
+            mapped(tonic::Code::InvalidArgument, "anything"),
+            Some((StatusCode::BAD_REQUEST, "continue_incomplete"))
+        );
+        // PermissionDenied and Unauthenticated are answered by `grpc_status_to_http`.
+        for code in [tonic::Code::PermissionDenied, tonic::Code::Unauthenticated] {
+            assert!(
+                matches!(
+                    preconsume_refusal(Err(status(code, "m"))),
+                    Err(PreconsumeRefusal::Status(ref s)) if s.code() == code
+                ),
+                "{code:?}"
+            );
+        }
+        // Everything else is ambiguous by definition: the consume may have committed.
+        for code in EVERY_CODE {
+            if matches!(
+                code,
+                tonic::Code::NotFound
+                    | tonic::Code::FailedPrecondition
+                    | tonic::Code::InvalidArgument
+                    | tonic::Code::PermissionDenied
+                    | tonic::Code::Unauthenticated
+            ) {
+                continue;
+            }
+            assert_eq!(
+                mapped(code, "whatever the server said"),
+                Some((StatusCode::SERVICE_UNAVAILABLE, "continue_unavailable")),
+                "{code:?}"
+            );
+        }
+        // Whatever the map says is a code the route lists, with the status it lists.
+        for code in EVERY_CODE {
+            for message in ["approval_not_granted", "approval_expired", "approval_not_resumable", "x"] {
+                if let Some((status, token)) = mapped(code, message) {
+                    assert!(
+                        CONTINUE_HTTP_REFUSALS.contains(&(token, status)),
+                        "{code:?}/{message}: ({token}, {status}) is not in CONTINUE_HTTP_REFUSALS"
+                    );
+                }
+            }
+        }
+    }
+
+    /// For every code but the two the owner check also passes through, the message of
+    /// the failed consume appears in no HTTP body: the answer is a closed code. For
+    /// those two the answer is `grpc_status_to_http`'s, exactly: the one documented
+    /// place a session-core message text reaches the caller (closed session-core
+    /// wording, never the claim token, which the request never echoes).
+    #[test]
+    fn a_consume_failure_echoes_nothing_but_closed_codes() {
+        const SECRET: &str = "claim-token-9f3a-must-not-appear";
+        for code in EVERY_CODE {
+            let status = tonic::Status::new(code, SECRET);
+            match preconsume_refusal(Err(status.clone())) {
+                Err(PreconsumeRefusal::Closed(http, token)) => {
+                    let (sent, Json(body)) = continue_error(http, token);
+                    assert_eq!(sent, http);
+                    assert!(
+                        !body.to_string().contains(SECRET) && !token.contains(SECRET),
+                        "{code:?} echoed the upstream message: {body}"
+                    );
+                }
+                Err(PreconsumeRefusal::Status(kept)) => {
+                    assert!(
+                        matches!(code, tonic::Code::PermissionDenied | tonic::Code::Unauthenticated),
+                        "{code:?} reaches the caller through grpc_status_to_http"
+                    );
+                    let (sent, Json(body)) = crate::http_routes::grpc_status_to_http(&kept);
+                    let (expected, Json(expected_body)) =
+                        crate::http_routes::grpc_status_to_http(&status);
+                    assert_eq!((sent, body), (expected, expected_body));
+                }
+                other => panic!("{code:?}: a consume failure must refuse, got {other:?}"),
+            }
+        }
+    }
+
+    /// The consumer reads one thing from the consume's answer: whether it was won.
+    /// Scope: `consume_within_bound`, the gRPC consumer's impl and `preconsume_request`,
+    /// by name. The gateway never holds the approved call or its authority.
+    #[test]
+    fn the_gateway_reads_only_the_won_flag_of_a_consume() {
+        let request = item_text("fn preconsume_request(", "\n}\n");
+        assert!(request.contains("omit_call: true"), "{request}");
+        // A struct literal is the type, a brace and a `field: value`; a return type
+        // followed by a body is not (its next token is a path).
+        let literal = regex::Regex::new(r"ConsumeApprovalRequest\s*\{\s*[a-z_]+\s*:\s")
+            .expect("pattern");
+        assert_eq!(
+            literal.find_iter(&production_text()).count(),
+            1,
+            "the gateway builds the consume request in one place"
+        );
+        let consumer = format!(
+            "{}\n{}",
+            item_text("fn consume_within_bound<", "\n}\n"),
+            item_text("impl ApprovalConsumer for GrpcApprovalConsumer {", "\n}\n"),
+        );
+        assert!(consumer.contains(".consumed"), "{consumer}");
+        for forbidden in [
+            ".tool_input_json",
+            ".tool_name",
+            ".authority",
+            ".step_id",
+            ".same_claim",
+            ".already_consumed",
+        ] {
+            assert!(
+                !consumer.contains(forbidden),
+                "the consumer reads {forbidden}: {consumer}"
+            );
+        }
+    }
+
+    /// The consumer is declared `Send + Sync`: the spawned task holds `&C` across an
+    /// await, which makes its future `Send` only if `C: Sync`. Pinned by the build in
+    /// the spawn-bounds test below; this names the declaration itself.
+    #[test]
+    fn the_consumer_trait_declares_send_and_sync() {
+        let production = production_text();
+        assert!(
+            production.contains("trait ApprovalConsumer: Send + Sync {"),
+            "the supertraits carry the spawn bounds to every implementation"
+        );
+    }
+
+    // ---- consume, then launch: the sequencing and the detach ----
+
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex,
+    };
+
+    type ContinueStream = Sse<ReceiverStream<Result<Event, Infallible>>>;
+
+    fn assert_send_and_static<T: Send + 'static>() {}
+
+    fn assert_send_and_sync<T: Send + Sync>() {}
+
+    /// Compile-time proof that the REAL consumer and the REAL stream type satisfy the
+    /// spawn bounds. It is never called: it fails to BUILD if the trait loses a
+    /// supertrait, the consumer stops being `Sync`, or the stream type stops being
+    /// `Send`. (The bound that was missing in the first design, which made the
+    /// spawned future `!Send`.)
+    #[allow(dead_code)]
+    fn the_real_consumer_can_be_spawned(
+        consumer: GrpcApprovalConsumer,
+    ) -> tokio::sync::oneshot::Receiver<Result<ContinueStream, PreconsumeRefusal>> {
+        spawn_consume_then_launch(
+            consumer,
+            preconsume_request("org-1", "run-1", "appr-1", "claim-1"),
+            || -> ContinueStream { unreachable!("compile-time proof only") },
+        )
+    }
+
+    #[test]
+    fn an_approval_consumer_satisfies_the_spawn_bounds() {
+        assert_send_and_sync::<GrpcApprovalConsumer>();
+        assert_send_and_static::<GrpcApprovalConsumer>();
+        assert_send_and_static::<ContinueStream>();
+        assert_send_and_static::<Result<ContinueStream, PreconsumeRefusal>>();
+        // What the launch closure of `continue_run` owns: it is moved into the
+        // spawned task, so each of these must be `Send + 'static`.
+        assert_send_and_static::<AppState>();
+        assert_send_and_static::<crate::session_flow::SessionRun>();
+        assert_send_and_static::<VerifiedModelBearer>();
+        assert_send_and_static::<VerifiedExecutionBearer>();
+        assert_send_and_static::<VerifiedBearer>();
+        assert_send_and_static::<VerifiedInferenceBearer>();
+    }
+
+    /// A consumer with a real single-use compare-and-set, as session-core's is. Its
+    /// state is an atomic and a mutex only, so it is `Sync` as the trait demands.
+    #[derive(Default)]
+    struct CasState {
+        winner: Mutex<Option<String>>,
+        calls: AtomicUsize,
+    }
+
+    #[derive(Clone, Default)]
+    struct CasConsumer(Arc<CasState>);
+
+    impl ApprovalConsumer for CasConsumer {
+        async fn consume(
+            &self,
+            request: mp_contracts::model_plane::v1::ConsumeApprovalRequest,
+        ) -> Result<bool, tonic::Status> {
+            self.0.calls.fetch_add(1, Ordering::SeqCst);
+            // The racing requests interleave here, as two requests do at the server.
+            tokio::task::yield_now().await;
+            let mut winner = self.0.winner.lock().expect("the lock is not poisoned");
+            if winner.is_none() {
+                *winner = Some(request.claim_token);
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+    }
+
+    /// A consumer that answers what it was told to, once.
+    struct ScriptedConsumer(Mutex<Option<Result<bool, tonic::Status>>>);
+
+    impl ApprovalConsumer for ScriptedConsumer {
+        async fn consume(
+            &self,
+            _request: mp_contracts::model_plane::v1::ConsumeApprovalRequest,
+        ) -> Result<bool, tonic::Status> {
+            self.0
+                .lock()
+                .expect("the lock is not poisoned")
+                .take()
+                .expect("one consume per script")
+        }
+    }
+
+    /// Counts how often it was launched and says what it launched.
+    fn counting_launch(launched: &Arc<AtomicUsize>) -> impl FnOnce() -> &'static str + Send + 'static {
+        let launched = Arc::clone(launched);
+        move || {
+            launched.fetch_add(1, Ordering::SeqCst);
+            "launched"
+        }
+    }
+
+    /// Wait, bounded, for a flag another task sets.
+    async fn wait_until(what: &str, condition: impl Fn() -> bool) {
+        let waited = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !condition() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        assert!(waited.is_ok(), "{what} never happened");
+    }
+
+    fn won_or_lost(
+        outcome: Result<Result<&'static str, PreconsumeRefusal>, tokio::sync::oneshot::error::RecvError>,
+    ) -> Result<&'static str, (StatusCode, &'static str)> {
+        match outcome.expect("the task answers") {
+            Ok(launched) => Ok(launched),
+            Err(PreconsumeRefusal::Closed(status, code)) => Err((status, code)),
+            Err(PreconsumeRefusal::Status(status)) => {
+                panic!("an unexpected passthrough status: {status:?}")
+            }
+        }
+    }
+
+    /// The consume comes first, with the request it was given, and the launch only
+    /// after it: the order is a fact the gateway keeps.
+    #[tokio::test]
+    async fn a_launch_follows_its_consume_and_never_precedes_it() {
+        struct Recording(Arc<Mutex<Vec<String>>>);
+        impl ApprovalConsumer for Recording {
+            async fn consume(
+                &self,
+                request: mp_contracts::model_plane::v1::ConsumeApprovalRequest,
+            ) -> Result<bool, tonic::Status> {
+                self.0.lock().unwrap().push(format!(
+                    "consume {} omit_call={}",
+                    request.claim_token, request.omit_call
+                ));
+                Ok(true)
+            }
+        }
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let launch_log = Arc::clone(&log);
+        let launched = consume_then_launch(
+            &Recording(Arc::clone(&log)),
+            preconsume_request("org-1", "run-1", "appr-1", "claim-1"),
+            move || {
+                launch_log.lock().unwrap().push("launch".to_owned());
+                "stream"
+            },
+        )
+        .await;
+        assert!(matches!(launched, Ok("stream")), "{launched:?}");
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec!["consume claim-1 omit_call=true".to_owned(), "launch".to_owned()]
+        );
+    }
+
+    /// Two clicks at once with different tokens: one proceeds, the other is a 409
+    /// before any stream opens, and exactly one continuation is launched.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_parallel_continues_with_distinct_tokens_get_one_proceed_and_one_409() {
+        let consumer = CasConsumer::default();
+        let launched = Arc::new(AtomicUsize::new(0));
+        let first = spawn_consume_then_launch(
+            consumer.clone(),
+            preconsume_request("org-1", "run-1", "appr-1", "claim-a"),
+            counting_launch(&launched),
+        );
+        let second = spawn_consume_then_launch(
+            consumer.clone(),
+            preconsume_request("org-1", "run-1", "appr-1", "claim-b"),
+            counting_launch(&launched),
+        );
+        let mut outcomes = vec![won_or_lost(first.await), won_or_lost(second.await)];
+        outcomes.sort_by_key(Result::is_err);
+        assert_eq!(
+            outcomes,
+            vec![
+                Ok("launched"),
+                Err((StatusCode::CONFLICT, "continuation_already_consumed"))
+            ]
+        );
+        assert_eq!(launched.load(Ordering::SeqCst), 1);
+        assert_eq!(consumer.0.calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// The same token twice at once, which the executor treats as a safe replay:
+    /// the gateway still lets exactly one through (the loser is a 409, not a second
+    /// dispatch).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_parallel_continues_with_the_same_token_get_one_proceed_and_one_409() {
+        let consumer = CasConsumer::default();
+        let launched = Arc::new(AtomicUsize::new(0));
+        let first = spawn_consume_then_launch(
+            consumer.clone(),
+            preconsume_request("org-1", "run-1", "appr-1", "claim-a"),
+            counting_launch(&launched),
+        );
+        let second = spawn_consume_then_launch(
+            consumer.clone(),
+            preconsume_request("org-1", "run-1", "appr-1", "claim-a"),
+            counting_launch(&launched),
+        );
+        let mut outcomes = vec![won_or_lost(first.await), won_or_lost(second.await)];
+        outcomes.sort_by_key(Result::is_err);
+        assert_eq!(
+            outcomes,
+            vec![
+                Ok("launched"),
+                Err((StatusCode::CONFLICT, "continuation_already_consumed"))
+            ]
+        );
+        assert_eq!(launched.load(Ordering::SeqCst), 1);
+    }
+
+    /// A consumer that is parked mid-RPC until the test lets it answer, and that
+    /// records the moment the server side commits.
+    struct ParkedConsumer {
+        started: Arc<AtomicBool>,
+        gate: Arc<tokio::sync::Notify>,
+        committed: Arc<AtomicBool>,
+    }
+
+    impl ApprovalConsumer for ParkedConsumer {
+        async fn consume(
+            &self,
+            _request: mp_contracts::model_plane::v1::ConsumeApprovalRequest,
+        ) -> Result<bool, tonic::Status> {
+            self.started.store(true, Ordering::SeqCst);
+            self.gate.notified().await;
+            self.committed.store(true, Ordering::SeqCst);
+            Ok(true)
+        }
+    }
+
+    /// The caller goes away while the consume is in flight (a closed browser tab, a
+    /// dropped connection). The consume still commits, and so the launch still
+    /// happens: a spent click always has its dispatch. Without the spawn the future
+    /// is dropped with the caller, the commit flag is never set and this fails.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dropped_receiver_cannot_spend_an_approval_without_dispatching() {
+        let started = Arc::new(AtomicBool::new(false));
+        let committed = Arc::new(AtomicBool::new(false));
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let launched = Arc::new(AtomicUsize::new(0));
+        let receiver = spawn_consume_then_launch(
+            ParkedConsumer {
+                started: Arc::clone(&started),
+                gate: Arc::clone(&gate),
+                committed: Arc::clone(&committed),
+            },
+            preconsume_request("org-1", "run-1", "appr-1", "claim-1"),
+            counting_launch(&launched),
+        );
+        wait_until("the consume starting", || started.load(Ordering::SeqCst)).await;
+        // The caller is gone, mid-RPC. A task that is tied to its caller notices at once and
+        // drops the consume; give it the time to, and only then let the server answer.
+        drop(receiver);
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        gate.notify_one();
+        wait_until("the server side committing", || committed.load(Ordering::SeqCst)).await;
+        wait_until("the launch after the commit", || launched.load(Ordering::SeqCst) > 0).await;
+        // The launch is a FnOnce: it cannot run twice. Give a second run the chance anyway.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(launched.load(Ordering::SeqCst), 1);
+    }
+
+    /// A consume that was not won, and every way a consume can fail, launches
+    /// nothing: a continuation is never started without a spent approval.
+    #[tokio::test]
+    async fn a_launch_that_never_follows_a_lost_consume_does_not_run() {
+        let launched = Arc::new(AtomicUsize::new(0));
+        let lost = ScriptedConsumer(Mutex::new(Some(Ok(false))));
+        let outcome = spawn_consume_then_launch(
+            lost,
+            preconsume_request("org-1", "run-1", "appr-1", "claim-1"),
+            counting_launch(&launched),
+        )
+        .await;
+        assert_eq!(
+            won_or_lost(outcome),
+            Err((StatusCode::CONFLICT, "continuation_already_consumed"))
+        );
+        for code in EVERY_CODE {
+            let refused = ScriptedConsumer(Mutex::new(Some(Err(tonic::Status::new(code, "no")))));
+            let outcome = spawn_consume_then_launch(
+                refused,
+                preconsume_request("org-1", "run-1", "appr-1", "claim-1"),
+                counting_launch(&launched),
+            )
+            .await
+            .expect("the task answers");
+            assert!(outcome.is_err(), "{code:?} must refuse");
+        }
+        assert_eq!(launched.load(Ordering::SeqCst), 0, "no launch without a won consume");
+    }
+
+    /// A consumer that never answers ends ambiguous once the bound has passed:
+    /// 503 `continue_unavailable`, and nothing is launched. The clock is paused, so
+    /// the bound is exact.
+    #[tokio::test(start_paused = true)]
+    async fn a_hung_consume_ends_ambiguous_within_the_bound() {
+        struct Hung;
+        impl ApprovalConsumer for Hung {
+            async fn consume(
+                &self,
+                _request: mp_contracts::model_plane::v1::ConsumeApprovalRequest,
+            ) -> Result<bool, tonic::Status> {
+                consume_within_bound(std::future::pending::<
+                    Result<
+                        tonic::Response<mp_contracts::model_plane::v1::ConsumeApprovalResponse>,
+                        tonic::Status,
+                    >,
+                >())
+                .await
+            }
+        }
+        assert_eq!(PRECONSUME_TIMEOUT, std::time::Duration::from_secs(10));
+        let launched = Arc::new(AtomicUsize::new(0));
+        let started = tokio::time::Instant::now();
+        let outcome = spawn_consume_then_launch(
+            Hung,
+            preconsume_request("org-1", "run-1", "appr-1", "claim-1"),
+            counting_launch(&launched),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        assert_eq!(
+            won_or_lost(outcome),
+            Err((StatusCode::SERVICE_UNAVAILABLE, "continue_unavailable"))
+        );
+        assert!(
+            elapsed >= PRECONSUME_TIMEOUT && elapsed < PRECONSUME_TIMEOUT + std::time::Duration::from_secs(1),
+            "the bound is PRECONSUME_TIMEOUT, took {elapsed:?}"
+        );
+        assert_eq!(launched.load(Ordering::SeqCst), 0);
+    }
+
+    /// The detach lives in one function, and the sequencing function does not detach.
+    /// Scope: `spawn_consume_then_launch` and `consume_then_launch`, by name.
+    #[test]
+    fn the_pre_consume_flow_is_spawned_in_exactly_one_place() {
+        let spawner = item_text("fn spawn_consume_then_launch<", "\n}\n");
+        assert_eq!(spawner.matches("tokio::spawn(").count(), 1, "{spawner}");
+        assert!(spawner.contains("consume_then_launch(&consumer"), "{spawner}");
+        let sequencer = item_text("async fn consume_then_launch<", "\n}\n");
+        assert!(!sequencer.contains("spawn"), "{sequencer}");
+        assert_eq!(
+            production_text().matches("consume_then_launch(&").count(),
+            1,
+            "only spawn_consume_then_launch drives the flow"
+        );
+    }
+
+    // ---- the frames of a continuation that is refused or fails to dispatch ----
+
+    /// One frame as the client receives it: its `event:` name and its JSON payload.
+    async fn frame_of(event: Event) -> (String, Value) {
+        use axum::response::IntoResponse;
+        let body = Sse::new(futures::stream::iter([Ok::<_, Infallible>(event)]))
+            .into_response()
+            .into_body();
+        let bytes = axum::body::to_bytes(body, usize::MAX)
+            .await
+            .expect("the stream body reads");
+        let text = String::from_utf8(bytes.to_vec()).expect("SSE is UTF-8");
+        let name = text
+            .lines()
+            .find_map(|line| line.strip_prefix("event: "))
+            .expect("an event line")
+            .to_owned();
+        let data = text
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("a data line");
+        (name, serde_json::from_str(data).expect("a JSON payload"))
+    }
+
+    /// The statuses the executor's refusals of a continuation travel in.
+    const REFUSAL_CARRIERS: [tonic::Code; 5] = [
+        tonic::Code::FailedPrecondition,
+        tonic::Code::Aborted,
+        tonic::Code::InvalidArgument,
+        tonic::Code::PermissionDenied,
+        tonic::Code::Unauthenticated,
+    ];
+
+    fn refused(status: &tonic::Status) -> Option<&'static str> {
+        match classify_continue_dispatch_failure(status) {
+            ContinueDispatchFailure::Refused(token) => Some(token),
+            _ => None,
+        }
+    }
+
+    /// A refused continuation is named by a closed token, never by an upstream
+    /// message: the closed executor tokens on the five carrier codes, an unknown
+    /// message on them as `continue_refused`, `NotFound` as `approval_not_found`, a
+    /// zero-retention trailer by its catalogue code and never its sentence. A request
+    /// that provably never left this process is unreachable; every other transport
+    /// outcome is unknown. Classifying never terminalizes: it is a pure map.
+    #[tokio::test]
+    async fn a_refused_continuation_is_classified_without_terminalizing() {
+        use mp_contracts::model_plane::v1::execution_core_client::ExecutionCoreClient;
+        use mp_contracts::zdr_refusal::Refusal;
+        for code in REFUSAL_CARRIERS {
+            for token in CONTINUE_EXECUTOR_MESSAGE_TOKENS {
+                assert_eq!(
+                    refused(&tonic::Status::new(code, *token)),
+                    Some(*token),
+                    "{code:?}/{token}"
+                );
+            }
+            // A message nobody listed is never echoed.
+            assert_eq!(
+                refused(&tonic::Status::new(code, "a brand new sentence with claim-token-77")),
+                Some("continue_refused"),
+                "{code:?}"
+            );
+            assert_eq!(refused(&tonic::Status::new(code, "")), Some("continue_refused"));
+        }
+        // NotFound is the code's own meaning, whatever it says.
+        assert_eq!(
+            refused(&tonic::Status::not_found("approval not found")),
+            Some("approval_not_found")
+        );
+        assert_eq!(
+            refused(&tonic::Status::not_found("continue_disabled")),
+            Some("approval_not_found")
+        );
+        // The zero-retention trailer is keyed on its catalogue code, not the message,
+        // and wins over a closed token in the message.
+        let zdr = Refusal::DURABLE_MUTATION_FORBIDDEN.grpc_status(tonic::Code::FailedPrecondition);
+        assert_eq!(refused(&zdr), Some("durable_mutation_forbidden"));
+        let zdr_on_other_code =
+            Refusal::DURABLE_MUTATION_FORBIDDEN.grpc_status(tonic::Code::InvalidArgument);
+        assert_eq!(refused(&zdr_on_other_code), Some("durable_mutation_forbidden"));
+        let mut disguised = Refusal::DURABLE_MUTATION_FORBIDDEN.grpc_status(tonic::Code::Aborted);
+        disguised = tonic::Status::with_metadata(
+            tonic::Code::Aborted,
+            "resume_incomplete",
+            disguised.metadata().clone(),
+        );
+        assert_eq!(refused(&disguised), Some("durable_mutation_forbidden"));
+        let other_zdr = Refusal::UNAVAILABLE.grpc_status(tonic::Code::Unavailable);
+        assert_eq!(refused(&other_zdr), Some("continue_refused"), "any other catalogue code");
+
+        // A closed token on a code that is not a carrier is not a refusal.
+        for code in EVERY_CODE {
+            if REFUSAL_CARRIERS.contains(&code) || code == tonic::Code::NotFound {
+                continue;
+            }
+            assert_eq!(
+                refused(&tonic::Status::new(code, "continue_disabled")),
+                None,
+                "{code:?} carries no refusal"
+            );
+        }
+
+        // Transport outcomes: a refused connect is unreachable, the rest unknown.
+        assert!(matches!(
+            classify_continue_dispatch_failure(&tonic::Status::unavailable("shedding load")),
+            ContinueDispatchFailure::Unknown
+        ));
+        for code in EVERY_CODE {
+            if REFUSAL_CARRIERS.contains(&code) || code == tonic::Code::NotFound {
+                continue;
+            }
+            assert!(
+                matches!(
+                    classify_continue_dispatch_failure(&tonic::Status::new(code, "no")),
+                    ContinueDispatchFailure::Unknown
+                ),
+                "{code:?}"
+            );
+        }
+        // A real connect failure against a closed port: the only way to build the
+        // genuine source chain (`Status` has no constructor for one).
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind probe port");
+        let addr = listener.local_addr().expect("probe addr");
+        drop(listener);
+        let mut client = ExecutionCoreClient::new(
+            tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+                .expect("endpoint")
+                .connect_lazy(),
+        );
+        let unreachable = client
+            .run_agent(RunAgentRequest::default())
+            .await
+            .expect_err("nothing is listening");
+        assert!(
+            matches!(
+                classify_continue_dispatch_failure(&unreachable),
+                ContinueDispatchFailure::Unreachable
+            ),
+            "{unreachable:?}"
+        );
+    }
+
+    /// Everything the classifier and the frame builders can say is in the closed frame
+    /// vocabulary, and together they say all of it: the tokens the failure classes
+    /// produce are set-equal to `CONTINUE_FRAME_REFUSALS`.
+    #[tokio::test]
+    async fn every_frame_token_is_in_the_closed_vocabulary_and_all_of_it_is_reachable() {
+        use mp_contracts::zdr_refusal::Refusal;
+        let mut produced: std::collections::BTreeSet<&'static str> = std::collections::BTreeSet::new();
+        for code in REFUSAL_CARRIERS {
+            for token in CONTINUE_EXECUTOR_MESSAGE_TOKENS {
+                produced.extend(refused(&tonic::Status::new(code, *token)));
+            }
+            produced.extend(refused(&tonic::Status::new(code, "unlisted")));
+        }
+        produced.extend(refused(&tonic::Status::not_found("x")));
+        produced.extend(refused(
+            &Refusal::DURABLE_MUTATION_FORBIDDEN.grpc_status(tonic::Code::FailedPrecondition),
+        ));
+        for failure in [ContinueDispatchFailure::Unreachable, ContinueDispatchFailure::Unknown] {
+            let (_, payload) = frame_of(continue_failure_event("req-1", "run-1", &failure)).await;
+            produced.insert(
+                CONTINUE_FRAME_REFUSALS
+                    .iter()
+                    .copied()
+                    .find(|token| payload["code"] == *token)
+                    .expect("the failure frame's code is in the vocabulary"),
+            );
+        }
+        let vocabulary: std::collections::BTreeSet<&'static str> =
+            CONTINUE_FRAME_REFUSALS.iter().copied().collect();
+        assert_eq!(produced, vocabulary);
+
+        // The literals the new functions state are in the vocabulary too (the map above
+        // proves what they can produce; this proves nobody added an unlisted spelling).
+        let quoted = |text: String| -> Vec<String> {
+            text.split('"')
+                .skip(1)
+                .step_by(2)
+                .filter(|s| s.contains('_') && s.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
+                .map(str::to_owned)
+                .collect()
+        };
+        let mut stated = quoted(item_text("fn classify_continue_dispatch_failure(", "\n}\n"));
+        stated.extend(quoted(item_text("fn continue_failure_event(", "\n}\n")));
+        stated.extend(quoted(item_text("fn dispatch_unknown_event(", "\n}\n")));
+        assert!(stated.len() >= 4, "{stated:?}");
+        for token in stated {
+            assert!(
+                CONTINUE_FRAME_REFUSALS.contains(&token.as_str()) || token == "agent_dispatch_unavailable",
+                "`{token}` is not in CONTINUE_FRAME_REFUSALS"
+            );
+        }
+    }
+
+    /// A refusal frame is never retryable and names the run. After a pre-consume it
+    /// says the approval is spent. Without one it says nothing of the spend: the
+    /// executor refused, and the approval state is the client's to re-read.
+    #[tokio::test]
+    async fn a_refusal_frame_is_not_retryable_and_names_the_run() {
+        let (name, spent) = frame_of(continue_refusal_event(
+            "req-1",
+            "run-42",
+            "continuation_already_consumed",
+            ApprovalSpend::SpentByGateway,
+        ))
+        .await;
+        assert_eq!(name, "error");
+        assert_eq!(spent["code"], "continuation_already_consumed");
+        assert_eq!(spent["retryable"], false);
+        assert_eq!(spent["run_id"], "run-42");
+        assert_eq!(spent["request_id"], "req-1");
+        assert_eq!(spent["approval_spent"], true);
+        assert!(spent["message"].as_str().is_some_and(|m| m == "continuation already consumed"));
+
+        let (name, unflagged) = frame_of(continue_refusal_event(
+            "req-1",
+            "run-42",
+            "continue_disabled",
+            ApprovalSpend::NotSpent,
+        ))
+        .await;
+        assert_eq!(name, "error");
+        assert_eq!(unflagged["code"], "continue_disabled");
+        assert_eq!(unflagged["retryable"], false);
+        assert_eq!(unflagged["run_id"], "run-42");
+        assert!(
+            unflagged.get("approval_spent").is_none(),
+            "a refusal the gateway did not pre-consume says nothing of the spend: {unflagged}"
+        );
+
+        // The spent regime's failure frames: closed, not retryable, spent, and never
+        // an agent_dispatch_* code.
+        for (failure, code) in [
+            (ContinueDispatchFailure::Refused("approval_snapshot_mismatch"), "approval_snapshot_mismatch"),
+            (ContinueDispatchFailure::Unreachable, "continue_unreachable"),
+            (ContinueDispatchFailure::Unknown, "continue_outcome_unknown"),
+        ] {
+            let (name, frame) = frame_of(continue_failure_event("req-1", "run-42", &failure)).await;
+            assert_eq!(name, "error");
+            assert_eq!(frame["code"], code);
+            assert_eq!(frame["retryable"], false, "{code}");
+            assert_eq!(frame["run_id"], "run-42", "{code}");
+            assert_eq!(frame["approval_spent"], true, "{code}");
+            assert!(!frame["code"].as_str().unwrap_or_default().starts_with("agent_dispatch"));
+        }
+
+        // The ambiguous outcome keeps its committed frame when the gateway spent
+        // nothing, and is the spent regime's own frame when it did.
+        let (_, committed) = frame_of(agent_dispatch_unavailable_event("req-1", "run-42")).await;
+        let (name, not_spent) =
+            frame_of(dispatch_unknown_event(ApprovalSpend::NotSpent, "req-1", "run-42")).await;
+        assert_eq!((name.as_str(), &not_spent), ("error", &committed));
+        let (_, spent_unknown) =
+            frame_of(dispatch_unknown_event(ApprovalSpend::SpentByGateway, "req-1", "run-42")).await;
+        assert_eq!(spent_unknown["code"], "continue_outcome_unknown");
+        assert_eq!(spent_unknown["retryable"], false);
+        assert_eq!(spent_unknown["approval_spent"], true);
+        assert_eq!(spent_unknown["run_id"], "run-42");
+    }
+
+    /// The first frame of a continuation is byte-identical to the committed one when
+    /// the gateway spent nothing, and says `approval_spent` when it did, so a client
+    /// knows from frame one that it must never post the continue again.
+    #[test]
+    fn connected_payload_adds_only_the_spend_flag() {
+        let committed = json!({
+            "ok": true,
+            "run_id": "run-1",
+            "thread_id": "thread-1",
+            "request_id": "req-1",
+        });
+        let not_spent = connected_payload("run-1", "thread-1", "req-1", ApprovalSpend::NotSpent);
+        assert_eq!(not_spent, committed);
+        assert_eq!(not_spent.to_string(), committed.to_string());
+        let spent = connected_payload("run-1", "thread-1", "req-1", ApprovalSpend::SpentByGateway);
+        let mut expected = committed;
+        expected["approval_spent"] = json!(true);
+        assert_eq!(spent, expected);
+        assert_eq!(spent["ok"], true, "the SPA reads ok on the connected frame");
+    }
+
+    /// The run-end frames after the executor's answer. With nothing spent they are the
+    /// committed frames BYTE for byte (the very `ChatEvent::Error` the code built before:
+    /// retryable, no run id, no `approval_spent`); after a pre-consume the same code and
+    /// text are final, name the run and say `approval_spent`.
+    #[tokio::test]
+    async fn the_run_end_frames_are_the_committed_ones_unless_the_gateway_spent_the_click() {
+        for (code, message) in [
+            ("agent_run_failed", "The governed agent run failed."),
+            (
+                "agent_run_state_unknown",
+                "The agent returned an unsupported lifecycle state.",
+            ),
+            (
+                "agent_run_output_unavailable",
+                "The completed agent run did not provide an answer.",
+            ),
+        ] {
+            let committed = crate::sse_events::ChatEvent::Error {
+                code: code.to_owned(),
+                message: message.to_owned(),
+                retryable: true,
+            };
+            let (name, unspent) = frame_of(run_end_error_event(
+                "req-1",
+                "run-42",
+                code,
+                message,
+                ApprovalSpend::NotSpent,
+            ))
+            .await;
+            let (committed_name, committed_payload) = frame_of(committed.to_sse("req-1")).await;
+            assert_eq!((name.as_str(), &unspent), (committed_name.as_str(), &committed_payload));
+            assert_eq!(unspent["retryable"], true, "{code}");
+            assert!(
+                unspent.get("run_id").is_none() && unspent.get("approval_spent").is_none(),
+                "{code}: an unspent continuation keeps the committed frame: {unspent}"
+            );
+
+            let (name, spent) = frame_of(run_end_error_event(
+                "req-1",
+                "run-42",
+                code,
+                message,
+                ApprovalSpend::SpentByGateway,
+            ))
+            .await;
+            assert_eq!(name, "error");
+            assert_eq!(
+                spent,
+                json!({
+                    "code": code,
+                    "message": message,
+                    "retryable": false,
+                    "request_id": "req-1",
+                    "run_id": "run-42",
+                    "approval_spent": true,
+                }),
+                "{code}"
+            );
+        }
+    }
+
+    /// Every frame of a whole stream, in order: `(event, payload)`.
+    async fn frames_of_stream(stream: Sse<ReceiverStream<Result<Event, Infallible>>>) -> Vec<(String, Value)> {
+        use axum::response::IntoResponse;
+        let body = stream.into_response().into_body();
+        let bytes = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            axum::body::to_bytes(body, usize::MAX),
+        )
+        .await
+        .expect("the stream ends")
+        .expect("the stream body reads");
+        String::from_utf8(bytes.to_vec())
+            .expect("SSE is UTF-8")
+            .split("\n\n")
+            .filter_map(|block| {
+                let event = block.lines().find_map(|line| line.strip_prefix("event: "))?;
+                let data = block.lines().find_map(|line| line.strip_prefix("data: "))?;
+                Some((event.to_owned(), serde_json::from_str(data).ok()?))
+            })
+            .collect()
+    }
+
+    /// The four credentials a continuation's launch carries, each valid, with one of them
+    /// replaced by a value that is not valid gRPC metadata (a newline).
+    fn bearers_with(
+        broken: Option<&str>,
+    ) -> (
+        VerifiedExecutionBearer,
+        VerifiedBearer,
+        VerifiedModelBearer,
+        VerifiedInferenceBearer,
+    ) {
+        let pick = |name: &str, good: &'static str| -> &'static str {
+            if broken == Some(name) {
+                "bad\nbearer"
+            } else {
+                good
+            }
+        };
+        (
+            VerifiedExecutionBearer::for_test(pick("execution", "execution-token")),
+            VerifiedBearer::for_test(pick("data_plane", "data-token")),
+            VerifiedModelBearer::for_test(pick("session", "session-token")),
+            VerifiedInferenceBearer::for_test(pick("inference", "inference-token")),
+        )
+    }
+
+    /// The request a continuation will send is checked BEFORE the click is spent: any one of
+    /// the four credentials that is not valid metadata is `Unauthenticated`, which is what the
+    /// launch's own construction would say after a spend.
+    #[test]
+    fn a_request_that_cannot_be_built_is_found_before_the_consume() {
+        let (execution, data_plane, session, inference) = bearers_with(None);
+        assert!(run_agent_request_is_buildable(&execution, &data_plane, &session, &inference).is_ok());
+        for broken in ["execution", "data_plane", "session", "inference"] {
+            let (execution, data_plane, session, inference) = bearers_with(Some(broken));
+            let refused = run_agent_request_is_buildable(&execution, &data_plane, &session, &inference)
+                .expect_err(broken);
+            assert_eq!(refused.code(), tonic::Code::Unauthenticated, "{broken}");
+            // The same four credentials make the launch's own request fail the same way.
+            let launch = authenticated_run_agent_request(
+                RunAgentRequest::default(),
+                &execution,
+                &data_plane,
+                &session,
+                &inference,
+                None,
+                None,
+            )
+            .expect_err(broken);
+            assert_eq!(launch.code(), refused.code(), "{broken}: the pre-check is the launch's check");
+        }
+    }
+
+    /// What the client is told when that pre-check fails: one `continue_refused` frame,
+    /// final, naming the run, and no `approval_spent` (nothing was spent, nothing sent), and
+    /// no `connected` frame before it.
+    #[tokio::test]
+    async fn a_continuation_refused_before_the_consume_is_one_unspent_continue_refused_frame() {
+        let frames = frames_of_stream(unbuildable_continuation_stream("run-42")).await;
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        let (name, frame) = &frames[0];
+        assert_eq!(name, "error");
+        assert_eq!(frame["code"], "continue_refused");
+        assert_eq!(frame["retryable"], false);
+        assert_eq!(frame["run_id"], "run-42");
+        assert!(frame.get("approval_spent").is_none(), "{frame}");
+    }
+
+    /// The pre-check stands strictly BEFORE the consume: inside the resume switch's branch
+    /// (so with the switch off the route is untouched), before the launch closure takes the
+    /// credentials, before `spawn_consume_then_launch(`, and it answers with the unspent
+    /// refusal stream. This is the textual half of "a construction failure never reaches a
+    /// consume": a handler-level test cannot make a verified bearer malformed (a verified JWT
+    /// is always valid metadata), so the order is read from the source and the two halves
+    /// (the check, the answer) are driven above.
+    #[test]
+    fn continue_run_checks_the_request_before_it_consumes() {
+        let body = continue_run_code();
+        let squashed = squash(&body);
+        let check = "run_agent_request_is_buildable( &execution_bearer, &data_plane_bearer, &model_bearer, &inference_bearer, )";
+        assert_eq!(squashed.matches(check).count(), 1, "one pre-check, over the four credentials");
+        assert_eq!(body.matches("unbuildable_continuation_stream(").count(), 1);
+        let at = position(&body, "run_agent_request_is_buildable(");
+        let switch = position(&body, "let resume_enabled =");
+        let branch = position(&body, "if resume_enabled {");
+        let closure = position(&body, "let launch = move ||");
+        let off = position(&body, "if !resume_enabled {");
+        let consume = position(&body, "spawn_consume_then_launch(");
+        assert!(switch < branch && branch < at, "the pre-check is inside `if resume_enabled {{`");
+        assert!(at < closure, "the pre-check borrows the credentials before the launch closure moves them");
+        assert!(closure < off && off < consume, "the committed off path and the consume keep their order");
+        // The answer of a failed check is the unspent refusal stream, returned at once.
+        let answer = &body[at..closure];
+        assert!(
+            squash(answer).contains("return Ok(unbuildable_continuation_stream(&run_id));"),
+            "{answer}"
+        );
+        // And the branch is closed before the closure: the off path never reaches it.
+        let branch_text = &body[branch..closure];
+        assert_eq!(branch_text.matches('{').count(), branch_text.matches('}').count(), "{branch_text}");
+    }
+
+    /// A request that cannot be built AFTER a spend (the pre-check is a pre-check, not a
+    /// proof): the stream answers `continue_refused` saying the click is spent, never
+    /// terminalizes, publishes nothing (no `RUN_STARTED`, `RUN_FAILED` or
+    /// `RUN_DISPATCH_DEGRADED`), and sends nothing to the executor (the state's clients are
+    /// the unreachable defaults, so a dispatch or a terminalization would show as a
+    /// different frame). The run waits out its renewed recovery window.
+    #[tokio::test]
+    async fn a_request_that_cannot_be_built_after_a_spend_is_continue_refused_and_ends_nothing() {
+        let mut state = AppState::new();
+        let publisher = std::sync::Arc::new(crate::state::DynPublisher::InMemory(
+            mp_events::publisher::InMemoryPublisher::new(),
+        ));
+        state.publisher = publisher.clone();
+        let (execution, data_plane, session, inference) = bearers_with(Some("execution"));
+        let stream = agentic_run_stream(
+            state,
+            crate::session_flow::SessionRun {
+                thread_id: "thread-1".to_owned(),
+                run_id: "run-42".to_owned(),
+                org_id: "org-1".to_owned(),
+                already_started: true,
+                terminal_source: mp_contracts::model_plane::v1::ManagedRunSource::ExecutionAgent,
+            },
+            "req-1".to_owned(),
+            "org-1".to_owned(),
+            "user-1".to_owned(),
+            String::new(),
+            "the run's goal".to_owned(),
+            Vec::new(),
+            Vec::new(),
+            false,
+            None,
+            0,
+            CONTINUE_PERMISSION_MODE.to_owned(),
+            false,
+            false,
+            execution,
+            data_plane,
+            session,
+            inference,
+            String::new(),
+            None,
+            None,
+            AgentRoute::default(),
+            None,
+            Some(continue_resume("appr-1", "claim-1", "loop")),
+            ApprovalSpend::SpentByGateway,
+            None,
+            Vec::new(),
+            Vec::new(),
+            0,
+        );
+        let frames = frames_of_stream(stream).await;
+        let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["connected", "error"], "{frames:?}");
+        assert_eq!(frames[0].1["approval_spent"], true, "the first frame already says the click is spent");
+        let error = &frames[1].1;
+        assert_eq!(error["code"], "continue_refused");
+        assert_eq!(error["retryable"], false);
+        assert_eq!(error["run_id"], "run-42");
+        assert_eq!(error["approval_spent"], true);
+        assert!(
+            publisher.drain().is_empty(),
+            "nothing is published: the run is neither started, failed nor degraded"
+        );
+    }
+
+    /// The run-end frames are a closed trio, and the stream builds each of them through
+    /// `run_end_error_event(.., spend)` and nowhere else: a hand-built `ChatEvent::Error`
+    /// with one of these codes would say `retryable: true` after a spend.
+    #[test]
+    fn the_run_end_frames_are_closed_and_only_built_with_the_spend() {
+        assert_eq!(
+            CONTINUE_SPENT_RUN_END_FRAMES,
+            [
+                "agent_run_failed",
+                "agent_run_state_unknown",
+                "agent_run_output_unavailable"
+            ]
+        );
+        // Not part of the refusal vocabulary: they are the run's own end, and an unspent
+        // continuation's frame of this code is the committed one.
+        for code in CONTINUE_SPENT_RUN_END_FRAMES {
+            assert!(!CONTINUE_FRAME_REFUSALS.contains(code), "{code}");
+        }
+        let stream = squash(&stream_code());
+        for code in CONTINUE_SPENT_RUN_END_FRAMES {
+            let call = format!("run_end_error_event( &request_id, &run.run_id, \"{code}\", \"");
+            assert_eq!(stream.matches(&call).count(), 1, "{code}: exactly one site");
+            let at = stream.find(&call).expect("the call is in the stream");
+            let call = &stream[at..];
+            let call = &call[..call.find(" )").expect("the call ends") + 2];
+            assert!(
+                call.ends_with(", spend, )"),
+                "{code}: the call does not pass the spend last: {call}"
+            );
+        }
+        assert!(
+            !stream.contains("code: \"agent_run_failed\"")
+                && !stream.contains("code: \"agent_run_state_unknown\"")
+                && !stream.contains("code: \"agent_run_output_unavailable\""),
+            "a hand-built ChatEvent::Error with a run-end code ignores the spend"
+        );
+    }
+
+    /// The typed subscription failure of a run that ended on one keeps its code, its text and
+    /// its timing fields; after a pre-consume ONLY `retryable`, `run_id` and `approval_spent`
+    /// change. With nothing spent it is the committed frame byte for byte, for every code.
+    #[tokio::test]
+    async fn a_subscription_failure_frame_keeps_its_code_and_text_and_is_final_only_after_a_spend() {
+        let resets_at = chrono::DateTime::parse_from_rfc3339("2026-10-19T12:00:00Z")
+            .expect("a date")
+            .with_timezone(&Utc);
+        // The one clock-dependent field (`retry_at`, dated from now) is taken out of both sides.
+        let strip = |mut payload: Value| {
+            payload.as_object_mut().expect("an object").remove("retry_at");
+            payload
+        };
+        for code in CONTINUE_SPENT_SUBSCRIPTION_FRAMES {
+            let code: &'static str = code;
+            for (retry_after_ms, resets) in [(None, None), (Some(90_000_u64), Some(resets_at))] {
+                let failure = crate::subscription_failure::SubscriptionFailure {
+                    code,
+                    retry_after_ms,
+                    resets_at: resets,
+                };
+                let message = format!("the words of {code}");
+                let (committed_name, committed) = frame_of(
+                    crate::sse_events::ChatEvent::subscription_error(&failure, message.clone())
+                        .to_sse("req-1"),
+                )
+                .await;
+
+                let (name, unspent) = frame_of(subscription_run_end_event(
+                    "req-1",
+                    "run-42",
+                    &failure,
+                    message.clone(),
+                    ApprovalSpend::NotSpent,
+                ))
+                .await;
+                assert_eq!(
+                    (name.as_str(), strip(unspent.clone())),
+                    (committed_name.as_str(), strip(committed.clone())),
+                    "{code}"
+                );
+                assert!(
+                    unspent.get("run_id").is_none() && unspent.get("approval_spent").is_none(),
+                    "{code}: an unspent continuation keeps the committed frame: {unspent}"
+                );
+
+                let (name, spent) = frame_of(subscription_run_end_event(
+                    "req-1",
+                    "run-42",
+                    &failure,
+                    message.clone(),
+                    ApprovalSpend::SpentByGateway,
+                ))
+                .await;
+                assert_eq!(name, "error", "{code}");
+                // Exactly the committed payload with three fields changed or added.
+                let mut expected = strip(committed.clone());
+                expected["retryable"] = json!(false);
+                expected["run_id"] = json!("run-42");
+                expected["approval_spent"] = json!(true);
+                assert_eq!(strip(spent.clone()), expected, "{code}");
+                assert_eq!(spent["code"], code);
+                assert_eq!(spent["message"], message.as_str());
+                assert_eq!(spent["request_id"], "req-1");
+                if retry_after_ms.is_some() {
+                    assert_eq!(spent["retry_after_ms"], 90_000, "{code}: the timing is kept");
+                    assert_eq!(spent["resets_at"], "2026-10-19T12:00:00Z", "{code}");
+                }
+            }
+        }
+    }
+
+    /// The seven subscription codes the SPA reads as spent are exactly the codes
+    /// `subscription_failure.rs` defines, and every one of them is a typed failure the run
+    /// path can produce (`known_code`). A code added there and not here would leave that
+    /// failure a retryable frame after a spend; a code listed here and not there is dead.
+    #[test]
+    fn the_subscription_frame_list_is_the_codes_subscription_failure_defines() {
+        let source = include_str!("subscription_failure.rs");
+        let production = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+        let mut defined: Vec<&str> = production
+            .lines()
+            .filter(|line| line.trim_start().starts_with("pub const "))
+            .filter_map(|line| {
+                let value = line.split_once("&str = \"")?.1.split('"').next()?;
+                (!value.is_empty() && value.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
+                    .then_some(value)
+            })
+            .collect();
+        defined.sort_unstable();
+        let mut listed: Vec<&str> = CONTINUE_SPENT_SUBSCRIPTION_FRAMES.to_vec();
+        listed.sort_unstable();
+        assert_eq!(
+            listed, defined,
+            "CONTINUE_SPENT_SUBSCRIPTION_FRAMES vs the codes of subscription_failure.rs"
+        );
+        for code in CONTINUE_SPENT_SUBSCRIPTION_FRAMES {
+            assert_eq!(
+                crate::subscription_failure::known_code(code),
+                Some(*code),
+                "{code} is not a code a run can end on"
+            );
+            assert!(
+                !CONTINUE_SPENT_RUN_END_FRAMES.contains(code) && !CONTINUE_FRAME_REFUSALS.contains(code),
+                "{code}: one vocabulary per frame"
+            );
+        }
+    }
+
+    /// Every `error` frame `agentic_run_stream` can send after the executor's answer is built
+    /// by a builder that takes the spend: the run-end frames through `run_end_error_event`, the
+    /// typed subscription failure through `subscription_run_end_event`. The stream hand-builds
+    /// no `ChatEvent::Error` and no `subscription_error` after the answer; the frames before it
+    /// (the dispatch rejections, which terminalize and are never spent) keep their literals.
+    #[test]
+    fn every_error_frame_after_the_executors_answer_is_built_with_the_spend() {
+        let stream = squash(&stream_code());
+        let answered = position(&stream, "Ok(Ok(Ok(response))) => response");
+        let after = &stream[answered..];
+        assert!(
+            !after.contains("ChatEvent::Error {") && !after.contains("subscription_error("),
+            "a hand-built error frame after the executor's answer ignores the spend: {after}"
+        );
+        let call = "subscription_run_end_event( &request_id, &run.run_id, &failure, message, spend, )";
+        assert_eq!(after.matches(call).count(), 1, "one site, the spend passed last");
+        assert_eq!(
+            after.matches("run_end_error_event(").count(),
+            CONTINUE_SPENT_RUN_END_FRAMES.len(),
+            "one run_end_error_event per run-end code"
+        );
+        assert!(
+            !stream[..answered].contains("subscription_run_end_event("),
+            "the frames before the answer are the dispatch's, never a subscription failure"
+        );
+    }
+
+    /// The run-subject event that closes the attempt of a spent continuation whose dispatch did
+    /// not start a segment: a refusal is `RUN_CONTINUE_REFUSED` (attempt-level, not terminal,
+    /// not a degraded mark), an unreachable or unknown outcome keeps `RUN_DISPATCH_DEGRADED`.
+    #[test]
+    fn a_spent_refusal_closes_the_attempt_and_the_other_failures_keep_their_run_level_mark() {
+        for token in CONTINUE_FRAME_REFUSALS {
+            assert_eq!(
+                spent_dispatch_run_event(&ContinueDispatchFailure::Refused(token)),
+                "RUN_CONTINUE_REFUSED",
+                "{token}"
+            );
+        }
+        for failure in [ContinueDispatchFailure::Unreachable, ContinueDispatchFailure::Unknown] {
+            assert_eq!(spent_dispatch_run_event(&failure), "RUN_DISPATCH_DEGRADED", "{failure:?}");
+        }
+    }
+
+    /// The spent arm publishes ONE run-subject event, chosen by `spent_dispatch_run_event`, and
+    /// no terminal one: no `RUN_FAILED`, `RUN_COMPLETED` or `RUN_CANCELLED`, and no hand-written
+    /// `RUN_DISPATCH_DEGRADED` or `RUN_CONTINUE_REFUSED` (the type comes from the pure map, so
+    /// the arm cannot publish the wrong one for a failure). The new type is written in one
+    /// place of the production text: not in the typed-refusal arm (an unspent continuation spent
+    /// nothing) and not in any committed arm.
+    #[test]
+    fn the_spent_arm_closes_the_attempt_once_and_never_ends_the_run() {
+        let code = squash(&stream_code());
+        let spent = "Ok(Ok(Err(status))) if spend.is_spent() =>";
+        let confirmed = "Ok(Ok(Err(status))) if is_confirmed_agent_dispatch_rejection(&status) =>";
+        let arm = arm_text(&code, spent, confirmed);
+        assert_eq!(arm.matches(".publish(").count(), 1, "published once per attempt: {arm}");
+        assert_eq!(arm.matches("spent_dispatch_run_event(&failure)").count(), 1, "{arm}");
+        for named in [
+            "RUN_FAILED",
+            "RUN_COMPLETED",
+            "RUN_CANCELLED",
+            "RUN_DISPATCH_DEGRADED",
+            "RUN_CONTINUE_REFUSED",
+        ] {
+            assert!(!arm.contains(named), "the spent arm names {named} itself: {arm}");
+        }
+        // The publish is after the click is known spent (the arm's guard) and before the frame,
+        // and its answer is ignored: the frame is sent whatever it says.
+        assert!(arm.contains("let _ = state .publisher .publish("), "{arm}");
+        assert!(position(arm, ".publish(") < position(arm, "continue_failure_event("), "{arm}");
+        // The type name is written in the one function that maps a failure to it.
+        // AMENDED for the park continue (WS03 S8-A): written twice, once per map, so the spent
+        // map and the park map each name it once and nothing else does.
+        let production = without_comments(&production_text());
+        assert_eq!(production.matches("\"RUN_CONTINUE_REFUSED\"").count(), 2);
+        for map in ["fn spent_dispatch_run_event(", "fn park_dispatch_run_event("] {
+            assert_eq!(
+                without_comments(&item_text(map, "\n}\n"))
+                    .matches("\"RUN_CONTINUE_REFUSED\"")
+                    .count(),
+                1,
+                "{map}"
+            );
+        }
+    }
+
+    // ---- the real consumer, over a real gRPC transport ----
+
+    type ConsumeAnswer = Result<mp_contracts::model_plane::v1::ConsumeApprovalResponse, tonic::Status>;
+
+    /// What the server saw of one consume: the `authorization` metadata and the request.
+    type SeenConsume = (Option<String>, mp_contracts::model_plane::v1::ConsumeApprovalRequest);
+
+    /// How the double answers a consume.
+    #[derive(Clone)]
+    enum ServerBehaviour {
+        /// From the script, in order.
+        Script,
+        /// Never: the consume hangs until the caller gives up.
+        Hang,
+        /// As session-core's compare-and-set does: the first claim wins, the same token
+        /// again is a replay (`consumed` false, `already_consumed` true, `same_claim`
+        /// true, with the call unless the caller asked to omit it), another token is
+        /// `already_consumed` with `same_claim` false and no call.
+        SingleUse(Arc<Mutex<Option<String>>>),
+    }
+
+    fn single_use_answer(
+        winner: &Mutex<Option<String>>,
+        request: &mp_contracts::model_plane::v1::ConsumeApprovalRequest,
+    ) -> mp_contracts::model_plane::v1::ConsumeApprovalResponse {
+        use mp_contracts::model_plane::v1::ConsumeApprovalResponse;
+        let mut winner = winner.lock().expect("the lock is not poisoned");
+        match winner.as_deref() {
+            None => {
+                *winner = Some(request.claim_token.clone());
+                ConsumeApprovalResponse {
+                    consumed: true,
+                    ..Default::default()
+                }
+            }
+            Some(first) => {
+                let same_claim = first == request.claim_token;
+                let with_call = same_claim && !request.omit_call;
+                ConsumeApprovalResponse {
+                    consumed: false,
+                    already_consumed: true,
+                    same_claim,
+                    tool_name: if with_call { "shell".to_owned() } else { String::new() },
+                    tool_input_json: if with_call {
+                        "{\"command\":\"echo\"}".to_owned()
+                    } else {
+                        String::new()
+                    },
+                    step_id: if with_call { "s1.tool_1".to_owned() } else { String::new() },
+                    authority: None,
+                }
+            }
+        }
+    }
+
+    /// A gRPC server that answers `ConsumeApproval` as its [`ServerBehaviour`] says and
+    /// nothing else. It stands in for session-core's service: the generated trait has two
+    /// dozen methods, and the consumer calls one.
+    #[derive(Clone)]
+    struct ConsumeOnlyServer {
+        seen: Arc<Mutex<Vec<SeenConsume>>>,
+        answers: Arc<Mutex<Vec<ConsumeAnswer>>>,
+        behaviour: ServerBehaviour,
+    }
+
+    impl tonic::server::NamedService for ConsumeOnlyServer {
+        const NAME: &'static str = "model_plane.v1.OrchestrationCoreService";
+    }
+
+    impl<B> tonic::codegen::Service<tonic::codegen::http::Request<B>> for ConsumeOnlyServer
+    where
+        B: tonic::codegen::Body + Send + 'static,
+        B::Error: Into<tonic::codegen::StdError> + Send + 'static,
+    {
+        type Response = tonic::codegen::http::Response<tonic::body::BoxBody>;
+        type Error = Infallible;
+        type Future = tonic::codegen::BoxFuture<Self::Response, Self::Error>;
+
+        fn poll_ready(
+            &mut self,
+            _cx: &mut tonic::codegen::Context<'_>,
+        ) -> tonic::codegen::Poll<Result<(), Self::Error>> {
+            tonic::codegen::Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, request: tonic::codegen::http::Request<B>) -> Self::Future {
+            use mp_contracts::model_plane::v1::{ConsumeApprovalRequest, ConsumeApprovalResponse};
+            let server = self.clone();
+            Box::pin(async move {
+                let handler = tower::service_fn(move |request: tonic::Request<ConsumeApprovalRequest>| {
+                    let server = server.clone();
+                    async move {
+                        let authorization = request
+                            .metadata()
+                            .get("authorization")
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_owned);
+                        let received = request.into_inner();
+                        server
+                            .seen
+                            .lock()
+                            .expect("the lock is not poisoned")
+                            .push((authorization, received.clone()));
+                        match &server.behaviour {
+                            ServerBehaviour::Script => server
+                                .answers
+                                .lock()
+                                .expect("the lock is not poisoned")
+                                .remove(0)
+                                .map(tonic::Response::new),
+                            ServerBehaviour::Hang => {
+                                std::future::pending::<ConsumeAnswer>().await.map(tonic::Response::new)
+                            }
+                            ServerBehaviour::SingleUse(winner) => {
+                                Ok(tonic::Response::new(single_use_answer(winner, &received)))
+                            }
+                        }
+                    }
+                });
+                let mut grpc = tonic::server::Grpc::new(
+                    tonic::codec::ProstCodec::<ConsumeApprovalResponse, ConsumeApprovalRequest>::default(),
+                );
+                Ok(grpc.unary(handler, request).await)
+            })
+        }
+    }
+
+    async fn consumer_over_grpc(
+        answers: Vec<ConsumeAnswer>,
+    ) -> (GrpcApprovalConsumer, Arc<Mutex<Vec<SeenConsume>>>) {
+        let (client, seen) = client_over_grpc(answers, ServerBehaviour::Script).await;
+        (
+            GrpcApprovalConsumer::new(client, VerifiedModelBearer::for_test("session-jwt-for-test")),
+            seen,
+        )
+    }
+
+    type ConsumeClient = mp_contracts::model_plane::v1::orchestration_core_service_client::OrchestrationCoreServiceClient<
+        tonic::transport::Channel,
+    >;
+
+    async fn client_over_grpc(
+        answers: Vec<ConsumeAnswer>,
+        behaviour: ServerBehaviour,
+    ) -> (ConsumeClient, Arc<Mutex<Vec<SeenConsume>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let server = ConsumeOnlyServer {
+            seen: Arc::clone(&seen),
+            answers: Arc::new(Mutex::new(answers)),
+            behaviour,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the test server");
+        let addr = listener.local_addr().expect("server address");
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(server)
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .ok();
+        });
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+            .expect("endpoint")
+            .connect()
+            .await
+            .expect("connect to the test server");
+        let client = mp_contracts::model_plane::v1::orchestration_core_service_client::OrchestrationCoreServiceClient::new(channel);
+        (client, seen)
+    }
+
+    /// The real consumer over a real transport: it presents the run's session bearer,
+    /// sends the spend-only request it was given, answers `true` only for a consume
+    /// that was won (a same-claim replay that carries the approved call is NOT a win,
+    /// and the call it carries is never read), and hands a refusal through as the
+    /// status the server sent.
+    #[tokio::test]
+    async fn the_grpc_consumer_asks_for_the_spend_only_and_reads_only_the_won_flag() {
+        use mp_contracts::model_plane::v1::ConsumeApprovalResponse;
+        let (consumer, seen) = consumer_over_grpc(vec![
+            Ok(ConsumeApprovalResponse {
+                consumed: true,
+                ..Default::default()
+            }),
+            Ok(ConsumeApprovalResponse {
+                consumed: false,
+                already_consumed: true,
+                same_claim: true,
+                tool_name: "shell".to_owned(),
+                tool_input_json: "{\"command\":\"echo\"}".to_owned(),
+                step_id: "s1.tool_1".to_owned(),
+                authority: Some(mp_contracts::model_plane::v1::ApprovedAuthority::default()),
+            }),
+            Err(tonic::Status::not_found("approval not found")),
+        ])
+        .await;
+        let request = preconsume_request("org-1", "run-1", "appr-1", "claim-1");
+        assert!(consumer.consume(request.clone()).await.expect("a won consume"));
+        assert!(
+            !consumer.consume(request.clone()).await.expect("a replay answers"),
+            "a same-claim replay is not a win, whatever it carries"
+        );
+        let refused = consumer.consume(request.clone()).await.expect_err("a refusal");
+        assert_eq!(refused.code(), tonic::Code::NotFound);
+        assert_eq!(
+            closed(preconsume_refusal(Err(refused))),
+            Some((StatusCode::NOT_FOUND, "approval_not_found"))
+        );
+
+        let seen = seen.lock().expect("the lock is not poisoned");
+        assert_eq!(seen.len(), 3);
+        for (authorization, received) in seen.iter() {
+            assert_eq!(authorization.as_deref(), Some("Bearer session-jwt-for-test"));
+            assert_eq!(received, &request, "the server received the spend-only request");
+            assert!(received.omit_call);
+        }
+    }
+
+    // ---- S7c-B1: the real consumer's bound and the same-claim race, over a real transport ----
+
+    /// A session-core that never answers: the real consumer must give up by itself after
+    /// [`PRECONSUME_TIMEOUT`], answer ambiguous (`503 continue_unavailable`) and launch
+    /// nothing. The bound is exercised through `GrpcApprovalConsumer::consume`, not only
+    /// through the free function it calls, so a consumer that stopped using
+    /// `consume_within_bound` would hang here and fail this test.
+    #[tokio::test]
+    async fn a_hung_session_core_ends_ambiguous_through_the_real_consumer() {
+        let (client, seen) = client_over_grpc(Vec::new(), ServerBehaviour::Hang).await;
+        let consumer = GrpcApprovalConsumer::new(client, VerifiedModelBearer::for_test("session-jwt-for-test"));
+        let launched = Arc::new(AtomicUsize::new(0));
+        let started = tokio::time::Instant::now();
+        let receiver = spawn_consume_then_launch(
+            consumer,
+            preconsume_request("org-1", "run-1", "appr-1", "claim-1"),
+            counting_launch(&launched),
+        );
+        // The consume really reaches the server (real sockets, real time) ...
+        wait_until("the consume reaching the server", || {
+            !seen.lock().expect("the lock is not poisoned").is_empty()
+        })
+        .await;
+        // ... and only then does the clock stop, so the bound passes at once and exactly.
+        tokio::time::pause();
+        // A consumer without its own bound never answers: the outer wait fails the test
+        // instead of hanging it.
+        let outcome = tokio::time::timeout(PRECONSUME_TIMEOUT * 3, receiver)
+            .await
+            .expect("the real consumer gives up by itself, within the bound");
+        let elapsed = started.elapsed();
+        assert_eq!(
+            won_or_lost(outcome),
+            Err((StatusCode::SERVICE_UNAVAILABLE, "continue_unavailable"))
+        );
+        assert!(
+            elapsed >= PRECONSUME_TIMEOUT && elapsed < PRECONSUME_TIMEOUT * 2,
+            "the real consumer gave up after {elapsed:?}, not at the bound"
+        );
+        assert_eq!(launched.load(Ordering::SeqCst), 0, "a consume that never answered launches nothing");
+    }
+
+    /// The scan that goes with the test above: the consumer's one RPC is wrapped by the
+    /// bound, in the consumer itself.
+    #[test]
+    fn the_grpc_consumer_applies_the_bound_to_its_own_rpc() {
+        let consumer = item_text("impl ApprovalConsumer for GrpcApprovalConsumer {", "\n}\n");
+        assert!(
+            consumer.contains("consume_within_bound(client.consume_approval("),
+            "the consumer's RPC must go through the bound: {consumer}"
+        );
+    }
+
+    /// Two clicks with the SAME claim token at once, against a server that answers as
+    /// session-core's compare-and-set really does: the winner gets `consumed`, and the
+    /// same token again gets the replay answer (`consumed` false, `already_consumed` true,
+    /// `same_claim` true, with the call when it is not omitted). The executor accepts that
+    /// replay; the gateway must not: exactly one proceeds, the other is a 409 and exactly
+    /// one continuation is launched. A fake that ignored the token could not show this.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_same_token_clicks_over_the_real_transport_get_one_proceed_and_one_409() {
+        for (first_token, second_token) in [("claim-a", "claim-a"), ("claim-a", "claim-b")] {
+            let winner = Arc::new(Mutex::new(None));
+            let (client, seen) =
+                client_over_grpc(Vec::new(), ServerBehaviour::SingleUse(Arc::clone(&winner))).await;
+            let bearer = || VerifiedModelBearer::for_test("session-jwt-for-test");
+            let launched = Arc::new(AtomicUsize::new(0));
+            let first = spawn_consume_then_launch(
+                GrpcApprovalConsumer::new(client.clone(), bearer()),
+                preconsume_request("org-1", "run-1", "appr-1", first_token),
+                counting_launch(&launched),
+            );
+            let second = spawn_consume_then_launch(
+                GrpcApprovalConsumer::new(client.clone(), bearer()),
+                preconsume_request("org-1", "run-1", "appr-1", second_token),
+                counting_launch(&launched),
+            );
+            let mut outcomes = vec![won_or_lost(first.await), won_or_lost(second.await)];
+            outcomes.sort_by_key(Result::is_err);
+            assert_eq!(
+                outcomes,
+                vec![
+                    Ok("launched"),
+                    Err((StatusCode::CONFLICT, "continuation_already_consumed"))
+                ],
+                "{first_token} / {second_token}"
+            );
+            assert_eq!(launched.load(Ordering::SeqCst), 1, "{first_token} / {second_token}");
+            assert_eq!(seen.lock().expect("the lock is not poisoned").len(), 2);
+
+            // The double speaks session-core's replay shape: the first (winning) token
+            // asked again is the replay the executor accepts, and the gateway's consume of it is
+            // still not a win.
+            let won_with = winner.lock().expect("the lock is not poisoned").clone().expect("a winner");
+            let replay_request = |omit_call: bool| {
+                let mut request = preconsume_request("org-1", "run-1", "appr-1", &won_with);
+                request.omit_call = omit_call;
+                authenticated_session_request(request, &bearer()).expect("a forwardable request")
+            };
+            let full = client
+                .clone()
+                .consume_approval(replay_request(false))
+                .await
+                .expect("a replay answers")
+                .into_inner();
+            assert!(!full.consumed && full.already_consumed && full.same_claim);
+            assert_eq!(full.tool_name, "shell", "the executor's own replay carries the call");
+            let spend_only = client
+                .clone()
+                .consume_approval(replay_request(true))
+                .await
+                .expect("a replay answers")
+                .into_inner();
+            assert!(!spend_only.consumed && spend_only.already_consumed && spend_only.same_claim);
+            assert!(spend_only.tool_name.is_empty(), "a spend-only replay carries no call");
+            let consumer = GrpcApprovalConsumer::new(client.clone(), bearer());
+            assert!(
+                !consumer
+                    .consume(preconsume_request("org-1", "run-1", "appr-1", &won_with))
+                    .await
+                    .expect("a replay answers"),
+                "the gateway never treats a same-claim replay as a win"
+            );
+        }
+    }
+
+    // ---- S7c-B1: the zero-retention refusal of the consume ----
+
+    /// A zero-retention catalogue refusal on the consume (session-core refuses a ZDR
+    /// caller with `FailedPrecondition` and the catalogue trailer) keeps its typed body, on
+    /// whichever code it arrives: it is not folded into `not_resumable`, and its answer is
+    /// `grpc_status_to_http`'s, exactly as the owner check's is.
+    #[test]
+    fn a_zero_retention_refusal_of_the_consume_keeps_its_typed_body() {
+        use mp_contracts::zdr_refusal::Refusal;
+        for code in [
+            tonic::Code::FailedPrecondition,
+            tonic::Code::PermissionDenied,
+            tonic::Code::Unavailable,
+            tonic::Code::InvalidArgument,
+        ] {
+            let status = Refusal::DURABLE_MUTATION_FORBIDDEN.grpc_status(code);
+            let Err(PreconsumeRefusal::Status(kept)) = preconsume_refusal(Err(status.clone())) else {
+                panic!("{code:?}: a catalogue refusal must reach the caller with its typed body");
+            };
+            let (sent, Json(body)) = crate::http_routes::grpc_status_to_http(&kept);
+            let (expected, Json(expected_body)) = crate::http_routes::grpc_status_to_http(&status);
+            assert_eq!((sent, body.clone()), (expected, expected_body), "{code:?}");
+            assert!(
+                !body.to_string().contains("not_resumable"),
+                "{code:?}: the typed refusal is not the closed `not_resumable`: {body}"
+            );
+        }
+        // The same status without the trailer keeps its closed mapping.
+        assert_eq!(
+            closed(preconsume_refusal(Err(tonic::Status::failed_precondition("x")))),
+            Some((StatusCode::CONFLICT, "not_resumable"))
+        );
+    }
+
+    // ---- S7c-B1: the builder and the wiring, by name ----
+
+    fn without_comments(text: &str) -> String {
+        text.lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn position(text: &str, needle: &str) -> usize {
+        text.find(needle)
+            .unwrap_or_else(|| panic!("`{needle}` is in the scanned text ({} bytes)", text.len()))
+    }
+
+    /// The code of `continue_run`, comments dropped.
+    fn continue_run_code() -> String {
+        without_comments(&item_text("pub(crate) async fn continue_run(", "\n}\n"))
+    }
+
+    /// Whitespace collapsed to single spaces, so a scan does not depend on how the code is wrapped.
+    fn squash(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// The code of `agentic_run_stream`, comments dropped.
+    fn stream_code() -> String {
+        without_comments(&item_text("fn agentic_run_stream(", "\n}\n"))
+    }
+
+    /// The text of one dispatch arm of `agentic_run_stream`: from the arm's pattern to the
+    /// start of the next arm of the same match (or `end`).
+    fn arm_text<'a>(code: &'a str, from: &str, to: &str) -> &'a str {
+        let start = position(code, from);
+        let rest = &code[start..];
+        let end = position(rest, to);
+        &rest[..end]
+    }
+
+    /// With the resume switch off the request is the one it always was: the builder given
+    /// the stage `resume_mode_for` picks for an off switch prost-encodes to the bytes of the
+    /// committed literal (built inline here), alone and inside the whole `RunAgentRequest`.
+    #[test]
+    fn with_the_resume_switch_off_the_continue_request_is_the_one_it_always_was() {
+        use prost::Message;
+        let committed = || mp_contracts::model_plane::v1::AgentResume {
+            mode: "segment".to_owned(),
+            approval_id: "appr_1".to_owned(),
+            claim_token: "claim-1".to_owned(),
+            brief: String::new(),
+            segment_no: 0,
+            ..Default::default()
+        };
+        for resumable in [false, true] {
+            let mode = resume_mode_for(false, resumable, false);
+            let built = continue_resume("appr_1", "claim-1", mode);
+            assert_eq!(built.encode_to_vec(), committed().encode_to_vec(), "resumable {resumable}");
+            let request = |resume| {
+                continue_run_agent_request(
+                    &continue_run_record(),
+                    "org-1",
+                    "user-1",
+                    "the run's goal",
+                    resume,
+                    None,
+                    crate::run_budget::RunBudget::default(),
+                )
+                .encode_to_vec()
+            };
+            assert_eq!(request(built), request(committed()), "resumable {resumable}");
+        }
+    }
+
+    /// The builder states the stage it was given and nothing else about the segment: the
+    /// executor derives the number, and no hint field is filled.
+    #[test]
+    fn continue_resume_states_the_stage_it_was_given() {
+        for mode in ["segment", "loop"] {
+            let built = continue_resume("appr_1", "claim-1", mode);
+            assert_eq!(built.mode, mode);
+            assert_eq!(built.segment_no, 0);
+            assert!(built.brief.is_empty());
+            assert_eq!(
+                built,
+                mp_contracts::model_plane::v1::AgentResume {
+                    mode: mode.to_owned(),
+                    approval_id: "appr_1".to_owned(),
+                    claim_token: "claim-1".to_owned(),
+                    ..Default::default()
+                },
+                "no hint field (step, tool, fingerprint, brief) is filled, and no attestation exists"
+            );
+        }
+    }
+
+    /// `continue_run` reaches the pre-consume only after every refusal check, through the
+    /// one spawning helper, with one launch closure that owns the one `agentic_run_stream`
+    /// call, and reads the resume switch once through the shared reader.
+    #[test]
+    fn continue_run_consumes_through_the_spawned_helper_after_the_preflight() {
+        let body = continue_run_code();
+        let ordered = [
+            "continue_persistent_gate(",
+            "require_durable_run_owner_with_token(",
+            ".get_run(",
+            ".get_approval(",
+            "continue_preflight(",
+            "loop_resume_enabled()",
+            "resume_mode_for(",
+            "preconsume_request(",
+            "move || {",
+            "agentic_run_stream(",
+            "spawn_consume_then_launch(",
+        ];
+        let mut last = 0;
+        for needle in ordered {
+            let at = position(&body, needle);
+            assert!(at >= last, "`{needle}` is out of order in continue_run");
+            last = at;
+        }
+        assert_eq!(body.matches("agentic_run_stream(").count(), 1, "one launch, one stream call");
+        assert_eq!(body.matches("loop_resume_enabled(").count(), 1, "the switch is read once");
+        assert_eq!(body.matches("spawn_consume_then_launch(").count(), 1);
+        assert_eq!(
+            body.matches("consume_then_launch(").count(),
+            body.matches("spawn_consume_then_launch(").count(),
+            "continue_run never drives the sequencing function itself: only the spawner does"
+        );
+        assert!(
+            !body.contains("EXECUTION_LOOP_RESUME_ENABLED") && !body.contains("env::var"),
+            "the switch is read through mp_contracts::loop_fold::loop_resume_enabled alone"
+        );
+        assert!(!body.contains("segment_no"), "the segment number is continue_resume's alone");
+        assert!(
+            body.contains("continue_resume(&req.approval_id, &req.claim_token, mode)"),
+            "the one builder, with the stage resume_mode_for picked"
+        );
+        assert!(
+            !body.contains("\"loop\"") && !body.contains("\"segment\""),
+            "the stage is named only by resume_mode_for"
+        );
+        // The pre-consume is detached: the one tokio::spawn of the flow is in the spawner.
+        let spawner = item_text("fn spawn_consume_then_launch<", "\n}\n");
+        assert_eq!(spawner.matches("tokio::spawn(").count(), 1);
+        // A switch that is off launches directly: no consume, no spawn.
+        let off = position(&body, "if !resume_enabled");
+        assert!(
+            off < position(&body, "spawn_consume_then_launch("),
+            "the off path returns before the pre-consume is built into a task"
+        );
+        assert!(body.contains("Ok(launch())"), "with the switch off the route launches as it always did");
+    }
+
+    /// `ApprovalSpend::SpentByGateway` is named only where the gateway knows it won a
+    /// consume: the spend is computed inside the launch closure (which runs after a won
+    /// consume, or at once with the switch off, where it says NotSpent), never up front, so
+    /// a lost or refused consume cannot claim `approval_spent`.
+    #[test]
+    fn the_spent_state_is_claimed_only_inside_the_launch_closure() {
+        let body = continue_run_code();
+        assert_eq!(body.matches("approval_spend_for(").count(), 1);
+        let closure = position(&body, "move || {");
+        let spend = position(&body, "approval_spend_for(");
+        let spawner = position(&body, "spawn_consume_then_launch(");
+        assert!(
+            closure < spend && spend < spawner,
+            "approval_spend_for is applied inside the launch closure, before the closure is handed to the spawner"
+        );
+        assert!(!body.contains("SpentByGateway"), "continue_run never names the spent state itself");
+        // Elsewhere in the production text only the definitions and the frame builders name it.
+        let production = without_comments(&production_text());
+        let mut owners = 0;
+        for owner in [
+            "fn approval_spend_for(",
+            "fn continue_failure_event(",
+            "fn dispatch_unknown_event(",
+        ] {
+            owners += without_comments(&item_text(owner, "\n}\n")).matches("SpentByGateway").count();
+        }
+        let enum_text = without_comments(&item_text("enum ApprovalSpend {", "\n}\n"));
+        owners += enum_text.matches("SpentByGateway").count();
+        owners += without_comments(&item_text("const fn is_spent(self)", "\n    }\n"))
+            .matches("SpentByGateway")
+            .count();
+        assert_eq!(
+            production.matches("SpentByGateway").count(),
+            owners,
+            "the spent state is named only by its definition, approval_spend_for and the frame builders"
+        );
+    }
+
+    /// The dispatch arms of a continuation, in the order the design gives and with the
+    /// guards the design gives:
+    ///  1. spent (the gateway consumed the approval): its own frames, never terminalizing;
+    ///  2. the committed confirmed-rejection arm for a continuation the gateway did not
+    ///     pre-consume (`InvalidArgument`, `Unauthenticated`, `PermissionDenied`), unchanged;
+    ///  3. the typed refusal for such a continuation's `FailedPrecondition`, `Aborted`,
+    ///     `NotFound` (and trailer) refusals: not degraded, not terminalized, no spend claim;
+    ///  4. the committed unreachable arm;  5. the committed ambiguous arm.
+    #[test]
+    fn the_dispatch_arms_of_a_continuation_are_spent_then_confirmed_then_typed_then_the_committed_ones() {
+        let code = squash(&stream_code());
+        let spent = "Ok(Ok(Err(status))) if spend.is_spent() =>";
+        let confirmed = "Ok(Ok(Err(status))) if is_confirmed_agent_dispatch_rejection(&status) =>";
+        let typed = "Ok(Ok(Err(status))) if continuing";
+        let unreachable = "Ok(Ok(Err(status))) if dispatch_never_reached_execution_core(&status) =>";
+        let ambiguous = "Ok(Ok(Err(status))) => {";
+        let positions: Vec<usize> = [spent, confirmed, typed, unreachable, ambiguous]
+            .iter()
+            .map(|needle| position(&code, needle))
+            .collect();
+        assert!(
+            positions.windows(2).all(|pair| pair[0] < pair[1]),
+            "arm order spent < confirmed < typed refusal < unreachable < ambiguous: {positions:?}"
+        );
+
+        // 1. the spent arm: gated on the local spend alone, no terminalizing, its own frames.
+        let spent_arm = arm_text(&code, spent, confirmed);
+        assert!(!spent_arm.contains("resume.is_some()") && !spent_arm.contains("continuing"));
+        assert!(
+            !spent_arm.contains("terminalize_agent_dispatch_rejection_authenticated")
+                && !spent_arm.contains("AgentDispatchFailure"),
+            "a spent continuation is never terminalized by the gateway: {spent_arm}"
+        );
+        assert!(spent_arm.contains("classify_continue_dispatch_failure(&status)"));
+        assert!(spent_arm.contains("continue_failure_event("));
+        assert!(
+            !spent_arm.contains("agent_dispatch_"),
+            "the spent regime never answers with an agent_dispatch_* frame"
+        );
+
+        // 2. the committed confirmed-rejection arm still terminalizes and still says so.
+        let confirmed_arm = arm_text(&code, confirmed, typed);
+        assert!(confirmed_arm.contains("terminalize_agent_dispatch_rejection_authenticated("));
+        assert!(confirmed_arm.contains("AgentDispatchFailure::Rejected"));
+        assert!(confirmed_arm.contains("\"agent_dispatch_rejected\""));
+        assert!(!confirmed_arm.contains("continue_refusal_event"));
+
+        // 3. the typed refusal of a continuation the gateway did not pre-consume.
+        let typed_arm = arm_text(&code, typed, unreachable);
+        let guard = &typed_arm[..position(typed_arm, "=>")];
+        assert!(guard.contains("continuing"), "{guard}");
+        assert!(guard.contains("!spend.is_spent()"), "{guard}");
+        assert!(guard.contains("classify_continue_dispatch_failure(&status)"), "{guard}");
+        assert!(guard.contains("ContinueDispatchFailure::Refused("), "{guard}");
+        assert!(
+            !typed_arm.contains("terminalize") && !typed_arm.contains("AgentDispatchFailure"),
+            "a typed refusal never terminalizes: {typed_arm}"
+        );
+        assert!(
+            !typed_arm.contains("RUN_DISPATCH_DEGRADED"),
+            "a refused continuation is not a degraded dispatch: {typed_arm}"
+        );
+        assert!(
+            !typed_arm.contains("approval_spent") && !typed_arm.contains("SpentByGateway"),
+            "the gateway cannot say whether the executor spent the approval: {typed_arm}"
+        );
+        assert!(typed_arm.contains("continue_refusal_event("));
+        assert!(!typed_arm.contains("agent_dispatch_unavailable"));
+
+        // 4. and 5. the committed arms stay; the ambiguous one goes through the one builder
+        // that says `continue_outcome_unknown` after a spend.
+        let unreachable_arm = arm_text(&code, unreachable, ambiguous);
+        assert!(unreachable_arm.contains("AgentDispatchFailure::Unreachable"));
+        assert!(unreachable_arm.contains("\"agent_dispatch_unreachable\""));
+        let ambiguous_arm = &code[position(&code, ambiguous)..];
+        let ambiguous_arm = &ambiguous_arm[..position(ambiguous_arm, "Ok(Ok(Ok(response))) => response")];
+        assert!(ambiguous_arm.contains("RUN_DISPATCH_DEGRADED"));
+        assert!(ambiguous_arm.contains("dispatch_unknown_event(spend,"));
+        assert!(!ambiguous_arm.contains("terminalize"));
+    }
+
+    /// Every place the stream used to say `agent_dispatch_unavailable` goes through the
+    /// one builder that picks the frame by the spend, and the first frame is built by the
+    /// payload function that adds `approval_spent` after a spend.
+    #[test]
+    fn the_stream_asks_the_spend_for_its_ambiguous_frames_and_its_connected_frame() {
+        let code = stream_code();
+        assert_eq!(
+            code.matches("agent_dispatch_unavailable_event(").count(),
+            0,
+            "the stream says agent_dispatch_unavailable only through dispatch_unknown_event"
+        );
+        assert_eq!(
+            code.matches("dispatch_unknown_event(spend,").count(),
+            3,
+            "the deadline, the join error and the ambiguous arm"
+        );
+        assert!(code.contains("connected_payload(&run_id, &thread_id, &request_id, spend)"));
+        assert!(
+            !code.contains("\"approval_spent\""),
+            "the flag is added by the frame builders, never inline"
+        );
+        // A request that cannot be built locally after a spend is a typed refusal, not a
+        // terminalization of a run the gateway has already spent the click of.
+        let construction = arm_text(&code, "Err(error) => {", "let run_started =");
+        let spent_path = position(construction, "spend.is_spent()");
+        let terminalizes = position(construction, "terminalize_agent_dispatch_rejection_authenticated");
+        assert!(spent_path < terminalizes, "the spent path comes before the terminalization");
+        assert!(construction.contains("continue_refusal_event("));
+    }
+
+    /// A Do run is registered for Stop before its `connected` frame, by the two calls the Ask path
+    /// makes, and the registration is released by a guard that drops with the task: no exit calls
+    /// `finish` by hand. Nothing is registered in the queue, since no loop drains mid-run input for
+    /// a Do run. A stopped run ends with the `stopped` frame the Ask path sends, one run-subject
+    /// `RUN_CANCELLED` and no second frame.
+    #[test]
+    fn the_agentic_stream_is_registered_for_stop_before_connected_and_released_by_a_guard() {
+        let code = squash(&stream_code());
+        let registered = position(&code, "register_run(&request_id, &org_id, &user_id, &run_id)");
+        let held = position(
+            &code,
+            "let _registration = state.cancels.hold(&request_id);",
+        );
+        let attached = position(
+            &code,
+            "attach(&state.cancels, &state.queued_inputs, &request_id, &run_id)",
+        );
+        let connected = position(
+            &code,
+            "let connected = connected_payload(&run_id, &thread_id, &request_id, spend);",
+        );
+        assert!(
+            registered < held && held < attached && attached < connected,
+            "registered, held, attached, then connected"
+        );
+        assert!(
+            !code.contains("queued_inputs.register("),
+            "a Do run takes no mid-run input"
+        );
+        assert!(
+            !code.contains(".finish("),
+            "no exit releases the entry by hand"
+        );
+
+        // The guard releases the entry when it drops: the drop is in the registry's own impl.
+        let registry = include_str!("cancel_registry.rs").replace("\r\n", "\n");
+        let drop_impl = &registry[position(&registry, "impl Drop for Registration {")..];
+        let drop_impl = &drop_impl[..position(drop_impl, "\n}\n")];
+        assert!(
+            drop_impl.contains("self.cancels.finish(&self.request_id);"),
+            "{drop_impl}"
+        );
+
+        // The stop: one terminal frame, one run-subject event, one Session Core cancel.
+        let stop = arm_text(
+            &code,
+            "Ok(Err(join_error)) if join_error.is_cancelled()",
+            "Ok(Err(join_error)) => {",
+        );
+        assert_eq!(
+            stop.matches("tx.send(").count(),
+            1,
+            "one terminal frame: {stop}"
+        );
+        assert_eq!(stop.matches(".publish(").count(), 1, "{stop}");
+        assert_eq!(
+            stop.matches("cancel_stopped_agentic_run(").count(),
+            1,
+            "{stop}"
+        );
+        assert!(
+            stop.contains("reason: \"client cancelled\".to_owned()"),
+            "{stop}"
+        );
+        assert!(stop.contains("\"RUN_CANCELLED\""), "{stop}");
+        assert!(
+            !stop.contains("terminalize") && !stop.contains("dispatch_unknown_event"),
+            "a stop is a cancellation, not a degraded or terminalized dispatch: {stop}"
+        );
+
+        // The helper sends the reason the durable cancel route sends, and one CancelRun.
+        let helper = without_comments(&item_text("async fn cancel_stopped_agentic_run(", "\n}\n"));
+        assert!(
+            helper.contains("reason: \"user_requested\".to_owned()"),
+            "{helper}"
+        );
+        assert_eq!(helper.matches("cancel_run(").count(), 1, "{helper}");
+    }
+
+    /// The claim token is a secret of the click: no log statement of the pre-consume or of
+    /// the stream names it, and nothing logs the upstream message.
+    #[test]
+    fn nothing_that_logs_in_the_pre_consume_flow_names_the_claim_token() {
+        let mut texts = vec![continue_run_code(), stream_code()];
+        for item in [
+            "fn preconsume_refusal(",
+            "fn consume_within_bound<",
+            "impl ApprovalConsumer for GrpcApprovalConsumer {",
+            "fn spawn_consume_then_launch<",
+            "async fn consume_then_launch<",
+        ] {
+            texts.push(without_comments(&item_text(item, "\n}\n")));
+        }
+        let mut statements = 0;
+        for text in &texts {
+            for chunk in text.split("tracing::").skip(1) {
+                let statement = &chunk[..chunk.find(");").unwrap_or(chunk.len())];
+                statements += 1;
+                assert!(
+                    !statement.contains("claim_token") && !statement.contains(".message()"),
+                    "a log statement names the claim token or an upstream message: {statement}"
+                );
+            }
+        }
+        assert!(statements >= 5, "the scan found only {statements} log statements");
+    }
+
+    // ---- WS03 S8-A S8-7: the park continue, the regime that never terminalizes ----
+
+    fn parked_answer(reason: &str, resets_at: &str) -> RunAgentResponse {
+        RunAgentResponse {
+            status: "parked".to_owned(),
+            park_reason: reason.to_owned(),
+            resets_at: resets_at.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn classify_agentic_run_outcome_parked() {
+        assert_eq!(classify_agentic_run_outcome("parked"), AgenticRunOutcome::Parked);
+        // Exact words only, as for every other status.
+        for status in ["Parked", "parked ", "park"] {
+            assert_eq!(classify_agentic_run_outcome(status), AgenticRunOutcome::Unknown, "{status:?}");
+        }
+    }
+
+    /// The `run_parked` frame of the owner's turn stream: ids, the status, the closed reason and
+    /// the time the run can be resumed, and nothing else.
+    #[tokio::test]
+    async fn run_parked_frame_has_exactly_the_documented_keys() {
+        for reason in [
+            "credential_window",
+            "provider_exhausted",
+            "upstream_unavailable",
+            "reauth_required",
+        ] {
+            let event = run_parked_event("req-1", "run-42", &parked_answer(reason, "2026-10-20T12:00:00Z"))
+                .unwrap_or_else(|| panic!("{reason} is a known park reason"));
+            let (name, frame) = frame_of(event).await;
+            assert_eq!(name, "run_parked");
+            assert_eq!(
+                frame,
+                json!({
+                    "run_id": "run-42",
+                    "request_id": "req-1",
+                    "status": "parked",
+                    "reason": reason,
+                    "resume_after": "2026-10-20T12:00:00Z",
+                }),
+                "{reason}"
+            );
+        }
+        // An unreadable time is null, never echoed.
+        let event = run_parked_event("req-1", "run-42", &parked_answer("provider_exhausted", "soon, maybe"))
+            .expect("a known reason");
+        let (_, frame) = frame_of(event).await;
+        assert!(frame["resume_after"].is_null(), "{frame}");
+    }
+
+    /// A parked answer with a reason this build does not know is an unknown status: the stream
+    /// reads the parked outcome only through `run_parked_event`.
+    #[test]
+    fn an_unknown_park_reason_is_agent_run_state_unknown() {
+        for reason in ["", "Provider_Exhausted", "provider_exhausted ", "a sentence"] {
+            assert!(
+                run_parked_event("req-1", "run-42", &parked_answer(reason, "")).is_none(),
+                "{reason:?}"
+            );
+        }
+        let stream = squash(&stream_code());
+        assert!(
+            stream.contains(
+                "AgenticRunOutcome::Parked if run_parked_event(&request_id, &run.run_id, &response).is_some() =>"
+            ),
+            "{stream}"
+        );
+        assert!(stream.contains("AgenticRunOutcome::Parked | AgenticRunOutcome::Unknown =>"));
+        // The parked arm appends nothing, terminalizes nothing and publishes RUN_PARKED once.
+        let arm = arm_text(
+            &stream,
+            "AgenticRunOutcome::Parked if",
+            "AgenticRunOutcome::Parked | AgenticRunOutcome::Unknown =>",
+        );
+        assert!(!arm.contains("append_assistant_message"), "{arm}");
+        assert!(!arm.contains("terminalize"), "{arm}");
+        assert_eq!(arm.matches(".publish(").count(), 1, "{arm}");
+        assert!(arm.contains("\"RUN_PARKED\""), "{arm}");
+    }
+
+    #[tokio::test]
+    async fn orchestration_run_parked_frame_has_no_reason() {
+        let event = OrchestrationEvent {
+            event: Some(orchestration_event::Event::RunParked(
+                orchestration_event::RunParked {
+                    run_id: "run-42".to_owned(),
+                },
+            )),
+            ..Default::default()
+        };
+        let (name, frame) = frame_of(orchestration_event_to_sse(&event).expect("a frame")).await;
+        assert_eq!(name, "run_parked");
+        assert_eq!(frame["run_id"], "run-42");
+        assert!(
+            frame.get("reason").is_none() && frame.get("park_reason").is_none(),
+            "the park reason is never broadcast: {frame}"
+        );
+    }
+
+    #[tokio::test]
+    async fn orchestration_run_resumed_frame_uses_resumed_segment() {
+        let event = OrchestrationEvent {
+            event: Some(orchestration_event::Event::RunResumed(
+                orchestration_event::RunResumed {
+                    run_id: "run-42".to_owned(),
+                    resumed_segment: 3,
+                },
+            )),
+            ..Default::default()
+        };
+        let (name, frame) = frame_of(orchestration_event_to_sse(&event).expect("a frame")).await;
+        assert_eq!(name, "run_resumed");
+        assert_eq!(frame["run_id"], "run-42");
+        assert_eq!(frame["resumed_segment"], 3);
+    }
+
+    #[test]
+    fn park_dispatch_run_event_maps_refused_and_unreachable_to_the_attempt_and_unknown_to_degraded() {
+        for token in CONTINUE_FRAME_REFUSALS {
+            assert_eq!(
+                park_dispatch_run_event(&ContinueDispatchFailure::Refused(token)),
+                "RUN_CONTINUE_REFUSED",
+                "{token}"
+            );
+        }
+        assert_eq!(
+            park_dispatch_run_event(&ContinueDispatchFailure::Unreachable),
+            "RUN_CONTINUE_REFUSED",
+            "nothing was claimed or started"
+        );
+        assert_eq!(
+            park_dispatch_run_event(&ContinueDispatchFailure::Unknown),
+            "RUN_DISPATCH_DEGRADED"
+        );
+    }
+
+    #[test]
+    fn park_frame_token_table() {
+        for token in CONTINUE_FRAME_REFUSALS {
+            assert_eq!(park_frame_token(&ContinueDispatchFailure::Refused(token)), *token);
+        }
+        assert_eq!(park_frame_token(&ContinueDispatchFailure::Unreachable), "continue_unreachable");
+        assert_eq!(park_frame_token(&ContinueDispatchFailure::Unknown), "continue_outcome_unknown");
+    }
+
+    /// The park frame is the committed refusal frame plus the run and the closed additive marker
+    /// `park_continue: true`; it never says `approval_spent`.
+    #[tokio::test]
+    async fn park_refusal_event_marks_the_frame_and_never_says_approval_spent() {
+        for token in CONTINUE_FRAME_REFUSALS {
+            let (name, frame) = frame_of(park_refusal_event("req-1", "run-42", token)).await;
+            assert_eq!(name, "error");
+            assert_eq!(
+                frame,
+                json!({
+                    "code": token,
+                    "message": token.replace('_', " "),
+                    "retryable": false,
+                    "request_id": "req-1",
+                    "run_id": "run-42",
+                    "park_continue": true,
+                }),
+                "{token}"
+            );
+        }
+        let body = without_comments(&item_text("fn park_refusal_event(", "\n}\n"));
+        assert!(!body.contains("approval_spent") && !body.contains("ApprovalSpend"), "{body}");
+    }
+
+    #[test]
+    fn park_dispatch_of_takes_only_an_executor_refusal_of_a_park() {
+        type Result3 = Result<Result<Result<u8, tonic::Status>, &'static str>, DeadlineExpired>;
+        let cases = || -> Vec<(&'static str, Result3)> {
+            vec![
+                ("refusal", Ok(Ok(Err(tonic::Status::failed_precondition("park_not_due"))))),
+                ("answer", Ok(Ok(Ok(7)))),
+                ("join", Ok(Err("join"))),
+                ("deadline", Err(DeadlineExpired)),
+            ]
+        };
+        for (name, result) in cases() {
+            assert!(
+                matches!(park_dispatch_of(false, result), ParkDispatch::Pass(_)),
+                "{name}: not a park continue, so everything passes"
+            );
+        }
+        for (name, result) in cases() {
+            match (name, park_dispatch_of(true, result)) {
+                ("refusal", ParkDispatch::Refused(status)) => {
+                    assert_eq!(status.message(), "park_not_due");
+                }
+                ("answer", ParkDispatch::Pass(Ok(Ok(Ok(7)))))
+                | ("join", ParkDispatch::Pass(Ok(Err("join"))))
+                | ("deadline", ParkDispatch::Pass(Err(DeadlineExpired))) => {}
+                (name, _) => panic!("{name} was not handled as designed"),
+            }
+        }
+    }
+
+    /// The park branch of `continue_run`: the pure checks, the stage, and its place in the source
+    /// (the handler-level cases are in `tests/continue_preconsume_test.rs`).
+    #[test]
+    fn the_park_branch() {
+        let conflict = |code| Err((StatusCode::CONFLICT, code));
+        assert_eq!(park_preflight(true, "running", true, true, true), Ok(()));
+        assert_eq!(park_preflight(false, "running", true, true, true), conflict("continue_disabled"));
+        // The switch off answers first, whatever else is wrong.
+        assert_eq!(
+            park_preflight(false, "completed", false, false, false),
+            conflict("continue_disabled")
+        );
+        assert_eq!(park_preflight(true, "running", true, true, false), conflict("not_resumable"));
+        for status in ["completed", "failed", "cancelled"] {
+            assert_eq!(park_preflight(true, status, true, true, true), conflict("not_resumable"), "{status}");
+        }
+        assert_eq!(park_preflight(true, "running", false, true, true), conflict("not_resumable"));
+        assert_eq!(
+            park_preflight(true, "running", true, false, true),
+            conflict("not_resumable"),
+            "a resumable run that is not parked is not a park continue"
+        );
+        for (enabled, resumable) in [(true, true), (true, false), (false, true), (false, false)] {
+            assert_eq!(resume_mode_for(enabled, resumable, true), "park", "{enabled} {resumable}");
+        }
+
+        let body = continue_run_code();
+        let squashed = squash(&body);
+        assert_eq!(
+            squashed
+                .matches("let parking = req.approval_id.is_empty() && mp_contracts::loop_fold::loop_parking_enabled();")
+                .count(),
+            1,
+            "an EXACTLY empty id, and only with the switch on"
+        );
+        assert!(squashed.contains(
+            "if (!parking && req.approval_id.trim().is_empty()) || req.claim_token.trim().is_empty() {"
+        ));
+        let park_branch = position(&body, "if parking {");
+        let preflight = position(&body, "park_preflight(");
+        let else_branch = position(&body, "} else {");
+        let approval = position(&body, ".get_approval(");
+        let continue_check = position(&body, "continue_preflight(");
+        assert!(
+            position(&body, ".get_run(") < park_branch
+                && park_branch < preflight
+                && preflight < else_branch
+                && else_branch < approval
+                && approval < continue_check,
+            "a park continue reads no approval: park_preflight in the park branch, GetApproval and continue_preflight in the other"
+        );
+        assert_eq!(body.matches(".get_approval(").count(), 1);
+        assert_eq!(body.matches("park_preflight(").count(), 1);
+        assert!(squashed.contains(
+            "if parking && !resume_enabled { return Err(continue_error(StatusCode::CONFLICT, \"continue_disabled\")); }"
+        ));
+        assert!(squashed.contains("resume_mode_for(resume_enabled, detail.resumable, parking)"));
+    }
+
+    /// Park StoreProof: a waived or zero-retention turn is refused before the run is read, by the
+    /// same early gate an approval continuation has, and the park preflight refuses it too.
+    #[test]
+    fn a_park_continue_of_a_non_persistent_turn_is_refused_before_any_read() {
+        let waived = token(
+            false,
+            Some(true),
+            Some(json!({"version": 1, "provider": PROVIDER_ID, "connection": "conn-1"})),
+        );
+        let zdr = token(true, Some(true), None);
+        for claims in [&waived, &zdr] {
+            assert_eq!(
+                continue_persistent_gate(true, claims),
+                Err((StatusCode::CONFLICT, "not_resumable"))
+            );
+            assert_eq!(
+                park_preflight(true, "running", true, true, continue_turn_is_persistent(claims)),
+                Err((StatusCode::CONFLICT, "not_resumable"))
+            );
+        }
+        let persistent = token(false, Some(false), None);
+        assert_eq!(
+            park_preflight(true, "running", true, true, continue_turn_is_persistent(&persistent)),
+            Ok(())
+        );
+        let body = continue_run_code();
+        let gate = position(&body, "continue_persistent_gate(");
+        for later in ["let parking =", "require_durable_run_owner", ".get_run(", "park_preflight("] {
+            assert!(gate < position(&body, later), "the gate must come before {later}");
+        }
+    }
+
+    /// The pre-consume check is skipped for a park continue (the rebinding stands before it), and
+    /// a park continue whose request cannot be built is answered by the stream with ONE
+    /// `park_continue` `continue_refused` frame, never the unbuildable stream's frame: nothing
+    /// published, nothing terminalized, nothing claimed.
+    #[tokio::test]
+    async fn a_park_continue_skips_the_pre_consume_check_and_its_construction_failure_is_a_park_frame() {
+        let body = continue_run_code();
+        let rebinding = "let resume_enabled = resume_enabled && !parking;";
+        assert_eq!(body.matches(rebinding).count(), 1);
+        let rebound = position(&body, rebinding);
+        assert!(position(&body, "resume_mode_for(") < rebound);
+        assert!(position(&body, "if parking && !resume_enabled {") < rebound);
+        assert!(
+            rebound < position(&body, "if resume_enabled {"),
+            "the rebinding comes BEFORE the pre-consume check, so a park never reaches it"
+        );
+        let stream = stream_code();
+        let anchor = position(&stream, "RunAgent request construction rejected before dispatch");
+        let park_block = anchor + position(&stream[anchor..], "if parking {");
+        let spent = anchor + position(&stream[anchor..], "if spend.is_spent() {");
+        assert!(park_block < spent, "the park block precedes the committed spent check");
+
+        let mut state = AppState::new();
+        let publisher = std::sync::Arc::new(crate::state::DynPublisher::InMemory(
+            mp_events::publisher::InMemoryPublisher::new(),
+        ));
+        state.publisher = publisher.clone();
+        let (execution, data_plane, session, inference) = bearers_with(Some("inference"));
+        let stream = agentic_run_stream(
+            state,
+            crate::session_flow::SessionRun {
+                thread_id: "thread-1".to_owned(),
+                run_id: "run-42".to_owned(),
+                org_id: "org-1".to_owned(),
+                already_started: true,
+                terminal_source: mp_contracts::model_plane::v1::ManagedRunSource::ExecutionAgent,
+            },
+            "req-1".to_owned(),
+            "org-1".to_owned(),
+            "user-1".to_owned(),
+            String::new(),
+            "the run's goal".to_owned(),
+            Vec::new(),
+            Vec::new(),
+            false,
+            None,
+            0,
+            CONTINUE_PERMISSION_MODE.to_owned(),
+            false,
+            false,
+            execution,
+            data_plane,
+            session,
+            inference,
+            String::new(),
+            None,
+            None,
+            AgentRoute::default(),
+            None,
+            Some(continue_resume("", "claim-1", "park")),
+            ApprovalSpend::NotSpent,
+            None,
+            Vec::new(),
+            Vec::new(),
+            0,
+        );
+        let frames = frames_of_stream(stream).await;
+        let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["connected", "error"], "{frames:?}");
+        assert!(frames[0].1.get("approval_spent").is_none(), "{frames:?}");
+        assert_eq!(
+            frames[1].1,
+            json!({
+                "code": "continue_refused",
+                "message": "continue refused",
+                "retryable": false,
+                "request_id": "req-1",
+                "run_id": "run-42",
+                "park_continue": true,
+            })
+        );
+        assert!(publisher.drain().is_empty(), "nothing is published for a park construction failure");
+        // The unbuildable stream's frame is not a park frame: a park continue must never get it.
+        let unbuildable = frames_of_stream(unbuildable_continuation_stream("run-42")).await;
+        assert!(unbuildable[0].1.get("park_continue").is_none());
+    }
+
+    /// A park continue runs on the pinned route the executor rebuilds from the park, so the
+    /// gateway follows it with the pinned deadline and words its typed failure as a pinned run's.
+    #[test]
+    fn a_park_continue_words_a_pinned_failure_and_follows_with_the_pinned_deadline() {
+        let stream = squash(&stream_code());
+        assert_eq!(
+            stream
+                .matches("let parking = resume.as_ref().is_some_and(|r| r.mode == \"park\");")
+                .count(),
+            1
+        );
+        assert!(stream.contains("resolve_agentic_run_deadline(route.is_pinned() || parking,"), "{stream}");
+        assert!(
+            stream.contains("agent_subscription_failure( &response, !route.provider_hint.is_empty() || parking, )"),
+            "{stream}"
+        );
+        assert_eq!(
+            resolve_agentic_run_deadline(true, &|_| None),
+            std::time::Duration::from_secs(AGENTIC_RUN_DEADLINE_SUBSCRIPTION_SECS)
+        );
+        let failed = RunAgentResponse {
+            status: "failed".to_owned(),
+            failure_code: "subscription_usage_limit".to_owned(),
+            ..Default::default()
+        };
+        assert!(agent_subscription_failure(&failed, false).is_none(), "an unpinned turn is not worded");
+        assert_eq!(
+            agent_subscription_failure(&failed, true).map(|failure| failure.code),
+            Some("subscription_usage_limit")
+        );
+    }
+}
+
+/// WS14 S2a, "run the approved plan": the gateway half. An execute turn (`execute_granted`)
+/// takes its rung from the thread's live grant or is refused; it runs under the ASK posture at
+/// the widest rung; a kill switch refuses it before any run exists. The pure decisions are
+/// tested directly; the wiring is pinned by name here and driven end to end in
+/// `tests/e2e_invoke_chain_test.rs`.
+#[cfg(test)]
+mod execute_turn_tests {
+    use super::*;
+    use mp_contracts::model_plane::v1::AutonomyRung as Rung;
+
+    fn store_with(org: &str, thread: &str, rung: Rung) -> crate::coordinator::PlanModeStore {
+        let store = crate::coordinator::PlanModeStore::new();
+        store.record_grant(org, thread, rung, "");
+        store
+    }
+
+    /// The rung a dispatch states, for a store that is known to resolve.
+    fn rung_of(
+        store: &crate::coordinator::PlanModeStore,
+        org: &str,
+        thread: &str,
+        plan_mode: bool,
+        execute: bool,
+    ) -> i32 {
+        resolve_autonomy_rung(store, org, thread, plan_mode, execute, None).expect("the rung resolves")
+    }
+
+    fn request(extra: serde_json::Value) -> InvokeRequest {
+        let mut body = serde_json::json!({ "content": "run the plan" });
+        body.as_object_mut()
+            .expect("object")
+            .extend(extra.as_object().expect("object").clone());
+        serde_json::from_value(body).expect("a wire body parses")
+    }
+
+    /// Plan mode is READ_ONLY whatever else is true: a grant that exists and an execute flag
+    /// that is also set do not widen it.
+    #[test]
+    fn plan_mode_wins_over_a_grant_and_over_execute() {
+        let store = store_with("org-1", "thread-1", Rung::DangerFullAccess);
+        for execute in [false, true] {
+            assert_eq!(
+                rung_of(&store, "org-1", "thread-1", true, execute),
+                Rung::ReadOnly as i32,
+                "execute_granted {execute}"
+            );
+        }
+        // And with no grant at all, plan mode still resolves (it never reads the store).
+        let empty = crate::coordinator::PlanModeStore::new();
+        assert_eq!(
+            rung_of(&empty, "org-1", "thread-1", true, true),
+            Rung::ReadOnly as i32
+        );
+    }
+
+    /// The compatibility pin for eval-lab and every existing agentic caller: without
+    /// `execute_granted` the rule is the legacy one, the grant's rung or UNSPECIFIED.
+    #[test]
+    fn the_legacy_path_is_unchanged_without_execute() {
+        let store = store_with("org-1", "thread-1", Rung::WorkspaceWrite);
+        assert_eq!(
+            rung_of(&store, "org-1", "thread-1", false, false),
+            Rung::WorkspaceWrite as i32,
+            "a grant states its rung"
+        );
+        for (org, thread) in [("org-1", "thread-2"), ("org-2", "thread-1")] {
+            assert_eq!(
+                rung_of(&store, org, thread, false, false),
+                Rung::Unspecified as i32,
+                "no grant for ({org}, {thread}) is UNSPECIFIED, the legacy fail-open that is kept for non-execute runs"
+            );
+        }
+    }
+
+    /// An execute turn without a live grant never runs with no stated rung.
+    #[test]
+    fn an_execute_turn_fails_closed_without_a_live_grant() {
+        let store = store_with("org-1", "thread-1", Rung::WorkspaceWrite);
+        // Another thread, another org, nothing recorded at all.
+        for (org, thread) in [
+            ("org-1", "thread-2"),
+            ("org-2", "thread-1"),
+            ("org-1", ""),
+        ] {
+            let error = resolve_autonomy_rung(&store, org, thread, false, true, None)
+                .expect_err("no live grant for this org and thread");
+            assert_eq!(error.code(), tonic::Code::FailedPrecondition, "({org}, {thread})");
+            assert_eq!(error.message(), PLAN_GRANT_UNAVAILABLE);
+        }
+        let none = resolve_autonomy_rung(
+            &crate::coordinator::PlanModeStore::new(),
+            "org-1",
+            "thread-1",
+            false,
+            true,
+            None,
+        )
+        .expect_err("a gateway that restarted holds no grant");
+        assert_eq!(none.message(), PLAN_GRANT_UNAVAILABLE);
+    }
+
+    /// A grant past its expiry is no grant.
+    #[test]
+    fn an_expired_grant_is_refused_and_a_live_one_gives_its_rung() {
+        let store = store_with("org-1", "thread-1", Rung::DangerFullAccess);
+        assert_eq!(
+            rung_of(&store, "org-1", "thread-1", false, true),
+            Rung::DangerFullAccess as i32,
+            "a live grant gives its own rung, the one the human approved"
+        );
+        let workspace = store_with("org-1", "thread-9", Rung::WorkspaceWrite);
+        assert_eq!(
+            rung_of(&workspace, "org-1", "thread-9", false, true),
+            Rung::WorkspaceWrite as i32
+        );
+        // Expired: planted already past its expiry, as `granted_rung` sees it.
+        let lapsed = crate::coordinator::PlanModeStore::new();
+        lapsed.plant_grant_for_test("org-1", "thread-1", Rung::DangerFullAccess, 1);
+        assert_eq!(
+            rung_of(&lapsed, "org-1", "thread-1", false, false),
+            Rung::Unspecified as i32,
+            "the legacy path sees an expired grant as none"
+        );
+        assert!(resolve_autonomy_rung(&lapsed, "org-1", "thread-1", false, true, None).is_err());
+    }
+
+    /// WS04 S4: with the durable grant switch on the rung is the one Session Core answered for
+    /// this run start, whatever this replica's memory holds (it may hold a different grant, or
+    /// none, because the approval was taken on another replica).
+    #[test]
+    fn a_durable_grant_decides_the_rung_and_this_replicas_memory_is_not_asked() {
+        use crate::session_flow::ThreadGrant;
+        let live = ThreadGrant {
+            rung: Some(Rung::WorkspaceWrite),
+            approved_plan_id: Some("plan-1".to_owned()),
+            expires_at_unix: Some(i64::MAX),
+            read_failed: false,
+        };
+        let empty = crate::coordinator::PlanModeStore::new();
+        for execute in [false, true] {
+            assert_eq!(
+                resolve_autonomy_rung(&empty, "org-1", "thread-1", false, execute, Some(&live))
+                    .expect("the durable rung resolves on a replica that never saw the approval"),
+                Rung::WorkspaceWrite as i32,
+                "execute_granted {execute}"
+            );
+        }
+        // A stale in-memory grant is not consulted once the durable one is the source.
+        let stale = store_with("org-1", "thread-1", Rung::DangerFullAccess);
+        let none = ThreadGrant::default();
+        assert_eq!(
+            resolve_autonomy_rung(&stale, "org-1", "thread-1", false, false, Some(&none))
+                .expect("legacy path"),
+            Rung::Unspecified as i32,
+            "no durable grant: the legacy fail-open for a non-execute run, memory ignored"
+        );
+        let refused = resolve_autonomy_rung(&stale, "org-1", "thread-1", false, true, Some(&none))
+            .expect_err("an execute turn with no durable grant fails closed");
+        assert_eq!(refused.message(), PLAN_GRANT_UNAVAILABLE);
+        // Plan mode is still READ_ONLY, whatever the durable grant says.
+        assert_eq!(
+            resolve_autonomy_rung(&empty, "org-1", "thread-1", true, true, Some(&live))
+                .expect("plan mode"),
+            Rung::ReadOnly as i32
+        );
+    }
+
+    /// WS04 S4 review defect 0: with the durable grant switch on, a grant read that FAILED is not
+    /// "no grant". An execute turn is refused (`plan_grant_unavailable`); any other run is held
+    /// to READ_ONLY, the narrowest rung, never the unstated one (which is the least constrained a
+    /// chat run can have and would silently widen the run past what the human granted). Only an
+    /// answer that says there is no grant keeps the legacy unstated rung.
+    #[test]
+    fn a_failed_grant_read_fails_closed_and_only_a_stated_absence_is_no_grant() {
+        let unreadable = crate::session_flow::ThreadGrant::unreadable();
+        let none = crate::session_flow::ThreadGrant::default();
+        // The in-memory store holds a wide grant: a failed durable read must not consult it
+        // either (the durable source decides), and must not widen to it.
+        let store = store_with("org-1", "thread-1", Rung::DangerFullAccess);
+
+        assert_eq!(
+            resolve_autonomy_rung(&store, "org-1", "thread-1", false, false, Some(&unreadable))
+                .expect("a non-execute run still starts"),
+            Rung::ReadOnly as i32,
+            "an unreadable grant holds a non-execute run to the narrowest rung"
+        );
+        assert_ne!(
+            resolve_autonomy_rung(&store, "org-1", "thread-1", false, false, Some(&unreadable))
+                .expect("a non-execute run still starts"),
+            Rung::Unspecified as i32,
+            "never the unstated rung, which is the least constrained"
+        );
+        let refused =
+            resolve_autonomy_rung(&store, "org-1", "thread-1", false, true, Some(&unreadable))
+                .expect_err("an execute turn with an unreadable grant fails closed");
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(refused.message(), PLAN_GRANT_UNAVAILABLE);
+        // Plan mode is READ_ONLY whatever the read said.
+        assert_eq!(
+            resolve_autonomy_rung(&store, "org-1", "thread-1", true, false, Some(&unreadable))
+                .expect("plan mode"),
+            Rung::ReadOnly as i32
+        );
+        // "No grant", stated by an Ok answer, is unchanged: the legacy unstated rung.
+        assert_eq!(
+            resolve_autonomy_rung(&store, "org-1", "thread-1", false, false, Some(&none))
+                .expect("legacy path"),
+            Rung::Unspecified as i32
+        );
+    }
+
+    /// Every way the read can fail is an unreadable grant, and an `Ok` is passed through
+    /// untouched (including the absence of a grant): a timeout, a transient `Unavailable`,
+    /// `Unimplemented` from a Session Core with no ThreadAutonomy service, a refusal.
+    #[test]
+    fn every_failed_grant_read_is_unreadable_and_an_ok_answer_is_not() {
+        for code in [
+            tonic::Code::DeadlineExceeded,
+            tonic::Code::Unavailable,
+            tonic::Code::Unimplemented,
+            tonic::Code::PermissionDenied,
+            tonic::Code::Internal,
+        ] {
+            let grant = grant_from_read(Err(tonic::Status::new(code, "secret upstream text")), "org-1", "thread-1");
+            assert!(grant.read_failed, "{code:?}");
+            assert_eq!(grant.rung, None, "{code:?}");
+        }
+        let none = grant_from_read(Ok(crate::session_flow::ThreadGrant::default()), "org-1", "thread-1");
+        assert_eq!(none, crate::session_flow::ThreadGrant::default());
+        assert!(!none.read_failed);
+        let live = crate::session_flow::ThreadGrant {
+            rung: Some(Rung::WorkspaceWrite),
+            approved_plan_id: None,
+            expires_at_unix: Some(1),
+            read_failed: false,
+        };
+        assert_eq!(grant_from_read(Ok(live.clone()), "org-1", "thread-1"), live);
+    }
+
+    /// The real read, through `durable_thread_grant`: a Session Core that cannot be reached
+    /// (the grant client points at a closed port) is an unreadable grant, and the rung the run
+    /// would state is READ_ONLY (execute: refused), not the unstated one.
+    #[tokio::test]
+    async fn an_unreachable_session_core_leaves_the_run_at_the_narrowest_rung() {
+        let mut state = AppState::new();
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        state.plan_mode = crate::coordinator::PlanModeStore::new()
+            .with_durable_grant_enabled(true)
+            .with_durable_grant_client(
+                mp_contracts::model_plane::v1::thread_autonomy_client::ThreadAutonomyClient::new(channel),
+            );
+        let bearer = crate::auth::VerifiedSessionBearer::for_test("session-token");
+        let grant = durable_thread_grant(&state, "org-1", "thread-1", &bearer).await;
+        assert!(grant.read_failed, "{grant:?}");
+        let store = crate::coordinator::PlanModeStore::new();
+        assert_eq!(
+            resolve_autonomy_rung(&store, "org-1", "thread-1", false, false, Some(&grant))
+                .expect("a non-execute run starts"),
+            Rung::ReadOnly as i32
+        );
+        assert_eq!(
+            resolve_autonomy_rung(&store, "org-1", "thread-1", false, true, Some(&grant))
+                .expect_err("an execute turn is refused")
+                .message(),
+            PLAN_GRANT_UNAVAILABLE
+        );
+    }
+
+    /// WS04 S4 review defect 1: the one grant a durable-switch replica holds in memory is the
+    /// one its own approval could not record in Session Core. It is honoured only when Session
+    /// Core answered "no grant"; a grant Session Core holds always wins, and a read that failed
+    /// is not an answer (the run fails closed, never on the strength of a copy in memory).
+    #[test]
+    fn this_replicas_unrecorded_grant_is_honoured_only_when_session_core_holds_none() {
+        let store = crate::coordinator::PlanModeStore::new();
+        store.record_grant("org-1", "thread-1", Rung::WorkspaceWrite, "plan-7");
+        let none = crate::session_flow::ThreadGrant::default();
+        let unreadable = crate::session_flow::ThreadGrant::unreadable();
+        let held = crate::session_flow::ThreadGrant {
+            rung: Some(Rung::ReadOnly),
+            approved_plan_id: None,
+            expires_at_unix: Some(1),
+            read_failed: false,
+        };
+
+        let fallback = with_local_fallback(none.clone(), &store, "org-1", "thread-1");
+        assert_eq!(fallback.rung, Some(Rung::WorkspaceWrite));
+        assert_eq!(fallback.approved_plan_id.as_deref(), Some("plan-7"));
+        assert!(fallback.expires_at_unix.is_some());
+        assert!(!fallback.read_failed);
+        assert_eq!(
+            store.peek_approved_plan("org-1", "thread-1").as_deref(),
+            Some("plan-7"),
+            "reading it does not spend it: the plan's own claim is the single-use guard"
+        );
+
+        // Another thread or org has no such grant.
+        assert_eq!(with_local_fallback(none.clone(), &store, "org-1", "thread-2"), none);
+        assert_eq!(with_local_fallback(none.clone(), &store, "org-2", "thread-1"), none);
+        // Session Core's own grant wins, even a narrower one.
+        assert_eq!(with_local_fallback(held.clone(), &store, "org-1", "thread-1"), held);
+        // A failed read is not "no grant": the copy in memory is not consulted.
+        assert_eq!(with_local_fallback(unreadable.clone(), &store, "org-1", "thread-1"), unreadable);
+        // A store that never recorded one changes nothing.
+        let empty = crate::coordinator::PlanModeStore::new();
+        assert_eq!(with_local_fallback(none.clone(), &empty, "org-1", "thread-1"), none);
+    }
+
+    /// A copy in memory that is NARROWER than Session Core's grant wins: an older, broader durable
+    /// grant must not outlive a newer narrower approval whose write failed here, and the copy's own
+    /// plan and expiry go with its rung. An equal rung keeps Session Core's grant as stated, and
+    /// another org's copy is no grant of this one.
+    #[test]
+    fn a_narrower_copy_in_memory_wins_over_an_older_broader_durable_grant() {
+        let store = crate::coordinator::PlanModeStore::new();
+        store.record_grant("org-1", "thread-1", Rung::WorkspaceWrite, "plan-7");
+        let broad = crate::session_flow::ThreadGrant {
+            rung: Some(Rung::DangerFullAccess),
+            approved_plan_id: Some("plan-old".to_owned()),
+            expires_at_unix: Some(1),
+            read_failed: false,
+        };
+        let fallback = with_local_fallback(broad.clone(), &store, "org-1", "thread-1");
+        assert_eq!(fallback.rung, Some(Rung::WorkspaceWrite));
+        assert_eq!(fallback.approved_plan_id.as_deref(), Some("plan-7"));
+        assert_eq!(fallback.expires_at_unix, store.grant_expires_at("org-1", "thread-1"));
+        assert!(!fallback.read_failed);
+
+        let same = crate::session_flow::ThreadGrant {
+            rung: Some(Rung::WorkspaceWrite),
+            approved_plan_id: Some("plan-durable".to_owned()),
+            expires_at_unix: Some(2),
+            read_failed: false,
+        };
+        assert_eq!(with_local_fallback(same.clone(), &store, "org-1", "thread-1"), same);
+
+        let other_org = crate::coordinator::PlanModeStore::new();
+        other_org.record_grant("org-2", "thread-1", Rung::ReadOnly, "plan-9");
+        assert_eq!(with_local_fallback(broad.clone(), &other_org, "org-1", "thread-1"), broad);
+    }
+
+    /// The ratchet: only an execute turn, only at the widest rung, and only ever stricter.
+    #[test]
+    fn the_widest_rung_of_an_execute_turn_runs_under_the_ask_posture() {
+        let widest = Rung::DangerFullAccess as i32;
+        let workspace = Rung::WorkspaceWrite as i32;
+        // An execute turn at the widest rung: ask, from either starting posture.
+        assert_eq!(execute_permission_mode("auto", true, widest), "ask");
+        assert_eq!(execute_permission_mode("ask", true, widest), "ask");
+        // Lower rungs keep the posture the turn had (no ratchet, no loosening).
+        for rung in [
+            Rung::Unspecified as i32,
+            Rung::ReadOnly as i32,
+            workspace,
+        ] {
+            assert_eq!(execute_permission_mode("auto", true, rung), "auto", "rung {rung}");
+            assert_eq!(execute_permission_mode("ask", true, rung), "ask", "rung {rung}");
+        }
+        // A turn that is not an execute turn is never ratcheted, whatever rung its thread holds.
+        assert_eq!(execute_permission_mode("auto", false, widest), "auto");
+        assert_eq!(execute_permission_mode("ask", false, widest), "ask");
+    }
+
+    #[test]
+    fn execute_request_problem_names_each_malformed_shape() {
+        // The default and every ordinary request have no problem, whatever else they say.
+        assert_eq!(execute_request_problem(&request(serde_json::json!({})), false), None);
+        assert_eq!(
+            execute_request_problem(
+                &request(serde_json::json!({"plan_mode": true, "thread_id": ""})),
+                false
+            ),
+            None,
+            "without execute_granted nothing is a problem here"
+        );
+        let valid = serde_json::json!({"execute_granted": true, "thread_id": "thread-1"});
+        assert_eq!(execute_request_problem(&request(valid.clone()), true), None);
+        // The camelCase alias the BFF may pass is the same field.
+        assert_eq!(
+            execute_request_problem(
+                &request(serde_json::json!({"executeGranted": true, "thread_id": "thread-1"})),
+                true
+            ),
+            None
+        );
+        assert!(
+            execute_request_problem(&request(valid.clone()), false).is_some(),
+            "no agentic feature"
+        );
+        let mut plan = valid.clone();
+        plan["plan_mode"] = serde_json::json!(true);
+        assert!(execute_request_problem(&request(plan), true).is_some(), "plan_mode");
+        for thread in [serde_json::json!(null), serde_json::json!(""), serde_json::json!("  ")] {
+            let mut body = valid.clone();
+            body["thread_id"] = thread.clone();
+            assert!(
+                execute_request_problem(&request(body), true).is_some(),
+                "a blank thread {thread}"
+            );
+        }
+        assert!(
+            execute_request_problem(&request(serde_json::json!({"execute_granted": true})), true)
+                .is_some(),
+            "no thread_id at all"
+        );
+    }
+
+    /// The switch comes first and decides alone; a request that is not an execute turn is
+    /// never touched by it.
+    #[test]
+    fn the_switch_refuses_every_execute_turn_and_no_other() {
+        let valid = request(serde_json::json!({"execute_granted": true, "thread_id": "t-1"}));
+        let malformed = request(serde_json::json!({"execute_granted": true}));
+        let ordinary = request(serde_json::json!({"thread_id": "t-1"}));
+        assert_eq!(
+            execute_refusal(&valid, true, false, true).map(|(code, _)| code),
+            Some("plan_execute_disabled")
+        );
+        assert_eq!(
+            execute_refusal(&malformed, false, false, true).map(|(code, _)| code),
+            Some("plan_execute_disabled"),
+            "with the switch off every execute turn gets the same answer, shape aside"
+        );
+        assert_eq!(execute_refusal(&valid, true, true, true), None, "switch on, valid shape");
+        assert_eq!(
+            execute_refusal(&malformed, true, true, true).map(|(code, _)| code),
+            Some("invalid_request")
+        );
+        for enabled in [false, true] {
+            for resume in [false, true] {
+                assert_eq!(
+                    execute_refusal(&ordinary, true, enabled, resume),
+                    None,
+                    "an ordinary turn is untouched whatever the switches say (enabled {enabled}, resume {resume})"
+                );
+            }
+        }
+        // No message carries a plan, thread or run: content-free.
+        let (_, message) = execute_refusal(&valid, true, false, true).expect("refused");
+        assert!(!message.contains("t-1"), "{message}");
+    }
+
+    /// An execute turn needs the approval-resume switch (`/continue` on): without it the ratcheted
+    /// widest rung would pause at its first risky call for an approval nothing resumes. It is the
+    /// same typed refusal as the kill switch and, like it, decides before the request's shape.
+    #[test]
+    fn an_execute_turn_needs_approvals_to_be_resumable() {
+        let valid = request(serde_json::json!({"execute_granted": true, "thread_id": "t-1"}));
+        let malformed = request(serde_json::json!({"execute_granted": true}));
+        let ordinary = request(serde_json::json!({"thread_id": "t-1"}));
+        for req in [&valid, &malformed] {
+            let (code, message) =
+                execute_refusal(req, true, true, false).expect("refused with resume off");
+            assert_eq!(code, "plan_execute_disabled");
+            assert!(!message.contains("t-1"), "content-free: {message}");
+        }
+        assert_eq!(
+            execute_refusal(&valid, true, true, true),
+            None,
+            "both switches on and a valid shape run"
+        );
+        assert_eq!(execute_refusal(&ordinary, true, true, false), None, "only execute turns");
+        // The reason is stated: the resume switch's message is not the kill switch's, so an
+        // operator who sees `plan_execute_disabled` with the execute switch on can tell why.
+        let (_, kill) = execute_refusal(&valid, true, false, true).expect("kill switch");
+        let (_, resume) = execute_refusal(&valid, true, true, false).expect("resume switch");
+        assert_ne!(kill, resume);
+        assert!(resume.to_lowercase().contains("approv"), "{resume}");
+    }
+
+    #[test]
+    fn a_missing_grant_is_the_typed_rejection_and_every_other_status_keeps_its_code() {
+        let (code, message) = dispatch_rejection_event(&tonic::Status::failed_precondition(
+            PLAN_GRANT_UNAVAILABLE,
+        ));
+        assert_eq!(code, "plan_grant_unavailable");
+        assert!(!message.is_empty());
+        // The same status code with another message, and another code with the same message,
+        // are the generic rejection: the typed code needs both.
+        for status in [
+            tonic::Status::failed_precondition("something else"),
+            tonic::Status::invalid_argument(PLAN_GRANT_UNAVAILABLE),
+            tonic::Status::unauthenticated("missing credential"),
+        ] {
+            assert_eq!(
+                dispatch_rejection_event(&status),
+                ("agent_dispatch_rejected", "The agent run could not be accepted."),
+                "{status:?}"
+            );
+        }
+    }
+
+    // ---- the wiring, by name (the end-to-end proof is in tests/e2e_invoke_chain_test.rs) ----
+
+    fn code_of(header: &str, terminator: &str) -> String {
+        let source = include_str!("sse.rs").replace("\r\n", "\n");
+        let production = source
+            .split("\n#[cfg(test)]\nmod continue_run_tests {")
+            .next()
+            .expect("the test modules are in this file");
+        let from = production
+            .find(header)
+            .unwrap_or_else(|| panic!("`{header}` is in the production text"));
+        let rest = &production[from..];
+        let to = rest
+            .find(terminator)
+            .unwrap_or_else(|| panic!("`{header}` ends with {terminator:?}"));
+        rest[..to]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The dispatch reads the thread's grant through `resolve_autonomy_rung` and no other
+    /// way, for the run's own thread, and sends the ratcheted posture.
+    #[test]
+    fn the_dispatch_resolves_the_rung_in_one_place_for_the_runs_own_thread() {
+        let body = code_of("fn spawn_run_dispatch(", "\n}\n");
+        assert_eq!(body.matches("resolve_autonomy_rung(").count(), 1, "{body}");
+        assert!(
+            !body.contains("granted_rung("),
+            "the grant is not read a second way: {body}"
+        );
+        let call = &body[body.find("resolve_autonomy_rung(").expect("the call")..];
+        let args: String = call.chars().take(160).collect();
+        assert!(
+            args.contains("&run.thread_id") && !args.contains("req."),
+            "keyed by the run's own, owner-verified thread: {args}"
+        );
+        assert!(args.contains("execute_granted"), "{args}");
+        // The `?` propagates the refusal before the request is built or sent.
+        assert!(call.trim_start_matches("resolve_autonomy_rung(").contains(")?;"), "{call}");
+        let resolved = body.find("resolve_autonomy_rung(").expect("resolved");
+        let built = body.find("resolved_run_agent_request(").expect("the request is built");
+        let sent = body.find(".run_agent(").expect("the request is sent");
+        assert!(resolved < built && built < sent, "resolve, build, then send");
+        assert!(body.contains("execute_permission_mode(permission_mode, execute_granted, rung)"));
+        // The request is built from the ratcheted posture, not the one the function was given.
+        let ratcheted = body.find("let permission_mode = ratcheted;").expect("the shadow");
+        assert!(ratcheted < built, "the posture is ratcheted before the request is built");
+    }
+
+    /// The answer's progress frame comes just before the usage frame and states the turn's total, so
+    /// the last progress frame of a turn and the frame that closes it agree.
+    #[test]
+    fn the_answer_progress_frame_precedes_the_usage_frame_with_the_turn_total() {
+        let invoke = code_of("pub async fn invoke_stream_sse(", "\n}\n");
+        assert_eq!(
+            invoke.matches("ChatEvent::UsageProgress {").count(),
+            1,
+            "{invoke}"
+        );
+        let progress = invoke
+            .find("ChatEvent::UsageProgress {")
+            .expect("the answer's progress frame");
+        let usage = invoke
+            .find("let usage_event = crate::sse_events::ChatEvent::Usage {")
+            .expect("the usage frame");
+        assert!(
+            progress < usage,
+            "the progress frame precedes the usage frame"
+        );
+        assert!(
+            invoke[progress..usage].contains("snapshot: turn,"),
+            "the progress frame states the turn's total: {invoke}"
+        );
+    }
+
+    /// Only an ordinary request's flag reaches the stream; a continuation passes false; and the
+    /// refusal of an unavailable grant keeps the run's terminalization (`dispatch_rejected`).
+    #[test]
+    fn the_flag_is_passed_by_the_invoke_and_never_by_a_continuation() {
+        let invoke = code_of("pub async fn invoke_stream_sse(", "\n}\n");
+        assert_eq!(
+            invoke.matches("req.execute_granted").count(),
+            // the waiver refusal, and the one stream call
+            2,
+            "{invoke}"
+        );
+        let stream_call = &invoke[invoke.find("agentic_run_stream(").expect("the stream call")..];
+        assert!(
+            stream_call.contains("req.plan_mode,\n            req.execute_granted,\n"),
+            "the flag follows plan_mode in the call: {stream_call}"
+        );
+        let continuation = code_of("pub(crate) async fn continue_run(", "\n}\n");
+        assert!(
+            !continuation.contains("execute_granted"),
+            "a continuation never names the flag; its slot is a literal false"
+        );
+        assert!(
+            continuation.contains("CONTINUE_PERMISSION_MODE.to_owned(),\n            false,\n            false,\n"),
+            "plan_mode false, execute_granted false: {continuation}"
+        );
+        let stream = code_of("fn agentic_run_stream(", "\n}\n");
+        assert!(stream.contains("dispatch_rejection_event(&error)"), "the typed mapping");
+        // The mapping sits in the branch that terminalizes the run, not a new one.
+        let terminalize = stream
+            .find("AgentDispatchFailure::Rejected")
+            .expect("the rejection terminalizes");
+        assert!(terminalize < stream.find("dispatch_rejection_event(&error)").unwrap());
+    }
+
+    /// The gate is between the credential preflight and the first durable side effect.
+    #[test]
+    fn the_execute_gate_runs_before_any_run_exists() {
+        let invoke = code_of("pub async fn invoke_stream_sse(", "\n}\n");
+        let credentials = invoke
+            .find("Agentic execution requires a dedicated Execution Core credential")
+            .expect("the agentic credential preflight");
+        let gate = invoke.find("execute_refusal(").expect("the execute gate");
+        let prepared = invoke
+            .find("prepare_managed_run_authenticated_with_receipt(")
+            .expect("the run is prepared");
+        assert!(credentials < gate && gate < prepared, "preflight, then the gate, then the run");
+        assert_eq!(invoke.matches("execute_refusal(").count(), 1);
+        assert!(invoke.contains("state.plan_mode.execute_enabled()"), "the switch is the store's");
+        assert!(
+            invoke.contains("state.plan_mode.approval_resume_enabled()"),
+            "and so is the approval-resume switch it is coupled to"
+        );
+        assert!(
+            !invoke.contains("env::var"),
+            "the handler reads no environment: the switch is the plan store's, read once"
+        );
+    }
+
+    /// The verification pass records the judge and resample calls it makes, so the overhead is
+    /// read after it: an earlier read would leave those calls out of the frame and its rows.
+    #[test]
+    fn the_overhead_is_read_after_the_verification_pass() {
+        let invoke = code_of("pub async fn invoke_stream_sse(", "\n}\n");
+        let verified = invoke
+            .find("crate::sse_events::ChatEvent::Verification {")
+            .expect("the verification pass emits its verdict");
+        let read = invoke.find("sink.overhead_usage()").expect("the overhead is read");
+        assert!(verified < read, "the verification pass runs before the overhead is read");
+        assert_eq!(invoke.matches("sink.overhead_usage()").count(), 1);
+    }
+
+    /// The gauge's one owner: the handler opens exactly one guard and its producer task holds it.
+    /// No hand-counted close is left for a new stop, error or panic path to forget.
+    #[test]
+    fn active_stream_gauge_has_one_owner_in_the_handler() {
+        let source = include_str!("sse.rs").replace("\r\n", "\n");
+        // Built from pieces, so that this test does not count its own needles.
+        assert_eq!(source.matches(concat!("stream_", "closed(")).count(), 0);
+        assert_eq!(source.matches(concat!("stream_", "opened(")).count(), 0);
+        assert_eq!(source.matches(concat!("ActiveStreamGuard::", "open()")).count(), 1);
+        assert_eq!(source.matches(concat!("let _active_stream", " = active_stream;")).count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use crate::compaction::{prepare_budget_compaction, IdentifiedMessage, StoredHeadSummary};
+    use std::collections::BTreeSet;
+
+    fn entry(id: &str, role: &str, content: &str) -> IdentifiedMessage {
+        IdentifiedMessage {
+            id: id.to_owned(),
+            message: ChatMessage {
+                compaction_summary: String::new(),
+                role: role.to_owned(),
+                content: content.to_owned(),
+                name: String::new(),
+            },
+        }
+    }
+
+    fn payload_of(facts: Option<lifecycle_events::CompactionFacts>) -> Value {
+        facts.expect("a compaction was reported").event().payload("req-1")
+    }
+
+    #[tokio::test]
+    async fn history_shed_emits_a_context_change_with_the_dropped_count() {
+        let buffers = crate::stream_buffer::StreamBufferStore::new();
+        let key = crate::stream_buffer::scoped_stream_key("org-1", "user-1", "req-1");
+        let (tx, mut live) = tokio::sync::mpsc::channel::<
+            Result<axum::response::sse::Event, std::convert::Infallible>,
+        >(8);
+        let mut seq = 0_u64;
+        // Past the switch: the env gate is covered by flag_off_stream_is_byte_identical.
+        emit_and_buffer(
+            &tx,
+            &buffers,
+            &key,
+            &mut seq,
+            &[],
+            "req-1",
+            lifecycle_events::history_shed(3),
+        )
+        .await;
+        assert!(live.try_recv().is_ok(), "the shed is announced once");
+        assert!(live.try_recv().is_err(), "and only once");
+        assert_eq!(seq, 1);
+        let replay = buffers.replay_after(&key, None).await;
+        let events: Vec<&str> = replay
+            .deltas
+            .iter()
+            .map(|buffered| buffered.event.as_str())
+            .collect();
+        assert_eq!(events, vec!["context_change"]);
+        let payload = lifecycle_events::history_shed(3).payload("req-1");
+        assert_eq!(payload["change"], "history_shed");
+        assert_eq!(payload["messages_dropped"], 3);
+    }
+
+    #[test]
+    fn a_reused_summary_reports_reused_not_summarized() {
+        let loaded = vec![
+            entry("m1", "user", "first"),
+            entry("m2", "assistant", "second"),
+            entry("m3", "user", "third"),
+            entry("m4", "assistant", "fourth"),
+            entry("", "user", "now"),
+        ];
+        let stored = StoredHeadSummary {
+            summary: "earlier turns".to_owned(),
+            through_id: "m2".to_owned(),
+            pinned_ids: Vec::new(),
+        };
+        let plan = prepare_budget_compaction(loaded, Some(&stored), &[], 1_000_000);
+        assert!(plan.reused, "the stored summary covers m1..m2");
+        assert!(plan.head.is_none(), "nothing new to summarise");
+        let payload = payload_of(lifecycle_events::compaction_facts(
+            plan.reused,
+            plan.head,
+            plan.messages.len(),
+            None,
+        ));
+        assert_eq!(payload["scope"], "history");
+        assert_eq!(payload["outcome"], "reused");
+        assert!(payload.get("messages_compacted").is_none(), "an unmeasured count is omitted");
+    }
+
+    #[test]
+    fn summarizer_outage_reports_truncated() {
+        let head = crate::compaction::HeadSummary { start: 1, end: 3 };
+        let outage = payload_of(lifecycle_events::compaction_facts(false, Some(head), 5, None));
+        assert_eq!(outage["outcome"], "truncated");
+        assert_eq!(outage["messages_compacted"], 2);
+        assert_eq!(outage["messages_kept"], 2);
+        let blank = payload_of(lifecycle_events::compaction_facts(false, Some(head), 5, Some("  ")));
+        assert_eq!(blank["outcome"], "truncated", "an empty summary is no summary");
+        let answered = payload_of(lifecycle_events::compaction_facts(false, Some(head), 5, Some("notes")));
+        assert_eq!(answered["outcome"], "summarized");
+        assert!(
+            lifecycle_events::compaction_facts(false, None, 5, None).is_none(),
+            "no head and no reuse is not a compaction"
+        );
+    }
+
+    #[test]
+    fn skill_truncation_reports_counts_only() {
+        assert!(lifecycle_events::skills_truncated(0, 0).is_none());
+        let event = lifecycle_events::skills_truncated(2, 1).expect("a cut was made");
+        let payload = event.payload("req-1");
+        assert_eq!(payload["change"], "skills_truncated");
+        assert_eq!(payload["skills_truncated"], 2);
+        assert_eq!(payload["skills_dropped"], 1);
+        let allowed: BTreeSet<&str> = mp_contracts::lifecycle_notice::CONTEXT_CHANGE_KEYS
+            .iter()
+            .copied()
+            .chain(std::iter::once("request_id"))
+            .collect();
+        for key in payload.as_object().expect("an object").keys() {
+            assert!(allowed.contains(key.as_str()), "{key} is outside the allowlist");
+        }
+    }
+
+    #[tokio::test]
+    async fn flag_off_stream_is_byte_identical() {
+        let buffers = crate::stream_buffer::StreamBufferStore::new();
+        let key = crate::stream_buffer::scoped_stream_key("org-1", "user-1", "req-1");
+        let (tx, mut live) = tokio::sync::mpsc::channel::<
+            Result<axum::response::sse::Event, std::convert::Infallible>,
+        >(8);
+        let mut seq = 0_u64;
+        // The switch is unset in the test environment, so every lifecycle frame is suppressed.
+        emit_lifecycle(&tx, &buffers, &key, &mut seq, &[], "req-1", lifecycle_events::history_shed(3))
+            .await;
+        emit_lifecycle(&tx, &buffers, &key, &mut seq, &[], "req-1", lifecycle_events::tool_results_cleared())
+            .await;
+        assert!(live.try_recv().is_err(), "no frame reaches a flag-off stream");
+        assert_eq!(seq, 0, "no cursor is consumed");
+        assert!(buffers.replay_after(&key, None).await.deltas.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod shared_idempotency_tests {
+    use super::*;
+    use crate::idempotency_registry::{SharedClaimState, SharedClaimValue};
+    use axum::response::IntoResponse;
+
+    fn original(request_id: &str) -> SharedClaimValue {
+        SharedClaimValue {
+            request_id: request_id.to_owned(),
+            run_id: Some("run-1".to_owned()),
+            thread_id: Some("thr-1".to_owned()),
+            state: SharedClaimState::Pending,
+        }
+    }
+
+    async fn body_of(stream: Sse<ReceiverStream<Result<Event, Infallible>>>) -> String {
+        let bytes = axum::body::to_bytes(stream.into_response().into_body(), usize::MAX)
+            .await
+            .expect("the attached stream ends");
+        String::from_utf8(bytes.to_vec()).expect("sse is utf-8")
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_attaches_to_the_originals_buffered_frames() {
+        let state = AppState::new();
+        let key = crate::stream_buffer::scoped_stream_key("org-1", "user-1", "req-A");
+        state
+            .stream_buffers
+            .append(&key, 1, "chunk", r#"{"delta":"hello"}"#)
+            .await;
+        state
+            .stream_buffers
+            .finish(
+                &key,
+                crate::stream_buffer::StreamDone {
+                    seq: 2,
+                    model_used: "m".into(),
+                    input_tokens: 1,
+                    output_tokens: 1,
+                },
+            )
+            .await;
+        let body = body_of(attach_to_original(&state, "org-1", "user-1", &original("req-A")).await)
+            .await;
+        assert!(body.contains(r#"{"delta":"hello"}"#), "{body}");
+        assert!(body.contains("event: done"), "{body}");
+        assert!(body.contains("req-A"), "the frames are the original's: {body}");
+    }
+
+    #[tokio::test]
+    async fn an_evicted_original_answers_an_error_naming_it_and_starts_nothing() {
+        let state = AppState::new();
+        let body = body_of(attach_to_original(&state, "org-1", "user-1", &original("req-gone")).await)
+            .await;
+        assert!(body.contains("event: error"), "{body}");
+        assert!(body.contains("req-gone"), "the error names the original: {body}");
+        assert!(body.contains("duplicate_in_flight"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn another_callers_identity_cannot_attach_to_the_original() {
+        let state = AppState::new();
+        let key = crate::stream_buffer::scoped_stream_key("org-1", "user-1", "req-A");
+        state
+            .stream_buffers
+            .append(&key, 1, "chunk", r#"{"delta":"secret"}"#)
+            .await;
+        state
+            .stream_buffers
+            .finish(
+                &key,
+                crate::stream_buffer::StreamDone {
+                    seq: 2,
+                    model_used: "m".into(),
+                    input_tokens: 1,
+                    output_tokens: 1,
+                },
+            )
+            .await;
+        let body = body_of(attach_to_original(&state, "org-2", "user-1", &original("req-A")).await)
+            .await;
+        assert!(!body.contains("secret"), "{body}");
+        assert!(body.contains("event: error"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn resume_of_an_unknown_stream_is_still_a_404() {
+        let state = AppState::new();
+        let refused = resume_stream_for(&state, "org-1", "user-1", "req-none", None).await;
+        assert_eq!(refused.err().map(|(status, _)| status), Some(StatusCode::NOT_FOUND));
+    }
+}
+
+#[cfg(test)]
+mod do_attachment_tests {
+    use super::*;
+    use crate::attachment_policy::AttachmentCode;
+    use crate::vision::InvokeAttachment;
+    use base64::Engine as _;
+    use mp_contracts::model_plane::v1::RunAttachmentKind;
+
+    fn file(name: &str, bytes: &[u8]) -> InvokeAttachment {
+        InvokeAttachment {
+            kind: Some("file".to_owned()),
+            name: Some(name.to_owned()),
+            data_base64: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+            mime_type: Some("text/csv".to_owned()),
+            ..InvokeAttachment::default()
+        }
+    }
+
+    fn image(bytes: &[u8], mime: &str) -> InvokeAttachment {
+        InvokeAttachment {
+            kind: Some("image".to_owned()),
+            data_base64: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+            mime_type: Some(mime.to_owned()),
+            ..InvokeAttachment::default()
+        }
+    }
+
+    #[test]
+    fn the_do_attachments_switch_is_off_unless_the_value_is_literally_true() {
+        for value in [None, Some(""), Some("1"), Some("TRUE"), Some("yes"), Some("false")] {
+            let value = value.map(str::to_owned);
+            assert!(!do_attachments_enabled_with(&|_| value.clone()), "{value:?}");
+        }
+        assert!(do_attachments_enabled_with(&|key| {
+            (key == "CHAT_DO_ATTACHMENTS_ENABLED").then(|| " true ".to_owned())
+        }));
+    }
+
+    #[test]
+    fn the_space_append_retrieval_switch_is_on_only_for_the_literal_true() {
+        for value in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("TRUE"),
+            Some(" true"),
+            Some("yes"),
+            Some("false"),
+        ] {
+            let value = value.map(str::to_owned);
+            assert!(
+                !space_append_retrieval_enabled_with(&|_| value.clone()),
+                "{value:?}"
+            );
+        }
+        assert!(space_append_retrieval_enabled_with(&|key| {
+            (key == SPACE_APPEND_RETRIEVAL_VAR).then(|| "true".to_owned())
+        }));
+    }
+
+    fn space_decision(retrieval_token: &str) -> crate::session_flow::ThreadSpaceContext {
+        crate::session_flow::ThreadSpaceContext {
+            space_id: "room-1".to_owned(),
+            space_decision_ref: "decision-1".to_owned(),
+            recipient_audience_ref: "audience-1".to_owned(),
+            recipient_audience_revision: 1,
+            recipient_audience_hash: "sha256:audience-1".to_owned(),
+            privacy_policy_ref: "privacy-1".to_owned(),
+            authority_revision: 1,
+            resource_authorization_ref: "resource-1".to_owned(),
+            space_decision_token: "space-token".to_owned(),
+            retrieval_decision_token: retrieval_token.to_owned(),
+            action_schema_hash: "sha256:schema".to_owned(),
+            payload_digest: "sha256:payload".to_owned(),
+            idempotency_key: "idem-1".to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_space_append_turn_retrieves_with_the_space_decision() {
+        let append = space_decision("append-retrieval-token");
+        assert_eq!(
+            space_retrieval_decision(None, Some(&append), true),
+            Some("append-retrieval-token")
+        );
+    }
+
+    #[test]
+    fn a_forbidden_append_decision_is_passed_empty_so_retrieval_is_suppressed() {
+        let append = space_decision("");
+        assert_eq!(space_retrieval_decision(None, Some(&append), true), Some(""));
+    }
+
+    #[test]
+    fn a_follow_up_keeps_todays_unscoped_retrieval_while_the_switch_is_off() {
+        let append = space_decision("append-retrieval-token");
+        assert_eq!(space_retrieval_decision(None, Some(&append), false), None);
+    }
+
+    #[test]
+    fn a_first_turn_decision_wins_and_non_space_turns_stay_unscoped() {
+        let first = space_decision("first-retrieval-token");
+        let append = space_decision("append-retrieval-token");
+        for enabled in [false, true] {
+            assert_eq!(
+                space_retrieval_decision(Some(&first), None, enabled),
+                Some("first-retrieval-token")
+            );
+            assert_eq!(
+                space_retrieval_decision(Some(&first), Some(&append), enabled),
+                Some("first-retrieval-token")
+            );
+            assert_eq!(space_retrieval_decision(None, None, enabled), None);
+        }
+    }
+
+    #[test]
+    fn a_turn_without_attachments_carries_nothing() {
+        assert!(do_run_attachments(&[], false, None).expect("nothing to carry").is_empty());
+        assert!(do_run_attachments(&[], true, Some(false)).expect("still nothing").is_empty());
+    }
+
+    #[test]
+    fn files_then_images_are_decoded_measured_and_hashed() {
+        let carried = do_run_attachments(
+            &[
+                image(b"png-bytes", "image/png; charset=binary"),
+                file("sales.csv", b"a,b\n1,2\n"),
+            ],
+            false,
+            Some(true),
+        )
+        .expect("carried");
+        assert_eq!(carried.len(), 2);
+        assert_eq!(carried[0].kind, RunAttachmentKind::File as i32);
+        assert_eq!(carried[0].name, "sales.csv");
+        assert_eq!(carried[1].kind, RunAttachmentKind::Image as i32);
+        assert_eq!(carried[1].mime, "image/png");
+        assert_eq!(carried[1].content, b"png-bytes");
+        assert_eq!(carried[1].size_bytes, 9);
+        assert_eq!(carried[1].sha256, mp_contracts::attachments::sha256_hex(b"png-bytes"));
+        assert_ne!(carried[1].name, "", "an image has an opaque name, never a path");
+        assert!(!carried[1].name.contains('/'));
+        // Files and images pass the contract the executor applies on arrival, as the executor
+        // splits them: the files as a list of files.
+        mp_contracts::attachments::validate(&carried[..1], false).expect("the file list is valid");
+    }
+
+    #[test]
+    fn a_zero_retention_turn_refuses_every_attachment() {
+        for list in [
+            vec![file("a.csv", b"1")],
+            vec![image(b"x", "image/png")],
+        ] {
+            let refusal = do_run_attachments(&list, true, Some(true)).expect_err("ZDR");
+            assert_eq!(refusal.code, AttachmentCode::MediaUnsupported);
+        }
+    }
+
+    #[test]
+    fn an_image_that_cannot_be_carried_refuses_the_turn_and_is_never_dropped() {
+        let svg = do_run_attachments(&[image(b"<svg/>", "image/svg+xml")], false, Some(true))
+            .expect_err("not an allowed type");
+        assert_eq!(svg.code, AttachmentCode::MediaUnsupported);
+        let mut broken = image(b"x", "image/png");
+        broken.data_base64 = Some("!!!".to_owned());
+        let broken = do_run_attachments(&[broken], false, Some(true)).expect_err("not base64");
+        assert_eq!(broken.code, AttachmentCode::EncodingInvalid);
+        let mut link = image(b"x", "image/png");
+        link.data_base64 = None;
+        link.url = Some("https://example.invalid/a.png".to_owned());
+        let link = do_run_attachments(&[link], false, Some(true)).expect_err("a link is not fetched");
+        assert_eq!(link.code, AttachmentCode::EncodingInvalid);
+        let blind = do_run_attachments(&[image(b"x", "image/png")], false, Some(false))
+            .expect_err("the picked model does not read images");
+        assert_eq!(blind.code, AttachmentCode::MediaUnsupported);
+        // Not knowing is not a refusal: inference-core fails a round no provider can serve.
+        assert!(do_run_attachments(&[image(b"x", "image/png")], false, None).is_ok());
+        // A bad file refuses too, with the contract's code.
+        let bad = do_run_attachments(&[file("../a.csv", b"1")], false, None).expect_err("name");
+        assert_eq!(bad.code, AttachmentCode::EncodingInvalid);
+    }
+
+    #[test]
+    fn the_run_request_carries_the_attachments_and_an_empty_list_changes_nothing() {
+        let run = crate::session_flow::SessionRun {
+            thread_id: "thread-1".to_owned(),
+            run_id: "run-1".to_owned(),
+            org_id: "org-1".to_owned(),
+            already_started: false,
+            terminal_source: mp_contracts::model_plane::v1::ManagedRunSource::ExecutionAgent,
+        };
+        let build = |attachments: Vec<mp_contracts::model_plane::v1::RunAttachment>| {
+            build_run_agent_request(
+                &run,
+                "org-1",
+                "user-1",
+                "gpt-5.6-terra",
+                "analyse the sheet",
+                &[],
+                false,
+                0,
+                "ask",
+                false,
+                0,
+                "",
+                None,
+                &AgentRoute::default(),
+                crate::run_budget::RunBudget::default(),
+                None,
+                None,
+                attachments,
+                Vec::new(),
+            )
+        };
+        let carried = do_run_attachments(&[file("sales.csv", b"a,b")], false, None).expect("ok");
+        let with = build(carried.clone());
+        assert_eq!(with.attachments, carried);
+        let without = build(Vec::new());
+        assert!(without.attachments.is_empty());
+        // proto3 leaves an empty repeated field off the wire: a request with none is the same
+        // bytes it was before the field existed, so an older executor reads it identically.
+        let mut cleared = with;
+        cleared.attachments.clear();
+        assert_eq!(prost::Message::encode_to_vec(&cleared), prost::Message::encode_to_vec(&without));
+    }
+}
+
+#[cfg(test)]
+mod ask_turn_tests {
+    use super::*;
+    use crate::attachment_policy::AttachmentCode;
+    use crate::vision::InvokeAttachment;
+    use base64::Engine as _;
+    use mp_contracts::model_plane::v1::RunAttachmentKind;
+
+    fn file(name: &str, bytes: &[u8]) -> InvokeAttachment {
+        InvokeAttachment {
+            kind: Some("file".to_owned()),
+            name: Some(name.to_owned()),
+            data_base64: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+            mime_type: Some("text/csv".to_owned()),
+            ..InvokeAttachment::default()
+        }
+    }
+
+    /// A refusal the way inference-core sends one: a failed precondition, with its kind on the trailer.
+    fn refusal(kind: Option<&str>) -> tonic::Status {
+        let mut status = tonic::Status::failed_precondition("the picked model refused the request");
+        if let Some(kind) = kind {
+            status
+                .metadata_mut()
+                .insert(crate::compaction::PROVIDER_ERROR_KIND_TRAILER, kind.parse().expect("a trailer value"));
+        }
+        status
+    }
+
+    #[test]
+    fn an_ask_turn_stages_its_files_only_with_the_switch_on() {
+        let staged = ask_turn_attachments(&[file("sales.csv", b"a,b\n1,2\n")], false, true, false)
+            .expect("the file is staged");
+        let [carried] = staged.run_attachments() else {
+            panic!("only the file is staged");
+        };
+        assert_eq!(carried.name, "sales.csv");
+        assert_eq!(carried.kind, RunAttachmentKind::File as i32);
+        let off = ask_turn_attachments(&[file("sales.csv", b"a,b")], false, false, false).expect("off");
+        assert!(off.is_empty(), "the switch off stages nothing");
+        let agentic = ask_turn_attachments(&[file("sales.csv", b"a,b")], true, true, false).expect("agentic");
+        assert!(agentic.is_empty(), "an agentic turn's files ride the Do run, not this path");
+    }
+
+    #[test]
+    fn a_zero_retention_or_waived_turn_refuses_its_files() {
+        // The call site passes `effective_zdr || retention_class.is_some()`, which is true for both.
+        let refused = ask_turn_attachments(&[file("a.csv", b"1")], false, true, true).expect_err("refused");
+        assert_eq!(refused.code, AttachmentCode::MediaUnsupported);
+    }
+
+    #[test]
+    fn a_vision_refusal_is_its_own_code_and_is_not_retried() {
+        let (code, message, retryable) =
+            vision_unsupported_refusal(&refusal(Some("vision_unsupported"))).expect("the vision refusal");
+        assert_eq!(code, "vision_unsupported");
+        assert!(message.contains("cannot read images"), "{message}");
+        assert!(!retryable, "a retry of the same image cannot succeed");
+        assert!(vision_unsupported_refusal(&refusal(Some("subscription_usage_limit"))).is_none());
+        assert!(vision_unsupported_refusal(&refusal(Some("too_long"))).is_none());
+        assert!(vision_unsupported_refusal(&refusal(None)).is_none());
+    }
+
+    #[test]
+    fn the_vision_check_names_the_turns_own_provider() {
+        assert_eq!(vision_catalogue_request("azure-openai").provider, "azure-openai");
+        assert_eq!(
+            vision_catalogue_request(""),
+            mp_contracts::model_plane::v1::ListModelsRequest::default(),
+            "an empty hint is the unfiltered default"
+        );
+    }
+
+    #[test]
+    fn the_vision_refusal_is_spelled_as_inference_core_declares_it() {
+        let inference = include_str!("../../inference-core/src/grpc.rs");
+        let declared = "pub const PROVIDER_ERROR_VISION_UNSUPPORTED: &str = \"";
+        let start = inference
+            .find(declared)
+            .expect("inference-core declares the vision refusal kind")
+            + declared.len();
+        let end = inference[start..].find('"').expect("a closing quote");
+        assert_eq!(&inference[start..start + end], VISION_UNSUPPORTED);
     }
 }

@@ -24,6 +24,7 @@ fi
 # Per-core environment files (each core also loads its own via `env_file:`).
 env_files=(
   "$root/Quarry-v2/.env"
+  "$root/../Engagement plane/anbud-core/.env"
   "$root/autocomplete-core/.env"
   "$root/finspo-core/.env"
   "$root/imports-core/.env"

@@ -72,6 +72,42 @@ describe('getRun privacy-tier provenance', () => {
   })
 })
 
+describe('getRun origin', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('reads a scheduled run stamp from metadata.origin', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({
+      run: { run_id: 'run_s', status: 'completed', goal: 'g', metadata: { origin: 'schedule' } },
+    })))
+
+    const run = await getRun('run_s')
+
+    expect(run?.origin).toBe('schedule')
+  })
+
+  it('reads a run with no stamp as chat, the way every run before the stamp reads', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({
+      run: { run_id: 'run_old', status: 'completed', goal: 'g', metadata: {} },
+    })))
+
+    const run = await getRun('run_old')
+
+    expect(run?.origin).toBe('chat')
+  })
+
+  it('refuses an origin outside the closed set rather than showing it', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({
+      run: { run_id: 'run_x', status: 'completed', goal: 'g', metadata: { origin: 'scheduled' } },
+    })))
+
+    const run = await getRun('run_x')
+
+    expect(run?.origin).toBeUndefined()
+  })
+})
+
 describe('watchRun', () => {
   afterEach(() => {
     vi.unstubAllGlobals()

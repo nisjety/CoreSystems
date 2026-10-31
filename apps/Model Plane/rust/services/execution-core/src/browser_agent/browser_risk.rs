@@ -549,6 +549,7 @@ mod tests {
             snapshot_generation: None,
             snapshot_targets: vec![],
             error_message: String::new(),
+            challenge: None,
         }
     }
 

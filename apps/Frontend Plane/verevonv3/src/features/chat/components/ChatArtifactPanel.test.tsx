@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
 
-import { fireEvent, render, screen } from '@solidjs/testing-library'
+import { cleanup, fireEvent, render, screen } from '@solidjs/testing-library'
 import { flush } from 'solid-js'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { I18nProvider } from '@/shared/i18n'
+import { localeStorageKey } from '@/shared/i18n/locales'
 
 const exportChatAnswerMock = vi.hoisted(() => vi.fn())
 vi.mock('../lib/chat-export', async (importOriginal) => ({
@@ -11,6 +13,7 @@ vi.mock('../lib/chat-export', async (importOriginal) => ({
 }))
 
 import { ArtifactsPanel } from './ChatArtifactPanel'
+import { extraArtifactRenderers } from './artifact-renderers'
 import { mergeArtifactVersion } from './chat-artifacts'
 import { collectArtifactItems } from './chat-media-markdown'
 import type { ArtifactPanelItem, ChatArtifact, ChatTurn } from './chat-types'
@@ -338,5 +341,116 @@ describe('artifact revision diff', () => {
     )
     expect(toggle).toBeUndefined()
     unmount()
+  })
+})
+
+describe('ArtifactsPanel in English', () => {
+  afterEach(() => {
+    cleanup()
+    window.localStorage.removeItem(localeStorageKey)
+  })
+
+  it('names the HTML toggle in English', () => {
+    window.localStorage.setItem(localeStorageKey, 'en')
+    const page: ChatArtifact = {
+      content: '<h1>Hei</h1>',
+      id: 'artifact-1',
+      kind: 'html',
+      title: 'index.html',
+      version: 1,
+    }
+    const { container } = render(() => (
+      <I18nProvider>
+        <ArtifactsPanel items={[item(page)]} />
+      </I18nProvider>
+    ))
+
+    screen.getByText('Show code').click()
+    flush()
+    expect(container.querySelector('.verevon-chat-artifact-code')).toBeTruthy()
+    screen.getByText('Show preview').click()
+    flush()
+    expect(container.querySelector('iframe')).toBeTruthy()
+  })
+
+  it('offers an English download for a generated spreadsheet', () => {
+    window.localStorage.setItem(localeStorageKey, 'en')
+    const href = `data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,${btoa('sheet')}`
+    const sheet: ChatArtifact = {
+      content: href,
+      id: 'artifact-1',
+      kind: 'spreadsheet',
+      title: 'Q4-tall',
+      version: 1,
+    }
+    render(() => (
+      <I18nProvider>
+        <ArtifactsPanel items={[item(sheet)]} />
+      </I18nProvider>
+    ))
+
+    const links = screen.getAllByText('Download').map((node) => node.closest('a'))
+    expect(links.length).toBeGreaterThan(0)
+    for (const link of links) {
+      expect(link?.getAttribute('href')).toBe(href)
+    }
+  })
+
+  it('says in English that an announced artifact could not be loaded', () => {
+    window.localStorage.setItem(localeStorageKey, 'en')
+    const announced: ChatArtifact = {
+      content: '',
+      id: 'artifact-1',
+      kind: 'spreadsheet',
+      title: 'Q4.xlsx',
+      version: 1,
+    }
+    render(() => (
+      <I18nProvider>
+        <ArtifactsPanel items={[item(announced)]} />
+      </I18nProvider>
+    ))
+
+    expect(screen.getByText('The artifact could not be loaded')).toBeTruthy()
+    expect(screen.getByText(/Verevon reported an artifact of type «spreadsheet»/)).toBeTruthy()
+    expect(screen.queryByText('Download')).toBeNull()
+  })
+})
+
+describe('ArtifactsPanel extra viewers', () => {
+  afterEach(() => {
+    cleanup()
+  })
+
+  it('draws a registered extra viewer in the body and keeps the built-in header label', () => {
+    const unregister = extraArtifactRenderers.register({
+      id: 'grid',
+      priority: 10,
+      match: (value) => value.kind === 'grid',
+      component: (props) => <p>Rutenett: {props.artifact.title}</p>,
+    })
+    try {
+      const grid: ChatArtifact = { content: 'a,b\n1,2', id: 'grid-1', kind: 'grid', title: 'Tall.csv', version: 1 }
+      const { container } = render(() => <ArtifactsPanel items={[item(grid)]} />)
+      expect(screen.getByText('Rutenett: Tall.csv')).toBeTruthy()
+      expect(container.querySelector('.verevon-chat-artifact-code--plain')).toBeNull()
+      expect(container.querySelector('.verevon-chat-artifact-view__title em')?.textContent).toBe('grid')
+    } finally {
+      unregister()
+    }
+  })
+
+  it('falls back to the built-in body once the extra viewer is removed', () => {
+    const unregister = extraArtifactRenderers.register({
+      id: 'grid',
+      priority: 10,
+      match: (value) => value.kind === 'grid',
+      component: () => <p>Rutenett</p>,
+    })
+    unregister()
+    const grid: ChatArtifact = { content: 'a,b\n1,2', id: 'grid-1', kind: 'grid', title: 'Tall.csv', version: 1 }
+    const { container } = render(() => <ArtifactsPanel items={[item(grid)]} />)
+    expect(screen.queryByText('Rutenett')).toBeNull()
+    expect(container.querySelector('.verevon-chat-artifact-code--plain')).toBeTruthy()
   })
 })

@@ -1,8 +1,11 @@
+import { flush } from 'solid-js'
 // @vitest-environment jsdom
 
 import { createRouter, memoryHistory } from '@solidjs/router'
 import { QueryClient, QueryClientProvider } from '@tanstack/solid-query'
-import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
+import { render } from '@/test/render'
+import { cleanup, screen, waitFor } from '@solidjs/testing-library'
+import { fireEvent } from '@/test/fire-event'
 import type { JSX } from '@solidjs/web'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import OnboardingPage from '@/features/onboarding/components/OnboardingPage'
@@ -41,7 +44,7 @@ function renderWithProviders(component: () => JSX.Element, path = '/onboarding')
 
 afterEach(() => {
   cleanup()
-  clearSession()
+  flush(() => clearSession())
   window.localStorage.clear()
   vi.unstubAllGlobals()
 })
@@ -331,7 +334,7 @@ describe('OnboardingPage website preview warnings', () => {
     const body = `event: warning\ndata: ${JSON.stringify(packet)}\n\n`
     vi.stubGlobal('fetch', vi.fn<typeof fetch>(async (input) => {
       const url = String(input)
-      if (url.includes('/onboarding/crawl-preview')) {
+      if (url.includes('/onboarding/audit-preview')) {
         return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
       }
       return new Response(JSON.stringify(

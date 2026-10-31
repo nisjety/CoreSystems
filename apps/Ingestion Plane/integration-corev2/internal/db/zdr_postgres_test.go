@@ -323,6 +323,23 @@ func TestPostgresConnectionZDRContractOnDisposablePostgres(t *testing.T) {
 	})
 }
 
+// Removal revocation, the organisation purge and the admin listing behave the same on PostgreSQL as in
+// memory: the same shared suite runs against both.
+func TestPostgresConnectionZDRLifecycleContractOnDisposablePostgres(t *testing.T) {
+	pool := storetest.IsolatedPostgres(t, true)
+	storetest.RunConnectionZDRLifecycleContract(t, storetest.ZDRHarness{
+		NewRepository: func(t *testing.T) store.Repository { return store.NewPostgresRepository(pool) },
+		AuditEventExists: func(t *testing.T, _ store.Repository, id string) bool {
+			t.Helper()
+			var exists bool
+			if err := pool.QueryRow(context.Background(), `SELECT EXISTS (SELECT 1 FROM integration_audit_events WHERE id = $1)`, id).Scan(&exists); err != nil {
+				t.Fatalf("audit event lookup: %v", err)
+			}
+			return exists
+		},
+	})
+}
+
 // A stale active acknowledgement (one a missed revocation left behind) is swept by the next
 // assessment even when the digest has not moved, so the ledger heals.
 func TestPostgresApplyHealsAStaleActiveAcknowledgement(t *testing.T) {

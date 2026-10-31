@@ -1,0 +1,517 @@
+name: engagement-plane
+
+x-service-hardening: &service-hardening
+    init: true
+    security_opt:
+        - no-new-privileges:true
+    cap_drop:
+        - ALL
+
+x-build-metadata: &build-metadata
+    SOURCE_REVISION: ${SOURCE_REVISION:-unverified}
+    BUILD_DATE: ${BUILD_DATE:-unknown}
+
+# One provider authority for every Studio consumer. OAuth client secrets and
+# provider grants belong to Ingestion Plane's persistent Integration Core.
+x-integration-environment: &integration-environment
+    INTEGRATION_CORE_URL: http://integration-api:3026
+
+services:
+    engagement-postgres:
+        image: postgres:16.14-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+        container_name: engagement-postgres
+        restart: unless-stopped
+        environment:
+            POSTGRES_USER: ${STUDIO_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}
+            POSTGRES_PASSWORD: ${STUDIO_PLANE_DB_PASSWORD:?STUDIO_PLANE_DB_PASSWORD must be set}
+            POSTGRES_DB: ${STUDIO_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
+        command:
+            [
+                "postgres",
+                "-c",
+                "shared_buffers=256MB",
+                "-c",
+                "max_connections=200",
+            ]
+        ports:
+            - "${STUDIO_BIND_ADDRESS:-127.0.0.1}:9540:5432"
+        volumes:
+            - postgres-data:/var/lib/postgresql/data
+        networks:
+            - engagement-net
+        deploy:
+            resources:
+                limits:
+                    memory: 512M
+                    cpus: "1.0"
+                reservations:
+                    memory: 256M
+        logging:
+            driver: json-file
+            options:
+                max-size: "20m"
+                max-file: "3"
+        healthcheck:
+            test:
+                [
+                    "CMD-SHELL",
+                    "pg_isready -U ${STUDIO_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}} -d ${STUDIO_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}",
+                ]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+            start_period: 10s
+
+    engagement-dragonfly:
+        image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.37.0@sha256:84b1009aee0b68327758bce8e99ed514f782d713353acc46caf5738feaa481d6
+        container_name: engagement-dragonfly
+        restart: unless-stopped
+        command:
+            - "--requirepass=${STUDIO_PLANE_DRAGONFLY_PASSWORD:?STUDIO_PLANE_DRAGONFLY_PASSWORD must be set}"
+            - "--cache_mode=true"
+            - "--maxmemory=256mb"
+            - "--proactor_threads=1"
+            - "--dir=/data"
+        ports:
+            - "${STUDIO_BIND_ADDRESS:-127.0.0.1}:6480:6379"
+        volumes:
+            - dragonfly-data:/data
+        networks:
+            - engagement-net
+        deploy:
+            resources:
+                limits:
+                    memory: 384M
+                    cpus: "0.5"
+                reservations:
+                    memory: 128M
+        logging:
+            driver: json-file
+            options:
+                max-size: "10m"
+                max-file: "3"
+        healthcheck:
+            test:
+                [
+                    "CMD",
+                    "redis-cli",
+                    "-a",
+                    "${STUDIO_PLANE_DRAGONFLY_PASSWORD:?STUDIO_PLANE_DRAGONFLY_PASSWORD must be set}",
+                    "ping",
+                ]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+
+
+    social-core:
+        <<: *service-hardening
+        build:
+            context: ./social-core
+            dockerfile: Dockerfile
+            additional_contexts:
+                studio-plane-client: ./pkg/planeclient
+            args: *build-metadata
+        container_name: social-core
+        restart: unless-stopped
+        environment:
+            <<: *integration-environment
+            PORT: "3162"
+            SERVICE_NAME: social-core
+            INTERNAL_API_KEY: ${STUDIO_SOCIAL_INTERNAL_API_KEY:?set INTERNAL_API_KEY in social-core/.env via scripts/engagement-compose.sh}
+            DATABASE_URL: postgresql://${STUDIO_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${STUDIO_PLANE_DB_PASSWORD:?STUDIO_PLANE_DB_PASSWORD must be set}@engagement-postgres:5432/${STUDIO_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
+            VEREVON_NATS_URL: nats://engagement-nats:4222
+            NATS_USER: studio-social
+            STUDIO_SOCIAL_NATS_PASSWORD: ${STUDIO_SOCIAL_NATS_PASSWORD:?set in social-core/.env via scripts/engagement-compose.sh}
+            # Tenant-scoped Integration bearers are opt-in. Do not run provider
+            # workers with the old inbound-key auth path or no verified org.
+            SOCIAL_PUBLISH_WORKER_ENABLED: "false"
+            SOCIAL_METRICS_WORKER_ENABLED: "false"
+        depends_on:
+            jetstream-provisioner:
+                condition: service_completed_successfully
+            nats:
+                condition: service_healthy
+            engagement-postgres:
+                condition: service_healthy
+        ports:
+            - "${STUDIO_BIND_ADDRESS:-127.0.0.1}:${SOCIAL_CORE_HOST_PORT:-3162}:3162"
+        networks:
+            - engagement-net
+            - inter-plane-bus
+        deploy:
+            resources:
+                limits:
+                    memory: 128M
+                    cpus: "0.5"
+                reservations:
+                    memory: 64M
+        logging:
+            driver: json-file
+            options:
+                max-size: "20m"
+                max-file: "3"
+        healthcheck:
+            test:
+                [
+                    "CMD-SHELL",
+                    "wget -qO- http://localhost:3162/health >/dev/null || exit 1",
+                ]
+            interval: 30s
+            timeout: 10s
+            retries: 3
+            start_period: 20s
+
+    # The shared broker is available before OAuth authorization. Search Console
+    # additionally needs the verified connection overlay and a mounted bearer.
+
+    marketing-core:
+        <<: *service-hardening
+        profiles: ["marketing"]
+        build:
+            context: ./visibility-core
+            dockerfile: Dockerfile
+            additional_contexts:
+                studio-plane-client: ./pkg/planeclient
+            args: *build-metadata
+        container_name: marketing-core
+        restart: unless-stopped
+        read_only: true
+        tmpfs:
+            - /tmp
+        environment:
+            <<: *integration-environment
+            PORT: "3165"
+            INTERNAL_API_KEY: ${STUDIO_MARKETING_INTERNAL_API_KEY:?set INTERNAL_API_KEY in visibility-core/.env via scripts/engagement-compose.sh}
+            MARKETING_GOOGLE_CONSENT_RETURN_URL: ${MARKETING_GOOGLE_CONSENT_RETURN_URL:-http://localhost:5173/studio/pulse}
+            MARKETING_GOOGLE_OAUTH_CALLBACK_URL: ${MARKETING_GOOGLE_OAUTH_CALLBACK_URL:-http://localhost:3026/oauth/callback/google}
+            ORG_CORE_URL: http://org-core-service:8080
+            ORG_CORE_SERVICE_TOKEN: ${STUDIO_VISIBILITY_ORG_CORE_TOKEN:-}
+        ports:
+            - "${STUDIO_BIND_ADDRESS:-127.0.0.1}:${MARKETING_CORE_HOST_PORT:-3165}:3165"
+        networks:
+            engagement-net: {}
+            studio-pulse-net: {}
+            inter-plane-bus:
+                aliases: [visibility-core]
+        deploy:
+            resources:
+                limits:
+                    memory: 64M
+                    cpus: "0.25"
+                reservations:
+                    memory: 16M
+        logging:
+            driver: json-file
+            options:
+                max-size: "10m"
+                max-file: "3"
+        healthcheck:
+            test:
+                [
+                    "CMD-SHELL",
+                    "wget -qO- http://localhost:3165/health >/dev/null || exit 1",
+                ]
+            interval: 30s
+            timeout: 10s
+            retries: 3
+            start_period: 10s
+
+    leads-core:
+        <<: *service-hardening
+        build:
+            context: ./leads-core
+            dockerfile: Dockerfile
+            additional_contexts:
+                studio-plane-client: ./pkg/planeclient
+            args: *build-metadata
+        container_name: leads-core
+        restart: unless-stopped
+        # W1 lead-builder: filtered Enhetsregisteret company search + saved org-scoped
+        # lists (Postgres) + metered CSV export. Emits a best-effort per-export audit
+        # event on the plane-local broker consumed by audit-core under the pinned
+        # `studio` authority.
+        #
+        # Provider lead sync: LinkedIn Lead Gen form responses via integration-corev2's
+        # actions gateway (integration-api on the inter-plane bus, same route as
+        # social-core/insight-core). PERSON DATA is confined to the provider_leads
+        # table — see leads-core/README.md "PII posture" before extending.
+        environment:
+            <<: *integration-environment
+            PORT: "3164"
+            SERVICE_NAME: leads-core
+            INTERNAL_API_KEY: ${STUDIO_LEADS_INTERNAL_API_KEY:?set INTERNAL_API_KEY in leads-core/.env via scripts/engagement-compose.sh}
+            DATABASE_URL: postgresql://${STUDIO_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${STUDIO_PLANE_DB_PASSWORD:?STUDIO_PLANE_DB_PASSWORD must be set}@engagement-postgres:5432/${STUDIO_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
+            NATS_URL: nats://engagement-nats:4222
+            NATS_USER: studio-leads
+            STUDIO_LEADS_NATS_PASSWORD: ${STUDIO_LEADS_NATS_PASSWORD:?set in leads-core/.env via scripts/engagement-compose.sh}
+            PROVIDER_LEAD_SYNC_ENABLED: "false"
+            BILLING_CORE_URL: ${STUDIO_LEADS_BILLING_CORE_URL:-}
+            LEADS_BILLING_SERVICE_ID: ${STUDIO_LEADS_BILLING_SERVICE_ID:-}
+            LEADS_BILLING_SERVICE_TOKEN: ${STUDIO_LEADS_BILLING_SERVICE_TOKEN:-}
+        ports:
+            - "${STUDIO_BIND_ADDRESS:-127.0.0.1}:${LEADS_CORE_HOST_PORT:-3164}:3164"
+        depends_on:
+            jetstream-provisioner:
+                condition: service_completed_successfully
+            nats:
+                condition: service_healthy
+            engagement-postgres:
+                condition: service_healthy
+        networks:
+            - engagement-net
+            - inter-plane-bus
+        deploy:
+            resources:
+                limits:
+                    memory: 128M
+                    cpus: "0.5"
+                reservations:
+                    memory: 32M
+        logging:
+            driver: json-file
+            options:
+                max-size: "20m"
+                max-file: "3"
+        healthcheck:
+            test:
+                [
+                    "CMD-SHELL",
+                    "wget -qO- http://localhost:3164/health >/dev/null || exit 1",
+                ]
+            interval: 30s
+            timeout: 10s
+            retries: 3
+            start_period: 20s
+
+    # Anbud keeps a dedicated database and a schema-owner credential that never
+    # enters the API container. Provision roles with scripts/roles.sql first.
+    anbud-migrate:
+        <<: *service-hardening
+        profiles: ["anbud"]
+        image: engagement-plane-anbud-core:local
+        build:
+            context: ./anbud-core
+            dockerfile: Dockerfile
+            additional_contexts:
+                studio-plane-client: ./pkg/planeclient
+            args: *build-metadata
+        restart: "no"
+        command: ["/usr/local/bin/anbud-api", "--migrate-only"]
+        read_only: true
+        tmpfs: [/tmp]
+        environment:
+            ANBUD_MIGRATE_DSN: postgresql://anbud_migrator:${STUDIO_ANBUD_MIGRATOR_DB_PASSWORD:-}@engagement-postgres:5432/anbud_core?sslmode=disable
+        depends_on:
+            engagement-postgres:
+                condition: service_healthy
+        networks: [engagement-net]
+        logging:
+            driver: json-file
+            options: {max-size: "10m", max-file: "3"}
+
+    anbud-core:
+        <<: *service-hardening
+        profiles: ["anbud"]
+        image: engagement-plane-anbud-core:local
+        build:
+            context: ./anbud-core
+            dockerfile: Dockerfile
+            additional_contexts:
+                studio-plane-client: ./pkg/planeclient
+            args: *build-metadata
+        container_name: anbud-core
+        restart: unless-stopped
+        read_only: true
+        tmpfs: [/tmp]
+        environment:
+            <<: *integration-environment
+            PORT: "3138"
+            SERVICE_NAME: anbud-core
+            ANBUD_API_KEY: ${STUDIO_ANBUD_INTERNAL_API_KEY:-}
+            ANBUD_ORG_CORE_URL: http://org-core-service:8080
+            ANBUD_ORG_CORE_TOKEN: ${STUDIO_ANBUD_ORG_CORE_TOKEN:-}
+            ANBUD_API_KEY_HEADER: X-Internal-API-Key
+            ANBUD_DSN: postgresql://anbud_app:${STUDIO_ANBUD_DB_PASSWORD:-}@engagement-postgres:5432/anbud_core?sslmode=disable
+            ANBUD_SKIP_MIGRATIONS: "true"
+            # Override any template value: schema authority belongs only to job.
+            ANBUD_MIGRATE_DSN: ""
+        depends_on:
+            anbud-migrate:
+                condition: service_completed_successfully
+        ports:
+            - "${STUDIO_BIND_ADDRESS:-127.0.0.1}:${ANBUD_CORE_HOST_PORT:-3138}:3138"
+        networks: [engagement-net, inter-plane-bus]
+        healthcheck:
+            test: [CMD-SHELL, "wget -qO- http://localhost:3138/ready >/dev/null || exit 1"]
+            interval: 30s
+            timeout: 5s
+            retries: 3
+            start_period: 20s
+        logging:
+            driver: json-file
+            options: {max-size: "10m", max-file: "3"}
+
+    # ─────────────────────────────────────────────────────────────
+    # NATS — plane-level message bus (required)
+    # ─────────────────────────────────────────────────────────────
+    nats:
+        image: nats:2.14.2-alpine@sha256:952d157e28d5394a211229bd57a7b37ff9f184e58e2c8486a08fa909fd254e32
+        container_name: engagement-nats
+        restart: unless-stopped
+        command: ["-c", "/etc/nats/nats.conf"]
+        environment:
+            STUDIO_SOCIAL_NATS_PASSWORD: '"${STUDIO_SOCIAL_NATS_PASSWORD:?supply in social-core/.env via scripts/engagement-compose.sh}"'
+            STUDIO_LEADS_NATS_PASSWORD: '"${STUDIO_LEADS_NATS_PASSWORD:?supply in leads-core/.env via scripts/engagement-compose.sh}"'
+            STUDIO_NATS_PROVISIONER_PASSWORD: '"${STUDIO_NATS_PROVISIONER_PASSWORD:?STUDIO_NATS_PROVISIONER_PASSWORD is required}"'
+        networks:
+            engagement-net:
+            inter-plane-bus:
+                aliases:
+                    - engagement-nats
+        volumes:
+            - nats-data:/data
+            - ./nats.conf:/etc/nats/nats.conf:ro
+        deploy:
+            resources:
+                limits:
+                    memory: 64M
+                    cpus: "0.25"
+        logging:
+            driver: json-file
+            options:
+                max-size: "10m"
+                max-file: "3"
+        healthcheck:
+            test:
+                [
+                    "CMD-SHELL",
+                    "wget -qO- http://127.0.0.1:8222/healthz >/dev/null 2>&1 || exit 1",
+                ]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+            start_period: 5s
+
+    # ==============================================
+    # JetStream provisioner (one-shot). App cores use BindProvisioned = bind to
+    # pre-existing streams + durable push consumers; they never create them. This
+    # runs after engagement-nats is healthy on every `up`, idempotently creating the
+    # VEREVON_* streams + consumers. Consumer/publisher cores depend on it
+    # completing (service_completed_successfully) so a clean bring-up has the
+    # topology before they bind. Manual equivalent: scripts/provision-jetstream.sh.
+    # ==============================================
+    jetstream-provisioner:
+        image: natsio/nats-box@sha256:ffce8bd103383f179f8c7f11cf645726acf5d17280706c530c3b342dbe16334c
+        container_name: engagement-jetstream-provisioner
+        restart: "no"
+        depends_on:
+            nats:
+                condition: service_healthy
+        environment:
+            STUDIO_NATS_PROVISIONER_PASSWORD: ${STUDIO_NATS_PROVISIONER_PASSWORD:?STUDIO_NATS_PROVISIONER_PASSWORD is required}
+        entrypoint: ["sh", "/provision.sh"]
+        volumes:
+            - ./scripts/jetstream-provision-entrypoint.sh:/provision.sh:ro
+        networks:
+            - engagement-net
+        logging:
+            driver: json-file
+            options:
+                max-size: "10m"
+                max-file: "3"
+
+    # ==============================================
+    # OBSERVABILITY (Phase 6 B13) — Prometheus + Grafana
+    # ==============================================
+
+    engagement-prometheus:
+        image: prom/prometheus:v2.54.1@sha256:f6639335d34a77d9d9db382b92eeb7fc00934be8eae81dbc03b31cfe90411a94
+        container_name: engagement-prometheus
+        restart: unless-stopped
+        command:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.retention.time=15d
+        volumes:
+            - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+            - prometheus-data:/prometheus
+        ports:
+            - "${STUDIO_BIND_ADDRESS:-127.0.0.1}:19096:9090" # host 19096 avoids Model Plane letta-bridge on host 9096
+        networks:
+            - engagement-net
+        deploy:
+            resources:
+                limits:
+                    memory: 256M
+                    cpus: "0.5"
+        healthcheck:
+            test:
+                [
+                    "CMD",
+                    "wget",
+                    "-q",
+                    "--spider",
+                    "http://127.0.0.1:9090/-/healthy",
+                ]
+            interval: 30s
+            timeout: 5s
+            retries: 3
+            start_period: 10s
+
+    engagement-grafana:
+        image: grafana/grafana:11.2.0@sha256:408afb9726de5122b00a2576763a8a57a3c86d5b0eff5305bc994ceb3eb96c3f
+        container_name: engagement-grafana
+        restart: unless-stopped
+        environment:
+            GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+            GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set}
+            GF_AUTH_ANONYMOUS_ENABLED: ${GRAFANA_ANONYMOUS_ENABLED:-false}
+            GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+            GF_USERS_ALLOW_SIGN_UP: "false"
+        volumes:
+            - ./observability/grafana/datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
+            - grafana-data:/var/lib/grafana
+        ports:
+            - "${STUDIO_BIND_ADDRESS:-127.0.0.1}:3010:3000" # host 3010 for the Studio-Plane Grafana UI
+        networks:
+            - engagement-net
+        depends_on:
+            - engagement-prometheus
+        deploy:
+            resources:
+                limits:
+                    memory: 256M
+                    cpus: "0.5"
+
+volumes:
+    postgres-data:
+        driver: local
+    dragonfly-data:
+        driver: local
+    nats-data:
+        driver: local
+    prometheus-data:
+        driver: local
+    grafana-data:
+        driver: local
+
+networks:
+    # Privat nettverk for Studio plane
+    engagement-net:
+        name: engagement-plane-net
+        driver: bridge
+
+    # Dedicated, opt-in path for the loopback Studio demo's read-only Pulse.
+    # Do not attach unrelated Studio services to this network.
+    studio-pulse-net:
+        name: studio-pulse-net
+        driver: bridge
+        internal: true
+
+    # Shared nettverk for cross-plane app-til-app kommunikasjon
+    inter-plane-bus:
+        external: true
+        name: inter-plane-bus
+        labels:
+            com.docker.compose.network: "inter-plane-bus"
+            com.docker.compose.project: "triodelab"

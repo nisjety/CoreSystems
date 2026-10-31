@@ -1,0 +1,56 @@
+config {
+  type: "assertion",
+  schema: "dw_1_silver_xero_assertions",
+  name: "xero_account_reporting_mapping_validity",
+  description: "Finance-owned account mappings must be complete, have valid effective intervals, and never overlap for one tenant/account."
+}
+
+WITH mappings AS (
+  SELECT *
+  FROM ${ref("xero_reference", "xero_account_reporting_mapping")}
+), invalid_rows AS (
+  SELECT
+    'invalid_mapping_row' AS violation,
+    CONCAT(tenant_id, '|', account_id, '|', COALESCE(mapping_id, ''), '|',
+           CAST(valid_from AS STRING), '|', mapping_version)
+      AS record_id
+  FROM mappings
+  WHERE NULLIF(TRIM(mapping_id), '') IS NULL
+     OR tenant_id IS NULL
+     OR account_id IS NULL
+     OR valid_from IS NULL
+     OR NULLIF(TRIM(mapping_source), '') IS NULL
+     OR NULLIF(TRIM(mapping_version), '') IS NULL
+     OR NULLIF(TRIM(bs_pl), '') IS NULL
+     OR NULLIF(TRIM(fsli_1), '') IS NULL
+     OR approved_at IS NULL
+     OR (valid_to IS NOT NULL AND valid_to <= valid_from)
+), duplicate_mapping_ids AS (
+  SELECT
+    'duplicate_mapping_id' AS violation,
+    CONCAT(tenant_id, '|', account_id, '|', mapping_id) AS record_id
+  FROM mappings
+  GROUP BY tenant_id, account_id, mapping_id
+  HAVING COUNT(*) > 1
+), overlapping_active_rows AS (
+  SELECT
+    'overlapping_active_mapping_interval' AS violation,
+    CONCAT(left_mapping.tenant_id, '|', left_mapping.account_id, '|',
+           left_mapping.mapping_id, '|', right_mapping.mapping_id)
+      AS record_id
+  FROM mappings AS left_mapping
+  INNER JOIN mappings AS right_mapping
+    ON left_mapping.tenant_id = right_mapping.tenant_id
+   AND left_mapping.account_id = right_mapping.account_id
+   AND left_mapping.is_active IS TRUE
+   AND right_mapping.is_active IS TRUE
+   AND left_mapping.mapping_id < right_mapping.mapping_id
+   AND left_mapping.valid_from < COALESCE(right_mapping.valid_to, DATE '9999-12-31')
+   AND right_mapping.valid_from < COALESCE(left_mapping.valid_to, DATE '9999-12-31')
+)
+
+SELECT violation, record_id FROM invalid_rows
+UNION ALL
+SELECT violation, record_id FROM duplicate_mapping_ids
+UNION ALL
+SELECT violation, record_id FROM overlapping_active_rows

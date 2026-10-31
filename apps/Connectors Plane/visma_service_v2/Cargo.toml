@@ -1,0 +1,102 @@
+[workspace]
+resolver = "2"
+members = [
+    "core/crates/vsv2-common",
+    "core/crates/vsv2-auth",
+    "core/crates/vsv2-signin",
+    "core/crates/vsv2-ratelimit",
+    "core/crates/vsv2-state",
+    "core/crates/vsv2-erp-rest",
+    "core/crates/vsv2-datamart",
+    "core/crates/vsv2-expense",
+    "core/crates/vsv2-orchestrator",
+    "core/crates/vsv2-reconcile",
+    "core/crates/vsv2-cli",
+    "core/crates/vsv2-http",
+    "core/crates/vsv2-interactive",
+    "core/crates/vsv2-mcp",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "Proprietary"
+authors = ["Aquatiq Integrasjonen"]
+
+[workspace.dependencies]
+# Async runtime + HTTP
+tokio = { version = "1.40", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
+http = "1.1"
+flate2 = "1.1"
+url = "2.5"
+axum = "0.8"
+tower = { version = "0.5", features = ["util", "limit"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+
+# Errors / observability
+anyhow = "1.0"
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+async-trait = "0.1"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+cron = "0.15"
+
+# DB
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "json", "macros"] }
+deadpool-redis = "0.18"
+
+# CLI
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# Config / env
+dotenvy = "0.15"
+
+# IDs
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Hashing / signing (Layer 3 confirm tokens)
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+base64 = "0.22"
+
+# Temp files
+tempfile = "3"
+
+# Test
+tokio-test = "0.4"
+mockito = "1.5"
+pretty_assertions = "1.4"
+
+# Workspace-internal
+vsv2-common       = { path = "core/crates/vsv2-common" }
+vsv2-auth         = { path = "core/crates/vsv2-auth" }
+vsv2-signin       = { path = "core/crates/vsv2-signin" }
+vsv2-ratelimit    = { path = "core/crates/vsv2-ratelimit" }
+vsv2-state        = { path = "core/crates/vsv2-state" }
+vsv2-erp-rest     = { path = "core/crates/vsv2-erp-rest" }
+vsv2-datamart     = { path = "core/crates/vsv2-datamart" }
+vsv2-expense      = { path = "core/crates/vsv2-expense" }
+vsv2-orchestrator = { path = "core/crates/vsv2-orchestrator" }
+vsv2-reconcile    = { path = "core/crates/vsv2-reconcile" }
+vsv2-http         = { path = "core/crates/vsv2-http" }
+vsv2-interactive  = { path = "core/crates/vsv2-interactive" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+panic = "abort"
+
+[profile.dev]
+opt-level = 0
+debug = true
