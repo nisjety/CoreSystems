@@ -43,6 +43,9 @@ pub(crate) struct ValidatedBrowserGrant {
     parent_grant_id: String,
     owner_id: String,
     zdr: bool,
+    // Whether the broker narrowed the grant to the read level (WS21-S4). A read-level grant refuses
+    // every browser action that changes the page (WS21-S5b).
+    read_only: bool,
 }
 
 impl ValidatedBrowserGrant {
@@ -73,6 +76,7 @@ impl ValidatedBrowserGrant {
             parent_grant_id: response.parent_grant_id.clone(),
             owner_id: response.owner_id.clone(),
             zdr: response.zdr,
+            read_only: response.read_only,
         })
     }
 
@@ -94,6 +98,7 @@ impl ValidatedBrowserGrant {
             parent_grant_id: parent_grant_id.to_owned(),
             owner_id: owner_id.to_owned(),
             zdr,
+            read_only: false,
         }
     }
 
@@ -129,6 +134,12 @@ impl ValidatedBrowserGrant {
     #[must_use]
     pub(crate) fn zdr(&self) -> bool {
         self.zdr
+    }
+
+    /// Whether the broker narrowed the grant to the read level (WS21-S4).
+    #[must_use]
+    pub(crate) fn read_only(&self) -> bool {
+        self.read_only
     }
 }
 
@@ -394,6 +405,10 @@ pub(crate) async fn execute_browser_do_tool(
                 Ok(_) => Ok(browser_session::close(dispatch, quarry.as_ref()).await),
             }
         }
+        browser_session::ACT_TOOL => match quarry.as_ref() {
+            Some(quarry) => browser_do_act_run(dispatch, quarry, tool_input).await,
+            None => Err(browser_session::UNAVAILABLE),
+        },
         _ => Err(browser_session::UNAVAILABLE),
     };
     match outcome {
@@ -419,6 +434,169 @@ fn browser_do_input<T: serde::de::DeserializeOwned>(
         tool_input
     };
     serde_json::from_str(input).map_err(|_| browser_session::INVALID_INPUT)
+}
+
+/// The refusal of a `browser.act` on a page this run holds at the read level (WS21-S5b). The page was
+/// opened to be read, and no approval the person gives changes that.
+const ACT_NOT_PERMITTED: browser_session::Refusal = browser_session::Refusal {
+    code: "browser_act_not_permitted",
+    message: "This page was opened for reading only, so this run cannot act on it.",
+};
+
+/// The refusal of a `browser.act` that needs an approval this run cannot request for itself: a dialog
+/// answer, an upload or a download.
+const ACT_NOT_AVAILABLE: browser_session::Refusal = browser_session::Refusal {
+    code: "browser_action_not_available",
+    message: "This action needs an approval this run cannot request. Ask the person to do it themselves.",
+};
+
+/// The refusal of an act the browser did not perform on the page.
+const ACT_REFUSED: browser_session::Refusal = browser_session::Refusal {
+    code: "browser_action_refused",
+    message: "The browser did not perform that action on the page.",
+};
+
+/// The budget of the Quarry run an act is sent under: the one a session's own steps run under.
+const ACT_MAX_STEPS: u32 = 32;
+const ACT_MAX_RUNTIME_SECONDS: u32 = 15 * 60;
+
+/// The input of `browser.act`: one action on an element of the page this run has open, named by the
+/// reference the last observation gave it. The page's ids stay with the session, so none is named.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BrowserDoActInput {
+    action: BrowserMcpAction,
+}
+
+/// The Quarry action a `browser.act` input names. A dialog answer, an upload and a download are refused
+/// here: each needs an approval that only the person can give.
+fn browser_do_act(
+    tool_input: &str,
+) -> Result<crate::quarry_agent::AgentAction, browser_session::Refusal> {
+    use crate::quarry_agent::AgentAction;
+
+    let input: BrowserDoActInput = browser_do_input(tool_input)?;
+    let action = input
+        .action
+        .into_quarry_action()
+        .map_err(|_| browser_session::INVALID_INPUT)?;
+    match action {
+        AgentAction::RespondDialog { .. }
+        | AgentAction::UploadRef { .. }
+        | AgentAction::FrameUploadRef { .. }
+        | AgentAction::DownloadRef { .. }
+        | AgentAction::FrameDownloadRef { .. } => Err(ACT_NOT_AVAILABLE),
+        action => Ok(action),
+    }
+}
+
+/// The refusal for a BrowserBroker failure, in the words the session gives it. The session keeps its
+/// own mapping private, so an act carries this one.
+fn broker_refusal(error: browser_session::BrokerError) -> browser_session::Refusal {
+    use browser_session::BrokerError;
+
+    match error {
+        BrokerError::SiteDenied => browser_session::SITE_DENIED,
+        BrokerError::CredentialRefused => browser_session::CREDENTIAL_EXPIRED,
+        BrokerError::Unavailable => browser_session::UNAVAILABLE,
+        BrokerError::Refused => browser_session::GRANT_REFUSED,
+    }
+}
+
+/// The refusal for a Quarry failure on an act. It follows the session's mapping for its own steps.
+fn act_refusal(error: &crate::quarry_agent::AgentClientError) -> browser_session::Refusal {
+    use crate::quarry_agent::AgentClientError;
+
+    match error {
+        AgentClientError::Challenge(_) => browser_session::BLOCKED,
+        AgentClientError::Status {
+            status: 404 | 410, ..
+        } => browser_session::SESSION_LOST,
+        AgentClientError::Transport(_) | AgentClientError::Authentication(_) => {
+            browser_session::UNAVAILABLE
+        }
+        AgentClientError::Status { .. } | AgentClientError::Decode(_) => {
+            browser_session::SESSION_FAILED
+        }
+    }
+}
+
+/// What a `browser.act` must pass before anyone is asked to approve it or Quarry is sent it (WS21-S5b):
+/// the input is a permitted action, the run holds a page, and the broker still reads that page's grant
+/// at the act level. A read-level grant is refused here, so nobody is asked to approve an act the grant
+/// cannot make.
+pub(crate) async fn browser_act_precheck(
+    dispatch: &browser_session::BrowserDispatch<'_>,
+    tool_input: &str,
+) -> Result<(), browser_session::Refusal> {
+    browser_do_act(tool_input)?;
+    let session = dispatch
+        .state
+        .browser_session(dispatch.run_id)
+        .ok_or(browser_session::NOT_OPEN)?;
+    let answer = dispatch
+        .broker
+        .validate_grant(dispatch.bearer, &session.grant_id)
+        .await
+        .map_err(broker_refusal)?;
+    let grant = ValidatedBrowserGrant::from_broker_response(&session.grant_id, &answer)
+        .map_err(|_| browser_session::GRANT_REFUSED)?;
+    if grant.read_only() {
+        return Err(ACT_NOT_PERMITTED);
+    }
+    Ok(())
+}
+
+/// `browser.act` (WS21-S5b): the precheck, one Quarry action on the page, then the page as Quarry reads
+/// it now, which is what the model acts on next. The page is read through the session's own
+/// observation, so an act that takes the page out of its fence ends the session as an observation does.
+async fn browser_do_act_run(
+    dispatch: &browser_session::BrowserDispatch<'_>,
+    quarry: &crate::quarry_agent::QuarryAgentClient,
+    tool_input: &str,
+) -> Result<String, browser_session::Refusal> {
+    use crate::quarry_agent::AgentConstraints;
+
+    browser_act_precheck(dispatch, tool_input).await?;
+    let action = browser_do_act(tool_input)?;
+    let session = dispatch
+        .state
+        .browser_session(dispatch.run_id)
+        .ok_or(browser_session::NOT_OPEN)?;
+    let constraints = AgentConstraints {
+        max_steps: ACT_MAX_STEPS,
+        allowed_domains: session.fence.clone(),
+        max_runtime_s: Some(ACT_MAX_RUNTIME_SECONDS),
+        max_cost_usd: None,
+    };
+    let acted = quarry
+        .step(
+            &session.quarry_run_id,
+            &session.lease_id,
+            dispatch.org_id,
+            action,
+            &constraints,
+            false,
+            &session.grant_id,
+        )
+        .await
+        .map_err(|error| act_refusal(&error))?;
+    if acted.challenge.is_some() {
+        return Err(browser_session::BLOCKED);
+    }
+    if !acted.policy_denials.is_empty() {
+        return Err(ACT_REFUSED);
+    }
+    browser_session::observe(dispatch, quarry).await
+}
+
+/// The risk category a `browser.act` is held under (WS21-S5b), read from its input alone. The labels of
+/// the elements its references name are not in the input, so a reference-bound act has no evidence to
+/// judge until the session keeps the page it was chosen from. Until then the category is `None`.
+pub(crate) fn browser_act_risk_category(tool_input: &str) -> Option<&'static str> {
+    let action = browser_do_act(tool_input).ok()?;
+    crate::browser_agent::RiskCategory::of_wire_action(&action, None)
+        .map(crate::browser_agent::RiskCategory::as_str)
 }
 
 /// The answer to a Do browser call this run cannot be served: it holds no verified browser sign-in,
@@ -1150,6 +1328,291 @@ mod tests {
             },
         );
         assert!(mismatched.is_err());
+    }
+
+    #[test]
+    fn broker_response_carries_the_read_level() {
+        let response = |read_only| ValidateGrantResponse {
+            grant_id: "grant-1".to_owned(),
+            active: true,
+            allowed_domains: vec!["example.com".to_owned()],
+            read_only,
+            ..Default::default()
+        };
+        let read = ValidatedBrowserGrant::from_broker_response("grant-1", &response(true))
+            .expect("a read-level grant validates");
+        let act = ValidatedBrowserGrant::from_broker_response("grant-1", &response(false))
+            .expect("an act-level grant validates");
+        assert!(read.read_only());
+        assert!(!act.read_only());
+    }
+
+    /// A BrowserBroker for the act tests: it answers the grant at the level the test chose and counts
+    /// how often the grant was read back.
+    struct ActBroker {
+        read_only: bool,
+        validations: std::sync::Mutex<u32>,
+    }
+
+    #[tonic::async_trait]
+    impl browser_session::BrowserBroker for ActBroker {
+        async fn acquire_run_grant(
+            &self,
+            _bearer: &str,
+            _grant: browser_session::RunGrant<'_>,
+        ) -> Result<String, browser_session::BrokerError> {
+            Err(browser_session::BrokerError::Refused)
+        }
+
+        async fn validate_grant(
+            &self,
+            _bearer: &str,
+            grant_id: &str,
+        ) -> Result<ValidateGrantResponse, browser_session::BrokerError> {
+            *self.validations.lock().unwrap() += 1;
+            Ok(ValidateGrantResponse {
+                grant_id: grant_id.to_owned(),
+                active: true,
+                allowed_domains: vec!["example.com".to_owned()],
+                read_only: self.read_only,
+                ..Default::default()
+            })
+        }
+
+        async fn revoke_grant(
+            &self,
+            _bearer: &str,
+            _grant_id: &str,
+            _reason: &str,
+        ) -> Result<(), browser_session::BrokerError> {
+            Ok(())
+        }
+    }
+
+    const CLICK_REF: &str =
+        r#"{"action":{"type":"click_ref","snapshot_id":"snap-1","generation":3,"ref_id":"@e1"}}"#;
+
+    /// A run holding one page on example.com, as a session's open leaves it.
+    fn holding_a_page(state: &crate::state::StateStore) {
+        state.replace_browser_session(
+            "run-1",
+            browser_session::BrowserSession {
+                grant_id: "grant-1".to_owned(),
+                quarry_run_id: "run-q1".to_owned(),
+                lease_id: "lease-q1".to_owned(),
+                host: "example.com".to_owned(),
+                fence: vec!["example.com".to_owned()],
+            },
+        );
+    }
+
+    fn act_dispatch<'a>(
+        state: &'a crate::state::StateStore,
+        broker: &'a ActBroker,
+    ) -> browser_session::BrowserDispatch<'a> {
+        browser_session::BrowserDispatch {
+            state,
+            broker,
+            bearer: "bearer-1",
+            org_id: "org-1",
+            run_id: "run-1",
+        }
+    }
+
+    /// Quarry's answer to one step, the shape `/step` returns, on `url`.
+    fn step_answer(url: &str) -> serde_json::Value {
+        serde_json::json!({
+            "run_id": "run-q1",
+            "step": 2,
+            "url": url,
+            "title": "Example",
+            "snapshot": {
+                "snapshot_id": "snap-2",
+                "generation": 4,
+                "targets": [{
+                    "ref_id": "@e1",
+                    "role": "button",
+                    "name": "Buy",
+                    "text": "Buy",
+                    "frame_id": null
+                }],
+                "frames": []
+            },
+            "observed_at": "2026-10-31T00:00:00Z"
+        })
+    }
+
+    fn step_envelope(data: serde_json::Value) -> wiremock::ResponseTemplate {
+        wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": data,
+            "meta": { "request_id": "req_1" },
+            "error": null,
+        }))
+    }
+
+    /// The act input names no grant, run or lease, and a dialog answer, an upload or a download is
+    /// refused: each needs an approval only the person can give.
+    #[test]
+    fn act_input_names_no_id_and_refuses_what_needs_a_separate_approval() {
+        assert!(browser_do_act(CLICK_REF).is_ok());
+        assert!(browser_do_act(
+            r#"{"action":{"type":"select_ref","snapshot_id":"snap-1","generation":3,"ref_id":"@e1","value":"no"}}"#
+        )
+        .is_ok());
+        for forged in [
+            r#"{"grant_id":"grant-1","action":{"type":"click_ref","snapshot_id":"snap-1","generation":3,"ref_id":"@e1"}}"#,
+            r#"{"action":{"type":"click_ref","snapshot_id":"snap-1","generation":3,"ref_id":"@e1","grant_id":"grant-1"}}"#,
+            r#"{"action":{"type":"click_ref","snapshot_id":"snap-1","generation":3,"ref_id":"@e1"},"lease_id":"lease-1"}"#,
+            "",
+        ] {
+            assert_eq!(
+                browser_do_act(forged).err(),
+                Some(browser_session::INVALID_INPUT),
+                "{forged}"
+            );
+        }
+        for needs_approval in [
+            r#"{"action":{"type":"respond_dialog","dialog_id":"dialog-1","accept":true,"approval_grant_id":"approval-1"}}"#,
+            r#"{"action":{"type":"download_ref","snapshot_id":"snap-1","generation":3,"ref_id":"@e1","approval_grant_id":"approval-1"}}"#,
+        ] {
+            assert_eq!(
+                browser_do_act(needs_approval).err(),
+                Some(ACT_NOT_AVAILABLE),
+                "{needs_approval}"
+            );
+        }
+    }
+
+    /// A read-level grant refuses an act before the approval is asked and before Quarry is sent
+    /// anything: the step mock below expects no call at all.
+    #[tokio::test]
+    async fn act_on_read_only_grant_refused() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/v1/agent/runs/run-q1/step"))
+            .respond_with(step_envelope(step_answer("https://example.com/")))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let state = crate::state::StateStore::new();
+        holding_a_page(&state);
+        let broker = ActBroker {
+            read_only: true,
+            validations: std::sync::Mutex::new(0),
+        };
+        let quarry = crate::quarry_agent::QuarryAgentClient::new(server.uri(), "tok")
+            .expect("a client for the stub");
+
+        let precheck = browser_act_precheck(&act_dispatch(&state, &broker), CLICK_REF).await;
+        assert_eq!(precheck.err(), Some(ACT_NOT_PERMITTED));
+        let act = browser_do_act_run(&act_dispatch(&state, &broker), &quarry, CLICK_REF).await;
+        assert_eq!(act.err(), Some(ACT_NOT_PERMITTED));
+        assert_eq!(*broker.validations.lock().unwrap(), 2, "the grant was read at each check");
+    }
+
+    /// An act with no page open is refused before the broker is asked anything.
+    #[tokio::test]
+    async fn an_act_without_a_page_is_refused_before_the_broker() {
+        let state = crate::state::StateStore::new();
+        let broker = ActBroker {
+            read_only: false,
+            validations: std::sync::Mutex::new(0),
+        };
+        let refusal = browser_act_precheck(&act_dispatch(&state, &broker), CLICK_REF).await;
+        assert_eq!(refusal.err(), Some(browser_session::NOT_OPEN));
+        assert_eq!(*broker.validations.lock().unwrap(), 0);
+    }
+
+    /// On an act-level grant an act is one Quarry action on the page, and the page is then read back
+    /// through the session, so the model reads what its act did. No id reaches the model.
+    #[tokio::test]
+    async fn an_act_on_an_act_grant_sends_one_action_then_reads_the_page() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/v1/agent/runs/run-q1/step"))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "action": {
+                    "type": "click_ref",
+                    "snapshot_id": "snap-1",
+                    "generation": 3,
+                    "ref_id": "@e1"
+                }
+            })))
+            .respond_with(step_envelope(step_answer("https://example.com/done")))
+            .expect(1)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/v1/agent/runs/run-q1/step"))
+            .and(wiremock::matchers::body_partial_json(
+                serde_json::json!({ "action": { "type": "get_content" } }),
+            ))
+            .respond_with(step_envelope(step_answer("https://example.com/done")))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let state = crate::state::StateStore::new();
+        holding_a_page(&state);
+        let broker = ActBroker {
+            read_only: false,
+            validations: std::sync::Mutex::new(0),
+        };
+        let quarry = crate::quarry_agent::QuarryAgentClient::new(server.uri(), "tok")
+            .expect("a client for the stub");
+
+        let text = browser_do_act_run(&act_dispatch(&state, &broker), &quarry, CLICK_REF)
+            .await
+            .expect("an act on an act-level grant runs");
+
+        assert!(text.starts_with("<untrusted_page_content>"), "{text}");
+        assert!(text.contains("\"page_url\":\"https://example.com/done\""), "{text}");
+        for id in ["grant-1", "run-q1", "lease-q1"] {
+            assert!(!text.contains(id), "{id} reached the model: {text}");
+        }
+    }
+
+    /// An act Quarry reports as blocked by policy is not reported as done, and the page is not read
+    /// as if it had changed.
+    #[tokio::test]
+    async fn a_blocked_act_is_not_reported_as_done() {
+        let server = wiremock::MockServer::start().await;
+        let mut answer = step_answer("https://example.com/");
+        answer["policy_denials"] = serde_json::json!(["navigation outside the fence"]);
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/v1/agent/runs/run-q1/step"))
+            .respond_with(step_envelope(answer))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let state = crate::state::StateStore::new();
+        holding_a_page(&state);
+        let broker = ActBroker {
+            read_only: false,
+            validations: std::sync::Mutex::new(0),
+        };
+        let quarry = crate::quarry_agent::QuarryAgentClient::new(server.uri(), "tok")
+            .expect("a client for the stub");
+
+        let refusal = browser_do_act_run(&act_dispatch(&state, &broker), &quarry, CLICK_REF).await;
+
+        assert_eq!(refusal.err(), Some(ACT_REFUSED));
+    }
+
+    /// A failed act is never replayed: the risk gate that holds every browser act is what decides the
+    /// retry, and an act is risky by name.
+    #[test]
+    fn act_is_never_retried() {
+        let gate = crate::permission::RunGate::with_gate(
+            crate::capability_policy::ToolClassGate::Off,
+            "org-1",
+            "run-1",
+        );
+        assert!(!crate::runtime_loop::retry::tool_call_is_retryable(
+            &gate,
+            "browser.act",
+            CLICK_REF,
+            "upstream timeout",
+        ));
     }
 
     #[test]

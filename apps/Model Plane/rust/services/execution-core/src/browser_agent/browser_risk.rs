@@ -8,6 +8,9 @@
 //! `request_approval`) stays in `browser_agent.rs` alongside `decide_next_action`.
 
 use super::{extract_host, ActionType, BrowserAction, BrowserObservation, BrowserSnapshotTarget};
+use crate::quarry_agent::{
+    browser_action_from_wire, observation_from_wire, AgentAction, WireObservation,
+};
 
 /// Category of elevated-risk browser action or run-level condition requiring
 /// human approval before it proceeds (Phase 5 — HITL gates, plan capability
@@ -76,6 +79,23 @@ impl RiskCategory {
             }
             _ => None,
         }
+    }
+}
+
+impl RiskCategory {
+    /// The category of an action as Quarry receives it (WS21-S5b): the rules of
+    /// [`classify_action_risk`] applied to the loop's form of the action, so a Do run's browser act is
+    /// judged on what it sends. A reference-bound action is judged by its element's label only when
+    /// `observation` is the page the reference was taken from. Without that page it has its own address
+    /// and selector to judge and nothing more. An action the loop cannot name is `None`.
+    #[must_use]
+    pub(crate) fn of_wire_action(
+        action: &AgentAction,
+        observation: Option<&WireObservation>,
+    ) -> Option<Self> {
+        let action = browser_action_from_wire(action)?;
+        let observation = observation.map(|wire| observation_from_wire(wire, "", ""));
+        classify_action_risk(&action, observation.as_ref())
     }
 }
 
@@ -519,6 +539,7 @@ pub(crate) fn approval_timeout_seconds() -> u32 {
 mod tests {
     use super::*;
     use crate::browser_agent::{BrowserSnapshotTarget, BrowserTargetRef, ObservationStatus};
+    use crate::quarry_agent::{action_to_wire, WireBrowserSnapshot, WireSnapshotTarget};
 
     fn action(action_type: ActionType, url: &str, selector: &str, value: &str) -> BrowserAction {
         BrowserAction {
@@ -727,6 +748,184 @@ mod tests {
             rows.len(),
             misses.join("\n")
         );
+        // A Do run judges the wire form of the action, read back against the page Quarry reports, so
+        // the same verdict must come out of that. The wire carries no planner self-report, so a row that
+        // sets one is judged on the loop's form alone. Only a navigation carries a url on the wire
+        // (`action_to_wire`), and the planner is told to leave it empty for every other action, so
+        // a row that names one has no wire form to compare with.
+        let wire_misses: Vec<String> = rows
+            .iter()
+            .filter(|row| row.action.risk_category.is_none())
+            .filter(|row| row.action.url.is_empty() || row.action.action_type == ActionType::Goto)
+            .filter_map(|row| {
+                let page = row.page.as_ref().map(wire_page);
+                let got = RiskCategory::of_wire_action(&action_to_wire(&row.action), page.as_ref());
+                (got != row.expect).then(|| {
+                    format!(
+                        "  {} (wire): expected {:?}, got {got:?}",
+                        row.name, row.expect
+                    )
+                })
+            })
+            .collect();
+        assert!(
+            wire_misses.is_empty(),
+            "{} of {} rows misclassified on the wire:\n{}",
+            wire_misses.len(),
+            rows.len(),
+            wire_misses.join("\n")
+        );
+    }
+
+    /// The page a row was chosen from, as Quarry reports it: the observation a wire action is judged
+    /// against.
+    fn wire_page(page: &BrowserObservation) -> WireObservation {
+        WireObservation {
+            url: page.page_url.clone(),
+            title: Some(page.page_title.clone()),
+            snapshot: Some(WireBrowserSnapshot {
+                snapshot_id: page.dom_snapshot_ref.clone(),
+                generation: page.snapshot_generation.unwrap_or_default(),
+                targets: page
+                    .snapshot_targets
+                    .iter()
+                    .map(|target| WireSnapshotTarget {
+                        ref_id: target.ref_id.clone(),
+                        role: target.role.clone(),
+                        name: target.name.clone(),
+                        text: target.text.clone(),
+                        frame_id: target.frame_id.clone(),
+                    })
+                    .collect(),
+                frames: Vec::new(),
+            }),
+            ..WireObservation::default()
+        }
+    }
+
+    /// The direct fixtures above, judged on the wire: the verdict a Do run gives must be the verdict
+    /// the loop gives for the same action.
+    #[test]
+    fn the_direct_fixtures_agree_on_the_wire() {
+        let cases: Vec<(
+            BrowserAction,
+            Option<BrowserObservation>,
+            Option<RiskCategory>,
+        )> = vec![
+            (
+                action(
+                    ActionType::Goto,
+                    "https://shop.example.com/checkout",
+                    "",
+                    "",
+                ),
+                None,
+                Some(RiskCategory::Checkout),
+            ),
+            (
+                action(
+                    ActionType::Type,
+                    "https://example.com/account",
+                    "input[type=password]",
+                    "hunter2",
+                ),
+                None,
+                Some(RiskCategory::Login),
+            ),
+            (
+                action(
+                    ActionType::Click,
+                    "https://example.com/settings",
+                    "button.delete-account",
+                    "",
+                ),
+                None,
+                Some(RiskCategory::Destructive),
+            ),
+            (
+                action(
+                    ActionType::Click,
+                    "https://example.com/comments",
+                    "button[type=submit]",
+                    "",
+                ),
+                None,
+                Some(RiskCategory::PostingForm),
+            ),
+            (
+                action(
+                    ActionType::Scroll,
+                    "https://example.com/comments",
+                    "button[type=submit]",
+                    "",
+                ),
+                None,
+                None,
+            ),
+            (
+                action(
+                    ActionType::Goto,
+                    "https://alt-domain.example/landing",
+                    "",
+                    "",
+                ),
+                Some(observation_at("https://shop.example.com/cart")),
+                Some(RiskCategory::CrossDomainNavigation),
+            ),
+            (
+                action(ActionType::Goto, "https://shop.example.com/about", "", ""),
+                Some(observation_at("https://shop.example.com/cart")),
+                None,
+            ),
+            (
+                action(ActionType::Goto, "https://example.com/", "", ""),
+                None,
+                None,
+            ),
+            (action(ActionType::Observe, "", "", ""), None, None),
+        ];
+        for (action, page, expect) in cases {
+            let wire = action_to_wire(&action);
+            let page = page.as_ref().map(wire_page);
+            assert_eq!(
+                RiskCategory::of_wire_action(&wire, page.as_ref()),
+                expect,
+                "{wire:?}"
+            );
+        }
+    }
+
+    /// A reference-bound act is judged by the label of the element it names, and only with the page the
+    /// reference came from. Without that page the same act reads as having no evidence, which is what
+    /// a Do run's approval shows until the session keeps the page.
+    #[test]
+    fn a_reference_is_judged_by_its_label_only_with_the_page_it_came_from() {
+        let page = page_with(vec![
+            snapshot_target("@e1", "link", Some("Hjem"), Some("Hjem")),
+            snapshot_target("@e2", "button", Some("Slett konto"), Some("Slett konto")),
+        ]);
+        let mut bound = action(ActionType::Click, "", "", "");
+        bound.target = Some(BrowserTargetRef {
+            snapshot_id: "snap_1".to_owned(),
+            generation: 1,
+            ref_id: "@e2".to_owned(),
+            frame_id: None,
+        });
+        let wire = action_to_wire(&bound);
+        assert_eq!(
+            RiskCategory::of_wire_action(&wire, Some(&wire_page(&page))),
+            Some(RiskCategory::Destructive)
+        );
+        assert_eq!(RiskCategory::of_wire_action(&wire, None), None);
+    }
+
+    /// A wire action the loop cannot name has nothing to judge, so it carries no category.
+    #[test]
+    fn a_wire_action_the_loop_cannot_name_carries_no_category() {
+        let press = AgentAction::Press {
+            key: "Enter".to_owned(),
+        };
+        assert_eq!(RiskCategory::of_wire_action(&press, None), None);
     }
 
     fn snapshot_target(

@@ -28,7 +28,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::browser_agent::{
     ActionType, BlockReason, BrowserAction, BrowserChallenge, BrowserObservation,
-    BrowserSnapshotTarget, ChallengeKind, ChallengeRecovery, ChallengeStrength, ObservationStatus,
+    BrowserSnapshotTarget, BrowserTargetRef, ChallengeKind, ChallengeRecovery, ChallengeStrength,
+    ObservationStatus,
 };
 use crate::quarry_auth::TokenSource;
 
@@ -452,6 +453,105 @@ pub fn action_to_wire(action: &BrowserAction) -> AgentAction {
         },
         ActionType::Extract | ActionType::Observe => AgentAction::GetContent,
     }
+}
+
+/// The inverse of [`action_to_wire`], for the actions the loop can name. A wire action with no loop
+/// equivalent (a select, a key press, a script) is `None`, so a caller that judges an action by the
+/// loop's vocabulary says it has nothing to judge rather than guessing.
+#[must_use]
+pub fn browser_action_from_wire(action: &AgentAction) -> Option<BrowserAction> {
+    fn loop_action(action_type: ActionType) -> BrowserAction {
+        BrowserAction {
+            action_id: String::new(),
+            grant_id: String::new(),
+            action_type,
+            selector: String::new(),
+            value: String::new(),
+            url: String::new(),
+            max_wait_ms: 0,
+            target: None,
+            reason: String::new(),
+            risk_category: None,
+        }
+    }
+    fn target_ref(
+        snapshot_id: &str,
+        generation: u32,
+        frame_id: Option<&str>,
+        ref_id: &str,
+    ) -> Option<BrowserTargetRef> {
+        Some(BrowserTargetRef {
+            snapshot_id: snapshot_id.to_owned(),
+            generation,
+            ref_id: ref_id.to_owned(),
+            frame_id: frame_id.map(str::to_owned),
+        })
+    }
+    Some(match action {
+        AgentAction::Navigate { url } => BrowserAction {
+            url: url.clone(),
+            ..loop_action(ActionType::Goto)
+        },
+        AgentAction::Click { selector } => BrowserAction {
+            selector: selector.clone(),
+            ..loop_action(ActionType::Click)
+        },
+        AgentAction::ClickRef {
+            snapshot_id,
+            generation,
+            ref_id,
+        } => BrowserAction {
+            target: target_ref(snapshot_id, *generation, None, ref_id),
+            ..loop_action(ActionType::Click)
+        },
+        AgentAction::FrameClickRef {
+            snapshot_id,
+            generation,
+            frame_id,
+            ref_id,
+        } => BrowserAction {
+            target: target_ref(snapshot_id, *generation, Some(frame_id), ref_id),
+            ..loop_action(ActionType::Click)
+        },
+        AgentAction::Type { selector, text } => BrowserAction {
+            selector: selector.clone(),
+            value: text.clone(),
+            ..loop_action(ActionType::Type)
+        },
+        AgentAction::TypeRef {
+            snapshot_id,
+            generation,
+            ref_id,
+            text,
+        } => BrowserAction {
+            target: target_ref(snapshot_id, *generation, None, ref_id),
+            value: text.clone(),
+            ..loop_action(ActionType::Type)
+        },
+        AgentAction::FrameTypeRef {
+            snapshot_id,
+            generation,
+            frame_id,
+            ref_id,
+            text,
+        } => BrowserAction {
+            target: target_ref(snapshot_id, *generation, Some(frame_id), ref_id),
+            value: text.clone(),
+            ..loop_action(ActionType::Type)
+        },
+        // `action_to_wire` sends a scroll's target as its value or, failing that, its selector; the
+        // classifier reads only the selector, so the target comes back as the selector.
+        AgentAction::Scroll { target } => BrowserAction {
+            selector: target.clone(),
+            ..loop_action(ActionType::Scroll)
+        },
+        AgentAction::Wait { ms } => BrowserAction {
+            max_wait_ms: i32::try_from(*ms).unwrap_or(i32::MAX),
+            ..loop_action(ActionType::Wait)
+        },
+        AgentAction::GetContent => loop_action(ActionType::Observe),
+        _ => return None,
+    })
 }
 
 /// Build the loop's internal `BrowserObservation` from a Quarry wire
@@ -962,6 +1062,97 @@ mod tests {
             action_to_wire(&act(ActionType::Wait, "", "", "")),
             AgentAction::Wait { ms: 3000 }
         );
+    }
+
+    /// The wire form reads back as the loop action it was made from, for each action the loop sends,
+    /// so a classifier judging the wire judges what Quarry receives. An observation reads back as
+    /// an observe, the one of the two reads that `action_to_wire` maps to `get_content`.
+    #[test]
+    fn browser_action_from_wire_reads_back_what_action_to_wire_sends() {
+        for action in [
+            act(ActionType::Goto, "", "", "https://example.com/a"),
+            act(ActionType::Click, "button.buy", "", ""),
+            act(ActionType::Type, "input.q", "hallo", ""),
+            act(ActionType::Scroll, "main", "", ""),
+            act(ActionType::Wait, "", "", ""),
+            act(ActionType::Observe, "", "", ""),
+        ] {
+            let back = browser_action_from_wire(&action_to_wire(&action)).expect("a loop action");
+            assert_eq!(back.action_type, action.action_type, "{action:?}");
+            assert_eq!(back.url, action.url, "{action:?}");
+            assert_eq!(back.selector, action.selector, "{action:?}");
+            assert_eq!(back.value, action.value, "{action:?}");
+            if action.action_type == ActionType::Wait {
+                assert_eq!(back.max_wait_ms, action.max_wait_ms, "{action:?}");
+            }
+        }
+    }
+
+    /// A reference-bound action keeps the snapshot, generation, frame and reference it names, which
+    /// is what the classifier looks the element up by.
+    #[test]
+    fn a_reference_bound_action_reads_back_with_its_target() {
+        let mut click = act(ActionType::Click, "", "", "");
+        click.target = Some(BrowserTargetRef {
+            snapshot_id: "snap-1".to_owned(),
+            generation: 4,
+            ref_id: "@e2".to_owned(),
+            frame_id: None,
+        });
+        let back = browser_action_from_wire(&action_to_wire(&click)).expect("a loop action");
+        assert_eq!(back.action_type, ActionType::Click);
+        let target = back.target.expect("the target reads back");
+        assert_eq!(
+            (
+                target.snapshot_id.as_str(),
+                target.generation,
+                target.ref_id.as_str(),
+                target.frame_id
+            ),
+            ("snap-1", 4, "@e2", None)
+        );
+
+        let mut typed = act(ActionType::Type, "", "hallo", "");
+        typed.target = Some(BrowserTargetRef {
+            snapshot_id: "snap-1".to_owned(),
+            generation: 4,
+            ref_id: "@e3".to_owned(),
+            frame_id: Some("frame-child".to_owned()),
+        });
+        let back = browser_action_from_wire(&action_to_wire(&typed)).expect("a loop action");
+        assert_eq!(back.value, "hallo");
+        assert_eq!(
+            back.target.and_then(|target| target.frame_id).as_deref(),
+            Some("frame-child")
+        );
+    }
+
+    /// The wire actions the loop has no vocabulary for read back as nothing, so they are never judged
+    /// by a classification they do not have.
+    #[test]
+    fn a_wire_action_with_no_loop_equivalent_reads_back_as_none() {
+        for wire in [
+            AgentAction::SelectRef {
+                snapshot_id: "snap-1".to_owned(),
+                generation: 1,
+                ref_id: "@e1".to_owned(),
+                value: "no".to_owned(),
+            },
+            AgentAction::Press {
+                key: "Enter".to_owned(),
+            },
+            AgentAction::Evaluate {
+                script: "1".to_owned(),
+            },
+            AgentAction::RespondDialog {
+                dialog_id: "dialog-1".to_owned(),
+                accept: true,
+                approval_grant_id: "approval-1".to_owned(),
+                prompt_text: None,
+            },
+        ] {
+            assert!(browser_action_from_wire(&wire).is_none(), "{wire:?}");
+        }
     }
 
     #[test]

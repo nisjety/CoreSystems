@@ -881,6 +881,12 @@ async fn execute_step_inner(
     browser: Option<&browser_session::BrowserDispatch<'_>>,
 ) -> StepOutcome {
     let released = release.is_some_and(|r| r.covers(step_id, tool_name, tool_input));
+    // A Do run's `browser.act` (WS21-S5b): served only while the act switch is on and the run holds its
+    // page dispatch, which is never the case under zero retention. Every other call keeps its path.
+    let browser_act = !zdr
+        && browser.is_some()
+        && tool_name == browser_session::ACT_TOOL
+        && agent::do_browser_act_enabled();
     // A capability pause that a standing grant may cover (build plan WS13 S6). It is held until the
     // hook and permission gates have answered, so a grant is never spent on a call a later gate holds.
     let mut deferred_pause: Option<CauseCode> = None;
@@ -1099,6 +1105,14 @@ async fn execute_step_inner(
         hook::HookDecision::Ask { .. } | hook::HookDecision::Allow => {}
     }
 
+    // A browser act is refused before anyone is asked to approve it when its page holds a read-level
+    // grant. The check runs for a released call too, since the grant may have changed while it waited.
+    let act_dispatch = browser.filter(|_| browser_act);
+    if let Some(dispatch) = act_dispatch {
+        if let Err(refusal) = tool_bridge::browser_act_precheck(dispatch, tool_input).await {
+            return StepOutcome::failed(&refusal.text());
+        }
+    }
     let mode = PermissionMode::from_wire(permission_mode);
     // Operation-aware gate: `execute_provider_action` is classified by the
     // `operation` embedded in `tool_input` (a read proceeds, a write pauses)
@@ -1113,9 +1127,18 @@ async fn execute_step_inner(
     if matches!(permission_decision, PermissionDecision::Deny) {
         return StepOutcome::permission_denied();
     }
+    // Every browser act waits for the person whatever the permission mode says: a click can change the
+    // page, and its one answer is the typed `browser_action_risk` cause (WS21-S5b).
     let permission_pause = (!released
-        && matches!(permission_decision, PermissionDecision::AwaitApproval))
-    .then(|| permission_pause_cause(permission::RunGate::for_run(org_id, run_id), tool_name));
+        && (act_dispatch.is_some()
+            || matches!(permission_decision, PermissionDecision::AwaitApproval)))
+    .then(|| {
+        if act_dispatch.is_some() {
+            CauseCode::BrowserActionRisk
+        } else {
+            permission_pause_cause(permission::RunGate::for_run(org_id, run_id), tool_name)
+        }
+    });
     // The pause the gate returns is the capability pause when there is one, as it always was. A
     // standing grant releases it only when every pause held for this call is one a grant may cover.
     if let Some(cause) = deferred_pause.or(permission_pause) {
@@ -1190,7 +1213,7 @@ async fn execute_step_inner(
     // verified browser sign-in outside zero retention (WS21-S5a). The grant-backed MCP aliases keep
     // their ExecuteStep path, and a Do name with no session is refused with its own typed answer.
     let exec = if let Some(dispatch) =
-        browser.filter(|_| !zdr && browser_session::is_do_tool(tool_name))
+        browser.filter(|_| !zdr && (browser_session::is_do_tool(tool_name) || browser_act))
     {
         tool_bridge::execute_browser_do_tool(tool_name, tool_input, dispatch).await
     } else if matches!(
