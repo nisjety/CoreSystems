@@ -413,11 +413,17 @@ const PENDING_FEATURES: &[&str] = &[
     "persistent_profile",
     "resume",
     "scrape_record_read",
+    // INNH-4: `GET /v1/change/diff` returns stored page text and is refused for a ZDR reader.
+    "change_diff_read",
     // D-B2-zdr-pins: the W2 routes' own refusals. `job_error_urls`: a crawl, batch or job
     // errors read names the URL of every page that failed (WS15.L1). `agent_attach`: the
     // agent attachment to a person's live run is refused for a ZDR run (WS8.F).
     "job_error_urls",
     "agent_attach",
+    // INNH-12: a job results read names the URL and title of every page the job fetched.
+    "job_result_urls",
+    // INNH-5: a webhook subscription pushes page URLs and fingerprints off-process; refused to create under ZDR.
+    "webhook_off_process",
 ];
 
 fn refusals_named_by_the_matrix() -> (BTreeSet<&'static str>, BTreeSet<&'static str>) {

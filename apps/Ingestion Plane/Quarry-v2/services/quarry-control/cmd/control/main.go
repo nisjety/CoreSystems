@@ -177,7 +177,16 @@ func main() {
 		resources.MountSchedules(r, db)
 		resources.MountRestore(r, db)
 		resources.MountEvents(r, db, apiKey, notifySink)
-		resources.MountWebhooks(r, db)
+		// INNH-5: the unscoped webhook CRUD and delivery routes are retired (410).
+		resources.MountWebhooksGone(r)
+		// INNH-5: the org-scoped subscription API. OFF BY DEFAULT: with the flag unset
+		// the path is not mounted (404) and no delivery retention sweep runs.
+		if resources.WebhookSubscriptionsEnabled(os.Getenv) {
+			resources.MountWebhookSubscriptions(r, db, resources.WebhookSubscriptionOptions{})
+			log.Warn().Msg("webhook subscription API is ON (QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS)")
+		} else {
+			log.Info().Msg("webhook subscription API is off (default): /v1/webhook-subscriptions is not mounted")
+		}
 		// Edge change-webhook receiver (docs/CHANGE_TRACKING.md §"Webhook
 		// emission"): signature + stale-ts + nonce replay are enforced by
 		// the hmacVerifier.Middleware above — mount here, not outside the
@@ -200,7 +209,6 @@ func main() {
 		// WS7.F: /v1/blocklists answers 410 Gone. The CRUD mount is
 		// resources.MountBlocklists(r, db); one-line rollback.
 		resources.MountBlocklistsGone(r)
-		resources.MountWebhookDeliveries(r, db)
 		resources.MountPresets(r)
 
 		// Cycle 23/24 additions — REST resource breadth part 2 +
@@ -228,6 +236,13 @@ func main() {
 	// past the TTL so their streams close.
 	go resources.RunBacklogJanitor(dCtx, db, admission, time.Minute, log.Logger)
 	go dispatcher.Run(dCtx, db, nil, dispatcher.Options{Workers: 4}, log.Logger)
+	if resources.WebhookSubscriptionsEnabled(os.Getenv) {
+		days, invalid := janitor.WebhookDeliveryRetentionDaysFromEnv(os.Getenv)
+		if invalid {
+			log.Warn().Int("retention_days", days).Msg("QUARRY_CONTROL__WEBHOOK_DELIVERY_RETENTION_DAYS is not an integer from 1 to 3650 - using the default")
+		}
+		go janitor.RunWebhookDeliveries(dCtx, db, days, time.Hour, log.Logger)
+	}
 	// Phase 7 retention sweep — INERT unless QUARRY_RETENTION_DAYS>0, and only
 	// deletes when QUARRY_RETENTION_DRY_RUN=false; otherwise a default-safe no-op.
 	go janitor.Run(dCtx, db, janitor.OptionsFromEnv(), log.Logger)

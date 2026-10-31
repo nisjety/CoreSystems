@@ -1,61 +1,49 @@
 # INNH-12: Per-run results: pages a crawl/batch fetched (Apify dataset equivalent), and a run_id filter on artifacts
 
-Status: not started
-Lane: B (control/orchestrator). Plan home: E4.1 (W4, on hold; the user asked for it now). Estimate: 4.5 d (core 3 d + optional run_id filter 1.5 d).
-Verified by reading quarryv2-next. Nothing was built or run. Paths under `apps/Ingestion Plane/Quarry-v2`.
+Status: done in tests (dark behind QUARRY_EDGE__JOB_RESULTS, default off; never run on a stack)
+Lane: B (control/orchestrator), branch innh/lane-b. Plan home: E4.1 (W4, on hold; the user asked for it now). Built 2026-10-31.
+Paths under `apps/Ingestion Plane/Quarry-v2`.
 
-## What exists
-NO results route exists: edge routes.rs:150-295 has crawl/batch status (:160-163, :167-169), errors, ongoing, events tails (/v1/jobs/:id/events, /v1/runs/:id/events, /v1/crawl|batch/:id/events; resource_routes list_job_events/list_run_events) and /v1/artifacts, /v1/artifacts/:id; nothing named results/pages. Raw material:
-1. The pipeline writes per page, for non-ZDR runs, three artifacts keyed by run: html (or raw for documents), markdown and meta.json (`quarry-runtime/src/pipeline.rs:1311-1400`; key `org=<org>/run=<run_id>/page=<page_hash>/<kind>.<ext>` via `quarry-core/src/artifact.rs:63-69` object_key), and emits ArtifactWritten events {url, format, artifact_id, bytes} (pipeline.rs:1341-1388) but those go to the runtime EventSink (NATS/local), NOT control's event log (the orchestrator re-emits only page_fetched, branding_extracted and page_extracted, workflows.go:268-290).
-2. Control's per-job event log holds page_fetched {url, status, fingerprint, links:count, content_type, title} (workflows.go:253-268), page_extracted {url, title, excerpt, word_count, driver, ...} (pageExtractedPayload workflows.go ~290-318) and final page_failed rows (workflows.go:226-247); readable today only as a raw event stream via GET /v1/jobs/{id}/events with a free-form `payload` (event_wire.go toJobHistoryEvent), not as a paged list of pages, and neither payload carries artifact ids or bytes (RunPageResult activities.go:204-225 and InternalRunPageResult routes.rs:1376-1417 have no artifact fields although NormalizedOutput.formats holds the ids, pipeline.rs:1395-1400).
-3. ListFilter (`quarry-core/src/pagination.rs:63-88`) = status, created_before, created_after, limit, cursor, sort; no run_id. ListQuery (resource_routes.rs:49-64) mirrors it and ignores unknown params, so even the documented `kind` filter of openapi.yaml /v1/artifacts (:1314-1370, enum markdown/html/raw/pdf/screenshot/extract) is silently NOT implemented. ArtifactSummary (resources.rs ~:84-97) = artifact_id, org_id, kind, bytes, sha256 (always None), created_at, source_url (always None): no run id, no page url. Backends: InMemoryStore keeps meta rows (artifact_store.rs:223-337), FilesystemStore lists from its .index and parses the org= segment (:345-590, list :537-575), S3Store has NO list (trait default returns an empty page, artifact_store.rs:146-153), so on S3 /v1/artifacts is empty. Deploy default: docker-compose.yml:172 uses ARTIFACT_BACKEND memory (artifacts vanish on edge restart), docker-compose.production.yml:60 filesystem.
-4. ZDR: crawl and batch are refused for ZDR callers at handoff (routes.rs ~:1188 refuse_durable_job_under_zdr; docs/ZDR_MATRIX.md durable_jobs row) so no ZDR job has results.
+## What existed (verified before building)
+No results route. The `page_fetched` event in control's log held url, status, fingerprint, links count, content_type and title, with no artifact ids; the runtime's ArtifactWritten events went to NATS only. `ListFilter` had no run_id; `ListQuery` ignored unknown params, so the documented `kind` filter of `GET /v1/artifacts` was a latent contract lie; `S3Store` has no `list`. INNH-4 had already added `markdown_artifact_id` to the `run_page` result (reused here).
 
-## The gap
-Recommended build is a per-job results route (the dataset equivalent), not an artifact filter, because the job-to-page-to-artifact join already exists in control's event log and does not depend on which artifact backend lists.
-(A) CORE.
-1. Make page_fetched self-describing: add closed, content-free fields markdown_artifact_id, source_artifact_id, bytes, word_count, driver to InternalRunPageResult::from_output (routes.rs:1424), to activities.RunPageResult (activities.go:204) and to the `fetched` map (workflows.go:253): additive, JSON-tolerant, no workflow command change (still verify Temporal replay safety: payload map only; run workflow replay tests). Note INNH-4 adds markdown_artifact_id to the same structs; coordinate to build once.
-2. Control: GET /v1/jobs/{id}/results built like jobErrors (jobs_lifecycle.go:286-306): org-scoped GetByOrg, db.Events().ForJobTypes(id, [page_fetched], after_seq, limit) (store.go:300), rows {url,status,content_type,title,fetched_at,word_count,driver,markdown_ref,source_ref,bytes,seq}, `next_seq` cursor, default 100, max 500; a URL fetched twice appears twice (retries/escalation); `latest=true` dedupes by latest per URL.
-3. Edge: /v1/jobs/:id/results, /v1/crawl/:id/results, /v1/batch/:id/results (kind check like errors_for job_lifecycle_routes.rs:180-215; ZDR token -> 403 because it returns URLs, like the errors route; service principals 403 by the default scope rule). Content is fetched by the existing GET /v1/artifacts/{id} (org-bound); `?include=markdown` NOT recommended for v1; ndjson export is a follow-up.
-(B) OPTIONAL (+1.5 d): `run_id` on ListFilter/ListQuery and ArtifactSummary.run_id/page_hash, implemented in list_window/InMemory meta/Filesystem (parse `run=`), and implement the documented `kind` filter; S3 remains unlistable until a ListObjectsV2 implementation is written (separate slice).
-Gaps the audit did not state: the event stream already exposes page urls so a client could reconstruct results today (poor UX, no artifact refs); artifact refs dangle after an edge restart on the memory backend; page_hash is url+fingerprint so a changed page in a later run is a different artifact.
+## What I built
+1. `page_fetched` is self-describing. Rust `InternalRunPageResult` gains `source_artifact_id` (html, or raw for a document) and `bytes` (size of the stored markdown) beside INNH-4's `markdown_artifact_id`; Go `RunPageResult` decodes them; `addFetchedResultFields` (workflows.go) copies `markdown_artifact_id`, `source_artifact_id`, `bytes`, `word_count`, `driver` onto the event payload, each only when the runtime reported it. Payload map only: no workflow command added or reordered, so a replayed history stays valid.
+2. Control `GET /v1/jobs/{id}/results` (`internal/resources/jobs_results.go`): org-scoped GetByOrg (foreign or unknown id 404), `ForJobTypes(page_fetched)` page, rows `{seq,url,status,content_type?,title?,fetched_at,word_count?,driver?,markdown_artifact_id?,source_artifact_id?,bytes?}`, `next_seq` when the page is full, `after_seq`, `limit` default 100 max 500. `latest=true` keeps the latest fetch of each URL (scans at most 20 000 fetches, then `scan_capped: true`).
+3. Edge `GET /v1/jobs/:id/results`, `/v1/crawl/:id/results`, `/v1/batch/:id/results` (`job_results_routes.rs`), flag `QUARRY_EDGE__JOB_RESULTS` (off: 501 before control, and 501 wins over the 403). Order: flag, ZDR floor (403, `details.reason: job_result_urls`), query check (400 names the field for limit outside 1..500, bad after_seq, bad latest), job exists and kind matches (else 404), control read. Service principals get 403 from the existing route scope. Envelope: `{data:{items,next_seq?}, meta:{request_id, page:{next?,limit}}}`.
+4. Artifact list (not behind the flag, additive): `GET /v1/artifacts?run_id=run_...&kind=markdown`. The documented `kind` filter is now real; a value that is not one of the six documented kinds, or a run_id that is not `run_...`, is a 400 with `details.field`. `ArtifactSummary` gains `run_id` and `page_hash`. Memory store keeps run and page per row; the filesystem store parses them from the key, so the filter survives a restart. S3 still lists nothing.
+5. ZDR matrix row `job_results` (Refused FORBIDDEN `job_result_urls`, Enforced; golden JSON, .sha256 and docs/ZDR_MATRIX.md regenerated with the existing mechanism, then rerun without it); `job_result_urls` added to `PENDING_FEATURES` in zdr_feature_matrix.rs. Route-count pin 109 to 112.
+6. Docs: openapi (3 paths, `JobResultsView`, `JobResult`, artifact `run_id` param, `ArtifactSummary.run_id/page_hash`), CONTRACTS ("Job results", "Artifact list filters"), RUNBOOKS ("Job results"), REST_RESOURCES, ERROR_REASONS.
 
-## Files
-Rust: `crates/quarry-edge/src/routes.rs:1376-1440` (InternalRunPageResult fields + from_output), NEW `crates/quarry-edge/src/job_results_routes.rs` (+ lib.rs mod) or add to `job_lifecycle_routes.rs` near errors_for (:180-215) and the route table routes.rs:160-170; `crates/quarry-core/src/resources.rs` (JobResultView, JobResultsView next to JobErrorsView ~:278-300).
-Go orchestrator: `services/quarry-orchestrator/internal/activities/activities.go:204-225`, `internal/workflows/workflows.go:253-268` (+ activities_test.go, workflows tests).
-Go control: NEW `services/quarry-control/internal/resources/jobs_results.go` (+ _test.go) mounted next to jobSummary/jobErrors (where MountJobs registers /v1/jobs/{id}/errors); event_wire.go untouched.
-ZDR: `quarry-core/src/zdr_matrix.rs` + `docs/ZDR_MATRIX.md` (new row job_results: refused FORBIDDEN, same shape as job_errors), `scripts/tests/zdr-contract-sync.test.sh` (append-only), `tests/zdr_gap_rows.rs`.
-Docs: `docs/openapi.yaml` (3 paths + JobResultsView schema), `docs/CONTRACTS.md` (beside "Errors (edge)" ~:745-752), `docs/REST_RESOURCES.md`, openapi route allowlist if needed.
-Optional (B): `quarry-core/src/pagination.rs:63-88`, `quarry-edge/src/resource_routes.rs:49-90, :120-131`, `quarry-runtime/src/artifact_store.rs:146-153` (trait), `:223-337` (memory meta + run_id), `:345-590` (fs parse), list_window `:174-215`, ArtifactSummary in resources.rs, `graphql/schema.rs:29` ListFilterInput. No migration.
-
-## Flag
-Edge `QUARRY_EDGE__JOB_RESULTS`, default OFF (501, same pattern as job control): recommended even though the route is a read, because it returns page URLs and artifact refs for the first time. The orchestrator/edge payload additions are additive and need no flag. Do not touch the live QUARRY_EDGE__SCRAPE_ACTIONS, SCRAPE_CAPTURE, JOB_CONTROL, AI_FORMATS or QUARRY_SCHEDULE_CAPABILITIES. Needs rebuilt edge AND orchestrator images (an orchestrator rebuild changes the live worker; Temporal replay safety must be checked before any live swap, so prove on a side-by-side stack and ask before touching live).
-
-## Contract change
-GET /v1/jobs/{id}/results (also /v1/crawl/{id}/results and /v1/batch/{id}/results; kind mismatch or foreign id is 404). Query: limit (1..500, default 100), after_seq (cursor), latest (bool, default false). 200 `{data:{items:[{seq:int, url:string (final URL), status:int, content_type?, title?, fetched_at:RFC3339, word_count?, driver?:'static'|'tls'|'browser', markdown_artifact_id?:'art_...', source_artifact_id?:'art_...', bytes?:int}], next_seq?:int}, meta:{request_id}}`. Rows come from page_fetched only; failed and blocked pages stay on /errors. Items written before the page_fetched fields existed carry url/status/title only; `next_seq` is set only when the page was full. Content: GET /v1/artifacts/{markdown_artifact_id} (existing, org-bound, 404 if gone). Errors: 404 NOT_FOUND (foreign/unknown/kind mismatch/not a job id), 403 FORBIDDEN under the token's ZDR floor (details.reason 'job_result_urls'), 403 for service principals, 501 UNSUPPORTED when the flag is off, 400 on a bad limit. Optional (B): `GET /v1/artifacts?run_id=run_...&kind=markdown` filters (documented `kind` now real), ArtifactSummary gains run_id and page_hash (additive).
-
-## Tests to add
-Go control: `jobs_results_test.go` - rows from page_fetched in seq order, cursor paging with next_seq, limit clamp 500, latest=true dedupes by URL, foreign org -> 404, unknown job -> 404, failed/blocked pages absent, rows from before the new payload fields tolerate missing artifact ids.
-Go orchestrator: workflows_test.go/activities_test.go - page_fetched payload carries markdown_artifact_id/bytes/word_count/driver when RunPage returns them, absent otherwise; replay test unchanged.
-Rust (Docker recipe): routes.rs unit test InternalRunPageResult::from_output includes artifact ids from NormalizedOutput.formats and omits them under ZDR (formats None); job_results_routes tests with mock control (pattern tests/job_lifecycle.rs: org from claims, kind mismatch 404, ZDR token 403, service token 403, flag off 501, next_seq passthrough); an integration test running a stubbed crawl page through PageRunner with InMemoryStore asserting the id in the result resolves via GET /v1/artifacts/{id} for the same org and 404s for another org. ZDR: new matrix row + zdr_gap_rows test; zdr-contract-sync.test.sh row.
-Optional (B): artifacts_fs_list.rs extension - ?run_id= returns only that run's artifacts on the fs backend and across a restart, memory likewise, another org sees none; ListFilter default serializes without run_id (pagination.rs tests ~:197-260); `kind` filter test.
-Docs: openapi-route-coverage, openapi-no-bare-null, docs-contract. Done requires a side-stack run: crawl 5 fixture pages, GET /v1/crawl/{id}/results returns 5 rows with working markdown refs; same call with a ZDR token is 403.
-
-## Risks
-- ZDR/privacy: results return URLs and titles so ZDR callers are refused; page_fetched payloads already persist url+title in control's event log (existing posture; events are not purged by org erasure, gdpr_purge.go:28 lists events as untouched): this adds no retention but makes it easy to read; document in org-erasure notes. Artifact content stays behind the org-bound GET /v1/artifacts/{id}.
-- Security: org scope enforced twice (control GetByOrg + artifact org binding via ensure_org_owns); a foreign job id must be 404 exactly like errors; ids parsed (JobKind) before reaching control as in load_summary; never echo raw error text.
-- Cost: reads are cheap (one indexed ForJobTypes page); no inline markdown (a 500-row page of full markdown can reach tens of MB).
-- Durability: on the memory artifact backend (dev default) markdown_artifact_id 404s after an edge restart; S3 cannot list (run_id filter returns nothing) though refs work via get; state it in CONTRACTS.md.
-- Duplicates/retries: a URL can have several page_fetched rows; clients use latest=true for a dataset view.
-- Temporal: adding fields to RunPageResult/page_fetched payload is replay-safe only if no new commands are introduced; run the orchestrator workflow tests.
-- Scale: a 5,000-page crawl is 5,000 rows paged at 500; ForJobTypes is by (job_id, type, seq): confirm an index exists (SummaryForJob/CountsForJobs use grouped queries, pg/resources.go:1297, :1323).
-- OpenAPI: the documented but unimplemented `kind` artifact filter is a latent contract lie; fix or remove it in the same edit.
-
-## Commits
-(none yet)
+## Commits (branch innh/lane-b)
+- cc2596c7a feat(quarry-control): per-job results route and self-describing page_fetched (INNH-12)
+- 4f2a1bc3c feat(quarry-edge): job results routes and artifact run_id/kind filters behind QUARRY_EDGE__JOB_RESULTS (INNH-12)
+- docs(quarry): job results contract, runbook, openapi and status (INNH-12) (this commit)
 
 ## Tests (counts)
-(none yet)
+- Go control `./...` all packages ok; new: 9 in `jobs_results_test.go` (rows from page_fetched in seq order and only those, absent fields left out of the wire, cursor paging, limit default 100 / clamp 500 / junk, a URL fetched twice vs `latest`, `latest` paging, org scoping + unknown + missing org, no leak from another job, in-process numeric payloads).
+- Go orchestrator `./...` all ok; new: 3 in `workflows/fetched_results_test.go` (payload carries the fields when RunPage returns them; no empty keys when not; content-free) + 1 in `activities/markdown_artifact_test.go` (RunPage decodes source id and bytes).
+- Rust (lane container, `qtest-lane.sh b`): quarry-core 281 lib tests ok (incl. golden), quarry-runtime `artifact_store` 20 ok (5 new: run/kind filters on both stores, after restart, key parsing), quarry-edge lib 673 ok (new: 6 in `job_results_routes`, 2 `from_output` tests, 1 artifact-filter check), integration: `job_results` 7 ok (real router + control double: pass-through and meta.page, query forwarding with the token's org, 400s before control, 404 for kind mismatch/foreign/malformed id, 501 flag off without a control call, 403 ZDR with reason without a control call, 403 service principal), `artifacts_fs_list` 6 ok (1 new: run_id + kind through the real route, org isolation, 400s, restart), `job_lifecycle` 14, `zdr_claim_floor` 26, `zdr_feature_matrix` 14 ok. `cargo check --workspace --all-targets` clean.
+- Node contract tests in Quarry-v2: 49 pass (route-count pin updated, openapi-no-bare-null, docs-contract).
+
+## Deviations from the status file's plan
+- Edge envelope has `meta.page {next, limit}` and no `links` object (the shared Envelope has none); `next_seq` is in `data` as planned.
+- A bad limit is a 400 (as the planned contract said), unlike the errors route which clamps.
+- `bytes` is the size of the stored markdown (not the source).
+- `latest=true` is capped at 20 000 fetches per call and says so (`scan_capped`); not in the plan.
+- Part B (artifact filters) is not behind the flag: it is additive and fixes the documented `kind`. `kind` accepts only the six documented kinds.
 
 ## Not verified
-Code reading only; nothing built or run. Unverified: index on (job_id, type, seq); Temporal replay safety of the payload change.
+- No stack was run: no Temporal replay of an old history, no real Postgres (the pg `ForJobTypes` is unchanged and was not exercised; the control tests use the in-memory store), no side-by-side crawl of five fixture pages, no ZDR token against a live edge. The status file's "done" condition (crawl 5 pages, GET results returns 5 rows with working refs; ZDR token 403) is NOT met on a stack; it is met by route tests with a control double.
+- Replay safety is by construction (payload map only) and by the workflow test environment, not by replaying a recorded history.
+- Index: `events_job_id_idx` is on `job_id` only (confirmed in 001_init.sql); type and seq filter over that job's rows. No composite index exists.
+- The edge and orchestrator images were not rebuilt; rows written before the orchestrator carries the fields have no artifact ids.
+
+## Contract the Innhenting UI needs
+`GET /v1/crawl/{id}/results` (also `/v1/batch/{id}/results`, `/v1/jobs/{id}/results`), bearer of the user (not a service identity). Query: `limit` 1..500 (default 100), `after_seq` (cursor), `latest` (bool). 200:
+`{ "data": { "items": [ { "seq": 12, "url": "https://e.test/a", "status": 200, "content_type": "text/html", "title": "A", "fetched_at": "2026-10-23T10:00:01Z", "word_count": 120, "driver": "static", "markdown_artifact_id": "art_...", "source_artifact_id": "art_...", "bytes": 900 } ], "next_seq": 12, "scan_capped": false }, "meta": { "request_id": "...", "page": { "next": "12", "limit": 100 } } }`.
+`next_seq` is absent on the last page; fields after `fetched_at` are absent, never null. Content: `GET /v1/artifacts/{markdown_artifact_id}` (org-bound, 404 when gone). Errors: 404 (foreign, unknown, wrong kind), 403 (`details.reason: job_result_urls` for ZDR; also service principals), 501 flag off (`QUARRY_EDGE__JOB_RESULTS`), 400 with `details.field`. Artifacts of a run: `GET /v1/artifacts?run_id=run_...&kind=markdown`.
+
+## Owner decisions needed
+- Switch `QUARRY_EDGE__JOB_RESULTS=1` on the live edge (flag is dark; the owner flips it) and rebuild edge plus orchestrator (an orchestrator rebuild changes the live worker: prove on a side-by-side stack first).
+- Whether the dev compose should default to the filesystem artifact backend so result ids survive an edge restart (today `ARTIFACT_BACKEND=memory`).

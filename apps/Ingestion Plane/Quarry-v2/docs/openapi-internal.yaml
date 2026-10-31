@@ -111,7 +111,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/InternalChangeRecordResponse'
         '400':
-          description: BAD_REQUEST when org_id or fresh_fingerprint is empty, or url is not a URL.
+          description: BAD_REQUEST when org_id or fresh_fingerprint is empty, or url is not a URL; with QUARRY_EDGE__CHANGE_TEXT_DIFF on, also when markdown_artifact_id is not a markdown artifact this org can read (nothing is saved).
           content:
             application/json:
               schema:
@@ -810,6 +810,13 @@ components:
           description: The driver that served the fetch.
         crawl:
           $ref: '#/components/schemas/CrawlReport'
+        markdown_artifact_id:
+          type: string
+          description: >-
+            INNH-4. The id of the stored markdown of this page (an org-bound artifact, readable
+            through GET /v1/artifacts/{id}). General, not change-specific: the change monitor keeps it
+            on a baseline and the per-run results of a crawl read it. Absent when nothing was stored,
+            always so under ZDR, and from a runtime that predates the field.
     CrawlContext:
       description: >-
         WS14.S2. The crawl scope for one run_page call. Absent or null leaves the
@@ -1041,6 +1048,14 @@ components:
           type: boolean
           nullable: true
           description: The posture of the schedule. When it is true the durable ChangeDetected event and the control webhook are suppressed.
+        markdown_artifact_id:
+          type: string
+          description: >-
+            INNH-4. The stored markdown of the fresh fetch, as run_page returned it. With
+            QUARRY_EDGE__CHANGE_TEXT_DIFF on and zdr not true, a new or changed check checks it is a
+            markdown artifact of org_id (a 400 otherwise, nothing saved) and keeps it as the
+            baseline's artifact_id; a changed check also stores the JSON paragraph diff. Ignored with
+            the flag off, and for a zdr body. Absent when run_page returned none.
     InternalChangeRecordResponse:
       type: object
       required:

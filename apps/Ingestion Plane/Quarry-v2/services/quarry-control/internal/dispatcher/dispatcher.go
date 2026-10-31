@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -106,6 +107,15 @@ func dispatch(ctx context.Context, db store.DB, hc *http.Client, d store.Webhook
 		updateDelivery(d, "missing_or_inactive")
 		return
 	}
+	// Tenancy (INNH-5), defence in depth behind the fan-out: a subscription with no org
+	// (legacy), or a delivery that belongs to another org than its subscription, is never
+	// sent. This also kills deliveries queued before migration 025 stamped an org on them.
+	if wh.OrgID == "" || wh.OrgID != d.OrgID {
+		d.Status = "failed"
+		d.LastError = "webhook org mismatch"
+		updateDelivery(d, "org_mismatch")
+		return
+	}
 
 	body := []byte(d.Payload)
 	ts := time.Now().Unix()
@@ -125,7 +135,9 @@ func dispatch(ctx context.Context, db store.DB, hc *http.Client, d store.Webhook
 
 	resp, err := hc.Do(req)
 	if err != nil {
-		retryOrDLQ(db, &d, "transport: "+err.Error(), true, logger)
+		// A target the egress guard refuses (private, loopback, link-local, metadata) will
+		// not become reachable by waiting: dead-letter it at once instead of five retries.
+		retryOrDLQ(db, &d, "transport: "+err.Error(), !errors.Is(err, egress.ErrBlocked), logger)
 		return
 	}
 	defer resp.Body.Close()

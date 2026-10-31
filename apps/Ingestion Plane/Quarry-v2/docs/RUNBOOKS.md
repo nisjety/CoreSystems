@@ -1989,6 +1989,29 @@ This section corrects and extends "Profile owner and ACL check (WS17.P2, unit W2
 
 **Evidence owed (stack session, not run here).** Everything above is proven by tests against a strict double of the gateway's chat route (`tests/ai_formats.rs`, `tests/ai_formats_off.rs`, `tests/ai_formats_real_token.rs`); no real Model Plane gateway has been called. On a side-by-side stack with the dev bypass and two hand-minted dev tokens: a scrape with `["markdown", {"type":"json","schema":...}, "summary"]` returns the fields and `data.ai.total.calls: 2`; the same with `zdr: true` returns `skipped` / `ZDR_UNAVAILABLE` and the gateway's log shows no call; with the switch off it is `400 feature_disabled`. The page-cache test (`an_ai_request_never_reads_or_writes_the_page_cache`) needs a Redis and skips without one.
 
+## Change text diff: enable, disable, read and retention (INNH-4, built, NOT run, 2026-10-31)
+
+A change monitor can keep the page text of each version and a paragraph diff between them, and `GET /v1/change/diff` returns both. The contract is `docs/CONTRACTS.md`, "Change text diff". It is off: `QUARRY_EDGE__CHANGE_TEXT_DIFF` is unset in the default composes, which is off, and no compose line is needed.
+
+**Enable.** Set `QUARRY_EDGE__CHANGE_TEXT_DIFF=1` (also `true`, `yes`, `on`) on the edge and restart it. The edge must be the `postgres-queue` build with `DATABASE_URL` (the baseline store), as for any change recording. Deploy the edge before the orchestrator: the edge accepts `markdown_artifact_id` on the record call and returns it from `run_page`, the orchestrator only forwards it, and an old orchestrator simply sends none (the baseline then has no text and its first change is an unavailable diff, `no_previous_text`).
+
+**Disable.** Unset the variable or set it to `0` and restart. Recording goes back to the one-line fingerprint note and baselines without text; `GET /v1/change/diff` answers 501. Baselines and diffs already stored stay (they are readable again when the flag returns). Nothing needs a migration either way.
+
+**What a person sees.** A monitored page changes: the `change_detected` event and the `quarry.change.detected` webhook carry `diff_id` and `new_baseline`; `GET /v1/change/diff?diff_id=...` returns the added and removed paragraphs (`real_delta` false means the bytes changed and the text did not: an ad or a timestamp). The first change after enabling, for a page that was already monitored, answers `available: false`, `reason: no_previous_text`; the next one has a diff.
+
+**Answers.**
+| Answer | Reason |
+|---|---|
+| 501 `UNSUPPORTED`, message names `QUARRY_EDGE__CHANGE_TEXT_DIFF` | the flag is off |
+| 403 `FORBIDDEN` | the caller is under Zero Data Retention |
+| 404 `NOT_FOUND` | no baseline for the url, or an unknown id, or an id of another organization (the same message) |
+| 200, `available: false`, `reason` | `no_previous_version` (one baseline), `no_previous_text` (recorded before text was kept), `no_text`, `artifact_gone` (a stored page was evicted) |
+| 400 on `POST /v1/internal/change/record` | `markdown_artifact_id` is not a markdown artifact of that org; nothing was saved, the activity fails and Temporal retries it |
+
+**Retention.** The page text lives in the artifact store like any page artifact. The artifact janitor deletes by age only; it is dry-run by default (`QUARRY_RETENTION_DRY_RUN` is not `false`). Arming it would delete the markdown of old baselines, and `GET /v1/change/diff` then answers `artifact_gone` for a pair whose diff was not stored (a stored diff keeps its own text). Do not arm it for a deployment that uses text diffs until it spares baseline artifacts. Organization erasure (`org_erasure.rs`) has no baseline handling today, so baseline rows are not removed by it: check that before offering text diffs to a customer who can ask for erasure.
+
+**ZDR.** A ZDR run stores no markdown, returns no `markdown_artifact_id`, and a `zdr: true` record body keeps no text or diff even in observe mode (`QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES` off), where its baseline row is still written. Reads are refused for a ZDR caller. To check by hand on a side-by-side stack: schedule a monitor on a fixture page, edit one paragraph, wait for the change, read `GET /v1/change/diff?diff_id=` with the id from the event, and confirm the edited paragraph is `added` and the old one `removed`; repeat with an ad-rotation fixture and confirm `real_delta: false`. Not done here: only unit tests with an in-memory store, no real Postgres or Temporal.
+
 ## `/v1/extract` with a `prompt` (INNH-2, built, NOT run, 2026-10-31)
 
 `POST /v1/extract` now sends `prompt` to the model: with `schema` as extra instructions, alone as a free-form JSON object (`data`, status `ok`). The contract is `docs/CONTRACTS.md`, "`/v1/extract`: the `prompt` takes effect". This arm has no switch of its own: it runs when `MODEL_PLANE_URL` is set and the edge holds a model credential (`MODEL_PLANE_TOKEN`, or the Auth Core minted path). It calls the gateway's `/v1/invoke`, not the `/v1/ai/chat` lane of the scrape AI formats, so `QUARRY_EDGE__AI_FORMATS` does not gate it. On a deployed stack the lane is ungranted until WS16.S1 to S3 and decision X-7, so a call there is answered by the 501 "lane refused" of INNH-3 after one fetch (see "Enable structured extract and AI formats"); do not point a deployed edge at a gateway for this.
@@ -2054,3 +2077,52 @@ Needs Redis (`REDIS_URL`): without it `max_age` is ignored with the warning `cac
 **Limits to know.** The TTL caps the effective `max_age`. A stored result whose artifacts expired is a miss (the page is fetched again). A hit is not metered as `scrape.page`; whether it should be is an open product decision. A redirect is keyed by the URL as requested, not the final one. The trailing slash and the query order are part of the URL identity.
 
 **Tests.** `crates/quarry-edge/tests/scrape_max_age.rs` (Redis, `REQUIRE_CONTRACT=1` makes an unreachable Redis a failure), `tests/scrape_max_age_off.rs` (no Redis), unit tests in `cache.rs`, `scrape_cache.rs`, `scrape_contract.rs` and `quarry-core` (`scrape.rs`, `cache.rs`). The `quarry-v2-ci.yml` step "Page-cache and ZDR cache gates (Redis)" runs `cache_policy.rs`; `scrape_max_age.rs` is not in it yet (an owner/CI decision, recorded in INNH-7-status.md).
+
+## Job results: enable, disable, read (INNH-12, built, NOT run, 2026-10-31)
+
+The pages a crawl or batch fetched, with the ids of what was stored for each, come back from `GET /v1/crawl/{id}/results`, `/v1/batch/{id}/results` and `/v1/jobs/{id}/results`. The contract is `docs/CONTRACTS.md`, "Job results". It is off: `QUARRY_EDGE__JOB_RESULTS` is unset in the default composes, which is off, and no compose line is needed.
+
+**Enable.** Set `QUARRY_EDGE__JOB_RESULTS=1` (also `true`, `yes`, `on`) on the edge and restart it. Rebuild both the edge and the orchestrator: the edge returns the artifact ids from `run_page`, the orchestrator copies them onto each `page_fetched` event, and control reads the rows back. Deploy the edge first. Pages fetched before the orchestrator carries the fields have rows without artifact ids (url, status and title only); nothing is lost and nothing needs a migration. Replaying an in-flight workflow is safe: only the payload of an event changes, no workflow command is added.
+
+**Disable.** Unset the variable or set it to `0` and restart. The three routes answer 501; the events keep the extra fields.
+
+**Answers.**
+| Answer | Reason |
+|---|---|
+| 501 `UNSUPPORTED`, message names `QUARRY_EDGE__JOB_RESULTS` | the flag is off |
+| 403 `FORBIDDEN`, `details.reason` is `job_result_urls` | the caller is under Zero Data Retention |
+| 403 | a service principal |
+| 404 `NOT_FOUND` | unknown id, an id of another organization, or a crawl id on the batch path |
+| 400 `BAD_REQUEST`, `details.field` | `limit` outside 1 to 500, `after_seq` not a number, `latest` not true or false |
+
+**Reading a run.** Page with `after_seq=<next_seq>` until `next_seq` is absent. Use `latest=true` for a dataset with one row per URL. Fetch a page with `GET /v1/artifacts/{markdown_artifact_id}`. On the in-memory artifact backend (`ARTIFACT_BACKEND=memory`, the default compose) the ids stop resolving when the edge restarts; use the filesystem backend for results that must outlive it. `GET /v1/artifacts?run_id=<run>&kind=markdown` lists one run's artifacts on the memory and filesystem backends (not on S3, which cannot list).
+
+**Cost and scale.** A read is one indexed page of the job's events (`events_job_id_idx` is on `job_id`; the type and seq filters run over that job's rows). A 5 000-page crawl is 10 pages at the maximum limit. `latest=true` reads the whole job (up to 20 000 fetches) on every call, so page through it with `after_seq` rather than polling it.
+
+**ZDR.** A ZDR run stores no artifact and its `page_fetched` carries none of the ids; the routes are refused for a ZDR caller anyway. The events already hold each page's url and title (existing posture); this makes them easy to read, which is why the routes are dark. To check by hand on a side-by-side stack: crawl five fixture pages, call `GET /v1/crawl/{id}/results` and confirm five rows whose `markdown_artifact_id` each return the page from `GET /v1/artifacts/{id}`; repeat with a ZDR token and confirm 403. Not done here: Go and Rust unit and route tests only, no stack, no Temporal and no Postgres were run.
+
+## Webhook subscriptions: enable, disable, rotate, retry, erase (INNH-5, built, NOT run, 2026-10-31)
+
+Customers can register an HTTPS endpoint that receives their organization's `change_detected` events, signed. The contract is `docs/CONTRACTS.md`, section 4 (what the endpoint receives) and "Webhook subscriptions" (the API). It is off: neither `QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS` nor `QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS` is set in the default composes, and no compose line is needed. Two things are not behind a switch and ship with the control image: the fan-out only delivers to the subscriptions of the event's own organization (an event of unknown owner delivers to nobody), and `/v1/webhooks` and `/v1/webhook-deliveries` on control answer 410.
+
+**Order.** Deploy control first: it applies migration 025 at boot (`webhooks` and `webhook_deliveries` gain `org_id`; nothing is dropped or rewritten, a legacy row keeps `org_id ''` and delivers to nobody). Then the edge. Then switch on: set `QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS=1` on control (it mounts the routes and starts the delivery retention sweep), restart it, then `QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS=1` on the edge (also `true`, `yes`, `on`). With the edge on and control off the routes answer 501 and the message names the control variable. The edge also needs the change webhook to reach control for anything to be delivered: `QUARRY_EDGE__CONTROL_BASE_URL` and `QUARRY_EDGE__INTERNAL_SECRET` are set, which the change monitor already requires.
+
+**Disable.** Unset the variables and restart. Subscriptions and deliveries stay in the database, and the switches do not stop delivery: control's fan-out and dispatcher read no switch, so while a subscription row exists its organization's events are still delivered. To stop one, `PATCH` it with `active: false` (needs the routes on) or delete it. To stop all at once, delete the rows: `DELETE FROM webhooks WHERE org_id <> ''` (deliveries go with them by cascade).
+
+**Day to day.**
+| Task | How |
+|---|---|
+| A customer lost its secret | `POST .../rotate-secret`; the new secret is in that response only, the old one stops at once. There is no way to read the current one |
+| A customer's endpoint was down | `GET .../deliveries?status=dlq`, then `POST .../deliveries/{id}/retry` for each; a retry restarts the attempt count |
+| An endpoint is refused as `blocked_target` | its host resolves to a private or loopback address (or a rebinding mix). The customer must serve it from a public address; nothing on the control side allows it. `EGRESS_ALLOWLIST_HOSTS` and `EGRESS_ALLOWLIST_CIDRS` must stay empty on control in production: they widen the guard for the dispatcher and for every other control egress |
+| Too many finished rows | `QUARRY_CONTROL__WEBHOOK_DELIVERY_RETENTION_DAYS` (default 14, 1 to 3650; an invalid value logs and keeps 14). The sweep runs hourly while the control switch is on and deletes only `success`, `failed` and `dlq` rows |
+| Organization erasure | `PurgeOrg` deletes the organization's `webhook_deliveries` and `webhooks`; `PurgeResult` reports `webhooks_deleted` and `webhook_deliveries_deleted`. Legacy rows with no organization are not matched by it |
+
+**Legacy rows.** A `webhooks` row from before migration 025 (no tenant route could create one, so there should be none on a deployed stack) has `org_id ''`. It receives nothing and is not listed by any tenant route. Delete it by hand if the table has any: `SELECT id, url FROM webhooks WHERE org_id = ''`.
+
+**Owner decision: the secret at rest.** The HMAC needs the raw key, so control stores `webhooks.secret` in plaintext; the API never returns it after create or rotate, and no log line carries it, but a database reader has every organization's keys. The proper fix is envelope encryption with a control key (a KMS-held data key wrapped per row); it is not built. Accept plaintext at rest for the first customers, or require the envelope before switching on? Until decided, keep the switches off outside a side-by-side stack.
+
+**Owner decision: ZDR.** A Zero Data Retention organization cannot create a subscription, patch one or retry a delivery (403, `webhook_off_process`); it can read, delete and rotate. Nothing is emitted for a ZDR check in any case. Control cannot tell an organization's posture; the edge's token floor is the only gate, and an organization that turns ZDR on later keeps the subscriptions it made until it deletes them (they receive nothing from ZDR checks). Say if enabling ZDR should also deactivate them.
+
+**Not done by this build.** Run against a real stack: the control Go tests ran against an in-memory store and, for the Postgres store, against a scratch Postgres 16; the edge tests run against a control double. No end-to-end run with a real receiver. To check by hand on a side-by-side stack: create a subscription through the edge with a public receiver (a tunnel, or a host on the test network the guard allows), run `POST /v1/change/check`-driven or scheduled changes twice with a changed fixture, confirm the receiver gets one POST per change, recompute `v1` from the documented recipe, then stop the receiver and watch the delivery go `pending` (attempt 1, then 2, ...) and `dlq` on the fifth failure; `rotate-secret` and confirm the next delivery verifies only with the new one.
+

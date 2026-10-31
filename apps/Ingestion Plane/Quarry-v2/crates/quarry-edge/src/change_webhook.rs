@@ -52,6 +52,21 @@ pub fn change_webhook_payload(record: &ChangeRecord) -> Option<serde_json::Value
     Some(body)
 }
 
+/// The idempotency key of a `ChangeDetected` event: one per `(org, url, new baseline)`. A record
+/// that names no new baseline (the recording path before INNH-4) ends in an empty id.
+pub fn change_detected_idempotency_key(record: &ChangeRecord) -> String {
+    format!(
+        "change_detected:{}:{}:{}",
+        record.org_id,
+        record.source_url,
+        record
+            .new_baseline
+            .as_ref()
+            .map(|b| b.baseline_id.clone())
+            .unwrap_or_default()
+    )
+}
+
 /// Serialize + HMAC-sign a change webhook for delivery to control.
 /// Returns `(path_with_query, body_bytes, headers)` ready for the
 /// transport layer. Fails closed on serialization errors rather than
@@ -120,16 +135,7 @@ pub async fn emit_change_side_effects(
 
     // Durable event log entry.
     let run_id = run_kind.unwrap_or_default();
-    let idem = format!(
-        "change_detected:{}:{}:{}",
-        record.org_id,
-        record.source_url,
-        record
-            .new_baseline
-            .as_ref()
-            .map(|b| b.baseline_id.clone())
-            .unwrap_or_default()
-    );
+    let idem = change_detected_idempotency_key(record);
     let payload = serde_json::to_value(record).unwrap_or(serde_json::Value::Null);
     state
         .event_sink
@@ -234,6 +240,33 @@ mod tests {
         assert_eq!(inner.source_url, record.source_url);
         assert_eq!(body["subject"], "quarry.change.detected");
         assert!(body.get("emitted_at").is_some());
+    }
+
+    #[test]
+    fn the_idempotency_key_ends_in_the_new_baseline_id() {
+        let record = changed_record();
+        assert_eq!(
+            change_detected_idempotency_key(&record),
+            "change_detected:org_a:https://example.com/pricing:bln_new"
+        );
+        // Two changes of one url have different keys once the baseline is named.
+        let mut next = changed_record();
+        next.new_baseline.as_mut().unwrap().baseline_id = "bln_next".into();
+        assert_ne!(
+            change_detected_idempotency_key(&record),
+            change_detected_idempotency_key(&next)
+        );
+        // The record the recorder passed before INNH-4 named none: the key ends empty.
+        let mut unnamed = changed_record();
+        unnamed.new_baseline = None;
+        assert!(change_detected_idempotency_key(&unnamed).ends_with(':'));
+    }
+
+    #[test]
+    fn the_payload_names_the_new_baseline_and_the_diff() {
+        let body = change_webhook_payload(&changed_record()).unwrap();
+        assert_eq!(body["new_baseline"]["baseline_id"], "bln_new");
+        assert_eq!(body["diff_id"], "diff_1");
     }
 
     #[test]

@@ -164,7 +164,8 @@ func changeWebhookHandler(db store.DB, sink notify.Sink) http.HandlerFunc {
 		// change_detected events born at the webhook are indistinguishable
 		// downstream: external webhook subscribers get delivery rows and
 		// the schedule creator gets their in-product notification.
-		fanoutWebhooks(db, evt)
+		// The org is the signed query value the body's org_id was just checked against.
+		fanoutWebhooks(db, evt, org)
 		notifyOnChange(sink, evt)
 
 		writeChangeAck(w, r, http.StatusOK, evt.EventID, false)

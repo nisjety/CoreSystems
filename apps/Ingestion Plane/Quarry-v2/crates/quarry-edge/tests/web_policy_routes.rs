@@ -398,6 +398,17 @@ fn route_manifest() -> Vec<(&'static str, Gate)> {
         ("/v1/batch/:id/resume", NoUrl),
         ("/v1/batch/:id/events", NoUrl),
         ("/v1/jobs/:id", NoUrl),
+        // INNH-12: reads the stored page_fetched rows of a job; nothing is fetched.
+        ("/v1/crawl/:id/results", NoUrl),
+        ("/v1/batch/:id/results", NoUrl),
+        ("/v1/jobs/:id/results", NoUrl),
+        // INNH-5: subscriptions are control records; the URL is a delivery target checked by
+        // control's egress guard, never fetched by the edge.
+        ("/v1/webhook-subscriptions", NoUrl),
+        ("/v1/webhook-subscriptions/:id", NoUrl),
+        ("/v1/webhook-subscriptions/:id/rotate-secret", NoUrl),
+        ("/v1/webhook-subscriptions/:id/deliveries", NoUrl),
+        ("/v1/webhook-subscriptions/:id/deliveries/:did/retry", NoUrl),
         ("/v1/jobs/:id/errors", NoUrl),
         ("/v1/jobs/:id/events", NoUrl),
         ("/v1/runs/:id/events", NoUrl),
@@ -430,6 +441,8 @@ fn route_manifest() -> Vec<(&'static str, Gate)> {
         ("/v1/change/check", NoUrl),
         ("/v1/change/latest", NoUrl),
         ("/v1/change/history", NoUrl),
+        // INNH-4: reads two stored baselines of a url the caller names; nothing is fetched.
+        ("/v1/change/diff", NoUrl),
         ("/v1/change/snapshot", NoUrl),
         // Queues a URL for a worker; gated before it is queued (the postgres-queue handler).
         ("/v1/change/refresh", Gated),

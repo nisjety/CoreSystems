@@ -314,6 +314,47 @@ pub const ROWS: &[Row] = &[
         log: Log::Unverified,
     },
     Row {
+        id: "job_results",
+        routes: &[
+            "/v1/crawl/{id}/results",
+            "/v1/batch/{id}/results",
+            "/v1/jobs/{id}/results",
+        ],
+        treatment: Treatment::Refused {
+            code: "FORBIDDEN",
+            feature: "job_result_urls",
+        },
+        status: Status::Enforced,
+        enforced_by: &[
+            "job_results::a_zdr_token_is_403_with_the_reason_and_control_is_not_called",
+            "job_results::flag_off_is_501_and_control_is_not_called",
+        ],
+        basis: "job_results_routes::gate refuses a caller whose token floor is ZDR before it asks Control Plane anything: a row is the URL, title and artifact ids of a page the job fetched (INNH-12), read from control's page_fetched events. Dark behind QUARRY_EDGE__JOB_RESULTS (501 off, which wins over the refusal); a service principal is refused 403 by the route scope. No ZDR job exists to have results (crawl and batch are refused at handoff) and a ZDR run stores no artifact, so the ids are absent for it as well. Page content is not in the response: it is read by id through the artifacts row, which binds the read to the org",
+        log: Log::Unverified,
+    },
+    Row {
+        id: "webhook_subscriptions",
+        routes: &[
+            "/v1/webhook-subscriptions",
+            "/v1/webhook-subscriptions/{id}",
+            "/v1/webhook-subscriptions/{id}/rotate-secret",
+            "/v1/webhook-subscriptions/{id}/deliveries",
+            "/v1/webhook-subscriptions/{id}/deliveries/{did}/retry",
+        ],
+        treatment: Treatment::Refused {
+            code: "FORBIDDEN",
+            feature: "webhook_off_process",
+        },
+        status: Status::Enforced,
+        enforced_by: &[
+            "webhook_subscriptions::a_zdr_token_cannot_create_patch_or_retry_and_control_is_not_called",
+            "webhook_subscriptions::flag_off_is_501_and_control_is_not_called",
+            "webhook_subscription_routes::tests::zdr_refuses_what_pushes_and_leaves_wind_down_open",
+        ],
+        basis: "webhook_subscription_routes::gate refuses create, patch and delivery retry for a caller whose token floor is ZDR before it asks Control Plane anything (403, details.reason webhook_off_process): a subscription pushes the page URL and fingerprints of every detected change to a third party. Reads, delete and secret rotation stay open so a ZDR organization can wind down what it holds. Dark behind QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS (501 off, which wins over the refusal); a service principal is refused 403 by the route scope and by the gate. Nothing is sent for a ZDR run in any case: emit_change_side_effects suppresses the change event and webhook for a declared zdr, so a subscription an organization made before it turned ZDR receives nothing from a ZDR check. Control keeps a subscription (URL and the HMAC secret, the secret stored in plaintext: see the owner decision in docs/RUNBOOKS.md) and each delivery row (the event payload) until delete, org erasure or the delivery retention sweep (default 14 days)",
+        log: Log::Unverified,
+    },
+    Row {
         id: "job_control",
         routes: &[
             "/v1/crawl/{id}/pause",
@@ -367,7 +408,22 @@ pub const ROWS: &[Row] = &[
         // No test here fails if the baseline write stops being true: this binary wires
         // no baseline store, so the write is unreachable (see the test's own doc).
         enforced_by: &[],
-        basis: "record_internal calls zdr_refusal::refuse on the body's declared zdr before the store (flag on: 403; flag off: zdr.would_refuse and the baseline is stored as before); emit_change_side_effects suppresses the change event and webhook for a declared zdr in both modes. The orchestrator declares the posture quarry-control stamped on the schedule at create (migration 023); a schedule created before that (NULL) or before its org turned ZDR on declares nothing or false and is stored (pinned by zdr_posture_stamp::record_trusts_the_stamp_not_the_current_posture); the orchestrator also declares the stamp on the run_page fetch that precedes the record call, so a stamped-ZDR monitor's fetch runs in ZDR mode and persists no page artifact, event or local-index write-back; ChangeMonitorWF still emits run_started and change_detected with the URL. No test observes the baseline write, because the harness wires no baseline store",
+        basis: "record_internal calls zdr_refusal::refuse on the body's declared zdr before the store (flag on: 403; flag off: zdr.would_refuse and the baseline is stored as before); emit_change_side_effects suppresses the change event and webhook for a declared zdr in both modes; with QUARRY_EDGE__CHANGE_TEXT_DIFF on (INNH-4) record_core still keeps no page text, markdown artifact id or text diff for a declared zdr in either mode (change_routes::record_tests::a_zdr_declared_check_never_stores_text_even_with_the_flag_on). The orchestrator declares the posture quarry-control stamped on the schedule at create (migration 023); a schedule created before that (NULL) or before its org turned ZDR on declares nothing or false and is stored (pinned by zdr_posture_stamp::record_trusts_the_stamp_not_the_current_posture); the orchestrator also declares the stamp on the run_page fetch that precedes the record call, so a stamped-ZDR monitor's fetch runs in ZDR mode and persists no page artifact, event or local-index write-back; ChangeMonitorWF still emits run_started and change_detected with the URL. No test observes the baseline write, because the harness wires no baseline store",
+        log: Log::Unverified,
+    },
+    Row {
+        id: "change_diff_read",
+        routes: &["/v1/change/diff"],
+        treatment: Treatment::Refused {
+            code: "FORBIDDEN",
+            feature: "change_diff_read",
+        },
+        status: Status::Enforced,
+        enforced_by: &[
+            "change_diff::tests::the_gate_names_the_variable_off_and_refuses_zdr",
+            "change_diff_route::the_route_is_off_by_default_then_gates_zdr_and_the_query",
+        ],
+        basis: "change_routes::diff calls change_diff::gate, which refuses a reader whose organization is under ZDR (the token's floor or the body flag) before the store is asked, even for a baseline stored before it was; dark behind QUARRY_EDGE__CHANGE_TEXT_DIFF (501 off, which wins over the refusal). The route returns stored page text (the markdown of two baselines and a paragraph diff of it). The text exists only for a change monitor that was not ZDR when it ran: a ZDR run stores no markdown artifact and run_page returns no markdown_artifact_id, and record_core keeps no text or diff for a body that declares zdr in either refusal mode. No hash of a page is returned in its place",
         log: Log::Unverified,
     },
     Row {
@@ -610,6 +666,8 @@ pub const MUST_STAY_REFUSED: &[&str] = &[
     "agent_persistent_profile",
     "agent_resume",
     "scrape_record_read",
+    "change_diff_read",
+    "webhook_subscriptions",
 ];
 
 fn normalize(path: &str) -> String {

@@ -116,17 +116,44 @@ An open agent run has its own trace. Its events are numbered densely per run fro
 
 Flags: `QUARRY_EDGE__TRACE_RING_EVENTS` (default 512; `0` disables the ring, so a resume that missed events gets `replay_gap`) and `QUARRY_EDGE__TRACE_RING_MAX_BYTES` (default 1 MiB, must be at least 1). An unparsable value aborts boot.
 
-## 4. Webhook payload
+## 4. Webhook delivery: what a subscriber's endpoint receives (INNH-5, 2026-10-31)
+
+This section used to describe a `{delivery_id, signature, event}` wrapper signed with an "org webhook secret". Neither was ever built. What control sends is below; it is what `internal/dispatcher` does and what its tests pin. The subscription API that creates the endpoint's registration is the section "Webhook subscriptions" further down.
+
+**Request.** `POST <the subscription's url>`, `Content-Type: application/json`, one header `X-Quarry-Signature`, and the body below. No redirect is followed. The connection is made to an address vetted at connect time: a private, loopback, link-local, metadata or carrier-grade-NAT address is refused (a blocked target is dead-lettered at once, `last_error` is `blocked_target`). The timeout is 30 seconds.
+
+**Body** is the control event as JSON, byte for byte what was signed:
 
 ```json
 {
-  "delivery_id": "whk_...",
-  "signature": "sha256=<hmac>",
-  "event": { <event envelope> }
+  "event_id": "evt_...",
+  "run_id": "run_...",
+  "job_id": "job_...",
+  "type": "change_detected",
+  "ts": "2026-10-31T10:00:06Z",
+  "seq": 0,
+  "payload": {
+    "subject": "quarry.change.detected",
+    "emitted_at": "2026-10-31T10:00:06Z",
+    "source_url": "https://example.com/pricing",
+    "org_id": "org_...",
+    "status": "changed",
+    "new_baseline": { "baseline_id": "bln_...", "fingerprint": "blake3:...", "artifact_id": "art_...", "captured_at": "..." },
+    "prev_baseline": { "baseline_id": "bln_...", "fingerprint": "blake3:...", "captured_at": "..." },
+    "diff_id": "diff_...",
+    "checked_at": "2026-10-31T10:00:05Z"
+  },
+  "idempotency_key": "..."
 }
 ```
 
-HMAC over raw body using org webhook secret. Retries: exp backoff, max 24h, DLQ to `quarry-control`.
+`type` is the stored event type (`change_detected`); `payload.subject` keeps the dotted subject `quarry.change.detected`. `run_id` and `job_id` are present only when the event belongs to one. `new_baseline`, `prev_baseline`, `diff_id` and `artifact_id` are present when the change monitor recorded them (see "Change text diff"). No page text is in the body; `GET /v1/change/diff?diff_id=` reads it, org-scoped. A page URL and two content fingerprints are in it, which is why a Zero Data Retention organization cannot subscribe.
+
+**Signature.** `X-Quarry-Signature: t=<unix seconds>,v1=<hex>`, where `<hex>` is the lowercase hex of HMAC-SHA256 keyed with the subscription secret (the whole `whsec_...` string, as UTF-8 bytes) over the ASCII string `<t>` + `.` + the raw request body. To verify: split the header on `,`, read `t` and `v1`, recompute over the raw bytes you received (not a re-serialised JSON), compare in constant time, and reject a `t` more than 5 minutes from your clock (replay). The timestamp is that of this attempt, so a retry carries a fresh signature over the same body. After `rotate-secret` the old secret stops verifying at once.
+
+**Outcome and retries.** A `2xx` is delivered. `408`, `429` and `5xx` and a transport failure are retried after 5 s, 30 s, 5 min and 1 h; the fifth failed attempt makes the delivery `dlq`. Any other `4xx` is `dlq` at once. A `dlq` delivery is visible in the delivery log and can be re-queued from the API; it is not retried on its own. Delivery is at least once and not ordered: de-duplicate on `event_id`. One detected change reaches control by more than one path; control keeps one delivery per subscription for it (the key is the org, the URL and the new baseline),; that de-duplication applies only when the event names a baseline id.
+
+**Tenancy.** An event is delivered only to the active subscriptions of the organization that owns it. An event whose owner is unknown is delivered to nobody. A subscription without an organization (rows from before migration 025) receives nothing, and the dispatcher re-checks that at send time.
 
 ## 5. Artifact naming
 
@@ -477,6 +504,8 @@ Denial reasons are emitted as `page.blocked` payloads or stored in crawl status 
 
 ### Change detail artifact
 
+This is a planned shape and nothing produces it. What a change monitor stores, with `QUARRY_EDGE__CHANGE_TEXT_DIFF` on, is the paragraph diff in "Change text diff" below.
+
 ```json
 {
   "status": "new | changed | unchanged",
@@ -808,6 +837,89 @@ Model output is untrusted and checked by Quarry, not by the model: `json` is val
 
 **Not in this version.** No per-call output cap and no `cost_usd` (WS16.S1). No LLM usage metric: metering is unchanged (`quarry.extract.url` per `ok` or `fetched` source). The Verevon gateway re-adding `prompt` to its own contract is the Innhenting session's change. The model lane for a deployed stack (a grant on the Model Plane, decision X-7) is not built, so a deployed stack still cannot run this arm.
 
+## Change text diff: stored page text, the paragraph diff and `GET /v1/change/diff` (INNH-4, 2026-10-31)
+
+A change monitor (a schedule with `target_kind=change_monitor`) used to keep a fingerprint per version and nothing a person could read. With `QUARRY_EDGE__CHANGE_TEXT_DIFF` on (default off) it keeps the page text and the difference between two versions. Off, nothing below exists: the recorder is what it was and `GET /v1/change/diff` answers 501. The flag is read per request.
+
+**What is stored.** `PageRunner` already writes a `markdown` artifact on every non-ZDR page run. `POST /v1/internal/run_page` now returns its id as `markdown_artifact_id` (general: any caller, and the per-run results of a crawl, can use it; absent when nothing was stored, always so under ZDR). The orchestrator passes it on `POST /v1/internal/change/record`. With the flag on and the body not `zdr: true`, a new or changed check:
+1. checks the id is a markdown artifact the body's `org_id` can read (a 400 otherwise, nothing saved; another org's id reads as not found, so it fails here);
+2. saves the new baseline with `artifact_id` set to it (an unchanged check saves nothing);
+3. on a change, computes the paragraph diff of the older baseline's markdown and the new one and stores it as an artifact of kind `change_diff` (extension `change_diff.json`, `application/json`), then a `DiffRecord` with `format: "json"`, `artifact_id` pointing at it and `summary` (at most 1 KB, for example `+3 -1 paragraphs, 2 moved`, `no paragraph change (the page markup changed, its text did not)` or `text diff unavailable: no_previous_text`);
+4. puts the saved baseline in `ChangeRecord.new_baseline` and the diff record in `ChangeRecord.diff_id` before the event and the webhook go out. Both were empty before: the `change_detected` event's idempotency key ended in an empty baseline id. The `quarry.change.detected` body is the same `ChangeRecord` plus `subject` and `emitted_at`; it now carries `new_baseline` (with `artifact_id`) and `diff_id`. No page text is in it.
+
+A baseline recorded before the flag has no `artifact_id`. The first change after it stores an unavailable diff (`reason: no_previous_text`) and the next one diffs. Unchanged, unreachable and ZDR-declared results persist no text.
+
+**The stored diff** (artifact kind `change_diff`, field names pinned by `quarry-core` `change_history`):
+
+```json
+{
+  "version": 1,
+  "source_url": "https://example.com/pricing",
+  "from_baseline_id": "bln_...", "to_baseline_id": "bln_...",
+  "from_fingerprint": "blake3:...", "to_fingerprint": "blake3:...",
+  "available": true,
+  "reason": "no_previous_text",
+  "diff": {
+    "format": "paragraph", "real_delta": true,
+    "added": 1, "removed": 1, "moved": 0, "unchanged": 14,
+    "ops": [
+      { "op": "added", "index": 6, "text": "Pro plan: 12 EUR per seat" },
+      { "op": "removed", "index": 6, "text": "Pro plan: 10 EUR per seat" },
+      { "op": "moved", "from": 2, "to": 5 }
+    ],
+    "truncated": false
+  }
+}
+```
+
+`reason` is present only when `available` is false (then there is no `diff`). The diff is paragraph-level and set-based: paragraphs are blocks separated by a blank line (a block over 8192 bytes is cut into units), compared by a hash of their text with whitespace collapsed and line endings ignored. `added`: in the new text and not the old; `removed`: the opposite; `moved`: kept its text but changed place among the paragraphs both texts hold (an inserted or dropped paragraph does not make the rest move; a repeated paragraph counts once). `real_delta` is `added + removed > 0`. The change fingerprint is still the raw-byte one, so a page whose bytes changed and whose text did not (an ad, a timestamp in the markup) is `status: changed` with `real_delta: false`; switching the monitor to a text fingerprint is a separate slice. Caps: 500 ops (added and removed first, then moved), 2048 bytes of text per op (cut on a character boundary), 1 MiB of markdown read per side; the counts are always complete and `truncated` says anything was cut.
+
+**`GET /v1/change/diff`** (bearer; org from the token). Query: `url`; `from` and `to` (baseline ids, together, with `url`); `diff_id`; `include=markdown`.
+- `url` alone: the latest two baselines. `url` + `from` + `to`: those two, in that order. `diff_id`: the diff a webhook announced (optionally with its `url`).
+- 200 `data`: `{ source_url, from: {baseline_id, fingerprint, captured_at, artifact_id|null} | null, to: {...}, diff_id: string|null, available, reason?, diff?, markdown?: {from, to, truncated} }`. `diff_id` is the stored record when the pair has one and its artifact reads back (the diff the webhook announced); otherwise the diff is computed from the two stored pages for this request and `diff_id` is null. `reason` is one of `no_previous_version` (one baseline; `from` is null), `no_previous_text`, `no_text`, `artifact_gone` (retention evicted a page; a stored diff still answers, it holds its own text). `markdown` only with `include=markdown`, each text cut at 1 MiB.
+- 400: no `url` and no `diff_id`; `from` without `to`; `diff_id` with `from` or `to`; baselines of another url than `url`, or the same baseline twice; `include` other than `markdown`; an id over 128 characters. 404 (`NOT_FOUND`, one message): no baseline for the org and url, or an unknown baseline or diff id, or one of another organization; there is no 403 for another tenant. 501: the flag is off (the message names `QUARRY_EDGE__CHANGE_TEXT_DIFF`) or the edge has no baseline store. 403: a Zero Data Retention caller (the token's floor or the body flag), refused like a stored scrape record: stored page text is not readable under ZDR.
+
+**ZDR.** A ZDR run stores no markdown, so `run_page` returns no id and nothing is kept; the record route also ignores a markdown id on a `zdr: true` body (the baseline row of an observe-mode ZDR body is still written, with no text). Row `change_diff_read` in `ZDR_MATRIX.md`: refused. No hash of a page is ever returned as a stand-in.
+
+**Not in this version.** `POST /v1/change/check` takes a caller-supplied fingerprint, fetches nothing and stores nothing, so it has no text diff; only scheduled monitors do. No consumer exists for `POST /v1/change/refresh`. The artifact janitor deletes by age only: if it is armed, old baselines lose their text (`artifact_gone`) until it learns to spare baseline artifacts. A retried record activity can write a second baseline (the record route ignores the idempotency key).
+
+## Webhook subscriptions: the API (INNH-5, 2026-10-31)
+
+A subscription is an HTTPS endpoint that receives `change_detected` events of the caller's organization. Off, nothing below exists: `QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS` and `QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS` are unset in the default composes. The edge routes answer 501 while the edge switch is off, and the edge reports control's plain 404 (switch off there) as 501 naming `QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS`. The fan-out tenancy fix and the retirement of the old global routes are not behind a switch: they close a hole that has no legitimate user.
+
+Edge routes (bearer; the organization is the token's, a caller-supplied `org_id` is ignored; control mirrors them under the same paths with `?org_id=` and the internal HMAC):
+
+| Method and path | Answer |
+|---|---|
+| `POST /v1/webhook-subscriptions` | 201 `data`: the subscription plus `secret` |
+| `GET /v1/webhook-subscriptions?limit&cursor` | 200 `data: {items, next_cursor?}` |
+| `GET /v1/webhook-subscriptions/{id}` | 200 `data`: the subscription |
+| `PATCH /v1/webhook-subscriptions/{id}` | 200 `data`; body names at least one of `active`, `events`, `description` |
+| `DELETE /v1/webhook-subscriptions/{id}` | 204, no body |
+| `POST /v1/webhook-subscriptions/{id}/rotate-secret` | 200 `data: {id, secret, secret_hint}` |
+| `GET /v1/webhook-subscriptions/{id}/deliveries?status&limit&cursor` | 200 `data: {items, next_cursor?}` |
+| `POST /v1/webhook-subscriptions/{id}/deliveries/{delivery_id}/retry` | 202 `data`: the delivery, `pending` |
+
+Create body: `{ "url": "https://hooks.example.com/q", "events": ["change_detected"], "description": "prod" }`; an unknown field is a 400. A subscription is:
+
+```json
+{ "id": "whk_...", "url": "...", "events": ["change_detected"], "active": true, "description": "prod",
+  "secret_hint": "whsec_...ab12", "created_at": "2026-10-31T10:00:00Z",
+  "last_delivery": { "status": "success", "at": "2026-10-31T10:05:00Z", "event_id": "evt_..." } }
+```
+
+`description` and `last_delivery` are absent when empty. A delivery is `{ id, event_id, event_type, status, attempt, next_attempt_at?, last_error?, created_at }`; there is no payload in it, and `last_error` is a closed token: `http_<status>`, `timeout`, `blocked_target`, `transport`, `inactive`, `error`.
+
+- **Secret.** Minted by control (32 random bytes, `whsec_` + 64 hex characters). Returned by create and by rotate-secret and by nothing else: the reads are typed views with no secret field, and the edge rebuilds every answer from a typed view as well. Control stores it in plaintext (the HMAC needs the key); see the owner decision in `RUNBOOKS.md`.
+- **URL.** `https` only; no user info or fragment; at most 2048 characters; every address the host resolves to must be public (checked at create with the egress guard, and again at every connect). The URL cannot be edited; delete and create.
+- **Events.** A closed list, `change_detected` today. The stored event type is `change_detected`; the `quarry.change.detected` subject appears in the delivery body only. Run-finished events (INNH-13) join the list without a contract change.
+- **Limits.** 10 subscriptions per organization (429 `subscription_limit`); the same URL with the same events twice is a 409 `subscription_exists`.
+- **Errors.** 400 with `error.details.field` and `error.details.reason` (`docs/ERROR_REASONS.md`); 404 for an unknown, foreign or malformed id (one answer); 403 for a service principal and for a Zero Data Retention caller on create, patch and retry (`details.reason` is `webhook_off_process`; reads, delete and rotate-secret stay open so an organization can wind down); 409 `delivery_not_retryable` for a delivery that is pending, in flight or delivered.
+- **Retention.** A delivery row holds the event payload. Finished deliveries (`success`, `failed`, `dlq`) are deleted after 14 days (`QUARRY_CONTROL__WEBHOOK_DELIVERY_RETENTION_DAYS`, 1 to 3650). Deleting a subscription deletes its deliveries. Organization erasure deletes both tables for the organization.
+- **Retired.** `GET/POST /v1/webhooks`, `GET /v1/webhooks/{id}` and `/v1/webhook-deliveries...` on control answer 410 `GONE`: they listed every organization's rows and returned secrets in cleartext, and nothing called them. `POST /v1/webhooks/change` (the edge's signed receiver) is unchanged.
+
+**Not in this version.** A test-ping route; auto-disable after repeated dead letters; two secrets during a rotation (the old one stops at once); encryption of the secret at rest; a per-subscription rate limit; run-finished and job events (the store and fan-out are ready, the list is closed).
+
 ## Crawl scope and robots: planned status and vocabulary (WS14.S0, 2026-10-23)
 
 Read this with `docs/CRAWL_SCOPE_ROBOTS.md`, which is the contract for WS14. The examples earlier in this file that show crawl and map scope fields, and the crawl denial reason schema, describe the target shape. They are not what the edge applies today.
@@ -880,6 +992,44 @@ attempt the orchestrator marked (`final: true`), with `code` and `category`, `st
 recorded is not returned. `next_seq` is set when the page was full; pass it as
 `after_seq`. Under the token's ZDR floor the whole route answers 403, because it returns
 URLs.
+
+**Job results (INNH-12, the dataset of a run).** `GET /v1/crawl/{id}/results`,
+`/v1/batch/{id}/results` and `/v1/jobs/{id}/results` list the pages a job fetched, one row
+for each fetch, in the order they were fetched. The edge answers `{data: {items, next_seq?},
+meta: {request_id, page: {next?, limit}}}`. A row is `{seq, url, status, content_type?,
+title?, fetched_at, word_count?, driver?, markdown_artifact_id?, source_artifact_id?,
+bytes?}`: `url` is the URL the job fetched (as requested), `bytes` the size of the stored
+Markdown, `driver` one of `static`, `tls`, `browser`. The rows come from the job's
+`page_fetched` events, which now carry the artifact ids, `bytes`, `word_count` and `driver`
+(content-free, closed fields). The page content is not in the response: read it with
+`GET /v1/artifacts/{id}` (org-bound, 404 when gone). Failed and blocked pages are not rows;
+they stay on `/errors`.
+
+Query: `limit` (1 to 500, default 100; anything else is a 400 naming the field),
+`after_seq` (the `next_seq` of the previous page, also `meta.page.next`; `next_seq` is
+absent on the last page) and `latest` (default false). A URL fetched twice (a retry, an
+escalation to a browser) has two rows; `latest=true` keeps the latest fetch of each URL, in
+`seq` order, and pages the kept rows by `after_seq`. A `latest=true` read looks at the first
+20 000 fetches of a job at most and sets `scan_capped: true` when there were more. A row
+written before the fields existed has `url`, `status`, `title` and `fetched_at` only; the
+ids are also absent when nothing was stored, which is every ZDR run.
+
+Off unless `QUARRY_EDGE__JOB_RESULTS=1` (501 `UNSUPPORTED`, checked first). 403 `FORBIDDEN`
+with `details.reason: job_result_urls` under the token's ZDR floor, because a row names a
+URL and a title (the same floor as `/errors`); crawl and batch are refused for ZDR callers at
+handoff, so no ZDR job has rows. A service principal gets 403 from the route scope, as on
+`/errors`. The organization is the token's: control answers a foreign or unknown id, a
+batch id on the crawl path and the reverse with the same 404. The artifact ids dangle after
+an edge restart on the in-memory artifact backend (the compose default), and an S3 backend
+cannot list artifacts (the ids still resolve by `GET /v1/artifacts/{id}`). Org erasure does
+not purge the events a row is read from (the existing posture of `/events` and `/errors`).
+
+**Artifact list filters (INNH-12).** `GET /v1/artifacts` takes `kind` (one of `markdown`,
+`html`, `raw`, `pdf`, `screenshot`, `extract`, as the OpenAPI always said and now enforced)
+and `run_id` (`run_...`), alone or together, on top of the paging filters. Another value of
+either is a 400 with `details.field`. `ArtifactSummary` gains `run_id` and `page_hash`
+(additive). The filters work on the in-memory and filesystem backends; they are not behind
+the results flag.
 
 **Ongoing.** `GET /v1/crawl/ongoing` and `/v1/batch/ongoing` list the org's jobs in
 `accepted`, `running` or `paused`, oldest first.

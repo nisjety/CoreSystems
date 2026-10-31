@@ -148,6 +148,59 @@ pub async fn send_json(
     Ok(raw.get("data").cloned().unwrap_or(raw))
 }
 
+/// What control answered, status and parsed JSON body (`Null` for an empty or unreadable
+/// one), for the routes that pass control's validation reasons through (INNH-5).
+#[derive(Debug, Clone)]
+pub struct ControlReply {
+    pub status: u16,
+    pub body: Value,
+}
+
+/// Sends any method to control and returns the reply whatever its status. Unlike
+/// [`get_json`] and [`send_json`] it does not turn a refusal into a mapped error, so the
+/// caller can keep control's `error.details` reason. The body is signed as sent; a call
+/// with no body signs the empty body. Only a transport failure is an error here.
+pub async fn send_raw(
+    state: &AppState,
+    method: reqwest::Method,
+    path: &str,
+    org_id: &str,
+    query: &[(&str, String)],
+    body: Option<&Value>,
+) -> Result<ControlReply, QuarryError> {
+    let url = control_url(state, path, org_id, query)?;
+    let body_bytes = match body {
+        Some(value) => serde_json::to_vec(value)
+            .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("encode control body: {e}")))?,
+        None => Vec::new(),
+    };
+    let method_name = method.as_str().to_string();
+    let mut request = client()?.request(method, url.clone());
+    if body.is_some() {
+        request = request.header("content-type", "application/json").body(body_bytes.clone());
+    }
+    for (name, value) in signed_headers(state, &method_name, &url, &body_bytes) {
+        request = request.header(name, value);
+    }
+    let resp = request.send().await.map_err(|e| {
+        QuarryError::new(
+            ErrorCode::UpstreamBlocked,
+            format!("control unreachable: {}", e.without_url()),
+        )
+    })?;
+    let status = resp.status().as_u16();
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|_| QuarryError::new(ErrorCode::Internal, "control response unreadable"))?;
+    let body = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    };
+    Ok(ControlReply { status, body })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

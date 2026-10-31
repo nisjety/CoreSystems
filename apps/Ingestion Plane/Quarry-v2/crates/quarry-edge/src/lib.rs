@@ -7,6 +7,8 @@ pub mod audio_routes;
 pub mod auth;
 pub mod cache;
 pub mod canary;
+#[cfg(feature = "postgres-queue")]
+pub mod change_diff;
 pub mod change_routes;
 pub mod change_webhook;
 pub mod config;
@@ -23,6 +25,7 @@ pub mod handoff;
 pub mod internal_auth;
 pub mod internal_routes;
 pub mod job_lifecycle_routes;
+pub mod job_results_routes;
 pub mod job_stream;
 pub mod limits;
 pub mod map_routes;
@@ -52,6 +55,7 @@ pub mod otel_zdr;
 pub mod zdr_log;
 pub mod zdr_refusal;
 pub mod web_policy_edge;
+pub mod webhook_subscription_routes;
 #[cfg(feature = "browser-agent")]
 pub mod agent_policy_gate;
 pub mod zdr_tombstone;

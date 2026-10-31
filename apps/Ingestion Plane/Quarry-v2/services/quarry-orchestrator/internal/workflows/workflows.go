@@ -265,6 +265,7 @@ func runPageWith(
 	if crawl != nil && res.Crawl != nil && res.Crawl.CrawlDelayMS != nil {
 		fetched["crawl_delay_ms"] = *res.Crawl.CrawlDelayMS
 	}
+	addFetchedResultFields(fetched, res)
 	_ = emitEvent(ctx, a, ids, quarrycontracts.EvtPageFetched, fetched,
 		ids.RunID, url, string(quarrycontracts.EvtPageFetched))
 	// Re-emit branding extracted from the seed page back through the
@@ -288,6 +289,30 @@ func runPageWith(
 			ids.RunID, url, string(quarrycontracts.EvtPageExtracted))
 	}
 	return res, nil
+}
+
+// addFetchedResultFields makes the page_fetched payload self-describing for the per-run
+// results (INNH-12): the stored artifact ids, the markdown size, the word count and the
+// serving driver. Every field is closed and content-free, and each is left out when the
+// runtime did not report it (ZDR, an older runtime, a non-HTML response), so an event
+// written without them keeps its old shape. Only the payload map changes: no workflow
+// command is added or reordered, so a replayed history stays valid.
+func addFetchedResultFields(fetched map[string]any, res activities.RunPageResult) {
+	if res.MarkdownArtifactID != "" {
+		fetched["markdown_artifact_id"] = res.MarkdownArtifactID
+	}
+	if res.SourceArtifactID != "" {
+		fetched["source_artifact_id"] = res.SourceArtifactID
+	}
+	if res.Bytes > 0 {
+		fetched["bytes"] = res.Bytes
+	}
+	if res.WordCount > 0 {
+		fetched["word_count"] = res.WordCount
+	}
+	if res.Driver != "" {
+		fetched["driver"] = res.Driver
+	}
 }
 
 // pageExtractedPayload builds the page_extracted payload from a runtime

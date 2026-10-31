@@ -1,55 +1,75 @@
 # INNH-4: Change monitoring text diff with stored artifacts
 
-Status: not started
-Lane: C (crawl/change/parse). Plan home: E3.5. Estimate: 5 d.
-Verified by reading quarryv2-next. Nothing was built or run. All paths under `apps/Ingestion Plane/Quarry-v2`.
+Status: done in tests, dark (default-off flag `QUARRY_EDGE__CHANGE_TEXT_DIFF`). Branch `innh/lane-b`, built 2026-10-31. Nothing was run against a real Postgres, Temporal or a deployed stack; not enabled anywhere.
+Lane: C (crawl/change/parse), built in lane-b. Plan home: E3.5. All paths under `apps/Ingestion Plane/Quarry-v2`.
 
-## What exists
-1. Routes (`crates/quarry-edge/src/routes.rs:276-289`): POST /v1/change/check (change_routes.rs:76; takes a caller-supplied fresh_fingerprint, does NO fetch and persists NOTHING, 501 without postgres-queue+DATABASE_URL), GET /v1/change/latest (:125), GET /v1/change/history (:155), POST /v1/change/snapshot (:200), POST /v1/change/refresh (:307; enqueues kind=change_refresh on queue 'change-refresh' but grep finds NO consumer in Rust or Go). The only writing path is POST /v1/internal/change/record (record_internal :498 -> record_check :552), called by the orchestrator CheckChange activity (`services/quarry-orchestrator/internal/activities/activities.go:467`), which runs RunPage (run_page, :228) and sends ONLY {org_id,url,fresh_fingerprint,run_id,zdr} (changeRecordRequest :448), no content.
-2. record_check stores baseline with `artifact_id: None` (change_routes.rs:605); on Changed it writes a 1-line artifact "content fingerprint changed: A -> B" under kind 'raw' (:622-635) and a DiffRecord format 'text' (:638-648). Baselines saved only for New/Changed.
-3. The page markdown IS already stored: PageRunner writes html/raw + 'markdown' + meta.json artifacts on every non-ZDR run (`quarry-runtime/src/pipeline.rs:1318-1340`) and NormalizedOutput.formats.markdown carries the id (pipeline.rs:1395-1400), but InternalRunPageResult (routes.rs:1376, from_output :1419) and Go RunPageResult (activities.go:204) do not return it, so the monitor path never learns it.
-4. The fingerprint is the RAW-BYTE fp = content_fingerprint(&resp.body) (pipeline.rs:1231); text_fingerprint(&md) is computed (:1232) but only used in the change_detected event payload, so ad/timestamp churn produces "changed".
-5. `quarry_transform::diff::diff_paragraphs` (`quarry-transform/src/diff.rs:72`, SemanticDiff/DiffOp added|removed|moved, is_real_delta) has NO non-test caller.
-6. Store (`quarry-runtime/src/postgres_baseline_store.rs`): save_baseline, load_latest, load_history, compare_snapshot, create_diff_record only; no load_baseline(org,id) or load_diff(org,diff_id). Schema `migrations/0004_baselines.sql`: quarry_baselines.artifact_id TEXT nullable (no migration needed), quarry_change_diffs.artifact_id NOT NULL.
-7. Artifacts readable org-bound via GET /v1/artifacts/:id (resource_routes.rs:142; get_with_key checks org; other org = 404).
-8. ChangeMonitorWF (workflows.go:364) already puts diff_id and baseline_id into the change_detected event payload (:413-421).
-9. Docs: CONTRACTS.md "Change detail artifact" (line 478) documents a semantic_diff JSON shape nobody produces; docs/CHANGE_TRACKING.md; openapi.yaml /v1/change/* 2456-2640, BaselineSnapshot 3788, ChangeRecord 3821; openapi-internal.yaml:86 (change/record) and 1015-1060.
-10. Tests: only unit tests in change_routes.rs (decode/token) and the ZDR suites zdr_gap_rows.rs, zdr_posture_stamp.rs, zdr_refusal_modes.rs ("the harness wires no baseline store"); Postgres store tests skip without DATABASE_URL. NO functional test of record_check.
+## What existed (verified by reading, still true before this change)
+- `record_check` saved baselines with `artifact_id: None` and, on a change, a one-line fingerprint note (kind `raw`, `DiffRecord.format = text`). Only the orchestrator's `CheckChange` reaches it (`/v1/internal/change/record`); `POST /v1/change/check` takes a caller fingerprint, fetches nothing and stores nothing.
+- The page markdown artifact was already written on every non-ZDR run (`pipeline.rs`) and carried in `NormalizedOutput.formats.markdown`, but `InternalRunPageResult` and the Go `RunPageResult` did not return its id.
+- `quarry_transform::diff::diff_paragraphs` had no non-test caller. The store had no `load_baseline` or `load_diff`.
+- The webhook and event payload had `new_baseline` and `diff_id` empty (`compare_snapshot` leaves them for the caller), so the `change_detected` idempotency key ended in an empty baseline id.
 
-## The gap (build only this)
-(a) Return the markdown artifact id from run_page: add `markdown_artifact_id` (Option<String>, skip if None; None under ZDR) to InternalRunPageResult::from_output (also correct on the cached branch, routes.rs:1736), add MarkdownArtifactID to Go RunPageResult, pass through CheckChange into changeRecordRequest (additive, replay-safe; activity code, no workflow GetVersion).
-(b) record_check: accept `markdown_artifact_id`; verify artifacts.get(org,id) succeeds (fail closed on org mismatch); set BaselineSnapshot.artifact_id on every New/Changed baseline; on Changed load prev markdown via prev.artifact_id (None = pre-deploy baseline: record diff with `unavailable: no_previous_text`), run diff_paragraphs(prev,new,max_chars), store the JSON diff artifact (shape = existing CONTRACTS "Change detail artifact" semantic_diff, plus real_delta) replacing the fingerprint-string artifact, DiffRecord.format = 'json'; summary <= 1KB e.g. "+3 -1 paragraphs, 2 moved". Also fill record.new_baseline and record.diff_id before emit_change_side_effects: today the webhook/event payload has new_baseline=None and the idempotency key ends in an empty baseline id (change_webhook.rs ~:120-140). Fix in the same change.
-(c) Store: add load_baseline(org,id), load_diff(org,diff_id) (org filter in SQL, like load_latest).
-(d) New read route `GET /v1/change/diff` (contract below).
-(e) Fingerprint noise honestly: raw-byte fp still gives "changed" with zero paragraph delta; diff reports `real_delta:false`. Switching to text_fp with re-baseline is the separate E3.5 slice, NOT part of this gap.
-(f) Artifact kind for the diff JSON: add a `change_diff.json` variant to quarry-core artifact.rs ArtifactKind (+kind_from_str in artifact_store.rs and content_type_for_key) or reuse 'extract'; recommend the new kind.
-Out of scope but recorded: POST /v1/change/check does not fetch or persist, so text diff exists only for scheduled monitors (target_kind=change_monitor); making the public check route fetch-and-record, and a consumer for /v1/change/refresh, are separate items.
+## What I built
+1. `markdown_artifact_id` on run_page (general, item 12 reuses it): `InternalRunPageResult` (skipped when None; the cached branch uses the same `from_output`), Go `RunPageResult.MarkdownArtifactID`, forwarded by `CheckChange` on the record body (omitted when empty, so an old runtime or a ZDR run gives a byte-identical body).
+2. Record path (`change_routes.rs`, `record_core`): with the flag on and the body not `zdr: true`, a new or changed check verifies the id is a markdown artifact of the body's org (`verify_markdown_artifact`, 400 and nothing saved otherwise), saves the baseline with `artifact_id`, and on a change stores a JSON paragraph diff (artifact kind `change_diff`) with `DiffRecord.format = json` and a summary of at most 1 KB. `ChangeRecord.new_baseline` and `diff_id` are filled before the event and webhook (idempotency key now ends in the baseline id). Flag off: the old code path, line for line, tested.
+3. Store: `load_baseline`, `load_diff`, `find_diff` (org filter in SQL).
+4. `GET /v1/change/diff?url=[&from=&to=][&diff_id=][&include=markdown]` (`change_diff.rs` + `change_routes::diff`): latest two by default, two named baselines, or a stored diff by id; 404 for unknown and other-org ids (one message, no oracle); 400 for bad combinations; 501 flag off; 403 ZDR reader. Uses the stored diff when it reads back, else diffs the stored pages now; unavailable answers are 200 with a closed `reason`.
+5. Fixes found on the way, in `quarry-transform`: `paragraph_chunks` panicked on a multi-byte character at a cut (the pipeline calls it on every page's markdown with 1000); `diff_paragraphs` is linear and `moved` no longer fires for every paragraph after an inserted one.
+6. Docs: openapi (`/v1/change/diff`, 6 schemas, BaselineSnapshot and ChangeRecord notes), openapi-internal (both new fields), CONTRACTS (new section), CHANGE_TRACKING, RUNBOOKS (enable, disable, retention, ZDR), ZDR matrix row `change_diff_read` (golden JSON, sha256 and ZDR_MATRIX.md regenerated, then re-run without the update), route-count pin 108 to 109, docs-contract test for the switch.
 
-## Files
-`crates/quarry-edge/src/routes.rs` (InternalRunPageResult, from_output, add_route /v1/change/diff near :278); `crates/quarry-edge/src/change_routes.rs` (RecordRequest, RecordResponse, record_check, new `diff` handler + tests); `crates/quarry-edge/src/change_webhook.rs`; `crates/quarry-runtime/src/postgres_baseline_store.rs` (load_baseline, load_diff + DB tests); `crates/quarry-core/src/change_history.rs` and `artifact.rs` (+ `artifact_store.rs` kind_from_str) if the new kind is taken; `crates/quarry-transform/src/diff.rs` (maybe a serde-friendly capped result); `services/quarry-orchestrator/internal/activities/activities.go` (RunPageResult, CheckChange, changeRecordRequest) + `activities_test.go`; `docs/openapi.yaml`, `docs/openapi-internal.yaml` (+ `scripts/openapi-route-allowlist.json`), `docs/CONTRACTS.md`, `docs/CHANGE_TRACKING.md`, `docs/RUNBOOKS.md`, `crates/quarry-core/src/zdr_matrix.rs` + `docs/ZDR_MATRIX.md`, `crates/quarry-edge/tests/web_policy_routes.rs` route_manifest (every registered route must be listed), regenerated sdks.
+## Contract the Innhenting UI needs
+Public, bearer, org from the token, envelope `{ data, meta }`. Off by default (501 until the edge sets the flag).
 
-## Flag
-No new flag strictly required (additive fields; the store writes already happen). Recommend `QUARRY_EDGE__CHANGE_TEXT_DIFF` default OFF gating (1) populating baseline artifact_id / writing the JSON diff (off = today's behaviour exactly) and (2) /v1/change/diff answering 501 UNSUPPORTED with a hint naming the variable when off (same pattern as QUARRY_EDGE__JOB_CONTROL, job_lifecycle_routes.rs:338). `QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES` (observe by default) unchanged. Do not touch the live flags in the brief.
+`GET /v1/change/diff` query: `url` (required unless `diff_id`), `from` and `to` (baseline ids, together), `diff_id`, `include=markdown`.
 
-## Contract change
-New public read route (envelope {data,meta}): `GET /v1/change/diff?url=<url>[&from=<baseline_id>&to=<baseline_id>][&diff_id=<diff_id>][&include=markdown]`. Default (url only) = latest two baselines. Response data: `{ source_url, from:{baseline_id,fingerprint,captured_at,artifact_id|null}, to:{...same}, diff_id|null, available:boolean, reason?:'no_previous_text'|'no_text'|'artifact_gone', diff:{format:'paragraph',real_delta:boolean,added,removed,moved,unchanged,ops:[{op:'added'|'removed',index,text}|{op:'moved',from,to}],truncated:boolean}, markdown?:{from:string|null,to:string|null,truncated:boolean} }`. ops capped (propose 500 ops, 2 KB per text), markdown capped (propose 1 MiB each); 404 for unknown/other-org ids (never 403, no existence oracle); 400 for from/to without url or baselines of different urls. BaselineSnapshot.artifact_id (already in openapi) becomes populated; ChangeRecord.diff_id stays. Internal: openapi-internal InternalChangeRecordRequest gains optional `markdown_artifact_id` (absent under ZDR); InternalRunPageResult gains `markdown_artifact_id`. Webhook/event payload (quarry.change.detected) now includes new_baseline and diff_id (additive). No change to POST /v1/change/check request/response.
-
-## Tests to add
-Rust unit: change_routes - record_check persists artifact_id on New and Changed and not Unchanged (Postgres-backed, gated on DATABASE_URL via postgres_test_support::isolated_pool, REQUIRE_CONTRACT fail-not-skip); Changed with prev artifact produces JSON diff artifact with correct added/removed/moved and real_delta; Changed with prev.artifact_id None gives unavailable diff, still 200; markdown_artifact_id of another org rejected and nothing saved; ZDR body (zdr:true) still refused before the store (extend zdr_refusal_modes / zdr_gap_rows). Store: load_baseline/load_diff org isolation in postgres_baseline_store.rs tests. Route: /v1/change/diff 200 default latest-two, explicit from/to, diff_id form, 404 other org, 400 mismatched urls, caps (truncated flags), 501 flag off, web_policy_routes route_manifest entry (NoUrl), zdr_feature_matrix row. Wire: InternalRunPageResult serializes markdown_artifact_id only when present; webhook payload contains new_baseline and a stable idempotency key (extend change_webhook_proptest.rs). Go: activities_test.go - CheckChange forwards markdown_artifact_id and tolerates an old edge that omits it (golden JSON of changeRecordRequest byte-identical when absent). Guards: openapi-route-coverage, openapi-internal-guard, openapi-no-bare-null, docs-contract; quarry-core contracts test pins the diff artifact field names.
-Evidence (side-by-side stack, not live): schedule a change_monitor on a fixture page, edit one paragraph, confirm change_detected carries diff_id and GET /v1/change/diff returns that paragraph as added and the old one as removed; ad-rotation fixture shows real_delta:false.
-
-## Risks
-- ZDR: baselines are durable page text, stored for NON-ZDR only (plan ADR topic 4; a ZDR-stamped schedule gets 403 zdr_durable_mutation_forbidden at record_internal before the store; run_page in ZDR mode so markdown_artifact_id is absent: keep it so, never a hash-only oracle). The read route returns stored page text: classify it in zdr_matrix.rs; safest = refuse include=markdown for a ZDR caller, allow metadata-only (owner decision).
-- Security: org-bound reads in SQL and in artifacts.get; ids from the orchestrator verified against the body org (test a forged cross-org markdown_artifact_id); no existence oracle; response caps.
-- Retention: the artifact janitor (`services/quarry-control/internal/janitor/janitor.go`) evicts artifacts by age only; dry-run by default, but arming it would delete baseline artifacts and break diffs (route returns available:false/reason artifact_gone; arming needs a baseline-provenance guard). Org erasure (quarry-runtime org_erasure.rs) has no baseline handling today: check when text is added.
-- Cost: one extra artifact GET plus CPU-light paragraph diff per Changed result; storage grows by one markdown pointer per baseline plus a small JSON diff.
-- Correctness: raw-byte fingerprint yields false "changed" (real_delta:false) until the text-fingerprint slice; existing baselines have artifact_id None so the first diff after deploy is unavailable (documented); record_check has no functional test and record_internal ignores Idempotency-Key, so retried activities can write duplicate baselines (note, do not fix here). Deploy order: edge first (accepts optional field), then orchestrator.
+```json
+{ "data": {
+  "source_url": "https://example.com/pricing",
+  "from": { "baseline_id": "bln_...", "fingerprint": "blake3:...", "captured_at": "...", "artifact_id": "art_..." },
+  "to":   { "baseline_id": "bln_...", "fingerprint": "blake3:...", "captured_at": "...", "artifact_id": "art_..." },
+  "diff_id": "diff_..." ,
+  "available": true,
+  "reason": "no_previous_version | no_previous_text | no_text | artifact_gone",
+  "diff": { "format": "paragraph", "real_delta": true, "added": 1, "removed": 1, "moved": 0, "unchanged": 14,
+            "ops": [ { "op": "added", "index": 6, "text": "..." }, { "op": "removed", "index": 6, "text": "..." }, { "op": "moved", "from": 2, "to": 5 } ],
+            "truncated": false },
+  "markdown": { "from": "...", "to": "...", "truncated": false }
+} }
+```
+`from` is null with one baseline; `diff_id` is null when the pair has no stored diff (computed now); `artifact_id` is null for a baseline recorded without text; `reason` and `diff` are mutually exclusive; `markdown` only with `include=markdown`. `real_delta: false` means the page bytes changed and its text did not (say "no text change" in the UI). The webhook and `change_detected` event payload (`ChangeRecord`) now carries `diff_id` and `new_baseline` (with `artifact_id`), so a notification can link to `?diff_id=`. Caps: 500 ops, 2 KB per op text, 1 MiB per markdown side. The baseline text is also readable through `GET /v1/artifacts/{id}`. Gateway route and SPA are the Innhenting session's.
 
 ## Commits
-(none yet)
+- `c9cca3667` feat(quarry-core): change text diff contract, store loaders, safe paragraph chunking (INNH-4)
+- `9455099e3` feat(quarry-orchestrator): CheckChange forwards run_page's markdown artifact id (INNH-4)
+- `96c5dc9c3` feat(quarry-edge): change text diff, stored markdown on baselines and GET /v1/change/diff behind QUARRY_EDGE__CHANGE_TEXT_DIFF (INNH-4)
+- docs commit: openapi, openapi-internal, CONTRACTS, CHANGE_TRACKING, RUNBOOKS, route-count pin, docs-contract test, this status, progress and depth-lane-b files (`docs(quarry): ... (INNH-4)`, the commit after `96c5dc9c3` on `innh/lane-b`)
 
 ## Tests (counts)
-(none yet)
+Run in the lane container (`qtest-lane.sh b`) and on the host, 2026-10-31:
+- quarry-core: 280 lib tests pass (new: 4 in `change_history` for the wire shapes and `cut_utf8`, 1 in `artifact` for the new kind); the ZDR matrix golden test passes after regeneration. quarry-transform: 11 `diff` tests (5 new) and 3 new `chunk` tests pass.
+- quarry-edge `--features postgres-queue --lib`: 699 pass. New: 22 in `change_diff` (query rules, gate order, ops cap with moves not hiding a removal, character-boundary cut, latest-two, named pair, stored diff preferred, legacy record fallback, other-org ids read as unknown, different urls, one baseline, each unavailable reason, foreign artifact reads as gone, markdown cap, markdown id checks, stored diff artifact), 8 in `change_routes::record_tests` (new baseline keeps the id, unchanged saves nothing, change stores the JSON diff and names it in the record and webhook payload, pre-feature baseline gives an unavailable diff, cross-org / non-markdown / garbage id refused with nothing saved, flag off identical to before, ZDR-declared body keeps no text with the flag on, same text different bytes gives `real_delta` false), 2 in `change_webhook` (idempotency key, payload), 2 in `routes` (`markdown_artifact_id` present and omitted).
+- quarry-edge integration, same feature: `change_diff_route` (new, real RS256 router: 501 off with the variable named, 403 ZDR, 400 bad queries, 501 store text), `zdr_feature_matrix`, `web_policy_routes`, `zdr_gap_rows`, `zdr_posture_stamp`, `zdr_refusal_modes`, `change_webhook_proptest` all pass.
+- quarry-runtime `--features postgres-queue --lib`: 1100 pass, 1 ignored. The two new store tests (`load_baseline_is_org_scoped...`, `load_diff_and_find_diff_are_org_scoped`) return early without `DATABASE_URL`: they did NOT exercise the SQL.
+- `cargo check -p quarry-edge --tests` with default features and with `postgres-queue` (bins included) compile. `rustfmt --check` was clean on the new files after formatting.
+- Go: `GOWORK=off go test -count=1 ./...` in quarry-orchestrator all pass (3 new in `internal/activities/markdown_artifact_test.go`: forwarded, omitted when none, RunPage decodes it).
+- Node: `node --test scripts/tests/*.test.mjs` 61 tests, 49 pass, 0 fail, 12 todo (pre-existing); includes the openapi route coverage (count re-pinned), no-bare-null and internal guards, and the new docs-contract test.
+
+## Deviations from the earlier plan in this file
+- The store is behind a trait (`ChangeStore`) in the edge so the record and read logic are tested without Postgres.
+- Reason set gained `no_previous_version` (one baseline), and `from` is nullable.
+- The read route refuses ZDR callers entirely (the plan allowed metadata-only). Owner decision below.
+- `diff_paragraphs` was changed (linear lookup, `moved` by longest increasing run) and `paragraph_chunks` fixed; both are in quarry-transform, outside the item's named files, because the feature cannot be correct without them.
+- No compose line for the flag: unset is off, and a docs-contract test fails if a compose turns it on.
 
 ## Not verified
-Code reading only; nothing built or run. The statement that no consumer exists for the change-refresh queue is from grep.
+- The SQL of `load_baseline`, `load_diff`, `find_diff` against a real Postgres (tests skip without `DATABASE_URL`). The `ChangeStore` impl for `PostgresBaselineStore` only delegates.
+- The end-to-end flow (schedule a change_monitor on a fixture page, edit a paragraph, see `change_detected` with `diff_id`, read `GET /v1/change/diff`) on a side-by-side stack. Not done: no Docker stack, Temporal or Postgres was started.
+- The SDKs (`sdks/`) were not regenerated from the new openapi (needs the generator in Docker); `spa-verify` or the SDK job will show the diff.
+- Behaviour with a retried CheckChange activity (duplicate baselines, see depth file) and with the janitor armed.
+- Clippy was not run.
+
+## Owner decisions needed
+1. Read route under ZDR: refuse entirely (built) or allow metadata only (fingerprints and ids, no text).
+2. Enabling the flag on any deployed edge (live flags are not touched here). Also: deploy edge before orchestrator.
+3. Arming the artifact janitor on a stack that uses text diffs (it deletes baseline text by age) and org erasure for baselines: both are open, see RUNBOOKS.
+4. The route-count pin in `scripts/openapi-route-allowlist.json` (108 to 109) will conflict with the other lanes' route additions at integration; re-pin with `ROUTE_BASELINE_UPDATE=1`.

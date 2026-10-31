@@ -1389,6 +1389,7 @@ paths:
         description: Opaque cursor from a prior page
       - name: kind
         in: query
+        description: Keep only artifacts of this kind. Any other value is a 400 (`error.details.field` is `kind`).
         schema:
           type: string
           enum:
@@ -1398,6 +1399,12 @@ paths:
           - pdf
           - screenshot
           - extract
+      - name: run_id
+        in: query
+        description: Keep only the artifacts one run wrote (`run_...`, as `ArtifactSummary.run_id` and the per-job results carry it). Any other value is a 400 (`error.details.field` is `run_id`). The filter works on the in-memory and filesystem backends; an S3 backend cannot list, so it lists nothing.
+        schema:
+          type: string
+          pattern: '^run_'
       responses:
         '200':
           description: Artifact page
@@ -1836,6 +1843,88 @@ paths:
             application/json:
               schema:
                 type: object
+  /v1/crawl/{job_id}/results:
+    get:
+      operationId: get_crawl_results
+      summary: The pages a crawl fetched, with their artifact ids (INNH-12)
+      description: |
+        The pages a crawl fetched, one row for each fetch (INNH-12): the page URL, the
+        fetch metadata and the ids of the stored artifacts. This is the dataset of a run; the
+        page content is not in the response, read it by id with `GET /v1/artifacts/{id}`
+        (`markdown_artifact_id` is the page as Markdown, `source_artifact_id` the HTML or the
+        original document). Failed and blocked pages are not rows: they are on `/errors`.
+
+        Rows are in the order the pages were fetched. `after_seq` pages forward: pass the
+        `next_seq` of the last page (also in `meta.page.next`). `next_seq` is absent on the
+        last page. A URL fetched twice (a retry, an escalation to a browser) has two rows;
+        `latest=true` returns the latest fetch of each URL instead, still in `seq` order.
+        When a job has more than 20 000 fetches, `latest=true` reads the first 20 000 only
+        and `scan_capped` is true.
+
+        A row from before this release carries `url`, `status`, `title` and `fetched_at`
+        only. The artifact ids are absent when nothing was stored (never under Zero Data
+        Retention). On the in-memory artifact backend the ids stop resolving when the edge
+        restarts.
+
+        Off unless the edge runs with `QUARRY_EDGE__JOB_RESULTS=1` (501 otherwise). 403 for a
+        caller under Zero Data Retention (`error.details.reason` is `job_result_urls`) and for
+        a service principal. The organization comes from the token.
+      tags:
+      - crawl
+      security:
+      - bearerAuth: []
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^job_'
+        - name: after_seq
+          in: query
+          required: false
+          description: The `next_seq` of the previous page.
+          schema:
+            type: integer
+            minimum: 0
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+        - name: latest
+          in: query
+          required: false
+          description: Keep only the latest fetch of each URL.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: One page of results.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/JobResultsView'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '400':
+          description: A bad `limit` (not 1 to 500), `after_seq` or `latest`. `error.details.field` names it.
+        '403':
+          description: The token's ZDR floor is set (`error.details.reason` is `job_result_urls`), or the caller is a service principal.
+        '404':
+          description: Not found for this organization, a foreign id, or a job of another kind.
+        '501':
+          description: Job results are not enabled on this edge (QUARRY_EDGE__JOB_RESULTS).
   /v1/batch/{job_id}:
     get:
       operationId: get_batch_status
@@ -2021,6 +2110,170 @@ paths:
           description: The token's ZDR floor is set; error URLs are not returned.
         '404':
           description: Not found for this organization.
+  /v1/batch/{job_id}/results:
+    get:
+      operationId: get_batch_results
+      summary: The pages a batch fetched, with their artifact ids (INNH-12)
+      description: |
+        The pages a batch fetched, one row for each fetch (INNH-12): the page URL, the
+        fetch metadata and the ids of the stored artifacts. This is the dataset of a run; the
+        page content is not in the response, read it by id with `GET /v1/artifacts/{id}`
+        (`markdown_artifact_id` is the page as Markdown, `source_artifact_id` the HTML or the
+        original document). Failed and blocked pages are not rows: they are on `/errors`.
+
+        Rows are in the order the pages were fetched. `after_seq` pages forward: pass the
+        `next_seq` of the last page (also in `meta.page.next`). `next_seq` is absent on the
+        last page. A URL fetched twice (a retry, an escalation to a browser) has two rows;
+        `latest=true` returns the latest fetch of each URL instead, still in `seq` order.
+        When a job has more than 20 000 fetches, `latest=true` reads the first 20 000 only
+        and `scan_capped` is true.
+
+        A row from before this release carries `url`, `status`, `title` and `fetched_at`
+        only. The artifact ids are absent when nothing was stored (never under Zero Data
+        Retention). On the in-memory artifact backend the ids stop resolving when the edge
+        restarts.
+
+        Off unless the edge runs with `QUARRY_EDGE__JOB_RESULTS=1` (501 otherwise). 403 for a
+        caller under Zero Data Retention (`error.details.reason` is `job_result_urls`) and for
+        a service principal. The organization comes from the token.
+      tags:
+      - batch
+      security:
+      - bearerAuth: []
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^job_'
+        - name: after_seq
+          in: query
+          required: false
+          description: The `next_seq` of the previous page.
+          schema:
+            type: integer
+            minimum: 0
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+        - name: latest
+          in: query
+          required: false
+          description: Keep only the latest fetch of each URL.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: One page of results.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/JobResultsView'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '400':
+          description: A bad `limit` (not 1 to 500), `after_seq` or `latest`. `error.details.field` names it.
+        '403':
+          description: The token's ZDR floor is set (`error.details.reason` is `job_result_urls`), or the caller is a service principal.
+        '404':
+          description: Not found for this organization, a foreign id, or a job of another kind.
+        '501':
+          description: Job results are not enabled on this edge (QUARRY_EDGE__JOB_RESULTS).
+  /v1/jobs/{job_id}/results:
+    get:
+      operationId: get_job_results
+      summary: The pages any durable job fetched, with their artifact ids (INNH-12)
+      description: |
+        The pages a job fetched, one row for each fetch (INNH-12): the page URL, the
+        fetch metadata and the ids of the stored artifacts. This is the dataset of a run; the
+        page content is not in the response, read it by id with `GET /v1/artifacts/{id}`
+        (`markdown_artifact_id` is the page as Markdown, `source_artifact_id` the HTML or the
+        original document). Failed and blocked pages are not rows: they are on `/errors`.
+
+        Rows are in the order the pages were fetched. `after_seq` pages forward: pass the
+        `next_seq` of the last page (also in `meta.page.next`). `next_seq` is absent on the
+        last page. A URL fetched twice (a retry, an escalation to a browser) has two rows;
+        `latest=true` returns the latest fetch of each URL instead, still in `seq` order.
+        When a job has more than 20 000 fetches, `latest=true` reads the first 20 000 only
+        and `scan_capped` is true.
+
+        A row from before this release carries `url`, `status`, `title` and `fetched_at`
+        only. The artifact ids are absent when nothing was stored (never under Zero Data
+        Retention). On the in-memory artifact backend the ids stop resolving when the edge
+        restarts.
+
+        Off unless the edge runs with `QUARRY_EDGE__JOB_RESULTS=1` (501 otherwise). 403 for a
+        caller under Zero Data Retention (`error.details.reason` is `job_result_urls`) and for
+        a service principal. The organization comes from the token.
+      tags:
+      - resources
+      security:
+      - bearerAuth: []
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^job_'
+        - name: after_seq
+          in: query
+          required: false
+          description: The `next_seq` of the previous page.
+          schema:
+            type: integer
+            minimum: 0
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+        - name: latest
+          in: query
+          required: false
+          description: Keep only the latest fetch of each URL.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: One page of results.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/JobResultsView'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '400':
+          description: A bad `limit` (not 1 to 500), `after_seq` or `latest`. `error.details.field` names it.
+        '403':
+          description: The token's ZDR floor is set (`error.details.reason` is `job_result_urls`), or the caller is a service principal.
+        '404':
+          description: Not found for this organization, a foreign id, or a job of another kind.
+        '501':
+          description: Job results are not enabled on this edge (QUARRY_EDGE__JOB_RESULTS).
   /v1/{kind}/jobs:
     get:
       operationId: list_jobs_by_kind
@@ -2632,6 +2885,114 @@ paths:
                     $ref: '#/components/schemas/ResponseMeta'
                   error:
                     $ref: '#/components/schemas/ErrorDetail'
+  /v1/change/diff:
+    get:
+      operationId: change_diff
+      summary: The two versions of a tracked page and the paragraph diff between them (INNH-4)
+      description: |
+        Returns the stored text of two baselines of a tracked URL and the paragraph diff between
+        them. A baseline keeps its page text only for a change monitor, only when the edge runs
+        with `QUARRY_EDGE__CHANGE_TEXT_DIFF` on, and never under Zero Data Retention.
+
+        Pick the pair one way: `url` alone compares the latest two baselines; `url` with `from`
+        and `to` compares two named baselines of that url (any two, in the order given);
+        `diff_id` reads the diff a `quarry.change.detected` event announced (`url` may be added
+        and must then be the diff's url). `include=markdown` adds the two pages' text, each cut
+        at 1 MiB.
+
+        The diff is paragraph-level and set-based: a paragraph is added when the newer text has
+        it and the older does not, removed in the opposite case, moved when it kept its text but
+        changed its place among the paragraphs both versions hold (an inserted paragraph does
+        not make the rest move). Whitespace and line endings are ignored. `real_delta` is false
+        when nothing was added or removed, which is the honest answer for a page whose raw
+        bytes changed (an ad, a timestamp in the markup) and whose text did not. The diff holds
+        at most 500 ops and 2 KB of text per op; the counts are complete and `truncated` says
+        whether anything was cut.
+
+        When the pair has no readable text the answer is 200 with `available: false` and a
+        `reason`: `no_previous_version` (the url has one baseline), `no_previous_text` (the older
+        baseline was recorded before text was kept), `no_text` (the newer one has none) or
+        `artifact_gone` (a stored page was evicted or cannot be read). The two sides' metadata
+        is returned either way.
+
+        An id of another organization answers 404 exactly like an id that does not exist.
+        501 when the edge runs without the flag; 403 for a Zero Data Retention caller.
+      tags:
+      - change-tracking
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: url
+        in: query
+        description: The tracked URL. Required unless `diff_id` is given.
+        schema:
+          type: string
+          format: uri
+      - name: from
+        in: query
+        description: The older baseline id (`bln_...`). Needs `to` and `url`.
+        schema:
+          type: string
+          maxLength: 128
+      - name: to
+        in: query
+        description: The newer baseline id (`bln_...`). Needs `from` and `url`.
+        schema:
+          type: string
+          maxLength: 128
+      - name: diff_id
+        in: query
+        description: A stored diff id (`diff_...`), as `quarry.change.detected` and `ChangeRecord.diff_id` carry it. Cannot be combined with `from` or `to`.
+        schema:
+          type: string
+          maxLength: 128
+      - name: include
+        in: query
+        description: '`markdown` adds the stored text of both versions.'
+        schema:
+          type: string
+          enum:
+          - markdown
+      responses:
+        '200':
+          description: The two versions and the diff, or why there is no diff
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/ChangeDiffView'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+                  error:
+                    $ref: '#/components/schemas/ErrorDetail'
+        '400':
+          description: Neither `url` nor `diff_id`; `from` without `to`; `diff_id` with `from` or `to`; baselines of different urls or the same baseline twice; an unknown `include`; an id over 128 characters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '403':
+          description: The caller is under Zero Data Retention. Stored page text is not readable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '404':
+          description: No baseline for this org and url, or an unknown baseline or diff id, or one that belongs to another organization
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: Change text diffs are not enabled on this edge (QUARRY_EDGE__CHANGE_TEXT_DIFF), or the edge has no baseline store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
   /v1/change/snapshot:
     post:
       operationId: promote_tracked_result_to_snapshot
@@ -3126,8 +3487,433 @@ paths:
           description: A service principal, or a ZDR organization with the flag on (action probe).
         '404':
           description: Not found, or not visible to the caller under enforce.
+  /v1/webhook-subscriptions:
+    post:
+      operationId: create_webhook_subscription
+      summary: Subscribe an HTTPS endpoint to change events (INNH-5)
+      description: |
+        Registers a webhook for the caller's organization. Quarry sends the endpoint a signed
+        `POST` for every event type named in `events`; v1 has one: `change_detected` (the stored
+        event type; the `payload.subject` of the delivery stays `quarry.change.detected`).
+        The delivery format, the signature and the retry rules are in `docs/CONTRACTS.md`,
+        section 4.
+
+        The response carries the HMAC `secret` (`whsec_` and 64 hex characters). It is shown
+        here once and by `rotate-secret`; no read returns it again, only `secret_hint`.
+
+        The URL must be `https`, carry no credentials or fragment, be at most 2048 characters,
+        and resolve only to public addresses (a private, loopback, link-local, metadata or
+        carrier-grade-NAT address is refused; every delivery is vetted again at connect time).
+        An organization holds at most 10 subscriptions. Unknown body fields are a 400.
+
+        Off unless the edge runs with `QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS` on and control with
+        `QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS` on (501 otherwise). A Zero Data Retention
+        caller gets 403 (`details.reason` is `webhook_off_process`): a subscription pushes page
+        URLs off-process.
+      tags:
+      - webhooks
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWebhookSubscription'
+      responses:
+        '201':
+          description: The subscription and its secret, once.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/WebhookSubscriptionCreated'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '400':
+          description: A field is invalid. `error.details.field` is `url`, `events`, `description` or `body`; `error.details.reason` is one of `url_invalid`, `url_too_long`, `url_not_https`, `url_userinfo`, `url_fragment`, `url_private_address`, `url_unresolvable`, `events_empty`, `events_unsupported`, `description_too_long`, `body_invalid`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '403':
+          description: The token's ZDR floor is set (`error.details.reason` is `webhook_off_process`), or the caller is a service principal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '409':
+          description: The organization already has a subscription with this URL and these events (`error.details.reason` is `subscription_exists`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '429':
+          description: The organization holds the maximum of 10 subscriptions (`error.details.reason` is `subscription_limit`, `error.details.limit` is 10).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: Not enabled (QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS on the edge, QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS on control; the message names the one that is off).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+    get:
+      operationId: list_webhook_subscriptions
+      summary: List the organization's webhook subscriptions (INNH-5)
+      description: Newest first. Never returns a secret. Each item carries the status of its latest delivery in `last_delivery`.
+      tags:
+      - webhooks
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+      - name: cursor
+        in: query
+        required: false
+        description: The `next_cursor` of the previous page.
+        schema:
+          type: string
+          maxLength: 256
+      responses:
+        '200':
+          description: One page of subscriptions.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/WebhookSubscriptionList'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '400':
+          description: A bad `limit` or `cursor` (`error.details.field`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: Not enabled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/webhook-subscriptions/{subscription_id}:
+    get:
+      operationId: get_webhook_subscription
+      summary: Read one webhook subscription (INNH-5)
+      tags:
+      - webhooks
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/WebhookSubscriptionId'
+      responses:
+        '200':
+          description: The subscription. No secret.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/WebhookSubscription'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '404':
+          description: Unknown id, an id of another organization (the same answer), or a malformed id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: Not enabled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+    patch:
+      operationId: update_webhook_subscription
+      summary: Pause, resume or change the events of a subscription (INNH-5)
+      description: |
+        Names at least one of `active`, `events`, `description`. The URL is not editable: delete
+        the subscription and create a new one, so every target goes through the create-time
+        check. Refused for a Zero Data Retention caller (403, `webhook_off_process`), because it
+        can resume pushing.
+      tags:
+      - webhooks
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/WebhookSubscriptionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateWebhookSubscription'
+      responses:
+        '200':
+          description: The subscription after the change.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/WebhookSubscription'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '400':
+          description: No field named (`reason` is `empty_patch`), an unsupported event, a description over 200 characters, or an unknown field (`body_invalid`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '403':
+          description: Zero Data Retention (`error.details.reason` is `webhook_off_process`), or a service principal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '404':
+          description: Unknown or foreign id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: Not enabled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+    delete:
+      operationId: delete_webhook_subscription
+      summary: Delete a subscription and its delivery log (INNH-5)
+      description: A hard delete. Pending deliveries of the subscription are dropped with it. Open to a Zero Data Retention caller (wind-down).
+      tags:
+      - webhooks
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/WebhookSubscriptionId'
+      responses:
+        '204':
+          description: Deleted. No body.
+        '404':
+          description: Unknown or foreign id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: Not enabled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/webhook-subscriptions/{subscription_id}/rotate-secret:
+    post:
+      operationId: rotate_webhook_subscription_secret
+      summary: Mint a new secret for a subscription (INNH-5)
+      description: The old secret stops working at once; deliveries already queued are signed with the new one. The new secret is in this response only.
+      tags:
+      - webhooks
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/WebhookSubscriptionId'
+      responses:
+        '200':
+          description: The new secret, once.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/WebhookSecretRotated'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '404':
+          description: Unknown or foreign id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: Not enabled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/webhook-subscriptions/{subscription_id}/deliveries:
+    get:
+      operationId: list_webhook_deliveries
+      summary: The delivery log of a subscription (INNH-5)
+      description: |
+        Newest first. A delivery shows its status and attempt count, never the payload or the
+        raw error: `last_error` is `http_<status>`, `timeout`, `blocked_target`, `transport`,
+        `inactive` or `error`. A delivery is `dlq` after five failed attempts or at once on a
+        4xx other than 408 and 429. Finished deliveries are deleted after 14 days.
+      tags:
+      - webhooks
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/WebhookSubscriptionId'
+      - name: status
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - pending
+          - in_flight
+          - success
+          - failed
+          - dlq
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          type: string
+          maxLength: 256
+      responses:
+        '200':
+          description: One page of deliveries.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/WebhookDeliveryList'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '400':
+          description: A bad `status`, `limit` or `cursor` (`error.details.field`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '404':
+          description: Unknown or foreign subscription id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: Not enabled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/webhook-subscriptions/{subscription_id}/deliveries/{delivery_id}/retry:
+    post:
+      operationId: retry_webhook_delivery
+      summary: Re-queue a failed delivery (INNH-5)
+      description: Only a `failed` or `dlq` delivery can be retried (409 `delivery_not_retryable` otherwise). The attempt count restarts at zero. Refused for a Zero Data Retention caller.
+      tags:
+      - webhooks
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/WebhookSubscriptionId'
+      - name: delivery_id
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^whkd_'
+      responses:
+        '202':
+          description: The delivery, now pending.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/WebhookDeliveryView'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '403':
+          description: Zero Data Retention (`webhook_off_process`), or a service principal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '404':
+          description: Unknown or foreign subscription or delivery id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '409':
+          description: The delivery is pending, in flight or delivered (`error.details.reason` is `delivery_not_retryable`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: Not enabled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
 components:
   parameters:
+    WebhookSubscriptionId:
+      name: subscription_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^whk_'
+      description: A webhook subscription id (`whk_...`) of the caller's organization
     AgentRunId:
       name: run_id
       in: path
@@ -3488,6 +4274,74 @@ components:
         source_url:
           type: string
           nullable: true
+        run_id:
+          type: string
+          description: The run that wrote the artifact (`run_...`). Absent when the backend cannot tell.
+        page_hash:
+          type: string
+          description: The page the artifact belongs to, the hash of its URL and content fingerprint. A changed page in a later run has a different one.
+    JobResultsView:
+      type: object
+      description: The data of GET /v1/{crawl,batch,jobs}/{job_id}/results (INNH-12)
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/JobResult'
+        next_seq:
+          type: integer
+          minimum: 0
+          description: Present when more rows remain. Pass it back as `after_seq`.
+        scan_capped:
+          type: boolean
+          description: True only for a `latest=true` read of a job with more than 20 000 fetches, whose answer covers the first 20 000.
+    JobResult:
+      type: object
+      description: One page a job fetched. Fields after `fetched_at` are absent when the fetch event predates them or nothing was stored.
+      required:
+      - seq
+      - url
+      - status
+      - fetched_at
+      properties:
+        seq:
+          type: integer
+          minimum: 0
+          description: Position of the fetch in the job's event log. The cursor is the last row's seq.
+        url:
+          type: string
+          description: The URL the job fetched (as requested; a redirect target is not recorded here).
+        status:
+          type: integer
+          description: HTTP status of the fetch.
+        content_type:
+          type: string
+        title:
+          type: string
+        fetched_at:
+          type: string
+          format: date-time
+        word_count:
+          type: integer
+          minimum: 0
+        driver:
+          type: string
+          enum:
+          - static
+          - tls
+          - browser
+        markdown_artifact_id:
+          type: string
+          description: The stored Markdown of the page. Read it with `GET /v1/artifacts/{id}`.
+        source_artifact_id:
+          type: string
+          description: The stored HTML, or the original document. Read it with `GET /v1/artifacts/{id}`.
+        bytes:
+          type: integer
+          minimum: 0
+          description: Size in bytes of the stored Markdown.
     JobSummary:
       type: object
       required:
@@ -4010,6 +4864,7 @@ components:
         artifact_id:
           type: string
           nullable: true
+          description: The stored markdown of this version (INNH-4). Set on a baseline a change monitor recorded with QUARRY_EDGE__CHANGE_TEXT_DIFF on; absent on older baselines and always under Zero Data Retention.
         prev_baseline_id:
           type: string
           nullable: true
@@ -4047,10 +4902,143 @@ components:
         diff_id:
           type: string
           nullable: true
-          description: Present only for status=changed
+          description: Present only for status=changed. A monitor's change event carries it with QUARRY_EDGE__CHANGE_TEXT_DIFF on (`GET /v1/change/diff?diff_id=`).
         checked_at:
           type: string
           format: date-time
+    ChangeDiffView:
+      type: object
+      description: The data of GET /v1/change/diff (INNH-4)
+      required:
+      - source_url
+      - from
+      - to
+      - diff_id
+      - available
+      properties:
+        source_url:
+          type: string
+          format: uri
+        from:
+          nullable: true
+          description: The older version. null when the url has one baseline only.
+          allOf:
+          - $ref: '#/components/schemas/ChangeDiffSide'
+        to:
+          $ref: '#/components/schemas/ChangeDiffSide'
+        diff_id:
+          type: [string, 'null']
+          description: The stored diff record of the pair. null when none was stored (the pair is not a change the monitor recorded, or it was recorded before text diffs); the diff is then computed for this request.
+        available:
+          type: boolean
+          description: True when `diff` is present.
+        reason:
+          $ref: '#/components/schemas/ChangeDiffUnavailable'
+        diff:
+          $ref: '#/components/schemas/ParagraphDiff'
+        markdown:
+          $ref: '#/components/schemas/ChangeDiffMarkdown'
+    ChangeDiffSide:
+      type: object
+      required:
+      - baseline_id
+      - fingerprint
+      - captured_at
+      - artifact_id
+      properties:
+        baseline_id:
+          type: string
+        fingerprint:
+          type: string
+          description: blake3 of the raw page bytes
+        captured_at:
+          type: string
+          format: date-time
+        artifact_id:
+          type: [string, 'null']
+          description: The stored markdown (`GET /v1/artifacts/{id}`). null for a baseline recorded without text.
+    ChangeDiffUnavailable:
+      type: string
+      description: Why a diff is not available. Absent when it is.
+      enum:
+      - no_previous_version
+      - no_previous_text
+      - no_text
+      - artifact_gone
+    ChangeDiffMarkdown:
+      type: object
+      description: Only with include=markdown. Each text is cut at 1 MiB.
+      required:
+      - from
+      - to
+      - truncated
+      properties:
+        from:
+          type: [string, 'null']
+        to:
+          type: [string, 'null']
+        truncated:
+          type: boolean
+    ParagraphDiff:
+      type: object
+      required:
+      - format
+      - real_delta
+      - added
+      - removed
+      - moved
+      - unchanged
+      - ops
+      - truncated
+      properties:
+        format:
+          type: string
+          enum:
+          - paragraph
+        real_delta:
+          type: boolean
+          description: False when no paragraph was added or removed.
+        added:
+          type: integer
+        removed:
+          type: integer
+        moved:
+          type: integer
+        unchanged:
+          type: integer
+        ops:
+          type: array
+          maxItems: 500
+          description: Added and removed ops first, then moved ones.
+          items:
+            $ref: '#/components/schemas/TextDiffOp'
+        truncated:
+          type: boolean
+          description: An op was dropped, a text was cut at 2 KB, or an input page was cut at 1 MiB. The counts are complete.
+    TextDiffOp:
+      type: object
+      required:
+      - op
+      properties:
+        op:
+          type: string
+          enum:
+          - added
+          - removed
+          - moved
+        index:
+          type: integer
+          description: For added, the paragraph's position in the newer text; for removed, in the older text.
+        text:
+          type: string
+          maxLength: 2048
+          description: For added and removed. Cut at 2 KB on a character boundary.
+        from:
+          type: integer
+          description: For moved, the paragraph's position in the older text.
+        to:
+          type: integer
+          description: For moved, its position in the newer text.
     OverlapPolicy:
       type: string
       enum:
@@ -7770,6 +8758,183 @@ components:
               type: string
             message:
               type: string
+    CreateWebhookSubscription:
+      type: object
+      additionalProperties: false
+      required:
+      - url
+      - events
+      properties:
+        url:
+          type: string
+          format: uri
+          maxLength: 2048
+          description: An `https` URL that resolves to public addresses only.
+        events:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            enum:
+            - change_detected
+          description: Stored event types. `change_detected` is the only one in v1; run-finished events will be added without a contract change.
+        description:
+          type: string
+          maxLength: 200
+    UpdateWebhookSubscription:
+      type: object
+      additionalProperties: false
+      properties:
+        active:
+          type: boolean
+        events:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            enum:
+            - change_detected
+        description:
+          type: string
+          maxLength: 200
+    WebhookLastDelivery:
+      type: object
+      required:
+      - status
+      - at
+      - event_id
+      properties:
+        status:
+          type: string
+          enum:
+          - pending
+          - in_flight
+          - success
+          - failed
+          - dlq
+        at:
+          type: string
+          format: date-time
+        event_id:
+          type: string
+    WebhookSubscription:
+      type: object
+      description: A webhook subscription. It has no secret field.
+      required:
+      - id
+      - url
+      - events
+      - active
+      - secret_hint
+      - created_at
+      properties:
+        id:
+          type: string
+          pattern: '^whk_'
+        url:
+          type: string
+          format: uri
+        events:
+          type: array
+          items:
+            type: string
+        active:
+          type: boolean
+        description:
+          type: string
+        secret_hint:
+          type: string
+          description: '`whsec_...` and the last four characters of the secret.'
+        created_at:
+          type: string
+          format: date-time
+        last_delivery:
+          $ref: '#/components/schemas/WebhookLastDelivery'
+    WebhookSubscriptionCreated:
+      allOf:
+      - $ref: '#/components/schemas/WebhookSubscription'
+      - type: object
+        required:
+        - secret
+        properties:
+          secret:
+            type: string
+            description: The HMAC key, `whsec_` and 64 hex characters. Shown here and by rotate-secret only.
+    WebhookSecretRotated:
+      type: object
+      required:
+      - id
+      - secret
+      - secret_hint
+      properties:
+        id:
+          type: string
+        secret:
+          type: string
+        secret_hint:
+          type: string
+    WebhookSubscriptionList:
+      type: object
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/WebhookSubscription'
+        next_cursor:
+          type: string
+          description: Present when more rows remain. Pass it back as `cursor`.
+    WebhookDeliveryView:
+      type: object
+      description: One delivery of an event to a subscription. No payload body.
+      required:
+      - id
+      - event_id
+      - event_type
+      - status
+      - attempt
+      - created_at
+      properties:
+        id:
+          type: string
+          pattern: '^whkd_'
+        event_id:
+          type: string
+        event_type:
+          type: string
+        status:
+          type: string
+          enum:
+          - pending
+          - in_flight
+          - success
+          - failed
+          - dlq
+        attempt:
+          type: integer
+          minimum: 0
+        next_attempt_at:
+          type: string
+          format: date-time
+          description: Present while the delivery is pending.
+        last_error:
+          type: string
+          description: '`http_<status>`, `timeout`, `blocked_target`, `transport`, `inactive` or `error`.'
+        created_at:
+          type: string
+          format: date-time
+    WebhookDeliveryList:
+      type: object
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/WebhookDeliveryView'
+        next_cursor:
+          type: string
 tags:
 - name: search
   description: Tavily-lineage web discovery
@@ -7791,3 +8956,5 @@ tags:
   description: Versioned URL change tracking — baselines, checks, promotion, refresh
 - name: schedules
   description: Cron / one-shot / change-monitor schedules
+- name: webhooks
+  description: Webhook subscriptions for change events (INNH-5)

@@ -22,7 +22,7 @@ type DB interface {
 	Profiles() ResourceStore[BrowserProfile]
 	Schedules() SchedulesStore
 	Sources() SourcesStore
-	Webhooks() ResourceStore[Webhook]
+	Webhooks() WebhooksStore
 	WebhookDeliveries() WebhookDeliveryStore
 	Blocklists() ResourceStore[BlocklistEntry]
 	Events() EventLog
@@ -81,6 +81,38 @@ type WebhookDeliveryStore interface {
 	ResourceStore[WebhookDelivery]
 	Update(d WebhookDelivery) error
 	ClaimDue(now int64, limit int) ([]WebhookDelivery, error)
+	// GetByOrg and ListByWebhook are the tenant reads (INNH-5): a delivery of another
+	// org answers exactly like a missing one. status "" lists every status.
+	GetByOrg(id quarrycontracts.ID, orgID string) (WebhookDelivery, bool)
+	ListByWebhook(orgID string, webhookID quarrycontracts.ID, status string, limit int, cursor string) ([]WebhookDelivery, string)
+	// DeleteTerminalBefore hard-deletes deliveries that reached a terminal status
+	// (success, failed, dlq) and were created before cutoff (unix seconds): the delivery
+	// rows hold the whole event payload, so they are bounded by a retention window.
+	DeleteTerminalBefore(cutoff int64) (int64, error)
+}
+
+// WebhooksStore is the webhook subscription table. The tenant methods (GetByOrg,
+// ListByOrg, CountByOrg, DeleteByOrg, UpdateByOrg, CreateCapped) are the only ones the
+// org-scoped /v1/webhook-subscriptions routes reach: a row of another org answers exactly
+// like a missing one. ListActiveByOrg is the fan-out read and takes an org by design:
+// there is no all-orgs read of subscriptions, so delivery cannot leak across tenants.
+// The unscoped ResourceStore methods stay for the dispatcher (Get by delivery.webhook_id)
+// and for tests.
+type WebhooksStore interface {
+	ResourceStore[Webhook]
+	// CreateCapped inserts an org-scoped subscription unless the org already holds
+	// maxPerOrg of them (ErrQuotaExceeded) or has one with the same url and events
+	// (ErrConflict). The count and the insert are one atomic step.
+	CreateCapped(w Webhook, maxPerOrg int) error
+	GetByOrg(id quarrycontracts.ID, orgID string) (Webhook, bool)
+	ListByOrg(orgID string, limit int, cursor string) ([]Webhook, string)
+	CountByOrg(orgID string) int
+	DeleteByOrg(id quarrycontracts.ID, orgID string) error
+	// UpdateByOrg writes the mutable fields (Events, Active, Secret, SecretHint,
+	// Description) of the row with w.ID in w.OrgID.
+	UpdateByOrg(w Webhook) error
+	// ListActiveByOrg returns up to limit active subscriptions of orgID. orgID "" returns none.
+	ListActiveByOrg(orgID string, limit int) []Webhook
 }
 
 // SchedulesStore is the schedule table. The tenant methods (GetByOrg,
@@ -688,25 +720,38 @@ type Source struct {
 	UpdatedAt int64              `json:"updated_at"`
 }
 
+// Webhook is a delivery subscription. OrgID is the tenant that owns it; a row with an empty
+// OrgID (created before INNH-5) belongs to nobody and receives no delivery. Secret is the
+// HMAC key and is never serialized: the subscription routes show it once, on create and on
+// rotate, from the value they minted.
 type Webhook struct {
-	ID        quarrycontracts.ID `json:"id"`
-	URL       string             `json:"url"`
-	Secret    string             `json:"secret"`
-	Events    []string           `json:"events"`
-	Active    bool               `json:"active"`
-	CreatedAt int64              `json:"created_at"`
+	ID          quarrycontracts.ID `json:"id"`
+	OrgID       string             `json:"org_id,omitempty"`
+	URL         string             `json:"url"`
+	Secret      string             `json:"-"`
+	SecretHint  string             `json:"secret_hint,omitempty"`
+	Events      []string           `json:"events"`
+	Active      bool               `json:"active"`
+	Description string             `json:"description,omitempty"`
+	CreatedBy   string             `json:"created_by,omitempty"`
+	CreatedAt   int64              `json:"created_at"`
 }
 
 type WebhookDelivery struct {
-	ID            quarrycontracts.ID `json:"id"`
-	WebhookID     quarrycontracts.ID `json:"webhook_id"`
-	EventID       quarrycontracts.ID `json:"event_id"`
-	Payload       string             `json:"payload"`
-	Attempt       int                `json:"attempt"`
-	Status        string             `json:"status"` // pending | in_flight | success | failed | dlq
-	LastError     string             `json:"last_error,omitempty"`
-	NextAttemptAt int64              `json:"next_attempt_at"`
-	CreatedAt     int64              `json:"created_at"`
+	ID        quarrycontracts.ID `json:"id"`
+	WebhookID quarrycontracts.ID `json:"webhook_id"`
+	OrgID     string             `json:"org_id,omitempty"`
+	EventID   quarrycontracts.ID `json:"event_id"`
+	EventType string             `json:"event_type,omitempty"`
+	// DedupeKey, when set, is unique per webhook: a second delivery of the same logical
+	// event (one change reaching control by two paths) is dropped with ErrConflict.
+	DedupeKey     string `json:"dedupe_key,omitempty"`
+	Payload       string `json:"payload"`
+	Attempt       int    `json:"attempt"`
+	Status        string `json:"status"` // pending | in_flight | success | failed | dlq
+	LastError     string `json:"last_error,omitempty"`
+	NextAttemptAt int64  `json:"next_attempt_at"`
+	CreatedAt     int64  `json:"created_at"`
 }
 
 type BlocklistEntry struct {
@@ -727,7 +772,7 @@ type memDB struct {
 	profiles     *genericStore[BrowserProfile]
 	schedules    *genericStore[Schedule]
 	sources      *memSources
-	webhooks     *genericStore[Webhook]
+	webhooks     *memWebhooks
 	whDeliveries *genericStore[WebhookDelivery]
 	blocklists   *genericStore[BlocklistEntry]
 	events       *memEventLog
@@ -745,7 +790,7 @@ func NewMemory() DB {
 		profiles:     newGeneric[BrowserProfile](func(p BrowserProfile) quarrycontracts.ID { return p.ID }),
 		schedules:    newGeneric[Schedule](func(s Schedule) quarrycontracts.ID { return s.ID }),
 		sources:      newMemSources(),
-		webhooks:     newGeneric[Webhook](func(w Webhook) quarrycontracts.ID { return w.ID }),
+		webhooks:     &memWebhooks{newGeneric[Webhook](func(w Webhook) quarrycontracts.ID { return w.ID })},
 		whDeliveries: newGeneric[WebhookDelivery](func(d WebhookDelivery) quarrycontracts.ID { return d.ID }),
 		blocklists:   newGeneric[BlocklistEntry](func(b BlocklistEntry) quarrycontracts.ID { return b.ID }),
 		events:       &memEventLog{},
@@ -764,7 +809,7 @@ func (d *memDB) Artifacts() ResourceStore[Artifact]      { return d.arts }
 func (d *memDB) Profiles() ResourceStore[BrowserProfile] { return d.profiles }
 func (d *memDB) Schedules() SchedulesStore               { return &memSchedules{d.schedules} }
 func (d *memDB) Sources() SourcesStore                   { return d.sources }
-func (d *memDB) Webhooks() ResourceStore[Webhook]        { return d.webhooks }
+func (d *memDB) Webhooks() WebhooksStore                 { return d.webhooks }
 func (d *memDB) WebhookDeliveries() WebhookDeliveryStore {
 	return &memWebhookDeliveries{d.whDeliveries}
 }
@@ -1379,6 +1424,225 @@ func (m *memJobs) ListBySchedule(sid quarrycontracts.ID, limit int, cur string) 
 }
 
 type memWebhookDeliveries struct{ *genericStore[WebhookDelivery] }
+
+func (m *memWebhookDeliveries) Create(d WebhookDelivery) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.items[d.ID]; exists {
+		return ErrConflict
+	}
+	if d.DedupeKey != "" {
+		for _, it := range m.items {
+			if it.WebhookID == d.WebhookID && it.DedupeKey == d.DedupeKey {
+				return ErrConflict
+			}
+		}
+	}
+	m.items[d.ID] = d
+	m.order = append(m.order, d.ID)
+	return nil
+}
+
+func (m *memWebhookDeliveries) GetByOrg(id quarrycontracts.ID, orgID string) (WebhookDelivery, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	it, ok := m.items[id]
+	if !ok || orgID == "" || it.OrgID != orgID {
+		return WebhookDelivery{}, false
+	}
+	return it, true
+}
+
+func (m *memWebhookDeliveries) ListByWebhook(orgID string, webhookID quarrycontracts.ID, status string, limit int, cursor string) ([]WebhookDelivery, string) {
+	m.mu.RLock()
+	var all []WebhookDelivery
+	if orgID != "" {
+		for _, it := range m.items {
+			if it.OrgID == orgID && it.WebhookID == webhookID && (status == "" || it.Status == status) {
+				all = append(all, it)
+			}
+		}
+	}
+	m.mu.RUnlock()
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].CreatedAt != all[j].CreatedAt {
+			return all[i].CreatedAt > all[j].CreatedAt
+		}
+		return all[i].ID > all[j].ID
+	})
+	return pageByLastID(all, limit, cursor, func(d WebhookDelivery) quarrycontracts.ID { return d.ID })
+}
+
+func (m *memWebhookDeliveries) DeleteTerminalBefore(cutoff int64) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var removed int64
+	kept := make([]quarrycontracts.ID, 0, len(m.order))
+	for _, id := range m.order {
+		it := m.items[id]
+		if it.CreatedAt < cutoff && (it.Status == "success" || it.Status == "failed" || it.Status == "dlq") {
+			delete(m.items, id)
+			removed++
+			continue
+		}
+		kept = append(kept, id)
+	}
+	m.order = kept
+	return removed, nil
+}
+
+// pageByLastID pages a newest-first slice by the id of the last row of the previous page.
+func pageByLastID[T any](all []T, limit int, cursor string, idOf func(T) quarrycontracts.ID) ([]T, string) {
+	if limit <= 0 {
+		limit = 50
+	}
+	start := 0
+	if cursor != "" {
+		start = len(all)
+		for i, it := range all {
+			if string(idOf(it)) == cursor {
+				start = i + 1
+				break
+			}
+		}
+	}
+	end := start + limit
+	if end > len(all) {
+		end = len(all)
+	}
+	out := append([]T(nil), all[start:end]...)
+	next := ""
+	if end < len(all) && len(out) > 0 {
+		next = string(idOf(out[len(out)-1]))
+	}
+	return out, next
+}
+
+// memWebhooks is the in-memory WebhooksStore. Every tenant method enforces the org guard
+// itself, because the pg store relies on its WHERE clause for the same invariant.
+type memWebhooks struct{ *genericStore[Webhook] }
+
+func sameEvents(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *memWebhooks) CreateCapped(w Webhook, maxPerOrg int) error {
+	if w.OrgID == "" {
+		return fmt.Errorf("store: CreateCapped requires an org")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.items[w.ID]; exists {
+		return ErrConflict
+	}
+	count := 0
+	for _, it := range m.items {
+		if it.OrgID != w.OrgID {
+			continue
+		}
+		count++
+		if it.URL == w.URL && sameEvents(it.Events, w.Events) {
+			return ErrConflict
+		}
+	}
+	if maxPerOrg > 0 && count >= maxPerOrg {
+		return ErrQuotaExceeded
+	}
+	m.items[w.ID] = w
+	m.order = append(m.order, w.ID)
+	return nil
+}
+
+func (m *memWebhooks) GetByOrg(id quarrycontracts.ID, orgID string) (Webhook, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	it, ok := m.items[id]
+	if !ok || orgID == "" || it.OrgID != orgID {
+		return Webhook{}, false
+	}
+	return it, true
+}
+
+func (m *memWebhooks) ListByOrg(orgID string, limit int, cursor string) ([]Webhook, string) {
+	m.mu.RLock()
+	var all []Webhook
+	if orgID != "" {
+		for _, it := range m.items {
+			if it.OrgID == orgID {
+				all = append(all, it)
+			}
+		}
+	}
+	m.mu.RUnlock()
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].CreatedAt != all[j].CreatedAt {
+			return all[i].CreatedAt > all[j].CreatedAt
+		}
+		return all[i].ID > all[j].ID
+	})
+	return pageByLastID(all, limit, cursor, func(w Webhook) quarrycontracts.ID { return w.ID })
+}
+
+func (m *memWebhooks) CountByOrg(orgID string) int {
+	if orgID == "" {
+		return 0
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	n := 0
+	for _, it := range m.items {
+		if it.OrgID == orgID {
+			n++
+		}
+	}
+	return n
+}
+
+func (m *memWebhooks) DeleteByOrg(id quarrycontracts.ID, orgID string) error {
+	if _, ok := m.GetByOrg(id, orgID); !ok {
+		return ErrNotFound
+	}
+	return m.genericStore.Delete(id)
+}
+
+func (m *memWebhooks) UpdateByOrg(w Webhook) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	it, ok := m.items[w.ID]
+	if !ok || w.OrgID == "" || it.OrgID != w.OrgID {
+		return ErrNotFound
+	}
+	it.Events, it.Active, it.Secret, it.SecretHint, it.Description = w.Events, w.Active, w.Secret, w.SecretHint, w.Description
+	m.items[w.ID] = it
+	return nil
+}
+
+func (m *memWebhooks) ListActiveByOrg(orgID string, limit int) []Webhook {
+	if orgID == "" {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []Webhook
+	for _, id := range m.order {
+		it := m.items[id]
+		if it.OrgID == orgID && it.Active {
+			out = append(out, it)
+			if limit > 0 && len(out) >= limit {
+				break
+			}
+		}
+	}
+	return out
+}
 
 func (m *memWebhookDeliveries) Update(d WebhookDelivery) error {
 	m.mu.Lock()
