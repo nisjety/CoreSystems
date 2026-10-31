@@ -40,7 +40,7 @@ type AttentionServiceClient interface {
 	// Marks one of the caller's threads read. Refused for a zero-retention or waived caller, whose
 	// read state stays on the client.
 	MarkThreadSeen(ctx context.Context, in *MarkThreadSeenRequest, opts ...grpc.CallOption) (*MarkThreadSeenResponse, error)
-	// The per-user attention stream. Not served yet (WS16 S5); the call answers UNIMPLEMENTED.
+	// The per-person attention stream (WS16 S5): a snapshot, then the changes, resyncs and heartbeats.
 	StreamAttention(ctx context.Context, in *StreamAttentionRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[StreamAttentionResponse], error)
 }
 
@@ -107,7 +107,7 @@ type AttentionServiceServer interface {
 	// Marks one of the caller's threads read. Refused for a zero-retention or waived caller, whose
 	// read state stays on the client.
 	MarkThreadSeen(context.Context, *MarkThreadSeenRequest) (*MarkThreadSeenResponse, error)
-	// The per-user attention stream. Not served yet (WS16 S5); the call answers UNIMPLEMENTED.
+	// The per-person attention stream (WS16 S5): a snapshot, then the changes, resyncs and heartbeats.
 	StreamAttention(*StreamAttentionRequest, grpc.ServerStreamingServer[StreamAttentionResponse]) error
 	mustEmbedUnimplementedAttentionServiceServer()
 }

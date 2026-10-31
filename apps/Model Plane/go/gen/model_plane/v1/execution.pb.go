@@ -988,6 +988,13 @@ type RunAgentResponse struct {
 	// `resets_at` carries the earliest time a resume is due (RFC 3339 UTC) and
 	// `failure_code` is empty.
 	ParkReason string `protobuf:"bytes,11,opt,name=park_reason,json=parkReason,proto3" json:"park_reason,omitempty"`
+	// Why the run's own loop guard ended it, as a closed token: "loop_detected" when
+	// the Do loop's loop guard stopped this run's loop (WS25-S2). A delegated loop's
+	// stop is a child result, so it never sets this field. Empty for every other
+	// outcome. The run appended its fixed reply and its terminal receipt still says
+	// "execution_failed"; this field alone names the stop. It is not `failure_code`,
+	// which is taken by the subscription vocabulary (tag 6).
+	LoopStopCode string `protobuf:"bytes,10,opt,name=loop_stop_code,json=loopStopCode,proto3" json:"loop_stop_code,omitempty"`
 	// What this invocation of the run's loop spent on inference: every round of the
 	// run and of the subagents it delegated to, summed. Counts and ids only, never
 	// content. Unset when the executor predates the field, which is not the same as
@@ -1088,6 +1095,13 @@ func (x *RunAgentResponse) GetResetsAt() string {
 func (x *RunAgentResponse) GetParkReason() string {
 	if x != nil {
 		return x.ParkReason
+	}
+	return ""
+}
+
+func (x *RunAgentResponse) GetLoopStopCode() string {
+	if x != nil {
+		return x.LoopStopCode
 	}
 	return ""
 }
@@ -2066,7 +2080,7 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"\x15authored_instructions\x18\x01 \x01(\tR\x14authoredInstructions\x125\n" +
 	"\ahistory\x18\x02 \x03(\v2\x1b.model_plane.v1.ChatMessageR\ahistory\x12!\n" +
 	"\fmemory_block\x18\x03 \x01(\tR\vmemoryBlock\x128\n" +
-	"\x06status\x18\x04 \x01(\v2 .model_plane.v1.RunContextStatusR\x06status\"\x94\x03\n" +
+	"\x06status\x18\x04 \x01(\v2 .model_plane.v1.RunContextStatusR\x06status\"\xba\x03\n" +
 	"\x10RunAgentResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\x12!\n" +
 	"\ffinal_output\x18\x02 \x01(\tR\vfinalOutput\x12'\n" +
@@ -2077,7 +2091,9 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"\x0eretry_after_ms\x18\a \x01(\x04H\x00R\fretryAfterMs\x88\x01\x01\x12\x1b\n" +
 	"\tresets_at\x18\b \x01(\tR\bresetsAt\x12\x1f\n" +
 	"\vpark_reason\x18\v \x01(\tR\n" +
-	"parkReason\x12.\n" +
+	"parkReason\x12$\n" +
+	"\x0eloop_stop_code\x18\n" +
+	" \x01(\tR\floopStopCode\x12.\n" +
 	"\x05usage\x18\t \x01(\v2\x18.model_plane.v1.RunUsageR\x05usageB\x11\n" +
 	"\x0f_retry_after_ms\"\xe8\x02\n" +
 	"\bRunUsage\x12!\n" +

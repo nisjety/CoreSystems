@@ -415,6 +415,7 @@ pub(crate) async fn list(
         enabled: true,
         items: listed.into_iter().map(|(_, item)| item).collect(),
         counts: Some(counts),
+        ..Default::default()
     })
 }
 

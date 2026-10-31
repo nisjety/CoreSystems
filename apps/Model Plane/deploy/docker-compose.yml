@@ -1278,6 +1278,9 @@ services:
       # WS27-S9: publish a run_usage_progress event per Do round, so model-gateway can stream per-round usage. Off by
       # default; only the literal `true`. Deploy before turning MODEL_GATEWAY_USAGE_PROGRESS on for Do runs.
       EXECUTION_RUN_USAGE_PROGRESS: ${EXECUTION_RUN_USAGE_PROGRESS:-false}
+      # WS25-S2: the Do-loop guard (off, shadow or enforce; unset is off). Collect shadow data before enforce:
+      # legitimate repeats such as polling stop at the eighth identical call.
+      LOOP_GUARD_MODE: ${LOOP_GUARD_MODE:-}
       # WS11-S8: a Do run's rounds use the turn's effort level (RunAgentRequest field 21).
       # Only the literal `true` turns it on; off, every round sends no level, as before.
       EXECUTION_CORE_RUN_EFFORT: ${EXECUTION_CORE_RUN_EFFORT:-false}

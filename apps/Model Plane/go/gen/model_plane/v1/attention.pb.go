@@ -387,7 +387,9 @@ type ListAttentionResponse struct {
 	// Threads that need attention or are working: most urgent first, oldest waiting first.
 	Items []*AttentionItem `protobuf:"bytes,2,rep,name=items,proto3" json:"items,omitempty"`
 	// The counts over every thread the page considered.
-	Counts        *AttentionCounts `protobuf:"bytes,3,opt,name=counts,proto3" json:"counts,omitempty"`
+	Counts *AttentionCounts `protobuf:"bytes,3,opt,name=counts,proto3" json:"counts,omitempty"`
+	// Whether this replica serves the attention stream, so a client knows to open it (WS16 S5).
+	StreamEnabled bool `protobuf:"varint,4,opt,name=stream_enabled,json=streamEnabled,proto3" json:"stream_enabled,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -441,6 +443,13 @@ func (x *ListAttentionResponse) GetCounts() *AttentionCounts {
 		return x.Counts
 	}
 	return nil
+}
+
+func (x *ListAttentionResponse) GetStreamEnabled() bool {
+	if x != nil {
+		return x.StreamEnabled
+	}
+	return false
 }
 
 // Marks one of the caller's threads read.
@@ -553,9 +562,13 @@ func (x *MarkThreadSeenResponse) GetThreadId() string {
 	return ""
 }
 
-// Opens the caller's attention stream. Not served yet (WS16 S5).
+// Opens the caller's attention stream (WS16 S5).
 type StreamAttentionRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The organization the caller acts in. Must match the verified caller (WS16 S5).
+	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// The owner whose attention is streamed. Must match the verified caller (WS16 S5).
+	UserId        string `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -590,9 +603,37 @@ func (*StreamAttentionRequest) Descriptor() ([]byte, []int) {
 	return file_model_plane_v1_attention_proto_rawDescGZIP(), []int{6}
 }
 
-// One frame of the attention stream. The frame set is defined with the stream (WS16 S5).
+func (x *StreamAttentionRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *StreamAttentionRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+// One frame of the attention stream (WS16 S5). Frames of one stream share an epoch and carry a
+// rising sequence number; a new epoch means the client must start from the next snapshot.
 type StreamAttentionResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The stream's epoch. It changes when the hub restarts (WS16 S5).
+	Epoch string `protobuf:"bytes,1,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	// The frame's sequence number within the epoch (WS16 S5).
+	Seq uint64 `protobuf:"varint,2,opt,name=seq,proto3" json:"seq,omitempty"`
+	// The frame (WS16 S5).
+	//
+	// Types that are valid to be assigned to Frame:
+	//
+	//	*StreamAttentionResponse_Snapshot
+	//	*StreamAttentionResponse_ThreadChanged
+	//	*StreamAttentionResponse_Resync
+	//	*StreamAttentionResponse_Heartbeat
+	Frame         isStreamAttentionResponse_Frame `protobuf_oneof:"frame"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -627,6 +668,279 @@ func (*StreamAttentionResponse) Descriptor() ([]byte, []int) {
 	return file_model_plane_v1_attention_proto_rawDescGZIP(), []int{7}
 }
 
+func (x *StreamAttentionResponse) GetEpoch() string {
+	if x != nil {
+		return x.Epoch
+	}
+	return ""
+}
+
+func (x *StreamAttentionResponse) GetSeq() uint64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
+
+func (x *StreamAttentionResponse) GetFrame() isStreamAttentionResponse_Frame {
+	if x != nil {
+		return x.Frame
+	}
+	return nil
+}
+
+func (x *StreamAttentionResponse) GetSnapshot() *AttentionSnapshot {
+	if x != nil {
+		if x, ok := x.Frame.(*StreamAttentionResponse_Snapshot); ok {
+			return x.Snapshot
+		}
+	}
+	return nil
+}
+
+func (x *StreamAttentionResponse) GetThreadChanged() *AttentionThreadChanged {
+	if x != nil {
+		if x, ok := x.Frame.(*StreamAttentionResponse_ThreadChanged); ok {
+			return x.ThreadChanged
+		}
+	}
+	return nil
+}
+
+func (x *StreamAttentionResponse) GetResync() *AttentionResync {
+	if x != nil {
+		if x, ok := x.Frame.(*StreamAttentionResponse_Resync); ok {
+			return x.Resync
+		}
+	}
+	return nil
+}
+
+func (x *StreamAttentionResponse) GetHeartbeat() *AttentionHeartbeat {
+	if x != nil {
+		if x, ok := x.Frame.(*StreamAttentionResponse_Heartbeat); ok {
+			return x.Heartbeat
+		}
+	}
+	return nil
+}
+
+type isStreamAttentionResponse_Frame interface {
+	isStreamAttentionResponse_Frame()
+}
+
+type StreamAttentionResponse_Snapshot struct {
+	// The full attention listing: the first frame, and the answer to a resync (WS16 S5).
+	Snapshot *AttentionSnapshot `protobuf:"bytes,3,opt,name=snapshot,proto3,oneof"`
+}
+
+type StreamAttentionResponse_ThreadChanged struct {
+	// One thread's attention changed (WS16 S5).
+	ThreadChanged *AttentionThreadChanged `protobuf:"bytes,4,opt,name=thread_changed,json=threadChanged,proto3,oneof"`
+}
+
+type StreamAttentionResponse_Resync struct {
+	// The client must discard its state and wait for the next snapshot (WS16 S5).
+	Resync *AttentionResync `protobuf:"bytes,5,opt,name=resync,proto3,oneof"`
+}
+
+type StreamAttentionResponse_Heartbeat struct {
+	// Keeps the connection alive; carries nothing (WS16 S5).
+	Heartbeat *AttentionHeartbeat `protobuf:"bytes,6,opt,name=heartbeat,proto3,oneof"`
+}
+
+func (*StreamAttentionResponse_Snapshot) isStreamAttentionResponse_Frame() {}
+
+func (*StreamAttentionResponse_ThreadChanged) isStreamAttentionResponse_Frame() {}
+
+func (*StreamAttentionResponse_Resync) isStreamAttentionResponse_Frame() {}
+
+func (*StreamAttentionResponse_Heartbeat) isStreamAttentionResponse_Frame() {}
+
+// The full attention listing of the caller (WS16 S5).
+type AttentionSnapshot struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The threads that need attention or are working, most urgent first (WS16 S5).
+	Items []*AttentionItem `protobuf:"bytes,1,rep,name=items,proto3" json:"items,omitempty"`
+	// The counts behind the badge (WS16 S5).
+	Counts        *AttentionCounts `protobuf:"bytes,2,opt,name=counts,proto3" json:"counts,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AttentionSnapshot) Reset() {
+	*x = AttentionSnapshot{}
+	mi := &file_model_plane_v1_attention_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AttentionSnapshot) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AttentionSnapshot) ProtoMessage() {}
+
+func (x *AttentionSnapshot) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_attention_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AttentionSnapshot.ProtoReflect.Descriptor instead.
+func (*AttentionSnapshot) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_attention_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *AttentionSnapshot) GetItems() []*AttentionItem {
+	if x != nil {
+		return x.Items
+	}
+	return nil
+}
+
+func (x *AttentionSnapshot) GetCounts() *AttentionCounts {
+	if x != nil {
+		return x.Counts
+	}
+	return nil
+}
+
+// One thread's new attention state, with the new counts (WS16 S5).
+type AttentionThreadChanged struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The thread's item (WS16 S5).
+	Item *AttentionItem `protobuf:"bytes,1,opt,name=item,proto3" json:"item,omitempty"`
+	// The counts after the change (WS16 S5).
+	Counts        *AttentionCounts `protobuf:"bytes,2,opt,name=counts,proto3" json:"counts,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AttentionThreadChanged) Reset() {
+	*x = AttentionThreadChanged{}
+	mi := &file_model_plane_v1_attention_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AttentionThreadChanged) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AttentionThreadChanged) ProtoMessage() {}
+
+func (x *AttentionThreadChanged) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_attention_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AttentionThreadChanged.ProtoReflect.Descriptor instead.
+func (*AttentionThreadChanged) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_attention_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *AttentionThreadChanged) GetItem() *AttentionItem {
+	if x != nil {
+		return x.Item
+	}
+	return nil
+}
+
+func (x *AttentionThreadChanged) GetCounts() *AttentionCounts {
+	if x != nil {
+		return x.Counts
+	}
+	return nil
+}
+
+// Tells the client to discard its state; a snapshot follows (WS16 S5).
+type AttentionResync struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AttentionResync) Reset() {
+	*x = AttentionResync{}
+	mi := &file_model_plane_v1_attention_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AttentionResync) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AttentionResync) ProtoMessage() {}
+
+func (x *AttentionResync) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_attention_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AttentionResync.ProtoReflect.Descriptor instead.
+func (*AttentionResync) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_attention_proto_rawDescGZIP(), []int{10}
+}
+
+// A keep-alive frame (WS16 S5).
+type AttentionHeartbeat struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AttentionHeartbeat) Reset() {
+	*x = AttentionHeartbeat{}
+	mi := &file_model_plane_v1_attention_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AttentionHeartbeat) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AttentionHeartbeat) ProtoMessage() {}
+
+func (x *AttentionHeartbeat) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_attention_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AttentionHeartbeat.ProtoReflect.Descriptor instead.
+func (*AttentionHeartbeat) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_attention_proto_rawDescGZIP(), []int{11}
+}
+
 var File_model_plane_v1_attention_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_attention_proto_rawDesc = "" +
@@ -646,19 +960,37 @@ const file_model_plane_v1_attention_proto_rawDesc = "" +
 	"\x14ListAttentionRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x17\n" +
 	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x14\n" +
-	"\x05limit\x18\x03 \x01(\x05R\x05limit\"\x9f\x01\n" +
+	"\x05limit\x18\x03 \x01(\x05R\x05limit\"\xc6\x01\n" +
 	"\x15ListAttentionResponse\x12\x18\n" +
 	"\aenabled\x18\x01 \x01(\bR\aenabled\x123\n" +
 	"\x05items\x18\x02 \x03(\v2\x1d.model_plane.v1.AttentionItemR\x05items\x127\n" +
-	"\x06counts\x18\x03 \x01(\v2\x1f.model_plane.v1.AttentionCountsR\x06counts\"d\n" +
+	"\x06counts\x18\x03 \x01(\v2\x1f.model_plane.v1.AttentionCountsR\x06counts\x12%\n" +
+	"\x0estream_enabled\x18\x04 \x01(\bR\rstreamEnabled\"d\n" +
 	"\x15MarkThreadSeenRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x17\n" +
 	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x1b\n" +
 	"\tthread_id\x18\x03 \x01(\tR\bthreadId\"5\n" +
 	"\x16MarkThreadSeenResponse\x12\x1b\n" +
-	"\tthread_id\x18\x01 \x01(\tR\bthreadId\"\x18\n" +
-	"\x16StreamAttentionRequest\"\x19\n" +
-	"\x17StreamAttentionResponse*\xa6\x02\n" +
+	"\tthread_id\x18\x01 \x01(\tR\bthreadId\"H\n" +
+	"\x16StreamAttentionRequest\x12\x15\n" +
+	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x17\n" +
+	"\auser_id\x18\x02 \x01(\tR\x06userId\"\xdb\x02\n" +
+	"\x17StreamAttentionResponse\x12\x14\n" +
+	"\x05epoch\x18\x01 \x01(\tR\x05epoch\x12\x10\n" +
+	"\x03seq\x18\x02 \x01(\x04R\x03seq\x12?\n" +
+	"\bsnapshot\x18\x03 \x01(\v2!.model_plane.v1.AttentionSnapshotH\x00R\bsnapshot\x12O\n" +
+	"\x0ethread_changed\x18\x04 \x01(\v2&.model_plane.v1.AttentionThreadChangedH\x00R\rthreadChanged\x129\n" +
+	"\x06resync\x18\x05 \x01(\v2\x1f.model_plane.v1.AttentionResyncH\x00R\x06resync\x12B\n" +
+	"\theartbeat\x18\x06 \x01(\v2\".model_plane.v1.AttentionHeartbeatH\x00R\theartbeatB\a\n" +
+	"\x05frame\"\x81\x01\n" +
+	"\x11AttentionSnapshot\x123\n" +
+	"\x05items\x18\x01 \x03(\v2\x1d.model_plane.v1.AttentionItemR\x05items\x127\n" +
+	"\x06counts\x18\x02 \x01(\v2\x1f.model_plane.v1.AttentionCountsR\x06counts\"\x84\x01\n" +
+	"\x16AttentionThreadChanged\x121\n" +
+	"\x04item\x18\x01 \x01(\v2\x1d.model_plane.v1.AttentionItemR\x04item\x127\n" +
+	"\x06counts\x18\x02 \x01(\v2\x1f.model_plane.v1.AttentionCountsR\x06counts\"\x11\n" +
+	"\x0fAttentionResync\"\x14\n" +
+	"\x12AttentionHeartbeat*\xa6\x02\n" +
 	"\x0eAttentionState\x12\x1f\n" +
 	"\x1bATTENTION_STATE_UNSPECIFIED\x10\x00\x12\"\n" +
 	"\x1eATTENTION_STATE_NEEDS_APPROVAL\x10\x01\x12\x1f\n" +
@@ -693,7 +1025,7 @@ func file_model_plane_v1_attention_proto_rawDescGZIP() []byte {
 }
 
 var file_model_plane_v1_attention_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_model_plane_v1_attention_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_model_plane_v1_attention_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
 var file_model_plane_v1_attention_proto_goTypes = []any{
 	(AttentionState)(0),             // 0: model_plane.v1.AttentionState
 	(AttentionReason)(0),            // 1: model_plane.v1.AttentionReason
@@ -705,25 +1037,37 @@ var file_model_plane_v1_attention_proto_goTypes = []any{
 	(*MarkThreadSeenResponse)(nil),  // 7: model_plane.v1.MarkThreadSeenResponse
 	(*StreamAttentionRequest)(nil),  // 8: model_plane.v1.StreamAttentionRequest
 	(*StreamAttentionResponse)(nil), // 9: model_plane.v1.StreamAttentionResponse
-	(*timestamppb.Timestamp)(nil),   // 10: google.protobuf.Timestamp
+	(*AttentionSnapshot)(nil),       // 10: model_plane.v1.AttentionSnapshot
+	(*AttentionThreadChanged)(nil),  // 11: model_plane.v1.AttentionThreadChanged
+	(*AttentionResync)(nil),         // 12: model_plane.v1.AttentionResync
+	(*AttentionHeartbeat)(nil),      // 13: model_plane.v1.AttentionHeartbeat
+	(*timestamppb.Timestamp)(nil),   // 14: google.protobuf.Timestamp
 }
 var file_model_plane_v1_attention_proto_depIdxs = []int32{
 	0,  // 0: model_plane.v1.AttentionItem.state:type_name -> model_plane.v1.AttentionState
 	1,  // 1: model_plane.v1.AttentionItem.reason:type_name -> model_plane.v1.AttentionReason
-	10, // 2: model_plane.v1.AttentionItem.since:type_name -> google.protobuf.Timestamp
+	14, // 2: model_plane.v1.AttentionItem.since:type_name -> google.protobuf.Timestamp
 	2,  // 3: model_plane.v1.ListAttentionResponse.items:type_name -> model_plane.v1.AttentionItem
 	3,  // 4: model_plane.v1.ListAttentionResponse.counts:type_name -> model_plane.v1.AttentionCounts
-	4,  // 5: model_plane.v1.AttentionService.ListAttention:input_type -> model_plane.v1.ListAttentionRequest
-	6,  // 6: model_plane.v1.AttentionService.MarkThreadSeen:input_type -> model_plane.v1.MarkThreadSeenRequest
-	8,  // 7: model_plane.v1.AttentionService.StreamAttention:input_type -> model_plane.v1.StreamAttentionRequest
-	5,  // 8: model_plane.v1.AttentionService.ListAttention:output_type -> model_plane.v1.ListAttentionResponse
-	7,  // 9: model_plane.v1.AttentionService.MarkThreadSeen:output_type -> model_plane.v1.MarkThreadSeenResponse
-	9,  // 10: model_plane.v1.AttentionService.StreamAttention:output_type -> model_plane.v1.StreamAttentionResponse
-	8,  // [8:11] is the sub-list for method output_type
-	5,  // [5:8] is the sub-list for method input_type
-	5,  // [5:5] is the sub-list for extension type_name
-	5,  // [5:5] is the sub-list for extension extendee
-	0,  // [0:5] is the sub-list for field type_name
+	10, // 5: model_plane.v1.StreamAttentionResponse.snapshot:type_name -> model_plane.v1.AttentionSnapshot
+	11, // 6: model_plane.v1.StreamAttentionResponse.thread_changed:type_name -> model_plane.v1.AttentionThreadChanged
+	12, // 7: model_plane.v1.StreamAttentionResponse.resync:type_name -> model_plane.v1.AttentionResync
+	13, // 8: model_plane.v1.StreamAttentionResponse.heartbeat:type_name -> model_plane.v1.AttentionHeartbeat
+	2,  // 9: model_plane.v1.AttentionSnapshot.items:type_name -> model_plane.v1.AttentionItem
+	3,  // 10: model_plane.v1.AttentionSnapshot.counts:type_name -> model_plane.v1.AttentionCounts
+	2,  // 11: model_plane.v1.AttentionThreadChanged.item:type_name -> model_plane.v1.AttentionItem
+	3,  // 12: model_plane.v1.AttentionThreadChanged.counts:type_name -> model_plane.v1.AttentionCounts
+	4,  // 13: model_plane.v1.AttentionService.ListAttention:input_type -> model_plane.v1.ListAttentionRequest
+	6,  // 14: model_plane.v1.AttentionService.MarkThreadSeen:input_type -> model_plane.v1.MarkThreadSeenRequest
+	8,  // 15: model_plane.v1.AttentionService.StreamAttention:input_type -> model_plane.v1.StreamAttentionRequest
+	5,  // 16: model_plane.v1.AttentionService.ListAttention:output_type -> model_plane.v1.ListAttentionResponse
+	7,  // 17: model_plane.v1.AttentionService.MarkThreadSeen:output_type -> model_plane.v1.MarkThreadSeenResponse
+	9,  // 18: model_plane.v1.AttentionService.StreamAttention:output_type -> model_plane.v1.StreamAttentionResponse
+	16, // [16:19] is the sub-list for method output_type
+	13, // [13:16] is the sub-list for method input_type
+	13, // [13:13] is the sub-list for extension type_name
+	13, // [13:13] is the sub-list for extension extendee
+	0,  // [0:13] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_attention_proto_init() }
@@ -731,13 +1075,19 @@ func file_model_plane_v1_attention_proto_init() {
 	if File_model_plane_v1_attention_proto != nil {
 		return
 	}
+	file_model_plane_v1_attention_proto_msgTypes[7].OneofWrappers = []any{
+		(*StreamAttentionResponse_Snapshot)(nil),
+		(*StreamAttentionResponse_ThreadChanged)(nil),
+		(*StreamAttentionResponse_Resync)(nil),
+		(*StreamAttentionResponse_Heartbeat)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_attention_proto_rawDesc), len(file_model_plane_v1_attention_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   8,
+			NumMessages:   12,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

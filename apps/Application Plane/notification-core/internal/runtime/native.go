@@ -20,6 +20,7 @@ var nativePayloadKeys = map[string]struct{}{
 	"thread_id":   {},
 	"run_id":      {},
 	"kind":        {},
+	"outcome":     {},
 }
 
 // NativeAdapter delivers the native types inside notification-core. It makes no provider call: the feed

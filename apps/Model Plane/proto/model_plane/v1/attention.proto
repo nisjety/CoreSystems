@@ -20,7 +20,7 @@ service AttentionService {
   // read state stays on the client.
   rpc MarkThreadSeen(MarkThreadSeenRequest) returns (MarkThreadSeenResponse);
 
-  // The per-user attention stream. Not served yet (WS16 S5); the call answers UNIMPLEMENTED.
+  // The per-person attention stream (WS16 S5): a snapshot, then the changes, resyncs and heartbeats.
   rpc StreamAttention(StreamAttentionRequest) returns (stream StreamAttentionResponse);
 }
 
@@ -106,6 +106,8 @@ message ListAttentionResponse {
   repeated AttentionItem items = 2;
   // The counts over every thread the page considered.
   AttentionCounts counts = 3;
+  // Whether this replica serves the attention stream, so a client knows to open it (WS16 S5).
+  bool stream_enabled = 4;
 }
 
 // Marks one of the caller's threads read.
@@ -124,8 +126,52 @@ message MarkThreadSeenResponse {
   string thread_id = 1;
 }
 
-// Opens the caller's attention stream. Not served yet (WS16 S5).
-message StreamAttentionRequest {}
+// Opens the caller's attention stream (WS16 S5).
+message StreamAttentionRequest {
+  // The organization the caller acts in. Must match the verified caller (WS16 S5).
+  string org_id = 1;
+  // The owner whose attention is streamed. Must match the verified caller (WS16 S5).
+  string user_id = 2;
+}
 
-// One frame of the attention stream. The frame set is defined with the stream (WS16 S5).
-message StreamAttentionResponse {}
+// One frame of the attention stream (WS16 S5). Frames of one stream share an epoch and carry a
+// rising sequence number; a new epoch means the client must start from the next snapshot.
+message StreamAttentionResponse {
+  // The stream's epoch. It changes when the hub restarts (WS16 S5).
+  string epoch = 1;
+  // The frame's sequence number within the epoch (WS16 S5).
+  uint64 seq = 2;
+  // The frame (WS16 S5).
+  oneof frame {
+    // The full attention listing: the first frame, and the answer to a resync (WS16 S5).
+    AttentionSnapshot snapshot = 3;
+    // One thread's attention changed (WS16 S5).
+    AttentionThreadChanged thread_changed = 4;
+    // The client must discard its state and wait for the next snapshot (WS16 S5).
+    AttentionResync resync = 5;
+    // Keeps the connection alive; carries nothing (WS16 S5).
+    AttentionHeartbeat heartbeat = 6;
+  }
+}
+
+// The full attention listing of the caller (WS16 S5).
+message AttentionSnapshot {
+  // The threads that need attention or are working, most urgent first (WS16 S5).
+  repeated AttentionItem items = 1;
+  // The counts behind the badge (WS16 S5).
+  AttentionCounts counts = 2;
+}
+
+// One thread's new attention state, with the new counts (WS16 S5).
+message AttentionThreadChanged {
+  // The thread's item (WS16 S5).
+  AttentionItem item = 1;
+  // The counts after the change (WS16 S5).
+  AttentionCounts counts = 2;
+}
+
+// Tells the client to discard its state; a snapshot follows (WS16 S5).
+message AttentionResync {}
+
+// A keep-alive frame (WS16 S5).
+message AttentionHeartbeat {}

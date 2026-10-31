@@ -638,6 +638,11 @@ func startRunWatchConsumer(ctx context.Context, nc *nats.Conn, pool *pgxpool.Poo
 		options = append(options, runwatch.WithAttentionNotify(coalesce))
 		slog.Info("run-watch attention notifications enabled", "coalesce", coalesce)
 	}
+	// WS20-S7: the scheduled-run outcome notice is off unless the switch is the literal "true".
+	if os.Getenv("CAPABILITY_CORE_SCHEDULED_NOTIFY_ENABLED") == "true" {
+		options = append(options, runwatch.WithScheduledOutcomeNotify())
+		slog.Info("run-watch scheduled-run outcome notices enabled")
+	}
 	notifier, err := runwatch.NewNotifier(runwatch.NewPostgresSubscriptionStore(pool), notifyClient, options...)
 	if err != nil {
 		slog.Error("run-watch notifier unavailable", "error", err)

@@ -168,6 +168,8 @@ const SPACE_SECTION_CODES = [
 // copy must be removed from here (checked below), and one the gateway stops
 // emitting must be removed too.
 const INTERNAL_ONLY: Record<string, string> = {
+  attention_stream_limit:
+    'the shared attention stream opens in the background and falls back to polling when refused; no person reads this code',
   agent_ref_required: 'the agent picker always sends the agent reference; only a hand-made request omits it',
   binding_ref_required: 'the agent row always carries its binding reference; only a hand-made request omits it',
   ambiguous_space_selection: 'the SPA sends one Space reference; two conflicting ones is a client bug',

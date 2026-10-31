@@ -76,12 +76,13 @@ type ChannelPreferenceGate interface {
 // inAppChannel is the channel native delivery writes to, so it is the one a native type's gate reads.
 const inAppChannel = "in_app"
 
-// nativeTypes are the content-free attention types. Native delivery is their only channel in this
-// build, so their preference gate reads the in-app channel alone.
+// nativeTypes are the content-free attention and scheduled-run outcome types. Native delivery is their
+// only channel in this build, so their preference gate reads the in-app channel alone.
 var nativeTypes = map[string]struct{}{
-	"modelplane.needs_approval": {},
-	"modelplane.needs_input":    {},
-	"modelplane.plan_ready":     {},
+	"modelplane.needs_approval":        {},
+	"modelplane.needs_input":           {},
+	"modelplane.plan_ready":            {},
+	"modelplane.scheduled_run_outcome": {},
 }
 
 // IsNativeType reports whether a notification type is delivered by the native in-app adapter.

@@ -12,6 +12,7 @@ mod approval_delivery;
 mod attention;
 mod attention_events;
 mod attention_grpc;
+mod attention_hub;
 mod audit_publisher;
 mod auth;
 mod compaction;
