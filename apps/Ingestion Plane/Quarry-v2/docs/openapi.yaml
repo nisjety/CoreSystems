@@ -475,6 +475,111 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorBody'
+  /v1/answer:
+    post:
+      operationId: answer
+      summary: One-call grounded answer with citations
+      description: >-
+        Searches, reads the top pages and synthesizes one answer through the Model
+        Plane, with the sources as citations. Metered as `quarry.answer.synth`, once
+        per synthesis. Off until the operator turns it on: it needs
+        `QUARRY_EDGE__ANSWER_SYNTHESIS=1`, a search provider and
+        `QUARRY_EDGE__MODEL_PLANE_URL`, and a Model Plane that accepts the edge's
+        service token. When it is not available the response names the reason, see
+        `AnswerErrorBody`. The same pipeline serves `include_answer` on
+        `POST /v1/search`, which reports the same reasons as `answer_status` and
+        `answer_reason`. A zero data retention request runs with the ZDR posture
+        (no paid providers, no answer cache) and leaves a metadata-only tombstone
+        when that is switched on.
+      tags:
+      - search
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AnswerRequest'
+      responses:
+        '200':
+          description: >-
+            The answer. With no usable source `answer` is empty and `model` is
+            empty; no model was called.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnswerResponse'
+        '400':
+          description: The query is empty
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnswerErrorBody'
+        '501':
+          description: >-
+            The answer pipeline is not wired. `reason` is the first closed gate:
+            `synthesis_disabled`, `no_search_provider`, `no_model_plane_url` or
+            `model_client_init_failed`; `hint` names the exact setting.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnswerErrorBody'
+        '502':
+          description: >-
+            The Model Plane failed the call (`reason` `model_plane_error`), or the
+            search or page-fetch step failed (`answer_search_failed`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnswerErrorBody'
+        '503':
+          description: >-
+            The pipeline is wired but the Model Plane refused the edge's service
+            token (`reason` `model_plane_auth_refused`). A deployment fact, not a
+            fault of the caller; the caller's own token is fine.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnswerErrorBody'
+  /v1/answer/stream:
+    post:
+      operationId: answerStream
+      summary: Server-sent events variant of /v1/answer
+      description: >-
+        Same pipeline and same request. Frames: `event: citations` (the citation
+        array), `event: delta` (`{"delta": text}`, repeated), then `event: done`
+        (`{"answer", "cached"}`); `event: error` (`{"message", "reason"}`) on
+        failure, where `reason` is the closed code of `AnswerErrorBody`. A warm
+        org-scoped answer-cache hit replays with no model call; a ZDR request
+        neither reads nor writes the cache. When the pipeline is not wired the
+        response is the same 501 as `/v1/answer`, not a stream. Metered as
+        `quarry.answer.synth` when an answer is produced.
+      tags:
+      - search
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AnswerRequest'
+      responses:
+        '200':
+          description: SSE stream of citations, deltas and a final `done`
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '400':
+          description: The query is empty
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnswerErrorBody'
+        '501':
+          description: The answer pipeline is not wired; `reason` as for `/v1/answer`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnswerErrorBody'
   /v1/agent/runs:
     post:
       operationId: startAgentRun
@@ -6292,6 +6397,11 @@ components:
         include_answer:
           type: boolean
           default: false
+          description: >-
+            Also synthesize an answer, as `POST /v1/answer` does. Never fails the
+            search: the response carries `answer_status` (and `answer_reason`) to say
+            whether `answer` is a real answer. Metered as `quarry.answer.synth` once
+            per synthesis, never on a cache hit. Skipped under zero data retention.
         format:
           type: string
           nullable: true
@@ -6353,6 +6463,34 @@ components:
         answer:
           type: string
           nullable: true
+        answer_status:
+          type: string
+          description: >-
+            Present only when the request set `include_answer`. `ok`: `answer` is a
+            synthesized answer. `no_sources`: the pipeline ran and no source had text,
+            `answer` is empty and no model was called. `skipped_zdr`: zero data
+            retention is on, nothing was sent to a model and `answer` is absent.
+            `unavailable`: no answer, `answer_reason` says why.
+          enum:
+          - ok
+          - no_sources
+          - skipped_zdr
+          - unavailable
+        answer_reason:
+          type: string
+          description: >-
+            Present only with `answer_status` `unavailable`. A closed code, never
+            provider text. See `AnswerErrorBody.reason` for what each one means and
+            the setting that fixes it.
+          enum:
+          - synthesis_disabled
+          - no_search_provider
+          - no_model_plane_url
+          - model_client_init_failed
+          - model_plane_auth_refused
+          - model_plane_rate_limited
+          - model_plane_error
+          - answer_search_failed
         citations:
           type: array
           nullable: true
@@ -6557,6 +6695,107 @@ components:
           type: integer
         requested:
           type: integer
+    AnswerRequest:
+      type: object
+      required:
+      - query
+      properties:
+        query:
+          type: string
+        top_k:
+          type: integer
+          nullable: true
+          description: Sources to read, 1 to 20 (default 5)
+        country:
+          type: string
+          nullable: true
+        language:
+          type: string
+          nullable: true
+        zdr:
+          type: boolean
+          nullable: true
+          description: Raised, never lowered, by the token's zero data retention floor
+    AnswerCitation:
+      type: object
+      required:
+      - url
+      - rank
+      properties:
+        url:
+          type: string
+        title:
+          type: string
+          nullable: true
+        rank:
+          type: integer
+        provider:
+          type: string
+        outcome:
+          type: object
+          description: >-
+            Where the cited text came from: `kind` is `fetched`, `snippet_fallback`
+            (the page fetch failed and the search snippet stood in; `reason` says why),
+            `failed` or `budget_exhausted`.
+        structured:
+          type: object
+          description: The structured facts harvested from the page, when it had any
+    AnswerResponse:
+      type: object
+      required:
+      - query
+      - answer
+      - citations
+      - model
+      - latency_ms
+      - sources_used
+      - sources_skipped
+      properties:
+        query:
+          type: string
+        answer:
+          type: string
+        citations:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnswerCitation'
+        model:
+          type: string
+        latency_ms:
+          type: integer
+        sources_used:
+          type: integer
+        sources_skipped:
+          type: integer
+        sources_snippet_fallback:
+          type: integer
+    AnswerErrorBody:
+      allOf:
+      - $ref: '#/components/schemas/ErrorBody'
+      - type: object
+        properties:
+          reason:
+            type: string
+            description: >-
+              A closed code, never provider text. `synthesis_disabled`: set
+              `QUARRY_EDGE__ANSWER_SYNTHESIS=1`. `no_search_provider`: configure a
+              search provider. `no_model_plane_url`: set
+              `QUARRY_EDGE__MODEL_PLANE_URL`. `model_client_init_failed`: the URL is
+              not a usable base URL, read the edge boot log. These four are 501
+              `UNSUPPORTED`. `model_plane_auth_refused`: 503 `UNAVAILABLE`, the
+              Control Plane registry or the Model Plane gateway refuses quarry-edge
+              (an owner decision, INNH-8b). `model_plane_rate_limited` and
+              `model_plane_error`: the model call failed. `answer_search_failed`: the
+              search or page-fetch step failed. Absent on a 400.
+            enum:
+            - synthesis_disabled
+            - no_search_provider
+            - no_model_plane_url
+            - model_client_init_failed
+            - model_plane_auth_refused
+            - model_plane_rate_limited
+            - model_plane_error
+            - answer_search_failed
     ErrorBody:
       type: object
       required:

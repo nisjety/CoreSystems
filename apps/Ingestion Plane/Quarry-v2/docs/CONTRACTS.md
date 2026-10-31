@@ -793,6 +793,43 @@ Model output is untrusted and checked by Quarry, not by the model: `json` is val
 
 **Not in this version.** No per-call output cap and no `cost_usd` (WS16.S1). No LLM usage metric: metering is unchanged (`quarry.extract.url` per `ok` or `fetched` source). The Verevon gateway re-adding `prompt` to its own contract is the Innhenting session's change. The model lane for a deployed stack (a grant on the Model Plane, decision X-7) is not built, so a deployed stack still cannot run this arm.
 
+## Answer synthesis: `/v1/answer`, `/v1/answer/stream` and `include_answer` (INNH-8a, 2026-10-31)
+
+One pipeline (search, read the top pages, synthesize through the Model Plane) serves three surfaces. It used to be wired whenever a search provider and `MODEL_PLANE_URL` were both set, and when it was not, `/v1/answer` said 501 with a hint that named two of the gates and `include_answer` said `answer: null` with no reason, and cached that null. This section is the contract after INNH-8a. The enablement steps are in `docs/RUNBOOKS.md`, "Answer synthesis".
+
+**The switch (new, default off).** `QUARRY_EDGE__ANSWER_SYNTHESIS` (`1`, `true` or `on` enables; anything else is off; compose `QUARRY_EDGE_ANSWER_SYNTHESIS`, default `0`). Read once at boot. The pipeline is built only with the switch on AND a search provider AND `QUARRY_EDGE__MODEL_PLANE_URL` AND a Model Plane client that builds. The edge records the FIRST closed gate in that order and reports it. A deployment that already set `MODEL_PLANE_URL` for another consumer (autoprompt, rerank, page titles, AI formats) no longer gets answer synthesis until it also sets the switch.
+
+**`POST /v1/answer` and `POST /v1/answer/stream`.** Request `{query, top_k?, country?, language?, zdr?}`. 200 `{query, answer, citations[], model, latency_ms, sources_used, sources_skipped, sources_snippet_fallback}`; the stream sends `citations`, `delta`, `done {answer, cached}` and `error {message, reason}` events. Errors keep the legacy body `{error, code, hint?}` (not the typed envelope) and gain one optional field, `reason`, a closed code that is never provider text:
+| status and `code` | `reason` | meaning and fix |
+|---|---|---|
+| 400 `BAD_REQUEST` | none | empty query |
+| 501 `UNSUPPORTED` | `synthesis_disabled` | the switch is off: set `QUARRY_EDGE__ANSWER_SYNTHESIS=1` |
+| 501 `UNSUPPORTED` | `no_search_provider` | configure `SEARXNG_URL`, `BRAVE_SEARCH_KEY` or `SERPER_KEY` |
+| 501 `UNSUPPORTED` | `no_model_plane_url` | set `QUARRY_EDGE__MODEL_PLANE_URL` (`MODEL_PLANE_URL` in compose) |
+| 501 `UNSUPPORTED` | `model_client_init_failed` | the URL is set but no client could be built from it: read the edge boot log |
+| 503 `UNAVAILABLE` | `model_plane_auth_refused` | wired, but Auth Core refused to mint the edge's Model Plane token or the gateway answered 401 or 403 to it. A deployment fact, never a 403 on the caller. The fix is cross-plane (owner decision INNH-8b, below) |
+| 429 `RATE_LIMITED` | `model_plane_rate_limited` | Auth Core rate limited the mint |
+| 502 `DRIVER_FAILED` (or the code the error had) | `model_plane_error` | the Model Plane call failed (transport, 5xx, undecodable) |
+| the status the error had | `answer_search_failed` | the search or page-fetch half failed before a model was asked |
+The `hint` of a 501 and of the 503 is fixed text that names the setting and `docs/RUNBOOKS.md`. The message of a 503 is fixed too; the gateway's own text never reaches the body. A stream whose pipeline is not wired answers the same 501 as JSON, not a stream.
+
+**`include_answer` on `POST /v1/search`.** The search never fails because of the answer. Two optional response fields, present only when the request set `include_answer`:
+| `answer_status` | `answer` | `answer_reason` | what happened |
+|---|---|---|---|
+| `ok` | the answer | absent | synthesized (or replayed from the search cache) |
+| `no_sources` | `""` | absent | the pipeline ran and no source had text; no model was called |
+| `skipped_zdr` | absent | absent | zero data retention (body flag or the token's floor): nothing was sent to a model |
+| `unavailable` | absent | one of the closed codes of the table above (`synthesis_disabled`, `no_search_provider`, `no_model_plane_url`, `model_client_init_failed`, `model_plane_auth_refused`, `model_plane_rate_limited`, `model_plane_error`, `answer_search_failed`) | no answer |
+A request without `include_answer` carries neither field and is byte for byte what it was. ZDR is checked before the gates, so a ZDR request says `skipped_zdr` even when the switch is off. The `answer` and `citations` fields are unchanged.
+
+**Metering.** `include_answer` is metered like `/v1/answer`: one `quarry.answer.synth` (quantity 1; metadata `sources_used`, `sources_skipped`, `model`, `latency_ms`, `via: "search.include_answer"`) per model call, on top of the one `quarry.search.query` the search always meters (whose metadata gains `answer_status`). Never on a cache hit, a refused or failed synthesis, a `no_sources` result or a ZDR request. The two events have different ids.
+
+**Cache.** A search that asked for an answer and has none (switch off, refused, failed) is not written to the search cache, so turning the pipeline on shows on the very next query and not after the TTL (it used to cache `answer: null`). An older entry of that kind is treated as a miss. A real answer, and an empty `no_sources` answer, are cached as before; ZDR never reads or writes the cache.
+
+**ZDR (ADR-4).** The model hop carries no ZDR posture, so `include_answer` under ZDR sends nothing to a model (`skipped_zdr`). `POST /v1/answer` and `/v1/answer/stream` are unchanged: under ZDR they still run the pipeline with the ZDR posture (no paid providers, no cache, no durable event) and still call the model with the page text. That is an open gap on the same hop as `search_suggest`, recorded as an owner decision, not closed here.
+
+**Owner decision INNH-8b (not built).** A deployed stack cannot turn synthesis on, whatever the edge is set to, until the cross-plane grant exists: the Control Plane registry must give quarry-edge the `model-gateway` audience (scope `models:invoke`, retention lane `zdr`), the Model Plane gateway must let a service principal reach the route Quarry calls (today only `POST /v1/ai/chat` and `/v1/ai/embeddings`; Quarry calls `/v1/invoke`), Quarry must send the second `x-inference-authorization` header, and the `model-invoke` manifest row flips to `granted: true` together with the registry grant. Until then a deployed stack answers `model_plane_auth_refused`.
+
 ## Crawl scope and robots: planned status and vocabulary (WS14.S0, 2026-10-23)
 
 Read this with `docs/CRAWL_SCOPE_ROBOTS.md`, which is the contract for WS14. The examples earlier in this file that show crawl and map scope fields, and the crawl denial reason schema, describe the target shape. They are not what the edge applies today.

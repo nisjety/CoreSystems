@@ -137,6 +137,12 @@ pub struct EdgeConfig {
     /// (falls back to the original order). Default off.
     #[serde(default)]
     pub semantic_rerank: bool,
+    /// Answer synthesis (INNH-8a): `/v1/answer`, `/v1/answer/stream` and `include_answer` on
+    /// `/v1/search`. Default off, so setting `model_plane_url` for another consumer (autoprompt,
+    /// rerank, page titles) does not also turn it on. It also needs a search provider and
+    /// `model_plane_url`. Env: `QUARRY_EDGE__ANSWER_SYNTHESIS`.
+    #[serde(default)]
+    pub answer_synthesis: bool,
     /// Optional Model Plane model override for semantic reranking.
     #[serde(default)]
     pub semantic_rerank_model: Option<String>,
@@ -374,6 +380,7 @@ impl EdgeConfig {
             autoprompt: false,
             autoprompt_model: None,
             semantic_rerank: false,
+            answer_synthesis: false,
             semantic_rerank_model: None,
             semantic_rerank_top_n: None,
             zero_saas_search: false,
@@ -465,6 +472,7 @@ mod compose_switch_tests {
         assert!(!cfg.autoprompt, "autoprompt is off");
         assert!(!cfg.semantic_rerank, "semantic rerank is off");
         assert!(!cfg.llm_classify_intent, "intent classification is off");
+        assert!(!cfg.answer_synthesis, "answer synthesis is off when the switch is absent");
         assert_eq!(cfg.page_title_enrich, Some(false), "page-title enrichment is off");
         blank_model_plane_url_is_unset(&mut cfg.model_plane_url);
         assert_eq!(cfg.model_plane_url, None, "an empty MODEL_PLANE_URL is not configured");
@@ -475,6 +483,23 @@ mod compose_switch_tests {
         let mut cfg = config_from(&[("QUARRY_EDGE__MODEL_PLANE_URL", "http://model-gateway:8080")]);
         blank_model_plane_url_is_unset(&mut cfg.model_plane_url);
         assert_eq!(cfg.model_plane_url.as_deref(), Some("http://model-gateway:8080"));
+    }
+
+    #[test]
+    fn answer_synthesis_parses_the_compose_values_and_is_off_by_default() {
+        for (raw, want) in [("0", false), ("1", true), ("true", true), ("false", false), ("on", true), ("off", false)] {
+            let cfg = config_from(&[("QUARRY_EDGE__ANSWER_SYNTHESIS", raw)]);
+            assert_eq!(cfg.answer_synthesis, want, "{raw:?}");
+        }
+        // The rest of the config still parses with the switch present, so the loader does not
+        // fall back to all-defaults (see `EdgeConfig::from_env`).
+        let cfg = config_from(&[
+            ("QUARRY_EDGE__ANSWER_SYNTHESIS", "1"),
+            ("QUARRY_EDGE__MODEL_PLANE_URL", "http://model-gateway:8080"),
+        ]);
+        assert!(cfg.answer_synthesis);
+        assert_eq!(cfg.model_plane_url.as_deref(), Some("http://model-gateway:8080"));
+        assert!(!config_from(&[]).answer_synthesis);
     }
 
     #[test]

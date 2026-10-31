@@ -1,6 +1,6 @@
 # INNH-8: Search answer provider switch (include_answer returns answer null; /v1/answer 501)
 
-Status: not started
+Status: 8a BUILT IN TESTS, DARK (local commit on innh/lane-d, see Commits). 8b (cross-plane grant) NOT BUILT: owner decision needed. Nothing was run against a real Model Plane; no flag or stack was touched.
 Lane: D (design/config). Plan home: none (config + docs, maybe small code). Estimate: 8 d total, of which 8a (Quarry side) about 2 d and 8b (cross-plane) about 5-7 d across three planes.
 Verified by reading quarryv2-next. Nothing was built or run. Paths under `apps/Ingestion Plane/Quarry-v2` unless stated.
 
@@ -71,11 +71,30 @@ Live proof (needs approval, not in this lane): side-by-side stack with MODEL_PLA
 - Security: the Model Plane route allowance for a service principal widens the gateway's service allowlist; keep to exact routes and models:invoke. SSRF/egress: the answer fetcher SimpleHttpMarkdownFetcher fetches arbitrary result URLs from the edge; confirm it goes through web policy and egress guard (answer candidate filter WS7.G is not done per RUNBOOKS.md:1230, :1242).
 - Contract: the legacy ErrorBody differs from the typed envelope; any client parsing `error` as an object breaks if it changes, so only add fields.
 
+## What 8a built (2026-10-31, lane D)
+- `QUARRY_EDGE__ANSWER_SYNTHESIS` (EdgeConfig `answer_synthesis`, default off; compose `QUARRY_EDGE_ANSWER_SYNTHESIS` `0` in both composes). The pipeline is built only with the switch AND a search provider AND `MODEL_PLANE_URL` AND a client that builds; `AppState.answer_status` keeps the first closed gate (`synthesis_disabled`, `no_search_provider`, `no_model_plane_url`, `model_client_init_failed`). Behaviour change: `MODEL_PLANE_URL` alone no longer enables synthesis.
+- `/v1/answer` and `/v1/answer/stream`: 501 `UNSUPPORTED` with `reason` and an exact `hint`; 503 `UNAVAILABLE` / `model_plane_auth_refused` when the mint is refused or the gateway answers 401/403 (fixed message, no provider text); other model-hop failures keep their status and gain `reason` (`model_plane_rate_limited`, `model_plane_error`, `answer_search_failed`); the stream error frame carries `reason`. The runtime stamps `hop: model_plane` on a model-call error so the search half is not mistaken for it.
+- `POST /v1/search` with `include_answer`: `answer_status` (`ok`, `no_sources`, `skipped_zdr`, `unavailable`) and `answer_reason`; neither field without `include_answer`. ZDR skips synthesis (no model call). ANSWER_SYNTH is metered once per model call (not on cache hit, refusal, failure, `no_sources`, ZDR). A request that asked for an answer and has none is never written to the cache; an answerless cached entry is a miss.
+- Docs: openapi (both routes, 4 schemas, 2 response fields; allowlist entries removed), CONTRACTS, ERROR_REASONS, RUNBOOKS "Answer synthesis: enable, disable and the reasons", SELF_HOST, TAVILY_PARITY, BILLING, composes, deploy README, ZDR matrix rows `search` and `answer` (goldens regenerated), docs-contract tests.
+
+## Contract the Innhenting UI needs
+`POST /v1/search` `{query, include_answer: true, ...}` -> 200 `{..., answer?, citations?, answer_status, answer_reason?}`. Show the answer when `answer_status` is `ok`; `no_sources` = empty answer; `skipped_zdr` = ZDR org (do not retry); `unavailable` + `answer_reason` = the operator's setting is missing (`synthesis_disabled` is today's live value; `model_plane_auth_refused` after the switch is on without the grant). `POST /v1/answer` errors: `{error, code, hint?, reason?}`; 501 for a closed gate, 503 for the refused token. No SDK regeneration was done (blocked by the unparseable spec, W2 U56).
+
+## Owner decisions (8b and ZDR)
+1. INNH-8b, the cross-plane grant (Control Plane registry `model-gateway` audience with `models:invoke` and the `zdr` lane for quarry-edge; Model Plane gateway route allowance for a service principal, or move Quarry to `/v1/ai/chat`; second `x-inference-authorization` header; `model-invoke` manifest row `granted: true` together with the registry). NOT built; until then a deployed stack answers `model_plane_auth_refused` if the switch is turned on, so do not turn it on there.
+2. `/v1/answer` under ZDR still sends page text to the Model Plane (no ZDR posture on the hop, ADR-4); `include_answer` now skips. Choose: refuse `/v1/answer` under ZDR like the AI formats, or accept until the `zdr` lane exists. The ZDR matrix `answer` row says so in its basis but stays Enforced/Honored.
+3. Confirm the default-off switch: a side-by-side stack that had `MODEL_PLANE_URL` set must now set `QUARRY_EDGE_ANSWER_SYNTHESIS=1`.
+
+## Deviations from the design above
+- Flat `answer_status` vocabulary became `ok | no_sources | skipped_zdr | unavailable` plus `answer_reason` (closed code), as the task asked; `not_requested` is an omitted field. ZDR is `skipped_zdr` (not in the original list).
+- 503 for the refused token (not 502). The legacy error body was kept and only gained `reason`.
+- SDK regeneration not done.
+
 ## Commits
-(none yet)
+(see git log --grep "INNH-8" on innh/lane-d)
 
 ## Tests (counts)
-(none yet)
+All in the lane container (`qtest-lane.sh d`), no host cargo. `quarry-edge --lib` 669 passed (new: answer_status 4, search_routes 4, config 1); `quarry-edge --bins` 655 passed (main binary compiles with the new wiring); `quarry-edge --test answer_provider_status` 12 passed (new; the Redis cache test returned early: no Redis in the container); `zdr_feature_matrix` 14, `zdr_claim_floor` 26, `zdr_tombstone` 29, `web_policy_routes` 11 passed; `quarry-core` zdr_matrix 6 passed (goldens regenerated with QUARRY_UPDATE_GOLDEN=1, CRLF restored, rerun without it); `quarry-runtime --lib answer` 34 passed (new: 1). rustfmt --check clean on the two new files. Node: `node --test scripts/tests/*.test.mjs` 51 pass, 0 fail, 12 todo (all todo before; 3 new docs-contract tests pass); openapi route coverage (allowlist entries removed, both routes documented), no-bare-null and internal-guard tests pass.
 
 ## Not verified
-Code reading only; Docker is off, nothing exercised. Unverified: the models:invoke vs inference:invoke scope mismatch in the deployed registry; whether the live model-gateway container is the build with these middleware rules.
+No real Model Plane gateway was called; a wiremock double of `/v1/invoke` stands in. The Redis-backed cache test never ran (no Redis in the lane container), so the failed-synthesis-not-cached rule is proven by the `cacheable` / `usable_hit` unit tests only; add `answer_provider_status` to the CI step that has a Redis and `REQUIRE_CONTRACT=1`. The dev-bypass enablement path in the runbook is unverified. Unverified (earlier, still open): the models:invoke vs inference:invoke scope mismatch in the deployed registry; whether the live model-gateway container is the build with these middleware rules.

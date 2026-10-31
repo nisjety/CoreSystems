@@ -26,6 +26,7 @@ use quarry_tls::TlsProfile;
 mod agent_routes;
 mod fleet_routes;
 mod answer_routes;
+mod answer_status;
 mod api_error;
 mod budget;
 mod audio_routes;
@@ -1455,13 +1456,23 @@ async fn run() -> anyhow::Result<()> {
     };
 
     // Cycle 19 / cluster #18: AnswerPipeline (Tavily replacement).
-    // Requires BOTH a SearchProvider AND a Model Plane URL. When either
-    // is missing, /v1/answer returns 501 Unsupported with a hint.
-    let answer_pipeline: Option<Arc<quarry_runtime::answer::AnswerPipeline>> = match (
+    // INNH-8a: needs the QUARRY_EDGE__ANSWER_SYNTHESIS switch (default off), a SearchProvider AND
+    // a Model Plane URL. The first closed gate is kept on the state, so /v1/answer answers 501
+    // with the exact reason and include_answer says why it has no answer.
+    let answer_gate = answer_status::AnswerPipelineStatus::gate(
+        cfg.answer_synthesis,
+        search.is_some(),
+        cfg.model_plane_url.as_deref().is_some_and(|s| !s.trim().is_empty()),
+    );
+    let (answer_pipeline, answer_pipeline_status): (
+        Option<Arc<quarry_runtime::answer::AnswerPipeline>>,
+        answer_status::AnswerPipelineStatus,
+    ) = match (
+        answer_gate,
         &search,
-        cfg.model_plane_url.as_deref().filter(|s| !s.is_empty()),
+        cfg.model_plane_url.as_deref().filter(|s| !s.trim().is_empty()),
     ) {
-        (Some(search_arc), Some(mp_url)) => {
+        (answer_status::AnswerPipelineStatus::Ready, Some(search_arc), Some(mp_url)) => {
             match build_model_client(mp_url) {
                 Ok(mp_client) => {
                     let mp_arc = Arc::new(mp_client);
@@ -1483,17 +1494,26 @@ async fn run() -> anyhow::Result<()> {
                         formats,
                     );
                     tracing::info!("answer pipeline: wired (search + model plane)");
-                    Some(Arc::new(pipeline))
+                    (
+                        Some(Arc::new(pipeline)),
+                        answer_status::AnswerPipelineStatus::Ready,
+                    )
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "answer pipeline disabled: model plane client init failed");
-                    None
+                    tracing::warn!(error = %e, reason = "model_client_init_failed", "answer pipeline disabled: model plane client init failed");
+                    (
+                        None,
+                        answer_status::AnswerPipelineStatus::ModelClientInitFailed,
+                    )
                 }
             }
         }
-        _ => {
-            tracing::info!("answer pipeline disabled (search or model_plane_url unset)");
-            None
+        (gate, _, _) => {
+            tracing::info!(
+                reason = gate.reason().map(|r| r.as_str()).unwrap_or("none"),
+                "answer pipeline disabled (set QUARRY_EDGE__ANSWER_SYNTHESIS=1, a search provider and QUARRY_EDGE__MODEL_PLANE_URL)"
+            );
+            (None, gate)
         }
     };
 
@@ -1742,6 +1762,7 @@ async fn run() -> anyhow::Result<()> {
         page_title_enricher,
         service_token_provider: cross_plane_tokens.clone(),
         answer_pipeline,
+        answer_status: answer_pipeline_status,
         local_index,
         usage,
         limits: org_limits,

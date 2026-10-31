@@ -175,13 +175,15 @@ services:
       # *_base_url); the config crate maps QUARRY_EDGE__MODEL_PLANE_URL to it. Empty,
       # the default, means no Model Plane: quarry-edge reads an empty value as unset
       # (config.rs, from_env). Set MODEL_PLANE_URL (for example http://model-gateway:8080)
-      # to opt in. Set, it serves /v1/invoke for answer synthesis; the gateway chooses
-      # the model (no model id needed).
+      # to opt in. Set, the Model Plane features that have a switch may use it (answer
+      # synthesis has one, below); the gateway chooses the model (no model id needed).
       QUARRY_EDGE__MODEL_PLANE_URL: ${MODEL_PLANE_URL:-}
       # Model Plane switches (decision 3.12 of 2026-10-27, accepted 2026-10-28): all
-      # off by default, and each one also needs MODEL_PLANE_URL above. Answer
-      # synthesis, search suggest, audio and the AI formats of /v1/extract have no
-      # switch: they run whenever MODEL_PLANE_URL is set (QB-T17, still pending).
+      # off by default, and each one also needs MODEL_PLANE_URL above. Search
+      # suggest, audio and the AI formats of /v1/extract have no switch: they run
+      # whenever MODEL_PLANE_URL is set (QB-T17, still pending). Answer synthesis
+      # (/v1/answer, /v1/answer/stream, include_answer; INNH-8a) has one, below:
+      # QUARRY_EDGE__ANSWER_SYNTHESIS, "0" here.
       # The AI formats of POST /v1/scrape (json, summary, question, highlights;
       # INNH-1) have one, below: QUARRY_EDGE__AI_FORMATS, "0" here. It is for a
       # development or side-by-side stack only (a deployed stack has no Model Plane
@@ -191,6 +193,11 @@ services:
       # Under ZDR the AI formats are refused (ADR-4); "refuse" is the only value
       # that takes effect in v1.
       QUARRY_EDGE__AI_FORMATS_ZDR: ${QUARRY_EDGE_AI_FORMATS_ZDR:-refuse}
+      # Answer synthesis (INNH-8a): off. It needs MODEL_PLANE_URL, a search provider and a Model
+      # Plane that accepts the edge's service token; a deployed stack has no such grant yet (owner
+      # decision INNH-8b), so an owner turns it on, not this file. While a gate is closed the
+      # answer routes name it in `reason`. See docs/RUNBOOKS.md (Quarry-v2), "Answer synthesis".
+      QUARRY_EDGE__ANSWER_SYNTHESIS: "${QUARRY_EDGE_ANSWER_SYNTHESIS:-0}"
       # Autoprompt: rewrite verbose Research/Comparative queries before fan-out.
       QUARRY_EDGE__AUTOPROMPT: "${QUARRY_EDGE_AUTOPROMPT:-0}"
       QUARRY_EDGE__AUTOPROMPT_MODEL: ${QUARRY_AUTOPROMPT_MODEL:-}

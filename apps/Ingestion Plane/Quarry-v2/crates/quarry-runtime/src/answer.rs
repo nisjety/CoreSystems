@@ -85,6 +85,26 @@ const MAX_TOTAL_CHARS: usize = 40_000;
 /// prose small enough for this to be the larger half anyway.
 const MAX_FIGURE_BLOCK_CHARS: usize = 2_000;
 
+/// Key and value of the detail `AnswerPipeline::answer` stamps on an error from the model hop
+/// (the Model Plane call), so a caller can tell a refused service token from a failed search
+/// without reading provider text. INNH-8a.
+pub const MODEL_HOP_KEY: &str = "hop";
+pub const MODEL_HOP: &str = "model_plane";
+
+/// Stamp `hop: model_plane` on an error from the model call. Existing details are kept.
+pub fn mark_model_hop(mut error: QuarryError) -> QuarryError {
+    match error.details.as_mut() {
+        Some(serde_json::Value::Object(map)) => {
+            map.insert(MODEL_HOP_KEY.into(), MODEL_HOP.into());
+        }
+        Some(_) => {}
+        None => {
+            error.details = Some(serde_json::json!({ MODEL_HOP_KEY: MODEL_HOP }));
+        }
+    }
+    error
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnswerRequest {
     pub query: String,
@@ -625,12 +645,14 @@ impl AnswerPipeline {
             Some(org_id) => {
                 self.formats
                     .query_for_org(org_id, &prepared.combined, &req.query, zdr)
-                    .await?
+                    .await
+                    .map_err(mark_model_hop)?
             }
             None => {
                 self.formats
                     .query(&prepared.combined, &req.query, zdr)
-                    .await?
+                    .await
+                    .map_err(mark_model_hop)?
             }
         };
         Ok(AnswerResult {
@@ -882,6 +904,24 @@ mod tests {
     use quarry_transform::structured::{FigureSource, KeyFigure};
     use serde_json::json;
     use std::sync::Mutex;
+
+    #[test]
+    fn the_model_hop_stamp_keeps_existing_details_and_is_added_to_a_bare_error() {
+        let bare = mark_model_hop(QuarryError::new(ErrorCode::Forbidden, "refused"));
+        assert_eq!(bare.details.as_ref().unwrap()[MODEL_HOP_KEY], MODEL_HOP);
+
+        let with = mark_model_hop(
+            QuarryError::new(ErrorCode::DriverFailed, "x")
+                .with_details(serde_json::json!({ "status": 500 })),
+        );
+        let details = with.details.unwrap();
+        assert_eq!(details["status"], 500, "existing details survive");
+        assert_eq!(details[MODEL_HOP_KEY], MODEL_HOP);
+        // The wire message and the code are untouched.
+        let again = mark_model_hop(QuarryError::new(ErrorCode::RateLimited, "slow"));
+        assert_eq!(again.code, ErrorCode::RateLimited);
+        assert_eq!(again.message, "slow");
+    }
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 

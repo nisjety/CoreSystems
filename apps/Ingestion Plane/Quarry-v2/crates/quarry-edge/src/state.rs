@@ -98,6 +98,9 @@ pub struct AppState {
     /// Wired only when both a SearchProvider AND model_plane_url are
     /// configured. `/v1/answer` returns 501 Unsupported otherwise.
     pub answer_pipeline: Option<Arc<AnswerPipeline>>,
+    /// INNH-8a: why `answer_pipeline` is `None` (the first closed gate), so a 501 on
+    /// `/v1/answer` and `answer_reason` on `/v1/search` name the exact switch.
+    pub answer_status: crate::answer_status::AnswerPipelineStatus,
     /// Cycle 19 / cluster #16: own-corpus Tantivy index. Cloned cheaply
     /// (interior Arc). PageRunner's success path pushes new docs here.
     pub local_index: Option<TantivyLocalIndex>,

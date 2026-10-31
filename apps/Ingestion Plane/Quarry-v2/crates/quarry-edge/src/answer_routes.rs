@@ -9,8 +9,12 @@
 //!   sources matched or no fetches succeeded — clients see a typed shape
 //!   rather than an error envelope)
 //! - `400` for empty queries
-//! - `501 Unsupported` when no answer pipeline is configured on the edge
-//!   (i.e. no SearchProvider or no Model Plane URL)
+//! - `501 Unsupported` when no answer pipeline is configured on the edge. INNH-8a: the body
+//!   carries `reason`, the FIRST closed gate (`synthesis_disabled`, `no_search_provider`,
+//!   `no_model_plane_url`, `model_client_init_failed`), and a `hint` that names the exact switch
+//! - `503 Service Unavailable` with `reason: model_plane_auth_refused` when the pipeline is wired
+//!   but the Model Plane refuses the edge's service token (a deployment fact, never a 403 on the
+//!   caller). Other model-hop failures keep their status and gain a `reason`
 
 use axum::response::sse::{Event, Sse};
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Extension, Json};
@@ -18,6 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use quarry_runtime::answer::{AnswerRequest, AnswerResult};
 
+use crate::answer_status::{self, AnswerReason};
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -39,6 +44,62 @@ pub struct ErrorBody {
     pub code: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+    /// INNH-8a: a closed code from [`AnswerReason`], never provider text. Additive; absent on
+    /// errors that have none (a 400 for an empty query).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
+}
+
+/// 501 for a pipeline that is not wired, naming the first closed gate.
+fn not_configured(reason: AnswerReason) -> axum::response::Response {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(
+            serde_json::to_value(ErrorBody {
+                error: "answer pipeline not configured".into(),
+                code: "UNSUPPORTED".into(),
+                hint: Some(reason.hint().into()),
+                reason: Some(reason.as_str()),
+            })
+            .unwrap(),
+        ),
+    )
+        .into_response()
+}
+
+/// The response for a failed `AnswerPipeline::answer`. A refused service token is a 503 with a
+/// fixed message (the model gateway's own text stays out); every other failure keeps the status
+/// its error code always had and gains the closed `reason`.
+fn failed(e: quarry_core::error::QuarryError) -> axum::response::Response {
+    let reason = answer_status::classify_failure(&e);
+    if reason == AnswerReason::ModelPlaneAuthRefused {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(
+                serde_json::to_value(ErrorBody {
+                    error: "the Model Plane refused quarry-edge's service token".into(),
+                    code: "UNAVAILABLE".into(),
+                    hint: Some(reason.hint().into()),
+                    reason: Some(reason.as_str()),
+                })
+                .unwrap(),
+            ),
+        )
+            .into_response();
+    }
+    (
+        StatusCode::from_u16(e.code.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        Json(
+            serde_json::to_value(ErrorBody {
+                error: e.message,
+                code: format!("{:?}", e.code).to_uppercase(),
+                hint: None,
+                reason: Some(reason.as_str()),
+            })
+            .unwrap(),
+        ),
+    )
+        .into_response()
 }
 
 /// `POST /v1/answer`. WS4.J: wraps `answer_run` so a ZDR run's metadata-only tombstone is
@@ -78,6 +139,7 @@ async fn answer_run(
                     error: "query must not be empty".into(),
                     code: "BAD_REQUEST".into(),
                     hint: None,
+                    reason: None,
                 })
                 .unwrap(),
             ),
@@ -85,22 +147,9 @@ async fn answer_run(
             .into_response();
     }
 
-    let Some(pipeline) = state.answer_pipeline.as_ref() else {
-        return (
-            StatusCode::NOT_IMPLEMENTED,
-            Json(
-                serde_json::to_value(ErrorBody {
-                    error: "answer pipeline not configured".into(),
-                    code: "UNSUPPORTED".into(),
-                    hint: Some(
-                        "configure a SearchProvider AND a Model Plane URL to enable /v1/answer"
-                            .into(),
-                    ),
-                })
-                .unwrap(),
-            ),
-        )
-            .into_response();
+    let pipeline = match answer_status::gate(&state) {
+        Ok(pipeline) => pipeline,
+        Err(reason) => return not_configured(reason),
     };
 
     let pipeline_req = AnswerRequest {
@@ -144,18 +193,7 @@ async fn answer_run(
                 .await;
             (StatusCode::OK, Json(serde_json::to_value(result).unwrap())).into_response()
         }
-        Err(e) => (
-            StatusCode::from_u16(e.code.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            Json(
-                serde_json::to_value(ErrorBody {
-                    error: e.message,
-                    code: format!("{:?}", e.code).to_uppercase(),
-                    hint: None,
-                })
-                .unwrap(),
-            ),
-        )
-            .into_response(),
+        Err(e) => failed(e),
     }
 }
 
@@ -179,6 +217,7 @@ pub async fn answer_stream(
                     error: "query must not be empty".into(),
                     code: "BAD_REQUEST".into(),
                     hint: None,
+                    reason: None,
                 })
                 .unwrap(),
             ),
@@ -194,23 +233,12 @@ pub async fn answer_stream(
         &claims.org_id,
         crate::zdr_tombstone::Kind::Answer,
     ));
-    let Some(pipeline) = state.answer_pipeline.clone() else {
-        tombstone.status(StatusCode::NOT_IMPLEMENTED.as_u16());
-        return (
-            StatusCode::NOT_IMPLEMENTED,
-            Json(
-                serde_json::to_value(ErrorBody {
-                    error: "answer pipeline not configured".into(),
-                    code: "UNSUPPORTED".into(),
-                    hint: Some(
-                        "configure a SearchProvider AND a Model Plane URL to enable /v1/answer"
-                            .into(),
-                    ),
-                })
-                .unwrap(),
-            ),
-        )
-            .into_response();
+    let pipeline = match answer_status::gate(&state) {
+        Ok(pipeline) => pipeline.clone(),
+        Err(reason) => {
+            tombstone.status(StatusCode::NOT_IMPLEMENTED.as_u16());
+            return not_configured(reason);
+        }
     };
 
     let query = req.query.clone();
@@ -263,9 +291,10 @@ pub async fn answer_stream(
             Ok(p) => p,
             Err(e) => {
                 tombstone.failed(&e);
+                let reason = answer_status::classify(false, e.code).as_str();
                 yield Ok(Event::default()
                     .event("error")
-                    .data(serde_json::json!({ "message": e.message }).to_string()));
+                    .data(serde_json::json!({ "message": e.message, "reason": reason }).to_string()));
                 return;
             }
         };
@@ -318,9 +347,10 @@ pub async fn answer_stream(
             }
             Err(e) => {
                 tombstone.failed(&e);
+                let reason = answer_status::classify(true, e.code).as_str();
                 yield Ok(Event::default()
                     .event("error")
-                    .data(serde_json::json!({ "message": e.message }).to_string()));
+                    .data(serde_json::json!({ "message": e.message, "reason": reason }).to_string()));
                 return;
             }
         }

@@ -20,7 +20,7 @@ import { parseYamlSubset } from "../yaml-subset.mjs";
 const OPTION_B =
   "option B (the Data Plane rerank wire and config) exists only as uncommitted edits in C:/dev/CoresSystem (branch main); see .plan-work/quarry-w1w2/depth/D-D-B3-openapi-sdk.md";
 const QB_T17 =
-  "QB-T17: answer synthesis, search suggest, audio and the AI formats of /v1/extract have no switch in config.rs and run whenever QUARRY_EDGE__MODEL_PLANE_URL is set, so the six switches this test pins include four that do not exist (the AI formats of /v1/scrape have theirs, QUARRY_EDGE__AI_FORMATS, pinned by its own test below). Stays pending until the QB-T17 gate lands (model_plane_gate.rs is not on this branch); see decision 3.12 in .plan-work/quarry-w1w2/DECISIONS-ROUND-2026-10-27.md";
+  "QB-T17: search suggest, audio and the AI formats of /v1/extract have no switch in config.rs and run whenever QUARRY_EDGE__MODEL_PLANE_URL is set, so the five switches this test pins include three that do not exist (the AI formats of /v1/scrape and answer synthesis have theirs, QUARRY_EDGE__AI_FORMATS and QUARRY_EDGE__ANSWER_SYNTHESIS, pinned by their own tests below). Stays pending until the QB-T17 gate lands (model_plane_gate.rs is not on this branch); see decision 3.12 in .plan-work/quarry-w1w2/DECISIONS-ROUND-2026-10-27.md";
 const pending = (name, reason, fn) => test(name, { todo: reason }, fn);
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -226,7 +226,6 @@ pending("the Model Plane switches default off, as the docs say (QB-T17)", QB_T17
     "QUARRY_EDGE__AUTOPROMPT",
     "QUARRY_EDGE__LLM_CLASSIFY_INTENT",
     "QUARRY_EDGE__PAGE_TITLE_ENRICH",
-    "QUARRY_EDGE__ANSWER_SYNTHESIS",
     "QUARRY_EDGE__SEARCH_SUGGEST",
     "QUARRY_EDGE__MODEL_AUDIO",
   ]) {
@@ -358,6 +357,68 @@ test("the runbook and the self-host guide document every name the AI formats rea
     assert.ok(runbook.includes(reason), `RUNBOOKS names ${reason}`);
     assert.ok(read(join(quarry, "docs", "ERROR_REASONS.md")).includes(reason), `ERROR_REASONS names ${reason}`);
   }
+});
+
+// ----------------------------------------------------------------------------- answer synthesis (INNH-8a)
+
+const ANSWER_REASONS = [
+  "synthesis_disabled",
+  "no_search_provider",
+  "no_model_plane_url",
+  "model_client_init_failed",
+  "model_plane_auth_refused",
+  "model_plane_rate_limited",
+  "model_plane_error",
+  "answer_search_failed",
+];
+
+test("answer synthesis is off in the Ingestion compose and in the deploy compose, and the code reads the switch", () => {
+  const deployCompose = join(quarry, "deploy", "compose", "docker-compose.yml");
+  for (const [label, text] of [
+    ["Ingestion compose", read(paths.compose)],
+    ["deploy compose", read(deployCompose)],
+  ]) {
+    const env = environmentOf(quarryEdgeBlock(text));
+    assert.equal(composeDefault(env.get("QUARRY_EDGE__ANSWER_SYNTHESIS")), "0", `${label}: QUARRY_EDGE__ANSWER_SYNTHESIS defaults to 0`);
+  }
+  const status = read(join(quarry, "crates", "quarry-edge", "src", "answer_status.rs"));
+  assert.match(status, /pub const ENV_ANSWER_SYNTHESIS: &str = "QUARRY_EDGE__ANSWER_SYNTHESIS";/, "the code names the switch");
+  assert.match(read(join(quarry, "crates", "quarry-edge", "src", "config.rs")), /pub answer_synthesis: bool,/, "EdgeConfig reads it");
+});
+
+test("every QUARRY_EDGE__ANSWER_SYNTHESIS name in the docs and the composes is the one the code reads", () => {
+  const deploy = join(quarry, "deploy", "compose");
+  const files = [paths.compose, join(deploy, "docker-compose.yml"), join(deploy, "README.md"), ...currentDocs().map((doc) => doc.path), paths.openapi];
+  let seen = 0;
+  for (const path of new Set(files)) {
+    for (const match of read(path).matchAll(/QUARRY_EDGE__?ANSWER_SYNTHESIS[A-Z0-9_]*/g)) {
+      const name = match[0].replace(/_+$/, "").replace(/^QUARRY_EDGE_ANSWER/, "QUARRY_EDGE__ANSWER");
+      seen += 1;
+      assert.equal(name, "QUARRY_EDGE__ANSWER_SYNTHESIS", `${path} names ${name}, which the code does not read`);
+    }
+  }
+  assert.ok(seen >= 6, "the check found the names it is about");
+});
+
+test("the runbook, the contract and the error reasons name every answer reason the code can send, and only those", () => {
+  const status = read(join(quarry, "crates", "quarry-edge", "src", "answer_status.rs"));
+  const inCode = [...status.matchAll(/Self::[A-Za-z]+ => "([a-z_]+)",/g)].map((m) => m[1]);
+  assert.deepEqual(new Set(inCode), new Set(ANSWER_REASONS), "the reasons in answer_status.rs are the documented set");
+  const runbook = read(paths.runbooks);
+  const contracts = read(join(quarry, "docs", "CONTRACTS.md"));
+  const reasons = read(join(quarry, "docs", "ERROR_REASONS.md"));
+  const spec = read(paths.openapi);
+  for (const reason of ANSWER_REASONS) {
+    assert.ok(reasons.includes("`" + reason + "`"), `ERROR_REASONS names ${reason}`);
+    assert.ok(contracts.includes(reason), `CONTRACTS names ${reason}`);
+    assert.ok(spec.includes("- " + reason), `openapi.yaml lists ${reason}`);
+  }
+  for (const reason of ["synthesis_disabled", "no_search_provider", "no_model_plane_url", "model_client_init_failed", "model_plane_auth_refused"]) {
+    assert.ok(runbook.includes(reason), `RUNBOOKS names ${reason}`);
+  }
+  assert.ok(runbook.includes("## Answer synthesis: enable, disable and the reasons"), "RUNBOOKS has the section the 501 hints point at");
+  assert.ok(runbook.includes("QUARRY_EDGE_ANSWER_SYNTHESIS=1"), "RUNBOOKS gives the switch to set");
+  assert.ok(read(paths.selfHost).includes("QUARRY_EDGE__ANSWER_SYNTHESIS"), "SELF_HOST documents the switch");
 });
 
 // ----------------------------------------------------------------------------- openapi

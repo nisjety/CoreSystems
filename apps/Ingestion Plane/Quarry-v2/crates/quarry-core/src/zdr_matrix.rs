@@ -137,8 +137,9 @@ pub const ROWS: &[Row] = &[
         enforced_by: &[
             "zdr_claim_floor::a_user_token_from_a_zdr_org_runs_search_as_zdr_even_when_the_body_says_false",
             "zdr_claim_floor::a_user_token_from_a_zdr_org_runs_search_as_zdr_when_the_body_omits_the_flag",
+            "answer_provider_status::include_answer_under_zdr_is_skipped_with_no_model_call_and_no_meter",
         ],
-        basis: "paid providers closed, search cache bypassed, no durable SearchIssued event; the provider failure is logged as a class only",
+        basis: "paid providers closed, search cache bypassed, no durable SearchIssued event; the provider failure is logged as a class only. include_answer (INNH-8a) sends nothing to a model under ZDR: answer_status skipped_zdr, the answer pipeline never starts, no answer usage is metered",
         log: Log::Canary {
             test: "zdr_log_capture::a_zdr_search_with_a_failing_provider_logs_no_query",
         },
@@ -185,7 +186,7 @@ pub const ROWS: &[Row] = &[
             "zdr_claim_floor::answer_runs_as_zdr_for_a_zdr_org_user_and_as_before_otherwise",
             "zdr_claim_floor::answer_stream_runs_as_zdr_for_a_zdr_org_user_and_as_before_otherwise",
         ],
-        basis: "the answer pipeline runs with the effective ZDR posture: no paid providers, no durable search event",
+        basis: "the answer pipeline runs with the effective ZDR posture: no paid providers, no durable search event, no answer cache. The model hop carries no ZDR posture (ADR-4), so a ZDR answer still sends the page text to the Model Plane: the same open gap as search_suggest, an owner decision with INNH-8b (include_answer on /v1/search does not do this: it is skipped under ZDR)",
         log: Log::Unverified,
     },
     Row {

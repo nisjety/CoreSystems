@@ -212,6 +212,23 @@ Field errors (400, in `details.fields[]`, not in `details.reason`; each carries 
 
 Not errors: a model failure, a rate limit, a schema the output could not satisfy, a ZDR request and an empty page are `data.ai.<kind>` entries inside a 200 (`status`, `code`, `reason`): codes `MODEL_UNAVAILABLE`, `MODEL_RATE_LIMITED`, `SCHEMA_INVALID`, `ZDR_UNAVAILABLE`, `BUDGET_EXHAUSTED`, `EMPTY_SOURCE`; reasons `model_lane_denied`, `model_lane_unauthorized`, `model_rejected_request`, `upstream_unavailable`, `timeout`, `transport`, `bad_reply`, `not_json`, `too_large`, `deadline`.
 
+## Answer synthesis (INNH-8a)
+
+These come from `POST /v1/answer`, `POST /v1/answer/stream` (as `reason` in the legacy error body, or in the `error` event) and `include_answer` on `POST /v1/search` (as `answer_reason`, inside a 200). Contract: `docs/CONTRACTS.md`, "Answer synthesis". Runbook: `docs/RUNBOOKS.md`, "Answer synthesis". The reason is a closed code and never carries provider text.
+
+| reason | status and code | meaning | what a caller does |
+|---|---|---|---|
+| `synthesis_disabled` | 501 `UNSUPPORTED` | `QUARRY_EDGE__ANSWER_SYNTHESIS` is not on (the default) | the operator sets it; use plain `/v1/search` meanwhile |
+| `no_search_provider` | 501 `UNSUPPORTED` | no search provider is configured | the operator configures `SEARXNG_URL`, `BRAVE_SEARCH_KEY` or `SERPER_KEY` |
+| `no_model_plane_url` | 501 `UNSUPPORTED` | `QUARRY_EDGE__MODEL_PLANE_URL` is unset or blank | the operator sets it |
+| `model_client_init_failed` | 501 `UNSUPPORTED` | the URL is set but the Model Plane client could not be built from it | the operator fixes the URL; the edge boot log has the cause |
+| `model_plane_auth_refused` | 503 `UNAVAILABLE` | the pipeline is wired but Auth Core refused to mint the edge's Model Plane token, or the gateway answered 401 or 403 to it | not the caller's token and not retryable by the caller; the operator needs the cross-plane grant (owner decision INNH-8b) |
+| `model_plane_rate_limited` | 429 `RATE_LIMITED` | the mint was rate limited | retry later |
+| `model_plane_error` | 502 `DRIVER_FAILED` | the Model Plane call failed | retry later |
+| `answer_search_failed` | the status of the error | the search or page-fetch half failed before a model was asked | retry later |
+
+On `POST /v1/search` the status of an answer is `answer_status`: `ok`, `no_sources`, `skipped_zdr` (ZDR: nothing was sent to a model) or `unavailable` (with `answer_reason` from the table). A missing answer is never a failed search.
+
 ## 403 `FORBIDDEN`: an action an agent may not take (WS9.B, D2-012)
 
 The agent is the one the verified token gives (a service principal, or a person's token that says `agent`), on the step route, its `interact` alias, the browser socket's `action` message (an error frame with the same `code` and `details`) and the attached delegate lane. Nothing is consumed: no budget step, no approval, no receipt. Not retryable by the same caller.

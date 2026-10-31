@@ -109,6 +109,10 @@ services:
       # Model Plane credential for this lane yet (decision X-7). Refused under ZDR (ADR-4).
       QUARRY_EDGE__AI_FORMATS: "${QUARRY_EDGE_AI_FORMATS:-0}"
       QUARRY_EDGE__AI_FORMATS_ZDR: ${QUARRY_EDGE_AI_FORMATS_ZDR:-refuse}
+      # Answer synthesis (/v1/answer, include_answer; INNH-8a): off. Needs MODEL_PLANE_URL, a search
+      # provider and a Model Plane that accepts the edge's service token (no deployed stack has that
+      # grant yet, owner decision INNH-8b). A closed gate is named in `reason` on the answer routes.
+      QUARRY_EDGE__ANSWER_SYNTHESIS: "${QUARRY_EDGE_ANSWER_SYNTHESIS:-0}"
       # ADR-6 (owner ruling 2026-10-28): scrape-time actions default off; see the Ingestion compose.
       QUARRY_EDGE__SCRAPE_ACTIONS: "${QUARRY_EDGE_SCRAPE_ACTIONS:-off}"
       # SmartRouter web-search primary. Quarry-v2 owns its searxng (defined
