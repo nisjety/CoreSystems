@@ -251,6 +251,8 @@ async fn spawn_counting_control(reach: Arc<Reach>) -> String {
 async fn spawn_sweep_edge() -> (SocketAddr, Arc<Reach>) {
     std::env::set_var("QUARRY_EDGE_AUTH_DEV_BYPASS", "1");
     std::env::set_var("QUARRY_EDGE__RUNTIME_AUTH_TOKEN", SWEEP_RUNTIME_TOKEN);
+    // INNH-6a: the sitemap discovery route is served only with its flag on.
+    std::env::set_var("QUARRY_EDGE__CRAWL_SITEMAP", "on");
     let reach = Arc::new(Reach::default());
     let control = spawn_counting_control(reach.clone()).await;
     let (tx, mut rx) = mpsc::channel(64);
@@ -277,7 +279,7 @@ async fn sweep_post(addr: SocketAddr, path: &str, body: Value) -> (u16, String) 
         .post(format!("http://{addr}{path}"))
         .timeout(Duration::from_secs(20))
         .json(&body);
-    let request = if path == "/v1/internal/run_page" {
+    let request = if path == "/v1/internal/run_page" || path == "/v1/internal/crawl/sitemap" {
         let url = body["url"].as_str().unwrap_or_default();
         let org = body["org_id"].as_str().unwrap_or_default();
         request
@@ -305,6 +307,10 @@ fn fetching_routes() -> Vec<(&'static str, Value)> {
         (
             "/v1/internal/run_page",
             json!({ "url": url, "org_id": "org_sweep" }),
+        ),
+        (
+            "/v1/internal/crawl/sitemap",
+            json!({ "url": url, "org_id": "org_sweep", "crawl": { "v": 1, "scope_mode": "enforce" } }),
         ),
     ]
 }
@@ -373,6 +379,8 @@ fn route_manifest() -> Vec<(&'static str, Gate)> {
         ("/v1/internal/change/record", NoUrl),
         ("/v1/internal/page-images/:org/:doc/:page/:hash", NoUrl),
         ("/v1/internal/run_page", Gated),
+        // INNH-6a: the seed is gated, and so is every sitemap file the route fetches.
+        ("/v1/internal/crawl/sitemap", Gated),
         ("/v1/internal/schedules/preflight", NoUrl),
         ("/v1/internal/orgs/:org/profiles", NoUrl),
         ("/v1/profiles", NoUrl),
