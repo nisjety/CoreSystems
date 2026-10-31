@@ -2,7 +2,7 @@
   "contract": "quarry.zdr-feature-matrix",
   "rows": [
     {
-      "basis": "no artifact, page-cache entry, scrape record or durable event; the text comes back in the response (default format markdown), cut at max_inline_bytes. The AI formats (json, summary, question, highlights; INNH-1, dark behind QUARRY_EDGE__AI_FORMATS) are refused under ZDR (ADR-4): each is answered status skipped, code ZDR_UNAVAILABLE inside the 200, with no Model Plane call, so no page text leaves for a model; QUARRY_EDGE__AI_FORMATS_ZDR accepts only refuse in v1 and the engine refuses a ZDR input as well",
+      "basis": "no artifact, page-cache entry, URL-result-cache entry (INNH-7, see scrape_max_age), scrape record or durable event; the text comes back in the response (default format markdown), cut at max_inline_bytes. The AI formats (json, summary, question, highlights; INNH-1, dark behind QUARRY_EDGE__AI_FORMATS) are refused under ZDR (ADR-4): each is answered status skipped, code ZDR_UNAVAILABLE inside the 200, with no Model Plane call, so no page text leaves for a model; QUARRY_EDGE__AI_FORMATS_ZDR accepts only refuse in v1 and the engine refuses a ZDR input as well",
       "detail": null,
       "enforced_by": [
         "zdr_claim_floor::scrape_runs_as_zdr_for_a_zdr_org_user_and_not_for_a_registry_zdr_service",
@@ -37,6 +37,23 @@
       ],
       "status": "enforced",
       "treatment": "honored"
+    },
+    {
+      "basis": "same route as scrape: INNH-7 max_age reads and writes quarry:scrape:{org}:{hash} (the output and warnings, no inline text; the text is rebuilt from artifacts), dark behind QUARRY_EDGE__SCRAPE_MAX_AGE. Under ZDR (body flag or the token's floor) the cache is neither read nor written and no key is computed, not even a hashed URL (a hash of a known URL is a membership oracle); the scrape runs as a fresh fetch and the response carries the warning max_age_ignored_zdr with cache_state bypass. The decision is made in scrape_cache::eligibility before any key exists",
+      "detail": {
+        "warning": "max_age_ignored_zdr"
+      },
+      "enforced_by": [
+        "scrape_max_age::zdr_never_reads_or_writes_the_url_cache_and_says_so",
+        "scrape_cache::tests::zdr_wins_over_everything_else"
+      ],
+      "id": "scrape_max_age",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [],
+      "status": "enforced",
+      "treatment": "degraded"
     },
     {
       "basis": "scrape_routes::get_scrape refuses a reader whose organization is under ZDR, even for a record written before it was",

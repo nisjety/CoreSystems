@@ -314,8 +314,19 @@ pub fn zdr_report(specs: &[AiSpec]) -> AiReport {
     report
 }
 
+/// What every requested format answers when the request's privacy block forbids
+/// a model hop (`credential_or_secret`, `zdr_ephemeral`): skipped, no call made.
+pub fn privacy_report(specs: &[AiSpec]) -> AiReport {
+    let mut report = AiReport::default();
+    for spec in specs {
+        report.set(spec.kind(), AiFormatReport::skipped(AiCode::PrivacyPolicy));
+    }
+    report
+}
+
 /// Run the requested AI formats against the page text. Never fails: what went
-/// wrong is in the report. Under ZDR it answers without building a client, so no
+/// wrong is in the report. Under ZDR, or when the privacy block forbids a model
+/// hop (`model_hop_allowed` false), it answers without building a client, so no
 /// call can be made.
 pub async fn run_ai_formats(
     state: &AppState,
@@ -323,10 +334,14 @@ pub async fn run_ai_formats(
     specs: &[AiSpec],
     source: &str,
     zdr: bool,
+    model_hop_allowed: bool,
     request_id: &str,
 ) -> (AiFields, AiReport) {
     if zdr {
         return (AiFields::default(), zdr_report(specs));
+    }
+    if !model_hop_allowed {
+        return (AiFields::default(), privacy_report(specs));
     }
     let Some(engine) = engine_for(state, settings()) else {
         // `availability` refuses this before the fetch; this is the guard behind it.

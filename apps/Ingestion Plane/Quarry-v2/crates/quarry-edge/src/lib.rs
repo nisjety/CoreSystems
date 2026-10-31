@@ -40,6 +40,7 @@ pub mod run_limits;
 pub mod schedule_preflight;
 pub mod schedule_routes;
 pub mod scrape_actions;
+pub mod scrape_cache;
 pub mod scrape_contract;
 pub mod scrape_routes;
 pub mod search_routes;

@@ -1,8 +1,8 @@
 # INNH-7: `max_age` on scrape: accept it and respect it
 
-Status: not started
+Status: done in tests (behind QUARRY_EDGE__SCRAPE_MAX_AGE, default off; not run on a live stack)
 Lane: A (scrape/extract). Plan home: E3.8 (slice E3.8.4 "URL cache freshness plus ZDR matrix row", 5.0 d, W3 batch B8, W3-estimate.md:45; NOT built per W2-closeout.md:199). Estimate: 5 d.
-Verified by reading quarryv2-next. Nothing was built or run. Paths under `apps/Ingestion Plane/Quarry-v2`.
+Section 'What exists' and 'The gap' below were written by reading quarryv2-next before the build and are kept as the plan record. Built and tested 2026-10-31 on innh/lane-a. Paths under `apps/Ingestion Plane/Quarry-v2`.
 
 ## What exists (NOT ACCEPTED, and the existing cache cannot serve a "max age" read)
 REQUEST SIDE: `max_age` / `maxAge` is not a field of ScrapeRequest (`crates/quarry-edge/src/routes.rs:451-499`) nor in ScrapeOptions OPTION_KEYS (`crates/quarry-core/src/scrape.rs:418-429`, 10 entries) nor REQUEST_KEYS (`scrape_contract.rs:36-48`, 11 entries). Sent today it is an unknown key: lenient mode ignores it with `warnings[] unknown_field` + `effective_options.ignored_fields` + `Deprecation: true` (scrape_contract.rs:205-227, 261-288; routes.rs:592-601, 657-662); strict mode (QUARRY_EDGE__SCRAPE_REQUEST_VALIDATION=strict) returns 400 unknown_field.
@@ -56,11 +56,72 @@ quarry-edge integration, `tests/cache_policy.rs` (Redis, REQUIRE_CONTRACT=1; reu
 - Compat: widening admission changes `cache_state` from bypass to miss for option-bearing requests only when `max_age` is sent.
 - Tests need a real Redis; Docker is not running, so proof is a build-time task with a throwaway redis:7-alpine.
 
+## What was built (2026-10-31, lane A, branch innh/lane-a)
+Status line above is the result. Everything is behind the new default-off flag `QUARRY_EDGE__SCRAPE_MAX_AGE` except the `CachePolicy.mode` default fix, the `GAP.md` correction and the dark metric label.
+
+1. Contract (quarry-core `scrape.rs`): `ScrapeOptions.max_age: Option<u64>` (alias `maxAge`, `OPTION_KEYS` 10 -> 11), read with the existing integer reader (`invalid_type`), checked in `resolve`: `feature_disabled` at `max_age` while `ScrapeLimits.max_age_enabled` is false, `out_of_range` above `MAX_AGE_CEILING_MS` (2_592_000_000). `ResolvedScrapeOptions.max_age_ms`. `canonical_options_key` does not contain it (a test pins that the key does not rotate). New `result_cache_admissible()` (no capture, no actions, no AI format); the old `is_default`/`cache_admissible` still gate the page cache, unchanged.
+2. `CachePolicy.mode` now has `#[serde(default)]` (`CacheMode` defaults to `ReadWrite`): `{"cache":{"max_age_s":60}}` is valid. Tested in quarry-core, `scrape_max_age_off.rs` (switch off) and `scrape_max_age.rs` (TTL 120 s honoured).
+3. URL result cache (quarry-edge `cache.rs`): `PageCache::result_key(org, url, options_key)` = `quarry:scrape:{org}:{blake3(canonical url \x1f options key)}`; `None` for an empty org and for a URL with no canonical form; canonical form = `quarry_transform::canonical_url::canonicalize` with tracking parameters stripped (fragment, host case, default port, `utm_*`/`gclid` do not matter; trailing slash and query order do). `CachedScrape {output, warnings}`, `get_result`, `put_result`. Metric label `cache="scrape"`. The old `fingerprint()` helper is still dead code.
+4. Decisions (quarry-edge `scrape_cache.rs`, new): `eligibility` (ZDR first, before any key exists; then captures, actions, AI formats, browser plan, non-default web policy, ingest, privacy class `zdr_ephemeral` / `credential_or_secret`), `age_ms`/`is_fresh` (inclusive; `max_age` 0 never serves), `is_storable` (2xx, driver not browser, markdown artifact present), `rehydrate` (markdown / html / rawHtml rebuilt from the stored artifacts with the same `offer_inline` the run uses, made `pub` in `quarry-runtime/src/pipeline.rs`; a missing artifact or another org's artifact is `None` = miss).
+5. Route (`routes.rs` `scrape_with`): after the web-policy gate and the existing `prev_fingerprint` page-cache read, before any driver is built: if the flag is on and the request is eligible, compute the key (only when a cache exists); with `max_age > 0` and `cache.mode` read-capable, read; fresh and rehydratable -> a hit response built from the stored output (original `fetched_at`, `effective_options.cache_state: "hit"`, `cached_at`, `cache_age_ms`, no `scrape_id`, not metered, stored warnings kept); else fetch. After a successful fetch, if a key exists and `cache.mode` is write-capable and the result is storable, write with TTL `cache.max_age_s` (default 3600). Warnings for a request that carried `max_age`: `max_age_ignored_zdr`, `max_age_ignored`, `cache_unavailable`.
+6. Flag (`scrape_contract.rs`): `QUARRY_EDGE__SCRAPE_MAX_AGE` on/1/true -> `ScrapeSettings.max_age_enabled` -> `ScrapeLimits.max_age_enabled`. Both compose files carry `QUARRY_EDGE__SCRAPE_MAX_AGE: "${QUARRY_EDGE_SCRAPE_MAX_AGE:-off}"`. `QUARRY_EDGE__SCRAPE_OPTIONS_ENABLED=0` turns `max_age` back into an unknown key (tested). `mod scrape_cache;` added to `main.rs` (the bin has its own module list).
+7. Docs: `openapi.yaml` (`ScrapeRequest.max_age`, `CachePolicy` descriptions, `effective_options` text), `CONTRACTS.md` 9.1 (paragraph on the page cache points at the new `max_age` section), `ERROR_REASONS.md`, `RUNBOOKS.md` ("Scrape `max_age`"), `GAP.md:61` corrected (was "Equivalent", false), ZDR matrix row `scrape_max_age` (`Degraded { max_age_ignored_zdr }`, two cited tests) plus a mention in the `scrape` row; `zdr-feature-matrix.json`, `.sha256`, `ZDR_MATRIX.md` regenerated with `QUARRY_UPDATE_GOLDEN=1` and re-verified without it; `docs/schemas/scrape-options.schema.json` and `effective-scrape-options.schema.json` regenerated with `UPDATE_SCHEMAS=1` and re-verified.
+
+## Decisions recorded
+- Hits are NOT metered as `scrape.page` (same as the existing page-cache hit). Owner/Control Plane decision whether a hit bills; the response already says `cache_state: "hit"`.
+- A hit has no `scrape_id` (no new record is written).
+- Writes happen for every cacheable success while the flag is on, whether or not the request sent `max_age`, so the first `max_age` request can hit. Cost: one Redis write (output without page text) per cacheable scrape for the TTL. Alternative (write only with `max_age`) is in the depth file.
+- Browser-served results (including a static request that escalated) and browser plans stay uncached in v1.
+- Redirects: keyed by the requested URL.
+- `max_age` larger than the entry TTL behaves as the TTL (documented).
+- Under ZDR no key is computed at all (not even a hashed URL), per ADR topic 4.
+
+## Review fixes (2026-10-31, one pass)
+BLOCKER 1 (bot walls and soft-404s were cached under the default). The shipped default is `QUARRY_CHALLENGE_ENFORCE=log`: the pipeline only logs `would_refuse_scrape` and returns Ok, and a soft-404 only emits an event, so the earlier claim that the run fails first was wrong and `is_storable` (2xx, non-browser, markdown artifact) let both through. Fixed: `InlineParts` (quarry-runtime `pipeline.rs`) has two new never-serialized booleans, `bot_wall_suspected` (set whenever the challenge classifier gives a block reason, in every mode, before the enforce branch) and `soft_404` (set where `soft_404::detect` fires). `scrape_cache::is_storable(output, inline)` refuses when either is set; `routes.rs` passes `&inline`. A browser escalation keeps the existing refusal. CONTRACTS.md 9.1, RUNBOOKS.md ("What is never cached"), the `scrape_cache.rs` header and the openapi `max_age` text now say what is true. The sentence "default enforce mode fails the run" is removed from 'Not verified'. Under `enforce` nothing changed (the run fails before any write).
+Tests: quarry-runtime `log_mode_still_flags_a_bot_wall_and_a_soft_404_on_the_inline_parts` (Turnstile page, WAF interstitial served as 200, soft-404 flagged under `log`; article, login and contact-form-with-recaptcha pages not flagged); quarry-edge unit `a_bot_wall_or_a_soft_404_is_never_stored_even_though_the_run_succeeded` (+ the old `is_storable` test updated); Redis test `scrape_max_age::a_bot_wall_or_a_soft_404_is_never_written_under_the_default_log_mode` (three bodies at the default mode: 200 answered, no `quarry:scrape:*` key, second `max_age` call is a `miss` with a second fetch, no key afterwards). Run results: see "Tests (review fixes)".
+BLOCKER 2 (openapi). `Alias actionsOnError.` was a continuation of the `max_age` text. Moved to the end of the `actions_on_error` description; `max_age` keeps its one `Alias maxAge.`. Guard added: `openapi-scrape-parity.test.mjs` `an_alias_note_sits_in_the_description_of_the_property_it_names` (every "Alias <camel>." sentence must sit in the property whose snake_case name it is; the two properties spelled out). Node: 10 of 10 pass.
+
+## Tests (review fixes)
+Same container recipe as above (`qtest-lane.sh a`, Debian `redis-server` started inside, `REQUIRE_CONTRACT=1`). The first attempt of the day failed to compile `quarry-runtime` (a stale-target `ArtifactSummary` error unrelated to this change; a later `cargo check` and the rerun were clean).
+- quarry-runtime `cargo test -p quarry-runtime --lib challenge`: 53 passed (includes the new `log_mode_still_flags_a_bot_wall_and_a_soft_404_on_the_inline_parts`).
+- quarry-edge `--lib scrape_cache`: 12 passed (new: `a_bot_wall_or_a_soft_404_is_never_stored_even_though_the_run_succeeded`; `only_a_2xx_non_browser_result_with_a_markdown_artifact_is_stored` updated for the new signature).
+- `tests/scrape_max_age.rs` (Redis): 15 passed (14 + the new default-log-mode guard). `scrape_max_age_off` 3, `cache_policy` 10, `zdr_feature_matrix` 14: all passed.
+- Node `openapi-scrape-parity.test.mjs`: 10 of 10 (new alias-note guard).
+
 ## Commits
-(none yet)
+- 31d9ad15f feat(quarry-edge): max_age on POST /v1/scrape with an org-scoped URL result cache (INNH-7): code, tests, docs, goldens, compose files.
+- the commit that adds this status, the progress file and the depth lines (docs(plan-work): INNH-7 status, progress and depth findings): see git log innh/lane-a.
 
 ## Tests (counts)
-(none yet)
+Run in the lane-a container (`qtest-lane.sh a`, shared warm target) with a Debian `redis-server` started inside the container (the build image has none; apt installed it for this run). `REQUIRE_CONTRACT=1` for the Redis-gated binaries, so none of them skipped.
+- `cargo test -p quarry-core --features jsonschema`: lib 284 passed (new: 2 in `cache.rs`, 7 for `max_age` in `scrape.rs`: parse snake/camel/conflict/null, invalid_type, ceiling and out_of_range, feature_disabled, key unchanged, result-cache admission, effective-options echo; the `OPTION_KEYS` pin test updated), `scrape_schema` 2 passed against the regenerated goldens, the ZDR matrix golden/markdown/sha test passed; other binaries green (2, 4, 31, 10, 15 (+1 ignored), 2, 29).
+- `cargo test -p quarry-edge --lib` (INNH-7 modules + `routes::tests`): `cache::result_key_tests` 4, `scrape_cache::tests` 11, `scrape_contract` +2 new (36 passed in the module filter); `routes::tests` and the others: 278 passed in the touched-modules filter.
+- `tests/scrape_max_age.rs` (switch on, Redis): 14 passed. Cases: hit within window without a fetch (fetch count stays 1, `cache_age_ms`, original `fetched_at`, `cached_at == fetched_at`, no `scrape_id`, markdown / html / rawHtml rebuilt equal to the first answer); camelCase `maxAge` plus `cache:{max_age_s:120}` without a mode (TTL 60..=120); older than `max_age` -> refetch and entry replaced, and the same entry fresh under a wider window; `max_age: 0` never reads but writes; absent `max_age` never reads; different `include_tags` / extractor -> separate entries; another org's entry never served or overwritten; artifacts gone -> miss, 200, re-written; ZDR (no read, no write, no key for an unplanted URL, warning `max_age_ignored_zdr`); 404 never written; browser plan (profile_required) bypasses with `max_age_ignored`; `cache.mode` read_only / write_only / bypass; no cache backend -> `cache_unavailable`; validation (`out_of_range`, `invalid_type` x3, 0 and the ceiling accepted).
+- `tests/scrape_max_age_off.rs` (switch off, no Redis): 3 passed (`feature_disabled` at `max_age` for both spellings and for 0 with zero fetches; a plain scrape unchanged with no `max_age` fields; `cache:{max_age_s}` without a mode accepted).
+- Regression: `cache_policy` 10 passed (unchanged, Redis, REQUIRE_CONTRACT=1), `ai_formats` 17, `ai_formats_off` 3 (the existing AI-request cache test is in `ai_formats.rs`), `zdr_feature_matrix` 14, `zdr_gap_rows` 9.
+- Node: `node --test scripts/tests/*.test.mjs` 60 tests, 48 pass, 0 fail, 12 todo (the todo are the pre-existing rerank/search ones); `openapi-scrape-parity` and `openapi-internal-guard` pass.
+
+## Deviations from the plan in this file
+- Response metadata is on `effective_options` (as the file recommended), not a new `data.cache` object.
+- Extra warning code `max_age_ignored` (non-ZDR ineligible requests) and `cache_unavailable` (no backend, or an org that cannot address a key); the file named only the ZDR one.
+- The write is also skipped for a result the browser served and for ingest requests; the file did not say.
+- Not built (per the file): crawl, batch, run_page, swr, `min_age`, `store`.
 
 ## Not verified
-Code reading only; nothing built or run. Unverified: that the write site is after the challenge gate; behaviour of artifact rehydrate for html/raw variants.
+- No real stack: no live Redis memory behaviour, no real origin, no gateway call. Redis was a Debian `redis-server` in the build container.
+- Charset: a hit rebuilds `html`/`rawHtml` with the stored `Content-Type` charset, as a run does; only utf-8 was tested.
+- `clippy` was not run. `rustfmt --check` was run on the touched files: the repo's existing code in scrape.rs / routes.rs was already not rustfmt-clean (INNH-1 left it so) and the new code was left in the file's own style, not reformatted.
+- The Model Plane's vendored copy of `scrape-options.schema.json` (RUNBOOKS says it vendors the golden) was not found under apps/ in this worktree and was not touched; if it exists elsewhere it now lacks `max_age`.
+- `quarry-v2-ci.yml` does not run `scrape_max_age.rs` (outside Quarry-v2); owner/CI decision.
+
+## Contract the Innhenting UI needs
+Request (additive, `POST /v1/scrape`, only while the stack runs with `QUARRY_EDGE_SCRAPE_MAX_AGE=on`; otherwise a 400 `feature_disabled` at `max_age`): `max_age` integer milliseconds, alias `maxAge`, 0..=2592000000. Firecrawl clients use only this. `cache.max_age_s` is something else (TTL in seconds of the entry this request writes); `cache` may now omit `mode`.
+Response, `data.effective_options` (additive): `max_age` (echo), `cache_state` (`hit` | `miss` | `bypass`), and on a hit `cached_at` (RFC 3339, the original fetch) and `cache_age_ms`. A hit has the ORIGINAL `data.fetched_at`, rebuilt `markdown` / `html` / `raw_html` when asked for, the run's stored warnings, and no `scrape_id`. `data.warnings[]` may carry `{code: "max_age_ignored_zdr" | "max_age_ignored" | "cache_unavailable", field: "max_age"}`.
+Errors: 400 `details.fields[] {path: "max_age", code: "feature_disabled" | "out_of_range" | "invalid_type" | "conflicting_aliases"}`.
+UI sketch: a "use cached result up to N minutes old" control sends `max_age: N*60000`; show "from cache, N min old" from `cache_age_ms`; when `cache_state` is `bypass` with a `max_age_ignored*` warning, say why.
+
+## Owner decisions needed
+1. Turn `QUARRY_EDGE_SCRAPE_MAX_AGE` on for a stack (dev first). It is not on anywhere.
+2. Do cache hits bill? (Today: no, same as the page-cache hit.)
+3. Write-always vs write-on-demand (Redis memory), and an entry cap per org, if option-bearing keys grow.
+4. Add `scrape_max_age.rs` to the Redis step of `quarry-v2-ci.yml`.

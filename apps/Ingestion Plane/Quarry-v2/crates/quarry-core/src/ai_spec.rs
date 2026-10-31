@@ -744,6 +744,9 @@ pub enum AiCode {
     ZdrUnavailable,
     BudgetExhausted,
     EmptySource,
+    /// The request's privacy block forbids a model hop (`credential_or_secret`,
+    /// `zdr_ephemeral`). Skipped, no model call.
+    PrivacyPolicy,
 }
 
 /// The detail under a code.
@@ -1291,6 +1294,7 @@ mod tests {
             (AiCode::SchemaInvalid, "SCHEMA_INVALID"),
             (AiCode::BudgetExhausted, "BUDGET_EXHAUSTED"),
             (AiCode::EmptySource, "EMPTY_SOURCE"),
+            (AiCode::PrivacyPolicy, "PRIVACY_POLICY"),
         ] {
             assert_eq!(serde_json::to_value(code).unwrap(), text);
         }

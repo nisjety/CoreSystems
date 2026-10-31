@@ -60,6 +60,15 @@
         "type": "string"
       }
     },
+    "max_age": {
+      "description": "INNH-7: serve a stored result no older than this many milliseconds\ninstead of fetching. Absent: no read of the URL result cache. `0`: never\nread it (but still write). Accepted only while `ScrapeLimits::max_age_enabled`.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
     "max_inline_bytes": {
       "type": [
         "integer",

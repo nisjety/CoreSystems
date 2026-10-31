@@ -181,7 +181,7 @@ test('the_response_documents_the_ai_fields_and_the_report_schemas', () => {
   for (const name of ['AiReport', 'AiFormatReport', 'Highlight']) component(name);
   const report = component('AiFormatReport');
   const codes = /code:\n\s+type: string\n\s+enum: \[([^\]]*)\]/.exec(report)[1].split(',').map((value) => value.trim());
-  assert.deepEqual(codes, ['MODEL_UNAVAILABLE', 'MODEL_RATE_LIMITED', 'SCHEMA_INVALID', 'ZDR_UNAVAILABLE', 'BUDGET_EXHAUSTED', 'EMPTY_SOURCE']);
+  assert.deepEqual(codes, ['MODEL_UNAVAILABLE', 'MODEL_RATE_LIMITED', 'SCHEMA_INVALID', 'ZDR_UNAVAILABLE', 'BUDGET_EXHAUSTED', 'EMPTY_SOURCE', 'PRIVACY_POLICY']);
   assert.deepEqual(propertyNames(component('AiReport')).sort(), ['highlights', 'json', 'question', 'summary', 'total']);
 });
 
@@ -202,4 +202,29 @@ test('reserved_format_is_gone_and_the_ai_reasons_are_documented', () => {
   for (const code of ['schema_root_not_object', 'schema_too_large', 'schema_too_complex', 'schema_keyword_not_supported', 'missing_field', 'feature_disabled']) {
     assert.ok(reasons.includes(code) && contracts.includes(code), `${code} is not documented in both files`);
   }
+});
+
+// INNH-7 review: `max_age` was once inserted in the middle of the `actions_on_error`
+// description, so `max_age` read "Alias actionsOnError." and `actions_on_error` lost
+// its note. Every "Alias <camelCase>." sentence in a ScrapeRequest property must
+// belong to the property whose snake_case name it is the alias of.
+test('an_alias_note_sits_in_the_description_of_the_property_it_names', () => {
+  const block = component('ScrapeRequest');
+  const names = propertyNames(block);
+  const sections = new Map();
+  for (const name of names) {
+    const at = block.indexOf(`\n        ${name}:\n`);
+    const after = block.slice(at + 1);
+    const next = after.slice(1).search(/\n        [A-Za-z_][A-Za-z0-9_]*:\s*\n/);
+    sections.set(name, next >= 0 ? after.slice(0, next + 1) : after);
+  }
+  for (const [name, section] of sections) {
+    for (const match of section.matchAll(/Alias ([a-z][A-Za-z0-9]*)\./g)) {
+      assert.equal(snake(match[1]), name, `${name} carries the alias note "Alias ${match[1]}."`);
+    }
+  }
+  // The two properties of the incident, spelled out.
+  assert.match(sections.get('actions_on_error'), /Alias actionsOnError\./);
+  assert.match(sections.get('max_age'), /Alias maxAge\./);
+  assert.doesNotMatch(sections.get('max_age'), /actionsOnError/);
 });

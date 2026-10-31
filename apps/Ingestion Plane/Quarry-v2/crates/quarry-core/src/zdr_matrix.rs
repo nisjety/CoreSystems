@@ -83,7 +83,7 @@ pub const ROWS: &[Row] = &[
             "ai_formats::zdr_skips_every_format_with_no_model_call_and_stores_nothing",
             "ai_formats_real_token::a_zdr_org_user_gets_every_format_skipped_even_when_the_body_says_zdr_false",
         ],
-        basis: "no artifact, page-cache entry, scrape record or durable event; the text comes back in the response (default format markdown), cut at max_inline_bytes. The AI formats (json, summary, question, highlights; INNH-1, dark behind QUARRY_EDGE__AI_FORMATS) are refused under ZDR (ADR-4): each is answered status skipped, code ZDR_UNAVAILABLE inside the 200, with no Model Plane call, so no page text leaves for a model; QUARRY_EDGE__AI_FORMATS_ZDR accepts only refuse in v1 and the engine refuses a ZDR input as well",
+        basis: "no artifact, page-cache entry, URL-result-cache entry (INNH-7, see scrape_max_age), scrape record or durable event; the text comes back in the response (default format markdown), cut at max_inline_bytes. The AI formats (json, summary, question, highlights; INNH-1, dark behind QUARRY_EDGE__AI_FORMATS) are refused under ZDR (ADR-4): each is answered status skipped, code ZDR_UNAVAILABLE inside the 200, with no Model Plane call, so no page text leaves for a model; QUARRY_EDGE__AI_FORMATS_ZDR accepts only refuse in v1 and the engine refuses a ZDR input as well",
         log: Log::Canary {
             test: "zdr_log_capture::a_zdr_scrape_logs_no_url_and_no_title_even_at_debug",
         },
@@ -101,6 +101,20 @@ pub const ROWS: &[Row] = &[
         log: Log::Canary {
             test: "zdr_log_capture::a_zdr_streamed_scrape_logs_no_url_from_its_spawned_runner",
         },
+    },
+    Row {
+        id: "scrape_max_age",
+        routes: &[],
+        treatment: Treatment::Degraded {
+            warning: "max_age_ignored_zdr",
+        },
+        status: Status::Enforced,
+        enforced_by: &[
+            "scrape_max_age::zdr_never_reads_or_writes_the_url_cache_and_says_so",
+            "scrape_cache::tests::zdr_wins_over_everything_else",
+        ],
+        basis: "same route as scrape: INNH-7 max_age reads and writes quarry:scrape:{org}:{hash} (the output and warnings, no inline text; the text is rebuilt from artifacts), dark behind QUARRY_EDGE__SCRAPE_MAX_AGE. Under ZDR (body flag or the token's floor) the cache is neither read nor written and no key is computed, not even a hashed URL (a hash of a known URL is a membership oracle); the scrape runs as a fresh fetch and the response carries the warning max_age_ignored_zdr with cache_state bypass. The decision is made in scrape_cache::eligibility before any key exists",
+        log: Log::Unverified,
     },
     Row {
         id: "scrape_record_read",

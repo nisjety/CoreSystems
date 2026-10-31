@@ -6,6 +6,13 @@
 //! is skipped entirely. On miss the fresh result is written back keyed by the
 //! newly computed fingerprint.
 //!
+//! INNH-7 adds a second key space on the same connection, read by `max_age`:
+//! `quarry:scrape:{org_id}:{blake3(canonical url, options key)}` holds a
+//! [`CachedScrape`] (the output plus the run's warnings, never page text; the
+//! text is rebuilt from the stored artifacts on a hit). It is keyed by what the
+//! caller asked for, not by the fetched body, so one URL under two option sets
+//! is two entries. See `scrape_cache.rs` for who may read and write it.
+//!
 //! The org segment is a hard tenant boundary. A fingerprint is a hash of the
 //! raw page body, so anyone can compute it for a public page; without the org
 //! in the key, a caller could send another org's fingerprint as
@@ -16,8 +23,9 @@
 use std::time::Duration;
 
 use quarry_core::output::NormalizedOutput;
+use quarry_core::scrape::ScrapeWarning;
 use redis::{aio::ConnectionManager, AsyncCommands};
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 pub const DEFAULT_TTL_SECS: u64 = 3600;
 
@@ -106,6 +114,94 @@ impl PageCache {
             redis::RedisError::from((
                 redis::ErrorKind::IoError,
                 "serialize NormalizedOutput",
+                e.to_string(),
+            ))
+        })?;
+        conn.set_ex::<_, _, ()>(key, encoded, ttl_secs.max(1)).await
+    }
+}
+
+/// What the URL result cache stores for one scrape: the output (with its artifact
+/// references and its ORIGINAL `fetched_at`) and the warnings the run produced, so a
+/// hit says what the first answer said. No inline text: a hit rebuilds that from the
+/// stored artifacts, so the page text is not copied into Redis.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedScrape {
+    pub output: NormalizedOutput,
+    #[serde(default)]
+    pub warnings: Vec<ScrapeWarning>,
+}
+
+impl PageCache {
+    /// `quarry:scrape:{org_id}:{blake3(canonical_url, options_key)}`. `None` for an empty
+    /// org id (which must never address the cache) and for a URL with no canonical form.
+    /// `options_key` is `ResolvedScrapeOptions::canonical_options_key`; it is part of the
+    /// key, so named formats, selectors and an extractor each get their own entry, and
+    /// `max_age` (which is not part of it) never rotates a key. The URL is reduced
+    /// with the conservative canonical form plus tracking-parameter removal: a fragment,
+    /// a default port, the case of the host and `utm_*`/`gclid`-style parameters do not
+    /// make a second entry; a trailing slash and the query order do.
+    pub fn result_key(org_id: &str, url: &str, options_key: &str) -> Option<String> {
+        let org_id = org_id.trim();
+        if org_id.is_empty() {
+            return None;
+        }
+        let canonical = quarry_transform::canonical_url::canonicalize(
+            url,
+            quarry_transform::canonical_url::CanonicalOptions {
+                strip_tracking_params: true,
+                ..Default::default()
+            },
+        )
+        .ok()?;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(canonical.as_bytes());
+        hasher.update(b"\x1f");
+        hasher.update(options_key.as_bytes());
+        Some(format!("quarry:scrape:{org_id}:{}", hasher.finalize().to_hex()))
+    }
+
+    /// `Some(entry)` on a hit, `None` on a miss or any recoverable error. The caller
+    /// still checks the entry's age against the request's `max_age`.
+    pub async fn get_result(&self, key: &str) -> Option<CachedScrape> {
+        let mut conn = self.conn.clone();
+        let raw: Option<String> = match conn.get(key).await {
+            Ok(raw) => raw,
+            Err(_) => {
+                crate::metrics::record_cache("scrape", "error");
+                return None;
+            }
+        };
+        let Some(raw) = raw else {
+            crate::metrics::record_cache("scrape", "miss");
+            return None;
+        };
+        match serde_json::from_str::<CachedScrape>(&raw) {
+            Ok(entry) => {
+                crate::metrics::record_cache("scrape", "hit");
+                Some(entry)
+            }
+            Err(err) => {
+                crate::metrics::record_cache("scrape", "error");
+                // zdr-log-ok: the URL result cache is never read for a ZDR request (scrape_cache::eligibility refuses it before a key exists); the key is not logged
+                tracing::warn!(error = %err, "scrape result cache: deserialize failed");
+                None
+            }
+        }
+    }
+
+    /// Stores `entry` under `key` for `ttl_secs` (clamped to at least 1 second).
+    pub async fn put_result(
+        &self,
+        key: &str,
+        entry: &CachedScrape,
+        ttl_secs: u64,
+    ) -> redis::RedisResult<()> {
+        let mut conn = self.conn.clone();
+        let encoded = serde_json::to_string(entry).map_err(|e| {
+            redis::RedisError::from((
+                redis::ErrorKind::IoError,
+                "serialize CachedScrape",
                 e.to_string(),
             ))
         })?;
@@ -275,6 +371,54 @@ mod page_cache_tests {
     fn page_cache_key_refuses_an_empty_org() {
         assert!(PageCache::key("", "fp1").is_none());
         assert!(PageCache::key("   ", "fp1").is_none());
+    }
+}
+
+#[cfg(test)]
+mod result_key_tests {
+    use super::PageCache;
+
+    const OPTS: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn the_key_is_org_url_and_options() {
+        let key = PageCache::result_key("org_a", "https://example.com/a", OPTS).expect("key");
+        assert!(key.starts_with("quarry:scrape:org_a:"), "{key}");
+        assert_eq!(key.len(), "quarry:scrape:org_a:".len() + 64);
+        // Stable.
+        assert_eq!(Some(key.clone()), PageCache::result_key("org_a", "https://example.com/a", OPTS));
+        // A second org, a second URL and a second option set are three other keys.
+        assert_ne!(Some(key.clone()), PageCache::result_key("org_b", "https://example.com/a", OPTS));
+        assert_ne!(Some(key.clone()), PageCache::result_key("org_a", "https://example.com/b", OPTS));
+        assert_ne!(Some(key), PageCache::result_key("org_a", "https://example.com/a", "other"));
+    }
+
+    #[test]
+    fn an_empty_org_is_never_a_key() {
+        assert!(PageCache::result_key("", "https://example.com/a", OPTS).is_none());
+        assert!(PageCache::result_key("  ", "https://example.com/a", OPTS).is_none());
+    }
+
+    #[test]
+    fn a_url_with_no_canonical_form_is_never_a_key() {
+        for url in ["not a url", "ftp://example.com/a", "https://user:pw@example.com/a"] {
+            assert!(PageCache::result_key("org_a", url, OPTS).is_none(), "{url}");
+        }
+    }
+
+    #[test]
+    fn spellings_of_one_page_share_a_key_and_distinct_pages_do_not() {
+        let key = |url: &str| PageCache::result_key("org_a", url, OPTS);
+        let base = key("https://example.com/a?x=1").expect("key");
+        // A fragment, the case of the host, a default port and tracking parameters
+        // do not change which page it is.
+        assert_eq!(Some(base.clone()), key("https://example.com/a?x=1#section"));
+        assert_eq!(Some(base.clone()), key("https://EXAMPLE.com:443/a?x=1"));
+        assert_eq!(Some(base.clone()), key("https://example.com/a?x=1&utm_source=news&gclid=abc"));
+        // A trailing slash, another query value and another scheme are other pages.
+        assert_ne!(key("https://example.com/a").unwrap(), key("https://example.com/a/").unwrap());
+        assert_ne!(Some(base.clone()), key("https://example.com/a?x=2"));
+        assert_ne!(Some(base), key("http://example.com/a?x=1"));
     }
 }
 

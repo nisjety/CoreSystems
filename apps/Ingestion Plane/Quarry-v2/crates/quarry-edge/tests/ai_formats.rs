@@ -45,6 +45,9 @@ const TEST_BEARER: &str = "ai-formats-dev-token";
 const MODEL_TOKEN: &str = "model-dev-token";
 const INFERENCE_TOKEN: &str = "inference-dev-token";
 const ORG: &str = "org_placeholder";
+const INPUT_CAP_ENV: &str = "QUARRY_EDGE__AI_FORMATS_MAX_INPUT_CHARS";
+/// The model input cap this binary runs with (the lowest the setting allows).
+const INPUT_CAP: usize = 1_000;
 
 const PAGE: &str = "<html><head><title>Kaffebrenneriet</title></head><body><main>\
 <h1>Kaffebrenneriet AS</h1>\
@@ -89,6 +92,8 @@ fn init() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         std::env::set_var("QUARRY_EDGE__AI_FORMATS", "on");
+        // The lowest input cap, so a page over it is small enough to build here.
+        std::env::set_var(INPUT_CAP_ENV, INPUT_CAP.to_string());
         std::env::set_var("QUARRY_EDGE__MODEL_PLANE_INFERENCE_TOKEN", INFERENCE_TOKEN);
         std::env::set_var("QUARRY_EDGE_AUTH_DEV_BYPASS", "1");
         let layer = tracing_subscriber::fmt::layer()
@@ -619,6 +624,143 @@ async fn zdr_is_answered_even_where_no_model_could_be_reached() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["data"]["ai"]["json"]["code"], "ZDR_UNAVAILABLE");
     assert_eq!(edge.fetches(), 1);
+}
+
+// ---- the input cap --------------------------------------------------------
+
+/// A page whose body is `n` copies of a letter no prompt of ours contains.
+fn page_of(n: usize) -> &'static str {
+    Box::leak(
+        format!("<html><body><main><p>{}</p></main></body></html>", "ж".repeat(n)).into_boxed_str(),
+    )
+}
+
+/// How many chars of that letter the model was sent in the page of its call.
+fn page_chars_sent(seen: &[Seen]) -> Vec<usize> {
+    seen.iter()
+        .map(|call| call.user().chars().filter(|c| *c == 'ж').count())
+        .collect()
+}
+
+fn three_formats() -> Value {
+    json!({
+        "url": "https://www.example.com/",
+        "formats": [
+            { "type": "json", "schema": schema() },
+            { "type": "summary" },
+            { "type": "question", "question": "Hva koster en pose?" },
+        ],
+    })
+}
+
+#[tokio::test]
+async fn a_page_over_the_input_cap_says_so_and_one_at_the_cap_or_under_does_not() {
+    // How long the markdown of `n` letters is, measured on a scrape that asks for no
+    // AI format, so the page at the cap is exactly at it.
+    let measure = spawn_edge_with(page_of(INPUT_CAP), None, None).await;
+    let (status, body) = post(
+        &measure,
+        "/v1/scrape",
+        json!({ "url": "https://www.example.com/", "formats": ["markdown"] }),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let at_cap_len = body["data"]["markdown"].as_str().unwrap().chars().count();
+    let overhead = at_cap_len as isize - INPUT_CAP as isize;
+    let letters_for = |chars: usize| (chars as isize - overhead) as usize;
+
+    for (chars, over) in [
+        (INPUT_CAP + 1, true),
+        (INPUT_CAP + 500, true),
+        (INPUT_CAP, false),
+        (INPUT_CAP - 1, false),
+        (100, false),
+    ] {
+        let model = ai_model_double::start(standard).await;
+        let edge = spawn_edge_with(
+            page_of(letters_for(chars)),
+            Some(model.uri.clone()),
+            Some(MODEL_TOKEN),
+        )
+        .await;
+        let (status, body) = post(&edge, "/v1/scrape", three_formats()).await;
+        assert_eq!(status, 200, "{chars}: {body}");
+        for kind in ["json", "summary", "question"] {
+            let entry = &body["data"]["ai"][kind];
+            assert_eq!(entry["status"], "ok", "{chars} {kind}: {entry}");
+            if over {
+                assert_eq!(entry["truncated_input"], true, "{chars} {kind}: {entry}");
+            } else {
+                assert!(
+                    entry.get("truncated_input").is_none(),
+                    "{chars} {kind}: {entry}"
+                );
+            }
+        }
+        // The model never read more than the cap.
+        let sent = page_chars_sent(&model.seen());
+        assert_eq!(sent.len(), 3, "{chars}");
+        let expected = letters_for(chars.min(INPUT_CAP));
+        assert!(sent.iter().all(|n| *n == expected), "{chars}: {sent:?}");
+    }
+}
+
+// ---- the privacy block ----------------------------------------------------
+
+#[tokio::test]
+async fn a_privacy_block_that_forbids_a_model_hop_skips_every_format_with_no_model_call() {
+    for classification in ["credential_or_secret", "zdr_ephemeral"] {
+        let model = ai_model_double::start(standard).await;
+        let edge = spawn_edge(&model).await;
+        let mut request = all_four();
+        request["privacy"] = json!({ "privacy_classification": classification });
+        let (status, body) = post(&edge, "/v1/scrape", request).await;
+        assert_eq!(status, 200, "{classification}: {body}");
+        let data = &body["data"];
+        assert!(
+            data["markdown"].as_str().is_some(),
+            "{classification}: the page itself is still scraped"
+        );
+        for key in ["json", "summary", "answer", "highlights"] {
+            assert!(data.get(key).is_none(), "{classification}: `{key}` came back");
+        }
+        for kind in ["json", "summary", "question", "highlights"] {
+            let entry = &data["ai"][kind];
+            assert_eq!(entry["status"], "skipped", "{classification} {kind}: {entry}");
+            assert_eq!(entry["code"], "PRIVACY_POLICY", "{classification} {kind}: {entry}");
+            assert!(
+                entry.get("model").is_none() && entry.get("usage").is_none(),
+                "{classification} {kind}"
+            );
+        }
+        assert_eq!(data["ai"]["total"]["calls"], 0, "{classification}");
+        assert_eq!(model.calls(), 0, "{classification}: page text left for a model");
+        assert_eq!(edge.fetches(), 1, "{classification}");
+    }
+}
+
+#[tokio::test]
+async fn an_unclassified_or_ordinary_privacy_block_still_calls_the_model() {
+    for privacy in [
+        None,
+        Some(json!({})),
+        Some(json!({ "privacy_classification": "customer_private" })),
+        Some(json!({ "privacy_classification": "personal" })),
+        Some(json!({ "privacy_classification": "public_non_personal" })),
+    ] {
+        let model = ai_model_double::start(standard).await;
+        let edge = spawn_edge(&model).await;
+        let mut request = three_formats();
+        if let Some(privacy) = &privacy {
+            request["privacy"] = privacy.clone();
+        }
+        let (status, body) = post(&edge, "/v1/scrape", request).await;
+        assert_eq!(status, 200, "{privacy:?}: {body}");
+        for kind in ["json", "summary", "question"] {
+            assert_eq!(body["data"]["ai"][kind]["status"], "ok", "{privacy:?} {kind}");
+        }
+        assert_eq!(model.calls(), 3, "{privacy:?}");
+    }
 }
 
 // ---- the stream -----------------------------------------------------------

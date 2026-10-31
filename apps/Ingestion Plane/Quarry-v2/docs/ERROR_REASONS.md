@@ -197,6 +197,16 @@ These reasons come from `POST /v1/scrape` (and the stream, where noted). The sta
 
 Field errors (400, in `errors[]`, not in `details.reason`): `feature_disabled`, `action_denied`, `unknown_action_type`, `invalid_action`, `too_many_actions`, `too_many_captures`, `too_many`, `unsupported_format`, `selector_too_long`, `text_too_long`. Each carries a path and never a value.
 
+## 501 `UNSUPPORTED` from `POST /v1/extract` (INNH-3)
+
+These come from `POST /v1/extract` when a `schema` or a `prompt` is sent and the Model Plane cannot be used. The body is `{error, code, hint, next_actions}` and has no `details`, so the three are told apart by the `error` text. All are decided before further pages are fetched. None is returned for a request with neither field, nor for a ZDR request. They are not the `model_plane_unavailable` and `model_lane_not_granted` reasons below, which belong to the AI formats of `POST /v1/scrape` and have `details.reason`. The set-up is in `docs/RUNBOOKS.md`, "Enable structured extract and AI formats".
+
+| `error` starts | meaning | what a caller does |
+|---|---|---|
+| `structured extraction needs the Model Plane, and QUARRY_EDGE__MODEL_PLANE_URL is not set` | no Model Plane URL on this deployment | retry without `schema` and `prompt` for cleaned markdown; the operator cannot unlock this on a deployed stack today |
+| `structured extraction needs a granted Model Plane lane, and this deployment holds no model credential` | a URL, but no service key and no development token | same |
+| `structured extraction needs a granted Model Plane lane, and the Model Plane refused this service` | the gateway refused the first model call (one page fetched, one call made, nothing metered) | same |
+
 ## Scrape AI formats (INNH-1)
 
 These come from `POST /v1/scrape` (and the stream, where noted) when a request names `json`, `summary`, `question` or `highlights` in `formats`. The edge answers the first three before it fetches the page. Contract: `docs/CONTRACTS.md` section "Scrape AI formats". The request-level reasons are decided by the edge (INNH-1 U3); the field codes by the contract in `quarry-core` (INNH-1 U1).
@@ -210,7 +220,7 @@ These come from `POST /v1/scrape` (and the stream, where noted) when a request n
 
 Field errors (400, in `details.fields[]`, not in `details.reason`; each carries a path and never a value): `feature_disabled` (at `formats[i]` while `QUARRY_EDGE__AI_FORMATS` is not on), `too_many` (two of one kind), `missing_field` (a bare `json`, `question` or `highlights`, or an absent `schema`, `question` or `query`), `empty`, `text_too_long` (a prompt or question over 10,000 characters, a query over 1,000), `out_of_range` (`max_chars`, `max_highlights`, `max_chars_each`), `invalid_value` (`language`), `invalid_type`, `unknown_field`, `schema_root_not_object`, `schema_too_large`, `schema_too_complex`, `schema_keyword_not_supported` (at the keyword's path). `reserved_format` no longer exists.
 
-Not errors: a model failure, a rate limit, a schema the output could not satisfy, a ZDR request and an empty page are `data.ai.<kind>` entries inside a 200 (`status`, `code`, `reason`): codes `MODEL_UNAVAILABLE`, `MODEL_RATE_LIMITED`, `SCHEMA_INVALID`, `ZDR_UNAVAILABLE`, `BUDGET_EXHAUSTED`, `EMPTY_SOURCE`; reasons `model_lane_denied`, `model_lane_unauthorized`, `model_rejected_request`, `upstream_unavailable`, `timeout`, `transport`, `bad_reply`, `not_json`, `too_large`, `deadline`.
+Not errors: a model failure, a rate limit, a schema the output could not satisfy, a ZDR request and an empty page are `data.ai.<kind>` entries inside a 200 (`status`, `code`, `reason`): codes `MODEL_UNAVAILABLE`, `MODEL_RATE_LIMITED`, `SCHEMA_INVALID`, `ZDR_UNAVAILABLE`, `PRIVACY_POLICY` (the request's privacy classification forbids a model hop), `BUDGET_EXHAUSTED`, `EMPTY_SOURCE`; reasons `model_lane_denied`, `model_lane_unauthorized`, `model_rejected_request`, `upstream_unavailable`, `timeout`, `transport`, `bad_reply`, `not_json`, `too_large`, `deadline`.
 
 ## 403 `FORBIDDEN`: an action an agent may not take (WS9.B, D2-012)
 
@@ -219,3 +229,7 @@ The agent is the one the verified token gives (a service principal, or a person'
 | reason | `details.denied_action` | meaning | what a caller does |
 |---|---|---|---|
 | `agent_reload_denied` | `reload` | a page reload proposed by an agent; reload is a person's action | navigate to the URL instead, or leave it to the person |
+
+## Scrape `max_age` (INNH-7)
+
+Field errors (400, in `details.fields[]`, not in `details.reason`; each carries a path and never a value): `feature_disabled` (at `max_age` while `QUARRY_EDGE__SCRAPE_MAX_AGE` is not on), `out_of_range` (at `max_age`, above 2592000000 ms), `invalid_type` (at `max_age`, not a non-negative integer), `conflicting_aliases` (`max_age` and `maxAge` with different values). Not errors, and the scrape is a 200: the warnings `max_age_ignored_zdr` (ZDR never reads or writes the result cache), `max_age_ignored` (a capture, actions, an AI format, the browser, a custom web policy, ingest or a private privacy class is never cached) and `cache_unavailable` (no cache backend on this deployment), each with `field: "max_age"`.

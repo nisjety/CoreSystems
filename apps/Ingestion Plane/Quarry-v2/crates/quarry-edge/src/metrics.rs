@@ -345,6 +345,7 @@ pub fn record_cache(cache: &'static str, outcome: &'static str) {
     let cache = match cache {
         "page" => "page",
         "search" => "search",
+        "scrape" => "scrape",
         _ => "other",
     };
     let outcome = match outcome {
