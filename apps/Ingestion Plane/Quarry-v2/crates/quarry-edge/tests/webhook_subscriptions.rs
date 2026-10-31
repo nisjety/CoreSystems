@@ -479,6 +479,8 @@ fn claims(principal: &str, zdr: Option<bool>) -> Claims {
         aud: None,
         scopes: if service { vec!["scrape:read".into(), "browser:execute".into()] } else { Vec::new() },
         zdr,
+        key_id: None,
+        acting_user_id: None,
     }
 }
 

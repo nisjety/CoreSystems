@@ -289,6 +289,8 @@ async fn a_zdr_token_is_403_with_the_reason_and_control_is_not_called() {
             aud: None,
             scopes: Vec::new(),
             zdr: Some(true),
+            key_id: None,
+            acting_user_id: None,
         });
         next.run(req).await
     }
@@ -348,6 +350,8 @@ async fn a_service_token_is_403_on_the_results_paths() {
             aud: None,
             scopes: vec!["scrape:read".into(), "browser:execute".into()],
             zdr: Some(true),
+            key_id: None,
+            acting_user_id: None,
         });
         next.run(req).await
     }

@@ -594,6 +594,8 @@ mod tests {
             aud: None,
             scopes: Vec::new(),
             zdr,
+            key_id: None,
+            acting_user_id: None,
         }
     }
 
