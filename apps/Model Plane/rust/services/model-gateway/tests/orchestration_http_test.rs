@@ -1890,6 +1890,28 @@ async fn post_plan_approval(
 
 #[tokio::test]
 #[serial_test::serial]
+async fn an_approval_answers_next_message_while_the_execute_switch_is_off() {
+    // WS14 S2: with the approve-then-execute switch off (the default) the answer is the one it
+    // always was: the grant waits for the person's own next message, and nothing is sent by itself.
+    let harness = plan_gate_harness().await;
+    let (status, body) = post_plan_approval(
+        &harness,
+        "run-owned",
+        &harness.owner,
+        serde_json::json!({
+            "decision": "approve",
+            "granted_rung": "workspace_write",
+            "justification": "writes the report into the workspace",
+            "plan_id": "plan-7",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["continuation"], "next_message", "{body}");
+}
+
+#[tokio::test]
+#[serial_test::serial]
 async fn approving_a_plan_checks_it_decides_it_with_the_edits_and_only_then_grants() {
     let harness = plan_gate_harness().await;
     let (status, body) = post_plan_approval(
@@ -2583,7 +2605,8 @@ async fn run_question_an_answer_never_touches_an_approval() {
 use mp_contracts::model_plane::v1::{
     thread_autonomy_client::ThreadAutonomyClient,
     thread_autonomy_server::{ThreadAutonomy, ThreadAutonomyServer},
-    GetThreadGrantRequest, GetThreadGrantResponse, SetRunModeRequest, SetRunModeResponse,
+    BindGrantToRunRequest, BindGrantToRunResponse, GetThreadGrantRequest, GetThreadGrantResponse,
+    SetRunModeRequest, SetRunModeResponse,
 };
 
 #[derive(Clone, Debug)]
@@ -2705,6 +2728,33 @@ impl ThreadAutonomy for SessionCoreDouble {
             _ => GetThreadGrantResponse::default(),
         };
         Ok(Response::new(answer))
+    }
+
+    /// WS14 S2: binds only the grant the thread holds for exactly the plan asked for, as the
+    /// real bind does; anything else is the refusal the gateway treats as no bound grant.
+    async fn bind_grant_to_run(
+        &self,
+        request: TonicRequest<BindGrantToRunRequest>,
+    ) -> Result<Response<BindGrantToRunResponse>, Status> {
+        if request.metadata().get("authorization").is_none() {
+            return Err(Status::unauthenticated("verified session credential required"));
+        }
+        let request = request.into_inner();
+        match self.grant.lock().unwrap().clone() {
+            Some(grant)
+                if grant.org_id == request.org_id
+                    && grant.thread_id == request.thread_id
+                    && grant.plan_id == request.approved_plan_id
+                    && grant.expires_at > unix_now() =>
+            {
+                Ok(Response::new(BindGrantToRunResponse {
+                    granted_rung: grant.rung,
+                    justification: String::new(),
+                    approved_plan_id: grant.plan_id,
+                }))
+            }
+            _ => Err(Status::failed_precondition("plan_grant_unavailable")),
+        }
     }
 }
 

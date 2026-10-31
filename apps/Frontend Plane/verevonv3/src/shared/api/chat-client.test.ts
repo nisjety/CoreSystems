@@ -2708,3 +2708,64 @@ describe('chat-client thread listing under WS09 S6', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 })
+
+// WS14 S2, approve then execute: the one execute turn an approval that answered `execute_now`
+// sends names the plan it runs. The plan id rides only on an execute turn, and the answer says
+// what the client does next.
+describe('chat-client approve then execute (WS14 S2)', () => {
+  afterEach(() => {
+    clearSupportChatThreads()
+  })
+
+  const respond = (body: unknown) =>
+    new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
+
+  const execute = { content: 'Kjør den godkjente planen', threadId: 'thread_1', executeGranted: true }
+
+  it('names the approved plan on the execute turn, and nowhere else', () => {
+    const body = buildChatWireBody({ ...execute, approvedPlanId: 'plan_1' })
+
+    expect(body.execute_granted).toBe(true)
+    expect(body.approved_plan_id).toBe('plan_1')
+    expect(body).not.toHaveProperty('granted_rung')
+    // Exactly the plan id differs from the same execute turn without it.
+    expect(body).toEqual({ ...buildChatWireBody(execute), approved_plan_id: 'plan_1' })
+    // Without the execute flag the plan id never goes out.
+    expect(buildChatWireBody({ content: 'hi', threadId: 'thread_1', approvedPlanId: 'plan_1' })).not.toHaveProperty(
+      'approved_plan_id',
+    )
+    expect(buildChatWireBody({ content: 'hi', threadId: 'thread_1', executeGranted: false, approvedPlanId: 'plan_1' })).not.toHaveProperty(
+      'approved_plan_id',
+    )
+  })
+
+  it('omits a blank plan id, so an execute turn without one is the S2a turn exactly', () => {
+    expect(buildChatWireBody({ ...execute, approvedPlanId: '   ' })).toEqual(buildChatWireBody(execute))
+    expect(buildChatWireBody({ ...execute, approvedPlanId: '' })).not.toHaveProperty('approved_plan_id')
+  })
+
+  it('reads continuation: execute_now only as that exact answer, and next_message otherwise', async () => {
+    for (const [answer, expected] of [
+      ['execute_now', 'execute_now'],
+      ['next_message', 'next_message'],
+      [undefined, 'next_message'],
+      ['run_it_now', 'next_message'],
+    ] as const) {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(
+          respond({
+            granted_rung: 'workspace_write',
+            was_in_plan_mode: true,
+            persisted: true,
+            ...(answer === undefined ? {} : { continuation: answer }),
+          }),
+        ),
+      )
+
+      const result = await approvePlan('run_1', 'workspace_write', 'writes its report', 'plan_1', [])
+
+      expect(result.continuation, `answer ${String(answer)}`).toBe(expected)
+    }
+  })
+})

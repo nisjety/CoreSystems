@@ -10185,6 +10185,12 @@ fn validate_grant_plan_id(plan_id: &str, grant_stated: bool) -> Result<(), Statu
     Ok(())
 }
 
+/// The refusal of an approve-then-execute bind that finds no live grant naming its plan
+/// (WS14 S2). The message is the typed code the gateway maps to `plan_grant_unavailable`.
+fn plan_grant_unavailable() -> Status {
+    Status::failed_precondition("plan_grant_unavailable")
+}
+
 /// Record an approved grant on its thread, inside the caller's transaction. The newest
 /// approval replaces the previous one, exactly as the gateway's in-memory grant did, and
 /// the expiry is counted from now by the database clock. Org-scoped: a thread of another
@@ -10310,6 +10316,86 @@ impl ThreadAutonomy for ThreadAutonomyGrpc {
         }
         .await;
         record_metrics("get_thread_grant", started, result.is_ok());
+        result
+    }
+
+    /// WS14 S2, approve then execute: copies the thread's live grant onto the run that executes
+    /// the plan it was approved with. One statement does the whole bind, so the rung is always
+    /// the one the thread holds and never one the caller stated, and the run record gets it only
+    /// while the thread still names exactly that plan and the grant has not lapsed.
+    async fn bind_grant_to_run(
+        &self,
+        request: Request<pb::BindGrantToRunRequest>,
+    ) -> Result<Response<pb::BindGrantToRunResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::BindGrantToRunResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:write")?;
+            // A grant is a durable record, which a zero-retention or waived credential never
+            // writes (the same refusal as `record_run_context`).
+            if caller.zdr() || caller.zdr_waiver().is_some() {
+                return Err(Refusal::DURABLE_MUTATION_FORBIDDEN
+                    .grpc_status(tonic::Code::FailedPrecondition));
+            }
+            let req = request.into_inner();
+            if req.run_id.is_empty() || req.thread_id.is_empty() || req.org_id.is_empty() {
+                return Err(Status::invalid_argument("run_id, thread_id and org_id are required"));
+            }
+            if req.approved_plan_id.is_empty() {
+                return Err(Status::invalid_argument("approved_plan_id is required"));
+            }
+            validate_grant_plan_id(&req.approved_plan_id, true)?;
+            caller.authorize_org(&req.org_id)?;
+            authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
+            // Without the 0050 columns the thread holds no grant to bind, and the statement below
+            // must not name a column that is not there.
+            if !self.grant_columns.records_grants() {
+                return Err(plan_grant_unavailable());
+            }
+            // The run takes the grant only where the thread is the run's own and of the same org,
+            // the thread still names the plan, and the grant has not lapsed (the database clock,
+            // as `record_thread_grant` counts it). `||` merges, so the run's other keys are kept.
+            let bound: Option<(Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+                "UPDATE runs AS r
+                    SET metadata = COALESCE(r.metadata, '{}'::jsonb) || jsonb_build_object(
+                            'autonomy_rung', t.granted_rung,
+                            'autonomy_justification', t.granted_justification,
+                            'approved_plan_id', t.granted_plan_id,
+                            'grant_bound_at', $5::text),
+                        updated_at = now()
+                   FROM threads AS t
+                  WHERE r.id = $1 AND r.org_id = $2 AND r.thread_id = $3
+                    AND t.id = r.thread_id AND t.org_id = r.org_id
+                    AND t.granted_plan_id = $4 AND t.granted_expires_at > now()
+                  RETURNING t.granted_rung, t.granted_justification, t.granted_plan_id",
+            )
+            .bind(&req.run_id)
+            .bind(&req.org_id)
+            .bind(&req.thread_id)
+            .bind(&req.approved_plan_id)
+            .bind(Utc::now().to_rfc3339())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "bind_grant_to_run failed");
+                Status::internal(e.to_string())
+            })?;
+            let Some((rung, justification, plan_id)) = bound else {
+                return Err(plan_grant_unavailable());
+            };
+            let granted_rung = rung
+                .as_deref()
+                .and_then(mp_contracts::autonomy::rung_from_keyword)
+                .filter(|rung| *rung != pb::AutonomyRung::Unspecified)
+                .ok_or_else(plan_grant_unavailable)?;
+            Ok(Response::new(pb::BindGrantToRunResponse {
+                granted_rung: granted_rung as i32,
+                justification: justification.unwrap_or_default(),
+                approved_plan_id: plan_id.unwrap_or_default(),
+            }))
+        }
+        .await;
+        record_metrics("bind_grant_to_run", started, result.is_ok());
         result
     }
 }
@@ -13851,6 +13937,112 @@ mod tests {
         let without = ThreadGrantColumns::detect_in(&pool, Some(&scratch)).await;
         sqlx::query(&format!("DROP SCHEMA {scratch} CASCADE")).execute(&pool).await.expect("drop");
         assert_eq!(without, ThreadGrantColumns::absent(), "a threads table without the columns");
+    }
+
+    /// WS14 S2, DB-gated: a run takes the thread's grant only while the thread names the plan the
+    /// run executes. The plan the approval recorded binds the rung, the reason and the plan id onto
+    /// the run record; another plan, a run of another thread and another org bind nothing, and the
+    /// refusal leaves the run record as it was.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn bind_grant_to_run_takes_only_the_plan_the_thread_names_against_real_pg() {
+        use super::{SessionService, ThreadAutonomyGrpc, ThreadGrantColumns};
+        use mp_contracts::model_plane::v1::session_core_server::SessionCore;
+        use mp_contracts::model_plane::v1::thread_autonomy_server::ThreadAutonomy;
+
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
+        let sfx = format!("bind-{}", std::process::id());
+        let (thread_id, run_id, org) = (format!("t-{sfx}"), format!("r-{sfx}"), format!("org-{sfx}"));
+        sqlx::query("INSERT INTO threads (id,session_key,org_id,user_id) VALUES ($1,$1,$2,'u1')")
+            .bind(&thread_id).bind(&org).execute(&pool).await.expect("seed thread");
+        sqlx::query("INSERT INTO runs (id,thread_id,goal,org_id,user_id) VALUES ($1,$2,'g',$3,'u1')")
+            .bind(&run_id).bind(&thread_id).bind(&org).execute(&pool).await.expect("seed run");
+        let svc = SessionService {
+            pool: pool.clone(),
+            retrieval_client: None,
+            graph_client: None,
+            knowledge_client: None,
+            letta_memory: None,
+            audit_publisher: None,
+            auth: None,
+            grant_columns: ThreadGrantColumns::present(),
+        };
+        // The approval records the grant on the thread, naming plan-1, in the same transaction.
+        svc.set_run_mode(as_user(
+            &org,
+            "u1",
+            pb::SetRunModeRequest {
+                run_id: run_id.clone(),
+                mode: "execute".into(),
+                org_id: org.clone(),
+                granted_rung: pb::AutonomyRung::WorkspaceWrite as i32,
+                justification: "writes the report into the workspace".into(),
+                approved_plan_id: "plan-1".into(),
+            },
+        ))
+        .await
+        .expect("the approval records its grant");
+        let reader = ThreadAutonomyGrpc { pool: pool.clone(), grant_columns: ThreadGrantColumns::present() };
+        let bind = |org: &str, plan: &str| {
+            as_user(
+                org,
+                "u1",
+                pb::BindGrantToRunRequest {
+                    run_id: run_id.clone(),
+                    thread_id: thread_id.clone(),
+                    org_id: org.to_owned(),
+                    approved_plan_id: plan.into(),
+                },
+            )
+        };
+        let plan_metadata = |sql: &'static str| {
+            let pool = pool.clone();
+            let run_id = run_id.clone();
+            async move {
+                sqlx::query_as::<_, (Option<String>,)>(sql)
+                    .bind(run_id)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("read the run record")
+                    .0
+            }
+        };
+
+        let other_plan = reader.bind_grant_to_run(bind(&org, "plan-2")).await.expect_err("a plan the thread does not name");
+        assert_eq!(other_plan.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(other_plan.message(), "plan_grant_unavailable");
+        assert_eq!(
+            plan_metadata("SELECT metadata->>'approved_plan_id' FROM runs WHERE id = $1").await,
+            None,
+            "a refused bind writes nothing to the run"
+        );
+        let other_org = reader.bind_grant_to_run(bind("org-other", "plan-1")).await;
+        assert!(other_org.is_err(), "another org's caller binds nothing");
+
+        let bound = reader
+            .bind_grant_to_run(bind(&org, "plan-1"))
+            .await
+            .expect("the grant the thread names binds to the run")
+            .into_inner();
+        assert_eq!(bound.granted_rung, pb::AutonomyRung::WorkspaceWrite as i32);
+        assert_eq!(bound.approved_plan_id, "plan-1");
+        assert_eq!(
+            plan_metadata("SELECT metadata->>'autonomy_rung' FROM runs WHERE id = $1").await.as_deref(),
+            Some("workspace_write"),
+        );
+        assert_eq!(
+            plan_metadata("SELECT metadata->>'approved_plan_id' FROM runs WHERE id = $1").await.as_deref(),
+            Some("plan-1"),
+        );
+        assert!(
+            plan_metadata("SELECT metadata->>'grant_bound_at' FROM runs WHERE id = $1").await.is_some(),
+            "the bind is timed on the run record"
+        );
     }
 
     /// DB-gated: SetRunMode and GetThreadGrant with the gate shut, against a database that has

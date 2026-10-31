@@ -2378,6 +2378,30 @@ export function useChatController() {
    * message plan again, so the user would approve a plan and then watch the
    * agent plan a second time — the grant would look like it did nothing.
    */
+  /**
+   * WS14 S2: sends the one execute turn an approval that answered `execute_now` earns, under the
+   * grant it has just pointed at, naming the plan. The pointer is spent when the turn connects
+   * (`spendThreadGrant`). When the turn never connected the pointer is still ours, and the plan
+   * card says so, with the armed pill as the way to try again.
+   */
+  const sendApprovedPlanNow = async (turnId: string, planId: string, grant: ThreadPlanGrant) => {
+    try {
+      await sendContent(i18n.tr('Kjør den godkjente planen', 'Run the approved plan'), undefined, {
+        executeGranted: true,
+        approvedPlanId: planId,
+      })
+    } catch {
+      // A send that throws never reached the gateway, so the grant is still ours to spend below.
+    }
+    if (threadGrant() === grant) {
+      setExecuteArmed(true)
+      setPlanApprovalError((prev) => ({
+        ...prev,
+        [turnId]: i18n.tr('Plan godkjent - Kjør nå', 'Plan approved - run now'),
+      }))
+    }
+  }
+
   const approveTurnPlan = async (
     turnId: string,
     rung: AutonomyRung,
@@ -2434,17 +2458,29 @@ export function useChatController() {
         && !isTemporaryThread(grantThreadId)
         && !isSupportChatThread(grantThreadId)
       ) {
-        setThreadGrant({
+        const planId = turnBefore?.proposedPlan?.planId
+        const grant: ThreadPlanGrant = {
           threadId: grantThreadId,
           rung: result.grantedRung,
-          planId: turnBefore?.proposedPlan?.planId,
+          planId,
           turnId,
           approvedAtMs: Date.now(),
           expiresAtMs: result.grantExpiresAtMs,
-        })
-        setExecuteArmed(true)
-        if (!input().trim()) {
-          setInput(i18n.tr('Kjør den godkjente planen', 'Run the approved plan'))
+        }
+        setThreadGrant(grant)
+        if (result.continuation === 'execute_now' && planId) {
+          // WS14 S2, approve then execute: the gateway recorded the grant for this plan and
+          // will run exactly one execute turn that names it, so that turn is sent now. The
+          // pill is not armed, so the person cannot send a second one from it. The plan-mode
+          // and grant writes above are applied first: the send reads both, and a signal write
+          // is not visible to a read until the reactive graph has flushed.
+          flush()
+          void sendApprovedPlanNow(turnId, planId, grant)
+        } else {
+          setExecuteArmed(true)
+          if (!input().trim()) {
+            setInput(i18n.tr('Kjør den godkjente planen', 'Run the approved plan'))
+          }
         }
       }
       if (!result.persisted) {
@@ -2664,7 +2700,12 @@ export function useChatController() {
     noteQueuedInput(id, 'refused', result.message)
   }
 
-  const sendContent = async (rawContent: string, modelOverride?: string, options: SendOptions & ServerVersionTarget = {}) => {
+  const sendContent = async (
+    rawContent: string,
+    modelOverride?: string,
+    // `approvedPlanId` is the WS14 S2 approve-then-execute plan; only `sendApprovedPlanNow` sets it.
+    options: SendOptions & ServerVersionTarget & { approvedPlanId?: string } = {},
+  ) => {
     const content = rawContent.trim()
     if (!content) return
     // A deep-linked transcript from Spaces, Support, or another agent surface
@@ -2852,7 +2893,8 @@ export function useChatController() {
         ...buildTaskSteps(content, tools, appendUser ? 'submit' : 'regenerate', assistantId, options.actions ?? []),
       ]
     })
-    setInput('')
+    // The approve-then-execute turn (WS14 S2) is never typed in the composer, so the person's draft stays.
+    if (!options.approvedPlanId) setInput('')
 
     const controller = new AbortController()
     abortController = controller
@@ -3031,6 +3073,11 @@ export function useChatController() {
           // Only the turn `sendContent` validated above; the wire builder drops it
           // again on any turn that cannot execute. It carries no rung.
           ...(executeGrant ? { executeGranted: true } : {}),
+          // WS14 S2: the approve-then-execute turn names the plan its grant holds, and
+          // only that plan; a pointer to any other plan sends the turn without it.
+          ...(executeGrant && options.approvedPlanId && executeGrant.planId === options.approvedPlanId
+            ? { approvedPlanId: options.approvedPlanId }
+            : {}),
           effort: options.effort,
           verbosity: options.tone,
           zdr: options.zdr,

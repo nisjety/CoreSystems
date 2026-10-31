@@ -2019,6 +2019,25 @@ pub async fn invoke_stream_sse(
     ) {
         return error_stream(&request_id, code, message, false);
     }
+    // WS14 S2, approve then execute: the plan an execute turn names. With its switch off the field
+    // is ignored, so the request runs exactly as it did before the field existed. With it on, the
+    // turn is refused here, before any run exists, unless the thread's grant names that plan: the
+    // run binds the grant itself once the plan is claimed (`agentic_run_stream`).
+    let approved_plan = approved_plan_of(&req, plan_execute_on_approve_enabled()).map(str::to_owned);
+    if let Some(plan_id) = approved_plan.as_deref() {
+        if !req.execute_granted {
+            return error_stream(
+                &request_id,
+                "invalid_request",
+                "approved_plan_id needs execute_granted",
+                false,
+            );
+        }
+        let read = durable_thread_grant(&state, &org_id, req.thread_id.as_deref().unwrap_or_default(), &model_bearer).await;
+        if !grant_names_plan(&read, plan_id) {
+            return error_stream(&request_id, PLAN_GRANT_UNAVAILABLE, PLAN_GRANT_UNAVAILABLE_MESSAGE, false);
+        }
+    }
     // Images as parts of the turn (WS08-S4), decided before any run exists. With the switch off
     // this is empty and the vision diversion below decides, as it always did. A Do turn with an
     // image is refused here rather than silently losing its tools to that diversion.
@@ -2352,6 +2371,7 @@ pub async fn invoke_stream_sse(
             posture.to_owned(),
             req.plan_mode,
             req.execute_granted,
+            approved_plan,
             execution_bearer,
             data_plane_bearer,
             model_bearer,
@@ -7324,6 +7344,7 @@ fn image_gen_stream(
                         url: content.clone(),
                         size: generated_image_size(&content),
                         check: None,
+                        preview: None,
                     };
                     if attachment.should_emit(&features) {
                         let _ = tx.send(Ok(attachment.to_sse(&request_id))).await;
@@ -10910,12 +10931,166 @@ fn execute_refusal(
 fn dispatch_rejection_event(status: &tonic::Status) -> (&'static str, &'static str) {
     if status.code() == tonic::Code::FailedPrecondition && status.message() == PLAN_GRANT_UNAVAILABLE
     {
-        (
-            PLAN_GRANT_UNAVAILABLE,
-            "No live plan grant exists for this conversation: it expired or the service restarted. Plan again and approve the plan.",
-        )
+        (PLAN_GRANT_UNAVAILABLE, PLAN_GRANT_UNAVAILABLE_MESSAGE)
     } else {
         ("agent_dispatch_rejected", "The agent run could not be accepted.")
+    }
+}
+
+/// The message of the typed `plan_grant_unavailable` refusal. One wording whichever refusal raised
+/// it, so the person sees the same explanation.
+const PLAN_GRANT_UNAVAILABLE_MESSAGE: &str = "No live plan grant exists for this conversation: it expired or the service restarted. Plan again and approve the plan.";
+
+/// The environment variable of the approve-then-execute switch (WS14 S2). With it on, a plan
+/// approval whose grant is durably recorded for the plan answers `continuation: execute_now`, and
+/// the client sends one execute turn that names the approved plan. Named and read here only.
+pub(crate) const PLAN_EXECUTE_ON_APPROVE_ENV: &str = "MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE";
+
+/// The one strict parser of that switch: `true` in any case with surrounding whitespace, and
+/// nothing else, so a typo never enables the path.
+#[must_use]
+pub(crate) fn plan_execute_on_approve_from(value: Option<&str>) -> bool {
+    mp_contracts::loop_fold::switch_from(value)
+}
+
+/// Whether the approve-then-execute switch is on in this process. The variable does not change for
+/// the life of the process, so reading it per request answers the same as reading it once.
+#[must_use]
+pub(crate) fn plan_execute_on_approve_enabled() -> bool {
+    plan_execute_on_approve_from(std::env::var(PLAN_EXECUTE_ON_APPROVE_ENV).ok().as_deref())
+}
+
+/// What a plan approval answers (WS14 S2). `execute_now` only when the switch is on, the grant the
+/// approval made is durably recorded for its plan, and an execute turn would be accepted here
+/// (`execute_accepted`: the execute switch and the approval-resume switch are both on). Otherwise
+/// `next_message`: the grant waits for the person's own next turn, exactly as before this switch.
+#[must_use]
+pub(crate) fn approval_continuation(
+    switch_on: bool,
+    recorded_for_plan: bool,
+    execute_accepted: bool,
+) -> &'static str {
+    if switch_on && recorded_for_plan && execute_accepted {
+        "execute_now"
+    } else {
+        "next_message"
+    }
+}
+
+/// The plan an approve-then-execute turn names, or `None`. With the switch off the field is ignored
+/// whatever it says, so such a request runs exactly as it did before the field existed.
+#[must_use]
+pub(crate) fn approved_plan_of(req: &InvokeRequest, switch_on: bool) -> Option<&str> {
+    if !switch_on {
+        return None;
+    }
+    req.approved_plan_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+}
+
+/// Whether a thread's grant, as read for this run, names the plan an approve-then-execute turn
+/// executes: the read was answered rather than failed, a rung is stated, and the plan is that one.
+#[must_use]
+pub(crate) fn grant_names_plan(grant: &crate::session_flow::ThreadGrant, plan_id: &str) -> bool {
+    !grant.read_failed && grant.rung.is_some() && grant.approved_plan_id.as_deref() == Some(plan_id)
+}
+
+/// The deadline on binding an approve-then-execute run to its grant (WS14 S2). As on the read of
+/// the grant, a Session Core that does not answer costs a bounded delay and no more.
+const BIND_GRANT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Session Core's bind of the thread's grant to this run (WS14 S2, `ThreadAutonomy.BindGrantToRun`),
+/// with the caller's own credential. Only the answer that names the plan asked for is used.
+async fn bind_grant_to_run(
+    state: &AppState,
+    run_id: &str,
+    org_id: &str,
+    thread_id: &str,
+    plan_id: &str,
+    bearer: &VerifiedModelBearer,
+) -> Result<crate::session_flow::ThreadGrant, tonic::Status> {
+    let Some(mut client) = state.plan_mode.durable_grant_client() else {
+        return Err(tonic::Status::unavailable(
+            "the durable plan grant reader is not configured",
+        ));
+    };
+    let request = authenticated_session_request(
+        mp_contracts::model_plane::v1::BindGrantToRunRequest {
+            run_id: run_id.to_owned(),
+            thread_id: thread_id.to_owned(),
+            org_id: org_id.to_owned(),
+            approved_plan_id: plan_id.to_owned(),
+        },
+        bearer,
+    )?;
+    let response = tokio::time::timeout(BIND_GRANT_TIMEOUT, client.bind_grant_to_run(request))
+        .await
+        .map_err(|_| {
+            tonic::Status::deadline_exceeded("binding the approved plan to its run timed out")
+        })??;
+    bound_grant_from(response.into_inner(), plan_id)
+}
+
+/// The grant a bind answered, when it states a rung and names the plan asked for. Pure.
+fn bound_grant_from(
+    response: mp_contracts::model_plane::v1::BindGrantToRunResponse,
+    plan_id: &str,
+) -> Result<crate::session_flow::ThreadGrant, tonic::Status> {
+    use mp_contracts::model_plane::v1::AutonomyRung;
+    let rung = AutonomyRung::try_from(response.granted_rung)
+        .ok()
+        .filter(|rung| *rung != AutonomyRung::Unspecified);
+    match rung {
+        Some(rung) if response.approved_plan_id == plan_id => Ok(crate::session_flow::ThreadGrant {
+            rung: Some(rung),
+            approved_plan_id: Some(plan_id.to_owned()),
+            expires_at_unix: None,
+            read_failed: false,
+        }),
+        _ => Err(tonic::Status::failed_precondition("plan_grant_unavailable")),
+    }
+}
+
+/// The grant an approve-then-execute run dispatches with (WS14 S2), decided after the plan claim.
+/// It is the grant Session Core BOUND to this run, and only when the plan was claimed here (the
+/// single-use guard: this run is the one that executes it), the grant the run read names the plan,
+/// and Session Core binds exactly that plan. Any other outcome is the unreadable grant, on which an
+/// execute turn is refused (`resolve_autonomy_rung`): typed, before execution-core is called, the
+/// same refusal a grant that could not be read gets.
+#[allow(clippy::too_many_arguments)]
+async fn approve_then_execute_grant(
+    state: &AppState,
+    run_id: &str,
+    org_id: &str,
+    thread_id: &str,
+    plan_id: &str,
+    bearer: &VerifiedModelBearer,
+    read: Option<&crate::session_flow::ThreadGrant>,
+    claimed: bool,
+) -> crate::session_flow::ThreadGrant {
+    if !claimed || !read.is_some_and(|grant| grant_names_plan(grant, plan_id)) {
+        tracing::warn!(
+            run_id,
+            org_id,
+            thread_id,
+            "approve-then-execute: the plan was not claimed for this run or the thread's grant does not name it; the run is refused"
+        );
+        return crate::session_flow::ThreadGrant::unreadable();
+    }
+    match bind_grant_to_run(state, run_id, org_id, thread_id, plan_id, bearer).await {
+        Ok(bound) => bound,
+        Err(status) => {
+            tracing::warn!(
+                code = ?status.code(),
+                run_id,
+                org_id,
+                thread_id,
+                "approve-then-execute: session-core did not bind the grant to the run; the run is refused"
+            );
+            crate::session_flow::ThreadGrant::unreadable()
+        }
     }
 }
 
@@ -11773,6 +11948,10 @@ fn agentic_run_stream(
     // An execute turn (WS14 S2a): the run takes the thread's live plan grant or is refused,
     // typed, before execution-core is called. `false` for a continuation and every other turn.
     execute_granted: bool,
+    // The plan an approve-then-execute turn runs (WS14 S2), `None` for every other turn. The run
+    // binds the thread's grant only when that grant names this plan, and only after the plan is
+    // claimed (`approve_then_execute_grant`).
+    approved_plan_id: Option<String>,
     execution_bearer: VerifiedExecutionBearer,
     data_plane_bearer: VerifiedBearer,
     model_bearer: VerifiedModelBearer,
@@ -11898,7 +12077,14 @@ fn agentic_run_stream(
         } else {
             None
         };
-        let plan_context = if plan_context_wanted(plan_mode, resume.is_some()) {
+        // WS14 S2: an approve-then-execute turn claims only the plan its grant names. A grant that
+        // names another plan is left alone, so a refused turn never consumes a plan it did not run.
+        let plan_context = if plan_context_wanted(plan_mode, resume.is_some())
+            && approved_plan_id.as_deref().map_or(true, |plan_id| {
+                durable_grant
+                    .as_ref()
+                    .is_some_and(|grant| grant_names_plan(grant, plan_id))
+            }) {
             approved_plan_context(
                 &state,
                 &org_id,
@@ -11909,6 +12095,26 @@ fn agentic_run_stream(
             .await
         } else {
             None
+        };
+        // WS14 S2: an approve-then-execute turn runs with the grant its plan binds, or not at all.
+        // The claim above is the single-use guard, so a second execute of the same plan finds it
+        // spent, and a grant that no longer names the plan is refused; both are typed, before
+        // execution-core is called. Otherwise the run dispatches with the grant as it was read.
+        let durable_grant = match approved_plan_id.as_deref() {
+            Some(plan_id) => Some(
+                approve_then_execute_grant(
+                    &state,
+                    &run.run_id,
+                    &org_id,
+                    &thread_id,
+                    plan_id,
+                    &model_bearer,
+                    durable_grant.as_ref(),
+                    plan_context.is_some(),
+                )
+                .await,
+            ),
+            None => durable_grant,
         };
 
         // Construct the authenticated request before reporting the run as
@@ -18850,6 +19056,8 @@ pub(crate) async fn continue_run(
             false,
             // A continuation is never an execute turn: its authority is the pause's.
             false,
+            // Nor an approve-then-execute turn (WS14 S2): it names no plan.
+            None,
             execution_bearer,
             data_plane_bearer,
             model_bearer,
@@ -19347,7 +19555,7 @@ mod continue_run_tests {
         // request sits behind the decision, exactly once.
         let gate = plan_context_gate();
         let decision = gate
-            .find("if plan_context_wanted(plan_mode, resume.is_some()) {")
+            .find("if plan_context_wanted(plan_mode, resume.is_some())")
             .expect("the plan context is requested only behind plan_context_wanted");
         let request = gate
             .find("approved_plan_context(")
@@ -20748,6 +20956,7 @@ mod continue_run_tests {
             CONTINUE_PERMISSION_MODE.to_owned(),
             false,
             false,
+            None,
             execution,
             data_plane,
             session,
@@ -22166,6 +22375,7 @@ mod continue_run_tests {
             CONTINUE_PERMISSION_MODE.to_owned(),
             false,
             false,
+            None,
             execution,
             data_plane,
             session,
@@ -22234,6 +22444,133 @@ mod continue_run_tests {
             agent_subscription_failure(&failed, true).map(|failure| failure.code),
             Some("subscription_usage_limit")
         );
+    }
+}
+
+/// WS14 S2, approve then execute: the gateway's decisions. A plan approval answers `execute_now`
+/// only when every condition holds; an execute turn names a plan only while its switch is on; the
+/// grant it runs under names that plan and is the one Session Core bound. The order of the claim,
+/// the bind and the dispatch is pinned by name here and driven end to end on the proof stack.
+#[cfg(test)]
+mod approve_then_execute_tests {
+    use super::*;
+    use mp_contracts::model_plane::v1::AutonomyRung as Rung;
+
+    fn request(extra: serde_json::Value) -> InvokeRequest {
+        let mut body = serde_json::json!({ "content": "run the plan" });
+        body.as_object_mut()
+            .expect("object")
+            .extend(extra.as_object().expect("object").clone());
+        serde_json::from_value(body).expect("a wire body parses")
+    }
+
+    fn grant(rung: Option<Rung>, plan: Option<&str>) -> crate::session_flow::ThreadGrant {
+        crate::session_flow::ThreadGrant {
+            rung,
+            approved_plan_id: plan.map(str::to_owned),
+            expires_at_unix: None,
+            read_failed: false,
+        }
+    }
+
+    #[test]
+    fn the_switch_takes_only_the_literal_true() {
+        assert!(plan_execute_on_approve_from(Some("true")));
+        assert!(plan_execute_on_approve_from(Some(" true ")));
+        for value in [None, Some(""), Some("false"), Some("1"), Some("yes"), Some("on")] {
+            assert!(!plan_execute_on_approve_from(value), "{value:?} must not enable the path");
+        }
+    }
+
+    #[test]
+    fn approval_answers_execute_now_only_when_all_three_conditions_hold() {
+        for switch_on in [false, true] {
+            for recorded in [false, true] {
+                for accepted in [false, true] {
+                    let expected = if switch_on && recorded && accepted {
+                        "execute_now"
+                    } else {
+                        "next_message"
+                    };
+                    assert_eq!(
+                        approval_continuation(switch_on, recorded, accepted),
+                        expected,
+                        "switch {switch_on}, recorded {recorded}, accepted {accepted}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_plan_field_is_ignored_while_its_switch_is_off() {
+        let req = request(serde_json::json!({ "execute_granted": true, "approvedPlanId": " plan-1 " }));
+        assert_eq!(approved_plan_of(&req, false), None, "switch off: the request runs as before");
+        assert_eq!(approved_plan_of(&req, true), Some("plan-1"), "trimmed when the switch is on");
+        let blank = request(serde_json::json!({ "execute_granted": true, "approved_plan_id": "   " }));
+        assert_eq!(approved_plan_of(&blank, true), None, "a blank id names no plan");
+        let absent = request(serde_json::json!({ "execute_granted": true }));
+        assert_eq!(approved_plan_of(&absent, true), None, "no field, no plan");
+    }
+
+    #[test]
+    fn an_execute_turn_runs_only_under_a_grant_that_names_its_plan() {
+        assert!(grant_names_plan(&grant(Some(Rung::WorkspaceWrite), Some("plan-1")), "plan-1"));
+        assert!(
+            !grant_names_plan(&grant(Some(Rung::WorkspaceWrite), Some("plan-1")), "plan-2"),
+            "a grant for another plan"
+        );
+        assert!(!grant_names_plan(&grant(None, Some("plan-1")), "plan-1"), "no rung stated");
+        assert!(!grant_names_plan(&grant(Some(Rung::WorkspaceWrite), None), "plan-1"), "no plan named");
+        assert!(
+            !grant_names_plan(&crate::session_flow::ThreadGrant::unreadable(), "plan-1"),
+            "an unanswered read is not a grant"
+        );
+    }
+
+    #[test]
+    fn a_bind_is_used_only_when_it_states_a_rung_for_the_plan_asked_for() {
+        let answer = |rung: Rung, plan: &str| mp_contracts::model_plane::v1::BindGrantToRunResponse {
+            granted_rung: rung as i32,
+            justification: "writes the report".to_owned(),
+            approved_plan_id: plan.to_owned(),
+        };
+        let bound = bound_grant_from(answer(Rung::WorkspaceWrite, "plan-1"), "plan-1")
+            .expect("the bound grant");
+        assert_eq!(bound.rung, Some(Rung::WorkspaceWrite));
+        assert_eq!(bound.approved_plan_id.as_deref(), Some("plan-1"));
+        assert!(!bound.read_failed);
+        assert!(
+            bound_grant_from(answer(Rung::WorkspaceWrite, "plan-2"), "plan-1").is_err(),
+            "a bind of another plan is refused"
+        );
+        assert!(
+            bound_grant_from(answer(Rung::Unspecified, "plan-1"), "plan-1").is_err(),
+            "a bind that states no rung is refused"
+        );
+    }
+
+    #[test]
+    fn the_bind_follows_the_claim_and_precedes_the_dispatch() {
+        let source = include_str!("sse.rs").replace("\r\n", "\n");
+        let start = source.find("fn agentic_run_stream(").expect("the stream launch");
+        let rest = &source[start..];
+        let body = &rest[..rest.find("\n}\n").expect("the end of the launch")];
+        let claim = body.find("approved_plan_context(").expect("the claim");
+        let bind = body.find("approve_then_execute_grant(").expect("the bind");
+        let dispatch = body.find("spawn_run_dispatch(").expect("the dispatch");
+        assert!(claim < bind && bind < dispatch, "the claim, then the bind, then the dispatch");
+    }
+
+    #[test]
+    fn the_pre_run_check_sits_before_the_stream_starts() {
+        let source = include_str!("sse.rs").replace("\r\n", "\n");
+        let start = source.find("pub async fn invoke_stream_sse(").expect("the invoke handler");
+        let rest = &source[start..];
+        let body = &rest[..rest.find("\n}\n").expect("the end of the handler")];
+        let check = body.find("approved_plan_of(").expect("the pre-run check");
+        let stream = body.find("agentic_run_stream(").expect("the stream call");
+        assert!(check < stream, "the check runs before the run is started");
     }
 }
 
@@ -22813,8 +23150,8 @@ mod execute_turn_tests {
         let invoke = code_of("pub async fn invoke_stream_sse(", "\n}\n");
         assert_eq!(
             invoke.matches("req.execute_granted").count(),
-            // the waiver refusal, and the one stream call
-            2,
+            // the waiver refusal, the approve-then-execute shape check (WS14 S2), and the one stream call
+            3,
             "{invoke}"
         );
         let stream_call = &invoke[invoke.find("agentic_run_stream(").expect("the stream call")..];

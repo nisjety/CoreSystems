@@ -258,6 +258,16 @@ service ThreadAutonomy {
   // "no grant" is an answer, not an error. Read-only; it spends nothing. Refused
   // for a caller that does not own the thread, and never answers for another org.
   rpc GetThreadGrant(GetThreadGrantRequest) returns (GetThreadGrantResponse);
+
+  // Bind the thread's live grant to the run that executes the plan it was
+  // approved with (WS14 S2, approve then execute). One statement copies the
+  // rung, the justification and the plan id onto the run's record, and it
+  // matches only while the thread still holds exactly that plan and the grant
+  // has not lapsed, so the rung is never one the caller stated. Refused with
+  // FAILED_PRECONDITION `plan_grant_unavailable` otherwise, and for a
+  // zero-retention or waived credential. Session Core does not spend the plan:
+  // the gateway's APPROVED -> EXECUTING compare-and-swap is the single-use guard.
+  rpc BindGrantToRun(BindGrantToRunRequest) returns (BindGrantToRunResponse);
 }
 
 // MessageSearch: full-text search over the durable conversation record. A
@@ -1606,6 +1616,27 @@ message GetThreadGrantResponse {
   string approved_plan_id = 3;
   // When the grant lapses; unset when there is no live grant.
   google.protobuf.Timestamp expires_at = 4;
+}
+
+// --- ThreadAutonomy.BindGrantToRun (build plan WS14 S2) ---
+
+message BindGrantToRunRequest {
+  string run_id = 1;
+  string thread_id = 2;
+  // Server-authoritative org scope, as in GetThreadGrantRequest.
+  string org_id = 3;
+  // The plan the run executes. The thread's live grant must name exactly this
+  // plan, or nothing is bound.
+  string approved_plan_id = 4;
+}
+
+message BindGrantToRunResponse {
+  // The rung the run was bound with, copied from the thread's grant.
+  AutonomyRung granted_rung = 1;
+  // The reason the approval stated, as the thread holds it.
+  string justification = 2;
+  // The plan the grant names; equal to the request's `approved_plan_id`.
+  string approved_plan_id = 3;
 }
 
 // --- RecordRunContext (build plan WS02 S4) ---

@@ -8273,6 +8273,13 @@ pub struct InvokeRequest {
     /// client is never read. A ZDR token is refused through the `agentic` row.
     #[serde(default, alias = "executeGranted")]
     pub execute_granted: bool,
+    /// The plan an approve-then-execute turn runs (WS14 S2): the plan a plan approval answered
+    /// `continuation: execute_now` for. It is read only while `MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE`
+    /// is on, and only together with `execute_granted`. The turn is refused typed
+    /// (`plan_grant_unavailable`) unless the thread's grant names this plan, and the run then binds
+    /// that grant itself (`sse::approve_then_execute_grant`). It carries no rung.
+    #[serde(default, alias = "approvedPlanId")]
+    pub approved_plan_id: Option<String>,
     /// chat-parity §2 function-calling: tool definitions the model may call.
     /// Empty → no tools. With the `tools` feature opted in, the stream path runs
     /// the tool loop (`tool_call`/`tool_result` events) before the final answer.
@@ -8985,6 +8992,15 @@ async fn plan_approval(
         state.plan_mode.grant_expires_at(&claims.org_id, &thread_id)
     };
 
+    // WS14 S2: what the client does next. `execute_now` needs the grant recorded durably for this
+    // plan (the durable switch on, the write landed, not waived) and an execute turn accepted here
+    // (the execute switch and the approval-resume switch both on). Otherwise the grant waits for the
+    // person's own next turn, as it always has.
+    let continuation = crate::sse::approval_continuation(
+        crate::sse::plan_execute_on_approve_enabled(),
+        durable_grant && durably_recorded && !body.plan_id.is_empty(),
+        state.plan_mode.execute_enabled() && state.plan_mode.approval_resume_enabled(),
+    );
     Ok(Json(json!({
         "run_id": run_id,
         "was_in_plan_mode": exited.was_active,
@@ -8997,6 +9013,8 @@ async fn plan_approval(
         // so and refuse to offer a rung that has run out. `null` when no grant is held
         // (a rung the store does not record).
         "grant_expires_at_unix": grant_expires_at_unix,
+        // WS14 S2, additive: `execute_now` or `next_message` (see above).
+        "continuation": continuation,
     })))
 }
 

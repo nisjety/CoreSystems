@@ -166,6 +166,13 @@ export type ChatInvokeRequest = {
    */
   executeGranted?: boolean
   /**
+   * The plan this execute turn runs (WS14 S2, approve then execute): sent only with
+   * `executeGranted`, and only for the turn a plan approval answered `execute_now` for. The
+   * gateway binds the thread's grant to the run only when that grant names this plan, so a
+   * stale or replaced approval refuses the turn (`plan_grant_unavailable`) instead of running it.
+   */
+  approvedPlanId?: string
+  /**
    * The id this send is named with (the receipt). Sent as `idempotency_key`, which the gateway
    * already reads as the retry identity of a send; with send receipts on it also stores the
    * user's message under it, so a repeat of the send is one transcript row. Never sent for a
@@ -412,6 +419,7 @@ export type ChatAttachmentEvent = {
   size?: number
   /** The gateway's structural check of an Office or PDF file, as sent; the normalizer validates it. */
   check?: unknown
+  preview?: unknown
 }
 /**
  * How a turn's cost was reached. `subscription` means a user-owned model
@@ -1442,9 +1450,18 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
         ? (request.planMode ?? false) && !conversationOnly
         : request.planMode ?? false,
     // Present ONLY on an execute turn, so every other body is byte-identical to
-    // what it was before this field existed. It carries no rung and no plan id:
-    // the server holds the grant, and a rung supplied here would never be read.
-    ...(executeGranted ? { execute_granted: true } : {}),
+    // what it was before this field existed. It carries no rung: the server holds
+    // the grant, and a rung supplied here would never be read. The plan id rides
+    // along only on the approve-then-execute turn (WS14 S2), which the gateway
+    // checks against the thread's grant before the run starts.
+    ...(executeGranted
+      ? {
+          execute_granted: true,
+          ...(request.approvedPlanId?.trim()
+            ? { approved_plan_id: request.approvedPlanId.trim() }
+            : {}),
+        }
+      : {}),
     // Deep research is its OWN field, not just `browse_web`. "Dyp research"
     // used to set only browseWeb, so it was indistinguishable from a plain
     // Search turn — the same failure planMode had. The gateway keys the
@@ -1671,6 +1688,7 @@ function dispatchAgUiEvent(
             url: str(value.url),
             size: num(value.size),
             check: value.check,
+            preview: value.preview,
           })
           break
         case 'reasoning_delta':
@@ -1913,6 +1931,7 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
         url: str(payload.url),
         size: num(payload.size),
         check: payload.check,
+        preview: payload.preview,
       })
       break
     case 'reasoning_delta':
@@ -2374,6 +2393,13 @@ export type PlanApprovalResult = {
    * for the UI only: the gateway's grant is the authority, never this value.
    */
   grantExpiresAtMs?: number
+  /**
+   * What the client does next (WS14 S2). `execute_now`: the gateway has recorded the grant for
+   * this plan and will run one execute turn that names it, so the client sends that turn now.
+   * `next_message` (the answer of every gateway without the switch, and of any approval the
+   * gateway did not record for the plan): the grant waits for the person's own next message.
+   */
+  continuation: 'execute_now' | 'next_message'
 }
 
 /**
@@ -2421,6 +2447,7 @@ export async function approvePlan(
     raw.grant_expires_at_unix > 0
       ? { grantExpiresAtMs: raw.grant_expires_at_unix * 1000 }
       : {}),
+    continuation: raw.continuation === 'execute_now' ? 'execute_now' : 'next_message',
   }
 }
 
