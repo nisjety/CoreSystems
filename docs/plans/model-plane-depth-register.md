@@ -2263,6 +2263,39 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-938 | WS21-S5a | live-proof | P1 | No rebuilt-stack proof exists. Quarry-side grant issuance and Quarry-to-broker identity live on quarryv2 and must merge before browser.open can be proven end to end. | open |
 | D2-939 | WS21-S5a | follow-up | P3 | 24 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-35.json | open |
 
+
+### Wave-mode batch W2-36 (2026-10-31)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-940 | WS14-S2 | decision | P1 | plan_approval always returns a continuation key (http_routes.rs about line 9017). With MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE off, the approval response gains a key, which conflicts with the byte-identical-when-off rule. The owner decides: omit the key when off, or accept it as additive (the S2a grant_expires_at_unix precedent). | open |
+| D2-941 | WS14-S2 | test-gap | P1 | No gateway test has run on this worktree since the S2 edits, because the crate does not compile. Claim-lost, bind-failure, plan-mismatch and double-execute refusals have helper tests and source-order pins only, no behaviour tests. | open |
+| D2-942 | WS14-S2 | risk | P1 | artifacts.rs is needed by WS19-S5's attachment change but sits in no listed owned set. W2-36 should assign it, or WS19-S5 cannot finish. | open |
+| D2-943 | WS14-S2 | decision | P1 | A plan grant still covers every later run on its thread for 24 h, and S2 binds only the execute run. The owner should confirm this before the switch goes on (carried). | open |
+| D2-944 | WS14-S2 | risk | P1 | A gateway restart or bind failure after the plan claim leaves the plan EXECUTING, so the person must plan again. Needs a live proof with the switch on (carried). | open |
+| D2-945 | WS14-S2 | decision | P1 | plan_approval (http_routes.rs ~9016) always adds `continuation` to the approval JSON, even with MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE off. That breaks the byte-identical-when-off rule unless the owner accepts it as additive (the grant_expires_at_unix precedent). | open |
+| D2-946 | WS14-S2 | follow-up | P1 | Owned deliverables are missing: action-registry.ts has no `chat.reject_plan` and was not touched (`chat.execute_approved_plan` already exists from S2a), and tests/e2e/plan-approve-execute.spec.ts was not written. | open |
+| D2-947 | WS14-S2 | test-gap | P1 | The plan row's plan-gate test names are not written: 'send failure leaves a retry, grant intact' and the concurrent-execute CAS test. Claim-lost, bind-failure and expired-grant outcomes in approve_then_execute_grant have pure-helper tests only. | open |
+| D2-948 | WS14-S2 | follow-up | P3 | 25 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-36.json | open |
+| D2-949 | WS19-S5 | risk | P1 | model-gateway's ExecutionCoreClient sets no decode limit: the only max_decoding_message_size in the Rust tree is the execution-core server at grpc.rs:2109. The tonic default of 4 MiB applies to ExecuteStepResponse. A 2 MiB preview (about 2.8 MB base64) rides the same response as the delivered files' content_b64, so a render can fail the whole call. Raise the client limit or send previews separately before CODE_INTERPRETER_OFFICE_VERIFY=render is enabled. The fix is in model-gateway state.rs, which is not owned here. | open |
+| D2-950 | WS19-S5 | test-gap | P1 | No owned Rust test has run, because the crate does not compile until the shared edits and WS14-S2's zdr_features.rs land. The e2e spec is absent. The live DoD (xlsx with chart, docx, pptx, screenshots, download hash equal to the sandbox hash, #page=N in a real browser) has not run. All of this is lead-only. | open |
+| D2-951 | WS19-S5 | risk | P1 | model-gateway's ExecutionCoreClient keeps the tonic default 4 MiB decode limit. A preview of up to about 2.8 MB of base64, plus the delivered files' content_b64 in the same ExecuteStepResponse, can fail the whole call once render is switched on. | open |
+| D2-952 | WS19-S5 | live-proof | P1 | The plan's test command `pnpm test:e2e -- office-deliverables.spec.ts` cannot run: tests/e2e/office-deliverables.spec.ts does not exist (only product-office-outputs.spec.ts does) and it is not in new_files. The lead must create it. | open |
+| D2-953 | WS19-S5 | live-proof | P1 | Live DoD: with CODE_INTERPRETER_OFFICE_VERIFY=render, generate an xlsx with a chart, a docx and a pptx; take screenshots of the page strip and the substitution notice; check that the download SHA-256 equals the sandbox output; check that #page=N works on a data: PDF in Chrome and Firefox. | open |
+| D2-954 | WS19-S5 | live-proof | P1 | zdr_features.rs:212 and normalize.rs:568 (WS14-S2 approved_plan_id) also block model-gateway compilation and must land first. | open |
+| D2-955 | WS19-S5 | live-proof | P1 | sequence first (not this slice): apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs:212 (WS14-S2 approved_plan_id pattern) blocks cargo check and test of model-gateway --lib until WS14-S2 fixes it. | open |
+| D2-956 | WS19-S5 | live-proof | P1 | golden regeneration, after the Rust and TSX edits compile: run MP_UPDATE_GOLDEN=1 for sse_event_payload_golden (sse_events.rs payload_contract) to refresh apps/Model Plane/api/contracts/sse-event-payloads.json and its .sha256; copy both to apps/Frontend Plane/verevonv3/src/shared/api/contracts/; from apps/Frontend Plane/verevonv3 run `node scripts/gen-chat-event-types.mjs` and then with --check; update the pinned digest on line 198 of scripts/tests/zdr-contract-sync.test.sh (repo root) to the new sha256 of the Model Plane golden. | open |
+| D2-957 | WS19-S5 | follow-up | P3 | 24 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-36.json | open |
+| D2-958 | WS21-S5b | risk | P1 | browser_session.rs acquire_run_grant still sends read_only=true, so every browser.act is refused at the read-level precheck. The act path cannot run live until open requests act-level grants. | open |
+| D2-959 | WS21-S5b | test-gap | P1 | Site consent is not built. Broker server.go siteDeniedError returns BROWSER_SITE_DENIED for both ask and deny, so browser_site_consent needs a distinct broker reason, a SiteConsent variant in browser_session.rs map_status, and the cause in approval-causes.json and mp-contracts. The tests consent_cause_options_clamped_to_cap and denied_site_not_reasked are not written. | open |
+| D2-960 | WS21-S5b | risk | P1 | Risk category is None for every act: browser_session.rs does not keep the last observation's snapshot targets, so a ref-bound act has no label evidence and the typed risk_category on the approval card stays empty. | open |
+| D2-961 | WS21-S5b | risk | P1 | Quarry is the hard guard against mutating actions on read-level grants. The K3-6 contract test lives on quarryv2, and the model-plane precheck only re-reads the broker. EXECUTION_DO_BROWSER_ACT_ENABLED must stay off until K3-6 passes. | open |
+| D2-962 | WS21-S5b | risk | P1 | risk_category on the browser_action_risk approval is always empty in practice: browser_act_tool_def only offers *_ref actions and browser_act_risk_category judges with observation None, so the classifier never sees a label; the card cannot say why an act is risky until the session keeps the last snapshot targets. | open |
+| D2-963 | WS21-S5b | live-proof | P1 | Live proof (form fill on act-level site works, checkout button pauses, read-level site refuses act; events + approval rows on the S5a stack) can only run after quarryv2 merges and after open requests act-level grants. | open |
+| D2-964 | WS21-S5b | live-proof | P1 | K3-6: Quarry read_only contract test on quarryv2 must pass before EXECUTION_DO_BROWSER_ACT_ENABLED is set anywhere. | open |
+| D2-965 | WS21-S5b | live-proof | P1 | Ledger entry (apps/Model Plane/docs/decisions/ledger.md) for the act-pauses-always decision, strict 'true' switch, and the wire-parity url skip: shared file, lead applies. | open |
+| D2-966 | WS21-S5b | follow-up | P3 | 22 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-36.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -2459,3 +2492,6 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS22-S3 | auth, zdr, authority | W2-34 | no |
 | WS19-S3 | policy, zdr | W2-35 | no |
 | WS21-S5a | authority, zdr, policy, cross-branch: the Quarry-side grant issuance endpoint and Quarry-to-broker identity are built on local branch quarryv2, not on model-plane; build against the contract with a stub and leave the live proof to the lead after quarryv2 merges | W2-35 | no |
+| WS14-S2 | authority, zdr, audit | W2-36 | no |
+| WS19-S5 | zdr, data-loss | W2-36 | no |
+| WS21-S5b | authority, policy, cross-branch: the Quarry-side grant issuance endpoint and Quarry-to-broker identity are built on local branch quarryv2, not on model-plane; build against the contract with a stub and leave the live proof to the lead after quarryv2 merges | W2-36 | no |
