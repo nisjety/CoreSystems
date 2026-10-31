@@ -1988,3 +1988,19 @@ This section corrects and extends "Profile owner and ACL check (WS17.P2, unit W2
 **Limits and cost.** Per request: at most 8 model calls (repair included), 200,000 reported tokens, 60,000 page characters per call, 4 calls in flight, and 16 in flight in the process; the AI phase is bounded at 45 s, and while the switch is on `POST /v1/scrape` gets the 125 s router deadline (as with scrape actions). Nothing is billed: token usage is reported in `data.ai`, and pricing (owner decision OD-3) is open. Quarry logs the kind, outcome, code, reason and counts of each format, never the page, the schema, a prompt or an output.
 
 **Evidence owed (stack session, not run here).** Everything above is proven by tests against a strict double of the gateway's chat route (`tests/ai_formats.rs`, `tests/ai_formats_off.rs`, `tests/ai_formats_real_token.rs`); no real Model Plane gateway has been called. On a side-by-side stack with the dev bypass and two hand-minted dev tokens: a scrape with `["markdown", {"type":"json","schema":...}, "summary"]` returns the fields and `data.ai.total.calls: 2`; the same with `zdr: true` returns `skipped` / `ZDR_UNAVAILABLE` and the gateway's log shows no call; with the switch off it is `400 feature_disabled`. The page-cache test (`an_ai_request_never_reads_or_writes_the_page_cache`) needs a Redis and skips without one.
+
+## `/v1/extract` with a `prompt` (INNH-2, built, NOT run, 2026-10-31)
+
+`POST /v1/extract` now sends `prompt` to the model: with `schema` as extra instructions, alone as a free-form JSON object (`data`, status `ok`). The contract is `docs/CONTRACTS.md`, "`/v1/extract`: the `prompt` takes effect". This arm has no switch of its own: it runs when `MODEL_PLANE_URL` is set and the edge holds a model credential (`MODEL_PLANE_TOKEN`, or the Auth Core minted path). It calls the gateway's `/v1/invoke`, not the `/v1/ai/chat` lane of the scrape AI formats, so `QUARRY_EDGE__AI_FORMATS` does not gate it. On a deployed stack the lane is ungranted until WS16.S1 to S3 and decision X-7, so a call there fails per source with a `403`-derived error string; do not point a deployed edge at a gateway for this.
+
+What a caller sees:
+| Answer | Reason |
+|---|---|
+| 400 `BAD_REQUEST` with a `hint` | `prompt` empty after trimming, or more than 10000 characters; before any fetch, and the message never repeats the prompt |
+| 501 `UNSUPPORTED` | a `schema` or a `prompt` was sent and `MODEL_PLANE_URL` is unset (not for a ZDR request) |
+| 200, item `ok`, `schema_valid: false`, `schema_issues` | the model answered something that does not fit the schema; the data is returned, the caller decides |
+| 200, item `ok`, `truncated_input: true` | the page was cut at 20000 bytes before the model read it |
+| 200, item `error`, `ZDR_UNAVAILABLE: ...` | ZDR (body flag or the token's floor): no page text goes to a model; `structured` still comes back |
+| 200, item `error`, message names the "request time budget" | 50 s passed before the model read this source; send fewer URLs |
+
+Nothing in a log or a response carries the prompt text; log lines carry lengths only. To check by hand on a side-by-side stack: send a page with a schema and a prompt, read the request the gateway receives (the prompt before the `<<<PAGE-` line, the page inside), then repeat with `"zdr": true` and confirm the gateway sees no request. Not done here: no real gateway was called.

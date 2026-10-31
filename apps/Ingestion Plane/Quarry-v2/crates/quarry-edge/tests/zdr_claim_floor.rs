@@ -937,6 +937,78 @@ async fn extract_runs_as_zdr_for_a_zdr_org_user_and_not_for_a_registry_zdr_servi
     assert_eq!(harness.fetch_zdr(), vec![true, false, true]);
 }
 
+/// INNH-2 (ADR-4): `schema` and `prompt` send page text to the Model Plane, whose `/v1/invoke`
+/// carries no ZDR posture. A ZDR org user (whatever the body says) and a body `zdr: true` get a
+/// per-source `ZDR_UNAVAILABLE` and the Model Plane sees no request; a standard org user reaches it.
+#[tokio::test]
+async fn extract_with_a_prompt_or_schema_never_reaches_the_model_for_a_zdr_org_user() {
+    let model_plane = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/invoke"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "request_id": "req_1",
+            "content": "{\"title\": \"x\"}",
+            "model_used": "test-model",
+        })))
+        .mount(&model_plane)
+        .await;
+    let model_plane_url = model_plane.uri();
+    let harness = Harness::start_with(move |state| AppState {
+        model_plane_url: Some(model_plane_url),
+        model_plane_token: Some("model-plane-test-token".into()),
+        ..state
+    })
+    .await;
+    let body = json!({
+        "urls": ["https://page.test/a"],
+        "prompt": "the page title",
+        "schema": { "type": "object", "properties": { "title": { "type": "string" } } },
+        "zdr": false
+    });
+
+    let zdr_org = harness
+        .post(&user_in_zdr_org(), "/v1/extract", body.clone())
+        .await;
+    assert_eq!(zdr_org.status().as_u16(), 200);
+    let payload: Value = zdr_org.json().await.unwrap();
+    assert_eq!(payload["results"][0]["status"], "error", "{payload}");
+    assert!(payload["results"][0]["error"]
+        .as_str()
+        .unwrap()
+        .starts_with("ZDR_UNAVAILABLE"));
+    assert_eq!(harness.fetch_zdr(), vec![true], "the page itself is read as ZDR");
+
+    let raised = harness
+        .post(
+            &user_in_standard_org(),
+            "/v1/extract",
+            json!({
+                "urls": ["https://page.test/a"],
+                "prompt": "the page title",
+                "zdr": true
+            }),
+        )
+        .await;
+    assert_eq!(raised.status().as_u16(), 200);
+    let payload: Value = raised.json().await.unwrap();
+    assert!(payload["results"][0]["error"]
+        .as_str()
+        .unwrap()
+        .starts_with("ZDR_UNAVAILABLE"));
+    assert!(
+        model_plane.received_requests().await.unwrap().is_empty(),
+        "no ZDR request may carry page text to the Model Plane"
+    );
+
+    let standard = harness
+        .post(&user_in_standard_org(), "/v1/extract", body)
+        .await;
+    assert_eq!(standard.status().as_u16(), 200);
+    let payload: Value = standard.json().await.unwrap();
+    assert_eq!(payload["results"][0]["status"], "ok", "{payload}");
+    assert_eq!(model_plane.received_requests().await.unwrap().len(), 1);
+}
+
 // ── /v1/agent/runs ──────────────────────────────────────────────────────────
 
 #[cfg(feature = "browser-agent")]

@@ -1,6 +1,6 @@
 # INNH-2: /v1/extract reads `prompt` but ignores it
 
-Status: not started
+Status: built in tests (commit below); not run against a real Model Plane
 Lane: A (scrape/extract). Plan home: WS16. Estimate: 1.5 d.
 Verified by reading quarryv2-next. Nothing was built or run.
 
@@ -47,10 +47,27 @@ Integration: extend tests/zdr_claim_floor.rs (extract schema variant) and tests/
 - Tenant: model call stays org-bound (`json_for_org`). Compat: additive ExtractItem fields; do not change `status` semantics.
 
 ## Commits
-(none yet)
+Local on quarryv2-next: "feat(quarry-edge): /v1/extract uses the prompt (INNH-2)" (sha in the INNH-STATUS row and in the run report). Nothing pushed.
 
-## Tests (counts)
-(none yet)
+## As built (deviations from the plan above)
+- Engine: `JsonRequest { schema, prompt }` and `AiFormatRunner::extract_for_org` in `quarry-runtime/src/ai_formats.rs`; `json` / `json_for_org` are thin wrappers (the page fence changed from a fixed `===` to the random-id frame for every caller). The prompt sits before the page, outside the fence; the fence id is `ai_scrape::fresh_nonce` (now `pub(crate)`, with `frame`). Reused from INNH-1: nonce framing only. The `/v1/ai/chat` engine (`AiScrapeEngine`) was NOT reused: extract still calls `/v1/invoke`, so no repair call and no `structured_output_schema` (depth line).
+- Prompt-only: the reply must be a JSON object, otherwise the source is a per-source `error` ("model returned JSON that is not an object"). No `schema_valid` key in that mode.
+- ZDR: per source, status `error`, message `ZDR_UNAVAILABLE: ...` (`ZDR_UNAVAILABLE_MESSAGE`); the page is still fetched under ZDR and its `structured` harvest returns. The 501 check is skipped under ZDR (as INNH-1 U3 does). The engine itself also refuses a ZDR `extract_for_org` call before any request.
+- Prompt rules: counted in characters (<= 10000 before cleaning), control characters other than line breaks and tabs dropped, trimmed, empty is 400; refusal carries a `hint` and never repeats the text. Prompt is never logged.
+- `truncated_input` is set on every item whose page was cut (fetched, ok and error), not only on the model arm.
+- Added (not in the plan): a 50 s request budget (`REQUEST_BUDGET`; `run_extract` takes it as a parameter); past it a source answers a typed `error`. Sources are still read in sequence.
+- No new flag, no new endpoint, no migration. The optional "require `QUARRY_EDGE__AI_FORMATS`" decision was not taken (stays additive).
+- Docs: `docs/openapi.yaml` (ExtractRequest.prompt maxLength 10000 + description, ExtractItem `schema_valid` / `schema_issues` / `truncated_input`, operation text, 400 and 501 text), `docs/CONTRACTS.md` (new section "`/v1/extract`: the `prompt` takes effect"; the AI-formats "Not in this version" line now points to it), `docs/RUNBOOKS.md` (new section). SDK docs untouched. ZDR matrix `extract` row: basis rewritten, three tests cited, golden JSON + `.sha256` + `ZDR_MATRIX.md` regenerated.
+
+## Tests (counts), all via qtest with QTARGET=quarry-target-integ
+- `cargo test -p quarry-runtime --lib`: 1059 passed (8 new in `ai_formats::tests`: prompt outside the fence with the schema, random fence id and a page that cannot close it, no-schema asks for one object, non-object reply is an error, neither schema nor prompt is 400, ZDR refused before any request, old wrapper unchanged).
+- `cargo test -p quarry-edge --lib`: 660 passed; `extract_routes` 20 (9 existing + 11 new: schema+prompt reach the model outside the fence, prompt-only free-form object with no `schema_valid`, 501 envelope `{code,error,hint}` with and without a prompt, bad prompt 400 and no echo and no model call, prompt cleaning and the char cap, schema-invalid answer is `ok` with `schema_valid:false` and issues, `truncated_input` on markdown and model routes, ZDR (org floor, body flag, no Model Plane) never reaches the model and keeps the harvest, hostile page text, failing model call keeps the harvest, request budget).
+- `--test zdr_claim_floor` 26 (1 new: ZDR org user and body flag see zero Model Plane requests, a standard user sees one), `--test zdr_feature_matrix` 14, `--test zdr_behavior` 4, `--test zdr_log_capture` 12, `cargo test -p quarry-core --lib zdr_matrix` 6 (golden regenerated, then re-run without the update flag).
+- `node --test scripts/tests/*.test.mjs`: 48 pass, 0 fail, 12 todo (already pending).
+- Clippy: no warning in the new code (one `result_large_err` on `clean_prompt` fixed by boxing). rustfmt: the new code is clean; the old code in `extract_routes.rs` (3 hunks) was already off and was left alone.
 
 ## Not verified
-Code reading only; nothing built or run. The 60 s router limit vs the sequential 25-call worst case was not measured.
+- No real Model Plane gateway call and no side-by-side stack; proven against a wiremock double of `/v1/invoke` only. The model lane is ungranted on a deployed stack (X-7), so this arm cannot run there.
+- No token-usage or cost surface (WS16.S1); no LLM metric; metering unchanged.
+- The 50 s budget is tested with a 100 ms budget and a delayed double; the edge router's 60 s limit was not driven end to end.
+- The Verevon gateway re-adding `prompt` to its contract is the Innhenting session's change.

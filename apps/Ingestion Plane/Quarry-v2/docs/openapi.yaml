@@ -1294,6 +1294,19 @@ paths:
 
         isolation — one failure never sinks the batch.
 
+
+        `schema` alone is schema-guided extraction. `prompt` alone asks the model for one
+
+        free-form JSON object (`data`, status `ok`, no `schema_valid`). Both together is
+
+        schema-guided extraction with the prompt as extra instructions. Neither returns
+
+        cleaned markdown (status `fetched`). Under zero data retention no page text is sent
+
+        to a model: each source answers status `error` with a `ZDR_UNAVAILABLE` message,
+
+        and its `structured` harvest still comes back.
+
         '
       tags:
       - extract
@@ -1311,13 +1324,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/ExtractResponse'
         '400':
-          description: No valid URLs in request
+          description: No valid URLs in request, or a `prompt` that is empty after trimming or over 10000 characters
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorBody'
         '501':
-          description: Structured extraction requires a Model Plane
+          description: A `schema` or a `prompt` was sent and no Model Plane is configured (not for a ZDR request)
           content:
             application/json:
               schema:
@@ -6426,6 +6439,14 @@ components:
         prompt:
           type: string
           nullable: true
+          maxLength: 10000
+          description: >-
+            Instructions for the model, 1 to 10000 characters after trimming (control
+            characters other than line breaks and tabs are dropped). With `schema` they
+            steer the schema-guided extraction and cannot relax the schema; alone they ask
+            for one free-form JSON object. The page text is sent as data, outside the
+            instructions. The prompt is never echoed in a response or written to a log.
+            An empty or over-long prompt is a 400.
         max_urls:
           type: integer
           format: int32
@@ -6452,6 +6473,22 @@ components:
         error:
           type: string
           nullable: true
+        schema_valid:
+          type: boolean
+          description: >-
+            Present when a `schema` was sent and the model answered: whether `data`
+            conforms to it. `status` stays `ok` either way. Absent for a prompt-only
+            request.
+        schema_issues:
+          type: array
+          items:
+            type: string
+          description: Why `data` does not conform, one line per issue. Present only when `schema_valid` is false.
+        truncated_input:
+          type: boolean
+          description: >-
+            True when the page was longer than the 20000-byte input cap and `markdown`
+            or the text the model read is only its start. Absent otherwise.
     StructuredData:
       type: object
       description: >-

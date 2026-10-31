@@ -773,7 +773,25 @@ Model output is untrusted and checked by Quarry, not by the model: `json` is val
 
 **Deadline.** While the switch is on, `POST /v1/scrape` gets the 125 s router deadline that scrape actions have (the fetch keeps its own cap, and the model phase has 45 s of its own); every other route keeps 60 s.
 
-**Not in this version.** No billing for AI formats (token usage is reported only; pricing is an owner decision). No result cache. Not on `/v1/scrape/stream`, `/v1/extract` (INNH-2 and 3), crawl or batch. The Model Plane lane for a deployed stack (a grant for Quarry on `/v1/ai/chat`, decision X-7) is not built: a deployed stack cannot turn the flag on until it is.
+**Not in this version.** No billing for AI formats (token usage is reported only; pricing is an owner decision). No result cache. Not on `/v1/scrape/stream`, crawl or batch. `/v1/extract` has its own `prompt` (next section, INNH-2). The Model Plane lane for a deployed stack (a grant for Quarry on `/v1/ai/chat`, decision X-7) is not built: a deployed stack cannot turn the flag on until it is.
+
+## `/v1/extract`: the `prompt` takes effect (INNH-2, 2026-10-31)
+
+`POST /v1/extract` used to read `prompt` and drop it. It is now sent to the model. No new endpoint, no new switch: the model arm is still gated by `QUARRY_EDGE__MODEL_PLANE_URL` and a model credential, as the schema arm always was. Callers that never sent `prompt` see no change except the additive item fields below.
+
+**Modes.** `schema` alone: schema-guided extraction, as before. `schema` + `prompt`: the same, with the prompt as extra instructions that say what to extract and cannot relax the schema. `prompt` alone: the model is asked for one JSON object that answers the instructions; the item is status `ok` and `data` is that object (a reply that is not an object is a per-source `error`). Neither: cleaned markdown, status `fetched`, unchanged.
+
+**Prompt rules.** 1 to 10000 characters after cleaning (characters, not bytes). Control characters other than line breaks and tabs are dropped and the ends are trimmed. An empty result, or more than 10000 characters before cleaning, is a 400 `BAD_REQUEST` with a `hint`; the message never repeats the prompt, and a refused prompt costs no fetch and no model call. The prompt is trusted text and goes before the page, outside a fence whose id is 128 random bits and is not in the page, so text on the page cannot close the fence or pose as the instructions. The output is still validated against `schema` when there is one. The prompt is not echoed in any response and not logged.
+
+**ExtractItem additions (additive).** `schema_valid` (bool): present when a `schema` was sent and the model answered; false means `data` does not conform, and `status` stays `ok` (the `fetched | ok | error` enum is unchanged). `schema_issues` (string[]): one line per issue, present only when `schema_valid` is false. `truncated_input` (bool): present and true when the page was cut at the 20000-byte input cap, whatever the status, so a caller knows the model (or the markdown) saw only the start of the page.
+
+**Errors.** 400 for the prompt rules above. 501 `UNSUPPORTED` when a `schema` or a `prompt` is sent and there is no Model Plane (hint: set `MODEL_PLANE_URL`, or omit `schema` and `prompt` to receive markdown); the exact enablement text is INNH-3. 429 short-circuit unchanged.
+
+**ZDR (ADR-4).** The model hop carries no ZDR posture, so under ZDR (the body flag, or the token's floor for a user of a ZDR org) no page text is sent to a model. The page is still fetched under ZDR; each source answers status `error`, `error` starting `ZDR_UNAVAILABLE:`, with its `structured` harvest, which needs no model. This is not a 501 and does not need a Model Plane. The engine refuses a ZDR call as well (`AiFormatRunner::extract_for_org`), so a future caller cannot reach the model by skipping the route check. The `extract` row of the ZDR matrix says so.
+
+**Time budget.** Sources are read one after another and every model call is paid. After 50 seconds from the start of the request a source that has not been read by the model answers status `error` with a message that names the budget, instead of the router cutting the whole request at 60 seconds. Send fewer URLs per request, or `max_urls` lower.
+
+**Not in this version.** No per-call output cap and no `cost_usd` (WS16.S1). No LLM usage metric: metering is unchanged (`quarry.extract.url` per `ok` or `fetched` source). The Verevon gateway re-adding `prompt` to its own contract is the Innhenting session's change. The model lane for a deployed stack (a grant on the Model Plane, decision X-7) is not built, so a deployed stack still cannot run this arm.
 
 ## Crawl scope and robots: planned status and vocabulary (WS14.S0, 2026-10-23)
 

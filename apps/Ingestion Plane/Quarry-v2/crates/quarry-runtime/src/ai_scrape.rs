@@ -861,7 +861,7 @@ fn parse_quotes(content: &str) -> Option<Vec<String>> {
 // ---- prompts --------------------------------------------------------------
 
 /// A random delimiter id, 128 bits as hex, that the text it fences does not hold.
-fn fresh_nonce(avoid: &str) -> String {
+pub(crate) fn fresh_nonce(avoid: &str) -> String {
     use ring::rand::SecureRandom;
     loop {
         let mut bytes = [0u8; 16];
@@ -882,7 +882,7 @@ fn fresh_nonce(avoid: &str) -> String {
 }
 
 /// `text` as the only content of a user message, fenced by a fresh id.
-fn frame(label: &str, nonce: &str, text: &str) -> String {
+pub(crate) fn frame(label: &str, nonce: &str, text: &str) -> String {
     format!("<<<{label}-{nonce}>>>\n{text}\n<<<END-{nonce}>>>")
 }
 

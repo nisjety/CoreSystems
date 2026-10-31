@@ -119,7 +119,7 @@ pub mod vision;
 pub use action_runtime::{ActionResult, ActionRuntime};
 pub use agent_loop::{AgentLoop, AgentLoopResult, LoopTermination};
 pub use agent_memory::{redact_sensitive, AgentScratchpad};
-pub use ai_formats::{AiFormatRunner, JsonResult, QueryResult, SummaryResult};
+pub use ai_formats::{AiFormatRunner, JsonRequest, JsonResult, QueryResult, SummaryResult};
 pub use answer::{
     AnswerPipeline, AnswerRequest, AnswerResult, Citation, ClosureFetcher, MarkdownFetcher,
     SimpleHttpMarkdownFetcher,

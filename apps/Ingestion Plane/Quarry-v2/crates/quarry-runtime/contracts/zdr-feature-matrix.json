@@ -163,10 +163,13 @@
       "treatment": "honored"
     },
     {
-      "basis": "the page runs carry the effective ZDR posture, so no artifact or durable page event is written",
+      "basis": "the page runs carry the effective ZDR posture, so no artifact or durable page event is written. A schema or a prompt (INNH-2) would send page text to the Model Plane, whose invoke call has no ZDR posture (ADR-4), so under ZDR each source is answered status error, ZDR_UNAVAILABLE, with no Model Plane call; the harvested structured data still returns; the engine refuses a ZDR call as well",
       "detail": null,
       "enforced_by": [
-        "zdr_claim_floor::extract_runs_as_zdr_for_a_zdr_org_user_and_not_for_a_registry_zdr_service"
+        "zdr_claim_floor::extract_runs_as_zdr_for_a_zdr_org_user_and_not_for_a_registry_zdr_service",
+        "zdr_claim_floor::extract_with_a_prompt_or_schema_never_reaches_the_model_for_a_zdr_org_user",
+        "extract_routes::a_zdr_request_never_reaches_the_model",
+        "ai_formats::extraction_under_zdr_is_refused_before_any_request"
       ],
       "id": "extract",
       "issue": null,
