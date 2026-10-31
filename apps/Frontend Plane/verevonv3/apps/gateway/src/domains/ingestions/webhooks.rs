@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use axum::{
     extract::{Extension, Path, Query, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -24,7 +24,7 @@ use crate::{
 };
 
 use super::shared::{
-    array_at, cookie_header, first_str, forward, okay, quarry_call, quarry_token, str_at,
+    array_at, cookie_header, first_str, forward, no_store, okay, quarry_call, quarry_token, str_at,
     str_or_null, validation,
 };
 
@@ -373,11 +373,6 @@ fn valid_webhook_id(raw: &str) -> Option<String> {
         && id.len() <= 80
         && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
     well_formed.then(|| id.to_owned())
-}
-
-/// Adds `Cache-Control: no-store` to an answer that carries a signing secret.
-fn no_store(response: impl IntoResponse) -> Response {
-    ([(header::CACHE_CONTROL, "no-store")], response).into_response()
 }
 
 #[cfg(test)]

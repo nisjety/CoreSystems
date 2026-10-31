@@ -1,7 +1,7 @@
 //! Ingestions domain.
 //!
 //! Backs the Verevon v3 SPA's `/api/ingestions/*` surface (runs, schedules,
-//! actions, sources, profiles, evidence, change webhooks) by proxying quarry-edge on the
+//! actions, sources, profiles, evidence, change webhooks, document reads) by proxying quarry-edge on the
 //! Ingestion Plane — the JWT-authenticated face of Quarry-v2 that owns the
 //! execution + profile endpoints and forwards the durable registry to
 //! quarry-control internally. All routes sit behind `require_session`; org
@@ -12,6 +12,7 @@
 
 mod evidence;
 pub(crate) mod jobs;
+mod parse;
 mod profiles;
 pub(crate) mod runs;
 pub(crate) mod schedules;
@@ -57,6 +58,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route("/api/ingestions/usage", get(jobs::get_usage))
         .route("/api/ingestions/profiles", get(profiles::list_profiles))
         .route("/api/ingestions/evidence", get(evidence::get_evidence))
+        .route("/api/ingestions/parse", post(parse::parse_document))
         .route(
             "/api/ingestions/webhooks",
             get(webhooks::list_webhooks).post(webhooks::create_webhook),

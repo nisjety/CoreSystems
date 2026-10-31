@@ -1497,3 +1497,71 @@
   display: grid;
   gap: 0.25rem;
 }
+
+/* Document reading (INNH-11): the file pick, the facts, the warnings above the text, and the Markdown. */
+.ingestions-doc__pick {
+  display: grid;
+  gap: 0.625rem;
+}
+
+.ingestions-doc__input {
+  max-width: 100%;
+}
+
+.ingestions-doc__result {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 0.5rem;
+}
+
+.ingestions-doc__facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.25rem;
+  margin: 0;
+}
+
+.ingestions-doc__facts div {
+  display: grid;
+  gap: 0.125rem;
+}
+
+.ingestions-doc__facts dt {
+  font-size: 0.75rem;
+  color: var(--ing-text-muted);
+}
+
+.ingestions-doc__facts dd {
+  margin: 0;
+  font-weight: 600;
+}
+
+.ingestions-doc__warnings {
+  display: grid;
+  gap: 0.375rem;
+  margin: 0;
+  padding: 0.75rem 0.875rem 0.75rem 2rem;
+  border: 1px solid var(--ing-accent);
+  border-radius: 0.5rem;
+  background: var(--ing-accent-soft);
+}
+
+.ingestions-doc__text-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.ingestions-doc__text {
+  max-height: 28rem;
+  margin: 0;
+  padding: 0.875rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border-radius: 0.5rem;
+  background: var(--ing-surface-sunken);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}

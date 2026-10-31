@@ -61,7 +61,7 @@ mangler. **Mangler** = Quarry har det ikke ennå; se avsnittet "Mangler i Quarry
 | Jobber: opprinnelse (manuell eller tidsplan) | `origin`, `schedule_id` | Koblet (ny i denne runden) | `ingestions/runs.rs` |
 | Kjøring: sider som ble hentet (Apify-datasett) | `GET /v1/jobs/{id}/results`, `/v1/crawl/{id}/results`, `/v1/batch/{id}/results` | Flagg `QUARRY_EDGE__JOB_RESULTS` (live: av). Koblet i Verevon: «Sider som ble hentet», med markdown per side | `ingestions/jobs.rs`, `IngestionsRunsView.tsx` |
 | Forbruk: kreditter for perioden | `GET /v1/team/credit-usage` | Koblet (ny i denne runden) | `ingestions/jobs.rs` |
-| Parse: dokument (PDF, DOCX) til Markdown | intern opptak, ikke offentlig parse-rute | Mangler (se under) | `pipeline.rs:1043` |
+| Parse: dokument (PDF, DOCX) til Markdown | `POST /v1/parse`, ingen lagring og ingen sladding | Koblet i Verevon: «Dokumenter», bak flagget `QUARRY_EDGE__PARSE_ROUTE` (live: av) | `ingestions/parse.rs`, `DocumentReadPanel.tsx` |
 | Browser-økter og profiler | `/api/v1/browser/*` | Koblet i Nettleser (ikke i denne siden) | `browser.rs` |
 
 ## Flagg som må slås på for å bruke de grå feltene
@@ -84,6 +84,7 @@ slås på, virker funksjonen uten endring i koden.
 | `QUARRY_EDGE__JOB_RESULTS=on` | sider per kjøring | av: 501 |
 | `QUARRY_EDGE__ANSWER_SYNTHESIS=on` | svar i søk (`answer_status`) | av: `answer_status` er `unavailable` med `synthesis_disabled` |
 | `QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS=on` (og `QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS=on`) | abonnement på endringswebhook, med UI | av: 501, og meldingen navngir bryteren |
+| `QUARRY_EDGE__PARSE_ROUTE=on` | dokumentlesing: PDF og DOCX til Markdown, uten lagring | av: 501 `parse_route_disabled`, og siden navngir bryteren |
 
 Ingen av disse er slått på i denne runden. Å slå dem på er en konfigurasjonsendring
 på den delte live-stacken, og det må godkjennes av eieren.
@@ -102,7 +103,7 @@ Hver linje peker til stedet i Quarry-koden. Nummereringen er den samme som før,
 7. **Svar i søk (Quarry-punkt 8a).** Levert på `innh/lane-d` (ab65682aa, 0aa5cbbb7): `answer_status` og `answer_reason`. Live svarer `synthesis_disabled` helt til bryteren `QUARRY_EDGE__ANSWER_SYNTHESIS` er slått på. Det er en konfigurasjon, ikke kode.
 8. **Kostnad per kjøring.** Levert på `quarryv2-next` (6bbd99763), bak `QUARRY_CONTROL__JOB_CREDITS` (av).
 9. **Direkte agent-API for Quarry-kallere.** `/v1/agent/runs` krever `grant_id` fra gatewayen (`agent_routes/lifecycle.rs`), så en ekstern klient kan ikke starte en agent direkte. Quarry-punkt 10 (agentkjøringer med API-nøkkel) er bygget på Quarry-siden bak `QUARRY_EDGE__API_KEY_AGENT_RUNS` (av). Gatewayen mangler sin halvdel, og Auth Core mangler utstedelse av nøkler. Begge venter på eierens beslutninger OD-1 til OD-17. Ingenting å koble i Verevon ennå.
-10. **Parse av dokumenter til Markdown.** Pipeline-en leser PDF og DOCX (`pipeline.rs:1043`), men bare som opptak til kunnskapsbasen. Må: en offentlig rute som returnerer Markdown uten å lagre. Quarry-punkt 11 (`POST /v1/parse`) er bygget, men ikke committet ennå.
+10. **Parse av dokumenter til Markdown (Quarry-punkt 11).** Levert på `innh/integ` (b68c347e9, a994e3cd7), lokalt og ikke pushet, bak `QUARRY_EDGE__PARSE_ROUTE` (av: 501 `parse_route_disabled`). Kontrakten er i `docs/CONTRACTS.md` under `/v1/parse`. Råbytes går opp med PDF- eller DOCX-typen, og svaret er Markdown med advarsler (skann, sider uten tekstlag, tomt dokument, kappet ved 8 MiB). Ingen lagring, ingen sladding (personopplysninger kommer tilbake uendret) og ingen måling. Koblet i Verevon: fanen «Dokumenter». Ikke kjørt på stack: Docker var nede hos Quarry-sesjonen.
 11. **Resultater per side for en jobb (Quarry-punkt 12).** Levert på `innh/lane-b` (cc2596c7a, 4f2a1bc3c): `GET /v1/jobs/{id}/results`, `/v1/crawl/{id}/results` og `/v1/batch/{id}/results`, bak `QUARRY_EDGE__JOB_RESULTS` (av), og `GET /v1/artifacts?run_id=&kind=`. Ikke prøvd mot et stack.
 12. **Schedule-kinds på live.** `QUARRY_SCHEDULE_CAPABILITIES` er tom, så siden kan ikke lagre tidsplaner. Må: konfigurasjon, etter at utførelsen er verifisert.
 13. **Vurdering av Quarry-punkt 13 (avbryt, nytt forsøk, eksport, kjøringsferdig-webhook).** Anbefalt rekkefølge: avbryt først (bygget bak `QUARRY_EDGE__JOB_CONTROL`, ikke prøvd på stack), så kjøringsferdig-webhook (1 til 1,5 dager, bare en ny hendelse i listen), så JSON-eksport hvis eieren vil ha den (paginert JSON og resultatruten finnes), og til slutt nytt forsøk (bare agentkjøringer kan gjenopptas i dag). Ingen kode i Verevon for dette ennå.
@@ -185,7 +186,31 @@ Frontend:
 - Feilmeldinger: bryteren som er av, ZDR, grensen på 10, duplikat og hver feltgrunn fra Quarry (`docs/ERROR_REASONS.md`).
 - Strukturert uttrekk: 501 viser hvilken av de fire årsakene som gjelder (Quarry skiller dem bare på teksten i `error`), og neste steg: kjør uten skjema og prompt for Markdown. `hint` vises ikke, fordi den er tekst til operatørene.
 
+Tester: gateway (bin-suiten): 856 bestått, 7 nye. Ingestions og shared/api i vitest: 471 bestått; `quarry-client.test.ts` kan ikke kjøres, som før. Panelets tre atferdstester: bestått. Typecheck: 33 feil, samme som baseline. ESLint på endrede filer: rent.
+
 Ikke verifisert:
 - Ingen webhook-bryter er slått på, og ingen kall er gjort mot en Quarry med dem på.
-- Leveringsstatusene `pending`, `in_flight`, `success`, `failed` og `dlq` er antatt fra kontrakten. De er ikke sett på et ekte stack.
+- Leveringsstatusene `pending`, `in_flight`, `success`, `failed` og `dlq` er bekreftet mot koden på `innh/integ` av Quarry-sesjonen, ikke på et stack. `in_flight` kan stå der uten at API-et kan sende den på nytt, så siden viser den som «sendes» uten knapp. «Send på nytt» vises bare for `failed` og `dlq`.
 - Ingen skjermbilde av webhook-panelet: nettleseren er utlogget.
+
+## Endringer i runden etter (fjerde leveranse fra Quarry)
+
+Quarry-punkt 11, `POST /v1/parse`, er levert på `innh/integ` (b68c347e9, a994e3cd7), lokalt og ikke pushet. Kontrakten står i `docs/CONTRACTS.md` under `/v1/parse`.
+
+Gateway (`apps/gateway`):
+- `POST /api/ingestions/parse` sender råbytes videre med klientens `Content-Type`, og Quarry avgjør typen fra innholdet. Bare `Content-Type` går videre, ikke filnavnet.
+- Gatewayen avviser en fil over 25 MiB før noe leses når lengden er oppgitt, og ellers ved grensen. Avvisningen er standardkonvolutten med `details.max_bytes`, samme som Quarry gir.
+- Svaret får `Cache-Control: no-store`, og `Retry-After` fra Quarry sendes videre. Dokumentet logges ikke. Tidsgrensen er 60 s: Quarry svarer innen sitt eget mål på 15 s, og opplastingen skal også få tid.
+
+Frontend:
+- Ny fane «Dokumenter», etter «Lekeplass». Velg en PDF eller DOCX og få Markdown. Advarslene står over teksten. Type, størrelse og antall sider vises.
+- En fil som ikke er PDF eller DOCX, eller er over 25 MiB, avvises før noe sendes.
+- 501 sier at dokumentlesing ikke er slått på, og navngir `QUARRY_EDGE__PARSE_ROUTE` når Quarry sier det. 429 gir en nedtelling fra `Retry-After`, og knappen kan trykkes først når den er ute.
+- Ingen kostnad vises: ruten er ikke målt. Siden sier at ingenting lagres, og at personopplysninger ikke fjernes.
+
+Ikke verifisert:
+- Ruten er ikke kjørt på et stack: Docker var nede hos Quarry-sesjonen. Bryteren er av på live.
+- Ingen kall mot Quarry med bryteren på, og gatewayen er ikke testet mot en ekte Quarry. Testene dekker grensene og konvolutten, ikke videresendingen av bytes.
+- Ingen skjermbilde av fanen: nettleseren er utlogget.
+
+Tester: gateway (bin-suiten): 861 bestått, 0 feilet, 5 nye for parse. Ingestions og shared/api i vitest: 485 bestått; `quarry-client.test.ts` kan ikke kjøres, som før. De tre nye testfilene for dokumentfanen: 14 bestått. Typecheck: 33 feil, samme som baseline. ESLint på endrede filer: rent.

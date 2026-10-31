@@ -4,6 +4,7 @@ import {
   ArrowUpRight,
   CalendarClock,
   CheckCircle2,
+  FileText,
   FlaskConical,
   Globe,
   ListChecks,
@@ -74,14 +75,16 @@ import {
 import { IngestionsRunsView } from '@/features/ingestions/components/IngestionsRunsView'
 import { IngestionsSchedulesView, type ScheduleFormState } from '@/features/ingestions/components/IngestionsSchedulesView'
 import { IngestionsMonitoringView } from '@/features/ingestions/components/IngestionsMonitoringView'
+import { DocumentReadPanel } from '@/features/ingestions/components/DocumentReadPanel'
 import { ProfilesPanel, SourcesPanel, type SourceFormState } from '@/features/ingestions/components/IngestionsSourcesView'
 import { StatusBadge, kindLabel, relativeTime } from '@/features/ingestions/components/ingestions-ui'
 import '@/features/ingestions/components/ingestions.css'
 
-type IngestionView = 'playground' | 'runs' | 'schedules' | 'monitoring' | 'sources' | 'profiles'
+type IngestionView = 'playground' | 'documents' | 'runs' | 'schedules' | 'monitoring' | 'sources' | 'profiles'
 
 const views: Array<{ id: IngestionView; icon: Component<LucideProps> }> = [
   { id: 'playground', icon: FlaskConical },
+  { id: 'documents', icon: FileText },
   { id: 'runs', icon: ListChecks },
   { id: 'schedules', icon: CalendarClock },
   { id: 'monitoring', icon: Telescope },
@@ -93,6 +96,8 @@ function viewLabel(id: IngestionView, tr: (no: string, en: string) => string) {
   switch (id) {
     case 'playground':
       return tr('Lekeplass', 'Playground')
+    case 'documents':
+      return tr('Dokumenter', 'Documents')
     case 'runs':
       return tr('Kjøringer', 'Runs')
     case 'schedules':
@@ -770,6 +775,10 @@ export default function VerevonIngestionsPage() {
             />
           </section>
           <RecentRuns runs={runs()} onOpenRun={openRun} onShowAll={() => showRuns('all')} />
+        </Show>
+
+        <Show when={activeView() === 'documents'}>
+          <DocumentReadPanel />
         </Show>
 
         <Show when={activeView() === 'runs'}>
