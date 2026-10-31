@@ -3094,6 +3094,119 @@ paths:
           description: A service principal, or a ZDR organization with the flag on (action probe).
         '404':
           description: Not found, or not visible to the caller under enforce.
+  /v1/parse:
+    post:
+      operationId: parse_document
+      summary: Parse an uploaded PDF or DOCX to text and store nothing (INNH-11)
+      description: >-
+        The request body is the document's raw bytes, not a URL and not multipart (a URL is
+        `POST /v1/scrape` with QUARRY_EDGE__DOC_ROUTING=on). The answer is the document's text in
+        the typed envelope. Nothing is stored: no artifact, no cache entry, no index row, no durable
+        event, no usage record, no ingest; the response carries `Cache-Control: no-store`, and no
+        filename or text is logged. The route is idempotent and has no side effect.
+
+
+        The bytes decide the kind (PDF or DOCX); `Content-Type` is only checked. It may be absent,
+        `application/octet-stream`, `application/pdf` or the DOCX media type; any other type is a
+        415, and a PDF or DOCX type that the bytes contradict is a 415 `content_type_mismatch`.
+        The body limit is 25 MiB (QUARRY_EDGE__PARSE_MAX_BYTES lowers it). The parse runs in an
+        isolated child process under memory and CPU limits with a 15 second deadline. An
+        organisation may have one parse in flight (QUARRY_EDGE__PARSE_CONCURRENCY_PER_ORG); a second
+        gets a 429 with `Retry-After` before its body is read.
+
+
+        The text is plain (`structure: plain`): paragraphs, no headings, lists or tables. A PDF page
+        with no text layer (a scan) has no text and a `document_has_no_text_layer` warning (or
+        `some_pages_have_no_text_layer`); there is no OCR. No redaction is applied to the returned
+        text: personal data in the document comes back as it is.
+
+
+        Dark: with QUARRY_EDGE__PARSE_ROUTE off (the default) the route answers 501. A service
+        principal needs the `parse:write` scope; a user token needs none.
+      tags:
+        - parse
+      requestBody:
+        required: true
+        content:
+          application/pdf:
+            schema:
+              type: string
+              format: binary
+          application/vnd.openxmlformats-officedocument.wordprocessingml.document:
+            schema:
+              type: string
+              format: binary
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '200':
+          description: The text of the document.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                enum: [no-store]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParseResponse'
+        '400':
+          description: An empty body (`details.reason` `empty_body`), or a body that could not be read.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParseError'
+        '401':
+          description: No valid token.
+        '403':
+          description: A service principal without the `parse:write` scope.
+        '413':
+          description: The body is over the limit (`details.reason` `too_large`, `details.max_bytes`), by its declared length or by its bytes.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParseError'
+        '415':
+          description: >-
+            Not a document the route reads. `details.reason` is `unsupported_media` (the bytes are
+            not a PDF or DOCX, or the declared type is not one the route takes),
+            `content_type_mismatch` (the declared type names the other document type than the
+            bytes), `pdf_parse_failed` or `docx_parse_failed` (the parser could not read the file,
+            or was stopped by its limits), or `too_large` (the parser's own size or inflate limit).
+            `details.supported` is `[pdf, docx]`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParseError'
+        '429':
+          description: >-
+            The organisation already has a document being parsed (`org_parse_busy`), the process is
+            buffering as many uploads as it will (`parse_capacity`), or the parser stayed busy
+            (`parser_busy`). `Retry-After` says when to come back.
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParseError'
+        '501':
+          description: >-
+            Off (`details.reason` `parse_route_disabled`, `details.env` QUARRY_EDGE__PARSE_ROUTE), or on
+            while documents would be parsed inside the edge (`isolation_required`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParseError'
+        '504':
+          description: The parse did not finish in 15 seconds (`TIMEOUT`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ParseError'
 components:
   parameters:
     AgentRunId:
@@ -3138,6 +3251,104 @@ components:
         $ref: '#/components/schemas/AdvisoryIdentifier'
       description: ADVISORY. A short label the caller gave its agent. Recorded, never trusted. `agent_label` is accepted too.
   schemas:
+    ParseWarning:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum: [document_has_no_text_layer, some_pages_have_no_text_layer, document_has_no_text, truncated_at_8mib]
+          description: >-
+            `document_has_no_text_layer`: no page of the PDF has text (a scan; no OCR).
+            `some_pages_have_no_text_layer`: some do not, and their text is missing.
+            `document_has_no_text`: a DOCX with no text. `truncated_at_8mib`: the text was cut.
+        message:
+          type: string
+    ParseData:
+      type: object
+      required: [markdown, kind, bytes, structure, truncated, warnings]
+      properties:
+        markdown:
+          type: string
+          description: The text of the document. Plain paragraphs, see `structure`.
+        kind:
+          type: string
+          enum: [pdf, docx]
+          description: What the bytes were read as.
+        bytes:
+          type: integer
+          description: The size of the uploaded document.
+        structure:
+          type: string
+          enum: [plain]
+          description: Paragraphs only. Headings, lists and tables are not marked up.
+        truncated:
+          type: boolean
+          description: The text was cut at 8 MiB.
+        pages:
+          type: integer
+          description: Pages of a PDF. Absent for a DOCX.
+        warnings:
+          type: array
+          items:
+            $ref: '#/components/schemas/ParseWarning'
+    ParseResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          $ref: '#/components/schemas/ParseData'
+        meta:
+          type: object
+          required: [request_id]
+          properties:
+            request_id:
+              type: string
+    ParseError:
+      type: object
+      required: [error, meta]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum: [BAD_REQUEST, UNSUPPORTED_MEDIA, RATE_LIMITED, UNSUPPORTED, TIMEOUT, INTERNAL]
+            message:
+              type: string
+            details:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  description: >-
+                    empty_body, body_unreadable, too_large, unsupported_media, content_type_mismatch,
+                    pdf_parse_failed, docx_parse_failed, org_parse_busy, parse_capacity, parser_busy,
+                    parse_route_disabled, isolation_required.
+                kind:
+                  type: string
+                detected:
+                  type: string
+                  description: What the bytes were (`html`, `image`, `archive`, `binary`, `pdf`, `docx`, ...).
+                declared:
+                  type: string
+                supported:
+                  type: array
+                  items:
+                    type: string
+                    enum: [pdf, docx]
+                max_bytes:
+                  type: integer
+                retry_after_seconds:
+                  type: integer
+                env:
+                  type: string
+        meta:
+          type: object
+          properties:
+            request_id:
+              type: string
     ProfileSummary:
       type: object
       required: [profile_id, scope, owner_is_caller]
@@ -7801,3 +8012,5 @@ tags:
   description: Versioned URL change tracking — baselines, checks, promotion, refresh
 - name: schedules
   description: Cron / one-shot / change-monitor schedules
+- name: parse
+  description: Parse an uploaded PDF or DOCX to text without storing it

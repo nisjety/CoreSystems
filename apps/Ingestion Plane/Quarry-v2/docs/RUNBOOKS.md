@@ -2023,3 +2023,23 @@ Nothing in a log or a response carries the prompt text; log lines carry lengths 
 **Tests (Linux container, `qtest-lane.sh`).** `cargo test -p quarry-edge --lib crawl_` (65 before the integration files), `--test crawl_sitemap`, `--test crawl_options_on`, `--test crawl_options_off`, `--test crawl_sitemap_scope_off`, `--test web_policy_routes`, `--test zdr_feature_matrix`; Go: `GOWORK=off go test ./...` in `services/quarry-orchestrator`; `node --test scripts/tests/*.test.mjs`.
 
 **Evidence owed (stack session).** On a side-by-side stack with the crawl fixture (`deploy/compose/crawl-fixture/`) and a sitemap that lists a page no link reaches: `sitemap: include` finds it and `skip` does not; `scrape_options.exclude_tags: ["nav"]` removes the nav text from a stored markdown artifact. The in-flight replay of a history recorded before the marker is not tested (there is no recorded history to replay).
+
+## `POST /v1/parse`: enable, disable and read the result (INNH-11, built, NOT run on a stack, 2026-10-31)
+
+`POST /v1/parse` takes a PDF or DOCX as the request body and answers its text; it stores nothing. It is dark. The contract is `docs/CONTRACTS.md`, "`POST /v1/parse`". The errors are in `docs/ERROR_REASONS.md`.
+
+**Enable (a development or side-by-side stack only; the owner decides, not the compose file).** The variable is read per request, so no restart is needed to turn it on or off, but the parser isolation is chosen at boot.
+1. `QUARRY_EDGE__PARSE_ROUTE=on`.
+2. Leave `QUARRY_EDGE__DOC_PARSE_ISOLATION` unset or `process` (the default for the edge binary on Linux). On any other setup the route answers 501 `isolation_required` and the boot line `document parse route is on` shows `serving=false`. Do not set `QUARRY_EDGE__PARSE_ALLOW_INPROCESS=1` on a multi-tenant deployment: it lets a hostile file run inside the edge.
+3. A service principal that should call it needs the `parse:write` scope on its token. The Control Plane registry (`plane-service-principals.json`) has no such scope yet, so a service cannot call the route until the owner adds it there.
+4. Optional: `QUARRY_EDGE__PARSE_MAX_BYTES` (lowers the 25 MiB limit), `QUARRY_EDGE__PARSE_CONCURRENCY_PER_ORG` (default 1), `QUARRY_EDGE__PARSE_MAX_INFLIGHT` (default 4). The last two are read once, at the first request.
+
+**Disable.** Unset `QUARRY_EDGE__PARSE_ROUTE` (or set it to `off`): the next request is a 501.
+
+**Read the result.** `data.markdown` is plain text; `data.warnings` says what is missing (a scan is `document_has_no_text_layer`). Nothing is recorded: there is no scrape id, no artifact, and `GET /v1/artifacts` shows no new row. A 429 with `Retry-After` is the per-organisation or process limit working; a 415 with `pdf_parse_failed` and `limit: parser_stopped` is a file the parser's memory or CPU limit stopped.
+
+**Limits to know.** No OCR (a scan has no text), no redaction (personal data comes back as it is), no layout (no headings, lists or tables). The two process-wide parse slots are shared with PDF scrapes (`DOC_ROUTING=on`): a busy scrape path makes `parser_busy` more likely. A 25 MiB body is held in memory while it is read: four at once by default.
+
+**Tests (Linux container, `qtest-lane.sh`).** `cargo test -p quarry-runtime --lib content_route`, `--test doc_parse_sandbox`; `cargo test -p quarry-edge --lib parse_routes`, `--test parse_route`, `--test parse_route_off`, `--test parse_route_process` (starts the real edge binary and sends it a decompression bomb), `--test zdr_feature_matrix`, `--test web_policy_routes`, `--test log_field_discipline`; `node --test scripts/tests/*.test.mjs`.
+
+**Evidence owed (stack session).** On a side-by-side stack with the flag on: `curl --data-binary @file.pdf -H 'Content-Type: application/pdf'` with a user token returns the text, and a following `GET /v1/artifacts` shows no new artifact; a scanned PDF returns the warning; a second parse started while the first runs is a 429 with `Retry-After`.

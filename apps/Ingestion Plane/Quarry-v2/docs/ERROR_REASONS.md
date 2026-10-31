@@ -238,3 +238,23 @@ The agent is the one the verified token gives (a service principal, or a person'
 | `scrape_options.extractor` | `unsupported_extractor`, `conflicts_with_only_main_content` | the shared validator's codes |
 
 Terminal events of a crawl: `run_failed` with `code` `sitemap_unavailable` (a `sitemap: only` crawl whose discovery failed) or `edge_scrape_options_unsupported` (the edge did not echo `scrape_applied`). `POST /v1/internal/crawl/sitemap` answers 501 `UNSUPPORTED` while `QUARRY_EDGE__CRAWL_SITEMAP` is off; `run_page` answers 400 with `details.fields` under `scrape.` for options that do not pass the same checks.
+
+## `POST /v1/parse` (INNH-11, 2026-10-31)
+
+Standard envelope, `error.details.reason` as below. A message never echoes document text.
+
+| Status | Code | `details.reason` | When | What a caller does |
+|---|---|---|---|---|
+| 400 | `BAD_REQUEST` | `empty_body` | the body has no bytes | send the document |
+| 400 | `BAD_REQUEST` | `body_unreadable` | the body stream failed | retry |
+| 413 | `BAD_REQUEST` | `too_large` (`max_bytes`) | the body is over 25 MiB (or the lower `QUARRY_EDGE__PARSE_MAX_BYTES`), by its declared length or its bytes | send a smaller file |
+| 415 | `UNSUPPORTED_MEDIA` | `unsupported_media` (`detected`, `supported`) | the bytes are not a PDF or DOCX, or the `Content-Type` is not one the route takes (`supported_content_types`) | send a PDF or DOCX |
+| 415 | `UNSUPPORTED_MEDIA` | `content_type_mismatch` (`detected`, `declared`) | the declared PDF or DOCX type names the other document than the bytes | fix the header or send the bytes you meant |
+| 415 | `UNSUPPORTED_MEDIA` | `pdf_parse_failed`, `docx_parse_failed` (`kind`, maybe `limit: parser_stopped`) | the file is damaged, or the parser was stopped by its memory or CPU limit | the file cannot be read; do not retry as is |
+| 415 | `UNSUPPORTED_MEDIA` | `too_large` (`kind`) | the parser's own size or inflate limit | send a smaller file |
+| 429 | `RATE_LIMITED` | `org_parse_busy`, `parse_capacity`, `parser_busy` (`retry_after_seconds`) | the organisation, the process, or the parser slots are busy | wait `Retry-After` seconds |
+| 501 | `UNSUPPORTED` | `parse_route_disabled` (`env`) | `QUARRY_EDGE__PARSE_ROUTE` is off | ask the operator |
+| 501 | `UNSUPPORTED` | `isolation_required` (`env`, `hint`) | documents would be parsed inside the edge process | ask the operator |
+| 504 | `TIMEOUT` | none | the parse took more than 15 seconds | the file is too slow to read; do not retry as is |
+
+A 200 may carry `warnings[]` (`document_has_no_text_layer`, `some_pages_have_no_text_layer`, `document_has_no_text`, `truncated_at_8mib`): they are not errors.
