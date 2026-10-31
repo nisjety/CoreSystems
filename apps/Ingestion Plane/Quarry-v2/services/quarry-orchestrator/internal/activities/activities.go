@@ -192,6 +192,9 @@ type RunPageInput struct {
 	// batch pages and for a crawl accepted before scope existed: the body is then
 	// byte-identical to before.
 	Crawl *CrawlContext `json:"crawl,omitempty"`
+	// Scrape is the crawl's per-page scrape options (INNH-6b), the canonical JSON the edge
+	// stamped on the job. Nil for every other page: the body is then byte-identical to before.
+	Scrape json.RawMessage `json:"scrape,omitempty"`
 }
 
 // RunPageResult is returned by the runtime after a successful page execution.
@@ -222,6 +225,9 @@ type RunPageResult struct {
 	// Crawl is the edge's report on the scope, set only when the request carried a
 	// `crawl` context (WS14.S3).
 	Crawl *CrawlReport `json:"crawl,omitempty"`
+	// ScrapeApplied is the edge's proof that it applied the request's scrape options
+	// (INNH-6b). Nil when the request carried none, or the edge predates the option.
+	ScrapeApplied *bool `json:"scrape_applied,omitempty"`
 }
 
 // RunPage executes a single page via Quarry Runtime.
@@ -236,6 +242,9 @@ func (a *Activities) RunPage(ctx context.Context, in RunPageInput) (RunPageResul
 	}
 	if in.Crawl != nil {
 		payload["crawl"] = in.Crawl
+	}
+	if len(in.Scrape) > 0 {
+		payload["scrape"] = in.Scrape
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
