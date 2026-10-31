@@ -3423,6 +3423,8 @@ mod tests {
         let mut inference = service_claims();
         inference["aud"] = serde_json::json!("inference-core");
         inference["zdr"] = serde_json::json!(false);
+        // The delegated inference bearer carries its own scope (main 56019468a).
+        inference["scopes"] = serde_json::json!(["inference:invoke"]);
         let (status, body) = send_with_headers(&[
             ("authorization", format!("Bearer {ingress}")),
             (

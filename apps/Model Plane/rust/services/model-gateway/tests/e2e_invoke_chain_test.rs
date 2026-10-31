@@ -3400,7 +3400,7 @@ async fn scoped_service_token_reaches_only_chat_and_embeddings_with_monotonic_zd
     let (state, _) = make_state(client, session_client).await;
 
     let (_inference_jwks, inference_token) =
-        signed_delegated_service_inference_token(&["models:invoke"]).await;
+        signed_delegated_service_inference_token(&["inference:invoke"]).await;
     let app = with_delegated_inference_token(build_router(state, None), inference_token);
     call_zdr_unary_routes(app, &token, false).await;
 
