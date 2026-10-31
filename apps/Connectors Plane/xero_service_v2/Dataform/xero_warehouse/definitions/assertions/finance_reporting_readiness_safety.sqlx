@@ -1,0 +1,23 @@
+config {
+  type: "assertion",
+  schema: "dw_1_silver_xero_assertions",
+  name: "xero_finance_reporting_readiness_safety",
+  description: "Finance reporting readiness must be the explicit conjunction of governed chart mapping and approved NOK conversion readiness."
+}
+
+SELECT
+  tenant_id AS record_id,
+  finance_reporting_readiness_state AS violation
+FROM ${ref("xero_datamart", "finance_reporting_readiness")}
+WHERE is_finance_reporting_ready IS DISTINCT FROM (
+    COALESCE(is_group_chart_mapping_ready, FALSE)
+    AND COALESCE(is_nok_conversion_ready, FALSE)
+  )
+   OR (
+     is_finance_reporting_ready
+     AND finance_reporting_readiness_state != 'ready'
+   )
+   OR (
+     NOT is_finance_reporting_ready
+     AND finance_reporting_readiness_state = 'ready'
+   )

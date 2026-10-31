@@ -47,6 +47,7 @@ for required in \
   DPV2_TEST_ORG_ID \
   DPV2_SPOOF_ORG_ID \
   DPV2_USER_BEARER \
+  DPV2_SERVICE_BEARER \
   DPV2_QUALITY_BEARER \
   DPV2_QUICKWIT_ADMIN_BEARER; do
   require_env "$required"
@@ -56,6 +57,7 @@ valid_org_id "$DPV2_TEST_ORG_ID" || configuration_error "DPV2_TEST_ORG_ID has an
 valid_org_id "$DPV2_SPOOF_ORG_ID" || configuration_error "DPV2_SPOOF_ORG_ID has an invalid format"
 [ "$DPV2_TEST_ORG_ID" != "$DPV2_SPOOF_ORG_ID" ] || configuration_error "test and spoof organizations must differ"
 valid_bearer "$DPV2_USER_BEARER" || configuration_error "DPV2_USER_BEARER must be a compact JWT"
+valid_bearer "$DPV2_SERVICE_BEARER" || configuration_error "DPV2_SERVICE_BEARER must be a compact JWT"
 valid_bearer "$DPV2_QUALITY_BEARER" || configuration_error "DPV2_QUALITY_BEARER must be a compact JWT"
 valid_bearer "$DPV2_QUICKWIT_ADMIN_BEARER" || configuration_error "DPV2_QUICKWIT_ADMIN_BEARER must be a compact JWT"
 
@@ -284,6 +286,23 @@ run_family \
   "$DPV2_QUICKWIT_ADMIN_BEARER" \
   "$QUICKWIT_OWN" \
   "$QUICKWIT_SPOOF"
+
+# QB-T08: Quarry's option B route (POST /v1/rerank) and the service-principal rows.
+# DPV2_SERVICE_BEARER is a quarry-edge service token with data:read only (the isolated MVP runner
+# mints it with tests/e2e/isolated/fixture.mjs mint-service; it is not an Auth Core mint). So the rerank
+# row is "a service without the scope", and the retrieval row is the one route the service is granted.
+# The admin row is a dry-run prune, refused by the default-deny route table before any handler runs. The
+# rerank body names zdr_mode "ephemeral" and leaves sovereign_required unset: even an admitted call would
+# be skipped, and no provider would be called.
+RERANK_URL="$RETRIEVAL_BASE/v1/rerank"
+RERANK_PROBE=$(printf '{"request_id":"matrix-probe-0001","query":"authorization regression probe","profile":"web-v1","zdr_mode":"ephemeral","documents":[{"id":"probe-1","text":"authorization regression probe"}]}')
+PRUNE_PROBE=$(printf '{"org_id":"%s","dry_run":true,"reason":"authorization regression probe"}' "$DPV2_TEST_ORG_ID")
+
+assert_status web-rerank "no credentials" 401 retrieval-engine POST "$RERANK_URL" "" "" "$RERANK_PROBE"
+assert_status web-rerank "user token" 403 retrieval-engine POST "$RERANK_URL" "$DPV2_USER_BEARER" "" "$RERANK_PROBE"
+assert_status web-rerank "service without scope" 403 retrieval-engine POST "$RERANK_URL" "$DPV2_SERVICE_BEARER" "" "$RERANK_PROBE"
+assert_status service-admin "service on admin route" 403 retrieval-engine POST "$RETRIEVAL_BASE/v1/cache/semantic/prune" "$DPV2_SERVICE_BEARER" "" "$PRUNE_PROBE"
+assert_status service-retrieval "service bearer" 200 retrieval-engine POST "$RETRIEVAL_BASE/v1/retrieve" "$DPV2_SERVICE_BEARER" "" "$RETRIEVAL_OWN"
 
 printf '\nResults: %s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

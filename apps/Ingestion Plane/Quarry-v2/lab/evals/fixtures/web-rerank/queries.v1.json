@@ -1,0 +1,1282 @@
+{
+  "schema": "quarry-web-rerank-queries-v1",
+  "label_state": "pending",
+  "freeze": {
+    "searxng_image": "searxng/searxng:2026.7.12-c19d86faa",
+    "frozen_at_unix": 1791848155,
+    "count_param": 20,
+    "safesearch": 1,
+    "candidates_per_query": 20
+  },
+  "queries": [
+    {
+      "id": "nav-01",
+      "lang": "en",
+      "category": "navigational",
+      "text": "efsa.europa.eu scientific opinions on sanitisers",
+      "frozen": {
+        "raw_results": 80,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage"
+        ]
+      }
+    },
+    {
+      "id": "nav-02",
+      "lang": "no",
+      "category": "navigational",
+      "text": "mattilsynet kontaktinformasjon og åpningstider",
+      "frozen": {
+        "raw_results": 57,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage"
+        ]
+      }
+    },
+    {
+      "id": "nav-03",
+      "lang": "en",
+      "category": "navigational",
+      "text": "FDA food safety modernization act official page",
+      "frozen": {
+        "raw_results": 73,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage"
+        ]
+      }
+    },
+    {
+      "id": "nav-04",
+      "lang": "no",
+      "category": "navigational",
+      "text": "lovdata forskrift om matproduksjon",
+      "frozen": {
+        "raw_results": 60,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage"
+        ]
+      }
+    },
+    {
+      "id": "nav-05",
+      "lang": "no",
+      "category": "navigational",
+      "text": "folkehelseinstituttet smittevern veiledning",
+      "frozen": {
+        "raw_results": 71,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage"
+        ]
+      }
+    },
+    {
+      "id": "nav-06",
+      "lang": "no",
+      "category": "navigational",
+      "text": "brreg enhetsregisteret søk etter firma",
+      "frozen": {
+        "raw_results": 52,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage"
+        ]
+      }
+    },
+    {
+      "id": "nav-07",
+      "lang": "no",
+      "category": "navigational",
+      "text": "nortura kjøttprodusent kontakt",
+      "frozen": {
+        "raw_results": 57,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage"
+        ]
+      }
+    },
+    {
+      "id": "nav-08",
+      "lang": "en",
+      "category": "navigational",
+      "text": "UK Food Standards Agency food hygiene rating scheme",
+      "frozen": {
+        "raw_results": 64,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage"
+        ]
+      }
+    },
+    {
+      "id": "nav-09",
+      "lang": "no",
+      "category": "navigational",
+      "text": "nav dagpenger søknad digitalt",
+      "frozen": {
+        "raw_results": 63,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage"
+        ]
+      }
+    },
+    {
+      "id": "nav-10",
+      "lang": "no",
+      "category": "navigational",
+      "text": "skatteetaten merverdiavgift registrering for bedrifter",
+      "frozen": {
+        "raw_results": 62,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage"
+        ]
+      }
+    },
+    {
+      "id": "fac-01",
+      "lang": "no",
+      "category": "factual",
+      "text": "hva er grenseverdien for listeria i ferdigpakket røkt laks",
+      "frozen": {
+        "raw_results": 47,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "fac-02",
+      "lang": "en",
+      "category": "factual",
+      "text": "what is the minimum core temperature for cooking poultry",
+      "frozen": {
+        "raw_results": 76,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "fac-03",
+      "lang": "no",
+      "category": "factual",
+      "text": "hva betyr HACCP og hvorfor brukes det i matindustrien",
+      "frozen": {
+        "raw_results": 68,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "fac-04",
+      "lang": "no",
+      "category": "factual",
+      "text": "hvor lenge kan kokt ris stå fremme før det må kastes",
+      "frozen": {
+        "raw_results": 59,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "fac-05",
+      "lang": "en",
+      "category": "factual",
+      "text": "difference between sanitising and disinfecting surfaces",
+      "frozen": {
+        "raw_results": 64,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "fac-06",
+      "lang": "no",
+      "category": "factual",
+      "text": "hva er forskjellen på best før og siste forbruksdag",
+      "frozen": {
+        "raw_results": 67,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "fac-07",
+      "lang": "no",
+      "category": "factual",
+      "text": "hvilke allergener må oppgis på merking etter EU-forordningen",
+      "frozen": {
+        "raw_results": 64,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "fac-08",
+      "lang": "en",
+      "category": "factual",
+      "text": "what is water activity and why does it matter for food safety",
+      "frozen": {
+        "raw_results": 83,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "fac-09",
+      "lang": "no",
+      "category": "factual",
+      "text": "når ble mattilsynet opprettet i Norge",
+      "frozen": {
+        "raw_results": 68,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "fac-10",
+      "lang": "en",
+      "category": "factual",
+      "text": "how long can vacuum packed smoked salmon last unopened",
+      "frozen": {
+        "raw_results": 63,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "fac-11",
+      "lang": "no",
+      "category": "factual",
+      "text": "hvor mange grader skal kjøleskapet være på for å holde mat trygt",
+      "frozen": {
+        "raw_results": 73,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "fac-12",
+      "lang": "no",
+      "category": "factual",
+      "text": "hva er pH-verdien til eddik og sitronsyre",
+      "frozen": {
+        "raw_results": 63,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "fac-13",
+      "lang": "en",
+      "category": "factual",
+      "text": "what causes biofilm to form in food processing pipes",
+      "frozen": {
+        "raw_results": 74,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "fac-14",
+      "lang": "no",
+      "category": "factual",
+      "text": "hva er et sanitærdesign for prosessutstyr",
+      "frozen": {
+        "raw_results": 47,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "fac-15",
+      "lang": "en",
+      "category": "factual",
+      "text": "maximum allowed nitrite level in cured meat in the EU",
+      "frozen": {
+        "raw_results": 73,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "fac-16",
+      "lang": "no",
+      "category": "factual",
+      "text": "hvordan fungerer UV-desinfeksjon av vann",
+      "frozen": {
+        "raw_results": 70,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "fac-17",
+      "lang": "no",
+      "category": "factual",
+      "text": "hva er kravene til rengjøring og desinfeksjon i slakteri",
+      "frozen": {
+        "raw_results": 67,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "fac-18",
+      "lang": "en",
+      "category": "factual",
+      "text": "what is the difference between pasteurisation and sterilisation",
+      "frozen": {
+        "raw_results": 66,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "fac-19",
+      "lang": "no",
+      "category": "factual",
+      "text": "hvor lang tid går det før symptomer etter matforgiftning",
+      "frozen": {
+        "raw_results": 62,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "fac-20",
+      "lang": "en",
+      "category": "factual",
+      "text": "what is an example of an HACCP critical control point",
+      "frozen": {
+        "raw_results": 59,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "new-01",
+      "lang": "no",
+      "category": "fresh_news",
+      "text": "mattilsynet tilbakekaller produkt denne uken",
+      "frozen": {
+        "raw_results": 56,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "new-02",
+      "lang": "en",
+      "category": "fresh_news",
+      "text": "food recall announcements this week Europe",
+      "frozen": {
+        "raw_results": 80,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "new-03",
+      "lang": "no",
+      "category": "fresh_news",
+      "text": "nyheter om matforgiftning i Norge i år",
+      "frozen": {
+        "raw_results": 71,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "new-04",
+      "lang": "no",
+      "category": "fresh_news",
+      "text": "ny forskrift om kosttilskudd 2026",
+      "frozen": {
+        "raw_results": 61,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "new-05",
+      "lang": "en",
+      "category": "fresh_news",
+      "text": "salmonella outbreak Europe 2026 latest",
+      "frozen": {
+        "raw_results": 67,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "new-06",
+      "lang": "no",
+      "category": "fresh_news",
+      "text": "lakseprisen denne uken",
+      "frozen": {
+        "raw_results": 55,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "new-07",
+      "lang": "no",
+      "category": "fresh_news",
+      "text": "kjøttprisene stiger i 2026",
+      "frozen": {
+        "raw_results": 62,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "new-08",
+      "lang": "en",
+      "category": "fresh_news",
+      "text": "EU food packaging rules update announced",
+      "frozen": {
+        "raw_results": 77,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "new-09",
+      "lang": "no",
+      "category": "fresh_news",
+      "text": "strømprisen i Norge i dag",
+      "frozen": {
+        "raw_results": 58,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "new-10",
+      "lang": "no",
+      "category": "fresh_news",
+      "text": "norske kronekurs i dag mot euro",
+      "frozen": {
+        "raw_results": 70,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "new-11",
+      "lang": "en",
+      "category": "fresh_news",
+      "text": "new allergen labelling rules announced in the EU",
+      "frozen": {
+        "raw_results": 70,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "new-12",
+      "lang": "no",
+      "category": "fresh_news",
+      "text": "utbrudd av listeriose i Norge nyheter",
+      "frozen": {
+        "raw_results": 61,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "new-13",
+      "lang": "en",
+      "category": "fresh_news",
+      "text": "Oslo weather forecast next week",
+      "frozen": {
+        "raw_results": 69,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "new-14",
+      "lang": "en",
+      "category": "fresh_news",
+      "text": "Norway salmon export prices this month",
+      "frozen": {
+        "raw_results": 73,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "new-15",
+      "lang": "no",
+      "category": "fresh_news",
+      "text": "matsvinn nyheter og statistikk fra 2026",
+      "frozen": {
+        "raw_results": 74,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "res-01",
+      "lang": "en",
+      "category": "research_comparative",
+      "text": "peracetic acid versus chlorine dioxide as sanitiser comparison",
+      "frozen": {
+        "raw_results": 72,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "res-02",
+      "lang": "no",
+      "category": "research_comparative",
+      "text": "fordeler og ulemper med ultrafiltrering i meierier",
+      "frozen": {
+        "raw_results": 55,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "res-03",
+      "lang": "en",
+      "category": "research_comparative",
+      "text": "membrane filtration versus thermal pasteurisation in dairy",
+      "frozen": {
+        "raw_results": 68,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "res-04",
+      "lang": "no",
+      "category": "research_comparative",
+      "text": "sammenligning av peroksid og klor som desinfeksjonsmiddel",
+      "frozen": {
+        "raw_results": 64,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "res-05",
+      "lang": "en",
+      "category": "research_comparative",
+      "text": "cloud versus on premise food traceability software compared",
+      "frozen": {
+        "raw_results": 70,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "res-06",
+      "lang": "no",
+      "category": "research_comparative",
+      "text": "hvilket rengjøringsmiddel fungerer best på rustfritt stål i bryggerier",
+      "frozen": {
+        "raw_results": 62,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "res-07",
+      "lang": "en",
+      "category": "research_comparative",
+      "text": "enzymatic versus alkaline cleaners for biofilm removal evidence",
+      "frozen": {
+        "raw_results": 80,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "res-08",
+      "lang": "no",
+      "category": "research_comparative",
+      "text": "miljøeffekten av engangsemballasje sammenlignet med gjenbruk",
+      "frozen": {
+        "raw_results": 55,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "seznam",
+          "startpage"
+        ]
+      }
+    },
+    {
+      "id": "res-09",
+      "lang": "no",
+      "category": "research_comparative",
+      "text": "forskjeller mellom SaaS og lokal installasjon for ERP-systemer",
+      "frozen": {
+        "raw_results": 54,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "seznam",
+          "startpage"
+        ]
+      }
+    },
+    {
+      "id": "res-10",
+      "lang": "en",
+      "category": "research_comparative",
+      "text": "ATP swab versus culture methods for hygiene monitoring accuracy",
+      "frozen": {
+        "raw_results": 73,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage"
+        ]
+      }
+    },
+    {
+      "id": "res-11",
+      "lang": "no",
+      "category": "research_comparative",
+      "text": "elektrisk eller gassoppvarming i matproduksjon sammenlignet energibruk",
+      "frozen": {
+        "raw_results": 53,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage"
+        ]
+      }
+    },
+    {
+      "id": "res-12",
+      "lang": "no",
+      "category": "research_comparative",
+      "text": "beste CIP-anlegg for små bryggerier sammenligning",
+      "frozen": {
+        "raw_results": 65,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage"
+        ]
+      }
+    },
+    {
+      "id": "res-13",
+      "lang": "en",
+      "category": "research_comparative",
+      "text": "electric versus gas heating energy efficiency in food plants",
+      "frozen": {
+        "raw_results": 75,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage"
+        ]
+      }
+    },
+    {
+      "id": "res-14",
+      "lang": "no",
+      "category": "research_comparative",
+      "text": "sammenligning av leverandører av hygieneovervåkning med ATP-måling",
+      "frozen": {
+        "raw_results": 45,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage"
+        ]
+      }
+    },
+    {
+      "id": "res-15",
+      "lang": "en",
+      "category": "research_comparative",
+      "text": "cold versus hot wash cycles and their energy use compared",
+      "frozen": {
+        "raw_results": 75,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage"
+        ]
+      }
+    },
+    {
+      "id": "loc-01",
+      "lang": "no",
+      "category": "local",
+      "text": "rengjøringsfirma for næringslokaler i Stavanger",
+      "frozen": {
+        "raw_results": 60,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage"
+        ]
+      }
+    },
+    {
+      "id": "loc-02",
+      "lang": "no",
+      "category": "local",
+      "text": "matvarelager i Bergen med kjølelager",
+      "frozen": {
+        "raw_results": 48,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage"
+        ]
+      }
+    },
+    {
+      "id": "loc-03",
+      "lang": "no",
+      "category": "local",
+      "text": "vannbehandling leverandør i Trondheim",
+      "frozen": {
+        "raw_results": 61,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage"
+        ]
+      }
+    },
+    {
+      "id": "loc-04",
+      "lang": "en",
+      "category": "local",
+      "text": "food safety consultant near Bergen",
+      "frozen": {
+        "raw_results": 80,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "loc-05",
+      "lang": "no",
+      "category": "local",
+      "text": "hygieneutstyr butikk i Drammen",
+      "frozen": {
+        "raw_results": 49,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "loc-06",
+      "lang": "no",
+      "category": "local",
+      "text": "kjøkkenutstyr i Tromsø for restauranter",
+      "frozen": {
+        "raw_results": 68,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "loc-07",
+      "lang": "no",
+      "category": "local",
+      "text": "laboratorium for mikrobiologisk analyse i Oslo",
+      "frozen": {
+        "raw_results": 69,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "loc-08",
+      "lang": "no",
+      "category": "local",
+      "text": "næringsmiddelkontroll i Fredrikstad kommune",
+      "frozen": {
+        "raw_results": 65,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "loc-09",
+      "lang": "en",
+      "category": "local",
+      "text": "water treatment supplier in Oslo",
+      "frozen": {
+        "raw_results": 77,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "loc-10",
+      "lang": "no",
+      "category": "local",
+      "text": "isolasjonsfirma i Kristiansand",
+      "frozen": {
+        "raw_results": 47,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "tec-01",
+      "lang": "en",
+      "category": "technical",
+      "text": "configuring a PLC program for a clean in place cycle",
+      "frozen": {
+        "raw_results": 72,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "tec-02",
+      "lang": "no",
+      "category": "technical",
+      "text": "programmering av PLC for CIP-syklus i prosessanlegg",
+      "frozen": {
+        "raw_results": 48,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "tec-03",
+      "lang": "en",
+      "category": "technical",
+      "text": "calibrating a pH probe in a process line step by step",
+      "frozen": {
+        "raw_results": 58,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "google cse",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "tec-04",
+      "lang": "no",
+      "category": "technical",
+      "text": "kalibrere pH-sensor i prosessanlegg trinn for trinn",
+      "frozen": {
+        "raw_results": 43,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "google cse",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "tec-05",
+      "lang": "en",
+      "category": "technical",
+      "text": "ISO 22000 implementation checklist for a food plant",
+      "frozen": {
+        "raw_results": 61,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "google cse",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "tec-06",
+      "lang": "no",
+      "category": "technical",
+      "text": "ISO 22000 implementering trinn for trinn",
+      "frozen": {
+        "raw_results": 46,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "google cse",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "tec-07",
+      "lang": "en",
+      "category": "technical",
+      "text": "debugging a Kubernetes pod restart loop caused by config",
+      "frozen": {
+        "raw_results": 57,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "google cse",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "tec-08",
+      "lang": "no",
+      "category": "technical",
+      "text": "feilsøking av temperaturføler i sterilisator",
+      "frozen": {
+        "raw_results": 49,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "google cse",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "tec-09",
+      "lang": "no",
+      "category": "technical",
+      "text": "hva er en sanitærsone i prosessdesign",
+      "frozen": {
+        "raw_results": 46,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "google cse",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    },
+    {
+      "id": "tec-10",
+      "lang": "no",
+      "category": "technical",
+      "text": "konfigurere docker compose med miljøfil og hemmeligheter",
+      "frozen": {
+        "raw_results": 48,
+        "unresponsive_engines": [
+          "brave",
+          "duckduckgo",
+          "google cse",
+          "privacywall",
+          "startpage",
+          "wikipedia"
+        ]
+      }
+    }
+  ]
+}

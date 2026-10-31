@@ -145,6 +145,9 @@ pub fn router(state: AppState) -> Router {
         .layer(DefaultBodyLimit::max(crate::profile_routes::IMPORT_MAX_BYTES))
         .layer(RequestBodyLimitLayer::new(crate::profile_routes::IMPORT_MAX_BYTES))
         .layer(middleware::from_fn(crate::auth::require_service_route_scope))
+        // INNH-10: an `api_key` principal is held to its route allow-list (dark behind
+        // QUARRY_EDGE__API_KEY_AGENT_RUNS; user and service tokens pass through untouched).
+        .layer(middleware::from_fn(crate::api_key::require_api_key_route_fence))
         .layer(middleware::from_fn(crate::zdr_log::mark_floor))
         .layer(middleware::from_fn(crate::auth::require_auth));
 
@@ -241,6 +244,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/search/similar", post(crate::search_routes::similar))
         .route("/v1/search/suggest", post(crate::search_routes::suggest))
         .route("/v1/map", post(crate::map_routes::map))
+        .route("/v1/audit/page", post(crate::audit_page::capture))
         .route("/v1/extract", post(crate::extract_routes::extract))
         .route("/v1/answer", post(crate::answer_routes::answer))
         .route(
@@ -363,6 +367,8 @@ pub fn router(state: AppState) -> Router {
         .layer(middleware::from_fn(
             crate::auth::require_service_route_scope,
         ))
+        // INNH-10: the API-key route fence, beside the service scope (see the profile router).
+        .layer(middleware::from_fn(crate::api_key::require_api_key_route_fence))
         // After require_auth (which inserts the claims), before the handler: a
         // user of a ZDR org is marked ZDR for the log from the first line.
         .layer(middleware::from_fn(crate::zdr_log::mark_floor))
@@ -682,6 +688,31 @@ async fn scrape_with(
     // INNH-1: the same rule the page-title hop uses. The AI formats are skipped
     // (no model call) when the request's privacy block forbids a model hop.
     let ai_model_hop_allowed = quarry_runtime::page_extract::model_hop_allowed(zdr, &privacy);
+    // An explicit durable-write request must not degrade into read-only
+    // capture because this local runtime has no Data Plane adapter. Check
+    // before cache lookup or fetching so neither can mask a missing write.
+    if req.ingest.unwrap_or(false) {
+        let error = if zdr.is_active() {
+            Some(QuarryError::new(
+                ErrorCode::BadRequest,
+                "ingest cannot be combined with zero data retention",
+            ))
+        } else if state.ingest.is_none() {
+            Some(QuarryError::new(
+                ErrorCode::RuntimeNotReady,
+                "durable ingestion is not configured for this runtime",
+            ))
+        } else {
+            None
+        };
+        if let Some(error) = error {
+            return Err((
+                StatusCode::from_u16(error.code.http_status())
+                    .unwrap_or(StatusCode::SERVICE_UNAVAILABLE),
+                Json(Envelope::<()>::err(&request_id, error)).into_response(),
+            ));
+        }
+    }
     // Tenant isolation: ignore any client-supplied org_id and use the
     // verified JWT claim. The `ScrapeRequest.org_id` field is preserved
     // on the wire for backwards-compat but its value is never trusted.
@@ -1078,8 +1109,7 @@ async fn scrape_with(
             if matches!(err.code, ErrorCode::RateLimited) {
                 return Err((
                     StatusCode::TOO_MANY_REQUESTS,
-                    Json(crate::api_error::ApiError::rate_limited(err.message, 60))
-                        .into_response(),
+                    Json(crate::api_error::ApiError::rate_limited(err.message, 60)).into_response(),
                 ));
             }
             Err((
@@ -2548,6 +2578,8 @@ mod tests {
             page_title_enricher: None,
             service_token_provider: None,
             answer_pipeline: None,
+            answer_status: crate::answer_status::AnswerPipelineStatus::SynthesisDisabled,
+            model_plane: Default::default(),
             local_index: None,
             usage: Arc::new(NoopUsageMeter),
             limits: Arc::new(crate::limits::StaticFloor),
@@ -2589,6 +2621,8 @@ mod tests {
             aud: None,
             scopes: Vec::new(),
             zdr: None,
+            key_id: None,
+            acting_user_id: None,
         }
     }
 
@@ -2717,6 +2751,62 @@ mod tests {
         }
     }
 
+    async fn ingest_request_response(service: bool, zdr: bool) -> (axum::response::Response, u32) {
+        let driver = crate::test_support::StubDriver::ok();
+        let state = crate::test_support::test_state(driver.clone());
+        let mut claims = crate::test_support::claims_for_org("org_alpha");
+        if service {
+            claims.sub = "service:marketing-core".into();
+            claims.user_id = claims.sub.clone();
+            claims.service_id = Some(claims.sub.clone());
+            claims.principal_type = Some("service".into());
+            claims.scopes = vec!["scrape:write".into()];
+        }
+        // Real Axum JSON/route and service-scope middleware, with already
+        // verified claims injected as the auth boundary's test fixture.
+        let app = Router::new()
+            .route("/v1/scrape", post(scrape))
+            .layer(middleware::from_fn(
+                crate::auth::require_service_route_scope,
+            ))
+            .layer(Extension(claims))
+            .with_state(state);
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/scrape")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::json!({"url":"https://example.com/", "ingest":true, "zdr":zdr})
+                    .to_string(),
+            ))
+            .unwrap();
+        let response = tower::ServiceExt::oneshot(app, request).await.unwrap();
+        (response, driver.calls.load(Ordering::Relaxed))
+    }
+
+    #[tokio::test]
+    async fn ingest_without_data_plane_fails_closed_before_fetch_for_users_and_services() {
+        for service in [false, true] {
+            let (response, calls) = ingest_request_response(service, false).await;
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let body = crate::test_support::response_json(response).await;
+            assert_eq!(body["error"]["code"], "RUNTIME_NOT_READY");
+            assert_eq!(body["data"], serde_json::Value::Null);
+            assert_eq!(calls, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn ingest_with_zdr_is_invalid_before_fetch_for_users_and_services() {
+        for service in [false, true] {
+            let (response, calls) = ingest_request_response(service, true).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = crate::test_support::response_json(response).await;
+            assert_eq!(body["error"]["code"], "BAD_REQUEST");
+            assert_eq!(calls, 0);
+        }
+    }
+
     #[tokio::test]
     async fn rate_limited_scrape_yields_api_error_envelope() {
         // The runtime pipeline surfaces a driver RateLimited as-is (no retry
@@ -2730,12 +2820,8 @@ mod tests {
         ));
         let mut drivers = DriverRegistry::new(DriverKind::Static);
         drivers.register(err_driver.clone());
-        let state = test_state_with_artifacts(
-            err_driver,
-            drivers,
-            None,
-            Arc::new(InMemoryStore::new()),
-        );
+        let state =
+            test_state_with_artifacts(err_driver, drivers, None, Arc::new(InMemoryStore::new()));
         let response = call_scrape(state, "https://example.com/page").await;
 
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
@@ -2762,11 +2848,7 @@ mod tests {
         // the ApiError adoption is scoped to rate-limit paths only.
         let calls = Arc::new(AtomicU32::new(0));
         let static_driver = Arc::new(TestDriver::ok(DriverKind::Static, calls, b"unused"));
-        let state = test_state(
-            static_driver,
-            DriverRegistry::new(DriverKind::Static),
-            None,
-        );
+        let state = test_state(static_driver, DriverRegistry::new(DriverKind::Static), None);
         let response = call_scrape(state, "not a url").await;
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);

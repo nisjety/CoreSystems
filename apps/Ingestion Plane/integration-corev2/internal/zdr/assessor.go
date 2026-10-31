@@ -159,6 +159,16 @@ func (a *Assessor) CatalogVersion() int { return a.doc.CatalogVersion }
 // PinnedSHA256 is the digest the loaded contract was verified against.
 func (a *Assessor) PinnedSHA256() string { return a.pinned }
 
+// WordingVariants maps every acknowledgement wording key of the contract to the variants that need
+// a text for it. The wording loader requires exactly these texts, in each locale.
+func (a *Assessor) WordingVariants() map[string][]string {
+	out := make(map[string][]string, len(a.doc.WordingKeys))
+	for _, w := range a.doc.WordingKeys {
+		out[w.Key] = append([]string(nil), w.Variants...)
+	}
+	return out
+}
+
 // Providers lists the assessed rows (a copy).
 func (a *Assessor) Providers() []ProviderRow { return append([]ProviderRow(nil), a.provider...) }
 

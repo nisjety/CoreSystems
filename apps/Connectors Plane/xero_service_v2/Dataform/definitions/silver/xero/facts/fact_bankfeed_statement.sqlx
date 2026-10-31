@@ -1,0 +1,27 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero_sensitive",
+  name: "fact_bankfeed_statement",
+  disabled: dataform.projectConfig.vars.enable_xero_sensitive !== "true",
+  description: "Bank Feeds statements with lines retained in the source payload.",
+  tags: ["silver", "xero", "fact"]
+}
+
+WITH source AS (
+  SELECT tenant_id, record_id, payload_json, synced_at
+  FROM ${ref("dw_1_silver_xero_sensitive", "current_sensitive_extended_records")}
+  WHERE endpoint = 'bankfeeds_statements'
+)
+SELECT
+  tenant_id,
+  record_id AS statement_id,
+  JSON_VALUE(payload_json, '$.feedConnectionId') AS feed_connection_id,
+  JSON_VALUE(payload_json, '$.status') AS statement_status,
+  SAFE_CAST(SUBSTR(JSON_VALUE(payload_json, '$.startDate'), 1, 10) AS DATE) AS start_date,
+  SAFE_CAST(SUBSTR(JSON_VALUE(payload_json, '$.endDate'), 1, 10) AS DATE) AS end_date,
+  SAFE_CAST(JSON_VALUE(payload_json, '$.startBalance.amount') AS NUMERIC) AS start_balance,
+  SAFE_CAST(JSON_VALUE(payload_json, '$.endBalance.amount') AS NUMERIC) AS end_balance,
+  SAFE_CAST(JSON_VALUE(payload_json, '$.statementLineCount') AS INT64) AS statement_line_count,
+  payload_json,
+  synced_at
+FROM source

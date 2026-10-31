@@ -1,0 +1,43 @@
+{
+  "endpoint_name": "customer_documents",
+  "bigquery_table": "visma_customer_documents",
+  "primary_key": [
+    "documentType",
+    "referenceNumber"
+  ],
+  "source": "erp_rest",
+  "api_method": "get_customer_documents",
+  "api_endpoint": "/v1/customerdocument",
+  "pagination_profile": "finance_page_number",
+  "modified_field": "lastModifiedDateTime",
+  "merge_type": "upsert",
+  "sync_pattern": "incremental_upsert",
+  "validation_fields": [
+    "documentType",
+    "referenceNumber",
+    "lastModifiedDateTime"
+  ],
+  "datamart": {
+    "ready": false,
+    "type_name": "CustomerDocument",
+    "query_file": "config/queries/customer_document.graphql",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "fallback_source": "erp_rest",
+    "join_normalizer": "normalize_customer_document",
+    "tenant_overrides": {
+      "33f319b9-4d57-11ee-960c-025417856183": false
+    },
+    "root_field": "customerDocuments"
+  },
+  "default_query": {
+    "expandApplications": "true",
+    "expandDunningInformation": "true",
+    "expandAttachments": "true",
+    "expandTaxDetails": "true",
+    "expandInvoiceAddress": "true"
+  },
+  "notes": "Key is (documentType, referenceNumber): referenceNumber alone is NOT unique, an Invoice and a CreditNote share numbers such as 015034. Full fetch of 23,132 documents: 23,131 distinct referenceNumbers, 23,132 distinct (documentType, referenceNumber). A windowed sweep never showed this.",
+  "tier": 1
+}

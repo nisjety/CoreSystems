@@ -441,10 +441,8 @@ pub async fn release_sandbox_lease_if_any(
     process_host: Option<&crate::process_host::ProcessHost>,
     run_id: &str,
     org_id: &str,
-) {
-    let Some(lease) = state.take_sandbox_lease(run_id) else {
-        return;
-    };
+) -> Option<WorkspaceUploadOutcome> {
+    let lease = state.take_sandbox_lease(run_id)?;
 
     // Stop this lease's background processes BEFORE the workspace is diffed
     // and uploaded: a process still writing into it would otherwise race the
@@ -459,20 +457,34 @@ pub async fn release_sandbox_lease_if_any(
         Ok(token) => token,
         Err(error) => {
             warn!(run_id = %run_id, %error, "sandbox-manager service credential unavailable; lease left for TTL expiry");
-            return;
+            // Nothing can be uploaded without the token. The directory is left
+            // on disk exactly as before, but the run must still learn its
+            // changes were not saved.
+            return state.hydrated_workspace(run_id).map(|_| {
+                settle_workspace_outcome(
+                    WorkspaceUploadOutcome {
+                        error: Some("sandbox-manager service credential unavailable".to_owned()),
+                        ..WorkspaceUploadOutcome::default()
+                    },
+                    &lease.lease_id,
+                )
+            });
         }
     };
 
-    if let Some(workspace) = state.take_hydrated_workspace(run_id) {
-        upload_and_discard_workspace(
-            sandbox_manager_client,
-            cas_client,
-            &token,
-            &lease,
-            &workspace,
-        )
-        .await;
-    }
+    let outcome = match state.take_hydrated_workspace(run_id) {
+        Some(workspace) => Some(
+            upload_and_discard_workspace(
+                sandbox_manager_client,
+                cas_client,
+                &token,
+                &lease,
+                &workspace,
+            )
+            .await,
+        ),
+        None => None,
+    };
 
     if let Err(status) = sandbox_manager_client
         .release_lease(&token, &lease.lease_id, &lease.backend_id)
@@ -485,6 +497,25 @@ pub async fn release_sandbox_lease_if_any(
             "sandbox-manager ReleaseLease failed; lease left for TTL expiry"
         );
     }
+    outcome
+}
+
+/// What became of one run's Space workspace changes at release. `uploaded` is
+/// the field a caller acts on: false means this run's edits did not reach the
+/// Space, and the run's summary has to say so.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkspaceUploadOutcome {
+    /// Files the run changed or created, as the diff found them. Zero when the
+    /// diff itself did not finish, since then the changed set is unknown.
+    pub changed: usize,
+    /// Whether every changed file reached CAS and `SnapshotSandbox` recorded
+    /// them. True when nothing changed.
+    pub uploaded: bool,
+    /// Whether `SnapshotSandbox` accepted the changed set. False when nothing
+    /// changed, since no snapshot is taken then.
+    pub snapshot_recorded: bool,
+    /// Why the upload stopped short, when it did.
+    pub error: Option<String>,
 }
 
 /// Diffs and uploads `workspace`'s changes (if CAS is configured), records
@@ -498,12 +529,15 @@ async fn upload_and_discard_workspace(
     token: &str,
     lease: &SandboxLease,
     workspace: &HydratedWorkspace,
-) {
+) -> WorkspaceUploadOutcome {
+    let mut outcome = WorkspaceUploadOutcome::default();
     if let Some(cas) = cas_client {
         match crate::workspace_hydrate::diff_and_upload(cas, &workspace.path, &workspace.baseline)
             .await
         {
-            Ok(changed) if !changed.is_empty() => {
+            Ok(changed) if changed.is_empty() => outcome.uploaded = true,
+            Ok(changed) => {
+                outcome.changed = changed.len();
                 let changed_files: Vec<WorkspaceChangedFile> = changed
                     .into_iter()
                     .map(|file| WorkspaceChangedFile {
@@ -513,7 +547,7 @@ async fn upload_and_discard_workspace(
                         base_hash: file.base_hash.unwrap_or_default(),
                     })
                     .collect();
-                if let Err(status) = sandbox_manager_client
+                match sandbox_manager_client
                     .snapshot_sandbox(
                         token,
                         &lease.lease_id,
@@ -523,30 +557,41 @@ async fn upload_and_discard_workspace(
                     )
                     .await
                 {
-                    warn!(
-                        lease_id = %lease.lease_id,
-                        code = ?status.code(),
-                        "sandbox-manager SnapshotSandbox failed; this run's workspace changes are lost"
-                    );
+                    Ok(_) => {
+                        outcome.snapshot_recorded = true;
+                        outcome.uploaded = true;
+                    }
+                    Err(status) => {
+                        outcome.error =
+                            Some(format!("SnapshotSandbox failed: {:?}", status.code()));
+                    }
                 }
             }
-            Ok(_) => {}
-            Err(error) => {
-                warn!(
-                    lease_id = %lease.lease_id,
-                    %error,
-                    "Space workspace diff/upload failed; this run's workspace changes are lost"
-                );
-            }
+            Err(error) => outcome.error = Some(error),
         }
     } else {
-        warn!(
-            lease_id = %lease.lease_id,
-            "CAS is not configured; this run's workspace changes cannot be uploaded and are lost"
-        );
+        outcome.error = Some("CAS is not configured".to_owned());
     }
 
     cleanup_workspace_dir(&workspace.path);
+    settle_workspace_outcome(outcome, &lease.lease_id)
+}
+
+/// Logs and counts an outcome whose changes were not saved. Every path that
+/// leaves a run's workspace unsaved goes through here, so the counter and the
+/// log line cannot drift apart.
+fn settle_workspace_outcome(outcome: WorkspaceUploadOutcome, lease_id: &str) -> WorkspaceUploadOutcome {
+    if !outcome.uploaded {
+        metrics::counter!("workspace_upload_failed_total").increment(1);
+        warn!(
+            lease_id = %lease_id,
+            changed = outcome.changed,
+            snapshot_recorded = outcome.snapshot_recorded,
+            error = outcome.error.as_deref().unwrap_or(""),
+            "this run's Space workspace changes were not saved"
+        );
+    }
+    outcome
 }
 
 fn cleanup_workspace_dir(path: &Path) {
@@ -859,6 +904,179 @@ mod tests {
             "sandbox-manager-token"
         );
         assert!(!format!("{provider:?}").contains("service-secret"));
+    }
+
+    fn workspace_test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "execution-core-sandbox-lease-test-{name}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create test workspace dir");
+        dir
+    }
+
+    fn test_cas(server: &wiremock::MockServer) -> CasClient {
+        CasClient::new_with_transport(
+            &server.uri(),
+            "test-bucket",
+            "access-key",
+            &"a".repeat(32),
+            "us-east-1",
+        )
+        .expect("valid transport config")
+    }
+
+    fn test_lease() -> SandboxLease {
+        SandboxLease {
+            lease_id: "lease-1".to_owned(),
+            backend_id: "backend-1".to_owned(),
+            processes_permitted: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_workspace_upload_is_reported_as_not_saved() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let cas_server = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .and(path_regex(r"^/test-bucket/cas/.+$"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&cas_server)
+            .await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&cas_server)
+            .await;
+        let dir = workspace_test_dir("cas-fails");
+        std::fs::write(dir.join("edited.txt"), b"new content").expect("write edit");
+        let workspace = HydratedWorkspace {
+            path: dir.clone(),
+            baseline: HashMap::new(),
+        };
+
+        let outcome = upload_and_discard_workspace(
+            &unroutable_sandbox_manager_client(),
+            Some(&test_cas(&cas_server)),
+            "token",
+            &test_lease(),
+            &workspace,
+        )
+        .await;
+
+        assert!(!outcome.uploaded, "a refused CAS upload must not read as saved: {outcome:?}");
+        assert!(!outcome.snapshot_recorded);
+        assert!(outcome.error.is_some());
+        assert!(!dir.exists(), "the directory is removed whatever the upload did");
+    }
+
+    #[tokio::test]
+    async fn a_failed_snapshot_is_reported_as_not_saved_with_the_changed_count() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let cas_server = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .and(path_regex(r"^/test-bucket/cas/.+$"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&cas_server)
+            .await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&cas_server)
+            .await;
+        let dir = workspace_test_dir("snapshot-fails");
+        std::fs::write(dir.join("edited.txt"), b"new content").expect("write edit");
+        let workspace = HydratedWorkspace {
+            path: dir.clone(),
+            baseline: HashMap::new(),
+        };
+
+        // Nothing listens on the sandbox-manager address, so SnapshotSandbox fails
+        // after the bytes already reached CAS.
+        let outcome = upload_and_discard_workspace(
+            &unroutable_sandbox_manager_client(),
+            Some(&test_cas(&cas_server)),
+            "token",
+            &test_lease(),
+            &workspace,
+        )
+        .await;
+
+        assert_eq!(outcome.changed, 1);
+        assert!(!outcome.uploaded);
+        assert!(!outcome.snapshot_recorded);
+        assert!(outcome.error.as_deref().is_some_and(|error| error.contains("SnapshotSandbox")));
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_workspace_is_saved_without_a_snapshot() {
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let cas_server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path_regex(r"^/test-bucket/cas/.+$"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&cas_server)
+            .await;
+        let dir = workspace_test_dir("unchanged");
+        std::fs::write(dir.join("kept.txt"), b"same").expect("write file");
+        let workspace = HydratedWorkspace {
+            path: dir.clone(),
+            baseline: HashMap::from([("kept.txt".to_owned(), crate::workspace_hydrate::content_version(b"same"))]),
+        };
+
+        let outcome = upload_and_discard_workspace(
+            &unroutable_sandbox_manager_client(),
+            Some(&test_cas(&cas_server)),
+            "token",
+            &test_lease(),
+            &workspace,
+        )
+        .await;
+
+        assert!(outcome.uploaded);
+        assert_eq!(outcome.changed, 0);
+        assert!(!outcome.snapshot_recorded, "no snapshot is taken when nothing changed");
+        assert!(outcome.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_credential_failure_with_a_workspace_reports_the_changes_as_not_saved() {
+        let state = StateStore::new();
+        state.cache_sandbox_lease("run-1", test_lease());
+        let dir = workspace_test_dir("credential-fails");
+        state.cache_hydrated_workspace(
+            "run-1",
+            HydratedWorkspace {
+                path: dir.clone(),
+                baseline: HashMap::new(),
+            },
+        );
+        let tokens = SandboxManagerTokenProvider::new_for_test(
+            "http://127.0.0.1:1",
+            "execution-core",
+            "service-secret-at-least-32-bytes",
+        );
+
+        let outcome = release_sandbox_lease_if_any(
+            &state,
+            &unroutable_sandbox_manager_client(),
+            &tokens,
+            None,
+            None,
+            "run-1",
+            "org-a",
+        )
+        .await
+        .expect("a run with a workspace always reports its outcome");
+
+        assert!(!outcome.uploaded);
+        assert!(outcome.error.is_some());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]

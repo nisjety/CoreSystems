@@ -393,13 +393,29 @@ const CLEAR_CONTINUATION_DESCRIPTOR_FOR_DELIVERY_SQL: &str =
 /// Expired approvals may never be delivered again. This is called from the
 /// delivery reaper so descriptors are removed even when no worker claims the
 /// expired row. The query is tenant-scoped and content-free.
+///
+/// One exception keeps a descriptor past its approval's expiry: the approval was
+/// consumed (a gateway spend-only consume spends the click and leaves the call
+/// for the executor's same-claim replay, which reads it later, in another
+/// transaction) and its run has not ended. The descriptor is then deleted by the
+/// first sweep after the run turns completed, failed or cancelled, or after the
+/// run row is gone. An unconsumed expired approval is deleted as before. This is
+/// deliberately not a bare `consumed_at IS NULL`: an approval without a delivery
+/// row has nothing else that clears its encrypted action input, so the run's end
+/// is what bounds it. The status list is the one the consume itself uses for a
+/// run that has ended.
 const CLEAR_EXPIRED_CONTINUATION_DESCRIPTORS_SQL: &str =
     "DELETE FROM approval_continuation_descriptors AS cd \
      USING approvals AS a \
      WHERE a.id = cd.approval_id \
        AND a.org_id = $1 \
        AND a.expires_at IS NOT NULL \
-       AND a.expires_at <= now()";
+       AND a.expires_at <= now() \
+       AND (a.consumed_at IS NULL \
+            OR NOT EXISTS (SELECT 1 FROM runs AS r \
+                           WHERE r.id = a.run_id \
+                             AND r.org_id = a.org_id \
+                             AND r.status NOT IN ('completed', 'failed', 'cancelled')))";
 
 /// Deterministic capped exponential backoff. Attempt 1 waits 5 seconds,
 /// attempt 2 waits 10, etc.; the server, not a worker, owns the schedule.
@@ -1091,6 +1107,39 @@ mod tests {
         }
     }
 
+    // A gateway spend-only consume leaves the descriptor for the executor's
+    // same-claim replay, which reads it in another transaction. The sweep must not
+    // take it from under that replay: an expired approval keeps its descriptor
+    // only when it is consumed AND its run is still live. Anything else (never
+    // consumed, run terminal, run gone) is deleted, as before.
+    #[test]
+    fn a_consumed_approvals_descriptor_outlives_its_expiry_only_while_its_run_is_live() {
+        let sql = CLEAR_EXPIRED_CONTINUATION_DESCRIPTORS_SQL;
+        for required in [
+            "a.consumed_at IS NULL",
+            "NOT EXISTS (SELECT 1 FROM runs AS r",
+            "r.id = a.run_id",
+            "r.org_id = a.org_id",
+            "r.status NOT IN ('completed', 'failed', 'cancelled')",
+        ] {
+            assert!(sql.contains(required), "the guarded sweep must require {required}");
+        }
+        // The guard is one parenthesised alternative ANDed with the expiry test,
+        // never a bare consumed_at test and never an OR that bypasses the expiry.
+        let expiry = sql.find("a.expires_at <= now()").expect("expiry test");
+        let guard = sql.find("(a.consumed_at IS NULL").expect("guarded alternative");
+        assert!(expiry < guard, "the guard follows the expiry test");
+        assert!(
+            sql[expiry..guard].contains("AND"),
+            "the guard is ANDed with the expiry test"
+        );
+        assert!(
+            !sql[..guard].contains(" OR "),
+            "nothing before the guard may widen the delete"
+        );
+        assert!(sql.contains("a.org_id = $1"), "the sweep stays tenant-scoped");
+    }
+
     #[test]
     fn descriptor_at_rest_encryption_is_required_and_fail_closed() {
         let migration =
@@ -1168,6 +1217,7 @@ mod tests {
             &serde_json::json!({}),
             Some(&descriptor),
             Some(Utc::now() + chrono::Duration::minutes(5)),
+            "",
         )
         .await
         .expect("request approval")

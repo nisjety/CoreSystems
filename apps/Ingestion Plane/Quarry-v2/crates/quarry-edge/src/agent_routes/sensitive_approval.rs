@@ -9,6 +9,21 @@ pub(super) struct SensitiveApproval {
     pub(super) artifact_id: Option<String>,
 }
 
+/// Whether `action` is one that needs a sensitive approval (a dialog reply, an upload, a
+/// download). INNH-10: an API key runs none of them, so admission refuses these for a key
+/// run on the action's kind alone, before the driver's capabilities or any observation are
+/// consulted and before any broker call.
+pub(super) fn is_sensitive_action(action: &AgentAction) -> bool {
+    matches!(
+        action,
+        AgentAction::RespondDialog { .. }
+            | AgentAction::UploadRef { .. }
+            | AgentAction::FrameUploadRef { .. }
+            | AgentAction::DownloadRef { .. }
+            | AgentAction::FrameDownloadRef { .. }
+    )
+}
+
 pub(super) fn sensitive_approval_for_action(
     entry: &RunEntry,
     action: &AgentAction,

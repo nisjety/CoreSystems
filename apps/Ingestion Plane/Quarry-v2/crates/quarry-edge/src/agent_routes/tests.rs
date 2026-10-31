@@ -263,6 +263,8 @@ fn browser_session_projection_requires_exact_tenant_and_actor() {
         aud: Some("quarry".to_owned()),
         scopes: Vec::new(),
         zdr: None,
+        key_id: None,
+        acting_user_id: None,
     };
 
     assert!(caller_owns_browser_run("org-owner", "user-owner", &claims));
@@ -289,6 +291,7 @@ fn step_budget_is_fail_closed_once_limit_is_reached() {
         run_id: Id::new(),
         org_id: "org".into(),
         actor_id: "user".into(),
+        key_id: None,
         session: BrowserSession {
             lease: BrowserLease {
                 lease_id: Id::new(),
@@ -372,6 +375,7 @@ fn entry_with_budget(budget: Option<crate::budget::RunBudget>) -> RunEntry {
         run_id: Id::new(),
         org_id: "org".into(),
         actor_id: "user".into(),
+        key_id: None,
         session: BrowserSession {
             lease: lease.clone(),
             tab_pin: None,
@@ -2323,6 +2327,7 @@ fn broker_grant(owner: &str, domains: &[&str], zdr: bool) -> quarry_runtime::Gra
         denied_domains: Vec::new(),
         absolute_expires_at: None,
         resource_id: String::new(),
+        key_id: String::new(),
     }
 }
 

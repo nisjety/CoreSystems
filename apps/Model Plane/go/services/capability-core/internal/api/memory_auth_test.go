@@ -100,6 +100,9 @@ func memoryAuthenticatedHandler(t *testing.T, database registryDatabase, runs ..
 	}
 	memory := NewMemoryHandler(nil, runClient)
 	memory.pool = database
+	// These tests exercise ownership and scoping, not the memory gate (see
+	// memory_gate_test.go), so Session Core allows everything here.
+	memory.controls = &fakeMemoryControls{decision: memoryDecisionOn}
 	mux := http.NewServeMux()
 	memory.Register(mux)
 	return mcpAuthenticatedHandler(t, mux)

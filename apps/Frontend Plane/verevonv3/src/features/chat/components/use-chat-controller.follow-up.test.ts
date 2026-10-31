@@ -183,6 +183,10 @@ describe('followUpPending', () => {
       await tick()
       expect(controller.followUpPending()).toBe(false)
 
+      // The run takes it at a round boundary and says so. A message the run ends without taking
+      // is sent again as the next turn (use-chat-controller.send-receipts.test.ts).
+      streams[0]!.handlers.onQueuedInput?.({ messages: ['Og hvem eier planen?'] })
+      flush()
       await finishStream(streams[0]!, 'req-1')
       expect(streams).toHaveLength(1)
       expect(voiceReply(controller)).toMatchObject({ text: 'Første svar', streaming: false })

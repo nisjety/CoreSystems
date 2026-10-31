@@ -13,8 +13,10 @@
 //!
 //! # Scope, deliberately narrow
 //!
-//! `is_risky_tool` gates a wide set of tools (shell, browser_agent, any MCP
-//! tool, …), but only three are resumable here: `execute_provider_action`,
+//! The permission engine gates a wide set of tools (shell, browser_agent, any
+//! MCP tool that is not a declared read, …: whatever the registry classes as
+//! risky, or the legacy name list where no class was declared), but only three
+//! are resumable here: `execute_provider_action`,
 //! `book_shipment`, and `tickets.create`. The first two share the shape that
 //! makes cold resumption safe —
 //! a single idempotent-key-gated HTTP call with no session state to
@@ -114,9 +116,9 @@ const APPROVAL_DELIVER_SCOPE: &str = "approval:deliver";
 const REFRESH_SKEW: Duration = Duration::from_secs(30);
 const MAX_TOKEN_TTL_SECONDS: u64 = 3600;
 
-/// The resumable tool names — see the module doc for why the rest of
-/// `is_risky_tool`'s set (`browser_agent`, arbitrary MCP tools, …) isn't
-/// here.
+/// The resumable tool names — see the module doc for why the rest of the gated
+/// set (`browser_agent`, arbitrary MCP tools, …) isn't here. A tool's class says
+/// whether it is gated, never whether it can be resumed: that stays this list.
 const PROVIDER_ACTION_TOOL_NAME: &str = "execute_provider_action";
 const SHIPMENT_BOOKING_TOOL_NAME: &str = "book_shipment";
 const TICKETS_CREATE_TOOL_NAME: &str = "tickets.create";

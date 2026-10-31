@@ -1,0 +1,80 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Same-run reconciliation of Xero getProject direct responses to getProjects collection observations. Direct detail proves field-level delivery but never controls project lifecycle.",
+  assertions: {
+    nonNull: ["direct_detail_reconciliation_key", "tenant_id", "project_id", "direct_detail_source_run_id"],
+    uniqueKey: ["direct_detail_reconciliation_key"]
+  }
+}
+
+WITH collection_observations AS (
+  SELECT
+    observation.tenant_id,
+    observation.project_id,
+    observation.source_run_id,
+    observation.project_observed_at,
+    observation.source_version_id,
+    observation.source_receipt_id,
+    raw.payload_hash AS collection_payload_hash
+  FROM ${ref("dw_bronze_xero", "xero_project_observations")} AS observation
+  LEFT JOIN ${ref("dw_bronze_xero", "xero_raw_record_history_canonical")} AS raw
+    ON raw.endpoint = 'projects_projects'
+   AND raw.tenant_id = observation.tenant_id
+   AND raw.record_id = observation.source_record_id
+   AND raw.version_id = observation.source_version_id
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY observation.tenant_id, observation.project_id, observation.source_run_id
+    ORDER BY observation.project_observed_at DESC, observation.source_receipt_id DESC,
+             observation.source_version_id DESC
+  ) = 1
+), direct_detail_observations AS (
+  SELECT
+    observation.tenant_id,
+    observation.project_id,
+    observation.project_detail_observation_id,
+    observation.project_observed_at AS direct_detail_observed_at,
+    observation.source_version_id AS direct_detail_source_version_id,
+    observation.source_receipt_id AS direct_detail_source_receipt_id,
+    observation.source_run_id AS direct_detail_source_run_id,
+    raw.payload_hash AS direct_detail_payload_hash
+  FROM ${ref("dw_bronze_xero", "xero_project_detail_observations")} AS observation
+  LEFT JOIN ${ref("dw_bronze_xero", "xero_raw_record_history_canonical")} AS raw
+    ON raw.endpoint = 'projects_project_details'
+   AND raw.tenant_id = observation.tenant_id
+   AND raw.record_id = observation.source_record_id
+   AND raw.version_id = observation.source_version_id
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY observation.tenant_id, observation.project_id, observation.source_run_id
+    ORDER BY observation.project_observed_at DESC, observation.source_receipt_id DESC,
+             observation.source_version_id DESC
+  ) = 1
+)
+SELECT
+  CONCAT(detail.tenant_id, '|', detail.project_id, '|', detail.direct_detail_source_run_id,
+         '|', detail.direct_detail_source_version_id) AS direct_detail_reconciliation_key,
+  detail.tenant_id,
+  detail.project_id,
+  detail.project_detail_observation_id,
+  detail.direct_detail_observed_at,
+  detail.direct_detail_source_version_id,
+  detail.direct_detail_source_receipt_id,
+  detail.direct_detail_source_run_id,
+  detail.direct_detail_payload_hash,
+  collection.project_observed_at AS collection_observed_at,
+  collection.source_version_id AS collection_source_version_id,
+  collection.source_receipt_id AS collection_source_receipt_id,
+  collection.collection_payload_hash,
+  collection.project_id IS NOT NULL AS has_same_run_collection_counterpart,
+  collection.collection_payload_hash IS NOT NULL AS has_collection_payload_fingerprint,
+  detail.direct_detail_payload_hash IS NOT NULL AS has_direct_detail_payload_fingerprint,
+  collection.project_id IS NOT NULL
+    AND collection.collection_payload_hash IS NOT NULL
+    AND detail.direct_detail_payload_hash IS NOT NULL
+    AND collection.collection_payload_hash = detail.direct_detail_payload_hash
+    AS is_direct_detail_reconciled
+FROM direct_detail_observations AS detail
+LEFT JOIN collection_observations AS collection
+  ON detail.tenant_id = collection.tenant_id
+ AND detail.project_id = collection.project_id
+ AND detail.direct_detail_source_run_id = collection.source_run_id

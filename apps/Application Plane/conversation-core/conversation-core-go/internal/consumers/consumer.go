@@ -34,7 +34,7 @@ const (
 	// are not scoped to the application/model/ingestion namespaces. Mirrors
 	// documents-api-go's GDPR subscriber (Data Plane v2) and audit-core's
 	// provisioner (ControlSharedStreamName).
-	controlSharedStream = "AQENCIA_CONTROLPLANE"
+	controlSharedStream = "CONTROLPLANE"
 )
 
 func NewDurableConsumer(js nats.JetStreamContext, name string) *DurableConsumer {

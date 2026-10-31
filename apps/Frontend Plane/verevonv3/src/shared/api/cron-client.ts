@@ -106,3 +106,28 @@ export function deleteCronSchedule(orgId: string, cronId: string): Promise<void>
     headers: { 'x-verevon-org-id': orgId },
   })
 }
+
+/**
+ * One fire of a schedule. Identifiers, closed tokens and counts only: the
+ * answer is read from the scheduled thread named by `thread_id`. `status` is
+ * the fire's own state (`pending`, `running`, `completed`, `failed`, `unknown`);
+ * `outcome` is the run's closed result token when one was recorded.
+ */
+export interface CronScheduleFire {
+  id: string
+  fired_at: string
+  status: string
+  outcome?: string | null
+  completed_at?: string | null
+  run_id?: string | null
+  thread_id?: string | null
+  withheld_effects: number
+}
+
+/** The most recent fires of one schedule, newest first. */
+export function listScheduleFires(orgId: string, cronId: string, limit = 5): Promise<CronScheduleFire[]> {
+  return requestJson<{ data: CronScheduleFire[] }>(
+    `/api/v1/cron/${encodeURIComponent(cronId)}/fires?limit=${limit}`,
+    { headers: { 'x-verevon-org-id': orgId } },
+  ).then((result) => result.data)
+}

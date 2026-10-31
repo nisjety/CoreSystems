@@ -285,6 +285,31 @@ impl Driver for FixtureSiteDriver {
             }
         }
     }
+
+    /// One hop with no redirect following, refused above `max_bytes`, as the
+    /// static driver's bounded discovery transport answers.
+    async fn fetch_discovery_hop(&self, url: &Url, max_bytes: usize) -> QuarryResult<FetchResponse> {
+        let started = Instant::now();
+        let current = strip_fragment(url);
+        let reply = self.answer(&current);
+        if reply.body.len() > max_bytes {
+            return Err(quarry_core::error::QuarryError::new(
+                quarry_core::error::ErrorCode::BadRequest,
+                "upstream body exceeds bounded fetch limit",
+            ));
+        }
+        let mut headers = vec![("content-type".to_owned(), reply.content_type)];
+        headers.extend(reply.headers);
+        Ok(FetchResponse {
+            status: reply.status,
+            final_url: current,
+            headers,
+            body: reply.body,
+            duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            served_by: DriverKind::Static,
+            captures: None,
+        })
+    }
 }
 
 /// An HTML page with `body` inside a minimal document.

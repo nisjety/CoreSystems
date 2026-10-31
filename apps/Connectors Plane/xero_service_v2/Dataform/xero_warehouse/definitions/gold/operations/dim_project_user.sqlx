@@ -1,0 +1,28 @@
+config {
+  type: "table",
+  schema: "xero_gold_operations",
+  description: "Conformed Xero Projects user directory. The source does not establish project assignments or roles.",
+  assertions: {
+    nonNull: ["tenant_id", "user_id", "project_user_key", "company_key"],
+    uniqueKey: ["project_user_key"]
+  }
+}
+
+SELECT
+  FARM_FINGERPRINT(CONCAT(tenant_id, '|', user_id)) AS project_user_key,
+  FARM_FINGERPRINT(tenant_id) AS company_key,
+  tenant_id,
+  user_id,
+  user_name,
+  user_email,
+  is_current,
+  is_removed,
+  removed_in_run_id,
+  removed_observed_at,
+  record_state,
+  first_seen_at,
+  last_seen_at,
+  project_observed_at,
+  source_run_id,
+  'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "dim_project_user")}

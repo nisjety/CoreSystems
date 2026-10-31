@@ -22,6 +22,8 @@ const (
 	serviceCredentialAudience = "org-core"
 	serviceCredentialEnv      = "ORG_CORE_SERVICE_CREDENTIALS"
 	gatewayServicePrincipal   = "verevon-gateway"
+	siemExporterPrincipal     = "audit-core"
+	browserBrokerPrincipal    = "browser-broker"
 	serviceDelegationMaxAge   = 30 * time.Second
 	serviceDelegationSkew     = 5 * time.Second
 	serviceDelegationMaxBody  = 1 << 20
@@ -34,6 +36,7 @@ var orgServiceScopeAllowlist = map[string]struct{}{
 	"org:provision:self":            {},
 	"org:settings:write:self":       {},
 	"org:brreg:read":                {},
+	"org:website:read":              {},
 	"org:erase:self":                {},
 	"org:deletion:self":             {},
 	"org:tenant:read:any":           {},
@@ -48,6 +51,26 @@ var orgServiceScopeAllowlist = map[string]struct{}{
 	// GET /internal/orgs/:orgId/retention-posture and nothing else. Deliberately
 	// not org:read:any, which returns the whole organization record.
 	"org:retention:read:any": {},
+	// Read-only access to one org's memory and learning-review policy, through
+	// GET /internal/orgs/:orgId/agent-policy and nothing else (WS07-S4). Held by
+	// session-core, which mirrors it; deliberately not org:read:any.
+	"org:agent-policy:read:any": {},
+	// Read-only access to the resolved chat model policy of one org and user,
+	// through GET /internal/orgs/:orgId/model-entitlement and nothing else. Held
+	// by inference-core (the enforcement point, ADR-0005) and by model-gateway
+	// for explain; deliberately not org:read:any.
+	"org:model-entitlement:read:any": {},
+	// SIEM destination administration (WS06-S7): owner/admin CRUD through the
+	// gateway on behalf of a signed user, and the exporter's read of every
+	// enabled destination with its unsealed secret. The read is held by audit-core
+	// alone (validateServiceCredential); neither is org:read:any.
+	"org:siem:manage:self": {},
+	"org:siem:read:any":    {},
+	// Read-only access to one org's agent-browser site decision, through
+	// GET /internal/orgs/:orgId/browser-sites/resolve and nothing else (WS21-S3).
+	// Held by the browser broker alone (validateServiceCredential); the decision
+	// is the broker's input at grant mint, never a member's list.
+	"org:browser-site:read:any": {},
 }
 
 type serviceCredential struct {
@@ -142,6 +165,14 @@ func validateServiceCredential(credential serviceCredential, principals map[stri
 			return fmt.Errorf("scope %s is not valid for principal %s", scope, credential.Principal)
 		}
 		if strings.HasSuffix(scope, ":any") && credential.Principal == gatewayServicePrincipal {
+			return fmt.Errorf("scope %s is not valid for principal %s", scope, credential.Principal)
+		}
+		// The exporter read returns plaintext destination secrets, so unlike the
+		// other :any scopes it is pinned to one principal.
+		if scope == "org:siem:read:any" && credential.Principal != siemExporterPrincipal {
+			return fmt.Errorf("scope %s is not valid for principal %s", scope, credential.Principal)
+		}
+		if scope == "org:browser-site:read:any" && credential.Principal != browserBrokerPrincipal {
 			return fmt.Errorf("scope %s is not valid for principal %s", scope, credential.Principal)
 		}
 		scopes[scope] = struct{}{}
@@ -293,12 +324,34 @@ func organizationAPIScopes(method string, rest []string) []string {
 		return []string{"org:settings:write:self"}
 	case len(rest) == 3 && method == http.MethodGet && rest[1] == "members" && rest[2] == "search":
 		return []string{"org:read:self", "org:read:any"}
+	// The model policy is read and written only on behalf of a signed user
+	// (:self); org:read:any holders never see it.
+	case len(rest) == 2 && method == http.MethodGet && rest[1] == "model-entitlement":
+		return []string{"org:read:self"}
+	case len(rest) == 2 && method == http.MethodPut && rest[1] == "model-entitlement":
+		return []string{"org:settings:write:self"}
+	case len(rest) == 3 && method == http.MethodGet && rest[1] == "model-entitlement" && rest[2] == "explain":
+		return []string{"org:read:self"}
+	// The agent-browser site policy (WS21-S3): an admin reads and writes it, and a
+	// member reads and writes only their own choices, all on behalf of a signed user.
+	case len(rest) == 2 && method == http.MethodGet && rest[1] == "browser-sites":
+		return []string{"org:read:self"}
+	case len(rest) == 2 && method == http.MethodPut && rest[1] == "browser-sites":
+		return []string{"org:settings:write:self"}
+	case len(rest) == 3 && method == http.MethodGet && rest[1] == "browser-sites" && (rest[2] == "explain" || rest[2] == "me"):
+		return []string{"org:read:self"}
+	case len(rest) == 4 && rest[1] == "browser-sites" && rest[2] == "me" && (method == http.MethodPut || method == http.MethodDelete):
+		return []string{"org:settings:write:self"}
 	case len(rest) == 2 && method == http.MethodPost && rest[1] == "plan":
 		return []string{"org:settings:write:self"}
 	case len(rest) == 2 && method == http.MethodPatch && rest[1] == "settings":
 		return []string{"org:settings:write:self"}
 	case len(rest) == 2 && method == http.MethodPatch && rest[1] == "brreg":
 		return []string{"org:settings:write:self"}
+	case len(rest) == 2 && method == http.MethodPatch && rest[1] == "website":
+		return []string{"org:settings:write:self"}
+	case len(rest) == 2 && method == http.MethodGet && rest[1] == "website":
+		return []string{"org:website:read"}
 	default:
 		return nil
 	}
@@ -322,6 +375,18 @@ func organizationProxyScopes(method string, rest []string) []string {
 		return []string{"org:read:self", "org:read:any"}
 	case len(rest) == 3 && method == http.MethodGet && rest[1] == "roles" && rest[2] == "catalog":
 		return []string{"org:read:self", "org:read:any"}
+	case len(rest) == 2 && method == http.MethodGet && rest[1] == "model-entitlement":
+		return []string{"org:read:self"}
+	case len(rest) == 2 && method == http.MethodPut && rest[1] == "model-entitlement":
+		return []string{"org:settings:write:self"}
+	case len(rest) == 3 && method == http.MethodGet && rest[1] == "model-entitlement" && rest[2] == "explain":
+		return []string{"org:read:self"}
+	// SIEM destinations are administered on behalf of a signed owner or admin
+	// only (:self); no :any holder reaches them through this path.
+	case len(rest) == 2 && rest[1] == "siem-destinations" && (method == http.MethodGet || method == http.MethodPost):
+		return []string{"org:siem:manage:self"}
+	case len(rest) == 3 && rest[1] == "siem-destinations" && (method == http.MethodPatch || method == http.MethodDelete):
+		return []string{"org:siem:manage:self"}
 	case len(rest) == 2 && method == http.MethodPost && rest[1] == "plan":
 		return []string{"org:settings:write:self"}
 	case len(rest) == 2 && method == http.MethodPatch && (rest[1] == "capabilities" || rest[1] == "settings"):
@@ -351,6 +416,10 @@ func internalOrganizationScopes(method string, rest []string) []string {
 		return []string{"org:read:any"}
 	case len(rest) == 1 && rest[0] == "by-tenant" && method == http.MethodGet:
 		return []string{"org:tenant:read:any"}
+	// Before the generic one-segment read below: org:read:any must not open the
+	// route that returns destination secrets.
+	case len(rest) == 1 && rest[0] == "siem-destinations" && method == http.MethodGet:
+		return []string{"org:siem:read:any"}
 	case len(rest) == 1 && method == http.MethodGet:
 		return []string{"org:read:any"}
 	case len(rest) == 1 && rest[0] == "ensure-from-tenant" && method == http.MethodPost:
@@ -359,6 +428,12 @@ func internalOrganizationScopes(method string, rest []string) []string {
 		return []string{"org:onboarding:write:self", "org:onboarding:write:any"}
 	case len(rest) == 2 && rest[1] == "retention-posture" && method == http.MethodGet:
 		return []string{"org:retention:read:any"}
+	case len(rest) == 2 && rest[1] == "agent-policy" && method == http.MethodGet:
+		return []string{"org:agent-policy:read:any"}
+	case len(rest) == 2 && rest[1] == "model-entitlement" && method == http.MethodGet:
+		return []string{"org:model-entitlement:read:any"}
+	case len(rest) == 3 && rest[1] == "browser-sites" && rest[2] == "resolve" && method == http.MethodGet:
+		return []string{"org:browser-site:read:any"}
 	case len(rest) == 2 && rest[1] == "reconcile" && method == http.MethodPost:
 		return []string{"org:projection:write:any"}
 	case len(rest) == 3 && rest[1] == "members" && rest[2] == "reconcile" && method == http.MethodPost:

@@ -76,6 +76,63 @@ func (MemoryProvenance) EnumDescriptor() ([]byte, []int) {
 	return file_model_plane_v1_memory_proto_rawDescGZIP(), []int{0}
 }
 
+// MemoryState — the user's own choice about their memory (build plan WS07 S1).
+type MemoryState int32
+
+const (
+	MemoryState_MEMORY_STATE_UNSPECIFIED MemoryState = 0
+	// The default. Memory is used and learned from.
+	MemoryState_MEMORY_STATE_ON MemoryState = 1
+	// Rows stay visible and deletable but are not recalled, and nothing new is
+	// learned. What is said while paused is never mined after a resume.
+	MemoryState_MEMORY_STATE_PAUSED MemoryState = 2
+	// As paused, and the user's rows are also hidden from the list.
+	MemoryState_MEMORY_STATE_OFF MemoryState = 3
+)
+
+// Enum value maps for MemoryState.
+var (
+	MemoryState_name = map[int32]string{
+		0: "MEMORY_STATE_UNSPECIFIED",
+		1: "MEMORY_STATE_ON",
+		2: "MEMORY_STATE_PAUSED",
+		3: "MEMORY_STATE_OFF",
+	}
+	MemoryState_value = map[string]int32{
+		"MEMORY_STATE_UNSPECIFIED": 0,
+		"MEMORY_STATE_ON":          1,
+		"MEMORY_STATE_PAUSED":      2,
+		"MEMORY_STATE_OFF":         3,
+	}
+)
+
+func (x MemoryState) Enum() *MemoryState {
+	p := new(MemoryState)
+	*p = x
+	return p
+}
+
+func (x MemoryState) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (MemoryState) Descriptor() protoreflect.EnumDescriptor {
+	return file_model_plane_v1_memory_proto_enumTypes[1].Descriptor()
+}
+
+func (MemoryState) Type() protoreflect.EnumType {
+	return &file_model_plane_v1_memory_proto_enumTypes[1]
+}
+
+func (x MemoryState) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use MemoryState.Descriptor instead.
+func (MemoryState) EnumDescriptor() ([]byte, []int) {
+	return file_model_plane_v1_memory_proto_rawDescGZIP(), []int{1}
+}
+
 type SearchMemoryRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Thread context for scoping.
@@ -194,8 +251,14 @@ type SearchMemoryResponse struct {
 	Degraded bool `protobuf:"varint,2,opt,name=degraded,proto3" json:"degraded,omitempty"`
 	// Stable machine-readable reason, empty when semantic recall is ready.
 	DegradationReason string `protobuf:"bytes,3,opt,name=degradation_reason,json=degradationReason,proto3" json:"degradation_reason,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// Why the caller's own memory was not used for this search, one of the
+	// closed MemoryControls.reason tokens: "user_paused", "user_off",
+	// "org_disabled", "policy_unavailable". Empty when it was used. A paused or
+	// off user still receives org-owned entries, so an empty `entries` with this
+	// set means "memory is switched off", never "nothing to recall".
+	SkipReason    string `protobuf:"bytes,4,opt,name=skip_reason,json=skipReason,proto3" json:"skip_reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *SearchMemoryResponse) Reset() {
@@ -245,6 +308,13 @@ func (x *SearchMemoryResponse) GetDegraded() bool {
 func (x *SearchMemoryResponse) GetDegradationReason() string {
 	if x != nil {
 		return x.DegradationReason
+	}
+	return ""
+}
+
+func (x *SearchMemoryResponse) GetSkipReason() string {
+	if x != nil {
+		return x.SkipReason
 	}
 	return ""
 }
@@ -383,7 +453,13 @@ type IndexMemoryRequest struct {
 	// correlate the same logical memory across the durable index and the
 	// semantic backend so a later DeleteMemory(memory_id) removes both. When
 	// empty the backend assigns its own id.
-	MemoryId      string `protobuf:"bytes,6,opt,name=memory_id,json=memoryId,proto3" json:"memory_id,omitempty"`
+	MemoryId string `protobuf:"bytes,6,opt,name=memory_id,json=memoryId,proto3" json:"memory_id,omitempty"`
+	// Who asked for this write, for the content policy (WS26-S4): "user" (the
+	// person, through the app), "model_tool" (save_memory), "delegation" (a
+	// subagent's outcome) or "workflow" (an orchestrator write). Empty, and any
+	// other value, is read as "model_tool", so only "user" may write org-wide
+	// memory.
+	Origin        string `protobuf:"bytes,7,opt,name=origin,proto3" json:"origin,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -456,6 +532,13 @@ func (x *IndexMemoryRequest) GetUserId() string {
 func (x *IndexMemoryRequest) GetMemoryId() string {
 	if x != nil {
 		return x.MemoryId
+	}
+	return ""
+}
+
+func (x *IndexMemoryRequest) GetOrigin() string {
+	if x != nil {
+		return x.Origin
 	}
 	return ""
 }
@@ -695,8 +778,12 @@ type ListMemoryResponse struct {
 	Degraded bool `protobuf:"varint,2,opt,name=degraded,proto3" json:"degraded,omitempty"`
 	// Stable machine-readable reason, empty when nothing is degraded.
 	DegradationReason string `protobuf:"bytes,3,opt,name=degradation_reason,json=degradationReason,proto3" json:"degradation_reason,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// Why the user's rows were left out of this list: "user_off" or
+	// "org_disabled". Empty when they are listed. Paused is not a reason: a
+	// paused user's rows stay visible and deletable.
+	HiddenReason  string `protobuf:"bytes,4,opt,name=hidden_reason,json=hiddenReason,proto3" json:"hidden_reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ListMemoryResponse) Reset() {
@@ -746,6 +833,13 @@ func (x *ListMemoryResponse) GetDegraded() bool {
 func (x *ListMemoryResponse) GetDegradationReason() string {
 	if x != nil {
 		return x.DegradationReason
+	}
+	return ""
+}
+
+func (x *ListMemoryResponse) GetHiddenReason() string {
+	if x != nil {
+		return x.HiddenReason
 	}
 	return ""
 }
@@ -878,6 +972,471 @@ func (x *DeleteMemoryResponse) GetDegradationReason() string {
 	return ""
 }
 
+type GetMemoryControlsRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Tenant context.
+	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// The user whose controls are read. A user caller may only read their own.
+	UserId        string `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetMemoryControlsRequest) Reset() {
+	*x = GetMemoryControlsRequest{}
+	mi := &file_model_plane_v1_memory_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetMemoryControlsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetMemoryControlsRequest) ProtoMessage() {}
+
+func (x *GetMemoryControlsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_memory_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetMemoryControlsRequest.ProtoReflect.Descriptor instead.
+func (*GetMemoryControlsRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_memory_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *GetMemoryControlsRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *GetMemoryControlsRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+type SetMemoryControlsRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Tenant context.
+	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// The user whose state is set. Must be the caller.
+	UserId string `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	// The new state. UNSPECIFIED is refused.
+	State         MemoryState `protobuf:"varint,3,opt,name=state,proto3,enum=model_plane.v1.MemoryState" json:"state,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetMemoryControlsRequest) Reset() {
+	*x = SetMemoryControlsRequest{}
+	mi := &file_model_plane_v1_memory_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetMemoryControlsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetMemoryControlsRequest) ProtoMessage() {}
+
+func (x *SetMemoryControlsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_memory_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetMemoryControlsRequest.ProtoReflect.Descriptor instead.
+func (*SetMemoryControlsRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_memory_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *SetMemoryControlsRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *SetMemoryControlsRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *SetMemoryControlsRequest) GetState() MemoryState {
+	if x != nil {
+		return x.State
+	}
+	return MemoryState_MEMORY_STATE_UNSPECIFIED
+}
+
+// MemoryControls — the user's state and the one decision every memory reader
+// and writer in session-core takes from it. Content-free.
+type MemoryControls struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The user's stored choice. Always reported, even when the decision below is
+	// dominated by org policy or zero data retention.
+	State MemoryState `protobuf:"varint,1,opt,name=state,proto3,enum=model_plane.v1.MemoryState" json:"state,omitempty"`
+	// The organization's memory policy: "allow", "disabled" or "unavailable".
+	OrgMemoryPolicy string `protobuf:"bytes,2,opt,name=org_memory_policy,json=orgMemoryPolicy,proto3" json:"org_memory_policy,omitempty"`
+	// The organization's learning-review policy. Empty until the org policy
+	// mirror exists (build plan WS07 S4).
+	OrgLearningPolicy string `protobuf:"bytes,3,opt,name=org_learning_policy,json=orgLearningPolicy,proto3" json:"org_learning_policy,omitempty"`
+	// Whether memory is recalled for this user's turns.
+	UseAllowed bool `protobuf:"varint,4,opt,name=use_allowed,json=useAllowed,proto3" json:"use_allowed,omitempty"`
+	// Whether new memory is written for this user.
+	GenerationAllowed bool `protobuf:"varint,5,opt,name=generation_allowed,json=generationAllowed,proto3" json:"generation_allowed,omitempty"`
+	// Whether this user's completed runs are announced to the learning loop.
+	LearningAllowed bool `protobuf:"varint,6,opt,name=learning_allowed,json=learningAllowed,proto3" json:"learning_allowed,omitempty"`
+	// Closed token for what decided the above: "on", "user_paused", "user_off",
+	// "org_disabled", "zdr", "policy_unavailable".
+	Reason string `protobuf:"bytes,7,opt,name=reason,proto3" json:"reason,omitempty"`
+	// How many of the user's rows the list hides under this decision (a count,
+	// never a row). Zero unless the state is off or the org disabled memory.
+	HiddenRows uint32 `protobuf:"varint,8,opt,name=hidden_rows,json=hiddenRows,proto3" json:"hidden_rows,omitempty"`
+	// When the state last changed; unset for a user who never set it.
+	UpdatedAt     *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MemoryControls) Reset() {
+	*x = MemoryControls{}
+	mi := &file_model_plane_v1_memory_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MemoryControls) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MemoryControls) ProtoMessage() {}
+
+func (x *MemoryControls) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_memory_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MemoryControls.ProtoReflect.Descriptor instead.
+func (*MemoryControls) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_memory_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *MemoryControls) GetState() MemoryState {
+	if x != nil {
+		return x.State
+	}
+	return MemoryState_MEMORY_STATE_UNSPECIFIED
+}
+
+func (x *MemoryControls) GetOrgMemoryPolicy() string {
+	if x != nil {
+		return x.OrgMemoryPolicy
+	}
+	return ""
+}
+
+func (x *MemoryControls) GetOrgLearningPolicy() string {
+	if x != nil {
+		return x.OrgLearningPolicy
+	}
+	return ""
+}
+
+func (x *MemoryControls) GetUseAllowed() bool {
+	if x != nil {
+		return x.UseAllowed
+	}
+	return false
+}
+
+func (x *MemoryControls) GetGenerationAllowed() bool {
+	if x != nil {
+		return x.GenerationAllowed
+	}
+	return false
+}
+
+func (x *MemoryControls) GetLearningAllowed() bool {
+	if x != nil {
+		return x.LearningAllowed
+	}
+	return false
+}
+
+func (x *MemoryControls) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *MemoryControls) GetHiddenRows() uint32 {
+	if x != nil {
+		return x.HiddenRows
+	}
+	return 0
+}
+
+func (x *MemoryControls) GetUpdatedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.UpdatedAt
+	}
+	return nil
+}
+
+type GetMemoryControlsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Controls      *MemoryControls        `protobuf:"bytes,1,opt,name=controls,proto3" json:"controls,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetMemoryControlsResponse) Reset() {
+	*x = GetMemoryControlsResponse{}
+	mi := &file_model_plane_v1_memory_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetMemoryControlsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetMemoryControlsResponse) ProtoMessage() {}
+
+func (x *GetMemoryControlsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_memory_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetMemoryControlsResponse.ProtoReflect.Descriptor instead.
+func (*GetMemoryControlsResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_memory_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *GetMemoryControlsResponse) GetControls() *MemoryControls {
+	if x != nil {
+		return x.Controls
+	}
+	return nil
+}
+
+type SetMemoryControlsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Controls      *MemoryControls        `protobuf:"bytes,1,opt,name=controls,proto3" json:"controls,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetMemoryControlsResponse) Reset() {
+	*x = SetMemoryControlsResponse{}
+	mi := &file_model_plane_v1_memory_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetMemoryControlsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetMemoryControlsResponse) ProtoMessage() {}
+
+func (x *SetMemoryControlsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_memory_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetMemoryControlsResponse.ProtoReflect.Descriptor instead.
+func (*SetMemoryControlsResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_memory_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *SetMemoryControlsResponse) GetControls() *MemoryControls {
+	if x != nil {
+		return x.Controls
+	}
+	return nil
+}
+
+type ResetMemoryRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Tenant context.
+	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// The user whose memory is erased. Must be the caller.
+	UserId string `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	// Must be true. A reset cannot be undone, so an unset field is a refusal,
+	// never a default.
+	Confirm       bool `protobuf:"varint,3,opt,name=confirm,proto3" json:"confirm,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResetMemoryRequest) Reset() {
+	*x = ResetMemoryRequest{}
+	mi := &file_model_plane_v1_memory_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResetMemoryRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResetMemoryRequest) ProtoMessage() {}
+
+func (x *ResetMemoryRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_memory_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResetMemoryRequest.ProtoReflect.Descriptor instead.
+func (*ResetMemoryRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_memory_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *ResetMemoryRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *ResetMemoryRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *ResetMemoryRequest) GetConfirm() bool {
+	if x != nil {
+		return x.Confirm
+	}
+	return false
+}
+
+type ResetMemoryResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// How many durable rows were erased (current rows and retired ancestors).
+	DurableDeleted uint32 `protobuf:"varint,1,opt,name=durable_deleted,json=durableDeleted,proto3" json:"durable_deleted,omitempty"`
+	// Durable rows whose semantic copy could not be confirmed erased. Their reads
+	// stay suppressed, because every erased id is recorded as forgotten.
+	SemanticUnconfirmed uint32 `protobuf:"varint,2,opt,name=semantic_unconfirmed,json=semanticUnconfirmed,proto3" json:"semantic_unconfirmed,omitempty"`
+	// True when semantic_unconfirmed is not zero.
+	Degraded bool `protobuf:"varint,3,opt,name=degraded,proto3" json:"degraded,omitempty"`
+	// Stable machine-readable reason, empty when nothing is degraded.
+	DegradationReason string `protobuf:"bytes,4,opt,name=degradation_reason,json=degradationReason,proto3" json:"degradation_reason,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *ResetMemoryResponse) Reset() {
+	*x = ResetMemoryResponse{}
+	mi := &file_model_plane_v1_memory_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResetMemoryResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResetMemoryResponse) ProtoMessage() {}
+
+func (x *ResetMemoryResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_memory_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResetMemoryResponse.ProtoReflect.Descriptor instead.
+func (*ResetMemoryResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_memory_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *ResetMemoryResponse) GetDurableDeleted() uint32 {
+	if x != nil {
+		return x.DurableDeleted
+	}
+	return 0
+}
+
+func (x *ResetMemoryResponse) GetSemanticUnconfirmed() uint32 {
+	if x != nil {
+		return x.SemanticUnconfirmed
+	}
+	return 0
+}
+
+func (x *ResetMemoryResponse) GetDegraded() bool {
+	if x != nil {
+		return x.Degraded
+	}
+	return false
+}
+
+func (x *ResetMemoryResponse) GetDegradationReason() string {
+	if x != nil {
+		return x.DegradationReason
+	}
+	return ""
+}
+
 var File_model_plane_v1_memory_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_memory_proto_rawDesc = "" +
@@ -890,11 +1449,13 @@ const file_model_plane_v1_memory_proto_rawDesc = "" +
 	"\x05limit\x18\x04 \x01(\rR\x05limit\x12\x15\n" +
 	"\x06org_id\x18\x05 \x01(\tR\x05orgId\x12?\n" +
 	"\rupdated_after\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\fupdatedAfter\x12\x17\n" +
-	"\auser_id\x18\a \x01(\tR\x06userId\"\x98\x01\n" +
+	"\auser_id\x18\a \x01(\tR\x06userId\"\xb9\x01\n" +
 	"\x14SearchMemoryResponse\x125\n" +
 	"\aentries\x18\x01 \x03(\v2\x1b.model_plane.v1.MemoryEntryR\aentries\x12\x1a\n" +
 	"\bdegraded\x18\x02 \x01(\bR\bdegraded\x12-\n" +
-	"\x12degradation_reason\x18\x03 \x01(\tR\x11degradationReason\"\xa3\x02\n" +
+	"\x12degradation_reason\x18\x03 \x01(\tR\x11degradationReason\x12\x1f\n" +
+	"\vskip_reason\x18\x04 \x01(\tR\n" +
+	"skipReason\"\xa3\x02\n" +
 	"\vMemoryEntry\x12\x1b\n" +
 	"\tmemory_id\x18\x01 \x01(\tR\bmemoryId\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x14\n" +
@@ -906,14 +1467,15 @@ const file_model_plane_v1_memory_proto_rawDesc = "" +
 	"\auser_id\x18\a \x01(\tR\x06userId\x12@\n" +
 	"\n" +
 	"provenance\x18\b \x01(\x0e2 .model_plane.v1.MemoryProvenanceR\n" +
-	"provenance\"\xae\x01\n" +
+	"provenance\"\xc6\x01\n" +
 	"\x12IndexMemoryRequest\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x12\x14\n" +
 	"\x05topic\x18\x02 \x01(\tR\x05topic\x12\x18\n" +
 	"\acontent\x18\x03 \x01(\tR\acontent\x12\x15\n" +
 	"\x06org_id\x18\x04 \x01(\tR\x05orgId\x12\x17\n" +
 	"\auser_id\x18\x05 \x01(\tR\x06userId\x12\x1b\n" +
-	"\tmemory_id\x18\x06 \x01(\tR\bmemoryId\"}\n" +
+	"\tmemory_id\x18\x06 \x01(\tR\bmemoryId\x12\x16\n" +
+	"\x06origin\x18\a \x01(\tR\x06origin\"}\n" +
 	"\x13IndexMemoryResponse\x12\x1b\n" +
 	"\tmemory_id\x18\x01 \x01(\tR\bmemoryId\x12\x1a\n" +
 	"\bdegraded\x18\x02 \x01(\bR\bdegraded\x12-\n" +
@@ -926,11 +1488,12 @@ const file_model_plane_v1_memory_proto_rawDesc = "" +
 	"\x11ListMemoryRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x17\n" +
 	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x14\n" +
-	"\x05limit\x18\x03 \x01(\rR\x05limit\"\x96\x01\n" +
+	"\x05limit\x18\x03 \x01(\rR\x05limit\"\xbb\x01\n" +
 	"\x12ListMemoryResponse\x125\n" +
 	"\aentries\x18\x01 \x03(\v2\x1b.model_plane.v1.MemoryEntryR\aentries\x12\x1a\n" +
 	"\bdegraded\x18\x02 \x01(\bR\bdegraded\x12-\n" +
-	"\x12degradation_reason\x18\x03 \x01(\tR\x11degradationReason\"b\n" +
+	"\x12degradation_reason\x18\x03 \x01(\tR\x11degradationReason\x12#\n" +
+	"\rhidden_reason\x18\x04 \x01(\tR\fhiddenReason\"b\n" +
 	"\x13DeleteMemoryRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x17\n" +
 	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x1b\n" +
@@ -938,18 +1501,59 @@ const file_model_plane_v1_memory_proto_rawDesc = "" +
 	"\x14DeleteMemoryResponse\x12\x18\n" +
 	"\adeleted\x18\x01 \x01(\bR\adeleted\x12\x1a\n" +
 	"\bdegraded\x18\x02 \x01(\bR\bdegraded\x12-\n" +
-	"\x12degradation_reason\x18\x03 \x01(\tR\x11degradationReason*s\n" +
+	"\x12degradation_reason\x18\x03 \x01(\tR\x11degradationReason\"J\n" +
+	"\x18GetMemoryControlsRequest\x12\x15\n" +
+	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x17\n" +
+	"\auser_id\x18\x02 \x01(\tR\x06userId\"}\n" +
+	"\x18SetMemoryControlsRequest\x12\x15\n" +
+	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x17\n" +
+	"\auser_id\x18\x02 \x01(\tR\x06userId\x121\n" +
+	"\x05state\x18\x03 \x01(\x0e2\x1b.model_plane.v1.MemoryStateR\x05state\"\x8e\x03\n" +
+	"\x0eMemoryControls\x121\n" +
+	"\x05state\x18\x01 \x01(\x0e2\x1b.model_plane.v1.MemoryStateR\x05state\x12*\n" +
+	"\x11org_memory_policy\x18\x02 \x01(\tR\x0forgMemoryPolicy\x12.\n" +
+	"\x13org_learning_policy\x18\x03 \x01(\tR\x11orgLearningPolicy\x12\x1f\n" +
+	"\vuse_allowed\x18\x04 \x01(\bR\n" +
+	"useAllowed\x12-\n" +
+	"\x12generation_allowed\x18\x05 \x01(\bR\x11generationAllowed\x12)\n" +
+	"\x10learning_allowed\x18\x06 \x01(\bR\x0flearningAllowed\x12\x16\n" +
+	"\x06reason\x18\a \x01(\tR\x06reason\x12\x1f\n" +
+	"\vhidden_rows\x18\b \x01(\rR\n" +
+	"hiddenRows\x129\n" +
+	"\n" +
+	"updated_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\"W\n" +
+	"\x19GetMemoryControlsResponse\x12:\n" +
+	"\bcontrols\x18\x01 \x01(\v2\x1e.model_plane.v1.MemoryControlsR\bcontrols\"W\n" +
+	"\x19SetMemoryControlsResponse\x12:\n" +
+	"\bcontrols\x18\x01 \x01(\v2\x1e.model_plane.v1.MemoryControlsR\bcontrols\"^\n" +
+	"\x12ResetMemoryRequest\x12\x15\n" +
+	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x17\n" +
+	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x18\n" +
+	"\aconfirm\x18\x03 \x01(\bR\aconfirm\"\xbc\x01\n" +
+	"\x13ResetMemoryResponse\x12'\n" +
+	"\x0fdurable_deleted\x18\x01 \x01(\rR\x0edurableDeleted\x121\n" +
+	"\x14semantic_unconfirmed\x18\x02 \x01(\rR\x13semanticUnconfirmed\x12\x1a\n" +
+	"\bdegraded\x18\x03 \x01(\bR\bdegraded\x12-\n" +
+	"\x12degradation_reason\x18\x04 \x01(\tR\x11degradationReason*s\n" +
 	"\x10MemoryProvenance\x12!\n" +
 	"\x1dMEMORY_PROVENANCE_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18MEMORY_PROVENANCE_STATED\x10\x01\x12\x1e\n" +
-	"\x1aMEMORY_PROVENANCE_INFERRED\x10\x022\xc7\x03\n" +
+	"\x1aMEMORY_PROVENANCE_INFERRED\x10\x02*o\n" +
+	"\vMemoryState\x12\x1c\n" +
+	"\x18MEMORY_STATE_UNSPECIFIED\x10\x00\x12\x13\n" +
+	"\x0fMEMORY_STATE_ON\x10\x01\x12\x17\n" +
+	"\x13MEMORY_STATE_PAUSED\x10\x02\x12\x14\n" +
+	"\x10MEMORY_STATE_OFF\x10\x032\xf3\x05\n" +
 	"\rMemoryService\x12Y\n" +
 	"\fSearchMemory\x12#.model_plane.v1.SearchMemoryRequest\x1a$.model_plane.v1.SearchMemoryResponse\x12V\n" +
 	"\vIndexMemory\x12\".model_plane.v1.IndexMemoryRequest\x1a#.model_plane.v1.IndexMemoryResponse\x12S\n" +
 	"\n" +
 	"ListMemory\x12!.model_plane.v1.ListMemoryRequest\x1a\".model_plane.v1.ListMemoryResponse\x12Y\n" +
 	"\fDeleteMemory\x12#.model_plane.v1.DeleteMemoryRequest\x1a$.model_plane.v1.DeleteMemoryResponse\x12S\n" +
-	"\x06Health\x12#.model_plane.v1.MemoryHealthRequest\x1a$.model_plane.v1.MemoryHealthResponseB\xb3\x01\n" +
+	"\x06Health\x12#.model_plane.v1.MemoryHealthRequest\x1a$.model_plane.v1.MemoryHealthResponse\x12h\n" +
+	"\x11GetMemoryControls\x12(.model_plane.v1.GetMemoryControlsRequest\x1a).model_plane.v1.GetMemoryControlsResponse\x12h\n" +
+	"\x11SetMemoryControls\x12(.model_plane.v1.SetMemoryControlsRequest\x1a).model_plane.v1.SetMemoryControlsResponse\x12V\n" +
+	"\vResetMemory\x12\".model_plane.v1.ResetMemoryRequest\x1a#.model_plane.v1.ResetMemoryResponseB\xb3\x01\n" +
 	"\x12com.model_plane.v1B\vMemoryProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3"
 
 var (
@@ -964,44 +1568,63 @@ func file_model_plane_v1_memory_proto_rawDescGZIP() []byte {
 	return file_model_plane_v1_memory_proto_rawDescData
 }
 
-var file_model_plane_v1_memory_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_model_plane_v1_memory_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_model_plane_v1_memory_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_model_plane_v1_memory_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
 var file_model_plane_v1_memory_proto_goTypes = []any{
-	(MemoryProvenance)(0),         // 0: model_plane.v1.MemoryProvenance
-	(*SearchMemoryRequest)(nil),   // 1: model_plane.v1.SearchMemoryRequest
-	(*SearchMemoryResponse)(nil),  // 2: model_plane.v1.SearchMemoryResponse
-	(*MemoryEntry)(nil),           // 3: model_plane.v1.MemoryEntry
-	(*IndexMemoryRequest)(nil),    // 4: model_plane.v1.IndexMemoryRequest
-	(*IndexMemoryResponse)(nil),   // 5: model_plane.v1.IndexMemoryResponse
-	(*MemoryHealthRequest)(nil),   // 6: model_plane.v1.MemoryHealthRequest
-	(*MemoryHealthResponse)(nil),  // 7: model_plane.v1.MemoryHealthResponse
-	(*ListMemoryRequest)(nil),     // 8: model_plane.v1.ListMemoryRequest
-	(*ListMemoryResponse)(nil),    // 9: model_plane.v1.ListMemoryResponse
-	(*DeleteMemoryRequest)(nil),   // 10: model_plane.v1.DeleteMemoryRequest
-	(*DeleteMemoryResponse)(nil),  // 11: model_plane.v1.DeleteMemoryResponse
-	(*timestamppb.Timestamp)(nil), // 12: google.protobuf.Timestamp
+	(MemoryProvenance)(0),             // 0: model_plane.v1.MemoryProvenance
+	(MemoryState)(0),                  // 1: model_plane.v1.MemoryState
+	(*SearchMemoryRequest)(nil),       // 2: model_plane.v1.SearchMemoryRequest
+	(*SearchMemoryResponse)(nil),      // 3: model_plane.v1.SearchMemoryResponse
+	(*MemoryEntry)(nil),               // 4: model_plane.v1.MemoryEntry
+	(*IndexMemoryRequest)(nil),        // 5: model_plane.v1.IndexMemoryRequest
+	(*IndexMemoryResponse)(nil),       // 6: model_plane.v1.IndexMemoryResponse
+	(*MemoryHealthRequest)(nil),       // 7: model_plane.v1.MemoryHealthRequest
+	(*MemoryHealthResponse)(nil),      // 8: model_plane.v1.MemoryHealthResponse
+	(*ListMemoryRequest)(nil),         // 9: model_plane.v1.ListMemoryRequest
+	(*ListMemoryResponse)(nil),        // 10: model_plane.v1.ListMemoryResponse
+	(*DeleteMemoryRequest)(nil),       // 11: model_plane.v1.DeleteMemoryRequest
+	(*DeleteMemoryResponse)(nil),      // 12: model_plane.v1.DeleteMemoryResponse
+	(*GetMemoryControlsRequest)(nil),  // 13: model_plane.v1.GetMemoryControlsRequest
+	(*SetMemoryControlsRequest)(nil),  // 14: model_plane.v1.SetMemoryControlsRequest
+	(*MemoryControls)(nil),            // 15: model_plane.v1.MemoryControls
+	(*GetMemoryControlsResponse)(nil), // 16: model_plane.v1.GetMemoryControlsResponse
+	(*SetMemoryControlsResponse)(nil), // 17: model_plane.v1.SetMemoryControlsResponse
+	(*ResetMemoryRequest)(nil),        // 18: model_plane.v1.ResetMemoryRequest
+	(*ResetMemoryResponse)(nil),       // 19: model_plane.v1.ResetMemoryResponse
+	(*timestamppb.Timestamp)(nil),     // 20: google.protobuf.Timestamp
 }
 var file_model_plane_v1_memory_proto_depIdxs = []int32{
-	12, // 0: model_plane.v1.SearchMemoryRequest.updated_after:type_name -> google.protobuf.Timestamp
-	3,  // 1: model_plane.v1.SearchMemoryResponse.entries:type_name -> model_plane.v1.MemoryEntry
-	12, // 2: model_plane.v1.MemoryEntry.updated_at:type_name -> google.protobuf.Timestamp
+	20, // 0: model_plane.v1.SearchMemoryRequest.updated_after:type_name -> google.protobuf.Timestamp
+	4,  // 1: model_plane.v1.SearchMemoryResponse.entries:type_name -> model_plane.v1.MemoryEntry
+	20, // 2: model_plane.v1.MemoryEntry.updated_at:type_name -> google.protobuf.Timestamp
 	0,  // 3: model_plane.v1.MemoryEntry.provenance:type_name -> model_plane.v1.MemoryProvenance
-	3,  // 4: model_plane.v1.ListMemoryResponse.entries:type_name -> model_plane.v1.MemoryEntry
-	1,  // 5: model_plane.v1.MemoryService.SearchMemory:input_type -> model_plane.v1.SearchMemoryRequest
-	4,  // 6: model_plane.v1.MemoryService.IndexMemory:input_type -> model_plane.v1.IndexMemoryRequest
-	8,  // 7: model_plane.v1.MemoryService.ListMemory:input_type -> model_plane.v1.ListMemoryRequest
-	10, // 8: model_plane.v1.MemoryService.DeleteMemory:input_type -> model_plane.v1.DeleteMemoryRequest
-	6,  // 9: model_plane.v1.MemoryService.Health:input_type -> model_plane.v1.MemoryHealthRequest
-	2,  // 10: model_plane.v1.MemoryService.SearchMemory:output_type -> model_plane.v1.SearchMemoryResponse
-	5,  // 11: model_plane.v1.MemoryService.IndexMemory:output_type -> model_plane.v1.IndexMemoryResponse
-	9,  // 12: model_plane.v1.MemoryService.ListMemory:output_type -> model_plane.v1.ListMemoryResponse
-	11, // 13: model_plane.v1.MemoryService.DeleteMemory:output_type -> model_plane.v1.DeleteMemoryResponse
-	7,  // 14: model_plane.v1.MemoryService.Health:output_type -> model_plane.v1.MemoryHealthResponse
-	10, // [10:15] is the sub-list for method output_type
-	5,  // [5:10] is the sub-list for method input_type
-	5,  // [5:5] is the sub-list for extension type_name
-	5,  // [5:5] is the sub-list for extension extendee
-	0,  // [0:5] is the sub-list for field type_name
+	4,  // 4: model_plane.v1.ListMemoryResponse.entries:type_name -> model_plane.v1.MemoryEntry
+	1,  // 5: model_plane.v1.SetMemoryControlsRequest.state:type_name -> model_plane.v1.MemoryState
+	1,  // 6: model_plane.v1.MemoryControls.state:type_name -> model_plane.v1.MemoryState
+	20, // 7: model_plane.v1.MemoryControls.updated_at:type_name -> google.protobuf.Timestamp
+	15, // 8: model_plane.v1.GetMemoryControlsResponse.controls:type_name -> model_plane.v1.MemoryControls
+	15, // 9: model_plane.v1.SetMemoryControlsResponse.controls:type_name -> model_plane.v1.MemoryControls
+	2,  // 10: model_plane.v1.MemoryService.SearchMemory:input_type -> model_plane.v1.SearchMemoryRequest
+	5,  // 11: model_plane.v1.MemoryService.IndexMemory:input_type -> model_plane.v1.IndexMemoryRequest
+	9,  // 12: model_plane.v1.MemoryService.ListMemory:input_type -> model_plane.v1.ListMemoryRequest
+	11, // 13: model_plane.v1.MemoryService.DeleteMemory:input_type -> model_plane.v1.DeleteMemoryRequest
+	7,  // 14: model_plane.v1.MemoryService.Health:input_type -> model_plane.v1.MemoryHealthRequest
+	13, // 15: model_plane.v1.MemoryService.GetMemoryControls:input_type -> model_plane.v1.GetMemoryControlsRequest
+	14, // 16: model_plane.v1.MemoryService.SetMemoryControls:input_type -> model_plane.v1.SetMemoryControlsRequest
+	18, // 17: model_plane.v1.MemoryService.ResetMemory:input_type -> model_plane.v1.ResetMemoryRequest
+	3,  // 18: model_plane.v1.MemoryService.SearchMemory:output_type -> model_plane.v1.SearchMemoryResponse
+	6,  // 19: model_plane.v1.MemoryService.IndexMemory:output_type -> model_plane.v1.IndexMemoryResponse
+	10, // 20: model_plane.v1.MemoryService.ListMemory:output_type -> model_plane.v1.ListMemoryResponse
+	12, // 21: model_plane.v1.MemoryService.DeleteMemory:output_type -> model_plane.v1.DeleteMemoryResponse
+	8,  // 22: model_plane.v1.MemoryService.Health:output_type -> model_plane.v1.MemoryHealthResponse
+	16, // 23: model_plane.v1.MemoryService.GetMemoryControls:output_type -> model_plane.v1.GetMemoryControlsResponse
+	17, // 24: model_plane.v1.MemoryService.SetMemoryControls:output_type -> model_plane.v1.SetMemoryControlsResponse
+	19, // 25: model_plane.v1.MemoryService.ResetMemory:output_type -> model_plane.v1.ResetMemoryResponse
+	18, // [18:26] is the sub-list for method output_type
+	10, // [10:18] is the sub-list for method input_type
+	10, // [10:10] is the sub-list for extension type_name
+	10, // [10:10] is the sub-list for extension extendee
+	0,  // [0:10] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_memory_proto_init() }
@@ -1014,8 +1637,8 @@ func file_model_plane_v1_memory_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_memory_proto_rawDesc), len(file_model_plane_v1_memory_proto_rawDesc)),
-			NumEnums:      1,
-			NumMessages:   11,
+			NumEnums:      2,
+			NumMessages:   18,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

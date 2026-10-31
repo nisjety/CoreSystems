@@ -5,11 +5,19 @@ import {
   recommendPlan,
   searchBrreg,
   startCheckout,
+  startConnectSession,
 } from '@/features/onboarding/lib/api'
 
 afterEach(() => vi.unstubAllGlobals())
 
 describe('dispatchCrawlPreviewPacket', () => {
+  it('sends the explicitly selected shared Workspace permission bundle', async () => {
+    const fetchMock=vi.fn<typeof fetch>(async()=>new Response(JSON.stringify({data:{connectUrl:'https://accounts.google.com/o/oauth2/v2/auth'}}),{headers:{'Content-Type':'application/json'}}))
+    vi.stubGlobal('fetch',fetchMock)
+    await startConnectSession({actor:{userId:'test-user'},orgId:'test-org',provider:'google',selectedSources:['search_console','analytics_readonly'],bundles:['workspace_readonly']})
+    const body=JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
+    expect(body.bundles).toEqual(['workspace_readonly'])
+  })
   it('routes malformed SSE payloads to warning handlers instead of throwing', () => {
     const onWarning = vi.fn()
 

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
+use mp_contracts::model_entitlement::Reason;
 use tokio::sync::mpsc;
 use tracing::{info, warn, Instrument};
 
@@ -12,13 +13,14 @@ use super::routing_policy::RoutingPolicy;
 use super::timing::{CallClock, StreamClock};
 use super::{
     anthropic::AnthropicProvider, codex_subscription::CodexSubscriptionProvider,
-    endpoint_region_is_non_eu, intent, is_eu_region, normalize_region_token,
-    openai::OpenAiProvider, EmbedRequest, EmbedResponse, InferChunk, InferRequest, InferResponse,
+    effort, endpoint_region_is_non_eu, intent, is_eu_region, model_accepts_images,
+    normalize_region_token, openai::OpenAiProvider, EmbedRequest, EmbedResponse, InferChunk, InferRequest, InferResponse,
     ModelFamily, ModelInfo, PrivacyTier, ProviderCapabilities, ProviderError, ProviderRouter,
     Residency,
 };
 use crate::cache::PromptCache;
-use crate::config::InferenceConfig;
+use crate::config::{EntitlementConfig, InferenceConfig};
+use crate::entitlement::{EntitlementGate, RequestAccess};
 
 /// A boxed, type-erased provider.
 type BoxedProvider = Arc<dyn ProviderRouterDyn>;
@@ -103,6 +105,10 @@ pub struct FallbackChain {
     /// could not previously coexist with Azure. Only consulted for providers that
     /// declare `exclusive_catalog`.
     catalogs: std::collections::HashMap<String, Vec<String>>,
+    /// Resolves the caller's model entitlement (ADR-0005). Off unless
+    /// `MODEL_ENTITLEMENT_MODE` says otherwise; the handlers ask it, and the
+    /// chain applies the answer a request carries.
+    entitlement: Arc<EntitlementGate>,
 }
 
 /// The deployment names that gate each model family on this resource.
@@ -233,7 +239,7 @@ impl FallbackChain {
 /// True when the caller didn't pin a model — empty or a "let the gateway pick"
 /// sentinel. Such requests resolve to the per-provider default so "Verevon Auto"
 /// works against whatever provider is actually configured.
-fn is_unspecified_model(model: &str) -> bool {
+pub(crate) fn is_unspecified_model(model: &str) -> bool {
     let m = model.trim().to_ascii_lowercase();
     // Empty / "default", plus any Verevon intent id. The intent layer normally
     // rewrites a `verevon-*` id to a concrete model before the provider loop;
@@ -289,6 +295,15 @@ fn tier_unavailable_error(required: PrivacyTier) -> ProviderError {
     ))
 }
 
+/// The typed exhaustion error for a request that carries images whose entire
+/// matching chain was skipped for being unable to read them. Content-free: it
+/// names the cause, never the images.
+fn vision_unsupported_error() -> ProviderError {
+    ProviderError::VisionUnsupported(
+        "no configured provider serves this model with image input".to_owned(),
+    )
+}
+
 /// A refusal's reset time for the log line: RFC 3339 UTC, or empty if unknown.
 fn reset_label(resets_at: Option<chrono::DateTime<chrono::Utc>>) -> String {
     resets_at
@@ -328,6 +343,12 @@ struct ThrottleState {
     /// walk still CONTINUES past a TooLong on purpose: a later provider with a
     /// larger window is the recovery path, and only exhaustion reports it.
     too_long_detail: Option<String>,
+    /// The first `RequestRejected` detail any provider returned during the walk.
+    ///
+    /// A provider that refused the request is not retried, but the walk still asks the next
+    /// provider or model, which may serve the same request. When nothing else was learned,
+    /// exhaustion names the refusal, since the same request would be refused again.
+    rejected_detail: Option<String>,
     /// The first final subscription outcome of the walk: a
     /// [`ProviderError::SubscriptionRefused`], or a
     /// [`ProviderError::SubscriptionFailed`] turn.
@@ -340,6 +361,16 @@ struct ThrottleState {
     /// everything else. It is deliberately not throttling — `throttled()`
     /// ignores it, so there is no second pass and no wait.
     refused: Option<ProviderError>,
+    /// The first reason the caller's entitlement skipped a candidate. Set only
+    /// under `enforce`; with no attempt made it ends the walk as
+    /// `model_not_entitled`, named before any zero-retention, residency or tier
+    /// refusal.
+    entitlement_denial: Option<Reason>,
+    /// A candidate that cleared every other gate was skipped only because the
+    /// request carries images and it cannot read them. With no attempt made it
+    /// ends the walk as `vision_unsupported`, ahead of the privacy, retention
+    /// and residency refusals, which a candidate that reached this gate passed.
+    vision_skipped: bool,
 }
 
 impl ThrottleState {
@@ -364,6 +395,12 @@ impl ThrottleState {
     fn record_too_long(&mut self, detail: &str) {
         if self.too_long_detail.is_none() {
             self.too_long_detail = Some(detail.to_owned());
+        }
+    }
+
+    fn record_rejected(&mut self, detail: &str) {
+        if self.rejected_detail.is_none() {
+            self.rejected_detail = Some(detail.to_owned());
         }
     }
 
@@ -396,16 +433,20 @@ impl ThrottleState {
         // shortly" is still the true story. TooLong next: it is deterministic —
         // the same prompt overflows the same providers every time — so once no
         // retry can help, the caller needs the typed overflow to trigger
-        // compaction, not a generic exhaustion. AllExhausted only when the walk
-        // learned nothing more specific.
-        match (&self.soonest_retry_ms, &self.too_long_detail) {
-            (Some(retry_after_ms), _) => ProviderError::RateLimited {
+        // compaction, not a generic exhaustion. RequestRejected after that: a provider refused
+        // the request itself, and a retry would hear the same refusal. AllExhausted only when
+        // the walk learned nothing more specific.
+        match (&self.soonest_retry_ms, &self.too_long_detail, &self.rejected_detail) {
+            (Some(retry_after_ms), _, _) => ProviderError::RateLimited {
                 retry_after_ms: *retry_after_ms,
             },
-            (None, Some(detail)) => ProviderError::TooLong {
+            (None, Some(detail), _) => ProviderError::TooLong {
                 detail: detail.clone(),
             },
-            (None, None) => ProviderError::AllExhausted { attempts },
+            (None, None, Some(detail)) => ProviderError::RequestRejected {
+                detail: detail.clone(),
+            },
+            (None, None, None) => ProviderError::AllExhausted { attempts },
         }
     }
 }
@@ -935,6 +976,7 @@ impl FallbackChain {
             defaults: ProviderDefaults::from_config(cfg),
             deployed,
             catalogs,
+            entitlement: Arc::new(EntitlementGate::new(&EntitlementConfig::from_env())),
         }
     }
 
@@ -977,7 +1019,22 @@ impl FallbackChain {
             // No configured catalog, so nothing is known to be undeployed and
             // the ladder is walked as written.
             deployed: DeployedModels::default(),
+            entitlement: Arc::new(EntitlementGate::off()),
         }
+    }
+
+    /// Replace the entitlement gate (test/builder helper).
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn with_entitlement(mut self, gate: EntitlementGate) -> Self {
+        self.entitlement = Arc::new(gate);
+        self
+    }
+
+    /// The gate the handlers resolve a caller's entitlement through.
+    #[must_use]
+    pub fn entitlement(&self) -> &EntitlementGate {
+        &self.entitlement
     }
 
     /// Toggle the Verevon intent layer by flipping `enabled` on the live policy
@@ -1037,7 +1094,104 @@ impl FallbackChain {
         );
         let mut rewritten = req.clone();
         rewritten.model = decision.model;
+        if effort::budget_clamp_enabled() {
+            if let Some(requested) = rewritten.reasoning_effort {
+                let applied = effort::clamp_to_cap(requested, decision.effort_cap);
+                if applied != requested {
+                    // Visible on purpose: the user asked for more than they got.
+                    info!(
+                        request_id = %req.request_id,
+                        resolved_model = %rewritten.model,
+                        posture = ?decision.posture,
+                        requested = requested.as_str(),
+                        applied = applied.as_str(),
+                        clamped = true,
+                        "effort clamped by budget posture"
+                    );
+                    rewritten.reasoning_effort = Some(applied);
+                }
+            } else {
+                // A request with no level carries only the legacy budget, which is
+                // what the gateway sends when its effort ladder is off. Without this
+                // branch an exhausted org would still spend the whole budget.
+                let budget = rewritten.thinking_budget_tokens;
+                let applied = effort::cap_legacy_budget(budget, decision.effort_cap);
+                if applied != budget {
+                    info!(
+                        request_id = %req.request_id,
+                        resolved_model = %rewritten.model,
+                        posture = ?decision.posture,
+                        requested_budget = budget,
+                        applied_budget = applied,
+                        clamped = true,
+                        "thinking budget clamped by budget posture"
+                    );
+                    rewritten.thinking_budget_tokens = applied;
+                }
+            }
+        }
         Some(rewritten)
+    }
+
+    /// Lower a request's effort to the org's `max_effort` ceiling. model-gateway
+    /// clamps the same ceiling for the callers it fronts; this is the enforcement
+    /// point for a caller that reaches inference-core directly, such as the agent
+    /// loop, which would otherwise run a deep loop under a role capped at `low`.
+    /// It clamps down only, and only when the policy is enforced: shadow mode
+    /// serves the request as it is. A Claude 5.5 request that names neither a
+    /// level nor a budget runs at its model's default, so that default is what the
+    /// ceiling bounds. Returns `None` when nothing changes, so the common path
+    /// neither clones the request nor reads the policy.
+    ///
+    /// It runs before the response cache is read, because the cache key carries
+    /// the effort level: an answer made above the ceiling must not answer a
+    /// request the ceiling now bounds.
+    fn apply_effort_ceiling(req: &InferRequest) -> Option<InferRequest> {
+        let access = req.access.as_deref().filter(|access| access.enforced())?;
+        // An empty or unknown ceiling limits nothing: org-core validates the name
+        // when the policy is written, and a stray value must not lower a request.
+        let ceiling = effort::Level::from_name(&access.resolved().policy.as_ref()?.max_effort)?;
+        // A Claude 5.5 request that names neither a level nor a budget runs at its
+        // model's default level, which the adapter sends explicitly, so the ceiling
+        // bounds that level as if it had been requested. The budget test is `<= 0`
+        // because that is when the adapter falls back to the default: a positive
+        // budget is read as a level by `from_legacy_budget`.
+        let model_default = if req.reasoning_effort.is_none() && req.thinking_budget_tokens <= 0 {
+            super::anthropic::claude_5_5_default_effort(&req.model)
+        } else {
+            None
+        };
+        let reasoning_effort = match (req.reasoning_effort, model_default) {
+            (Some(requested), _) => Some(effort::clamp_to_cap(requested, Some(ceiling))),
+            // Set only when the ceiling lowers the default: a default the ceiling
+            // leaves alone stays unset, so the request reaches the adapter as it was.
+            (None, Some(default)) => {
+                let bounded = effort::clamp_to_cap(default, Some(ceiling));
+                (bounded < default).then_some(bounded)
+            }
+            (None, None) => None,
+        };
+        // A request with no level is bounded by its legacy budget instead.
+        let thinking_budget_tokens = if req.reasoning_effort.is_none() {
+            effort::cap_legacy_budget(req.thinking_budget_tokens, Some(ceiling))
+        } else {
+            req.thinking_budget_tokens
+        };
+        if reasoning_effort == req.reasoning_effort
+            && thinking_budget_tokens == req.thinking_budget_tokens
+        {
+            return None;
+        }
+        info!(
+            request_id = %req.request_id,
+            ceiling = ceiling.as_str(),
+            clamped = true,
+            "effort clamped by the org's effort ceiling"
+        );
+        let mut clamped = req.clone();
+        clamped.reasoning_effort = reasoning_effort;
+        clamped.thinking_budget_tokens = thinking_budget_tokens;
+        Some(clamped)
     }
 
     #[allow(dead_code)]
@@ -1109,7 +1263,17 @@ impl FallbackChain {
     /// `verevon-*` mode. Substituting under a caller who pinned a model would
     /// answer with something they did not ask for; "the model I chose was busy"
     /// is their decision to make, not ours to paper over.
-    fn tool_ladder(&self, resolved: &str) -> Vec<String> {
+    ///
+    /// For a caller whose organisation restricts models, a rung the policy
+    /// refuses is dropped before the step bound is counted, so a denied rung
+    /// never uses up one of the [`MAX_TOOL_LADDER_STEPS`] a permitted one could
+    /// have had.
+    fn tool_ladder(
+        &self,
+        resolved: &str,
+        access: Option<&RequestAccess>,
+        hint: &str,
+    ) -> Vec<String> {
         let policy = self.policy.load();
         let mut ladder: Vec<String> = Vec::new();
         for candidate in &policy.tool_fallback_ladder {
@@ -1121,9 +1285,90 @@ impl FallbackChain {
             if already_queued || !self.is_deployed(candidate) {
                 continue;
             }
+            if access.is_some_and(|access| self.entitlement_refusal(access, candidate, hint).is_some()) {
+                continue;
+            }
             ladder.push(candidate.clone());
         }
         ladder
+    }
+
+    /// Why the caller's entitlement refuses `model` on every provider that could
+    /// serve it, or `None` when some provider may, when no provider matches (the
+    /// walk then ends in its usual way) or when `model` is unspecified (each
+    /// provider's own default is judged where it is chosen).
+    ///
+    /// The provider is part of the question because a policy may name a whole
+    /// provider (`provider:openai`), and a model id alone does not say which
+    /// provider would serve it.
+    fn entitlement_refusal(&self, access: &RequestAccess, model: &str, hint: &str) -> Option<Reason> {
+        if is_unspecified_model(model) {
+            return None;
+        }
+        let mut first = None;
+        for (name, provider) in &self.providers {
+            let caps = provider.capabilities_dyn();
+            if !Self::hint_matches(hint, name, &caps.aliases)
+                || !provider_serves_model(&caps, self.catalog_for(name), model)
+            {
+                continue;
+            }
+            match access.refuses(model, name) {
+                None => return None,
+                Some(reason) => {
+                    first.get_or_insert(reason);
+                }
+            }
+        }
+        first
+    }
+
+    /// The model the caller named, after checking it against their entitlement:
+    /// `None` for an unspecified (automatic) model, `Some` for a pinned one the
+    /// policy allows on some provider.
+    ///
+    /// # Errors
+    /// [`ProviderError::ModelNotEntitled`] when the policy refuses a pinned model
+    /// on every provider that could serve it. Nothing has been sent anywhere.
+    fn pinned_model<'a>(&self, req: &'a InferRequest) -> Result<Option<&'a str>, ProviderError> {
+        if is_unspecified_model(&req.model) {
+            return Ok(None);
+        }
+        if let Some(access) = &req.access {
+            if let Some(reason) = self.entitlement_refusal(access, &req.model, &req.provider_hint) {
+                return Err(access.refusal(&req.model, reason));
+            }
+        }
+        Ok(Some(&req.model))
+    }
+
+    /// Whether a stored response may be served to this caller: it was made by a
+    /// model their organisation still allows. The cache key does not carry the
+    /// policy, so a revocation must be checked here or an old answer outlives it.
+    fn entitled_hit(&self, req: &InferRequest, model_used: &str, provider_used: &str) -> bool {
+        req.access
+            .as_ref()
+            .is_none_or(|access| access.refuses(model_used, provider_used).is_none())
+    }
+
+    /// The error that ends a walk in which no candidate was tried because the
+    /// caller's entitlement skipped each one. `pinned` is the model the caller
+    /// named, if they named one; an automatic request names no model.
+    fn entitlement_exhaustion(
+        req: &InferRequest,
+        throttle: &ThrottleState,
+        total_attempts: u32,
+        pinned: Option<&str>,
+    ) -> Option<ProviderError> {
+        if total_attempts != 0 {
+            return None;
+        }
+        let access = req.access.as_ref()?;
+        let denial = throttle.entitlement_denial?;
+        Some(match pinned {
+            Some(model) => access.refusal(model, denial),
+            None => access.refusal("", Reason::NoEntitledRoute),
+        })
     }
 
     /// Perform unary inference with fallback and caching.
@@ -1143,21 +1388,41 @@ impl FallbackChain {
 
     async fn infer_with_response_cache(&self, req: &InferRequest, cache_response: bool) -> Result<InferResponse, ProviderError> {
         let mut clock = CallClock::start();
+        // A retired Claude id is answered by its successor, so the entitlement check,
+        // the cache key and every rung of the ladder all name the model that serves.
+        let current = super::anthropic::with_current_model(req);
+        let req: &InferRequest = current.as_ref().unwrap_or(req);
+        // A model the caller named is checked against their organisation's
+        // entitlement first of all: before the intent layer spends a budget call
+        // and before the cache can answer with a model they may not use.
+        let pinned = self.pinned_model(req)?;
         // Verevon intent layer: resolve a `verevon-*` mode to a concrete model
         // (complexity + budget) before anything else. A pinned model or a
         // disabled intent layer leaves `req` untouched.
         let intent_req = self.resolve_intent(req).await;
         // The ladder exists only for a model WE chose. `intent_req.is_some()` is
         // exactly that condition — see `attempt_models`.
-        let ladder = intent_req
-            .as_ref()
-            .map_or_else(Vec::new, |resolved| self.tool_ladder(&resolved.model));
+        let ladder = intent_req.as_ref().map_or_else(Vec::new, |resolved| {
+            self.tool_ladder(&resolved.model, resolved.access.as_deref(), &resolved.provider_hint)
+        });
         let req: &InferRequest = intent_req.as_ref().unwrap_or(req);
+        // The org's effort ceiling bounds the request before the cache is read,
+        // because the cache key carries the effort level.
+        let ceiled = Self::apply_effort_ceiling(req);
+        let req: &InferRequest = ceiled.as_ref().unwrap_or(req);
         validate_min_residency(req)?;
+        // An image is part of the question but not of the cache key, and a
+        // stored answer about one image must never answer another: a request
+        // with images neither reads nor fills the response cache.
+        let cache_response = cache_response && req.image_parts.is_empty();
 
         // Check cache first
         if cache_response {
-            if let Some(mut cached) = self.cache.get(req) {
+            if let Some(mut cached) = self
+                .cache
+                .get(req)
+                .filter(|cached| self.entitled_hit(req, &cached.model_used, &cached.provider_used))
+            {
                 info!(request_id = %req.request_id, "cache hit");
                 // The stored copy may carry the timing of the call that filled
                 // the cache; this call reached no provider at all.
@@ -1219,7 +1484,11 @@ impl FallbackChain {
             }
         }
 
-        if req.min_privacy_tier > PrivacyTier::Unspecified && total_attempts == 0 {
+        if let Some(refusal) = Self::entitlement_exhaustion(req, &throttle, total_attempts, pinned) {
+            Err(refusal)
+        } else if throttle.vision_skipped && total_attempts == 0 {
+            Err(vision_unsupported_error())
+        } else if req.min_privacy_tier > PrivacyTier::Unspecified && total_attempts == 0 {
             Err(tier_unavailable_error(req.min_privacy_tier))
         } else if req.zdr && total_attempts == 0 {
             Err(ProviderError::ZdrUnavailable(
@@ -1315,6 +1584,29 @@ impl FallbackChain {
                 continue;
             }
             let call_req = self.request_for(req, model, name);
+            // The caller's entitlement, judged on the model this provider would
+            // really serve (its own default for an unspecified one).
+            if let Some(reason) = req
+                .access
+                .as_ref()
+                .and_then(|access| access.refuses(&call_req.model, name))
+            {
+                throttle.entitlement_denial.get_or_insert(reason);
+                continue;
+            }
+            // Vision gate: a request that carries images is never sent to a
+            // provider or model that cannot read them, and never answered from
+            // its text alone. Skipped before any network call, like the gates
+            // above; the exhaustion below names it.
+            if !req.image_parts.is_empty() && !model_accepts_images(&caps, &call_req.model) {
+                warn!(
+                    provider = %name,
+                    request_id = %req.request_id,
+                    "provider skipped: the request carries images and this model does not accept them"
+                );
+                throttle.vision_skipped = true;
+                continue;
+            }
             for attempt in 1..=self.max_retries {
                 *total_attempts += 1;
                 let span = tracing::info_span!(
@@ -1385,6 +1677,15 @@ impl FallbackChain {
                         );
                         throttle.record_too_long(&detail);
                         break; // Deterministic for this provider — retrying cannot help.
+                    }
+                    Err(ProviderError::RequestRejected { detail }) => {
+                        warn!(
+                            provider = %name,
+                            attempt = attempt,
+                            "provider rejected the request as malformed; walking on"
+                        );
+                        throttle.record_rejected(&detail);
+                        break; // Deterministic for this provider — the same request is refused again.
                     }
                     Err(ProviderError::SubscriptionRefused {
                         reason,
@@ -1481,6 +1782,13 @@ impl FallbackChain {
         }
         let mut rewritten = req.clone();
         effective.clone_into(&mut rewritten.model);
+        // The effort ceiling ran on the unresolved id (an unpinned "Verevon Auto"
+        // request, or the pinned model before a ladder rung replaced it), where a
+        // Claude 5.5 default is invisible. Bound the resolved model too: the clamp
+        // only lowers and is idempotent, so an already bounded request is unchanged.
+        if let Some(ceiled) = Self::apply_effort_ceiling(&rewritten) {
+            rewritten = ceiled;
+        }
         std::borrow::Cow::Owned(rewritten)
     }
 
@@ -1528,12 +1836,19 @@ impl FallbackChain {
         req: &InferRequest,
     ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
         let mut clock = CallClock::start();
+        // A retired Claude id is answered by its successor, as on the unary path.
+        let current = super::anthropic::with_current_model(req);
+        let req: &InferRequest = current.as_ref().unwrap_or(req);
+        // Entitlement of a pinned model first, as on the unary path.
+        let pinned = self.pinned_model(req)?;
         // Verevon intent layer — same resolution as the unary path.
         let intent_req = self.resolve_intent(req).await;
-        let ladder = intent_req
-            .as_ref()
-            .map_or_else(Vec::new, |resolved| self.tool_ladder(&resolved.model));
+        let ladder = intent_req.as_ref().map_or_else(Vec::new, |resolved| {
+            self.tool_ladder(&resolved.model, resolved.access.as_deref(), &resolved.provider_hint)
+        });
         let req: &InferRequest = intent_req.as_ref().unwrap_or(req);
+        let ceiled = Self::apply_effort_ceiling(req);
+        let req: &InferRequest = ceiled.as_ref().unwrap_or(req);
         validate_min_residency(req)?;
 
         let mut total_attempts: u32 = 0;
@@ -1583,7 +1898,11 @@ impl FallbackChain {
             }
         }
 
-        if req.min_privacy_tier > PrivacyTier::Unspecified && total_attempts == 0 {
+        if let Some(refusal) = Self::entitlement_exhaustion(req, &throttle, total_attempts, pinned) {
+            Err(refusal)
+        } else if throttle.vision_skipped && total_attempts == 0 {
+            Err(vision_unsupported_error())
+        } else if req.min_privacy_tier > PrivacyTier::Unspecified && total_attempts == 0 {
             Err(tier_unavailable_error(req.min_privacy_tier))
         } else if req.zdr && total_attempts == 0 {
             Err(ProviderError::ZdrUnavailable(
@@ -1649,6 +1968,27 @@ impl FallbackChain {
                 continue;
             }
             let call_req = self.request_for(req, model, name);
+            if let Some(reason) = req
+                .access
+                .as_ref()
+                .and_then(|access| access.refuses(&call_req.model, name))
+            {
+                throttle.entitlement_denial.get_or_insert(reason);
+                continue;
+            }
+            // Vision gate: a request that carries images is never sent to a
+            // provider or model that cannot read them, and never answered from
+            // its text alone. Skipped before any network call, like the gates
+            // above; the exhaustion below names it.
+            if !req.image_parts.is_empty() && !model_accepts_images(&caps, &call_req.model) {
+                warn!(
+                    provider = %name,
+                    request_id = %req.request_id,
+                    "provider skipped: the request carries images and this model does not accept them"
+                );
+                throttle.vision_skipped = true;
+                continue;
+            }
             for attempt in 1..=self.max_retries {
                 *total_attempts += 1;
                 let span = tracing::info_span!(
@@ -1713,6 +2053,15 @@ impl FallbackChain {
                         );
                         throttle.record_too_long(&detail);
                         break; // Deterministic for this provider — retrying cannot help.
+                    }
+                    Err(ProviderError::RequestRejected { detail }) => {
+                        warn!(
+                            provider = %name,
+                            attempt = attempt,
+                            "provider rejected the request as malformed; walking on"
+                        );
+                        throttle.record_rejected(&detail);
+                        break; // Deterministic for this provider — the same request is refused again.
                     }
                     Err(ProviderError::SubscriptionRefused {
                         reason,
@@ -1862,6 +2211,15 @@ impl FallbackChain {
                         throttle.record_too_long(&detail);
                         break; // Deterministic for this provider — retrying cannot help.
                     }
+                    Err(ProviderError::RequestRejected { detail }) => {
+                        warn!(
+                            provider = %name,
+                            attempt = attempt,
+                            "provider rejected the request as malformed; walking on"
+                        );
+                        throttle.record_rejected(&detail);
+                        break; // Deterministic for this provider — the same request is refused again.
+                    }
                     Err(e) => {
                         warn!(
                             provider = %name,
@@ -1912,7 +2270,7 @@ mod resolution_tests {
         for m in ["", "   ", "default", "AUTO", "Verevon", "verevon-auto"] {
             assert!(is_unspecified_model(m), "{m:?} should be unspecified");
         }
-        for m in ["claude-sonnet-4-20250514", "gpt-4o-mini"] {
+        for m in ["claude-sonnet-5-5", "gpt-4o-mini"] {
             assert!(!is_unspecified_model(m), "{m:?} should be specified");
         }
     }
@@ -2218,6 +2576,9 @@ mod resolution_tests {
         /// correctly refuse every `claude-*` model. `Default` gives
         /// `OpenAiCompatible`, so Claude-serving doubles set this explicitly.
         family: ModelFamily,
+        /// Whether this double reads images. `Default` gives `false`, so the
+        /// pre-existing tests never meet the vision gate.
+        vision: bool,
     }
 
     impl Default for RecordingProvider {
@@ -2227,6 +2588,7 @@ mod resolution_tests {
                 zdr_supported: false,
                 residency: Residency::Eu,
                 family: ModelFamily::OpenAiCompatible,
+                vision: false,
             }
         }
     }
@@ -2235,6 +2597,7 @@ mod resolution_tests {
     impl ProviderRouter for RecordingProvider {
         fn capabilities(&self) -> crate::provider::ProviderCapabilities {
             crate::provider::ProviderCapabilities {
+                supports_vision: self.vision,
                 supports_zdr: self.zdr_supported,
                 model_family: self.family,
                 residency: self.residency,
@@ -3028,14 +3391,67 @@ mod resolution_tests {
         let req = InferRequest {
             thinking_budget_tokens: 0,
             request_id: "r2".to_owned(),
-            model: "claude-opus-4-20250514".to_owned(),
+            model: "claude-opus-5-5".to_owned(),
             ..Default::default()
         };
         chain.infer(&req).await.unwrap();
         assert_eq!(
             seen.lock().unwrap().as_deref(),
-            Some("claude-opus-4-20250514")
+            Some("claude-opus-5-5")
         );
+    }
+
+    #[tokio::test]
+    async fn a_retired_pinned_model_is_answered_by_its_successor() {
+        let seen = Arc::new(Mutex::new(None));
+        let chain = chain_with(seen.clone());
+        let req = InferRequest {
+            thinking_budget_tokens: 0,
+            request_id: "r2-retired".to_owned(),
+            model: "claude-opus-4-20250514".to_owned(),
+            ..Default::default()
+        };
+        let response = chain.infer(&req).await.unwrap();
+        assert_eq!(seen.lock().unwrap().as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(response.model_used, "claude-opus-5-5");
+    }
+
+    #[tokio::test]
+    async fn a_retired_model_and_its_successor_share_one_response_cache_entry() {
+        let seen = Arc::new(Mutex::new(None));
+        let chain = chain_with(seen.clone());
+        let successor = InferRequest {
+            thinking_budget_tokens: 0,
+            request_id: "cache-successor".to_owned(),
+            model: "claude-sonnet-5-5".to_owned(),
+            ..Default::default()
+        };
+        chain.infer(&successor).await.unwrap();
+        // A call that reached the provider would record its model here, so the
+        // sentinel shows that the retired-id request was answered from the cache.
+        *seen.lock().unwrap() = Some("sentinel".to_owned());
+        let retired = InferRequest {
+            request_id: "cache-retired".to_owned(),
+            model: "claude-sonnet-4-20250514".to_owned(),
+            ..successor.clone()
+        };
+        let response = chain.infer(&retired).await.unwrap();
+        assert_eq!(response.request_id, "cache-successor");
+        assert_eq!(seen.lock().unwrap().as_deref(), Some("sentinel"));
+    }
+
+    #[tokio::test]
+    async fn the_streaming_path_answers_a_retired_model_with_its_successor() {
+        let seen = Arc::new(Mutex::new(None));
+        let chain = chain_with(seen.clone());
+        let req = InferRequest {
+            thinking_budget_tokens: 0,
+            request_id: "stream-retired".to_owned(),
+            model: "claude-3-5-haiku-20241022".to_owned(),
+            ..Default::default()
+        };
+        chain.infer_stream(&req).await.unwrap();
+        assert_eq!(seen.lock().unwrap().as_deref(), Some("claude-haiku-5-5"));
     }
 
     #[tokio::test]
@@ -3713,6 +4129,221 @@ mod resolution_tests {
         }
     }
 
+    /// Refuses every call as a malformed request, counting the calls. This is the shape
+    /// the Anthropic adapter gives a 400 that is not an overflow.
+    struct MalformedRequestProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl MalformedRequestProvider {
+        fn refusal(&self) -> ProviderError {
+            ProviderError::RequestRejected {
+                detail: "400 Bad Request: tools.0.custom.name: String should match pattern"
+                    .to_owned(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderRouter for MalformedRequestProvider {
+        fn capabilities(&self) -> crate::provider::ProviderCapabilities {
+            crate::provider::ProviderCapabilities::default()
+        }
+
+        async fn infer(&self, _req: &InferRequest) -> Result<InferResponse, ProviderError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(self.refusal())
+        }
+
+        async fn infer_stream(
+            &self,
+            _req: &InferRequest,
+        ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(self.refusal())
+        }
+
+        async fn create_embedding(
+            &self,
+            _req: &EmbedRequest,
+        ) -> Result<EmbedResponse, ProviderError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(self.refusal())
+        }
+    }
+
+    /// Fails every call with a server error, counting the calls.
+    struct ServerErrorProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderRouter for ServerErrorProvider {
+        fn capabilities(&self) -> crate::provider::ProviderCapabilities {
+            crate::provider::ProviderCapabilities::default()
+        }
+
+        async fn infer(&self, _req: &InferRequest) -> Result<InferResponse, ProviderError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(ProviderError::Http("500 Internal Server Error: upstream".to_owned()))
+        }
+
+        async fn infer_stream(
+            &self,
+            _req: &InferRequest,
+        ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(ProviderError::Http("500 Internal Server Error: upstream".to_owned()))
+        }
+    }
+
+    /// A request its provider refuses as malformed is sent to that provider once on each
+    /// route, not once per retry, because the same request is refused again. The chain
+    /// then walks on to the next provider, which serves it.
+    #[tokio::test]
+    async fn a_malformed_request_is_sent_once_per_provider_and_the_chain_walks_on() {
+        use std::sync::atomic::Ordering;
+        let refused = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = Arc::new(Mutex::new(None));
+        let chain = FallbackChain::new_with_providers(
+            vec![
+                (
+                    "azure-openai".into(),
+                    Arc::new(MalformedRequestProvider { calls: refused.clone() }) as BoxedProvider,
+                ),
+                (
+                    "openai".into(),
+                    Arc::new(RecordingProvider { seen_model: seen.clone(), ..Default::default() })
+                        as BoxedProvider,
+                ),
+            ],
+            3,
+        );
+        let request = InferRequest {
+            request_id: "malformed".into(),
+            model: "gpt-4o-mini".into(),
+            ..Default::default()
+        };
+
+        let response = chain.infer(&request).await.expect("the second provider serves it");
+        assert_eq!(response.provider_used, "openai");
+        assert_eq!(refused.load(Ordering::SeqCst), 1, "one unary attempt, not three");
+
+        chain.infer_stream(&request).await.expect("the second provider streams it");
+        assert_eq!(refused.load(Ordering::SeqCst), 2, "one stream attempt, not three");
+        assert!(seen.lock().unwrap().is_some());
+    }
+
+    /// A walk that only ever saw a refusal reports the refusal, not generic exhaustion,
+    /// and still makes one attempt.
+    #[tokio::test]
+    async fn a_walk_that_only_saw_a_refusal_reports_the_refusal() {
+        use std::sync::atomic::Ordering;
+        let refused = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let chain = FallbackChain::new_with_providers(
+            vec![(
+                "azure-openai".into(),
+                Arc::new(MalformedRequestProvider { calls: refused.clone() }) as BoxedProvider,
+            )],
+            3,
+        );
+        let request = InferRequest {
+            request_id: "refused-only".into(),
+            model: "gpt-4o-mini".into(),
+            ..Default::default()
+        };
+
+        match chain.infer(&request).await {
+            Err(ProviderError::RequestRejected { detail }) => {
+                assert!(detail.contains("tools.0.custom.name"), "{detail}");
+            }
+            other => panic!("expected the refusal back, got {other:?}"),
+        }
+        assert_eq!(refused.load(Ordering::SeqCst), 1);
+    }
+
+    /// The embedding walk types a refusal the same way: one attempt, then the chain walks on.
+    #[tokio::test]
+    async fn a_refused_embedding_input_is_sent_once_per_provider() {
+        use std::sync::atomic::Ordering;
+        let refused = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let chain = FallbackChain::new_with_providers(
+            vec![(
+                "azure-openai".to_owned(),
+                Arc::new(MalformedRequestProvider { calls: refused.clone() }) as BoxedProvider,
+            )],
+            3,
+        );
+        let request = EmbedRequest {
+            request_id: "embed-refused".to_owned(),
+            provider_hint: "azure-openai".to_owned(),
+            text: "hello".to_owned(),
+            model: "text-embedding-3-large".to_owned(),
+            region: "swedencentral".to_owned(),
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            chain.create_embedding(&request).await,
+            Err(ProviderError::RequestRejected { .. })
+        ));
+        assert_eq!(refused.load(Ordering::SeqCst), 1);
+    }
+
+    /// A failure a retry can clear keeps its retries: a 5xx is three attempts on the same
+    /// provider before the chain gives up on it.
+    #[tokio::test]
+    async fn a_server_error_is_still_retried_on_the_same_provider() {
+        use std::sync::atomic::Ordering;
+        let failing = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let chain = FallbackChain::new_with_providers(
+            vec![(
+                "azure-openai".into(),
+                Arc::new(ServerErrorProvider { calls: failing.clone() }) as BoxedProvider,
+            )],
+            3,
+        );
+        let request = InferRequest {
+            request_id: "server-error".into(),
+            model: "gpt-4o-mini".into(),
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            chain.infer(&request).await,
+            Err(ProviderError::AllExhausted { attempts: 3 })
+        ));
+        assert_eq!(failing.load(Ordering::SeqCst), 3);
+    }
+
+    /// A refusal is reported only when nothing more specific happened. Throttling and an
+    /// overflow outrank it, and the first refusal is the one named.
+    #[test]
+    fn a_refusal_is_reported_only_when_nothing_more_specific_happened() {
+        let mut throttle = ThrottleState::default();
+        throttle.record_rejected("400: tools.0.custom.name");
+        assert!(!throttle.throttled(), "a refusal is never waited out");
+        assert!(matches!(
+            throttle.exhausted_error(2),
+            ProviderError::RequestRejected { detail } if detail == "400: tools.0.custom.name"
+        ));
+        throttle.record_too_long("413: too long");
+        assert!(matches!(throttle.exhausted_error(2), ProviderError::TooLong { .. }));
+        throttle.record(2_000);
+        assert!(matches!(
+            throttle.exhausted_error(2),
+            ProviderError::RateLimited { retry_after_ms: 2_000 }
+        ));
+
+        let mut first = ThrottleState::default();
+        first.record_rejected("first");
+        first.record_rejected("second");
+        assert!(matches!(
+            first.exhausted_error(1),
+            ProviderError::RequestRejected { detail } if detail == "first"
+        ));
+    }
+
     #[test]
     fn an_unthrottled_chain_still_reports_exhaustion() {
         // Genuine breakage must not be mislabeled as throttling — nothing to wait
@@ -4237,13 +4868,304 @@ mod resolution_tests {
         assert_eq!(asked.lock().unwrap().as_slice(), ["claude-sonnet-4-6"]);
     }
 
+    /// Records the reasoning effort and the legacy budget each call reached it
+    /// with, so the effort-ceiling tests can see what the policy let through.
+    struct EffortRecordingProvider {
+        seen: Arc<Mutex<Vec<(Option<effort::Level>, i32)>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderRouter for EffortRecordingProvider {
+        fn capabilities(&self) -> crate::provider::ProviderCapabilities {
+            crate::provider::ProviderCapabilities {
+                model_family: ModelFamily::OpenAiCompatible,
+                residency: Residency::Eu,
+                ..crate::provider::ProviderCapabilities::default()
+            }
+        }
+
+        async fn infer(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((req.reasoning_effort, req.thinking_budget_tokens));
+            Ok(InferResponse {
+                request_id: req.request_id.clone(),
+                content: "ok".to_owned(),
+                model_used: req.model.clone(),
+                stop_reason: "stop".to_owned(),
+                ..InferResponse::default()
+            })
+        }
+
+        async fn infer_stream(
+            &self,
+            req: &InferRequest,
+        ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((req.reasoning_effort, req.thinking_budget_tokens));
+            let (_tx, rx) = mpsc::channel(1);
+            Ok(rx)
+        }
+    }
+
+    /// An org policy as org-core answers it, whose only limit is the `max_effort`
+    /// ceiling. `enforced` picks enforce over shadow.
+    fn effort_ceiling_access(enforced: bool, max_effort: &str) -> Arc<RequestAccess> {
+        let body = serde_json::json!({
+            "state": "org",
+            "revision": 1,
+            "policy": {"allow_mode": "all", "allow": [], "deny": [], "max_effort": max_effort},
+        });
+        let mode = if enforced {
+            mp_contracts::model_entitlement::Mode::Enforce
+        } else {
+            mp_contracts::model_entitlement::Mode::Shadow
+        };
+        let resolved = mp_contracts::model_entitlement::ResolvedAccess::from_body(&body)
+            .expect("a readable policy body");
+        Arc::new(RequestAccess::new(Arc::new(resolved), mode, "org-1"))
+    }
+
+    /// A request for a model every policy here allows, carrying the given effort
+    /// level, legacy budget and access.
+    fn effort_probe(
+        id: &str,
+        reasoning_effort: Option<effort::Level>,
+        thinking_budget_tokens: i32,
+        access: Option<Arc<RequestAccess>>,
+    ) -> InferRequest {
+        InferRequest {
+            request_id: id.to_owned(),
+            model: "gpt-5-mini".to_owned(),
+            reasoning_effort,
+            thinking_budget_tokens,
+            access,
+            ..Default::default()
+        }
+    }
+
+    /// What the provider was handed by one unary call through a fresh chain.
+    async fn effort_reached_unary(request: &InferRequest) -> Vec<(Option<effort::Level>, i32)> {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider: BoxedProvider = Arc::new(EffortRecordingProvider { seen: seen.clone() });
+        let chain =
+            FallbackChain::new_with_providers(vec![("azure-openai".to_owned(), provider)], 1);
+        chain.infer(request).await.unwrap();
+        let reached = seen.lock().unwrap().clone();
+        reached
+    }
+
+    /// The same request through the streaming path.
+    async fn effort_reached_streamed(request: &InferRequest) -> Vec<(Option<effort::Level>, i32)> {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider: BoxedProvider = Arc::new(EffortRecordingProvider { seen: seen.clone() });
+        let chain =
+            FallbackChain::new_with_providers(vec![("azure-openai".to_owned(), provider)], 1);
+        let _rx = chain.infer_stream(request).await.unwrap();
+        let reached = seen.lock().unwrap().clone();
+        reached
+    }
+
+    #[tokio::test]
+    async fn an_enforced_effort_ceiling_lowers_the_level_on_the_unary_path() {
+        let request = effort_probe(
+            "effort-unary-level",
+            Some(effort::Level::High),
+            0,
+            Some(effort_ceiling_access(true, "low")),
+        );
+        assert_eq!(
+            effort_reached_unary(&request).await,
+            [(Some(effort::Level::Low), 0)]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_enforced_effort_ceiling_caps_the_legacy_budget_when_no_level_is_set() {
+        let request = effort_probe(
+            "effort-unary-budget",
+            None,
+            4096,
+            Some(effort_ceiling_access(true, "low")),
+        );
+        assert_eq!(effort_reached_unary(&request).await, [(None, 1024)]);
+    }
+
+    #[tokio::test]
+    async fn an_enforced_effort_ceiling_applies_on_the_streaming_path_too() {
+        let level = effort_probe(
+            "effort-stream-level",
+            Some(effort::Level::High),
+            0,
+            Some(effort_ceiling_access(true, "low")),
+        );
+        assert_eq!(
+            effort_reached_streamed(&level).await,
+            [(Some(effort::Level::Low), 0)]
+        );
+        let budget = effort_probe(
+            "effort-stream-budget",
+            None,
+            4096,
+            Some(effort_ceiling_access(true, "low")),
+        );
+        assert_eq!(effort_reached_streamed(&budget).await, [(None, 1024)]);
+    }
+
+    #[tokio::test]
+    async fn a_shadowed_or_absent_policy_leaves_the_effort_exactly_as_asked() {
+        let shadow = Some(effort_ceiling_access(false, "low"));
+        let level = effort_probe(
+            "effort-shadow-level",
+            Some(effort::Level::High),
+            0,
+            shadow.clone(),
+        );
+        assert_eq!(
+            effort_reached_unary(&level).await,
+            [(Some(effort::Level::High), 0)]
+        );
+        let budget = effort_probe("effort-shadow-budget", None, 4096, shadow);
+        assert_eq!(effort_reached_unary(&budget).await, [(None, 4096)]);
+        // A service principal carries no access, so no policy ever clamps it.
+        let service = effort_probe(
+            "effort-service-principal",
+            Some(effort::Level::High),
+            0,
+            None,
+        );
+        assert_eq!(
+            effort_reached_unary(&service).await,
+            [(Some(effort::Level::High), 0)]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_effort_ceiling_never_raises_and_ignores_an_empty_or_unknown_name() {
+        for (index, ceiling) in ["", "ultra"].into_iter().enumerate() {
+            let request = effort_probe(
+                &format!("effort-ceiling-{index}"),
+                Some(effort::Level::High),
+                4096,
+                Some(effort_ceiling_access(true, ceiling)),
+            );
+            assert_eq!(
+                effort_reached_unary(&request).await,
+                [(Some(effort::Level::High), 4096)],
+                "ceiling {ceiling:?} must not lower the request"
+            );
+        }
+        // A ceiling above the request leaves the request where it was.
+        let below = effort_probe(
+            "effort-below-ceiling",
+            Some(effort::Level::Low),
+            0,
+            Some(effort_ceiling_access(true, "max")),
+        );
+        assert_eq!(
+            effort_reached_unary(&below).await,
+            [(Some(effort::Level::Low), 0)]
+        );
+    }
+
+    #[test]
+    fn an_unpinned_anthropic_request_is_bounded_by_the_ceiling_after_its_model_resolves() {
+        // An unpinned request names no model, so apply_effort_ceiling sees no Claude
+        // 5.5 default; request_for then rewrites it to the Anthropic default. The
+        // ceiling must bound the resolved model's default as well, or an org capped
+        // at low would run the common chat path at the model's default.
+        let chain = chain_with(Arc::new(Mutex::new(None)));
+        let unpinned = InferRequest {
+            request_id: "effort-unpinned".to_owned(),
+            model: String::new(),
+            access: Some(effort_ceiling_access(true, "low")),
+            ..Default::default()
+        };
+        let sent = chain.request_for(&unpinned, &unpinned.model, "anthropic");
+        assert_eq!(sent.model, "claude-sonnet-5-5");
+        assert_eq!(sent.reasoning_effort, Some(effort::Level::Low));
+
+        // No ceiling, or a shadow one, leaves the level to the model default.
+        let free = InferRequest { access: None, ..unpinned.clone() };
+        assert_eq!(chain.request_for(&free, &free.model, "anthropic").reasoning_effort, None);
+        let shadow = InferRequest {
+            access: Some(effort_ceiling_access(false, "low")),
+            ..unpinned.clone()
+        };
+        assert_eq!(chain.request_for(&shadow, &shadow.model, "anthropic").reasoning_effort, None);
+    }
+
+    #[test]
+    fn an_effort_ceiling_bounds_the_claude_5_5_default_of_a_request_naming_no_level() {
+        // A Claude 5.5 request with neither a level nor a budget runs at its model's
+        // default (high on Sonnet 5.5), which the adapter sends explicitly. The
+        // ceiling bounds that level too, so a thread saved on a retired id cannot run
+        // above the org's cap just because it names no effort.
+        let sonnet = InferRequest {
+            request_id: "effort-5-5-default".to_owned(),
+            model: "claude-sonnet-5-5".to_owned(),
+            access: Some(effort_ceiling_access(true, "low")),
+            ..Default::default()
+        };
+        let bounded = FallbackChain::apply_effort_ceiling(&sonnet)
+            .expect("an enforced low ceiling lowers the high default of claude-sonnet-5-5");
+        assert_eq!(bounded.reasoning_effort, Some(effort::Level::Low));
+        assert_eq!(bounded.thinking_budget_tokens, 0);
+
+        // Without an enforced ceiling the request is passed through unchanged.
+        let unceiled = InferRequest {
+            access: None,
+            ..sonnet.clone()
+        };
+        assert!(FallbackChain::apply_effort_ceiling(&unceiled).is_none());
+        let shadow = InferRequest {
+            access: Some(effort_ceiling_access(false, "low")),
+            ..sonnet.clone()
+        };
+        assert!(FallbackChain::apply_effort_ceiling(&shadow).is_none());
+
+        // A ceiling that leaves the default alone changes nothing, and so does a
+        // model with no 5.5 default.
+        let at_default = InferRequest {
+            access: Some(effort_ceiling_access(true, "high")),
+            ..sonnet.clone()
+        };
+        assert!(FallbackChain::apply_effort_ceiling(&at_default).is_none());
+        let earlier = InferRequest {
+            model: "claude-sonnet-4-6".to_owned(),
+            ..sonnet.clone()
+        };
+        assert!(FallbackChain::apply_effort_ceiling(&earlier).is_none());
+
+        // Opus 5.5 defaults to medium, and a negative budget asks for no thinking
+        // just as zero does, so the ceiling bounds the default there too.
+        let opus = InferRequest {
+            model: "claude-opus-5-5".to_owned(),
+            ..sonnet.clone()
+        };
+        let opus_bounded =
+            FallbackChain::apply_effort_ceiling(&opus).expect("medium is above a low ceiling");
+        assert_eq!(opus_bounded.reasoning_effort, Some(effort::Level::Low));
+        let negative = InferRequest {
+            thinking_budget_tokens: -1,
+            ..sonnet
+        };
+        let negative_bounded = FallbackChain::apply_effort_ceiling(&negative)
+            .expect("a negative budget leaves the default to the ceiling");
+        assert_eq!(negative_bounded.reasoning_effort, Some(effort::Level::Low));
+        assert_eq!(negative_bounded.thinking_budget_tokens, -1);
+    }
+
     #[test]
     fn the_ladder_is_pruned_to_deployments_that_exist_and_stays_bounded() {
         let asked = Arc::new(Mutex::new(Vec::new()));
         let mut chain = ladder_chain(&asked, vec![], vec![]);
 
         // Unknown catalogs prune nothing, but the step bound still holds.
-        let unpruned = chain.tool_ladder("claude-sonnet-4-6");
+        let unpruned = chain.tool_ladder("claude-sonnet-4-6", None, "");
         assert!(unpruned.len() <= MAX_TOOL_LADDER_STEPS);
         assert!(!unpruned.iter().any(|m| m == "claude-sonnet-4-6"));
 
@@ -4257,7 +5179,7 @@ mod resolution_tests {
             openai: Some(vec!["gpt-4o-mini".to_owned()]),
         };
         assert_eq!(
-            chain.tool_ladder("claude-sonnet-4-6"),
+            chain.tool_ladder("claude-sonnet-4-6", None, ""),
             ["claude-haiku-4-5", "gpt-4o-mini"]
         );
     }
@@ -4309,5 +5231,89 @@ mod resolution_tests {
         let error = chain.create_embedding(&req).await.unwrap_err();
         assert!(matches!(error, ProviderError::ZdrUnavailable(_)));
         assert!(!*reached.lock().unwrap());
+    }
+
+    fn image_request(model: &str) -> InferRequest {
+        InferRequest {
+            request_id: "img-1".to_owned(),
+            model: model.to_owned(),
+            messages: vec![crate::provider::ChatMessage {
+                compaction_summary: String::new(),
+                role: "user".to_owned(),
+                content: "what is this".to_owned(),
+                name: String::new(),
+            }],
+            image_parts: vec![crate::provider::ImagePart {
+                message_index: 0,
+                data: Arc::from(&b"png"[..]),
+                mime_type: "image/png".to_owned(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn image_request_skips_non_vision_provider() {
+        let blind_seen = Arc::new(Mutex::new(None));
+        let sighted_seen = Arc::new(Mutex::new(None));
+        let blind: BoxedProvider =
+            Arc::new(RecordingProvider { seen_model: blind_seen.clone(), ..Default::default() });
+        let sighted: BoxedProvider = Arc::new(RecordingProvider {
+            seen_model: sighted_seen.clone(),
+            vision: true,
+            ..Default::default()
+        });
+        let chain = FallbackChain::new_with_providers(
+            vec![("blind".to_owned(), blind), ("sighted".to_owned(), sighted)],
+            1,
+        );
+
+        let response = chain.infer(&image_request("gpt-4o")).await.unwrap();
+        assert_eq!(response.model_used, "gpt-4o");
+        assert!(blind_seen.lock().unwrap().is_none(), "the provider that cannot read images is never called");
+        assert_eq!(sighted_seen.lock().unwrap().as_deref(), Some("gpt-4o"));
+
+        *sighted_seen.lock().unwrap() = None;
+        chain.infer_stream(&image_request("gpt-4o")).await.unwrap();
+        assert!(blind_seen.lock().unwrap().is_none());
+        assert_eq!(sighted_seen.lock().unwrap().as_deref(), Some("gpt-4o"));
+    }
+
+    #[tokio::test]
+    async fn image_request_with_no_vision_provider_fails_closed_typed() {
+        let seen = Arc::new(Mutex::new(None));
+        let blind: BoxedProvider =
+            Arc::new(RecordingProvider { seen_model: seen.clone(), ..Default::default() });
+        let denylisted: BoxedProvider = Arc::new(RecordingProvider {
+            seen_model: seen.clone(),
+            vision: true,
+            ..Default::default()
+        });
+        let chain = FallbackChain::new_with_providers(vec![("blind".to_owned(), blind)], 1);
+
+        let error = chain.infer(&image_request("gpt-4o")).await.unwrap_err();
+        assert!(matches!(error, ProviderError::VisionUnsupported(_)), "{error:?}");
+        let error = chain.infer_stream(&image_request("gpt-4o")).await.unwrap_err();
+        assert!(matches!(error, ProviderError::VisionUnsupported(_)), "{error:?}");
+
+        // A provider that reads images still refuses a model that does not.
+        let chain = FallbackChain::new_with_providers(vec![("sighted".to_owned(), denylisted)], 1);
+        let error = chain.infer(&image_request("deepseek-chat")).await.unwrap_err();
+        assert!(matches!(error, ProviderError::VisionUnsupported(_)), "{error:?}");
+
+        assert!(seen.lock().unwrap().is_none(), "no provider was called");
+    }
+
+    #[tokio::test]
+    async fn a_text_request_does_not_meet_the_vision_gate() {
+        let seen = Arc::new(Mutex::new(None));
+        let blind: BoxedProvider =
+            Arc::new(RecordingProvider { seen_model: seen.clone(), ..Default::default() });
+        let chain = FallbackChain::new_with_providers(vec![("blind".to_owned(), blind)], 1);
+        let mut text_only = image_request("gpt-4o");
+        text_only.image_parts.clear();
+
+        chain.infer(&text_only).await.unwrap();
+        assert_eq!(seen.lock().unwrap().as_deref(), Some("gpt-4o"));
     }
 }

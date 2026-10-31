@@ -1,6 +1,6 @@
 name: SSE taxonomy freshness
 
-# Fails when the gateway's ChatEvent surface, the SPA's stream client, and the
+# Fails when the gateway's chat-event surface, the SPA's stream client, and the
 # committed taxonomy doc stop agreeing.
 #
 # Two failure modes, both previously invisible:
@@ -9,6 +9,9 @@ name: SSE taxonomy freshness
 #   - the doc drifts behind the code, which is this repo's documented recurring
 #     problem (prose claiming a smaller SSE surface than the code emits).
 #
+# The gate reads every literal `.event("...")` writer in model-gateway's source and
+# the OrchestrationEvent oneof, so a change to any of those runs it too.
+#
 # Deliberately narrow. docs/endpoint-map.md is NOT regenerated here: its `v3`
 # relevance ratings and "do not wire yet" flags are human judgment, and a
 # generator would overwrite exactly the part that carries the value.
@@ -16,17 +19,21 @@ name: SSE taxonomy freshness
 on:
   push:
     paths:
-      - 'apps/Model Plane/rust/services/model-gateway/src/sse_events.rs'
+      - 'apps/Model Plane/rust/services/model-gateway/src/**/*.rs'
+      - 'apps/Model Plane/proto/model_plane/v1/orchestration.proto'
       - 'apps/Model Plane/docs/sse-event-taxonomy.md'
       - 'apps/Model Plane/scripts/gen-sse-event-taxonomy.py'
       - 'apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts'
+      - 'scripts/tests/test_sse_taxonomy.py'
       - '.github/workflows/sse-taxonomy.yml'
   pull_request:
     paths:
-      - 'apps/Model Plane/rust/services/model-gateway/src/sse_events.rs'
+      - 'apps/Model Plane/rust/services/model-gateway/src/**/*.rs'
+      - 'apps/Model Plane/proto/model_plane/v1/orchestration.proto'
       - 'apps/Model Plane/docs/sse-event-taxonomy.md'
       - 'apps/Model Plane/scripts/gen-sse-event-taxonomy.py'
       - 'apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts'
+      - 'scripts/tests/test_sse_taxonomy.py'
       - '.github/workflows/sse-taxonomy.yml'
 
 jobs:
@@ -44,19 +51,41 @@ jobs:
       - name: Verify the taxonomy matches source
         run: python3 "apps/Model Plane/scripts/gen-sse-event-taxonomy.py" --check
 
+      # The gate's own cases: an unknown SPA case and a renamed orchestration arm
+      # must fail it, and a comment inside an arm list must not.
+      - name: Unit-test the taxonomy gate
+        run: python3 -m unittest scripts/tests/test_sse_taxonomy.py
+
       # A checker that cannot fail is worse than none: it reads as coverage.
-      # Prove it detects drift on every run.
+      # Prove it detects drift on every run, once for each surface it reads.
       - name: Prove the check detects drift
         run: |
           set -uo pipefail
-          doc="apps/Model Plane/docs/sse-event-taxonomy.md"
-          cp "$doc" /tmp/taxonomy.orig
+          gate="apps/Model Plane/scripts/gen-sse-event-taxonomy.py"
+          # probe LABEL FILE SED_ARGS...: apply one edit, require the gate to fail,
+          # then put the file back whatever the outcome.
+          probe() {
+            local label="$1" file="$2" backup passed=0
+            shift 2
+            backup="$(mktemp)"
+            cp "$file" "$backup"
+            sed -i "$@" "$file"
+            if cmp -s "$file" "$backup"; then
+              cp "$backup" "$file"
+              echo "::error::the $label probe edited nothing; the probe itself is broken"
+              exit 1
+            fi
+            python3 "$gate" --check >/dev/null 2>&1 && passed=1
+            cp "$backup" "$file"
+            if [ "$passed" -eq 1 ]; then
+              echo "::error::the freshness check PASSED on a deliberately $label; it is not actually checking anything"
+              exit 1
+            fi
+            echo "$label detection confirmed"
+          }
           # Drop one documented event, exactly the stale-doc shape this guards.
-          grep -v '| `memory_recall` |' /tmp/taxonomy.orig > "$doc"
-          if python3 "apps/Model Plane/scripts/gen-sse-event-taxonomy.py" --check; then
-            echo "::error::the freshness check PASSED on a deliberately stale doc; it is not actually checking anything"
-            cp /tmp/taxonomy.orig "$doc"
-            exit 1
-          fi
-          cp /tmp/taxonomy.orig "$doc"
-          echo "drift detection confirmed"
+          probe "stale doc" "apps/Model Plane/docs/sse-event-taxonomy.md" '/| `memory_recall` |/d'
+          # Rename a native SPA case that a producer writes.
+          probe "renamed SPA case" "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts" "s/case 'connected':/case 'connected_probe':/"
+          # Rename the wire name of an orchestration arm.
+          probe "renamed orchestration arm" "apps/Model Plane/rust/services/model-gateway/src/sse.rs" 's/Event::RunResumed(_) => "run_resumed",/Event::RunResumed(_) => "run_resumed_probe",/'

@@ -17,7 +17,7 @@
 //! under the narrowly-scoped `retrieval-engine-gdpr` identity — NEVER this
 //! service's own Data-Plane-local NATS connection (`DPV2_NATS_URL` /
 //! `SHARED_NATS_URL` / `NATS_URL` / `NATS_LOCAL_URL` in `main.rs`): that
-//! broker does not host `AQENCIA_CONTROLPLANE`, and `SHARED_NATS_URL` is
+//! broker does not host `CONTROLPLANE`, and `SHARED_NATS_URL` is
 //! already claimed there for this service's own plane-local connection
 //! fallback chain — reusing it (or its near-identical sibling name
 //! `NATS_SHARED_URL`, which sibling services use for their own dedicated
@@ -52,7 +52,7 @@ use tracing::{error, info, warn};
 
 use super::{parse_erasure_event, purge_organization_data};
 
-pub const STREAM_NAME: &str = "AQENCIA_CONTROLPLANE";
+pub const STREAM_NAME: &str = "CONTROLPLANE";
 pub const SUBJECT: &str = "verevon.gdpr.erasure.requested";
 pub const DURABLE_NAME: &str = "retrieval-engine-gdpr-erasure-v1";
 

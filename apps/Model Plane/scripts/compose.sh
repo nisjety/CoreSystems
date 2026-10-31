@@ -34,6 +34,8 @@ if [[ "$artifact_mode" == "1" ]]; then
     die "artifact-contained Compose requires MODEL_PLANE_PRODUCTION=1"
   [[ "${MODEL_PLANE_BRIDGES:-0}" != "1" ]] ||
     die "artifact-contained Compose does not permit optional bridge overlays"
+  [[ "${MODEL_PLANE_REPLICAS:-1}" == "1" ]] ||
+    die "artifact-contained Compose does not permit the two-replica overlay"
   [[ -z "${MODEL_PLANE_RELEASE_LOCK:-}" ]] ||
     die "artifact-contained Compose selects its own immutable image lock"
   [[ -n "${MODEL_PLANE_RUNTIME_ENV_FILE:-}" ]] ||
@@ -122,6 +124,22 @@ fi
 if [[ "${MODEL_PLANE_BRIDGES:-0}" == "1" ]]; then
   compose_files+=(-f "$ROOT_DIR/deploy/docker-compose.bridges.yml")
 fi
+
+# MODEL_PLANE_REPLICAS is the number of model-gateway replicas: 1 (the default)
+# changes nothing, 2 adds model-gateway-b on host ports 28080/29090 so run control
+# can be proven across replicas. The overlay builds its own image, so it is a
+# development and proof profile; a release lock replaces every image with an
+# artifact-contained one and would not cover it.
+replicas="${MODEL_PLANE_REPLICAS:-1}"
+case "$replicas" in
+  1) ;;
+  2)
+    [[ -z "${MODEL_PLANE_RELEASE_LOCK:-}" ]] ||
+      die "MODEL_PLANE_REPLICAS=2 is a development profile; it cannot be combined with a release lock"
+    compose_files+=(-f "$ROOT_DIR/deploy/docker-compose.replicas.yml")
+    ;;
+  *) die "MODEL_PLANE_REPLICAS must be 1 or 2, got '$replicas'" ;;
+esac
 
 env_files=()
 # Control Plane owns the org-core service credential model-gateway presents to

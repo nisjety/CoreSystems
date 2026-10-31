@@ -1,0 +1,260 @@
+==> WS04-S9 replica run-control proof, 2026-10-27T15:42:26Z
+    A=http://127.0.0.1:8080 (model-plane-model-gateway-1)  B=http://127.0.0.1:28080 (model-plane-model-gateway-b-1)  nats=model-plane-nats-1  evidence=/c/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/../../docs/compliance/evidence/live-proof-ws04-replica-run-control-2026-10-27.txt
+    provider=anthropic model=claude-sonnet-5-5
+
+== preflight: switches as the containers were started, and readiness
+    model-plane-model-gateway-1 MODEL_GATEWAY_RUN_CONTROL_BUS=true
+    ok: model-plane-model-gateway-1 MODEL_GATEWAY_RUN_CONTROL_BUS is on
+    model-plane-model-gateway-1 MODEL_GATEWAY_DURABLE_PLAN_GRANT=true
+    ok: model-plane-model-gateway-1 MODEL_GATEWAY_DURABLE_PLAN_GRANT is on
+    model-plane-model-gateway-1 MODEL_GATEWAY_SHARED_TURN_RECORD=true
+    ok: model-plane-model-gateway-1 MODEL_GATEWAY_SHARED_TURN_RECORD is on
+    model-plane-model-gateway-1 MODEL_GATEWAY_SEND_RECEIPTS=true
+    ok: model-plane-model-gateway-1 MODEL_GATEWAY_SEND_RECEIPTS is on
+    model-plane-model-gateway-1 MODEL_GATEWAY_SHARED_IDEMPOTENCY=false (not part of this proof)
+    model-plane-model-gateway-b-1 MODEL_GATEWAY_RUN_CONTROL_BUS=true
+    ok: model-plane-model-gateway-b-1 MODEL_GATEWAY_RUN_CONTROL_BUS is on
+    model-plane-model-gateway-b-1 MODEL_GATEWAY_DURABLE_PLAN_GRANT=true
+    ok: model-plane-model-gateway-b-1 MODEL_GATEWAY_DURABLE_PLAN_GRANT is on
+    model-plane-model-gateway-b-1 MODEL_GATEWAY_SHARED_TURN_RECORD=true
+    ok: model-plane-model-gateway-b-1 MODEL_GATEWAY_SHARED_TURN_RECORD is on
+    model-plane-model-gateway-b-1 MODEL_GATEWAY_SEND_RECEIPTS=true
+    ok: model-plane-model-gateway-b-1 MODEL_GATEWAY_SEND_RECEIPTS is on
+    model-plane-model-gateway-b-1 MODEL_GATEWAY_SHARED_IDEMPOTENCY=false (not part of this proof)
+    http://127.0.0.1:8080 /readyz: run_control=ok
+    http://127.0.0.1:28080 /readyz: run_control=ok
+
+== preflight: a short turn on each replica is served by the direct Anthropic provider
+    model=claude-sonnet-5-5
+    A usage frame: provider_used=anthropic
+    ok: A is served by anthropic
+    model=claude-sonnet-5-5
+    B usage frame: provider_used=anthropic
+    ok: B is served by anthropic
+
+== case 1: Stop on B for a stream owned by A
+    model=claude-sonnet-5-5
+    POST B /v1/invoke/01M5Z0EV7CXJQKPRPS4Q5J0YEP/cancel -> 202 {"cancelled":true,"request_id":"01M5Z0EV7CXJQKPRPS4Q5J0YEP","via":"peer"}
+    ok: case 1: Stop via B answers 202
+    ok: the answer says via peer
+    ok: case 1: A's stream ends with one stopped frame
+           17 event: chunk
+            1 event: connected
+            1 event: stopped
+    gateway_active_streams on A after the stream ended: 1
+FAIL: case 1: A's gateway_active_streams did not return to 0 within 15 s
+==> WS04-S9 replica run-control proof, 2026-10-27T17:05:47Z
+    A=http://127.0.0.1:8080 (model-plane-model-gateway-1)  B=http://127.0.0.1:28080 (model-plane-model-gateway-b-1)  nats=model-plane-nats-1  evidence=/c/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/../../docs/compliance/evidence/live-proof-ws04-replica-run-control-2026-10-27.txt
+    provider=anthropic model=claude-sonnet-5-5
+
+== preflight: switches as the containers were started, and readiness
+    model-plane-model-gateway-1 MODEL_GATEWAY_RUN_CONTROL_BUS=true
+    ok: model-plane-model-gateway-1 MODEL_GATEWAY_RUN_CONTROL_BUS is on
+    model-plane-model-gateway-1 MODEL_GATEWAY_DURABLE_PLAN_GRANT=true
+    ok: model-plane-model-gateway-1 MODEL_GATEWAY_DURABLE_PLAN_GRANT is on
+    model-plane-model-gateway-1 MODEL_GATEWAY_SHARED_TURN_RECORD=true
+    ok: model-plane-model-gateway-1 MODEL_GATEWAY_SHARED_TURN_RECORD is on
+    model-plane-model-gateway-1 MODEL_GATEWAY_SEND_RECEIPTS=true
+    ok: model-plane-model-gateway-1 MODEL_GATEWAY_SEND_RECEIPTS is on
+    model-plane-model-gateway-1 MODEL_GATEWAY_SHARED_IDEMPOTENCY=false (not part of this proof)
+    model-plane-model-gateway-b-1 MODEL_GATEWAY_RUN_CONTROL_BUS=true
+    ok: model-plane-model-gateway-b-1 MODEL_GATEWAY_RUN_CONTROL_BUS is on
+    model-plane-model-gateway-b-1 MODEL_GATEWAY_DURABLE_PLAN_GRANT=true
+    ok: model-plane-model-gateway-b-1 MODEL_GATEWAY_DURABLE_PLAN_GRANT is on
+    model-plane-model-gateway-b-1 MODEL_GATEWAY_SHARED_TURN_RECORD=true
+    ok: model-plane-model-gateway-b-1 MODEL_GATEWAY_SHARED_TURN_RECORD is on
+    model-plane-model-gateway-b-1 MODEL_GATEWAY_SEND_RECEIPTS=true
+    ok: model-plane-model-gateway-b-1 MODEL_GATEWAY_SEND_RECEIPTS is on
+    model-plane-model-gateway-b-1 MODEL_GATEWAY_SHARED_IDEMPOTENCY=false (not part of this proof)
+    http://127.0.0.1:8080 /readyz: run_control=ok
+    http://127.0.0.1:28080 /readyz: run_control=ok
+
+== preflight: a short turn on each replica is served by the direct Anthropic provider
+    model=claude-sonnet-5-5
+    A usage frame: provider_used=anthropic
+    ok: A is served by anthropic
+    model=claude-sonnet-5-5
+    B usage frame: provider_used=anthropic
+    ok: B is served by anthropic
+
+== case 1: Stop on B for a stream owned by A
+    model=claude-sonnet-5-5
+    POST B /v1/invoke/01M5Z57DPMDCTJN29BE8K3FR5G/cancel -> 202 {"cancelled":true,"request_id":"01M5Z57DPMDCTJN29BE8K3FR5G","via":"peer"}
+    ok: case 1: Stop via B answers 202
+    ok: the answer says via peer
+    ok: case 1: A's stream ends with one stopped frame
+           13 event: chunk
+            1 event: connected
+            1 event: stopped
+    gateway_active_streams on A after the stream ended: 0
+    ok: A's active-stream gauge is back to 0
+    run_control_requests_total on A:
+      run_control_requests_total{op="cancel",outcome="local"} 1
+    run_control_requests_total on B:
+      run_control_requests_total{op="queue",outcome="peer"} 2
+      run_control_requests_total{op="probe",outcome="peer"} 2
+      run_control_requests_total{op="cancel",outcome="peer"} 2
+
+== case 2: a queued message sent to B is delivered by A
+    model=claude-sonnet-5-5
+    POST B /v1/invoke/01M5Z57SV1E7SD51S6CQWGZ189/queue -> 202 {"client_message_id":"ws04proof-2026-10-27-29762","deduplicated":false,"message_id":"01M5Z581JZQ92F749TM0R8M9FE","pending":1,"persisted":true,"queued":true,"request_id":"01M5Z57SV1E7SD51S6CQWGZ189"}
+    ok: case 2: queue via B answers 202
+    ok: the answer says queued true
+    ok: the send receipt says persisted
+    ok: case 2: one stored row for the client message id
+    POST B /v1/invoke/01M5Z57SV1E7SD51S6CQWGZ189/queue again, same body -> 202
+    ok: case 2: the repeat stores no second row
+    queued_input on A: {"ids":["ws04proof-2026-10-27-29762"],"messages":["Also say in one line who first traded salt."],"request_id":"01M5Z57SV1E7SD51S6CQWGZ189"}
+    ok: case 2: local Stop on A ends the stream
+            1 event: connected
+            1 event: queued_input
+            1 event: stopped
+            3 event: tool_call
+            3 event: tool_result
+            1 event: turn_timing
+    run_control_requests_total on B:
+      run_control_requests_total{op="cancel",outcome="peer"} 2
+      run_control_requests_total{op="probe",outcome="peer"} 4
+      run_control_requests_total{op="queue",outcome="peer"} 4
+
+== case 3: plan approved on A, Do run on B under the durable grant
+    model=
+    POST A /v1/runs/01M5Z59P9CFRY0CD2AYYMCMB5M/plan-approval -> 200 {"grant_expires_at_unix":1793207268,"granted_rung":"workspace_write","justification":"Owner approved this plan during the WS04-S9 live proof; the run may write the one-page note only.","persisted":true,"plan":{"author":"exk2VRh85CGt8s4FsJy4JxI3Xq3r4X0O","id":"plan_01M5Z59WD4G5DH32ZEGRGY3PSQ","run_id":"01M5Z59P9CFRY0CD2AYYMCMB5M","state":"PLAN_STATE_APPROVED","steps":[{"detail":null,"id":"step_01M5Z59WD49YY8HW8RJ9F2W799","operation":null,"state":"PLAN_STEP_STATE_PENDING","title":"Confirm scope and audience (e.g. general overview vs. food/health vs. de-icing/industry) and preferred format (Word/PDF)"},{"detail":null,"id":"step_01M5Z59WD4P0TNKQB2N1XKNBQE","operation":"web_search","state":"PLAN_STEP_STATE_PENDING","title":"Gather key facts: what salt is, main types (sea, rock, table), production and global/Norwegian context"},{"detail":null,"id":"step_01M5Z59WD4595Q3RPCV5KJ1YMR","operation":null,"state":"PLAN_STEP_STATE_PENDING","title":"Outline the note: introduction, main uses, health and dietary guidance, environmental/road-salt aspects, key takeaways"},{"detail":null,"id":"step_01M5Z59WD4DAG7XBW22H3A2JWZ","operation":null,"state":"PLAN_STEP_STATE_PENDING","title":"Draft the note at roughly 300–400 words so it fits on one page"},{"detail":null,"id":"step_01M5Z59WD432RYTDK86VEYK2BY","operation":"code_interpreter","state":"PLAN_STEP_STATE_PENDING","title":"Review for accuracy and length, then deliver the final one-page document"}],"summary":"Produce a concise one-page note on salt covering what it is, its uses, health considerations and key facts. This is a plan only; nothing will be researched or written until approved.","supersedes":null,"thread_id":"01M5Z59P7YS773Z5ZN4A8BJQ56"},"run_id":"01M5Z59P9CFRY0CD2AYYMCMB5M","was_in_plan_mode":true}
+    ok: case 3: approval on A answers 200
+    model=
+    ok: case 3: the Do run on B raised no error frame
+    ok: case 3: the grant is on the thread row in session-core
+FAIL: case 3: one RUN_PLAN_MODE_EXITED event for the approved run: wanted '1', got '0'
+==> WS04-S9 replica run-control proof, 2026-10-27T17:10:22Z
+    A=http://127.0.0.1:8080 (model-plane-model-gateway-1)  B=http://127.0.0.1:28080 (model-plane-model-gateway-b-1)  nats=model-plane-nats-1  evidence=/c/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/../../docs/compliance/evidence/live-proof-ws04-replica-run-control-2026-10-27.txt
+    provider=anthropic model=claude-sonnet-5-5
+
+== preflight: switches as the containers were started, and readiness
+    model-plane-model-gateway-1 MODEL_GATEWAY_RUN_CONTROL_BUS=true
+    ok: model-plane-model-gateway-1 MODEL_GATEWAY_RUN_CONTROL_BUS is on
+    model-plane-model-gateway-1 MODEL_GATEWAY_DURABLE_PLAN_GRANT=true
+    ok: model-plane-model-gateway-1 MODEL_GATEWAY_DURABLE_PLAN_GRANT is on
+    model-plane-model-gateway-1 MODEL_GATEWAY_SHARED_TURN_RECORD=true
+    ok: model-plane-model-gateway-1 MODEL_GATEWAY_SHARED_TURN_RECORD is on
+    model-plane-model-gateway-1 MODEL_GATEWAY_SEND_RECEIPTS=true
+    ok: model-plane-model-gateway-1 MODEL_GATEWAY_SEND_RECEIPTS is on
+    model-plane-model-gateway-1 MODEL_GATEWAY_SHARED_IDEMPOTENCY=false (not part of this proof)
+    model-plane-model-gateway-b-1 MODEL_GATEWAY_RUN_CONTROL_BUS=true
+    ok: model-plane-model-gateway-b-1 MODEL_GATEWAY_RUN_CONTROL_BUS is on
+    model-plane-model-gateway-b-1 MODEL_GATEWAY_DURABLE_PLAN_GRANT=true
+    ok: model-plane-model-gateway-b-1 MODEL_GATEWAY_DURABLE_PLAN_GRANT is on
+    model-plane-model-gateway-b-1 MODEL_GATEWAY_SHARED_TURN_RECORD=true
+    ok: model-plane-model-gateway-b-1 MODEL_GATEWAY_SHARED_TURN_RECORD is on
+    model-plane-model-gateway-b-1 MODEL_GATEWAY_SEND_RECEIPTS=true
+    ok: model-plane-model-gateway-b-1 MODEL_GATEWAY_SEND_RECEIPTS is on
+    model-plane-model-gateway-b-1 MODEL_GATEWAY_SHARED_IDEMPOTENCY=false (not part of this proof)
+    http://127.0.0.1:8080 /readyz: run_control=ok
+    http://127.0.0.1:28080 /readyz: run_control=ok
+
+== preflight: a short turn on each replica is served by the direct Anthropic provider
+    model=claude-sonnet-5-5
+    A usage frame: provider_used=anthropic
+    ok: A is served by anthropic
+    model=claude-sonnet-5-5
+    B usage frame: provider_used=anthropic
+    ok: B is served by anthropic
+
+== case 1: Stop on B for a stream owned by A
+    model=claude-sonnet-5-5
+    POST B /v1/invoke/01M5Z5FJYNS470TKF2JJTY04MX/cancel -> 202 {"cancelled":true,"request_id":"01M5Z5FJYNS470TKF2JJTY04MX","via":"peer"}
+    ok: case 1: Stop via B answers 202
+    ok: the answer says via peer
+    ok: case 1: A's stream ends with one stopped frame
+           15 event: chunk
+            1 event: connected
+            1 event: stopped
+    gateway_active_streams on A after the stream ended: 0
+    ok: A's active-stream gauge is back to 0
+    run_control_requests_total on A:
+      run_control_requests_total{op="cancel",outcome="local"} 2
+    run_control_requests_total on B:
+      run_control_requests_total{op="probe",outcome="peer"} 4
+      run_control_requests_total{op="queue",outcome="peer"} 4
+      run_control_requests_total{op="cancel",outcome="peer"} 3
+
+== case 2: a queued message sent to B is delivered by A
+    model=claude-sonnet-5-5
+    POST B /v1/invoke/01M5Z5FZMV1STY999HA7ZSGP7S/queue -> 202 {"client_message_id":"ws04proof-2026-10-27-12435","deduplicated":false,"message_id":"01M5Z5G5Q0V2DFF54FVZ128Y4V","pending":1,"persisted":true,"queued":true,"request_id":"01M5Z5FZMV1STY999HA7ZSGP7S"}
+    ok: case 2: queue via B answers 202
+    ok: the answer says queued true
+    ok: the send receipt says persisted
+    ok: case 2: one stored row for the client message id
+    POST B /v1/invoke/01M5Z5FZMV1STY999HA7ZSGP7S/queue again, same body -> 202
+    ok: case 2: the repeat stores no second row
+    queued_input on A: {"ids":["ws04proof-2026-10-27-12435"],"messages":["Also say in one line who first traded salt."],"request_id":"01M5Z5FZMV1STY999HA7ZSGP7S"}
+    ok: case 2: local Stop on A ends the stream
+            1 event: connected
+            1 event: queued_input
+            1 event: stopped
+            3 event: tool_call
+            3 event: tool_result
+            1 event: turn_timing
+    run_control_requests_total on B:
+      run_control_requests_total{op="probe",outcome="peer"} 6
+      run_control_requests_total{op="cancel",outcome="peer"} 3
+      run_control_requests_total{op="queue",outcome="peer"} 6
+
+== case 3: plan approved on A, Do run on B under the durable grant
+    model=
+    POST A /v1/runs/01M5Z5HQP5EE4B6V3X4NMRC1W6/plan-approval -> 200 {"grant_expires_at_unix":1793207528,"granted_rung":"workspace_write","justification":"Owner approved this plan during the WS04-S9 live proof; the run may write the one-page note only.","persisted":true,"plan":{"author":"exk2VRh85CGt8s4FsJy4JxI3Xq3r4X0O","id":"plan_01M5Z5HVMBGR2GTVVTH01HCSXE","run_id":"01M5Z5HQP5EE4B6V3X4NMRC1W6","state":"PLAN_STATE_APPROVED","steps":[{"detail":null,"id":"step_01M5Z5HVMB87H1AQFZ9QXWWFYA","operation":null,"state":"PLAN_STEP_STATE_PENDING","title":"Confirm audience and angle (e.g. general/business readers; food, health, industry or de-icing focus)"},{"detail":null,"id":"step_01M5Z5HVMB8ZTATW0EVW20W4EC","operation":null,"state":"PLAN_STEP_STATE_PENDING","title":"Research key facts: what salt is, how it is produced (sea, rock, evaporation), and main uses (food, industry, road de-icing)"},{"detail":null,"id":"step_01M5Z5HVMBXFFEM031YQXJEEE2","operation":null,"state":"PLAN_STEP_STATE_PENDING","title":"Gather health and recommended-intake guidance from reliable sources (e.g. WHO, Norwegian Directorate of Health)"},{"detail":null,"id":"step_01M5Z5HVMBCGPMRR2G4FZC7T2E","operation":null,"state":"PLAN_STEP_STATE_PENDING","title":"Draft the note: short intro, 3 to 4 key sections, and a brief takeaways list, kept to about 400 words"},{"detail":null,"id":"step_01M5Z5HVMBSXBCEDAKTTCK42F7","operation":null,"state":"PLAN_STEP_STATE_PENDING","title":"Edit for length and clarity, add sources, and format as a one-page document"}],"summary":"Outline for a one-page note on salt, covering what it is, its uses, health considerations and key takeaways. This is a plan only; nothing will be researched or written until approved.","supersedes":null,"thread_id":"01M5Z5HQNAEZDTK337Q2NBCZEF"},"run_id":"01M5Z5HQP5EE4B6V3X4NMRC1W6","was_in_plan_mode":true}
+    ok: case 3: approval on A answers 200
+    model=
+    ok: case 3: the Do run on B raised no error frame
+    ok: case 3: the grant is on the thread row in session-core
+    ok: case 3: the approved run left plan mode on its durable run row
+    B log: {"timestamp":"2026-10-27T17:12:12.268418Z","level":"INFO","fields":{"message":"plan grant read from session-core for the run start","org_id":"rfDfmPhdN7YWCTzfwaL23fzieBdf2S4M","thread_id":"01M5Z5HQNAEZDTK337Q2NBCZEF","rung":"workspace_write","has_plan":true},"target":"model_gateway::sse","threadId":"ThreadId(3)"}
+    run_control_requests_total on B:
+      run_control_requests_total{op="probe",outcome="peer"} 6
+      run_control_requests_total{op="queue",outcome="peer"} 6
+      run_control_requests_total{op="cancel",outcome="peer"} 3
+
+== case 6: a turn streamed on A is rated on B (shared turn record)
+    model=claude-sonnet-5-5
+    ok: case 6: the turn on A was served by anthropic
+    POST B /v1/feedback -> 200 {"accepted":true,"rating":"good","skill_ids":[]}
+    ok: B rated the turn streamed on A
+    run_control_requests_total on B:
+      run_control_requests_total{op="cancel",outcome="peer"} 3
+      run_control_requests_total{op="queue",outcome="peer"} 6
+      run_control_requests_total{op="probe",outcome="peer"} 6
+
+== case 4: kill -9 of the owner A mid-stream
+    model=claude-sonnet-5-5
+    killed model-plane-model-gateway-1; stopped frames on the dead stream: 0
+    POST B /v1/invoke/01M5Z5KGRNY8K7D5PAGT0B2F8S/cancel -> 404 {"cancelled":false,"error":"no active stream","request_id":"01M5Z5KGRNY8K7D5PAGT0B2F8S"}
+    ok: case 4: Stop via B answers 404 with no owner
+    POST B /v1/orchestration/runs/01M5Z5KGVRMT32HC79S38A99GT/cancel -> 200 {"cancelled":true,"receipt_id":"01M5Z5KXKS1WPDS4792HXY830A","run_id":"01M5Z5KGVRMT32HC79S38A99GT","status":"cancelled"}
+    ok: the durable run cancel is accepted
+    POST B /v1/invoke/01M5Z5KGRNY8K7D5PAGT0B2F8S/queue -> 404 {"client_message_id":"msg-2bebbe5b4d3479d045cadf63299207c0","error":"no active stream","persisted":false,"queued":false,"request_id":"01M5Z5KGRNY8K7D5PAGT0B2F8S","resend_as_new_turn":true}
+    ok: case 4: queue via B answers 404 with no owner
+    ok: the answer says resend_as_new_turn
+    resume on B: 22 frame(s) from the buffer
+    A restarted: run_control=ok
+    run_control_requests_total on B:
+      run_control_requests_total{op="queue",outcome="peer"} 6
+      run_control_requests_total{op="cancel",outcome="peer"} 3
+      run_control_requests_total{op="probe",outcome="no_owner"} 16
+      run_control_requests_total{op="probe",outcome="peer"} 6
+      run_control_requests_total{op="cancel",outcome="no_owner"} 2
+
+== case 5: NATS stopped, Stop on B answers 503
+    model=claude-sonnet-5-5
+    /readyz on B with NATS down: ok run_control=ok
+    POST B /v1/invoke/01M5Z5N873TDYCW02XCB2BM558/cancel -> 503 {"cancelled":false,"error":"run_control_unavailable","request_id":"01M5Z5N873TDYCW02XCB2BM558","retryable":true}
+    ok: case 5: Stop via B answers 503 while NATS is down
+    ok: the answer says run_control_unavailable
+    ok: case 5: local Stop on A ends the stream
+    run_control_requests_total on B:
+      run_control_requests_total{op="probe",outcome="no_owner"} 16
+      run_control_requests_total{op="cancel",outcome="timeout"} 1
+      run_control_requests_total{op="probe",outcome="peer"} 6
+      run_control_requests_total{op="queue",outcome="peer"} 6
+      run_control_requests_total{op="cancel",outcome="no_owner"} 2
+      run_control_requests_total{op="cancel",outcome="peer"} 3
+
+PASS — the six run-control cases were recorded in /c/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/../../docs/compliance/evidence/live-proof-ws04-replica-run-control-2026-10-27.txt

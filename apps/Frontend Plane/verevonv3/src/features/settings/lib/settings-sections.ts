@@ -16,7 +16,9 @@ export const workspaceSettingsSectionIds = [
   'plugins',
   'cron',
   'quotas',
+  'model-access',
   'memory',
+  'learning',
 ] as const
 
 export type WorkspaceSettingsSectionId = (typeof workspaceSettingsSectionIds)[number]
@@ -151,10 +153,24 @@ export const workspaceSettingsSections: SectionDetail[] = [
     saveLabel: 'Lagre tak',
   },
   {
+    id: 'model-access',
+    label: 'Modelltilgang',
+    title: 'Modelltilgang',
+    description: 'Hvilke AI-modeller medlemmene kan bruke, og hvor mye resonnering de kan be om. Håndheves av Model Plane; en modell som ikke er tillatt vises ikke i modellvelgeren.',
+    saveLabel: 'Lagre modelltilgang',
+  },
+  {
     id: 'memory',
     label: 'Minne',
     title: 'Minne',
     description: 'Se hva Verevon har lagret om deg på tvers av alle samtaler, og slett det du ikke vil at agenten skal huske.',
+    saveLabel: 'Lagre',
+  },
+  {
+    id: 'learning',
+    label: 'Læring',
+    title: 'Læring',
+    description: 'Forslag Verevon har laget fra samtalene dine, og alt Verevon har lært. Et forslag brukes ikke før du godtar det.',
     saveLabel: 'Lagre',
   },
 ]

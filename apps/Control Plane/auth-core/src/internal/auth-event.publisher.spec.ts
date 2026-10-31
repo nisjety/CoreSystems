@@ -38,7 +38,7 @@ describe('AuthEventPublisher Control audit routing', () => {
 
     expect(publish.mock.calls).toEqual([
       [
-        'aqencia.controlplane.org.changed',
+        'controlplane.org.changed',
         {
           schema_version: 1,
           event_id: 'organization:org-1:7:upsert',
@@ -53,7 +53,7 @@ describe('AuthEventPublisher Control audit routing', () => {
         { msgID: 'organization:org-1:7:upsert' },
       ],
       [
-        'aqencia.controlplane.org.member_changed',
+        'controlplane.org.member_changed',
         {
           schema_version: 1,
           event_id: 'organization:org-1:member:user-1:9:upsert',
@@ -68,7 +68,7 @@ describe('AuthEventPublisher Control audit routing', () => {
         { msgID: 'organization:org-1:member:user-1:9:upsert' },
       ],
       [
-        'aqencia.controlplane.org.changed',
+        'controlplane.org.changed',
         {
           schema_version: 1,
           event_id: 'organization:org-1:10:deleted',

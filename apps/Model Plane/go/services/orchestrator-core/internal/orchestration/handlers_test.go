@@ -14,8 +14,12 @@ import (
 )
 
 // stubClient captures the last request passed to each method and returns
-// the configured response/error. Implements mpv1.OrchestrationCoreServiceClient.
+// the configured response/error. Implements mpv1.OrchestrationCoreServiceClient: the
+// embedded interface covers RPCs no test exercises (a call to one panics on the nil
+// embed instead of the whole package failing to compile whenever the proto grows).
 type stubClient struct {
+	mpv1.OrchestrationCoreServiceClient
+
 	lastReq any
 	err     error
 

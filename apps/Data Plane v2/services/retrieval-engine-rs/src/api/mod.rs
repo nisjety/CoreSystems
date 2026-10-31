@@ -442,21 +442,21 @@ mod auth_security_tests {
     }
 }
 
+/// The engine's HTTP router. `rerank` is the QB-T05a route (`POST /v1/rerank`), built by
+/// `main` from the reranker and the signed cost path. It is merged before the engine-wide
+/// layers, and it carries its own body limit, admission and rate gate.
 pub fn router_with_metrics(
     state: AppState,
     metrics_handle: Option<Arc<crate::metrics::PrometheusHandle>>,
+    rerank: crate::rerank_api::RerankState,
 ) -> Router {
-    router_inner(state, metrics_handle)
-}
-
-#[allow(dead_code)] // kept as the no-metrics-handle variant for tests + downstream embedders
-pub fn router(state: AppState) -> Router {
-    router_inner(state, None)
+    router_inner(state, metrics_handle, rerank)
 }
 
 fn router_inner(
     state: AppState,
     metrics_handle: Option<Arc<crate::metrics::PrometheusHandle>>,
+    rerank: crate::rerank_api::RerankState,
 ) -> Router {
     let authed = Router::new()
         // Core retrieval
@@ -533,6 +533,7 @@ fn router_inner(
 
     let mut app = Router::new()
         .merge(authed)
+        .merge(crate::rerank_api::router::<AppState>(rerank))
         .route("/health", get(health))
         .route("/readyz", get(readyz));
 
@@ -643,6 +644,35 @@ async fn resolved_space_scope(
     Ok(Some(scope))
 }
 
+/// Maps a failed retrieval to its HTTP status. A service principal asking for
+/// something outside its corpus grant is refused: the caller's authority is what
+/// failed, not the engine, so that is a 403 and not a 500. Every other failure
+/// stays a 500.
+fn retrieval_error(error: anyhow::Error) -> AppError {
+    use crate::authz::service_routes::ConfinementError;
+    let refused = error.downcast_ref::<ConfinementError>().is_some();
+    let status = if refused {
+        StatusCode::FORBIDDEN
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    AppError { error, status }
+}
+
+#[cfg(test)]
+mod confinement_status_tests {
+    use super::*;
+    use crate::authz::service_routes::ConfinementError;
+
+    #[test]
+    fn a_confinement_refusal_is_forbidden_and_other_failures_stay_internal() {
+        let refused = retrieval_error(ConfinementError::NoCorpusGrant.into());
+        assert_eq!(refused.status, StatusCode::FORBIDDEN);
+        let failed = retrieval_error(anyhow::anyhow!("qdrant unavailable"));
+        assert_eq!(failed.status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+}
+
 async fn retrieve(
     State(pipeline): State<AppState>,
     auth: Option<axum::extract::Extension<crate::authz::AuthContext>>,
@@ -660,7 +690,7 @@ async fn retrieve(
     // it is supplied it is verified and resolved before the pipeline can see
     // any caller-controlled workspace/collection filter.
     req.space_scope = resolved_space_scope(&pipeline, auth.as_ref(), &headers).await?;
-    let resp = pipeline.retrieve(req).await?;
+    let resp = pipeline.retrieve(req).await.map_err(retrieval_error)?;
     Ok(Json(resp))
 }
 
@@ -1520,6 +1550,7 @@ fn pack_retrieval_request(
         agent_id: None,
         admin_read_all: false,
         service_principal: false,
+        service_id: None,
         space_scope: None,
     };
     auth.apply_to_request(&mut retrieval);
@@ -1535,11 +1566,16 @@ async fn retrieve_pack(
     // the same RetrievalRequest consumed by the canonical pipeline.
     let retrieval_req = pack_retrieval_request(req, &auth)?;
     let resp = pipeline.retrieve(retrieval_req).await?;
-    Ok(Json(serde_json::json!({
+    let mut body = serde_json::json!({
         "context_pack": resp.context_pack,
         "trace_id": resp.trace_id,
         "candidates_used": resp.candidates.len(),
-    })))
+    });
+    // A reduced answer (Z-41) says so on this route too, so the notice is never dropped here.
+    if let Some(notice) = resp.notice.as_ref() {
+        body["notice"] = serde_json::json!(notice);
+    }
+    Ok(Json(body))
 }
 
 // D7: Source lookup

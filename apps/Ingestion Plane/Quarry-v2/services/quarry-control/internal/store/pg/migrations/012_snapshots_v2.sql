@@ -5,9 +5,9 @@
 -- The legacy snapshots table stays untouched; backfill is best-effort so the
 -- table is usable immediately after apply.
 --
--- Request-queue tables are owned and migrated by the Rust runtime. The
--- control plane only exposes a read-only projection over them; it must not
--- alter that schema here because the runtime may use a separate database.
+-- Request queues belong to the Rust runtime and may live in a separate
+-- database. Control exposes a read-only projection; it must neither require
+-- nor alter those tables during its own startup migrations.
 
 CREATE TABLE IF NOT EXISTS snapshots_v2 (
     id           BIGSERIAL PRIMARY KEY,

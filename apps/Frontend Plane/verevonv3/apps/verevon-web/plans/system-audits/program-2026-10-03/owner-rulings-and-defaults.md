@@ -10,6 +10,7 @@ These bind every implementer and reviewer of the contextual-retrieval, Quarry op
 4. Quarry: option B. The Data Plane owns a rerank capability that accepts caller-supplied candidate documents; Quarry calls it instead of prompting a general model. The full system must work.
 5. ZDR must be workable, only for orgs that have it on, and we respect it. If a user uses their OWN subscription or API key that does not support ZDR, we do not stop them: when they ADD the connection we check ZDR support and show a prompt that says whether it does or not (stronger warning when their org has ZDR on, because it contradicts the org setting). They can continue. ZDR is then turned off ONLY for runs that use that connection. NEVER org-wide, never for other members, never for other connections.
 6. The trust edits are completed, but only claims that are true on the code and the live stack. Sentences about ZDR, rerank and contextual retrieval are re-verified after the build.
+7. (2026-10-27) OD18 / DEC-37: recommended defaults taken: 4 MB xlsx/pptx/pdf after the zip guard, 60k characters, local Tesseract eng+nor (15 pages, 18 s, truncate with a marker on chat), standard fonts; WS08-S8 gate = per-org WS25 key reference_uploads, default off. Details: Model Plane ledger.
 
 ## Defaults chosen for the questions the owner has not answered (change only on a new owner ruling)
 

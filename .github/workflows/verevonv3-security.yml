@@ -6,12 +6,12 @@ name: Verevon v3 Frontend Security
 # does not fire on unrelated plane changes.
 on:
   push:
-    branches: [main]
+    branches: [main, develop, fix/ui-premium-restore]
     paths:
       - 'apps/Frontend Plane/verevonv3/**'
       - '.github/workflows/verevonv3-security.yml'
   pull_request:
-    branches: [main]
+    branches: [main, develop, fix/ui-premium-restore]
     paths:
       - 'apps/Frontend Plane/verevonv3/**'
       - '.github/workflows/verevonv3-security.yml'

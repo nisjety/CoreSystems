@@ -239,6 +239,10 @@ DEMOTED — verified NOT a real finding, do not "fix"
              (it had one global RPM, so a per-org ceiling was unsettable).
              Setting one drops the stale bucket so a lowered limit bites now.
            allowed_models -> STILL homeless; refused by name.
+           SUPERSEDED by ADR-0005 (2026-10-23, DEC-13): the model allowlist is org-core's
+             entitlement policy, enforced by inference-core and asked by model-gateway through
+             GetModelAccess. capability-core routing_policies is not its store. The lines
+             above stay as the record of the earlier decision.
          USD is stored in micro-dollars because quota_limit is BIGINT, under a
          key that names the unit. Quota reads FAIL OPEN on an org-core outage
          (logged): rejecting every chat turn during an unrelated Control Plane
@@ -385,7 +389,7 @@ making a decision. The historical finding below describes the pre-fix state.
 
 **Consequence:** An operator sets an org-wide `max_cost_per_run_usd = 5` and `denied_tools = "book_shipment"`, gets the stored policy echoed back, and nothing enforces either: the budget check only fires when the *caller* supplies `max_cost_usd` on the request, so any client that omits the field bypasses the org cap entirely; the tool denylist is read by no dispatch path; `allowed_models` never reaches inference-core's router. The org cap is not merely unenforced, it is trivially bypassable by omission — and it is lost on restart.
 
-**Fix direction:** Retire `OrgPolicy`/`PolicyStore`. Route each field to its owner: org cost caps into the cost-core budget check (`budget::check_budget` should fold in the org policy fetched from cost-core, not just the request), model allowlist into capability-core `routing_policies` / inference-core's router-policy endpoint (the pattern the verevonv3 BFF already uses in `domains/router_policy.rs`), tool deny into capability-core's policy engine.
+**Fix direction:** Retire `OrgPolicy`/`PolicyStore`. Route each field to its owner: org cost caps into the cost-core budget check (`budget::check_budget` should fold in the org policy fetched from cost-core, not just the request), model allowlist into capability-core `routing_policies` / inference-core's router-policy endpoint (the pattern the verevonv3 BFF already uses in `domains/router_policy.rs`), tool deny into capability-core's policy engine. **Superseded for the model allowlist by ADR-0005 (2026-10-23):** the allowlist is org-core's entitlement policy, enforced by inference-core, not `routing_policies` and not the router-policy endpoint named above. The cost-cap and tool-deny directions stand.
 
 ### CR-07 [medium] — capability-registry
 

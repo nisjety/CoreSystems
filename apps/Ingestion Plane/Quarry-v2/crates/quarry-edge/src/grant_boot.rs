@@ -53,6 +53,10 @@ pub struct GrantBootInputs {
     pub service_tokens_configured: bool,
     /// `QUARRY_EDGE__CROSS_PLANE_AUTH_DEV_BYPASS`.
     pub dev_bypass: bool,
+    /// INNH-10: `QUARRY_EDGE__API_KEY_AGENT_RUNS` is on. A key run is admitted only under a
+    /// grant the broker vouches for, so the edge refuses to boot with the switch on and no
+    /// validator that can say so.
+    pub api_key_runs: bool,
 }
 
 /// Why the edge must not start.
@@ -66,6 +70,9 @@ pub enum GrantBootRefusal {
     HttpOnlyInProduction,
     /// A gRPC endpoint without the credential to mint broker tokens.
     GrpcWithoutServiceTokens,
+    /// INNH-10: API-key agent runs are on and no validator endpoint is configured, so the
+    /// no-op validator would accept any grant for a key.
+    ApiKeyRunsWithoutValidator,
 }
 
 impl fmt::Display for GrantBootRefusal {
@@ -84,6 +91,11 @@ impl fmt::Display for GrantBootRefusal {
             Self::GrpcWithoutServiceTokens => {
                 "QUARRY_EDGE__BROWSER_GRANT_VALIDATOR_GRPC_URL needs QUARRY_EDGE__QUARRY_SERVICE_API_KEY: \
                  the BrowserBroker accepts only a service token minted for the run's organization"
+            }
+            Self::ApiKeyRunsWithoutValidator => {
+                "QUARRY_EDGE__API_KEY_AGENT_RUNS needs a BrowserBroker validation endpoint: an API-key run \
+                 is admitted only under a grant the broker vouches for (set \
+                 QUARRY_EDGE__BROWSER_GRANT_VALIDATOR_GRPC_URL)"
             }
         })
     }
@@ -108,13 +120,19 @@ pub fn decide(inputs: GrantBootInputs) -> Result<ValidatorChoice, GrantBootRefus
     if inputs.grpc_configured && !inputs.service_tokens_configured && !static_dev_bearer {
         return Err(GrantBootRefusal::GrpcWithoutServiceTokens);
     }
-    Ok(if inputs.grpc_configured {
+    let choice = if inputs.grpc_configured {
         ValidatorChoice::Grpc
     } else if inputs.http_configured {
         ValidatorChoice::Http
     } else {
         ValidatorChoice::Noop
-    })
+    };
+    // INNH-10: the no-op validator accepts every grant id, which for an API key would be an
+    // open door. It is refused whatever the environment.
+    if inputs.api_key_runs && choice == ValidatorChoice::Noop {
+        return Err(GrantBootRefusal::ApiKeyRunsWithoutValidator);
+    }
+    Ok(choice)
 }
 
 /// Builds the gRPC validator the way production wires it, in one place so that a
@@ -158,6 +176,7 @@ mod tests {
             grpc_compiled: true,
             service_tokens_configured: true,
             dev_bypass: false,
+            api_key_runs: false,
         }
     }
 
@@ -170,6 +189,7 @@ mod tests {
             grpc_compiled: true,
             service_tokens_configured: false,
             dev_bypass: false,
+            api_key_runs: false,
         }
     }
 
@@ -244,6 +264,54 @@ mod tests {
             }),
             Err(GrantBootRefusal::GrpcWithoutServiceTokens),
             "production never accepts the bypass as a credential"
+        );
+    }
+
+    #[test]
+    fn api_key_runs_refuse_to_boot_without_a_validator_in_every_environment() {
+        for base in [development(), production()] {
+            let refused = decide(GrantBootInputs {
+                api_key_runs: true,
+                http_configured: false,
+                grpc_configured: false,
+                require_grants: false,
+                ..base
+            });
+            assert_eq!(refused, Err(GrantBootRefusal::ApiKeyRunsWithoutValidator));
+            let text = refused.unwrap_err().to_string();
+            assert!(text.contains("QUARRY_EDGE__API_KEY_AGENT_RUNS"), "{text}");
+            assert!(text.contains("QUARRY_EDGE__BROWSER_GRANT_VALIDATOR_GRPC_URL"), "{text}");
+        }
+    }
+
+    #[test]
+    fn api_key_runs_boot_with_a_validator_and_change_nothing_else() {
+        // The switch off: every existing case stays as the tests above pin it.
+        assert_eq!(decide(development()), Ok(ValidatorChoice::Noop));
+        // With a gRPC validator (production) or the development shim, the switch boots.
+        assert_eq!(
+            decide(GrantBootInputs {
+                api_key_runs: true,
+                ..production()
+            }),
+            Ok(ValidatorChoice::Grpc)
+        );
+        assert_eq!(
+            decide(GrantBootInputs {
+                api_key_runs: true,
+                http_configured: true,
+                ..development()
+            }),
+            Ok(ValidatorChoice::Http)
+        );
+        // The older refusals still come first.
+        assert_eq!(
+            decide(GrantBootInputs {
+                api_key_runs: true,
+                grpc_compiled: false,
+                ..production()
+            }),
+            Err(GrantBootRefusal::GrpcNotCompiled)
         );
     }
 

@@ -21,6 +21,7 @@ pub(super) async fn session_refresh(
         &url,
         Some(body),
         Some(&actor_for(&user)),
+        user.active_org_id.as_deref(),
     )
     .await
 }

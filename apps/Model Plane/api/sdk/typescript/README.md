@@ -114,6 +114,7 @@ All URIs are relative to *http://localhost:8080*
 - [AiSpeechRequest](docs/AiSpeechRequest.md)
 - [AiTranslateRequest](docs/AiTranslateRequest.md)
 - [Approval](docs/Approval.md)
+- [ApprovalCause](docs/ApprovalCause.md)
 - [CancelRun200Response](docs/CancelRun200Response.md)
 - [Capability](docs/Capability.md)
 - [ChatMessage](docs/ChatMessage.md)

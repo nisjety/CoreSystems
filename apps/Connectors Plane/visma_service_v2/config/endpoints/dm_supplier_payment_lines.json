@@ -1,0 +1,27 @@
+{
+  "endpoint_name": "dm_supplier_payment_lines",
+  "bigquery_table": "visma_dm_supplier_payment_lines",
+  "primary_key": "id",
+  "source": "datamart_graphql",
+  "enabled": true,
+  "api_method": "datamart.supplierPaymentLines",
+  "modified_field": "updatedInDataMartDateTime",
+  "merge_type": "upsert",
+  "sync_pattern": "incremental_upsert",
+  "validation_fields": [
+    "id",
+    "companyId",
+    "updatedInDataMartDateTime"
+  ],
+  "notes": "Raw DataMart `supplierPaymentLines` (SupplierPaymentLine), stored untouched for later Dataform mapping. No join_normalizer: every DataMart field is kept, unlike the lossy ERP-shaped shadow block some ERP endpoints carry. Deleted rows are included (deletedDatabaseRecord=true). Needs VSV2_AQUATIQ_DATAMART_COMPANY_ID.",
+  "datamart": {
+    "ready": true,
+    "query_file": "config/queries/dm_supplier_payment_lines.graphql",
+    "root_field": "supplierPaymentLines",
+    "type_name": "SupplierPaymentLine",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "fallback_source": "datamart_graphql"
+  }
+}

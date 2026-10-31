@@ -52,13 +52,13 @@ const closingStills = [
 ] as const;
 
 const preFooterTitleLines = [
-	["Fra", "kunnskap", "til", "handling."],
-	["Med", "kontroll", "underveis."],
+	["Felles", "grunnlag."],
+	["Styrt", "arbeid."],
 ] as const;
 
 const preFooterNextPhraseLines = [
-	["Finn", "grunnlaget."],
-	["Få", "neste", "steg", "klart."],
+	["Se", "sammenhengen."],
+	["Ta", "neste", "steg."],
 ] as const;
 
 function AnimatedTitleLine({ words }: { words: readonly string[] }) {
@@ -437,7 +437,7 @@ export function PreFooterStatementSection() {
 						data-prefooter-first-phase
 					>
 						<h2
-							aria-label="Fra kunnskap til handling. Med kontroll underveis."
+							aria-label="Felles grunnlag. Styrt arbeid."
 							className="verevon-home-heading m-0 max-w-none whitespace-nowrap text-verevon-j-text max-[760px]:whitespace-normal"
 						>
 							{preFooterTitleLines.map((line, index) => (
@@ -454,7 +454,7 @@ export function PreFooterStatementSection() {
 						data-prefooter-second-phase
 					>
 						<h2
-							aria-label="Finn grunnlaget. Få neste steg klart."
+							aria-label="Se sammenhengen. Ta neste steg."
 							className="verevon-home-heading m-0 max-w-none whitespace-nowrap text-verevon-j-text max-[760px]:whitespace-normal"
 							data-prefooter-next-title
 						>
@@ -474,8 +474,8 @@ export function PreFooterStatementSection() {
 							className="flex flex-wrap items-center justify-center gap-5"
 							data-prefooter-cta-safe-zone
 						>
-							<ArrowButton href="#produkt" variant="muted">
-								Se hvordan Verevon fungerer
+							<ArrowButton href="#flyt" variant="muted">
+								Se Verevon i arbeid
 							</ArrowButton>
 
 							<ArrowButton href="#kontakt" variant="dark">

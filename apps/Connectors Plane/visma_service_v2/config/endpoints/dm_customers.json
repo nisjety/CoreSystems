@@ -1,0 +1,27 @@
+{
+  "endpoint_name": "dm_customers",
+  "bigquery_table": "visma_dm_customers",
+  "primary_key": "id",
+  "source": "datamart_graphql",
+  "enabled": true,
+  "api_method": "datamart.customers",
+  "modified_field": "updatedInDataMartDateTime",
+  "merge_type": "upsert",
+  "sync_pattern": "incremental_upsert",
+  "validation_fields": [
+    "id",
+    "companyId",
+    "updatedInDataMartDateTime"
+  ],
+  "notes": "Raw DataMart `customers` (Customer), stored untouched for later Dataform mapping. No join_normalizer: every DataMart field is kept, unlike the lossy ERP-shaped shadow block some ERP endpoints carry. Deleted rows are included (deletedDatabaseRecord=true). Needs VSV2_AQUATIQ_DATAMART_COMPANY_ID.",
+  "datamart": {
+    "ready": true,
+    "query_file": "config/queries/dm_customers.graphql",
+    "root_field": "customers",
+    "type_name": "Customer",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "fallback_source": "datamart_graphql"
+  }
+}

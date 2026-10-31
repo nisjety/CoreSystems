@@ -8,20 +8,33 @@ import {
 } from './catalog-manifest'
 
 describe('provisional Action Catalog manifest', () => {
-  it('is deterministic, versioned, and sorted independently of source order', () => {
-    const forward = buildActionCatalogManifest(actionRegistry)
-    const reverse = buildActionCatalogManifest([...actionRegistry].reverse())
+  it('is deterministic, versioned, and sorted independently of source order', async () => {
+    const forward = await buildActionCatalogManifest(actionRegistry)
+    const reverse = await buildActionCatalogManifest([...actionRegistry].reverse())
 
     expect(forward.schemaVersion).toBe(ACTION_CATALOG_SCHEMA_VERSION)
     expect(forward).toEqual(reverse)
     expect(forward.actions.map((action) => action.id)).toEqual(
       [...forward.actions.map((action) => action.id)].sort(),
     )
-    expect(canonicalActionCatalogJson(actionRegistry)).toBe(canonicalActionCatalogJson([...actionRegistry].reverse()))
+    expect(await canonicalActionCatalogJson(actionRegistry)).toBe(
+      await canonicalActionCatalogJson([...actionRegistry].reverse()),
+    )
   })
 
-  it('marks an action model-eligible only where the owner adapter is live', () => {
-    const manifest = buildActionCatalogManifest()
+  it('gives every action an access level, a closed reason only where it is closed, and the owner hash for tickets.create', async () => {
+    const manifest = await buildActionCatalogManifest()
+
+    expect(manifest.actions.filter((action) => action.modelAccess === 'none').every((action) => action.exemptReason !== null)).toBe(true)
+    expect(manifest.actions.filter((action) => action.modelAccess !== 'none').every((action) => action.exemptReason === null)).toBe(true)
+    expect(manifest.actions.find((action) => action.id === 'tickets.create')).toMatchObject({
+      modelAccess: 'write_approval',
+      schemaHash: 'sha256:c3aa12ec85c2d79f08e5e8cc726fd75af10ddab0b29f2a6e0dddb0bd42bb56df',
+    })
+  })
+
+  it('marks an action model-eligible only where the owner adapter is live', async () => {
+    const manifest = await buildActionCatalogManifest()
     expect(manifest.actions).not.toHaveLength(0)
 
     // Each of these is an action whose owner issues a durable, queryable
@@ -49,8 +62,8 @@ describe('provisional Action Catalog manifest', () => {
     expect(manifest.actions.every((action) => action.allowedActorTypes.includes('human'))).toBe(true)
   })
 
-  it('does not confuse legacy dispatch with an owner-issued operation receipt', () => {
-    const manifest = buildActionCatalogManifest()
+  it('does not confuse legacy dispatch with an owner-issued operation receipt', async () => {
+    const manifest = await buildActionCatalogManifest()
     const ticketCreate = manifest.actions.find((action) => action.id === 'tickets.create')
     const ticketUpdate = manifest.actions.find((action) => action.id === 'tickets.update')
 
@@ -62,6 +75,15 @@ describe('provisional Action Catalog manifest', () => {
       executionContract: 'legacy_direct',
       idempotency: 'not_yet_contractual',
     })
+  })
+
+  it('lists the memory controls as human-only actions', async () => {
+    const manifest = await buildActionCatalogManifest()
+    for (const id of ['memory.set_state', 'memory.reset', 'memory.remember']) {
+      const entry = manifest.actions.find((action) => action.id === id)
+      expect(entry, id).toBeDefined()
+      expect(entry?.allowedActorTypes).toEqual(['human'])
+    }
   })
 
   it('produces a stable SHA-256 digest', async () => {

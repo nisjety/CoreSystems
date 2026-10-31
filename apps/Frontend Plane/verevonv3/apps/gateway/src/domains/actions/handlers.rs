@@ -40,19 +40,24 @@ use super::dispatchers::{
     dispatch_integrations_trigger_sync, dispatch_knowledge_create_document,
     dispatch_knowledge_extract_products, dispatch_knowledge_register_sharepoint_source,
     dispatch_knowledge_summarize_products,
-    dispatch_leads_create_list, dispatch_leads_delete_list, dispatch_mcp_delete_server,
+    dispatch_leads_create_list, dispatch_leads_delete_list,
+    dispatch_learning_accept_skill, dispatch_learning_reject_skill, dispatch_learning_undo,
+    dispatch_mcp_delete_server,
     dispatch_mcp_share_server, dispatch_membership_invite_member,
     dispatch_membership_remove_member, dispatch_membership_update_member_role,
-    dispatch_memory_delete, dispatch_monitoring_check_now, dispatch_navbar_create_calendar_event,
+    dispatch_memory_delete, dispatch_memory_remember, dispatch_memory_reset,
+    dispatch_memory_set_state, dispatch_monitoring_check_now, dispatch_navbar_create_calendar_event,
     dispatch_navbar_create_calendar_note, dispatch_navbar_mark_notification_read,
     dispatch_navbar_save_theme, dispatch_navbar_submit_support_request,
     dispatch_notification_delete, dispatch_notification_mark_all_read,
     dispatch_notification_mark_read, dispatch_notification_update_preference,
     dispatch_orchestration_cancel_run, dispatch_orchestration_decide_approval,
     dispatch_orchestration_resume_run, dispatch_org_acknowledge_deletion,
-    dispatch_org_mark_exported, dispatch_org_restore, dispatch_org_set_quota,
+    dispatch_org_mark_exported, dispatch_org_restore, dispatch_org_set_model_entitlement,
+    dispatch_org_set_quota,
     dispatch_org_soft_delete, dispatch_org_update_instructions,
-    dispatch_org_update_support_ai_mode, dispatch_org_update_zdr,
+    dispatch_org_update_agent_learning_policy, dispatch_org_update_support_ai_mode,
+    dispatch_org_update_zdr,
     dispatch_organization_switch_active, dispatch_ownership_revoke_document_share,
     dispatch_ownership_share_document, dispatch_privacy_erase_my_account,
     dispatch_router_policy_update, dispatch_settings_create_api_key,
@@ -222,6 +227,18 @@ pub(super) async fn execute_action(
             dispatch_ownership_revoke_document_share(&state, &user, &body.input).await
         }
         "memory.delete" => dispatch_memory_delete(&state, &user, &headers, &body.input).await,
+        "memory.set_state" => {
+            dispatch_memory_set_state(&state, &user, &headers, &body.input).await
+        }
+        "memory.reset" => dispatch_memory_reset(&state, &user, &headers, &body.input).await,
+        "memory.remember" => dispatch_memory_remember(&state, &user, &headers, &body.input).await,
+        "learning.accept_skill" => {
+            dispatch_learning_accept_skill(&state, &user, &headers, &body.input).await
+        }
+        "learning.reject_skill" => {
+            dispatch_learning_reject_skill(&state, &user, &headers, &body.input).await
+        }
+        "learning.undo" => dispatch_learning_undo(&state, &user, &headers, &body.input).await,
         "settings.update_me" => dispatch_settings_update_me(&state, &user, &body.input).await,
         "settings.update_preferences" => {
             dispatch_settings_update_preferences(&state, &user, &body.input).await
@@ -305,12 +322,18 @@ pub(super) async fn execute_action(
             dispatch_org_acknowledge_deletion(&state, &user, &body.input).await
         }
         "org.set_quota" => dispatch_org_set_quota(&state, &user, &body.input).await,
+        "org.set_model_entitlement" => {
+            dispatch_org_set_model_entitlement(&state, &user, &headers, &body.input).await
+        }
         "org.update_instructions" => {
             dispatch_org_update_instructions(&state, &user, &body.input).await
         }
         "org.update_zdr" => dispatch_org_update_zdr(&state, &user, &headers, &body.input).await,
         "org.update_support_ai_mode" => {
             dispatch_org_update_support_ai_mode(&state, &user, &headers, &body.input).await
+        }
+        "org.update_agent_learning_policy" => {
+            dispatch_org_update_agent_learning_policy(&state, &user, &headers, &body.input).await
         }
         "membership.invite_member" => {
             dispatch_membership_invite_member(&state, &user, &headers, &body.input).await

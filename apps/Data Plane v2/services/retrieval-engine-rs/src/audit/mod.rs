@@ -12,6 +12,12 @@ use sqlx::PgPool;
 
 use crate::authz::AuthContext;
 
+/// The cause a response names for its access row when the handler knows the outcome better
+/// than the status does (the rerank route records `rerank:ok`, `rerank:skipped_zdr` and so on).
+/// The admission guard reads it from the response extensions; without it the status decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuditCause(pub &'static str);
+
 #[derive(Clone)]
 pub struct AccessEvent<'a> {
     pub ctx: &'a AuthContext,

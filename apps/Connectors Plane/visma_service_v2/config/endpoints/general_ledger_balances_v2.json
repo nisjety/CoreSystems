@@ -1,0 +1,48 @@
+{
+  "endpoint_name": "general_ledger_balances_v2",
+  "bigquery_table": "visma_general_ledger_balances_v2",
+  "primary_key": [
+    "account.number",
+    "subAccountCd",
+    "financialPeriod",
+    "ledger.id"
+  ],
+  "source": "erp_rest",
+  "api_method": "get_general_ledger_balances_v2",
+  "api_endpoint": "/v2/generalLedgerBalance",
+  "pagination_profile": "finance_page_number",
+  "modified_field": "lastModifiedDateTime",
+  "merge_type": "upsert",
+  "sync_pattern": "incremental_upsert",
+  "validation_fields": [
+    "account.number",
+    "subAccountCd",
+    "financialPeriod",
+    "ledger.id",
+    "beginningBalance",
+    "yearToDateBalance",
+    "currencyId",
+    "lastModifiedDateTime"
+  ],
+  "datamart": {
+    "ready": false,
+    "type_name": "GeneralLedgerBalance",
+    "query_file": "config/queries/datamart/general_ledger_balances_v2.graphql",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "join_normalizer": "normalize_general_ledger_balance",
+    "fallback_source": "erp_rest",
+    "tenant_overrides": {
+      "33f319b9-4d57-11ee-960c-025417856183": false
+    },
+    "root_field": "generalLedgerBalancesV2"
+  },
+  "period_scan": {
+    "first_period": "202001",
+    "query_params": [
+      "periodId"
+    ]
+  },
+  "notes": "Fetched per period with periodId. Asked by lastModifiedDateTime the API returns only the balances modified in a period (pilot tenant: 15,066 rows in all, 981 for 202609); asked by periodId it returns every balance of the period (2,691 for 202609, 27,313+ keys over all periods, what v1 holds). DataMart carries the same 15,066 as the modified-since list, so it cannot fill the gap. The API also answers 400 when neither periodId nor lastModifiedDateTime is sent. period_scan walks first_period to the current month, one walk per month, on every run. It stops at the current month on purpose: asked for any future period the API returns a copy of the current balances (2,691 rows for each of the next 12 months), not stored data. periodToDateDebit and periodToDateCredit are not validation fields: the API leaves them out of a balance that had no movement in the period (45,574 of the 60,655 rows in a full scan)."
+}

@@ -1,0 +1,39 @@
+config {
+  type: "table",
+  schema: "visma_bronze",
+  name: "visma_customer_sales_prices",
+  description: "Bronze: Customer-specific pricing (item/customer/price) from Visma Global API.",
+  tags: ["bronze", "visma"]
+}
+
+SELECT
+  s.last_run_id AS `syncId`,
+  s.updated_at AS `syncedAt`,
+  s.first_seen_at AS `firstSyncedAt`,
+  s.updated_at AS `refreshedAt`,
+  CAST(NULL AS INT64) AS `seenInFullScopeRuns`,
+  CAST(NULL AS INT64) AS `consecutiveMissingFullRuns`,
+  s.deleted_at IS NOT NULL AS `isDeleted`,
+  s.deleted_at AS `deletedAt`,
+  s.tenant_id AS `tenantId`,
+  CAST(NULL AS STRING) AS `syncBatch`,
+  tenant.tenant_name AS `organizationName`,
+  ${bronze.float("breakQty")} AS `breakQty`,
+  ${bronze.str("currency")} AS `currency`,
+  ${bronze.str("description")} AS `description`,
+  ${bronze.str("effectiveDate")} AS `effectiveDate`,
+  ${bronze.str("expirationDate")} AS `expirationDate`,
+  ${bronze.str("inventoryId")} AS `inventoryId`,
+  ${bronze.str("lastModifiedDateTime")} AS `lastModifiedDateTime`,
+  ${bronze.str("metadata")} AS `metadata`,
+  ${bronze.float("price")} AS `price`,
+  ${bronze.str("priceCode")} AS `priceCode`,
+  ${bronze.str("priceType")} AS `priceType`,
+  ${bronze.bool("promotion")} AS `promotion`,
+  ${bronze.int("recordId")} AS `recordId`,
+  ${bronze.str("timeStamp")} AS `timeStamp`,
+  ${bronze.str("uoM")} AS `uoM`,
+  CAST(NULL AS STRING) AS `businessUnitId`,  -- v2 does not fetch this field
+  CAST(NULL AS STRING) AS `businessUnitName`  -- v2 does not fetch this field
+FROM ${ref("dw_staging_visma", "customer_sales_prices")} AS s
+LEFT JOIN ${ref("visma_tenants")} AS tenant ON tenant.tenant_id = s.tenant_id

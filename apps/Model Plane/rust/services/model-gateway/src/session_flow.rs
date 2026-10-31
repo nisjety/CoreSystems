@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use mp_contracts::model_plane::v1::{
-    AppendMessageRequest, CancelRunRequest, CompleteDirectRunWithMessageRequest,
+    AppendMessageRequest, AutonomyRung, CancelRunRequest, CompleteDirectRunWithMessageRequest,
     CompleteDirectRunWithMessageResponse, CreateThreadRequest, GetRunRequest,
-    HeartbeatManagedRunRequest, ManagedRunSource, RecordTerminalOutcomeRequest,
-    ResolveRunOwnerRequest, StartManagedRunRequest, StartRunRequest, TerminalOutcome,
+    GetThreadGrantRequest, GetThreadGrantResponse, HeartbeatManagedRunRequest, ManagedRunSource,
+    RecordTerminalOutcomeRequest, ResolveRunOwnerRequest, StartManagedRunRequest,
+    StartRunRequest, TerminalOutcome,
 };
 use mp_ids::new_ulid;
 use std::time::Duration;
@@ -246,6 +247,15 @@ fn user_message_metadata(
     }
 }
 
+/// What Session Core stored for an append that named a `client_message_id`: the row's id, and
+/// whether the id had already been stored (the repeat wrote nothing).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AppendReceipt {
+    pub message_id: String,
+    pub deduplicated: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn append_user_message(
     client: &mut mp_contracts::model_plane::v1::session_core_client::SessionCoreClient<
         tonic::transport::Channel,
@@ -256,7 +266,10 @@ async fn append_user_message(
     space: Option<&ThreadSpaceContext>,
     conversation_only: bool,
     retrieval_scope: Option<&str>,
-) -> Result<(), tonic::Status> {
+    // The send's receipt id (see [`send_receipt_id`]); `None` sends none, which is the append as it
+    // was before receipts existed.
+    client_message_id: Option<&str>,
+) -> Result<AppendReceipt, tonic::Status> {
     let space = space.cloned().unwrap_or_else(|| ThreadSpaceContext {
         space_id: String::new(),
         space_decision_ref: String::new(),
@@ -291,11 +304,48 @@ async fn append_user_message(
             action_schema_hash: space.action_schema_hash,
             payload_digest: space.payload_digest,
             idempotency_key: space.idempotency_key,
+            client_message_id: client_message_id.unwrap_or_default().to_owned(),
         },
         bearer,
     )
     .map_err(|_| tonic::Status::unauthenticated("verified session credential required"))?;
-    client.append_message(request).await.map(|_| ())
+    client.append_message(request).await.map(|response| {
+        let response = response.into_inner();
+        AppendReceipt {
+            message_id: response.message_id,
+            deduplicated: response.deduplicated,
+        }
+    })
+}
+
+/// The `client_message_id` a user send persists under, or `None` for none.
+///
+/// The SPA names every send with the id it mints (`idempotency_key` on a send, `client_message_id`
+/// on a queued message), so a repeat of the same send (a retry after a lost reply, a queued message
+/// the run never took and the client then sends as a new turn) lands as one transcript row. None
+/// when:
+/// - the switch is off (`enabled` is [`crate::queued_input::send_receipts_enabled`]): the append is
+///   then byte-identical to before receipts;
+/// - the turn is ZDR: nothing of it is stored, and an id is a stored fact;
+/// - the send is a regenerate or an edited resubmit: it states the previous question again on
+///   purpose, as a new message, whatever key it carries;
+/// - the key is not an id session-core would store (it is free-form for the idempotency guard).
+#[must_use]
+// Each bool is one of the named conditions above, read off the request as the caller has it.
+#[allow(clippy::fn_params_excessive_bools)]
+pub fn send_receipt_id(
+    enabled: bool,
+    zdr: bool,
+    regenerated: bool,
+    edited_resubmit: bool,
+    idempotency_key: Option<&str>,
+) -> Option<&str> {
+    if !enabled || zdr || regenerated || edited_resubmit {
+        return None;
+    }
+    idempotency_key
+        .map(str::trim)
+        .filter(|key| crate::queued_input::valid_client_message_id(key))
 }
 
 /// Ensure the request has a thread, persist the user prompt, and create a run.
@@ -382,6 +432,54 @@ pub async fn prepare_managed_run_authenticated(
     // caller of this function, matching today's byte-identical behavior.
     retrieval_scope: Option<&str>,
 ) -> Result<SessionRun> {
+    prepare_managed_run_authenticated_with_receipt(
+        state,
+        requested_thread_id,
+        requested_session_key,
+        org_id,
+        user_id,
+        goal,
+        agent_id,
+        mode,
+        start_key,
+        source,
+        zdr,
+        bearer,
+        space,
+        append_space,
+        conversation_only,
+        retrieval_scope,
+        None,
+    )
+    .await
+}
+
+/// [`prepare_managed_run_authenticated`] for a user send that names itself: the prompt is persisted
+/// under `client_message_id` (from [`send_receipt_id`]), so a repeat of the send finds the first
+/// row instead of writing a second.
+///
+/// # Errors
+/// As [`prepare_managed_run_authenticated`].
+#[allow(clippy::too_many_arguments)]
+pub async fn prepare_managed_run_authenticated_with_receipt(
+    state: &AppState,
+    requested_thread_id: Option<&str>,
+    requested_session_key: Option<&str>,
+    org_id: &str,
+    user_id: &str,
+    goal: &str,
+    agent_id: &str,
+    mode: &str,
+    start_key: &str,
+    source: ManagedRunSource,
+    zdr: bool,
+    bearer: &VerifiedSessionBearer,
+    space: Option<&ThreadSpaceContext>,
+    append_space: Option<&ThreadSpaceContext>,
+    conversation_only: bool,
+    retrieval_scope: Option<&str>,
+    client_message_id: Option<&str>,
+) -> Result<SessionRun> {
     prepare_managed_run_with_bearer(
         state,
         requested_thread_id,
@@ -399,6 +497,8 @@ pub async fn prepare_managed_run_authenticated(
         append_space,
         conversation_only,
         retrieval_scope,
+        client_message_id,
+        true,
     )
     .await
 }
@@ -438,6 +538,8 @@ pub(crate) async fn prepare_managed_run_with_token(
         None,
         false,
         None,
+        None,
+        true,
     )
     .await
 }
@@ -517,6 +619,7 @@ pub(crate) async fn prepare_idempotent_browser_run(
             None,
             false,
             None,
+            None,
         )
         .await
         {
@@ -544,6 +647,145 @@ pub(crate) async fn prepare_idempotent_browser_run(
     })
 }
 
+/// What a regenerate or an edit leaves the run to answer (WS17 S9). For a regenerate, the question the
+/// answer continues, read from the thread so the model is asked what the thread shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VersionMove {
+    pub goal: Option<String>,
+}
+
+/// The typed refusal of a branch move the thread cannot make: a turn that is not on the active path, is of
+/// the wrong role, or has no turn to move to. The gateway maps it to the `history_branch_refused` conflict.
+const VERSION_TURN_REFUSED: &str = "history_branch_refused";
+
+/// Moves the active branch of `thread_id` for a regenerate or an edit (WS17 S9), before the run that answers
+/// it starts. The thread is read once: its turns, with the inactive branches, give the turn's parent (where
+/// the leaf moves), the leaf the move must still find (the compare-and-set) and, for a regenerate, the
+/// question. A turn written before the tree has no parent yet, so the turn before it in sequence is its
+/// parent, as Session Core links a legacy chain.
+///
+/// # Errors
+/// `FailedPrecondition` with `history_branch_refused` for a refused turn; Session Core's own refusals of the
+/// move (a stale leaf, an active run, a Space or waived thread) come back unchanged.
+pub async fn move_active_leaf(
+    state: &AppState,
+    org_id: &str,
+    thread_id: &str,
+    turn: &crate::normalize::VersionTurn,
+    bearer: &VerifiedSessionBearer,
+) -> Result<VersionMove, tonic::Status> {
+    use crate::normalize::VersionTurn;
+    use mp_contracts::model_plane::v1::{ListConversationRequest, SetActiveLeafRequest};
+
+    let mut session_client = state.session_client.clone();
+    let turns = session_client
+        .list_conversation(crate::sse::authenticated_session_request(
+            ListConversationRequest {
+                org_id: org_id.to_owned(),
+                thread_id: thread_id.to_owned(),
+                space_id: String::new(),
+                space_read_decision_ref: String::new(),
+                space_read_decision_token: String::new(),
+                // Unpaged, with the branches the leaf is not on: the leaf is the newest active turn.
+                limit: 0,
+                before_message_id: String::new(),
+                include_inactive: true,
+            },
+            bearer,
+        )?)
+        .await?
+        .into_inner()
+        .messages;
+
+    let refused = || tonic::Status::failed_precondition(VERSION_TURN_REFUSED);
+    let (message_id, role) = match turn {
+        VersionTurn::Regenerate { message_id } => (message_id, "assistant"),
+        VersionTurn::Edit { message_id } => (message_id, "user"),
+    };
+    let index = turns
+        .iter()
+        .position(|message| &message.message_id == message_id)
+        .ok_or_else(refused)?;
+    let message = &turns[index];
+    if message.role != role || !message.on_active_path {
+        return Err(refused());
+    }
+    let parent_index = if message.parent_message_id.is_empty() {
+        index.checked_sub(1)
+    } else {
+        turns
+            .iter()
+            .position(|candidate| candidate.message_id == message.parent_message_id)
+    }
+    .ok_or_else(refused)?;
+    let parent = &turns[parent_index];
+    let goal = match turn {
+        VersionTurn::Regenerate { .. } if parent.role == "user" => Some(parent.content.clone()),
+        VersionTurn::Regenerate { .. } => return Err(refused()),
+        VersionTurn::Edit { .. } => None,
+    };
+    let expected_leaf_message_id = turns
+        .iter()
+        .rev()
+        .find(|candidate| candidate.on_active_path)
+        .map(|candidate| candidate.message_id.clone())
+        .unwrap_or_default();
+
+    state
+        .message_tree_client
+        .clone()
+        .set_active_leaf(crate::sse::authenticated_session_request(
+            SetActiveLeafRequest {
+                org_id: org_id.to_owned(),
+                thread_id: thread_id.to_owned(),
+                target_message_id: parent.message_id.clone(),
+                expected_leaf_message_id,
+            },
+            bearer,
+        )?)
+        .await?;
+    Ok(VersionMove { goal })
+}
+
+/// The managed run of a regenerate or an edit whose branch has moved (see [`move_active_leaf`]). A regenerate
+/// appends no user turn, since its question is already the leaf. An edit appends its text beside the edited
+/// turn, as an ordinary send does. The rest is the ordinary managed start.
+///
+/// # Errors
+/// As [`prepare_managed_run_authenticated`].
+pub async fn prepare_version_run_authenticated(
+    state: &AppState,
+    thread_id: &str,
+    org_id: &str,
+    user_id: &str,
+    goal: &str,
+    turn: &crate::normalize::VersionTurn,
+    start_key: &str,
+    bearer: &VerifiedSessionBearer,
+) -> Result<SessionRun> {
+    prepare_managed_run_with_bearer(
+        state,
+        Some(thread_id),
+        None,
+        org_id,
+        user_id,
+        goal,
+        "model-gateway",
+        "execute",
+        start_key,
+        ManagedRunSource::GatewayDirect,
+        false,
+        Some(bearer.as_str()),
+        None,
+        None,
+        false,
+        None,
+        None,
+        matches!(turn, crate::normalize::VersionTurn::Edit { .. }),
+    )
+    .await
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn prepare_managed_run_with_bearer(
     state: &AppState,
@@ -562,6 +804,8 @@ async fn prepare_managed_run_with_bearer(
     append_space: Option<&ThreadSpaceContext>,
     conversation_only: bool,
     retrieval_scope: Option<&str>,
+    client_message_id: Option<&str>,
+    append_goal: bool,
 ) -> Result<SessionRun> {
     let thread_id = if zdr {
         // Do not persist a caller-provided thread id or prompt before Session
@@ -583,9 +827,12 @@ async fn prepare_managed_run_with_bearer(
             )
             .await?
         };
-        if let Err(error) =
-            append_user_message(&mut session_client, &thread_id, goal, bearer, append_space, conversation_only, retrieval_scope).await
-        {
+        let appended = if append_goal {
+            append_user_message(&mut session_client, &thread_id, goal, bearer, append_space, conversation_only, retrieval_scope, client_message_id).await
+        } else {
+            Ok(AppendReceipt::default())
+        };
+        if let Err(error) = appended {
             if non_empty(requested_thread_id).is_some() && missing_thread_append_error(&error) {
                 tracing::info!(
                     requested_thread_id = %thread_id,
@@ -600,7 +847,7 @@ async fn prepare_managed_run_with_bearer(
                     space,
                 )
                 .await?;
-                append_user_message(&mut session_client, &thread_id, goal, bearer, append_space, conversation_only, retrieval_scope)
+                append_user_message(&mut session_client, &thread_id, goal, bearer, append_space, conversation_only, retrieval_scope, client_message_id)
                     .await
                     .context("session-core append_message(user) failed")?;
             } else {
@@ -702,6 +949,11 @@ pub(crate) async fn require_durable_run_owner_with_token(
         .await
         .map(|response| response.into_inner().authorized)
         .map_err(|error| {
+            // A typed refusal from Session Core (a posture mismatch under owner decision 17) is the answer
+            // and passes through unchanged. Any other failure reads as the authority being unavailable.
+            if mp_contracts::zdr_refusal::Refusal::from_status(&error).is_some() {
+                return error;
+            }
             tracing::warn!(code = ?error.code(), "Session Core run ownership lookup unavailable");
             tonic::Status::unavailable("run ownership unavailable")
         })?;
@@ -736,7 +988,7 @@ async fn prepare_run_with_bearer(
         .await?
     };
 
-    if let Err(error) = append_user_message(&mut client, &thread_id, goal, bearer, None, false, None).await {
+    if let Err(error) = append_user_message(&mut client, &thread_id, goal, bearer, None, false, None, None).await {
         if non_empty(requested_thread_id).is_some() && missing_thread_append_error(&error) {
             tracing::info!(
                 requested_thread_id = %thread_id,
@@ -751,7 +1003,7 @@ async fn prepare_run_with_bearer(
                 None,
             )
             .await?;
-            append_user_message(&mut client, &thread_id, goal, bearer, None, false, None)
+            append_user_message(&mut client, &thread_id, goal, bearer, None, false, None, None)
                 .await
                 .context("session-core append_message(user) failed")?;
         } else {
@@ -1349,17 +1601,83 @@ pub async fn terminalize_browser_agent_run_authenticated(
     }
     let (outcome, failure_code) = match terminal {
         BrowserAgentTerminal::Completed => (TerminalOutcome::Completed, ""),
-        BrowserAgentTerminal::Failed(_) => (TerminalOutcome::Failed, "browser_failed"),
+        BrowserAgentTerminal::Failed(classified) => {
+            // The classified code only: the step's error text is not logged,
+            // because the browser loop's reasons can carry URLs.
+            tracing::warn!(
+                run_id = %run.run_id,
+                failure_code = classified,
+                "browser-agent run failed"
+            );
+            (
+                TerminalOutcome::Failed,
+                browser_terminal_failure_code(classified),
+            )
+        }
     };
-    record_gateway_managed_terminal_outcome(
-        state,
-        &run.run_id,
-        &run.org_id,
-        ManagedRunSource::GatewayBrowser,
-        outcome,
-        failure_code,
-    )
+    record_browser_terminal_with_fallback(failure_code, |code| {
+        record_gateway_managed_terminal_outcome(
+            state,
+            &run.run_id,
+            &run.org_id,
+            ManagedRunSource::GatewayBrowser,
+            outcome,
+            code,
+        )
+    })
     .await
+}
+
+/// The generic durable code for a failed browser-agent run, and the one every
+/// Session Core build accepts.
+const BROWSER_FAILED_CODE: &str = "browser_failed";
+
+/// Map the browser endpoint's classified failure (`browser_run.rs`
+/// `classify_browser_execution_status`) to the durable, allowlisted
+/// `failure_code` on the terminal receipt. Must stay within
+/// `terminalization::ALLOWED_FAILURE_CODES` in Session Core and the matching
+/// CHECK on `managed_run_terminalization_outbox` (migration 0069).
+fn browser_terminal_failure_code(classified: &str) -> &'static str {
+    match classified {
+        "browser_agent_permission_denied" => "browser_permission_denied",
+        "browser_agent_timed_out" => "browser_timed_out",
+        "browser_agent_resource_exhausted" => "browser_resource_exhausted",
+        _ => BROWSER_FAILED_CODE,
+    }
+}
+
+/// Record a browser terminal receipt, falling back once to `browser_failed`
+/// when Session Core refuses a specific code with `InvalidArgument`.
+///
+/// A Session Core build older than migration 0069 does not know the specific
+/// browser codes and rejects them before any database access, so the retry
+/// cannot double-write; it only makes a gateway-before-session-core deploy
+/// order harmless. Any other failure, and any refusal of `browser_failed`
+/// itself, is returned unchanged.
+async fn record_browser_terminal_with_fallback<F, Fut>(
+    failure_code: &'static str,
+    mut record: F,
+) -> Result<()>
+where
+    F: FnMut(&'static str) -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    match record(failure_code).await {
+        Err(error)
+            if !failure_code.is_empty()
+                && failure_code != BROWSER_FAILED_CODE
+                && error
+                    .downcast_ref::<tonic::Status>()
+                    .is_some_and(|status| status.code() == Code::InvalidArgument) =>
+        {
+            tracing::warn!(
+                failure_code,
+                "session-core refused the browser failure code; recording browser_failed instead"
+            );
+            record(BROWSER_FAILED_CODE).await
+        }
+        other => other,
+    }
 }
 
 /// Mark a run cancelled through Session Core's authoritative run lifecycle
@@ -1737,6 +2055,9 @@ fn json_to_prost_value(value: &serde_json::Value) -> prost_types::Value {
 /// append has always sent, so this path grants no authority the normal send
 /// path does not.
 ///
+/// `client_message_id` is the receipt the SPA's tray reports against (`None` with send receipts
+/// off): a repeat of a queued message the thread already holds answers with the first row.
+///
 /// # Errors
 /// Returns an error when the credential cannot be forwarded, or Session Core
 /// rejects or cannot complete the append.
@@ -1747,7 +2068,8 @@ pub async fn append_queued_user_message(
     bearer: &VerifiedSessionBearer,
     space: Option<&ThreadSpaceContext>,
     conversation_only: bool,
-) -> Result<(), tonic::Status> {
+    client_message_id: Option<&str>,
+) -> Result<AppendReceipt, tonic::Status> {
     let mut client = state.session_client.clone();
     append_user_message(
         &mut client,
@@ -1763,12 +2085,103 @@ pub async fn append_queued_user_message(
         // of this item's receipt/citation guarantee (see `EnqueueOutcome`'s
         // doc comment in `queued_input.rs`).
         None,
+        client_message_id,
     )
     .await
     .map_err(|error| {
         tracing::warn!(%error, %thread_id, "session-core append_message(queued user) failed");
         error
     })
+}
+
+/// Bound on the read of a thread's plan grant at run start. The read sits on the path of
+/// every Do-run start while the durable grant switch is on, so a Session Core that does not
+/// answer must cost a bounded delay and no more: the caller treats the timeout as an
+/// unreadable grant ([`ThreadGrant::unreadable`]), which is not the same as "no grant".
+const THREAD_GRANT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A thread's plan grant as Session Core holds it (build plan WS04 S4). The default is "no
+/// grant": nothing recorded, lapsed, or a rung this build does not know. A read that failed is
+/// NOT the default: it is [`ThreadGrant::unreadable`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ThreadGrant {
+    /// The rung the thread's approved plan granted. `None` is "no live grant", which is not
+    /// the same as READ_ONLY: nothing was stated.
+    pub rung: Option<AutonomyRung>,
+    /// The plan approved with the grant, when it named one. Reading it does not consume it:
+    /// the plan's own `APPROVED -> EXECUTING` compare-and-swap is the single-use guard.
+    pub approved_plan_id: Option<String>,
+    /// When the grant lapses, unix seconds.
+    pub expires_at_unix: Option<i64>,
+    /// The READ itself failed (a timeout, `Unavailable`, `Unimplemented` from an older Session
+    /// Core, a refusal), so nothing is known about the grant. This is NOT "no grant": a caller
+    /// must not read it as the thread having none, because a grant may well exist that this
+    /// call could not see. It is only ever set by [`ThreadGrant::unreadable`].
+    pub read_failed: bool,
+}
+
+impl ThreadGrant {
+    /// The answer for a grant that could not be read (see [`ThreadGrant::read_failed`]).
+    #[must_use]
+    pub fn unreadable() -> Self {
+        Self {
+            read_failed: true,
+            ..Self::default()
+        }
+    }
+}
+
+impl From<GetThreadGrantResponse> for ThreadGrant {
+    fn from(response: GetThreadGrantResponse) -> Self {
+        let rung = AutonomyRung::try_from(response.granted_rung)
+            .ok()
+            .filter(|rung| *rung != AutonomyRung::Unspecified);
+        if rung.is_none() {
+            return Self::default();
+        }
+        Self {
+            rung,
+            approved_plan_id: Some(response.approved_plan_id).filter(|id| !id.is_empty()),
+            expires_at_unix: response.expires_at.map(|at| at.seconds),
+            read_failed: false,
+        }
+    }
+}
+
+/// Read the live plan grant of `thread_id` from Session Core (`ThreadAutonomy`), with the
+/// caller's own credential: Session Core checks that the caller owns the thread and answers
+/// nothing for another org's. One primary-key read, uncached on purpose: a cache would be a
+/// second place a revoked or replaced grant could still be believed.
+///
+/// # Errors
+/// Returns an error when the reader is not configured, the credential cannot be forwarded,
+/// Session Core refuses or does not answer within [`THREAD_GRANT_TIMEOUT`]. An absent grant
+/// is not an error: it is `Ok(ThreadGrant::default())`.
+pub async fn thread_grant(
+    state: &AppState,
+    org_id: &str,
+    thread_id: &str,
+    bearer: &str,
+) -> Result<ThreadGrant, tonic::Status> {
+    let Some(mut client) = state.plan_mode.durable_grant_client() else {
+        return Err(tonic::Status::unavailable(
+            "the durable plan grant reader is not configured",
+        ));
+    };
+    let mut request = tonic::Request::new(GetThreadGrantRequest {
+        thread_id: thread_id.to_owned(),
+        org_id: org_id.to_owned(),
+    });
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {bearer}")
+            .parse()
+            .map_err(|_| tonic::Status::internal("verified session credential is not forwardable"))?,
+    );
+    let response = tokio::time::timeout(THREAD_GRANT_TIMEOUT, client.get_thread_grant(request))
+        .await
+        .map_err(|_| tonic::Status::deadline_exceeded("reading the thread's plan grant timed out"))??;
+    Ok(response.into_inner().into())
 }
 
 trait StringExt {
@@ -1787,6 +2200,23 @@ impl StringExt for String {
 
 #[cfg(test)]
 mod tests {
+    /// A send names itself to the transcript only with the switch on, only when the turn keeps a
+    /// transcript at all, and never when it restates the previous question on purpose.
+    #[test]
+    fn a_send_is_named_only_when_receipts_are_on_and_the_turn_is_neither_zdr_nor_a_redo() {
+        use super::send_receipt_id as id;
+        assert_eq!(id(true, false, false, false, Some("msg-1")), Some("msg-1"));
+        assert_eq!(id(true, false, false, false, Some(" msg-1 ")), Some("msg-1"));
+        assert_eq!(id(false, false, false, false, Some("msg-1")), None, "switch off: byte-identical");
+        assert_eq!(id(true, true, false, false, Some("msg-1")), None, "a zdr turn names nothing");
+        assert_eq!(id(true, false, true, false, Some("msg-1")), None, "regenerate");
+        assert_eq!(id(true, false, false, true, Some("msg-1")), None, "edited resubmit");
+        assert_eq!(id(true, false, false, false, None), None);
+        for free_form in ["", "  ", "has space", "-lead", "x".repeat(129).as_str(), "emoji-\u{1F600}"] {
+            assert_eq!(id(true, false, false, false, Some(free_form)), None, "{free_form:?}");
+        }
+    }
+
     #[test]
     fn native_checkpoint_survives_durable_metadata_encoding_and_respects_zdr() {
         use prost::Message;
@@ -1797,6 +2227,74 @@ mod tests {
         assert!(super::with_compaction_summary(None, "private source", true).is_none());
         assert!(super::with_compaction_summary(None, &"x".repeat(128_001), false).is_none());
         assert!(super::persisted_compaction_summary(None).is_empty());
+    }
+
+    /// What Session Core answers for a thread's grant becomes the gateway's view of it: a live
+    /// grant in full, and every other answer (none, a rung this build cannot name) as no grant,
+    /// which is never READ_ONLY and never a rung nobody approved.
+    #[test]
+    fn a_thread_grant_answer_becomes_a_grant_or_no_grant() {
+        use super::{AutonomyRung, GetThreadGrantResponse, ThreadGrant};
+        let live = ThreadGrant::from(GetThreadGrantResponse {
+            granted_rung: AutonomyRung::WorkspaceWrite as i32,
+            justification: "writes the report".to_owned(),
+            approved_plan_id: "plan-7".to_owned(),
+            expires_at: Some(prost_types::Timestamp {
+                seconds: 1_800_000_000,
+                nanos: 0,
+            }),
+        });
+        assert_eq!(live.rung, Some(AutonomyRung::WorkspaceWrite));
+        assert_eq!(live.approved_plan_id.as_deref(), Some("plan-7"));
+        assert_eq!(live.expires_at_unix, Some(1_800_000_000));
+
+        let without_plan = ThreadGrant::from(GetThreadGrantResponse {
+            granted_rung: AutonomyRung::DangerFullAccess as i32,
+            ..Default::default()
+        });
+        assert_eq!(without_plan.rung, Some(AutonomyRung::DangerFullAccess));
+        assert_eq!(without_plan.approved_plan_id, None, "an empty plan id is no plan");
+
+        for granted_rung in [AutonomyRung::Unspecified as i32, 99, -1] {
+            assert_eq!(
+                ThreadGrant::from(GetThreadGrantResponse {
+                    granted_rung,
+                    approved_plan_id: "plan-7".to_owned(),
+                    ..Default::default()
+                }),
+                ThreadGrant::default(),
+                "rung {granted_rung} is no grant, and carries no plan with it"
+            );
+        }
+    }
+
+    /// A grant that could not be read is its own answer, never the "no grant" one: only the
+    /// reader's own failure sets it, and no answer from Session Core can.
+    #[test]
+    fn an_unreadable_grant_is_not_the_no_grant_answer() {
+        use super::{AutonomyRung, GetThreadGrantResponse, ThreadGrant};
+        let unreadable = ThreadGrant::unreadable();
+        assert!(unreadable.read_failed);
+        assert_ne!(unreadable, ThreadGrant::default(), "unreadable is not 'no grant'");
+        assert_eq!(unreadable.rung, None, "an unreadable grant states no rung of its own");
+        for granted_rung in [AutonomyRung::Unspecified as i32, AutonomyRung::ReadOnly as i32, 99] {
+            let answered = ThreadGrant::from(GetThreadGrantResponse {
+                granted_rung,
+                ..Default::default()
+            });
+            assert!(!answered.read_failed, "an answer is never a failed read (rung {granted_rung})");
+        }
+    }
+
+    /// A gateway whose reader is not configured answers a typed refusal, not a guess: the caller
+    /// then treats the grant as unreadable, never as the thread holding none.
+    #[tokio::test]
+    async fn reading_a_grant_without_a_configured_reader_is_unavailable() {
+        let state = crate::state::AppState::new();
+        let error = super::thread_grant(&state, "org-1", "thread-1", "token")
+            .await
+            .expect_err("the durable grant switch is off, so there is no reader");
+        assert_eq!(error.code(), tonic::Code::Unavailable);
     }
 
     /// A reload shows a failed run by its recorded code, so a draft the
@@ -2280,5 +2778,92 @@ mod tests {
         assert_ne!(first, second);
         assert!(first.contains("full-goal-blake3:"));
         assert!(second.contains("full-goal-blake3:"));
+    }
+
+    #[test]
+    fn a_classified_browser_failure_keeps_its_durable_code() {
+        for (classified, durable) in [
+            (
+                "browser_agent_permission_denied",
+                "browser_permission_denied",
+            ),
+            ("browser_agent_timed_out", "browser_timed_out"),
+            (
+                "browser_agent_resource_exhausted",
+                "browser_resource_exhausted",
+            ),
+            ("browser_agent_failed", "browser_failed"),
+            ("browser_agent_something_new", "browser_failed"),
+            ("", "browser_failed"),
+        ] {
+            assert_eq!(
+                super::browser_terminal_failure_code(classified),
+                durable,
+                "{classified}"
+            );
+        }
+    }
+
+    fn refused(code: tonic::Code) -> anyhow::Error {
+        use anyhow::Context as _;
+        Err::<(), _>(tonic::Status::new(code, "x"))
+            .context("session-core managed terminal receipt failed")
+            .unwrap_err()
+    }
+
+    /// A Session Core that predates the specific browser codes answers
+    /// InvalidArgument; the receipt is retried exactly once as browser_failed.
+    #[tokio::test]
+    async fn an_unknown_browser_code_is_retried_once_as_browser_failed() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&calls);
+        super::record_browser_terminal_with_fallback("browser_permission_denied", |code| {
+            seen.lock().unwrap().push(code);
+            let result = if code == "browser_failed" {
+                Ok(())
+            } else {
+                Err(refused(tonic::Code::InvalidArgument))
+            };
+            async move { result }
+        })
+        .await
+        .expect("the browser_failed retry succeeds");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["browser_permission_denied", "browser_failed"]
+        );
+    }
+
+    /// Only InvalidArgument on a specific code is retried: other failures, a
+    /// refused browser_failed, and a completed receipt are returned as is.
+    #[tokio::test]
+    async fn the_browser_code_fallback_retries_nothing_else() {
+        for (code, status) in [
+            ("browser_timed_out", tonic::Code::Unavailable),
+            ("browser_resource_exhausted", tonic::Code::PermissionDenied),
+            ("browser_failed", tonic::Code::InvalidArgument),
+            ("", tonic::Code::InvalidArgument),
+        ] {
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let seen = Arc::clone(&calls);
+            let outcome = super::record_browser_terminal_with_fallback(code, |sent| {
+                seen.lock().unwrap().push(sent);
+                let result = Err(refused(status));
+                async move { result }
+            })
+            .await;
+            assert!(outcome.is_err(), "{code} {status:?}");
+            assert_eq!(*calls.lock().unwrap(), vec![code], "{code} {status:?}");
+        }
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&calls);
+        super::record_browser_terminal_with_fallback("browser_permission_denied", |sent| {
+            seen.lock().unwrap().push(sent);
+            async move { Ok(()) }
+        })
+        .await
+        .expect("an accepted specific code is recorded once");
+        assert_eq!(*calls.lock().unwrap(), vec!["browser_permission_denied"]);
     }
 }

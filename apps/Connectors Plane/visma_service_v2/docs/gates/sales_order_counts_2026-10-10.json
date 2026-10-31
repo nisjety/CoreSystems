@@ -1,0 +1,134 @@
+[
+ {
+  "tenant": "33f319b9-4d57-11ee-960c-025417856183",
+  "name": "Aquatiq AS (pilot)",
+  "visma_total": 22314,
+  "changed": 336,
+  "silver_total": 22105,
+  "last_sync": "2026-10-01T13:50:35.570527+00:00",
+  "last_sync_source": "last staging write (no heartbeat yet)",
+  "verdict": "PASS",
+  "reason": "209 missing, within the 336 changed since the last sync"
+ },
+ {
+  "tenant": "ab0e5d06-fa25-11ed-a0e0-0693d8a7c3dd",
+  "name": "Aqua Pharma AS",
+  "visma_total": 49,
+  "changed": 0,
+  "silver_total": 49,
+  "last_sync": "2026-10-01T14:10:40.679640+00:00",
+  "last_sync_source": "last staging write (no heartbeat yet)",
+  "verdict": "PASS",
+  "reason": "0 missing, within the 0 changed since the last sync"
+ },
+ {
+  "tenant": "ffa4a061-8084-11e9-b307-0aa512338dd6",
+  "name": "Aqua Pharma Group AS",
+  "visma_total": 0,
+  "changed": 0,
+  "silver_total": 0,
+  "last_sync": "none",
+  "last_sync_source": "last staging write (no heartbeat yet)",
+  "verdict": "PASS",
+  "reason": "0 missing, within the 0 changed since the last sync"
+ },
+ {
+  "tenant": "2b6e5cd6-6ce0-11ee-970e-025417856183",
+  "name": "Aquatiq AB",
+  "visma_total": 69,
+  "changed": 0,
+  "silver_total": 69,
+  "last_sync": "2026-10-01T14:00:55.545070+00:00",
+  "last_sync_source": "last staging write (no heartbeat yet)",
+  "verdict": "PASS",
+  "reason": "0 missing, within the 0 changed since the last sync"
+ },
+ {
+  "tenant": "d1507c4a-7717-11ee-970e-025417856183",
+  "name": "Aquatiq Aps",
+  "visma_total": 13,
+  "changed": 0,
+  "silver_total": 13,
+  "last_sync": "2026-10-01T23:31:40.635391+00:00",
+  "last_sync_source": "last staging write (no heartbeat yet)",
+  "verdict": "PASS",
+  "reason": "0 missing, within the 0 changed since the last sync"
+ },
+ {
+  "tenant": "bed46bb6-21cc-11e9-b307-0aa512338dd6",
+  "name": "Aquatiq Food Automation ApS",
+  "visma_total": 0,
+  "changed": 0,
+  "silver_total": 0,
+  "last_sync": "none",
+  "last_sync_source": "last staging write (no heartbeat yet)",
+  "verdict": "PASS",
+  "reason": "0 missing, within the 0 changed since the last sync"
+ },
+ {
+  "tenant": "7d2c489e-21cc-11e9-b307-0aa512338dd6",
+  "name": "Aquatiq Group AS",
+  "visma_total": 0,
+  "changed": 0,
+  "silver_total": 0,
+  "last_sync": "none",
+  "last_sync_source": "last staging write (no heartbeat yet)",
+  "verdict": "PASS",
+  "reason": "0 missing, within the 0 changed since the last sync"
+ },
+ {
+  "tenant": "eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd",
+  "name": "Sensilist AS",
+  "visma_total": 193,
+  "changed": 4,
+  "silver_total": 190,
+  "last_sync": "2026-10-01T13:55:36.377930+00:00",
+  "last_sync_source": "last staging write (no heartbeat yet)",
+  "verdict": "PASS",
+  "reason": "3 missing, within the 4 changed since the last sync"
+ },
+ {
+  "tenant": "9b1fa69b-5568-11ee-960c-025417856183",
+  "name": "Consult AS",
+  "visma_total": 1157,
+  "changed": 0,
+  "silver_total": 1157,
+  "last_sync": "2026-10-01T11:42:31.034168+00:00",
+  "last_sync_source": "last staging write (no heartbeat yet)",
+  "verdict": "PASS",
+  "reason": "0 missing, within the 0 changed since the last sync"
+ },
+ {
+  "tenant": "f630d6b0-5566-11ee-960c-025417856183",
+  "name": "Aquatiq Food Factory AS",
+  "visma_total": 220,
+  "changed": 0,
+  "silver_total": 220,
+  "last_sync": "2026-10-01T12:51:33.790032+00:00",
+  "last_sync_source": "last staging write (no heartbeat yet)",
+  "verdict": "PASS",
+  "reason": "0 missing, within the 0 changed since the last sync"
+ },
+ {
+  "tenant": "61320c0a-102d-11ee-a0e0-0693d8a7c3dd",
+  "name": "Aquatiq Hygiene Systems AS",
+  "visma_total": 3497,
+  "changed": 0,
+  "silver_total": 3497,
+  "last_sync": "2026-10-01T11:48:00.907636+00:00",
+  "last_sync_source": "last staging write (no heartbeat yet)",
+  "verdict": "PASS",
+  "reason": "0 missing, within the 0 changed since the last sync"
+ },
+ {
+  "tenant": "bb6c024e-5567-11ee-960c-025417856183",
+  "name": "Aquatiq Sense AS",
+  "visma_total": 77,
+  "changed": 0,
+  "silver_total": 77,
+  "last_sync": "2026-10-01T11:22:53.216519+00:00",
+  "last_sync_source": "last staging write (no heartbeat yet)",
+  "verdict": "PASS",
+  "reason": "0 missing, within the 0 changed since the last sync"
+ }
+]

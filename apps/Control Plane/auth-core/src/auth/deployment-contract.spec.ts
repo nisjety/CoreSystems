@@ -394,8 +394,8 @@ describe('Control Plane deployment contract', () => {
     expect(worker).toContain('publishOrganizationProjection');
     expect(worker).toContain('publishOrganizationMembershipProjection');
     expect(worker).toContain('publishOrganizationDeletionProjection');
-    expect(publisher).toContain('aqencia.controlplane.org.changed');
-    expect(publisher).toContain('aqencia.controlplane.org.member_changed');
+    expect(publisher).toContain('controlplane.org.changed');
+    expect(publisher).toContain('controlplane.org.member_changed');
     expect(worker).toContain('revision,');
     expect(deletionMigration).toContain('event_synced_at');
   });

@@ -13,6 +13,7 @@ import {
 } from '@/shared/icons'
 import type { ThreadContext } from '@/shared/api/chat-client'
 import { OPEN_FEEDBACK_EVENT } from '@/features/core/components/FeedbackWidget'
+import { isSafeLinkHref } from '../lib/safe-href'
 import {
   getRunProofBundle,
   type ProofApproval,
@@ -25,6 +26,7 @@ import {
   type Plan,
   type Todo,
 } from '@/shared/api/orchestration-client'
+import { approvalKindLabel } from '@/shared/approvals/approval-copy'
 import { ToolCallCard } from './ChatMessages'
 import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch } from 'solid-js'
 import { createResource } from '@/shared/lib/create-resource-compat'
@@ -36,6 +38,8 @@ import {
   imageArtifactSrc,
 } from './chat-artifacts'
 import {
+  citationGroupKey,
+  citationGroupLabel,
   evidenceSourceGroupKey,
   evidenceSourceGroupLabel,
   evidenceSourceSnippet,
@@ -355,7 +359,16 @@ export function EmptyPanel(props: { icon: JSX.Element; title: string; subtitle: 
  */
 export function SourcesPanel(props: { grounding?: ChatKnowledgeGrounding | null; sources: EvidenceSource[] }) {
   const i18n = useI18n()
-  const groups = createMemo(() => partitionEvidenceSources(props.sources))
+  // Connected-app items (WS23 S6) are the person's own mail, files and events, not web or knowledge
+  // evidence: they sit under their own heading, grouped by account, and stay out of the read tally.
+  const connectorSources = createMemo(() => props.sources.filter(isConnectorSource))
+  const connectorGroups = createMemo(() => groupBySourceGroupId(
+    connectorSources(),
+    (source) => citationGroupKey(source),
+    (source) => citationGroupLabel(source),
+  ))
+  const webSources = createMemo(() => props.sources.filter((source) => !isConnectorSource(source)))
+  const groups = createMemo(() => partitionEvidenceSources(webSources()))
   const hasUnread = () => groups().unread.length > 0
   // `<For>` runs its mapper untracked in Solid 2, so the card's position is
   // computed here rather than read off `groups()` inside the mapper — where a
@@ -398,6 +411,23 @@ export function SourcesPanel(props: { grounding?: ChatKnowledgeGrounding | null;
           <Show when={props.grounding}>
             {(grounding) => <GroundingOverviewCard grounding={grounding()} />}
           </Show>
+          <Show when={connectorSources().length > 0}>
+            <section class="verevon-chat-source-group verevon-chat-source-group--connector">
+              <h2 class="verevon-chat-source-group__heading">{i18n.tr('Tilkoblede apper', 'Connected apps')}</h2>
+              <For each={connectorGroups()}>
+                {(group) => (
+                  <section class="verevon-chat-source-domain-group">
+                    <Show when={connectorGroups().length > 1}>
+                      <h3 class="verevon-chat-source-domain-group__heading">{group.label}</h3>
+                    </Show>
+                    <For each={group.items}>
+                      {(source) => <ConnectorSourceCard source={source} />}
+                    </For>
+                  </section>
+                )}
+              </For>
+            </section>
+          </Show>
           <Show when={hasUnread()}>
             {/* Both numbers, in one line, before the first card: the count in
                 the tab badge is the read one, and a reader who has just seen
@@ -405,8 +435,8 @@ export function SourcesPanel(props: { grounding?: ChatKnowledgeGrounding | null;
                 list below is. */}
             <p class="verevon-chat-source-tally" role="note">
               {i18n.tr(
-                `${groups().read.length} av ${props.sources.length} kilder er lest`,
-                `${groups().read.length} of ${props.sources.length} sources were read`,
+                `${groups().read.length} av ${webSources().length} kilder er lest`,
+                `${groups().read.length} of ${webSources().length} sources were read`,
               )}
             </p>
           </Show>
@@ -535,21 +565,63 @@ export function KnowledgeSourceCard(props: { source: ChatGroundingSource; index:
   )
 }
 
+/** A connected-app item (WS23 S6) is a web-shaped source that came from the connector origin. */
+function isConnectorSource(source: EvidenceSource): source is Citation & { kind: 'web' } {
+  return source.kind === 'web' && source.origin === 'connector'
+}
+
+/**
+ * A connected-app item cited in an answer (WS23 S6): its title and the metadata line the gateway
+ * allows (sender and date, a start time or a file type). Body text is never sent, so none is shown,
+ * and the title links only when the provider's own address is a safe link.
+ */
+export function ConnectorSourceCard(props: { source: Citation & { kind: 'web' } }) {
+  const i18n = useI18n()
+  const body = () => (
+    <>
+      <div class="verevon-chat-source-card__meta">
+        <span>{i18n.tr('Tilkoblet app', 'Connected app')}</span>
+        <em>{citationGroupLabel(props.source)}</em>
+      </div>
+      <h2>{props.source.title || citationGroupLabel(props.source)}</h2>
+      <Show when={props.source.snippet}><p>{props.source.snippet}</p></Show>
+    </>
+  )
+  return (
+    <Show
+      when={isSafeLinkHref(props.source.url)}
+      fallback={<div class="verevon-chat-source-card">{body()}</div>}
+    >
+      <a class="verevon-chat-source-card" href={props.source.url} target="_blank" rel="noopener noreferrer">{body()}</a>
+    </Show>
+  )
+}
+
 export function WebSourceCard(props: { source: Citation & { kind: 'web' }; index: number }) {
   // The `[not read: …]` marker is the grouping's input, not the reader's: under
   // the "Ikke lest" heading it says nothing the heading has not already said,
   // and an unread lead whose snippet was ONLY the marker must render no
   // paragraph at all rather than an empty one.
+  const i18n = useI18n()
   const snippet = createMemo(() => evidenceSourceSnippet(props.source))
-  return (
-    <a class="verevon-chat-source-card" href={props.source.url} target="_blank" rel="noopener noreferrer">
+  const body = () => (
+    <>
       <div class="verevon-chat-source-card__meta">
         <span>{props.index}</span>
         <em>{hostname(props.source.url)}</em>
       </div>
       <h2>{props.source.title || props.source.url}</h2>
       <Show when={snippet()}><p>{snippet()}</p></Show>
-    </a>
+    </>
+  )
+  // The URL comes from the model's search results: an unsafe one keeps the card's text but is not a link.
+  return (
+    <Show
+      when={isSafeLinkHref(props.source.url)}
+      fallback={<span class="verevon-chat-source-card verevon-chat-link-blocked" title={i18n.tr('Lenke blokkert: ukjent adresse', 'Link blocked: unsupported address')}>{body()}</span>}
+    >
+      <a class="verevon-chat-source-card" href={props.source.url} target="_blank" rel="noopener noreferrer">{body()}</a>
+    </Show>
   )
 }
 
@@ -1366,7 +1438,7 @@ function ChatProofApproval(props: { approval: ProofApproval }) {
   return (
     <article class="verevon-run-proof__approval verevon-chat-run-proof__approval">
       <div class="verevon-run-proof__approval-head">
-        <span class="verevon-run-proof__kind">{props.approval.kind || 'Handling'}</span>
+        <span class="verevon-run-proof__kind">{approvalKindLabel(props.approval.kind, i18n)}</span>
         <span class={`verevon-run-proof__pill verevon-run-proof__pill--${statusTone()}`}>{status()}</span>
       </div>
       <Show when={execution()?.receiptId || outcome()?.outcome || verification()?.status}>

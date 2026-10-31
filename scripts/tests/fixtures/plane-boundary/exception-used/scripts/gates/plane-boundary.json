@@ -1,0 +1,35 @@
+{
+  "local_hosts": [
+    "localhost",
+    "127.0.0.1"
+  ],
+  "planes": {
+    "Control Plane": {
+      "db_hosts": [
+        "controlplane-postgres"
+      ]
+    },
+    "Model Plane": {
+      "db_hosts": [
+        "postgres"
+      ]
+    }
+  },
+  "shared_hosts": {
+    "legacy-monolith-db": "fixture: a shared host that no plane owns"
+  },
+  "db_exceptions": [
+    {
+      "file": "apps/Model Plane/deploy/docker-compose.yml",
+      "host": "controlplane-postgres",
+      "reason": "fixture: a reviewed cross-plane link"
+    }
+  ],
+  "manifest_exceptions": [
+    {
+      "file": "apps/Model Plane/rust/services/api/Cargo.toml",
+      "target": "apps/Control Plane/rust/cp-lib",
+      "reason": "fixture: a reviewed cross-plane path dependency"
+    }
+  ]
+}

@@ -25,6 +25,7 @@ use orchestration_event::{
     BrowserRunPaused as PbBrowserRunPaused, BrowserRunResumed as PbBrowserRunResumed,
     Event as ProtoEvent, PlanTransitioned as PbPlanTransitioned,
     RunPausedForApproval as PbRunPausedForApproval,
+    RunParked as PbRunParked, RunResumed as PbRunResumed,
     RunResumedAfterApproval as PbRunResumedAfterApproval, SubagentAttached as PbSubagentAttached,
     SubagentStopped as PbSubagentStopped, TodoTransitioned as PbTodoTransitioned,
 };
@@ -43,6 +44,11 @@ pub enum ShimError {
     /// The envelope did not include an event payload.
     #[error("orchestration event envelope missing payload")]
     MissingEvent,
+    /// The event is a wire event with no domain counterpart: the question events
+    /// (build plan WS14 S3) are written by session-core's question store and travel
+    /// only on the run's gRPC stream, never through this mirror.
+    #[error("orchestration event has no domain mapping")]
+    UnsupportedEvent,
     /// The envelope timestamp was not a valid `chrono::DateTime<Utc>`.
     #[error("orchestration event timestamp out of range")]
     InvalidTimestamp,
@@ -291,6 +297,8 @@ impl From<OrchestrationEvent> for ProtoOrchestrationEvent {
                     approval_kind: approval_kind_to_proto(approval_kind),
                     to: approval_state_to_proto(to),
                     decided_by,
+                    // The decision provenance fields (WS13-S3) are not carried by this event shim.
+                    ..Default::default()
                 }),
             ),
             OrchestrationEvent::SubagentAttached {
@@ -473,6 +481,20 @@ impl From<OrchestrationEvent> for ProtoOrchestrationEvent {
                     }),
                 }),
             ),
+            OrchestrationEvent::RunParked { run_id, at } => {
+                envelope(at, ProtoEvent::RunParked(PbRunParked { run_id }))
+            }
+            OrchestrationEvent::RunResumed {
+                run_id,
+                resumed_segment,
+                at,
+            } => envelope(
+                at,
+                ProtoEvent::RunResumed(PbRunResumed {
+                    run_id,
+                    resumed_segment,
+                }),
+            ),
         }
     }
 }
@@ -604,6 +626,18 @@ impl TryFrom<ProtoOrchestrationEvent> for OrchestrationEvent {
                     at,
                 }
             }
+            ProtoEvent::RunParked(p) => OrchestrationEvent::RunParked {
+                run_id: p.run_id,
+                at,
+            },
+            ProtoEvent::RunResumed(p) => OrchestrationEvent::RunResumed {
+                run_id: p.run_id,
+                resumed_segment: p.resumed_segment,
+                at,
+            },
+            ProtoEvent::QuestionAsked(_) | ProtoEvent::QuestionAnswered(_) => {
+                return Err(ShimError::UnsupportedEvent);
+            }
         })
     }
 }
@@ -620,6 +654,25 @@ mod tests {
         let pb: ProtoOrchestrationEvent = ev.clone().into();
         let back: OrchestrationEvent = pb.try_into().expect("decode");
         assert_eq!(*ev, back);
+    }
+
+    #[test]
+    fn the_question_events_have_no_domain_mapping() {
+        use mp_contracts::model_plane::v1::orchestration_event::{QuestionAnswered, QuestionAsked};
+        for event in [
+            ProtoEvent::QuestionAsked(QuestionAsked::default()),
+            ProtoEvent::QuestionAnswered(QuestionAnswered::default()),
+        ] {
+            let pb = ProtoOrchestrationEvent {
+                at: Some(ts_from(fixture_at())),
+                event_id: String::new(),
+                event: Some(event),
+            };
+            assert_eq!(
+                OrchestrationEvent::try_from(pb),
+                Err(ShimError::UnsupportedEvent)
+            );
+        }
     }
 
     #[test]
@@ -728,6 +781,86 @@ mod tests {
             verification_reason: "provider returned authoritative receipt id booking-1".into(),
             at: fixture_at(),
         });
+    }
+
+    #[test]
+    fn round_trip_run_parked() {
+        round_trip(&OrchestrationEvent::RunParked {
+            run_id: "run-1".into(),
+            at: fixture_at(),
+        });
+    }
+
+    #[test]
+    fn round_trip_run_resumed() {
+        round_trip(&OrchestrationEvent::RunResumed {
+            run_id: "run-1".into(),
+            resumed_segment: 3,
+            at: fixture_at(),
+        });
+    }
+
+    #[test]
+    fn run_parked_and_run_resumed_ride_tags_24_and_25() {
+        use prost::Message;
+        // The wire tags are the contract (plan 4.3): field 24 and field 25 of the
+        // envelope, each a length-delimited message. A re-numbering would be
+        // silent for a round trip through this same build, so pin the bytes.
+        let parked: ProtoOrchestrationEvent = OrchestrationEvent::RunParked {
+            run_id: "r".into(),
+            at: fixture_at(),
+        }
+        .into();
+        let resumed: ProtoOrchestrationEvent = OrchestrationEvent::RunResumed {
+            run_id: "r".into(),
+            resumed_segment: 2,
+            at: fixture_at(),
+        }
+        .into();
+        // key = (field << 3) | wire type 2: 24 -> 0xC2 0x01, 25 -> 0xCA 0x01.
+        let parked_bytes = parked.encode_to_vec();
+        let resumed_bytes = resumed.encode_to_vec();
+        assert!(
+            parked_bytes.windows(4).any(|w| w == [0xC2, 0x01, 0x03, 0x0A]),
+            "run_parked must be field 24 holding {{ run_id = 1 }}: {parked_bytes:?}"
+        );
+        assert!(
+            resumed_bytes
+                .windows(6)
+                .any(|w| w == [0xCA, 0x01, 0x05, 0x0A, 0x01, b'r']),
+            "run_resumed must be field 25 holding {{ run_id = 1, .. }}: {resumed_bytes:?}"
+        );
+        assert!(
+            resumed_bytes.windows(2).any(|w| w == [0x10, 0x02]),
+            "resumed_segment must be field 2 of RunResumed: {resumed_bytes:?}"
+        );
+    }
+
+    /// The same bytes are pinned for the Go readers in the Go wire-parity test that
+    /// WS03 S8-2's Go regeneration adds (`go/gen/model_plane/v1`): both sides name the
+    /// run `run-1`, the resumed segment 3 and the envelope time 1_700_000_000 s.
+    #[test]
+    fn run_parked_and_run_resumed_encode_to_the_golden_bytes() {
+        use prost::Message;
+        let parked: ProtoOrchestrationEvent = OrchestrationEvent::RunParked {
+            run_id: "run-1".into(),
+            at: fixture_at(),
+        }
+        .into();
+        assert_eq!(
+            hex::encode(parked.encode_to_vec()),
+            "0a060880e2cfaa06c201070a0572756e2d31"
+        );
+        let resumed: ProtoOrchestrationEvent = OrchestrationEvent::RunResumed {
+            run_id: "run-1".into(),
+            resumed_segment: 3,
+            at: fixture_at(),
+        }
+        .into();
+        assert_eq!(
+            hex::encode(resumed.encode_to_vec()),
+            "0a060880e2cfaa06ca01090a0572756e2d311003"
+        );
     }
 
     #[test]

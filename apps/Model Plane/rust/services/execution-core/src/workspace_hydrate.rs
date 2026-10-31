@@ -3,15 +3,14 @@
 //! apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md
 //! §3 and §8 item 3.5.C.
 //!
-//! **Deliberately standalone, still not wired into a real caller as of this
-//! module's own code.** `code_interpreter.rs`'s existing workspace is fully
-//! ephemeral — created and `Drop`-cleaned up within one tool call, with no
-//! lease or Space association whatsoever; 3.5.C's own sub-slice C.5 is where
-//! that gets rewritten to call `hydrate`/`diff_and_upload`. Everything this
-//! module needs from sandbox-manager now exists (the `GetWorkspaceManifest`
-//! RPC feeding `hydrate`, `SnapshotSandbox`'s `changed_files` field consuming
-//! `diff_and_upload`'s output) — this module itself just hasn't been called
-//! from that rewrite yet.
+//! Driven by `sandbox_lease.rs`, the only module that calls `hydrate` and
+//! `diff_and_upload`. The first Space-scoped `code_interpreter` call or
+//! `process_start` of a run reaches `hydrate` through `ensure_hydrated_workspace`
+//! (the other `process_*` tools reuse an existing lease), and
+//! `release_sandbox_lease_if_any` reaches `diff_and_upload` when the run ends:
+//! from `CancelRun` or the `RunAgent` finalise. A run driven only by
+//! `ExecuteStep` calls has no run-end signal, so its edits are not uploaded
+//! (see the module doc of `sandbox_lease.rs`).
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -152,6 +151,21 @@ fn redact(raw: &[u8]) -> Vec<u8> {
 
 fn sha256_digest(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
+}
+
+/// The version token of one file's content: the `sha256:<hex>` digest of its
+/// redacted bytes. It is the CAS hash [`diff_and_upload`] uploads those bytes
+/// under, so a version handed out now is the one a later diff compares against.
+#[must_use]
+pub fn content_version(raw: &[u8]) -> String {
+    sha256_digest(&redact(raw))
+}
+
+/// Whether redaction would change `raw`, that is, the file holds a known secret
+/// pattern. Binary content is never redacted and so is never reported.
+#[must_use]
+pub fn would_redact(raw: &[u8]) -> bool {
+    redact(raw) != raw
 }
 
 /// Validates `path` is a safe, relative path with no `..`/absolute/prefix
@@ -357,6 +371,79 @@ mod tests {
             .await
             .expect("diff succeeds; the mock only matches byte-identical binary content");
         assert_eq!(changed[0].content_hash, sha256_digest(&binary_content));
+
+        std::fs::remove_dir_all(&target_dir).ok();
+    }
+
+    #[test]
+    fn redaction_is_idempotent_over_fixture_corpus() {
+        // One sample per pattern in `scrub.rs`. A pattern whose output the same
+        // pattern matches again would make a hydrated file look changed at every
+        // run end and be re-uploaded.
+        let corpus = [
+            "Authorization: Bearer abcDEF123.ghi-JKL/mno=",
+            "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.c2lnbmF0dXJlVmFsdWU",
+            "openai sk-proj-abcdefghijklmnop1234",
+            "aws AKIAIOSFODNN7EXAMPLE",
+            "github ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+            "slack xoxb-1234567890-abcdefghij",
+            // Assembled so the file holds no key-shaped literal for a secret scanner to flag.
+            concat!("google AI", "za0123456789abcdefghijklmnopqrstuvwxy"),
+            "header Basic dXNlcjpwYXNzd29yZA==",
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKj\n-----END RSA PRIVATE KEY-----",
+            "postgres://svc:hunter2pass@db.internal:5432/app",
+            "DB_PASSWORD=hunter2hunter2",
+            "api_key: \"xyz123456\"",
+        ];
+        let combined = corpus.join("\n");
+        for sample in corpus.iter().copied().chain(std::iter::once(combined.as_str())) {
+            let raw = sample.as_bytes();
+            assert!(would_redact(raw), "fixture must actually match a pattern: {sample:?}");
+            let once = redact(raw);
+            assert_eq!(redact(&once), once, "redaction must be idempotent: {sample:?}");
+        }
+    }
+
+    #[test]
+    fn would_redact_is_false_for_clean_and_binary_content() {
+        assert!(!would_redact(b"plain notes, nothing secret"));
+        assert!(!would_redact(&[0xFF, 0xFE, 0x00, 0x80]));
+    }
+
+    #[tokio::test]
+    async fn unchanged_hydrated_file_is_never_reuploaded() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT")).respond_with(ResponseTemplate::new(200)).expect(0).mount(&server).await;
+
+        let cas = test_client(&server).await;
+        let target_dir = tempfile_dir("diff-hydrated-secret");
+        let raw = b"api_key: \"xyz123456\"";
+        std::fs::write(target_dir.join("config.txt"), raw).unwrap();
+        // The baseline is what CAS stored when the file was last uploaded: the
+        // version of its redacted bytes, not of the raw bytes on disk.
+        let baseline = HashMap::from([("config.txt".to_owned(), content_version(raw))]);
+
+        let changed = diff_and_upload(&cas, &target_dir, &baseline).await.expect("diff succeeds");
+        assert!(changed.is_empty(), "a file that redacts to its baseline is unchanged: {changed:?}");
+
+        std::fs::remove_dir_all(&target_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn content_version_equals_cas_put_hash() {
+        let server = MockServer::start().await;
+        Mock::given(method("HEAD")).respond_with(ResponseTemplate::new(404)).mount(&server).await;
+        Mock::given(method("PUT")).respond_with(ResponseTemplate::new(200)).mount(&server).await;
+
+        let cas = test_client(&server).await;
+        let target_dir = tempfile_dir("content-version");
+        let raw = b"api_key: \"xyz123456\" and more text";
+        std::fs::write(target_dir.join("notes.txt"), raw).unwrap();
+
+        let changed = diff_and_upload(&cas, &target_dir, &HashMap::new()).await.expect("diff succeeds");
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].content_hash, content_version(raw), "the version a caller reads is the hash CAS stores under");
+        assert!(changed[0].content_hash.starts_with("sha256:"));
 
         std::fs::remove_dir_all(&target_dir).ok();
     }

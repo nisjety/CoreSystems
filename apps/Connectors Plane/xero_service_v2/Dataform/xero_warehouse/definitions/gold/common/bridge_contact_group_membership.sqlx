@@ -1,0 +1,22 @@
+config {
+  type: "table",
+  schema: "xero_gold_common",
+  description: "Xero contact-group membership bridge. A missing copied parent is visible through flags rather than removed from the bridge.",
+  assertions: { nonNull: ["tenant_id", "contact_group_membership_key", "contact_group_membership_natural_key"], uniqueKey: ["contact_group_membership_key"] }
+}
+
+SELECT
+  FARM_FINGERPRINT(s.contact_group_membership_key) AS contact_group_membership_key,
+  s.contact_group_membership_key AS contact_group_membership_natural_key,
+  IF(s.is_group_unresolved, NULL, FARM_FINGERPRINT(CONCAT(s.tenant_id, '|', s.contact_group_id))) AS contact_group_key,
+  IF(s.is_contact_unresolved, NULL, FARM_FINGERPRINT(CONCAT(s.tenant_id, '|', s.contact_id))) AS contact_key,
+  s.tenant_id,
+  s.contact_group_id,
+  s.contact_id,
+  s.source_group_name,
+  s.source_group_status,
+  s.is_group_unresolved,
+  s.is_contact_unresolved,
+  s.synced_at,
+  'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "bridge_contact_group_membership")} AS s

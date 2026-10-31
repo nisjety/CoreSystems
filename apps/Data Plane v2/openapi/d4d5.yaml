@@ -263,6 +263,16 @@ components:
         low_confidence:       { type: boolean }
         context_pack:         { $ref: '#/components/schemas/ContextPack' }
         suggested_next_tools: { type: array, items: { type: string } }
+        notice:
+          description: |
+            Set only when the answer was produced in a reduced form the caller must show (Z-41): a ZDR
+            retrieval with no attested query embedding route answers from text search only, with code
+            `zdr_dense_unavailable`. Absent otherwise.
+          type: object
+          required: [code, message]
+          properties:
+            code:    { type: string }
+            message: { type: string }
 
     # ─── Documents ──────────────────────────────────────────────────────
     Document:
@@ -525,6 +535,60 @@ components:
             threshold_percent: { type: number, description: CONTEXT_COVERAGE_THRESHOLD_PERCENT (default 99). }
             message:           { type: string }
 
+    # ─── Rerank (QB-T08): POST /v1/rerank, Quarry option B, service-only ───────────
+    RerankDocument:
+      type: object
+      description: One caller-supplied candidate. Text longer than 4000 characters is cut, and its id is listed in `truncated_ids`.
+      required: [id, text]
+      additionalProperties: false
+      properties:
+        id:   { type: string, minLength: 1, maxLength: 256, description: 'Unique within the request; 1 to 256 bytes; no control characters.' }
+        text: { type: string, description: 'Non-blank. Cut at 4000 characters, never mid-character.' }
+
+    RerankRequest:
+      type: object
+      description: |
+        Service-only: the `service:quarry-edge` principal with scope `data:rerank`. `zdr_mode` is REQUIRED and is
+        never defaulted. `sovereign_required` is optional, and absent means strict (true), so a caller that omits
+        it is not run: its reason is `sovereign` unless an earlier check applies. Limits: 100 documents, a 1024-character query, a 1 MiB body, and a
+        deadline of 100 to 8000 ms (default 2000).
+      required: [request_id, query, profile, zdr_mode, documents]
+      additionalProperties: false
+      properties:
+        request_id:         { type: string, minLength: 8, maxLength: 64, pattern: '^[A-Za-z0-9._:-]+$' }
+        query:              { type: string, maxLength: 1024, description: 'Non-blank; a longer query is refused with query_invalid.' }
+        profile:            { type: string, enum: [web-v1] }
+        zdr_mode:           { type: string, enum: [disabled, reject, ephemeral], description: 'The run-level effective ZDR mode, after any per-connection downgrade. `reject` and `ephemeral` restrict egress. The value `off` is refused (zdr_mode_invalid).' }
+        sovereign_required: { type: boolean, description: 'Absent means true (strict). A true value is never run: its reason is sovereign unless an earlier check applies, because the route cannot show a sovereign deployment. A signed sovereign claim floors it to true.' }
+        top_n:              { type: integer, minimum: 1, description: 'At most the number of documents. Absent means all of them.' }
+        deadline_ms:        { type: integer, minimum: 100, maximum: 8000, default: 2000 }
+        documents:          { type: array, minItems: 1, maxItems: 100, items: { $ref: '#/components/schemas/RerankDocument' } }
+
+    RerankResult:
+      type: object
+      required: [id, index, scored]
+      properties:
+        id:     { type: string }
+        index:  { type: integer, minimum: 0, description: 'Position in the request documents.' }
+        scored: { type: boolean }
+        score:  { type: number, format: float, description: 'Present only when scored is true.' }
+
+    RerankResponse:
+      type: object
+      description: |
+        HTTP 200 for every outcome. `status` is `ok` (scored and ranked best first, cut to `top_n`), `skipped`
+        (the call did not run and no provider was called) or `degraded` (the provider failed or timed out). A
+        non-ok outcome answers in input order with `scored: false` and no scores.
+      required: [request_id, status, reason, profile, zdr_actions_applied, truncated_ids, results]
+      properties:
+        request_id:          { type: string }
+        status:              { type: string, enum: [ok, skipped, degraded] }
+        reason:              { type: string, nullable: true, description: 'null for ok. For skipped: disabled, misconfigured, processor_unapproved, metering_unavailable, zdr, sovereign or circuit_open. For degraded: timeout, provider_rate_limited or provider_error.' }
+        profile:             { type: string, enum: [web-v1] }
+        zdr_actions_applied: { type: array, items: { type: string, enum: [no_provider_call, no_cost_event, no_result_cache] } }
+        truncated_ids:       { type: array, items: { type: string } }
+        results:             { type: array, items: { $ref: '#/components/schemas/RerankResult' } }
+
 # ─── Paths ─────────────────────────────────────────────────────────────────
 paths:
   # ── Retrieval ─────────────────────────────────────────────────────────
@@ -640,6 +704,34 @@ paths:
   /v1/knowledge/wiki:    { post: { summary: wiki (App Shell), tags: [retrieval], responses: { '200': { description: OK } } } }
   /v1/knowledge/sources: { post: { summary: sources (App Shell), tags: [retrieval], responses: { '200': { description: OK } } } }
   /v1/knowledge/freshness: { post: { summary: freshness (App Shell), tags: [retrieval], responses: { '200': { description: OK } } } }
+
+  # QB-T08: Quarry option B. Service-only and dark until WEB_RERANK_ENABLED and WEB_RERANK_PROCESSOR_APPROVED are on.
+  /v1/rerank:
+    post:
+      summary: Rerank caller-supplied candidates (Quarry option B, service-only)
+      description: |
+        Reranks candidates the caller supplies, through the paid Azure Cohere deployment. Only the
+        `service:quarry-edge` principal holding scope `data:rerank` may call it. A user token is refused with 403
+        before any lookup. Every outcome is HTTP 200 with `status` ok, skipped or degraded; a skipped call makes no
+        provider call. The runbook is docs/web-rerank-v1.md.
+      tags: [retrieval]
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RerankRequest' }
+      responses:
+        '200':
+          description: 'ok (scored and ranked), skipped (reason, no provider call) or degraded (reason, unscored). Input order for every non-ok outcome.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RerankResponse' }
+        '400': { description: 'invalid request, with a fixed code such as zdr_mode_required, zdr_mode_invalid, documents_invalid or top_n_invalid', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '401': { description: no bearer token }
+        '403': { description: 'a service route refusal (route not granted, or the scope is missing), or a user token on this service-only route', content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '413': { description: body above 1 MiB }
+        '429': { description: 'per-org rate limit exceeded; Retry-After 1' }
 
   /v1/index/versions:
     get:

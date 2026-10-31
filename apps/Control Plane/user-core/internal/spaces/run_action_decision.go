@@ -154,10 +154,11 @@ func (d RunActionDecision) Validate() error {
 	if !validSHA256Commitment(d.ActionSchemaHash) || !validSHA256Commitment(d.PayloadDigest) {
 		return fmt.Errorf("run action decision commitments are invalid")
 	}
-	if audience, found := runActionTarget(d.ActionID); !found || d.ServiceAudience != audience {
+	target, found := runActionTargetFor(d.ActionID)
+	if !found || d.ServiceAudience != target.ServiceAudience {
 		return fmt.Errorf("run action decision target is invalid")
 	}
-	if d.RecipientAudienceRevision <= 0 || d.AuthorityRevision <= 0 || len(d.Permissions) != 1 || d.Permissions[0] != ticketsCreateActionPermission {
+	if d.RecipientAudienceRevision <= 0 || d.AuthorityRevision <= 0 || len(d.Permissions) != 1 || d.Permissions[0] != target.Permission {
 		return fmt.Errorf("run action decision authority is invalid")
 	}
 	if d.ZeroDataRetention || d.IssuedAt.IsZero() || d.ExpiresAt.IsZero() || !d.ExpiresAt.After(d.IssuedAt) {
@@ -194,7 +195,7 @@ func IssueRunActionDecision(evidence PersonalThreadDecisionEvidence, authority R
 	) || evidence.ResourceAuthorizationRef != expectedSourceRef {
 		return RunActionDecision{}, fmt.Errorf("run action authority does not match current Control authority")
 	}
-	audience, _ := runActionTarget(request.ActionID)
+	target, _ := runActionTargetFor(request.ActionID)
 	return RunActionDecision{
 		DecisionRef:                strings.TrimSpace(request.DecisionRef),
 		RunID:                      strings.TrimSpace(authority.RunID),
@@ -202,7 +203,7 @@ func IssueRunActionDecision(evidence PersonalThreadDecisionEvidence, authority R
 		OrgID:                      evidence.Membership.OrgID,
 		SpaceRef:                   evidence.Membership.SpaceRef,
 		SubjectID:                  evidence.Membership.SubjectID,
-		ServiceAudience:            audience,
+		ServiceAudience:            target.ServiceAudience,
 		ActionID:                   strings.TrimSpace(request.ActionID),
 		ActionSchemaHash:           strings.TrimSpace(request.ActionSchemaHash),
 		PayloadDigest:              strings.TrimSpace(request.PayloadDigest),
@@ -213,7 +214,7 @@ func IssueRunActionDecision(evidence PersonalThreadDecisionEvidence, authority R
 		PrivacyPolicyRef:           evidence.Privacy.PolicyRef,
 		RunContextAuthorizationRef: expectedSourceRef,
 		AuthorityRevision:          evidence.Membership.Revisions.Authority,
-		Permissions:                []string{ticketsCreateActionPermission},
+		Permissions:                []string{target.Permission},
 		Purpose:                    evidence.Privacy.Purpose,
 		LawfulBasis:                evidence.Privacy.LawfulBasis,
 		PrivacyClass:               evidence.Privacy.PrivacyClass,
@@ -249,8 +250,6 @@ func ValidateCurrentRunActionDecision(evidence PersonalThreadDecisionEvidence, d
 		decision.RunContextAuthorizationRef,
 		decision.RecipientAudienceRevision, decision.AuthorityRevision,
 	) ||
-		decision.ServiceAudience != ticketsCreateServiceAudience ||
-		decision.ActionID != "tickets.create" ||
 		decision.Purpose != evidence.Privacy.Purpose ||
 		decision.LawfulBasis != evidence.Privacy.LawfulBasis ||
 		decision.PrivacyClass != evidence.Privacy.PrivacyClass ||
@@ -335,15 +334,6 @@ func runClaimsMatchEvidence(
 		policyRef == evidence.Privacy.PolicyRef &&
 		authorityRevision == evidence.Membership.Revisions.Authority &&
 		sourceRef == expectedSourceRef
-}
-
-func runActionTarget(actionID string) (string, bool) {
-	switch strings.TrimSpace(actionID) {
-	case "tickets.create":
-		return ticketsCreateServiceAudience, true
-	default:
-		return "", false
-	}
 }
 
 func validSHA256Commitment(value string) bool {

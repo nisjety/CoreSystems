@@ -1,0 +1,30 @@
+config {
+  type: "assertion",
+  schema: "visma_assertions",
+  name: "assert_customer_payment_rows_complete",
+  description: "Silver must hold every customer payment document that bronze holds. Returns one row per tenant where the number of distinct (refNbr, type), the staging key of visma_bronze.visma_customer_payments, differs from the rows of visma_silver.fact_customer_payment. A payment and its VoidPayment (or a Refund and its VoidRefund) share one refNbr, so a key without the type silently drops one half of each pair (134 documents in 2026-10).",
+  tags: ["assertion", "silver", "customer_payment"]
+}
+
+WITH bronze AS (
+  SELECT
+    tenantId AS tenant_id,
+    COUNT(DISTINCT FORMAT('%t|%t', refNbr, type)) AS bronze_rows
+  FROM ${ref("visma_bronze", "visma_customer_payments")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+  GROUP BY tenantId
+),
+
+silver AS (
+  SELECT tenant_id, COUNT(*) AS silver_rows
+  FROM ${ref("visma_silver", "fact_customer_payment")}
+  GROUP BY tenant_id
+)
+
+SELECT
+  COALESCE(bronze.tenant_id, silver.tenant_id) AS tenant_id,
+  COALESCE(bronze_rows, 0) AS bronze_rows,
+  COALESCE(silver_rows, 0) AS silver_rows
+FROM bronze
+FULL OUTER JOIN silver ON bronze.tenant_id = silver.tenant_id
+WHERE COALESCE(bronze_rows, 0) != COALESCE(silver_rows, 0)

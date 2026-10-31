@@ -18,7 +18,7 @@ describe("features module cards", () => {
 			"Kunnskap",
 			"AI og agenter",
 			"Arbeidsflate",
-			"Datamaskiner og support",
+			"Oversikt og drift",
 			"Tilgang og kontroll",
 		]);
 	});

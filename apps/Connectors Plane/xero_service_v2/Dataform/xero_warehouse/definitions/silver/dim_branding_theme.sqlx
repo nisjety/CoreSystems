@@ -1,0 +1,32 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Current Xero invoice branding themes. Payment-service details are excluded because Xero Payment Services is out of warehouse scope.",
+  assertions: {
+    nonNull: ["tenant_id", "branding_theme_id", "branding_theme_key"],
+    uniqueKey: ["branding_theme_key"]
+  }
+}
+
+WITH latest AS (
+  SELECT *
+  FROM ${ref("dw_bronze_xero", "xero_branding_themes")}
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY tenant_id, branding_theme_id
+    ORDER BY synced_at DESC, first_seen_at DESC, record_id DESC
+  ) = 1
+)
+SELECT
+  CONCAT(tenant_id, '|', branding_theme_id) AS branding_theme_key,
+  tenant_id,
+  branding_theme_id,
+  record_id AS branding_theme_internal_id,
+  theme_name,
+  theme_type,
+  sort_order,
+  logo_url,
+  payment_service_count,
+  created_at,
+  first_seen_at,
+  synced_at
+FROM latest

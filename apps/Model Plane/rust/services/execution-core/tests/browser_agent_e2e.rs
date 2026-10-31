@@ -187,6 +187,7 @@ fn observation(
         snapshot_generation: Some(generation),
         snapshot_targets: targets,
         error_message: String::new(),
+        challenge: None,
     }
 }
 

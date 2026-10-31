@@ -1,8 +1,29 @@
 pub mod agentic_subscription;
+pub mod approval_cause;
+pub mod attachments;
 pub mod autonomy;
 pub mod dataplane_posture;
+pub mod durable_gate;
+pub mod effect_ledger;
+pub mod lifecycle_notice;
+pub mod loop_fold;
+pub mod model_entitlement;
+pub mod office_verification;
+pub mod org_agent_policy;
+pub mod park_reason;
+pub mod prompt_tier;
+pub mod provider_reads;
+pub mod result_query;
+pub mod retention;
+pub mod run_context;
+pub mod run_origin;
+pub mod scheduled_contract;
+pub mod skill_bundle;
 pub mod skill_recovery;
 pub mod tool_arguments;
+pub mod tool_class;
+pub mod user_question;
+pub mod zdr_refusal;
 
 /// Generated protobuf and gRPC types for the Model Plane.
 ///

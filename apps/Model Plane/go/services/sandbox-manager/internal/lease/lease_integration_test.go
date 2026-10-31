@@ -59,6 +59,10 @@ func setupLeaseDB(t *testing.T) string {
 		// 0003 adds leases.processes_permitted, which scanLease now reads.
 		"0003_process_registry.up.sql",
 		"0004_audience_revision_ceiling.up.sql",
+		// WS22-S1: thread_workspaces, and the live-thread-lease unique index
+		// that AcquireThread's ON CONFLICT needs.
+		"0005_thread_workspace.up.sql",
+		"0006_thread_lease_unique.up.sql",
 	} {
 		sqlBytes, readErr := os.ReadFile(filepath.Join("..", "..", "migrations", migration))
 		if readErr != nil {
@@ -226,5 +230,49 @@ func TestLeaseStore_ConcurrentCreateIsRaceFree(t *testing.T) {
 			t.Fatalf("Create[%d]: empty or duplicate id %q", i, ids[i])
 		}
 		seen[ids[i]] = true
+	}
+}
+
+// TestLeaseStore_AcquireThreadIsIdempotentInPostgres checks what the in-memory
+// store cannot: that Postgres infers the partial unique index from the
+// ON CONFLICT clause, so a retried acquire returns the same row and a released
+// lease is not revived.
+func TestLeaseStore_AcquireThreadIsIdempotentInPostgres(t *testing.T) {
+	dsn := setupLeaseDB(t)
+	ctx := context.Background()
+	store := newPoolStore(t, dsn)
+
+	first, err := store.AcquireThread(ctx, "thread-1", "org-a", "user-a", "backend-a", time.Minute)
+	if err != nil {
+		t.Fatalf("AcquireThread: %v", err)
+	}
+	second, err := store.AcquireThread(ctx, "thread-1", "org-a", "user-a", "backend-a", 30*time.Minute)
+	if err != nil {
+		t.Fatalf("second AcquireThread: %v", err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("second acquire minted %s, want the live lease %s", second.ID, first.ID)
+	}
+	if !second.ExpiresAt.After(first.ExpiresAt) {
+		t.Fatalf("expiry did not slide: first %v, second %v", first.ExpiresAt, second.ExpiresAt)
+	}
+
+	other, err := store.AcquireThread(ctx, "thread-1", "org-a", "user-b", "backend-a", time.Minute)
+	if err != nil {
+		t.Fatalf("user-b AcquireThread: %v", err)
+	}
+	if other.ID == first.ID {
+		t.Fatal("user-b was handed user-a's thread lease")
+	}
+
+	if ok, err := store.ReleaseScoped(ctx, first.ID, "org-a", "user-a", "backend-a"); err != nil || !ok {
+		t.Fatalf("ReleaseScoped: ok = %v, err = %v", ok, err)
+	}
+	fresh, err := store.AcquireThread(ctx, "thread-1", "org-a", "user-a", "backend-a", time.Minute)
+	if err != nil {
+		t.Fatalf("acquire after release: %v", err)
+	}
+	if fresh.ID == first.ID {
+		t.Fatal("a released (DESTROYED) thread lease was revived instead of replaced")
 	}
 }

@@ -101,17 +101,22 @@ services:
       QUARRY_EDGE__MODEL_PLANE_URL: ${MODEL_PLANE_URL:-}
       # Model Plane switches, off (decision 3.12 of 2026-10-27). Each one also needs MODEL_PLANE_URL.
       QUARRY_EDGE__AUTOPROMPT: "${QUARRY_EDGE_AUTOPROMPT:-0}"
-      QUARRY_EDGE__SEMANTIC_RERANK: "${QUARRY_EDGE_SEMANTIC_RERANK:-0}"
       QUARRY_EDGE__LLM_CLASSIFY_INTENT: "${QUARRY_EDGE_LLM_CLASSIFY_INTENT:-0}"
       QUARRY_EDGE__PAGE_TITLE_ENRICH: "${QUARRY_EDGE_PAGE_TITLE_ENRICH:-0}"
-      # AI formats of POST /v1/scrape (json, summary, question, highlights; INNH-1): off. Needs
-      # MODEL_PLANE_URL and, today, the development credential above; a deployed stack has no
-      # Model Plane credential for this lane yet (decision X-7). Refused under ZDR (ADR-4).
+      # QB-T17 switches, off until the search_suggest ZDR and token-retention review.
+      QUARRY_EDGE__ANSWER_SYNTHESIS: "${QUARRY_EDGE_ANSWER_SYNTHESIS:-0}"
       QUARRY_EDGE__AI_FORMATS: "${QUARRY_EDGE_AI_FORMATS:-0}"
+      # Under ZDR the AI formats of POST /v1/scrape are refused (ADR-4); "refuse" is the only value
+      # that takes effect in v1 (INNH-1).
       QUARRY_EDGE__AI_FORMATS_ZDR: ${QUARRY_EDGE_AI_FORMATS_ZDR:-refuse}
       # max_age on POST /v1/scrape (INNH-7): off. `on` accepts it and runs the URL result cache
       # (needs Redis); never read or written under ZDR.
       QUARRY_EDGE__SCRAPE_MAX_AGE: "${QUARRY_EDGE_SCRAPE_MAX_AGE:-off}"
+      QUARRY_EDGE__SEARCH_SUGGEST: "${QUARRY_EDGE_SEARCH_SUGGEST:-0}"
+      QUARRY_EDGE__MODEL_AUDIO: "${QUARRY_EDGE_MODEL_AUDIO:-0}"
+      # Semantic rerank is option B: Data Plane's /v1/rerank (needs DATA_PLANE_URL and the
+      # cross-plane tokens), not Model Plane. Off; see the Ingestion compose.
+      QUARRY_EDGE__SEMANTIC_RERANK: "${QUARRY_EDGE_SEMANTIC_RERANK:-0}"
       # ADR-6 (owner ruling 2026-10-28): scrape-time actions default off; see the Ingestion compose.
       QUARRY_EDGE__SCRAPE_ACTIONS: "${QUARRY_EDGE_SCRAPE_ACTIONS:-off}"
       # SmartRouter web-search primary. Quarry-v2 owns its searxng (defined

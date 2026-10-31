@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
 	"strings"
@@ -17,12 +18,13 @@ import (
 )
 
 const (
-	controlScheduledRunDecisionVersion     = "v2"
-	controlScheduledRunExecutionAction     = "model.schedule.execute"
-	controlScheduledRunExecutionAudience   = "model-plane-session-core"
-	controlScheduledRunExecutionSchema     = "sha256:space-scheduled-run-execute-v1"
-	controlScheduledRunExecutorPrincipal   = "orchestrator-core"
-	maxControlScheduledRunDecisionResponse = 64 << 10
+	controlScheduledRunDecisionVersion         = "v2"
+	controlScheduledRunExecutionAction         = "model.schedule.execute"
+	controlScheduledRunExecutionAudience       = "model-plane-session-core"
+	controlScheduledRunExecutionSchema         = "sha256:space-scheduled-run-execute-v1"
+	controlScheduledRunExecutionContractSchema = "sha256:space-scheduled-run-execute-v2"
+	controlScheduledRunExecutorPrincipal       = "orchestrator-core"
+	maxControlScheduledRunDecisionResponse     = 64 << 10
 )
 
 // ScheduledRunExecutionIntent is the non-secret, immutable result of the
@@ -39,6 +41,10 @@ type ScheduledRunExecutionIntent struct {
 	RunID          string
 	TemplateDigest string
 	IdempotencyKey string
+	// Set only for a schedule under a stored-consent contract; the digest and
+	// expiry are the values Control binds into the execution decision.
+	ContractDigest    string
+	ContractExpiresAt string
 }
 
 func (i ScheduledRunExecutionIntent) validate() error {
@@ -57,7 +63,7 @@ func (i ScheduledRunExecutionIntent) validate() error {
 	if !strings.HasPrefix(i.TemplateDigest, "sha256:") || len(i.TemplateDigest) != len("sha256:")+64 {
 		return fmt.Errorf("scheduled run execution template digest is invalid")
 	}
-	return nil
+	return validateScheduledContractBinding(i.ContractDigest, i.ContractExpiresAt)
 }
 
 // ScheduledRunExecutionAuthorizer obtains the one direct-hop bearer that
@@ -100,11 +106,16 @@ func (a *ControlScheduledRunExecutionAuthorizer) AuthorizeScheduledRunExecution(
 	if err := intent.validate(); err != nil {
 		return "", err
 	}
-	body, err := json.Marshal(map[string]any{"intent": map[string]string{
+	bodyIntent := map[string]string{
 		"org_id": intent.OrgID, "space_ref": intent.SpaceRef, "subject_id": intent.SubjectID,
 		"thread_id": intent.ThreadID, "schedule_id": intent.ScheduleID, "fire_key": intent.FireKey,
 		"task_id": intent.RunID, "template_digest": intent.TemplateDigest, "idempotency_key": intent.IdempotencyKey,
-	}})
+	}
+	if intent.hasContract() {
+		bodyIntent["contract_digest"] = intent.ContractDigest
+		bodyIntent["contract_expires_at"] = intent.ContractExpiresAt
+	}
+	body, err := json.Marshal(map[string]any{"intent": bodyIntent})
 	if err != nil {
 		return "", fmt.Errorf("encode scheduled-run execution intent: %w", err)
 	}
@@ -137,30 +148,78 @@ func (a *ControlScheduledRunExecutionAuthorizer) AuthorizeScheduledRunExecution(
 	return envelope.Data.Token, nil
 }
 
+func (i ScheduledRunExecutionIntent) hasContract() bool {
+	return i.ContractDigest != "" || i.ContractExpiresAt != ""
+}
+
+// validateScheduledContractBinding accepts an absent contract or a complete,
+// well-formed digest and RFC 3339 expiry; a half-bound contract is refused.
+func validateScheduledContractBinding(digest, expiresAt string) error {
+	if digest == "" && expiresAt == "" {
+		return nil
+	}
+	if !strings.HasPrefix(digest, "sha256:") || len(digest) != len("sha256:")+64 {
+		return fmt.Errorf("scheduled contract digest is invalid")
+	}
+	if _, err := time.Parse(time.RFC3339, expiresAt); err != nil {
+		return fmt.Errorf("scheduled contract expiry is invalid")
+	}
+	return nil
+}
+
+// writeScheduledContractDigest feeds the contract digest and expiry into a
+// step or run payload digest exactly as user-core and execution-core do.
+func writeScheduledContractDigest(h hash.Hash, contractDigest string, expiresAt time.Time) {
+	h.Write([]byte("contract_digest"))
+	h.Write([]byte{0})
+	var length [8]byte
+	binary.BigEndian.PutUint64(length[:], uint64(len(contractDigest)))
+	h.Write(length[:])
+	h.Write([]byte(contractDigest))
+	h.Write([]byte("contract_expires_at"))
+	h.Write([]byte{0})
+	var encoded [8]byte
+	binary.BigEndian.PutUint64(encoded[:], uint64(expiresAt.Unix()))
+	h.Write(encoded[:])
+}
+
+// scheduledContractMatches requires the decision to carry exactly the contract
+// the intent names and to be checked against that contract's expiry now.
+func scheduledContractMatches(boundDigest, boundExpiresAt string, decisionDigest string, decisionExpiresAt *time.Time, now time.Time) bool {
+	if boundDigest == "" && boundExpiresAt == "" {
+		return decisionDigest == "" && decisionExpiresAt == nil
+	}
+	expiresAt, err := time.Parse(time.RFC3339, boundExpiresAt)
+	return err == nil && decisionDigest == boundDigest && decisionExpiresAt != nil &&
+		decisionExpiresAt.Unix() == expiresAt.Unix() && now.Before(expiresAt)
+}
+
 type scheduledRunExecutionDecision struct {
-	DecisionRef               string    `json:"decision_ref"`
-	OrgID                     string    `json:"org_id"`
-	SpaceRef                  string    `json:"space_ref"`
-	SubjectID                 string    `json:"subject_id"`
-	ServiceAudience           string    `json:"service_audience"`
-	ActionID                  string    `json:"action_id"`
-	ActionSchemaHash          string    `json:"action_schema_hash"`
-	PayloadDigest             string    `json:"payload_digest"`
-	IdempotencyKey            string    `json:"idempotency_key"`
-	RecipientAudienceRef      string    `json:"recipient_audience_ref"`
-	RecipientAudienceHash     string    `json:"recipient_audience_hash"`
-	PrivacyPolicyRef          string    `json:"privacy_policy_ref"`
-	ResourceAuthorizationRef  string    `json:"resource_authorization_ref"`
-	AuthorityRevision         int64     `json:"authority_revision"`
-	MembershipRevision        int64     `json:"membership_revision"`
-	PrivacyRevision           int64     `json:"privacy_revision"`
-	RecipientAudienceRevision int64     `json:"recipient_audience_revision"`
-	EntitlementRevision       int64     `json:"entitlement_revision"`
-	Permissions               []string  `json:"permissions"`
-	ZeroDataRetention         bool      `json:"zero_data_retention"`
-	Nonce                     string    `json:"nonce"`
-	IssuedAt                  time.Time `json:"issued_at"`
-	ExpiresAt                 time.Time `json:"expires_at"`
+	DecisionRef               string     `json:"decision_ref"`
+	OrgID                     string     `json:"org_id"`
+	SpaceRef                  string     `json:"space_ref"`
+	SubjectID                 string     `json:"subject_id"`
+	ServiceAudience           string     `json:"service_audience"`
+	ActionID                  string     `json:"action_id"`
+	ActionSchemaHash          string     `json:"action_schema_hash"`
+	PayloadDigest             string     `json:"payload_digest"`
+	IdempotencyKey            string     `json:"idempotency_key"`
+	RecipientAudienceRef      string     `json:"recipient_audience_ref"`
+	RecipientAudienceHash     string     `json:"recipient_audience_hash"`
+	PrivacyPolicyRef          string     `json:"privacy_policy_ref"`
+	ResourceAuthorizationRef  string     `json:"resource_authorization_ref"`
+	AuthorityRevision         int64      `json:"authority_revision"`
+	MembershipRevision        int64      `json:"membership_revision"`
+	PrivacyRevision           int64      `json:"privacy_revision"`
+	RecipientAudienceRevision int64      `json:"recipient_audience_revision"`
+	EntitlementRevision       int64      `json:"entitlement_revision"`
+	Permissions               []string   `json:"permissions"`
+	ZeroDataRetention         bool       `json:"zero_data_retention"`
+	ContractDigest            string     `json:"contract_digest,omitempty"`
+	ContractExpiresAt         *time.Time `json:"contract_expires_at,omitempty"`
+	Nonce                     string     `json:"nonce"`
+	IssuedAt                  time.Time  `json:"issued_at"`
+	ExpiresAt                 time.Time  `json:"expires_at"`
 }
 
 func (a *ControlScheduledRunExecutionAuthorizer) verify(token string, intent ScheduledRunExecutionIntent, now time.Time) error {
@@ -184,14 +243,19 @@ func (a *ControlScheduledRunExecutionAuthorizer) verify(token string, intent Sch
 	if err := json.Unmarshal(payload, &decision); err != nil {
 		return fmt.Errorf("invalid Control scheduled-run execution decision claims")
 	}
+	schema := controlScheduledRunExecutionSchema
+	if intent.hasContract() {
+		schema = controlScheduledRunExecutionContractSchema
+	}
 	if decision.OrgID != intent.OrgID ||
 		decision.SpaceRef != intent.SpaceRef ||
 		decision.SubjectID != intent.SubjectID ||
 		decision.ServiceAudience != controlScheduledRunExecutionAudience ||
 		decision.ActionID != controlScheduledRunExecutionAction ||
-		decision.ActionSchemaHash != controlScheduledRunExecutionSchema ||
+		decision.ActionSchemaHash != schema ||
 		decision.IdempotencyKey != intent.IdempotencyKey ||
-		decision.PayloadDigest != scheduledRunExecutionPayloadDigest(decision, intent) ||
+		decision.PayloadDigest != scheduledRunExecutionPayloadDigest(decision, intent, schema) ||
+		!scheduledContractMatches(intent.ContractDigest, intent.ContractExpiresAt, decision.ContractDigest, decision.ContractExpiresAt, now) ||
 		decision.ZeroDataRetention ||
 		strings.TrimSpace(decision.DecisionRef) == "" ||
 		strings.TrimSpace(decision.Nonce) == "" ||
@@ -203,7 +267,7 @@ func (a *ControlScheduledRunExecutionAuthorizer) verify(token string, intent Sch
 	return nil
 }
 
-func scheduledRunExecutionPayloadDigest(decision scheduledRunExecutionDecision, intent ScheduledRunExecutionIntent) string {
+func scheduledRunExecutionPayloadDigest(decision scheduledRunExecutionDecision, intent ScheduledRunExecutionIntent, schema string) string {
 	hash := sha256.New()
 	hash.Write([]byte(controlScheduledRunExecutionAction + "\x00v1\x00"))
 	for _, field := range []struct{ name, value string }{
@@ -213,7 +277,7 @@ func scheduledRunExecutionPayloadDigest(decision scheduledRunExecutionDecision, 
 		{"template_digest", intent.TemplateDigest}, {"recipient_audience_ref", decision.RecipientAudienceRef},
 		{"recipient_audience_hash", decision.RecipientAudienceHash}, {"privacy_policy_ref", decision.PrivacyPolicyRef},
 		{"resource_authorization_ref", decision.ResourceAuthorizationRef},
-		{"action_schema_hash", controlScheduledRunExecutionSchema}, {"thread_id", intent.ThreadID},
+		{"action_schema_hash", schema}, {"thread_id", intent.ThreadID},
 		{"idempotency_key", intent.IdempotencyKey},
 	} {
 		hash.Write([]byte(field.name))
@@ -238,6 +302,9 @@ func scheduledRunExecutionPayloadDigest(decision scheduledRunExecutionDecision, 
 		var encoded [8]byte
 		binary.BigEndian.PutUint64(encoded[:], uint64(revision.value))
 		hash.Write(encoded[:])
+	}
+	if intent.hasContract() && decision.ContractExpiresAt != nil {
+		writeScheduledContractDigest(hash, decision.ContractDigest, *decision.ContractExpiresAt)
 	}
 	return "sha256:" + hex.EncodeToString(hash.Sum(nil))
 }

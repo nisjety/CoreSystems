@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -30,7 +31,18 @@ func signedScheduledStepToken(t *testing.T, keyID string, private ed25519.Privat
 		PrivacyRevision: 1, RecipientAudienceRevision: 1, EntitlementRevision: 1,
 		Permissions: []string{"schedule:step"}, Nonce: "nonce-1", IssuedAt: now.Add(-time.Second), ExpiresAt: now.Add(time.Minute),
 	}
-	decision.PayloadDigest = scheduledStepPayloadDigest(decision, intent)
+	schema := controlScheduledStepSchema
+	if intent.hasContract() {
+		schema = controlScheduledStepContractSchema
+		expiresAt, err := time.Parse(time.RFC3339, intent.ContractExpiresAt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decision.ContractDigest = intent.ContractDigest
+		decision.ContractExpiresAt = &expiresAt
+	}
+	decision.ActionSchemaHash = schema
+	decision.PayloadDigest = scheduledStepPayloadDigest(decision, intent, schema)
 	payload, err := json.Marshal(decision)
 	if err != nil {
 		t.Fatal(err)
@@ -40,6 +52,39 @@ func signedScheduledStepToken(t *testing.T, keyID string, private ed25519.Privat
 	signingInput := controlScheduledStepDecisionVersion + "." + key + "." + body
 	signature := base64.RawURLEncoding.EncodeToString(ed25519.Sign(private, []byte(signingInput)))
 	return signingInput + "." + signature
+}
+
+func TestControlScheduledStepAuthorizerVerifiesContractBoundStepOnly(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 16, 0, 0, 0, 0, time.UTC)
+	intent := validScheduledStepExecutionIntent()
+	intent.ContractDigest = "sha256:" + strings.Repeat("c", 64)
+	intent.ContractExpiresAt = now.Add(time.Hour).Format(time.RFC3339)
+	authorizer := &ControlScheduledStepAuthorizer{keyID: "key-1", public: public}
+	token := signedScheduledStepToken(t, "key-1", private, intent, now)
+	if err := authorizer.verify(token, intent, now); err != nil {
+		t.Fatalf("contract-bound step denied: %v", err)
+	}
+
+	legacy := signedScheduledStepToken(t, "key-1", private, validScheduledStepExecutionIntent(), now)
+	if err := authorizer.verify(legacy, intent, now); err == nil {
+		t.Fatal("a step decision without the contract stood in for a contract-bound step")
+	}
+	other := intent
+	other.ContractDigest = "sha256:" + strings.Repeat("d", 64)
+	if err := authorizer.verify(token, other, now); err == nil {
+		t.Fatal("a signed step was reused with a different contract digest")
+	}
+	expiresAt, err := time.Parse(time.RFC3339, intent.ContractExpiresAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scheduledContractMatches(intent.ContractDigest, intent.ContractExpiresAt, intent.ContractDigest, &expiresAt, expiresAt) {
+		t.Fatal("a contract stayed live at its own expiry instant")
+	}
 }
 
 func TestControlScheduledStepAuthorizerBindsExactStep(t *testing.T) {

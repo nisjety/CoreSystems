@@ -77,7 +77,8 @@ pub enum InitiatorHint {
 
 /// The initiator of an action, from the verified token and the optional hint.
 ///
-/// A service principal is always an agent, whatever it sends. A user is a person
+/// A service principal is always an agent, whatever it sends, and so is an API key (INNH-10:
+/// there is never a person behind a key). A user is a person
 /// unless the hint says agent (the gateway sends that for actions the model
 /// proposed through the user's own session). `System` is never derived from a
 /// request.
@@ -85,7 +86,7 @@ pub fn derive_initiator(
     claims: &crate::auth::Claims,
     hint: Option<InitiatorHint>,
 ) -> StepInitiator {
-    if claims.is_service() {
+    if claims.is_service() || claims.is_api_key() {
         return StepInitiator::Agent;
     }
     match hint {
@@ -152,6 +153,9 @@ impl From<StepInitiator> for Initiator {
 /// - A service principal's token: an agent, whatever it sends. The identity is
 ///   `ServicePrincipal` and its `principal_id` is the token's signed service id:
 ///   the only verified part. It cannot be claimed or changed from the request.
+/// - An API key's token (INNH-10): an agent, whatever it sends. The identity is `ApiKey` and
+///   its `principal_id` is the token's signed actor, `apikey:<key_id>`: verified, like a
+///   service id. The key id is the only verified part; the owner is not on the receipt.
 /// - A person's token with the `agent` hint: an agent (the hint only tightens),
 ///   identity `UserSession` with no `principal_id`: the token proves a person,
 ///   not an agent.
@@ -169,20 +173,29 @@ pub fn derive_initiator_ref(
         return Initiator { class, agent: None };
     }
     let service = claims.is_service();
+    let api_key = claims.is_api_key();
     Initiator {
         class,
         agent: Some(AgentIdentity {
             basis: if service {
                 AgentIdentityBasis::ServicePrincipal
+            } else if api_key {
+                AgentIdentityBasis::ApiKey
             } else {
                 AgentIdentityBasis::UserSession
             },
-            principal_id: service.then(|| {
-                claims
-                    .service_id
-                    .clone()
-                    .unwrap_or_else(|| claims.actor_id().to_owned())
-            }),
+            principal_id: if service {
+                Some(
+                    claims
+                        .service_id
+                        .clone()
+                        .unwrap_or_else(|| claims.actor_id().to_owned()),
+                )
+            } else if api_key {
+                Some(claims.actor_id().to_owned())
+            } else {
+                None
+            },
             ai_run_id: advisory.ai_run_id.clone(),
             label: advisory.label.clone(),
         }),
@@ -314,6 +327,11 @@ impl RunLive {
 
     pub fn org_id(&self) -> &str {
         &self.org_id
+    }
+
+    /// The signed actor that started the run (`apikey:<key_id>` for an API key's run).
+    pub fn actor_id(&self) -> &str {
+        &self.actor_id
     }
 
     /// Record activity by the run's owner.

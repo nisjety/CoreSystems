@@ -76,3 +76,7 @@ services:
     build: !reset null
     image: ${BRIDGE_CORE_RELEASE_IMAGE:?BRIDGE_CORE_RELEASE_IMAGE digest is required}
     pull_policy: never
+  nats-provisioner:
+    build: !reset null
+    image: ${NATS_PROVISIONER_RELEASE_IMAGE:?NATS_PROVISIONER_RELEASE_IMAGE digest is required}
+    pull_policy: never

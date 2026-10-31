@@ -1,0 +1,118 @@
+config {
+  type: "table",
+  schema: "visma_silver",
+  name: "dim_department",
+  description: "Silver: Department master dimension. Source: visma_departments.",
+  tags: ["silver", "visma", "dimension"]
+}
+
+-- =============================================================================
+-- dim_department.sqlx
+-- Silver dimension: Department master data
+-- Source: visma_bronze.visma_departments + synthetic "Uspesifisert"
+-- sentinels for the no-department placeholder Visma encodes in
+-- the department segment of the subaccount ('000' / '0000' / '0' depending on tenant segment width;
+-- segment 3 on the new structure, segment 2 on the old one, see dim_subaccount.department_code).
+-- Grain: one row per (tenant_id, department_id), latest non-deleted record.
+--
+-- Why sentinels are added here (not in source):
+--   The Visma /v1/department endpoint does not return a row for "Uspesifisert"
+--   — it is implicit. But fact_general_ledger pulls department_id from
+--   the subaccount's department segment, where ~870k of 970k GL rows resolve to the zero-only
+--   sentinel. Without these synthetic rows the fact→dim join misses 92.8% of
+--   real GL traffic. Adding them in silver keeps the gap closed for any
+--   downstream join (gold_finance, BI_FinanceTable, Superset).
+-- =============================================================================
+
+WITH visma_departments AS (
+    SELECT
+        FARM_FINGERPRINT(CONCAT(
+            CAST(tenantId AS STRING), '|',
+            CAST(departmentId AS STRING)
+        ))                                                  AS department_key,
+        tenantId                                            AS tenant_id,
+        syncedAt                                            AS synced_at,
+        organizationName                                    AS organization_name,
+        departmentId                                        AS department_id,
+        publicId                                            AS public_id,
+        description                                         AS department_name,
+        SAFE_CAST(lastModifiedDateTime AS TIMESTAMP)        AS last_modified_at
+    FROM ${ref("visma_bronze", "visma_departments")}
+    WHERE isDeleted IS DISTINCT FROM TRUE
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY tenantId, departmentId
+        ORDER BY syncedAt DESC
+    ) = 1
+),
+
+-- Discover the actual zero-only sentinel value used by each tenant.
+-- Visma uses different segment widths ('000', '0000', '0'), so we derive the
+-- value rather than hardcoding it. Only zero-pattern segment3 values that
+-- are NOT already covered by visma_departments are surfaced as sentinels.
+unspecified_sentinels AS (
+    SELECT DISTINCT
+        s.tenant_id                                                            AS tenant_id,
+        s.department_code                                                      AS department_id
+    FROM ${ref("visma_silver", "dim_subaccount")} AS s
+    LEFT JOIN visma_departments AS vd
+        ON  vd.tenant_id     = s.tenant_id
+        AND vd.department_id = s.department_code
+    WHERE s.department_code IS NOT NULL
+        AND REGEXP_CONTAINS(s.department_code, r'^0+$')
+        AND vd.department_id IS NULL
+),
+
+-- Departments that exist as a subaccount segment but have no row in visma_departments under that id.
+-- The tenants on the old structure write the segment value with a leading zero ('02') where the
+-- department master has '2' (and names it differently: Hygiene Systems' master calls '1' "Aquatiq
+-- Hygiene Systems" while segment value '01' is "Administrasjon"), so the exact join of the facts to
+-- the master misses them. The segment's own description is what Visma's accounting shows; it names
+-- the department here and gives the facts' department_key a row to resolve to.
+segment_departments AS (
+    SELECT
+        s.tenant_id                                                            AS tenant_id,
+        s.department_code                                                      AS department_id,
+        MAX(s.department_value_description)                                    AS department_name
+    FROM ${ref("visma_silver", "dim_subaccount")} AS s
+    LEFT JOIN visma_departments AS vd
+        ON  vd.tenant_id     = s.tenant_id
+        AND vd.department_id = s.department_code
+    WHERE s.department_code IS NOT NULL
+        AND NOT REGEXP_CONTAINS(s.department_code, r'^0+$')
+        AND vd.department_id IS NULL
+    GROUP BY s.tenant_id, s.department_code
+)
+
+SELECT * FROM visma_departments
+
+UNION ALL
+
+SELECT
+    FARM_FINGERPRINT(CONCAT(
+        CAST(tenant_id AS STRING), '|',
+        CAST(department_id AS STRING)
+    ))                                                      AS department_key,
+    tenant_id,
+    CAST(NULL AS TIMESTAMP)                                 AS synced_at,
+    CAST(NULL AS STRING)                                    AS organization_name,
+    department_id,
+    CAST(NULL AS STRING)                                    AS public_id,
+    department_name,
+    CAST(NULL AS TIMESTAMP)                                 AS last_modified_at
+FROM segment_departments
+
+UNION ALL
+
+SELECT
+    FARM_FINGERPRINT(CONCAT(
+        CAST(tenant_id AS STRING), '|',
+        CAST(department_id AS STRING)
+    ))                                                      AS department_key,
+    tenant_id,
+    CAST(NULL AS TIMESTAMP)                                 AS synced_at,
+    CAST(NULL AS STRING)                                    AS organization_name,
+    department_id,
+    CAST(NULL AS STRING)                                    AS public_id,
+    'Uspesifisert'                                          AS department_name,
+    CAST(NULL AS TIMESTAMP)                                 AS last_modified_at
+FROM unspecified_sentinels

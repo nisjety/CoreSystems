@@ -19,11 +19,14 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	MemoryService_SearchMemory_FullMethodName = "/model_plane.v1.MemoryService/SearchMemory"
-	MemoryService_IndexMemory_FullMethodName  = "/model_plane.v1.MemoryService/IndexMemory"
-	MemoryService_ListMemory_FullMethodName   = "/model_plane.v1.MemoryService/ListMemory"
-	MemoryService_DeleteMemory_FullMethodName = "/model_plane.v1.MemoryService/DeleteMemory"
-	MemoryService_Health_FullMethodName       = "/model_plane.v1.MemoryService/Health"
+	MemoryService_SearchMemory_FullMethodName      = "/model_plane.v1.MemoryService/SearchMemory"
+	MemoryService_IndexMemory_FullMethodName       = "/model_plane.v1.MemoryService/IndexMemory"
+	MemoryService_ListMemory_FullMethodName        = "/model_plane.v1.MemoryService/ListMemory"
+	MemoryService_DeleteMemory_FullMethodName      = "/model_plane.v1.MemoryService/DeleteMemory"
+	MemoryService_Health_FullMethodName            = "/model_plane.v1.MemoryService/Health"
+	MemoryService_GetMemoryControls_FullMethodName = "/model_plane.v1.MemoryService/GetMemoryControls"
+	MemoryService_SetMemoryControls_FullMethodName = "/model_plane.v1.MemoryService/SetMemoryControls"
+	MemoryService_ResetMemory_FullMethodName       = "/model_plane.v1.MemoryService/ResetMemory"
 )
 
 // MemoryServiceClient is the client API for MemoryService service.
@@ -48,6 +51,16 @@ type MemoryServiceClient interface {
 	DeleteMemory(ctx context.Context, in *DeleteMemoryRequest, opts ...grpc.CallOption) (*DeleteMemoryResponse, error)
 	// Health check.
 	Health(ctx context.Context, in *MemoryHealthRequest, opts ...grpc.CallOption) (*MemoryHealthResponse, error)
+	// The user's memory state and what it currently allows. Readable by a ZDR
+	// caller (it answers reason "zdr"), which writes nothing.
+	GetMemoryControls(ctx context.Context, in *GetMemoryControlsRequest, opts ...grpc.CallOption) (*GetMemoryControlsResponse, error)
+	// Set the user's own memory state (on, paused, off). User callers only, for
+	// themselves; refused for a ZDR or waived credential.
+	SetMemoryControls(ctx context.Context, in *SetMemoryControlsRequest, opts ...grpc.CallOption) (*SetMemoryControlsResponse, error)
+	// Erase every durable memory the caller owns, with its supersession lineage
+	// and semantic copies, in one confirmed step. Org-owned memory is left alone.
+	// Open to a ZDR caller too: erasure only removes, and pre-ZDR rows may exist.
+	ResetMemory(ctx context.Context, in *ResetMemoryRequest, opts ...grpc.CallOption) (*ResetMemoryResponse, error)
 }
 
 type memoryServiceClient struct {
@@ -108,6 +121,36 @@ func (c *memoryServiceClient) Health(ctx context.Context, in *MemoryHealthReques
 	return out, nil
 }
 
+func (c *memoryServiceClient) GetMemoryControls(ctx context.Context, in *GetMemoryControlsRequest, opts ...grpc.CallOption) (*GetMemoryControlsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetMemoryControlsResponse)
+	err := c.cc.Invoke(ctx, MemoryService_GetMemoryControls_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *memoryServiceClient) SetMemoryControls(ctx context.Context, in *SetMemoryControlsRequest, opts ...grpc.CallOption) (*SetMemoryControlsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetMemoryControlsResponse)
+	err := c.cc.Invoke(ctx, MemoryService_SetMemoryControls_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *memoryServiceClient) ResetMemory(ctx context.Context, in *ResetMemoryRequest, opts ...grpc.CallOption) (*ResetMemoryResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ResetMemoryResponse)
+	err := c.cc.Invoke(ctx, MemoryService_ResetMemory_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // MemoryServiceServer is the server API for MemoryService service.
 // All implementations must embed UnimplementedMemoryServiceServer
 // for forward compatibility.
@@ -130,6 +173,16 @@ type MemoryServiceServer interface {
 	DeleteMemory(context.Context, *DeleteMemoryRequest) (*DeleteMemoryResponse, error)
 	// Health check.
 	Health(context.Context, *MemoryHealthRequest) (*MemoryHealthResponse, error)
+	// The user's memory state and what it currently allows. Readable by a ZDR
+	// caller (it answers reason "zdr"), which writes nothing.
+	GetMemoryControls(context.Context, *GetMemoryControlsRequest) (*GetMemoryControlsResponse, error)
+	// Set the user's own memory state (on, paused, off). User callers only, for
+	// themselves; refused for a ZDR or waived credential.
+	SetMemoryControls(context.Context, *SetMemoryControlsRequest) (*SetMemoryControlsResponse, error)
+	// Erase every durable memory the caller owns, with its supersession lineage
+	// and semantic copies, in one confirmed step. Org-owned memory is left alone.
+	// Open to a ZDR caller too: erasure only removes, and pre-ZDR rows may exist.
+	ResetMemory(context.Context, *ResetMemoryRequest) (*ResetMemoryResponse, error)
 	mustEmbedUnimplementedMemoryServiceServer()
 }
 
@@ -154,6 +207,15 @@ func (UnimplementedMemoryServiceServer) DeleteMemory(context.Context, *DeleteMem
 }
 func (UnimplementedMemoryServiceServer) Health(context.Context, *MemoryHealthRequest) (*MemoryHealthResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Health not implemented")
+}
+func (UnimplementedMemoryServiceServer) GetMemoryControls(context.Context, *GetMemoryControlsRequest) (*GetMemoryControlsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetMemoryControls not implemented")
+}
+func (UnimplementedMemoryServiceServer) SetMemoryControls(context.Context, *SetMemoryControlsRequest) (*SetMemoryControlsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetMemoryControls not implemented")
+}
+func (UnimplementedMemoryServiceServer) ResetMemory(context.Context, *ResetMemoryRequest) (*ResetMemoryResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ResetMemory not implemented")
 }
 func (UnimplementedMemoryServiceServer) mustEmbedUnimplementedMemoryServiceServer() {}
 func (UnimplementedMemoryServiceServer) testEmbeddedByValue()                       {}
@@ -266,6 +328,60 @@ func _MemoryService_Health_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _MemoryService_GetMemoryControls_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetMemoryControlsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MemoryServiceServer).GetMemoryControls(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MemoryService_GetMemoryControls_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MemoryServiceServer).GetMemoryControls(ctx, req.(*GetMemoryControlsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MemoryService_SetMemoryControls_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetMemoryControlsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MemoryServiceServer).SetMemoryControls(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MemoryService_SetMemoryControls_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MemoryServiceServer).SetMemoryControls(ctx, req.(*SetMemoryControlsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MemoryService_ResetMemory_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResetMemoryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MemoryServiceServer).ResetMemory(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MemoryService_ResetMemory_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MemoryServiceServer).ResetMemory(ctx, req.(*ResetMemoryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // MemoryService_ServiceDesc is the grpc.ServiceDesc for MemoryService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -292,6 +408,18 @@ var MemoryService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Health",
 			Handler:    _MemoryService_Health_Handler,
+		},
+		{
+			MethodName: "GetMemoryControls",
+			Handler:    _MemoryService_GetMemoryControls_Handler,
+		},
+		{
+			MethodName: "SetMemoryControls",
+			Handler:    _MemoryService_SetMemoryControls_Handler,
+		},
+		{
+			MethodName: "ResetMemory",
+			Handler:    _MemoryService_ResetMemory_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

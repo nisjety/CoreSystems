@@ -1,0 +1,14 @@
+config {
+  type: "table",
+  schema: "xero_gold_common",
+  description: "Xero tracking-option dimension, retaining source archived and deleted markers.",
+  assertions: { nonNull: ["tenant_id", "tracking_option_id", "tracking_option_key"], uniqueKey: ["tracking_option_key"] }
+}
+
+SELECT FARM_FINGERPRINT(CONCAT(tenant_id, '|', tracking_option_id)) AS tracking_option_key,
+       FARM_FINGERPRINT(CONCAT(tenant_id, '|', tracking_category_id)) AS tracking_category_key,
+       FARM_FINGERPRINT(tenant_id) AS company_key,
+       tenant_id, tracking_option_id, tracking_category_id,
+       category_name, option_name, status, is_active, is_archived, is_deleted,
+       synced_at, 'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "dim_tracking_option")}

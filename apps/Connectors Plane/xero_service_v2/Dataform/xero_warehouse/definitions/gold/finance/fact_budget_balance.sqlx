@@ -1,0 +1,51 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "Conformed Xero budget account-period source balances. Xero returns Amount and UnitAmount without a shared aggregation contract, so both remain native source fields; neither is converted or combined across tenants. Deleted source rows are retained with is_reportable set false.",
+  assertions: {
+    nonNull: ["tenant_id", "budget_id", "budget_balance_key"],
+    uniqueKey: ["budget_balance_key"]
+  }
+}
+
+SELECT
+  FARM_FINGERPRINT(source.tenant_id) AS company_key,
+  IF(source.budget_period_date IS NULL, NULL,
+     FARM_FINGERPRINT(CAST(source.budget_period_date AS STRING))) AS date_key,
+  IF(source.account_id IS NULL, NULL,
+     FARM_FINGERPRINT(CONCAT(source.tenant_id, '|', source.account_id))) AS account_key,
+  FARM_FINGERPRINT(CONCAT(source.tenant_id, '|', source.budget_id)) AS budget_key,
+  company.base_currency AS functional_currency,
+  source.budget_balance_key,
+  source.tenant_id,
+  source.budget_id,
+  source.budget_type,
+  source.budget_description,
+  source.budget_status,
+  source.account_id,
+  source.account_code,
+  source.budget_line_position,
+  source.budget_balance_position,
+  source.budget_period_raw,
+  source.budget_period_date,
+  source.source_budget_amount,
+  source.source_budget_unit_amount,
+  source.notes,
+  source.is_budget_period_valid,
+  source.is_amount_available,
+  source.is_unit_amount_available,
+  source.is_additive_within_budget_period,
+  source.is_non_additive_across_budget_versions,
+  source.is_reportable,
+  source.is_current,
+  source.is_source_deleted,
+  source.generation,
+  source.version_id,
+  source.run_id,
+  source.receipt_id,
+  source.observed_at,
+  source.source_updated_at,
+  'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "fact_budget_balance")} AS source
+LEFT JOIN ${ref("xero_gold_common", "dim_company")} AS company
+  USING (tenant_id)

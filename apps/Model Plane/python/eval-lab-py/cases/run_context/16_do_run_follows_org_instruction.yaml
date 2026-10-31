@@ -1,0 +1,29 @@
+id: "16-do-run-follows-an-authored-instruction"
+name: "A Do run must follow the authored instructions an Ask turn follows"
+# WS02-S6. The authored-instruction hierarchy (platform, org, Space, persona,
+# mentioned agent) reached an Ask turn only; the BFF injected it onto every
+# request and model-gateway dropped it for a Do run. With
+# MODEL_GATEWAY_RUN_CONTEXT=instructions (or full) the run gets the same text,
+# composed by the same function.
+#
+# This harness talks to model-gateway directly, not through the BFF, so the org,
+# Space and persona layers (which the BFF resolves) are never on its requests.
+# The one authored layer it can exercise is the deployment's own: run the stack
+# with PLATFORM_SYSTEM_INSTRUCTIONS set to
+#   End every answer with the exact token EVAL-RULE-7.
+# The org-level path is covered by the composer's unit tests and by the live
+# flow through the BFF (an org instruction set in Settings, then a Do turn).
+#
+# Skips (does not fail) until both exist: set
+# EVAL_CAPABILITIES=run-context-instructions,authored-instruction-fixture.
+profile: deployed_agent
+features: [usage, tools, citations, agentic]
+prompt: "In one sentence: what is HACCP?"
+checks:
+  contains: ["EVAL-RULE-7"]
+loop:
+  max_tool_calls: 4
+  max_errors: 1
+requires: [run-context-instructions, authored-instruction-fixture]
+tags: [run-context, instructions, agentic]
+timeout_s: 180.0

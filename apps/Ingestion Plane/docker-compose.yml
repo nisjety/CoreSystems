@@ -175,26 +175,22 @@ services:
       # *_base_url); the config crate maps QUARRY_EDGE__MODEL_PLANE_URL to it. Empty,
       # the default, means no Model Plane: quarry-edge reads an empty value as unset
       # (config.rs, from_env). Set MODEL_PLANE_URL (for example http://model-gateway:8080)
-      # to opt in. Set, it serves /v1/invoke for answer synthesis; the gateway chooses
-      # the model (no model id needed).
+      # to opt in. Set, the Model Plane features that have a switch may use it (answer
+      # synthesis has one, below); the gateway chooses the model (no model id needed).
       QUARRY_EDGE__MODEL_PLANE_URL: ${MODEL_PLANE_URL:-}
-      # Model Plane switches (decision 3.12 of 2026-10-27, accepted 2026-10-28): all
-      # off by default, and each one also needs MODEL_PLANE_URL above. Answer
-      # synthesis, search suggest, audio and structured extract (a schema or a prompt
-      # on /v1/extract) have no switch: they run whenever MODEL_PLANE_URL is set
-      # (QB-T17, still pending). Extract also needs a model credential, which no
-      # deployed stack can hold yet (decision X-7, WS16.S1 to S3), so it answers 501
-      # there; QUARRY_EDGE__AI_FORMATS does not gate it. See docs/RUNBOOKS.md (Quarry-v2),
-      # "Enable structured extract and AI formats".
-      # The AI formats of POST /v1/scrape (json, summary, question, highlights;
-      # INNH-1) have one, below: QUARRY_EDGE__AI_FORMATS, "0" here. It is for a
-      # development or side-by-side stack only (a deployed stack has no Model Plane
-      # credential for this lane yet, decision X-7), and an owner turns it on, not
-      # this file. See docs/RUNBOOKS.md (Quarry-v2), "Scrape AI formats".
-      QUARRY_EDGE__AI_FORMATS: "${QUARRY_EDGE_AI_FORMATS:-0}"
-      # Under ZDR the AI formats are refused (ADR-4); "refuse" is the only value
-      # that takes effect in v1.
-      QUARRY_EDGE__AI_FORMATS_ZDR: ${QUARRY_EDGE_AI_FORMATS_ZDR:-refuse}
+      # Model Plane features (QB-T17, owner default D-C; decision 3.12 of 2026-10-27, accepted
+      # 2026-10-28). Every one is OFF by default, and each one also needs MODEL_PLANE_URL above: the
+      # cross-plane registry grants quarry-edge no model-gateway request yet (the manifest rows
+      # model-invoke and model-audio are granted:false), so each would be refused by Auth Core on
+      # every call. A switch set to 1 without a granted model path stays off, and boot logs an
+      # ERROR that names it. Flip a switch only together with the registry grant. The semantic
+      # rerank below is not a Model Plane feature: it calls the Data Plane.
+      # (The Quarry token-request manifest holds three model-gateway rows, all granted:false.)
+      # Structured extract (a schema or a prompt on /v1/extract; INNH-2, INNH-3) is gated by
+      # QUARRY_EDGE__AI_FORMATS below, like the AI formats of POST /v1/scrape (INNH-1): off by
+      # default, and it also needs a model credential, which no deployed stack can hold yet
+      # (decision X-7, WS16.S1 to S3). See docs/RUNBOOKS.md (Quarry-v2), "Enable structured
+      # extract and AI formats" and "Scrape AI formats". An owner turns it on, not this file.
       # max_age on POST /v1/scrape (INNH-7): "off" here. "on" accepts it and runs the
       # org-scoped URL result cache (needs Redis); never read or written under ZDR. An
       # owner turns it on, not this file. See docs/RUNBOOKS.md (Quarry-v2), "Scrape max_age".
@@ -202,16 +198,40 @@ services:
       # Autoprompt: rewrite verbose Research/Comparative queries before fan-out.
       QUARRY_EDGE__AUTOPROMPT: "${QUARRY_EDGE_AUTOPROMPT:-0}"
       QUARRY_EDGE__AUTOPROMPT_MODEL: ${QUARRY_AUTOPROMPT_MODEL:-}
-      # Semantic rerank through the Model Plane: reorder the top-N merged results by
-      # relevance and attach a short highlight per result. Degrade-safe: without a
-      # Model Plane the merge order is kept.
-      QUARRY_EDGE__SEMANTIC_RERANK: "${QUARRY_EDGE_SEMANTIC_RERANK:-0}"
-      QUARRY_EDGE__SEMANTIC_RERANK_MODEL: ${QUARRY_SEMANTIC_RERANK_MODEL:-}
-      QUARRY_EDGE__SEMANTIC_RERANK_TOP_N: ${QUARRY_SEMANTIC_RERANK_TOP_N:-10}
       # LLM intent classification for queries the rules do not settle.
       QUARRY_EDGE__LLM_CLASSIFY_INTENT: "${QUARRY_EDGE_LLM_CLASSIFY_INTENT:-0}"
       # Page titles and short summaries from the Model Plane for pages without a usable title.
       QUARRY_EDGE__PAGE_TITLE_ENRICH: "${QUARRY_EDGE_PAGE_TITLE_ENRICH:-0}"
+      QUARRY_EDGE__ANSWER_SYNTHESIS: "${QUARRY_EDGE_ANSWER_SYNTHESIS:-0}"
+      QUARRY_EDGE__AI_FORMATS: "${QUARRY_EDGE_AI_FORMATS:-0}"
+      # Under ZDR the AI formats of POST /v1/scrape are refused (ADR-4); "refuse" is the only value
+      # that takes effect in v1 (INNH-1).
+      QUARRY_EDGE__AI_FORMATS_ZDR: ${QUARRY_EDGE_AI_FORMATS_ZDR:-refuse}
+      QUARRY_EDGE__SEARCH_SUGGEST: "${QUARRY_EDGE_SEARCH_SUGGEST:-0}"
+      QUARRY_EDGE__MODEL_AUDIO: "${QUARRY_EDGE_MODEL_AUDIO:-0}"
+      # Semantic rerank (Quarry option B): the Data Plane's POST /v1/rerank (rerank-v1, profile web-v1)
+      # reorders the top-N merged results by a paid cross-encoder score. No Model Plane call and no
+      # general model prompt is made. TOP_N bounds the candidates sent per search (the Data Plane takes
+      # at most 100). DEADLINE_MS is one call's budget: it is sent as the Data Plane's deadline_ms, clamped
+      # to 100..8000; a call that misses it keeps the search in its input order.
+      # Scores: a caller sees a score only when it asks for cross_encoder.v1 in score_kinds. model-gateway
+      # sends no score_kinds until QB-T12 (its score_kind calibration in relevance.rs) ships: deploy QB-T12
+      # before or with any change that makes it ask.
+      # DEPLOY ORDER (owner ruling 2026-10-12): this default is 0, so a deploy is dark. Turn the rerank on
+      # (QUARRY_EDGE_SEMANTIC_RERANK=1) only after the Data Plane gate is open (retrieval-engine
+      # WEB_RERANK_ENABLED=1, WEB_RERANK_PROCESSOR_APPROVED=true only after counsel's Article 28 sign-off, and
+      # the data:rerank grant for quarry-edge live in auth-service). Check with
+      #   bash "apps/Data Plane v2/scripts/qb-preflight.sh" --live --ship-qb-t09
+      # (exit 0). A rerank that is on before then sends every non-ZDR search to a route that may not be
+      # deployed: each such search is skipped or degraded, is never cached and pays the search providers again.
+      QUARRY_EDGE__SEMANTIC_RERANK: "${QUARRY_EDGE_SEMANTIC_RERANK:-0}"
+      QUARRY_EDGE__SEMANTIC_RERANK_TOP_N: ${QUARRY_SEMANTIC_RERANK_TOP_N:-10}
+      QUARRY_EDGE__RERANK_DEADLINE_MS: "${QUARRY_EDGE_RERANK_DEADLINE_MS:-2000}"
+      # Shadow mode: the Data Plane is asked and its order measured, but the results keep their order and
+      # carry no score. The first deploy is a shadow smoke run, so this default is 1 until the live proof
+      # passes; the orchestrator then sets the default to 0 (the post-proof flip of this task). The binary's
+      # own default is off. It has no effect unless SEMANTIC_RERANK is on.
+      QUARRY_EDGE__RERANK_SHADOW: "${QUARRY_EDGE_RERANK_SHADOW:-1}"
       # Data residency: set to 1 to refuse external SERP SaaS (Brave/Serper) so
       # web-search queries never leave the cluster (in-infra providers only).
       QUARRY_EDGE__ZERO_SAAS_SEARCH: "${QUARRY_EDGE_ZERO_SAAS_SEARCH:-0}"
@@ -500,6 +520,8 @@ services:
       TIKA_ENABLED: ${TIKA_ENABLED:-false}
       TIKA_URL: ${TIKA_URL:-http://tika:9998}
       TIKA_TIMEOUT_S: ${TIKA_TIMEOUT_S:-20}
+      CHAT_EXTRACT_OCR_ENABLED: ${CHAT_EXTRACT_OCR_ENABLED:-false}
+      CHAT_EXTRACT_OCR_MAX_PAGES: ${CHAT_EXTRACT_OCR_MAX_PAGES:-15}
       GOTENBERG_URL: ${GOTENBERG_URL:-http://gotenberg:3000}
       STIRLING_PDF_URL: ${STIRLING_PDF_URL:-http://stirling-pdf:8080}
     deploy:
@@ -1021,6 +1043,68 @@ services:
         max-file: "3"
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3130/health || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ==================== ANBUD CORE (public tender ingestion) ====================
+  # Doffin/TED notices -> eForms parse -> validated tender corpus. anbud-core owns
+  # ../Engagement plane/anbud-core/.env; the Doffin key lives ONLY there (injected via env_file).
+  # Do NOT re-list DOFFIN_API_KEY or the DOFFIN_* knobs under `environment:`: an
+  # `${DOFFIN_API_KEY:-}` there resolves to empty whenever compose runs without
+  # scripts/run-ingestion-plane.sh's --env-file arguments, and `environment:`
+  # beats `env_file:`, so it would silently blank the key.
+  # The one exception is DOFFIN_API_KEY_SECONDARY, which is blanked below on
+  # purpose: env_file would otherwise hand the running service a key it never uses.
+  anbud-api:
+    # Opt-in only. anbud-core now runs in the Engagement plane against
+    # engagement-postgres with dedicated anbud_migrator/anbud_app roles and its
+    # own migration job; this copy connects as ingestion_user, which the current
+    # anbud-core refuses ("use the dedicated anbud_app role").
+    profiles: ["legacy-anbud"]
+    env_file:
+      - "../Engagement plane/anbud-core/.env"
+    build:
+      context: "../Engagement plane/anbud-core"
+      dockerfile: Dockerfile
+      # The Dockerfile copies the shared plane client from this named context,
+      # as the Engagement plane's own compose provides it.
+      additional_contexts:
+        studio-plane-client: "../Engagement plane/pkg/planeclient"
+      args: *build-metadata
+    container_name: anbud-api
+    restart: unless-stopped
+    environment:
+      PORT: "3138"
+      ENVIRONMENT: ${ENVIRONMENT:-dev}
+      SERVICE_NAME: anbud-core
+      ANBUD_API_KEY: ${AUTH_CORE_INTERNAL_API_KEY:?AUTH_CORE_INTERNAL_API_KEY is required}
+      ANBUD_DSN: postgres://ingestion_user:${INGESTION_PG_PASSWORD:?INGESTION_PG_PASSWORD is required}@ingestion-postgres:5432/anbud_core?sslmode=disable
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      DOFFIN_API_KEY_SECONDARY: ""
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+        reservations:
+          memory: 64M
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:3138:3138"
+    networks:
+      - ingestion-net
+      - inter-plane-bus
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3138/health || exit 1"]
       interval: 60s
       timeout: 10s
       retries: 3

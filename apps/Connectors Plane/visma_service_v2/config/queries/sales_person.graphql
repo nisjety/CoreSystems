@@ -1,0 +1,25 @@
+query SalesPersons(
+  $lastId: String,
+  $updatedInDataMart: DateTime,
+  $pageSize: Int! = 5000,
+  $includeDeleted: Boolean! = false
+) {
+  salesPersons(
+    lastId: $lastId,
+    updatedInDataMart: $updatedInDataMart,
+    pageSize: $pageSize,
+    includeDeleted: $includeDeleted
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    salesPersonId
+    salesPersonCd
+    name
+    isActive
+    commissionPct
+    lastModifiedDateTime
+    deletedDatabaseRecord
+    createdInDataMartDateTime
+  }
+}

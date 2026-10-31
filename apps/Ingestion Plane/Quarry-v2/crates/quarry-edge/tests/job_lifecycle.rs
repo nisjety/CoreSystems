@@ -272,6 +272,8 @@ async fn service_token_gets_403_on_lifecycle_routes() {
             aud: None,
             scopes: vec!["scrape:read".into(), "browser:execute".into()],
             zdr: Some(true),
+            key_id: None,
+            acting_user_id: None,
         });
         next.run(req).await
     }
@@ -314,6 +316,8 @@ fn a_model_plane_service_origin_is_an_agent_with_its_run_id() {
         aud: None,
         scopes: Vec::new(),
         zdr: Some(true),
+        key_id: None,
+        acting_user_id: None,
     };
     let mut headers = HeaderMap::new();
     headers.insert("x-verevon-run-id", "run_abc".parse().unwrap());
@@ -491,6 +495,8 @@ async fn service_token_cannot_control() {
             aud: None,
             scopes: vec!["scrape:read".into(), "browser:execute".into()],
             zdr: Some(true),
+            key_id: None,
+            acting_user_id: None,
         });
         next.run(req).await
     }
@@ -540,6 +546,8 @@ async fn zdr_caller_can_cancel_but_not_read_errors() {
             aud: None,
             scopes: Vec::new(),
             zdr: Some(true),
+            key_id: None,
+            acting_user_id: None,
         });
         next.run(req).await
     }

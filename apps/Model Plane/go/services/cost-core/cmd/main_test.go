@@ -221,3 +221,33 @@ func TestUsageEnvelopeSubscriptionTurnLedgersRealTokensAtZeroCost(t *testing.T) 
 		}
 	}
 }
+
+// The gateway's advisory cache miss reason rides the usage payload into the
+// ledger entry; an unknown value is dropped, never a reason to lose the tokens.
+func TestUsageEnvelopeDecodesCacheMissReason(t *testing.T) {
+	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
+	envelopeWith := func(requestID, field string) []byte {
+		return []byte(`{
+			"event_type":"USAGE_ENVELOPE",
+			"producer":"model-gateway",
+			"correlation_id":"` + requestID + `",
+			"idempotency_key":"` + requestID + `-USAGE_ENVELOPE",
+			"org_id":"org-a",
+			"user_id":"user-a",
+			"payload":{"request_id":"` + requestID + `","org_id":"org-a","user_id":"user-a","model":"claude-sonnet-4-6","input_tokens":5000,"output_tokens":40` + field + `}
+		}`)
+	}
+	for name, test := range map[string]struct{ field, want string }{
+		"classified": {`,"cache_miss_reason":"prefix_changed"`, ledger.CacheMissPrefixChanged},
+		"older":      {``, ""},
+		"future":     {`,"cache_miss_reason":"cold_start"`, ""},
+	} {
+		entry, err := decodeUsageMessage("mp.v1.usage.org-a", envelopeWith("req-"+name, test.field), now)
+		if err != nil {
+			t.Fatalf("%s: valid envelope rejected: %v", name, err)
+		}
+		if entry.CacheMissReason != test.want || entry.InputTokens != 5000 {
+			t.Fatalf("%s: reason=%q input=%d, want %q/5000", name, entry.CacheMissReason, entry.InputTokens, test.want)
+		}
+	}
+}

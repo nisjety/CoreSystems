@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { deriveConversationNodes } from './derive'
+import { deriveConversationNodes, nodeKey } from './derive'
 import type { ChatTurn } from './types'
 import {
   messageToTurn,
@@ -151,6 +151,47 @@ describe('deriveConversationNodes', () => {
     ])
     // No 'follow-ups' tail: see the suppression test above.
     expect(kinds(rich)).not.toContain('follow-ups')
+  })
+})
+
+describe('nodeKey', () => {
+  const richTurn = () =>
+    assistantTurn({
+      reasoning: 'thinking',
+      grounding: { sources: [] } as unknown as ChatTurn['grounding'],
+      confidence: 0.2,
+      memoryRecallCount: 2,
+      stopReason: 'max_tokens',
+      toolCalls: [{ id: 't1', name: 'shell' } as unknown as NonNullable<ChatTurn['toolCalls']>[number]],
+      pendingApprovals: [{ id: 'ap1' } as unknown as NonNullable<ChatTurn['pendingApprovals']>[number]],
+      files: [{ name: 'a.txt', mime: 'text/plain' } as unknown as NonNullable<ChatTurn['files']>[number]],
+    })
+
+  it('is the node kind, so a row survives every re-derivation of its turn', () => {
+    const nodes = deriveConversationNodes(richTurn())
+    expect(nodes.length).toBeGreaterThan(5)
+    // A fresh derivation builds new node objects; the key must not follow them.
+    expect(deriveConversationNodes(richTurn())[0]).not.toBe(nodes[0])
+    expect(nodes.map(nodeKey)).toEqual(nodes.map((node) => node.kind))
+  })
+
+  /**
+   * The list's rows are keyed by this. Two nodes with one key would be one row,
+   * the second taking the first's place, so a kind that can repeat in a turn must
+   * put an id in its key before it is derived twice.
+   */
+  it('is unique within a derived list, for a plain, a rich, a waiting and a failed turn', () => {
+    const turns = [
+      assistantTurn(),
+      richTurn(),
+      assistantTurn({ status: 'waiting', content: '' }),
+      assistantTurn({ status: 'error', content: 'boom' }),
+      assistantTurn({ planMode: true, streaming: false }),
+    ]
+    for (const turn of turns) {
+      const keys = deriveConversationNodes(turn).map(nodeKey)
+      expect(new Set(keys).size).toBe(keys.length)
+    }
   })
 })
 

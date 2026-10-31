@@ -36,7 +36,8 @@ class TestDecideApprovalBody(unittest.TestCase):
         if include_optional:
             return DecideApprovalBody(
                 decision = 'approve',
-                reason = ''
+                reason = '',
+                scope = 'once'
             )
         else:
             return DecideApprovalBody(

@@ -1,0 +1,281 @@
+# promtool unit tests for audit-core.rules.yml:
+#   promtool test rules audit-core.rules.test.yml
+# The primary subscriber reports its events and consumer as bus="control"
+# (subscriber.New defaults); its NATS connection gauge is set as bus="primary"
+# (cmd/server/main.go), so the series below carry those labels.
+rule_files:
+  - audit-core.rules.yml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    name: an authority mismatch fires as soon as the counter rises
+    input_series:
+      - series: 'audit_core_events_total{bus="control",kind="audit",result="authority_mismatch"}'
+        values: '0x5 1x20'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ControlAuditCoreAuthorityMismatch
+        exp_alerts:
+          - exp_labels: { severity: critical, plane: control, bus: control, kind: audit, result: authority_mismatch }
+            exp_annotations:
+              summary: "audit-core refused audit events whose subject does not match their payload or plane"
+
+  - interval: 1m
+    name: no authority mismatch stays quiet
+    input_series:
+      - series: 'audit_core_events_total{bus="control",kind="audit",result="authority_mismatch"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ControlAuditCoreAuthorityMismatch
+        exp_alerts: []
+
+  - interval: 1m
+    name: a store error fires while the counter rises
+    input_series:
+      - series: 'audit_core_events_total{bus="control",kind="usage",result="store_error"}'
+        values: '0+1x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ControlAuditCoreStoreError
+        exp_alerts:
+          - exp_labels: { severity: warning, plane: control, bus: control, kind: usage, result: store_error }
+            exp_annotations:
+              summary: "audit-core could not persist an audit event (it retries, then dead-letters)"
+
+  - interval: 1m
+    name: a malformed message fires while the counter rises
+    input_series:
+      - series: 'audit_core_events_total{bus="control",kind="audit",result="malformed"}'
+        values: '0+1x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ControlAuditCoreMalformed
+        exp_alerts:
+          - exp_labels: { severity: warning, plane: control, bus: control, kind: audit, result: malformed }
+            exp_annotations:
+              summary: "audit-core received a message it cannot decode"
+
+  - interval: 1m
+    name: messages pending on the consumer fire after fifteen minutes
+    input_series:
+      - series: 'audit_core_consumer_pending{bus="control",kind="audit"}'
+        values: '4x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ControlAuditCoreConsumerPending
+        exp_alerts:
+          - exp_labels: { severity: warning, plane: control, bus: control, kind: audit }
+            exp_annotations:
+              summary: "audit-core has audit messages pending on its durable consumer for over 15 minutes"
+
+  - interval: 1m
+    name: a drained consumer stays quiet
+    input_series:
+      - series: 'audit_core_consumer_pending{bus="control",kind="audit"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ControlAuditCoreConsumerPending
+        exp_alerts: []
+
+  - interval: 1m
+    name: a NATS disconnect fires after five minutes
+    input_series:
+      - series: 'audit_core_nats_connected{bus="primary"}'
+        values: '1x5 0x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ControlAuditCoreNATSDisconnected
+        exp_alerts:
+          - exp_labels: { severity: critical, plane: control, bus: primary }
+            exp_annotations:
+              summary: "audit-core has been disconnected from a NATS bus for over 5 minutes"
+
+  - interval: 1m
+    name: a connected bus stays quiet
+    input_series:
+      - series: 'audit_core_nats_connected{bus="primary"}'
+        values: '1x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ControlAuditCoreNATSDisconnected
+        exp_alerts: []
+
+  - interval: 1m
+    name: a failed chain verification fires while the counter rises
+    input_series:
+      - series: 'audit_core_chain_verify_failures_total'
+        values: '0x5 1x20'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ControlAuditChainVerifyFailed
+        exp_alerts:
+          - exp_labels: { severity: critical, plane: control }
+            exp_annotations:
+              summary: "audit-core's chain verifier found an org's audit chain broken"
+
+  - interval: 1m
+    name: clean chain verifications stay quiet
+    input_series:
+      - series: 'audit_core_chain_verify_failures_total'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ControlAuditChainVerifyFailed
+        exp_alerts: []
+
+  - interval: 1m
+    name: a chain marked broken at insert time fires
+    input_series:
+      - series: 'audit_core_chain_broken_total'
+        values: '0x5 1x20'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ControlAuditChainBroken
+        exp_alerts:
+          - exp_labels: { severity: critical, plane: control }
+            exp_annotations:
+              summary: "audit-core found an org's chain head disagreeing with its stored tip row at insert time"
+
+  - interval: 1m
+    name: an unchanged broken counter stays quiet after the window
+    input_series:
+      - series: 'audit_core_chain_broken_total'
+        values: '1x300'
+    alert_rule_test:
+      - eval_time: 200m
+        alertname: ControlAuditChainBroken
+        exp_alerts: []
+
+  - interval: 1m
+    name: a purge refused for a broken prefix fires while the counter rises
+    input_series:
+      - series: 'audit_core_chain_purge_blocked_total{kind="row_hash_mismatch"}'
+        values: '0x5 1x20'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ControlAuditChainPurgeBlocked
+        exp_alerts:
+          - exp_labels: { severity: critical, plane: control, kind: row_hash_mismatch }
+            exp_annotations:
+              summary: "audit-core refused to purge an org's expired audit rows: a chain prefix or checkpoint did not verify"
+
+  - interval: 1m
+    name: an unchanged purge-refused counter stays quiet
+    input_series:
+      - series: 'audit_core_chain_purge_blocked_total{kind="row_hash_mismatch"}'
+        values: '1x300'
+    alert_rule_test:
+      - eval_time: 200m
+        alertname: ControlAuditChainPurgeBlocked
+        exp_alerts: []
+
+  - interval: 1m
+    name: a purge refusal stays up for the 25-hour window and then clears
+    input_series:
+      - series: 'audit_core_chain_purge_blocked_total{kind="row_hash_mismatch"}'
+        values: '0x5 1x1700'
+    alert_rule_test:
+      - eval_time: 24h
+        alertname: ControlAuditChainPurgeBlocked
+        exp_alerts:
+          - exp_labels: { severity: critical, plane: control, kind: row_hash_mismatch }
+            exp_annotations:
+              summary: "audit-core refused to purge an org's expired audit rows: a chain prefix or checkpoint did not verify"
+      - eval_time: 27h
+        alertname: ControlAuditChainPurgeBlocked
+        exp_alerts: []
+
+  - interval: 1m
+    name: a verifier that stopped finishing passes goes stale after 36 hours
+    input_series:
+      - series: 'audit_core_chain_last_verify_timestamp_seconds'
+        values: '0x2400'
+    alert_rule_test:
+      - eval_time: 37h
+        alertname: ControlAuditChainVerifyStale
+        exp_alerts:
+          - exp_labels: { severity: warning, plane: control }
+            exp_annotations:
+              summary: "audit-core's chain verifier has not completed a pass in over 36 hours"
+
+  - interval: 1m
+    name: a verifier that finished a pass within a day stays quiet
+    input_series:
+      - series: 'audit_core_chain_last_verify_timestamp_seconds'
+        values: '86400x2400'
+    alert_rule_test:
+      - eval_time: 30h
+        alertname: ControlAuditChainVerifyStale
+        exp_alerts: []
+
+  - interval: 1m
+    name: a destination more than fifteen minutes behind fires after five more
+    input_series:
+      - series: 'audit_siem_export_lag_seconds{destination_kind="ndjson_webhook"}'
+        values: '1000x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ControlAuditSIEMExportLag
+        exp_alerts:
+          - exp_labels: { severity: warning, plane: control, destination_kind: ndjson_webhook }
+            exp_annotations:
+              summary: "a SIEM destination is more than 15 minutes behind the audit chain"
+
+  - interval: 1m
+    name: a destination inside fifteen minutes of the chain stays quiet
+    input_series:
+      - series: 'audit_siem_export_lag_seconds{destination_kind="splunk_hec"}'
+        values: '800x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ControlAuditSIEMExportLag
+        exp_alerts: []
+
+  - interval: 1m
+    name: a lag that clears before five minutes never fires
+    input_series:
+      - series: 'audit_siem_export_lag_seconds{destination_kind="ndjson_webhook"}'
+        values: '1000x3 0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ControlAuditSIEMExportLag
+        exp_alerts: []
+
+  - interval: 1m
+    name: batches that keep failing fire after ten minutes
+    input_series:
+      - series: 'audit_siem_export_batches_total{result="failed"}'
+        values: '0+1x40'
+      - series: 'audit_siem_export_batches_total{result="ok"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: ControlAuditSIEMExportFailing
+        exp_alerts:
+          - exp_labels: { severity: warning, plane: control }
+            exp_annotations:
+              summary: "most SIEM export batches are failing (a destination is refusing or unreachable)"
+
+  - interval: 1m
+    name: a healthy export with the odd failure stays quiet
+    input_series:
+      - series: 'audit_siem_export_batches_total{result="failed"}'
+        values: '0x10 1x30'
+      - series: 'audit_siem_export_batches_total{result="ok"}'
+        values: '0+4x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: ControlAuditSIEMExportFailing
+        exp_alerts: []
+
+  - interval: 1m
+    name: no batches at all is not a failure
+    input_series:
+      - series: 'audit_siem_export_batches_total{result="ok"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: ControlAuditSIEMExportFailing
+        exp_alerts: []

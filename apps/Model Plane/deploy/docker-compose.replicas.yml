@@ -1,0 +1,57 @@
+# Two-replica profile - opt-in, development and proof stacks only. Layer on top of
+# docker-compose.yml (and the dev override) when run control has to be exercised
+# across gateways (build plan WS04-S1):
+#
+#   cd apps/Model\ Plane
+#   MODEL_PLANE_REPLICAS=2 ./scripts/compose.sh up -d model-gateway model-gateway-b
+#
+# compose.sh refuses it in an artifact, under the production profile and under a
+# release lock: a replica count in production is the deployment's decision
+# (WS01), not this file's.
+#
+# model-gateway-b is the same service as model-gateway, taken from the base file
+# with `extends`, so it cannot drift from it. What differs is only what two
+# containers cannot share:
+#   - host ports. Replica A keeps 8080/9090. B gets 28080 (HTTP) and 29090 (gRPC
+#     probe), overridable with MODEL_GATEWAY_B_HTTP_HOST_PORT and
+#     MODEL_GATEWAY_B_GRPC_HOST_PORT. Not 8081 and 9091: host 8081 is Ingestion's
+#     quarry-control and 9091 is session-core's gRPC. Not 18080 and 19090 either:
+#     those are org-core's host ports in the Control Plane stack, which runs
+#     beside this one in the cross-plane dev stack.
+#   - the network aliases. B joins inter-plane-bus under the shared `model-gateway`
+#     alias, so a caller that resolves that name is balanced across the two
+#     replicas (which is exactly the case a Stop that lands on the wrong replica
+#     comes from), and under an alias of its own.
+#
+# The dev override's values for model-gateway are repeated here, because `extends`
+# reads the base file only and the override is a separate layer: without them B
+# would run with a stricter rate limit and a model allow-list that A does not
+# have, and a proof that sends one turn to each would not compare like with like.
+# Keep them equal to the model-gateway entry of docker-compose.override.yml.
+#
+# Both replicas read MODEL_GATEWAY_RUN_CONTROL_BUS from the same host variable, so
+# the bus is on for both or for neither. Deploy order: the NATS ACL (nats.conf)
+# first, then the gateways, then the switch.
+services:
+  model-gateway-b:
+    extends:
+      file: docker-compose.yml
+      service: model-gateway
+    # `ports` and `networks` of an extended service are appended to, not replaced;
+    # without !override B would also try to publish host 8080 and 9090.
+    ports: !override
+      - "127.0.0.1:${MODEL_GATEWAY_B_HTTP_HOST_PORT:-28080}:8080"   # HTTP
+      - "127.0.0.1:${MODEL_GATEWAY_B_GRPC_HOST_PORT:-29090}:9090"   # gRPC compatibility probe
+    networks: !override
+      default: {}
+      inter-plane-bus:
+        aliases:
+          - model-plane-model-gateway-b-1
+          - model-gateway
+    environment:
+      RUST_LOG: debug
+      RATE_LIMIT_RPM: "1000"
+      ALLOWED_MODELS: ""
+      FINETUNE_ENABLED: "1"
+      FINETUNE_ORG_BUDGET_USD: "50"
+      FINETUNE_PER_JOB_BUDGET_USD: "20"

@@ -424,6 +424,9 @@ const PENDING_FEATURES: &[&str] = &[
     "job_result_urls",
     // INNH-5: a webhook subscription pushes page URLs and fingerprints off-process; refused to create under ZDR.
     "webhook_off_process",
+    // INNH-8: `/v1/answer` and `/v1/answer/stream` are refused under ZDR (ADR-4), because the Model
+    // Plane hop carries no ZDR posture. The catalogue has no key for answer synthesis.
+    "answer_synthesis",
 ];
 
 fn refusals_named_by_the_matrix() -> (BTreeSet<&'static str>, BTreeSet<&'static str>) {

@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/triodelab/controlplane/audit-core/internal/chain"
 	"github.com/triodelab/controlplane/audit-core/internal/events"
 )
 
@@ -26,6 +27,24 @@ import (
 // that implements the same interface.
 type Store struct {
 	pool *pgxpool.Pool
+	// chain makes every new audit row join its org's hash chain (see chain.go).
+	// Off, insertAudit is the single unchained INSERT it always was.
+	chain bool
+	// keys signs attestations and checkpoints; prune decides whether Purge may
+	// delete chained rows (see attest.go). The zero values keep chained rows.
+	keys               *chain.KeyRing
+	prune              PruneMode
+	pruneBatchOverride int // tests only; zero means defaultPruneBatchSize
+	// manifestSigner signs compliance manifests; nil means the key ring if it can.
+	manifestSigner PayloadSigner
+}
+
+// Option configures a Store at construction.
+type Option func(*Store)
+
+// WithChain turns on the per-org chained insert (AUDIT_CHAIN_ENABLED).
+func WithChain() Option {
+	return func(s *Store) { s.chain = true }
 }
 
 var (
@@ -33,8 +52,12 @@ var (
 	ErrUsageEventConflict = errors.New("usage event identity conflicts with an existing payload")
 )
 
-func New(pool *pgxpool.Pool) *Store {
-	return &Store{pool: pool}
+func New(pool *pgxpool.Pool, opts ...Option) *Store {
+	s := &Store{pool: pool}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // InsertAudit appends a single audit event. Returns the assigned ID so
@@ -74,6 +97,19 @@ func (s *Store) InsertAuditFromStream(ctx context.Context, ev *events.AuditEvent
 	return inserted, err
 }
 
+// insertAuditSQL is the one audit INSERT, shared by the unchained path
+// (RETURNING id) and the chained path (RETURNING the hashed columns).
+// The ::bigint cast matters: NULLIF($18, 0) alone types the parameter from
+// the literal as int4, so a stream sequence above 2^31 failed to encode.
+const insertAuditSQL = `
+		INSERT INTO audit_events (
+			occurred_at, org_id, user_id, actor_role, plane, event, subject,
+			resource_id, outcome, details, event_id, request_id, ip_address, user_agent,
+			source_bus, source_subject, source_producer, source_stream_sequence, payload_hash
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NULLIF($13, '')::inet, $14,
+			NULLIF($15, ''), NULLIF($16, ''), NULLIF($17, ''), NULLIF($18::bigint, 0), $19)
+		ON CONFLICT DO NOTHING`
+
 func (s *Store) insertAudit(ctx context.Context, ev *events.AuditEvent, sourceBus, sourceSubject string, streamSequence int64) (int64, bool, error) {
 	if ev == nil || strings.TrimSpace(sourceBus) == "" || strings.TrimSpace(sourceSubject) == "" {
 		return 0, false, fmt.Errorf("audit event and logical source identity are required")
@@ -90,20 +126,15 @@ func (s *Store) insertAudit(ctx context.Context, ev *events.AuditEvent, sourceBu
 		return 0, false, err
 	}
 	payloadHash := sha256.Sum256(payloadBytes)
-	var id int64
-	err = s.pool.QueryRow(ctx, `
-		INSERT INTO audit_events (
-			occurred_at, org_id, user_id, actor_role, plane, event, subject,
-			resource_id, outcome, details, event_id, request_id, ip_address, user_agent,
-			source_bus, source_subject, source_producer, source_stream_sequence, payload_hash
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NULLIF($13, '')::inet, $14,
-			NULLIF($15, ''), NULLIF($16, ''), NULLIF($17, ''), NULLIF($18, 0), $19)
-		ON CONFLICT DO NOTHING
-		RETURNING id
-	`, ev.OccurredAt, ev.OrgID, nilIfEmpty(ev.UserID), nilIfEmpty(ev.ActorRole),
+	args := []any{ev.OccurredAt, ev.OrgID, nilIfEmpty(ev.UserID), nilIfEmpty(ev.ActorRole),
 		ev.Plane, ev.Event, nilIfEmpty(ev.Subject), nilIfEmpty(ev.ResourceID),
 		ev.Outcome, details, nilIfEmpty(ev.EventID), nilIfEmpty(ev.RequestID), ev.IPAddress,
-		nilIfEmpty(ev.UserAgent), sourceBus, sourceSubject, ev.Producer, streamSequence, payloadHash[:]).Scan(&id)
+		nilIfEmpty(ev.UserAgent), sourceBus, sourceSubject, ev.Producer, streamSequence, payloadHash[:]}
+	if s.chain {
+		return s.insertAuditChained(ctx, ev, args, details, sourceBus, sourceSubject, streamSequence, payloadHash[:])
+	}
+	var id int64
+	err = s.pool.QueryRow(ctx, insertAuditSQL+" RETURNING id", args...).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return s.resolveAuditConflict(ctx, ev, sourceBus, sourceSubject, streamSequence, payloadHash[:])
 	}
@@ -190,13 +221,15 @@ func (s *Store) insertUsage(ctx context.Context, ev *events.UsageEvent, sourceBu
 	}
 	payloadHash := sha256.Sum256(payloadBytes)
 	var id int64
+	// ::bigint for the same reason as insertAuditSQL: a bare NULLIF($17, 0)
+	// types the stream sequence as int4.
 	err = s.pool.QueryRow(ctx, `
 		INSERT INTO usage_events (
 			event_id, occurred_at, org_id, user_id, plane, op, tokens_in, tokens_out,
 			bytes_in, bytes_out, cost_cents, request_id, metadata,
 			source_bus, source_subject, source_producer, source_stream_sequence, payload_hash
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-			NULLIF($14, ''), NULLIF($15, ''), NULLIF($16, ''), NULLIF($17, 0), $18)
+			NULLIF($14, ''), NULLIF($15, ''), NULLIF($16, ''), NULLIF($17::bigint, 0), $18)
 		ON CONFLICT DO NOTHING
 		RETURNING id
 	`, nilIfEmpty(ev.EventID), ev.OccurredAt, ev.OrgID, nilIfEmpty(ev.UserID), ev.Plane, ev.Op,
@@ -228,8 +261,15 @@ func validateStreamIdentity(sourceBus string, streamSequence uint64) (int64, err
 // PurgeResult reports how many rows each append-only table shed during a
 // single retention sweep.
 type PurgeResult struct {
-	AuditDeleted int64
+	AuditDeleted int64 // unchained rows plus, with pruning on, chained rows
 	UsageDeleted int64
+	// CheckpointsWritten counts signed retention checkpoints (one per chained
+	// batch). OrgsBlocked counts orgs whose prefix failed verification, which
+	// lost nothing and have an incident row. ChainedPlanned is what a dry run
+	// would have deleted.
+	CheckpointsWritten int
+	OrgsBlocked        int
+	ChainedPlanned     int64
 }
 
 // Purge enforces data retention by deleting events older than retentionDays
@@ -247,11 +287,27 @@ func (s *Store) Purge(ctx context.Context, retentionDays int) (PurgeResult, erro
 
 	var res PurgeResult
 
-	auditTag, err := s.pool.Exec(ctx, `
+	// audit_events is guarded against DELETE (migration 007); audit.maintenance
+	// lifts the guard for this transaction only. Chained rows are skipped here:
+	// deleting one by age would break its org's chain, so they leave only
+	// through purgeChained below (verified, checkpointed, and off by default).
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return PurgeResult{}, fmt.Errorf("purge audit_events: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op after a successful Commit
+	if _, err := tx.Exec(ctx, `SELECT set_config('audit.maintenance', 'on', true)`); err != nil {
+		return PurgeResult{}, fmt.Errorf("purge audit_events: %w", err)
+	}
+	auditTag, err := tx.Exec(ctx, `
 		DELETE FROM audit_events
-		WHERE ingested_at < NOW() - ($1 * INTERVAL '1 day')
+		WHERE chain_seq IS NULL
+		  AND ingested_at < NOW() - ($1 * INTERVAL '1 day')
 	`, retentionDays)
 	if err != nil {
+		return PurgeResult{}, fmt.Errorf("purge audit_events: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return PurgeResult{}, fmt.Errorf("purge audit_events: %w", err)
 	}
 	res.AuditDeleted = auditTag.RowsAffected()
@@ -264,6 +320,12 @@ func (s *Store) Purge(ctx context.Context, retentionDays int) (PurgeResult, erro
 		return PurgeResult{}, fmt.Errorf("purge usage_events: %w", err)
 	}
 	res.UsageDeleted = usageTag.RowsAffected()
+
+	// Last, so a chained-purge failure cannot skip the work above. The partial
+	// result is returned with the error: what was deleted is still true.
+	if err := s.purgeChained(ctx, retentionDays, &res); err != nil {
+		return res, fmt.Errorf("purge chained audit_events: %w", err)
+	}
 
 	return res, nil
 }

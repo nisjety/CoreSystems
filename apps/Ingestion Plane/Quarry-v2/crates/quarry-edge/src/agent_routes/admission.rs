@@ -34,6 +34,7 @@ pub(super) async fn validate_run_grant(
     state: &AppState,
     org_id: &str,
     grant_id: &str,
+    run_key_id: Option<&str>,
     run_domains: &[String],
     run_nav: &super::human_browse::RunNavPolicy,
 ) -> QuarryResult<()> {
@@ -44,7 +45,26 @@ pub(super) async fn validate_run_grant(
             "browser grant is inactive or expired",
         ));
     }
-    if state.require_browser_grants {
+    // INNH-10: a key run stays bound to the key it started under. A grant that answers for
+    // another key, or for none, is refused, so a grant swapped under a live run stops it.
+    match run_key_id {
+        Some(run_key) if grant.key_id != run_key => {
+            return Err(QuarryError::new(
+                ErrorCode::SecurityBlocked,
+                "browser grant no longer belongs to this key",
+            ));
+        }
+        // And a key's grant never backs a run that is not a key's.
+        None if !grant.key_id.is_empty() => {
+            return Err(QuarryError::new(
+                ErrorCode::SecurityBlocked,
+                "browser grant belongs to an API key",
+            ));
+        }
+        _ => {}
+    }
+    // A key run always compares the broker's policy, as `require_browser_grants` does.
+    if state.require_browser_grants || run_key_id.is_some() {
         // The broker's mode decides the comparison (WS8.B): an allow-list is the
         // exact host list, an open-web grant is the same denied list. Any other
         // pairing, or an unknown mode, is a mismatch.
@@ -414,14 +434,24 @@ pub(super) async fn admit_action(
             state,
             &entry.org_id,
             grant_id,
+            entry.key_id.as_deref(),
             &entry.constraints.allowed_domains,
             &entry.nav_policy,
         )
         .await?;
-    } else if state.require_browser_grants {
+    } else if state.require_browser_grants || entry.key_id.is_some() {
         return Err(QuarryError::new(
             ErrorCode::Forbidden,
             "browser grant is required for every action",
+        ));
+    }
+
+    // INNH-10: an API key takes no sensitive action: there is no person to sign an ask. Refused
+    // on the kind of the action, ahead of the driver's capabilities, with nothing consumed.
+    // (Gate 10 holds the same line for any action that would still name an approval.)
+    if entry.key_id.is_some() && is_sensitive_action(action) {
+        return Err(crate::api_key::refusal_error(
+            crate::api_key::reason::SENSITIVE_ACTION_REFUSED,
         ));
     }
 
@@ -454,7 +484,16 @@ pub(super) async fn admit_action(
     }
 
     // 10. sensitive approval (the only gate that consumes state)
-    if let Some(approval) = sensitive_approval_for_action(entry, action, input.last_observation)? {
+    let sensitive = sensitive_approval_for_action(entry, action, input.last_observation);
+    // INNH-10: there is no person to sign an ask for an API key, so a key run takes no
+    // sensitive action at all: refused before any broker call. An action that would need an
+    // approval but cannot name one (a stale target) is refused the same way.
+    if entry.key_id.is_some() && !matches!(sensitive, Ok(None)) {
+        return Err(crate::api_key::refusal_error(
+            crate::api_key::reason::SENSITIVE_ACTION_REFUSED,
+        ));
+    }
+    if let Some(approval) = sensitive? {
         validate_sensitive_approval(state, &entry.org_id, &approval).await?;
         if !entry
             .used_sensitive_approval_grants

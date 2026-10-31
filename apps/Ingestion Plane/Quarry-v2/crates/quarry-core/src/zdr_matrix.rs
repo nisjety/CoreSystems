@@ -151,8 +151,9 @@ pub const ROWS: &[Row] = &[
         enforced_by: &[
             "zdr_claim_floor::a_user_token_from_a_zdr_org_runs_search_as_zdr_even_when_the_body_says_false",
             "zdr_claim_floor::a_user_token_from_a_zdr_org_runs_search_as_zdr_when_the_body_omits_the_flag",
+            "answer_provider_status::include_answer_under_zdr_is_skipped_with_no_model_call_and_no_meter",
         ],
-        basis: "paid providers closed, search cache bypassed, no durable SearchIssued event; the provider failure is logged as a class only",
+        basis: "paid providers closed, search cache bypassed, no durable SearchIssued event; the provider failure is logged as a class only. include_answer (INNH-8a) sends nothing to a model under ZDR: answer_status skipped_zdr, the answer pipeline never starts, no answer usage is metered",
         log: Log::Canary {
             test: "zdr_log_capture::a_zdr_search_with_a_failing_provider_logs_no_query",
         },
@@ -193,13 +194,17 @@ pub const ROWS: &[Row] = &[
     Row {
         id: "answer",
         routes: &["/v1/answer", "/v1/answer/stream"],
-        treatment: Treatment::Honored,
+        treatment: Treatment::Refused {
+            code: "FORBIDDEN",
+            feature: "answer_synthesis",
+        },
         status: Status::Enforced,
         enforced_by: &[
-            "zdr_claim_floor::answer_runs_as_zdr_for_a_zdr_org_user_and_as_before_otherwise",
-            "zdr_claim_floor::answer_stream_runs_as_zdr_for_a_zdr_org_user_and_as_before_otherwise",
+            "zdr_claim_floor::answer_is_refused_for_a_zdr_org_user_and_runs_as_before_otherwise",
+            "zdr_claim_floor::answer_stream_is_refused_for_a_zdr_org_user_and_runs_as_before_otherwise",
+            "answer_provider_status::a_zdr_answer_is_refused_before_the_pipeline_starts_and_nothing_reaches_the_model",
         ],
-        basis: "the answer pipeline runs with the effective ZDR posture: no paid providers, no durable search event",
+        basis: "answer_routes::answer_run and ::answer_stream refuse a request under effective ZDR (the body flag or the token's floor) with a 403 FORBIDDEN, reason zdr_unavailable, before the deployment's gate, the answer cache and the pipeline start: no search, no page fetch and no Model Plane call, because the model hop carries no ZDR posture (ADR-4) and would take the query and the page text. A refused ZDR run leaves only a metadata-only tombstone (outcome refused). include_answer on /v1/search is not refused: it is answered answer_status skipped_zdr, with the search itself run under ZDR and no model call",
         log: Log::Unverified,
     },
     Row {
@@ -225,6 +230,17 @@ pub const ROWS: &[Row] = &[
         status: Status::Enforced,
         enforced_by: &[],
         basis: "map_routes::map touches no cache, artifact store, index or event sink",
+        log: Log::Unverified,
+    },
+    Row {
+        id: "audit_page",
+        routes: &["/v1/audit/page"],
+        treatment: Treatment::Inert {
+            reason: "fetches robots and one page and returns bounded evidence; nothing is stored",
+        },
+        status: Status::Enforced,
+        enforced_by: &[],
+        basis: "audit_page::capture touches no cache, artifact store, index or event sink",
         log: Log::Unverified,
     },
     Row {
@@ -503,6 +519,19 @@ pub const ROWS: &[Row] = &[
         log: Log::Unverified,
     },
     Row {
+        id: "agent_run_api_key",
+        routes: &[],
+        treatment: Treatment::Honored,
+        status: Status::Enforced,
+        enforced_by: &[
+            "api_key_agent_runs::a_zdr_key_token_makes_a_zdr_run_and_a_zdr_grant_needs_one",
+            "api_key_agent_runs::a_key_run_takes_no_profile_and_no_resume",
+            "api_key_fence::switch_on_with_the_scope_refuses_every_route_off_the_allow_list",
+        ],
+        basis: "an API-key principal (INNH-10, dark behind QUARRY_EDGE__API_KEY_AGENT_RUNS) starts a run on the agent_run route and keeps exactly the persistence of agent_run: a ZDR run writes no checkpoint, timeline row or receipt. On top of that, in every posture: no resume and no profile or persist_profile (api_key_resume_refused, api_key_profile_refused, so a key run never reads or writes a durable profile or checkpoint of its own), no artifacts route (the route fence refuses /v1/artifacts*, api_key_route_refused), no sensitive action. The token's zdr claim is the organization's posture raised by the key's own flag and counts as a floor like a user's (auth::Claims::zdr_floor), and a ZDR grant cannot back a non-ZDR run. Quarry sends nothing to a model on these routes",
+        log: Log::Unverified,
+    },
+    Row {
         id: "agent_attach",
         routes: &[
             "/v1/agent/runs/{run_id}/attach",
@@ -676,6 +705,7 @@ pub const ROWS: &[Row] = &[
 /// table cannot make quietly.
 pub const MUST_STAY_REFUSED: &[&str] = &[
     "durable_jobs",
+    "answer",
     "agent_persistent_profile",
     "agent_resume",
     "scrape_record_read",

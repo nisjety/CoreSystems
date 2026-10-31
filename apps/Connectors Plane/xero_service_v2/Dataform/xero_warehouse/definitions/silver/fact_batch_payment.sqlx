@@ -1,0 +1,15 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Current Xero batch-payment headers; these are payment aggregates, not independent cash facts.",
+  assertions: { nonNull: ["tenant_id", "batch_payment_id", "batch_payment_key"], uniqueKey: ["batch_payment_key"] }
+}
+
+SELECT CONCAT(tenant_id, '|', batch_payment_id) AS batch_payment_key,
+       tenant_id, batch_payment_id, record_id AS batch_payment_internal_id,
+       batch_payment_type, status, COALESCE(status = 'DELETED', FALSE) AS is_deleted,
+       code, reference, narrative, particulars, details,
+       payment_date, payment_date_local, bank_account_id, account_currency_code,
+       payment_count, total_amount, is_reconciled, reconciled_statement_line_id,
+       updated_at, first_seen_at, synced_at
+FROM ${ref("dw_bronze_xero", "xero_batch_payments")}

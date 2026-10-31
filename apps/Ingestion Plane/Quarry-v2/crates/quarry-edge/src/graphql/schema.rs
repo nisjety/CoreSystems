@@ -169,6 +169,8 @@ mod tests {
             aud: None,
             scopes: Vec::new(),
             zdr: None,
+            key_id: None,
+            acting_user_id: None,
         };
         let schema = build_schema();
         let req =

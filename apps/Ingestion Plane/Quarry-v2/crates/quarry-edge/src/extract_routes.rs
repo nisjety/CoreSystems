@@ -47,6 +47,10 @@ const PRIVACY_POLICY_MESSAGE: &str = "PRIVACY_POLICY: extraction with a schema o
 const NO_MODEL_PLANE_ERROR: &str =
     "structured extraction needs the Model Plane, and QUARRY_EDGE__MODEL_PLANE_URL is not set on this deployment";
 const NO_MODEL_PLANE_HINT: &str = "omit `schema` and `prompt` to receive cleaned markdown. Operators: the URL QUARRY_EDGE__MODEL_PLANE_URL is missing, and setting it alone is not enough because the model lane must also be granted; see docs/RUNBOOKS.md, \"Enable structured extract and AI formats\"";
+/// A URL, but the AI formats switch is off (QB-T17).
+const AI_FORMATS_OFF_ERROR: &str =
+    "structured extraction is not available on this edge: QUARRY_EDGE__AI_FORMATS is off";
+const AI_FORMATS_OFF_HINT: &str = "omit `schema` and `prompt` to receive cleaned markdown. Operators: structured extraction needs QUARRY_EDGE__AI_FORMATS=1 and a granted Model Plane path (QUARRY_EDGE__MODEL_PLANE_URL); see docs/RUNBOOKS.md, \"Enable structured extract and AI formats\"";
 /// A URL, but nothing to authenticate with (no service token provider, no development token).
 const NO_MODEL_CREDENTIAL_ERROR: &str =
     "structured extraction needs a granted Model Plane lane, and this deployment holds no model credential";
@@ -325,8 +329,11 @@ async fn run_extract(
 
     // Structured extraction needs Model Plane. Without it, fall back to
     // returning cleaned markdown (still useful), unless a schema or a prompt was requested.
-    let runner: Option<AiFormatRunner> = match state.model_plane_url.as_deref().map(str::trim) {
-        Some(url) if !url.is_empty() => match ModelPlaneClient::new(url) {
+    // QB-T17: the runner exists only when QUARRY_EDGE__AI_FORMATS is on and a model path exists.
+    let ai_formats_on = state.model_plane.ai_formats;
+    let model_plane_url = state.model_plane_url.as_deref().map(str::trim);
+    let runner: Option<AiFormatRunner> = match model_plane_url {
+        Some(url) if !url.is_empty() && ai_formats_on => match ModelPlaneClient::new(url) {
             Ok(mut c) => {
                 if let Some(provider) = state.service_token_provider.clone() {
                     c = c.with_token_provider(provider);
@@ -345,6 +352,11 @@ async fn run_extract(
     // A ZDR request never reaches the model arm (each source answers ZDR_UNAVAILABLE below), so
     // whether a Model Plane exists does not matter to it.
     if wants_model && !zdr.is_active() {
+        // A Model Plane URL with the AI formats switch off is its own answer (QB-T17): the
+        // operator needs the switch, not a URL.
+        if !ai_formats_on && model_plane_url.is_some_and(|url| !url.is_empty()) {
+            return not_implemented(AI_FORMATS_OFF_ERROR, AI_FORMATS_OFF_HINT);
+        }
         if runner.is_none() {
             return not_implemented(NO_MODEL_PLANE_ERROR, NO_MODEL_PLANE_HINT);
         }
@@ -838,6 +850,58 @@ mod tests {
         assert!(expand_targets(&urls, 10).is_empty());
     }
 
+    /// QB-T17: with `QUARRY_EDGE__AI_FORMATS` off, a `schema` request answers 501 before any page
+    /// is fetched, and makes no mint and no Model Plane call (the registry refuses that call).
+    #[tokio::test]
+    async fn structured_extraction_makes_no_model_plane_call_while_its_switch_is_off() {
+        use crate::test_support::{claims_for_org, test_state, StubDriver};
+        use axum::response::IntoResponse;
+        use quarry_runtime::service_tokens::{
+            AuthCoreServiceTokenProvider, SharedServiceTokenProvider,
+        };
+        use wiremock::matchers::any;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let auth_core = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token": "header.payload.signature",
+                "expiresInSeconds": 300
+            })))
+            .mount(&auth_core)
+            .await;
+        let model_plane = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&model_plane)
+            .await;
+        let provider: SharedServiceTokenProvider = Arc::new(
+            AuthCoreServiceTokenProvider::new(auth_core.uri(), "credential-long-enough").unwrap(),
+        );
+        let state = AppState {
+            model_plane_url: Some(model_plane.uri()),
+            service_token_provider: Some(provider),
+            ..test_state(StubDriver::ok())
+        };
+        let request: ExtractRequest = serde_json::from_value(serde_json::json!({
+            "urls": ["https://example.com/structured"],
+            "schema": { "type": "object" }
+        }))
+        .unwrap();
+
+        let response = extract(
+            State(state),
+            axum::Extension(claims_for_org("org_extract")),
+            axum::Json(request),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        assert!(auth_core.received_requests().await.unwrap().is_empty());
+        assert!(model_plane.received_requests().await.unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn no_valid_urls_returns_structured_envelope() {
         let state = crate::test_support::test_state(crate::test_support::StubDriver::ok());
@@ -944,6 +1008,8 @@ mod tests {
         if let Some(model) = model {
             state.model_plane_url = Some(model.uri());
             state.model_plane_token = Some("model-plane-test-token".into());
+            // QB-T17: the model arm is off unless the gate enabled `ai_formats`.
+            state.model_plane.ai_formats = true;
         }
         state
     }
@@ -1412,6 +1478,8 @@ mod tests {
         }));
         state.model_plane_url = model_plane_url;
         state.model_plane_token = token.map(str::to_string);
+        // QB-T17: the model arm is off unless the gate enabled `ai_formats`.
+        state.model_plane.ai_formats = true;
         (state, counter)
     }
 
@@ -1460,7 +1528,6 @@ mod tests {
             );
         }
         assert!(text.contains("Enable structured extract and AI formats"));
-        assert!(!text.contains("AI_FORMATS"), "the AI formats switch does not gate /v1/extract");
     }
 
     #[test]
@@ -1494,6 +1561,25 @@ mod tests {
                 .contains("QUARRY_EDGE__MODEL_PLANE_URL"));
             assert_eq!(fetches(&counter), 0, "a refused request spends no fetch");
         }
+    }
+
+    #[tokio::test]
+    async fn a_model_plane_url_with_the_ai_formats_switch_off_is_the_switch_501_before_any_fetch() {
+        let (mut state, counter) =
+            counting_state(Some("http://model-plane.invalid:9".to_string()), Some("tok"));
+        state.model_plane.ai_formats = false;
+        let (status, body) = call(
+            state,
+            crate::test_support::claims_for_org("org_alpha"),
+            request(Some(plan_schema()), Some("anything")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert_501_envelope(&body);
+        assert_eq!(body["error"], AI_FORMATS_OFF_ERROR);
+        assert_eq!(body["hint"], AI_FORMATS_OFF_HINT);
+        assert!(!body.to_string().contains("model-plane.invalid"));
+        assert_eq!(fetches(&counter), 0, "a refused request spends no fetch");
     }
 
     #[tokio::test]

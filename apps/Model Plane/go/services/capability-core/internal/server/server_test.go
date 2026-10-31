@@ -11,6 +11,7 @@ import (
 	"github.com/triodelab/model-plane/services/capability-core/internal/models"
 	"github.com/triodelab/model-plane/services/capability-core/internal/policy"
 	"github.com/triodelab/model-plane/services/capability-core/internal/registry"
+	"github.com/triodelab/model-plane/services/capability-core/internal/skillbundle"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -618,6 +619,18 @@ func TestInMemoryGRPCMethodsRequireVerifiedIdentity(t *testing.T) {
 			})
 			return err
 		},
+		"list skill bundles": func() error {
+			_, err := server.ListSkillBundles(context.Background(), &mpv1.ListSkillBundlesRequest{})
+			return err
+		},
+		"get skill bundle manifest": func() error {
+			_, err := server.GetSkillBundleManifest(context.Background(), &mpv1.GetSkillBundleManifestRequest{SkillId: "skill-a"})
+			return err
+		},
+		"get skill blob": func() error {
+			_, err := server.GetSkillBlob(context.Background(), &mpv1.GetSkillBlobRequest{SkillId: "skill-a", Sha256: "d1"})
+			return err
+		},
 		// No "promote" case: PromoteSkill is unconditionally Unimplemented
 		// (see server.go) and never reaches the identity check at all.
 	} {
@@ -886,6 +899,123 @@ func TestEvaluatePolicy(t *testing.T) {
 			t.Errorf("expected NotFound, got %v", err)
 		}
 	})
+}
+
+type skillBundleReaderStub struct {
+	summaries  []skillbundle.Summary
+	manifest   skillbundle.Manifest
+	blob       []byte
+	err        error
+	calls      int
+	gotOrg     string
+	gotSkillID []string
+	gotDigest  string
+}
+
+func (stub *skillBundleReaderStub) List(_ context.Context, orgID string, skillIDs []string) ([]skillbundle.Summary, error) {
+	stub.calls++
+	stub.gotOrg = orgID
+	stub.gotSkillID = skillIDs
+	return stub.summaries, stub.err
+}
+
+func (stub *skillBundleReaderStub) Manifest(_ context.Context, orgID, skillID string) (skillbundle.Manifest, error) {
+	stub.calls++
+	stub.gotOrg = orgID
+	stub.gotSkillID = []string{skillID}
+	return stub.manifest, stub.err
+}
+
+func (stub *skillBundleReaderStub) Blob(_ context.Context, orgID, skillID, digest string) ([]byte, error) {
+	stub.calls++
+	stub.gotOrg = orgID
+	stub.gotSkillID = []string{skillID}
+	stub.gotDigest = digest
+	return stub.blob, stub.err
+}
+
+func TestSkillBundleReadRPCsAreFlagGatedAndMapTheStore(t *testing.T) {
+	t.Parallel()
+
+	created := time.Date(2026, time.October, 24, 9, 0, 0, 0, time.UTC)
+	store := &skillBundleReaderStub{
+		summaries: []skillbundle.Summary{{
+			SkillID: "skill-a", ManifestSHA256: "m1", FileCount: 3, TotalBytes: 12,
+			CreatedBy: "user-1", CreatedAt: created,
+		}},
+		manifest: skillbundle.Manifest{SkillID: "skill-a", ManifestSHA256: "m1", Files: []skillbundle.File{
+			{Path: "SKILL.md", SHA256: "d1", Size: 6},
+			{Path: "scripts/run.sh", SHA256: "d2", Size: 4, Executable: true},
+			{Path: "assets/logo.bin", SHA256: "d3", Size: 2, Binary: true},
+		}},
+		blob: []byte("body"),
+	}
+	ctx := verifiedGRPCContext(t, "triodelab")
+
+	off := newTestServer().WithSkillBundles(store, false)
+	list, err := off.ListSkillBundles(ctx, &mpv1.ListSkillBundlesRequest{})
+	if err != nil || len(list.Bundles) != 0 {
+		t.Fatalf("flag-off ListSkillBundles = %+v, %v; want an empty list", list, err)
+	}
+	if _, err := off.GetSkillBundleManifest(ctx, &mpv1.GetSkillBundleManifestRequest{SkillId: "skill-a"}); status.Code(err) != codes.NotFound {
+		t.Fatalf("flag-off manifest status = %v, want NotFound", status.Code(err))
+	}
+	if _, err := off.GetSkillBlob(ctx, &mpv1.GetSkillBlobRequest{SkillId: "skill-a", Sha256: "d1"}); status.Code(err) != codes.NotFound {
+		t.Fatalf("flag-off blob status = %v, want NotFound", status.Code(err))
+	}
+	if store.calls != 0 {
+		t.Fatalf("flag-off reads reached the store %d times", store.calls)
+	}
+
+	on := newTestServer().WithSkillBundles(store, true)
+	list, err = on.ListSkillBundles(ctx, &mpv1.ListSkillBundlesRequest{SkillIds: []string{"skill-a"}})
+	if err != nil {
+		t.Fatalf("ListSkillBundles: %v", err)
+	}
+	if store.gotOrg != "triodelab" || len(store.gotSkillID) != 1 || store.gotSkillID[0] != "skill-a" {
+		t.Fatalf("list scoped to org %q and skills %v", store.gotOrg, store.gotSkillID)
+	}
+	if len(list.Bundles) != 1 {
+		t.Fatalf("summaries = %+v, want one bundle", list.Bundles)
+	}
+	summary := list.Bundles[0]
+	if summary.SkillId != "skill-a" || summary.ManifestSha256 != "m1" || summary.FileCount != 3 ||
+		summary.TotalBytes != 12 || summary.CreatedBy != "user-1" || summary.CreatedAt != "2026-10-24T09:00:00Z" {
+		t.Fatalf("summary mapped to %+v", summary)
+	}
+
+	manifest, err := on.GetSkillBundleManifest(ctx, &mpv1.GetSkillBundleManifestRequest{SkillId: "skill-a"})
+	if err != nil {
+		t.Fatalf("GetSkillBundleManifest: %v", err)
+	}
+	if manifest.SkillId != "skill-a" || manifest.ManifestSha256 != "m1" || len(manifest.Files) != 3 {
+		t.Fatalf("manifest mapped to %+v", manifest)
+	}
+	script := manifest.Files[1]
+	if script.Path != "scripts/run.sh" || script.Sha256 != "d2" || script.SizeBytes != 4 || !script.Executable || script.Binary {
+		t.Fatalf("script file mapped to %+v", script)
+	}
+	if !manifest.Files[2].Binary {
+		t.Fatalf("binary flag lost in %+v", manifest.Files[2])
+	}
+
+	blob, err := on.GetSkillBlob(ctx, &mpv1.GetSkillBlobRequest{SkillId: "skill-a", Sha256: "d1"})
+	if err != nil {
+		t.Fatalf("GetSkillBlob: %v", err)
+	}
+	if string(blob.Content) != "body" || store.gotDigest != "d1" {
+		t.Fatalf("blob content %q for digest %q", blob.Content, store.gotDigest)
+	}
+
+	store.err = skillbundle.ErrNotFound
+	if _, err := on.GetSkillBundleManifest(ctx, &mpv1.GetSkillBundleManifestRequest{SkillId: "skill-a"}); status.Code(err) != codes.NotFound {
+		t.Fatalf("missing manifest status = %v, want NotFound", status.Code(err))
+	}
+	store.err = errors.New("connection reset by peer")
+	_, err = on.GetSkillBlob(ctx, &mpv1.GetSkillBlobRequest{SkillId: "skill-a", Sha256: "d1"})
+	if status.Code(err) != codes.Internal || status.Convert(err).Message() != "skill bundle store unavailable" {
+		t.Fatalf("store failure = %v, want a fixed Internal message", err)
+	}
 }
 
 func TestSkillPromotionRPCs(t *testing.T) {

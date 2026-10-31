@@ -1,0 +1,174 @@
+{
+  "version": 1,
+  "operations": [
+    {
+      "provider": "google",
+      "operation": "calendar.events",
+      "params": [
+        "since",
+        "until",
+        "query",
+        "maxResults",
+        "pageToken"
+      ],
+      "capability": "calendar.read",
+      "sensitive": true
+    },
+    {
+      "provider": "google",
+      "operation": "drive.file.content",
+      "params": [
+        "fileId",
+        "mimeType",
+        "exportAs"
+      ],
+      "capability": "drive.read",
+      "sensitive": false
+    },
+    {
+      "provider": "google",
+      "operation": "drive.files",
+      "params": [
+        "query",
+        "match",
+        "folderId",
+        "driveId",
+        "maxResults",
+        "pageToken"
+      ],
+      "capability": "drive.read",
+      "sensitive": false
+    },
+    {
+      "provider": "google",
+      "operation": "gmail.messages",
+      "params": [
+        "query",
+        "from",
+        "since",
+        "until",
+        "folder",
+        "unread",
+        "headers",
+        "maxResults",
+        "pageToken"
+      ],
+      "capability": "gmail.read",
+      "sensitive": true
+    },
+    {
+      "provider": "google",
+      "operation": "gmail.messages.get",
+      "params": [
+        "id"
+      ],
+      "capability": "gmail.read",
+      "sensitive": true
+    },
+    {
+      "provider": "google",
+      "operation": "profile",
+      "params": [],
+      "capability": "profile.read",
+      "sensitive": false
+    },
+    {
+      "provider": "microsoft",
+      "operation": "calendar.events",
+      "params": [
+        "since",
+        "until",
+        "query",
+        "maxResults",
+        "pageToken"
+      ],
+      "capability": "calendar.read",
+      "sensitive": true
+    },
+    {
+      "provider": "microsoft",
+      "operation": "drive.file.content",
+      "params": [
+        "itemId",
+        "driveId"
+      ],
+      "capability": "sharepoint.read",
+      "sensitive": false
+    },
+    {
+      "provider": "microsoft",
+      "operation": "drive.files",
+      "params": [
+        "query",
+        "folderId",
+        "driveId",
+        "maxResults",
+        "pageToken"
+      ],
+      "capability": "sharepoint.read",
+      "sensitive": false
+    },
+    {
+      "provider": "microsoft",
+      "operation": "mail.messages",
+      "params": [
+        "query",
+        "from",
+        "since",
+        "until",
+        "folder",
+        "unread",
+        "maxResults",
+        "pageToken"
+      ],
+      "capability": "mail.read",
+      "sensitive": true
+    },
+    {
+      "provider": "microsoft",
+      "operation": "mail.messages.get",
+      "params": [
+        "messageId"
+      ],
+      "capability": "mail.read",
+      "sensitive": true
+    },
+    {
+      "provider": "microsoft",
+      "operation": "profile",
+      "params": [],
+      "capability": "profile.read",
+      "sensitive": false
+    },
+    {
+      "provider": "microsoft",
+      "operation": "sharepoint.drives",
+      "params": [
+        "siteId",
+        "pageToken"
+      ],
+      "capability": "sharepoint.read",
+      "sensitive": false
+    },
+    {
+      "provider": "microsoft",
+      "operation": "sharepoint.sites",
+      "params": [
+        "query",
+        "pageToken"
+      ],
+      "capability": "sharepoint.read",
+      "sensitive": false
+    }
+  ],
+  "excludedWrites": [
+    {
+      "provider": "google",
+      "operation": "gmail.send"
+    },
+    {
+      "provider": "microsoft",
+      "operation": "mail.send"
+    }
+  ]
+}

@@ -1,0 +1,51 @@
+==> WS04-S9 replica run-control proof, 2026-10-28T00:10:34Z
+    A=http://127.0.0.1:8080 (model-plane-model-gateway-1)  B=http://127.0.0.1:28080 (model-plane-model-gateway-b-1)  nats=model-plane-nats-1  evidence=C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/docs/compliance/evidence/live-proof-d1-229-do-run-stop-2026-10-28.txt
+    provider=anthropic model=claude-sonnet-5-5
+
+== preflight: switches as the containers were started, and readiness
+    model-plane-model-gateway-1 MODEL_GATEWAY_RUN_CONTROL_BUS=true
+    ok: model-plane-model-gateway-1 MODEL_GATEWAY_RUN_CONTROL_BUS is on
+    model-plane-model-gateway-1 MODEL_GATEWAY_DURABLE_PLAN_GRANT=true
+    ok: model-plane-model-gateway-1 MODEL_GATEWAY_DURABLE_PLAN_GRANT is on
+    model-plane-model-gateway-1 MODEL_GATEWAY_SHARED_TURN_RECORD=true
+    ok: model-plane-model-gateway-1 MODEL_GATEWAY_SHARED_TURN_RECORD is on
+    model-plane-model-gateway-1 MODEL_GATEWAY_SEND_RECEIPTS=true
+    ok: model-plane-model-gateway-1 MODEL_GATEWAY_SEND_RECEIPTS is on
+    model-plane-model-gateway-1 MODEL_GATEWAY_SHARED_IDEMPOTENCY=false (not part of this proof)
+    model-plane-model-gateway-b-1 MODEL_GATEWAY_RUN_CONTROL_BUS=true
+    ok: model-plane-model-gateway-b-1 MODEL_GATEWAY_RUN_CONTROL_BUS is on
+    model-plane-model-gateway-b-1 MODEL_GATEWAY_DURABLE_PLAN_GRANT=true
+    ok: model-plane-model-gateway-b-1 MODEL_GATEWAY_DURABLE_PLAN_GRANT is on
+    model-plane-model-gateway-b-1 MODEL_GATEWAY_SHARED_TURN_RECORD=true
+    ok: model-plane-model-gateway-b-1 MODEL_GATEWAY_SHARED_TURN_RECORD is on
+    model-plane-model-gateway-b-1 MODEL_GATEWAY_SEND_RECEIPTS=true
+    ok: model-plane-model-gateway-b-1 MODEL_GATEWAY_SEND_RECEIPTS is on
+    model-plane-model-gateway-b-1 MODEL_GATEWAY_SHARED_IDEMPOTENCY=false (not part of this proof)
+    http://127.0.0.1:8080 /readyz: run_control=ok
+    http://127.0.0.1:28080 /readyz: run_control=ok
+
+== preflight: a short turn on each replica is served by the direct Anthropic provider
+    model=claude-sonnet-5-5
+    A usage frame: provider_used=anthropic
+    ok: A is served by anthropic
+    model=claude-sonnet-5-5
+    B usage frame: provider_used=anthropic
+    ok: B is served by anthropic
+
+== case 7: Stop on B for a Do run owned by A (D1-229)
+    ok: case 7: approval on A answers 200
+    Do run 01M5ZXHME8N0RVS5Z6EJQ2K17Z on A, request 01M5ZXHMDD37ZS5E6HZJFK858B
+    ok: case 7: the Do run is still going when Stop is sent
+    POST B /v1/invoke/01M5ZXHMDD37ZS5E6HZJFK858B/cancel -> 202 {"cancelled":true,"request_id":"01M5ZXHMDD37ZS5E6HZJFK858B","via":"peer"}
+    ok: case 7: Stop via B answers 202
+    ok: the answer says via peer
+    the Do stream ended 4 s after Stop
+    ok: case 7: A's Do stream ends with one stopped frame
+            1 event: connected
+            1 event: step_update
+            1 event: stopped
+    ok: case 7: the Do run is cancelled on its durable row
+    gateway_active_streams on A after the Do stream ended: 0
+    run_control_requests_total on B:
+      run_control_requests_total{op="cancel",outcome="peer"} 1
+PASS — the run-control cases (7) were recorded in C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/docs/compliance/evidence/live-proof-d1-229-do-run-stop-2026-10-28.txt

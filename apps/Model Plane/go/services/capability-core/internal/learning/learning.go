@@ -38,6 +38,17 @@ const (
 // one.
 const MinConfidence = 0.5
 
+// MaxReasonChars bounds the reason a candidate carries. It is shown to the
+// owner beside the proposal, so it stays one sentence; the reviewer's output is
+// untrusted and is cut here rather than trusted to obey the prompt.
+const MaxReasonChars = 300
+
+// Screen is the content-safety hook every candidate passes before it can reach
+// the sink: false drops the candidate. It does nothing until the content-safety
+// work (WS26) installs its check at start-up; it is a variable so that is one
+// assignment and not an edit to the selection policy.
+var Screen = func(SkillCandidate) bool { return true }
+
 // SkillCandidate is the producer-side shape an LLM review emits, before it is
 // validated and persisted as a registry `models.Capability`. It is
 // intentionally a distinct DTO from the stored model: candidates are
@@ -50,6 +61,9 @@ type SkillCandidate struct {
 	TriggerKeywords []string
 	// Confidence is the model-estimated usefulness in [0,1].
 	Confidence float64
+	// Reason is the reviewer's one-sentence case for the proposal, at most
+	// MaxReasonChars. The owner sees it when deciding; it never steers a turn.
+	Reason string
 	// Origin is forced to OriginBackgroundReview by SelectForPersistence;
 	// any caller-supplied value is ignored to prevent a review from
 	// masquerading as a user skill.
@@ -95,9 +109,10 @@ func (c SkillCandidate) IsValid() bool {
 //  4. Drop candidates whose content hash already exists in the registry
 //     (no churn for skills we already have).
 //  5. Deduplicate within the batch (first occurrence wins).
+//  6. Drop candidates the content-safety hook refuses.
 //
-// Survivors are returned with Origin forced to OriginBackgroundReview and
-// input order preserved.
+// Survivors are returned with Origin forced to OriginBackgroundReview, the
+// reason cut to MaxReasonChars, and input order preserved.
 func SelectForPersistence(candidates []SkillCandidate, existing []ExistingSkill) []SkillCandidate {
 	protectedNames := make(map[string]struct{})
 	existingHashes := make(map[string]struct{})
@@ -126,11 +141,24 @@ func SelectForPersistence(candidates []SkillCandidate, existing []ExistingSkill)
 		if _, dup := seen[hash]; dup {
 			continue
 		}
+		if !Screen(c) {
+			continue
+		}
 		seen[hash] = struct{}{}
 		c.Origin = OriginBackgroundReview
+		c.Reason = clampReason(c.Reason)
 		selected = append(selected, c)
 	}
 	return selected
+}
+
+// clampReason trims a reason and cuts it to MaxReasonChars characters.
+func clampReason(reason string) string {
+	runes := []rune(strings.TrimSpace(reason))
+	if len(runes) > MaxReasonChars {
+		runes = runes[:MaxReasonChars]
+	}
+	return string(runes)
 }
 
 // ReviewPrompt is the post-session skill-review instruction. Adapted from
@@ -165,6 +193,9 @@ Rules:
 
 Return one JSON object with a required skills array, including an empty array
 when nothing qualifies. No prose or Markdown fences. Each candidate has name,
-description, content, trigger_keywords (array of strings) and confidence (0–1).
+description, content, trigger_keywords (array of strings), confidence (0–1)
+and reason: one sentence of at most 300 characters saying what in this session
+makes it worth keeping. The person whose session this was reads that reason and
+decides whether to accept the proposal; nothing is used until they do.
 Example: {"skills":[]}. Propose at most 8 short candidates. When the
 submit_skill_review tool is available, return this object through that tool.`

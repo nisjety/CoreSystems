@@ -25,8 +25,10 @@
 //! no `zdr` claim at all, so it cannot see this behaviour either way.
 //!
 //! The effects asserted are the ones a ZDR request must have:
-//! * search/answer: the provider is called with `zdr = true` and no paid-provider
+//! * search: the provider is called with `zdr = true` and no paid-provider
 //!   permission, and no durable `SearchIssued` event is emitted;
+//! * answer (`/v1/answer`, `/v1/answer/stream`): refused with a 403 before the pipeline starts
+//!   (INNH-8, ADR-4: the model hop has no ZDR posture), so no search, fetch or model call is made;
 //! * scrape / scrape stream / extract: the driver is handed a privacy policy with
 //!   `zdr` active, and no durable page event is emitted;
 //! * agent runs: a ZDR run cannot take a persistent profile;
@@ -622,7 +624,7 @@ async fn a_user_token_without_a_zdr_claim_is_accepted_and_adds_no_floor() {
 // ── /v1/answer and /v1/answer/stream ────────────────────────────────────────
 
 #[tokio::test]
-async fn answer_runs_as_zdr_for_a_zdr_org_user_and_as_before_otherwise() {
+async fn answer_is_refused_for_a_zdr_org_user_and_runs_as_before_otherwise() {
     let harness = Harness::start().await;
     let zdr_org = harness
         .post(
@@ -631,7 +633,7 @@ async fn answer_runs_as_zdr_for_a_zdr_org_user_and_as_before_otherwise() {
             json!({ "query": "what is zdr", "zdr": false }),
         )
         .await;
-    assert_eq!(zdr_org.status().as_u16(), 200);
+    assert_eq!(zdr_org.status().as_u16(), 403, "the token's floor refuses it");
     let standard = harness
         .post(
             &user_in_standard_org(),
@@ -647,37 +649,34 @@ async fn answer_runs_as_zdr_for_a_zdr_org_user_and_as_before_otherwise() {
             json!({ "query": "what is zdr", "zdr": true }),
         )
         .await;
-    assert_eq!(raised.status().as_u16(), 200);
+    assert_eq!(raised.status().as_u16(), 403, "the body flag refuses it");
 
-    assert_eq!(
-        harness.answer_search_calls(),
-        vec![(true, false), (false, false), (true, false)]
-    );
+    // Only the standard request reached the pipeline's search step.
+    assert_eq!(harness.answer_search_calls(), vec![(false, false)]);
 }
 
 #[tokio::test]
-async fn answer_stream_runs_as_zdr_for_a_zdr_org_user_and_as_before_otherwise() {
+async fn answer_stream_is_refused_for_a_zdr_org_user_and_runs_as_before_otherwise() {
     let harness = Harness::start().await;
-    for (bearer, body) in [
+    for (bearer, body, want) in [
         (
             user_in_zdr_org(),
             json!({ "query": "what is zdr", "zdr": false }),
+            403,
         ),
-        (user_in_standard_org(), json!({ "query": "what is zdr" })),
+        (user_in_standard_org(), json!({ "query": "what is zdr" }), 200),
         (
             user_in_standard_org(),
             json!({ "query": "what is zdr", "zdr": true }),
+            403,
         ),
     ] {
         let response = harness.post(&bearer, "/v1/answer/stream", body).await;
-        assert_eq!(response.status().as_u16(), 200);
-        // Drain the SSE body so the stream (and the provider call) completes.
-        let _ = response.text().await.expect("sse body");
+        assert_eq!(response.status().as_u16(), want);
+        // Drain the body so the stream (and the provider call) completes.
+        let _ = response.text().await.expect("body");
     }
-    assert_eq!(
-        harness.answer_search_calls(),
-        vec![(true, false), (false, false), (true, false)]
-    );
+    assert_eq!(harness.answer_search_calls(), vec![(false, false)]);
 }
 
 // ── /v1/scrape, /v1/scrape/stream, /v1/extract ──────────────────────────────
@@ -956,6 +955,12 @@ async fn extract_with_a_prompt_or_schema_never_reaches_the_model_for_a_zdr_org_u
     let harness = Harness::start_with(move |state| AppState {
         model_plane_url: Some(model_plane_url),
         model_plane_token: Some("model-plane-test-token".into()),
+        // QB-T17: the model arm of /v1/extract is off unless its switch is on; this test is about
+        // the posture it forwards.
+        model_plane: quarry_edge::model_plane_gate::ModelPlaneFeatures {
+            ai_formats: true,
+            ..Default::default()
+        },
         ..state
     })
     .await;
@@ -1272,6 +1277,11 @@ async fn audio_forwards_the_floored_posture_to_the_model_plane() {
     let harness = Harness::start_with(move |state| AppState {
         model_plane_url: Some(model_plane_url),
         model_plane_token: Some("model-plane-test-token".into()),
+        // QB-T17: /v1/audio is off unless its switch is on; this test is about the posture it forwards.
+        model_plane: quarry_edge::model_plane_gate::ModelPlaneFeatures {
+            model_audio: true,
+            ..Default::default()
+        },
         ..state
     })
     .await;
@@ -1327,6 +1337,11 @@ async fn audio_transcription_forwards_the_floored_posture_to_the_model_plane() {
     let harness = Harness::start_with(move |state| AppState {
         model_plane_url: Some(model_plane_url),
         model_plane_token: Some("model-plane-test-token".into()),
+        // QB-T17: /v1/audio is off unless its switch is on; this test is about the posture it forwards.
+        model_plane: quarry_edge::model_plane_gate::ModelPlaneFeatures {
+            model_audio: true,
+            ..Default::default()
+        },
         ..state
     })
     .await;
@@ -1548,10 +1563,9 @@ async fn a_zdr_org_user_never_reads_or_writes_a_cache_and_a_registry_zdr_service
     }
     let from_zdr_org = harness
         .post(&zdr_user, "/v1/answer/stream", json!({ "query": question }))
-        .await
-        .text()
-        .await
-        .expect("sse body");
+        .await;
+    assert_eq!(from_zdr_org.status().as_u16(), 403, "refused before the cache is read");
+    let from_zdr_org = from_zdr_org.text().await.expect("body");
     assert!(
         !from_zdr_org.contains("PLANTED ANSWER"),
         "a ZDR org's answer must not be served from the answer cache: {from_zdr_org}"
@@ -1570,8 +1584,8 @@ async fn a_zdr_org_user_never_reads_or_writes_a_cache_and_a_registry_zdr_service
         from_standard_org.contains("PLANTED ANSWER") && from_standard_org.contains("\"cached\":true"),
         "the planted entry must be served to a standard org (the cache is live): {from_standard_org}"
     );
-    // The ZDR request ran the pipeline (one provider call), the cached one did not.
-    assert_eq!(harness.answer_search_calls(), vec![(true, false)]);
+    // Neither the refused ZDR request nor the cached one ran the pipeline.
+    assert_eq!(harness.answer_search_calls(), Vec::<(bool, bool)>::new());
     let key = quarry_edge::cache::SearchCache::key(&zdr_org, &question, "answer:stream:v1");
     let _: i64 = conn.del(&key).await.expect("remove planted answer");
     let key = quarry_edge::cache::SearchCache::key(&standard_org, &question, "answer:stream:v1");

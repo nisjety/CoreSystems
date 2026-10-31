@@ -7,6 +7,7 @@ Name | Type | Description | Notes
 ------------ | ------------- | ------------- | -------------
 **decision** | **str** |  | 
 **reason** | **str** |  | [optional] [default to '']
+**scope** | **str** | How far the decision reaches. Omitted means once. A standing scope is refused with 422 scope_not_enabled until grants exist. | [optional] [default to 'once']
 
 ## Example
 

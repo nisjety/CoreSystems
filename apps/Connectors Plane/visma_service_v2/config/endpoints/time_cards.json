@@ -1,0 +1,37 @@
+{
+  "endpoint_name": "time_cards",
+  "bigquery_table": "visma_time_cards",
+  "primary_key": "refNbr",
+  "source": "erp_rest",
+  "api_method": "get_time_cards",
+  "api_endpoint": "/v1/timecard",
+  "pagination_profile": "finance_page_number",
+  "partitioning": {
+    "mode": "cartesian",
+    "max_partitions": 100000,
+    "dimensions": [
+      {
+        "query_param": "employeeCd",
+        "source_endpoint": "/v1/employee",
+        "source_path": "employeeNumber"
+      }
+    ]
+  },
+  "required_query": [
+    "employeeCd"
+  ],
+  "modified_field": "lastModifiedDateTime",
+  "merge_type": "upsert",
+  "sync_pattern": "incremental_upsert",
+  "validation_fields": [
+    "refNbr",
+    "employee",
+    "week",
+    "status",
+    "totalTimeSpent",
+    "invoiceableTotalTime",
+    "lastModifiedDateTime"
+  ],
+  "notes": "Time-card entries keyed by refNbr. GET /v1/timecard REQUIRES an employeeCd filter, so this endpoint uses a cartesian employee fanout: one request per employee, sourced from /v1/employee. partition.rs supports a real source_endpoint/source_path dimension (same mechanism as budgets.json), so the fanout is implemented natively rather than disabled. SOURCE-PATH ASSUMPTION (FLAG): employeeCd expects the employee code; source_path is set to 'employeeNumber' (the human-readable EmployeeDto code) rather than the int32 'employeeId'. Verify employeeNumber is the field Visma's timecard employeeCd filter matches for these tenants; if the API expects a different code field, adjust source_path. EDGE CASE: a tenant with zero employees yields no partition values and partition.rs will error ('dimension produced no values'); time cards are tenant_support=optional in v1, so on tenants without the time/project module this endpoint should be skipped at scheduling time. Incremental syncs add lastModifiedDateTime >= watermark on top of employeeCd; full syncs use the baseline.",
+  "tier": 4
+}

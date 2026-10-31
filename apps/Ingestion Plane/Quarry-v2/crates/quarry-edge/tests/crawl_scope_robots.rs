@@ -364,6 +364,8 @@ fn claims_for_org(org_id: &str) -> quarry_edge::auth::Claims {
         aud: None,
         scopes: Vec::new(),
         zdr: None,
+        key_id: None,
+        acting_user_id: None,
     }
 }
 
@@ -409,9 +411,36 @@ fn map_state(site: FixtureSiteDriver, gate: Arc<RobotsGate>) -> AppState {
     }
 }
 
+/// /v1/map only takes public HTTPS seeds, so the map tests serve fixture A
+/// over https.
+const FIXTURE_A_TLS: &str = "https://fixture-a.crawl.test";
+
+/// Fixture A's index, robots.txt and pages, served at [`FIXTURE_A_TLS`].
+fn tls_site() -> FixtureSiteDriver {
+    use support::fixture_site::{page, STANDARD_INDEX_A, STANDARD_ROBOTS_A};
+    FixtureSiteDriver::new()
+        .serve(&format!("{FIXTURE_A_TLS}/"), FixtureReply::html(STANDARD_INDEX_A))
+        .serve(
+            &format!("{FIXTURE_A_TLS}/robots.txt"),
+            FixtureReply::text(STANDARD_ROBOTS_A),
+        )
+        .serve(
+            &format!("{FIXTURE_A_TLS}/docs/a"),
+            FixtureReply::html(page("Docs A", "<a href=\"/\">home</a>")),
+        )
+        .serve(
+            &format!("{FIXTURE_A_TLS}/blog/b"),
+            FixtureReply::html(page("Blog B", "<a href=\"/docs/a\">docs</a>")),
+        )
+        .serve(
+            &format!("{FIXTURE_A_TLS}/private/secret"),
+            FixtureReply::html(page("Secret", "<p>private page</p>")),
+        )
+}
+
 #[tokio::test]
 async fn map_drops_the_private_urls_and_a_zdr_token_leaves_no_cache_entry() {
-    let site = FixtureSiteDriver::standard_site();
+    let site = tls_site();
     let config = RobotsGateConfig {
         mode: RobotsEnforceMode::Enforce,
         ..RobotsGateConfig::default()
@@ -421,13 +450,13 @@ async fn map_drops_the_private_urls_and_a_zdr_token_leaves_no_cache_entry() {
     // A ZDR token: robots.txt is fetched, nothing is stored.
     let mut zdr_claims = claims_for_org(ORG);
     zdr_claims.zdr = Some(true);
-    let (status, body) = call_map(map_state(site.clone(), gate.clone()), zdr_claims, &format!("{FIXTURE_A}/")).await;
+    let (status, body) = call_map(map_state(site.clone(), gate.clone()), zdr_claims, &format!("{FIXTURE_A_TLS}/")).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(gate.len(), 0, "a ZDR map call fills no robots cache");
 
     // A normal token fills the cache and the private URL is gone.
     let claims = claims_for_org(ORG);
-    let (status, body) = call_map(map_state(site, gate.clone()), claims, &format!("{FIXTURE_A}/")).await;
+    let (status, body) = call_map(map_state(site, gate.clone()), claims, &format!("{FIXTURE_A_TLS}/")).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(gate.len(), 1);
     let urls: Vec<&str> = body["links"]
@@ -442,8 +471,8 @@ async fn map_drops_the_private_urls_and_a_zdr_token_leaves_no_cache_entry() {
 
 #[tokio::test]
 async fn map_with_an_unreachable_robots_txt_is_refused_under_the_disallow_policy() {
-    let site = FixtureSiteDriver::standard_site().serve(
-        &format!("{FIXTURE_A}/robots.txt"),
+    let site = tls_site().serve(
+        &format!("{FIXTURE_A_TLS}/robots.txt"),
         FixtureReply::text_with_status(503, "unavailable"),
     );
     let config = RobotsGateConfig {
@@ -452,7 +481,7 @@ async fn map_with_an_unreachable_robots_txt_is_refused_under_the_disallow_policy
     };
     let gate = Arc::new(RobotsGate::new(Arc::new(site.clone()), config));
     let claims = claims_for_org(ORG);
-    let (status, body) = call_map(map_state(site, gate), claims, &format!("{FIXTURE_A}/")).await;
+    let (status, body) = call_map(map_state(site, gate), claims, &format!("{FIXTURE_A_TLS}/")).await;
     assert_eq!(status, 403, "{body}");
 }
 

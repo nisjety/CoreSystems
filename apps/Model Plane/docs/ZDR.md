@@ -99,8 +99,9 @@ the boundaries and their current state.
 | **The model provider itself** | The provider must contractually not retain the request | **NOT satisfied. No provider is attested. See section 3.** |
 | **Web search, browse and file or artifact output** | Refused with a typed reason | **Gap.** They are dropped silently: the ZDR path performs and reports none of them (read in source; task Z-05a would close it). Separately, the free search chain forwards the query to external engines even for a ZDR request (`docs/compliance/evidence/honest-limits.md`, L13). |
 | **Connector ingestion, contextual retrieval, graph extraction, embeddings, rerank** | Follow the org's setting | **Gap, recorded.** The org setting covers interactive content only. Sync, imports and Quarry ingest run under persistent service principals. Contextual retrieval and graph extraction go to Azure OpenAI for any document not classified restricted. Embeddings and rerank (Cohere on Foundry) are guarded per document and per request, not per organisation (honest-limits L12, L33, L24). The designed fix gives background principals the `tenant` posture (matrix rule 16; built in Auth Core, held by no principal yet). |
-| **Metering** | A paid add-on should be metered | **Gap.** The ZDR path returns before the budget check and emits no usage frame: ZDR turns are unmetered and show no processing line (the metering half of task Z-06 is deferred). |
+| **Metering** | A paid add-on should be metered | **Split.** In-stream cost: built behind `MODEL_GATEWAY_ZDR_STREAM_COST` (default off, WS27-S5). When it is on, a ZDR answer's usage frame states its cost and cache counts, priced from the answer's counts and the model that served it. Numbers only: nothing is stored, no usage envelope is published and no ledger row is written. **Gap, recorded (DEF-Z-06b):** the ledger. A ZDR turn still returns before the budget check and is not ledgered, so budget ceilings and admin cost dashboards do not cover ZDR spend. |
 | **Browser-side copy after an org turns ZDR on** | The SPA purges its local copy | **Gap.** The threads listing returns no retention field, so the purge cannot fire (finding F8, task Z-09). Turning ZDR on is forward-looking: it purges conversation-core drafts only, and saved threads, memory and documents stay. |
+| **Run control across replicas (Stop, queue, probe, plan grant, send receipts, shared turn record, shared idempotency claim)** | A ZDR turn registers no run-control listener, buffer or claim, and no queue text, client message id or grant from a ZDR turn crosses NATS or is stored. | Built behind default-off switches (`MODEL_GATEWAY_RUN_CONTROL_BUS`, `MODEL_GATEWAY_DURABLE_PLAN_GRANT`, `MODEL_GATEWAY_SHARED_TURN_RECORD`, `MODEL_GATEWAY_SEND_RECEIPTS`, `MODEL_GATEWAY_SHARED_IDEMPOTENCY`); not live-verified. Pinned by `run_control_two_replica_test.rs:475` `zdr_turn_registers_no_run_control_listener` (Stop for a ZDR request id is a 404); `queued_input.rs:913` `queue_bus_message_is_never_built_for_zdr_or_waived_claims`; `zdr_posture.rs:826` `every_durable_mutation_refuses_a_zdr_or_waived_token_before_it_runs`; `chat_turn_registry.rs:725` `shared_turn_key_is_identity_scoped`. Redis keys are identity-scoped and hold ids only. |
 
 The first six rows were verified on 2026-08-01. The row that does not hold is the
 model provider itself, and because inference-core fails **closed**, it takes the whole
@@ -362,6 +363,12 @@ it, keyed to the run's retention class and never to the org: memory indexing, dr
 extraction and learning review (owner default D-B, 2026-10-03). The acknowledgement text
 names this.
 
+[live-only] The learning review's cost controls (WS07-S10) keep one counter per owner and one
+per organization for each UTC day, keyed by identifiers and holding only an integer, so they
+hold no content. A zero-retention envelope is refused before its transcript is read and is
+never counted. Session Core withholds zero-retention and waived runs before they are announced
+(learning_events.rs), so the review never receives them.
+
 ### 5.6 What the waiver can never do
 Never org-wide (no write to org-core), never for another member (the decision requires
 the session user to equal the acknowledging user and the connection's owner), never for
@@ -393,7 +400,7 @@ comes first.
 | Z-00 | model-gateway refuses the subscription route by name when only the token carries ZDR. Today `normalize` checks only the body flag and the ZDR stream branch calls the direct path with no provider or connection, so the user's route choice is dropped. | Not built |
 | Z-01 | Strict `zdr` claim, equal posture across delegated bearers. Today model-gateway and inference-core read an absent claim as false and model-gateway does not compare `zdr` across bearers. | Not built |
 | Z-02, Z-03 | Auth Core resolver (stale rule, no failure caching, org-core read route) | Built by the Control Plane wave; readers outside the Control Plane not migrated |
-| Z-04 | Gate on the org switch | Built |
+| Z-04 | Gate on the org switch | Built; live-proven 2026-10-28 on the dedicated `ZDR-TEST` org: the switch is disabled with the reason, the live catalogue has the fields the gate reads, and the PATCH is refused 409 `zdr_no_attested_provider` writing nothing (`docs/compliance/evidence/live-proof-wave1-zdr-2026-10-28.txt` at the repository root) |
 | Z-05a, Z-05b, Z-06 | Typed refusal catalogue and silent-drop closure in the Model Plane (Z-05a, which absorbed Z-07), the SPA's localized rendering of each code (Z-05b), usage frame provenance (Z-06) | Not built |
 | Z-08 | Quarry reads an interactive user token's ZDR claim as a floor and ignores a service principal's | Built in the working tree |
 | Z-10 | Golden posture matrix and connection capability contract | Authored in the working tree on 2026-10-06 with a strict loader, a drift check and, in inference-core, a test that holds the capability file against the real ChatGPT-account provider (`apps/Model Plane/api/contracts/README.md`). No plane evaluates the posture-matrix rows yet |
@@ -404,23 +411,94 @@ comes first.
 | Z-19 to Z-21b | BFF, prompts, composer chip, answer line, admin record and counts (Z-21a is the session-core aggregate behind the counts) | Not built |
 | Z-31, Z-32 | End-to-end helper and ZDR specs; launcher, compose and flag wiring | Not built |
 | Z-40 | Provider attestation (operator action) | Not done |
-| Z-60 | Live proof on `gpt-5.6-terra` with a ZDR-on test organisation | Not run |
+| Z-60 | Live proof on `gpt-5.6-terra` with a ZDR-on test organisation | Pass 1 (fail-closed) run 2026-10-28 on the developer stack, on `claude-sonnet-5-5` (the stack's only allowed test model; a pass 1 turn reaches no model): the wave deployed in order, the preflight passed, one turn from the `ZDR-TEST` org was refused `zdr_unavailable` before any model call with no streamed content, and threads, messages, runs, feedback, the audit outbox and the `mp:gw:cache:*` keyspace were unchanged; the org was switched back off (`docs/compliance/evidence/live-proof-wave1-zdr-2026-10-28.txt` at the repository root). Pass 2 not run: it needs Z-40 |
 
 ### 5.9 Refusal codes: what exists and what is designed
 
 | Code | Where | State |
 |---|---|---|
-| `zdr_unavailable` | inference-core, no attested provider | Built in the working tree; not in the running image |
+| `zdr_unavailable` | inference-core, no attested provider | Built; in the running image, seen live on 2026-10-28 (Z-60 pass 1) |
 | `zdr_no_attested_provider`, `zdr_gate_unavailable` | gateway, enabling org ZDR | Built |
 | `retention_posture_unavailable` | Auth Core mint, posture unresolvable (503) | Built |
 | `zdr_feature_not_supported`, `zdr_durable_mutation_forbidden`, `zdr_draft_persistence_forbidden`, `zdr_ai_proposal_forbidden`, `zdr_recurrence_forbidden` | model-gateway, gateway, conversation-core | Built |
-| `zdr_connection_not_acknowledged`, `zdr_connection_not_supported`, `zdr_explicit_request_not_supported_by_connection`, `zdr_decision_unavailable` | decision and turn start | Designed, not built |
+| `zdr_connection_not_supported` | decision and turn start | Built (Z-00) on the HTTP stream, unary and `/v1/ai/chat` paths; not yet on gRPC |
+| `zdr_connection_not_acknowledged`, `zdr_explicit_request_not_supported_by_connection`, `zdr_decision_unavailable` | decision and turn start | Designed, not built |
 | `zdr_waiver_route_mismatch`, `zdr_posture_mismatch` | the planes that receive tokens | Designed, not built |
 
 This document and the others that name these codes are checked by
 `docs/compliance/evidence/tools/check-doc-codes.mjs` (registry `doc-codes.json` in the
 same folder): a code presented as built must be in its source file, and a document that
 names a designed code must say "not built".
+
+### 5.10 Reduced answers: the retrieval notice (Z-41b)
+
+A ZDR or waived turn that asks for organisation knowledge is answered from text search only when the Data
+Plane has no ZDR-approved route to embed the query. No embedding route is attested while Z-40 is not done, so
+that is the case the code is built for; the live state was not checked for this section. The Data Plane says so
+with the notice `zdr_dense_unavailable`. A ZDR turn is told it under that code. A waived turn runs
+persistent for its connection, so it is told only that its answer was reduced, under the generic code
+`retrieval_reduced`, and never the zero-retention wording. model-gateway passes the notice on in three places:
+
+- the `retrieval_notice` SSE event, `{code, wording_key, request_id}`. It is a control event, sent whatever
+  features the client opted into, and before the answer. On a durable turn it is buffered like every other
+  frame, so a resumed stream replays it. A ZDR answer has no stream buffer by design, so it cannot be resumed,
+  and its notice reaches only the live connection;
+- `notice` on the answer of `POST /v1/retrieval`, present only when the answer was reduced;
+- `retrieval_notice` in the knowledge-search tool result that the model reads. A ZDR turn runs no tool loop (it
+  offers no tools), so only a waived turn reaches this place; the turn emits the same typed event where it emits the
+  tool result, so a resumed stream replays it.
+
+The notice carries only the code and the key the client's wording is filed under, never the Data Plane's
+English sentence. The wording belongs to the client (task Z-20). A persistent turn never carries the notice,
+whatever mode its body asks for. Where the Data Plane refuses a restrictive retrieval instead of answering it
+(the reason `zdr_dense_unavailable` leads the status message; its streaming retrieval sends it as
+`failed_precondition`, and the gateway matches the reason, not the code), the turn gets the typed `zdr_unavailable`
+refusal, not an empty answer. A refused knowledge search inside a waived turn's tool loop reaches the model as a tool
+error that carries only the typed code (`knowledge_search refused: retrieval_reduced`), never the Data Plane's
+sentence; a persistent turn gets a plain failure named by its status code.
+
+Not covered: the source-verification retrieval that runs after a durable answer, whose verdict does not carry the
+notice. Accepted limit (Z-41b finding b, owned by the Data Plane): the gateway's unary Data Plane call never receives
+the typed refusal today, so the typed path is proven by a Data Plane double only. With hybrid search switched off on
+the Data Plane, the unary retrieve returns the refusal as `internal` with the embedding error text and no typed
+reason (retrieval-engine `retrieve` handler, `Status::internal(e.to_string())`), so the answer goes on ungrounded with
+no notice; the gateway cannot match a reason the Data Plane does not send. The typed refusal has to come from the Data
+Plane (task Z-41) and this item is raised to its owner. Proof of what is built: the streamed notice before the first
+chunk, on resume, on a persistent turn (absent) and from a waived tool call is covered by the `stream_answer` and
+`knowledge_search_says` tests in `model-gateway/tests/e2e_invoke_chain_test.rs`. The live proof needs an attested ZDR
+route, so it waits for Z-40 and Z-60.
+
+### 5.11 Durable mutations and the retention receipt (Z-15b)
+
+Owner decision 17 (2026-10-13) splits the durable mutations by what they do.
+
+1. **Deletes, archives and presentation controls are the owner's housekeeping under every posture.** A
+   zero-retention user can delete or archive a thread, set its pin and persona controls, delete a memory of their
+   own, and remove an MCP server they own. Each keeps its org and owner checks. A presentation request that carries a title or a preview is
+   refused as a durable mutation under ZDR, because a ZDR credential never persists conversation text.
+2. **Starting or advancing stored work, and continuing a stored run, is allowed only when the caller's posture
+   equals the receipt of the object it changes.** The receipt is the run's retention receipt (Z-17). A plan or a
+   todo takes the receipt of its run, and a plan with no run is persistent. An approval takes its run's receipt.
+   A ZDR credential is always refused with `zdr_durable_mutation_forbidden`, because a ZDR run keeps no plan, todo
+   or approval to advance. A waiver is valid only for the run started under the same waiver (same connection and
+   acknowledgement). Any other difference is `zdr_posture_mismatch`. Every refusal comes before any state change.
+3. **Service workloads are not held to a user's posture.** They act for the run's owner under their own scope, and
+   their system writes (the terminal outcome of a ZDR run among them) keep working.
+
+Where it is enforced. Session Core: `retention_receipt::require_stored_posture`, `run_owner_matches` (behind
+`ResolveRunOwner`), `stored_plan_retention`, `stored_todo_retention` and `stored_approval_retention`, called from
+`TransitionPlan`, `TransitionTodo` and `DecideApproval`. Model Gateway: `zdr_posture::continuation_gate` on approve,
+reject, todo update, approval decision, resume, cancel and plan approval. A typed refusal from Session Core passes
+through the run-owner gate unchanged.
+
+Left as they were. Create memory, create document, queue input, feedback, the MCP register, share, OAuth and connect
+routes, and the task and cron proxies are not continuations. They keep the blanket refusal of ZDR and waived
+credentials. A waiver is minted only behind Auth Core's kill switch, which is off by default.
+
+Open. Threads carry no receipt: Z-17 stamps runs. A waived turn that appends to an existing thread (`AppendMessage`)
+is therefore not checked against that thread's posture. Closing this needs a thread receipt (a migration and a stamp
+at thread creation). Until then the owner's continuation rule covers plans, todos, approvals and runs, not threads.
+A ZDR credential is refused on thread appends by Session Core's ordinary write rule, which is untyped.
 
 ---
 

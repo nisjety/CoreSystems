@@ -5,14 +5,7 @@ import {
   Image as ImageIcon,
   Table2,
 } from '@/shared/icons'
-import {
-  For,
-  Match,
-  Show,
-  Switch,
-  createEffect,
-  createSignal,
-} from 'solid-js'
+import { For, Match, Show, Switch, createEffect, createSignal } from 'solid-js'
 import type { ChatTurnAttachment } from './chat-types'
 import { sandboxHtmlDocument } from '@/shared/lib/sandbox-html'
 import { useI18n } from '@/shared/i18n'

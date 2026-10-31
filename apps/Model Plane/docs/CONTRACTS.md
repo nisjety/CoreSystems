@@ -56,6 +56,7 @@ All events use the `Event` proto envelope with `EventType` discriminator.
 | SUBAGENT_STOPPED | 127 | session-core | Subagent lifecycle ended |
 | RUN_PAUSED_FOR_APPROVAL | 128 | orchestrator-core | Run paused pending approval decision |
 | RUN_RESUMED_AFTER_APPROVAL | 129 | orchestrator-core | Run resumed after approval resolved |
+| APPROVAL_DECIDED (audit, not a run event) | none | session-core | One content-free `approval_decided` audit row per decision, enqueued in the decision's transaction when `APPROVAL_AUDIT_EVENTS_ENABLED=true` (default off). Details: `cause_code, tool, effect_class, rule_id, scope, decision_source, step_up_verified, kind`; never the reason, arguments or context (build plan WS13 S3) |
 | RECOVERY_ATTEMPTED | 130 | execution-core | Recovery loop triggered |
 
 ## Idempotency Strategy

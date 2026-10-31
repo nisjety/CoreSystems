@@ -60,6 +60,11 @@ pub(crate) const RATE_LIMITED: &str = "rate_limited";
 pub(crate) const SUBSCRIPTION_ROUTE_UNAVAILABLE: &str = "subscription_route_unavailable";
 /// The code for a prompt still too long after compaction.
 pub(crate) const PROMPT_TOO_LONG: &str = "prompt_too_long";
+/// The organization has not been granted the model the round asked for (WS10-S4). Typed by
+/// inference-core on PERMISSION_DENIED; a retry of the same request cannot succeed.
+pub(crate) const MODEL_NOT_ENTITLED: &str = "model_not_entitled";
+/// The model entitlement could not be resolved (WS10-S4): a wait, never an answer either way.
+pub(crate) const MODEL_ENTITLEMENT_UNAVAILABLE: &str = "model_entitlement_unavailable";
 
 /// Trailer carrying inference-core's classification of a provider failure.
 pub(crate) const PROVIDER_ERROR_KIND_TRAILER: &str = "x-mp-provider-error";
@@ -131,10 +136,23 @@ impl Refusal {
     /// long for it, is the request's own failure.
     pub(crate) fn terminal_failure_code(&self) -> &'static str {
         match self.code {
-            SUBSCRIPTION_BAD_REQUEST | PROMPT_TOO_LONG => TERMINAL_INFERENCE_FAILED,
+            SUBSCRIPTION_BAD_REQUEST | PROMPT_TOO_LONG | MODEL_NOT_ENTITLED => TERMINAL_INFERENCE_FAILED,
             _ => TERMINAL_PROVIDER_UNAVAILABLE,
         }
     }
+}
+
+/// The typed refusal of the model entitlement a failed inference call declares, if any, for ANY
+/// run (a subscription-pinned run reads its own trailers instead). Read through the shared
+/// contract reader, never the status message, and never latched: it is about the model of one
+/// round, not the run.
+pub(crate) fn entitlement_refusal_from_status(status: &tonic::Status) -> Option<Refusal> {
+    mp_contracts::model_entitlement::Refusal::from_status(status).map(|refusal| {
+        Refusal::bare(match refusal.code() {
+            MODEL_NOT_ENTITLED => MODEL_NOT_ENTITLED,
+            _ => MODEL_ENTITLEMENT_UNAVAILABLE,
+        })
+    })
 }
 
 /// The typed refusal a failed inference call declares, if any.
@@ -374,5 +392,16 @@ mod tests {
 
         // A different run's latch is independent.
         assert_eq!(RefusalLatch::default().latched(), None);
+    }
+
+    #[test]
+    fn a_model_entitlement_refusal_is_typed_terminal_and_never_run_wide() {
+        let denied = Refusal::bare(MODEL_NOT_ENTITLED);
+        let unavailable = Refusal::bare(MODEL_ENTITLEMENT_UNAVAILABLE);
+        assert!(!denied.latches() && !unavailable.latches());
+        assert_eq!(denied.terminal_failure_code(), TERMINAL_INFERENCE_FAILED);
+        assert_eq!(unavailable.terminal_failure_code(), TERMINAL_PROVIDER_UNAVAILABLE);
+        // A status that names no entitlement kind is no entitlement refusal.
+        assert_eq!(entitlement_refusal_from_status(&tonic::Status::permission_denied("no")), None);
     }
 }

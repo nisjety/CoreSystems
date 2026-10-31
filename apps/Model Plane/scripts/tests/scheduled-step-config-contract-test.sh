@@ -79,4 +79,65 @@ for source in \
   }
 done
 
+# Contract-bound (v2) bindings from WS20 S5. Each schema string must be the same
+# literal in every language that verifies it, so a drift fails here first.
+for pattern in \
+  'sha256:space-scheduled-step-v2|rust/services/execution-core/src/scheduled_step_decision.rs' \
+  'sha256:space-scheduled-step-v2|../Control Plane/user-core/internal/spaces/scheduled_step_decision.go' \
+  'sha256:space-scheduled-step-v2|go/services/orchestrator-core/cmd/activities/scheduled_step_authorizer.go' \
+  'sha256:space-scheduled-run-execute-v2|rust/services/session-core/src/grpc.rs' \
+  'sha256:space-scheduled-run-execute-v2|../Control Plane/user-core/internal/spaces/scheduled_run_decision.go' \
+  'sha256:space-scheduled-run-execute-v2|go/services/orchestrator-core/cmd/activities/scheduled_run_authorizer.go'; do
+  literal="${pattern%%|*}"
+  source="${pattern#*|}"
+  rg -Fq "$literal" "$ROOT_DIR/$source" || {
+    echo "contract-bound schema $literal is missing from $source" >&2
+    exit 1
+  }
+done
+
+rg -Fq 'EXECUTION_CORE_SCHEDULED_CONTRACT_REQUIRED' \
+  "$ROOT_DIR/rust/services/execution-core/src/scheduled_step_decision.rs" || {
+  echo "execution-core contract-required switch is not read" >&2
+  exit 1
+}
+rg -Fq 'Some("true")' \
+  "$ROOT_DIR/rust/services/execution-core/src/scheduled_step_decision.rs" || {
+  echo "execution-core contract-required switch is not a strict literal parser" >&2
+  exit 1
+}
+rg -Fq 'scheduled_contract_expired' \
+  "$ROOT_DIR/rust/services/session-core/src/grpc.rs" || {
+  echo "session-core does not refuse an expired scheduled contract" >&2
+  exit 1
+}
+rg -Fq 'contract_json = 14' "$ROOT_DIR/proto/model_plane/v1/sessions.proto" || {
+  echo "StartScheduledRunRequest contract_json is not at its reserved tag 14" >&2
+  exit 1
+}
+rg -Fq 'contract_digest = 15' "$ROOT_DIR/proto/model_plane/v1/sessions.proto" || {
+  echo "StartScheduledRunRequest contract_digest is not at its reserved tag 15" >&2
+  exit 1
+}
+rg -Fq 'contract_expires_at = 16' "$ROOT_DIR/proto/model_plane/v1/sessions.proto" || {
+  echo "StartScheduledRunRequest contract_expires_at is not at its reserved tag 16" >&2
+  exit 1
+}
+
 echo "scheduled-step config contract: exact bindings and Auth Core scopes declared, empty by default, and fail-closed"
+
+echo "scheduled-step config contract: exact bindings and Auth Core scopes declared, empty by default, and fail-closed"
+
+# WS20 S6: the scheduled Do lane is switched by one name, default off, read by both the
+# execution-core lane and the orchestrator that chooses it. Only the source is checked here; the
+# deploy overlay is the owner's rollout step, and this script never enables the lane.
+rg -q 'SWITCH_ENV: &str = "EXECUTION_SCHEDULED_AGENT_ENABLED"' \
+  "$ROOT_DIR/rust/services/execution-core/src/scheduled_agent.rs" || {
+  echo "execution-core scheduled agent switch name is missing or changed" >&2
+  exit 1
+}
+rg -Fq 'os.Getenv("EXECUTION_SCHEDULED_AGENT_ENABLED")' \
+  "$ROOT_DIR/go/services/orchestrator-core/cmd/activities/activities.go" || {
+  echo "orchestrator scheduled agent switch name is missing or changed" >&2
+  exit 1
+}

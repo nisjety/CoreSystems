@@ -22,6 +22,21 @@ fn test_db_url() -> Option<String> {
     std::env::var("TEST_DATABASE_URL").ok()
 }
 
+/// The URL for a test that needs a database, or `None` when the test skips. Under REQUIRE_CONTRACT
+/// a missing URL fails the test instead: a database test that skips proves nothing. Bare `CI` does
+/// not fail it, because the data-plane `rust-check` job runs `cargo test --workspace --tests` with
+/// `CI` set and no database on purpose; `rust-integration-tests` supplies the database.
+fn test_db_url_or_skip() -> Option<String> {
+    let url = test_db_url();
+    if url.is_none() {
+        if std::env::var_os("REQUIRE_CONTRACT").is_some() {
+            panic!("TEST_DATABASE_URL is not set but REQUIRE_CONTRACT is: a database test that skips proves nothing");
+        }
+        eprintln!("skipped: TEST_DATABASE_URL is not set");
+    }
+    url
+}
+
 async fn setup_schema(pool: &PgPool) {
     // Schema mirrors init.sql for the slices we touch.
     sqlx::query(
@@ -129,6 +144,7 @@ fn make_request(zdr_mode: &str) -> RetrievalRequest {
         agent_id: None,
         admin_read_all: false,
         service_principal: false,
+        service_id: None,
         space_scope: None,
     }
 }
@@ -198,7 +214,7 @@ async fn test_persist_trace_creates_row_when_not_ephemeral() {
 
 #[tokio::test]
 async fn test_ephemeral_mode_does_not_persist_trace() {
-    let Some(url) = test_db_url() else {
+    let Some(url) = test_db_url_or_skip() else {
         return;
     };
     let pool = PgPool::connect(&url).await.unwrap();
@@ -222,7 +238,7 @@ async fn test_ephemeral_mode_does_not_persist_trace() {
 
 #[tokio::test]
 async fn test_reject_mode_filters_restricted_docs() {
-    let Some(url) = test_db_url() else {
+    let Some(url) = test_db_url_or_skip() else {
         return;
     };
     let pool = PgPool::connect(&url).await.unwrap();
@@ -283,7 +299,7 @@ async fn test_reject_mode_filters_restricted_docs() {
 
 #[tokio::test]
 async fn test_disabled_mode_does_not_filter_restricted() {
-    let Some(url) = test_db_url() else {
+    let Some(url) = test_db_url_or_skip() else {
         return;
     };
     let pool = PgPool::connect(&url).await.unwrap();

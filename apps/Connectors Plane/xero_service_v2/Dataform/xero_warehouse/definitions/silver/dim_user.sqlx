@@ -1,0 +1,34 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Current Xero organisation user directory. A user belongs to a Xero tenant/company; this is not an employee or business-unit hierarchy.",
+  assertions: {
+    nonNull: ["tenant_id", "user_id", "user_key"],
+    uniqueKey: ["user_key"]
+  }
+}
+
+WITH latest AS (
+  SELECT *
+  FROM ${ref("dw_bronze_xero", "xero_users")}
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY tenant_id, user_id
+    ORDER BY synced_at DESC, updated_at DESC, first_seen_at DESC, record_id DESC
+  ) = 1
+)
+SELECT
+  CONCAT(tenant_id, '|', user_id) AS user_key,
+  tenant_id,
+  user_id,
+  global_user_id,
+  record_id AS user_internal_id,
+  NULLIF(TRIM(CONCAT(COALESCE(first_name, ''), ' ', COALESCE(last_name, ''))), '') AS user_name,
+  first_name,
+  last_name,
+  email_address,
+  organisation_role,
+  is_subscriber,
+  updated_at,
+  first_seen_at,
+  synced_at
+FROM latest

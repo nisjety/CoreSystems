@@ -5,6 +5,7 @@ import {
 	certifications,
 	dataClasses,
 	liveControls,
+	procurementEvidence,
 	subprocessors,
 } from "./trust-data";
 
@@ -46,6 +47,56 @@ function TrustHero() {
 						Kontakt sikkerhets­teamet
 					</ArrowButton>
 				</div>
+			</div>
+		</section>
+	);
+}
+
+function ProcurementEvidenceSection() {
+	return (
+		<section
+			className="border-b border-verevon-j-text/8 bg-verevon-surface-soft/40 px-[var(--verevon-edge)] py-[var(--verevon-section-vpad)] max-[760px]:px-[var(--verevon-page-pad)]"
+			id="bevis"
+		>
+			<div className="mx-auto max-w-[1680px]">
+				<div className="max-w-[760px]">
+					<Eyebrow marker>Dokumentasjon for innkjøp</Eyebrow>
+					<h2 className="verevon-h2 mt-6 text-balance">
+						Hva dere kan verifisere i dag.
+					</h2>
+					<p className="verevon-body-lg mt-7 max-w-[62ch] text-pretty">
+						Dette er statusen på materialet en sikkerhets- eller
+						innkjøpsprosess vanligvis ber om. Vi omtaler ikke en kontroll som
+						dokumentert før både omfanget og begrensningen kan vises her.
+					</p>
+				</div>
+
+				<ul className="mt-[clamp(40px,5vw,72px)] flex flex-col border-b border-verevon-j-text/12">
+					{procurementEvidence.map((item) => (
+						<li
+							className="grid gap-x-8 gap-y-5 border-t border-verevon-j-text/12 py-7 lg:grid-cols-[minmax(190px,0.75fr)_minmax(0,1fr)_minmax(0,1fr)]"
+							data-procurement-evidence
+							key={item.title}
+						>
+							<div className="flex items-start justify-between gap-4 lg:block">
+								<h3 className="verevon-h3 text-[clamp(1.2rem,1.3vw,1.6rem)] text-balance">
+									{item.title}
+								</h3>
+								<div className="mt-0 shrink-0 lg:mt-4">
+									<StatusBadge level={item.level} />
+								</div>
+							</div>
+							<div>
+								<p className="verevon-eyebrow mb-3">Tilgjengelig nå</p>
+								<p className="verevon-body text-pretty">{item.available}</p>
+							</div>
+							<div>
+								<p className="verevon-eyebrow mb-3">Ikke dokumentert ennå</p>
+								<p className="verevon-body text-pretty">{item.pending}</p>
+							</div>
+						</li>
+					))}
+				</ul>
 			</div>
 		</section>
 	);
@@ -360,6 +411,7 @@ export function TrustCenter() {
 	return (
 		<main className="bg-background text-verevon-j-text">
 			<TrustHero />
+			<ProcurementEvidenceSection />
 			<ControlsSection />
 			<CertificationsSection />
 			<ResidencySection />

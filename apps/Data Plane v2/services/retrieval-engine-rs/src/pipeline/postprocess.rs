@@ -456,6 +456,13 @@ pub struct VisibilityGate<'a> {
     pub viewer: Option<&'a str>,
     /// The viewer's explicit grants from user-core's `resource_grants`.
     pub granted: &'a [String],
+    /// A service principal's corpus: its confined `filters.sources`. When set, a
+    /// candidate must also be a live `documents` row whose `source` is one of
+    /// these, and the wiki branch below is skipped, because wiki pages sit outside
+    /// every document corpus. `None` for users: the gate is unchanged for them.
+    /// This is the second control behind the dense arm's `source` filter; it runs
+    /// after the overfetch trim, so it never replaces that filter.
+    pub sources: Option<&'a [String]>,
 }
 
 #[async_trait]
@@ -498,11 +505,13 @@ impl NodePostprocessor for VisibilityGate<'_> {
                    OR owner_id = $2
                    OR visibility = 'org'
                    OR document_id = ANY($3))
+              AND ($4::text[] IS NULL OR source = ANY($4::text[]))
             "#,
         )
         .bind(&doc_ids)
         .bind(self.viewer)
         .bind(self.granted)
+        .bind(self.sources)
         .fetch_all(&mut *tx)
         .await?
         .into_iter()
@@ -524,6 +533,11 @@ impl NodePostprocessor for VisibilityGate<'_> {
         // a hard error at COMMIT, which is exactly what this `match` exists to
         // avoid.
         match async {
+            // A service confined to a corpus never sees wiki pages (they are not
+            // documents of any corpus), so the wiki branch is skipped for it.
+            if self.sources.is_some() {
+                return Ok::<_, anyhow::Error>(Vec::new());
+            }
             let mut tx = pg_org_scope::begin_org_scoped(self.pool, self.org_id).await?;
             let rows: Vec<(String,)> = sqlx::query_as(
                 r#"

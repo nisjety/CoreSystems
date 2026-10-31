@@ -160,7 +160,7 @@ Current relationships:
   - `usage.>`
   - `organization.deleted` (deactivates billing account)
 - `billing-core` -> shared NATS consumers
-  - `aqencia.controlplane.billing.*`
+  - `controlplane.billing.*`
   - plain notification subjects via `PublishPlain`
 - `auth-core` -> `billing-core` via `BILLING_CORE_URL` HTTP call to the new `/deactivate` route (new WIP integration point; currently misconfigured, see Finding 1)
 

@@ -13,22 +13,18 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
 	metadataBase: siteUrl,
 	title: {
-		default: "Verevon — Én arbeidsflate for mennesker og AI",
+		default: "Verevon — Én styrt arbeidsflate for mennesker og AI",
 		template: "%s — Verevon",
 	},
 	description: siteDescription,
-	alternates: {
-		canonical: "/",
-	},
 	openGraph: {
-		title: "Verevon — Én arbeidsflate for mennesker og AI",
+		title: "Verevon — Én styrt arbeidsflate for mennesker og AI",
 		description: siteDescription,
 		locale: "nb_NO",
 		type: "website",
-		url: "/",
 		images: [
 			{
-				alt: "Verevon — Én arbeidsflate for mennesker og AI",
+				alt: "Verevon — Én styrt arbeidsflate for mennesker og AI",
 				height: 630,
 				url: "/opengraph-image",
 				width: 1200,
@@ -38,7 +34,7 @@ export const metadata: Metadata = {
 	twitter: {
 		card: "summary_large_image",
 		description: siteDescription,
-		title: "Verevon — Én arbeidsflate for mennesker og AI",
+		title: "Verevon — Én styrt arbeidsflate for mennesker og AI",
 		images: ["/opengraph-image"],
 	},
 };
@@ -67,9 +63,11 @@ const structuredData = {
 			url: siteUrl.toString(),
 			description: siteDescription,
 			featureList: [
-				"Kildebaserte svar",
-				"Godkjenning før handling",
-				"Revisjonsspor",
+				"Arbeid på tvers av systemer",
+				"Kildebaserte svar og planer",
+				"Policy-styrt agentarbeid",
+				"Risikobasert godkjenning",
+				"Sporbar utførelse",
 			],
 		},
 	],
@@ -89,21 +87,39 @@ const fullMotionPreferenceScript = `
 })();
 `;
 
+const homepageIntroSessionScript = `
+(() => {
+	if (window.location.pathname !== "/") return;
+	try {
+		if (window.sessionStorage.getItem("verevon.home-intro-seen-v1") === "1") {
+			document.documentElement.dataset.homeIntroSession = "seen";
+		}
+	} catch {
+		document.documentElement.dataset.homeIntroSession = "unavailable";
+	}
+})();
+`;
+
 export default function RootLayout({
 	children,
 }: Readonly<{
 	children: React.ReactNode;
 }>) {
 	return (
-		<html data-motion="full" data-scroll-behavior="smooth" lang="nb">
+		<html data-motion="full" data-scroll-behavior="smooth" lang="nb" suppressHydrationWarning>
 			<head>
 				<Script
 					dangerouslySetInnerHTML={{ __html: fullMotionPreferenceScript }}
 					id="verevon-full-motion-preference"
 					strategy="beforeInteractive"
 				/>
+				<Script
+					dangerouslySetInnerHTML={{ __html: homepageIntroSessionScript }}
+					id="verevon-homepage-intro-session"
+					strategy="beforeInteractive"
+				/>
 			</head>
-			<body className={`${geistMono.variable}`}>
+			<body className={`${geistMono.variable}`} suppressHydrationWarning>
 				<Script
 					dangerouslySetInnerHTML={{
 						__html: JSON.stringify(structuredData).replace(/</g, "\\u003c"),

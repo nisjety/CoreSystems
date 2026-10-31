@@ -50,7 +50,7 @@ func (sp *SharedPublisher) PublishSessionCommand(ctx context.Context, sessionID,
 
 	case "v1":
 		// Route to existing Model Plane v1 subjects (compat)
-		subject := fmt.Sprintf("aqencia.reasoning.session.%s.command", sessionID)
+		subject := fmt.Sprintf("verevon.session.%s.command", sessionID)
 		msg := map[string]any{
 			"type":       commandType,
 			"session_id": sessionID,

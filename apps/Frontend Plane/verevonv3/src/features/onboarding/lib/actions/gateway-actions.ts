@@ -1,3 +1,5 @@
+import { recordOrganizationWebsite } from '@/shared/api/organization-client'
+import { addWebsite } from '@/shared/api/marketing/website-client'
 import {
   cleanupSource,
   confirmCheckout,
@@ -27,6 +29,13 @@ import {
 export function createOnboardingGatewayActions(actor: ActionActor = getBrowserActor()) {
   return {
     actor,
+    // The same governed marketing.websites.add contract used by Pulse. The
+    // backend saves the site and queues public preparation; no browser org or
+    // provider credential is forwarded.
+    // The organisation's own website is kept in org-core, the owner of the company's facts. Recorded before the
+    // marketing registry, so a website the registry holds is always one the organisation has on record too.
+    recordOrganizationWebsite: (orgId: string, site: string) => recordOrganizationWebsite(orgId, site),
+    registerMarketingWebsite: (site: string) => addWebsite(site),
     cleanupSource: (input: Omit<Parameters<typeof cleanupSource>[0], 'actor'>) =>
       cleanupSource({ actor, ...input }),
     confirmCheckout: (input: Omit<Parameters<typeof confirmCheckout>[0], 'actor'>) =>

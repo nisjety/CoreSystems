@@ -13,6 +13,7 @@ into `browser_capacity_reached` with `Retry-After`. Retryable.
 | `global_run_cap` | `global` | the edge has this many live runs | `MAX_CONCURRENT_RUNS` (32) |
 | `org_run_cap` | `org` | this organization has this many live runs | `MAX_CONCURRENT_RUNS_PER_ORG` (8) |
 | `org_interactive_run_cap` | `org` | this organization has this many of a person's own sessions open; the sub-cap leaves room for its agent runs | `MAX_INTERACTIVE_RUNS_PER_ORG` (6) |
+| `per_key_run_cap` | `key` | an API key (INNH-10) has this many live runs; counted per key id inside the organization, and checked right after `global_run_cap` for API-key starts only | `MAX_CONCURRENT_RUNS_PER_KEY` (2, at least 1) |
 | `org_plan_cap` | `org` | the organization's plan bounds this class of run (agent runs or a person's sessions) and it has this many live; `limit` is the plan value, never above `MAX_CONCURRENT_RUNS` | the plan keys `quarry.cap.agent_runs` and `quarry.cap.interactive_runs`; nothing by default (see below) |
 
 `0` disables a cap.
@@ -247,6 +248,47 @@ Not errors: a model failure, a rate limit, a schema the output could not satisfy
 | 429 `RATE_LIMITED` | | `subscription_limit` (`details.limit` is 10) | the organization holds the maximum | delete one first |
 
 501 `UNSUPPORTED` means a switch is off: the message names `QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS` or, when control has it off, `QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS`. 404 `NOT_FOUND` is one answer for an unknown, a foreign and a malformed id.
+
+## Answer synthesis (INNH-8a)
+
+These come from `POST /v1/answer`, `POST /v1/answer/stream` (as `reason` in the legacy error body, or in the `error` event) and `include_answer` on `POST /v1/search` (as `answer_reason`, inside a 200). Contract: `docs/CONTRACTS.md`, "Answer synthesis". Runbook: `docs/RUNBOOKS.md`, "Answer synthesis". The reason is a closed code and never carries provider text.
+
+| reason | status and code | meaning | what a caller does |
+|---|---|---|---|
+| `synthesis_disabled` | 501 `UNSUPPORTED` | `QUARRY_EDGE__ANSWER_SYNTHESIS` is not on (the default) | the operator sets it; use plain `/v1/search` meanwhile |
+| `model_path_refused` | 501 `UNSUPPORTED` | the switch is on but the QB-T17 boot gate refused it: the manifest row `model-invoke` is not granted (or there is no service identity); the feature stays off and no Model Plane call is made | the operator needs the cross-plane grant (owner decision INNH-8b); the boot log names the refusal |
+| `zdr_unavailable` | 403 `FORBIDDEN` | zero data retention (the body flag or the token's floor): the model hop carries no ZDR posture (ADR-4), so `/v1/answer` and `/v1/answer/stream` refuse the request before any search, fetch or model call | not retryable under ZDR; use `/v1/search` or `/v1/scrape`, which run under ZDR without a model |
+| `no_search_provider` | 501 `UNSUPPORTED` | no search provider is configured | the operator configures `SEARXNG_URL`, `BRAVE_SEARCH_KEY` or `SERPER_KEY` |
+| `no_model_plane_url` | 501 `UNSUPPORTED` | `QUARRY_EDGE__MODEL_PLANE_URL` is unset or blank | the operator sets it |
+| `model_client_init_failed` | 501 `UNSUPPORTED` | the URL is set but the Model Plane client could not be built from it | the operator fixes the URL; the edge boot log has the cause |
+| `model_plane_auth_refused` | 503 `UNAVAILABLE` | the pipeline is wired but Auth Core refused to mint the edge's Model Plane token, or the gateway answered 401 or 403 to it | not the caller's token and not retryable by the caller; the operator needs the cross-plane grant (owner decision INNH-8b) |
+| `model_plane_rate_limited` | 429 `RATE_LIMITED` | Auth Core rate limited the edge's service-token mint (the edge's call, not the caller's own quota) | retry later |
+| `model_plane_error` | 502 `DRIVER_FAILED` | the Model Plane call failed | retry later |
+| `answer_search_failed` | the status of the error | the search or page-fetch half failed before a model was asked | retry later |
+
+On `POST /v1/search` the status of an answer is `answer_status`: `ok`, `no_sources`, `skipped_zdr` (ZDR: nothing was sent to a model) or `unavailable` (with `answer_reason` from the table, never `zdr_unavailable`: ZDR is `skipped_zdr` there). A missing answer is never a failed search. The `code` in an error body is the wire name of the error code (`DRIVER_FAILED`, `RATE_LIMITED`, `FORBIDDEN`).
+
+## 403 `FORBIDDEN`: API-key agent runs (INNH-10, dark)
+
+These come from the routes under `/v1/agent/` when the caller's token is an `api_key` principal (`principal_type: "api_key"`, `sub: "apikey:<key_id>"`, minted by Auth Core for an API key). The status is always 403, the code is `FORBIDDEN`, and `details.reason` is one of the closed list below. Nothing is acquired and nothing is consumed. Contract: `docs/CONTRACTS.md`, "API-key agent runs". Runbook: `docs/RUNBOOKS.md`, "API-key agent runs". A user or service token never gets these. The 429 `per_key_run_cap` is in the run-cap table at the top.
+
+| reason | where | meaning | what a caller does |
+|---|---|---|---|
+| `api_key_agent_runs_disabled` | any route | `QUARRY_EDGE__API_KEY_AGENT_RUNS` is not on (the default); a key token is refused on EVERY route, the allowed ones included | the operator turns the switch on; nothing a caller can do |
+| `api_key_scope_missing` | any route | the key token does not carry the scope `browser:agent` | the key needs the permission; Auth Core mints the scope from it |
+| `api_key_route_refused` | any route off the allow-list | the method and path are not one of the nine routes of the allow-list (see CONTRACTS) | none: the route is not available to a key |
+| `api_key_grant_required` | `POST /v1/agent/runs` | no `grant_id`; a key run needs one in every environment, whatever `REQUIRE_BROWSER_GRANTS` says | acquire a key grant first |
+| `api_key_grant_kind_refused` | `POST /v1/agent/runs` | the grant is not a plain allow-list session grant: a run, sensitive-approval or derived attach grant, an unknown policy mode | acquire a key grant |
+| `api_key_open_web_refused` | `POST /v1/agent/runs` | the grant is a `human_browse` grant or an open-web policy; a key never gets the open web | acquire a key grant |
+| `api_key_grant_owner_mismatch` | `POST /v1/agent/runs` | the grant was not issued to this key and this key's owner (its `key_id` or `owner_id` differ, or it has no `key_id`); also what a person or a service gets for presenting a key grant | use the grant issued for this key |
+| `api_key_grant_budget_required` | `POST /v1/agent/runs` | the grant carries no budget claim that bounds anything | the broker issues key grants with a budget |
+| `api_key_grant_hosts_required` | `POST /v1/agent/runs` | the grant's host list is empty or not canonical | the broker issues key grants with a canonical host list |
+| `api_key_profile_refused` | `POST /v1/agent/runs` | `profile_id` or `persist_profile` was sent; a key run always gets a fresh, run-scoped profile | leave them out |
+| `api_key_resume_refused` | `POST /v1/agent/runs` | `resume_run_id` was sent; a key run cannot be resumed | start a new run |
+| `api_key_sensitive_action_refused` | `POST /v1/agent/runs/{run_id}/step` | a dialog reply, an upload or a download (the actions that need a person's approval); there is no person to sign an ask for a key | none in v1 |
+| `api_key_budget_not_enforced` | `POST /v1/agent/runs` | the edge runs with `QUARRY_EDGE__BUDGET_ENFORCEMENT` short of `on`, so the grant's budget would bound nothing | the operator sets `QUARRY_EDGE__BUDGET_ENFORCEMENT=on` |
+
+Two answers a key can also get, which are not key reasons: a grant the broker no longer vouches for (`browser grant is inactive or expired`, 403, on a start or the next step) and a grant that now answers for another key (`browser grant no longer belongs to this key`, 403 `SECURITY_BLOCKED`, on the next step). A key that is revoked stops within the token's life (two minutes at most) and the broker revokes its grants on the revocation event.
 
 ## 403 `FORBIDDEN`: an action an agent may not take (WS9.B, D2-012)
 

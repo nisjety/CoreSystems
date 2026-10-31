@@ -2034,23 +2034,24 @@ Read this before telling anyone to "turn extract on". Two Model Plane features s
 
 | | `POST /v1/extract` with `schema` or `prompt` | `json`, `summary`, `question`, `highlights` in `formats` of `POST /v1/scrape` |
 |---|---|---|
-| Switch | none: it runs when the Model Plane URL is set and Quarry holds a model credential | `QUARRY_EDGE__AI_FORMATS` (off by default; see "Scrape AI formats" below) |
+| Switch | `QUARRY_EDGE__AI_FORMATS` (QB-T17 gates it; off by default); it then runs when the Model Plane URL is set and Quarry holds a model credential | `QUARRY_EDGE__AI_FORMATS` (off by default; see "Scrape AI formats" below) |
 | Gateway route | `/v1/invoke` (token-request row `model-invoke`) | `/v1/ai/chat`, with an `x-inference-authorization` header |
 | Credential | the Auth Core minted token (needs `QUARRY_EDGE__QUARRY_SERVICE_API_KEY`), or in development `QUARRY_EDGE__MODEL_PLANE_TOKEN` | `QUARRY_EDGE__MODEL_PLANE_TOKEN`, and optionally `QUARRY_EDGE__MODEL_PLANE_INFERENCE_TOKEN` (development only) |
 | Not ready | 501 `UNSUPPORTED`, three texts below | 501 `model_plane_unavailable` or `model_lane_not_granted`; 400 `feature_disabled` while the switch is off |
 
-`QUARRY_EDGE__AI_FORMATS` has never gated `/v1/extract`. The Innhenting audit (commit `14299e659`) and the 12-item brief say that extract needs `QUARRY_EDGE__AI_FORMATS=1`; that is wrong, and the old 501 hint that said to set `MODEL_PLANE_URL` alone was wrong too. Do not tell a user or an operator to set the AI formats switch for extract.
+`QUARRY_EDGE__AI_FORMATS` gates `/v1/extract` (QB-T17, merged from main into the integration; before it the switch never gated extract, and INNH-3 documented that interim state). The Innhenting audit (commit `14299e659`) and the 12-item brief said that extract needs `QUARRY_EDGE__AI_FORMATS=1`, and with the gate that is now true: the switch is decided at boot with the other Model Plane switches (see "Answer synthesis" below), and a switch that is on without a model path is refused at boot and stays off. The old 501 hint that said to set `MODEL_PLANE_URL` alone was wrong too.
 
-**There is no production path today.** A deployed stack cannot run structured extract, and it cannot run the AI formats either. Both wait for the same two things: WS16.S1 to S3 (the metered service lane on the Model Plane gateway) and the owner decision X-7 (OD-1: the grant that lets Quarry call the Model Plane: audiences, retention, and the manifest rows set `granted: true`). Until then, in the committed files: the `model-invoke` row of `crates/quarry-runtime/contracts/cross-plane-token-requests.json` is `granted: false`, the Control Plane registry gives `quarry-edge` no `model-gateway` audience, and the gateway refuses a service principal on `/v1/invoke`. Setting `MODEL_PLANE_URL` on a deployed stack therefore enables nothing: it turns the first 501 below into the third, and it makes the edge refuse to boot unless `QUARRY_EDGE__QUARRY_SERVICE_API_KEY` is set. The live stack keeps `MODEL_PLANE_URL` unset. Do not set it.
+**There is no production path today.** A deployed stack cannot run structured extract, and it cannot run the AI formats either. Both wait for the same two things: WS16.S1 to S3 (the metered service lane on the Model Plane gateway) and the owner decision X-7 (OD-1: the grant that lets Quarry call the Model Plane: audiences, retention, and the manifest rows set `granted: true`). Until then, in the committed files: the `model-invoke` row of `crates/quarry-runtime/contracts/cross-plane-token-requests.json` is `granted: false`, the Control Plane registry gives `quarry-edge` no `model-gateway` audience, and the gateway refuses a service principal on `/v1/invoke`. Setting `MODEL_PLANE_URL` on a deployed stack therefore enables nothing: it turns the first 501 below into 1b (the AI formats switch is off by default and a switch that is on is refused at boot without a model path), and it makes the edge refuse to boot unless `QUARRY_EDGE__QUARRY_SERVICE_API_KEY` is set. The live stack keeps `MODEL_PLANE_URL` unset. Do not set it.
 
-**The three 501s of `/v1/extract`.** They are decided before any further page is fetched, they share one body, `{"error", "code": "UNSUPPORTED", "hint", "next_actions"}` (no other key; `next_actions` has two entries), and they never name a URL, a host or a token. A request with neither `schema` nor `prompt` (cleaned markdown) and a ZDR request (each source answers `ZDR_UNAVAILABLE`) never get one.
+**The four 501s of `/v1/extract`.** They are decided before any further page is fetched, they share one body, `{"error", "code": "UNSUPPORTED", "hint", "next_actions"}` (no other key; `next_actions` has two entries), and they never name a URL, a host or a token. A request with neither `schema` nor `prompt` (cleaned markdown) and a ZDR request (each source answers `ZDR_UNAVAILABLE`) never get one.
 1. No Model Plane URL (`QUARRY_EDGE__MODEL_PLANE_URL` unset, empty or blank). `error`: `structured extraction needs the Model Plane, and QUARRY_EDGE__MODEL_PLANE_URL is not set on this deployment`. No page is fetched.
+1b. The AI formats switch is off (QB-T17), or was refused at boot, with a URL set. `error`: `structured extraction is not available on this edge: QUARRY_EDGE__AI_FORMATS is off`. No page is fetched.
 2. A URL, but nothing to authenticate with (no service key and no development token). `error`: `structured extraction needs a granted Model Plane lane, and this deployment holds no model credential`. No page is fetched.
 3. A URL and a credential, but the gateway refuses the first model call (401 or 403, or Auth Core refuses to mint the token because the row is not granted). `error`: `structured extraction needs a granted Model Plane lane, and the Model Plane refused this service`. Exactly one page was fetched and one model call made; the other sources are not fetched and nothing is metered. Before INNH-3 this was a 200 in which every source (up to 25, fetched one after another) said `status: error`, and the fetches were paid. The stop applies only while no source has been extracted: a refusal after one source came back `ok` stays per source, and a timeout, a 5xx, a non-JSON answer or a 429 never stops the batch (429 keeps its own envelope).
 
 `hint` always starts with "omit `schema` and `prompt` to receive cleaned markdown" and ends with a pointer to this section; `next_actions[0]` is the same retry. A caller that gets a 501 can repeat the same request without `schema` and `prompt` and receive `status: fetched` markdown.
 
-**What works in development (a side-by-side or dev stack only; the owner decides).** Run the edge with the cross-plane auth dev bypass (`QUARRY_EDGE__CROSS_PLANE_AUTH_DEV_BYPASS=true`, refused in production). Set `QUARRY_EDGE__MODEL_PLANE_URL` to a gateway and `QUARRY_EDGE__MODEL_PLANE_TOKEN` to a token that gateway accepts on `/v1/invoke`. Leave `QUARRY_EDGE__QUARRY_SERVICE_API_KEY` unset: with a service key the minted path is used instead, and it is refused (state 3). Restart the edge; all of these are read at boot. The deploy compose forwards `MODEL_PLANE_URL` and `MODEL_PLANE_TOKEN`; the Ingestion compose forwards only `MODEL_PLANE_URL`, so give the container the token through an override file. Then `POST /v1/extract` with a `schema` returns `status: ok` with `data`. The AI formats of `/v1/scrape` additionally need `QUARRY_EDGE_AI_FORMATS=on` (compose spelling) and, for the chat route, the inference token; follow "Scrape AI formats" below.
+**What works in development (a side-by-side or dev stack only; the owner decides).** Run the edge with the cross-plane auth dev bypass (`QUARRY_EDGE__CROSS_PLANE_AUTH_DEV_BYPASS=true`, refused in production). Set `QUARRY_EDGE__MODEL_PLANE_URL` to a gateway and `QUARRY_EDGE__MODEL_PLANE_TOKEN` to a token that gateway accepts on `/v1/invoke`. Leave `QUARRY_EDGE__QUARRY_SERVICE_API_KEY` unset: with a service key the minted path is used instead, and it is refused (state 3). Restart the edge; all of these are read at boot. The deploy compose forwards `MODEL_PLANE_URL` and `MODEL_PLANE_TOKEN`; the Ingestion compose forwards only `MODEL_PLANE_URL`, so give the container the token through an override file. Set `QUARRY_EDGE_AI_FORMATS=on` (compose spelling) too: QB-T17 gates the model arm of `/v1/extract` with it, and boot refuses it unless a model path exists (the dev bypass credential is one). Then `POST /v1/extract` with a `schema` returns `status: ok` with `data`. The AI formats of `/v1/scrape` use the same switch and, for the chat route, additionally need the inference token; follow "Scrape AI formats" below.
 
 **For the Innhenting UI.** Show `error` as the reason. Offer the retry in `next_actions[0]`. Do not parse `hint` and do not tell a person to set a flag or a variable: they are for the operator, and no flag unlocks this on the live stack. The three states are told apart by the `error` text only (there is no `details`). The cross-plane asks are WS16.S1 to S3 and decision X-7.
 
@@ -2144,3 +2145,136 @@ Customers can register an HTTPS endpoint that receives their organization's `cha
 **Tests (Linux container, `qtest-lane.sh`).** `cargo test -p quarry-edge --lib crawl_` (65 before the integration files), `--test crawl_sitemap`, `--test crawl_options_on`, `--test crawl_options_off`, `--test crawl_sitemap_scope_off`, `--test web_policy_routes`, `--test zdr_feature_matrix`; Go: `GOWORK=off go test ./...` in `services/quarry-orchestrator`; `node --test scripts/tests/*.test.mjs`.
 
 **Evidence owed (stack session).** On a side-by-side stack with the crawl fixture (`deploy/compose/crawl-fixture/`) and a sitemap that lists a page no link reaches: `sitemap: include` finds it and `skip` does not; `scrape_options.exclude_tags: ["nav"]` removes the nav text from a stored markdown artifact. The in-flight replay of a history recorded before the marker is not tested (there is no recorded history to replay).
+
+
+## Answer synthesis: enable, disable and the reasons (INNH-8a, built, NOT run, 2026-10-31)
+
+`POST /v1/answer`, `POST /v1/answer/stream` and `include_answer` on `POST /v1/search` are answered by one pipeline: search, read the top pages, ask the Model Plane. The contract is `docs/CONTRACTS.md`, "Answer synthesis"; the code is `crates/quarry-edge/src/answer_status.rs` (the gates and the reasons), `model_plane_gate.rs` (the one boot gate that owns the switch) and `answer_routes.rs`. It is dark: `QUARRY_EDGE__ANSWER_SYNTHESIS` is off by default, both composes set it to `0`, and no stack has it on. `MODEL_PLANE_URL` alone does not turn it on.
+
+**One switch, one boot gate (QB-T17).** `QUARRY_EDGE__ANSWER_SYNTHESIS` is decided at boot by `model_plane_gate` together with the other Model Plane switches. A switch that is on is REFUSED, and stays off, unless the edge has a model path: `MODEL_PLANE_URL`, and either a service identity whose manifest row `model-invoke` (`crates/quarry-runtime/contracts/cross-plane-token-requests.json`) is `granted`, or the development bypass credential. The shipped manifest grants nothing, so on a deployed stack the boot log shows an `ERROR` that names `QUARRY_EDGE__ANSWER_SYNTHESIS` and the routes answer `501` with `reason: model_path_refused`. The answer status is derived from that decision; the answer code has no switch of its own.
+
+**The gates, in the order the edge checks them.** The edge reports the first closed one (`reason`, and on `/v1/answer` a `hint` that names the setting). The switch is read once, so every change takes a restart of the edge.
+1. `QUARRY_EDGE_ANSWER_SYNTHESIS=1` (compose variable; the edge reads `QUARRY_EDGE__ANSWER_SYNTHESIS`). Closed: `synthesis_disabled`.
+2. A model path, as the boot gate sees it: `MODEL_PLANE_URL` (the gateway, for example `http://model-gateway:8080`) and a granted `model-invoke` row or the dev bypass credential. The switch on without them: `model_path_refused`; without the URL: `no_model_plane_url`.
+3. A search provider: `SEARXNG_URL`, `BRAVE_SEARCH_KEY` or `SERPER_KEY`. Closed: `no_search_provider`. (Live search works, so this is open wherever search works.) A URL the Model Plane client cannot be built from: `model_client_init_failed`, with the cause in the edge boot log.
+4. A Model Plane that accepts the edge. This is the cross-plane part and it is NOT in Quarry's hands. With 1 to 3 open through the dev bypass and no real grant, a call is `model_plane_auth_refused` (503 on `/v1/answer`, `answer_status: unavailable` on search); on a deployed stack the boot gate stops earlier, at step 2 (`model_path_refused`). It needs, all of them (owner decision INNH-8b, not built): the Control Plane registry (`apps/Control Plane/config/plane-service-principals.json`) giving quarry-edge the `model-gateway` audience with scope `models:invoke` and the `zdr` retention lane; the Model Plane gateway letting a service principal reach the route Quarry calls (`authorize_principal_route` in `model-gateway/src/auth.rs` allows only `POST /v1/ai/chat` and `/v1/ai/embeddings`, Quarry calls `POST /v1/invoke`) or Quarry moving to `/v1/ai/chat`; Quarry sending the second `x-inference-authorization` header; and the `model-invoke` row of `crates/quarry-runtime/contracts/cross-plane-token-requests.json` (and Auth Core's copy) flipping to `granted: true` in the same change as the registry grant.
+
+**Enable (a development or side-by-side stack only; the owner decides, not the compose file).** Set 1 to 3 above and recreate the edge. On a side-by-side stack with the cross-plane auth dev bypass, steps 2 and 4 are the development credential: `QUARRY_EDGE__CROSS_PLANE_AUTH_DEV_BYPASS` on and `MODEL_PLANE_TOKEN` carrying a user ingress token the gateway accepts on `/v1/invoke` (the same credential the AI formats use; not verified against a real gateway here). A deployed stack must not set the switch until the grant exists: the boot gate refuses it (`model_path_refused`, an `ERROR` in the boot log) and nothing is served. After the grant, flip the `model-invoke` row and the registry together, then set the switch.
+
+**Check it worked.** `POST /v1/search` with `{"query": "capital of norway", "include_answer": true}` and a user token, read `answer_status`: `ok` (and an `answer`) is working. `unavailable` with `answer_reason` is the gate that is closed. Then `POST /v1/answer` with the same query: 200 with `answer`, `citations` and `model`. Cost: an `include_answer` search runs the search provider twice (once for the results, once inside the pipeline), reads up to 5 pages (about 10k input tokens at most) and calls the model once.
+
+**Disable.** Unset the switch (or set it to anything but `1`, `true`, `on`) and restart. `/v1/answer` is then `501 synthesis_disabled`; `include_answer` says `unavailable` / `synthesis_disabled`; nothing else changes.
+
+**What a caller sees.** The reason table is `docs/ERROR_REASONS.md`, "Answer synthesis". In short: 501 with a `reason` (`synthesis_disabled`, `model_path_refused`, `no_search_provider`, `no_model_plane_url`, `model_client_init_failed`) for a gate that is closed; 403 `zdr_unavailable` for a ZDR request; 503 `model_plane_auth_refused` for the cross-plane grant; 429 `model_plane_rate_limited` and 502 `model_plane_error` for a failing hop; `answer_search_failed` when the search or page fetch failed first. A failed synthesis is not cached: the search cache skips a request that asked for an answer and has none, so the first query after step 4 is true is answered.
+
+**Billing.** One `quarry.answer.synth` per model call, on `/v1/answer`, the stream and an `include_answer` search (metadata `via: "search.include_answer"` on the last); never on a cache hit, a refusal, a failure, `no_sources` or ZDR. `quarry.search.query` is metered for the search as before.
+
+**ZDR.** The model hop carries no ZDR posture (ADR-4), so no ZDR request reaches a model. `include_answer` under ZDR sends nothing to a model (`answer_status: skipped_zdr`, the search runs under ZDR). `/v1/answer` and `/v1/answer/stream` REFUSE a ZDR request (body flag or the token's floor) with `403 FORBIDDEN`, `reason: zdr_unavailable`, before the gate, the cache and the pipeline: no search, no page fetch, no Model Plane call, and the refusal comes before the 501 checks. The `answer` row of `docs/ZDR_MATRIX.md` is `refused`, enforced. This closes the exposure for a ZDR organization even with the switch on. If an operator sees 403 `zdr_unavailable` for an organization they did not expect to be under ZDR, check the token's `zdr` floor and the request's `zdr` field, not the synthesis settings.
+
+**Evidence owed (stack session, not run here).** Everything above is proven by tests against a double of the gateway's `/v1/invoke` (`tests/answer_provider_status.rs`); no real Model Plane gateway was called. On a side-by-side stack with the dev bypass: one `include_answer` search with the switch on and a credential the gateway accepts (expect `answer_status: ok` and one `quarry.answer.synth` event), the same with the credential removed (expect `model_plane_auth_refused` and no event), and the same with `"zdr": true` (expect `skipped_zdr` and no request at the gateway); and `POST /v1/answer` with `"zdr": true` (expect 403 `zdr_unavailable` and no request at the gateway).
+
+## API-key agent runs: enable, disable and the refusals (INNH-10, Quarry side built dark, NOT run, 2026-10-31)
+
+An API key may drive a fenced browser run on `/v1/agent/*` once the whole chain exists. The contract is `docs/CONTRACTS.md`, "API-key agent runs"; the reasons are `docs/ERROR_REASONS.md`, "API-key agent runs"; the design and the asks to the other planes are `.plan-work/quarry-w1w2/INNH-10-design.md`. The code is `crates/quarry-edge/src/api_key.rs` (the route fence), `agent_routes/api_key_runs.rs` (the start rules), `agent_routes/admission.rs` (the per-step rules) and `grant_boot.rs`. **It is dark: `QUARRY_EDGE__API_KEY_AGENT_RUNS` is `0` by default and no compose file sets it.** With it off a key token is refused on every route and every other caller is served as before.
+
+**What must exist first (other owners; none is built).** Auth Core mints the `api_key` token (a gateway-only exchange of the key, ask CP-1 to CP-4); the BrowserBroker issues key grants stamped with the key's id, with hosts inside the key's host ceiling and a mandatory budget, and revokes them when the key is revoked (MP-1, MP-2); the model-gateway has the key-grant door (MP-3); the Verevon gateway composes exchange, grant and run (GW-1). Until the broker's `ValidateGrantResponse` carries `key_id` and Quarry vendors the field into `crates/quarry-runtime/proto/browser.proto`, the gRPC validator always yields an empty `key_id`, so EVERY key run is refused with `api_key_grant_owner_mismatch` on a gRPC-validated edge (fail closed, on purpose). The HTTP shim validator reads `key_id` from its JSON today (development only).
+
+**Enable order (the owner decides each step; do not change a live flag without that).** 1. Auth Core flag for the key exchange (CP-1). 2. BrowserBroker `BROWSER_BROKER_KEY_GRANTS_ENABLED` and the model-gateway door. 3. On the edge: `QUARRY_EDGE__BUDGET_ENFORCEMENT=on` (a key run is refused with `api_key_budget_not_enforced` otherwise: in `shadow` the grant's budget would bound nothing), a real grant validator (`QUARRY_EDGE__BROWSER_GRANT_VALIDATOR_GRPC_URL` and `QUARRY_EDGE__QUARRY_SERVICE_API_KEY`; or the HTTP shim outside production), then `QUARRY_EDGE__API_KEY_AGENT_RUNS=1` and a restart. Optionally `QUARRY_EDGE__MAX_CONCURRENT_RUNS_PER_KEY` (default 2, at least 1).
+
+**Boot refusals.** The edge does not start with the switch on and no validator endpoint (`ApiKeyRunsWithoutValidator`: the no-op validator accepts any grant id, which for a key would be an open door), whatever the environment; it does not start with a value it cannot read (`QUARRY_EDGE__API_KEY_AGENT_RUNS` must be 0, 1, on, off, true or false). With the switch on the boot log carries a warning line.
+
+**Kill switches, fastest first.** Revoke the key in Auth Core: new tokens stop at once and a live run's next call fails within the token's life (at most two minutes); the broker revokes the key's grants on the revocation event and the run's next step fails with `browser grant is inactive or expired`. Or set `QUARRY_EDGE__API_KEY_AGENT_RUNS=0` and restart: every key token is refused on every route again, the live key runs of that edge are released with it. A key run that stops stepping is released by the idle sweeper like any agent run.
+
+**Check it worked (side-by-side stack, owner approval needed).** With a key that holds `browser:agent`: acquire a key grant through the gateway, `POST /v1/agent/runs` with the key's token and the grant id (expect 200 and `constraints.max_steps` no larger than the grant's), one `wait` step (receipt `agent.basis` `api_key`, `principalId` `apikey:<key_id>`), then revoke the key and step again (expect 403). Negative checks: the same start without the grant id (`api_key_grant_required`), with the owner's own session token and the key grant (`api_key_grant_owner_mismatch`), `GET /v1/artifacts` with the key token (`api_key_route_refused`), and a third run of one key (429 `per_key_run_cap`). **Not run here: nothing in this item has been run against a stack.**
+
+**A refusal you did not expect.** `api_key_agent_runs_disabled`: the switch is off on that edge. `api_key_scope_missing`: the key lacks the permission. `api_key_grant_owner_mismatch` on a gRPC edge with a valid grant: the proto carries no `key_id` yet (above). `api_key_budget_not_enforced`: `QUARRY_EDGE__BUDGET_ENFORCEMENT` is not `on`.
+
+## Semantic rerank (Data Plane `/v1/rerank`)
+
+Quarry reorders the top search results with the Data Plane's rerank (`rerank-v1`, profile
+`web-v1`, a paid Azure cross-encoder). No Model Plane is involved and no general model is prompted.
+
+Switches on quarry-edge (each: default, boot check, effect):
+
+- `QUARRY_EDGE__SEMANTIC_RERANK`: off in the binary, and off in the Ingestion compose
+  (`QUARRY_EDGE_SEMANTIC_RERANK` defaults to `0`). Set it to `1` only after the ship check passes (see
+  Deploy order). On needs `QUARRY_EDGE__DATA_PLANE_URL` and the cross-plane tokens. Boot logs
+  `semantic rerank: enabled (Data Plane /v1/rerank)`; if an input is missing it logs one ERROR naming
+  it and rerank stays off.
+- `QUARRY_EDGE__SEMANTIC_RERANK_TOP_N`: default 10, clamped to 1..100 (the Data Plane's limit).
+- `QUARRY_EDGE__RERANK_DEADLINE_MS`: the budget of one call in milliseconds, default 2000 (the compose
+  sets it from `QUARRY_EDGE_RERANK_DEADLINE_MS`). It is sent as the Data Plane's `deadline_ms`, clamped to
+  100 to 8000, the range the Data Plane accepts. Quarry stops waiting at the budget plus 0.5 s, and a miss
+  degrades the search to its input order (`degraded`, reason `timeout`). Boot logs `deadline_ms` on the
+  `semantic rerank: enabled` line.
+- `QUARRY_EDGE__RERANK_SHADOW`: off in the binary. The Ingestion compose sets it to `1`
+  (`QUARRY_EDGE_RERANK_SHADOW`) for the first deploy's smoke run, and the orchestrator sets that default to
+  `0` after the live proof. In shadow mode the Data Plane is asked and its answer measured, but the results
+  keep their input order and carry no score (`status: shadow`). Boot logs a WARN if it is set while
+  `SEMANTIC_RERANK` is off.
+- `QUARRY_EDGE__ZERO_SAAS_SEARCH`: on a sovereign deployment the reranker is never called
+  (`skipped sovereign`, no call).
+
+Data Plane switches (on `retrieval-engine`, default safe): `WEB_RERANK_ENABLED` and
+`WEB_RERANK_PROCESSOR_APPROVED` are off until set, so the route answers `skipped disabled` or
+`skipped processor_unapproved` and makes no provider call. `WEB_RERANK_ALLOWED_SERVICES` defaults to
+`service:quarry-edge`.
+
+Reading an outcome: each search response carries `rerank.status` (`applied`, `skipped`, `degraded`,
+`shadow`, or `rerank-not-configured`) and `rerank.reason`. Every such response writes one
+`search.rerank` log line with `outcome`, `reason`, `profile`, `score_kind`, `cache_hit`, `zdr` and
+`hits`. The query text is never logged. In shadow mode `rerank.reason` is `would_apply` when the Data Plane's order would have reordered the head. Scores reach a caller only when it sends
+`score_kinds: ["cross_encoder.v1"]`; the response then names `score_kind`.
+
+What never reaches the Data Plane: a ZDR run (from the body or the user's token), and an org that is
+not a tenant (`onboarding` or `global`, reason `input_not_tenant`). A service caller that omits `zdr` is refused
+with `ZDR_REQUIRED`. Degraded and skipped answers are never cached.
+
+Deploy order (owner ruling 2026-10-12). Do not ship the rerank client before the Data Plane gate and the
+Control Plane grant are live: until they are, every non-ZDR search skips or degrades its rerank, the
+outcome is never cached, and each search pays the search providers again. The order, the sign-off marker the
+check accepts and the rollback order are in `apps/Data Plane v2/docs/web-rerank-v1.md` (deploy order for
+quarry-edge). The check is `bash "apps/Data Plane v2/scripts/qb-preflight.sh" --live --ship-qb-t09`. The compose default is `0`, so a deploy is dark until `QUARRY_EDGE_SEMANTIC_RERANK=1` is set after the
+check passes (exit 0). Do not set it on a deploy whose check fails.
+
+The two Data Plane switches are `WEB_RERANK_ENABLED` and `WEB_RERANK_PROCESSOR_APPROVED`. The processor
+switch is `true` only after counsel's Article 28 sign-off (OD-LEGAL), and the check accepts it only with
+`DPV2_PREFLIGHT_ART28_CONFIRMED=yes` recorded. The Control Plane grant is `data:rerank` for `quarry-edge` on
+`data-plane`, which is in the committed registry and live in auth-service (read-only check, 2026-10-13). Model Gateway sends no `score_kinds`
+until QB-T12 ships its `score_kind` calibration in `relevance.rs`, so QB-T12 ships before or with any change
+that makes Model Gateway ask for `cross_encoder.v1`.
+
+Failures and what to do:
+
+- `degraded`, reason `refused`: the Data Plane answered 401, 403, 404 or 422 to the rerank call, and the
+  results keep their input order. One ERROR line is written a minute. That window is shared with the token
+  refusals below, so a misconfigured principal writes one line a minute, not one per search. A 401 or 403
+  means the quarry-edge principal lacks `data:rerank` or its audience: check the registry row. A 404 can mean the route is not deployed on the Data Plane (the live check of 2026-10-13 found an image
+  without `/v1/rerank`), and a 422 means the `rerank-v1` contract has drifted: check the goldens.
+- `degraded`, reason `token_unavailable`: Auth Core refused the `web-rerank` token (an ERROR line in that
+  shared window when Auth Core answers 401 or 403) or could not be reached (a warning). The token log line
+  says which.
+- `degraded`, reason `contract`: the answer did not match `rerank-v1`. That is a 400, a 413 or another status
+  other than 200, 429 or 5xx, an answer that does not decode, or an answer for another request or profile.
+  Check the goldens and the Data Plane's version.
+- `degraded`, reason `rate_limited`: the Data Plane's rate gate answered 429. The provider was not called,
+  so the breaker does not count it.
+- `degraded`, reason `provider_error` (a 5xx from the Data Plane) or `unreachable` (no answer, or a body cut
+  off): both count against the breaker.
+- `skipped`, reason `circuit_open`: five consecutive failed calls opened the breaker for 30 s. It then admits
+  one probe, and a success closes it.
+- `degraded`, reason `provider_rate_limited`: the Data Plane answered `degraded` because its rerank provider
+  reported a rate limit. The breaker counts it.
+- `degraded`, reason `no_scores`: the Data Plane answered `ok` with no usable scores for the head. The breaker
+  counts it.
+- `skipped`, reason `processor_unapproved`, `misconfigured` or `metering_unavailable`: the Data Plane's own gate
+  declined before any provider call (see the Data Plane switches above). That is not a failure of the route.
+- `degraded`, reason `timeout`: the Data Plane did not answer inside the budget (`QUARRY_EDGE__RERANK_DEADLINE_MS`,
+  2 s by default).
+
+Known gap: the candidates go to the processor for every non-ZDR tenant org, and they are not all public web
+pages. The org's own indexed pages (the local index, always registered) are candidates whether or not the
+vector leg is on, and with the vector leg on (`QUARRY_EDGE__VECTOR_RETRIEVAL`) its vector hits are too, so
+their titles and snippets reach the processor. Quarry's per-request `allow_third_party_processing` privacy
+flag is not carried on the search path. The processor gate that applies today is the Data Plane's deployment switch
+`WEB_RERANK_PROCESSOR_APPROVED`, which the owner's legal confirmation (O2) decides before production.

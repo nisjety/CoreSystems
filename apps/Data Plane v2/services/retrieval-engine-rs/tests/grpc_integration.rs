@@ -440,8 +440,8 @@ async fn test_document_index_status() {
 
     sqlx::query(
         "INSERT INTO knowledge_units (document_id, org_id, chunk_index, text, content_hash, embedding_status)
-         VALUES ($1, $2, 0, 'chunk 0', 'hash0', 'completed'),
-                ($1, $2, 1, 'chunk 1', 'hash1', 'completed'),
+         VALUES ($1, $2, 0, 'chunk 0', 'hash0', 'done'),
+                ($1, $2, 1, 'chunk 1', 'hash1', 'done'),
                 ($1, $2, 2, 'chunk 2', 'hash2', 'failed')"
     )
     .bind(&document_id)

@@ -92,13 +92,22 @@ Edge config flags (`crates/quarry-edge/src/config.rs`):
 | `QUARRY_EDGE__SEARXNG_URL`         | Enables SearXNG slot                   |
 | `QUARRY_EDGE__BRAVE_SEARCH_KEY`    | Enables Brave paid backup              |
 | `QUARRY_EDGE__SERPER_KEY`          | Enables Serper paid backup             |
-| `QUARRY_EDGE__MODEL_PLANE_URL`     | Required for `/v1/answer` synth        |
+| `QUARRY_EDGE__MODEL_PLANE_URL`     | Needed for `/v1/answer` synth (with `QUARRY_EDGE__ANSWER_SYNTHESIS=1`), not enough alone |
+| `QUARRY_EDGE__ANSWER_SYNTHESIS`    | `1`/`true`/`on` enables `/v1/answer`, `/v1/answer/stream` and `include_answer` (default off; INNH-8a) |
 | `QUARRY_EDGE__MODEL_PLANE_TOKEN`   | Optional bearer for MP                 |
 | `QUARRY_EDGE__LLM_CLASSIFY_INTENT` | `true` enables LLM intent classifier (requires Model Plane URL) |
 | `QUARRY_EDGE__LLM_CLASSIFY_MODEL`  | Optional override (e.g. `claude-haiku-4-5`) |
 
 Setting none of the search providers leaves `/v1/search` and `/v1/answer`
-returning 501 Unsupported with a clear hint in the response body.
+returning 501 Unsupported with a clear hint in the response body. Since INNH-8a the
+body also carries a closed `reason` that names the first closed gate
+(`synthesis_disabled`, `model_path_refused` when the switch is on but the QB-T17
+boot gate refused it, `no_search_provider`, `no_model_plane_url`,
+`model_client_init_failed`), `include_answer` reports `answer_status` and
+`answer_reason` instead of a silent `answer: null`, and a Model Plane that refuses
+the edge is a 503 `model_plane_auth_refused`. A zero data retention request is
+refused with a 403 (`zdr_unavailable`) before any work, because the model hop has
+no ZDR posture. Enablement: `docs/RUNBOOKS.md`, "Answer synthesis".
 
 ## Out of Scope (deferred)
 

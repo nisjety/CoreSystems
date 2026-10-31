@@ -1,0 +1,15 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "Xero customer contacts, including contacts that are also suppliers.",
+  assertions: { nonNull: ["tenant_id", "customer_id", "customer_key"], uniqueKey: ["customer_key"] }
+}
+
+SELECT FARM_FINGERPRINT(CONCAT(tenant_id, '|', contact_id)) AS customer_key,
+       FARM_FINGERPRINT(tenant_id) AS company_key,
+       tenant_id, contact_id AS customer_id, contact_number AS customer_number,
+       contact_name AS customer_name, is_customer, is_supplier,
+       status, is_active, default_currency, tax_number,
+       is_missing_from_staging, 'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "dim_contact")}
+WHERE is_customer IS TRUE

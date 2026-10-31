@@ -1,0 +1,15 @@
+# Explicit projection from the canonical Integration configuration. No provider
+# environment file or client credential enters a Studio API or the frontend.
+services:
+  integration-api:
+    environment:
+      AZURE_CLIENT_ID: ${INTEGRATION_LOCAL_MICROSOFT_CLIENT_ID:?existing Microsoft client required}
+      AZURE_TENANT_ID: ${INTEGRATION_LOCAL_MICROSOFT_TENANT_ID:?existing Microsoft tenant required}
+      MICROSOFT_CLIENT_AUTH_MODE: ${INTEGRATION_LOCAL_MICROSOFT_AUTH_MODE:-public}
+      AZURE_CLIENT_SECRET: ''
+      AZURE_CLIENT_SECRET_FILE: /run/secrets/microsoft_client_secret
+    secrets:
+      - microsoft_client_secret
+secrets:
+  microsoft_client_secret:
+    file: ${INTEGRATION_LOCAL_MICROSOFT_SECRET_FILE:?protected existing Microsoft secret required}

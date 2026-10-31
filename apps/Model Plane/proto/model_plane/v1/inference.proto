@@ -73,6 +73,14 @@ service InferenceCore {
 
   // Stream generated video content through the provider credential boundary.
   rpc StreamVideoGenerationContent(StreamVideoGenerationContentRequest) returns (stream StreamVideoGenerationContentResponse);
+
+  // What the caller's organisation allows this caller to use (ADR-0005).
+  // inference-core is the only enforcement point and the only service that
+  // reads the policy, so model-gateway asks here instead of keeping a second
+  // cache. The answer is about chat models; every other modality passes
+  // unfiltered. Under MODEL_ENTITLEMENT_MODE=off nothing is resolved and the
+  // answer says it is not enforced.
+  rpc GetModelAccess(GetModelAccessRequest) returns (GetModelAccessResponse);
 }
 
 // PrivacyTier — programmatic privacy posture of a provider/deployment,
@@ -96,6 +104,29 @@ enum PrivacyTier {
   PRIVACY_TIER_SOVEREIGN = 4;
 }
 
+// ReasoningEffort — the canonical reasoning-effort ladder, weakest first.
+//
+// One ordered set of levels the caller asks for and the catalogue advertises
+// (`ModelInfo.effort_levels` carries the lowercase names). inference-core
+// clamps a requested level to the nearest level the serving model supports
+// rather than failing, so a level is a request, not a guarantee.
+enum ReasoningEffort {
+  // No level requested. The legacy `thinking_budget_tokens` (if any) decides.
+  REASONING_EFFORT_UNSPECIFIED = 0;
+  // The least reasoning the model supports.
+  REASONING_EFFORT_MINIMAL = 1;
+  // A little reasoning; the fast default for quick answers.
+  REASONING_EFFORT_LOW = 2;
+  // Moderate reasoning.
+  REASONING_EFFORT_MEDIUM = 3;
+  // Deep reasoning for hard problems.
+  REASONING_EFFORT_HIGH = 4;
+  // Deeper than high, where the model supports it.
+  REASONING_EFFORT_XHIGH = 5;
+  // The most reasoning the model supports.
+  REASONING_EFFORT_MAX = 6;
+}
+
 // InferRequest — a single inference request to be routed to a provider.
 message InferRequest {
   // Client-supplied request identifier for tracing.
@@ -104,7 +135,7 @@ message InferRequest {
   // Tenant identifier.
   string org_id = 2;
 
-  // Requested model (e.g. "claude-sonnet-4-20250514", "gpt-4o").
+  // Requested model (e.g. "claude-sonnet-5-5", "gpt-4o").
   string model = 3;
 
   // Optional provider hint: "anthropic", "openai", etc.
@@ -172,6 +203,72 @@ message InferRequest {
   // model, provider, privacy floor or subscription connection. Other providers
   // ignore it; unsupported subscription models stay on their normal tier.
   bool prefer_priority_service_tier = 16;
+
+  // Canonical reasoning-effort level for this request. UNSPECIFIED (default)
+  // leaves the decision to the legacy `thinking_budget_tokens` (field 13),
+  // which stays as an input so an older caller is byte-identical to before.
+  // When both are set the level wins and the budget is ignored: the level, not
+  // a token count, is what inference-core renders for each provider.
+  //
+  // A value this build does not know is rejected with `invalid_argument`
+  // rather than treated as UNSPECIFIED, so a newer caller never has its
+  // request silently weakened. Effort is a request parameter only and is never
+  // persisted, so it needs no Zero Data Retention handling.
+  ReasoningEffort reasoning_effort = 17;
+
+  // Which leading messages are standing text a provider may cache across
+  // turns. Absent (default) names none, and a request without it is sent to the
+  // provider exactly as before. Only the Anthropic adapter reads it, and only
+  // when INFERENCE_ANTHROPIC_TIERED_SYSTEM is on and the request is not Zero
+  // Data Retention; every other provider and every ZDR request ignores it.
+  // A plan that does not describe the request (counts past the message list, or
+  // a counted message that is not a system message) is ignored, never an error:
+  // it is a hint about layout, not an instruction. It carries counts only.
+  PromptTierPlan prompt_tiers = 18;
+
+  // Provider prompt-cache routing key for this conversation: the first 32 hex
+  // characters of blake3 over the org and thread ids (mp-contracts
+  // `prompt_tier::cache_scope_key`), with `:sub` appended for a delegated
+  // subagent. Empty (default) names no scope and is sent exactly as before. It is
+  // derived from identifiers only, never from message content: inference-core
+  // sends it to a provider only behind INFERENCE_OPENAI_PROMPT_CACHE_KEY, and
+  // never on a Zero Data Retention request.
+  string cache_scope_key = 19;
+
+  // Images that ride with the messages, by index into `messages` as sent (the
+  // original list, system messages included). Empty (default) is a text-only
+  // request and is sent to the provider exactly as before.
+  //
+  // At most 4, each within the image size cap, an allowlisted mime type, and
+  // each on a `user` message; anything else is rejected with `invalid_argument`
+  // before a provider is chosen. A request that carries images is served only
+  // by a provider and model that accept them: where none does it fails with
+  // `FAILED_PRECONDITION` and the kind `vision_unsupported`, never by dropping
+  // the images. The bytes are request-scope memory only: never cached, never
+  // logged, and a field of the internal request that the Debug output redacts.
+  repeated InferImagePart image_parts = 20;
+}
+
+// InferImagePart — one image attached to a message of an InferRequest. Bytes
+// only: a URL is never fetched on the caller's behalf.
+message InferImagePart {
+  // Index of the message this image belongs to, in `InferRequest.messages` as
+  // sent. Must name a `user` message.
+  uint32 message_index = 1;
+  // The raw image bytes (not base64).
+  bytes data = 2;
+  // Media type of `data`: image/png, image/jpeg, image/webp or image/gif.
+  string mime_type = 3;
+}
+
+// PromptTierPlan — the Stable and Context tiers of a prompt, by message count
+// from index 0 (see mp-contracts `prompt_tier`). Stable is the standing platform
+// text; Context is text authored for the org, Space, persona and user.
+message PromptTierPlan {
+  // Leading messages in the Stable tier.
+  uint32 stable_messages = 1;
+  // Messages in the Context tier, directly after the Stable ones.
+  uint32 context_messages = 2;
 }
 
 // ToolDefinition — a function the model may call (chat-parity §2).
@@ -517,12 +614,195 @@ message ModelInfo {
   // Declared residency label: "global", "eu", or "norway". Empty means the
   // provider declares no residency commitment.
   string residency = 7;
+
+  // Reasoning-effort levels this model accepts, weakest first, as the
+  // lowercase canonical names ("minimal", "low", "medium", "high", "xhigh",
+  // "max"). Empty means the model has no effort control or the provider does
+  // not advertise one yet; a client must offer no effort choice in that case.
+  repeated string effort_levels = 8;
 }
 
 // ListModelsResponse — available models in the active provider chain.
 message ListModelsResponse {
   // Matching models.
   repeated ModelInfo models = 1;
+
+  // What the caller's organisation policy did to this catalogue. Absent when
+  // entitlement is off (MODEL_ENTITLEMENT_MODE=off) and for a service caller,
+  // so a response without it is byte-identical to one from before the policy
+  // existed.
+  ModelAccessMeta access = 2;
+}
+
+// ModelAccessMeta — the entitlement facts that travel with a model catalogue.
+// Carries model ids' counts and policy defaults only, never content.
+message ModelAccessMeta {
+  // Which layer of the policy answered: "none" (no policy, unrestricted),
+  // "org" (organisation default), "role" (a role override) or
+  // "member_not_found" (the caller is not an active member, so nothing is
+  // allowed).
+  string state = 1;
+
+  // Whether the policy is applied to this caller. False under shadow mode: the
+  // catalogue is then unfiltered and the policy only counted.
+  bool enforced = 2;
+
+  // Revision of the organisation's policy set the answer was read at. Zero
+  // means no policy was ever written.
+  int64 revision = 3;
+
+  // Whether the policy limits anything: a model list, a ceiling or a minimum
+  // privacy tier.
+  bool restricted = 4;
+
+  // How many chat models the policy removed from this catalogue. Zero unless
+  // `enforced`.
+  uint32 hidden_count = 5;
+
+  // The model a chat surface starts with when the caller names none. Empty
+  // when the policy sets none.
+  string default_model = 6;
+
+  // The effort a chat surface starts with, as a canonical effort name. Empty
+  // when the policy sets none.
+  string default_effort = 7;
+
+  // The highest reasoning effort the policy allows, as a canonical effort
+  // name. Empty means no ceiling.
+  string max_effort = 8;
+}
+
+// SurfaceDefault — what one product surface starts with when the caller names
+// nothing. Surfaces are lowercase names such as "chat".
+message SurfaceDefault {
+  // Model id the surface starts with. Empty means the platform default.
+  string model = 1;
+
+  // Canonical effort name the surface starts with. Empty means none.
+  string effort = 2;
+}
+
+// ModelPolicyDoc — a model entitlement policy in the shape org-core stores
+// (ADR-0005). It holds model ids, an effort name, a privacy tier and per-surface
+// defaults, and nothing else, so it carries no content.
+message ModelPolicyDoc {
+  // "all" or "listed". Anything but "all" is read as "listed".
+  string allow_mode = 1;
+
+  // Models allowed in "listed" mode: exact lower-case ids or "provider:<id>"
+  // selectors. There are no patterns.
+  repeated string allow = 2;
+
+  // Models denied in either mode, in the same form. A deny wins over an allow.
+  repeated string deny = 3;
+
+  // Highest reasoning effort allowed, as a canonical effort name. Empty means
+  // no ceiling.
+  string max_effort = 4;
+
+  // Weakest privacy tier a request under this policy may be served at.
+  // UNSPECIFIED imposes no minimum.
+  PrivacyTier min_privacy_tier = 5;
+
+  // Per-surface starting points, keyed by surface name.
+  map<string, SurfaceDefault> defaults = 6;
+}
+
+// GetModelAccessRequest — ask what a caller may use.
+message GetModelAccessRequest {
+  // Client-supplied request identifier for tracing.
+  string request_id = 1;
+
+  // Tenant identifier. Must match the verified credential.
+  string org_id = 2;
+
+  // A model to judge. Empty asks for the policy alone.
+  string model = 3;
+
+  // Provider the model is served by, for "provider:<id>" entries. Empty lets
+  // inference-core look the model up in its catalogue.
+  string provider_hint = 4;
+
+  // Surface whose defaults to return, such as "chat". Empty returns none.
+  string surface = 5;
+
+  // A policy to judge instead of the stored one: the write guard asks what an
+  // admin's draft would leave. Needs a caller that can manage the policy.
+  ModelPolicyDoc draft = 6;
+
+  // Return one verdict per chat model in the catalogue. Needs a caller that can
+  // manage the policy.
+  bool include_catalogue = 7;
+}
+
+// GetModelAccessResponse — what the caller's organisation allows.
+message GetModelAccessResponse {
+  // Echo of the request identifier.
+  string request_id = 1;
+
+  // Which layer of the policy answered; see ModelAccessMeta.state.
+  string state = 2;
+
+  // Whether the policy is applied to this caller: the mode is "enforce" and the
+  // caller is a user, not a service.
+  bool enforced = 3;
+
+  // Revision of the policy set the answer was read at.
+  int64 revision = 4;
+
+  // The caller's role in the organisation. Empty for a service caller or a
+  // non-member.
+  string role = 5;
+
+  // Whether the policy limits anything; see ModelAccessMeta.restricted.
+  bool restricted = 6;
+
+  // Whether `model` is allowed. True when `model` is empty or nothing is
+  // restricted.
+  bool model_allowed = 7;
+
+  // Why `model` is not allowed: a refusal reason name such as
+  // "not_in_allow_list" or "explicitly_denied". Empty when allowed.
+  string reason = 8;
+
+  // The surface's default model, when the policy sets one.
+  string default_model = 9;
+
+  // The surface's default effort, when the policy sets one.
+  string default_effort = 10;
+
+  // Highest reasoning effort allowed. Empty means no ceiling.
+  string max_effort = 11;
+
+  // Weakest privacy tier a request may be served at.
+  PrivacyTier min_privacy_tier = 12;
+
+  // Whether the caller may change the organisation's policy.
+  bool can_manage = 13;
+
+  // One verdict per chat model, when `include_catalogue` was set.
+  repeated ModelAccessEntry catalogue = 14;
+}
+
+// ModelAccessEntry — the verdict on one chat model.
+message ModelAccessEntry {
+  // Model id.
+  string id = 1;
+
+  // Provider that serves it.
+  string provider = 2;
+
+  // Whether the policy allows it.
+  bool entitled = 3;
+
+  // Why not, as a refusal reason name. Empty when entitled.
+  string reason = 4;
+
+  // Whether the model's deployment carries a zero-retention attestation for
+  // chat. It is a fact about the deployment, not the policy: the policy decides
+  // whether the caller may use the model, this says whether the model could
+  // serve a zero-retention turn at all.
+  bool zdr_attested = 5;
 }
 
 // SynthesizeSpeechRequest — text-to-speech request routed to a speech provider.
@@ -1132,6 +1412,13 @@ message LanguageAnalysisResult {
   // "violence":0..1,"self_harm":0..1,"sexual":0..1}}. Empty otherwise.
   // capability-core safety_policies (kind=content_safety) own the thresholds.
   string content_safety_json = 13;
+
+  // Prompt-injection verdict JSON for operation="prompt_injection":
+  // {"flagged":bool,"categories":{"instruction_override":0..1,"role_impersonation":0..1,
+  // "exfiltration_request":0..1,"tool_use_request":0..1,"hidden_text":0..1}}. Empty otherwise.
+  // The gateway only ever reads it tighten-only (WS26-S6): a flag can promote a clean
+  // result, nothing can demote one. Owner: WS26 S6.
+  string injection_json = 14;
 }
 
 // AnalyzeLanguageResponse — language analytics results and serving metadata.

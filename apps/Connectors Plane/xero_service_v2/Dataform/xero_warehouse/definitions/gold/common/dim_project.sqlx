@@ -1,0 +1,88 @@
+config {
+  type: "table",
+  schema: "xero_gold_common",
+  description: "Conformed Xero project master dimension. A Xero tenant is the company boundary; no Visma-style business unit is inferred.",
+  assertions: {
+    nonNull: ["tenant_id", "project_id", "project_key", "company_key"],
+    uniqueKey: ["project_key"]
+  }
+}
+
+WITH direct_detail_quality AS (
+  SELECT
+    tenant_id,
+    project_id,
+    direct_detail_observed_at,
+    direct_detail_source_run_id,
+    is_direct_detail_reconciled
+  FROM ${ref("dw_1_silver_xero", "audit_project_direct_detail_reconciliation")}
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY tenant_id, project_id
+    ORDER BY direct_detail_observed_at DESC, direct_detail_source_run_id DESC,
+             direct_detail_source_version_id DESC
+  ) = 1
+)
+
+SELECT
+  FARM_FINGERPRINT(CONCAT(project.tenant_id, '|', project.project_id)) AS project_key,
+  FARM_FINGERPRINT(project.tenant_id) AS company_key,
+  IF(project.contact_id IS NULL, NULL,
+     FARM_FINGERPRINT(CONCAT(project.tenant_id, '|', project.contact_id))) AS contact_key,
+  project.tenant_id,
+  project.project_id,
+  project.contact_id,
+  contact.contact_id IS NULL AND project.contact_id IS NOT NULL AS is_contact_unresolved,
+  project.project_name,
+  project.project_status,
+  project.currency_code,
+  project.deadline_date,
+  project.estimate_amount,
+  project.estimate_currency_code,
+  project.total_invoiced_amount,
+  project.total_invoiced_currency_code,
+  project.total_to_be_invoiced_amount,
+  project.total_to_be_invoiced_currency_code,
+  project.total_expense_amount,
+  project.total_expense_currency_code,
+  project.expense_amount_invoiced,
+  project.expense_amount_invoiced_currency_code,
+  project.expense_amount_to_be_invoiced,
+  project.expense_amount_to_be_invoiced_currency_code,
+  project.total_task_amount,
+  project.total_task_currency_code,
+  project.task_amount_invoiced,
+  project.task_amount_invoiced_currency_code,
+  project.task_amount_to_be_invoiced,
+  project.task_amount_to_be_invoiced_currency_code,
+  project.project_amount_invoiced,
+  project.project_amount_invoiced_currency_code,
+  project.credit_note_amount,
+  project.credit_note_currency_code,
+  project.deposit_amount,
+  project.deposit_currency_code,
+  project.deposit_applied_amount,
+  project.deposit_applied_currency_code,
+  project.minutes_logged,
+  project.minutes_to_be_invoiced,
+  direct_detail.project_id IS NOT NULL AS has_direct_detail_evidence,
+  direct_detail.is_direct_detail_reconciled,
+  direct_detail.direct_detail_observed_at,
+  direct_detail.direct_detail_source_run_id,
+  project.is_source_deleted,
+  project.is_current,
+  project.is_removed,
+  project.removed_in_run_id,
+  project.removed_observed_at,
+  project.record_state,
+  project.first_seen_at,
+  project.last_seen_at,
+  project.project_observed_at,
+  project.source_run_id,
+  'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "dim_project")} AS project
+LEFT JOIN ${ref("xero_gold_common", "dim_contact")} AS contact
+  ON project.tenant_id = contact.tenant_id
+ AND project.contact_id = contact.contact_id
+LEFT JOIN direct_detail_quality AS direct_detail
+  ON project.tenant_id = direct_detail.tenant_id
+ AND project.project_id = direct_detail.project_id

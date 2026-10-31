@@ -125,3 +125,217 @@ func TestRunAgentResponseWithoutTheFailureFieldsHasNoTypedFailure(t *testing.T) 
 		t.Fatalf("an old response must decode with the failure unset: %+v", &decoded)
 	}
 }
+
+// RunAgentRequest.run_context (field 18, build plan WS02 S4). The same bytes are
+// pinned in rust/crates/mp-contracts/tests/proto_wire_parity_execution.rs.
+const runContextWireHex = "0a0272319201160a0942652062726965662e1a016d22060a0408011001"
+
+func TestRunAgentRequestRunContextDecodesFromGoldenHex(t *testing.T) {
+	raw, err := hex.DecodeString(runContextWireHex)
+	if err != nil {
+		t.Fatalf("bad golden hex: %v", err)
+	}
+	var decoded RunAgentRequest
+	if err := proto.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	rc := decoded.GetRunContext()
+	if rc == nil {
+		t.Fatal("run_context (field 18) missing")
+	}
+	if rc.GetAuthoredInstructions() != "Be brief." || rc.GetMemoryBlock() != "m" {
+		t.Fatalf("unexpected context: %q %q", rc.GetAuthoredInstructions(), rc.GetMemoryBlock())
+	}
+	part := rc.GetStatus().GetInstructions()
+	if part.GetState() != RunContextState_RUN_CONTEXT_STATE_INCLUDED || part.GetIncluded() != 1 {
+		t.Fatalf("unexpected status part: %v", part)
+	}
+}
+
+func TestRunAgentRequestWithoutRunContextHasNone(t *testing.T) {
+	raw, err := proto.Marshal(&RunAgentRequest{RunId: "r1"})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	var decoded RunAgentRequest
+	if err := proto.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if decoded.GetRunContext() != nil {
+		t.Fatal("an absent run_context must stay absent")
+	}
+}
+
+// RunAgentRequest.reasoning_effort (field 21, build plan WS11 S8). The same bytes are pinned
+// in rust/crates/mp-contracts/tests/proto_wire_parity_execution.rs.
+const runReasoningEffortWireHex = "a80104"
+
+func TestRunAgentRequestReasoningEffortDecodesFromGoldenHex(t *testing.T) {
+	raw, err := hex.DecodeString(runReasoningEffortWireHex)
+	if err != nil {
+		t.Fatalf("bad golden hex: %v", err)
+	}
+	var decoded RunAgentRequest
+	if err := proto.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := decoded.GetReasoningEffort(); got != ReasoningEffort_REASONING_EFFORT_HIGH {
+		t.Fatalf("reasoning_effort (field 21) = %v, want HIGH", got)
+	}
+}
+
+func TestRunAgentRequestWithoutReasoningEffortIsUnspecified(t *testing.T) {
+	raw, err := proto.Marshal(&RunAgentRequest{RunId: "r1"})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	var decoded RunAgentRequest
+	if err := proto.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := decoded.GetReasoningEffort(); got != ReasoningEffort_REASONING_EFFORT_UNSPECIFIED {
+		t.Fatalf("an absent reasoning_effort must be UNSPECIFIED, got %v", got)
+	}
+}
+
+// RunAgentResponse.usage (field 9, build plan WS02 S3). The same bytes are pinned
+// in rust/crates/mp-contracts/tests/proto_wire_parity_execution.rs.
+const (
+	usageWireHex     = "0a09636f6d706c6574656418034a2b08b00910d40218a006206428033209616e7468726f7069633a11636c617564652d736f6e6e65742d352d35"
+	zeroUsageWireHex = "0a09636f6d706c6574656418034a00"
+)
+
+func TestRunAgentResponseUsageDecodesFromGoldenHex(t *testing.T) {
+	usage := decodeRunAgentResponse(t, usageWireHex).GetUsage()
+	if usage == nil {
+		t.Fatal("usage (field 9) missing")
+	}
+	if usage.GetInputTokens() != 1200 || usage.GetOutputTokens() != 340 {
+		t.Fatalf("unexpected tokens: %d %d", usage.GetInputTokens(), usage.GetOutputTokens())
+	}
+	if usage.GetCacheReadInputTokens() != 800 || usage.GetCacheCreationInputTokens() != 100 {
+		t.Fatalf("unexpected cache legs: %d %d", usage.GetCacheReadInputTokens(), usage.GetCacheCreationInputTokens())
+	}
+	if usage.GetInferenceRounds() != 3 || usage.GetProviderUsed() != "anthropic" || usage.GetModelUsed() != "claude-sonnet-5-5" {
+		t.Fatalf("unexpected rounds or route: %v", usage)
+	}
+
+	// A run that spent nothing is a present, empty message: not absence.
+	if decodeRunAgentResponse(t, zeroUsageWireHex).GetUsage() == nil {
+		t.Fatal("a run that spent nothing must report so, not look like an old executor")
+	}
+}
+
+func TestRunAgentResponseUsageEncodesToGoldenHex(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		response *RunAgentResponse
+		want     string
+	}{
+		{
+			name: "three rounds with cache legs",
+			response: &RunAgentResponse{
+				Status: "completed", RoundsExecuted: 3,
+				Usage: &RunUsage{
+					InputTokens: 1200, OutputTokens: 340, CacheReadInputTokens: 800, CacheCreationInputTokens: 100,
+					InferenceRounds: 3, ProviderUsed: "anthropic", ModelUsed: "claude-sonnet-5-5",
+				},
+			},
+			want: usageWireHex,
+		},
+		{
+			name:     "no spend",
+			response: &RunAgentResponse{Status: "completed", RoundsExecuted: 3, Usage: &RunUsage{}},
+			want:     zeroUsageWireHex,
+		},
+	} {
+		raw, err := proto.MarshalOptions{Deterministic: true}.Marshal(tc.response)
+		if err != nil {
+			t.Fatalf("%s: encode: %v", tc.name, err)
+		}
+		if got := hex.EncodeToString(raw); got != tc.want {
+			t.Fatalf("%s: wire bytes differ\n got %s\nwant %s", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestRunAgentResponseWithoutUsageHasNone(t *testing.T) {
+	raw, err := proto.Marshal(&RunAgentResponse{Status: "completed"})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	var decoded RunAgentResponse
+	if err := proto.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if decoded.GetUsage() != nil {
+		t.Fatal("an absent usage must stay absent")
+	}
+}
+
+// RunUsage.legs (field 8, a repeated RunUsageLeg): the same spend split by the
+// provider and model that served it. The same bytes are pinned in
+// rust/crates/mp-contracts/tests/proto_wire_parity_execution.rs.
+const usageWithLegsWireHex = "0a09636f6d706c6574656418034a7008b00910d40218a006206428033209616e7468726f7069633a11636c617564652d736f6e6e65742d352d35422b0a09616e7468726f7069631211636c617564652d736f6e6e65742d352d3518e80720ac0228a0063064380242160a066f70656e616912056770742d3518c80120283801"
+
+func usageWithTwoLegs() *RunUsage {
+	return &RunUsage{
+		InputTokens: 1200, OutputTokens: 340, CacheReadInputTokens: 800, CacheCreationInputTokens: 100,
+		InferenceRounds: 3, ProviderUsed: "anthropic", ModelUsed: "claude-sonnet-5-5",
+		Legs: []*RunUsageLeg{
+			{
+				ProviderUsed: "anthropic", ModelUsed: "claude-sonnet-5-5",
+				InputTokens: 1000, OutputTokens: 300, CacheReadInputTokens: 800, CacheCreationInputTokens: 100,
+				InferenceRounds: 2,
+			},
+			{
+				ProviderUsed: "openai", ModelUsed: "gpt-5",
+				InputTokens: 200, OutputTokens: 40, InferenceRounds: 1,
+			},
+		},
+	}
+}
+
+func TestRunUsageLegsEncodeToGoldenHex(t *testing.T) {
+	raw, err := proto.MarshalOptions{Deterministic: true}.Marshal(
+		&RunAgentResponse{Status: "completed", RoundsExecuted: 3, Usage: usageWithTwoLegs()},
+	)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if got := hex.EncodeToString(raw); got != usageWithLegsWireHex {
+		t.Fatalf("wire bytes differ\n got %s\nwant %s", got, usageWithLegsWireHex)
+	}
+}
+
+func TestRunUsageLegsDecodeFromGoldenHex(t *testing.T) {
+	usage := decodeRunAgentResponse(t, usageWithLegsWireHex).GetUsage()
+	if usage == nil {
+		t.Fatal("usage (field 9) missing")
+	}
+	legs := usage.GetLegs()
+	if len(legs) != 2 {
+		t.Fatalf("want 2 legs, got %d", len(legs))
+	}
+	if legs[0].GetProviderUsed() != "anthropic" || legs[0].GetModelUsed() != "claude-sonnet-5-5" ||
+		legs[0].GetInputTokens() != 1000 || legs[0].GetOutputTokens() != 300 ||
+		legs[0].GetCacheReadInputTokens() != 800 || legs[0].GetCacheCreationInputTokens() != 100 ||
+		legs[0].GetInferenceRounds() != 2 {
+		t.Fatalf("unexpected first leg: %v", legs[0])
+	}
+	if legs[1].GetProviderUsed() != "openai" || legs[1].GetModelUsed() != "gpt-5" ||
+		legs[1].GetInputTokens() != 200 || legs[1].GetOutputTokens() != 40 || legs[1].GetInferenceRounds() != 1 {
+		t.Fatalf("unexpected second leg: %v", legs[1])
+	}
+	var sum uint64
+	for _, leg := range legs {
+		sum += leg.GetInputTokens()
+	}
+	if sum != usage.GetInputTokens() {
+		t.Fatalf("legs sum to %d, totals say %d", sum, usage.GetInputTokens())
+	}
+	// The legs-free golden still decodes, with none: an executor without legs.
+	if len(decodeRunAgentResponse(t, usageWireHex).GetUsage().GetLegs()) != 0 {
+		t.Fatal("a usage without legs must decode with none")
+	}
+}

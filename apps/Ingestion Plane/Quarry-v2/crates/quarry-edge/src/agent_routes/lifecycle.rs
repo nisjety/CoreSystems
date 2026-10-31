@@ -124,6 +124,17 @@ pub async fn start_run(
         crate::metrics::record_run_start("", "draining");
         return Err(driver_err(&request_id, error));
     }
+    // INNH-10: an API-key principal is held to the key rules before anything is read or
+    // reserved: the switch, no resume, no profile, a grant, and enforced run budgets.
+    if claims.is_api_key() {
+        super::api_key_runs::check_start_request(
+            &claims,
+            &body,
+            crate::run_limits::api_key_agent_runs_enabled(),
+            crate::budget::current_mode() == crate::budget::BudgetMode::On,
+        )
+        .map_err(|reason| super::api_key_runs::refuse(&claims, &request_id, reason))?;
+    }
     // The start of this request: the owner stamp below is ordered against a delete by it, as a
     // save is by its capture start (WS17.P2).
     let requested_at = chrono::Utc::now();
@@ -283,7 +294,22 @@ pub async fn start_run(
         grant_is_zdr = grant.zdr;
         grant_budget = grant.budget.clone().filter(|claim| claim.is_set());
         grant_is_run_kind = grant.kind == "run";
-        if grant.kind == super::human_browse::GRANT_KIND_HUMAN_BROWSE {
+        if claims.is_api_key() {
+            // INNH-10: a key run's hosts are ALWAYS the grant's, in every environment, and the
+            // grant must have been issued to this very key (see `bind_key_grant`). It never
+            // enters the human-browse branch.
+            constraints.allowed_domains = super::api_key_runs::bind_key_grant(&grant, &claims)
+                .map_err(|reason| super::api_key_runs::refuse(&claims, &request_id, reason))?;
+        } else if !grant.key_id.is_empty() {
+            // INNH-10: a key grant backs only its own key's runs. A person (the key's owner
+            // included), another person or a service presenting it is refused, so a leaked
+            // grant id is useless to anyone who does not hold the key's token.
+            return Err(super::api_key_runs::refuse(
+                &claims,
+                &request_id,
+                crate::api_key::reason::GRANT_OWNER_MISMATCH,
+            ));
+        } else if grant.kind == super::human_browse::GRANT_KIND_HUMAN_BROWSE {
             human_grant = Some(grant.clone());
         } else if let Some(broker_domains) =
             bind_validated_grant(&grant, &claims, state.require_browser_grants)
@@ -474,7 +500,8 @@ pub async fn start_run(
     let run_class = resumed_run_class(
         resume_checkpoint.as_ref(),
         crate::budget::classify(
-            claims.is_service() || (enforce_claim && grant_is_run_kind),
+            // INNH-10: a key run is always an agent run (the org's agent caps and allowance).
+            claims.is_service() || claims.is_api_key() || (enforce_claim && grant_is_run_kind),
             body.initiated_by.as_deref(),
         ),
     );
@@ -545,11 +572,13 @@ pub async fn start_run(
     let run_id_text = run_id.to_string();
     let slot = state
         .agent_runs
-        .try_reserve_for(
+        .try_reserve_keyed(
             &org_id,
             run_class,
             org_limits.run_override(),
             resume_checkpoint.is_some().then_some(run_id_text.as_str()),
+            // INNH-10: a key's live runs are counted per key (`per_key_run_cap`).
+            claims.is_api_key().then_some(actor_id.as_str()),
         )
         .map_err(|denied| match denied {
             super::run_registry::ReserveDenied::Capacity(denied) => {
@@ -648,7 +677,8 @@ pub async fn start_run(
             crate::budget::BudgetLimits::cached(),
             run_class,
             &constraints,
-            grant_budget.as_ref().filter(|_| enforce_claim),
+            // INNH-10: a key run's grant budget is applied whatever QUARRY_EDGE__GRANT_BUDGET_CLAIM says.
+            grant_budget.as_ref().filter(|_| enforce_claim || claims.is_api_key()),
             resume_checkpoint
                 .as_ref()
                 .and_then(|checkpoint| checkpoint.budget.as_ref()),
@@ -665,6 +695,7 @@ pub async fn start_run(
         run_id: run_id.clone(),
         org_id: org_id.clone(),
         actor_id,
+        key_id: claims.key_id().map(str::to_owned),
         session,
         // WS8.H: the person's lane and the run summary start from the same checkpoint.
         human_lane: LaneRef::new(LaneState { ctx: ObservationContext {
@@ -764,6 +795,9 @@ pub async fn start_run(
         }
     }
 
+    if claims.is_api_key() {
+        super::api_key_runs::log_started(&entry, run_class.label());
+    }
     slot.commit(run_id.to_string(), RunHandle::new(entry, live));
     crate::metrics::record_run_start(
         run_class.label(),

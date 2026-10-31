@@ -190,7 +190,11 @@ async fn issue_grant(
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     require_user(&claims)?;
     let ValidatedIssue { mode, grant_kind } = validate_request(&req)?;
-    let zdr = claims.effective_zdr(req.zdr);
+    // A grant names no provider or connection, so the resolver reads the token's posture plus the
+    // request's own ask. A waived turn is persistent and therefore not ZDR here.
+    let zdr = crate::zdr_posture::decide_for(&claims, &crate::zdr_posture::Route::plain(req.zdr))
+        .map_err(|refusal| crate::zdr_posture::http(&refusal))?
+        .zdr();
 
     let request = AcquireGrantRequest {
         session_key: format!("ui-{}", new_ulid()),
@@ -451,6 +455,8 @@ mod tests {
             aud: Some("model-gateway".to_owned()),
             scopes: Vec::new(),
             zdr,
+            org_zdr: None,
+            zdr_waiver: None,
             sovereign: None,
             principal_type: Some("user".to_owned()),
             service_id: None,

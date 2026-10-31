@@ -24,10 +24,15 @@ const (
 	SessionCore_StartRun_FullMethodName                   = "/model_plane.v1.SessionCore/StartRun"
 	SessionCore_StartScheduledRun_FullMethodName          = "/model_plane.v1.SessionCore/StartScheduledRun"
 	SessionCore_PrepareScheduledRunThread_FullMethodName  = "/model_plane.v1.SessionCore/PrepareScheduledRunThread"
+	SessionCore_PrepareUserOwnedThread_FullMethodName     = "/model_plane.v1.SessionCore/PrepareUserOwnedThread"
 	SessionCore_CompleteStep_FullMethodName               = "/model_plane.v1.SessionCore/CompleteStep"
 	SessionCore_ReserveToolAction_FullMethodName          = "/model_plane.v1.SessionCore/ReserveToolAction"
 	SessionCore_FinalizeToolAction_FullMethodName         = "/model_plane.v1.SessionCore/FinalizeToolAction"
 	SessionCore_SaveCheckpoint_FullMethodName             = "/model_plane.v1.SessionCore/SaveCheckpoint"
+	SessionCore_SaveLoopCheckpoint_FullMethodName         = "/model_plane.v1.SessionCore/SaveLoopCheckpoint"
+	SessionCore_ClaimLoopCheckpoint_FullMethodName        = "/model_plane.v1.SessionCore/ClaimLoopCheckpoint"
+	SessionCore_CloseLoopCheckpoint_FullMethodName        = "/model_plane.v1.SessionCore/CloseLoopCheckpoint"
+	SessionCore_ListToolActions_FullMethodName            = "/model_plane.v1.SessionCore/ListToolActions"
 	SessionCore_ReplayThread_FullMethodName               = "/model_plane.v1.SessionCore/ReplayThread"
 	SessionCore_GetContextAssembly_FullMethodName         = "/model_plane.v1.SessionCore/GetContextAssembly"
 	SessionCore_CompactNow_FullMethodName                 = "/model_plane.v1.SessionCore/CompactNow"
@@ -45,6 +50,8 @@ const (
 	SessionCore_SetRunMode_FullMethodName                 = "/model_plane.v1.SessionCore/SetRunMode"
 	SessionCore_ClaimScheduledStep_FullMethodName         = "/model_plane.v1.SessionCore/ClaimScheduledStep"
 	SessionCore_RecordScheduledStepReceipt_FullMethodName = "/model_plane.v1.SessionCore/RecordScheduledStepReceipt"
+	SessionCore_RecordRunContext_FullMethodName           = "/model_plane.v1.SessionCore/RecordRunContext"
+	SessionCore_RecordScheduledRunResult_FullMethodName   = "/model_plane.v1.SessionCore/RecordScheduledRunResult"
 )
 
 // SessionCoreClient is the client API for SessionCore service.
@@ -69,6 +76,19 @@ type SessionCoreClient interface {
 	// Control-authorized schedule fire. The decision bearer is consumed only by
 	// this RPC and is never persisted or forwarded to Temporal.
 	PrepareScheduledRunThread(ctx context.Context, in *PrepareScheduledRunThreadRequest, opts ...grpc.CallOption) (*PrepareScheduledRunThreadResponse, error)
+	// Create-or-reuse a durable thread owned by a REAL user (never a service
+	// principal), with a caller-named origin, keyed by session_key for
+	// idempotency (chat-wave2 "schedule"/"mail-task" specs, 2026-09-28 —
+	// the reusable "service creates or reuses a thread owned by user U,
+	// readable by U, with a named origin" seam). Unlike
+	// PrepareScheduledRunThread, which always mints a service-owned,
+	// Space-authority-bound thread, this RPC's thread IS owned by the given
+	// user_id, so it is trivially readable through the existing owner-bound
+	// path (ListThreads' default user_id filter) -- no Control decision, no
+	// Space authority, is required to read it back. Restricted to an allow-
+	// listed set of trusted service callers; never reachable by a live user's
+	// own bearer.
+	PrepareUserOwnedThread(ctx context.Context, in *PrepareUserOwnedThreadRequest, opts ...grpc.CallOption) (*PrepareUserOwnedThreadResponse, error)
 	// Record completion of a single step within a run.
 	CompleteStep(ctx context.Context, in *CompleteStepRequest, opts ...grpc.CallOption) (*CompleteStepResponse, error)
 	// Durably reserve an inline tool-action audit intent before the tool runs.
@@ -79,6 +99,31 @@ type SessionCoreClient interface {
 	FinalizeToolAction(ctx context.Context, in *FinalizeToolActionRequest, opts ...grpc.CallOption) (*FinalizeToolActionResponse, error)
 	// Persist a checkpoint snapshot for a run.
 	SaveCheckpoint(ctx context.Context, in *SaveCheckpointRequest, opts ...grpc.CallOption) (*SaveCheckpointResponse, error)
+	// Save the durable loop's fold for a run (build plan WS03 S4). Latest wins,
+	// compare-and-set on expected_seq. Refused for a zero-retention or waived run.
+	SaveLoopCheckpoint(ctx context.Context, in *SaveLoopCheckpointRequest, opts ...grpc.CallOption) (*SaveLoopCheckpointResponse, error)
+	// Claim a paused or parked run's fold for one continuation. Exactly one claim wins.
+	ClaimLoopCheckpoint(ctx context.Context, in *ClaimLoopCheckpointRequest, opts ...grpc.CallOption) (*ClaimLoopCheckpointResponse, error)
+	// Close a run's fold once its loop has finished. Idempotent for a closed row.
+	CloseLoopCheckpoint(ctx context.Context, in *CloseLoopCheckpointRequest, opts ...grpc.CallOption) (*CloseLoopCheckpointResponse, error)
+	// Read the effect ledger's rows for named tool calls of one run (build plan WS03
+	// S7a). Digest-only: the status, class and argument digest of each action, never
+	// its arguments or output. The loop that resumes a run reads it to close a call
+	// honestly instead of running it again.
+	//
+	// Answers only while the loop checkpoint store is switched on (otherwise the same
+	// closed "loop_checkpoint_disabled" refusal the checkpoint RPCs give), and only for a
+	// run that persists: a zero-retention or waived run never keeps a fold, so it gets the
+	// durable-mutation refusal. The caller must be allowed to read the run under the same
+	// rule as GetRun, which includes refusing a run whose owner was removed from its
+	// Space. Rows written under zero retention are never returned.
+	//
+	// ABSENCE IS NOT PROOF. An action id missing from the answer is UNKNOWN. It may never
+	// have been reserved, may be reserved by a concurrent writer that has not committed
+	// yet, or may be a row this read hides. Never read absence as "the call did not run".
+	// For an effectful call, only a row with status "not_run" (or a "completed" row with
+	// its output) licenses a re-dispatch decision.
+	ListToolActions(ctx context.Context, in *ListToolActionsRequest, opts ...grpc.CallOption) (*ListToolActionsResponse, error)
 	// Replay the thread event log as a stream of Events.
 	// Ordering: (ts, event_id) with event_id as deterministic tiebreaker.
 	ReplayThread(ctx context.Context, in *ReplayThreadRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Event], error)
@@ -152,6 +197,16 @@ type SessionCoreClient interface {
 	// `unknown_outcome` is explicit: a lost transport response is not converted
 	// into success or an immediate blind retry.
 	RecordScheduledStepReceipt(ctx context.Context, in *RecordScheduledStepReceiptRequest, opts ...grpc.CallOption) (*RecordScheduledStepReceiptResponse, error)
+	// Stamp how a run's context was assembled onto the run record
+	// (`runs.metadata.run_context`). Counts and closed tokens only; refused for
+	// zero-retention and waived credentials like every durable run mutation.
+	RecordRunContext(ctx context.Context, in *RecordRunContextRequest, opts ...grpc.CallOption) (*RecordRunContextResponse, error)
+	// Persist the answer of a claimed scheduled step into the scheduled thread
+	// and complete its receipt in one transaction. Idempotent on (run_id,
+	// step_id). Refused for zero-retention and waived runs. Off unless
+	// SESSION_CORE_SCHEDULED_RESULT_PERSIST is `true`; off keeps the receipt-only
+	// path. `output` is content and is accepted only on this direct hop.
+	RecordScheduledRunResult(ctx context.Context, in *RecordScheduledRunResultRequest, opts ...grpc.CallOption) (*RecordScheduledRunResultResponse, error)
 }
 
 type sessionCoreClient struct {
@@ -212,6 +267,16 @@ func (c *sessionCoreClient) PrepareScheduledRunThread(ctx context.Context, in *P
 	return out, nil
 }
 
+func (c *sessionCoreClient) PrepareUserOwnedThread(ctx context.Context, in *PrepareUserOwnedThreadRequest, opts ...grpc.CallOption) (*PrepareUserOwnedThreadResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PrepareUserOwnedThreadResponse)
+	err := c.cc.Invoke(ctx, SessionCore_PrepareUserOwnedThread_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *sessionCoreClient) CompleteStep(ctx context.Context, in *CompleteStepRequest, opts ...grpc.CallOption) (*CompleteStepResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CompleteStepResponse)
@@ -246,6 +311,46 @@ func (c *sessionCoreClient) SaveCheckpoint(ctx context.Context, in *SaveCheckpoi
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SaveCheckpointResponse)
 	err := c.cc.Invoke(ctx, SessionCore_SaveCheckpoint_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sessionCoreClient) SaveLoopCheckpoint(ctx context.Context, in *SaveLoopCheckpointRequest, opts ...grpc.CallOption) (*SaveLoopCheckpointResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SaveLoopCheckpointResponse)
+	err := c.cc.Invoke(ctx, SessionCore_SaveLoopCheckpoint_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sessionCoreClient) ClaimLoopCheckpoint(ctx context.Context, in *ClaimLoopCheckpointRequest, opts ...grpc.CallOption) (*ClaimLoopCheckpointResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ClaimLoopCheckpointResponse)
+	err := c.cc.Invoke(ctx, SessionCore_ClaimLoopCheckpoint_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sessionCoreClient) CloseLoopCheckpoint(ctx context.Context, in *CloseLoopCheckpointRequest, opts ...grpc.CallOption) (*CloseLoopCheckpointResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CloseLoopCheckpointResponse)
+	err := c.cc.Invoke(ctx, SessionCore_CloseLoopCheckpoint_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sessionCoreClient) ListToolActions(ctx context.Context, in *ListToolActionsRequest, opts ...grpc.CallOption) (*ListToolActionsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListToolActionsResponse)
+	err := c.cc.Invoke(ctx, SessionCore_ListToolActions_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -431,6 +536,26 @@ func (c *sessionCoreClient) RecordScheduledStepReceipt(ctx context.Context, in *
 	return out, nil
 }
 
+func (c *sessionCoreClient) RecordRunContext(ctx context.Context, in *RecordRunContextRequest, opts ...grpc.CallOption) (*RecordRunContextResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RecordRunContextResponse)
+	err := c.cc.Invoke(ctx, SessionCore_RecordRunContext_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sessionCoreClient) RecordScheduledRunResult(ctx context.Context, in *RecordScheduledRunResultRequest, opts ...grpc.CallOption) (*RecordScheduledRunResultResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RecordScheduledRunResultResponse)
+	err := c.cc.Invoke(ctx, SessionCore_RecordScheduledRunResult_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SessionCoreServer is the server API for SessionCore service.
 // All implementations must embed UnimplementedSessionCoreServer
 // for forward compatibility.
@@ -453,6 +578,19 @@ type SessionCoreServer interface {
 	// Control-authorized schedule fire. The decision bearer is consumed only by
 	// this RPC and is never persisted or forwarded to Temporal.
 	PrepareScheduledRunThread(context.Context, *PrepareScheduledRunThreadRequest) (*PrepareScheduledRunThreadResponse, error)
+	// Create-or-reuse a durable thread owned by a REAL user (never a service
+	// principal), with a caller-named origin, keyed by session_key for
+	// idempotency (chat-wave2 "schedule"/"mail-task" specs, 2026-09-28 —
+	// the reusable "service creates or reuses a thread owned by user U,
+	// readable by U, with a named origin" seam). Unlike
+	// PrepareScheduledRunThread, which always mints a service-owned,
+	// Space-authority-bound thread, this RPC's thread IS owned by the given
+	// user_id, so it is trivially readable through the existing owner-bound
+	// path (ListThreads' default user_id filter) -- no Control decision, no
+	// Space authority, is required to read it back. Restricted to an allow-
+	// listed set of trusted service callers; never reachable by a live user's
+	// own bearer.
+	PrepareUserOwnedThread(context.Context, *PrepareUserOwnedThreadRequest) (*PrepareUserOwnedThreadResponse, error)
 	// Record completion of a single step within a run.
 	CompleteStep(context.Context, *CompleteStepRequest) (*CompleteStepResponse, error)
 	// Durably reserve an inline tool-action audit intent before the tool runs.
@@ -463,6 +601,31 @@ type SessionCoreServer interface {
 	FinalizeToolAction(context.Context, *FinalizeToolActionRequest) (*FinalizeToolActionResponse, error)
 	// Persist a checkpoint snapshot for a run.
 	SaveCheckpoint(context.Context, *SaveCheckpointRequest) (*SaveCheckpointResponse, error)
+	// Save the durable loop's fold for a run (build plan WS03 S4). Latest wins,
+	// compare-and-set on expected_seq. Refused for a zero-retention or waived run.
+	SaveLoopCheckpoint(context.Context, *SaveLoopCheckpointRequest) (*SaveLoopCheckpointResponse, error)
+	// Claim a paused or parked run's fold for one continuation. Exactly one claim wins.
+	ClaimLoopCheckpoint(context.Context, *ClaimLoopCheckpointRequest) (*ClaimLoopCheckpointResponse, error)
+	// Close a run's fold once its loop has finished. Idempotent for a closed row.
+	CloseLoopCheckpoint(context.Context, *CloseLoopCheckpointRequest) (*CloseLoopCheckpointResponse, error)
+	// Read the effect ledger's rows for named tool calls of one run (build plan WS03
+	// S7a). Digest-only: the status, class and argument digest of each action, never
+	// its arguments or output. The loop that resumes a run reads it to close a call
+	// honestly instead of running it again.
+	//
+	// Answers only while the loop checkpoint store is switched on (otherwise the same
+	// closed "loop_checkpoint_disabled" refusal the checkpoint RPCs give), and only for a
+	// run that persists: a zero-retention or waived run never keeps a fold, so it gets the
+	// durable-mutation refusal. The caller must be allowed to read the run under the same
+	// rule as GetRun, which includes refusing a run whose owner was removed from its
+	// Space. Rows written under zero retention are never returned.
+	//
+	// ABSENCE IS NOT PROOF. An action id missing from the answer is UNKNOWN. It may never
+	// have been reserved, may be reserved by a concurrent writer that has not committed
+	// yet, or may be a row this read hides. Never read absence as "the call did not run".
+	// For an effectful call, only a row with status "not_run" (or a "completed" row with
+	// its output) licenses a re-dispatch decision.
+	ListToolActions(context.Context, *ListToolActionsRequest) (*ListToolActionsResponse, error)
 	// Replay the thread event log as a stream of Events.
 	// Ordering: (ts, event_id) with event_id as deterministic tiebreaker.
 	ReplayThread(*ReplayThreadRequest, grpc.ServerStreamingServer[Event]) error
@@ -536,6 +699,16 @@ type SessionCoreServer interface {
 	// `unknown_outcome` is explicit: a lost transport response is not converted
 	// into success or an immediate blind retry.
 	RecordScheduledStepReceipt(context.Context, *RecordScheduledStepReceiptRequest) (*RecordScheduledStepReceiptResponse, error)
+	// Stamp how a run's context was assembled onto the run record
+	// (`runs.metadata.run_context`). Counts and closed tokens only; refused for
+	// zero-retention and waived credentials like every durable run mutation.
+	RecordRunContext(context.Context, *RecordRunContextRequest) (*RecordRunContextResponse, error)
+	// Persist the answer of a claimed scheduled step into the scheduled thread
+	// and complete its receipt in one transaction. Idempotent on (run_id,
+	// step_id). Refused for zero-retention and waived runs. Off unless
+	// SESSION_CORE_SCHEDULED_RESULT_PERSIST is `true`; off keeps the receipt-only
+	// path. `output` is content and is accepted only on this direct hop.
+	RecordScheduledRunResult(context.Context, *RecordScheduledRunResultRequest) (*RecordScheduledRunResultResponse, error)
 	mustEmbedUnimplementedSessionCoreServer()
 }
 
@@ -561,6 +734,9 @@ func (UnimplementedSessionCoreServer) StartScheduledRun(context.Context, *StartS
 func (UnimplementedSessionCoreServer) PrepareScheduledRunThread(context.Context, *PrepareScheduledRunThreadRequest) (*PrepareScheduledRunThreadResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method PrepareScheduledRunThread not implemented")
 }
+func (UnimplementedSessionCoreServer) PrepareUserOwnedThread(context.Context, *PrepareUserOwnedThreadRequest) (*PrepareUserOwnedThreadResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PrepareUserOwnedThread not implemented")
+}
 func (UnimplementedSessionCoreServer) CompleteStep(context.Context, *CompleteStepRequest) (*CompleteStepResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CompleteStep not implemented")
 }
@@ -572,6 +748,18 @@ func (UnimplementedSessionCoreServer) FinalizeToolAction(context.Context, *Final
 }
 func (UnimplementedSessionCoreServer) SaveCheckpoint(context.Context, *SaveCheckpointRequest) (*SaveCheckpointResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SaveCheckpoint not implemented")
+}
+func (UnimplementedSessionCoreServer) SaveLoopCheckpoint(context.Context, *SaveLoopCheckpointRequest) (*SaveLoopCheckpointResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SaveLoopCheckpoint not implemented")
+}
+func (UnimplementedSessionCoreServer) ClaimLoopCheckpoint(context.Context, *ClaimLoopCheckpointRequest) (*ClaimLoopCheckpointResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ClaimLoopCheckpoint not implemented")
+}
+func (UnimplementedSessionCoreServer) CloseLoopCheckpoint(context.Context, *CloseLoopCheckpointRequest) (*CloseLoopCheckpointResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CloseLoopCheckpoint not implemented")
+}
+func (UnimplementedSessionCoreServer) ListToolActions(context.Context, *ListToolActionsRequest) (*ListToolActionsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListToolActions not implemented")
 }
 func (UnimplementedSessionCoreServer) ReplayThread(*ReplayThreadRequest, grpc.ServerStreamingServer[Event]) error {
 	return status.Error(codes.Unimplemented, "method ReplayThread not implemented")
@@ -623,6 +811,12 @@ func (UnimplementedSessionCoreServer) ClaimScheduledStep(context.Context, *Claim
 }
 func (UnimplementedSessionCoreServer) RecordScheduledStepReceipt(context.Context, *RecordScheduledStepReceiptRequest) (*RecordScheduledStepReceiptResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RecordScheduledStepReceipt not implemented")
+}
+func (UnimplementedSessionCoreServer) RecordRunContext(context.Context, *RecordRunContextRequest) (*RecordRunContextResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RecordRunContext not implemented")
+}
+func (UnimplementedSessionCoreServer) RecordScheduledRunResult(context.Context, *RecordScheduledRunResultRequest) (*RecordScheduledRunResultResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RecordScheduledRunResult not implemented")
 }
 func (UnimplementedSessionCoreServer) mustEmbedUnimplementedSessionCoreServer() {}
 func (UnimplementedSessionCoreServer) testEmbeddedByValue()                     {}
@@ -735,6 +929,24 @@ func _SessionCore_PrepareScheduledRunThread_Handler(srv interface{}, ctx context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SessionCore_PrepareUserOwnedThread_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PrepareUserOwnedThreadRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionCoreServer).PrepareUserOwnedThread(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionCore_PrepareUserOwnedThread_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionCoreServer).PrepareUserOwnedThread(ctx, req.(*PrepareUserOwnedThreadRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _SessionCore_CompleteStep_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CompleteStepRequest)
 	if err := dec(in); err != nil {
@@ -803,6 +1015,78 @@ func _SessionCore_SaveCheckpoint_Handler(srv interface{}, ctx context.Context, d
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(SessionCoreServer).SaveCheckpoint(ctx, req.(*SaveCheckpointRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SessionCore_SaveLoopCheckpoint_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SaveLoopCheckpointRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionCoreServer).SaveLoopCheckpoint(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionCore_SaveLoopCheckpoint_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionCoreServer).SaveLoopCheckpoint(ctx, req.(*SaveLoopCheckpointRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SessionCore_ClaimLoopCheckpoint_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ClaimLoopCheckpointRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionCoreServer).ClaimLoopCheckpoint(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionCore_ClaimLoopCheckpoint_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionCoreServer).ClaimLoopCheckpoint(ctx, req.(*ClaimLoopCheckpointRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SessionCore_CloseLoopCheckpoint_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CloseLoopCheckpointRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionCoreServer).CloseLoopCheckpoint(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionCore_CloseLoopCheckpoint_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionCoreServer).CloseLoopCheckpoint(ctx, req.(*CloseLoopCheckpointRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SessionCore_ListToolActions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListToolActionsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionCoreServer).ListToolActions(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionCore_ListToolActions_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionCoreServer).ListToolActions(ctx, req.(*ListToolActionsRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1106,6 +1390,42 @@ func _SessionCore_RecordScheduledStepReceipt_Handler(srv interface{}, ctx contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SessionCore_RecordRunContext_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RecordRunContextRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionCoreServer).RecordRunContext(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionCore_RecordRunContext_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionCoreServer).RecordRunContext(ctx, req.(*RecordRunContextRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SessionCore_RecordScheduledRunResult_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RecordScheduledRunResultRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionCoreServer).RecordScheduledRunResult(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionCore_RecordScheduledRunResult_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionCoreServer).RecordScheduledRunResult(ctx, req.(*RecordScheduledRunResultRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // SessionCore_ServiceDesc is the grpc.ServiceDesc for SessionCore service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1134,6 +1454,10 @@ var SessionCore_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _SessionCore_PrepareScheduledRunThread_Handler,
 		},
 		{
+			MethodName: "PrepareUserOwnedThread",
+			Handler:    _SessionCore_PrepareUserOwnedThread_Handler,
+		},
+		{
 			MethodName: "CompleteStep",
 			Handler:    _SessionCore_CompleteStep_Handler,
 		},
@@ -1148,6 +1472,22 @@ var SessionCore_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SaveCheckpoint",
 			Handler:    _SessionCore_SaveCheckpoint_Handler,
+		},
+		{
+			MethodName: "SaveLoopCheckpoint",
+			Handler:    _SessionCore_SaveLoopCheckpoint_Handler,
+		},
+		{
+			MethodName: "ClaimLoopCheckpoint",
+			Handler:    _SessionCore_ClaimLoopCheckpoint_Handler,
+		},
+		{
+			MethodName: "CloseLoopCheckpoint",
+			Handler:    _SessionCore_CloseLoopCheckpoint_Handler,
+		},
+		{
+			MethodName: "ListToolActions",
+			Handler:    _SessionCore_ListToolActions_Handler,
 		},
 		{
 			MethodName: "GetContextAssembly",
@@ -1212,6 +1552,14 @@ var SessionCore_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RecordScheduledStepReceipt",
 			Handler:    _SessionCore_RecordScheduledStepReceipt_Handler,
+		},
+		{
+			MethodName: "RecordRunContext",
+			Handler:    _SessionCore_RecordRunContext_Handler,
+		},
+		{
+			MethodName: "RecordScheduledRunResult",
+			Handler:    _SessionCore_RecordScheduledRunResult_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
@@ -1532,6 +1880,696 @@ var ManagedRunLifecycle_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CompleteDirectRunWithMessage",
 			Handler:    _ManagedRunLifecycle_CompleteDirectRunWithMessage_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "model_plane/v1/sessions.proto",
+}
+
+const (
+	SessionRetentionService_CountWaivedRuns_FullMethodName = "/model_plane.v1.SessionRetentionService/CountWaivedRuns"
+)
+
+// SessionRetentionServiceClient is the client API for SessionRetentionService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// SessionRetentionService: read-only retention receipt counts for the org
+// admin view. It is a separate service, as ManagedRunLifecycle is, so that
+// SessionCore and every mock of it stay source-compatible. The answer carries
+// counts and dates only, never run, message or goal content.
+type SessionRetentionServiceClient interface {
+	// Count an org's waived runs per (connection, user), with the start time of
+	// the most recent one. Refused to user credentials and to any service that
+	// lacks session:retention:read, and never answers for another org.
+	CountWaivedRuns(ctx context.Context, in *CountWaivedRunsRequest, opts ...grpc.CallOption) (*CountWaivedRunsResponse, error)
+}
+
+type sessionRetentionServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewSessionRetentionServiceClient(cc grpc.ClientConnInterface) SessionRetentionServiceClient {
+	return &sessionRetentionServiceClient{cc}
+}
+
+func (c *sessionRetentionServiceClient) CountWaivedRuns(ctx context.Context, in *CountWaivedRunsRequest, opts ...grpc.CallOption) (*CountWaivedRunsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CountWaivedRunsResponse)
+	err := c.cc.Invoke(ctx, SessionRetentionService_CountWaivedRuns_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// SessionRetentionServiceServer is the server API for SessionRetentionService service.
+// All implementations must embed UnimplementedSessionRetentionServiceServer
+// for forward compatibility.
+//
+// SessionRetentionService: read-only retention receipt counts for the org
+// admin view. It is a separate service, as ManagedRunLifecycle is, so that
+// SessionCore and every mock of it stay source-compatible. The answer carries
+// counts and dates only, never run, message or goal content.
+type SessionRetentionServiceServer interface {
+	// Count an org's waived runs per (connection, user), with the start time of
+	// the most recent one. Refused to user credentials and to any service that
+	// lacks session:retention:read, and never answers for another org.
+	CountWaivedRuns(context.Context, *CountWaivedRunsRequest) (*CountWaivedRunsResponse, error)
+	mustEmbedUnimplementedSessionRetentionServiceServer()
+}
+
+// UnimplementedSessionRetentionServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedSessionRetentionServiceServer struct{}
+
+func (UnimplementedSessionRetentionServiceServer) CountWaivedRuns(context.Context, *CountWaivedRunsRequest) (*CountWaivedRunsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CountWaivedRuns not implemented")
+}
+func (UnimplementedSessionRetentionServiceServer) mustEmbedUnimplementedSessionRetentionServiceServer() {
+}
+func (UnimplementedSessionRetentionServiceServer) testEmbeddedByValue() {}
+
+// UnsafeSessionRetentionServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to SessionRetentionServiceServer will
+// result in compilation errors.
+type UnsafeSessionRetentionServiceServer interface {
+	mustEmbedUnimplementedSessionRetentionServiceServer()
+}
+
+func RegisterSessionRetentionServiceServer(s grpc.ServiceRegistrar, srv SessionRetentionServiceServer) {
+	// If the following call panics, it indicates UnimplementedSessionRetentionServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&SessionRetentionService_ServiceDesc, srv)
+}
+
+func _SessionRetentionService_CountWaivedRuns_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CountWaivedRunsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionRetentionServiceServer).CountWaivedRuns(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionRetentionService_CountWaivedRuns_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionRetentionServiceServer).CountWaivedRuns(ctx, req.(*CountWaivedRunsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// SessionRetentionService_ServiceDesc is the grpc.ServiceDesc for SessionRetentionService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var SessionRetentionService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "model_plane.v1.SessionRetentionService",
+	HandlerType: (*SessionRetentionServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "CountWaivedRuns",
+			Handler:    _SessionRetentionService_CountWaivedRuns_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "model_plane/v1/sessions.proto",
+}
+
+const (
+	ThreadAutonomy_GetThreadGrant_FullMethodName = "/model_plane.v1.ThreadAutonomy/GetThreadGrant"
+)
+
+// ThreadAutonomyClient is the client API for ThreadAutonomy service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// ThreadAutonomy: the autonomy grant a plan approval made, read back by the
+// run that is about to start. A separate service, as SessionRetentionService
+// is, so that SessionCore and every mock of it stay source-compatible. The
+// grant is WRITTEN by SessionCore.SetRunMode (with `approved_plan_id` set), in
+// the same transaction as the run update.
+type ThreadAutonomyClient interface {
+	// The live grant of one thread: the rung, the reason it was granted, the plan
+	// it was approved with and when it lapses. A thread with no grant, or one
+	// that has lapsed, answers a response whose `granted_rung` is UNSPECIFIED:
+	// "no grant" is an answer, not an error. Read-only; it spends nothing. Refused
+	// for a caller that does not own the thread, and never answers for another org.
+	GetThreadGrant(ctx context.Context, in *GetThreadGrantRequest, opts ...grpc.CallOption) (*GetThreadGrantResponse, error)
+}
+
+type threadAutonomyClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewThreadAutonomyClient(cc grpc.ClientConnInterface) ThreadAutonomyClient {
+	return &threadAutonomyClient{cc}
+}
+
+func (c *threadAutonomyClient) GetThreadGrant(ctx context.Context, in *GetThreadGrantRequest, opts ...grpc.CallOption) (*GetThreadGrantResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetThreadGrantResponse)
+	err := c.cc.Invoke(ctx, ThreadAutonomy_GetThreadGrant_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ThreadAutonomyServer is the server API for ThreadAutonomy service.
+// All implementations must embed UnimplementedThreadAutonomyServer
+// for forward compatibility.
+//
+// ThreadAutonomy: the autonomy grant a plan approval made, read back by the
+// run that is about to start. A separate service, as SessionRetentionService
+// is, so that SessionCore and every mock of it stay source-compatible. The
+// grant is WRITTEN by SessionCore.SetRunMode (with `approved_plan_id` set), in
+// the same transaction as the run update.
+type ThreadAutonomyServer interface {
+	// The live grant of one thread: the rung, the reason it was granted, the plan
+	// it was approved with and when it lapses. A thread with no grant, or one
+	// that has lapsed, answers a response whose `granted_rung` is UNSPECIFIED:
+	// "no grant" is an answer, not an error. Read-only; it spends nothing. Refused
+	// for a caller that does not own the thread, and never answers for another org.
+	GetThreadGrant(context.Context, *GetThreadGrantRequest) (*GetThreadGrantResponse, error)
+	mustEmbedUnimplementedThreadAutonomyServer()
+}
+
+// UnimplementedThreadAutonomyServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedThreadAutonomyServer struct{}
+
+func (UnimplementedThreadAutonomyServer) GetThreadGrant(context.Context, *GetThreadGrantRequest) (*GetThreadGrantResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetThreadGrant not implemented")
+}
+func (UnimplementedThreadAutonomyServer) mustEmbedUnimplementedThreadAutonomyServer() {}
+func (UnimplementedThreadAutonomyServer) testEmbeddedByValue()                        {}
+
+// UnsafeThreadAutonomyServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to ThreadAutonomyServer will
+// result in compilation errors.
+type UnsafeThreadAutonomyServer interface {
+	mustEmbedUnimplementedThreadAutonomyServer()
+}
+
+func RegisterThreadAutonomyServer(s grpc.ServiceRegistrar, srv ThreadAutonomyServer) {
+	// If the following call panics, it indicates UnimplementedThreadAutonomyServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&ThreadAutonomy_ServiceDesc, srv)
+}
+
+func _ThreadAutonomy_GetThreadGrant_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetThreadGrantRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ThreadAutonomyServer).GetThreadGrant(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ThreadAutonomy_GetThreadGrant_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ThreadAutonomyServer).GetThreadGrant(ctx, req.(*GetThreadGrantRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// ThreadAutonomy_ServiceDesc is the grpc.ServiceDesc for ThreadAutonomy service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var ThreadAutonomy_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "model_plane.v1.ThreadAutonomy",
+	HandlerType: (*ThreadAutonomyServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "GetThreadGrant",
+			Handler:    _ThreadAutonomy_GetThreadGrant_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "model_plane/v1/sessions.proto",
+}
+
+const (
+	MessageSearch_SearchMessages_FullMethodName = "/model_plane.v1.MessageSearch/SearchMessages"
+)
+
+// MessageSearchClient is the client API for MessageSearch service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// MessageSearch: full-text search over the durable conversation record. A
+// separate service, as ThreadAutonomy and SessionRetentionService are, so that
+// SessionCore and every mock of it stay source-compatible. Read-only.
+type MessageSearchClient interface {
+	// Search the messages of threads the caller may list, with the same owner and
+	// Space-audience rules as ListThreads. Refused with unavailable
+	// `message_search_disabled` while SESSION_CORE_MESSAGE_SEARCH_ENABLED is not
+	// `true`. A query that holds no searchable word answers an empty page.
+	SearchMessages(ctx context.Context, in *SearchMessagesRequest, opts ...grpc.CallOption) (*SearchMessagesResponse, error)
+}
+
+type messageSearchClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewMessageSearchClient(cc grpc.ClientConnInterface) MessageSearchClient {
+	return &messageSearchClient{cc}
+}
+
+func (c *messageSearchClient) SearchMessages(ctx context.Context, in *SearchMessagesRequest, opts ...grpc.CallOption) (*SearchMessagesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SearchMessagesResponse)
+	err := c.cc.Invoke(ctx, MessageSearch_SearchMessages_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// MessageSearchServer is the server API for MessageSearch service.
+// All implementations must embed UnimplementedMessageSearchServer
+// for forward compatibility.
+//
+// MessageSearch: full-text search over the durable conversation record. A
+// separate service, as ThreadAutonomy and SessionRetentionService are, so that
+// SessionCore and every mock of it stay source-compatible. Read-only.
+type MessageSearchServer interface {
+	// Search the messages of threads the caller may list, with the same owner and
+	// Space-audience rules as ListThreads. Refused with unavailable
+	// `message_search_disabled` while SESSION_CORE_MESSAGE_SEARCH_ENABLED is not
+	// `true`. A query that holds no searchable word answers an empty page.
+	SearchMessages(context.Context, *SearchMessagesRequest) (*SearchMessagesResponse, error)
+	mustEmbedUnimplementedMessageSearchServer()
+}
+
+// UnimplementedMessageSearchServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedMessageSearchServer struct{}
+
+func (UnimplementedMessageSearchServer) SearchMessages(context.Context, *SearchMessagesRequest) (*SearchMessagesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SearchMessages not implemented")
+}
+func (UnimplementedMessageSearchServer) mustEmbedUnimplementedMessageSearchServer() {}
+func (UnimplementedMessageSearchServer) testEmbeddedByValue()                       {}
+
+// UnsafeMessageSearchServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to MessageSearchServer will
+// result in compilation errors.
+type UnsafeMessageSearchServer interface {
+	mustEmbedUnimplementedMessageSearchServer()
+}
+
+func RegisterMessageSearchServer(s grpc.ServiceRegistrar, srv MessageSearchServer) {
+	// If the following call panics, it indicates UnimplementedMessageSearchServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&MessageSearch_ServiceDesc, srv)
+}
+
+func _MessageSearch_SearchMessages_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SearchMessagesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MessageSearchServer).SearchMessages(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MessageSearch_SearchMessages_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MessageSearchServer).SearchMessages(ctx, req.(*SearchMessagesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// MessageSearch_ServiceDesc is the grpc.ServiceDesc for MessageSearch service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var MessageSearch_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "model_plane.v1.MessageSearch",
+	HandlerType: (*MessageSearchServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "SearchMessages",
+			Handler:    _MessageSearch_SearchMessages_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "model_plane/v1/sessions.proto",
+}
+
+const (
+	MessageTreeService_SetActiveLeaf_FullMethodName = "/model_plane.v1.MessageTreeService/SetActiveLeaf"
+)
+
+// MessageTreeServiceClient is the client API for MessageTreeService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// MessageTreeService: moves a thread's active leaf between the branches of its message
+// tree (WS17 S8). A separate service, as MessageSearch is, so that SessionCore and
+// every mock of it stay source-compatible.
+type MessageTreeServiceClient interface {
+	// Make a branch of the thread the active one. A target on the active path is a
+	// rewind: the leaf becomes the target and nothing is deleted. Any other target is
+	// a version switch: the leaf becomes the newest turn beneath it, so the chosen
+	// branch shows its own continuation. Owner only, with `session:write`. Refused
+	// for a Space thread, a thread that holds a waived run and a thread with a queued
+	// or running run. Refused with unavailable `message_versions_disabled` while
+	// SESSION_CORE_MESSAGE_VERSIONS_ENABLED is not `true`.
+	SetActiveLeaf(ctx context.Context, in *SetActiveLeafRequest, opts ...grpc.CallOption) (*SetActiveLeafResponse, error)
+}
+
+type messageTreeServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewMessageTreeServiceClient(cc grpc.ClientConnInterface) MessageTreeServiceClient {
+	return &messageTreeServiceClient{cc}
+}
+
+func (c *messageTreeServiceClient) SetActiveLeaf(ctx context.Context, in *SetActiveLeafRequest, opts ...grpc.CallOption) (*SetActiveLeafResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetActiveLeafResponse)
+	err := c.cc.Invoke(ctx, MessageTreeService_SetActiveLeaf_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// MessageTreeServiceServer is the server API for MessageTreeService service.
+// All implementations must embed UnimplementedMessageTreeServiceServer
+// for forward compatibility.
+//
+// MessageTreeService: moves a thread's active leaf between the branches of its message
+// tree (WS17 S8). A separate service, as MessageSearch is, so that SessionCore and
+// every mock of it stay source-compatible.
+type MessageTreeServiceServer interface {
+	// Make a branch of the thread the active one. A target on the active path is a
+	// rewind: the leaf becomes the target and nothing is deleted. Any other target is
+	// a version switch: the leaf becomes the newest turn beneath it, so the chosen
+	// branch shows its own continuation. Owner only, with `session:write`. Refused
+	// for a Space thread, a thread that holds a waived run and a thread with a queued
+	// or running run. Refused with unavailable `message_versions_disabled` while
+	// SESSION_CORE_MESSAGE_VERSIONS_ENABLED is not `true`.
+	SetActiveLeaf(context.Context, *SetActiveLeafRequest) (*SetActiveLeafResponse, error)
+	mustEmbedUnimplementedMessageTreeServiceServer()
+}
+
+// UnimplementedMessageTreeServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedMessageTreeServiceServer struct{}
+
+func (UnimplementedMessageTreeServiceServer) SetActiveLeaf(context.Context, *SetActiveLeafRequest) (*SetActiveLeafResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetActiveLeaf not implemented")
+}
+func (UnimplementedMessageTreeServiceServer) mustEmbedUnimplementedMessageTreeServiceServer() {}
+func (UnimplementedMessageTreeServiceServer) testEmbeddedByValue()                            {}
+
+// UnsafeMessageTreeServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to MessageTreeServiceServer will
+// result in compilation errors.
+type UnsafeMessageTreeServiceServer interface {
+	mustEmbedUnimplementedMessageTreeServiceServer()
+}
+
+func RegisterMessageTreeServiceServer(s grpc.ServiceRegistrar, srv MessageTreeServiceServer) {
+	// If the following call panics, it indicates UnimplementedMessageTreeServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&MessageTreeService_ServiceDesc, srv)
+}
+
+func _MessageTreeService_SetActiveLeaf_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetActiveLeafRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MessageTreeServiceServer).SetActiveLeaf(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MessageTreeService_SetActiveLeaf_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MessageTreeServiceServer).SetActiveLeaf(ctx, req.(*SetActiveLeafRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// MessageTreeService_ServiceDesc is the grpc.ServiceDesc for MessageTreeService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var MessageTreeService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "model_plane.v1.MessageTreeService",
+	HandlerType: (*MessageTreeServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "SetActiveLeaf",
+			Handler:    _MessageTreeService_SetActiveLeaf_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "model_plane/v1/sessions.proto",
+}
+
+const (
+	LearningGovernanceService_DecideSkillProposal_FullMethodName = "/model_plane.v1.LearningGovernanceService/DecideSkillProposal"
+	LearningGovernanceService_UndoLearningEntry_FullMethodName   = "/model_plane.v1.LearningGovernanceService/UndoLearningEntry"
+	LearningGovernanceService_ListLearningLedger_FullMethodName  = "/model_plane.v1.LearningGovernanceService/ListLearningLedger"
+)
+
+// LearningGovernanceServiceClient is the client API for LearningGovernanceService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// LearningGovernanceService: the owner's decisions on what Verevon learned from their
+// conversations (WS07 S8). A separate service, as MessageSearch is, so that
+// SessionCore and every mock of it stay source-compatible. Every RPC is the
+// owner's own: a service credential is refused, and a person never reaches
+// another person's skill proposals or ledger.
+type LearningGovernanceServiceClient interface {
+	// Accept or reject one learned-skill proposal. Only the person the proposal
+	// belongs to may decide, and only while it is still proposed.
+	DecideSkillProposal(ctx context.Context, in *DecideSkillProposalRequest, opts ...grpc.CallOption) (*DecideSkillProposalResponse, error)
+	// Undo one ledger entry of a skill by restoring the snapshot taken before it.
+	// Only the latest entry of a skill can be undone, and only by its owner. A
+	// learned memory is not undone here: it is erased by DeleteMemory.
+	UndoLearningEntry(ctx context.Context, in *UndoLearningEntryRequest, opts ...grpc.CallOption) (*UndoLearningEntryResponse, error)
+	// The owner's ledger of what was learned and changed: skill revisions and the
+	// memories the extractor wrote, newest first.
+	ListLearningLedger(ctx context.Context, in *ListLearningLedgerRequest, opts ...grpc.CallOption) (*ListLearningLedgerResponse, error)
+}
+
+type learningGovernanceServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewLearningGovernanceServiceClient(cc grpc.ClientConnInterface) LearningGovernanceServiceClient {
+	return &learningGovernanceServiceClient{cc}
+}
+
+func (c *learningGovernanceServiceClient) DecideSkillProposal(ctx context.Context, in *DecideSkillProposalRequest, opts ...grpc.CallOption) (*DecideSkillProposalResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DecideSkillProposalResponse)
+	err := c.cc.Invoke(ctx, LearningGovernanceService_DecideSkillProposal_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *learningGovernanceServiceClient) UndoLearningEntry(ctx context.Context, in *UndoLearningEntryRequest, opts ...grpc.CallOption) (*UndoLearningEntryResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UndoLearningEntryResponse)
+	err := c.cc.Invoke(ctx, LearningGovernanceService_UndoLearningEntry_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *learningGovernanceServiceClient) ListLearningLedger(ctx context.Context, in *ListLearningLedgerRequest, opts ...grpc.CallOption) (*ListLearningLedgerResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListLearningLedgerResponse)
+	err := c.cc.Invoke(ctx, LearningGovernanceService_ListLearningLedger_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// LearningGovernanceServiceServer is the server API for LearningGovernanceService service.
+// All implementations must embed UnimplementedLearningGovernanceServiceServer
+// for forward compatibility.
+//
+// LearningGovernanceService: the owner's decisions on what Verevon learned from their
+// conversations (WS07 S8). A separate service, as MessageSearch is, so that
+// SessionCore and every mock of it stay source-compatible. Every RPC is the
+// owner's own: a service credential is refused, and a person never reaches
+// another person's skill proposals or ledger.
+type LearningGovernanceServiceServer interface {
+	// Accept or reject one learned-skill proposal. Only the person the proposal
+	// belongs to may decide, and only while it is still proposed.
+	DecideSkillProposal(context.Context, *DecideSkillProposalRequest) (*DecideSkillProposalResponse, error)
+	// Undo one ledger entry of a skill by restoring the snapshot taken before it.
+	// Only the latest entry of a skill can be undone, and only by its owner. A
+	// learned memory is not undone here: it is erased by DeleteMemory.
+	UndoLearningEntry(context.Context, *UndoLearningEntryRequest) (*UndoLearningEntryResponse, error)
+	// The owner's ledger of what was learned and changed: skill revisions and the
+	// memories the extractor wrote, newest first.
+	ListLearningLedger(context.Context, *ListLearningLedgerRequest) (*ListLearningLedgerResponse, error)
+	mustEmbedUnimplementedLearningGovernanceServiceServer()
+}
+
+// UnimplementedLearningGovernanceServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedLearningGovernanceServiceServer struct{}
+
+func (UnimplementedLearningGovernanceServiceServer) DecideSkillProposal(context.Context, *DecideSkillProposalRequest) (*DecideSkillProposalResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DecideSkillProposal not implemented")
+}
+func (UnimplementedLearningGovernanceServiceServer) UndoLearningEntry(context.Context, *UndoLearningEntryRequest) (*UndoLearningEntryResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UndoLearningEntry not implemented")
+}
+func (UnimplementedLearningGovernanceServiceServer) ListLearningLedger(context.Context, *ListLearningLedgerRequest) (*ListLearningLedgerResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListLearningLedger not implemented")
+}
+func (UnimplementedLearningGovernanceServiceServer) mustEmbedUnimplementedLearningGovernanceServiceServer() {
+}
+func (UnimplementedLearningGovernanceServiceServer) testEmbeddedByValue() {}
+
+// UnsafeLearningGovernanceServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to LearningGovernanceServiceServer will
+// result in compilation errors.
+type UnsafeLearningGovernanceServiceServer interface {
+	mustEmbedUnimplementedLearningGovernanceServiceServer()
+}
+
+func RegisterLearningGovernanceServiceServer(s grpc.ServiceRegistrar, srv LearningGovernanceServiceServer) {
+	// If the following call panics, it indicates UnimplementedLearningGovernanceServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&LearningGovernanceService_ServiceDesc, srv)
+}
+
+func _LearningGovernanceService_DecideSkillProposal_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DecideSkillProposalRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(LearningGovernanceServiceServer).DecideSkillProposal(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: LearningGovernanceService_DecideSkillProposal_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(LearningGovernanceServiceServer).DecideSkillProposal(ctx, req.(*DecideSkillProposalRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _LearningGovernanceService_UndoLearningEntry_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UndoLearningEntryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(LearningGovernanceServiceServer).UndoLearningEntry(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: LearningGovernanceService_UndoLearningEntry_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(LearningGovernanceServiceServer).UndoLearningEntry(ctx, req.(*UndoLearningEntryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _LearningGovernanceService_ListLearningLedger_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListLearningLedgerRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(LearningGovernanceServiceServer).ListLearningLedger(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: LearningGovernanceService_ListLearningLedger_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(LearningGovernanceServiceServer).ListLearningLedger(ctx, req.(*ListLearningLedgerRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// LearningGovernanceService_ServiceDesc is the grpc.ServiceDesc for LearningGovernanceService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var LearningGovernanceService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "model_plane.v1.LearningGovernanceService",
+	HandlerType: (*LearningGovernanceServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "DecideSkillProposal",
+			Handler:    _LearningGovernanceService_DecideSkillProposal_Handler,
+		},
+		{
+			MethodName: "UndoLearningEntry",
+			Handler:    _LearningGovernanceService_UndoLearningEntry_Handler,
+		},
+		{
+			MethodName: "ListLearningLedger",
+			Handler:    _LearningGovernanceService_ListLearningLedger_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

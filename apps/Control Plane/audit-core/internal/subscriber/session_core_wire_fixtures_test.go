@@ -163,6 +163,41 @@ func TestSessionCoreWireFixturesAreAcceptedByAuditCore(t *testing.T) {
 	}
 }
 
+// An approval decision is audited as who decided what, under which cause and provenance.
+// Its row never carries the decision reason, the call's arguments or the approval's
+// context, whatever the retention class of the run.
+func TestApprovalDecidedWireBodyIsContentFree(t *testing.T) {
+	fixture, ok := loadSessionCoreFixtures(t)["approval_decided.json"]
+	if !ok {
+		t.Fatal("missing the approval decision fixture")
+	}
+	event, err := events.DecodeAudit(fixture.Body)
+	if err != nil {
+		t.Fatalf("audit-core refuses the approval decision body: %v", err)
+	}
+	if event.Event != "approval_decided" {
+		t.Fatalf("event = %q, want approval_decided", event.Event)
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(fixture.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"decision_reason", "context", "arguments"} {
+		if _, present := body[forbidden]; present {
+			t.Fatalf("approval decision body carries %q: the audit row must stay content-free", forbidden)
+		}
+	}
+	var details map[string]json.RawMessage
+	if err := json.Unmarshal(body["details"], &details); err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"cause_code", "decision_source", "scope", "step_up_verified"} {
+		if _, present := details[required]; !present {
+			t.Fatalf("approval decision details lack %q", required)
+		}
+	}
+}
+
 // The legacy case, kept as a test of audit-core's rule: a reservation body on
 // the final-outcome subject. session-core stored 2,477 such rows before it named
 // each phase's subject from the body's event; it now republishes them on the

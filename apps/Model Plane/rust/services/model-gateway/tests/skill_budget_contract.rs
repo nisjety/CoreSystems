@@ -166,3 +166,75 @@ fn both_loops_mark_a_truncated_skill_identically() {
         "the two loops announce a truncated skill differently"
     );
 }
+
+/// A skill with a bundle says so in its block, and the footer counts against the same
+/// budget as the rest of the block. A long instruction is cut before its footer is, so
+/// the model can always see that the bundle exists (WS19-S7).
+#[test]
+fn bundle_footer_stays_inside_the_skill_budget() {
+    use model_gateway::skills::{
+        bundle_footer, fit_skill_blocks_with_footers, SKILL_CONTEXT_BUDGET_CHARS, TRUNCATION_MARKER,
+    };
+
+    let short_footer = bundle_footer("Short", 2, 300);
+    let long_footer = bundle_footer("Long", 12, 84_000);
+    let fitted = fit_skill_blocks_with_footers(vec![
+        (
+            "## Skill: Short\nSmall rule.".to_owned(),
+            short_footer.clone(),
+        ),
+        (
+            format!(
+                "## Skill: Long\n{}",
+                "x".repeat(SKILL_CONTEXT_BUDGET_CHARS * 2)
+            ),
+            long_footer.clone(),
+        ),
+    ]);
+
+    let total: usize = fitted
+        .blocks
+        .iter()
+        .map(|block| block.chars().count())
+        .sum();
+    assert!(
+        total <= SKILL_CONTEXT_BUDGET_CHARS,
+        "skill guidance took {total} characters of a {SKILL_CONTEXT_BUDGET_CHARS} budget"
+    );
+    assert_eq!(fitted.truncated, 1);
+    assert!(
+        fitted.blocks[0].ends_with(&short_footer),
+        "a block that fits must keep its footer"
+    );
+    assert!(
+        fitted.blocks[1].contains(TRUNCATION_MARKER) && fitted.blocks[1].ends_with(&long_footer),
+        "a truncated block must say so and keep its bundle footer"
+    );
+}
+
+/// With no footers the fit is exactly the unfooted fit, so a turn that has no bundles
+/// injects the same guidance it did before footers existed.
+#[test]
+fn fitting_with_empty_footers_matches_the_unfooted_fit() {
+    use model_gateway::skills::{
+        fit_skill_blocks, fit_skill_blocks_with_footers, SKILL_CONTEXT_BUDGET_CHARS,
+    };
+
+    let blocks = vec![
+        format!("## Skill: A\n{}", "a".repeat(3_000)),
+        format!("## Skill: B\n{}", "b".repeat(SKILL_CONTEXT_BUDGET_CHARS)),
+        format!("## Skill: C\n{}", "c".repeat(400)),
+    ];
+    let plain = fit_skill_blocks(blocks.clone());
+    let footed = fit_skill_blocks_with_footers(
+        blocks
+            .into_iter()
+            .map(|block| (block, String::new()))
+            .collect(),
+    );
+    assert_eq!(plain.blocks, footed.blocks);
+    assert_eq!(
+        (plain.truncated, plain.dropped),
+        (footed.truncated, footed.dropped)
+    );
+}

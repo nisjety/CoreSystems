@@ -44,6 +44,8 @@ const FORGED_SPACE_AUTHORITY_FIELDS: &[&str] = &[
     "resource_authorization_ref",
     "action_schema_hash",
     "payload_digest",
+    "contract_digest",
+    "contract_expires_at",
 ];
 
 /// Turns an untrusted personal-Space selection into a Control-issued thread
@@ -167,7 +169,7 @@ pub(crate) async fn inject_personal_thread_context(
             .get("token")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let context = json!({
+        let mut context = json!({
             "space_id": required_decision_string(decision, "space_ref")?,
             "space_decision_ref": required_decision_string(decision, "decision_ref")?,
             "recipient_audience_ref": required_decision_string(decision, "recipient_audience_ref")?,
@@ -183,6 +185,18 @@ pub(crate) async fn inject_personal_thread_context(
         });
         if token.trim().is_empty() {
             return Err(invalid_decision());
+        }
+        if space_append_retrieval_enabled() {
+            let retrieval_token = space_retrieval_token(
+                state,
+                org_id,
+                &actor,
+                &space_ref,
+                "space-retrieval-append",
+                counter,
+            )
+            .await?;
+            context["retrieval_decision_token"] = json!(retrieval_token);
         }
         object.insert("space_append_context".to_owned(), context);
         return Ok(());
@@ -249,38 +263,9 @@ pub(crate) async fn inject_personal_thread_context(
     // an outage must never be silently treated as "retrieval is fine, just
     // not entitled" — see scoped_retrieval_token's own contract in
     // model-gateway/src/retrieval.rs.
-    let retrieval_url = format!(
-        "{}/api/v1/internal/spaces/retrieval-decision",
-        state.user_core_url
-    );
-    let (retrieval_status, Json(retrieval_response)) = proxy_json(
-        state,
-        Method::POST,
-        &retrieval_url,
-        Some(json!({
-            "space_ref": space_ref,
-            "idempotency_key": format!("space-retrieval-{}-{counter}", unix_nanos()),
-        })),
-        Some(org_id),
-        Some(&actor),
-        None,
-    )
-    .await;
-    let retrieval_token = if retrieval_status == StatusCode::FORBIDDEN {
-        String::new()
-    } else if !retrieval_status.is_success() {
-        return Err((retrieval_status, Json(retrieval_response)));
-    } else {
-        let retrieval_token = crate::envelope::unwrap_data(&retrieval_response)
-            .get("token")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
-        if retrieval_token.trim().is_empty() {
-            return Err(invalid_decision());
-        }
-        retrieval_token
-    };
+    let retrieval_token =
+        space_retrieval_token(state, org_id, &actor, &space_ref, "space-retrieval", counter)
+            .await?;
     let context = json!({
         "space_id": required_decision_string(decision, "space_ref")?,
         "space_decision_ref": required_decision_string(decision, "decision_ref")?,
@@ -301,6 +286,59 @@ pub(crate) async fn inject_personal_thread_context(
     }
     object.insert("space_context".to_owned(), context);
     Ok(())
+}
+
+/// GATEWAY_SPACE_APPEND_RETRIEVAL (WS18-S2). Read strictly and per request: only
+/// the literal `true` makes a follow-up turn fetch its own retrieval decision, so
+/// every other value leaves the follow-up exactly as it was.
+fn space_append_retrieval_enabled() -> bool {
+    std::env::var("GATEWAY_SPACE_APPEND_RETRIEVAL").is_ok_and(|value| value == "true")
+}
+
+/// Asks Control for the retrieval authority of one scoped turn. A FORBIDDEN answer
+/// is a decline, not an outage: it yields an empty token, which the gateway
+/// suppresses so the turn is answered without organisation documents. Any other
+/// failure fails the turn, because an outage must never read as "not entitled".
+async fn space_retrieval_token(
+    state: &AppState,
+    org_id: &str,
+    actor: &ActionActor,
+    space_ref: &str,
+    key_prefix: &str,
+    counter: u64,
+) -> Result<String, (StatusCode, Json<Value>)> {
+    let url = format!(
+        "{}/api/v1/internal/spaces/retrieval-decision",
+        state.user_core_url
+    );
+    let (status, Json(response)) = proxy_json(
+        state,
+        Method::POST,
+        &url,
+        Some(json!({
+            "space_ref": space_ref,
+            "idempotency_key": format!("{key_prefix}-{}-{counter}", unix_nanos()),
+        })),
+        Some(org_id),
+        Some(actor),
+        None,
+    )
+    .await;
+    if status == StatusCode::FORBIDDEN {
+        return Ok(String::new());
+    }
+    if !status.is_success() {
+        return Err((status, Json(response)));
+    }
+    let token = crate::envelope::unwrap_data(&response)
+        .get("token")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    if token.trim().is_empty() {
+        return Err(invalid_decision());
+    }
+    Ok(token)
 }
 
 /// Resolves a browser-selected personal Space into the initial, short-lived
@@ -430,6 +468,7 @@ pub(crate) async fn inject_personal_schedule_create_context(
     input: &mut Value,
     schedule_id: &str,
     idempotency_key: &str,
+    contract_enabled: bool,
 ) -> Result<(), (StatusCode, Json<Value>)> {
     let object = input.as_object_mut().ok_or_else(|| {
         (
@@ -488,7 +527,7 @@ pub(crate) async fn inject_personal_schedule_create_context(
                 )
             })?,
     };
-    let template = object.get("task_template").cloned().ok_or_else(|| {
+    let mut template = object.get("task_template").cloned().ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,
             Json(error(
@@ -510,6 +549,8 @@ pub(crate) async fn inject_personal_schedule_create_context(
             )),
         ));
     }
+    let contract = split_schedule_contract(&mut template, contract_enabled)?;
+    object.insert("task_template".to_owned(), template.clone());
     // The digest Control commits to is recomputed by Go at create, at fire and
     // in Orchestrator, so the template must be one whose digest survives the
     // Postgres JSONB round trip and must be hashed the way Go hashes it. See
@@ -539,16 +580,25 @@ pub(crate) async fn inject_personal_schedule_create_context(
         "{}/api/v1/internal/spaces/schedule-create-decision",
         state.user_core_url
     );
+    let mut control_request = json!({
+        "space_ref": space_ref,
+        "schedule_id": schedule_id,
+        "template_digest": template_digest,
+        "idempotency_key": idempotency_key,
+    });
+    let expected_schema = match &contract {
+        Some((contract_digest, contract_expires_at)) => {
+            control_request["contract_digest"] = json!(contract_digest);
+            control_request["contract_expires_at"] = json!(contract_expires_at);
+            "sha256:space-cron-create-v2"
+        }
+        None => "sha256:space-cron-create-v1",
+    };
     let (status, Json(response)) = proxy_json(
         state,
         Method::POST,
         &url,
-        Some(json!({
-            "space_ref": space_ref,
-            "schedule_id": schedule_id,
-            "template_digest": template_digest,
-            "idempotency_key": idempotency_key,
-        })),
+        Some(control_request),
         Some(org_id),
         Some(&actor),
         None,
@@ -572,8 +622,7 @@ pub(crate) async fn inject_personal_schedule_create_context(
         || required_decision_string(decision, "subject_id")? != user.user_id
         || required_decision_string(decision, "service_audience")? != "model-plane-capability-core"
         || required_decision_string(decision, "action_id")? != "model.cron.create"
-        || required_decision_string(decision, "action_schema_hash")?
-            != "sha256:space-cron-create-v1"
+        || required_decision_string(decision, "action_schema_hash")? != expected_schema
         || required_decision_string(decision, "idempotency_key")? != idempotency_key
     {
         return Err(invalid_decision());
@@ -593,6 +642,54 @@ pub(crate) async fn inject_personal_schedule_create_context(
         Value::String(idempotency_key.to_owned()),
     );
     Ok(())
+}
+
+/// Splits the `approval_contract` text off a create template (DEC-16). The text
+/// is hashed exactly as stored, the digest capability-core recomputes, and its
+/// expiry is what Control signs. With the switch off the key is dropped, so the
+/// schedule stays draft-only and no contract reaches Control.
+fn split_schedule_contract(
+    template: &mut Value,
+    enabled: bool,
+) -> Result<Option<(String, String)>, (StatusCode, Json<Value>)> {
+    let Some(object) = template.as_object_mut() else {
+        return Ok(None);
+    };
+    let Some(contract) = object.get("approval_contract").cloned() else {
+        return Ok(None);
+    };
+    if !enabled {
+        object.remove("approval_contract");
+        return Ok(None);
+    }
+    let text = contract.as_str().ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_task_template",
+                "The schedule contract must be JSON text.",
+            )),
+        )
+    })?;
+    let expires_at = serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("expires_at")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(error(
+                    "invalid_task_template",
+                    "The schedule contract must name an expiry.",
+                )),
+            )
+        })?;
+    let digest = format!("sha256:{}", hex::encode(Sha256::digest(text.as_bytes())));
+    Ok(Some((digest, expires_at)))
 }
 
 fn unix_nanos() -> u128 {
@@ -4533,6 +4630,10 @@ fn apply_mention_binding_policy(
         "auto" => {}
         _ => {
             object.insert("plan_mode".to_owned(), json!(false));
+            // An execute turn is an autonomous run too; the model gateway
+            // reads both spellings, so both are removed.
+            object.remove("execute_granted");
+            object.remove("executeGranted");
             if let Some(features) = object.get_mut("features").and_then(Value::as_array_mut) {
                 features.retain(|feature| feature.as_str() != Some("agentic"));
             }
@@ -5218,6 +5319,7 @@ mod tests {
             &mut outbound,
             "cron-1",
             "create-1",
+            false,
         )
         .await
         .expect("Control schedule create authority should be injected");
@@ -5279,6 +5381,7 @@ mod tests {
             &mut outbound,
             "cron-1",
             "create-1",
+            false,
         )
         .await
         .map_err(|(status, axum::Json(body))| (status, body));
@@ -5333,6 +5436,95 @@ mod tests {
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
         assert_eq!(body["error"]["code"], "invalid_task_template");
         assert_eq!(control_requests, 0);
+    }
+
+    /// The stored-consent vector shared with capability-core contract_test.go and
+    /// mp-contracts scheduled_contract.rs. Its digest is pinned in both.
+    const SCHEDULE_CONTRACT_TEXT: &str = r#"{"expires_at":"2026-11-23T10:00:00Z","max_rounds":6,"max_tokens_per_round":2048,"tools":[{"approved_at":"2026-10-24T10:00:00Z","capability":"cap.tool.web_search","class":"read","tool":"web_search"}],"v":1}"#;
+    const SCHEDULE_CONTRACT_GO_DIGEST: &str =
+        "sha256:3d4828c85b976a25447098498e5077de75aa531a0e64aebe2d68bfc8f7953d55";
+
+    #[test]
+    fn schedule_contract_digest_matches_the_cross_plane_vector() {
+        let mut template = json!({"goal": "Summarise", "approval_contract": SCHEDULE_CONTRACT_TEXT});
+
+        let (digest, expires_at) = super::split_schedule_contract(&mut template, true)
+            .expect("the vector is accepted")
+            .expect("a contract is present");
+
+        assert_eq!(digest, SCHEDULE_CONTRACT_GO_DIGEST);
+        assert_eq!(expires_at, "2026-11-23T10:00:00Z");
+        assert_eq!(template["approval_contract"], SCHEDULE_CONTRACT_TEXT);
+    }
+
+    #[test]
+    fn schedule_contract_is_dropped_while_the_switch_is_off() {
+        let mut template = json!({"goal": "Summarise", "approval_contract": SCHEDULE_CONTRACT_TEXT});
+
+        let split = super::split_schedule_contract(&mut template, false).expect("no refusal");
+
+        assert!(split.is_none());
+        assert!(template.get("approval_contract").is_none());
+    }
+
+    async fn contract_create_for(enabled: bool, schema: &str) -> (Value, Value) {
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/schedule-create-decision"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"token": "schedule-create-token", "decision": {
+                    "space_ref": "personal-1", "subject_id": "user-1",
+                    "service_audience": "model-plane-capability-core", "action_id": "model.cron.create",
+                    "action_schema_hash": schema, "idempotency_key": "create-1"
+                }}
+            })))
+            .mount(&user_core)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.user_core_url = user_core.uri();
+        let mut outbound = json!({
+            "space_ref": "personal-1", "name": "Nightly",
+            "task_template": {"goal": "Summarise", "approval_contract": SCHEDULE_CONTRACT_TEXT},
+        });
+        inject_personal_schedule_create_context(
+            &state,
+            &authenticated_user(),
+            "org-1",
+            &mut outbound,
+            "cron-1",
+            "create-1",
+            enabled,
+        )
+        .await
+        .expect("the create is accepted");
+        let received = user_core.received_requests().await.expect("Control requests");
+        let control_body: Value =
+            serde_json::from_slice(&received.first().expect("Control was asked").body).expect("JSON");
+        (outbound, control_body)
+    }
+
+    #[tokio::test]
+    async fn schedule_create_asks_control_to_bind_the_contract_when_enabled() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+
+        let (outbound, control_body) =
+            contract_create_for(true, "sha256:space-cron-create-v2").await;
+
+        assert_eq!(control_body["contract_digest"], SCHEDULE_CONTRACT_GO_DIGEST);
+        assert_eq!(control_body["contract_expires_at"], "2026-11-23T10:00:00Z");
+        assert_eq!(outbound["task_template"]["approval_contract"], SCHEDULE_CONTRACT_TEXT);
+    }
+
+    #[tokio::test]
+    async fn schedule_create_stays_draft_only_when_the_switch_is_off() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+
+        let (outbound, control_body) =
+            contract_create_for(false, "sha256:space-cron-create-v1").await;
+
+        assert!(control_body.get("contract_digest").is_none());
+        assert!(control_body.get("contract_expires_at").is_none());
+        assert!(outbound["task_template"].get("approval_contract").is_none());
     }
 
     #[tokio::test]
@@ -5654,6 +5846,145 @@ mod tests {
         );
         assert!(request.headers.get("x-delegation-signature").is_some());
         assert!(outbound.get("space_ref").is_none());
+    }
+
+    /// One follow-up turn of a room thread. Control answers the append decision and
+    /// the retrieval decision with the given replies; the helper returns the outcome,
+    /// the outbound body and the requests Control received.
+    async fn follow_up_turn(
+        retrieval: ResponseTemplate,
+    ) -> (
+        Result<(), axum::http::StatusCode>,
+        Value,
+        Vec<wiremock::Request>,
+    ) {
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/thread-append-decision"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"token": "append-token", "decision": {
+                    "space_ref": "room-1", "decision_ref": "append-decision-1",
+                    "recipient_audience_ref": "audience-2", "recipient_audience_revision": 4,
+                    "recipient_audience_hash": "sha256:audience-2", "privacy_policy_ref": "privacy-1",
+                    "authority_revision": 8, "resource_authorization_ref": "resource-1",
+                    "action_schema_hash": "sha256:thread-append-v1", "payload_digest": "sha256:append-payload",
+                    "idempotency_key": "append-1"
+                }}
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/retrieval-decision"))
+            .respond_with(retrieval)
+            .mount(&user_core)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.user_core_url = user_core.uri();
+        let mut outbound = json!({
+            "content": "and the second one?", "thread_id": "thread-1", "space_ref": "room-1",
+            "idempotency_key": "append-1"
+        });
+
+        let outcome = inject_personal_thread_context(
+            &state,
+            &authenticated_user(),
+            "org-1",
+            &mut outbound,
+        )
+        .await
+        .map_err(|(status, _)| status);
+        let received = user_core
+            .received_requests()
+            .await
+            .expect("Control requests");
+        (outcome, outbound, received)
+    }
+
+    #[tokio::test]
+    async fn a_scoped_append_turn_carries_the_retrieval_decision() {
+        // Serialized: reads a process-global env switch and service URLs that sibling tests mutate.
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        std::env::set_var("GATEWAY_SPACE_APPEND_RETRIEVAL", "true");
+        let (outcome, outbound, received) = follow_up_turn(ResponseTemplate::new(200).set_body_json(
+            json!({"data": {"token": "append-retrieval-token"}}),
+        ))
+        .await;
+        std::env::remove_var("GATEWAY_SPACE_APPEND_RETRIEVAL");
+
+        outcome.expect("a follow-up with retrieval authority is accepted");
+        assert_eq!(
+            outbound["space_append_context"]["retrieval_decision_token"],
+            "append-retrieval-token"
+        );
+        let request = received
+            .iter()
+            .find(|request| request.url.path() == "/api/v1/internal/spaces/retrieval-decision")
+            .expect("retrieval decision request");
+        let body: Value = serde_json::from_slice(&request.body).expect("retrieval JSON");
+        assert_eq!(body["space_ref"], "room-1");
+        assert!(body["idempotency_key"]
+            .as_str()
+            .is_some_and(|key| key.starts_with("space-retrieval-append-")));
+    }
+
+    #[tokio::test]
+    async fn a_forbidden_retrieval_decision_on_append_yields_an_empty_token_not_an_unscoped_call() {
+        // Serialized: reads a process-global env switch and service URLs that sibling tests mutate.
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        std::env::set_var("GATEWAY_SPACE_APPEND_RETRIEVAL", "true");
+        let (outcome, outbound, _received) = follow_up_turn(ResponseTemplate::new(403).set_body_json(
+            json!({"error": "current retrieval authority required"}),
+        ))
+        .await;
+        std::env::remove_var("GATEWAY_SPACE_APPEND_RETRIEVAL");
+
+        outcome.expect("a denied retrieval entitlement must not fail a follow-up");
+        // The key stays and is empty: the gateway suppresses grounding for an empty
+        // token, where an absent key would mean an organisation-wide search.
+        assert_eq!(
+            outbound["space_append_context"]["retrieval_decision_token"],
+            ""
+        );
+        assert_eq!(
+            outbound["space_append_context"]["space_decision_token"],
+            "append-token"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retrieval_decision_outage_fails_the_follow_up() {
+        // Serialized: reads a process-global env switch and service URLs that sibling tests mutate.
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        std::env::set_var("GATEWAY_SPACE_APPEND_RETRIEVAL", "true");
+        let (outcome, _outbound, _received) = follow_up_turn(ResponseTemplate::new(503).set_body_json(
+            json!({"error": "Space authority repository unavailable"}),
+        ))
+        .await;
+        std::env::remove_var("GATEWAY_SPACE_APPEND_RETRIEVAL");
+
+        assert!(
+            outcome.is_err(),
+            "an outage must fail the follow-up, not degrade it silently"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_follow_up_without_the_switch_asks_control_for_no_retrieval_decision() {
+        // Serialized: reads a process-global env switch and service URLs that sibling tests mutate.
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        std::env::remove_var("GATEWAY_SPACE_APPEND_RETRIEVAL");
+        let (outcome, outbound, received) = follow_up_turn(ResponseTemplate::new(200).set_body_json(
+            json!({"data": {"token": "unused"}}),
+        ))
+        .await;
+
+        outcome.expect("the follow-up is accepted as it was before");
+        assert!(outbound["space_append_context"]
+            .get("retrieval_decision_token")
+            .is_none());
+        assert!(received.iter().all(|request| {
+            request.url.path() != "/api/v1/internal/spaces/retrieval-decision"
+        }));
     }
 
     #[tokio::test]
@@ -8929,6 +9260,8 @@ mod tests {
             "space_ref": "space-1",
             "mentioned_agent_ref": "svc-support",
             "plan_mode": true,
+            "execute_granted": true,
+            "executeGranted": true,
             "features": ["tools", "agentic", "memory"],
             "tools": [{"name": "web_search"}],
         });
@@ -8948,6 +9281,10 @@ mod tests {
         assert_eq!(
             body["plan_mode"], false,
             "confirmation policy forbids autonomous runs"
+        );
+        assert!(
+            body.get("execute_granted").is_none() && body.get("executeGranted").is_none(),
+            "confirmation policy forbids an execute turn, under either spelling"
         );
         assert_eq!(
             body["features"],
@@ -9606,6 +9943,54 @@ mod tests {
         assert!(
             body.get("space_instructions").is_none(),
             "no Space content may leak to a caller Control never confirmed as a member"
+        );
+    }
+
+    #[tokio::test]
+    async fn space_instructions_are_stamped_on_a_plan_mode_turn_and_withheld_from_a_non_member() {
+        // A Do turn (plan mode, agentic) in a project gets the Space layer the same
+        // way an Ask turn does: the flag is not what decides it, membership is.
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _application, _user_core) = authored_instructions_test_state(
+            json!({"instructions": "Org rule."}),
+            json!({"instructions": "Space rule."}),
+        )
+        .await;
+        let mut member_turn = json!({
+            "content": "make the plan",
+            "space_ref": "space-1",
+            "plan_mode": true,
+            "features": ["agentic"],
+        });
+        let result =
+            inject_authored_instructions(&state, &authenticated_user(), "org-1", &mut member_turn)
+                .await;
+
+        assert!(result.is_ok());
+        assert_eq!(member_turn["space_instructions"], "Space rule.");
+        assert_eq!(
+            member_turn["plan_mode"], true,
+            "the Space layer rides the turn; it does not change its mode"
+        );
+
+        let mut non_member_turn = json!({
+            "content": "make the plan",
+            "space_ref": "someone-elses-space",
+            "plan_mode": true,
+            "features": ["agentic"],
+        });
+        let result = inject_authored_instructions(
+            &state,
+            &authenticated_user(),
+            "org-1",
+            &mut non_member_turn,
+        )
+        .await;
+
+        assert!(result.is_err(), "a non-member's plan-mode turn fails closed");
+        assert!(
+            non_member_turn.get("space_instructions").is_none(),
+            "no Space text reaches a caller Control never confirmed as a member"
         );
     }
 

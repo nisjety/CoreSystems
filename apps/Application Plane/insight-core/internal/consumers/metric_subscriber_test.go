@@ -333,6 +333,32 @@ func TestProcess_MetricsSnapshotted_FetchesAndRecordsRealValues(t *testing.T) {
 		if input.ConnectorType != "meta" {
 			t.Errorf("connector_type = %q, want meta", input.ConnectorType)
 		}
+		if input.TimeWindow == nil || input.TimeWindow.From == nil || input.TimeWindow.To == nil {
+			t.Errorf("time_window = %#v, want a bounded provider observation window", input.TimeWindow)
+		}
+		if input.ObservedAt.IsZero() || input.SourceTraceRef == "" || input.RetentionClass != "durable" {
+			t.Errorf("grounding fields = %#v, want observed_at, trace ref, and durable retention", input)
+		}
+	}
+}
+
+func TestProcess_MetricsSnapshottedUsesDistinctTraceForEachMetaAdAccount(t *testing.T) {
+	snapshotDate := time.Date(2026, 7, 4, 0, 0, 0, 0, time.UTC)
+	rec := &fakeRecorder{}
+	fetcher := &fakeSocialFetcher{rows: []socialmetrics.Metric{
+		{OrgID: "org-1", AccountID: "acct-1", ProviderKey: "meta", MetricName: "ads.impressions", MetricValue: 100, Dimensions: map[string]any{"ad_account_id": "ad-1", "campaign_id": ""}, SnapshotDate: snapshotDate},
+		{OrgID: "org-1", AccountID: "acct-1", ProviderKey: "meta", MetricName: "ads.impressions", MetricValue: 200, Dimensions: map[string]any{"ad_account_id": "ad-2", "campaign_id": ""}, SnapshotDate: snapshotDate},
+	}}
+	sub := &MetricSubscriber{recorder: rec, fetcher: fetcher}
+
+	if got := sub.process(context.Background(), socialSubjectPrefix+metricsSnapshottedType, metricsSnapshottedEvent("org-1", "acct-1", "2026-07-04")); got != outcomeAck {
+		t.Fatalf("outcome = %v, want ack", got)
+	}
+	if rec.count() != 2 {
+		t.Fatalf("recorded %d metrics, want 2", rec.count())
+	}
+	if rec.inputs[0].ID == rec.inputs[1].ID || rec.inputs[0].SourceTraceRef == rec.inputs[1].SourceTraceRef {
+		t.Errorf("distinct Meta ad accounts must not share event ids or source traces: %#v", rec.inputs)
 	}
 }
 

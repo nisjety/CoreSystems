@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  moment_service:
+    build: .
+    container_name: moment_service
+    ports:
+      - "5006:5006"
+    environment:
+      - MOMENT_API_KEY=${MOMENT_API_KEY}
+      - MOMENT_COMPANY_CODE=${MOMENT_COMPANY_CODE}
+      - MOMENT_ENVIRONMENT=${MOMENT_ENVIRONMENT:-prod}
+      - MOMENT_BASE_URL=${MOMENT_BASE_URL:-https://app.moment.team/api/1.0}
+      - MOMENT_PORT=5006
+      - FLASK_SECRET_KEY=${FLASK_SECRET_KEY:-moment_secret_key_change_in_production}
+      - FLASK_DEBUG=${FLASK_DEBUG:-false}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - POSTGRES_URL=${POSTGRES_URL:-postgresql://aquatiq_user:aquatiq_dev_password@postgres:5432/aquatiq_dev}
+      - DATABASE_PATH=/app/data/moment_sync.db
+    volumes:
+      - ./data:/app/data
+      - ./.env:/app/.env:ro
+    depends_on:
+      - redis
+      - postgres
+    networks:
+      - moment_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.connect(('localhost', 5006))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    container_name: moment_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - moment_network
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: moment_postgres
+    environment:
+      - POSTGRES_USER=aquatiq_user
+      - POSTGRES_PASSWORD=aquatiq_dev_password
+      - POSTGRES_DB=aquatiq_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - moment_network
+    restart: unless-stopped
+
+networks:
+  moment_network:
+    driver: bridge
+
+volumes:
+  redis_data:
+  postgres_data:

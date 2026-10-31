@@ -11,8 +11,9 @@
 //! appears, and the obvious place to look (the backend, which is emitting
 //! correctly) is the wrong one.
 //!
-//! The relay is `upstream::proxy_sse_stream_with_data_plane`; the other
-//! `proxy_sse_stream*` entry points delegate to it.
+//! The relay is `upstream::proxy_sse_stream_with_browser`. WS21-S2 moved its body
+//! there from `proxy_sse_stream_with_data_plane`, which now delegates to it; the
+//! other `proxy_sse_stream*` entry points delegate to the relay, directly or through it.
 //!
 //! # What this test does and does not prove
 //!
@@ -62,7 +63,7 @@ fn relay_source() -> String {
 /// assertion strict where it matters.
 fn relay_function_body() -> String {
     let source = relay_source();
-    const RELAY: &str = "pub(crate) async fn proxy_sse_stream_with_data_plane(";
+    const RELAY: &str = "pub(crate) async fn proxy_sse_stream_with_browser(";
     let start = source.find(RELAY).unwrap_or_else(|| {
         panic!(
             "{RELAY} not found in src/upstream.rs. The other proxy_sse_stream* \

@@ -35,6 +35,20 @@ pub(crate) fn ok_with_source<T: Serialize>(data: T, source: &str) -> Value {
     })
 }
 
+/// Success envelope carrying a keyset cursor in `meta.next_cursor`. `null`
+/// means the page was the last one, so the client stops asking for more.
+pub(crate) fn ok_with_cursor<T: Serialize>(data: T, next_cursor: &str) -> Value {
+    let next_cursor = if next_cursor.is_empty() {
+        Value::Null
+    } else {
+        json!(next_cursor)
+    };
+    json!({
+        "data": serde_json::to_value(data).unwrap_or(Value::Null),
+        "meta": { "next_cursor": next_cursor },
+    })
+}
+
 pub(crate) fn error(code: &'static str, message: impl Into<String>) -> Value {
     serde_json::to_value(ApiErrorEnvelope {
         error: ApiError {
@@ -57,7 +71,17 @@ pub(crate) fn upstream_unavailable() -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::upstream_unavailable;
+    use super::{ok_with_cursor, upstream_unavailable};
+    use serde_json::{json, Value};
+
+    #[test]
+    fn cursor_envelope_reports_null_on_the_last_page() {
+        let last = ok_with_cursor(json!({ "sessions": [] }), "");
+        assert_eq!(last["meta"]["next_cursor"], Value::Null);
+        let more = ok_with_cursor(json!({ "sessions": [] }), "abc-_123");
+        assert_eq!(more["meta"]["next_cursor"], "abc-_123");
+        assert_eq!(more["data"]["sessions"], json!([]));
+    }
 
     #[test]
     fn upstream_transport_failures_use_a_bounded_public_message() {

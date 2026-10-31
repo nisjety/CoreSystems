@@ -18,12 +18,14 @@
 //! be about the question at all", using signals that can be justified line by
 //! line:
 //!
-//! 1. **Quarry's own reranker score**, when present. Quarry's search stack wraps
-//!    its provider in a `RerankingSearchProvider` that asks the Model Plane to
-//!    score how well each of the top-N results answers the query, and returns
-//!    that as `score` in `[0,1]`. It is a real relevance judgement against the
-//!    same query and therefore outranks anything we can compute here. It is
-//!    absent (not zero) when reranking is disabled or the hit fell outside the
+//! 1. **Quarry's own reranker score**, when it can be read. Quarry reorders its
+//!    results with the Data Plane's cross-encoder, and a caller that asks for
+//!    `cross_encoder.v1` gets that score on each reranked hit. It is a real
+//!    relevance judgement against the same query and therefore outranks anything
+//!    we can compute here, but a raw cross-encoder score is not a probability, so
+//!    it is read only through its calibration table
+//!    ([`provider_score_for_gate`]). Without one it is absent. It is also absent
+//!    (not zero) when the rerank did not apply or the hit fell outside the
 //!    reranked head — see [`Candidate::provider_score`].
 //! 2. **Lexical overlap** between the question's content terms and the hit's
 //!    title + snippet, stopword-stripped and lightly stemmed in Norwegian *and*
@@ -70,6 +72,8 @@
 
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
+
+use crate::relevance_calibration::Calibration;
 
 // ---------------------------------------------------------------------------
 // Tunables. Same rule as `deep_research`'s caps: every one is env-overridable
@@ -742,13 +746,71 @@ impl Question {
 // Candidate + verdict
 // ---------------------------------------------------------------------------
 
+/// A provider score kind the gate knows how to read.
+///
+/// Quarry names the kind of the scores it sends on a `/v1/search` answer, and only for a caller
+/// that asked for it. A kind the gate does not know is never read, because a number on a guessed
+/// scale is worse than no number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScoreKind {
+    /// Quarry's cross-encoder score (`cross_encoder.v1`). Read only through its calibration table.
+    CrossEncoderV1,
+}
+
+impl ScoreKind {
+    /// The kind a wire name denotes, or `None` for a name this gate does not read.
+    #[must_use]
+    pub fn parse(wire: &str) -> Option<Self> {
+        match wire {
+            "cross_encoder.v1" => Some(Self::CrossEncoderV1),
+            _ => None,
+        }
+    }
+
+    /// The wire name of this kind.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CrossEncoderV1 => "cross_encoder.v1",
+        }
+    }
+}
+
+/// The provider score as the gate may read it, given the kind Quarry named for it.
+///
+/// - No kind named (a legacy response): the score is read exactly as it always was.
+/// - `cross_encoder.v1` with a calibration table: the score is mapped through the table, so the
+///   blend in [`assess_with_signals`] always sees a value on the scale the gate was tuned for.
+/// - `cross_encoder.v1` with no table, or any other kind: the score is **absent**. It is not read
+///   raw, and it is not zero.
+///
+/// A score that is not a number is absent in every case.
+#[must_use]
+pub fn provider_score_for_gate(
+    kind: Option<&str>,
+    raw: Option<f32>,
+    calibration: Option<&Calibration>,
+) -> Option<f32> {
+    let raw = raw.filter(|score| score.is_finite());
+    match kind {
+        None => raw,
+        Some(wire) => match (ScoreKind::parse(wire), calibration) {
+            (Some(ScoreKind::CrossEncoderV1), Some(table)) => {
+                raw.and_then(|score| table.apply(score))
+            }
+            _ => None,
+        },
+    }
+}
+
 /// One search hit, borrowed for scoring.
 #[derive(Debug, Clone, Copy)]
 pub struct Candidate<'a> {
     pub url: &'a str,
     pub title: &'a str,
     pub snippet: &'a str,
-    /// Quarry's semantic-reranker relevance in `[0,1]`.
+    /// Quarry's relevance judgement in `[0,1]`, already on the gate's scale: a
+    /// cross-encoder score arrives calibrated ([`provider_score_for_gate`]).
     ///
     /// `None` means **not reranked** — reranking is off for this deployment, or
     /// the hit fell outside the reranked head — which is a different fact from
@@ -2291,5 +2353,99 @@ mod tests {
         assert!(reason.contains("filtered as irrelevant"), "{reason}");
         assert!(reason.contains("0.00"), "{reason}");
         assert!(reason.contains("social/video/aggregator host"), "{reason}");
+    }
+
+    // --- which provider scores the gate may read (QB-T12) -----------------
+
+    /// A legacy response names no score kind, and its score is read exactly as the gate has always
+    /// read it. This is the byte-identical path: no table is consulted.
+    #[test]
+    fn a_legacy_score_is_read_exactly_as_it_always_was() {
+        assert_eq!(provider_score_for_gate(None, Some(0.42), None), Some(0.42));
+        assert_eq!(provider_score_for_gate(None, Some(0.0), None), Some(0.0));
+        assert_eq!(provider_score_for_gate(None, None, None), None);
+        assert_eq!(
+            provider_score_for_gate(None, Some(f32::NAN), None),
+            None,
+            "a legacy score that is not a number is absent"
+        );
+    }
+
+    /// A cross-encoder score is read only through its table. The raw value never reaches the blend.
+    #[test]
+    fn a_cross_encoder_score_is_read_only_through_its_calibration() {
+        let table =
+            Calibration::from_knots(&[(0.0, 0.0), (0.5, 0.4), (1.0, 1.0)]).expect("a valid table");
+        assert_eq!(
+            provider_score_for_gate(Some("cross_encoder.v1"), Some(0.5), Some(&table)),
+            Some(0.4),
+            "the calibrated value, not the raw 0.5"
+        );
+        assert_eq!(
+            provider_score_for_gate(Some("cross_encoder.v1"), Some(f32::NAN), Some(&table)),
+            None
+        );
+    }
+
+    /// The defect this guards against: a raw cross-encoder score fed to the gate as if it were
+    /// calibrated. With no table the score is absent, so the gate runs on the words alone.
+    #[test]
+    fn a_cross_encoder_score_without_a_table_is_absent_not_read_raw() {
+        assert_eq!(
+            provider_score_for_gate(Some("cross_encoder.v1"), Some(0.9), None),
+            None
+        );
+    }
+
+    #[test]
+    fn an_unknown_score_kind_is_never_read_even_with_a_table() {
+        let table = Calibration::from_knots(&[(0.0, 0.0), (1.0, 1.0)]).expect("a valid table");
+        assert_eq!(
+            provider_score_for_gate(Some("cross_encoder.v2"), Some(0.9), Some(&table)),
+            None
+        );
+    }
+
+    #[test]
+    fn the_score_kind_names_round_trip_and_refuse_the_unknown() {
+        assert_eq!(
+            ScoreKind::parse("cross_encoder.v1"),
+            Some(ScoreKind::CrossEncoderV1)
+        );
+        assert_eq!(ScoreKind::parse("cross_encoder.v2"), None);
+        assert_eq!(ScoreKind::CrossEncoderV1.as_str(), "cross_encoder.v1");
+    }
+
+    /// A calibrated zero is a judgement that the hit is irrelevant, and the gate must treat it as one.
+    /// This hit matches one of the two question terms in its title, so on its words it scores 0.5.
+    /// Judged irrelevant by the reranker it must be dropped, and it must not be kept on its words.
+    #[test]
+    fn a_judged_zero_drops_a_hit_that_its_words_alone_would_keep() {
+        let question = Question::parse("kvantekomputer gjennombrudd");
+        let page = Candidate {
+            url: "https://www.example.no/a",
+            title: "Kvantekomputer",
+            snippet: "",
+            provider_score: None,
+        };
+        let unjudged = assess(&question, &page);
+        let judged_zero = assess(
+            &question,
+            &Candidate {
+                provider_score: Some(0.0),
+                ..page
+            },
+        );
+        assert!(
+            unjudged.kept(),
+            "the words alone keep it: {:.2}",
+            unjudged.score
+        );
+        assert_eq!(judged_zero.provider, Some(0.0));
+        assert!(
+            !judged_zero.kept(),
+            "a judged-irrelevant hit must not be kept on its words: {:.2}",
+            judged_zero.score
+        );
     }
 }

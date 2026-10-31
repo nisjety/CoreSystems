@@ -8,6 +8,7 @@ Name | Type
 ------------ | -------------
 `decision` | string
 `reason` | string
+`scope` | string
 
 ## Example
 
@@ -18,6 +19,7 @@ import type { DecideApprovalBody } from '@model-plane/sdk'
 const example = {
   "decision": null,
   "reason": null,
+  "scope": null,
 } satisfies DecideApprovalBody
 
 console.log(example)

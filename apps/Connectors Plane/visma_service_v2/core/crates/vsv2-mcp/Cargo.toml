@@ -1,0 +1,42 @@
+[package]
+name = "vsv2-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "vsv2-mcp"
+path = "src/main.rs"
+
+[dependencies]
+vsv2-common      = { workspace = true }
+vsv2-auth        = { workspace = true }
+vsv2-ratelimit   = { workspace = true }
+vsv2-erp-rest    = { workspace = true }
+vsv2-datamart    = { workspace = true }
+vsv2-interactive = { workspace = true }
+vsv2-signin      = { workspace = true }
+rmcp             = { version = "3.5", default-features = false, features = ["server", "transport-io", "elicitation", "schemars"] }
+tokio            = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+async-trait      = { workspace = true }
+thiserror        = { workspace = true }
+anyhow           = { workspace = true }
+tracing          = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono           = { workspace = true }
+sqlx             = { workspace = true }
+serde_yaml       = { workspace = true }
+uuid             = { workspace = true }
+dotenvy          = { workspace = true }
+url              = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+tempfile   = { workspace = true }
+mockito    = { workspace = true }
+uuid       = { workspace = true }
+base64     = { workspace = true }

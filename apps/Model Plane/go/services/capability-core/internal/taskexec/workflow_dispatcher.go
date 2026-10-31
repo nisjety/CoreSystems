@@ -355,6 +355,9 @@ func (d *WorkflowDispatcher) reauthorizeScheduleFire(ctx context.Context, task T
 	if actualTemplateDigest != intent.TemplateDigest {
 		return nil, fmt.Errorf("taskexec: cron task %s template digest does not match its fire intent", task.ID)
 	}
+	if err := refuseExpiredContract(canonicalTemplate, time.Now().UTC()); err != nil {
+		return nil, fmt.Errorf("taskexec: cron task %s: %w", task.ID, err)
+	}
 	if err := d.fireAuthorizer.AuthorizeFire(ctx, intent); err != nil {
 		return nil, fmt.Errorf("taskexec: cron task %s fresh Control fire authorization failed: %w", task.ID, err)
 	}
@@ -400,6 +403,29 @@ func (d *WorkflowDispatcher) reauthorizeScheduleFire(ctx context.Context, task T
 // taskConfigJSON adds the fire intent after persisting that template; that
 // record is authority context, not executable work, and must be excluded
 // before hashing or forwarding it to the scheduled-only workflow.
+// refuseExpiredContract stops a fire whose stored consent contract has run out
+// before Control is called or Temporal starts. The template can outlive the
+// window it was approved in, so the window is checked again at every fire.
+func refuseExpiredContract(canonicalTemplate []byte, now time.Time) error {
+	var fields struct {
+		ApprovalContract string `json:"approval_contract"`
+	}
+	if err := json.Unmarshal(canonicalTemplate, &fields); err != nil {
+		return fmt.Errorf("taskexec: template is not an object: %w", err)
+	}
+	if fields.ApprovalContract == "" {
+		return nil
+	}
+	contract, err := cron.ParseScheduleContract(fields.ApprovalContract)
+	if err != nil {
+		return fmt.Errorf("contract_invalid: %w", err)
+	}
+	if err := cron.CheckContractWindow(contract, now); err != nil {
+		return fmt.Errorf("contract_expired: %w", err)
+	}
+	return nil
+}
+
 func canonicalScheduledTemplate(config json.RawMessage) ([]byte, string, error) {
 	var fields map[string]json.RawMessage
 	if len(config) == 0 || json.Unmarshal(config, &fields) != nil || fields == nil {

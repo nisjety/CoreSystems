@@ -1,0 +1,4 @@
+services:
+  gateway:
+    environment:
+      DATABASE_URL: postgres://user@postgres:5432/gateway

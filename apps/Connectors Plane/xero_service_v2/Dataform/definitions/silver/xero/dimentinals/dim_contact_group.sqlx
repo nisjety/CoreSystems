@@ -1,0 +1,29 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  name: "dim_contact_group",
+  description: "Silver: current Xero contact groups from detail-derived staging. Grain: one row per tenant and group.",
+  tags: ["silver", "xero", "dimension"]
+}
+
+WITH current_groups AS (
+  SELECT *
+  FROM ${ref("dw_staging_xero", "contact_groups")}
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY tenant_id, record_id
+    ORDER BY synced_at DESC
+  ) = 1
+)
+
+SELECT
+  tenant_id,
+  synced_at,
+  first_seen_at,
+  contact_group_id,
+  record_id AS contact_group_internal_id,
+  name AS group_name,
+  status,
+  status = 'ACTIVE' AS is_active,
+  member_count,
+  'xero' AS _source
+FROM current_groups

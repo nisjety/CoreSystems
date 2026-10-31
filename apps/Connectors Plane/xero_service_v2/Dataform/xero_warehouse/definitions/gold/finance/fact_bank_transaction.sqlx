@@ -1,0 +1,41 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "Xero bank transactions; signed external cash flow excludes transfers, overpayments, and deleted rows.",
+  assertions: { nonNull: ["tenant_id", "bank_transaction_id", "bank_transaction_key"], uniqueKey: ["bank_transaction_key"] }
+}
+
+WITH line_sets AS (
+  SELECT tenant_id, bank_transaction_id, COUNT(*) AS observed_line_count,
+         LOGICAL_OR(is_line_set_ambiguous) AS has_ambiguous_lines
+  FROM ${ref("dw_1_silver_xero", "fact_bank_transaction_line")}
+  GROUP BY tenant_id, bank_transaction_id
+), transactions AS (
+  SELECT b.*, COALESCE(s.observed_line_count, 0) AS observed_line_count,
+         (b.line_item_count IS DISTINCT FROM COALESCE(s.observed_line_count, 0)
+          OR COALESCE(s.has_ambiguous_lines, FALSE)) AS is_line_set_ambiguous
+  FROM ${ref("dw_1_silver_xero", "fact_bank_transaction")} AS b
+  LEFT JOIN line_sets AS s
+    ON b.tenant_id = s.tenant_id AND b.bank_transaction_id = s.bank_transaction_id
+)
+SELECT FARM_FINGERPRINT(b.tenant_id) AS company_key,
+       FARM_FINGERPRINT(CAST(b.transaction_date_local AS STRING)) AS date_key,
+       IF(b.bank_account_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(b.tenant_id, '|', b.bank_account_id))) AS bank_account_key,
+       b.bank_transaction_key, b.tenant_id, b.bank_transaction_id,
+       b.transaction_type, b.status, b.is_deleted, b.is_external_cash_flow,
+       b.is_line_set_ambiguous,
+       b.is_reconciled, b.bank_account_id, b.bank_account_code,
+       b.bank_account_name, b.contact_id, b.contact_name, b.reference,
+       b.transaction_date_local AS transaction_date, b.currency_code,
+       b.currency_rate AS source_exchange_rate, b.total AS source_total_in_currency,
+       b.sub_total AS source_subtotal_in_currency,
+       b.total_tax AS source_vat_in_currency,
+       CASE WHEN b.status = 'AUTHORISED' AND NOT b.is_line_set_ambiguous
+                  AND b.currency_code IS NOT NULL
+                  AND b.transaction_type = 'SPEND' THEN -b.total
+            WHEN b.status = 'AUTHORISED' AND NOT b.is_line_set_ambiguous
+                  AND b.currency_code IS NOT NULL
+                  AND b.transaction_type = 'RECEIVE' THEN b.total
+            ELSE NULL END AS external_cash_flow_in_currency,
+       b.line_item_count, b.observed_line_count, b.synced_at, 'xero' AS source_system
+FROM transactions AS b

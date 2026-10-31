@@ -72,6 +72,7 @@ func envBytesWithRetention(t *testing.T, eventType, resourceRef, org, payload st
 	b, err := json.Marshal(&envelope.Envelope{
 		EventType:   eventType,
 		OrgID:       org,
+		UserID:      "user-1",
 		ResourceRef: resourceRef,
 		Payload:     json.RawMessage(payload),
 	})

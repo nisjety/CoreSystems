@@ -27,11 +27,11 @@ func TestPublishGDPRErasureRequiresValidJetStreamPubAck(t *testing.T) {
 		err     error
 		wantErr bool
 	}{
-		{name: "acknowledged", ack: &jetstream.PubAck{Stream: "AQENCIA_CONTROLPLANE", Sequence: 42}},
+		{name: "acknowledged", ack: &jetstream.PubAck{Stream: "CONTROLPLANE", Sequence: 42}},
 		{name: "transport failure", err: errors.New("broker unavailable"), wantErr: true},
 		{name: "missing ack", wantErr: true},
 		{name: "wrong stream", ack: &jetstream.PubAck{Stream: "OTHER", Sequence: 42}, wantErr: true},
-		{name: "zero sequence", ack: &jetstream.PubAck{Stream: "AQENCIA_CONTROLPLANE"}, wantErr: true},
+		{name: "zero sequence", ack: &jetstream.PubAck{Stream: "CONTROLPLANE"}, wantErr: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			publisher := &SharedPublisher{gdprJS: &fakeGDPRJetStream{ack: test.ack, err: test.err}}

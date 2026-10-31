@@ -13,6 +13,8 @@ pub struct Inner {
     pending_global: usize,
     pending_org: HashMap<String, usize>,
     pending_interactive: HashMap<String, usize>,
+    /// INNH-10: starts of an API key admitted but not committed yet, by `key_book`.
+    pending_key: HashMap<String, usize>,
     /// D1-021: run ids a resume has claimed but not committed yet, so two resumes of the
     /// same id racing each other cannot both get past the "is it live" check.
     pending_resume_ids: std::collections::HashSet<String>,
@@ -39,6 +41,12 @@ impl Inner {
         self.runs.len()
     }
 
+    /// Tests only: no API-key start is pending any more (every slot was committed or dropped).
+    #[cfg(test)]
+    pub fn inner_pending_key_is_empty_for_tests(&self) -> bool {
+        self.pending_key.is_empty()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.runs.is_empty()
     }
@@ -50,6 +58,13 @@ impl Inner {
             .map(|(run_id, handle)| (run_id.clone(), handle.clone()))
             .collect()
     }
+}
+
+/// INNH-10: the registry's book key for one API key's runs: its organization and its actor
+/// (`apikey:<key_id>`). The key id is unique across organizations, the org is kept as well so
+/// a runaway id in one tenant can never count against another.
+fn key_book(org_id: &str, key_actor: &str) -> String {
+    format!("{org_id}\u{1f}{key_actor}")
 }
 
 /// Why a start was refused. The reasons are the closed list in
@@ -188,6 +203,22 @@ impl RunRegistry {
         plan: RunCapOverride,
         resume_run_id: Option<&str>,
     ) -> Result<RunSlot, ReserveDenied> {
+        self.try_reserve_keyed(org_id, class, plan, resume_run_id, None)
+    }
+
+    /// As [`try_reserve_for`](Self::try_reserve_for), and for an API key's run (INNH-10)
+    /// `key_actor` (`apikey:<key_id>`) is counted too: the key may have at most
+    /// `RunLimits::max_runs_per_key` live runs (live plus pending, in the run's organization),
+    /// refused as `per_key_run_cap` with scope `key`. It is checked right after the global cap,
+    /// so a key at its cap hears so rather than hearing about the organization.
+    pub fn try_reserve_keyed(
+        self: &Arc<Self>,
+        org_id: &str,
+        class: RunClass,
+        plan: RunCapOverride,
+        resume_run_id: Option<&str>,
+        key_actor: Option<&str>,
+    ) -> Result<RunSlot, ReserveDenied> {
         let limits = &self.limits;
         let mut inner = self.inner.lock().expect("agent_runs mutex poisoned");
         if let Some(run_id) = resume_run_id {
@@ -227,6 +258,30 @@ impl RunRegistry {
                 global,
             ));
         }
+        if let Some(actor) = key_actor {
+            if limits.max_runs_per_key > 0 {
+                let live = inner
+                    .runs
+                    .values()
+                    .filter(|handle| {
+                        handle.live.org_id() == org_id && handle.live.actor_id() == actor
+                    })
+                    .count();
+                let pending = inner
+                    .pending_key
+                    .get(&key_book(org_id, actor))
+                    .copied()
+                    .unwrap_or(0);
+                if live + pending >= limits.max_runs_per_key as usize {
+                    return Err(denied(
+                        "per_key_run_cap",
+                        "key",
+                        limits.max_runs_per_key,
+                        live + pending,
+                    ));
+                }
+            }
+        }
         if let Some(bound) = plan.bound_for(class, limits.max_concurrent_runs) {
             let in_class = match class {
                 RunClass::Interactive => interactive_in_org,
@@ -259,11 +314,15 @@ impl RunRegistry {
         if class == RunClass::Interactive {
             *inner.pending_interactive.entry(org_id.to_owned()).or_default() += 1;
         }
+        if let Some(actor) = key_actor {
+            *inner.pending_key.entry(key_book(org_id, actor)).or_default() += 1;
+        }
         Ok(RunSlot {
             registry: self.clone(),
             org_id: org_id.to_owned(),
             class,
             resume_run_id: resume_run_id.map(str::to_owned),
+            key_actor: key_actor.map(str::to_owned),
             committed: false,
         })
     }
@@ -277,6 +336,8 @@ pub struct RunSlot {
     class: RunClass,
     /// The id a resume claimed (D1-021), released with the slot.
     resume_run_id: Option<String>,
+    /// INNH-10: the API key actor (`apikey:<key_id>`) whose pending count this slot holds.
+    key_actor: Option<String>,
     committed: bool,
 }
 
@@ -310,6 +371,15 @@ impl RunSlot {
                 }
             }
         }
+        if let Some(actor) = self.key_actor.as_deref() {
+            let book = key_book(&self.org_id, actor);
+            if let Some(count) = inner.pending_key.get_mut(&book) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    inner.pending_key.remove(&book);
+                }
+            }
+        }
     }
 
     /// Register the run; its slot stops being pending in the same step, so the
@@ -334,6 +404,108 @@ impl Drop for RunSlot {
                 self.release_pending(&mut inner);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod key_cap_tests {
+    use super::*;
+    use RunClass::Agent;
+
+    const KEY_A: &str = "apikey:key-a";
+    const KEY_B: &str = "apikey:key-b";
+
+    fn registry(per_key: u32) -> Arc<RunRegistry> {
+        Arc::new(RunRegistry::new(RunLimits {
+            max_runs_per_key: per_key,
+            ..RunLimits::unlimited()
+        }))
+    }
+
+    fn reserve(runs: &Arc<RunRegistry>, org: &str, key: Option<&str>) -> Result<RunSlot, CapacityDenied> {
+        match runs.try_reserve_keyed(org, Agent, RunCapOverride::NONE, None, key) {
+            Ok(slot) => Ok(slot),
+            Err(ReserveDenied::Capacity(denied)) => Err(denied),
+            Err(ReserveDenied::ResumeLive) => unreachable!("no resume id was named"),
+        }
+    }
+
+    #[test]
+    fn a_third_pending_run_of_one_key_is_refused_and_another_key_is_not() {
+        let runs = registry(2);
+        let first = reserve(&runs, "org_a", Some(KEY_A)).unwrap();
+        let _second = reserve(&runs, "org_a", Some(KEY_A)).unwrap();
+        let denied = reserve(&runs, "org_a", Some(KEY_A)).unwrap_err();
+        assert_eq!(denied.reason, "per_key_run_cap");
+        assert_eq!(denied.scope, "key");
+        assert_eq!(denied.limit, 2);
+        assert_eq!(denied.active, 2);
+        assert_eq!(denied.retry_after_s, RunLimits::default().cap_retry_after_s);
+        // Another key of the same org, a person's start and a service's start are unaffected.
+        assert!(reserve(&runs, "org_a", Some(KEY_B)).is_ok());
+        assert!(reserve(&runs, "org_a", None).is_ok());
+        // The same key in another organization is a different book.
+        assert!(reserve(&runs, "org_b", Some(KEY_A)).is_ok());
+        // A start that fails before it commits gives the slot back.
+        drop(first);
+        assert!(reserve(&runs, "org_a", Some(KEY_A)).is_ok());
+    }
+
+    #[tokio::test]
+    async fn live_runs_of_the_key_count_and_closing_one_frees_a_slot() {
+        let runs = registry(2);
+        let state = crate::test_support::test_state(crate::test_support::StubDriver::ok());
+        let mut claims = crate::test_support::claims_for_org("org_a");
+        claims.user_id = KEY_A.into();
+        let mut live = Vec::new();
+        for _ in 0..2 {
+            let handle = crate::test_support::insert_live_run(&state, &claims);
+            let run_id = handle.entry.try_lock().expect("idle").run_id.to_string();
+            runs.lock().unwrap().insert(run_id.clone(), handle);
+            live.push(run_id);
+        }
+        let denied = reserve(&runs, "org_a", Some(KEY_A)).unwrap_err();
+        assert_eq!((denied.reason, denied.active), ("per_key_run_cap", 2));
+        assert!(reserve(&runs, "org_a", Some(KEY_B)).is_ok(), "another key is not counted");
+        runs.lock().unwrap().remove(&live[0]);
+        assert!(reserve(&runs, "org_a", Some(KEY_A)).is_ok(), "closing a run frees its slot");
+    }
+
+    #[tokio::test]
+    async fn a_committed_slot_moves_from_pending_to_live_without_double_counting() {
+        let runs = registry(2);
+        let state = crate::test_support::test_state(crate::test_support::StubDriver::ok());
+        let mut claims = crate::test_support::claims_for_org("org_a");
+        claims.user_id = KEY_A.into();
+        let slot = reserve(&runs, "org_a", Some(KEY_A)).unwrap();
+        let handle = crate::test_support::insert_live_run(&state, &claims);
+        slot.commit("run_x".to_owned(), handle);
+        // One live, nothing pending: one more fits, the next does not.
+        let one_more = reserve(&runs, "org_a", Some(KEY_A)).unwrap();
+        assert!(reserve(&runs, "org_a", Some(KEY_A)).is_err());
+        drop(one_more);
+        assert!(runs.lock().unwrap().inner_pending_key_is_empty_for_tests());
+    }
+
+    #[test]
+    fn zero_means_no_per_key_cap() {
+        let runs = registry(0);
+        let held: Vec<_> = (0..10)
+            .map(|_| reserve(&runs, "org_a", Some(KEY_A)).unwrap())
+            .collect();
+        assert_eq!(held.len(), 10);
+    }
+
+    #[test]
+    fn the_global_cap_is_checked_before_the_key_cap() {
+        let runs = Arc::new(RunRegistry::new(RunLimits {
+            max_concurrent_runs: 1,
+            max_runs_per_key: 2,
+            ..RunLimits::unlimited()
+        }));
+        let _held = reserve(&runs, "org_a", Some(KEY_A)).unwrap();
+        let denied = reserve(&runs, "org_a", Some(KEY_A)).unwrap_err();
+        assert_eq!(denied.reason, "global_run_cap");
     }
 }
 

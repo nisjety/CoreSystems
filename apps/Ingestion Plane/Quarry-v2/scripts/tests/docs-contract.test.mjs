@@ -15,14 +15,6 @@ import { fileURLToPath } from "node:url";
 
 import { parseYamlSubset } from "../yaml-subset.mjs";
 
-// Assertions that pin work this branch does not have. They still run and are printed as TODO, so a failure is
-// visible but does not fail the suite. Drop the marker when the work lands on quarryv2-next.
-const OPTION_B =
-  "option B (the Data Plane rerank wire and config) exists only as uncommitted edits in C:/dev/CoresSystem (branch main); see .plan-work/quarry-w1w2/depth/D-D-B3-openapi-sdk.md";
-const QB_T17 =
-  "QB-T17: answer synthesis, search suggest, audio and structured extract (a schema or a prompt on /v1/extract) have no switch in config.rs and run whenever QUARRY_EDGE__MODEL_PLANE_URL is set, so the six switches this test pins include four that do not exist (the AI formats of /v1/scrape have theirs, QUARRY_EDGE__AI_FORMATS, pinned by its own test below; it never gated /v1/extract, see INNH-3). Stays pending until the QB-T17 gate lands (model_plane_gate.rs is not on this branch); see decision 3.12 in .plan-work/quarry-w1w2/DECISIONS-ROUND-2026-10-27.md";
-const pending = (name, reason, fn) => test(name, { todo: reason }, fn);
-
 const here = dirname(fileURLToPath(import.meta.url));
 const quarry = resolve(here, "..", "..");
 const ingestion = resolve(quarry, "..");
@@ -150,7 +142,7 @@ const registry = JSON.parse(read(paths.registry));
 
 // ----------------------------------------------------------------------------- removed identifiers
 
-pending("no removed rerank identifier remains in the compose, the config, the code or the docs", OPTION_B, () => {
+test("no removed rerank identifier remains in the compose, the config, the code or the docs", () => {
   const removed = [
     "SEMANTIC_RERANK_MODEL",
     "semantic_rerank_model",
@@ -182,7 +174,7 @@ test("no current document says the semantic reranker calls the Model Plane", () 
 
 // ----------------------------------------------------------------------------- rerank wiring
 
-pending("the rerank deadline is read from its env, clamped in the config and passed to the reranker", OPTION_B, () => {
+test("the rerank deadline is read from its env, clamped in the config and passed to the reranker", () => {
   const config = read(paths.config);
   const main = read(paths.main);
   assert.match(config, /pub rerank_deadline_ms:\s*Option<u64>/, "config.rs has the deadline field");
@@ -191,7 +183,7 @@ pending("the rerank deadline is read from its env, clamped in the config and pas
   assert.match(main, /\.with_deadline\(cfg\.rerank_deadline\(\)\)/, "main.rs gives the wrapper the budget");
 });
 
-pending("the rerank switches the compose sets are the ones the binary reads", OPTION_B, () => {
+test("the rerank switches the compose sets are the ones the binary reads", () => {
   const env = environmentOf(quarryEdgeBlock(read(paths.compose)));
   // A rerank key the binary never reads is a dead switch: each must be a field of EdgeConfig in config.rs.
   const fields = new Set([...read(paths.config).matchAll(/^\s*pub ([a-z_][a-z0-9_]*)\s*:/gm)].map((m) => m[1]));
@@ -212,7 +204,7 @@ pending("the rerank switches the compose sets are the ones the binary reads", OP
   }
 });
 
-pending("the compose rerank comments name the live check, the ship gate and the score opt-in", OPTION_B, () => {
+test("the compose rerank comments name the live check, the ship gate and the score opt-in", () => {
   const comments = quarryEdgeBlock(read(paths.compose))
     .filter((line) => /^ {6}#/.test(line))
     .join("\n");
@@ -220,13 +212,12 @@ pending("the compose rerank comments name the live check, the ship gate and the 
   assert.match(comments, /model-gateway[\s\S]{0,200}score_kinds|score_kinds[\s\S]{0,200}model-gateway/, "the model-gateway score opt-in (QB-T12) is named");
 });
 
-pending("the Model Plane switches default off, as the docs say (QB-T17)", QB_T17, () => {
+test("the Model Plane switches default off, as the docs say (QB-T17)", () => {
   const env = environmentOf(quarryEdgeBlock(read(paths.compose)));
   for (const key of [
     "QUARRY_EDGE__AUTOPROMPT",
     "QUARRY_EDGE__LLM_CLASSIFY_INTENT",
     "QUARRY_EDGE__PAGE_TITLE_ENRICH",
-    "QUARRY_EDGE__ANSWER_SYNTHESIS",
     "QUARRY_EDGE__SEARCH_SUGGEST",
     "QUARRY_EDGE__MODEL_AUDIO",
   ]) {
@@ -234,7 +225,7 @@ pending("the Model Plane switches default off, as the docs say (QB-T17)", QB_T17
   }
 });
 
-pending("the runbook and the self-host table state the rerank defaults the compose has", OPTION_B, () => {
+test("the runbook and the self-host table state the rerank defaults the compose has", () => {
   const env = environmentOf(quarryEdgeBlock(read(paths.compose)));
   const rerank = composeDefault(env.get("QUARRY_EDGE__SEMANTIC_RERANK"));
   const shadow = composeDefault(env.get("QUARRY_EDGE__RERANK_SHADOW"));
@@ -291,7 +282,7 @@ test("each token-request row is named in the cross-plane integration table", () 
   }
 });
 
-pending("the integration table does not list the semantic reranker among the Model Plane callers", OPTION_B, () => {
+test("the integration table does not list the semantic reranker among the Model Plane callers", () => {
   const line = read(paths.crossPlaneIntegration)
     .split(/\r?\n/)
     .find((candidate) => candidate.includes("refuses the three Model Plane rows"));
@@ -363,7 +354,7 @@ test("the runbook and the self-host guide document every name the AI formats rea
 // ----------------------------------------------------------------------------- no phantom variables (INNH-3)
 
 // A name the docs and the 501 hints tell an operator to set must be one the code reads. The AI formats
-// switch was named for /v1/extract in an audit and in the brief, and it never gated it; this guard is
+// switch was named for /v1/extract in an audit and in the brief before QB-T17 made it the gate; this guard is
 // the one that would have caught a name like that.
 
 const rustFiles = (dir, out = []) => {
@@ -476,11 +467,13 @@ test("every variable the Model Plane docs, the openapi, the composes and the ext
   }
 });
 
-test("the extract 501 texts name the real Model Plane URL setting and never the AI formats switch", () => {
+test("the extract 501 texts name the real Model Plane URL setting and the AI formats switch only in its own text", () => {
   const hints = hintsOfExtract();
   assert.ok(hints.includes("QUARRY_EDGE__MODEL_PLANE_URL"), "the 501 names QUARRY_EDGE__MODEL_PLANE_URL");
   assert.ok(hints.includes("Enable structured extract and AI formats"), "the 501 points at the RUNBOOKS section");
-  assert.ok(!hints.includes("AI_FORMATS"), "no AI formats switch is named by /v1/extract");
+  // QB-T17 (main) gates /v1/extract with QUARRY_EDGE__AI_FORMATS, so the switch off has its own 501 text; the two
+  // texts for a missing URL and a missing credential name no switch.
+  assert.ok(hints.includes("AI_FORMATS_OFF_ERROR"), "extract has a 501 text for the AI formats switch being off");
   assert.ok(sectionOf(read(paths.runbooks), /Enable structured extract and AI formats/, "##").length > 500, "the RUNBOOKS section exists");
 });
 
@@ -488,15 +481,86 @@ test("the RUNBOOKS section says there is no production path before WS16.S1 to S3
   const section = sectionOf(read(paths.runbooks), /Enable structured extract and AI formats/, "##");
   assert.match(section, /no production path today/i);
   assert.ok(section.includes("WS16.S1 to S3") && section.includes("X-7") && section.includes("OD-1"), "names WS16.S1 to S3, X-7 and OD-1");
-  assert.match(section, /has never gated `\/v1\/extract`/, "says the AI formats switch never gated extract");
-  for (const state of ["No Model Plane URL", "A URL, but nothing to authenticate with", "A URL and a credential, but the gateway refuses"]) {
+  assert.match(section, /gates `\/v1\/extract`/, "says the AI formats switch gates extract (QB-T17)");
+  for (const state of ["No Model Plane URL", "The AI formats switch is off", "A URL, but nothing to authenticate with", "A URL and a credential, but the gateway refuses"]) {
     assert.ok(section.includes(state), `the section describes the state: ${state}`);
   }
 });
 
+// ----------------------------------------------------------------------------- answer synthesis (INNH-8a)
+
+const ANSWER_REASONS = [
+  "synthesis_disabled",
+  "zdr_unavailable",
+  "model_path_refused",
+  "no_search_provider",
+  "no_model_plane_url",
+  "model_client_init_failed",
+  "model_plane_auth_refused",
+  "model_plane_rate_limited",
+  "model_plane_error",
+  "answer_search_failed",
+];
+
+test("answer synthesis is off in the Ingestion compose and in the deploy compose, and the code reads the switch", () => {
+  const deployCompose = join(quarry, "deploy", "compose", "docker-compose.yml");
+  for (const [label, text] of [
+    ["Ingestion compose", read(paths.compose)],
+    ["deploy compose", read(deployCompose)],
+  ]) {
+    const env = environmentOf(quarryEdgeBlock(text));
+    assert.equal(composeDefault(env.get("QUARRY_EDGE__ANSWER_SYNTHESIS")), "0", `${label}: QUARRY_EDGE__ANSWER_SYNTHESIS defaults to 0`);
+  }
+  const status = read(join(quarry, "crates", "quarry-edge", "src", "answer_status.rs"));
+  // One switch, one gate: the QB-T17 boot gate owns QUARRY_EDGE__ANSWER_SYNTHESIS, and the answer
+  // status is derived from its decision. A second env constant or config field would be a second gate.
+  assert.doesNotMatch(status, /ENV_ANSWER_SYNTHESIS|"QUARRY_EDGE__ANSWER_SYNTHESIS"/, "answer_status.rs defines no switch of its own");
+  assert.match(status, /from_decision\(/, "the answer status is derived from the boot gate's decision");
+  const gate = read(join(quarry, "crates", "quarry-edge", "src", "model_plane_gate.rs"));
+  assert.match(gate, /Self::AnswerSynthesis => "QUARRY_EDGE__ANSWER_SYNTHESIS"/, "the boot gate names the switch");
+  const config = read(join(quarry, "crates", "quarry-edge", "src", "config.rs"));
+  assert.match(config, /pub answer_synthesis: bool,/, "EdgeConfig reads it");
+  assert.equal((config.match(/pub answer_synthesis: bool,/g) || []).length, 1, "EdgeConfig has the field once");
+});
+
+test("every QUARRY_EDGE__ANSWER_SYNTHESIS name in the docs and the composes is the one the code reads", () => {
+  const deploy = join(quarry, "deploy", "compose");
+  const files = [paths.compose, join(deploy, "docker-compose.yml"), join(deploy, "README.md"), ...currentDocs().map((doc) => doc.path), paths.openapi];
+  let seen = 0;
+  for (const path of new Set(files)) {
+    for (const match of read(path).matchAll(/QUARRY_EDGE__?ANSWER_SYNTHESIS[A-Z0-9_]*/g)) {
+      const name = match[0].replace(/_+$/, "").replace(/^QUARRY_EDGE_ANSWER/, "QUARRY_EDGE__ANSWER");
+      seen += 1;
+      assert.equal(name, "QUARRY_EDGE__ANSWER_SYNTHESIS", `${path} names ${name}, which the code does not read`);
+    }
+  }
+  assert.ok(seen >= 6, "the check found the names it is about");
+});
+
+test("the runbook, the contract and the error reasons name every answer reason the code can send, and only those", () => {
+  const status = read(join(quarry, "crates", "quarry-edge", "src", "answer_status.rs"));
+  const inCode = [...status.matchAll(/Self::[A-Za-z]+ => "([a-z_]+)",/g)].map((m) => m[1]);
+  assert.deepEqual(new Set(inCode), new Set(ANSWER_REASONS), "the reasons in answer_status.rs are the documented set");
+  const runbook = read(paths.runbooks);
+  const contracts = read(join(quarry, "docs", "CONTRACTS.md"));
+  const reasons = read(join(quarry, "docs", "ERROR_REASONS.md"));
+  const spec = read(paths.openapi);
+  for (const reason of ANSWER_REASONS) {
+    assert.ok(reasons.includes("`" + reason + "`"), `ERROR_REASONS names ${reason}`);
+    assert.ok(contracts.includes(reason), `CONTRACTS names ${reason}`);
+    assert.ok(spec.includes("- " + reason), `openapi.yaml lists ${reason}`);
+  }
+  for (const reason of ["synthesis_disabled", "model_path_refused", "zdr_unavailable", "no_search_provider", "no_model_plane_url", "model_client_init_failed", "model_plane_auth_refused"]) {
+    assert.ok(runbook.includes(reason), `RUNBOOKS names ${reason}`);
+  }
+  assert.ok(runbook.includes("## Answer synthesis: enable, disable and the reasons"), "RUNBOOKS has the section the 501 hints point at");
+  assert.ok(runbook.includes("QUARRY_EDGE_ANSWER_SYNTHESIS=1"), "RUNBOOKS gives the switch to set");
+  assert.ok(read(paths.selfHost).includes("QUARRY_EDGE__ANSWER_SYNTHESIS"), "SELF_HOST documents the switch");
+});
+
 // ----------------------------------------------------------------------------- openapi
 
-pending("SearchRequest documents zdr and score_kinds", OPTION_B, () => {
+test("SearchRequest documents zdr and score_kinds", () => {
   const spec = read(paths.openapi);
   const properties = schemaProperties(spec, "SearchRequest");
   assert.ok(properties.has("zdr"), "zdr is documented");
@@ -507,7 +571,7 @@ pending("SearchRequest documents zdr and score_kinds", OPTION_B, () => {
   );
 });
 
-pending("SearchResponse documents score_kind and the rerank report", OPTION_B, () => {
+test("SearchResponse documents score_kind and the rerank report", () => {
   const spec = read(paths.openapi);
   const properties = schemaProperties(spec, "SearchResponse");
   assert.ok(properties.has("score_kind"), "score_kind is documented");
@@ -518,7 +582,7 @@ pending("SearchResponse documents score_kind and the rerank report", OPTION_B, (
   );
 });
 
-pending("RerankReport lists the five statuses the wire carries", OPTION_B, () => {
+test("RerankReport lists the five statuses the wire carries", () => {
   const spec = read(paths.openapi);
   const properties = schemaProperties(spec, "RerankReport");
   assert.ok(properties.has("status") && properties.has("reason") && properties.has("profile"));
@@ -528,14 +592,14 @@ pending("RerankReport lists the five statuses the wire carries", OPTION_B, () =>
   }
 });
 
-pending("SearchResultItem documents the per-result score and no highlights", OPTION_B, () => {
+test("SearchResultItem documents the per-result score and no highlights", () => {
   const spec = read(paths.openapi);
   const properties = schemaProperties(spec, "SearchResultItem");
   assert.ok(properties.has("score"), "score is documented");
   assert.ok(!properties.has("highlights"), "rerank highlights are deferred (QB-T06), not documented");
 });
 
-pending("the /v1/search operation documents its 400 refusals", OPTION_B, () => {
+test("the /v1/search operation documents its 400 refusals", () => {
   const block = pathBlock(read(paths.openapi), "/v1/search");
   assert.ok(block.includes("'400':"), "the 400 response (ZDR_REQUIRED, SCORE_KIND_UNSUPPORTED) is documented");
 });

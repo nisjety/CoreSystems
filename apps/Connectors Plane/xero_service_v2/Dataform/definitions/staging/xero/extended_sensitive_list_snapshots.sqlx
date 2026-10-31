@@ -1,0 +1,7 @@
+config {
+  type: "declaration",
+  database: dataform.projectConfig.defaultDatabase,
+  schema: "staging_xero_sensitive",
+  name: "extended_list_snapshots",
+  description: "Restricted immutable completed Bank Feeds/Identity list memberships."
+}

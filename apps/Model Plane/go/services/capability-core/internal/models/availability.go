@@ -1,6 +1,7 @@
 package models
 
 import (
+	"os"
 	"strings"
 	"time"
 )
@@ -38,6 +39,54 @@ const (
 	AvailabilityFutureSkew = 30 * time.Second
 )
 
+// MCP tool rows have no workload that attests their health every few minutes.
+// What proves one is still real is that the gateway keeps seeing it when it
+// lists the server's tools, so the freshness window for a kind=mcp_tool row is
+// the observation window below instead of AvailabilityAttestationTTL.
+const (
+	// MCPToolObservationTTLEnv overrides the window, as a Go duration ("90m").
+	MCPToolObservationTTLEnv = "MCP_TOOL_OBSERVATION_TTL"
+	// DefaultMCPToolObservationTTL is the window when nothing valid is set.
+	DefaultMCPToolObservationTTL = time.Hour
+	// MaxMCPToolObservationTTL bounds the override: a tool the gateway stopped
+	// seeing must not keep reading as available for longer than a day.
+	MaxMCPToolObservationTTL = 24 * time.Hour
+)
+
+// Reason codes a kind=mcp_tool row carries when it is not callable. Observation
+// writes them onto the capability row so that availability, and therefore the
+// policy gate, can name the cause without reading the per-tool table.
+const (
+	// ReasonToolDefinitionChanged: the server's description or schema no longer
+	// matches the digest a person approved; the tool stays off until re-approved.
+	ReasonToolDefinitionChanged = "tool_definition_changed"
+	// ReasonToolNotApproved: the tool was seen but is not yet approved (its
+	// server is not registered, or it is not on the server's allowlist).
+	ReasonToolNotApproved = "tool_not_approved"
+	// ReasonToolObservationStale: the gateway has not seen the tool inside the
+	// observation window.
+	ReasonToolObservationStale = "tool_observation_stale"
+)
+
+// MCPToolObservationTTL is the observation window for kind=mcp_tool rows: the
+// MCP_TOOL_OBSERVATION_TTL duration when it parses and is positive (capped at
+// MaxMCPToolObservationTTL), otherwise one hour. An unusable value is the
+// default, never "no limit".
+func MCPToolObservationTTL() time.Duration {
+	raw := strings.TrimSpace(os.Getenv(MCPToolObservationTTLEnv))
+	if raw == "" {
+		return DefaultMCPToolObservationTTL
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil || parsed <= 0 {
+		return DefaultMCPToolObservationTTL
+	}
+	if parsed > MaxMCPToolObservationTTL {
+		return MaxMCPToolObservationTTL
+	}
+	return parsed
+}
+
 // Availability is a normalized immutable view suitable for wire responses.
 type Availability struct {
 	State            AvailabilityState `json:"state"`
@@ -74,10 +123,21 @@ func DeriveAvailabilityAt(capability *Capability, now time.Time) Availability {
 		strings.TrimSpace(capability.AvailabilityState) == string(AvailabilityApprovalRequired)
 
 	if !capability.Enabled {
+		reasonCode, reason := "capability_disabled", "Capability is disabled by registry policy."
+		if capability.Kind == KindMCPTool {
+			// An MCP tool is off for a reason the tool table knows and observation
+			// recorded on the row; name it instead of the generic cause.
+			switch strings.TrimSpace(capability.ReasonCode) {
+			case ReasonToolDefinitionChanged:
+				reasonCode, reason = ReasonToolDefinitionChanged, "The tool's definition changed since it was approved and it must be approved again."
+			case ReasonToolNotApproved:
+				reasonCode, reason = ReasonToolNotApproved, "The tool has not been approved."
+			}
+		}
 		return Availability{
 			State:            AvailabilityDisabled,
-			ReasonCode:       "capability_disabled",
-			Reason:           "Capability is disabled by registry policy.",
+			ReasonCode:       reasonCode,
+			Reason:           reason,
 			RequiresApproval: requiresApproval,
 			ExecutionMode:    ExecutionUnavailable,
 			CostClass:        normalizeCostClass(capability.CostClass),
@@ -157,7 +217,16 @@ func DeriveAvailabilityAt(capability *Capability, now time.Time) Availability {
 			requiresApproval,
 		)
 	}
-	if now.Sub(checkedAt) > AvailabilityAttestationTTL {
+	if capability.Kind == KindMCPTool {
+		if now.Sub(checkedAt) > MCPToolObservationTTL() {
+			return unavailableForCapability(
+				capability,
+				ReasonToolObservationStale,
+				"The tool has not been seen on its server recently.",
+				requiresApproval,
+			)
+		}
+	} else if now.Sub(checkedAt) > AvailabilityAttestationTTL {
 		return unavailableForCapability(
 			capability,
 			"health_attestation_stale",

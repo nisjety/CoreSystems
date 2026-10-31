@@ -46,6 +46,7 @@ __all__ = [
     "AiSpeechRequest",
     "AiTranslateRequest",
     "Approval",
+    "ApprovalCause",
     "CancelRun200Response",
     "Capability",
     "ChatMessage",
@@ -110,6 +111,7 @@ from model_plane_sdk.models.ai_realtime_request import AiRealtimeRequest as AiRe
 from model_plane_sdk.models.ai_speech_request import AiSpeechRequest as AiSpeechRequest
 from model_plane_sdk.models.ai_translate_request import AiTranslateRequest as AiTranslateRequest
 from model_plane_sdk.models.approval import Approval as Approval
+from model_plane_sdk.models.approval_cause import ApprovalCause as ApprovalCause
 from model_plane_sdk.models.cancel_run200_response import CancelRun200Response as CancelRun200Response
 from model_plane_sdk.models.capability import Capability as Capability
 from model_plane_sdk.models.chat_message import ChatMessage as ChatMessage

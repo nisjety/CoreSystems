@@ -7,6 +7,10 @@ import {
 } from './orchestration-client'
 
 import { readSseStream, type SseEvent } from './sse'
+import { createDeltaCoalescer, type DeltaCoalescer } from './delta-coalescer'
+import type { ChatEventPayloads } from './chat-event-payloads.generated'
+import { isZdrCode } from './zdr-refusals'
+import { normalizeConnectorScope } from '@/shared/actions/chat-connector-scope'
 import {
   isSelectablePrivacyTier,
   normalizeAnswerServedBy,
@@ -16,6 +20,7 @@ import {
   type PrivacyTier,
 } from './privacy-tier'
 import { createSelectedAgentToolSpecs } from '@/shared/actions/agent-tools'
+import { parseChatHistoryAction } from '@/shared/actions/chat-history'
 import { isSupportChatThread } from '@/shared/chat/support-chat-thread'
 import { isAgUiEventName, toVerevonUiEvent, type VerevonUiEvent } from '@/shared/chat/verevon-ui-events'
 import {
@@ -23,6 +28,7 @@ import {
   forgetThreadLocally,
   reconcileLocalThreads,
 } from '@/features/chat/lib/chat-retention'
+import { runParkedFrameOf, type RunParkedFrame } from '@/features/chat/lib/run-park'
 
 // ── Wire contract ───────────────────────────────────────────────────────────
 // `truncated` is set when a workbook was cut on a row boundary to fit one turn;
@@ -67,6 +73,12 @@ export type ChatInvokeRequest = {
    * `sourceScope === 'conversation'`, which already excludes both families.
    */
   retrievalScope?: import('@/shared/actions/chat-source-scope').RetrievalScope
+  /**
+   * The connected accounts this turn may read (WS23 S6), picked in the composer's
+   * connected-apps chips. Sent as `connector_scope` only when non-empty and the turn
+   * can take it: `buildChatWireBody` withholds it on the turns the composer blocks.
+   */
+  connectorScope?: string[]
   content: string
   model?: string
   /** Explicit provider route for a user-owned model subscription. */
@@ -111,8 +123,12 @@ export type ChatInvokeRequest = {
    * the ordinary turn is unchanged; only `deep`/`quick` cost the extra latency
    * and tokens. Reasoning arrives on `reasoning_delta`, which requires the
    * `reasoning` feature (already in `DEFAULT_FEATURES`).
+   *
+   * A canonical {@link EffortLevel} is accepted too: the gateway takes one
+   * `effort` string and reads either vocabulary. Only a level the selected
+   * model's catalogue entry lists (`modelEffortLevels`) is ever sent.
    */
-  effort?: 'quick' | 'standard' | 'deep'
+  effort?: EffortProfile | EffortLevel
   /**
    * Response-style dial, orthogonal to `effort`: how much prose the answer
    * spends, not how hard the model thinks.
@@ -138,6 +154,25 @@ export type ChatInvokeRequest = {
    */
   planMode?: boolean
   /**
+   * This turn runs the plan the person just approved (WS14 S2a "Run the
+   * approved plan"). Only the chat controller sets it, and only after it has
+   * checked that a grant for this thread is armed and usable. It carries NO rung:
+   * model-gateway runs the turn under the grant it holds for the thread and
+   * refuses it typed (`plan_grant_unavailable`, `plan_execute_disabled`) when it
+   * cannot. Dropped here, with no `agentic` feature, when the turn has no
+   * thread, is a plan turn, is conversation-only, Support-derived, zero-retention
+   * or on the subscription route, so it can never ride on a turn that cannot
+   * execute. Regenerate, edit-resubmit, continue-generation and retry never set it.
+   */
+  executeGranted?: boolean
+  /**
+   * The id this send is named with (the receipt). Sent as `idempotency_key`, which the gateway
+   * already reads as the retry identity of a send; with send receipts on it also stores the
+   * user's message under it, so a repeat of the send is one transcript row. Never sent for a
+   * zero-retention turn.
+   */
+  clientMessageId?: string
+  /**
    * This turn is a REGENERATE of the previous answer, not a new question.
    *
    * Client-declared because the server cannot infer it: a regenerate arrives as
@@ -149,6 +184,13 @@ export type ChatInvokeRequest = {
   regenerated?: boolean
   /** This turn is an EDITED resubmit of the previous question. Same reasoning. */
   editResubmit?: boolean
+  /**
+   * The answer this turn regenerates, by its server message id (WS17 S9). Sent only on a versioned
+   * thread, where the regenerate moves the branch instead of appending the question again.
+   */
+  regenerateOfMessageId?: string
+  /** The user turn this turn edits, by its server message id (WS17 S9). Sent only on a versioned thread. */
+  editOfMessageId?: string
   /**
    * Minimum Venice-style privacy tier this turn may be served by
    * (`min_privacy_tier` on the wire). Enforcement is server-side: ineligible
@@ -168,6 +210,11 @@ export type ChatConnectedEvent = {
   model?: string
   /** Durable run id. Work surfaces only use it when the turn is plan/research. */
   runId?: string
+  /**
+   * The server keeps a message tree for conversations (WS17 S9), so a regenerate or an edit may name its
+   * turn. Absent while the server's switch is off.
+   */
+  versionsEnabled?: boolean
 }
 export type ChatMessageEvent = { content: string; requestId?: string }
 export type ChatDoneEvent = {
@@ -240,8 +287,55 @@ export type ChatVerificationEvent = {
   webAllowed: boolean
 }
 
-/** Mid-run user messages the agent has just been handed. */
-export type ChatQueuedInputEvent = { messages: string[] }
+/**
+ * Mid-run user messages the agent has just been handed. `ids` (additive, send receipts on)
+ * holds the `client_message_id` of each message in `messages`, in order, with an empty string
+ * for one sent without an id; absent when the gateway names none of them.
+ */
+export type ChatQueuedInputEvent = { messages: string[]; ids?: string[] }
+/**
+ * An answer produced in a reduced form (`retrieval_notice`). `code` is the stable reason and `wordingKey` the
+ * key the client's wording is filed under: the gateway sends no sentence, so the text is the client's to write.
+ */
+export type ChatRetrievalNoticeEvent = { code: string; wordingKey: string; requestId?: string }
+/**
+ * A tool call is being retried after a transient failure (`retry_scheduled`, `steps` family). Counts and
+ * closed tokens only: the error text never reaches the client. An unknown `reason` is passed through as-is.
+ */
+export type ChatRetryScheduledEvent = {
+  scope: string
+  tool?: string
+  attempt: number
+  maxAttempts: number
+  waitMs?: number
+  reason: string
+  requestId?: string
+}
+/**
+ * The history or tool results were compacted to fit the model (`compaction`, control). `outcome` says what
+ * happened, so a summary that failed arrives as `truncated`, never as `summarized`.
+ */
+export type ChatCompactionEvent = {
+  scope: string
+  outcome: string
+  messagesCompacted?: number
+  messagesKept?: number
+  pinnedKept?: number
+  requestId?: string
+}
+/**
+ * The context the model was given changed (`context_change`, control): history was shed, skill guidance was
+ * cut short, or a run-context part was skipped. Counts and the gateway's own tokens only.
+ */
+export type ChatContextChangeEvent = {
+  change: string
+  messagesDropped?: number
+  skillsTruncated?: number
+  skillsDropped?: number
+  layer?: string
+  state?: string
+  requestId?: string
+}
 export type ChatErrorEvent = {
   code: string
   message: string
@@ -261,6 +355,12 @@ export type ChatErrorEvent = {
    * re-validate it.
    */
   resetsAt?: string
+  /**
+   * For a zero-retention refusal that names a feature (`zdr_feature_not_supported`):
+   * the feature's stable key, such as `web_search`. The SPA words it in the
+   * reader's language (`zdr-refusals.ts`). Absent for every other error.
+   */
+  feature?: string
 }
 export type ChatArtifactEvent = {
   id?: string
@@ -329,6 +429,12 @@ export type ChatUsageEvent = {
   confidence?: number
   cacheReadTokens?: number
   cacheWriteTokens?: number
+  /** Model calls the total covers: tool-decision rounds, artifact checks, overhead and the answer. Absent on an older gateway. */
+  calls?: number
+  /** Of `calls`, the metered ones whose price was unknown. A total with any has a null `costUsd`. */
+  unpricedCalls?: number
+  /** The cost split by what was billed, present exactly when the total was priced. */
+  costByCategory?: ChatCostByCategory
   /**
    * Where the answer was processed, exactly as the gateway stamped it
    * (`provider_used`, `residency`, `privacy_tier`). Absent on an older gateway
@@ -338,8 +444,94 @@ export type ChatUsageEvent = {
   servedBy?: AnswerServedBy
 }
 
+export type ChatCostByCategory = {
+  inputUsd: number
+  cacheReadUsd: number
+  cacheWriteUsd: number
+  outputUsd: number
+}
+
+/** The provider call a progress frame reports, as its closed phase token. */
+export type ChatUsagePhase = 'answer' | 'tool_round' | 'agent_round' | 'overhead'
+
+/**
+ * The turn's running total after one of its provider calls (`usage_progress`, `usage` family).
+ *
+ * The gateway streams one per call while the turn runs. The terminal `usage` frame stays the
+ * authority: its totals replace every progress total of the turn. Counts and closed tokens only.
+ */
+export type ChatUsageProgressEvent = {
+  /** Calls the total covers so far, the call this frame reports included. */
+  calls?: number
+  phase?: ChatUsagePhase
+  inputTokens?: number
+  outputTokens?: number
+  cacheReadTokens?: number
+  cacheWriteTokens?: number
+  /**
+   * The metered cost so far. Absent while a call is unpriced or the turn is a subscription's, and
+   * `unpricedCalls` or `costBasis` then says which.
+   */
+  costUsd?: number
+  /** Absent when the turn mixes metered and subscription calls. */
+  costBasis?: ChatCostBasis
+  /** Of `calls`, the metered ones whose price was unknown. Absent at zero. */
+  unpricedCalls?: number
+  /** The metered spend cap, when the turn has one (WS27-S6). */
+  ceilingUsd?: number
+  /** The metered token cap, when the turn has one (WS27-S6). */
+  ceilingTokens?: number
+  /** The share of the ceiling used, when a capped figure is known. Above 1 once the cap is passed. */
+  fraction?: number
+  /** The ceiling warning this frame is the first to carry. */
+  warning?: 'run_ceiling_80' | 'run_ceiling_reached'
+}
+
 function costBasisValue(value: unknown): ChatCostBasis | undefined {
   return value === 'metered' || value === 'subscription' ? value : undefined
+}
+
+/** The breakdown of a usage total: present only when all four parts are numbers. */
+function costByCategoryValue(value: unknown): ChatCostByCategory | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const parts = value as Record<string, unknown>
+  const inputUsd = num(parts.input_usd)
+  const cacheReadUsd = num(parts.cache_read_usd)
+  const cacheWriteUsd = num(parts.cache_write_usd)
+  const outputUsd = num(parts.output_usd)
+  if (inputUsd === undefined || cacheReadUsd === undefined || cacheWriteUsd === undefined || outputUsd === undefined) {
+    return undefined
+  }
+  return { inputUsd, cacheReadUsd, cacheWriteUsd, outputUsd }
+}
+
+function usagePhaseValue(value: unknown): ChatUsagePhase | undefined {
+  return value === 'answer' || value === 'tool_round' || value === 'agent_round' || value === 'overhead'
+    ? value
+    : undefined
+}
+
+function runCeilingWarningValue(value: unknown): 'run_ceiling_80' | 'run_ceiling_reached' | undefined {
+  return value === 'run_ceiling_80' || value === 'run_ceiling_reached' ? value : undefined
+}
+
+/** A `usage_progress` payload, read by its closed keys and nothing else. */
+function usageProgressFrame(payload: Record<string, unknown>): ChatUsageProgressEvent {
+  return {
+    calls: num(payload.calls),
+    phase: usagePhaseValue(payload.phase),
+    inputTokens: num(payload.input_tokens),
+    outputTokens: num(payload.output_tokens),
+    cacheReadTokens: num(payload.cache_read_tokens),
+    cacheWriteTokens: num(payload.cache_write_tokens),
+    costUsd: num(payload.cost_usd),
+    costBasis: costBasisValue(payload.cost_basis),
+    unpricedCalls: num(payload.unpriced_calls),
+    ceilingUsd: num(payload.ceiling_usd),
+    ceilingTokens: num(payload.ceiling_tokens),
+    fraction: num(payload.fraction),
+    warning: runCeilingWarningValue(payload.warning),
+  }
 }
 
 /** The `servedBy` key of a usage event, present only when the server stamped something usable. */
@@ -356,6 +548,8 @@ export type TurnTimingProvider = {
   providerMs: number
   firstTokenMs?: number
   attempts: number
+  failedAttemptsMs?: number
+  retryWaitMs?: number
   responseCacheHit: boolean
   upstreamMs?: Record<string, number>
 }
@@ -446,6 +640,8 @@ function turnTimingProvider(value: unknown): TurnTimingProvider | undefined {
     providerMs,
     ...(millis(raw.first_token_ms) !== undefined ? { firstTokenMs: millis(raw.first_token_ms) } : {}),
     attempts: countValue(raw.attempts),
+    ...(millis(raw.failed_attempts_ms) !== undefined ? { failedAttemptsMs: millis(raw.failed_attempts_ms) } : {}),
+    ...(millis(raw.retry_wait_ms) !== undefined ? { retryWaitMs: millis(raw.retry_wait_ms) } : {}),
     responseCacheHit: raw.response_cache_hit === true,
     ...(upstreamMs && Object.keys(upstreamMs).length > 0 ? { upstreamMs } : {}),
   }
@@ -637,6 +833,8 @@ export type ChatStreamHandlers = {
   onToolResult?: (event: ChatToolResultEvent) => void
   onAttachment?: (event: ChatAttachmentEvent) => void
   onUsage?: (event: ChatUsageEvent) => void
+  /** The running total after one provider call, while the turn runs (`usage_progress`). See `ChatUsageProgressEvent`. */
+  onUsageProgress?: (event: ChatUsageProgressEvent) => void
   onTitle?: (event: ChatTitleEvent) => void
   onFollowUps?: (event: ChatFollowUpsEvent) => void
   /** See `ChatPlanProposedEvent`. */
@@ -656,6 +854,23 @@ export type ChatStreamHandlers = {
    * client cannot otherwise know is when the agent actually saw it.
    */
   onQueuedInput?: (event: ChatQueuedInputEvent) => void
+  /**
+   * The answer was produced in a reduced form, so the user must be told: a ZDR answer that used text search
+   * only. Ungated: sent whatever features the client opted into. See `ChatRetrievalNoticeEvent`.
+   */
+  onRetrievalNotice?: (event: ChatRetrievalNoticeEvent) => void
+  /** A tool call is being retried (`retry_scheduled`, `steps` family). See `ChatRetryScheduledEvent`. */
+  onRetryScheduled?: (event: ChatRetryScheduledEvent) => void
+  /** The history or tool results were compacted (`compaction`). Ungated. See `ChatCompactionEvent`. */
+  onCompaction?: (event: ChatCompactionEvent) => void
+  /** The context the model was given changed (`context_change`). Ungated. See `ChatContextChangeEvent`. */
+  onContextChange?: (event: ChatContextChangeEvent) => void
+  /**
+   * The run was PARKED (WS03 S8-A): it stopped on a typed, recoverable failure and stays open, so
+   * it can be resumed later. Display only: read with `runParkedFrameOf`, and a frame whose reason
+   * this build does not know goes to `onUnknownEvent` instead. Nothing here resumes the run.
+   */
+  onRunParked?: (event: RunParkedFrame) => void
   /**
    * Any SSE event this client has no case for. The gateway relays upstream
    * events verbatim with no allowlist, so a new backend event reaches the
@@ -707,6 +922,25 @@ export type ChatMessage = {
   confidence?: number
   /** What the backend's verification pass found, when it ran on this turn. */
   verification?: ChatVerificationEvent
+  /**
+   * Where this turn sits among the turns that share its parent, as the server reports it on a versioned
+   * thread (WS17 S9). Absent when the server keeps no version tree for the thread.
+   */
+  version?: ChatMessageVersion
+}
+
+/** A turn's place in the server's message tree (WS17 S9): its parent, its place among the turns sharing it, and those turns. */
+export type ChatMessageVersion = {
+  /** The turn this one continues. Empty for the first turn of a thread. */
+  parentMessageId: string
+  /** 1-based place among the turns that share the parent. */
+  siblingOrdinal: number
+  /** How many turns share the parent, this one included. */
+  siblingCount: number
+  /** Whether the turn is on the active path, the conversation the thread shows. */
+  onActivePath: boolean
+  /** The ids of the turns that share the parent, in order: the versions a switch can move to. */
+  siblings: string[]
 }
 
 export type ChatThreadSession = {
@@ -741,6 +975,16 @@ export type ChatThreadSession = {
    * "chat" in practice (see history.rs's backfill note). Read today only to
    * show the "Fra e-post / From email" badge on a mail-task thread. */
   origin?: string
+  /** Set when the owner archived the thread. Absent for an active thread. */
+  archivedAt?: string
+  /** Whether the owner starred the thread. Server-owned, like `pinned`. */
+  starred?: boolean
+  /**
+   * Whether the thread holds a reply the owner has not read yet. The one unread
+   * definition (build plan DEC-11): the server compares the newest assistant reply
+   * with the owner's last read, and the client never derives its own.
+   */
+  unread?: boolean
 }
 
 export type ChatThreadTranscriptSnapshot = {
@@ -846,6 +1090,21 @@ export function verevonModeById(id: string): VerevonMode | undefined {
   return VEREVON_MODES.find((mode) => mode.id === id)
 }
 
+/** The composer's named effort profiles; `standard` asks for no reasoning. */
+export type EffortProfile = 'quick' | 'standard' | 'deep'
+
+/**
+ * The canonical reasoning ladder, weakest first. Mirrors the names the gateway
+ * accepts for `effort` and lists in `effort_levels` on `/v1/models`.
+ */
+export const EFFORT_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
+export type EffortLevel = (typeof EFFORT_LEVELS)[number]
+
+/** Narrows an arbitrary wire value to a canonical level; anything else is no level. */
+export function isEffortLevel(value: unknown): value is EffortLevel {
+  return typeof value === 'string' && (EFFORT_LEVELS as readonly string[]).includes(value)
+}
+
 export type ModelInfo = {
   id: string
   name: string
@@ -866,6 +1125,12 @@ export type ModelInfo = {
   privacyTier?: PrivacyTier
   /** Data-residency region the backend reports alongside the tier (`residency`). */
   residency?: string
+  /**
+   * Reasoning levels this model accepts (`effort_levels` on `/v1/models`).
+   * `undefined` when the server lists none: the model has no effort control,
+   * or the gateway's ladder is off.
+   */
+  effortLevels?: EffortLevel[]
 }
 
 // Opt-in rich SSE families the model-gateway understands (chat-parity §2).
@@ -920,8 +1185,22 @@ function failureTiming(payload: Record<string, unknown>): Pick<ChatErrorEvent, '
   }
 }
 
+/**
+ * The feature a zero-retention refusal names, as the server sent its key: on
+ * the frame, or in its error envelope. Absent when neither names one, so an
+ * error without it keeps its exact shape.
+ */
+function failureFeature(
+  payload: Record<string, unknown>,
+  envelope: Record<string, unknown> | undefined,
+): Pick<ChatErrorEvent, 'feature'> {
+  const feature = str(payload.feature) ?? str(envelope?.feature)
+  return feature ? { feature } : {}
+}
+
 function emitCitation(value: unknown, handlers: ChatStreamHandlers): void {
-  const payload = objectValue(value)
+  // The golden's keys are typed; the legacy spellings read below stay `unknown` until they are retired.
+  const payload = objectValue(value) as (Partial<ChatEventPayloads['citation']> & Record<string, unknown>) | undefined
   if (!payload) return
   handlers.onCitation?.({
     id: str(payload.id),
@@ -1001,6 +1280,22 @@ export function shouldRequestSupportContext(content: string): boolean {
   ].some((pattern) => pattern.test(query))
 }
 
+/**
+ * Thrown by `buildChatWireBody` when a turn carries media its route cannot
+ * deliver. The ChatGPT-subscription wire has no attachments, so the images used
+ * to be dropped while the transcript said they were added; nothing is sent now,
+ * and the code is typed so the chat can say so (`streamFailurePresentation`).
+ * The composer refuses these files first (`attachment-policy.ts`); this is the
+ * backstop for a turn that reaches the client by another path.
+ */
+export class AttachmentsNotSentError extends Error {
+  readonly code = 'attachments_not_sent'
+  constructor() {
+    super('attachments_not_sent')
+    this.name = 'AttachmentsNotSentError'
+  }
+}
+
 export function buildChatWireBody(request: ChatInvokeRequest): Record<string, unknown> {
   const conversationOnly = request.sourceScope === 'conversation'
   // Per-turn retrieval-source filter (chat-wave2 scope spec): conversation
@@ -1018,6 +1313,7 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
   const threadId = request.threadId?.trim() || undefined
   const supportReadOnly = isSupportChatThread(threadId)
   const subscriptionBacked = request.provider === 'openai-codex-subscription'
+  if (subscriptionBacked && (request.attachments ?? []).length > 0) throw new AttachmentsNotSentError()
   const tools = supportReadOnly || subscriptionBacked ? [] : buildToolSpecs(request)
   const features = new Set(request.features ?? DEFAULT_FEATURES)
   if (conversationOnly) features.add('conversation_only')
@@ -1051,13 +1347,39 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
   // switch is off is refused with the typed `agentic_subscription_disabled`
   // code, which the chat presents in words (`streamFailurePresentation`). The
   // body stays as narrow as before on every other axis: no client tools,
-  // browsing, image generation, deep research, skills or attachments.
-  if (request.planMode && !conversationOnly && !supportReadOnly) features.add('agentic')
+  // browsing, image generation, deep research or skills, and an image is
+  // refused (`AttachmentsNotSentError`), never dropped.
+  //
+  // An EXECUTE turn (WS14 S2a, the turn that runs an approved plan) is agentic
+  // too, with plan_mode false: model-gateway runs it under the grant it holds
+  // for the thread, or refuses it typed. It is only ever put on the wire when
+  // every precondition the server enforces also holds here (an existing thread,
+  // not Support-derived, not conversation-only, not zero-retention, not the
+  // subscription route, not a plan turn), so the body this builds never asks for
+  // something the gateway would refuse as malformed. The controller has already
+  // decided whether the turn may execute; this is the last, narrow gate.
+  const executeGranted =
+    request.executeGranted === true &&
+    !request.planMode &&
+    !conversationOnly &&
+    !supportReadOnly &&
+    !subscriptionBacked &&
+    !request.zdr &&
+    Boolean(threadId)
+  if ((request.planMode || executeGranted) && !conversationOnly && !supportReadOnly) features.add('agentic')
   else features.delete('agentic')
 
   const supportContextQuery = !conversationOnly && !supportReadOnly && shouldRequestSupportContext(request.content)
     ? request.content.trim().slice(0, 240)
     : undefined
+  // Connected apps (WS23 S6): the field exists only when the person picked an account for this
+  // turn. It is withheld on the turns the composer blocks (zero retention, Space, conversation-only,
+  // subscription, a filtered source, support) and on an execute turn, which carries no picks of its
+  // own, so the gateway never has to refuse a field this client should not have sent.
+  const connectorScope = conversationOnly || supportReadOnly || subscriptionBacked || request.zdr
+    || executeGranted || request.spaceRef?.trim() || retrievalScope !== 'auto'
+    ? []
+    : normalizeConnectorScope(request.connectorScope)
 
   return {
     content: request.content,
@@ -1089,6 +1411,10 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
       : subscriptionBacked
         ? (request.planMode ?? false) && !conversationOnly
         : request.planMode ?? false,
+    // Present ONLY on an execute turn, so every other body is byte-identical to
+    // what it was before this field existed. It carries no rung and no plan id:
+    // the server holds the grant, and a rung supplied here would never be read.
+    ...(executeGranted ? { execute_granted: true } : {}),
     // Deep research is its OWN field, not just `browse_web`. "Dyp research"
     // used to set only browseWeb, so it was indistinguishable from a plain
     // Search turn — the same failure planMode had. The gateway keys the
@@ -1110,8 +1436,13 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     // gateway reads an absent value as `auto` (today's byte-identical
     // behavior), so this is only ever sent for a real `knowledge_only`/
     // `web_only` pick on a `workspace`-scope thread.
-    ...(retrievalScope !== 'auto' ? { retrieval_scope: retrievalScope } : {}),
-    attachments: subscriptionBacked ? [] : request.attachments ?? [],
+    //
+    // Never on an execute turn: the gateway refuses an agentic run with a
+    // filtered scope, and the execute turn carries no per-turn source filter.
+    ...(retrievalScope !== 'auto' && !executeGranted ? { retrieval_scope: retrievalScope } : {}),
+    // Omitted entirely when nothing was picked, like `retrieval_scope`: an ordinary turn is unchanged.
+    ...(connectorScope.length > 0 ? { connector_scope: connectorScope } : {}),
+    attachments: request.attachments ?? [],
     // Opt-in only, like `min_privacy_tier` below: omitted entirely when
     // nothing is pinned, so an ordinary turn's body is byte-identical to
     // what it was before pinning existed. Support threads have this
@@ -1129,6 +1460,12 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     // matching the rest of this body keeps one convention.
     regenerated: request.regenerated ?? false,
     edited_resubmit: request.editResubmit ?? false,
+    // Only on a versioned thread (WS17 S9), so every other body is byte-identical to before.
+    ...(request.regenerateOfMessageId ? { regenerate_of_message_id: request.regenerateOfMessageId } : {}),
+    ...(request.editOfMessageId ? { edit_of_message_id: request.editOfMessageId } : {}),
+    // The send's receipt id, omitted unless set so every other body is byte-identical to what it
+    // was before this field existed. Never on a zero-retention turn.
+    ...(request.clientMessageId && !request.zdr ? { idempotency_key: request.clientMessageId } : {}),
     // Tier selection is opt-in ONLY: omitted unless the user explicitly picked
     // a tier, so a default send stays byte-identical to today's behavior
     // (UNSPECIFIED ⇒ no constraint server-side). Same pattern as
@@ -1207,6 +1544,7 @@ function dispatchAgUiEvent(
         retryable: payload.retryable === true,
         runId,
         requestId,
+        ...failureFeature(payload, undefined),
       })
       return true
     case 'TEXT_MESSAGE_CONTENT':
@@ -1344,6 +1682,12 @@ function dispatchAgUiEvent(
             status: str(value.status),
           })
           break
+        case 'run_parked': {
+          const parked = runParkedFrameOf(value)
+          if (parked) handlers.onRunParked?.(parked)
+          else handlers.onUnknownEvent?.({ name: 'run_parked', payload: value })
+          break
+        }
         case 'tool_result':
           handlers.onToolResult?.({
             id: str(value.id) ?? str(value.tool_call_id),
@@ -1362,8 +1706,14 @@ function dispatchAgUiEvent(
             confidence: num(value.confidence),
             cacheReadTokens: num(value.cache_read_tokens) ?? num(value.cacheReadTokens),
             cacheWriteTokens: num(value.cache_write_tokens) ?? num(value.cacheWriteTokens),
+            calls: num(value.calls),
+            unpricedCalls: num(value.unpriced_calls),
+            costByCategory: costByCategoryValue(value.cost_by_category),
             ...servedByField(value),
           })
+          break
+        case 'usage_progress':
+          handlers.onUsageProgress?.(usageProgressFrame(value))
           break
         case 'awaiting_approval':
         case 'run_paused_for_approval':
@@ -1386,7 +1736,8 @@ function dispatchAgUiEvent(
           handlers.onStep?.({
             id: str(value.approval_id) ?? str(value.approvalId),
             title: 'Approval',
-            detail: str(value.approval_kind) ?? str(value.approvalKind),
+            // The wire kind is an enum token (APPROVAL_KIND_*); this module has no
+            // locale to word it in, so the step carries the state alone.
             status: str(value.to) ?? str(value.state) ?? str(value.status),
           })
           break
@@ -1461,6 +1812,7 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
         threadId: str(payload.thread_id),
         model: str(payload.model_used) ?? str(payload.model),
         runId: str(payload.run_id),
+        versionsEnabled: payload.versions_enabled === true ? true : undefined,
       })
       break
     case 'chunk': {
@@ -1508,6 +1860,7 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
         runId: str(payload.run_id) ?? str(payload.runId),
         requestId: str(payload.request_id) ?? str(payload.requestId),
         ...failureTiming(payload),
+        ...failureFeature(payload, envelope),
       })
       break
     }
@@ -1585,6 +1938,14 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
         ...(event.id ? { frameId: event.id } : {}),
       })
       break
+    case 'run_parked': {
+      // A parked run (WS03 S8-A): display only. A reason this build does not know is not read as
+      // a park; it is reported like any other event this client has not learned.
+      const parked = runParkedFrameOf(payload)
+      if (parked) handlers.onRunParked?.(parked)
+      else handlers.onUnknownEvent?.({ name: 'run_parked', payload })
+      break
+    }
     case 'awaiting_approval':
       // Agentic runs can pause at the run boundary before a derived
       // `step_update` is available. Keep the same compatibility callback so
@@ -1597,18 +1958,26 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
         ...(event.id ? { frameId: event.id } : {}),
       })
       break
-    case 'usage':
+    case 'usage': {
+      const usage = payload as Partial<ChatEventPayloads['usage']> & Record<string, unknown>
       handlers.onUsage?.({
-        inputTokens: num(payload.input_tokens),
-        outputTokens: num(payload.output_tokens),
-        costUsd: num(payload.cost_usd),
-        costBasis: costBasisValue(payload.cost_basis),
-        latencyMs: num(payload.latency_ms),
-        confidence: num(payload.confidence),
-        cacheReadTokens: num(payload.cache_read_tokens) ?? num(payload.cacheReadTokens),
-        cacheWriteTokens: num(payload.cache_write_tokens) ?? num(payload.cacheWriteTokens),
+        inputTokens: num(usage.input_tokens),
+        outputTokens: num(usage.output_tokens),
+        costUsd: num(usage.cost_usd),
+        costBasis: costBasisValue(usage.cost_basis),
+        latencyMs: num(usage.latency_ms),
+        confidence: num(usage.confidence),
+        cacheReadTokens: num(usage.cache_read_tokens) ?? num(usage.cacheReadTokens),
+        cacheWriteTokens: num(usage.cache_write_tokens) ?? num(usage.cacheWriteTokens),
+        calls: num(usage.calls),
+        unpricedCalls: num(usage.unpriced_calls),
+        costByCategory: costByCategoryValue(usage.cost_by_category),
         ...servedByField(payload),
       })
+      break
+    }
+    case 'usage_progress':
+      handlers.onUsageProgress?.(usageProgressFrame(payload))
       break
     case 'turn_timing': {
       // Optional by contract: an older gateway never sends it, and a payload
@@ -1691,17 +2060,83 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
       break
     }
     case 'queued_input': {
-      const messages = Array.isArray(payload.messages)
-        ? payload.messages.filter(
-            (item): item is string =>
-              typeof item === 'string' && item.trim().length > 0,
-          )
-        : []
+      const messages: string[] = []
+      const ids: string[] = []
+      if (Array.isArray(payload.messages)) {
+        // `ids` is parallel to `messages`: the pair is kept together, so dropping an unreadable
+        // message drops its id and never shifts the rest.
+        const wireIds: unknown[] = Array.isArray(payload.ids) ? payload.ids : []
+        payload.messages.forEach((item: unknown, index: number) => {
+          if (typeof item !== 'string' || item.trim().length === 0) return
+          messages.push(item)
+          const id = wireIds[index]
+          ids.push(typeof id === 'string' ? id : '')
+        })
+      }
       // A delivery with no readable text is a malformed frame, not a delivery.
       // Reporting it would tell the user their message arrived when we cannot
       // show which one.
       if (messages.length > 0) {
-        handlers.onQueuedInput?.({ messages })
+        handlers.onQueuedInput?.(ids.some((id) => id.length > 0) ? { messages, ids } : { messages })
+      }
+      break
+    }
+    case 'retrieval_notice': {
+      // Control: a reduced answer is told to the user whatever features were opted into. A notice without its
+      // reason and wording key is a malformed frame, so it is not reported as a reduction.
+      const code = str(payload.code)
+      const wordingKey = str(payload.wording_key)
+      if (code && wordingKey) {
+        handlers.onRetrievalNotice?.({ code, wordingKey, requestId: str(payload.request_id) })
+      }
+      break
+    }
+    case 'retry_scheduled': {
+      // A retry with no scope, reason or counts cannot say what was retried, so it is not reported.
+      const scope = str(payload.scope)
+      const reason = str(payload.reason)
+      const attempt = num(payload.attempt)
+      const maxAttempts = num(payload.max_attempts)
+      if (scope && reason && attempt !== undefined && maxAttempts !== undefined) {
+        handlers.onRetryScheduled?.({
+          scope,
+          tool: str(payload.tool),
+          attempt,
+          maxAttempts,
+          waitMs: num(payload.wait_ms),
+          reason,
+          requestId: str(payload.request_id),
+        })
+      }
+      break
+    }
+    case 'compaction': {
+      const scope = str(payload.scope)
+      const outcome = str(payload.outcome)
+      if (scope && outcome) {
+        handlers.onCompaction?.({
+          scope,
+          outcome,
+          messagesCompacted: num(payload.messages_compacted),
+          messagesKept: num(payload.messages_kept),
+          pinnedKept: num(payload.pinned_kept),
+          requestId: str(payload.request_id),
+        })
+      }
+      break
+    }
+    case 'context_change': {
+      const change = str(payload.change)
+      if (change) {
+        handlers.onContextChange?.({
+          change,
+          messagesDropped: num(payload.messages_dropped),
+          skillsTruncated: num(payload.skills_truncated),
+          skillsDropped: num(payload.skills_dropped),
+          layer: str(payload.layer),
+          state: str(payload.state),
+          requestId: str(payload.request_id),
+        })
       }
       break
     }
@@ -1731,8 +2166,19 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
  * the browser session is no longer accepted: the run itself is unaffected, but
  * no reconnect can succeed until the user signs in again, so reporting it as a
  * lost connection told them the wrong thing and retried into the same refusal.
+ *
+ * A zero-retention refusal is the server's answer, not a broken connection, so
+ * it keeps its code and feature (and a 403 for it is not a sign-in problem). It
+ * is checked first, for that reason.
  */
 function streamConnectionFailure(err: unknown, fallback: string): ChatErrorEvent {
+  if (err instanceof ApiError && err.code !== null && isZdrCode(err.code)) {
+    return {
+      code: err.code,
+      message: err.message,
+      ...(err.feature ? { feature: err.feature } : {}),
+    }
+  }
   if (err instanceof ApiError && err.status === 401) {
     return {
       code: 'unauthorized',
@@ -1748,10 +2194,41 @@ function streamConnectionFailure(err: unknown, fallback: string): ChatErrorEvent
   return { code: 'connection_error', message: err instanceof Error ? err.message : fallback }
 }
 
+/**
+ * WS09 S4: with `VITE_CHAT_DELTA_FRAME_BATCH` set to exactly `true`, a stream's
+ * text callbacks go through a frame batch. The dispatcher is handed an object
+ * whose text callbacks feed the coalescer, and the coalescer emits to the real
+ * ones. Off, there is no batch and the stream dispatches as it always did.
+ */
+type FrameBatch = { deltas: DeltaCoalescer; handlers: ChatStreamHandlers }
+
+function frameBatchFor(handlers: ChatStreamHandlers, signal?: AbortSignal): FrameBatch | undefined {
+  if (import.meta.env.VITE_CHAT_DELTA_FRAME_BATCH !== 'true') return undefined
+  const deltas = createDeltaCoalescer((run) => {
+    if (run.kind === 'message') handlers.onMessage?.({ content: run.text, requestId: run.requestId })
+    else handlers.onReasoning?.({ delta: run.text })
+  }, signal)
+  // Inherits every other callback from `handlers`, which is then read at dispatch time as before.
+  const textHandlers: ChatStreamHandlers = Object.create(handlers)
+  textHandlers.onMessage = ({ content, requestId }) => deltas.push('message', requestId, content)
+  textHandlers.onReasoning = ({ delta }) => deltas.push('reasoning', undefined, delta)
+  return { deltas, handlers: textHandlers }
+}
+
 /** One SSE frame: the resume filter first, then the cursor, then the event. */
-function dispatchFrame(event: SseEvent, handlers: ChatStreamHandlers): void {
+function dispatchFrame(event: SseEvent, handlers: ChatStreamHandlers, batch?: FrameBatch): void {
   if (handlers.acceptFrame && !handlers.acceptFrame(event.id || undefined)) return
   if (event.id) handlers.onFrameId?.(event.id)
+  if (!batch) {
+    dispatchEvent(event, handlers)
+    return
+  }
+  if (event.event === 'chunk' || event.event === 'reasoning_delta') {
+    dispatchEvent(event, batch.handlers)
+    return
+  }
+  // Text still waiting for its frame reaches the handler before a frame that is not a delta.
+  batch.deltas.flush()
   dispatchEvent(event, handlers)
 }
 
@@ -1763,19 +2240,34 @@ export async function streamChat(
 ): Promise<void> {
   let connError: unknown
 
+  let body: string
+  try {
+    body = JSON.stringify(buildChatWireBody(request))
+  } catch (err) {
+    // Refused locally before any request: the typed code reaches the chat the
+    // way a server refusal does, instead of a rejected promise nobody awaits.
+    if (!(err instanceof AttachmentsNotSentError)) throw err
+    handlers.onError?.({ code: err.code, message: err.message })
+    return
+  }
+
+  const batch = frameBatchFor(handlers, signal)
   await readSseStream(
     '/api/v1/chat/stream',
     {
       method: 'POST',
-      body: JSON.stringify(buildChatWireBody(request)),
+      body,
       signal,
       lastEventId,
     },
-    (event) => dispatchFrame(event, handlers),
+    (event) => dispatchFrame(event, handlers, batch),
     (err) => {
       connError = err
     },
   )
+  // The stream ended, by close, error or abort: the text still waiting for its
+  // frame goes out before the connection error is reported.
+  batch?.deltas.close()
 
   if (connError) {
     handlers.onError?.(streamConnectionFailure(connError, 'Connection failed'))
@@ -1790,14 +2282,16 @@ export async function resumeStream(
 ): Promise<void> {
   let connError: unknown
 
+  const batch = frameBatchFor(handlers, signal)
   await readSseStream(
     `/api/v1/chat/stream/resume/${encodeURIComponent(requestId)}`,
     { method: 'GET', signal, lastEventId },
-    (event) => dispatchFrame(event, handlers),
+    (event) => dispatchFrame(event, handlers, batch),
     (err) => {
       connError = err
     },
   )
+  batch?.deltas.close()
 
   if (connError) {
     handlers.onError?.(streamConnectionFailure(connError, 'Resume failed'))
@@ -1841,6 +2335,13 @@ export type PlanApprovalResult = {
   /** The finalized, post-edit plan (plan-gate §2.3) — absent when this turn
    * never proposed a structured plan (the pure rung-grant path, unchanged). */
   plan?: Plan
+  /**
+   * When the grant the gateway just recorded lapses, in epoch milliseconds
+   * (`grant_expires_at_unix` on the wire is seconds). Absent for an older
+   * gateway, a null, or a value that is not a positive finite number. A pointer
+   * for the UI only: the gateway's grant is the authority, never this value.
+   */
+  grantExpiresAtMs?: number
 }
 
 /**
@@ -1883,6 +2384,11 @@ export async function approvePlan(
     wasInPlanMode: raw.was_in_plan_mode === true,
     persisted: raw.persisted !== false,
     plan: plan ? (normalizePlan(plan) ?? undefined) : undefined,
+    ...(typeof raw.grant_expires_at_unix === 'number' &&
+    Number.isFinite(raw.grant_expires_at_unix) &&
+    raw.grant_expires_at_unix > 0
+      ? { grantExpiresAtMs: raw.grant_expires_at_unix * 1000 }
+      : {}),
   }
 }
 
@@ -1922,17 +2428,30 @@ export async function rejectPlan(
  * simply returned, and the user's words were gone.
  */
 export type QueuedInputResult =
-  /** Delivered to the running agent at its next tool-round boundary. */
-  | { outcome: 'queued'; pending: number; persisted: boolean }
+  /**
+   * Accepted for delivery to the running agent at its next tool-round boundary.
+   * With send receipts on, `clientMessageId` and `messageId` name the stored message.
+   */
+  | {
+      outcome: 'queued'
+      pending: number
+      persisted: boolean
+      clientMessageId?: string
+      messageId?: string
+    }
   /**
    * The run finished before the message landed. Not an error — the caller should
-   * send it as an ordinary turn instead, so nothing is lost.
+   * send it as an ordinary turn instead, under the same id, so nothing is lost and
+   * the transcript holds it once (`persisted`: it was already stored).
    */
-  | { outcome: 'run_ended' }
-  /** Refused with a reason worth showing: too many pending, or too long. */
+  | { outcome: 'run_ended'; persisted?: boolean; clientMessageId?: string }
+  /**
+   * Refused with a reason worth showing: too many pending, too long, or the gateway
+   * could not say (`unavailable`, retryable).
+   */
   | {
       outcome: 'refused'
-      reason: 'too_many' | 'too_long' | 'other'
+      reason: 'too_many' | 'too_long' | 'unavailable' | 'other'
       message: string
     }
 
@@ -1947,7 +2466,7 @@ export type QueuedInputResult =
 export async function queueInvocationInput(
   requestId: string,
   content: string,
-  options: { threadId?: string; spaceRef?: string } = {},
+  options: { threadId?: string; spaceRef?: string; clientMessageId?: string } = {},
 ): Promise<QueuedInputResult> {
   try {
     const raw = await requestJson<Record<string, unknown>>(
@@ -1958,6 +2477,8 @@ export async function queueInvocationInput(
           content,
           ...(options.threadId ? { thread_id: options.threadId } : {}),
           ...(options.spaceRef ? { space_ref: options.spaceRef } : {}),
+          // The receipt: what the gateway stores the message under and names in the delivery.
+          ...(options.clientMessageId ? { client_message_id: options.clientMessageId } : {}),
         }),
       },
     )
@@ -1967,7 +2488,11 @@ export async function queueInvocationInput(
     // adds a misleading red entry to DevTools. Keep accepting a legacy 404 in
     // the catch below while older gateways roll out.
     if (raw.queued === false && raw.resend_as_new_turn === true) {
-      return { outcome: 'run_ended' }
+      return {
+        outcome: 'run_ended',
+        ...(typeof raw.persisted === 'boolean' ? { persisted: raw.persisted } : {}),
+        ...(typeof raw.client_message_id === 'string' ? { clientMessageId: raw.client_message_id } : {}),
+      }
     }
     return {
       outcome: 'queued',
@@ -1976,6 +2501,8 @@ export async function queueInvocationInput(
       // record it. Surfaced rather than swallowed: the reply would otherwise
       // appear in history answering nothing.
       persisted: raw.persisted !== false,
+      ...(typeof raw.client_message_id === 'string' ? { clientMessageId: raw.client_message_id } : {}),
+      ...(typeof raw.message_id === 'string' ? { messageId: raw.message_id } : {}),
     }
   } catch (error) {
     if (!(error instanceof ApiError)) {
@@ -1996,6 +2523,12 @@ export async function queueInvocationInput(
     }
     if (error.status === 413) {
       return { outcome: 'refused', reason: 'too_long', message: error.message }
+    }
+    // The gateway could not tell whether the message was queued (the run-control bus did not
+    // answer, or the message could not be recorded): nothing was claimed, and sending again
+    // under the same id stores it once.
+    if (error.status === 503) {
+      return { outcome: 'refused', reason: 'unavailable', message: error.message }
     }
     return { outcome: 'refused', reason: 'other', message: error.message }
   }
@@ -2107,13 +2640,57 @@ export async function getThreadContext(
   }
 }
 
+/**
+ * WS09 S9. With `VITE_CHAT_PAGED_TRANSCRIPT` set to exactly `true`, a thread is
+ * read in pages: the newest page on open, older pages on request. Off, the whole
+ * thread is read in one call, as it always was. Read at call time so a test can
+ * stub it.
+ */
+export function pagedTranscriptEnabled(): boolean {
+  return import.meta.env.VITE_CHAT_PAGED_TRANSCRIPT === 'true'
+}
+
+/** A page of a thread's messages, oldest first. */
+export type ChatThreadMessagesPage = {
+  messages: ChatMessage[]
+  /** True when older messages exist before `messages[0]`. */
+  hasMore: boolean
+}
+
+export type ChatThreadMessagesPageRequest = {
+  /** How many of the newest messages to return; the server clamps it. */
+  limit: number
+  /** The id of the oldest message already held: the page is the messages before it. */
+  beforeMessageId?: string
+}
+
+export function getThreadMessages(threadId: string): Promise<ChatMessage[]>
+export function getThreadMessages(
+  threadId: string,
+  page: ChatThreadMessagesPageRequest,
+): Promise<ChatThreadMessagesPage>
 export async function getThreadMessages(
   threadId: string,
-): Promise<ChatMessage[]> {
+  page?: ChatThreadMessagesPageRequest,
+): Promise<ChatMessage[] | ChatThreadMessagesPage> {
+  const search = new URLSearchParams()
+  if (page) {
+    search.set('limit', String(page.limit))
+    if (page.beforeMessageId) search.set('before', page.beforeMessageId)
+  }
+  const query = search.toString()
   const raw = await requestJson<unknown>(
-    `/api/v1/chat/threads/${encodeURIComponent(threadId)}/messages`,
+    `/api/v1/chat/threads/${encodeURIComponent(threadId)}/messages${query ? `?${query}` : ''}`,
   )
-  return normalizeThreadMessages(raw)
+  const messages = normalizeThreadMessages(raw)
+  if (!page) return messages
+  const record = objectValue(raw)
+  const oldestId = objectValue(Array.isArray(record?.messages) ? record?.messages[0] : undefined)?.message_id
+  // A page can only be continued from a message the server can name. A row
+  // written before ids were returned has none, so the page it starts cannot
+  // anchor the next one, and the reader is not offered a page it cannot ask for.
+  const anchored = typeof oldestId === 'string' && oldestId !== ''
+  return { messages, hasMore: record?.has_more === true && anchored }
 }
 
 /**
@@ -2133,18 +2710,304 @@ function applyRetentionFrom(raw: unknown): void {
   applyServerRetention(typeof zdr === 'boolean' ? zdr : undefined)
 }
 
-export async function listChatThreads(): Promise<ChatThreadSession[]> {
-  const raw = await requestJson<unknown>('/api/v1/chat/threads')
+export type ChatThreadPage = {
+  sessions: ChatThreadSession[]
+  /** Keyset cursor for the next page; null on the last page. */
+  nextCursor: string | null
+}
+
+export type ChatThreadArchiveFilter = 'active' | 'archived' | 'all'
+
+/**
+ * One page of the owner's threads, in the order Session Core sorts them. Does
+ * not reconcile local copies: a single page is never the whole listing.
+ */
+export async function listChatThreadsPage(
+  options: { cursor?: string; archived?: ChatThreadArchiveFilter; starredOnly?: boolean } = {},
+): Promise<ChatThreadPage> {
+  const params = new URLSearchParams()
+  if (options.cursor) params.set('cursor', options.cursor)
+  if (options.archived) params.set('archived', options.archived)
+  if (options.starredOnly) params.set('starred_only', 'true')
+  const query = params.toString()
+  const raw = await requestJson<unknown>(`/api/v1/chat/threads${query ? `?${query}` : ''}`)
   applyRetentionFrom(raw)
-  const sessions = normalizeChatThreadSessions(raw)
+  // requestJson hands back `data` only, so the BFF repeats the cursor there.
+  return {
+    sessions: normalizeChatThreadSessions(raw),
+    nextCursor: str(objectValue(raw)?.nextCursor) ?? null,
+  }
+}
+
+/**
+ * WS09 S6. With `VITE_CHAT_PARALLEL_THREAD_LOAD` set to exactly `true`, a call
+ * that arrives while a listing walk is running takes that walk's result instead
+ * of paging the whole listing again. Off, every call walks, as it always did.
+ * Read at call time so a test can stub it.
+ */
+export function parallelThreadLoadEnabled(): boolean {
+  return import.meta.env.VITE_CHAT_PARALLEL_THREAD_LOAD === 'true'
+}
+
+let listChatThreadsInFlight: Promise<ChatThreadSession[]> | null = null
+
+export async function listChatThreads(): Promise<ChatThreadSession[]> {
+  if (!parallelThreadLoadEnabled()) return listAllChatThreadPages()
+  // The sidebar, the dashboard and the retention check all list at mount. Each
+  // caller gets its own array, so one that sorts its copy cannot reorder another's.
+  if (!listChatThreadsInFlight) {
+    listChatThreadsInFlight = listAllChatThreadPages().finally(() => {
+      listChatThreadsInFlight = null
+    })
+  }
+  return [...(await listChatThreadsInFlight)]
+}
+
+async function listAllChatThreadPages(): Promise<ChatThreadSession[]> {
+  // Walk every page before reconciling: a thread on page two is still listed,
+  // and reconciling against page one alone would erase its local copy. A cursor
+  // the walk has already requested ends it, so a server that stops advancing
+  // cannot loop the client; that walk is incomplete and reconciles nothing.
+  const sessions: ChatThreadSession[] = []
+  const requested = new Set<string>()
+  let cursor: string | undefined
+  let complete = false
+  for (;;) {
+    const page = await listChatThreadsPage(cursor ? { cursor } : {})
+    sessions.push(...page.sessions)
+    if (page.nextCursor === null) {
+      complete = true
+      break
+    }
+    if (requested.has(page.nextCursor)) break
+    requested.add(page.nextCursor)
+    cursor = page.nextCursor
+  }
   // Reached only on a SUCCESSFUL listing — `requestJson` throws otherwise — so
   // an empty array here really means "the server has no threads for you", not
   // "the request failed". That distinction is what makes this safe to act on:
   // a thread the server no longer lists has been erased upstream, and its local
   // copy must go with it. This is the only way a GDPR erasure reaches the
-  // device at all.
-  reconcileLocalThreads(sessions.map((session) => session.threadId))
+  // device at all. Only a walk that reached the last page is the whole listing,
+  // so only that walk may reconcile.
+  if (complete) {
+    reconcileLocalThreads(sessions.map((session) => session.threadId))
+  }
   return sessions
+}
+
+/**
+ * One thread's session by id, so a thread past the first page resolves like
+ * any other. Null when the server no longer has it as a chat thread.
+ */
+export async function getChatThread(threadId: string): Promise<ChatThreadSession | null> {
+  let raw: unknown
+  try {
+    raw = await requestJson<unknown>(`/api/v1/chat/threads/${encodeURIComponent(threadId)}`)
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return null
+    throw error
+  }
+  applyRetentionFrom(raw)
+  return normalizeChatThreadSession(objectValue(raw)?.session)
+}
+
+/**
+ * Hide a thread from the ordinary list, or bring it back. Both return the
+ * thread's session as the server now holds it (`archivedAt` set or absent), and
+ * null when the server no longer has it as a chat thread.
+ */
+export async function archiveChatThread(threadId: string): Promise<ChatThreadSession | null> {
+  parseChatHistoryAction({ type: 'thread.archive', threadId })
+  return postChatThreadArchiveState(threadId, 'archive')
+}
+
+export async function unarchiveChatThread(threadId: string): Promise<ChatThreadSession | null> {
+  parseChatHistoryAction({ type: 'thread.unarchive', threadId })
+  return postChatThreadArchiveState(threadId, 'unarchive')
+}
+
+async function postChatThreadArchiveState(
+  threadId: string,
+  verb: 'archive' | 'unarchive',
+): Promise<ChatThreadSession | null> {
+  let raw: unknown
+  try {
+    raw = await requestJson<unknown>(
+      `/api/v1/chat/threads/${encodeURIComponent(threadId)}/${verb}`,
+      { method: 'POST' },
+    )
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return null
+    throw error
+  }
+  applyRetentionFrom(raw)
+  return normalizeChatThreadSession(objectValue(raw)?.session)
+}
+
+/** Where a branch move landed: the new active leaf, and the path up to it (WS17 S9). */
+export type ChatBranchMove = {
+  activeLeafMessageId: string
+  activePath: string[]
+}
+
+/**
+ * Make another version of a message the active one (WS17 S9). `messageId` is a sibling of the turn the user
+ * saw, `index` its 0-based place among them, and `expectedLeafMessageId` the leaf the client last displayed.
+ * A conflict (`active_leaf_stale`) means the thread moved on: reload it before moving again.
+ */
+export async function switchChatVersion(
+  threadId: string,
+  messageId: string,
+  index: number,
+  expectedLeafMessageId: string,
+): Promise<ChatBranchMove> {
+  parseChatHistoryAction({ type: 'message.switch_version', threadId, messageId, index })
+  return postChatBranchMove(threadId, 'branch', { targetMessageId: messageId, expectedLeafMessageId })
+}
+
+/**
+ * Rewind a thread to an earlier turn of its active path (WS17 S9). The user confirms it first. Nothing is
+ * deleted: the turns after the rewind stay on their branch, reachable through the version switcher.
+ */
+export async function rewindChatThread(
+  threadId: string,
+  messageId: string,
+  expectedLeafMessageId: string,
+): Promise<ChatBranchMove> {
+  parseChatHistoryAction({ type: 'thread.rewind', threadId, messageId, confirm: true })
+  return postChatBranchMove(threadId, 'rewind', { targetMessageId: messageId, expectedLeafMessageId, confirm: true })
+}
+
+async function postChatBranchMove(
+  threadId: string,
+  verb: 'branch' | 'rewind',
+  body: Record<string, unknown>,
+): Promise<ChatBranchMove> {
+  const raw = await requestJson<unknown>(
+    `/api/v1/chat/threads/${encodeURIComponent(threadId)}/${verb}`,
+    { method: 'POST', body: JSON.stringify(body) },
+  )
+  const record = objectValue(raw)
+  const path = Array.isArray(record?.active_path) ? record.active_path : []
+  return {
+    activeLeafMessageId: str(record?.active_leaf_message_id) ?? '',
+    activePath: path.filter((id): id is string => typeof id === 'string'),
+  }
+}
+
+/**
+ * Star or unstar a thread, or mark it read or unread. Each call writes only the
+ * flag it names, so the server leaves the title, preview and pin alone. Null when
+ * the server no longer has the thread as one the caller owns.
+ */
+export async function setChatThreadStarred(threadId: string, starred: boolean): Promise<ChatThreadSession | null> {
+  parseChatHistoryAction({ type: 'thread.star', threadId, starred })
+  return postChatThreadFlags(threadId, { starred })
+}
+
+export async function markChatThreadUnread(threadId: string): Promise<ChatThreadSession | null> {
+  parseChatHistoryAction({ type: 'thread.mark_unread', threadId })
+  return postChatThreadFlags(threadId, { unread: true })
+}
+
+export async function markChatThreadRead(threadId: string): Promise<ChatThreadSession | null> {
+  parseChatHistoryAction({ type: 'thread.mark_read', threadId })
+  return postChatThreadFlags(threadId, { unread: false })
+}
+
+async function postChatThreadFlags(
+  threadId: string,
+  flags: { starred?: boolean; unread?: boolean },
+): Promise<ChatThreadSession | null> {
+  let raw: unknown
+  try {
+    raw = await requestJson<unknown>(
+      `/api/v1/chat/threads/${encodeURIComponent(threadId)}/flags`,
+      { method: 'PUT', body: JSON.stringify(flags) },
+    )
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return null
+    throw error
+  }
+  applyRetentionFrom(raw)
+  return normalizeChatThreadSession(objectValue(raw)?.session)
+}
+
+/** One conversation search hit. The snippet carries match markers, never markup. */
+export type ChatSearchHit = {
+  threadId: string
+  messageId: string
+  role: string
+  /**
+   * The matched text, with each matched word between U+E000 and U+E001. The
+   * page splits on those markers into text nodes; it never parses this as HTML.
+   */
+  snippet: string
+  createdAt: string
+  threadTitle: string
+  archived: boolean
+}
+
+export type ChatSearchResult =
+  | { status: 'ok'; hits: ChatSearchHit[] }
+  /**
+   * Search is off on this deployment, or it ran past its time budget. Not an
+   * error: the sidebar keeps its local filter and says so.
+   */
+  | { status: 'unavailable'; reason: 'disabled' | 'timeout' }
+
+/**
+ * Search the owner's chat threads, first page only. Rejects on any failure other
+ * than the two typed unavailable answers, so the caller decides what a broken
+ * request means for its view.
+ */
+export async function searchChatThreads(
+  query: string,
+  options: { limit?: number } = {},
+): Promise<ChatSearchResult> {
+  // The contract refuses an empty or oversized query before anything is sent.
+  parseChatHistoryAction({ type: 'thread.search', query })
+  const params = new URLSearchParams({ q: query.trim() })
+  if (options.limit != null && Number.isFinite(options.limit) && options.limit > 0) {
+    params.set('limit', String(Math.floor(options.limit)))
+  }
+  let raw: unknown
+  try {
+    raw = await requestJson<unknown>(`/api/v1/chat/threads/search?${params.toString()}`)
+  } catch (error) {
+    const reason = searchUnavailableReason(error)
+    if (reason) return { status: 'unavailable', reason }
+    throw error
+  }
+  return { status: 'ok', hits: normalizeChatSearchHits(raw) }
+}
+
+function searchUnavailableReason(error: unknown): 'disabled' | 'timeout' | null {
+  if (!(error instanceof ApiError) || error.status !== 503) return null
+  if (error.code === 'history_search_disabled') return 'disabled'
+  if (error.code === 'history_search_timeout') return 'timeout'
+  return null
+}
+
+function normalizeChatSearchHits(raw: unknown): ChatSearchHit[] {
+  const source = objectValue(raw)?.hits
+  if (!Array.isArray(source)) return []
+  return source.flatMap((item): ChatSearchHit[] => {
+    const record = objectValue(item)
+    const threadId = str(record?.threadId)
+    const messageId = str(record?.messageId)
+    if (!threadId || !messageId) return []
+    return [{
+      threadId,
+      messageId,
+      role: str(record?.role) ?? '',
+      snippet: str(record?.snippet) ?? '',
+      createdAt: str(record?.createdAt) ?? '',
+      threadTitle: str(record?.threadTitle) ?? '',
+      archived: record?.archived === true,
+    }]
+  })
 }
 
 export async function saveChatThreadSnapshot(
@@ -2250,7 +3113,34 @@ function normalizeThreadMessages(raw: unknown): ChatMessage[] {
       // field means "not recorded" — never a score of zero.
       confidence: num(item.confidence),
       verification: normalizeVerification(item.verification),
+      ...messageVersionField(item.version),
     }))
+}
+
+/** A turn's place in a versioned thread, read by name. A malformed place is dropped, never guessed. */
+function normalizeMessageVersion(value: unknown): ChatMessageVersion | undefined {
+  const record = objectValue(value)
+  if (!record) return undefined
+  const siblingOrdinal = num(record.sibling_ordinal)
+  const siblingCount = num(record.sibling_count)
+  if (siblingOrdinal === undefined || siblingCount === undefined || typeof record.on_active_path !== 'boolean') {
+    return undefined
+  }
+  return {
+    parentMessageId: str(record.parent_message_id) ?? '',
+    siblingOrdinal,
+    siblingCount,
+    onActivePath: record.on_active_path,
+    siblings: Array.isArray(record.siblings)
+      ? record.siblings.filter((id): id is string => typeof id === 'string')
+      : [],
+  }
+}
+
+/** The `version` key for a turn that has one, and no key at all for a turn that does not. */
+function messageVersionField(value: unknown): { version?: ChatMessageVersion } {
+  const version = normalizeMessageVersion(value)
+  return version ? { version } : {}
 }
 
 /**
@@ -2296,6 +3186,9 @@ function normalizeChatThreadSession(raw: unknown): ChatThreadSession | null {
   const latestRunUpdatedAt = normalizeOptionalIsoTimestamp(
     str(item.latestRunUpdatedAt) ?? str(item.latest_run_updated_at),
   )
+  const archivedAt = normalizeOptionalIsoTimestamp(
+    str(item.archivedAt) ?? str(item.archived_at),
+  )
   return {
     threadId,
     title,
@@ -2311,6 +3204,9 @@ function normalizeChatThreadSession(raw: unknown): ChatThreadSession | null {
     ...(latestRunUpdatedAt ? { latestRunUpdatedAt } : {}),
     spaceRef: str(item.spaceRef) ?? str(item.space_ref),
     origin: str(item.origin),
+    ...(item.starred === true ? { starred: true } : {}),
+    ...(item.unread === true ? { unread: true } : {}),
+    ...(archivedAt ? { archivedAt } : {}),
   }
 }
 
@@ -2430,6 +3326,13 @@ function normalizeCostTier(value: unknown): ModelInfo['costTier'] {
   return undefined
 }
 
+/** Unknown names are dropped, not guessed at: a level the client cannot name is never offered. */
+function normalizeEffortLevels(value: unknown): ModelInfo['effortLevels'] {
+  if (!Array.isArray(value)) return undefined
+  const levels = value.filter(isEffortLevel)
+  return levels.length > 0 ? levels : undefined
+}
+
 function readBool(value: unknown): boolean | undefined {
   if (typeof value === 'boolean') return value
   if (typeof value === 'string') {
@@ -2440,15 +3343,208 @@ function readBool(value: unknown): boolean | undefined {
   return undefined
 }
 
-export async function listModels(): Promise<ModelInfo[]> {
+/**
+ * What the server says a chat turn may attach (`attachment_policy` beside
+ * `models` on `/api/v1/models`). The server enforces these numbers; the client
+ * declares them instead of keeping a copy that can drift.
+ */
+export interface AttachmentPolicy {
+  readonly imageMimes: readonly string[]
+  readonly maxImages: number
+  readonly maxImageBytes: number
+  readonly maxFiles: number
+  readonly maxFileBytes: number
+  readonly maxTotalBytes: number
+  readonly modes: {
+    readonly vision: boolean
+    readonly sandboxFiles: boolean
+    /**
+     * Images ride as parts of a chat turn on the server (`CHAT_VISION_AS_PARTS_ENABLED`). Optional in the type so
+     * a literal written before this mode existed still type-checks; {@link parseAttachmentPolicy} always sets it.
+     */
+    readonly visionAsParts?: boolean
+    /** A Do run carries the turn's attachments on the server (`CHAT_DO_ATTACHMENTS_ENABLED`). Optional, as above. */
+    readonly doAttachments?: boolean
+  }
+}
+
+function positiveInteger(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined
+}
+
+/**
+ * A switch the server declares beside `modes`. Absent means off: a server that predates the switch does not
+ * declare it. Present but not a boolean is malformed, so the whole policy is dropped like any other bad field.
+ */
+function declaredSwitch(value: unknown): boolean | undefined {
+  if (value === undefined) return false
+  return typeof value === 'boolean' ? value : undefined
+}
+
+/**
+ * The declared policy, or `undefined` when the response carries none or any
+ * field of it is malformed. Never half-trusted: a policy the client cannot read
+ * whole is the same as no policy, which keeps today's constants.
+ */
+export function parseAttachmentPolicy(value: unknown): AttachmentPolicy | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const raw = value as Record<string, unknown>
+  const modes = raw.modes && typeof raw.modes === 'object' ? (raw.modes as Record<string, unknown>) : undefined
+  const imageMimes = Array.isArray(raw.image_mimes)
+    ? raw.image_mimes.filter((mime): mime is string => typeof mime === 'string')
+    : undefined
+  const maxImages = positiveInteger(raw.max_images)
+  const maxImageBytes = positiveInteger(raw.max_image_bytes)
+  const maxFiles = positiveInteger(raw.max_files)
+  const maxFileBytes = positiveInteger(raw.max_file_bytes)
+  const maxTotalBytes = positiveInteger(raw.max_total_bytes)
+  const visionAsParts = declaredSwitch(modes?.vision_as_parts)
+  const doAttachments = declaredSwitch(modes?.do_attachments)
+  if (
+    !imageMimes || imageMimes.length !== (raw.image_mimes as unknown[]).length
+    || maxImages === undefined || maxImageBytes === undefined
+    || maxFiles === undefined || maxFileBytes === undefined || maxTotalBytes === undefined
+    || !modes || typeof modes.vision !== 'boolean' || typeof modes.sandbox_files !== 'boolean'
+    || visionAsParts === undefined || doAttachments === undefined
+  ) {
+    return undefined
+  }
+  return {
+    imageMimes,
+    maxImages,
+    maxImageBytes,
+    maxFiles,
+    maxFileBytes,
+    maxTotalBytes,
+    modes: { vision: modes.vision, sandboxFiles: modes.sandbox_files, visionAsParts, doAttachments },
+  }
+}
+
+let declaredAttachmentPolicy: AttachmentPolicy | undefined
+
+/**
+ * The attachment policy the last catalogue load declared. `undefined` before the
+ * catalogue answers, when the server declares none, or after a load that failed:
+ * callers then use today's constants. Set by {@link listModels}.
+ */
+export function getAttachmentPolicy(): AttachmentPolicy | undefined {
+  return declaredAttachmentPolicy
+}
+
+/**
+ * What the organisation's model policy did to this catalogue (`entitlement` beside
+ * `models` on `/api/v1/models`): counts, a revision and defaults, never a model
+ * list. The server enforces it; the client only reconciles what it shows.
+ */
+export interface ModelEntitlementMeta {
+  /** `none`, `org`, `role` or `member_not_found`. */
+  readonly state: string
+  /** False in shadow mode: the policy is counted but nothing is hidden or lowered. */
+  readonly enforced: boolean
+  readonly revision: number
+  readonly restricted: boolean
+  /** Chat models the policy removed from the catalogue. */
+  readonly hiddenCount: number
+  readonly defaultModel?: string
+  readonly defaultEffort?: string
+  /** The highest reasoning level the policy allows. */
+  readonly maxEffort?: EffortLevel
+}
+
+/**
+ * The declared meta, or `undefined` when the response carries none or a required
+ * field of it is malformed. Never half-trusted: without it the catalogue is shown
+ * as served and the server's own refusal stays the only gate.
+ */
+export function parseModelEntitlementMeta(value: unknown): ModelEntitlementMeta | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const raw = value as Record<string, unknown>
+  const state = str(raw.state)
+  if (
+    state === undefined
+    || typeof raw.enforced !== 'boolean'
+    || typeof raw.restricted !== 'boolean'
+    || typeof raw.revision !== 'number' || !Number.isFinite(raw.revision)
+    || typeof raw.hidden_count !== 'number' || !Number.isFinite(raw.hidden_count)
+  ) {
+    return undefined
+  }
+  const defaultModel = str(raw.default_model)
+  const defaultEffort = str(raw.default_effort)
+  return {
+    state,
+    enforced: raw.enforced,
+    revision: raw.revision,
+    restricted: raw.restricted,
+    hiddenCount: Math.max(0, Math.trunc(raw.hidden_count)),
+    ...(defaultModel ? { defaultModel } : {}),
+    ...(defaultEffort ? { defaultEffort } : {}),
+    ...(isEffortLevel(raw.max_effort) ? { maxEffort: raw.max_effort } : {}),
+  }
+}
+
+let declaredModelEntitlement: ModelEntitlementMeta | undefined
+
+/**
+ * The entitlement meta the last catalogue load declared. `undefined` before the
+ * catalogue answers or when no policy applies. Set by
+ * {@link listModels}, like {@link getAttachmentPolicy}, so a caller that already
+ * loads the catalogue reads it without a second request.
+ */
+export function getModelEntitlementMeta(): ModelEntitlementMeta | undefined {
+  return declaredModelEntitlement
+}
+
+/** The catalogue and what the organisation's policy did to it. */
+export interface ModelCatalogue {
+  readonly models: ModelInfo[]
+  readonly entitlement?: ModelEntitlementMeta
+}
+
+/**
+ * The ceiling the server applies to a request's reasoning effort, or `undefined`
+ * when it applies none (no policy, shadow mode, or no `max_effort`).
+ */
+export function enforcedMaxEffort(meta: ModelEntitlementMeta | undefined): EffortLevel | undefined {
+  return meta?.enforced ? meta.maxEffort : undefined
+}
+
+/** Whether `level` is within the ceiling; no ceiling allows every level. */
+export function effortLevelWithin(level: EffortLevel, ceiling: EffortLevel | undefined): boolean {
+  return ceiling === undefined || EFFORT_LEVELS.indexOf(level) <= EFFORT_LEVELS.indexOf(ceiling)
+}
+
+/**
+ * Whether a selection the policy no longer offers must be dropped. Only an
+ * enforced, restrictive policy resets, and only against a catalogue that lists
+ * chat models: an empty catalogue is an outage (`listModels()` swallows one into
+ * `[]`), and a pinned Verevon mode is resolved server-side so it is never absent.
+ */
+export function selectionIsStale(
+  selection: { readonly model: string; readonly provider?: string },
+  catalogue: readonly ModelInfo[],
+  meta: ModelEntitlementMeta | undefined,
+): boolean {
+  if (!meta?.enforced || !meta.restricted) return false
+  if (!selection.model || isVerevonModeId(selection.model)) return false
+  const chat = catalogue.filter(isChatModel)
+  if (chat.length === 0) return false
+  return !chat.some((model) => model.id === selection.model && model.provider === selection.provider)
+}
+
+export async function listModelCatalogue(): Promise<ModelCatalogue> {
   const raw = await requestJson<unknown>('/api/v1/models')
+  const envelope = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : undefined
+  declaredAttachmentPolicy = parseAttachmentPolicy(envelope?.attachment_policy)
+  const entitlement = parseModelEntitlementMeta(envelope?.entitlement)
+  declaredModelEntitlement = entitlement
   const source = Array.isArray(raw)
     ? raw
     : raw && typeof raw === 'object' && Array.isArray((raw as { models?: unknown }).models)
       ? (raw as { models: unknown[] }).models
       : []
 
-  return source
+  const models = source
     .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
     .map((item) => {
       const id = str(item.id) ?? ''
@@ -2479,9 +3575,15 @@ export async function listModels(): Promise<ModelInfo[]> {
         privacyTier,
         residency: str(item.residency),
         cheap: readBool(item.cheap) ?? readBool(item.is_cheap),
+        effortLevels: normalizeEffortLevels(item.effort_levels ?? item.effortLevels),
       }
     })
     .filter((model) => model.id.length > 0)
+  return { models, ...(entitlement ? { entitlement } : {}) }
+}
+
+export async function listModels(): Promise<ModelInfo[]> {
+  return (await listModelCatalogue()).models
 }
 
 /** Product-facing label for a ChatGPT-plan model. `codex` is an implementation
@@ -2570,6 +3672,57 @@ export const AGENTIC_CAPABILITY = 'agentic'
  */
 export function modelSupportsAgentic(model: Pick<ModelInfo, 'capabilities'> | undefined): boolean {
   return model?.capabilities?.includes(AGENTIC_CAPABILITY) ?? false
+}
+
+/**
+ * The catalogue flag for connected-app reads (WS23 S6): a chat model lists it only while
+ * the gateway's connector-read switch is on for the deployment, so the composer shows its
+ * chip row only when the server says the reads can run. Nothing here derives it from a name.
+ */
+export const CONNECTOR_SCOPE_CAPABILITY = 'connector_scope'
+
+/**
+ * Whether some chat model in the catalogue advertises connected-app reads. Deployment-wide,
+ * like the switch behind it: a Verevon mode is not a catalogue entry, so the check is not
+ * per model. An empty or unanswered catalogue advertises nothing.
+ */
+export function catalogueAdvertisesConnectorScope(
+  models: readonly Pick<ModelInfo, 'capabilities' | 'modality'>[],
+): boolean {
+  return models.some((model) => model.modality === 'chat' && (model.capabilities?.includes(CONNECTOR_SCOPE_CAPABILITY) ?? false))
+}
+
+/**
+ * The per-model capability flag inference-core lists on a model that reads
+ * images (`list_models` emits `vision` per model, not per provider).
+ */
+export const VISION_CAPABILITY = 'vision'
+
+/**
+ * Whether the picked model can read an attached image, for the turns on which
+ * the model, not the vision-only diversion, is the reader (images as parts).
+ *
+ * An explicit catalogue model answers for itself. A Verevon mode is not a
+ * catalogue entry (`model` is `undefined` for it), so it follows the server's
+ * declared policy: some model that reads images exists. Anything else is
+ * `false`: a catalogue that has not answered never switches images on by guess.
+ */
+export function modelSupportsVision(
+  model: Pick<ModelInfo, 'capabilities'> | undefined,
+  policy: Pick<AttachmentPolicy, 'modes'> | undefined,
+  options: { verevonMode?: boolean } = {},
+): boolean {
+  if (model) return model.capabilities?.includes(VISION_CAPABILITY) ?? false
+  return options.verevonMode === true && (policy?.modes.vision ?? false)
+}
+
+/**
+ * The reasoning levels the catalogue lists for a model, weakest first. Empty
+ * for a model that is not listed or lists none, so a catalogue that has not
+ * answered never offers a level by guess.
+ */
+export function modelEffortLevels(model: Pick<ModelInfo, 'effortLevels'> | undefined): readonly EffortLevel[] {
+  return model?.effortLevels ?? []
 }
 
 /** Patterns that mark a model as expensive enough to warrant a deliberate pick. */

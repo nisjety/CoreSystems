@@ -1,0 +1,157 @@
+name: Model Plane Ops Gates
+
+# The release and operations gates of the Model Plane that no workflow ran before: the three
+# release-*.sh contract tests (signed artifact, runtime partition, input security), the
+# acceptance thresholds file, the conformance gate, the rollback rehearsal and migration
+# expand/contract guards, and the session-core audit outbox against a real Postgres.
+#
+# Not here on purpose: audit-core Go tests and promtool run in audit-core-ci.yml (WS06-S1), so
+# one workflow owns each. Every script below stubs docker; a green run does not mean an image
+# was built, signed or deployed. The runtime conformance report at the end only lists gaps and
+# never fails the job: it stays blocked until a signed candidate and a passed rehearsal exist.
+
+on:
+  pull_request:
+    paths:
+      - "apps/Model Plane/scripts/**"
+      - "apps/Model Plane/deploy/**"
+      - "apps/Model Plane/docs/CORESYSTEM_ACCEPTANCE_THRESHOLDS.tsv"
+      - "apps/Model Plane/docs/RELEASE_GATE_WAIVERS.tsv"
+      - "apps/Model Plane/docs/CAPABILITY_PROMOTION_LEDGER.tsv"
+      - "apps/Model Plane/go/services/nats-provisioner/**"
+      - "apps/Model Plane/rust/services/session-core/**"
+      - "scripts/coresystem-conformance*.sh"
+      - "scripts/tests/coresystem-conformance*"
+      - ".github/workflows/model-plane-ops-gates.yml"
+  push:
+    branches: [main, fix/ui-premium-restore]
+    paths:
+      - "apps/Model Plane/scripts/**"
+      - "apps/Model Plane/deploy/**"
+      - "apps/Model Plane/docs/CORESYSTEM_ACCEPTANCE_THRESHOLDS.tsv"
+      - "apps/Model Plane/docs/RELEASE_GATE_WAIVERS.tsv"
+      - "apps/Model Plane/docs/CAPABILITY_PROMOTION_LEDGER.tsv"
+      - "apps/Model Plane/go/services/nats-provisioner/**"
+      - "apps/Model Plane/rust/services/session-core/**"
+      - "scripts/coresystem-conformance*.sh"
+      - "scripts/tests/coresystem-conformance*"
+      - ".github/workflows/model-plane-ops-gates.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: model-plane-ops-gates-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release-gates:
+    name: Release and conformance gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.25"
+          cache-dependency-path: "apps/Model Plane/go/services/nats-provisioner/go.sum"
+
+      # capability-promotion-ledger-test.sh (run by the conformance gate) calls rg.
+      - name: Install ripgrep
+        run: sudo apt-get install -y --no-install-recommends ripgrep
+
+      # K1-22: these three were run by hand only.
+      - name: Release artifact contract tests
+        run: |
+          set -euo pipefail
+          bash "apps/Model Plane/scripts/tests/release-contract-test.sh"
+          bash "apps/Model Plane/scripts/tests/release-runtime-partition-test.sh"
+          bash "apps/Model Plane/scripts/tests/release-input-security-test.sh"
+
+      - name: Acceptance thresholds contract
+        run: |
+          set -euo pipefail
+          bash "apps/Model Plane/scripts/tests/acceptance-thresholds-test.sh"
+          bash "apps/Model Plane/scripts/tests/acceptance-thresholds-test.sh" --self-test
+
+      - name: Conformance gate and artifact contract
+        run: bash scripts/tests/coresystem-conformance-artifact-test.sh
+
+      - name: Rollback rehearsal, migration policy and rebuild guards
+        run: |
+          set -euo pipefail
+          bash "apps/Model Plane/scripts/tests/rollback-rehearsal-test.sh"
+          bash "apps/Model Plane/scripts/tests/migration-expand-contract-test.sh"
+          bash "apps/Model Plane/scripts/tests/rebuild-service-test.sh"
+
+      # The provisioner ships in the signed artifact (WS01-S8); its manifest contract is the
+      # source of truth for the broker topology the artifact assumes.
+      - name: nats-provisioner tests
+        working-directory: "apps/Model Plane/go/services/nats-provisioner"
+        run: go test ./...
+
+      # Informational: names the real gaps of the runtime profile in the job summary.
+      - name: Runtime conformance report (gaps only)
+        run: |
+          set +e
+          bash scripts/coresystem-conformance.sh --json --profile runtime >runtime-conformance.json
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ] && [ "$status" -ne 2 ]; then
+            echo "::error::conformance command failed with status $status"
+            exit 1
+          fi
+          {
+            echo "### Runtime conformance"
+            echo '```json'
+            cat runtime-conformance.json
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+  # Postgres contract tests of the session-core audit outbox: the requeue function the
+  # replay runbook relies on (migration 0043). They are #[ignore]d because they need a
+  # database, so rust-ci never runs them. The broker-backed audit tests need a provisioned
+  # NATS and stay with the live proof. The count fails the job if the filter stops
+  # matching, so a renamed test cannot turn the job green.
+  session-core-audit-db:
+    name: Session Core audit outbox (Postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: session_core
+          POSTGRES_PASSWORD: session_core
+          POSTGRES_DB: session_core_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U session_core"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    defaults:
+      run:
+        working-directory: "apps/Model Plane/rust"
+    env:
+      DATABASE_URL: postgres://session_core:session_core@localhost:5432/session_core_test
+      REQUIRE_CONTRACT: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "apps/Model Plane/rust -> target"
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "27.x"
+      - name: Run the audit outbox requeue tests against a migrated database
+        run: |
+          set -euo pipefail
+          cargo test -p session-core --bin session-core audit_publisher::tests::requeue_function -- --ignored --test-threads=1 2>&1 | tee audit-db-tests.log
+          passed=$(grep -oE "test result: ok\. [0-9]+ passed" audit-db-tests.log | grep -oE "[0-9]+" | head -1)
+          if [ -z "$passed" ] || [ "$passed" -lt 1 ]; then
+            echo "expected at least 1 audit outbox test to run, got ${passed:-0}"
+            exit 1
+          fi

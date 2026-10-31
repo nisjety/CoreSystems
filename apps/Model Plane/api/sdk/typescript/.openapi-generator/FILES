@@ -12,6 +12,7 @@ docs/AiRealtimeRequest.md
 docs/AiSpeechRequest.md
 docs/AiTranslateRequest.md
 docs/Approval.md
+docs/ApprovalCause.md
 docs/CancelRun200Response.md
 docs/CapabilitiesApi.md
 docs/Capability.md
@@ -72,6 +73,7 @@ src/models/AiRealtimeRequest.ts
 src/models/AiSpeechRequest.ts
 src/models/AiTranslateRequest.ts
 src/models/Approval.ts
+src/models/ApprovalCause.ts
 src/models/CancelRun200Response.ts
 src/models/Capability.ts
 src/models/ChatMessage.ts

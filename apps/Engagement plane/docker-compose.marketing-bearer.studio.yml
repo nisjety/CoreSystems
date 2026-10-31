@@ -1,0 +1,62 @@
+# Auth Core issues a narrowly scoped service bearer; this worker renews it.
+# Google provider grants remain exclusively in Integration Core's vault.
+services:
+  marketing-bearer-init:
+    image: alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+    profiles: ["marketing"]
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "FOWNER", "DAC_OVERRIDE"]
+    command: ["sh", "-ec", "chown 100:101 /run/marketing-bearer && chmod 0700 /run/marketing-bearer"]
+    volumes:
+      - marketing-integration-bearer:/run/marketing-bearer
+
+  marketing-bearer-refresh:
+    profiles: ["marketing"]
+    build:
+      context: ./visibility-core
+      dockerfile: Dockerfile
+      target: bearer-refresh
+      additional_contexts:
+        studio-plane-client: ./pkg/planeclient
+    init: true
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    environment:
+      AUTH_CORE_URL: http://auth-core:3011
+      MARKETING_INTEGRATION_ORGANIZATION_ID: ${STUDIO_MARKETING_INTEGRATION_ORGANIZATION_ID:?set the verified Marketing organization}
+      MARKETING_INTEGRATION_SERVICE_KEY_FILE: /run/secrets/marketing_plane_service_key
+      INTEGRATION_BEARER_TOKEN_FILE: /run/marketing-bearer/token
+    secrets:
+      - marketing_plane_service_key
+    volumes:
+      - marketing-integration-bearer:/run/marketing-bearer
+    networks:
+      - inter-plane-bus
+    depends_on:
+      marketing-bearer-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/app/integration-bearer-refresh", "--check"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+secrets:
+  marketing_plane_service_key:
+    file: ${STUDIO_MARKETING_SERVICE_KEY_FILE:?set the protected Marketing service credential file}
+
+volumes:
+  marketing-integration-bearer:

@@ -34,13 +34,11 @@ pub(crate) fn document_zdr_requested(zdr: bool, classification: &str) -> bool {
     )
 }
 
-#[must_use]
-const fn durable_mutation_blocked(claim_zdr: bool, request_zdr: bool) -> bool {
-    claim_zdr || request_zdr
-}
-
+/// The Data Plane `zdr_mode` a retrieval carries. A ZDR turn is `ephemeral`, and a waived turn is
+/// `reject`, so restricted documents never reach the personal account. Only a persistent turn
+/// takes the caller's own mode, which is what it always did.
 fn effective_retrieval_zdr_mode(
-    claim_zdr: bool,
+    posture: &crate::zdr_posture::TurnPosture,
     request_mode: Option<&str>,
 ) -> Result<Option<String>, &'static str> {
     let validated = match request_mode {
@@ -48,18 +46,18 @@ fn effective_retrieval_zdr_mode(
         Some("disabled" | "reject" | "ephemeral") => request_mode.map(str::to_owned),
         Some(_) => return Err("zdr_mode must be one of: disabled, reject, ephemeral"),
     };
-    Ok(if claim_zdr {
-        Some("ephemeral".to_owned())
-    } else {
-        validated
+    Ok(match posture {
+        crate::zdr_posture::TurnPosture::Zdr { .. }
+        | crate::zdr_posture::TurnPosture::Waived { .. } => posture.data_plane_mode(),
+        crate::zdr_posture::TurnPosture::Persistent => validated,
     })
 }
 
 fn reject_zdr_durable_mutation(claims: &Claims, request_zdr: bool) -> Result<(), HttpJsonError> {
-    if durable_mutation_blocked(claims.zdr, request_zdr) {
+    if crate::zdr_posture::zdr_or_refuse(claims, &crate::zdr_posture::Route::plain(request_zdr))? {
         Err((
             StatusCode::PRECONDITION_FAILED,
-            Json(json!({ "error": "durable mutation is unavailable under ZDR" })),
+            Json(mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN.json_body()),
         ))
     } else {
         Ok(())
@@ -76,6 +74,18 @@ fn grpc_err(e: &tonic::Status) -> HttpJsonError {
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
     (code, Json(json!({ "error": e.message() })))
+}
+
+/// The error of a failed retrieval call. On a restrictive turn the Data Plane's refusal for want of a
+/// ZDR-approved query embedding route is the typed zero-data-retention refusal, with the precondition
+/// status every ZDR refusal carries (Z-41b). Any other failure keeps the mapping it always had.
+fn retrieval_err(e: &tonic::Status, restrictive_turn: bool) -> HttpJsonError {
+    match crate::retrieval::dense_unavailable_refusal(e) {
+        Some(refusal) if restrictive_turn => {
+            (StatusCode::PRECONDITION_FAILED, Json(refusal.json_body()))
+        }
+        _ => grpc_err(e),
+    }
 }
 
 fn user_data_request<T>(
@@ -634,8 +644,12 @@ pub async fn retrieve(
     bearer: VerifiedBearer,
     Json(body): Json<RetrieveBody>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    let effective_zdr_mode = effective_retrieval_zdr_mode(claims.zdr, body.zdr_mode.as_deref())
+    let posture = crate::zdr_posture::decide_for(&claims, &crate::zdr_posture::Route::plain(false))
+        .map_err(|refusal| crate::zdr_posture::http(&refusal))?;
+    let effective_zdr_mode = effective_retrieval_zdr_mode(&posture, body.zdr_mode.as_deref())
         .map_err(|message| (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))))?;
+    // The mode this retrieval carries decides what its notice may say (`notice_for_mode`).
+    let notice_mode = effective_zdr_mode.clone();
     // The jurisdiction axis, resolved the same way one line below its retention
     // sibling: signed claim first, caller's declared value second. Sending
     // nothing at all is what made every gRPC dense query fail closed upstream,
@@ -659,6 +673,9 @@ pub async fn retrieve(
         check_pending_documents(&state, &claims.org_id, &filters.document_ids, &bearer).await?
     };
 
+    // A persistent turn is never told its answer was reduced under zero retention, whatever mode its body
+    // asked for; only a ZDR or waived turn may carry the notice or the refusal's typed form (Z-41b).
+    let restrictive_turn = !matches!(posture, crate::zdr_posture::TurnPosture::Persistent);
     let request = user_data_request(
         ret_pb::RetrieveRequest {
             org_id: claims.org_id.clone(),
@@ -692,7 +709,7 @@ pub async fn retrieve(
         .clone()
         .retrieve(request)
         .await
-        .map_err(|e| grpc_err(&e))?
+        .map_err(|e| retrieval_err(&e, restrictive_turn))?
         .into_inner();
     // Data Plane v2's advisory side channel (proto field 10): follow-up endpoint
     // hints, and — the compliance half — which ZDR enforcement actions it
@@ -705,7 +722,7 @@ pub async fn retrieve(
     // cannot observe enforcement cannot propagate it. The endpoint→tool mapping
     // is the tool loop's concern, not a pass-through surface's.
     let metadata = crate::retrieval_metadata::from_struct(resp.retrieval_metadata.as_ref());
-    Ok(Json(json!({
+    let mut body = json!({
         "candidates": resp.candidates.iter().map(candidate_value).collect::<Vec<_>>(),
         "sources": resp.sources.iter().map(source_value).collect::<Vec<_>>(),
         "query": resp.query,
@@ -717,7 +734,17 @@ pub async fn retrieve(
         "pending_documents": pending_documents,
         "suggested_next_tools": metadata.suggested_next_tools,
         "zdr_actions_applied": metadata.zdr_actions_applied,
-    })))
+    });
+    // A reduced answer says so on this route too (Z-41b): the typed code and wording key, present only
+    // when the answer was reduced, so an ordinary answer's wire form is unchanged.
+    if let Some(notice) = metadata
+        .notice
+        .filter(|_| restrictive_turn)
+        .and_then(|notice| crate::retrieval_metadata::notice_for_mode(notice, notice_mode.as_deref()))
+    {
+        body["notice"] = json!(notice);
+    }
+    Ok(Json(body))
 }
 
 /// Upper bound on how long a single `retrieve` will block on readiness signals,
@@ -1743,6 +1770,8 @@ mod zdr_contract_tests {
             scopes: Vec::new(),
             zdr,
             sovereign: None,
+            org_zdr: None,
+            zdr_waiver: None,
             principal_type: Some("user".to_owned()),
             service_id: None,
             reason: None,
@@ -1767,30 +1796,52 @@ mod zdr_contract_tests {
 
     #[test]
     fn verified_claim_zdr_cannot_be_downgraded_by_document_or_bulk_body() {
-        assert!(durable_mutation_blocked(true, false));
-        assert!(durable_mutation_blocked(false, true));
-        assert!(!durable_mutation_blocked(false, false));
+        assert!(reject_zdr_durable_mutation(&document_claims(true), false).is_err());
+        assert!(reject_zdr_durable_mutation(&document_claims(false), true).is_err());
+        assert!(reject_zdr_durable_mutation(&document_claims(false), false).is_ok());
     }
 
     #[test]
     fn verified_claim_zdr_forces_ephemeral_retrieval_over_disabled_body() {
+        let zdr = crate::zdr_posture::TurnPosture::Zdr {
+            reason: mp_contracts::retention::Reason::OrgZdr,
+        };
         assert_eq!(
-            effective_retrieval_zdr_mode(true, Some("disabled"))
+            effective_retrieval_zdr_mode(&zdr, Some("disabled"))
                 .expect("supported mode must resolve")
                 .as_deref(),
             Some("ephemeral")
         );
         assert_eq!(
-            effective_retrieval_zdr_mode(false, Some("reject"))
+            effective_retrieval_zdr_mode(&crate::zdr_posture::TurnPosture::Persistent, Some("reject"))
                 .expect("supported mode must pass through")
                 .as_deref(),
             Some("reject")
         );
     }
 
+    /// A waived turn filters restricted documents whatever mode the body asks for, because the
+    /// personal account is the one place they must not reach.
+    #[test]
+    fn a_waived_turn_retrieves_in_reject_mode_whatever_the_body_asks() {
+        let waived = crate::zdr_posture::TurnPosture::Waived {
+            connection: "conn-1".to_owned(),
+            reason: mp_contracts::retention::Reason::ConnectionNotZdrCapable,
+        };
+        for body in [None, Some("disabled"), Some("ephemeral"), Some("reject")] {
+            assert_eq!(
+                effective_retrieval_zdr_mode(&waived, body)
+                    .expect("supported mode must resolve")
+                    .as_deref(),
+                Some("reject"),
+                "{body:?}"
+            );
+        }
+    }
+
     #[test]
     fn wiki_mutations_are_blocked_by_verified_claim_zdr() {
-        assert!(durable_mutation_blocked(true, false));
+        assert!(reject_zdr_durable_mutation(&document_claims(true), false).is_err());
     }
 
     #[tokio::test]
@@ -1828,7 +1879,102 @@ mod zdr_contract_tests {
 
     #[test]
     fn invalid_retrieval_mode_is_rejected_instead_of_forwarded() {
-        assert!(effective_retrieval_zdr_mode(false, Some("Ephemeral")).is_err());
-        assert!(effective_retrieval_zdr_mode(false, Some("unknown")).is_err());
+        let persistent = crate::zdr_posture::TurnPosture::Persistent;
+        assert!(effective_retrieval_zdr_mode(&persistent, Some("Ephemeral")).is_err());
+        assert!(effective_retrieval_zdr_mode(&persistent, Some("unknown")).is_err());
+    }
+
+    /// The proxy handler, called with a real Data Plane double behind it and the claims given. Returns the
+    /// handler's answer and every `zdr_mode` the double received.
+    async fn proxied_retrieval(
+        claims: Claims,
+        reply: crate::retrieval::notice_double::Reply,
+        zdr_mode: Option<&str>,
+    ) -> (Result<Json<Value>, HttpJsonError>, Vec<Option<String>>) {
+        use crate::retrieval::notice_double::NoticeDouble;
+        let double = NoticeDouble::new(reply);
+        let seen = double.clone();
+        let mut state = AppState::new();
+        state.retrieval_client = double.client().await;
+        let body = RetrieveBody {
+            query: "what does the contract say".to_owned(),
+            top_k: 5,
+            filters: None,
+            reranker_model: None,
+            context_budget_tokens: None,
+            context_format: None,
+            zdr_mode: zdr_mode.map(str::to_owned),
+            sovereign_required: None,
+            wait_for_ready_ms: None,
+        };
+        let result = retrieve(
+            State(state),
+            Extension(claims),
+            VerifiedBearer::for_test("signed-user-jwt"),
+            Json(body),
+        )
+        .await;
+        (result, seen.modes())
+    }
+
+    /// On a ZDR turn the proxied answer says it was reduced: the typed code and its wording key, and not the
+    /// Data Plane's own sentence.
+    #[tokio::test]
+    async fn a_zdr_proxied_answer_carries_its_notice() {
+        use crate::retrieval::notice_double::Reply;
+        let (result, modes) = proxied_retrieval(document_claims(true), Reply::Degraded, None).await;
+        let body = result.expect("a degraded answer is still an answer").0;
+        assert_eq!(body["notice"]["code"], "zdr_dense_unavailable", "{body}");
+        assert_eq!(
+            body["notice"]["wording_key"],
+            "retrieval.zdr_dense_unavailable"
+        );
+        assert!(!body.to_string().contains("Semantic search"), "{body}");
+        assert_eq!(modes, vec![Some("ephemeral".to_owned())]);
+    }
+
+    /// A persistent turn never carries the notice, even when its body asks for a restrictive mode, because the
+    /// statement would be false for it. Forwarding the notice on a non-ZDR turn fails this test.
+    #[tokio::test]
+    async fn a_persistent_proxied_answer_never_carries_a_notice() {
+        use crate::retrieval::notice_double::Reply;
+        let (result, modes) =
+            proxied_retrieval(document_claims(false), Reply::Degraded, Some("reject")).await;
+        let body = result.expect("the answer is delivered").0;
+        assert!(body.get("notice").is_none(), "{body}");
+        assert_eq!(modes, vec![Some("reject".to_owned())]);
+    }
+
+    /// An ordinary answer is unchanged: it has no notice key at all.
+    #[tokio::test]
+    async fn an_ordinary_proxied_answer_has_no_notice_key() {
+        use crate::retrieval::notice_double::Reply;
+        let (result, _) = proxied_retrieval(document_claims(true), Reply::Ordinary, None).await;
+        let body = result.expect("the answer is delivered").0;
+        assert!(body.get("notice").is_none(), "{body}");
+        assert!(body.get("suggested_next_tools").is_some(), "{body}");
+    }
+
+    /// The Data Plane's refusal on a ZDR turn is the typed zero-data-retention refusal with its precondition
+    /// status, not a generic server error an operator or client cannot match on.
+    #[tokio::test]
+    async fn a_zdr_refusal_from_the_data_plane_is_the_typed_refusal() {
+        use crate::retrieval::notice_double::Reply;
+        let (result, _) = proxied_retrieval(document_claims(true), Reply::Refused, None).await;
+        let (status, Json(body)) = result.expect_err("the refusal reaches the caller");
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(body["error"]["code"], "zdr_unavailable", "{body}");
+        assert_eq!(body["error"]["retryable"], false, "{body}");
+    }
+
+    /// The same Data Plane refusal on a persistent turn keeps the proxy's ordinary mapping. It is not a ZDR
+    /// refusal, and no persistent turn is refused for a retention reason.
+    #[tokio::test]
+    async fn the_same_refusal_on_a_persistent_turn_keeps_the_ordinary_mapping() {
+        use crate::retrieval::notice_double::Reply;
+        let (result, _) = proxied_retrieval(document_claims(false), Reply::Refused, None).await;
+        let (status, Json(body)) = result.expect_err("the failure reaches the caller");
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(body["error"]["code"].is_null(), "{body}");
     }
 }

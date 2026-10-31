@@ -745,11 +745,22 @@ async fn the_vector_leg_asks_auth_core_for_exactly_the_retrieval_row() {
         .mount(&data_plane)
         .await;
 
-    let index = DataPlaneVectorIndex::new(data_plane.uri()).with_token_provider(provider(&auth));
-    index
-        .retrieve("org_wire", "wire query", 3)
+    let index = DataPlaneVectorIndex::new(data_plane.uri())
+        .expect("a vector index")
+        .with_token_provider(provider(&auth));
+    let outcome = index
+        .retrieve(&crate::vector_index::VectorQuery {
+            org_id: "org_wire",
+            query: "wire query",
+            zdr: quarry_core::zdr::ZdrMode::Off,
+            limit: 3,
+        })
         .await
         .expect("the mock Data Plane answers");
+    assert_eq!(
+        outcome,
+        crate::vector_index::VectorOutcome::Hits(Vec::new())
+    );
 
     assert_one_mint_is_row(&mints(&auth).await, "vector-retrieve", "org_wire");
     assert_bearer_reached(&data_plane, "/v1/retrieve").await;

@@ -1,0 +1,57 @@
+query Customers(
+  $lastId: String,
+  $updatedInDataMart: DateTime,
+  $updatedInDataMartTo: DateTime,
+  $pageSize: Int! = 5000,
+  $includeDeleted: Boolean! = false
+) {
+  customers(
+    lastId: $lastId,
+    updatedInDataMart: $updatedInDataMart,
+    updatedInDataMartTo: $updatedInDataMartTo,
+    pageSize: $pageSize,
+    includeDeleted: $includeDeleted
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    customerId
+    customerNumber
+    customerName
+    status
+    accountReference
+    parentCustomer
+    currencyId
+    customerClassId
+    customerClassDescription
+    creditVerification
+    creditLimit
+    creditDaysPastDue
+    billAddressId
+    billContactId
+    attributesId
+    printInvoices
+    acceptAutoInvoices
+    sendInvoicesByEmail
+    printStatements
+    sendStatementsByEmail
+    printMultiCurrencyStatements
+    statementType
+    printDunningLetters
+    sendDunningLettersViaEmail
+    invoiceToDefaultLocation
+    excludeDebtCollection
+    defaultPaymentMethodId
+    vatRegistrationId
+    corporateId
+    note
+    creditTermsId
+    mainLocationId
+    mainAddressId
+    mainContactId
+    lastModifiedDateTime
+    createdDateTime
+    deletedDatabaseRecord
+    createdInDataMartDateTime
+  }
+}

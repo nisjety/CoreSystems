@@ -1,0 +1,35 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "Xero fixed-asset book-value observations. Values describe the source response observed at extraction time, not a reconstructed accounting-period balance.",
+  assertions: {
+    nonNull: ["tenant_id", "asset_id", "asset_observation_key", "asset_key"],
+    uniqueKey: ["asset_observation_key"]
+  }
+}
+
+SELECT
+  FARM_FINGERPRINT(asset_observation_id) AS asset_observation_key,
+  FARM_FINGERPRINT(CONCAT(tenant_id, '|', asset_id)) AS asset_key,
+  IF(asset_type_id IS NULL, NULL,
+     FARM_FINGERPRINT(CONCAT(tenant_id, '|', asset_type_id))) AS asset_type_key,
+  FARM_FINGERPRINT(tenant_id) AS company_key,
+  FARM_FINGERPRINT(CAST(observation_date AS STRING)) AS date_key,
+  tenant_id,
+  asset_id,
+  asset_type_id,
+  observation_date,
+  asset_observed_at,
+  purchase_price,
+  accounting_book_value,
+  disposal_price,
+  book_current_accumulated_depreciation,
+  book_prior_accumulated_depreciation,
+  book_current_capital_gain,
+  book_current_gain_loss,
+  book_cost_limit,
+  book_residual_value,
+  is_book_value_available,
+  is_source_deleted,
+  'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "fact_fixed_asset_value_observation")}

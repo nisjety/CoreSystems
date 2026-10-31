@@ -1216,12 +1216,13 @@ async fn browser_run_start_inner(
     headers: HeaderMap,
     Json(req): Json<BrowserRunStartRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    if browser_run_zdr_blocked(&claims, req.zdr) {
+    if browser_run_zdr_blocked(&claims, req.zdr)? {
         return Err((
             StatusCode::PRECONDITION_FAILED,
-            Json(json!({
-                "error": "ZDR browser runs are disabled until the durable run lifecycle is bypassed"
-            })),
+            Json(
+                mp_contracts::zdr_refusal::Refusal::feature_not_supported("browser_run")
+                    .json_body(),
+            ),
         ));
     }
     let data_plane_bearer = data_plane_bearer
@@ -1509,6 +1510,10 @@ async fn browser_run_start_inner(
             // which wired code_interpreter's ExecuteStepRequest.space_id but
             // explicitly left this path's own separate gap for a follow-up).
             space_id: String::new(),
+            // browser_agent reads no attached files.
+            attachments: Vec::new(),
+            // Only code_interpreter steps mount skill bundles.
+            skill_mounts: Vec::new(),
         });
         let authorization = format!("Bearer {}", execution_bearer.as_str())
             .parse()
@@ -1699,8 +1704,11 @@ fn browser_run_finalization(outcome: BrowserExecutionOutcome) -> BrowserRunFinal
     }
 }
 
-fn browser_run_zdr_blocked(claims: &Claims, request_zdr: bool) -> bool {
-    claims.effective_zdr(request_zdr)
+/// Whether a browser action is refused under ZDR. A browser run is a feature the persistence-free
+/// path does not run, and a waiver names a model connection, never a browser route, so a waived
+/// token is refused as a route mismatch here.
+fn browser_run_zdr_blocked(claims: &Claims, request_zdr: bool) -> Result<bool, ApiError> {
+    crate::zdr_posture::zdr_or_refuse(claims, &crate::zdr_posture::Route::plain(request_zdr))
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -1731,12 +1739,13 @@ async fn browser_run_control(
     // Resume can restart browser actions and session events for a pre-existing
     // durable run, so issuer-enforced ZDR must stop every action before any
     // Execution Core request is constructed or forwarded.
-    if browser_run_zdr_blocked(&claims, false) {
+    if browser_run_zdr_blocked(&claims, false)? {
         return Err((
             StatusCode::PRECONDITION_FAILED,
-            Json(json!({
-                "error": "ZDR browser-run controls are disabled until the durable run lifecycle is bypassed"
-            })),
+            Json(
+                mp_contracts::zdr_refusal::Refusal::feature_not_supported("browser_run_control")
+                    .json_body(),
+            ),
         ));
     }
     if run_id.trim().is_empty() {
@@ -2164,6 +2173,8 @@ mod tests {
             scopes: Vec::new(),
             zdr,
             sovereign: None,
+            org_zdr: None,
+            zdr_waiver: None,
             principal_type: Some("user".to_owned()),
             service_id: None,
             reason: None,
@@ -3569,7 +3580,7 @@ mod tests {
     fn issuer_zdr_cannot_be_downgraded_by_browser_run_body() {
         let claims = browser_claims(true);
 
-        assert!(browser_run_zdr_blocked(&claims, false));
+        assert!(browser_run_zdr_blocked(&claims, false).expect("a ZDR token decides"));
     }
     /// A Session Core stand-in that counts connections and drops each one, so
     /// any thread or run write fails and is visible as a connection.
@@ -3921,7 +3932,7 @@ mod tests {
                                 return Err(Status::unavailable("append is down"));
                             }
                             this.appends.lock().expect("appends").push(r.into_inner());
-                            Ok(tonic::Response::new(AppendMessageResponse { sequence: 1 }))
+                            Ok(tonic::Response::new(AppendMessageResponse { sequence: 1, ..Default::default() }))
                         })
                         .await)
                     }),

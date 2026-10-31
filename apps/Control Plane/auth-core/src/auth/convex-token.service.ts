@@ -49,6 +49,8 @@ type ModelPlaneJwtClaims = {
   serviceId?: string;
   reason?: string;
   retentionPosture?: ServiceRetentionPosture | InteractiveRetentionPosture;
+  // A fresh password re-check from POST /api/v2/auth/step-up (WS13-S5).
+  stepUp?: { at: number; method: 'password' };
 };
 
 type ModelPlaneTokenBundle = {
@@ -601,6 +603,7 @@ export class ConvexTokenService {
       ...(claims.scopes && claims.scopes.length > 0
         ? { scopes: claims.scopes }
         : {}),
+      ...(claims.stepUp ? { step_up: claims.stepUp } : {}),
       // Interactive posture comes from Auth Core's exact organization policy;
       // service posture comes from the bounded service-principal registry, or,
       // for a `tenant` principal, from the same organization policy resolved at

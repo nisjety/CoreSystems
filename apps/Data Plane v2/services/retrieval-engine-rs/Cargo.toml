@@ -46,6 +46,7 @@ metrics-exporter-prometheus.workspace = true
 async-nats.workspace = true
 nats-connection-rs = { path = "../nats-connection-rs" }
 event-envelope-rs = { path = "../event-envelope-rs" }
+usage-ledger-rs = { path = "../usage-ledger-rs" }
 pg-org-scope-rs = { path = "../pg-org-scope-rs" }
 regex.workspace = true
 once_cell.workspace = true
@@ -64,3 +65,8 @@ rand = "0.8"
 rsa = { version = "0.9", features = ["pem"] }
 tokio = { workspace = true, features = ["test-util"] }
 tokio-stream = "0.1"
+# QB-T05a: the TLS stand-in for the Azure provider host in tests/rerank_contract.rs, and the
+# SHA-256 algorithm identifier its test certificate is signed with (rsa's PKCS#1 signer needs it).
+rustls = "0.23"
+tokio-rustls = "0.26"
+sha2 = { version = "0.10", features = ["oid"] }

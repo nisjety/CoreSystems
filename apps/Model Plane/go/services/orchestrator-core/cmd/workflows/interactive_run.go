@@ -33,19 +33,24 @@ type InteractiveRunInput struct {
 // immutable owner/schedule facts let the first activity request fresh execution
 // authority; no Control bearer is ever persisted in Temporal history.
 type ScheduledRunInput struct {
-	RunID          string               `json:"run_id"`
-	ThreadID       string               `json:"thread_id"`
-	Goal           string               `json:"goal"`
-	Policy         string               `json:"policy"`
-	OrgID          string               `json:"org_id"`
-	SpaceRef       string               `json:"space_ref"`
-	SubjectID      string               `json:"subject_id"`
-	ScheduleID     string               `json:"schedule_id"`
-	FireKey        string               `json:"fire_key"`
-	TemplateDigest string               `json:"template_digest"`
-	PolicyDigest   string               `json:"policy_digest"`
-	IdempotencyKey string               `json:"idempotency_key"`
-	Retention      activities.Retention `json:"retention"`
+	RunID          string `json:"run_id"`
+	ThreadID       string `json:"thread_id"`
+	Goal           string `json:"goal"`
+	Policy         string `json:"policy"`
+	OrgID          string `json:"org_id"`
+	SpaceRef       string `json:"space_ref"`
+	SubjectID      string `json:"subject_id"`
+	ScheduleID     string `json:"schedule_id"`
+	FireKey        string `json:"fire_key"`
+	TemplateDigest string `json:"template_digest"`
+	PolicyDigest   string `json:"policy_digest"`
+	IdempotencyKey string `json:"idempotency_key"`
+	// The stored-consent contract the digest-verified template commits to (WS20
+	// S5). All three are empty for a schedule without a contract.
+	ContractJSON      string               `json:"contract_json,omitempty"`
+	ContractDigest    string               `json:"contract_digest,omitempty"`
+	ContractExpiresAt string               `json:"contract_expires_at,omitempty"`
+	Retention         activities.Retention `json:"retention"`
 }
 
 const (
@@ -60,6 +65,11 @@ const (
 	// replayable while new fires use the dedicated service-owned step activity.
 	scheduledStepLaneChange  = "scheduled-step-lane"
 	scheduledStepLaneVersion = 1
+
+	// scheduledAgentLaneChange gates the bounded agent loop for a fire under a stored-consent
+	// contract (WS20 S6). Histories that predate it keep the step loops below.
+	scheduledAgentLaneChange  = "scheduled-agent-lane"
+	scheduledAgentLaneVersion = 1
 )
 
 // InteractiveRunSupervision orchestrates an interactive agent run.
@@ -217,6 +227,7 @@ func ScheduledRunSupervision(ctx workflow.Context, input ScheduledRunInput) erro
 		"StartScheduledRunActivity",
 		input.RunID, input.ThreadID, input.OrgID, input.SpaceRef, input.SubjectID,
 		input.ScheduleID, input.FireKey, input.TemplateDigest, input.IdempotencyKey, input.Goal, "execute",
+		input.ContractJSON, input.ContractDigest, input.ContractExpiresAt,
 	).Get(ctx, &runMeta)
 	if err != nil {
 		return handleFailure(ctx, input.RunID, input.OrgID, "", input.Retention, fmt.Sprintf("start scheduled run: %v", err))
@@ -226,14 +237,21 @@ func ScheduledRunSupervision(ctx workflow.Context, input ScheduledRunInput) erro
 	}
 
 	var stepOutput activities.StepLoopOutput
-	if workflow.GetVersion(ctx, scheduledStepLaneChange, workflow.DefaultVersion, scheduledStepLaneVersion) == workflow.DefaultVersion {
+	// The agent lane is decided once, from the answer the start recorded. A fire without a
+	// contract never takes it, and a history that predates it replays with the marker absent.
+	agentLane := input.ContractJSON != "" && runMeta.AgentLane &&
+		workflow.GetVersion(ctx, scheduledAgentLaneChange, workflow.DefaultVersion, scheduledAgentLaneVersion) == scheduledAgentLaneVersion
+	switch {
+	case agentLane:
+		stepOutput, err = executeScheduledAgentStep(actCtx, input)
+	case workflow.GetVersion(ctx, scheduledStepLaneChange, workflow.DefaultVersion, scheduledStepLaneVersion) == workflow.DefaultVersion:
 		// Replay-only compatibility for histories created before the dedicated
 		// service-owned lane existed. New fires must never take this branch.
 		stepOutput, err = runStepLoop(actCtx, activities.StepLoopInput{
 			RunID: input.RunID, ThreadID: input.ThreadID, Goal: input.Goal,
 			Policy: input.Policy, MaxTurns: defaultMaxTurns, OrgID: input.OrgID,
 		})
-	} else {
+	default:
 		stepOutput, err = executeScheduledStepLoop(actCtx, input)
 	}
 	if err != nil {
@@ -245,10 +263,14 @@ func ScheduledRunSupervision(ctx workflow.Context, input ScheduledRunInput) erro
 	if cancelled {
 		return handleFailure(ctx, input.RunID, input.OrgID, "", input.Retention, "cancelled")
 	}
+	summary := stepOutput.Summary
+	if agentLane {
+		summary = scheduledAgentOutcomeSummary(input.RunID, stepOutput)
+	}
 	completionInput := activities.CompletionInput{
 		RunID:     input.RunID,
 		OrgID:     input.OrgID,
-		Summary:   stepOutput.Summary,
+		Summary:   summary,
 		Retention: input.Retention,
 	}
 	if err := workflow.ExecuteActivity(actCtx, "CompleteRunActivity", completionInput).Get(ctx, nil); err != nil {

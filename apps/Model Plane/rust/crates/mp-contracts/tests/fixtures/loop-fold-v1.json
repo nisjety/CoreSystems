@@ -1,0 +1,34 @@
+{
+  "v": 1,
+  "run_id": "run-golden",
+  "segment_no": 1,
+  "rounds_executed": 2,
+  "delegated_rounds": 0,
+  "step_seq": 3,
+  "children_started": 0,
+  "grounded": true,
+  "compaction_triggered": false,
+  "attempted_retrievals": [],
+  "messages": [
+    { "role": "user", "content": "Summarise the contract" },
+    { "role": "assistant", "content": "I will run a script." }
+  ],
+  "round_in_flight": {
+    "assistant_content": "I will run a script.",
+    "calls": [{ "id": "call-1", "name": "code_interpreter", "arguments_json": "{}", "step_id": "step-3" }],
+    "completed": []
+  },
+  "pending": { "kind": "approval", "pause_ref": "appr-1", "step_id": "step-3", "call": "code_interpreter", "action_fingerprint": "abc" },
+  "authority": {
+    "mode": "ask",
+    "plan_mode": false,
+    "autonomy_rung": "workspace_write",
+    "space_id": "",
+    "min_privacy_tier": 1,
+    "provider_hint": "",
+    "tool_names": ["code_interpreter", "knowledge_search"],
+    "max_rounds": 8
+  },
+  "prompt_digest": "d",
+  "extensions": { "loop_guard": { "repeats": 0 } }
+}

@@ -50,7 +50,7 @@ billing-core accepts the same JSON shape over HTTP if NATS is unhealthy.
 | `usage_metrics::SCRAPE_PAGE`        | `quarry.scrape.page`         | After successful `/v1/scrape` (skipped on error) | `1.0` per page          |
 | `usage_metrics::CRAWL_SEED`         | `quarry.crawl.seed`          | On every `/v1/crawl` job Control creates (not a replay) | `1.0` per seed URL      |
 | `usage_metrics::SEARCH_QUERY`       | `quarry.search.query`        | On every successful `/v1/search`                 | `1.0` per query         |
-| `usage_metrics::ANSWER_SYNTH`       | `quarry.answer.synth`        | On every successful `/v1/answer`                 | `1.0` per synthesis     |
+| `usage_metrics::ANSWER_SYNTH`       | `quarry.answer.synth`        | On every successful `/v1/answer` and `/v1/answer/stream`, and on every `/v1/search` with `include_answer` that called the model (metadata `via: "search.include_answer"`); never on a cache hit, a refused or failed synthesis, an empty `no_sources` answer or a ZDR request | `1.0` per synthesis     |
 | `usage_metrics::BATCH_URL`          | `quarry.batch.url`           | On every `/v1/batch` job Control creates (not a replay) | `len(urls) as f64`      |
 
 **Pricing model:** these are free-form strings — Lago billable-metric

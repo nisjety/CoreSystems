@@ -1,0 +1,15 @@
+config { type: "assertion", schema: "dw_1_silver_xero_assertions", name: "xero_trial_balance_snapshot_balances" }
+
+SELECT
+  tenant_id,
+  report_snapshot_id,
+  balance_date,
+  SUM(debit_amount) AS snapshot_debit_amount,
+  SUM(credit_amount) AS snapshot_credit_amount,
+  SUM(ytd_debit_amount) AS snapshot_ytd_debit_amount,
+  SUM(ytd_credit_amount) AS snapshot_ytd_credit_amount
+FROM ${ref("dw_1_silver_xero", "fact_general_ledger_balance")}
+WHERE is_reportable
+GROUP BY 1, 2, 3
+HAVING ABS(SUM(debit_amount) - SUM(credit_amount)) > 0.02
+    OR ABS(SUM(ytd_debit_amount) - SUM(ytd_credit_amount)) > 0.02

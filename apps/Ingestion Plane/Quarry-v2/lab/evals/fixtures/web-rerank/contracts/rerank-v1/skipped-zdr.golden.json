@@ -1,0 +1,29 @@
+{
+  "profile": "web-v1",
+  "reason": "zdr",
+  "request_id": "rr-golden-zdr1",
+  "results": [
+    {
+      "id": "doc-0",
+      "index": 0,
+      "scored": false
+    },
+    {
+      "id": "doc-1",
+      "index": 1,
+      "scored": false
+    },
+    {
+      "id": "doc-2",
+      "index": 2,
+      "scored": false
+    }
+  ],
+  "status": "skipped",
+  "truncated_ids": [],
+  "zdr_actions_applied": [
+    "no_provider_call",
+    "no_cost_event",
+    "no_result_cache"
+  ]
+}
