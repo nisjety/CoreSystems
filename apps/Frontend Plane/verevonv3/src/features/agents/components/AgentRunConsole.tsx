@@ -1489,7 +1489,7 @@ function TrustPanel(props: { citations: Citation[]; usage: RunUsage | null }) {
           <>
             <p class="verevon-run-trust__subhead">{i18n.tr('Bruk', 'Usage')}</p>
             {/* Tokens and cost live in the meter, which says "included in the subscription" or "price unavailable" rather than a bare zero. */}
-            <RunCostMeter meter={usage()} />
+            <RunCostMeter meter={usage()} quotaRefreshKey={`${state.runId ?? ''}:${state.status}`} />
             <div class="verevon-run-trust__usage">
               <Show when={usage().confidence != null}>
                 <UsageStat label={i18n.tr('Konfidens', 'Confidence')} value={`${Math.round((usage().confidence ?? 0) * 100)}%`} />

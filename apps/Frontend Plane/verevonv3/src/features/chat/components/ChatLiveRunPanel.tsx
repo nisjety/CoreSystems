@@ -587,7 +587,7 @@ export function ChatLiveRunPanel(props: {
               {/* The Work panel carries the meter itself, so the live rail shows it only while Work is closed. */}
               <Show
                 when={props.workContent}
-                fallback={<RunCostMeter meter={props.meter} />}
+                fallback={<RunCostMeter meter={props.meter} quotaRefreshKey={props.runId ?? undefined} />}
               >
                 <section
                   id="verevon-chat-tabpanel-steps"

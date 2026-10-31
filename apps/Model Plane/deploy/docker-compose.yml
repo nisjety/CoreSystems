@@ -359,6 +359,10 @@ services:
       # retrieval to the thread's Space. Off by default; only the literal `true` turns it on, and only after the
       # staging proof.
       MODEL_GATEWAY_SPACE_APPEND_RETRIEVAL: ${MODEL_GATEWAY_SPACE_APPEND_RETRIEVAL:-false}
+      # WS18-S5: a Do run in a project forwards its Space retrieval decision to execution-core, so knowledge_search
+      # runs Space-scoped. Off by default (today's unscoped Do search). Deploy execution-core first, and turn on
+      # MODEL_GATEWAY_SPACE_APPEND_RETRIEVAL before this switch.
+      AGENTIC_SPACE_RETRIEVAL_ENABLED: ${AGENTIC_SPACE_RETRIEVAL_ENABLED:-false}
       # WS11-S5: derive the reasoning level once in the gateway and send it to inference-core. Off by default; only the
       # literal `true` turns it on. Roll out in this order: inference-core adapter flags on first, then this switch. With
       # this on and the adapter flags off, a deep request sends budget 0 and a level nothing renders (no thinking).
@@ -934,6 +938,10 @@ services:
       SESSION_CORE_MESSAGE_SEARCH_ENABLED: ${SESSION_CORE_MESSAGE_SEARCH_ENABLED:-false}
       # WS16-S1: attention state on thread listings, ListAttention and MarkThreadSeen. Off by default; only true turns it on.
       SESSION_CORE_ATTENTION_ENABLED: ${SESSION_CORE_ATTENTION_ENABLED:-false}
+      # WS16-S3: a sweeper writes one content-free RUN_ATTENTION outbox row per pending waiting item. Off by default;
+      # only true turns it on, and only after WS01-S2's drainer fix is deployed.
+      SESSION_CORE_ATTENTION_EVENTS_ENABLED: ${SESSION_CORE_ATTENTION_EVENTS_ENABLED:-false}
+      SESSION_CORE_ATTENTION_SWEEP_SECONDS: ${SESSION_CORE_ATTENTION_SWEEP_SECONDS:-5}
       # WS17-S8: the persisted message tree (versions, branch and rewind). Off by default; set it together with
       # MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED on model-gateway. Build the 0061 indexes CONCURRENTLY first on a
       # populated messages table.

@@ -11,6 +11,8 @@ interface ImportMetaEnv {
 	readonly VITE_SCENE_MODE?: string;
 	readonly VITE_PLAN_EXECUTE_ENABLED?: string;
 	readonly VITE_CHAT_VISION_AS_PARTS_ENABLED?: string;
+	readonly VITE_QUOTA_READOUT?: string;
+	readonly VITE_QUOTA_READOUT_METRIC?: string;
 }
 
 interface ImportMeta {

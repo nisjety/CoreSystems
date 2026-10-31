@@ -911,7 +911,10 @@ export function StepsPanel(props: {
               {i18n.tr('Stopp', 'Stop')}
             </button>
           </div>
-          <RunCostMeter meter={props.meter} />
+          <RunCostMeter
+            meter={props.meter}
+            quotaRefreshKey={`${props.threadId ?? ''}:${activeTask() ? 'live' : 'settled'}`}
+          />
           {/* Step count drives the plan refetch: session-core mirrors each
               completed execution step into the run's plan, so a new task step
               is the cheapest available signal that the durable plan has more
