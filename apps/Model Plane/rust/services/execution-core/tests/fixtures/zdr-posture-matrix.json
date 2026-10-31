@@ -795,6 +795,19 @@
         "route": {"provider": "", "connection": null, "explicit_zdr": false}
       },
       "expect": {"decision": "zdr", "code": "org_zdr"}
+    },
+    {
+      "id": "e_browser_do_tools_refused_under_zdr",
+      "title": "A ZDR run that asks for ZDR, with a browser bearer and the browser switch on, is offered no Do browser tool: ZDR.",
+      "tags": [],
+      "note": "The Do loop offers browser.open, browser.observe and browser.close only to a run that is not ZDR, holds a verified browser bearer and has EXECUTION_DO_BROWSER_ENABLED=1. The browser bearer is never minted or forwarded under ZDR, and a call that reaches the dispatch anyway is refused with the feature browser_tool.",
+      "inputs": {
+        "bearers": [
+          {"zdr": true, "org_zdr": true, "waiver": null}
+        ],
+        "route": {"provider": "", "connection": null, "explicit_zdr": true}
+      },
+      "expect": {"decision": "zdr", "code": "explicit_zdr"}
     }
   ]
 }

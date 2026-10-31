@@ -34,6 +34,9 @@ use crate::quarry_auth::TokenSource;
 
 const AGENT_SCOPES: &[&str] = &["browser:execute"];
 
+/// How long the readiness probe waits for Quarry's `/ready` answer.
+const READY_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
 // ---------------------------------------------------------------------------
 // Wire DTOs — mirror of quarry-core::contracts (JSON-compatible).
 // ---------------------------------------------------------------------------
@@ -831,6 +834,21 @@ impl QuarryAgentClient {
         }
     }
 
+    /// Whether Quarry reports itself ready for agent runs: `/ready` answers 200 within the probe
+    /// timeout. Read by the health reporter only; nothing here names a run.
+    pub async fn ready(&self) -> bool {
+        match self
+            .http
+            .get(self.url("/ready"))
+            .timeout(READY_PROBE_TIMEOUT)
+            .send()
+            .await
+        {
+            Ok(response) => response.status().is_success(),
+            Err(_) => false,
+        }
+    }
+
     /// Decode a Quarry `Envelope<T>` response, returning the unwrapped `data`.
     async fn decode<T: for<'de> Deserialize<'de>>(
         resp: reqwest::Response,
@@ -1255,6 +1273,25 @@ mod tests {
         assert_eq!(obs.challenge, Some(challenge));
         assert!(obs.error_message.contains("block_reason=challenge_loop"));
         assert!(obs.extracted_text.is_empty() && obs.snapshot_targets.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ready_is_true_only_for_a_200() {
+        let ready = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/ready"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&ready)
+            .await;
+        assert!(QuarryAgentClient::new(ready.uri(), "tok").unwrap().ready().await);
+
+        let down = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/ready"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&down)
+            .await;
+        assert!(!QuarryAgentClient::new(down.uri(), "tok").unwrap().ready().await);
     }
 
     #[tokio::test]

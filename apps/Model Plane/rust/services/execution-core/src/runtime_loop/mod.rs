@@ -34,6 +34,7 @@ use mp_contracts::model_plane::v1::{
 };
 use tonic::transport::Channel;
 
+use crate::browser_session;
 use crate::hook;
 use crate::permission::{self, PermissionDecision, PermissionMode};
 use crate::policy::{MpNetworkPolicy, MpSandboxPolicy};
@@ -566,6 +567,7 @@ pub async fn execute_step(
         &[],
         // The compatibility entry point has no run, so no Space retrieval was authorised for it.
         crate::knowledge_tools::SpaceRetrieval::Organisation,
+        None,
     )
     .await
 }
@@ -638,6 +640,7 @@ pub(crate) async fn execute_step_with_browser_grant(
         &[],
         // The direct single-step RPC has no run, so no Space retrieval was authorised for it.
         crate::knowledge_tools::SpaceRetrieval::Organisation,
+        None,
     )
     .await
 }
@@ -714,6 +717,7 @@ pub(crate) async fn execute_step_with_subagent(
         // Only tests call this wrapper. The agent loop calls `execute_step_with_result_handles`
         // directly with its run's own Space retrieval, so this one authorises none.
         crate::knowledge_tools::SpaceRetrieval::Organisation,
+        None,
     )
     .await
 }
@@ -767,6 +771,9 @@ pub(crate) async fn execute_step_with_result_handles(
     // The run's Space retrieval for `knowledge_search` (WS18-S5). The agent loop passes its run's; a
     // caller with no run passes `Organisation`.
     space_retrieval: crate::knowledge_tools::SpaceRetrieval<'_>,
+    // The run's browser page dispatch (WS21-S5a). Only the agent loop of a run holding a verified
+    // browser sign-in passes one; every other caller passes none.
+    browser: Option<&browser_session::BrowserDispatch<'_>>,
 ) -> StepOutcome {
     execute_step_inner(
         tool_name,
@@ -797,6 +804,7 @@ pub(crate) async fn execute_step_with_result_handles(
         read_run_inputs,
         connector_scope,
         space_retrieval,
+        browser,
     )
     .await
 }
@@ -869,6 +877,8 @@ async fn execute_step_inner(
     connector_scope: &[String],
     // The run's Space retrieval for `knowledge_search` (WS18-S5); see `execute_knowledge_search`.
     space_retrieval: crate::knowledge_tools::SpaceRetrieval<'_>,
+    // The run's browser page dispatch (WS21-S5a); see `execute_step_with_result_handles`.
+    browser: Option<&browser_session::BrowserDispatch<'_>>,
 ) -> StepOutcome {
     let released = release.is_some_and(|r| r.covers(step_id, tool_name, tool_input));
     // A capability pause that a standing grant may cover (build plan WS13 S6). It is held until the
@@ -1176,12 +1186,21 @@ async fn execute_step_inner(
     // every other tool keeps the deterministic tool_bridge path. The permission
     // and hook gates above apply uniformly, so a shell call is still subject to
     // the same approval/deny policy.
-    let exec = if matches!(
+    // The Do loop's browser tools run on the run's own page session, and only for a run holding a
+    // verified browser sign-in outside zero retention (WS21-S5a). The grant-backed MCP aliases keep
+    // their ExecuteStep path, and a Do name with no session is refused with its own typed answer.
+    let exec = if let Some(dispatch) =
+        browser.filter(|_| !zdr && browser_session::is_do_tool(tool_name))
+    {
+        tool_bridge::execute_browser_do_tool(tool_name, tool_input, dispatch).await
+    } else if matches!(
         tool_name,
         QUARRY_MCP_BROWSER_OBSERVE_TOOL | QUARRY_MCP_BROWSER_ACT_TOOL
     ) {
         tool_bridge::execute_quarry_browser_mcp(tool_name, tool_input, org_id, zdr, browser_grant)
             .await
+    } else if browser_session::is_do_tool(tool_name) {
+        tool_bridge::browser_do_unavailable(zdr)
     } else if tool_name == SHELL_TOOL {
         execute_shell(tool_input).await
     } else if tool_name == CODE_INTERPRETER_TOOL {
@@ -3045,6 +3064,7 @@ mod connector_tool_tests {
                     true,
                     &[],
                     crate::knowledge_tools::SpaceRetrieval::Organisation,
+                    None,
                 )
                 .await;
                 assert_eq!(out.status, "failed", "{tool} zdr={zdr} waived={waived}");
@@ -3089,7 +3109,7 @@ mod connector_tool_tests {
         let out = execute_step_inner(
             EXECUTE_PROVIDER_ACTION_TOOL, input, "ask", "", "org-1", "user-1", "run-1", "step-1", "",
             None, None, None, false, false, 0, None, None, None, &NoPolicy, None, None, None, None,
-            None, None, true, &selected, crate::knowledge_tools::SpaceRetrieval::Organisation,
+            None, None, true, &selected, crate::knowledge_tools::SpaceRetrieval::Organisation, None,
         )
         .await;
         assert_eq!(out.status, "failed");

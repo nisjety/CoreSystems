@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use dashmap::{mapref::entry::Entry, DashMap};
 
+use crate::browser_session::BrowserSession;
 use crate::workspace_edit::WorkspaceLock;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,6 +131,9 @@ pub struct StateStore {
     /// Scheduled Do runs with no one attached to answer an approval. Each run's
     /// withheld effects accumulate here until its step takes them.
     unattended: Arc<DashMap<String, Arc<std::sync::Mutex<Vec<WithheldEffect>>>>>,
+    /// The browser page a Do run has open, keyed by run (WS21-S5a). It holds ids only and is ended
+    /// by the run's end, its cancellation, a close or the next open.
+    browser_sessions: Arc<DashMap<String, BrowserSession>>,
 }
 
 impl StateStore {
@@ -151,6 +155,31 @@ impl StateStore {
 
     pub fn update(&self, snapshot: RunSnapshot) {
         self.runs.insert(snapshot.run_id.clone(), snapshot);
+    }
+
+    /// The browser page the run has open, if any (WS21-S5a). A copy: the map keeps its own.
+    #[must_use]
+    pub(crate) fn browser_session(&self, run_id: &str) -> Option<BrowserSession> {
+        self.browser_sessions
+            .get(run_id)
+            .map(|session| session.clone())
+    }
+
+    /// Record the run's browser page and return the one it replaces, which the caller must end.
+    pub(crate) fn replace_browser_session(
+        &self,
+        run_id: &str,
+        session: BrowserSession,
+    ) -> Option<BrowserSession> {
+        self.browser_sessions.insert(run_id.to_owned(), session)
+    }
+
+    /// Remove the run's browser page. Whoever takes it is the one that ends it, so two callers
+    /// cannot both end the same grant.
+    pub(crate) fn take_browser_session(&self, run_id: &str) -> Option<BrowserSession> {
+        self.browser_sessions
+            .remove(run_id)
+            .map(|(_, session)| session)
     }
 
     /// Mark a run unattended: no one is present to answer its approvals, so each

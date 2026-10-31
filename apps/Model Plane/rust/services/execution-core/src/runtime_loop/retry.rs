@@ -158,6 +158,11 @@ pub fn tool_call_is_retryable(
     if gate.is_risky_call(tool_name, tool_input) {
         return false;
     }
+    // A Do browser open or close acts on the broker and on Quarry: a replay could open a second page
+    // or close one the model still reads. Observing only reads, so it keeps the ordinary rule.
+    if crate::browser_session::is_effectful_do_tool(tool_name) {
+        return false;
+    }
     // A delegation is not replayable either, for a reason the risk classifier
     // cannot see: it has already written a durable, IMMUTABLE terminal receipt
     // for its child run.
@@ -407,6 +412,8 @@ mod tests {
             "publish_social_post",
             "shell",
             "browser_agent",
+            "browser.open",
+            "browser.close",
         ] {
             assert!(
                 !legacy_retryable(tool, "{}", "operation timed out"),

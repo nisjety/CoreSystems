@@ -1561,10 +1561,13 @@ pub fn trusted_capability_id(tool_name: &str) -> Option<String> {
         // Space.
         "process_start" | "process_read" | "process_stdin" | "process_signal"
         | "process_list" => "cap.process.background",
-        // The granular MCP facade never creates raw browser authority. It is
-        // governed by the same browser capability as the agent loop, while
-        // BrowserBroker separately binds its opaque run grant.
-        "browser_agent" | "browser.observe" | "browser.act" => "cap.browser.open",
+        // The granular MCP facade never creates raw browser authority: BrowserBroker separately binds
+        // its opaque run grant. The legacy autonomous loop keeps cap.browser.open. The read tools of
+        // the Do loop (browser.open, browser.observe; WS21-S5a) and its act name each have their own
+        // capability, so a read-level grant never answers for a write. Migration 0025 seeds them.
+        "browser_agent" => "cap.browser.open",
+        "browser.open" | "browser.observe" | "browser.close" => "cap.browser.observe",
+        "browser.act" => "cap.browser.act",
         "web_search" | "web_fetch" | "web.search" | "web.read" => "cap.tool.http",
         "knowledge_search" => "cap.retrieval.query",
         // The owner document inventory (WS24-S8) is a read of the same Data Plane corpus under the
@@ -2042,15 +2045,19 @@ mod tests {
     fn a_read_decision_replayed_against_another_tool_of_the_same_capability_is_refused() {
         let key = SigningKey::from_bytes(&[12; 32]);
         let verifier = verifier_for(&key);
-        // browser.observe and browser.act share one capability; only the signed
-        // tool name tells a read from a write.
-        let browser = Fixture::builtin("browser.act");
-        assert_eq!(browser.capability_id, "cap.browser.open");
-        let (response, observe_evidence) = v2_pair(
+        // browser.open and browser.observe share one capability (WS21-S5a); only the signed tool
+        // name tells one read from the other. browser.act has its own capability now.
+        let browser = Fixture::builtin("browser.observe");
+        assert_eq!(browser.capability_id, "cap.browser.observe");
+        assert_eq!(
+            Fixture::builtin("browser.act").capability_id,
+            "cap.browser.act"
+        );
+        let (response, open_evidence) = v2_pair(
             &key,
             &V2 {
-                capability_id: "cap.browser.open",
-                tool_name: "browser.observe",
+                capability_id: "cap.browser.observe",
+                tool_name: "browser.open",
                 user_id: "user-a",
             },
             "read",
@@ -2060,23 +2067,23 @@ mod tests {
 
         assert!(
             !verifier.verify(
-                &observe_evidence,
+                &open_evidence,
                 &response,
-                &browser.call("browser.act", ToolClassGate::Enforce)
+                &browser.call("browser.observe", ToolClassGate::Enforce)
             ),
             "enforce must refuse evidence minted for another tool"
         );
         // Shadow lets the legacy tuple decide for a built-in tool, and counts it.
         assert!(verifier.verify(
-            &observe_evidence,
+            &open_evidence,
             &response,
-            &browser.call("browser.act", ToolClassGate::Shadow)
+            &browser.call("browser.observe", ToolClassGate::Shadow)
         ));
         // The same evidence is, of course, good for the tool it names.
         assert!(verifier.verify(
-            &observe_evidence,
+            &open_evidence,
             &response,
-            &browser.call("browser.observe", ToolClassGate::Enforce)
+            &browser.call("browser.open", ToolClassGate::Enforce)
         ));
     }
 

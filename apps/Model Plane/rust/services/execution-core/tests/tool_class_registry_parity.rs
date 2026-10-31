@@ -98,6 +98,7 @@ fn seeded_rows() -> Vec<Seeded> {
         "0019_workspace_write_capability.up.sql",
         "0020_result_query_capability.up.sql",
         "0024_provider_read_tool.up.sql",
+        "0027_browser_tool_capabilities.up.sql",
         "0026_knowledge_list_documents_tool.up.sql",
     ] {
         sql.push_str(&read_text(&format!(
@@ -108,8 +109,20 @@ fn seeded_rows() -> Vec<Seeded> {
         r"\('global', '([^']+)', '([^']+)', '([a-z_]+)', '([a-z_]+)', (NULL|'[a-z_]+'), 'seed'\)",
     )
     .expect("seed row pattern");
+    // 0025 moves browser.observe and browser.act off cap.browser.open; its DELETE is the record of the
+    // move, so the effective seed no longer carries those two rows under cap.browser.open.
+    assert!(
+        read_text(
+            "../../../go/services/capability-core/migrations/0027_browser_tool_capabilities.up.sql",
+        )
+        .contains("tool_name IN ('browser.observe', 'browser.act')"),
+        "0025 no longer moves browser.observe and browser.act; update the moved set"
+    );
     let rows: Vec<Seeded> = row
         .captures_iter(&sql)
+        .filter(|c| {
+            !(&c[1] == "cap.browser.open" && matches!(&c[2], "browser.observe" | "browser.act"))
+        })
         .map(|c| Seeded {
             capability_id: c[1].to_owned(),
             tool: c[2].to_owned(),

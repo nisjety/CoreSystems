@@ -2,7 +2,7 @@
 
 use mp_contracts::model_plane::v1::ValidateGrantResponse;
 
-use crate::{browser_agent, wiki_agent};
+use crate::{browser_agent, browser_session, wiki_agent};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolExecution {
@@ -354,6 +354,85 @@ fn browser_mcp_error(error: impl Into<String>) -> ToolExecution {
     ToolExecution {
         output: String::new(),
         error: Some(error.into()),
+    }
+}
+
+/// A Do loop browser call (WS21-S5a): `browser.open`, `browser.observe` or `browser.close`, served
+/// by the run's own browser session. The input is read strictly, so no grant, run or lease id can
+/// be passed in, and the result carries none back.
+pub(crate) async fn execute_browser_do_tool(
+    tool_name: &str,
+    tool_input: &str,
+    dispatch: &browser_session::BrowserDispatch<'_>,
+) -> ToolExecution {
+    let quarry = crate::quarry_agent::QuarryAgentClient::from_env()
+        .ok()
+        .flatten();
+    let outcome = match tool_name {
+        browser_session::OPEN_TOOL => {
+            match browser_do_input::<browser_session::OpenInput>(tool_input) {
+                Err(refusal) => Err(refusal),
+                Ok(input) => match quarry.as_ref() {
+                    Some(quarry) => browser_session::open(dispatch, quarry, &input.url).await,
+                    None => Err(browser_session::UNAVAILABLE),
+                },
+            }
+        }
+        browser_session::OBSERVE_TOOL => {
+            match (
+                browser_do_input::<browser_session::NoInput>(tool_input),
+                quarry.as_ref(),
+            ) {
+                (Err(refusal), _) => Err(refusal),
+                (Ok(_), None) => Err(browser_session::UNAVAILABLE),
+                (Ok(_), Some(quarry)) => browser_session::observe(dispatch, quarry).await,
+            }
+        }
+        browser_session::CLOSE_TOOL => {
+            match browser_do_input::<browser_session::NoInput>(tool_input) {
+                Err(refusal) => Err(refusal),
+                Ok(_) => Ok(browser_session::close(dispatch, quarry.as_ref()).await),
+            }
+        }
+        _ => Err(browser_session::UNAVAILABLE),
+    };
+    match outcome {
+        Ok(output) => ToolExecution {
+            output,
+            error: None,
+        },
+        Err(refusal) => ToolExecution {
+            output: String::new(),
+            error: Some(refusal.text()),
+        },
+    }
+}
+
+/// Reads a Do browser tool's input. An empty input is an empty object, and a field the tool does
+/// not name is refused.
+fn browser_do_input<T: serde::de::DeserializeOwned>(
+    tool_input: &str,
+) -> Result<T, browser_session::Refusal> {
+    let input = if tool_input.trim().is_empty() {
+        "{}"
+    } else {
+        tool_input
+    };
+    serde_json::from_str(input).map_err(|_| browser_session::INVALID_INPUT)
+}
+
+/// The answer to a Do browser call this run cannot be served: it holds no verified browser sign-in,
+/// or it is zero-retention, under which the browser tools are refused by their feature key.
+pub(crate) fn browser_do_unavailable(zdr: bool) -> ToolExecution {
+    let error = if zdr {
+        let refusal = mp_contracts::zdr_refusal::Refusal::feature_not_supported("browser_tool");
+        format!("{}: {}", refusal.code(), refusal.message())
+    } else {
+        "browser_unavailable: browser tools need a verified browser sign-in for this run".to_owned()
+    };
+    ToolExecution {
+        output: String::new(),
+        error: Some(error),
     }
 }
 
@@ -966,6 +1045,37 @@ pub(crate) fn requested_browser_grant_id(tool_input: &str) -> Result<String, Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Do browser input is read strictly: a grant, run or lease id named in it is refused, so the
+    /// model cannot pick a session. The empty input is the empty object.
+    #[test]
+    fn a_do_browser_input_names_no_grant_run_or_lease() {
+        use crate::browser_session::{NoInput, OpenInput, INVALID_INPUT};
+        assert!(browser_do_input::<NoInput>("").is_ok());
+        assert!(browser_do_input::<NoInput>("{}").is_ok());
+        for forged in [
+            r#"{"grant_id":"grant-1"}"#,
+            r#"{"quarry_run_id":"run-1","lease_id":"lease-1"}"#,
+        ] {
+            assert_eq!(browser_do_input::<NoInput>(forged).err(), Some(INVALID_INPUT), "{forged}");
+        }
+        assert!(browser_do_input::<OpenInput>(r#"{"url":"https://example.com/"}"#).is_ok());
+        assert_eq!(
+            browser_do_input::<OpenInput>(r#"{"url":"https://example.com/","grant_id":"g"}"#).err(),
+            Some(INVALID_INPUT)
+        );
+        assert_eq!(browser_do_input::<OpenInput>("{}").err(), Some(INVALID_INPUT));
+    }
+
+    /// Under zero retention a Do browser call is refused with the feature it is refused for, and
+    /// with no sign-in it is refused as unavailable. Neither names an id.
+    #[test]
+    fn a_do_browser_call_without_a_session_is_refused_typed() {
+        let zdr = browser_do_unavailable(true).error.expect("refused");
+        assert!(zdr.starts_with("zdr_feature_not_supported: "), "{zdr}");
+        let signed_out = browser_do_unavailable(false).error.expect("refused");
+        assert!(signed_out.starts_with("browser_unavailable: "), "{signed_out}");
+    }
 
     #[test]
     fn browser_plan_uses_verified_org_not_model_input() {

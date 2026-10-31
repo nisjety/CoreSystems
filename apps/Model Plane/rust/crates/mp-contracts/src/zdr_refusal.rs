@@ -314,6 +314,10 @@ pub const FEATURES: &[Feature] = &[
         label: "browser run controls",
     },
     Feature {
+        key: "browser_tool",
+        label: "browser tools",
+    },
+    Feature {
         key: "translation",
         label: "translation",
     },

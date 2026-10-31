@@ -54,9 +54,9 @@ const MATRIX: &str = include_str!("fixtures/zdr-posture-matrix.json");
 /// The enforcement rows of the canonical matrix when this test was written, and
 /// how they split by decision. A row added or removed without this file being
 /// read is a change nobody reviewed against the durable stores.
-const ENFORCEMENT_ROWS: usize = 27;
+const ENFORCEMENT_ROWS: usize = 28;
 const REFUSE: usize = 18;
-const ZDR: usize = 4;
+const ZDR: usize = 5;
 const PERSISTENT: usize = 3;
 const WAIVED: usize = 2;
 

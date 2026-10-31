@@ -2730,7 +2730,8 @@ mod tests {
                 off += 1;
             }
         }
-        assert_eq!((on, off), (3, 6), "every served row was checked");
+        // One more refused-under-ZDR row than before: the browser tools' row (WS21-S5a).
+        assert_eq!((on, off), (3, 7), "every served row was checked");
     }
 
     /// The control for the no-call proofs: the same drive against an ACTIVE writer does
@@ -3243,7 +3244,7 @@ mod tests {
         }
         assert_eq!(
             (open, zdr_off, waived_off),
-            (3, 4, 2),
+            (3, 5, 2),
             "every served row was checked"
         );
     }
