@@ -1,6 +1,6 @@
 # Space depth pass A: fix order, and the UI parity track (2026-10-28)
 
-Updated later on 2026-10-28 (items 2, 3 and 4 fixed, U2 done). Inputs: `space-w1-report.md` (clusters), `space-depth-register-w1.md`, `space-w1-live-proof.md`, and a code check of each item below. Nothing here starts Wave 2. Branch `space`, nothing pushed.
+Updated 2026-10-28 (items 2, 3 and 4 fixed, U2 done) and 2026-10-31 (items 5 and 6, F2, F4, the archive leg, part of cluster 9, U3, U4 and two visual rounds; section 4). Inputs: `space-w1-report.md` (clusters), `space-depth-register-w1.md`, `space-w1-live-proof.md`, and a code check of each item below. Nothing here starts Wave 2. Branch `space`, nothing pushed.
 
 ## 1. What is already fixed (commits c453d629c, 739b510ed)
 
@@ -23,8 +23,8 @@ Size: XS under an hour, S a few hours, M a day or more.
 | 2 | DONE (50be21db0). People-search SQL: `searchPeopleSQL` never referenced `$2` but `callerID` was bound as `$2`, so Postgres could not type it (SQLSTATE 42P18) | the 5 directory live tests failed with this error; now all 6 pass on Postgres, plus a DB-free test that every placeholder is referenced | XS | The "add a member" picker failed 100% on a real database. |
 | 3 | DONE (db4a9c4b1), and smaller than first written. `SEARCH_SQL` had no `post_kind` predicate, but recall is confined to the owner's unscoped threads (room posts cannot exist there) and the only caller uses the UI purpose, so this was a latent gap for the planned recall tool, not an active leak. Recall now excludes `post_kind = 'post'`; UI search still finds posts | 16 message_search tests pass on Postgres, incl. a new one that seeds a turn and a post | S | Defence in depth for the recall tool and any future Space-scoped model search. Still open from cluster 3: bind `post_kind` in the v1 digest (D1-073), the in-tx gate's second-caller risk, and the member INSERT never run on Postgres. |
 | 4 | DONE in part (see section 2a). Cluster 1, ZDR on Space writes: each row was checked in code; three of the eight were wrong or stale, two were real gaps and are fixed, the rest are owner decisions | section 2a | M | Privacy. |
-| 5 | Boot guards from the live proof: F10 (convex-core image bakes `startup.sh`) and F11 (a decision key id mismatch shows up as a generic 403) | live-proof findings | S | Both cost hours on the private stack. Make a key-id mismatch a loud boot error in session, capability and orchestrator cores; add the convex-core rebuild to the deploy checklist. |
-| 6 | F3: reverting 0044 fails once 0072 is installed (its triggers depend on `runs.retention_class`) | DB tier; `revert/0044` drops the column, `revert/0072` already exists | S | Rare path, but a rollback that fails when needed is dangerous. Make the 0044 revert drop the 0072 triggers first (or document and test the order). |
+| 5 | DONE (30ef4888d, c74a5245c, 1d32179a8; section 4). Boot guards from the live proof: F10 (convex-core image bakes `startup.sh`) and F11 (a decision key id mismatch shows up as a generic 403) | live-proof findings | S | Both cost hours on the private stack. Make a key-id mismatch a loud boot error in session, capability and orchestrator cores; add the convex-core rebuild to the deploy checklist. |
+| 6 | DONE (30ef4888d). F3: reverting 0044 fails once 0072 is installed (its triggers depend on `runs.retention_class`) | DB tier; `revert/0044` drops the column, `revert/0072` already exists | S | Rare path, but a rollback that fails when needed is dangerous. Make the 0044 revert drop the 0072 triggers first (or document and test the order). |
 | 7 | F12: a same-org non-member gets 403 for a real room and 404 for a missing one on `context`, `threads`, `artifacts` | live proof (D and E probes) | M | Misses the M1-S6 "byte-equal 404" criterion. Severity is low: room refs are opaque random ids, so this only confirms a ref the caller already has. Needs an owner decision first (are org-visible rooms discoverable?). |
 | 8 | Clusters 9, 2, 4, 5, 6, 10 as in the W1 report | W1 report | M each | After the above. Cluster 5 (production credential registry, owner question 6) blocks any staging flag. |
 
@@ -57,16 +57,47 @@ What the room looked like before, against the three references:
 | Room pulse plus thread pane squeezed the feed to 480 px (three columns) | one contextual right pane | no | Done (U1) |
 | Viewer avatar read "S(" | initials | no | Done (U1) |
 | Each post card repeated the whole thread inline, then the pane repeated it again | Slack: root message plus "N replies" and who replied; Teams: collapsed replies | no | Done (U2): root message plus one reply-summary row (distinct repliers' avatars, count, latest reply, how long ago) that opens the pane |
-| No time beside a message (only the card footer has a date) | all three | yes: transcript turns carry no `created_at` | U3, needs a gateway/session-core field |
-| Same author, consecutive turns repeat avatar and name | Slack, Teams group them | no | U3 |
+| No time beside a message (only the card footer has a date) | all three | yes: transcript turns carry no `created_at` | Done (U3; `SessionMessage.created_at`, 313bed724) |
+| Same author, consecutive turns repeat avatar and name | Slack, Teams group them | no | Done (U3) |
 | First post of a card showed a generic chat icon, replies showed initials | consistent initials avatars | no | Done (U2) |
-| No "new messages" divider, only a per-card "Ny" badge | Slack, Teams | no | U3 |
-| Header has no member avatars or count; editing the name sits in the header | Slack, Teams: member stack, details panel | no | U4: member stack, move edit into a details panel |
+| No "new messages" divider, only a per-card "Ny" badge | Slack, Teams | no | Done (U3) |
+| Header has no member avatars or count; editing the name sits in the header | Slack, Teams: member stack, details panel | no | Done (U4) |
 | Composer has no toolbar | Slack, Teams: format, attach, emoji, mention | attach and emoji: yes (WS12, WS14) | Out of scope now; mention and slash exist |
 | No reactions, edit or delete on a message | all three | yes (WS12) | Wave 3 track; not started |
 | No DM section in the room list | all three | yes (WS12) | Wave 3 track; not started |
 | Agent activity: strip, pulse card, inline working row | Grok Bot | no | Already close; U2 can put the agent's plan and approval cards in the thread pane |
-| On a phone the shell opens its sidebar drawer over the room on first visit | Slack and Teams show the room | no, but it is the shared shell | Logged; the default should be closed on a room route |
-| Dark mode and the 4 other tabs not yet reviewed | - | no | U4 |
+| On a phone the shell opens its sidebar drawer over the room on first visit | Slack and Teams show the room | no, but it is the shared shell | Done for the first visit (U4); the drawer still stays open after tapping a room from the rooms index |
+| Dark mode and the 4 other tabs not yet reviewed | - | no | Dark mode done (visual round 1); the other tabs only lightly reviewed |
 
 Order: U2 is done; U3 (time, grouping, divider, needs the `created_at` field) before U4 (header and details). Disk note: C: is at 98% (21 GB free); Docker's build cache holds about 21 GB that `docker builder prune` would free, and the worktree cargo targets (`C:/dev/space-target-*`) are large. Reactions, edit/delete, attachments and DMs stay with WS12 to WS15, which are not Wave 1.
+
+## 4. Pass of 2026-10-31 (commits 30ef4888d..29dc07790)
+
+Built by one workflow (5 backend and 2 SPA builders, a reviewer per slice, two visual critic and fix rounds, one final verify), then committed by area. Nothing is pushed. Nothing here ran against a live stack: the UI was checked only in the mocked-API harness.
+
+| Commit | What |
+|---|---|
+| 30ef4888d | F11 in session-core (unknown key id logged with the configured ids, counter `mp_session_space_decision_unknown_key_total`, fingerprinted boot log, boot fails on a set-but-unparseable key), F3 (0044 revert drops the 0072 triggers first), F4 seed |
+| c74a5245c | F11 in capability-core and orchestrator-core, plus `scripts/check-control-decision-key.sh` (opt-in, not wired into `compose.sh`) |
+| 1d32179a8 | F10: convex image staleness warning in `run-application-plane.sh`, runbook step |
+| c1fd3c073 | F2: live tests build the Space repository with the audit outbox, as `main.go` does (no production defect); full user-core live suite green on Postgres 16 |
+| 313bed724 | `SessionMessage.created_at = 12` through session-core and model-gateway (`buf breaking` clean) |
+| 13472fa25 | D1-352 archive and unarchive routes behind `room_archive_api`; filtered Control refusals and a 30/min ceiling on member writers (D1-342); cluster 9 read and decision-relay fixes |
+| 5b8247dce | U3 (times, grouping, divider, typed denials in send and transcript load, D1-258 and D1-259), U4 (header, details dialog, archive banner, BFF features replace the `VITE_*` flags), and the two visual rounds (dark mode, flat rows, composer, avatars, tablet sheet, feedback pill moved into the navbar menu on `/spaces`) |
+| 29dc07790 | A human post to an archived room now answers `room_archived`, not `space_authority_stale` |
+
+Checks (final verify over the whole tree): gateway 940 unit tests (was 926) plus integration; session-core 750 bin tests and the full DB tier (1043 pass, the 2 NATS tests need a broker); model-gateway all targets except `zdr_refusal_inventory`; the three Go modules; SPA 1779 of 1780 tests; typecheck at the 34-error baseline; contract sync 96 pass, 30 pre-existing.
+
+Pre-existing failures, not from this work: `zdr_refusal_inventory` flags `browser_run.rs:802` (from the quarryv2-next merge); `CoreShell.test.tsx` expects a room href without `?thread_id=...#chat` (stale since b4556868e); `quarry-client.test.ts` cannot resolve `@quarry/client`.
+
+Still open from this pass:
+- D1-109 (no per-user ceiling on the two human-post routes) and D1-110 (`map_model_response` relays model-gateway error bodies unfiltered).
+- D1-214 root cause: `writeSpaceDenial` in user-core still sends 503 for typed refusals on the personal-Space routes; the gateway corrects the status.
+- D1-242 needs a `ThreadSpaceContext` field for the retrieval-decline reason.
+- `SpaceThreadPanel` still shows the generic restricted notice for a typed 403.
+- Go cores accept padded and standard base64 keys (with a warning); session-core accepts only unpadded base64url.
+- The TS and Python generated session types are stale (they already lacked `post_kind`).
+- The rooms sidebar has no archived marker; the phone drawer stays open after picking a room from the rooms index.
+- Visual round 2 leftovers: 11px tabs, the empty Rompuls column, two identical buttons in the details dialog, a selected card that grows 20px.
+- Owner decisions SD-12 and F12 are unchanged.
+
