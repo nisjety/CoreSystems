@@ -11436,12 +11436,17 @@ fn agentic_run_events(
 /// so the tail is not drained. The order is the dispatch result, then the stop,
 /// then the deadline, so a run that finished in the same poll keeps its answer
 /// and a Stop that lands at the deadline is still a Stop.
+///
+/// Each event the tail delivers goes through two mappers, in order: `step_frame`
+/// for the chat timeline and `usage_frame` for the run's usage meter (WS27 S9).
+#[allow(clippy::too_many_arguments)] // the two frame mappers ride beside the follow's own handles
 async fn follow_agentic_run<S>(
     events: S,
     mut dispatch: tokio::task::JoinHandle<Result<RunAgentResponse, tonic::Status>>,
     deadline_at: tokio::time::Instant,
     drain_grace: std::time::Duration,
     step_frame: impl Fn(&OrchestrationEvent) -> Option<Event>,
+    mut usage_frame: impl FnMut(&OrchestrationEvent) -> Option<Event>,
     tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
     stop: &std::sync::atomic::AtomicBool,
 ) -> Result<DispatchJoin, DeadlineExpired>
@@ -11474,6 +11479,9 @@ where
                     if let Some(frame) = step_frame(&event) {
                         let _ = tx.send(Ok(frame)).await;
                     }
+                    if let Some(frame) = usage_frame(&event) {
+                        let _ = tx.send(Ok(frame)).await;
+                    }
                 }
                 Some(Err(status)) => {
                     tracing::debug!(%status, "orchestration tail failed; following the dispatch alone");
@@ -11494,6 +11502,9 @@ where
                 next = events.next() => match next {
                     Some(Ok(event)) => {
                         if let Some(frame) = step_frame(&event) {
+                            let _ = tx.send(Ok(frame)).await;
+                        }
+                        if let Some(frame) = usage_frame(&event) {
                             let _ = tx.send(Ok(frame)).await;
                         }
                     }
@@ -11869,6 +11880,14 @@ fn agentic_run_stream(
             std::env::var(key).ok()
         });
         let followed_at = std::time::Instant::now();
+        // The run's usage meter (WS27 S9): one catalogue snapshot for the whole run, read only
+        // when the progress switch is on and the run may state a cost. A ZDR or waived run
+        // states none.
+        let mut agent_usage = if usage_progress_switch() && !zdr && retention_class.is_none() {
+            Some(AgentRunUsage::start(&state.pricing, &model, &route).await)
+        } else {
+            None
+        };
         let dispatch_result = follow_agentic_run(
             agentic_run_events(&state, &run.run_id, &model_bearer),
             dispatch,
@@ -11878,6 +11897,15 @@ fn agentic_run_stream(
                 orchestration_event_to_step_update(event)
                     .filter(|step| step.should_emit(&features))
                     .map(|step| step.to_sse(&request_id))
+            },
+            |event| match event.event.as_ref()? {
+                orchestration_event::Event::RunUsageProgress(progress) => {
+                    let frame = agent_usage.as_mut()?.record_round(progress);
+                    frame
+                        .should_emit(&features)
+                        .then(|| frame.to_sse(&request_id))
+                }
+                _ => None,
             },
             &tx,
             &cancel_flag,
@@ -12454,30 +12482,44 @@ fn agentic_run_stream(
         // Phase 7 B6 — emit the quality signal for the agentic run so the Agent
         // Run Console's confidence column goes live. The tokens are the ones
         // execution-core summed over the run's rounds and its delegates' (zero from
-        // an executor that predates the field). Their price is not known at this
-        // layer, so cost_usd stays null rather than a fabricated 0. The ledger rows
-        // are not published here: `AgentUsageLedger::publish` publishes them from the
-        // dispatch task itself, the moment the executor answers, because this stream
-        // may have given up at its deadline long before. Confidence is scored over the run's
-        // final answer.
+        // an executor that predates the field). The cost is priced from those legs only
+        // when the run streamed its meter (see `AgentRunUsage`), and is null otherwise
+        // rather than a fabricated 0. The ledger rows are not published here:
+        // `AgentUsageLedger::publish` publishes them from the dispatch task itself, the
+        // moment the executor answers, because this stream may have given up at its
+        // deadline long before. Confidence is scored over the run's final answer.
         let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
         // HONESTY_CONTRACT: `grounded` reflects whether a knowledge_search call
         // in this run actually returned org knowledge (execution-core's
         // `run_agent` sets it from a real "status": "ok" tool outcome, not a
         // guess) — see agent.rs::knowledge_search_found_grounding.
         let run_usage = response.usage.clone().unwrap_or_default();
+        // The legs priced under the meter's snapshot, so the final frame agrees with the progress
+        // frames. The rounds whose price is unknown are counted, not the calls.
+        let (cost_usd, cost_basis, cost_by_category, unpriced_calls) = match agent_usage.as_ref() {
+            Some(meter) => {
+                let (total, unpriced_rounds) = meter.total(&run_usage);
+                (
+                    frame_cost_usd(&total),
+                    total.basis,
+                    total.by_category,
+                    unpriced_rounds,
+                )
+            }
+            None => (None, None, None, run_usage.inference_rounds),
+        };
         let usage_event = crate::sse_events::ChatEvent::Usage {
             cache_read_tokens: saturating_u32(run_usage.cache_read_input_tokens),
             cache_write_tokens: saturating_u32(run_usage.cache_creation_input_tokens),
             input_tokens: saturating_u32(run_usage.input_tokens),
             output_tokens: saturating_u32(run_usage.output_tokens),
-            cost_usd: None,
-            // Nor its basis: no price is established here.
-            cost_basis: None,
-            // Every round of the run is a call whose price is not established here.
+            cost_usd,
+            cost_basis,
+            // Every round of the run is a call; `unpriced_calls` counts the rounds whose price
+            // is unknown.
             calls: run_usage.inference_rounds,
-            unpriced_calls: run_usage.inference_rounds,
-            cost_by_category: None,
+            unpriced_calls,
+            cost_by_category,
             latency_ms,
             confidence: crate::confidence::score(
                 &final_text,
@@ -12784,11 +12826,7 @@ fn build_agent_usage_envelope(
     } else {
         &leg.model_used
     };
-    let cost_basis = crate::pricing::CostBasis::of_route(
-        &route.provider_hint,
-        &route.subscription_connection_id,
-    )
-    .served_by(&leg.provider_used);
+    let cost_basis = agent_leg_basis(route, &leg.provider_used);
     let mut envelope = build_usage_envelope(
         request_id,
         org_id,
@@ -12892,6 +12930,162 @@ impl AgentUsageLedger {
                 tracing::warn!(%error, run_id = %self.run_id, leg = index, "failed to publish the agent run's usage envelope");
             }
         }
+    }
+}
+
+/// The cost basis of a round that `route` served through `provider_used`: subscription when the
+/// provider that served it is the subscription, whatever the route asked for (see
+/// `CostBasis::served_by`).
+fn agent_leg_basis(route: &AgentRoute, provider_used: &str) -> crate::pricing::CostBasis {
+    crate::pricing::CostBasis::of_route(&route.provider_hint, &route.subscription_connection_id)
+        .served_by(provider_used)
+}
+
+/// A token count as the meter's signed counter: a count past `i64::MAX` is the largest counter.
+fn call_tokens(tokens: u64) -> i64 {
+    i64::try_from(tokens).unwrap_or(i64::MAX)
+}
+
+/// The four token counts of a run's usage, as one value.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RunTokens {
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_write: u64,
+}
+
+impl RunTokens {
+    fn of_leg(leg: &mp_contracts::model_plane::v1::RunUsageLeg) -> Self {
+        Self {
+            input: leg.input_tokens,
+            output: leg.output_tokens,
+            cache_read: leg.cache_read_input_tokens,
+            cache_write: leg.cache_creation_input_tokens,
+        }
+    }
+
+    /// What `self` adds over `earlier`, count by count: a report behind `earlier` adds nothing.
+    fn since(self, earlier: Self) -> Self {
+        Self {
+            input: self.input.saturating_sub(earlier.input),
+            output: self.output.saturating_sub(earlier.output),
+            cache_read: self.cache_read.saturating_sub(earlier.cache_read),
+            cache_write: self.cache_write.saturating_sub(earlier.cache_write),
+        }
+    }
+
+    /// The larger of each count.
+    fn at_least(self, other: Self) -> Self {
+        Self {
+            input: self.input.max(other.input),
+            output: self.output.max(other.output),
+            cache_read: self.cache_read.max(other.cache_read),
+            cache_write: self.cache_write.max(other.cache_write),
+        }
+    }
+}
+
+/// A Do run's usage as its frames state it (build plan WS27 S9). Each round the executor counted
+/// reports the run's totals so far. The increment since the last report is one call, priced under
+/// the model that served it, so a run that changed model mid-run is priced at each model's rates.
+/// The final `usage` frame prices the run's legs the same way, so it agrees with the progress
+/// frames.
+struct AgentRunUsage {
+    rates: crate::pricing::RateSnapshot,
+    /// The gateway's own model, which stands in for a round that named none (as the ledger rows
+    /// do).
+    model: String,
+    route: AgentRoute,
+    meter: crate::usage_meter::UsageMeter,
+    /// The largest totals reported so far, so a late or reordered report adds nothing.
+    reported: RunTokens,
+}
+
+impl AgentRunUsage {
+    /// The meter of one run. The catalogue is read once, so every round of the run is priced
+    /// against the same rates.
+    async fn start(
+        pricing: &crate::pricing::PricingCache,
+        model: &str,
+        route: &AgentRoute,
+    ) -> Self {
+        Self {
+            rates: pricing.snapshot().await,
+            model: model.to_owned(),
+            route: route.clone(),
+            meter: crate::usage_meter::UsageMeter::default(),
+            reported: RunTokens::default(),
+        }
+    }
+
+    /// One provider call of the run: `tokens` served by `model` through `provider`.
+    fn call(
+        &self,
+        provider: &str,
+        model: &str,
+        tokens: RunTokens,
+    ) -> crate::usage_meter::CallUsage {
+        crate::usage_meter::CallUsage {
+            phase: crate::usage_meter::CallPhase::AgentRound,
+            model: if model.is_empty() {
+                self.model.clone()
+            } else {
+                model.to_owned()
+            },
+            provider: provider.to_owned(),
+            basis: agent_leg_basis(&self.route, provider),
+            input: call_tokens(tokens.input),
+            output: call_tokens(tokens.output),
+            cache_read: call_tokens(tokens.cache_read),
+            cache_write: call_tokens(tokens.cache_write),
+        }
+    }
+
+    /// Record one counted round's report, and return the run so far as its progress frame.
+    fn record_round(
+        &mut self,
+        progress: &mp_contracts::model_plane::v1::orchestration_event::RunUsageProgress,
+    ) -> crate::sse_events::ChatEvent {
+        let reported = RunTokens {
+            input: progress.input_tokens,
+            output: progress.output_tokens,
+            cache_read: progress.cache_read_input_tokens,
+            cache_write: progress.cache_creation_input_tokens,
+        };
+        let call = self.call(
+            &progress.provider_used,
+            &progress.model_used,
+            reported.since(self.reported),
+        );
+        self.reported = self.reported.at_least(reported);
+        let priced = self.rates.priced(call.basis, &call.model, call.legs());
+        crate::sse_events::ChatEvent::UsageProgress {
+            phase: crate::usage_meter::CallPhase::AgentRound,
+            snapshot: self.meter.record(&call, &priced),
+            ceiling: None,
+        }
+    }
+
+    /// The run's total as its final frame states it, and the rounds whose price is unknown. The
+    /// total is the sum of the legs the executor reported, which is what the ledger rows are too.
+    fn total(
+        &self,
+        usage: &mp_contracts::model_plane::v1::RunUsage,
+    ) -> (crate::usage_meter::Snapshot, u32) {
+        let mut meter = crate::usage_meter::UsageMeter::default();
+        let mut unpriced_rounds = 0u32;
+        let mut unpriced_calls = 0u32;
+        for leg in agent_usage_legs(usage) {
+            let call = self.call(&leg.provider_used, &leg.model_used, RunTokens::of_leg(&leg));
+            let priced = self.rates.priced(call.basis, &call.model, call.legs());
+            let snapshot = meter.record(&call, &priced);
+            if snapshot.unpriced_calls > unpriced_calls {
+                unpriced_calls = snapshot.unpriced_calls;
+                unpriced_rounds = unpriced_rounds.saturating_add(leg.inference_rounds);
+            }
+        }
+        (meter.snapshot(), unpriced_rounds)
     }
 }
 
@@ -13101,10 +13295,12 @@ fn orchestration_event_to_step_update(
         // A park and its resume are not steps of the chat timeline: the owner's turn
         // stream carries its own `run_parked` frame (WS03 S8), and the run console reads
         // the raw orchestration events.
+        // The run's usage is a meter, not a step: its frame is `usage_progress` (WS27 S9).
         Event::RunParked(_)
         | Event::RunResumed(_)
         | Event::QuestionAsked(_)
-        | Event::QuestionAnswered(_) => return None,
+        | Event::QuestionAnswered(_)
+        | Event::RunUsageProgress(_) => return None,
     };
     Some(crate::sse_events::ChatEvent::StepUpdate {
         id,
@@ -13277,7 +13473,8 @@ fn event_payload_value(event: &OrchestrationEvent) -> Option<Value> {
         }
         // Never forwarded raw (see the name map), so there is nothing to project.
         orchestration_event::Event::QuestionAsked(_)
-        | orchestration_event::Event::QuestionAnswered(_) => {}
+        | orchestration_event::Event::QuestionAnswered(_)
+        | orchestration_event::Event::RunUsageProgress(_) => {}
     }
 
     Some(Value::Object(object))
@@ -14463,6 +14660,237 @@ mod tests {
             .mount(server)
             .await;
         crate::pricing::PricingCache::new(Some(server.uri()), reqwest::Client::new())
+    }
+
+    /// A catalogue for the Do run tests: `mock` at 1 and 2, `other` at 5 and 10 USD per million
+    /// input and output tokens, and the `default` row.
+    async fn run_usage_pricing(server: &wiremock::MockServer) -> crate::pricing::PricingCache {
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/pricing"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "rates": [
+                    { "model": "default", "input_per_million": 3.0, "output_per_million": 15.0 },
+                    { "model": "mock", "input_per_million": 1.0, "output_per_million": 2.0 },
+                    { "model": "other", "input_per_million": 5.0, "output_per_million": 10.0 },
+                ],
+            })))
+            .mount(server)
+            .await;
+        crate::pricing::PricingCache::new(Some(server.uri()), reqwest::Client::new())
+    }
+
+    /// The report execution-core publishes after one counted round of a Do run.
+    fn round_report(
+        round: u32,
+        input: u64,
+        output: u64,
+        model: &str,
+        provider: &str,
+    ) -> mp_contracts::model_plane::v1::orchestration_event::RunUsageProgress {
+        mp_contracts::model_plane::v1::orchestration_event::RunUsageProgress {
+            run_id: "run-1".to_owned(),
+            round,
+            input_tokens: input,
+            output_tokens: output,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            model_used: model.to_owned(),
+            provider_used: provider.to_owned(),
+        }
+    }
+
+    /// The snapshot a `usage_progress` frame states.
+    fn progress_snapshot(event: crate::sse_events::ChatEvent) -> crate::usage_meter::Snapshot {
+        match event {
+            crate::sse_events::ChatEvent::UsageProgress { snapshot, .. } => snapshot,
+            _ => panic!("expected a usage_progress frame"),
+        }
+    }
+
+    /// The counts of one leg of a Do run's usage.
+    fn run_leg(
+        provider: &str,
+        model: &str,
+        input: u64,
+        output: u64,
+        rounds: u32,
+    ) -> mp_contracts::model_plane::v1::RunUsageLeg {
+        mp_contracts::model_plane::v1::RunUsageLeg {
+            provider_used: provider.to_owned(),
+            model_used: model.to_owned(),
+            input_tokens: input,
+            output_tokens: output,
+            inference_rounds: rounds,
+            ..Default::default()
+        }
+    }
+
+    fn priced_legs(input: i64, output: i64) -> crate::pricing::TokenLegs {
+        crate::pricing::TokenLegs {
+            input_tokens: input,
+            output_tokens: output,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        }
+    }
+
+    /// A Do run that changes model mid-run is priced round by round: each increment at the rates
+    /// of the model that served it (build plan WS27 S9).
+    #[tokio::test]
+    async fn agent_run_usage_prices_each_round_under_the_model_that_served_it() {
+        let server = wiremock::MockServer::start().await;
+        let pricing = run_usage_pricing(&server).await;
+        let rates = pricing.snapshot().await;
+        let mut run =
+            super::AgentRunUsage::start(&pricing, "mock", &super::AgentRoute::default()).await;
+
+        let first = progress_snapshot(run.record_round(&round_report(1, 1_000, 100, "mock", "")));
+        let second = progress_snapshot(run.record_round(&round_report(2, 1_500, 150, "other", "")));
+
+        let mock_round = rates
+            .priced(
+                crate::pricing::CostBasis::Metered,
+                "mock",
+                priced_legs(1_000, 100),
+            )
+            .usd
+            .expect("mock is listed");
+        let other_round = rates
+            .priced(
+                crate::pricing::CostBasis::Metered,
+                "other",
+                priced_legs(500, 50),
+            )
+            .usd
+            .expect("other is listed");
+        assert!((first.cost_usd.expect("priced") - mock_round).abs() < 1e-12);
+        assert!(
+            (second.cost_usd.expect("priced") - (mock_round + other_round)).abs() < 1e-12,
+            "the second round is priced under its own model: {second:?}"
+        );
+        assert_eq!((second.calls, second.input, second.output), (2, 1_500, 150));
+    }
+
+    /// A round whose model the catalogue does not list states no cost. The run's total is then
+    /// null and counts that round as unpriced, never a sum of the rounds that were priced (WS27 S9).
+    #[tokio::test]
+    async fn agent_run_usage_states_no_cost_for_an_unlisted_model() {
+        let server = wiremock::MockServer::start().await;
+        let pricing = run_usage_pricing(&server).await;
+        let mut run =
+            super::AgentRunUsage::start(&pricing, "mock", &super::AgentRoute::default()).await;
+
+        let first = progress_snapshot(run.record_round(&round_report(1, 1_000, 100, "mock", "")));
+        let second =
+            progress_snapshot(run.record_round(&round_report(2, 1_500, 150, "unlisted", "")));
+        assert!(first.cost_usd.is_some());
+        assert_eq!((second.cost_usd, second.unpriced_calls), (None, 1));
+
+        let usage = mp_contracts::model_plane::v1::RunUsage {
+            inference_rounds: 2,
+            input_tokens: 1_500,
+            output_tokens: 150,
+            legs: vec![
+                run_leg("", "mock", 1_000, 100, 1),
+                run_leg("", "unlisted", 500, 50, 1),
+            ],
+            ..Default::default()
+        };
+        let (total, unpriced_rounds) = run.total(&usage);
+        assert_eq!((total.cost_usd, unpriced_rounds), (None, 1));
+    }
+
+    /// A subscription round adds its tokens and no dollars. The final total states the subscription
+    /// basis and a known zero, not a null cost, so the run is not shown as unpriced (WS27 S9).
+    #[tokio::test]
+    async fn agent_run_usage_states_a_subscription_run_as_included_and_not_unpriced() {
+        let server = wiremock::MockServer::start().await;
+        let pricing = run_usage_pricing(&server).await;
+        let route = super::AgentRoute {
+            provider_hint: "openai-codex-subscription".to_owned(),
+            subscription_connection_id: "conn_1".to_owned(),
+        };
+        let mut run = super::AgentRunUsage::start(&pricing, "gpt-5.6-terra", &route).await;
+
+        let progress = progress_snapshot(run.record_round(&round_report(
+            1,
+            1_000,
+            100,
+            "gpt-5.6-terra",
+            "openai-codex-subscription",
+        )));
+        assert_eq!(
+            (progress.cost_usd, progress.basis, progress.unpriced_calls),
+            (None, Some(crate::pricing::CostBasis::Subscription), 0)
+        );
+
+        let usage = mp_contracts::model_plane::v1::RunUsage {
+            inference_rounds: 1,
+            input_tokens: 1_000,
+            output_tokens: 100,
+            legs: vec![run_leg(
+                "openai-codex-subscription",
+                "gpt-5.6-terra",
+                1_000,
+                100,
+                1,
+            )],
+            ..Default::default()
+        };
+        let (total, unpriced_rounds) = run.total(&usage);
+        assert_eq!(
+            (super::frame_cost_usd(&total), total.basis, unpriced_rounds),
+            (Some(0.0), Some(crate::pricing::CostBasis::Subscription), 0)
+        );
+    }
+
+    /// Once every round has reported, the final total prices the same legs under the same snapshot,
+    /// so it agrees with the cost the progress frames streamed (WS27 S9).
+    #[tokio::test]
+    async fn agent_run_usage_final_total_agrees_with_the_progress_it_streamed() {
+        let server = wiremock::MockServer::start().await;
+        let pricing = run_usage_pricing(&server).await;
+        let mut run =
+            super::AgentRunUsage::start(&pricing, "mock", &super::AgentRoute::default()).await;
+
+        run.record_round(&round_report(1, 1_000, 100, "mock", ""));
+        let streamed =
+            progress_snapshot(run.record_round(&round_report(2, 1_500, 150, "other", "")))
+                .cost_usd
+                .expect("both models are listed");
+
+        let usage = mp_contracts::model_plane::v1::RunUsage {
+            inference_rounds: 2,
+            input_tokens: 1_500,
+            output_tokens: 150,
+            legs: vec![
+                run_leg("", "mock", 1_000, 100, 1),
+                run_leg("", "other", 500, 50, 1),
+            ],
+            ..Default::default()
+        };
+        let (total, unpriced_rounds) = run.total(&usage);
+        assert!((total.cost_usd.expect("priced") - streamed).abs() < 1e-12);
+        assert_eq!(unpriced_rounds, 0);
+    }
+
+    /// A report behind the last one adds no tokens, so a late or reordered report cannot inflate the
+    /// run (WS27 S9).
+    #[tokio::test]
+    async fn agent_run_usage_ignores_a_report_that_goes_backwards() {
+        let server = wiremock::MockServer::start().await;
+        let pricing = run_usage_pricing(&server).await;
+        let mut run =
+            super::AgentRunUsage::start(&pricing, "mock", &super::AgentRoute::default()).await;
+
+        let ahead = progress_snapshot(run.record_round(&round_report(2, 200, 20, "mock", "")));
+        let behind = progress_snapshot(run.record_round(&round_report(1, 100, 10, "mock", "")));
+        assert_eq!((behind.input, behind.output), (200, 20));
+        assert_eq!(
+            behind.calls, 2,
+            "the late report is still one reported call"
+        );
+        assert_eq!(behind.cost_usd, ahead.cost_usd);
     }
 
     fn turn_call(
@@ -16067,6 +16495,7 @@ mod agentic_follow_tests {
                 recorder.lock().unwrap().push((id.clone(), started.elapsed()));
                 Some(Event::default().event("step_update").data(id))
             },
+            |_| None,
             &tx,
             stop,
         )
@@ -16168,6 +16597,83 @@ mod agentic_follow_tests {
             .collect();
         assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{}", run.wire);
         assert_eq!(expect_response(run.result).status, "completed");
+    }
+
+    /// A usage report as execution-core publishes it after a counted round: the run's totals so
+    /// far.
+    fn usage_event(round: u32) -> OrchestrationEvent {
+        OrchestrationEvent {
+            event_id: format!("evt-usage-{round}"),
+            at: None,
+            event: Some(orchestration_event::Event::RunUsageProgress(
+                orchestration_event::RunUsageProgress {
+                    run_id: "run-1".to_owned(),
+                    round,
+                    input_tokens: u64::from(round),
+                    output_tokens: u64::from(round),
+                    model_used: "mock".to_owned(),
+                    ..Default::default()
+                },
+            )),
+        }
+    }
+
+    /// Each usage report goes through the usage mapper, and the frame it yields reaches the client
+    /// in event order beside the step frames (WS27 S9). The step mapper never sees a usage report.
+    #[tokio::test(start_paused = true)]
+    async fn follow_agentic_run_forwards_each_usage_frame_in_event_order() {
+        let (dispatch, _) = dispatch_after(secs(5), Ok(completed()));
+        let tail = open_tail(vec![
+            (secs(1), usage_event(1)),
+            (secs(2), plan_event("plan-1")),
+            (secs(3), usage_event(2)),
+        ]);
+        let usage_seen = Arc::new(Mutex::new(Vec::new()));
+        let recorder = usage_seen.clone();
+        let (tx, rx) = mpsc::channel(32);
+        let result = follow_agentic_run(
+            tail,
+            dispatch,
+            Instant::now() + secs(120),
+            AGENTIC_EVENT_DRAIN_GRACE,
+            |event| match event.event.as_ref() {
+                Some(orchestration_event::Event::PlanTransitioned(_)) => Some(
+                    Event::default()
+                        .event("step_update")
+                        .data(plan_id_of(event)),
+                ),
+                _ => None,
+            },
+            move |event| match event.event.as_ref() {
+                Some(orchestration_event::Event::RunUsageProgress(progress)) => {
+                    recorder.lock().unwrap().push(progress.round);
+                    Some(
+                        Event::default()
+                            .event("usage_progress")
+                            .data(format!("round-{}", progress.round)),
+                    )
+                }
+                _ => None,
+            },
+            &tx,
+            &AtomicBool::new(false),
+        )
+        .await;
+        drop(tx);
+        let wire = wire(ReceiverStream::new(rx)).await;
+
+        assert_eq!(
+            *usage_seen.lock().unwrap(),
+            vec![1, 2],
+            "one usage frame per report, in order"
+        );
+        assert_eq!(wire.matches("event: usage_progress").count(), 2, "{wire}");
+        assert!(
+            wire.find("data: round-1").expect("the first usage frame")
+                < wire.find("data: plan-1").expect("the step frame"),
+            "{wire}"
+        );
+        assert_eq!(expect_response(result).status, "completed");
     }
 
     /// The last step update of a run can land just behind its result. It is
@@ -21174,6 +21680,28 @@ mod continue_run_tests {
         assert!(
             frame.get("reason").is_none() && frame.get("park_reason").is_none(),
             "the park reason is never broadcast: {frame}"
+        );
+    }
+
+    #[test]
+    fn run_usage_progress_is_never_forwarded_raw() {
+        let event = OrchestrationEvent {
+            event: Some(orchestration_event::Event::RunUsageProgress(
+                orchestration_event::RunUsageProgress {
+                    run_id: "run-42".to_owned(),
+                    round: 1,
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        };
+        assert!(
+            super::orchestration_event_to_sse(&event).is_none(),
+            "the meter reaches the stream as its own usage_progress frame, never as a raw event"
+        );
+        assert!(
+            super::orchestration_event_to_step_update(&event).is_none(),
+            "a meter is not a step"
         );
     }
 

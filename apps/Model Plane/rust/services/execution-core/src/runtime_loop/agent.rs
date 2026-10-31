@@ -428,6 +428,9 @@ struct LoopContext<'a> {
     /// Whether tool calls are recorded in the effect ledger (build plan WS03 S5).
     /// Resolved once per run; a delegated child inherits its parent's.
     effect_ledger: bool,
+    /// Whether each counted round publishes the run's cumulative usage (build plan WS27 S9).
+    /// Resolved once per run; a delegated child inherits its parent's.
+    run_usage_progress: bool,
     state: &'a crate::state::StateStore,
     session_channel: &'a Channel,
     inference_channel: &'a Channel,
@@ -1761,6 +1764,7 @@ async fn run_agent_with_route_parkable(
         // again. A park resume holds no release and runs under the derived set (WS03 S8-6).
         tools_derivable: derivable && resumed.as_ref().is_none_or(|r| r.release.is_none()),
         effect_ledger: runtime_loop::effect::ledger_enabled(),
+        run_usage_progress: run_usage_progress_enabled(),
         state,
         session_channel: &session_channel,
         inference_channel: &inference_channel,
@@ -3195,6 +3199,10 @@ async fn run_rounds(
         // nothing and is not a round that returned a provider response.
         if !first_of_segment {
             ctx.usage.record(&response);
+            // The run's meter follows each counted round, so a Do run's cost rises while it runs.
+            if ctx.run_usage_progress {
+                publish_run_usage_progress(ctx, &response).await;
+            }
         }
 
         // No tool calls → the model is ready to answer.
@@ -5508,6 +5516,7 @@ async fn run_delegated_child(
         // A delegated child never parks.
         tools_derivable: false,
         effect_ledger: parent.effect_ledger,
+        run_usage_progress: parent.run_usage_progress,
         state: parent.state,
         session_channel: parent.session_channel,
         inference_channel: parent.inference_channel,
@@ -8174,6 +8183,94 @@ async fn publish_plan_transition(
     }
 }
 
+/// The environment switch for a Do run's per-round usage progress (build plan WS27 S9). Off by
+/// default; only the literal `true` turns it on, through the one strict parser.
+const RUN_USAGE_PROGRESS_ENV: &str = "EXECUTION_RUN_USAGE_PROGRESS";
+
+#[cfg(test)]
+thread_local! {
+    /// A test's override of the switch. `#[tokio::test]` runs its future on the test's own thread,
+    /// so the override cannot leak into a parallel test the way a process-wide variable would.
+    static RUN_USAGE_PROGRESS_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Holds the switch at a fixed value for the current test thread, then restores it.
+#[cfg(test)]
+struct RunUsageProgressSwitch;
+
+#[cfg(test)]
+impl RunUsageProgressSwitch {
+    fn set(on: bool) -> Self {
+        RUN_USAGE_PROGRESS_OVERRIDE.with(|cell| cell.set(Some(on)));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for RunUsageProgressSwitch {
+    fn drop(&mut self) {
+        RUN_USAGE_PROGRESS_OVERRIDE.with(|cell| cell.set(None));
+    }
+}
+
+/// Whether a Do run publishes its usage after each round it counts.
+fn run_usage_progress_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(forced) = RUN_USAGE_PROGRESS_OVERRIDE.with(std::cell::Cell::get) {
+        return forced;
+    }
+    mp_contracts::loop_fold::switch_from(std::env::var(RUN_USAGE_PROGRESS_ENV).ok().as_deref())
+}
+
+/// Publish the run's cumulative usage after a round the tally counted (build plan WS27 S9), so the
+/// run's cost meter can rise while the run is still going. Counts and ids only: the gateway prices
+/// the increment, and session-core broadcasts the event on the run's stream without storing it.
+/// Best-effort, like the plan transition: a failed publish is logged and the run goes on.
+async fn publish_run_usage_progress(ctx: &LoopContext<'_>, response: &pb::InferResponse) {
+    let total = ctx.usage.snapshot();
+    let request = pb::RecordOrchestrationEventRequest {
+        event: Some(pb::OrchestrationEvent {
+            // session-core assigns event_id + at.
+            event_id: String::new(),
+            at: None,
+            event: Some(pb::orchestration_event::Event::RunUsageProgress(
+                pb::orchestration_event::RunUsageProgress {
+                    // A delegated child runs under its parent's run id, so its rounds reach the
+                    // same stream and count in the same totals.
+                    run_id: ctx.req.run_id.clone(),
+                    round: total.inference_rounds,
+                    input_tokens: total.input_tokens,
+                    output_tokens: total.output_tokens,
+                    cache_read_input_tokens: total.cache_read_input_tokens,
+                    cache_creation_input_tokens: total.cache_creation_input_tokens,
+                    // The route of the round that just finished: the increment since the last
+                    // event is priced under it.
+                    model_used: response.model_used.clone(),
+                    provider_used: response.provider_used.clone(),
+                },
+            )),
+        }),
+    };
+    let result = match authenticated_session_request(request, ctx.session_bearer) {
+        Ok(request) => {
+            OrchestrationCoreServiceClient::new(ctx.session_channel.clone())
+                .record_orchestration_event(request)
+                .await
+        }
+        Err(error) => Err(error),
+    };
+    if let Err(error) = result {
+        warn!(
+            run_id = %ctx.req.run_id,
+            depth = ctx.depth,
+            code = ?error.code(),
+            reason = %status_reason(&error),
+            "run_agent: run usage progress not published (best-effort)"
+        );
+    }
+}
+
 #[allow(clippy::result_large_err)]
 fn authenticated_session_request<T>(
     value: T,
@@ -9427,6 +9524,9 @@ mod tests {
         run_parked_events: Vec<String>,
         /// `(run_id, resumed_segment)` of every `RunResumed` the mock saw (WS03 S8-6).
         run_resumed_events: Vec<(String, u32)>,
+        /// Every `RunUsageProgress` the mock saw on the orchestration broadcast, in order
+        /// (WS27 S9).
+        run_usage_progress: Vec<pb::orchestration_event::RunUsageProgress>,
         /// Every `ClaimLoopCheckpoint` the mock observed. Only an in-place resume claims (a
         /// stage 1 continuation touches no fold), so tests of stage 1 pin it empty.
         claim_calls: Vec<pb::ClaimLoopCheckpointRequest>,
@@ -10913,6 +11013,12 @@ mod tests {
                     rec.order.push("run_resumed".to_owned());
                     rec.run_resumed_events
                         .push((resumed.run_id, resumed.resumed_segment));
+                }
+                Some(pb::OrchestrationEvent {
+                    event: Some(pb::orchestration_event::Event::RunUsageProgress(progress)),
+                    ..
+                }) => {
+                    self.rec.lock().unwrap().run_usage_progress.push(progress);
                 }
                 _ => {}
             }
@@ -13441,6 +13547,149 @@ mod tests {
         }
         fn enter(&self, _: &tracing::span::Id) {}
         fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// Run `script` as a plain Do run with the usage-progress switch at `on`. Returns the result
+    /// and every `RunUsageProgress` the session recorder saw, in order (build plan WS27 S9).
+    async fn run_with_usage_progress(
+        on: bool,
+        script: Vec<Scripted>,
+    ) -> (
+        Result<pb::RunAgentResponse, Status>,
+        Vec<pb::orchestration_event::RunUsageProgress>,
+    ) {
+        let _switch = RunUsageProgressSwitch::set(on);
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel = spawn_inference_channel(script).await;
+        let state = crate::state::StateStore::new();
+
+        let result = run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            &plain_caller(),
+            sample_request(),
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+        )
+        .await;
+        let progress = rec.lock().unwrap().run_usage_progress.clone();
+        (result, progress)
+    }
+
+    /// A Do run publishes its cumulative usage after each round it counts (build plan WS27 S9): one
+    /// event per round, the totals so far, and the route of the round that just finished.
+    #[tokio::test]
+    async fn each_round_publishes_cumulative_run_usage() {
+        let (result, progress) = run_with_usage_progress(
+            true,
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![failing_tool_call("wx-1")],
+                },
+                Scripted::Answer("done".to_owned()),
+            ],
+        )
+        .await;
+        assert_eq!(
+            result.expect("a run with a tool round completes").status,
+            "completed"
+        );
+
+        assert_eq!(
+            progress.iter().map(|p| p.round).collect::<Vec<_>>(),
+            vec![1, 2],
+            "one event per counted round"
+        );
+        assert_eq!(
+            progress.iter().map(|p| p.input_tokens).collect::<Vec<_>>(),
+            vec![1, 2],
+            "the totals so far, not the round's own counts"
+        );
+        assert_eq!(
+            progress.iter().map(|p| p.output_tokens).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert!(
+            progress.iter().all(|p| p.run_id == "run_test"),
+            "{progress:?}"
+        );
+        assert_eq!(progress[1].model_used, "mock");
+    }
+
+    /// A delegated child's rounds count in the run's cumulative usage and reach the run's stream
+    /// (build plan WS27 S9): the child shares the parent's tally and runs under its run id.
+    #[tokio::test]
+    async fn delegated_rounds_are_included() {
+        // Parent delegates, the delegate runs a tool round and answers, the parent answers from it:
+        // four provider responses, each reporting 1 in and 1 out.
+        let (result, progress) = run_with_usage_progress(
+            true,
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![subagent_call("sub-1", r#"{"goal":"look it up"}"#)],
+                },
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![failing_tool_call("wx-1")],
+                },
+                Scripted::Answer("found".to_owned()),
+                Scripted::Answer("done".to_owned()),
+            ],
+        )
+        .await;
+        assert_eq!(
+            result.expect("a delegating run completes").status,
+            "completed"
+        );
+
+        assert_eq!(
+            progress.iter().map(|p| p.round).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4],
+            "the parent's round, the delegate's two, then the parent's last"
+        );
+        let last = progress.last().expect("the run published its usage");
+        assert_eq!(
+            (last.input_tokens, last.output_tokens),
+            (4, 4),
+            "the delegate's rounds are in the run's total"
+        );
+        assert!(
+            progress.iter().all(|p| p.run_id == "run_test"),
+            "{progress:?}"
+        );
+    }
+
+    /// With the switch off (its default) a Do run publishes no usage progress at all.
+    #[tokio::test]
+    async fn no_run_usage_progress_is_published_while_the_switch_is_off() {
+        let (result, progress) = run_with_usage_progress(
+            false,
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![failing_tool_call("wx-1")],
+                },
+                Scripted::Answer("done".to_owned()),
+            ],
+        )
+        .await;
+        assert_eq!(result.expect("completes").status, "completed");
+        assert!(progress.is_empty(), "{progress:?}");
     }
 
     #[tokio::test]

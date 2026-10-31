@@ -2232,6 +2232,10 @@ fn event_run_id(ev: &proto::OrchestrationEvent) -> Option<&str> {
         // Questions (WS14 S3): run-scoped, ids only.
         orchestration_event::Event::QuestionAsked(p) => Some(&p.run_id),
         orchestration_event::Event::QuestionAnswered(p) => Some(&p.run_id),
+        // Do-run usage progress (WS27 S9): run-scoped, counts and ids only. It is broadcast and
+        // replayed like the other run events, and never persisted (`persist_browser_event` has no
+        // arm for it).
+        orchestration_event::Event::RunUsageProgress(p) => Some(&p.run_id),
     }
 }
 
@@ -5589,6 +5593,25 @@ mod tests {
             )),
         };
         assert_eq!(event_run_id(&loop_resumed), Some("run_k"));
+
+        // A Do run's usage progress (WS27 S9) is run-scoped, so it reaches the run's stream.
+        let usage_progress = proto::OrchestrationEvent {
+            event_id: String::new(),
+            at: None,
+            event: Some(orchestration_event::Event::RunUsageProgress(
+                orchestration_event::RunUsageProgress {
+                    run_id: "run_u".into(),
+                    round: 2,
+                    input_tokens: 3,
+                    output_tokens: 4,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    model_used: "gpt-5.6-terra".into(),
+                    provider_used: "openai-codex-subscription".into(),
+                },
+            )),
+        };
+        assert_eq!(event_run_id(&usage_progress), Some("run_u"));
     }
 
     fn park_event(resumed: bool, run_id: &str) -> proto::OrchestrationEvent {

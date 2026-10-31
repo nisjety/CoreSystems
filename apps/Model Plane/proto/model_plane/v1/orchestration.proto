@@ -1265,6 +1265,11 @@ message OrchestrationEvent {
     QuestionAsked question_asked = 27;
     // A requested question was answered or skipped.
     QuestionAnswered question_answered = 28;
+
+    // Do-run usage progress (build plan WS27 S9, tag 29 — additive). After each round a Do
+    // run's executor counted, the run's cumulative usage. Counts and ids only; session-core
+    // broadcasts it on the run's stream and never persists it.
+    RunUsageProgress run_usage_progress = 29;
   }
 
   message PlanTransitioned {
@@ -1489,6 +1494,29 @@ message OrchestrationEvent {
     string question_id = 2;
     // The state it reached: ANSWERED or SKIPPED.
     QuestionState state = 3;
+  }
+
+  // The cumulative usage of a Do run after one of its counted rounds (build plan WS27 S9).
+  // Counts and ids only. The counts are the run's totals so far, its delegates' rounds
+  // included, as RunUsage states them; the model and provider are the route of the round
+  // that just finished, so a reader can price the increment under the model that served it.
+  message RunUsageProgress {
+    // The run the usage belongs to: the run whose stream carries this event.
+    string run_id = 1;
+    // Inference rounds the run has counted so far, delegated rounds included.
+    uint32 round = 2;
+    // Input tokens so far, folding in both cache legs as RunUsage.input_tokens does.
+    uint64 input_tokens = 3;
+    // Completion tokens so far.
+    uint64 output_tokens = 4;
+    // Input tokens so far that were served from the provider's prompt cache.
+    uint64 cache_read_input_tokens = 5;
+    // Input tokens so far that were written to the provider's prompt cache.
+    uint64 cache_creation_input_tokens = 6;
+    // The model that served the round that just finished, as the provider reported it.
+    string model_used = 7;
+    // The provider that served the round that just finished, as the provider reported it.
+    string provider_used = 8;
   }
 }
 
