@@ -219,3 +219,14 @@ The agent is the one the verified token gives (a service principal, or a person'
 | reason | `details.denied_action` | meaning | what a caller does |
 |---|---|---|---|
 | `agent_reload_denied` | `reload` | a page reload proposed by an agent; reload is a person's action | navigate to the URL instead, or leave it to the person |
+
+
+## 403 `FORBIDDEN`: job results under Zero Data Retention (INNH-12)
+
+`GET /v1/crawl/{id}/results`, `/v1/batch/{id}/results` and `/v1/jobs/{id}/results` return the URL and title of every page a job fetched, so a caller under the token's ZDR floor is refused before control is asked. Not retryable by the same caller.
+
+| reason | `details.reason` | meaning | what a caller does |
+|---|---|---|---|
+| `job_result_urls` | `job_result_urls` | the caller is under Zero Data Retention | read the job's counts on `GET /v1/crawl/{id}` or `/v1/batch/{id}`; there are no page rows for a ZDR caller |
+
+The same routes answer 501 `UNSUPPORTED` while `QUARRY_EDGE__JOB_RESULTS` is off (checked before the refusal), and 400 `BAD_REQUEST` with `details.field` `limit`, `after_seq` or `latest`. `GET /v1/artifacts` answers 400 with `details.field` `kind` or `run_id` for a value that is not an artifact kind or a run id.

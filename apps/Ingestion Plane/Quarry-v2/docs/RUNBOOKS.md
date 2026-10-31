@@ -2027,3 +2027,27 @@ What a caller sees:
 | 200, item `error`, message names the "request time budget" | 50 s passed before the model read this source; send fewer URLs |
 
 Nothing in a log or a response carries the prompt text; log lines carry lengths only. To check by hand on a side-by-side stack: send a page with a schema and a prompt, read the request the gateway receives (the prompt before the `<<<PAGE-` line, the page inside), then repeat with `"zdr": true` and confirm the gateway sees no request. Not done here: no real gateway was called.
+
+
+## Job results: enable, disable, read (INNH-12, built, NOT run, 2026-10-31)
+
+The pages a crawl or batch fetched, with the ids of what was stored for each, come back from `GET /v1/crawl/{id}/results`, `/v1/batch/{id}/results` and `/v1/jobs/{id}/results`. The contract is `docs/CONTRACTS.md`, "Job results". It is off: `QUARRY_EDGE__JOB_RESULTS` is unset in the default composes, which is off, and no compose line is needed.
+
+**Enable.** Set `QUARRY_EDGE__JOB_RESULTS=1` (also `true`, `yes`, `on`) on the edge and restart it. Rebuild both the edge and the orchestrator: the edge returns the artifact ids from `run_page`, the orchestrator copies them onto each `page_fetched` event, and control reads the rows back. Deploy the edge first. Pages fetched before the orchestrator carries the fields have rows without artifact ids (url, status and title only); nothing is lost and nothing needs a migration. Replaying an in-flight workflow is safe: only the payload of an event changes, no workflow command is added.
+
+**Disable.** Unset the variable or set it to `0` and restart. The three routes answer 501; the events keep the extra fields.
+
+**Answers.**
+| Answer | Reason |
+|---|---|
+| 501 `UNSUPPORTED`, message names `QUARRY_EDGE__JOB_RESULTS` | the flag is off |
+| 403 `FORBIDDEN`, `details.reason` is `job_result_urls` | the caller is under Zero Data Retention |
+| 403 | a service principal |
+| 404 `NOT_FOUND` | unknown id, an id of another organization, or a crawl id on the batch path |
+| 400 `BAD_REQUEST`, `details.field` | `limit` outside 1 to 500, `after_seq` not a number, `latest` not true or false |
+
+**Reading a run.** Page with `after_seq=<next_seq>` until `next_seq` is absent. Use `latest=true` for a dataset with one row per URL. Fetch a page with `GET /v1/artifacts/{markdown_artifact_id}`. On the in-memory artifact backend (`ARTIFACT_BACKEND=memory`, the default compose) the ids stop resolving when the edge restarts; use the filesystem backend for results that must outlive it. `GET /v1/artifacts?run_id=<run>&kind=markdown` lists one run's artifacts on the memory and filesystem backends (not on S3, which cannot list).
+
+**Cost and scale.** A read is one indexed page of the job's events (`events_job_id_idx` is on `job_id`; the type and seq filters run over that job's rows). A 5 000-page crawl is 10 pages at the maximum limit. `latest=true` reads the whole job (up to 20 000 fetches) on every call, so page through it with `after_seq` rather than polling it.
+
+**ZDR.** A ZDR run stores no artifact and its `page_fetched` carries none of the ids; the routes are refused for a ZDR caller anyway. The events already hold each page's url and title (existing posture); this makes them easy to read, which is why the routes are dark. To check by hand on a side-by-side stack: crawl five fixture pages, call `GET /v1/crawl/{id}/results` and confirm five rows whose `markdown_artifact_id` each return the page from `GET /v1/artifacts/{id}`; repeat with a ZDR token and confirm 403. Not done here: Go and Rust unit and route tests only, no stack, no Temporal and no Postgres were run.

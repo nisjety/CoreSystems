@@ -914,6 +914,44 @@ recorded is not returned. `next_seq` is set when the page was full; pass it as
 `after_seq`. Under the token's ZDR floor the whole route answers 403, because it returns
 URLs.
 
+**Job results (INNH-12, the dataset of a run).** `GET /v1/crawl/{id}/results`,
+`/v1/batch/{id}/results` and `/v1/jobs/{id}/results` list the pages a job fetched, one row
+for each fetch, in the order they were fetched. The edge answers `{data: {items, next_seq?},
+meta: {request_id, page: {next?, limit}}}`. A row is `{seq, url, status, content_type?,
+title?, fetched_at, word_count?, driver?, markdown_artifact_id?, source_artifact_id?,
+bytes?}`: `url` is the URL the job fetched (as requested), `bytes` the size of the stored
+Markdown, `driver` one of `static`, `tls`, `browser`. The rows come from the job's
+`page_fetched` events, which now carry the artifact ids, `bytes`, `word_count` and `driver`
+(content-free, closed fields). The page content is not in the response: read it with
+`GET /v1/artifacts/{id}` (org-bound, 404 when gone). Failed and blocked pages are not rows;
+they stay on `/errors`.
+
+Query: `limit` (1 to 500, default 100; anything else is a 400 naming the field),
+`after_seq` (the `next_seq` of the previous page, also `meta.page.next`; `next_seq` is
+absent on the last page) and `latest` (default false). A URL fetched twice (a retry, an
+escalation to a browser) has two rows; `latest=true` keeps the latest fetch of each URL, in
+`seq` order, and pages the kept rows by `after_seq`. A `latest=true` read looks at the first
+20 000 fetches of a job at most and sets `scan_capped: true` when there were more. A row
+written before the fields existed has `url`, `status`, `title` and `fetched_at` only; the
+ids are also absent when nothing was stored, which is every ZDR run.
+
+Off unless `QUARRY_EDGE__JOB_RESULTS=1` (501 `UNSUPPORTED`, checked first). 403 `FORBIDDEN`
+with `details.reason: job_result_urls` under the token's ZDR floor, because a row names a
+URL and a title (the same floor as `/errors`); crawl and batch are refused for ZDR callers at
+handoff, so no ZDR job has rows. A service principal gets 403 from the route scope, as on
+`/errors`. The organization is the token's: control answers a foreign or unknown id, a
+batch id on the crawl path and the reverse with the same 404. The artifact ids dangle after
+an edge restart on the in-memory artifact backend (the compose default), and an S3 backend
+cannot list artifacts (the ids still resolve by `GET /v1/artifacts/{id}`). Org erasure does
+not purge the events a row is read from (the existing posture of `/events` and `/errors`).
+
+**Artifact list filters (INNH-12).** `GET /v1/artifacts` takes `kind` (one of `markdown`,
+`html`, `raw`, `pdf`, `screenshot`, `extract`, as the OpenAPI always said and now enforced)
+and `run_id` (`run_...`), alone or together, on top of the paging filters. Another value of
+either is a 400 with `details.field`. `ArtifactSummary` gains `run_id` and `page_hash`
+(additive). The filters work on the in-memory and filesystem backends; they are not behind
+the results flag.
+
 **Ongoing.** `GET /v1/crawl/ongoing` and `/v1/batch/ongoing` list the org's jobs in
 `accepted`, `running` or `paused`, oldest first.
 

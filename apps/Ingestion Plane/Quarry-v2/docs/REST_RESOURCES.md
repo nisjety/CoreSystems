@@ -120,6 +120,7 @@ Defined in `crates/quarry-core/src/resources.rs`:
 | `GET /v1/crawl/{id}`, `/v1/batch/{id}` | crawl, batch | kind mismatch 404 |
 | `GET /v1/crawl/{id}/errors`, `/v1/batch/{id}/errors` | crawl, batch | paged by `after_seq`, `limit` (max 500) |
 | `GET /v1/crawl/ongoing`, `/v1/batch/ongoing` | crawl, batch | in-flight jobs, oldest first |
+| `GET /v1/crawl/{id}/results`, `/v1/batch/{id}/results`, `/v1/jobs/{id}/results` | crawl, batch, any job | INNH-12: the pages fetched with artifact ids, paged by `after_seq`, `limit` (max 500), `latest`; dark behind `QUARRY_EDGE__JOB_RESULTS`; 403 under the ZDR floor |
 | `GET /v1/{kind}/jobs?status=a,b` | crawl and the other kinds | status filter; unknown status 400 |
 
 Shapes, origin set, status vocabulary and the errors rules are in `CONTRACTS.md`

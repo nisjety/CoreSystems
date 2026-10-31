@@ -1357,6 +1357,7 @@ paths:
         description: Opaque cursor from a prior page
       - name: kind
         in: query
+        description: Keep only artifacts of this kind. Any other value is a 400 (`error.details.field` is `kind`).
         schema:
           type: string
           enum:
@@ -1366,6 +1367,12 @@ paths:
           - pdf
           - screenshot
           - extract
+      - name: run_id
+        in: query
+        description: Keep only the artifacts one run wrote (`run_...`, as `ArtifactSummary.run_id` and the per-job results carry it). Any other value is a 400 (`error.details.field` is `run_id`). The filter works on the in-memory and filesystem backends; an S3 backend cannot list, so it lists nothing.
+        schema:
+          type: string
+          pattern: '^run_'
       responses:
         '200':
           description: Artifact page
@@ -1804,6 +1811,88 @@ paths:
             application/json:
               schema:
                 type: object
+  /v1/crawl/{job_id}/results:
+    get:
+      operationId: get_crawl_results
+      summary: The pages a crawl fetched, with their artifact ids (INNH-12)
+      description: |
+        The pages a crawl fetched, one row for each fetch (INNH-12): the page URL, the
+        fetch metadata and the ids of the stored artifacts. This is the dataset of a run; the
+        page content is not in the response, read it by id with `GET /v1/artifacts/{id}`
+        (`markdown_artifact_id` is the page as Markdown, `source_artifact_id` the HTML or the
+        original document). Failed and blocked pages are not rows: they are on `/errors`.
+
+        Rows are in the order the pages were fetched. `after_seq` pages forward: pass the
+        `next_seq` of the last page (also in `meta.page.next`). `next_seq` is absent on the
+        last page. A URL fetched twice (a retry, an escalation to a browser) has two rows;
+        `latest=true` returns the latest fetch of each URL instead, still in `seq` order.
+        When a job has more than 20 000 fetches, `latest=true` reads the first 20 000 only
+        and `scan_capped` is true.
+
+        A row from before this release carries `url`, `status`, `title` and `fetched_at`
+        only. The artifact ids are absent when nothing was stored (never under Zero Data
+        Retention). On the in-memory artifact backend the ids stop resolving when the edge
+        restarts.
+
+        Off unless the edge runs with `QUARRY_EDGE__JOB_RESULTS=1` (501 otherwise). 403 for a
+        caller under Zero Data Retention (`error.details.reason` is `job_result_urls`) and for
+        a service principal. The organization comes from the token.
+      tags:
+      - crawl
+      security:
+      - bearerAuth: []
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^job_'
+        - name: after_seq
+          in: query
+          required: false
+          description: The `next_seq` of the previous page.
+          schema:
+            type: integer
+            minimum: 0
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+        - name: latest
+          in: query
+          required: false
+          description: Keep only the latest fetch of each URL.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: One page of results.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/JobResultsView'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '400':
+          description: A bad `limit` (not 1 to 500), `after_seq` or `latest`. `error.details.field` names it.
+        '403':
+          description: The token's ZDR floor is set (`error.details.reason` is `job_result_urls`), or the caller is a service principal.
+        '404':
+          description: Not found for this organization, a foreign id, or a job of another kind.
+        '501':
+          description: Job results are not enabled on this edge (QUARRY_EDGE__JOB_RESULTS).
   /v1/batch/{job_id}:
     get:
       operationId: get_batch_status
@@ -1989,6 +2078,170 @@ paths:
           description: The token's ZDR floor is set; error URLs are not returned.
         '404':
           description: Not found for this organization.
+  /v1/batch/{job_id}/results:
+    get:
+      operationId: get_batch_results
+      summary: The pages a batch fetched, with their artifact ids (INNH-12)
+      description: |
+        The pages a batch fetched, one row for each fetch (INNH-12): the page URL, the
+        fetch metadata and the ids of the stored artifacts. This is the dataset of a run; the
+        page content is not in the response, read it by id with `GET /v1/artifacts/{id}`
+        (`markdown_artifact_id` is the page as Markdown, `source_artifact_id` the HTML or the
+        original document). Failed and blocked pages are not rows: they are on `/errors`.
+
+        Rows are in the order the pages were fetched. `after_seq` pages forward: pass the
+        `next_seq` of the last page (also in `meta.page.next`). `next_seq` is absent on the
+        last page. A URL fetched twice (a retry, an escalation to a browser) has two rows;
+        `latest=true` returns the latest fetch of each URL instead, still in `seq` order.
+        When a job has more than 20 000 fetches, `latest=true` reads the first 20 000 only
+        and `scan_capped` is true.
+
+        A row from before this release carries `url`, `status`, `title` and `fetched_at`
+        only. The artifact ids are absent when nothing was stored (never under Zero Data
+        Retention). On the in-memory artifact backend the ids stop resolving when the edge
+        restarts.
+
+        Off unless the edge runs with `QUARRY_EDGE__JOB_RESULTS=1` (501 otherwise). 403 for a
+        caller under Zero Data Retention (`error.details.reason` is `job_result_urls`) and for
+        a service principal. The organization comes from the token.
+      tags:
+      - batch
+      security:
+      - bearerAuth: []
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^job_'
+        - name: after_seq
+          in: query
+          required: false
+          description: The `next_seq` of the previous page.
+          schema:
+            type: integer
+            minimum: 0
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+        - name: latest
+          in: query
+          required: false
+          description: Keep only the latest fetch of each URL.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: One page of results.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/JobResultsView'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '400':
+          description: A bad `limit` (not 1 to 500), `after_seq` or `latest`. `error.details.field` names it.
+        '403':
+          description: The token's ZDR floor is set (`error.details.reason` is `job_result_urls`), or the caller is a service principal.
+        '404':
+          description: Not found for this organization, a foreign id, or a job of another kind.
+        '501':
+          description: Job results are not enabled on this edge (QUARRY_EDGE__JOB_RESULTS).
+  /v1/jobs/{job_id}/results:
+    get:
+      operationId: get_job_results
+      summary: The pages any durable job fetched, with their artifact ids (INNH-12)
+      description: |
+        The pages a job fetched, one row for each fetch (INNH-12): the page URL, the
+        fetch metadata and the ids of the stored artifacts. This is the dataset of a run; the
+        page content is not in the response, read it by id with `GET /v1/artifacts/{id}`
+        (`markdown_artifact_id` is the page as Markdown, `source_artifact_id` the HTML or the
+        original document). Failed and blocked pages are not rows: they are on `/errors`.
+
+        Rows are in the order the pages were fetched. `after_seq` pages forward: pass the
+        `next_seq` of the last page (also in `meta.page.next`). `next_seq` is absent on the
+        last page. A URL fetched twice (a retry, an escalation to a browser) has two rows;
+        `latest=true` returns the latest fetch of each URL instead, still in `seq` order.
+        When a job has more than 20 000 fetches, `latest=true` reads the first 20 000 only
+        and `scan_capped` is true.
+
+        A row from before this release carries `url`, `status`, `title` and `fetched_at`
+        only. The artifact ids are absent when nothing was stored (never under Zero Data
+        Retention). On the in-memory artifact backend the ids stop resolving when the edge
+        restarts.
+
+        Off unless the edge runs with `QUARRY_EDGE__JOB_RESULTS=1` (501 otherwise). 403 for a
+        caller under Zero Data Retention (`error.details.reason` is `job_result_urls`) and for
+        a service principal. The organization comes from the token.
+      tags:
+      - resources
+      security:
+      - bearerAuth: []
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^job_'
+        - name: after_seq
+          in: query
+          required: false
+          description: The `next_seq` of the previous page.
+          schema:
+            type: integer
+            minimum: 0
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+        - name: latest
+          in: query
+          required: false
+          description: Keep only the latest fetch of each URL.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: One page of results.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/JobResultsView'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '400':
+          description: A bad `limit` (not 1 to 500), `after_seq` or `latest`. `error.details.field` names it.
+        '403':
+          description: The token's ZDR floor is set (`error.details.reason` is `job_result_urls`), or the caller is a service principal.
+        '404':
+          description: Not found for this organization, a foreign id, or a job of another kind.
+        '501':
+          description: Job results are not enabled on this edge (QUARRY_EDGE__JOB_RESULTS).
   /v1/{kind}/jobs:
     get:
       operationId: list_jobs_by_kind
@@ -3564,6 +3817,74 @@ components:
         source_url:
           type: string
           nullable: true
+        run_id:
+          type: string
+          description: The run that wrote the artifact (`run_...`). Absent when the backend cannot tell.
+        page_hash:
+          type: string
+          description: The page the artifact belongs to, the hash of its URL and content fingerprint. A changed page in a later run has a different one.
+    JobResultsView:
+      type: object
+      description: The data of GET /v1/{crawl,batch,jobs}/{job_id}/results (INNH-12)
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/JobResult'
+        next_seq:
+          type: integer
+          minimum: 0
+          description: Present when more rows remain. Pass it back as `after_seq`.
+        scan_capped:
+          type: boolean
+          description: True only for a `latest=true` read of a job with more than 20 000 fetches, whose answer covers the first 20 000.
+    JobResult:
+      type: object
+      description: One page a job fetched. Fields after `fetched_at` are absent when the fetch event predates them or nothing was stored.
+      required:
+      - seq
+      - url
+      - status
+      - fetched_at
+      properties:
+        seq:
+          type: integer
+          minimum: 0
+          description: Position of the fetch in the job's event log. The cursor is the last row's seq.
+        url:
+          type: string
+          description: The URL the job fetched (as requested; a redirect target is not recorded here).
+        status:
+          type: integer
+          description: HTTP status of the fetch.
+        content_type:
+          type: string
+        title:
+          type: string
+        fetched_at:
+          type: string
+          format: date-time
+        word_count:
+          type: integer
+          minimum: 0
+        driver:
+          type: string
+          enum:
+          - static
+          - tls
+          - browser
+        markdown_artifact_id:
+          type: string
+          description: The stored Markdown of the page. Read it with `GET /v1/artifacts/{id}`.
+        source_artifact_id:
+          type: string
+          description: The stored HTML, or the original document. Read it with `GET /v1/artifacts/{id}`.
+        bytes:
+          type: integer
+          minimum: 0
+          description: Size in bytes of the stored Markdown.
     JobSummary:
       type: object
       required:
