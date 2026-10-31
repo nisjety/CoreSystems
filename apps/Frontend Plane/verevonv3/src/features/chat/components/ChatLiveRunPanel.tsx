@@ -67,6 +67,8 @@ import {
 import { useI18n } from '@/shared/i18n'
 import { isSafeLinkHref } from '../lib/safe-href'
 import { RunNotifyButton } from './RunNotifyButton'
+import { RunCostMeter } from './RunCostMeter'
+import type { RunMeter } from './chat-types'
 
 // The run stores its error as this Norwegian text; the reader's language is chosen where it is shown.
 const RUN_STREAM_ERROR = 'Kunne ikke lese hendelsesstrømmen for denne kjøringen.'
@@ -231,6 +233,8 @@ export function ChatLiveRunPanel(props: {
    * panel only observes the run stream; it never manufactures approval rows.
    */
   onRefreshApprovals?: (runId: string) => void
+  /** The watched turn's running cost and usage (WS27-S4). Shown here while no Work panel is open. */
+  meter?: RunMeter
 }) {
   const i18n = useI18n()
   // One name for two attributes: the button carries the same text as its
@@ -587,7 +591,11 @@ export function ChatLiveRunPanel(props: {
 
           <Show when={!props.collapsed}>
             <div class="verevon-chat-run-panel__body">
-              <Show when={props.workContent}>
+              {/* The Work panel carries the meter itself, so the live rail shows it only while Work is closed. */}
+              <Show
+                when={props.workContent}
+                fallback={<RunCostMeter meter={props.meter} />}
+              >
                 <section
                   id="verevon-chat-tabpanel-steps"
                   class="verevon-chat-run-panel__work"

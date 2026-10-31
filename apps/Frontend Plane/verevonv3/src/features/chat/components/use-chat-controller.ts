@@ -184,6 +184,7 @@ import type {
   TaskStepStatus,
   ThreadPlanGrant,
 } from './chat-types'
+import { applyUsageProgress, applyUsageTotal } from './RunCostMeter'
 import type { ChatEffectClass } from '@/shared/chat/effect-class'
 import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
 import { planExecuteEnabled } from '@/shared/chat/plan-execute'
@@ -3688,9 +3689,18 @@ export function useChatController() {
             // leaves the turn without a processing line, never a guessed one.
             turn.servedBy = usage.servedBy
             turn.confidence = usage.confidence
+            // The turn's final total: it replaces every running total the progress frames gave.
+            turn.meter = applyUsageTotal(turn.meter, usage)
           }
         })
         upsertTaskStep(createTurnStep(assistantId, turnTitle, 'usage', 'Usage recorded', formatUsageSummary(usage), 'done'))
+      },
+      // The running total after each provider call of the turn (WS27-S4). The usage frame still ends it.
+      onUsageProgress: (progress: Parameters<NonNullable<ChatStreamHandlers['onUsageProgress']>>[0]) => {
+        setState((s) => {
+          const turn = s.turns.find((t) => t.id === assistantId)
+          if (turn) turn.meter = applyUsageProgress(turn.meter, progress)
+        })
       },
       onTurnTiming: (timing: Parameters<NonNullable<ChatStreamHandlers['onTurnTiming']>>[0]) => {
         setState((s) => {

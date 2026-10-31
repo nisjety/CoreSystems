@@ -62,7 +62,9 @@ import {
   type Citation,
   type EvidenceSource,
   type IconComponent,
+  type RunMeter,
 } from './chat-types'
+import { RunCostMeter } from './RunCostMeter'
 import { uiEventLabel, type VerevonUiEvent } from '@/shared/chat/verevon-ui-events'
 import { availableChatSurfaces, type ChatSurfaceAvailability } from '../lib/chat-surfaces'
 import { useI18n } from '@/shared/i18n'
@@ -807,6 +809,8 @@ export function StepsPanel(props: {
    */
   toolCalls?: ChatToolCall[]
   screen?: ChatArtifact | null
+  /** The turn's running cost and usage (WS27-S4), shown under the Work header. */
+  meter?: RunMeter
   onStopTask: () => void
 }) {
   const i18n = useI18n()
@@ -907,6 +911,7 @@ export function StepsPanel(props: {
               {i18n.tr('Stopp', 'Stop')}
             </button>
           </div>
+          <RunCostMeter meter={props.meter} />
           {/* Step count drives the plan refetch: session-core mirrors each
               completed execution step into the run's plan, so a new task step
               is the cheapest available signal that the durable plan has more
@@ -997,15 +1002,17 @@ export function StepsPanel(props: {
                         ? Math.round((outputTokens / latencyMs) * 1000)
                         : null
                     }
+                    // The run-cost meter's cache figures, so this line and the meter cannot disagree.
+                    const cacheRead = () => props.meter?.cacheReadTokens ?? current.cacheReadTokens ?? 0
                     const cacheTotal = () => {
-                      return (current.cacheReadTokens ?? 0) + (current.cacheWriteTokens ?? 0)
+                      return cacheRead() + (props.meter?.cacheWriteTokens ?? current.cacheWriteTokens ?? 0)
                     }
                     return (
                       <div class="verevon-chat-telemetry" aria-label={i18n.tr('Kjøringsmålinger', 'Run metrics')}>
                         <Metric label="Output" value={`${current.outputTokens ?? '—'} tokens`} />
                         <Metric label="Tokens/sec" value={tokensPerSecond() != null ? String(tokensPerSecond()) : '—'} />
                         <Show when={cacheTotal() > 0}>
-                          <Metric label="Prompt cache" value={`${current.cacheReadTokens ?? 0} read`} />
+                          <Metric label="Prompt cache" value={`${cacheRead()} read`} />
                         </Show>
                       </div>
                     )

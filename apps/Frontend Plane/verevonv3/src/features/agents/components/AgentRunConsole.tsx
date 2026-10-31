@@ -90,6 +90,8 @@ import {
   summarizeToolArgs,
   summarizeToolResult,
 } from '@/features/chat/components/chat-normalizers'
+import type { RunMeter } from '@/features/chat/components/chat-types'
+import { RunCostMeter, applyUsageProgress, applyUsageTotal } from '@/features/chat/components/RunCostMeter'
 import type { PrivacyTier } from '@/shared/api/privacy-tier'
 import { useI18n } from '@/shared/i18n'
 import {
@@ -144,10 +146,8 @@ type Citation = {
   snippet: string
 }
 
-type RunUsage = {
-  inputTokens?: number
-  outputTokens?: number
-  costUsd?: number
+/** The run's usage: its running cost and tokens (`RunMeter`), with the latency and confidence the chat stream states. */
+type RunUsage = RunMeter & {
   latencyMs?: number
   confidence?: number
 }
@@ -753,11 +753,18 @@ export default function AgentRunConsole() {
       onUsage: (usage) => {
         setState((s) => {
           s.usage = {
-            inputTokens: usage.inputTokens,
-            outputTokens: usage.outputTokens,
-            costUsd: usage.costUsd,
+            ...applyUsageTotal(s.usage ?? undefined, usage),
             latencyMs: usage.latencyMs,
             confidence: usage.confidence,
+          }
+        })
+      },
+      onUsageProgress: (progress) => {
+        setState((s) => {
+          s.usage = {
+            ...applyUsageProgress(s.usage ?? undefined, progress),
+            latencyMs: s.usage?.latencyMs,
+            confidence: s.usage?.confidence,
           }
         })
       },
@@ -1481,18 +1488,11 @@ function TrustPanel(props: { citations: Citation[]; usage: RunUsage | null }) {
         {(usage) => (
           <>
             <p class="verevon-run-trust__subhead">{i18n.tr('Bruk', 'Usage')}</p>
+            {/* Tokens and cost live in the meter, which says "included in the subscription" or "price unavailable" rather than a bare zero. */}
+            <RunCostMeter meter={usage()} />
             <div class="verevon-run-trust__usage">
               <Show when={usage().confidence != null}>
                 <UsageStat label={i18n.tr('Konfidens', 'Confidence')} value={`${Math.round((usage().confidence ?? 0) * 100)}%`} />
-              </Show>
-              <Show when={usage().inputTokens != null || usage().outputTokens != null}>
-                <UsageStat
-                  label={i18n.tr('Tokens', 'Tokens')}
-                  value={i18n.tr(`${usage().inputTokens ?? 0} inn · ${usage().outputTokens ?? 0} ut`, `${usage().inputTokens ?? 0} in · ${usage().outputTokens ?? 0} out`)}
-                />
-              </Show>
-              <Show when={usage().costUsd != null}>
-                <UsageStat label={i18n.tr('Kostnad', 'Cost')} value={`$${(usage().costUsd ?? 0).toFixed(4)}`} />
               </Show>
               <Show when={usage().latencyMs != null}>
                 <UsageStat label={i18n.tr('Ventetid', 'Latency')} value={`${usage().latencyMs} ms`} />

@@ -5,7 +5,10 @@ import {
   type AutonomyRung,
   type ChatAction,
   type ChatCostBasis,
+  type ChatCostByCategory,
   type ChatTurnTiming,
+  type ChatUsagePhase,
+  type ChatUsageProgressEvent,
   type ChatVerificationEvent,
   type EffortLevel,
   type EffortProfile,
@@ -248,6 +251,35 @@ export const LOW_CONFIDENCE_ANSWER_THRESHOLD = 0.75
 export type StreamFailureAction = 'retry' | 'reconnect' | 'wait' | 'open_integrations' | 'none'
 
 /**
+ * The running cost and usage of one turn or agent run (WS27-S4): the latest `usage_progress` frame,
+ * replaced by the turn's `usage` frame. Counts and closed tokens only; every key is optional because
+ * a frame carries only what it has. Session-only: never written to the thread transcript, so a reload
+ * shows the turn's own usage fields and no breakdown.
+ */
+export type RunMeter = {
+  /** Model calls the total covers so far. */
+  calls?: number
+  /** The provider call the latest progress frame reports. */
+  phase?: ChatUsagePhase
+  inputTokens?: number
+  outputTokens?: number
+  cacheReadTokens?: number
+  cacheWriteTokens?: number
+  /** The metered cost. Never set on a subscription turn, whose wire 0.0 is a placeholder. */
+  costUsd?: number
+  costBasis?: ChatCostBasis
+  /** Of `calls`, the metered ones whose price was unknown. A total with any has no `costUsd`. */
+  unpricedCalls?: number
+  /** The cost by what was billed. Only the `usage` frame states it, and only for a priced total. */
+  costByCategory?: ChatCostByCategory
+  /** The run's caps and the share of them used (WS27-S6). */
+  ceilingUsd?: number
+  ceilingTokens?: number
+  fraction?: number
+  warning?: NonNullable<ChatUsageProgressEvent['warning']>
+}
+
+/**
  * One conversation turn as the chat renders it.
  *
  * Every field is named. Server message metadata is never spread onto a turn:
@@ -307,6 +339,11 @@ export type ChatTurn = {
    * A restored transcript keeps only the three totals.
    */
   timing?: ChatTurnTiming
+  /**
+   * The turn's running cost and usage (see `RunMeter`), for the Work panel and the agent console.
+   * Session-only: `turnsToTranscript` does not copy it.
+   */
+  meter?: RunMeter
   /**
    * Answer text that streamed live and was then NOT saved: the server ended
    * the turn with an error that says so (`session_liveness_failed`, for one,
