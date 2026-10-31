@@ -889,6 +889,64 @@ A request without `include_answer` carries neither field and is byte for byte wh
 
 **Owner decision INNH-8b (not built).** A deployed stack cannot turn synthesis on, whatever the edge is set to, until the cross-plane grant exists: the Control Plane registry must give quarry-edge the `model-gateway` audience (scope `models:invoke`, retention lane `zdr`), the Model Plane gateway must let a service principal reach the route Quarry calls (today only `POST /v1/ai/chat` and `/v1/ai/embeddings`; Quarry calls `/v1/invoke`), Quarry must send the second `x-inference-authorization` header, and the `model-invoke` manifest row flips to `granted: true` together with the registry grant. Until the row is granted, the boot gate REFUSES the switch (`model_path_refused`, with the ERROR log); with the dev bypass credential the switch takes effect and a gateway that refuses the call answers `model_plane_auth_refused`.
 
+## API-key agent runs (INNH-10, Quarry side built dark, NOT run, 2026-10-31)
+
+A caller that holds an API key (not a person's session, not a service) may drive a fenced browser run on `/v1/agent/*`. The switch is `QUARRY_EDGE__API_KEY_AGENT_RUNS` (default `0`); with it off, behaviour is exactly what it was and an API-key token is refused on every route (`api_key_agent_runs_disabled`). The whole path stays dark until Auth Core mints the token, the BrowserBroker issues key grants and the Verevon gateway composes them (design: `.plan-work/quarry-w1w2/INNH-10-design.md`). **Quarry consumes what is described here; it issues nothing.** An API key never reaches Quarry: Auth Core exchanges it for a short-lived token, the BrowserBroker issues the grant, Quarry admits the run.
+
+**The token Quarry reads.** An RS256 JWT, `aud: quarry`, like every plane token, with these claims; anything else is a 401 (`principal_type` `api_key` is accepted only in this exact shape):
+
+| claim | value |
+|---|---|
+| `principal_type` | `api_key` |
+| `sub` | `apikey:<key_id>` (must equal `apikey:` plus `key_id`) |
+| `key_id` | the key's id, 1 to 128 printable ASCII bytes with no space; never the key |
+| `acting_user_id` | the user who owns the key, 1 to 256 bytes, no padding or control character |
+| `org_id` | the organization the key is bound to |
+| `scopes` | `["browser:agent"]`; a token without it is refused on every route (`api_key_scope_missing`) |
+| `zdr` | the organization's posture raised by the key's own flag; counts as a floor like a user's |
+| `user_id`, `service_id` | absent (either one makes the token ambiguous: 401) |
+| `exp` | auth-core mints at most 120 s; Quarry rejects an expired token as for any other, and an event stream ends at `exp` |
+
+The run's actor is `apikey:<key_id>`, so the ordinary scoping applies: a run a key starts belongs to that key, and neither its owner's session nor another key of the same owner can step, read or close it (404), and the key cannot touch the owner's runs. `acting_user_id` is read only for the grant owner check. A key is always an agent: the `initiated_by` hint cannot make it a person, the receipts say `initiated_by: agent` with `agent: {basis: "api_key", principalId: "apikey:<key_id>"}` (`basis` is a new value beside `service_principal` and `user_session`), and the web policy treats it as an autonomous principal.
+
+**The route allow-list** (method and path, nothing else; anything else is `api_key_route_refused`, a trailing slash included):
+
+| method | path |
+|---|---|
+| `POST` | `/v1/agent/runs` |
+| `POST` | `/v1/agent/runs/{run_id}/step` |
+| `GET` | `/v1/agent/runs/{run_id}/receipts` and `/egress-receipts` |
+| `GET`, `POST` | `/v1/agent/runs/{run_id}/tabs` |
+| `POST` | `/v1/agent/runs/{run_id}/tabs/{tab_id}/select` |
+| `DELETE` | `/v1/agent/runs/{run_id}/tabs/{tab_id}` |
+| `GET` | `/v1/agent/runs/{run_id}/events/stream` (closed with `done: token_expired` when the token that opened it expires) |
+| `DELETE` | `/v1/agent/runs/{run_id}` |
+
+Refused by omission: `interact`, `browser-session*`, `attach*`, `live-view`, `frame`, `frames/*`, `devtools`, `procedure*`, `tabs/{id}/control`, `/v1/profiles*`, `/v1/artifacts*` and every scrape, crawl, search, extract, job, schedule, change, team and fleet route.
+
+**The grant Quarry consumes** (`ValidateGrant`, unchanged call, one new field). The grant must be an allow-list session grant issued to this key:
+
+| field | rule |
+|---|---|
+| `key_id` | new, optional on the wire; must equal the token's `key_id`. Empty (every person's grant, an older broker, the gRPC validator until `proto/browser.proto` carries the field) never matches, so a key run is refused: fail closed |
+| `owner_id` | must equal the token's `acting_user_id` |
+| `kind` | `""` or `session`; `human_browse` is `api_key_open_web_refused`, any other kind `api_key_grant_kind_refused` |
+| `policy_mode` | `""` or `allowlist`; `open_web` is `api_key_open_web_refused`, an unknown mode `api_key_grant_kind_refused` |
+| `allowed_domains` | non-empty and canonical (the broker's list); they ALWAYS replace the request's `constraints.allowed_domains`, in every environment |
+| `budget` | must bound at least one of `micro_usd`, `max_steps`, `max_runtime_s`; applied to the run whatever `QUARRY_EDGE__GRANT_BUDGET_CLAIM` says |
+| `parent_grant_id`, `resource_id` | must be empty (no derived grants) |
+| `zdr` | a ZDR grant cannot back a non-ZDR run (the existing rule) |
+
+A key grant backs only its key's runs: a person (the owner included), another person or a service that presents one gets `api_key_grant_owner_mismatch`. Every step and every tab open revalidates the grant, and the run stops when the grant is inactive, expired, no longer carries the key's id or no longer matches the run's hosts.
+
+**Start rules.** `POST /v1/agent/runs` with a key token: a `grant_id` is required whatever `REQUIRE_BROWSER_GRANTS` says; `resume_run_id`, `profile_id` and `persist_profile` are refused; the run is always an agent run (the organization's agent caps, plan caps and allowance apply); at most `QUARRY_EDGE__MAX_CONCURRENT_RUNS_PER_KEY` (2) live runs per key (429 `per_key_run_cap`); and `QUARRY_EDGE__BUDGET_ENFORCEMENT` must be `on` (`api_key_budget_not_enforced`), because in `shadow` the grant's budget would bound nothing. Sensitive actions (a dialog reply, an upload, a download) are refused on the action's kind (`api_key_sensitive_action_refused`) before the driver or the broker is asked. Nothing the request carries (a hint, a body field) loosens any of this.
+
+**ZDR.** A key run keeps exactly the persistence of any agent run: under ZDR no checkpoint, timeline row or receipt. A key run never resumes or keeps a profile in any posture. See the row `agent_run_api_key` in `docs/ZDR_MATRIX.md`.
+
+**Reasons.** Closed list in `docs/ERROR_REASONS.md`, "API-key agent runs": `api_key_agent_runs_disabled`, `api_key_scope_missing`, `api_key_route_refused`, `api_key_grant_required`, `api_key_grant_kind_refused`, `api_key_open_web_refused`, `api_key_grant_owner_mismatch`, `api_key_grant_budget_required`, `api_key_grant_hosts_required`, `api_key_profile_refused`, `api_key_resume_refused`, `api_key_sensitive_action_refused`, `api_key_budget_not_enforced`; and 429 `per_key_run_cap`.
+
+**Audit.** Quarry has no durable audit stream. The trail is Auth Core (who got a token), the BrowserBroker (who got a grant) and Quarry's receipts, which name `apikey:<key_id>` per step. Quarry logs `agent.run.started` and `agent.run.refused` with ids only (run, organization, key, grant, ZDR flag, class, reason): never a host, a token or the key.
+
 ## Crawl scope and robots: planned status and vocabulary (WS14.S0, 2026-10-23)
 
 Read this with `docs/CRAWL_SCOPE_ROBOTS.md`, which is the contract for WS14. The examples earlier in this file that show crawl and map scope fields, and the crawl denial reason schema, describe the target shape. They are not what the edge applies today.

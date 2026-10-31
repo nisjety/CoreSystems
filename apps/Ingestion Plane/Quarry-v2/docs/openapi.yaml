@@ -613,13 +613,20 @@ paths:
     post:
       operationId: startAgentRun
       summary: Acquire a governed browser-agent run
-      description: 'Creates a tenant-owned browser lease. BrowserBroker grants are
-
+      description: >-
+        Creates a tenant-owned browser lease. BrowserBroker grants are
         revalidated at run start and before every action; non-ZDR runs receive
-
         a durable continuation checkpoint.
-
-        '
+        API-key callers (INNH-10, off until `QUARRY_EDGE__API_KEY_AGENT_RUNS` is on):
+        the bearer is a short-lived token of the `api_key` principal type
+        (`sub` `apikey:<key_id>`, scope `browser:agent`) that Auth Core minted for the
+        key; the key itself never reaches Quarry. A key run needs a `grant_id`
+        in every environment, issued to that key (an allow-list session grant with
+        hosts and a budget; its hosts replace `constraints.allowed_domains`),
+        takes no `resume_run_id`, `profile_id` or `persist_profile`, is always an agent run,
+        and may call only the routes of the key allow-list (see CONTRACTS.md, "API-key agent runs").
+        The refusals are 403 with `error.details.reason` `api_key_*` and 429 `per_key_run_cap`;
+        see ERROR_REASONS.md.
       tags:
       - agent
       requestBody:
@@ -652,6 +659,12 @@ paths:
             `human_browse_service_refused`, `human_browse_owner_mismatch`, `human_browse_zdr_posture`
             or `human_browse_policy_unknown`. A resumed run whose stored policy mode differs is refused
             with "resumed run policy no longer matches its broker grant".
+            An API-key caller (INNH-10) is refused with `error.details.reason` one of
+            `api_key_agent_runs_disabled`, `api_key_scope_missing`, `api_key_route_refused`,
+            `api_key_grant_required`, `api_key_grant_kind_refused`, `api_key_open_web_refused`,
+            `api_key_grant_owner_mismatch`, `api_key_grant_budget_required`,
+            `api_key_grant_hosts_required`, `api_key_profile_refused`, `api_key_resume_refused`
+            or `api_key_budget_not_enforced`.
           content:
             application/json:
               schema:
@@ -659,8 +672,9 @@ paths:
         '429':
           description: >-
             RATE_LIMITED. A run cap is full: `error.details.reason` is
-            `global_run_cap`, `org_run_cap`, `org_interactive_run_cap` or
-            `org_plan_cap` (the organization's plan bounds this class of run), with
+            `global_run_cap`, `org_run_cap`, `org_interactive_run_cap`,
+            `org_plan_cap` (the organization's plan bounds this class of run) or
+            `per_key_run_cap` (an API key has its maximum of live runs), with
             `scope`, `limit`, `active` and `retry_after_seconds`. Retryable. See
             ERROR_REASONS.md.
           content:
@@ -671,6 +685,11 @@ paths:
     post:
       operationId: agentStep
       summary: Execute one governed browser action
+      description: >-
+        For an API-key caller (INNH-10) the grant is revalidated on every step and must
+        still be the key's own; a dialog reply, an upload or a download is refused with 403
+        `error.details.reason` `api_key_sensitive_action_refused` before the driver or the
+        broker is asked, and a run belongs to the key that started it (another caller gets 404).
       tags:
       - agent
       parameters:

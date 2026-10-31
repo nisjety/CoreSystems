@@ -494,6 +494,22 @@
       "treatment": "refused"
     },
     {
+      "basis": "an API-key principal (INNH-10, dark behind QUARRY_EDGE__API_KEY_AGENT_RUNS) starts a run on the agent_run route and keeps exactly the persistence of agent_run: a ZDR run writes no checkpoint, timeline row or receipt. On top of that, in every posture: no resume and no profile or persist_profile (api_key_resume_refused, api_key_profile_refused, so a key run never reads or writes a durable profile or checkpoint of its own), no artifacts route (the route fence refuses /v1/artifacts*, api_key_route_refused), no sensitive action. The token's zdr claim is the organization's posture raised by the key's own flag and counts as a floor like a user's (auth::Claims::zdr_floor), and a ZDR grant cannot back a non-ZDR run. Quarry sends nothing to a model on these routes",
+      "detail": null,
+      "enforced_by": [
+        "api_key_agent_runs::a_zdr_key_token_makes_a_zdr_run_and_a_zdr_grant_needs_one",
+        "api_key_agent_runs::a_key_run_takes_no_profile_and_no_resume",
+        "api_key_fence::switch_on_with_the_scope_refuses_every_route_off_the_allow_list"
+      ],
+      "id": "agent_run_api_key",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [],
+      "status": "enforced",
+      "treatment": "honored"
+    },
+    {
       "basis": "attach::attach_run refuses a ZDR run (reason attach_zdr_refused) before it reads the grant or opens a tab, in both modes; the route is also dark behind QUARRY_EDGE__ATTACH. The release route has nothing to release for a ZDR run. No test drives a ZDR run through the attach route yet: the refusal is a three-line guard in the handler",
       "detail": {
         "code": "FORBIDDEN",

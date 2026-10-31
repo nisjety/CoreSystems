@@ -13,7 +13,7 @@ This describes behaviour. It does not change it. A **gap** is a place where ZDR 
 | refused | the request is refused with a message naming ZDR |
 | inert | ZDR does not apply: nothing of the caller's content is stored, or the route is not reachable with ZDR |
 
-6 of 37 rows are gaps.
+6 of 38 rows are gaps.
 
 | Feature | Routes | Treatment | Status | Log |
 |---|---|---|---|---|
@@ -43,6 +43,7 @@ This describes behaviour. It does not change it. A **gap** is a place where ZDR 
 | `agent_run` | `/v1/agent/runs` | honored | enforced | canary `zdr_log_capture::a_zdr_agent_start_logs_no_url` |
 | `agent_persistent_profile` | (same route as another row) | refused (`BAD_REQUEST`, `persistent_profile`) | enforced | log-unverified |
 | `agent_resume` | (same route as another row) | refused (`FORBIDDEN`, `resume`) | enforced | log-unverified |
+| `agent_run_api_key` | (same route as another row) | honored | enforced | log-unverified |
 | `agent_attach` | `/v1/agent/runs/{run_id}/attach`<br>`/v1/agent/runs/{run_id}/attach/{attach_id}` | refused (`FORBIDDEN`, `agent_attach`) | enforced | log-unverified |
 | `agent_run_surface` | `/v1/agent/runs/{run_id}`<br>`/v1/agent/runs/{run_id}/step`<br>`/v1/agent/runs/{run_id}/interact`<br>`/v1/agent/runs/{run_id}/browser-session`<br>`/v1/agent/runs/{run_id}/browser-session/control`<br>`/v1/agent/runs/{run_id}/browser-session/timeline`<br>`/v1/agent/runs/{run_id}/egress-receipts`<br>`/v1/agent/runs/{run_id}/tabs`<br>`/v1/agent/runs/{run_id}/tabs/{tab_id}`<br>`/v1/agent/runs/{run_id}/tabs/{tab_id}/select`<br>`/v1/agent/runs/{run_id}/tabs/{tab_id}/control`<br>`/v1/agent/runs/{run_id}/devtools`<br>`/v1/agent/runs/{run_id}/frames/ws`<br>`/v1/agent/runs/{run_id}/frames/stream`<br>`/v1/agent/runs/{run_id}/frame`<br>`/v1/agent/runs/{run_id}/live-view`<br>`/v1/agent/runs/{run_id}/events/stream` | honored | enforced | log-unverified |
 | `agent_receipts_and_procedures` | `/v1/agent/runs/{run_id}/receipts`<br>`/v1/agent/runs/{run_id}/procedure`<br>`/v1/agent/procedures/replay-check`<br>`/v1/agent/procedures/quality-check`<br>`/v1/agent/procedures/impact-check` | inert: reads receipts a ZDR run never wrote; the checks are pure functions of the request body | enforced | log-unverified |
@@ -83,6 +84,7 @@ This describes behaviour. It does not change it. A **gap** is a place where ZDR 
 - `agent_run`: a ZDR run writes no checkpoint, timeline row or receipt and logs under a ZDR span Tests: `agent_routes::tests::zdr_expiry_writes_no_timeline_row_and_no_checkpoint`.
 - `agent_persistent_profile`: same route as agent_run: lifecycle::start_run refuses persist_profile or a profile id under ZDR Tests: `zdr_claim_floor::a_zdr_org_users_agent_run_cannot_take_a_persistent_profile`, `zdr_gap_rows::a_service_principal_with_body_zdr_gets_the_same_persistent_profile_refusal`.
 - `agent_resume`: same route as agent_run: lifecycle::start_run refuses a resume of a ZDR checkpoint (none is written)
+- `agent_run_api_key`: an API-key principal (INNH-10, dark behind QUARRY_EDGE__API_KEY_AGENT_RUNS) starts a run on the agent_run route and keeps exactly the persistence of agent_run: a ZDR run writes no checkpoint, timeline row or receipt. On top of that, in every posture: no resume and no profile or persist_profile (api_key_resume_refused, api_key_profile_refused, so a key run never reads or writes a durable profile or checkpoint of its own), no artifacts route (the route fence refuses /v1/artifacts*, api_key_route_refused), no sensitive action. The token's zdr claim is the organization's posture raised by the key's own flag and counts as a floor like a user's (auth::Claims::zdr_floor), and a ZDR grant cannot back a non-ZDR run. Quarry sends nothing to a model on these routes Tests: `api_key_agent_runs::a_zdr_key_token_makes_a_zdr_run_and_a_zdr_grant_needs_one`, `api_key_agent_runs::a_key_run_takes_no_profile_and_no_resume`, `api_key_fence::switch_on_with_the_scope_refuses_every_route_off_the_allow_list`.
 - `agent_attach`: attach::attach_run refuses a ZDR run (reason attach_zdr_refused) before it reads the grant or opens a tab, in both modes; the route is also dark behind QUARRY_EDGE__ATTACH. The release route has nothing to release for a ZDR run. No test drives a ZDR run through the attach route yet: the refusal is a three-line guard in the handler
 - `agent_run_surface`: every step, tab and control change skips receipts and timeline rows when the run is ZDR (step.rs, control.rs, projection.rs; the person's tab hand-over, attach::control_tab, records through control::record_browser_timeline_event, which returns before any write for a ZDR run) Tests: `agent_routes::tests::zdr_expiry_writes_no_timeline_row_and_no_checkpoint`.
 - `agent_receipts_and_procedures`: receipts.rs lists from the receipt store; replay, quality and impact checks hold no state

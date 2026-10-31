@@ -13,6 +13,7 @@ into `browser_capacity_reached` with `Retry-After`. Retryable.
 | `global_run_cap` | `global` | the edge has this many live runs | `MAX_CONCURRENT_RUNS` (32) |
 | `org_run_cap` | `org` | this organization has this many live runs | `MAX_CONCURRENT_RUNS_PER_ORG` (8) |
 | `org_interactive_run_cap` | `org` | this organization has this many of a person's own sessions open; the sub-cap leaves room for its agent runs | `MAX_INTERACTIVE_RUNS_PER_ORG` (6) |
+| `per_key_run_cap` | `key` | an API key (INNH-10) has this many live runs; counted per key id inside the organization, and checked right after `global_run_cap` for API-key starts only | `MAX_CONCURRENT_RUNS_PER_KEY` (2, at least 1) |
 | `org_plan_cap` | `org` | the organization's plan bounds this class of run (agent runs or a person's sessions) and it has this many live; `limit` is the plan value, never above `MAX_CONCURRENT_RUNS` | the plan keys `quarry.cap.agent_runs` and `quarry.cap.interactive_runs`; nothing by default (see below) |
 
 `0` disables a cap.
@@ -230,6 +231,28 @@ These come from `POST /v1/answer`, `POST /v1/answer/stream` (as `reason` in the 
 | `answer_search_failed` | the status of the error | the search or page-fetch half failed before a model was asked | retry later |
 
 On `POST /v1/search` the status of an answer is `answer_status`: `ok`, `no_sources`, `skipped_zdr` (ZDR: nothing was sent to a model) or `unavailable` (with `answer_reason` from the table, never `zdr_unavailable`: ZDR is `skipped_zdr` there). A missing answer is never a failed search. The `code` in an error body is the wire name of the error code (`DRIVER_FAILED`, `RATE_LIMITED`, `FORBIDDEN`).
+
+## 403 `FORBIDDEN`: API-key agent runs (INNH-10, dark)
+
+These come from the routes under `/v1/agent/` when the caller's token is an `api_key` principal (`principal_type: "api_key"`, `sub: "apikey:<key_id>"`, minted by Auth Core for an API key). The status is always 403, the code is `FORBIDDEN`, and `details.reason` is one of the closed list below. Nothing is acquired and nothing is consumed. Contract: `docs/CONTRACTS.md`, "API-key agent runs". Runbook: `docs/RUNBOOKS.md`, "API-key agent runs". A user or service token never gets these. The 429 `per_key_run_cap` is in the run-cap table at the top.
+
+| reason | where | meaning | what a caller does |
+|---|---|---|---|
+| `api_key_agent_runs_disabled` | any route | `QUARRY_EDGE__API_KEY_AGENT_RUNS` is not on (the default); a key token is refused on EVERY route, the allowed ones included | the operator turns the switch on; nothing a caller can do |
+| `api_key_scope_missing` | any route | the key token does not carry the scope `browser:agent` | the key needs the permission; Auth Core mints the scope from it |
+| `api_key_route_refused` | any route off the allow-list | the method and path are not one of the nine routes of the allow-list (see CONTRACTS) | none: the route is not available to a key |
+| `api_key_grant_required` | `POST /v1/agent/runs` | no `grant_id`; a key run needs one in every environment, whatever `REQUIRE_BROWSER_GRANTS` says | acquire a key grant first |
+| `api_key_grant_kind_refused` | `POST /v1/agent/runs` | the grant is not a plain allow-list session grant: a run, sensitive-approval or derived attach grant, an unknown policy mode | acquire a key grant |
+| `api_key_open_web_refused` | `POST /v1/agent/runs` | the grant is a `human_browse` grant or an open-web policy; a key never gets the open web | acquire a key grant |
+| `api_key_grant_owner_mismatch` | `POST /v1/agent/runs` | the grant was not issued to this key and this key's owner (its `key_id` or `owner_id` differ, or it has no `key_id`); also what a person or a service gets for presenting a key grant | use the grant issued for this key |
+| `api_key_grant_budget_required` | `POST /v1/agent/runs` | the grant carries no budget claim that bounds anything | the broker issues key grants with a budget |
+| `api_key_grant_hosts_required` | `POST /v1/agent/runs` | the grant's host list is empty or not canonical | the broker issues key grants with a canonical host list |
+| `api_key_profile_refused` | `POST /v1/agent/runs` | `profile_id` or `persist_profile` was sent; a key run always gets a fresh, run-scoped profile | leave them out |
+| `api_key_resume_refused` | `POST /v1/agent/runs` | `resume_run_id` was sent; a key run cannot be resumed | start a new run |
+| `api_key_sensitive_action_refused` | `POST /v1/agent/runs/{run_id}/step` | a dialog reply, an upload or a download (the actions that need a person's approval); there is no person to sign an ask for a key | none in v1 |
+| `api_key_budget_not_enforced` | `POST /v1/agent/runs` | the edge runs with `QUARRY_EDGE__BUDGET_ENFORCEMENT` short of `on`, so the grant's budget would bound nothing | the operator sets `QUARRY_EDGE__BUDGET_ENFORCEMENT=on` |
+
+Two answers a key can also get, which are not key reasons: a grant the broker no longer vouches for (`browser grant is inactive or expired`, 403, on a start or the next step) and a grant that now answers for another key (`browser grant no longer belongs to this key`, 403 `SECURITY_BLOCKED`, on the next step). A key that is revoked stops within the token's life (two minutes at most) and the broker revokes its grants on the revocation event.
 
 ## 403 `FORBIDDEN`: an action an agent may not take (WS9.B, D2-012)
 
