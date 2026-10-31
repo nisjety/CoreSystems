@@ -2,8 +2,8 @@
 // store's PurgeOrg (internal/store/gdpr_purge.go). See that file's package
 // doc for the full enumeration of which tables actually carry an org_id
 // column and why the rest (stores, snapshots, artifacts, profiles,
-// webhooks, webhook_deliveries, blocklist_entries, events) are deliberately
-// out of scope.
+// blocklist_entries, events) are deliberately out of scope. webhooks and
+// webhook_deliveries became org data in migration 025 and are purged here.
 //
 // Every statement below is a direct `DELETE ... WHERE org_id = $1` — no
 // joins, no derived subject sets — per the safety rule that a purge query
@@ -31,8 +31,8 @@ import (
 var zdrOrgIDShape = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // PurgeOrg hard-deletes every row for orgID across jobs, schedules,
-// quarry_sources, quarry_benchmarks, quarry_idempotency_keys and
-// zdr_run_tombstones (WS4.J).
+// quarry_sources, quarry_benchmarks, quarry_idempotency_keys,
+// zdr_run_tombstones (WS4.J), webhook_deliveries and webhooks (INNH-5).
 func (d *postgresDB) PurgeOrg(orgID string) (store.PurgeResult, error) {
 	orgID = strings.TrimSpace(orgID)
 	if orgID == "" {
@@ -79,6 +79,14 @@ func (d *postgresDB) PurgeOrg(orgID string) (store.PurgeResult, error) {
 	}
 	if res.ZdrTombstonesDeleted, derr = del(`DELETE FROM zdr_run_tombstones WHERE org_id = $1`); derr != nil {
 		return store.PurgeResult{}, fmt.Errorf("pg: PurgeOrg zdr_run_tombstones: %w", derr)
+	}
+	// INNH-5: webhook deliveries (full event payloads) first, then the subscriptions; both
+	// carry a literal org_id column since migration 025.
+	if res.WebhookDeliveriesDeleted, derr = del(`DELETE FROM webhook_deliveries WHERE org_id = $1`); derr != nil {
+		return store.PurgeResult{}, fmt.Errorf("pg: PurgeOrg webhook_deliveries: %w", derr)
+	}
+	if res.WebhooksDeleted, derr = del(`DELETE FROM webhooks WHERE org_id = $1`); derr != nil {
+		return store.PurgeResult{}, fmt.Errorf("pg: PurgeOrg webhooks: %w", derr)
 	}
 	if d.zdrTombs.markers.Load() && zdrOrgIDShape.MatchString(orgID) {
 		if _, err := tx.Exec(ctx, `INSERT INTO zdr_tombstone_erasures (org_id) VALUES ($1)
