@@ -1,0 +1,131 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+// AttentionService: the closed attention state of a thread (build plan WS16 S1).
+//
+// Session Core derives the state from rows it already owns (runs, approvals, plans and run
+// questions). Nothing stores the conclusion, so nothing can go stale. The unseen marker is the
+// one unread definition (`threads.last_read_at`, WS17 S7).
+service AttentionService {
+  // The caller's threads that need a person or are working. Served only while the attention
+  // switch is on; while it is off the response says so and carries no items.
+  rpc ListAttention(ListAttentionRequest) returns (ListAttentionResponse);
+
+  // Marks one of the caller's threads read. Refused for a zero-retention or waived caller, whose
+  // read state stays on the client.
+  rpc MarkThreadSeen(MarkThreadSeenRequest) returns (MarkThreadSeenResponse);
+
+  // The per-user attention stream. Not served yet (WS16 S5); the call answers UNIMPLEMENTED.
+  rpc StreamAttention(StreamAttentionRequest) returns (stream StreamAttentionResponse);
+}
+
+// The attention state of a thread. The set is closed: a new state needs a new number here and a
+// row in Session Core's derivation, and nothing else may invent one.
+enum AttentionState {
+  // No state was derived. Old replicas and flag-off responses read as this.
+  ATTENTION_STATE_UNSPECIFIED = 0;
+  // A pending approval waits for the owner's decision.
+  ATTENTION_STATE_NEEDS_APPROVAL = 1;
+  // A run question waits for the owner's answer.
+  ATTENTION_STATE_NEEDS_INPUT = 2;
+  // A proposed plan waits for the owner to approve or reject it.
+  ATTENTION_STATE_PLAN_READY = 3;
+  // The latest run is queued or running.
+  ATTENTION_STATE_WORKING = 4;
+  // The latest run completed.
+  ATTENTION_STATE_COMPLETED = 5;
+  // The latest run failed.
+  ATTENTION_STATE_FAILED = 6;
+  // The owner archived the thread.
+  ATTENTION_STATE_ARCHIVED = 7;
+  // Nothing needs the owner: no live run and no pending row, or the latest run was cancelled.
+  ATTENTION_STATE_IDLE = 8;
+}
+
+// Why a thread is in a waiting state: the kind of pending row that set the state. Tag 4 is
+// reserved for the parked loop of WS03 and is not assigned here.
+enum AttentionReason {
+  // The state has no pending row behind it (WORKING, COMPLETED, FAILED, ARCHIVED, IDLE).
+  ATTENTION_REASON_UNSPECIFIED = 0;
+  // A tool, permission, destructive or cost approval.
+  ATTENTION_REASON_APPROVAL = 1;
+  // A proposed plan.
+  ATTENTION_REASON_PLAN = 2;
+  // A run question.
+  ATTENTION_REASON_INPUT = 3;
+}
+
+// One thread that needs attention or is working. Identifiers and the closed state only: no title,
+// preview or run content, so the item carries nothing a zero-retention caller could not see.
+message AttentionItem {
+  // The thread the state belongs to.
+  string thread_id = 1;
+  // The derived state.
+  AttentionState state = 2;
+  // The pending row that set the state.
+  AttentionReason reason = 3;
+  // When the state began: the oldest pending row for a waiting state, the latest run's last update
+  // for a run state, the archive time for ARCHIVED.
+  google.protobuf.Timestamp since = 4;
+  // Whether the thread holds an assistant reply the owner has not read.
+  bool unseen = 5;
+  // The thread's latest run, for a deep link. Empty when the thread has no run.
+  string run_id = 6;
+}
+
+// The counts behind the attention badge. Each thread counts once in each group it belongs to.
+message AttentionCounts {
+  // Threads in NEEDS_APPROVAL, NEEDS_INPUT or PLAN_READY.
+  int32 needs_you = 1;
+  // Threads in WORKING.
+  int32 working = 2;
+  // Threads with an unread assistant reply.
+  int32 unseen = 3;
+}
+
+// Asks for one page of the caller's threads that need attention or are working.
+message ListAttentionRequest {
+  // The organization the caller acts in. Must match the verified caller.
+  string org_id = 1;
+  // The owner whose threads are listed. Must match the verified caller; a service cannot name a user.
+  string user_id = 2;
+  // The page size, 1 to 200. Zero or more than 200 reads as 200.
+  int32 limit = 3;
+}
+
+// One page of attention items, with the counts behind the badge.
+message ListAttentionResponse {
+  // False while the attention switch is off. Items and counts are then empty.
+  bool enabled = 1;
+  // Threads that need attention or are working: most urgent first, oldest waiting first.
+  repeated AttentionItem items = 2;
+  // The counts over every thread the page considered.
+  AttentionCounts counts = 3;
+}
+
+// Marks one of the caller's threads read.
+message MarkThreadSeenRequest {
+  // The organization the caller acts in. Must match the verified caller.
+  string org_id = 1;
+  // The owner of the thread. Must match the verified caller.
+  string user_id = 2;
+  // The thread to mark read.
+  string thread_id = 3;
+}
+
+// Confirms the thread that was marked read.
+message MarkThreadSeenResponse {
+  // The thread that was marked read.
+  string thread_id = 1;
+}
+
+// Opens the caller's attention stream. Not served yet (WS16 S5).
+message StreamAttentionRequest {}
+
+// One frame of the attention stream. The frame set is defined with the stream (WS16 S5).
+message StreamAttentionResponse {}

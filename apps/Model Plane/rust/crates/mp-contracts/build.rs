@@ -41,6 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "model_plane/v1/events.proto",
         "model_plane/v1/gateway.proto",
         "model_plane/v1/sessions.proto",
+        "model_plane/v1/attention.proto",
         "model_plane/v1/runs.proto",
         "model_plane/v1/capabilities.proto",
         "model_plane/v1/sandboxes.proto",

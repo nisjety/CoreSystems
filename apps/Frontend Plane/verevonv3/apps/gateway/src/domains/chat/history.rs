@@ -79,6 +79,16 @@ struct ChatThreadSummary {
     /// Session Core owns it; the sidebar dot reads it.
     #[serde(default)]
     unread: bool,
+    /// The derived attention state (WS16 S1), as its wire name. Absent while the attention
+    /// switch is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attention_state: Option<String>,
+    /// When the attention state began. Absent when the state has no start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attention_since: Option<String>,
+    /// Whether the thread has an unread reply. Present only with an attention state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attention_unseen: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -206,6 +216,12 @@ struct DurableThreadSummary {
     starred: bool,
     #[serde(default)]
     unread: bool,
+    #[serde(default, alias = "attentionState")]
+    attention_state: String,
+    #[serde(default, alias = "attentionSince")]
+    attention_since: String,
+    #[serde(default, alias = "attentionUnseen")]
+    attention_unseen: bool,
 }
 
 pub(super) async fn list_threads(
@@ -714,6 +730,12 @@ fn durable_to_summary(item: DurableThreadSummary, now: &str) -> Option<ChatThrea
         archived_at: Some(item.archived_at.trim().to_owned()).filter(|value| !value.is_empty()),
         starred: item.starred,
         unread: item.unread,
+        // The attention fields are present only with a state: a flag-off replica sends none.
+        attention_unseen: (!item.attention_state.is_empty()).then_some(item.attention_unseen),
+        attention_state: Some(item.attention_state.trim().to_owned())
+            .filter(|value| !value.is_empty()),
+        attention_since: Some(item.attention_since.trim().to_owned())
+            .filter(|value| !value.is_empty()),
     })
 }
 
@@ -1282,6 +1304,38 @@ mod thread_messages_url_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn attention_fields_reach_the_spa_only_with_a_state() {
+        let now = "2026-08-16T12:00:00Z";
+        let waiting: DurableThreadSummary = serde_json::from_value(json!({
+            "thread_id": "thread-1",
+            "title": "Waiting",
+            "updated_at": "2026-08-16T11:59:00Z",
+            "attention_state": "needs_approval",
+            "attention_since": "2026-08-16T11:58:00Z",
+            "attention_unseen": true,
+        }))
+        .expect("a summary with an attention state");
+        let summary = durable_to_summary(waiting, now).expect("a summary");
+        let wire = serde_json::to_value(&summary).expect("json");
+        assert_eq!(wire["attentionState"], "needs_approval");
+        assert_eq!(wire["attentionSince"], "2026-08-16T11:58:00Z");
+        assert_eq!(wire["attentionUnseen"], true);
+
+        // A replica with the switch off sends none of the three, and the SPA sees none.
+        let off: DurableThreadSummary = serde_json::from_value(json!({
+            "thread_id": "thread-2",
+            "title": "Switch off",
+            "updated_at": "2026-08-16T11:59:00Z",
+        }))
+        .expect("a summary without attention");
+        let summary = durable_to_summary(off, now).expect("a summary");
+        let wire = serde_json::to_value(&summary).expect("json");
+        assert!(wire.get("attentionState").is_none());
+        assert!(wire.get("attentionSince").is_none());
+        assert!(wire.get("attentionUnseen").is_none());
+    }
+
     use super::{
         canonical_messages_to_transcript, chat_history_sessions, durable_to_summary,
         enforce_support_thread_policy, strip_support_thread_capabilities, CanonicalMessage,
@@ -1309,6 +1363,9 @@ mod tests {
                 archived_at: String::new(),
                 starred: false,
                 unread: false,
+                attention_state: String::new(),
+                attention_since: String::new(),
+                attention_unseen: false,
             },
             now,
         )
@@ -1330,6 +1387,9 @@ mod tests {
                 archived_at: String::new(),
                 starred: false,
                 unread: false,
+                attention_state: String::new(),
+                attention_since: String::new(),
+                attention_unseen: false,
             },
             now,
         )
@@ -1370,6 +1430,9 @@ mod tests {
                     archived_at: String::new(),
                     starred: false,
                     unread: false,
+                    attention_state: String::new(),
+                    attention_since: String::new(),
+                    attention_unseen: false,
                 },
                 now,
             )
@@ -1415,6 +1478,9 @@ mod tests {
                 archived_at: String::new(),
                 starred: false,
                 unread: false,
+                attention_state: String::new(),
+                attention_since: String::new(),
+                attention_unseen: false,
             },
             now,
         )
@@ -1442,6 +1508,9 @@ mod tests {
                 archived_at: String::new(),
                 starred: false,
                 unread: false,
+                attention_state: String::new(),
+                attention_since: String::new(),
+                attention_unseen: false,
             },
             "2026-08-11T12:00:00Z",
         )
@@ -1876,6 +1945,9 @@ mod thread_paging_tests {
                 archived_at: String::new(),
                 starred: true,
                 unread: true,
+                attention_state: String::new(),
+                attention_since: String::new(),
+                attention_unseen: false,
             },
             "2026-10-28T11:00:00Z",
         )

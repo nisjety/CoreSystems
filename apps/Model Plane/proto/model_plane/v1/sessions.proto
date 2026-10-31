@@ -9,6 +9,7 @@ import "google/protobuf/struct.proto";
 // AutonomyRung — the shared autonomy ladder a plan approval grants.
 import "model_plane/v1/runs.proto";
 import "model_plane/v1/events.proto";
+import "model_plane/v1/attention.proto";
 
 // SessionCore — authoritative state for thread timeline, run metadata,
 // checkpoints, instruction loading, compaction summaries, and auto-memory index.
@@ -1273,6 +1274,17 @@ message ThreadSummary {
   // The owner's last read of the thread. Mark-read sets it to now; mark-unread
   // moves it to one microsecond before the newest assistant message.
   google.protobuf.Timestamp last_read_at = 22;
+
+  // The derived attention state of the thread (WS16 S1). Unspecified while the attention switch
+  // is off, so a flag-off response carries nothing new.
+  AttentionState attention_state = 16;
+
+  // When the attention state began. Absent when no state was derived.
+  google.protobuf.Timestamp attention_since = 17;
+
+  // Whether the thread has an unread assistant reply. The same definition as `unread` above,
+  // repeated so the attention surfaces read one message (DEC-11).
+  bool attention_unseen = 18;
 }
 
 message ListThreadsResponse {

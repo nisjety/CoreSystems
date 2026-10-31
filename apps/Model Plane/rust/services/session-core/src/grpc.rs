@@ -14,6 +14,7 @@ use mp_contracts::dataplane::retrieval_v2::{
 };
 use mp_contracts::model_plane::v1::{
     self as pb,
+    attention_service_server::AttentionServiceServer,
     finetune_jobs_server::FinetuneJobsServer,
     learning_governance_service_server::{LearningGovernanceService, LearningGovernanceServiceServer},
     managed_run_lifecycle_server::{ManagedRunLifecycle, ManagedRunLifecycleServer},
@@ -38,6 +39,7 @@ use tonic::transport::Channel;
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
+use crate::attention;
 use crate::auth::{
     authorize_operation, authorize_owner_housekeeping, authorize_owner_row,
     authorize_scheduled_step_service, authorize_space_deletion_service, authorize_system_run_owner,
@@ -532,8 +534,9 @@ fn bucket_memory_segments(rows: Vec<(String, String)>) -> TopicBuckets {
     buckets
 }
 
+#[derive(Clone)]
 pub struct SessionService {
-    pool: PgPool,
+    pub(crate) pool: PgPool,
     retrieval_client: Option<RetrievalServiceClient<Channel>>,
     graph_client: Option<GraphServiceClient<Channel>>,
     knowledge_client: Option<KnowledgeServiceClient<Channel>>,
@@ -8057,7 +8060,7 @@ impl SessionCore for SessionService {
             };
             rows.truncate(page_size);
 
-            let threads = rows
+            let mut threads: Vec<pb::ThreadSummary> = rows
                 .into_iter()
                 .map(
                     |row| {
@@ -8109,10 +8112,18 @@ impl SessionCore for SessionService {
                             starred,
                             unread,
                             last_read_at: Some(to_proto_timestamp(last_read_at)),
+                            attention_state: pb::AttentionState::Unspecified as i32,
+                            attention_since: None,
+                            attention_unseen: false,
                         }
                     },
                 )
                 .collect();
+            // The attention fields are a post-step on the rows already read: one batched read of
+            // the pending rows, and nothing at all while the switch is off (WS16 S1).
+            if attention::enabled() {
+                attention::enrich(&self.pool, &req.org_id, &mut threads).await?;
+            }
 
             Ok(Response::new(pb::ListThreadsResponse {
                 threads,
@@ -9903,7 +9914,8 @@ pub async fn serve(
 
     tonic::transport::Server::builder()
         .add_service(health_service)
-        .add_service(SessionCoreServer::with_interceptor(session, auth.clone()))
+        .add_service(SessionCoreServer::with_interceptor(session.clone(), auth.clone()))
+        .add_service(AttentionServiceServer::with_interceptor(session, auth.clone()))
         .add_service(ManagedRunLifecycleServer::with_interceptor(
             managed_lifecycle,
             auth.clone(),

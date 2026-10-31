@@ -130,6 +130,39 @@ fn derived_stream_body_limit(explicit: usize, declared_total: Option<usize>) -> 
 }
 
 #[cfg(test)]
+mod attention_state_tests {
+    use super::{attention_reason_name, attention_state_name};
+
+    /// A replica with the attention switch off returns the unspecified state, and the wire omits
+    /// it, so a flag-off thread listing is unchanged. The named states are the closed set.
+    #[test]
+    fn unspecified_is_omitted_and_every_named_state_has_a_wire_name() {
+        assert_eq!(attention_state_name(0), None);
+        assert_eq!(attention_state_name(1), Some("needs_approval"));
+        assert_eq!(attention_state_name(2), Some("needs_input"));
+        assert_eq!(attention_state_name(3), Some("plan_ready"));
+        assert_eq!(attention_state_name(4), Some("working"));
+        assert_eq!(attention_state_name(5), Some("completed"));
+        assert_eq!(attention_state_name(6), Some("failed"));
+        assert_eq!(attention_state_name(7), Some("archived"));
+        assert_eq!(attention_state_name(8), Some("idle"));
+        // A number this build does not name reads as absent, never as a guessed state.
+        assert_eq!(attention_state_name(9), None);
+    }
+
+    /// A reason names the pending row behind a waiting state. Tag 4 belongs to WS03's parked loop
+    /// and reads as absent until that slice names it.
+    #[test]
+    fn reason_names_the_pending_row_and_leaves_the_rest_absent() {
+        assert_eq!(attention_reason_name(0), None);
+        assert_eq!(attention_reason_name(1), Some("approval"));
+        assert_eq!(attention_reason_name(2), Some("plan"));
+        assert_eq!(attention_reason_name(3), Some("input"));
+        assert_eq!(attention_reason_name(4), None);
+    }
+}
+
+#[cfg(test)]
 mod stream_body_limit_tests {
     use super::{derived_stream_body_limit, STREAM_BODY_HEADROOM_BYTES};
     use crate::attachment_policy::DEFAULT_STREAM_BODY_LIMIT_BYTES as DEFAULT;
@@ -216,6 +249,12 @@ pub fn build_router_with_readiness(
             "/v1/threads/:thread_id/presentation",
             post(update_thread_presentation),
         )
+        // The attention state of the caller's threads (build plan WS16 S1). It is off by
+        // default, and the response says so rather than failing.
+        .route("/v1/attention", get(list_attention))
+        // Marks one thread read (WS16 S1). A zero-retention caller's read state stays on the
+        // client, so Session Core refuses that caller here.
+        .route("/v1/threads/:thread_id/seen", post(mark_thread_seen))
         .route("/v1/threads/:thread_id/archive", post(archive_thread))
         // Context inspector (plan item 3.5): what is actually in the model's
         // window for this thread, itemized. session-core has computed this all
@@ -9648,6 +9687,81 @@ struct ListThreadsQuery {
     starred_only: Option<bool>,
 }
 
+/// The wire name of a derived attention state (WS16 S1). `None` for the unspecified value, which
+/// is what a replica with the switch off returns, so the field is omitted and the response is
+/// unchanged. A number this build does not name reads the same way.
+fn attention_state_name(state: i32) -> Option<&'static str> {
+    use mp_contracts::model_plane::v1::AttentionState;
+    match AttentionState::try_from(state).ok()? {
+        AttentionState::Unspecified => None,
+        AttentionState::NeedsApproval => Some("needs_approval"),
+        AttentionState::NeedsInput => Some("needs_input"),
+        AttentionState::PlanReady => Some("plan_ready"),
+        AttentionState::Working => Some("working"),
+        AttentionState::Completed => Some("completed"),
+        AttentionState::Failed => Some("failed"),
+        AttentionState::Archived => Some("archived"),
+        AttentionState::Idle => Some("idle"),
+    }
+}
+
+/// The wire name of an attention reason (WS16 S1): the pending row behind a waiting state. Tag 4 is
+/// reserved for the parked loop of WS03, so this build names nothing for it.
+fn attention_reason_name(reason: i32) -> Option<&'static str> {
+    use mp_contracts::model_plane::v1::AttentionReason;
+    match AttentionReason::try_from(reason).ok()? {
+        AttentionReason::Unspecified => None,
+        AttentionReason::Approval => Some("approval"),
+        AttentionReason::Plan => Some("plan"),
+        AttentionReason::Input => Some("input"),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ListAttentionQuery {
+    /// Page size, 1 to 200. Absent or out of range reads as 200 in Session Core.
+    limit: Option<i32>,
+}
+
+#[derive(Debug, Serialize)]
+struct AttentionItemResponse {
+    thread_id: String,
+    /// Omitted for a state this build does not name, rather than guessed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
+    /// When the state began, RFC 3339. Omitted when the state has no start.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    since: Option<String>,
+    /// Whether the thread holds an assistant reply the owner has not read.
+    unseen: bool,
+    /// The thread's latest run, for a deep link. Omitted when the thread has no run.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    run_id: String,
+}
+
+/// The counts behind the attention badge.
+#[derive(Debug, Serialize)]
+struct AttentionCountsResponse {
+    needs_you: i32,
+    working: i32,
+    unseen: i32,
+}
+
+#[derive(Debug, Serialize)]
+struct ListAttentionResponse {
+    /// False while the attention switch is off; the items and counts are then empty.
+    enabled: bool,
+    items: Vec<AttentionItemResponse>,
+    counts: AttentionCountsResponse,
+}
+
+#[derive(Debug, Serialize)]
+struct MarkThreadSeenResponse {
+    thread_id: String,
+}
+
 #[derive(Debug, Serialize)]
 struct ThreadSummaryResponse {
     thread_id: String,
@@ -9684,6 +9798,16 @@ struct ThreadSummaryResponse {
     /// Whether the thread has a reply the owner has not read yet. This is the one
     /// unread definition (build plan DEC-11); the sidebar dot reads it as is.
     unread: bool,
+    /// The derived attention state (WS16 S1), as its wire name. Omitted while the attention
+    /// switch is off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attention_state: Option<&'static str>,
+    /// When the attention state began, RFC 3339. Omitted when the state has no start.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attention_since: Option<String>,
+    /// Whether the thread has an unread reply. Present only with an attention state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attention_unseen: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -9940,6 +10064,12 @@ async fn list_threads(
             archived_at: timestamp_to_rfc3339(thread.archived_at),
             starred: thread.starred,
             unread: thread.unread,
+            attention_state: attention_state_name(thread.attention_state),
+            attention_since: thread
+                .attention_since
+                .map(|value| timestamp_to_rfc3339(Some(value))),
+            attention_unseen: attention_state_name(thread.attention_state)
+                .map(|_| thread.attention_unseen),
         })
         .collect();
 
@@ -9994,6 +10124,93 @@ async fn update_thread_presentation(
         .into_inner();
 
     Ok(Json(UpdateThreadPresentationResponse {
+        thread_id: response.thread_id,
+    }))
+}
+
+/// The caller's threads that need attention or are working (WS16 S1). The scope comes from the
+/// verified claims, so a query naming another user changes nothing, and the answer carries
+/// identifiers and the closed state only.
+async fn list_attention(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Query(query): Query<ListAttentionQuery>,
+) -> Result<Json<ListAttentionResponse>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::ListAttentionRequest;
+
+    let response = state
+        .attention_client
+        .clone()
+        .list_attention(authenticated_session_request(
+            ListAttentionRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+                limit: query.limit.unwrap_or_default(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|error| session_thread_error("session-core list_attention failed", &error))?
+        .into_inner();
+
+    let counts = response.counts.unwrap_or_default();
+    Ok(Json(ListAttentionResponse {
+        enabled: response.enabled,
+        items: response
+            .items
+            .into_iter()
+            .map(|item| AttentionItemResponse {
+                thread_id: item.thread_id,
+                state: attention_state_name(item.state),
+                reason: attention_reason_name(item.reason),
+                since: item.since.map(|value| timestamp_to_rfc3339(Some(value))),
+                unseen: item.unseen,
+                run_id: item.run_id,
+            })
+            .collect(),
+        counts: AttentionCountsResponse {
+            needs_you: counts.needs_you,
+            working: counts.working,
+            unseen: counts.unseen,
+        },
+    }))
+}
+
+/// Marks one of the caller's threads read (WS16 S1). Session Core refuses a zero-retention or
+/// waived caller, and answers 412 while the attention switch is off.
+async fn mark_thread_seen(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(thread_id): Path<String>,
+) -> Result<Json<MarkThreadSeenResponse>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::MarkThreadSeenRequest;
+
+    let thread_id = thread_id.trim();
+    if thread_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "thread_id is required"})),
+        ));
+    }
+
+    let response = state
+        .attention_client
+        .clone()
+        .mark_thread_seen(authenticated_session_request(
+            MarkThreadSeenRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+                thread_id: thread_id.to_owned(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|error| session_thread_error("session-core mark_thread_seen failed", &error))?
+        .into_inner();
+
+    Ok(Json(MarkThreadSeenResponse {
         thread_id: response.thread_id,
     }))
 }

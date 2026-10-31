@@ -1380,6 +1380,53 @@ describe('chat-client server thread history', () => {
     ])
   })
 
+  it('carries the derived attention state, drops a state outside the closed set, and omits it when off', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        data: {
+          sessions: [
+            {
+              threadId: 'thread_waiting',
+              title: 'Waiting',
+              preview: '',
+              updatedAt: '2026-06-17T10:00:00.000Z',
+              attentionState: 'needs_approval',
+              attentionSince: '2026-06-17T09:59:00.000Z',
+              attentionUnseen: true,
+            },
+            {
+              threadId: 'thread_unknown',
+              title: 'Unknown state',
+              preview: '',
+              updatedAt: '2026-06-17T10:00:00.000Z',
+              attentionState: 'paused_somehow',
+              attentionUnseen: true,
+            },
+            {
+              threadId: 'thread_flag_off',
+              title: 'Switch off',
+              preview: '',
+              updatedAt: '2026-06-17T10:00:00.000Z',
+            },
+          ],
+        },
+      }), { headers: { 'Content-Type': 'application/json' }, status: 200 }),
+    ))
+
+    const [waiting, unknown, flagOff] = await listChatThreads()
+
+    expect(waiting).toMatchObject({
+      threadId: 'thread_waiting',
+      attentionState: 'needs_approval',
+      attentionSince: '2026-06-17T09:59:00.000Z',
+      attentionUnseen: true,
+    })
+    expect(unknown).not.toHaveProperty('attentionState')
+    expect(unknown).not.toHaveProperty('attentionUnseen')
+    expect(flagOff).not.toHaveProperty('attentionState')
+    expect(flagOff).not.toHaveProperty('attentionUnseen')
+  })
+
   it('reads a server-owned pin, and treats anything non-true as unpinned', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(

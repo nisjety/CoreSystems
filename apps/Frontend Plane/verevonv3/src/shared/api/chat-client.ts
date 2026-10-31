@@ -943,6 +943,23 @@ export type ChatMessageVersion = {
   siblings: string[]
 }
 
+/**
+ * The attention state of a thread, as Session Core derives it (build plan WS16 S1). A closed set:
+ * a value outside it is dropped rather than guessed at.
+ */
+const CHAT_ATTENTION_STATES = [
+  'needs_approval',
+  'needs_input',
+  'plan_ready',
+  'working',
+  'completed',
+  'failed',
+  'archived',
+  'idle',
+] as const
+
+export type ChatAttentionState = (typeof CHAT_ATTENTION_STATES)[number]
+
 export type ChatThreadSession = {
   preview: string
   threadId: string
@@ -985,6 +1002,15 @@ export type ChatThreadSession = {
    * with the owner's last read, and the client never derives its own.
    */
   unread?: boolean
+  /**
+   * The derived attention state (WS16 S1). Absent while the server's attention switch is off, and
+   * for a state this build does not name.
+   */
+  attentionState?: ChatAttentionState
+  /** When the attention state began (ISO 8601). Absent when the state has no start. */
+  attentionSince?: string
+  /** Whether the thread holds an unread reply. Present only with an attention state. */
+  attentionUnseen?: boolean
 }
 
 export type ChatThreadTranscriptSnapshot = {
@@ -3189,6 +3215,8 @@ function normalizeChatThreadSession(raw: unknown): ChatThreadSession | null {
   const archivedAt = normalizeOptionalIsoTimestamp(
     str(item.archivedAt) ?? str(item.archived_at),
   )
+  const attentionState = normalizeChatAttentionState(str(item.attentionState))
+  const attentionSince = normalizeOptionalIsoTimestamp(str(item.attentionSince))
   return {
     threadId,
     title,
@@ -3206,6 +3234,9 @@ function normalizeChatThreadSession(raw: unknown): ChatThreadSession | null {
     origin: str(item.origin),
     ...(item.starred === true ? { starred: true } : {}),
     ...(item.unread === true ? { unread: true } : {}),
+    ...(attentionState ? { attentionState } : {}),
+    ...(attentionState && attentionSince ? { attentionSince } : {}),
+    ...(attentionState ? { attentionUnseen: item.attentionUnseen === true } : {}),
     ...(archivedAt ? { archivedAt } : {}),
   }
 }
@@ -3263,6 +3294,11 @@ function normalizeIsoTimestamp(value: string | undefined): string {
   if (!value) return new Date().toISOString()
   const parsed = Date.parse(value)
   return Number.isNaN(parsed) ? new Date().toISOString() : new Date(parsed).toISOString()
+}
+
+/** The attention state a wire value names, or `undefined` for a value outside the closed set. */
+function normalizeChatAttentionState(value: string | undefined): ChatAttentionState | undefined {
+  return CHAT_ATTENTION_STATES.find((state) => state === value)
 }
 
 function normalizeOptionalIsoTimestamp(value: string | undefined): string | undefined {
