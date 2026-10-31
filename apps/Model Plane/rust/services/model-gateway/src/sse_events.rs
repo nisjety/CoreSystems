@@ -143,6 +143,23 @@ impl RetentionClass {
     }
 }
 
+/// The render of an Office file for the artifact panel: its pages as a PDF and the first pages as thumbnails.
+/// It is a view of the file the sandbox wrote, never the download, and it is transient: it rides on the
+/// attachment frame and is not kept with the thread.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AttachmentPreview {
+    /// Always `application/pdf`.
+    pub mime: String,
+    /// A `data:` URI of the rendered PDF.
+    pub url: String,
+    /// The pages the render layer produced.
+    pub pages: u64,
+    /// Whether a font the file names was drawn with a stand-in, so the viewer can say so.
+    pub fonts_substituted: bool,
+    /// `data:` URIs of the first pages, in page order.
+    pub thumbs: Vec<String>,
+}
+
 /// A rich chat-stream event beyond the plain text delta.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChatEvent {
@@ -271,6 +288,9 @@ pub enum ChatEvent {
         /// The structural check of a generated Office or PDF file, when the
         /// verifier made one. Carried on this frame, not in a new event name.
         check: Option<mp_contracts::office_verification::OfficeVerification>,
+        /// The render of a generated Office file, when the render layer made one.
+        /// Transient: it rides on this frame only, and the download is still the file.
+        preview: Option<AttachmentPreview>,
     },
     /// Usage/latency/cost/confidence for the insight chip + reasoning popover.
     Usage {
@@ -683,12 +703,23 @@ impl ChatEvent {
                 url,
                 size,
                 check,
+                preview,
             } => {
                 let mut attachment =
                     json!({ "id": id, "name": name, "type": mime, "url": url, "size": size });
                 // Optional, and only where the verifier ran: an attachment with no check keeps its old keys.
                 if let Some(report) = check {
                     attachment["check"] = serde_json::to_value(report).unwrap_or_else(|_| json!({}));
+                }
+                // The same rule for the render: no preview, no key.
+                if let Some(preview) = preview {
+                    attachment["preview"] = json!({
+                        "mime": preview.mime,
+                        "url": preview.url,
+                        "pages": preview.pages,
+                        "fonts_substituted": preview.fonts_substituted,
+                        "thumbs": preview.thumbs,
+                    });
                 }
                 attachment
             }
@@ -1118,11 +1149,12 @@ struct SinkResume {
     next_seq: tokio::sync::Mutex<u64>,
 }
 
-/// A generated image or file, whose payload is an inline `data:` URI.
+/// A generated image or file, whose payload is an inline `data:` URI. A preview is binary as well, and it is the
+/// larger of the two, so it bypasses the resume buffer with the file it was rendered from.
 fn carries_binary(event: &ChatEvent) -> bool {
     match event {
         ChatEvent::Artifact { content, .. } => content.starts_with("data:"),
-        ChatEvent::Attachment { url, .. } => url.starts_with("data:"),
+        ChatEvent::Attachment { url, preview, .. } => url.starts_with("data:") || preview.is_some(),
         _ => false,
     }
 }
@@ -2498,6 +2530,7 @@ mod tests {
             url: "blob:1".into(),
             size: 99,
             check: None,
+            preview: None,
         };
         assert_eq!(att.payload("r")["type"], "image/png");
     }
@@ -2519,6 +2552,7 @@ mod tests {
             url: "data:application/octet-stream;base64,AA".into(),
             size: 2,
             check,
+            preview: None,
         };
 
         let plain = attachment(None).payload("r");
@@ -2531,6 +2565,67 @@ mod tests {
         assert_eq!(checked["check"]["checks"][0]["message"], "a relationship points nowhere");
         assert_eq!(checked["check"]["stats"]["paragraphs"], 2);
         assert_eq!(checked["name"], "letter.docx");
+    }
+
+    /// The preview rides on the attachment frame only when the render layer made one. The download URL stays the
+    /// file itself, so the viewer is never the deliverable.
+    #[test]
+    fn attachment_event_carries_preview_only_when_present() {
+        let preview = AttachmentPreview {
+            mime: "application/pdf".into(),
+            url: "data:application/pdf;base64,AA".into(),
+            pages: 3,
+            fonts_substituted: true,
+            thumbs: vec!["data:image/png;base64,AA".into()],
+        };
+        let attachment = |preview| ChatEvent::Attachment {
+            id: "a".into(),
+            name: "budget.xlsx".into(),
+            mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".into(),
+            url: "data:application/octet-stream;base64,AA".into(),
+            size: 2,
+            check: None,
+            preview,
+        };
+
+        let plain = attachment(None).payload("r");
+        assert!(
+            plain.get("preview").is_none(),
+            "no render ran, so the key is absent: {plain}"
+        );
+
+        let rendered = attachment(Some(preview)).payload("r");
+        assert_eq!(rendered["preview"]["mime"], "application/pdf");
+        assert_eq!(rendered["preview"]["url"], "data:application/pdf;base64,AA");
+        assert_eq!(rendered["preview"]["pages"], 3);
+        assert_eq!(rendered["preview"]["fonts_substituted"], true);
+        assert_eq!(rendered["preview"]["thumbs"][0], "data:image/png;base64,AA");
+        assert_eq!(rendered["url"], "data:application/octet-stream;base64,AA");
+    }
+
+    #[test]
+    fn carries_binary_is_true_for_a_preview_attachment() {
+        let preview = AttachmentPreview {
+            mime: "application/pdf".into(),
+            url: "data:application/pdf;base64,AA".into(),
+            pages: 1,
+            fonts_substituted: false,
+            thumbs: Vec::new(),
+        };
+        let attachment = |url: &str, preview| ChatEvent::Attachment {
+            id: "a".into(),
+            name: "budget.xlsx".into(),
+            mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".into(),
+            url: url.into(),
+            size: 2,
+            check: None,
+            preview,
+        };
+        assert!(carries_binary(&attachment("blob:1", Some(preview))));
+        assert!(!carries_binary(&attachment(
+            "https://example.test/budget.xlsx",
+            None
+        )));
     }
 
     #[test]
@@ -2990,7 +3085,7 @@ mod payload_contract {
     use serde::Serialize;
     use serde_json::{json, Value};
 
-    use super::{ChatEvent, RetentionClass, ServedBy};
+    use super::{AttachmentPreview, ChatEvent, RetentionClass, ServedBy};
 
     const REQUEST_ID: &str = "req-sample";
 
@@ -3084,6 +3179,17 @@ mod payload_contract {
             mp_contracts::office_verification::OfficeKind::Docx,
         )
         .expect("a well-formed report")
+    }
+
+    /// The render of the file `office_check` judges, the optional `preview` key the full attachment sample sets.
+    fn office_preview() -> AttachmentPreview {
+        AttachmentPreview {
+            mime: s("application/pdf"),
+            url: s("data:application/pdf;base64,AA"),
+            pages: 1,
+            fonts_substituted: false,
+            thumbs: vec![s("data:image/png;base64,AA")],
+        }
     }
 
     fn citation(full: bool) -> ChatEvent {
@@ -3323,7 +3429,15 @@ mod payload_contract {
             grounding(true),
             ChatEvent::Artifact { id: s("a1"), kind: s("document"), title: s(""), content: s(""), version: 1 },
             ChatEvent::Artifact { id: s("a1"), kind: s("code"), title: s("T"), content: s("body"), version: 2 },
-            ChatEvent::Attachment { id: s("f1"), name: s("f.png"), mime: s("image/png"), url: s("blob:1"), size: 0, check: None },
+            ChatEvent::Attachment {
+                id: s("f1"),
+                name: s("f.png"),
+                mime: s("image/png"),
+                url: s("blob:1"),
+                size: 0,
+                check: None,
+                preview: None,
+            },
             ChatEvent::Attachment {
                 id: s("f1"),
                 name: s("f.docx"),
@@ -3331,6 +3445,7 @@ mod payload_contract {
                 url: s("data:application/octet-stream;base64,AA"),
                 size: 2048,
                 check: Some(office_check()),
+                preview: Some(office_preview()),
             },
             usage(false),
             usage(true),

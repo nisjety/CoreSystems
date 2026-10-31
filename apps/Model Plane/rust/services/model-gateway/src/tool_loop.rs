@@ -32,7 +32,7 @@ use crate::{
     grounding,
     quarry::SearchOptions,
     relevance,
-    sse_events::ChatEvent,
+    sse_events::{AttachmentPreview, ChatEvent},
     state::AppState,
 };
 
@@ -599,6 +599,46 @@ fn office_report_for(payload: &Value, name: &str) -> Option<OfficeVerification> 
     OfficeVerification::from_untrusted_json(&report.to_string(), name, kind).ok()
 }
 
+/// The largest preview PDF the frame carries: the verifier's 2 MiB cap as base64 characters, 4 * ceil(2 MiB / 3).
+const PREVIEW_PDF_MAX_BASE64: usize = 2_796_204;
+/// The thumbnails a preview carries, the same cap the verifier applies.
+const PREVIEW_MAX_THUMBS: usize = 3;
+
+/// The render the verifier made of the delivered file `name`, when it made one. The PDF and the thumbnails are the
+/// verifier's copies; the download stays the sandbox's bytes. A preview with no report has no page count or font
+/// facts, so it is no preview at all, and one over the cap is dropped rather than cut short.
+fn office_preview_for(payload: &Value, name: &str) -> Option<AttachmentPreview> {
+    let element = payload
+        .get("previews")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|element| element.get("name").and_then(Value::as_str) == Some(name))?;
+    let pdf_b64 = element.get("pdf_b64").and_then(Value::as_str)?;
+    if pdf_b64.len() > PREVIEW_PDF_MAX_BASE64 {
+        return None;
+    }
+    let report = office_report_for(payload, name)?;
+    let thumbs = element
+        .get("thumbs_b64")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .take(PREVIEW_MAX_THUMBS)
+        .map(|thumb| format!("data:image/png;base64,{thumb}"))
+        .collect();
+    Some(AttachmentPreview {
+        mime: "application/pdf".to_owned(),
+        url: format!("data:application/pdf;base64,{pdf_b64}"),
+        pages: report.stats.get("render_pages").copied().unwrap_or(0),
+        fonts_substituted: report
+            .stats
+            .get("fonts_substituted")
+            .is_some_and(|&count| count > 0),
+        thumbs,
+    })
+}
+
 /// What the model is told about the files a `code_interpreter` call delivered when none was held back.
 const DELIVERED_FILES_NOTE: &str = "\nThese files were delivered to the user as downloadable artifacts, which already appear as download cards below your message — the user can click them right now. Confirm what you produced in plain text (e.g. \"Fil lagret: name.xlsx (N bytes), tilgjengelig for nedlasting nedenfor.\"); NEVER write a markdown link, a bare URL, or a \"sandbox:/\" path for one of these files — no such link exists and it will not work.";
 
@@ -668,6 +708,7 @@ fn code_interpreter_events(
         let data_uri = format!("data:{mime};base64,{content_b64}");
         let artifact_id = format!("{}-file-{}", outcome.call_id, index + 1);
         let kind = crate::artifacts::kind_for_generated_file(&mime, &name);
+        let preview = office_preview_for(&payload, &name);
         events.push(crate::artifacts::artifact_event(
             &artifact_id,
             kind,
@@ -682,6 +723,7 @@ fn code_interpreter_events(
             &data_uri,
             bytes,
             check,
+            preview,
         ));
         listed.push(format!("{name} ({mime}, {bytes} bytes)"));
     }
@@ -13057,6 +13099,83 @@ mod tests {
         let summary = summary.expect("a summary for delivered files");
         assert!(!summary.contains("office_checks"), "{summary}");
         assert!(!summary.contains("Regenerate each failed file"));
+    }
+
+    /// A delivered Office file carries the render of its check as its preview, and its download stays the file the
+    /// sandbox wrote, byte for byte. The preview is a view of the deliverable, never the deliverable.
+    #[test]
+    fn a_delivered_office_file_carries_its_render_preview_and_its_own_download() {
+        let output = serde_json::json!({
+            "stdout": "",
+            "stderr": "",
+            "exit_code": 0,
+            "files": [{
+                "name": "budget.xlsx",
+                "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "bytes": 3,
+                "content_b64": "QUFB",
+            }],
+            "verification": [{
+                "name": "budget.xlsx",
+                "kind": "xlsx",
+                "level": "passed",
+                "checks": [],
+                "stats": { "render_pages": 2, "fonts_substituted": 1 },
+            }],
+            "previews": [{
+                "name": "budget.xlsx",
+                "pdf_b64": "JVBERi0=",
+                "thumbs_b64": ["iVBORw0KGgo=", "iVBORw0KGgo=", "iVBORw0KGgo=", "iVBORw0KGgo="],
+            }],
+        })
+        .to_string();
+        let (events, _) = tool_artifact_events(
+            &outcome_for("code_interpreter", output),
+            None,
+            &mut OfficeDelivery::default(),
+        );
+        let (url, preview) = events
+            .iter()
+            .find_map(|event| match event {
+                ChatEvent::Attachment { url, preview, .. } => Some((url.clone(), preview.clone())),
+                _ => None,
+            })
+            .expect("the delivered file is an attachment");
+        assert_eq!(
+            url,
+            "data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,QUFB"
+        );
+        let preview = preview.expect("the render made a preview");
+        assert_eq!(preview.url, "data:application/pdf;base64,JVBERi0=");
+        assert_eq!(preview.pages, 2);
+        assert!(preview.fonts_substituted);
+        assert_eq!(
+            preview.thumbs.len(),
+            3,
+            "at most three thumbnails reach the frame"
+        );
+    }
+
+    /// A preview with no report has no page count or font facts, and one over the cap is dropped, not cut short.
+    #[test]
+    fn a_preview_without_a_report_or_over_the_cap_is_no_preview() {
+        let without_report = serde_json::json!({
+            "previews": [{ "name": "budget.xlsx", "pdf_b64": "JVBERi0=", "thumbs_b64": [] }],
+        });
+        assert!(office_preview_for(&without_report, "budget.xlsx").is_none());
+
+        let oversized = "A".repeat(PREVIEW_PDF_MAX_BASE64 + 1);
+        let over_cap = serde_json::json!({
+            "previews": [{ "name": "budget.xlsx", "pdf_b64": oversized, "thumbs_b64": [] }],
+            "verification": [{
+                "name": "budget.xlsx",
+                "kind": "xlsx",
+                "level": "passed",
+                "checks": [],
+                "stats": { "render_pages": 1 },
+            }],
+        });
+        assert!(office_preview_for(&over_cap, "budget.xlsx").is_none());
     }
 
     /// A `code_interpreter` result that delivers one Office file and the verifier's report on it.

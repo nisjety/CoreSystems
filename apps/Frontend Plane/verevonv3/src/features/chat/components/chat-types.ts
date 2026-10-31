@@ -158,6 +158,22 @@ export type GeneratedFileCheck = {
   checks: { id: string; level: GeneratedFileCheckLevel; message: string }[]
 }
 
+/**
+ * The render of a generated Office file for the artifact panel: its pages as a
+ * PDF, with thumbnails of the first pages. It shows the file; it is never the
+ * download, and it is not kept with the thread.
+ */
+export type GeneratedFilePreview = {
+  mime: 'application/pdf'
+  /** A `data:` URI of the rendered PDF. */
+  url: string
+  pages: number
+  /** True when a font the file names was drawn with a stand-in, so the viewer says so. */
+  fontsSubstituted: boolean
+  /** `data:` URIs of the first pages, in page order. */
+  thumbs: string[]
+}
+
 export type GeneratedFile = {
   id: string
   name: string
@@ -166,6 +182,8 @@ export type GeneratedFile = {
   url: string
   /** Present only when `code_interpreter` ran the structural check on this file. */
   check?: GeneratedFileCheck
+  /** Present only when the render layer made a preview of this Office file. */
+  preview?: GeneratedFilePreview
 }
 
 export type GeneratedImagePreview = {

@@ -12,8 +12,20 @@
  *     file must stay a leaf so `chat-artifacts.ts` can import it);
  *   - extra viewers registered at runtime, drawn by the panel's Dynamic slot.
  */
+import type { JSX } from '@solidjs/web'
 import type { Component } from 'solid-js'
-import type { ChatArtifact } from './chat-types'
+import type { ChatArtifact, GeneratedFile } from './chat-types'
+
+/**
+ * What an extra viewer is given. `file` is the generated file the artifact came
+ * from, when there is one. `fallback` is the panel's own body for the artifact,
+ * for a viewer with nothing better to draw.
+ */
+export type ArtifactRendererProps = {
+  artifact: ChatArtifact
+  file?: GeneratedFile
+  fallback?: () => JSX.Element
+}
 
 export type ArtifactRenderer<Id extends string = string> = {
   id: Id
@@ -21,7 +33,7 @@ export type ArtifactRenderer<Id extends string = string> = {
   priority: number
   match: (artifact: ChatArtifact) => boolean
   /** Body for an extra viewer. Built-in kinds are drawn by the panel's own switch. */
-  component?: Component<{ artifact: ChatArtifact }>
+  component?: Component<ArtifactRendererProps>
 }
 
 export type ArtifactRendererRegistry<Id extends string = string> = {
