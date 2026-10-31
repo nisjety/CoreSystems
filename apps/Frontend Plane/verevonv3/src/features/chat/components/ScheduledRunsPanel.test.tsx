@@ -57,6 +57,22 @@ function schedule(overrides: Partial<CronSchedule>): CronSchedule {
   }
 }
 
+/** A schedule template that carries an approval, the way WS20-S4 stores it. */
+function approvalTemplate(expiresAt: string) {
+  return {
+    kind: 'cron',
+    title: 'Daglig rapport',
+    description: 'summarise the week',
+    approval_contract: JSON.stringify({
+      v: 1,
+      tools: [{ tool: 'web_search', capability: 'cap.tool.web_search', class: 'read', approved_at: '2026-10-24T10:00:00Z' }],
+      expires_at: expiresAt,
+      max_rounds: 6,
+      max_tokens_per_round: 2048,
+    }),
+  }
+}
+
 afterEach(() => {
   vi.clearAllMocks()
   vi.restoreAllMocks()
@@ -178,5 +194,76 @@ describe('ScheduledRunsPanel', () => {
     fireEvent.click(deleteButton)
 
     expect(mockedDelete).not.toHaveBeenCalled()
+  })
+
+  it('offers renewal instead of resume once the approval has expired', async () => {
+    mockedList.mockResolvedValue({
+      schedules: [schedule({ enabled: false, task_template: approvalTemplate('2026-01-01T00:00:00Z') })],
+    })
+
+    render(() => <ScheduledRunsPanel />)
+
+    expect(await screen.findByText('Forny godkjenning')).toBeTruthy()
+    expect(screen.queryByText('Aktiver')).toBeNull()
+    expect(screen.getByText(/godkjenning utløpt/)).toBeTruthy()
+  })
+
+  it('keeps resume for a paused schedule whose approval is still live', async () => {
+    mockedList.mockResolvedValue({
+      schedules: [schedule({ enabled: false, task_template: approvalTemplate('2099-01-01T00:00:00Z') })],
+    })
+
+    render(() => <ScheduledRunsPanel />)
+
+    expect(await screen.findByText('Aktiver')).toBeTruthy()
+    expect(screen.queryByText('Forny godkjenning')).toBeNull()
+    expect(screen.getByText(/godkjenning til/)).toBeTruthy()
+  })
+
+  it('keeps pause and offers renewal for an enabled schedule whose approval has expired', async () => {
+    mockedList.mockResolvedValue({
+      schedules: [schedule({ enabled: true, task_template: approvalTemplate('2026-01-01T00:00:00Z') })],
+    })
+
+    render(() => <ScheduledRunsPanel />)
+
+    expect(await screen.findByText('Forny godkjenning')).toBeTruthy()
+    expect(screen.getByText('Pause')).toBeTruthy()
+  })
+
+  it('opens the consent card seeded with the schedule when renewing', async () => {
+    mockedList.mockResolvedValue({
+      schedules: [schedule({ enabled: false, task_template: approvalTemplate('2026-01-01T00:00:00Z') })],
+    })
+
+    render(() => <ScheduledRunsPanel />)
+    fireEvent.click(await screen.findByText('Forny godkjenning'))
+
+    const name = (await screen.findByRole('textbox', { name: 'Navn' })) as HTMLInputElement
+    expect(name.value).toBe('Daglig rapport')
+    // The goal is carried over, so the dialog never asks for a new task.
+    expect(screen.queryByRole('textbox', { name: 'Oppgave' })).toBeNull()
+  })
+
+  it('labels a fire that the guards paused as paused, with its reason', async () => {
+    vi.stubEnv('VITE_SCHEDULE_RESULTS', 'true')
+    mockedList.mockResolvedValue({ schedules: [schedule({})] })
+    mockedFires.mockResolvedValue([
+      {
+        id: 'fire_9',
+        fired_at: '2026-10-23T07:00:00Z',
+        status: 'paused',
+        outcome: 'paused_expired',
+        run_id: null,
+        thread_id: null,
+        withheld_effects: 0,
+      },
+    ])
+
+    render(() => <ScheduledRunsPanel />)
+    fireEvent.click(await screen.findByText('Se resultater'))
+
+    expect(await screen.findByText('Pauset')).toBeTruthy()
+    expect(screen.getByText('Utløpt')).toBeTruthy()
   })
 })

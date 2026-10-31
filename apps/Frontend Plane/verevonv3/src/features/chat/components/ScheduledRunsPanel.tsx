@@ -13,6 +13,7 @@ import { translateApiError, useI18n } from '@/shared/i18n'
 import { getSession } from '@/shared/session/session-store'
 import { chatThreadHref } from '../lib/chat-thread-deep-link'
 import { selectChatThread } from '../lib/chat-thread-history'
+import { ScheduleDialog } from './ScheduleDialog'
 
 /**
  * "Planlagte kjøringer" — list/pause/delete a schedule from chat (chat-wave2
@@ -26,6 +27,10 @@ import { selectChatThread } from '../lib/chat-thread-history'
  * scheduled thread that holds its answer. It stays disabled unless
  * VITE_SCHEDULE_RESULTS is the literal "true", so a rollback restores the
  * disabled button without a code change.
+ *
+ * A schedule whose approval has lapsed (WS20-S8) cannot be resumed by a bare
+ * toggle. The panel offers "Forny godkjenning" instead, which opens the
+ * consent card again with the schedule's goal; the renewal is a new schedule.
  */
 function formatWhen(value?: string | null, locale?: string): string {
   if (!value) return '—'
@@ -37,6 +42,43 @@ function formatWhen(value?: string | null, locale?: string): string {
 }
 
 const scheduleResultsEnabled = () => import.meta.env.VITE_SCHEDULE_RESULTS === 'true'
+
+/** The expiry of a stored approval's `expires_at`, or null when it cannot be read. */
+function approvalExpiry(text: unknown): Date | null {
+  if (typeof text !== 'string') return null
+  try {
+    const parsed: unknown = JSON.parse(text)
+    const raw = parsed && typeof parsed === 'object' ? (parsed as { expires_at?: unknown }).expires_at : undefined
+    if (typeof raw !== 'string') return null
+    const expires = new Date(raw)
+    return Number.isNaN(expires.getTime()) ? null : expires
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The consent contract a schedule carries (WS20-S4), read from its stored template.
+ * An approval that cannot be read or has passed its expiry cannot fire, which is
+ * the same rule capability-core applies (WS20-S8).
+ */
+function approvalOf(schedule: CronSchedule, now: number): { expiresAt: Date | null; lapsed: boolean } | null {
+  const template = schedule.task_template
+  if (!template || typeof template !== 'object' || !('approval_contract' in template)) return null
+  const expiresAt = approvalExpiry(template.approval_contract)
+  return { expiresAt, lapsed: !expiresAt || expiresAt.getTime() <= now }
+}
+
+function approvalLapsed(schedule: CronSchedule): boolean {
+  return approvalOf(schedule, Date.now())?.lapsed ?? false
+}
+
+/** The goal a schedule was created with, which the renewal's consent card starts from. */
+function goalOf(schedule: CronSchedule): string {
+  const template = schedule.task_template
+  if (!template || typeof template !== 'object' || !('description' in template)) return ''
+  return typeof template.description === 'string' ? template.description : ''
+}
 
 // Closed tokens from cron_fires and the run's outcome. A token outside this
 // list is shown as-is rather than guessed at.
@@ -52,6 +94,8 @@ function fireTokenLabel(token: string, i18n: ReturnType<typeof useI18n>): string
       return i18n.tr('Feilet', 'Failed')
     case 'unknown':
       return i18n.tr('Ukjent', 'Unknown')
+    case 'paused':
+      return i18n.tr('Pauset', 'Paused')
     case 'unknown_outcome':
       return i18n.tr('Ukjent utfall', 'Unknown outcome')
     case 'needs_review':
@@ -149,6 +193,7 @@ export function ScheduledRunsPanel() {
   const [busyId, setBusyId] = createSignal<string | null>(null)
   const [actionError, setActionError] = createSignal<string | null>(null)
   const [openResultsId, setOpenResultsId] = createSignal<string | null>(null)
+  const [renewing, setRenewing] = createSignal<CronSchedule | null>(null)
   const list = createMemo(() => schedules() ?? [])
 
   const handleToggle = async (schedule: CronSchedule) => {
@@ -233,6 +278,16 @@ export function ScheduledRunsPanel() {
                         : i18n.tr('pauset', 'paused')}
                       {' · '}
                       {i18n.tr('neste', 'next')}: {formatWhen(schedule.next_fire_at, i18n.locale() === 'no' ? 'nb-NO' : 'en-US')}
+                      <Show when={approvalOf(schedule, Date.now())}>
+                        {(approval) => (
+                          <>
+                            {' · '}
+                            {approval().lapsed
+                              ? i18n.tr('godkjenning utløpt', 'approval expired')
+                              : `${i18n.tr('godkjenning til', 'approval until')} ${formatWhen(approval().expiresAt?.toISOString(), i18n.locale() === 'no' ? 'nb-NO' : 'en-US')}`}
+                          </>
+                        )}
+                      </Show>
                     </span>
                   </div>
                   <div class="verevon-scheduled-runs-panel__actions">
@@ -260,14 +315,26 @@ export function ScheduledRunsPanel() {
                         {i18n.tr('Se resultater', 'See results')}
                       </button>
                     </Show>
-                    <button
-                      type="button"
-                      disabled={busyId() === schedule.id}
-                      onClick={() => void handleToggle(schedule)}
-                      aria-label={`${schedule.enabled ? i18n.tr('Pause', 'Pause') : i18n.tr('Aktiver', 'Resume')} ${schedule.name}`}
-                    >
-                      {schedule.enabled ? i18n.tr('Pause', 'Pause') : i18n.tr('Aktiver', 'Resume')}
-                    </button>
+                    <Show when={schedule.enabled || !approvalLapsed(schedule)}>
+                      <button
+                        type="button"
+                        disabled={busyId() === schedule.id}
+                        onClick={() => void handleToggle(schedule)}
+                        aria-label={`${schedule.enabled ? i18n.tr('Pause', 'Pause') : i18n.tr('Aktiver', 'Resume')} ${schedule.name}`}
+                      >
+                        {schedule.enabled ? i18n.tr('Pause', 'Pause') : i18n.tr('Aktiver', 'Resume')}
+                      </button>
+                    </Show>
+                    <Show when={approvalLapsed(schedule)}>
+                      <button
+                        type="button"
+                        disabled={busyId() === schedule.id}
+                        onClick={() => setRenewing(schedule)}
+                        aria-label={`${i18n.tr('Forny godkjenning', 'Renew approval')} ${schedule.name}`}
+                      >
+                        {i18n.tr('Forny godkjenning', 'Renew approval')}
+                      </button>
+                    </Show>
                     <button
                       type="button"
                       disabled={busyId() === schedule.id}
@@ -287,6 +354,17 @@ export function ScheduledRunsPanel() {
             )}
           </For>
         </Show>
+      </Show>
+      <Show when={renewing()}>
+        {(target) => (
+          <ScheduleDialog
+            seedTitle={target().name}
+            seedGoal={goalOf(target())}
+            threadOriginHint="composer"
+            onClose={() => setRenewing(null)}
+            onCreated={() => void refetch()}
+          />
+        )}
       </Show>
     </div>
   )
