@@ -179,6 +179,96 @@ pub async fn history(
 }
 
 // ============================================================================
+// GET /v1/change/diff — the two versions of a tracked page and the diff (INNH-4).
+//
+// `?url=` alone compares the latest two baselines; `&from=&to=` compare two named baselines of
+// the url; `?diff_id=` reads the diff a change webhook announced. `include=markdown` adds the
+// two pages' text. 501 unless QUARRY_EDGE__CHANGE_TEXT_DIFF is on; refused for a ZDR reader.
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct DiffQuery {
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub from: Option<String>,
+    #[serde(default)]
+    pub to: Option<String>,
+    #[serde(default)]
+    pub diff_id: Option<String>,
+    #[serde(default)]
+    pub include: Option<String>,
+}
+
+#[cfg(feature = "postgres-queue")]
+pub async fn diff(
+    State(state): State<AppState>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    Query(q): Query<DiffQuery>,
+) -> Result<
+    Json<Envelope<quarry_core::change_history::ChangeDiffView>>,
+    (StatusCode, Json<Envelope<()>>),
+> {
+    use crate::change_diff::{change_text_diff_enabled, diff_core, gate, DiffParams};
+
+    let request_id = crate::request_id::current();
+    gate(
+        change_text_diff_enabled(),
+        claims.effective_zdr_mode(None).is_active(),
+    )
+    .map_err(|e| err_response(&request_id, e))?;
+    let params = DiffParams::parse(
+        q.url.as_deref(),
+        q.from.as_deref(),
+        q.to.as_deref(),
+        q.diff_id.as_deref(),
+        q.include.as_deref(),
+    )
+    .map_err(|e| err_response(&request_id, e))?;
+    if let Some(url) = params.url.as_deref() {
+        validate_url(url).map_err(|e| err_response(&request_id, e))?;
+    }
+    let Some(store) = state.baseline_store.as_ref() else {
+        return Err(err_response(
+            &request_id,
+            QuarryError::new(
+                ErrorCode::Unsupported,
+                "change text diffs need the postgres-queue feature + DATABASE_URL on the edge",
+            ),
+        ));
+    };
+    let view = diff_core(
+        store.as_ref(),
+        state.artifacts.as_ref(),
+        &claims.org_id,
+        &params,
+    )
+    .await
+    .map_err(|e| err_response(&request_id, e))?;
+    Ok(Json(Envelope::ok(request_id, view)))
+}
+
+#[cfg(not(feature = "postgres-queue"))]
+pub async fn diff(
+    State(state): State<AppState>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    Query(q): Query<DiffQuery>,
+) -> Result<
+    Json<Envelope<quarry_core::change_history::ChangeDiffView>>,
+    (StatusCode, Json<Envelope<()>>),
+> {
+    let request_id = crate::request_id::current();
+    let _ = (&state, &claims, &q);
+    Err(err_response(
+        &request_id,
+        QuarryError::new(
+            ErrorCode::Unsupported,
+            "change text diffs need the postgres-queue feature",
+        ),
+    ))
+}
+
+// ============================================================================
 // POST /v1/change/snapshot — PromoteTrackedResultToSnapshot.
 //
 // Projects a stored baseline (and its predecessor, when one exists) into
@@ -421,6 +511,13 @@ pub struct RecordRequest {
     /// the control webhook) are suppressed — fail closed.
     #[serde(default)]
     pub zdr: Option<bool>,
+    /// INNH-4: the stored markdown of the fresh fetch, as `run_page` returned it
+    /// (`markdown_artifact_id`). Kept on the new baseline only with
+    /// `QUARRY_EDGE__CHANGE_TEXT_DIFF` on, after it is verified to be a markdown artifact of
+    /// `org_id`. Absent under ZDR and from an older orchestrator.
+    #[serde(default)]
+    #[allow(dead_code)] // read only under `postgres-queue` in record_core
+    pub markdown_artifact_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -529,9 +626,16 @@ pub async fn record_internal(
 
     #[cfg(feature = "postgres-queue")]
     if let Some(store) = state.baseline_store.as_ref() {
-        let resp = record_check(&state, store, state.artifacts.as_ref(), &req)
-            .await
-            .map_err(|e| err_response(&request_id, e))?;
+        let text_diff = crate::change_diff::change_text_diff_enabled();
+        let resp = record_check(
+            &state,
+            store.as_ref(),
+            state.artifacts.as_ref(),
+            &req,
+            text_diff,
+        )
+        .await
+        .map_err(|e| err_response(&request_id, e))?;
         return Ok(Json(resp));
     }
 
@@ -545,23 +649,51 @@ pub async fn record_internal(
     ))
 }
 
-/// Runs the compare → save_baseline → (on change) diff sequence in-process.
-/// The baseline/diff store is Rust-local; the diff artifact body is stored via
-/// the same ArtifactStore that page runs use.
+/// Runs [`record_core`], then the post-persistence fan-out (durable event + signed webhook).
 #[cfg(feature = "postgres-queue")]
 async fn record_check(
     state: &AppState,
-    store: &quarry_runtime::postgres_baseline_store::PostgresBaselineStore,
+    store: &dyn crate::change_diff::ChangeStore,
     artifacts: &dyn quarry_runtime::artifact_store::ArtifactStore,
     req: &RecordRequest,
+    text_diff: bool,
 ) -> Result<RecordResponse, QuarryError> {
+    let (resp, record, run_kind) = record_core(store, artifacts, req, text_diff).await?;
+    let zdr = quarry_core::zdr::ZdrMode::from(req.zdr.unwrap_or(false));
+    crate::change_webhook::emit_change_side_effects(state, &record, run_kind, zdr).await;
+    Ok(resp)
+}
+
+/// The compare → save_baseline → (on change) diff sequence. The baseline/diff store is
+/// Rust-local; the diff artifact body is stored via the same ArtifactStore that page runs use.
+///
+/// `text_diff` is `QUARRY_EDGE__CHANGE_TEXT_DIFF`. Off, the sequence is what it always was: the
+/// baseline keeps no artifact, a change stores a one-line fingerprint note (format `text`), and
+/// the returned `ChangeRecord` has no `new_baseline` or `diff_id`. On (and the schedule not ZDR),
+/// INNH-4 applies: the baseline keeps the fetch's markdown artifact, a change stores the JSON
+/// paragraph diff (format `json`), and the record that goes to the event log and the webhook
+/// carries `new_baseline` and `diff_id`.
+#[cfg(feature = "postgres-queue")]
+async fn record_core(
+    store: &dyn crate::change_diff::ChangeStore,
+    artifacts: &dyn quarry_runtime::artifact_store::ArtifactStore,
+    req: &RecordRequest,
+    text_diff: bool,
+) -> Result<
+    (
+        RecordResponse,
+        ChangeRecord,
+        Option<quarry_core::ids::kinds::RunKind>,
+    ),
+    QuarryError,
+> {
     use chrono::Utc;
     use quarry_core::change_history::{ChangeStatus, DiffRecord};
     // These are concrete prefixed-ULID types (`kinds::X` is a type alias for
     // `Id<X marker>`); `X::new()` mints one and `.ulid()` is the raw ULID.
     use quarry_core::ids::kinds::{ArtifactKind, RunKind};
 
-    let record = store
+    let mut record = store
         .compare_snapshot(&req.org_id, &req.url, &req.fresh_fingerprint)
         .await?;
     let now = Utc::now();
@@ -595,66 +727,117 @@ async fn record_check(
 
     // Persist a new baseline for New or Changed; Unchanged/Unreachable persist
     // nothing (intentional storage saving — compare_snapshot is side-effect-free).
-    if matches!(record.status, ChangeStatus::New | ChangeStatus::Changed) {
+    let persists = matches!(record.status, ChangeStatus::New | ChangeStatus::Changed);
+    // The text path needs the flag and a schedule that is not ZDR. A ZDR-declared run stores no
+    // page text (run_page returns no markdown id for it), and in observe mode, where its
+    // baseline row is still written, no text or diff may follow it either.
+    let text_mode = text_diff && !req.zdr.unwrap_or(false);
+
+    // Fail closed before anything is saved: the id came over the wire, so it is checked to be a
+    // markdown artifact this org can read. Another org's id reads as not found and is refused.
+    let markdown_id: Option<ArtifactKind> = match req
+        .markdown_artifact_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        Some(raw) if text_mode && persists => {
+            Some(crate::change_diff::verify_markdown_artifact(artifacts, &req.org_id, raw).await?)
+        }
+        _ => None,
+    };
+
+    let mut new_baseline: Option<BaselineSnapshot> = None;
+    if persists {
         let baseline_id = format!("bln_{}", ArtifactKind::new().ulid());
-        let new_baseline = BaselineSnapshot {
+        let baseline = BaselineSnapshot {
             baseline_id: baseline_id.clone(),
             org_id: req.org_id.clone(),
             source_url: req.url.clone(),
             fingerprint: req.fresh_fingerprint.clone(),
-            artifact_id: None,
+            artifact_id: markdown_id,
             // Chain from the already-loaded prev — no second load_latest.
             prev_baseline_id: record.prev_baseline.as_ref().map(|b| b.baseline_id.clone()),
             captured_at: now,
             run_id: run_kind.clone(),
         };
-        store.save_baseline(&new_baseline).await?;
+        store.save_baseline(&baseline).await?;
         resp.baseline_id = baseline_id;
+        new_baseline = Some(baseline);
     }
 
     // On Changed, persist a diff record. DiffRecord.artifact_id is required, so
-    // store the diff body first. We hold fingerprints (not the prev content),
-    // so the honest diff artifact records the fingerprint transition.
+    // store the diff body first.
     if record.status == ChangeStatus::Changed {
         let prev = record.prev_baseline.as_ref().ok_or_else(|| {
             QuarryError::new(ErrorCode::Internal, "changed status without prev baseline")
         })?;
-        let summary = format!(
-            "content fingerprint changed: {} → {}",
-            prev.fingerprint, req.fresh_fingerprint
-        );
         let artifact_run: RunKind = run_kind.clone().unwrap_or_default();
-        let handle = artifacts
-            .put(
+        let diff_id = format!("diff_{}", ArtifactKind::new().ulid());
+        let diff = if text_mode {
+            let to = new_baseline.as_ref().ok_or_else(|| {
+                QuarryError::new(ErrorCode::Internal, "changed status without a new baseline")
+            })?;
+            let (handle, summary) = crate::change_diff::store_text_diff(
+                artifacts,
                 &req.org_id,
                 &artifact_run,
-                &req.fresh_fingerprint,
-                "raw",
-                summary.clone().into_bytes(),
+                prev,
+                to,
             )
             .await?;
-
-        let diff_id = format!("diff_{}", ArtifactKind::new().ulid());
-        let diff = DiffRecord {
-            diff_id: diff_id.clone(),
-            org_id: req.org_id.clone(),
-            from_baseline_id: prev.baseline_id.clone(),
-            to_baseline_id: resp.baseline_id.clone(),
-            source_url: req.url.clone(),
-            format: "text".to_string(),
-            artifact_id: handle.artifact_id,
-            summary: Some(summary),
-            created_at: now,
+            DiffRecord {
+                diff_id: diff_id.clone(),
+                org_id: req.org_id.clone(),
+                from_baseline_id: prev.baseline_id.clone(),
+                to_baseline_id: resp.baseline_id.clone(),
+                source_url: req.url.clone(),
+                format: quarry_core::change_history::TEXT_DIFF_FORMAT.to_string(),
+                artifact_id: handle.artifact_id,
+                summary: Some(summary),
+                created_at: now,
+            }
+        } else {
+            // We hold fingerprints (not the prev content), so the honest diff artifact
+            // records the fingerprint transition.
+            let summary = format!(
+                "content fingerprint changed: {} → {}",
+                prev.fingerprint, req.fresh_fingerprint
+            );
+            let handle = artifacts
+                .put(
+                    &req.org_id,
+                    &artifact_run,
+                    &req.fresh_fingerprint,
+                    "raw",
+                    summary.clone().into_bytes(),
+                )
+                .await?;
+            DiffRecord {
+                diff_id: diff_id.clone(),
+                org_id: req.org_id.clone(),
+                from_baseline_id: prev.baseline_id.clone(),
+                to_baseline_id: resp.baseline_id.clone(),
+                source_url: req.url.clone(),
+                format: "text".to_string(),
+                artifact_id: handle.artifact_id,
+                summary: Some(summary),
+                created_at: now,
+            }
         };
         store.create_diff_record(&diff).await?;
         resp.diff_id = Some(diff_id);
     }
 
-    // Post-persistence fan-out (durable event + signed webhook).
-    let zdr = quarry_core::zdr::ZdrMode::from(req.zdr.unwrap_or(false));
-    crate::change_webhook::emit_change_side_effects(state, &record, run_kind, zdr).await;
+    // The record that reaches the event log and the webhook names the baseline it saved and the
+    // diff it stored (before INNH-4 both were empty, and the event's idempotency key ended in
+    // an empty baseline id).
+    if text_mode {
+        record.new_baseline = new_baseline;
+        record.diff_id = resp.diff_id.clone();
+    }
 
-    Ok(resp)
+    Ok((resp, record, run_kind))
 }
 
 #[cfg(test)]
@@ -771,5 +954,332 @@ mod tests {
         assert_eq!(wrong.code, ErrorCode::Unauthorized);
         let missing = check_internal_token("s3cret", None, false).unwrap_err();
         assert_eq!(missing.code, ErrorCode::Unauthorized);
+    }
+}
+
+#[cfg(all(test, feature = "postgres-queue"))]
+mod record_tests {
+    use super::*;
+    use crate::change_diff::testing::MemStore;
+    use quarry_core::change_history::TextDiffArtifact;
+    use quarry_core::ids::kinds::{ArtifactKind, RunKind};
+    use quarry_runtime::artifact_store::{ArtifactStore, InMemoryStore};
+
+    const ORG: &str = "org_a";
+    const URL: &str = "https://example.com/pricing";
+
+    async fn page(artifacts: &InMemoryStore, org: &str, kind: &str, body: &str) -> ArtifactKind {
+        artifacts
+            .put(
+                org,
+                &RunKind::new(),
+                "page_hash",
+                kind,
+                body.as_bytes().to_vec(),
+            )
+            .await
+            .unwrap()
+            .artifact_id
+    }
+
+    fn request(
+        org: &str,
+        fingerprint: &str,
+        markdown: Option<String>,
+        zdr: Option<bool>,
+    ) -> RecordRequest {
+        serde_json::from_value(serde_json::json!({
+            "org_id": org,
+            "url": URL,
+            "fresh_fingerprint": fingerprint,
+            "run_id": "temporal-run-1",
+            "zdr": zdr,
+            "markdown_artifact_id": markdown,
+        }))
+        .unwrap()
+    }
+
+    async fn stored_diff(store: &MemStore, artifacts: &InMemoryStore) -> TextDiffArtifact {
+        let record = store
+            .diffs
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .expect("a diff record");
+        let bytes = artifacts.get(ORG, &record.artifact_id).await.unwrap();
+        serde_json::from_slice(&bytes).expect("the stored diff is JSON")
+    }
+
+    #[test]
+    fn the_record_request_decodes_the_optional_markdown_id() {
+        let with: RecordRequest = serde_json::from_value(serde_json::json!({
+            "org_id": "org_a", "url": URL, "fresh_fingerprint": "blake3:a",
+            "markdown_artifact_id": "art_01"
+        }))
+        .unwrap();
+        assert_eq!(with.markdown_artifact_id.as_deref(), Some("art_01"));
+        let without: RecordRequest = serde_json::from_value(serde_json::json!({
+            "org_id": "org_a", "url": URL, "fresh_fingerprint": "blake3:a"
+        }))
+        .unwrap();
+        assert!(without.markdown_artifact_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_new_baseline_keeps_the_markdown_and_an_unchanged_check_keeps_nothing() {
+        let (store, artifacts) = (MemStore::default(), InMemoryStore::new());
+        let md = page(&artifacts, ORG, "markdown", "first page").await;
+
+        let (resp, record, _) = record_core(
+            &store,
+            &artifacts,
+            &request(ORG, "blake3:a", Some(md.to_string()), None),
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status, "new");
+        let saved = store.baselines.lock().unwrap().clone();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].artifact_id, Some(md));
+        assert_eq!(saved[0].baseline_id, resp.baseline_id);
+        assert_eq!(record.new_baseline.unwrap().baseline_id, resp.baseline_id);
+        assert!(resp.diff_id.is_none());
+
+        // The same fingerprint again: nothing new is saved and the markdown id is not even read.
+        let (again, record, _) = record_core(
+            &store,
+            &artifacts,
+            &request(ORG, "blake3:a", Some("not-an-id".into()), None),
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(again.status, "unchanged");
+        assert_eq!(store.baselines.lock().unwrap().len(), 1);
+        assert!(record.new_baseline.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_change_stores_the_json_diff_and_names_it_in_the_record() {
+        let (store, artifacts) = (MemStore::default(), InMemoryStore::new());
+        let md1 = page(&artifacts, ORG, "markdown", "keep\n\nold price").await;
+        let md2 = page(&artifacts, ORG, "markdown", "keep\n\nnew price").await;
+        let (first, _, _) = record_core(
+            &store,
+            &artifacts,
+            &request(ORG, "blake3:a", Some(md1.to_string()), None),
+            true,
+        )
+        .await
+        .unwrap();
+
+        let (resp, record, _) = record_core(
+            &store,
+            &artifacts,
+            &request(ORG, "blake3:b", Some(md2.to_string()), None),
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(resp.changed);
+        let diff_id = resp.diff_id.clone().expect("a diff id");
+
+        let diffs = store.diffs.lock().unwrap().clone();
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].format, "json");
+        assert_eq!(diffs[0].from_baseline_id, first.baseline_id);
+        assert_eq!(diffs[0].to_baseline_id, resp.baseline_id);
+        assert_eq!(diffs[0].summary.as_deref(), Some("+1 -1 paragraphs"));
+        let artifact = stored_diff(&store, &artifacts).await;
+        assert!(artifact.available);
+        let diff = artifact.diff.unwrap();
+        assert_eq!((diff.added, diff.removed, diff.moved), (1, 1, 0));
+        assert!(diff.real_delta);
+
+        // What the event log and the webhook see names the baseline and the diff.
+        assert_eq!(record.diff_id.as_deref(), Some(diff_id.as_str()));
+        let new_baseline = record.new_baseline.clone().expect("new_baseline filled");
+        assert_eq!(new_baseline.baseline_id, resp.baseline_id);
+        assert_eq!(new_baseline.artifact_id, Some(md2));
+        let payload = crate::change_webhook::change_webhook_payload(&record).expect("a webhook");
+        assert_eq!(payload["diff_id"], diff_id);
+        assert_eq!(payload["new_baseline"]["baseline_id"], resp.baseline_id);
+        assert!(
+            crate::change_webhook::change_detected_idempotency_key(&record)
+                .ends_with(&resp.baseline_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_baseline_from_before_the_text_diff_gives_an_unavailable_diff_not_an_error() {
+        let (store, artifacts) = (MemStore::default(), InMemoryStore::new());
+        // As the recorder wrote it before INNH-4: a baseline with no artifact.
+        let (old, _, _) = record_core(
+            &store,
+            &artifacts,
+            &request(ORG, "blake3:a", None, None),
+            false,
+        )
+        .await
+        .unwrap();
+        let md = page(&artifacts, ORG, "markdown", "page after deploy").await;
+
+        let (resp, _, _) = record_core(
+            &store,
+            &artifacts,
+            &request(ORG, "blake3:b", Some(md.to_string()), None),
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(resp.changed && resp.diff_id.is_some());
+        let artifact = stored_diff(&store, &artifacts).await;
+        assert!(!artifact.available && artifact.diff.is_none());
+        assert_eq!(
+            artifact.reason,
+            Some(quarry_core::change_history::DiffUnavailable::NoPreviousText)
+        );
+        assert_eq!(artifact.from_baseline_id, old.baseline_id);
+        let summary = store.diffs.lock().unwrap()[0].summary.clone().unwrap();
+        assert_eq!(summary, "text diff unavailable: no_previous_text");
+        // The new baseline now holds text, so the next change diffs.
+        let saved = store.baselines.lock().unwrap().clone();
+        assert!(saved[0].artifact_id.is_none() && saved[1].artifact_id.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_markdown_id_of_another_org_is_refused_and_nothing_is_saved() {
+        let (store, artifacts) = (MemStore::default(), InMemoryStore::new());
+        let foreign = page(&artifacts, "org_b", "markdown", "someone else's page").await;
+        let err = record_core(
+            &store,
+            &artifacts,
+            &request(ORG, "blake3:a", Some(foreign.to_string()), None),
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, ErrorCode::BadRequest);
+        assert!(store.baselines.lock().unwrap().is_empty());
+        assert!(store.diffs.lock().unwrap().is_empty());
+
+        // Not a markdown artifact, and not an id at all: refused the same way.
+        let html = page(&artifacts, ORG, "html", "<p>x</p>").await;
+        for bad in [html.to_string(), "garbage".to_string()] {
+            let err = record_core(
+                &store,
+                &artifacts,
+                &request(ORG, "blake3:a", Some(bad), None),
+                true,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, ErrorCode::BadRequest);
+        }
+        assert!(store.baselines.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn with_the_flag_off_the_recorder_is_what_it_was() {
+        let (store, artifacts) = (MemStore::default(), InMemoryStore::new());
+        let md1 = page(&artifacts, ORG, "markdown", "one").await;
+        let md2 = page(&artifacts, ORG, "markdown", "two").await;
+        record_core(
+            &store,
+            &artifacts,
+            &request(ORG, "blake3:a", Some(md1.to_string()), None),
+            false,
+        )
+        .await
+        .unwrap();
+        let (resp, record, _) = record_core(
+            &store,
+            &artifacts,
+            &request(ORG, "blake3:b", Some(md2.to_string()), None),
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(store
+            .baselines
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|b| b.artifact_id.is_none()));
+        let diffs = store.diffs.lock().unwrap().clone();
+        assert_eq!(diffs[0].format, "text");
+        let note = artifacts.get(ORG, &diffs[0].artifact_id).await.unwrap();
+        assert!(String::from_utf8(note)
+            .unwrap()
+            .starts_with("content fingerprint changed: blake3:a"));
+        // And the record the webhook gets is unfilled, as before.
+        assert!(record.new_baseline.is_none() && record.diff_id.is_none());
+        assert!(
+            resp.diff_id.is_some(),
+            "the response still names the diff it stored"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_zdr_declared_check_never_stores_text_even_with_the_flag_on() {
+        // Observe mode: the baseline row is still written for a ZDR-declared body. No text and no
+        // diff may follow it, and a markdown id the orchestrator should never send is not trusted.
+        let (store, artifacts) = (MemStore::default(), InMemoryStore::new());
+        let md = page(&artifacts, ORG, "markdown", "page").await;
+        record_core(
+            &store,
+            &artifacts,
+            &request(ORG, "blake3:a", Some(md.to_string()), Some(true)),
+            true,
+        )
+        .await
+        .unwrap();
+        let (resp, record, _) = record_core(
+            &store,
+            &artifacts,
+            &request(ORG, "blake3:b", Some("garbage".into()), Some(true)),
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(store
+            .baselines
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|b| b.artifact_id.is_none()));
+        assert_eq!(store.diffs.lock().unwrap()[0].format, "text");
+        assert!(resp.changed && record.new_baseline.is_none() && record.diff_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_raw_byte_change_with_the_same_text_is_reported_as_no_real_delta() {
+        let (store, artifacts) = (MemStore::default(), InMemoryStore::new());
+        let md1 = page(&artifacts, ORG, "markdown", "same text\n\nsecond").await;
+        let md2 = page(&artifacts, ORG, "markdown", "same  text\n\nsecond").await;
+        record_core(
+            &store,
+            &artifacts,
+            &request(ORG, "blake3:a", Some(md1.to_string()), None),
+            true,
+        )
+        .await
+        .unwrap();
+        let (resp, _, _) = record_core(
+            &store,
+            &artifacts,
+            &request(ORG, "blake3:b", Some(md2.to_string()), None),
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(resp.changed, "the raw-byte fingerprint still says changed");
+        let artifact = stored_diff(&store, &artifacts).await;
+        assert!(!artifact.diff.unwrap().real_delta);
+        let summary = store.diffs.lock().unwrap()[0].summary.clone().unwrap();
+        assert!(summary.starts_with("no paragraph change"), "{summary}");
     }
 }

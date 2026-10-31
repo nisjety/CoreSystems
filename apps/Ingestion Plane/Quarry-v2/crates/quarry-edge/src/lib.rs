@@ -7,6 +7,8 @@ pub mod audio_routes;
 pub mod auth;
 pub mod cache;
 pub mod canary;
+#[cfg(feature = "postgres-queue")]
+pub mod change_diff;
 pub mod change_routes;
 pub mod change_webhook;
 pub mod config;

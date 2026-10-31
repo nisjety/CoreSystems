@@ -32,6 +32,10 @@ mod audio_routes;
 mod auth;
 mod cache;
 mod canary;
+// INNH-4: the text diff of a monitored URL; it reads and writes the baseline store, so it exists
+// only where that does.
+#[cfg(feature = "postgres-queue")]
+mod change_diff;
 mod change_routes;
 // Only consumed by the postgres-queue-gated fan-out in change_routes; the
 // bin target has no external consumers, so an ungated declaration would be

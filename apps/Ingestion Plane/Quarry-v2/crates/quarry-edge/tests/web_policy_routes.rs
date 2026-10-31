@@ -430,6 +430,8 @@ fn route_manifest() -> Vec<(&'static str, Gate)> {
         ("/v1/change/check", NoUrl),
         ("/v1/change/latest", NoUrl),
         ("/v1/change/history", NoUrl),
+        // INNH-4: reads two stored baselines of a url the caller names; nothing is fetched.
+        ("/v1/change/diff", NoUrl),
         ("/v1/change/snapshot", NoUrl),
         // Queues a URL for a worker; gated before it is queued (the postgres-queue handler).
         ("/v1/change/refresh", Gated),

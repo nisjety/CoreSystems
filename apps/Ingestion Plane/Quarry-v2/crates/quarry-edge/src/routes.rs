@@ -276,6 +276,9 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/change/check", post(crate::change_routes::check))
         .route("/v1/change/latest", get(crate::change_routes::latest))
         .route("/v1/change/history", get(crate::change_routes::history))
+        // INNH-4: the two versions of a tracked page and the diff between them. 501 unless
+        // QUARRY_EDGE__CHANGE_TEXT_DIFF is on.
+        .route("/v1/change/diff", get(crate::change_routes::diff))
         // Parity finishers — PromoteTrackedResultToSnapshot +
         // ScheduleRefreshRun over the PostgresBaselineStore / durable
         // frontier. Both 501 with a hint when postgres-queue is off.
@@ -1469,6 +1472,13 @@ pub struct InternalRunPageResult {
     /// WS14.S2: set only when the request carried `crawl`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub crawl: Option<quarry_core::crawl_scope::CrawlReport>,
+    /// INNH-4: id of the stored markdown artifact of this page (org-bound, readable through
+    /// `GET /v1/artifacts/{id}`). General, not change-specific: the change monitor keeps it
+    /// on a baseline, and the per-run results of a crawl or batch can list it (INNH-12).
+    /// Absent when nothing was stored, always so under ZDR. An older runtime omits it, and
+    /// so does every response when no page artifact was written.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub markdown_artifact_id: Option<String>,
 }
 
 impl InternalRunPageResult {
@@ -1499,6 +1509,11 @@ impl InternalRunPageResult {
                     .unwrap_or_default()
             }),
             crawl: None,
+            markdown_artifact_id: out
+                .formats
+                .markdown
+                .as_ref()
+                .map(|format| format.artifact_id.to_string()),
         }
     }
 }
@@ -2920,4 +2935,45 @@ mod tests {
         assert!(body["data"].get("scrape_id").is_none());
     }
 
+    // ---- INNH-4: run_page hands back the id of the stored markdown ----
+
+    fn output_with_markdown(markdown: Option<&str>) -> NormalizedOutput {
+        let mut formats = serde_json::json!({});
+        if let Some(id) = markdown {
+            formats = serde_json::json!({ "markdown": { "artifact_id": id, "bytes": 12 } });
+        }
+        serde_json::from_value(serde_json::json!({
+            "run_id": quarry_core::ids::kinds::RunKind::new(),
+            "url": { "requested": "https://example.com/p", "final_url": "https://example.com/p" },
+            "status": 200,
+            "fetched_at": "2026-01-01T00:00:00Z",
+            "fingerprint": "blake3:fp",
+            "formats": formats,
+            "change": { "status": "new" },
+            "metadata": {},
+            "driver": { "kind": "static", "duration_ms": 1 }
+        }))
+        .expect("a minimal NormalizedOutput")
+    }
+
+    #[test]
+    fn run_page_result_carries_the_markdown_artifact_id() {
+        let id = quarry_core::ids::kinds::ArtifactKind::new().to_string();
+        let out = output_with_markdown(Some(&id));
+        let result = InternalRunPageResult::from_output("run_1".into(), &out);
+        assert_eq!(result.markdown_artifact_id.as_deref(), Some(id.as_str()));
+        let wire = serde_json::to_value(&result).unwrap();
+        assert_eq!(wire["markdown_artifact_id"], id);
+    }
+
+    #[test]
+    fn run_page_result_omits_the_markdown_artifact_id_when_nothing_was_stored() {
+        // ZDR (and a failed write) leave `formats.markdown` empty: the wire carries no key,
+        // so the orchestrator forwards nothing and no hash-only stand-in exists.
+        let out = output_with_markdown(None);
+        let result = InternalRunPageResult::from_output("run_1".into(), &out);
+        assert!(result.markdown_artifact_id.is_none());
+        let wire = serde_json::to_value(&result).unwrap();
+        assert!(wire.get("markdown_artifact_id").is_none(), "{wire}");
+    }
 }
