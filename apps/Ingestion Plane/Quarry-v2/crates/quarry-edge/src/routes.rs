@@ -642,6 +642,9 @@ async fn scrape_with(
         }
     }
     let privacy = effective_privacy(req.privacy.clone(), zdr);
+    // INNH-1: the same rule the page-title hop uses. The AI formats are skipped
+    // (no model call) when the request's privacy block forbids a model hop.
+    let ai_model_hop_allowed = quarry_runtime::page_extract::model_hop_allowed(zdr, &privacy);
     // Tenant isolation: ignore any client-supplied org_id and use the
     // verified JWT claim. The `ScrapeRequest.org_id` field is preserved
     // on the wire for backwards-compat but its value is never trusted.
@@ -795,10 +798,15 @@ async fn scrape_with(
             remove_base64_images: resolved.remove_base64_images,
             extractor: resolved.extractor,
         },
-        // INNH-1: the page text the AI formats read, cut to the model's input cap.
-        // Asked for only when the request carries an AI format.
-        ai_source_max_chars: (!ai_specs.is_empty())
-            .then(|| crate::scrape_contract::ai_formats::settings().max_input_chars),
+        // INNH-1: the page text the AI formats read. One char more than the
+        // model's input cap, so the engine does the cut and can tell a page that
+        // is over the cap (`truncated_input`) from one of exactly the cap. Asked
+        // for only when the request carries an AI format and a model hop is allowed.
+        ai_source_max_chars: (!ai_specs.is_empty() && ai_model_hop_allowed).then(|| {
+            crate::scrape_contract::ai_formats::settings()
+                .max_input_chars
+                .saturating_add(1)
+        }),
     };
     let tombstone_started = chrono::Utc::now();
     // The caller's bound, never past the table's cap, so the typed Timeout
@@ -879,6 +887,7 @@ async fn scrape_with(
                     &ai_specs,
                     inline.ai_source.as_deref().unwrap_or(""),
                     zdr.is_active(),
+                    ai_model_hop_allowed,
                     &request_id,
                 )
                 .await;

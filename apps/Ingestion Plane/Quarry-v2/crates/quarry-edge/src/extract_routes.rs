@@ -37,6 +37,9 @@ const MAX_PROMPT_CHARS: usize = 10_000;
 /// source with a schema or a prompt is a paid model call made in turn, so past this budget the
 /// remaining sources answer a typed per-source error instead of the whole request timing out.
 const REQUEST_BUDGET: std::time::Duration = std::time::Duration::from_secs(50);
+/// INNH-1: the request's privacy block (`credential_or_secret`, `zdr_ephemeral`) forbids a
+/// model hop, the same rule the AI scrape formats and the page-title hop follow.
+const PRIVACY_POLICY_MESSAGE: &str = "PRIVACY_POLICY: extraction with a schema or a prompt sends page text to a model, which the request's privacy classification does not allow";
 const BUDGET_EXHAUSTED_MESSAGE: &str =
     "the request time budget ran out before the model read this source; send fewer URLs per request";
 /// Default back-off window advertised on a 429 so callers can retry without
@@ -416,6 +419,17 @@ async fn run_extract(
                         status: "error".into(),
                         structured,
                         error: Some(ZDR_UNAVAILABLE_MESSAGE.into()),
+                        truncated_input: truncated,
+                        ..ExtractItem::default()
+                    }
+                } else if !quarry_runtime::page_extract::model_hop_allowed(zdr, &privacy) {
+                    // The privacy block forbids a model hop. No page text leaves; the
+                    // harvest needs no model, so it still comes back.
+                    ExtractItem {
+                        url: raw.clone(),
+                        status: "error".into(),
+                        structured,
+                        error: Some(PRIVACY_POLICY_MESSAGE.into()),
                         truncated_input: truncated,
                         ..ExtractItem::default()
                     }
@@ -1178,6 +1192,53 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["results"][0]["status"], "error");
+    }
+
+    #[tokio::test]
+    async fn a_privacy_block_that_forbids_a_model_hop_never_reaches_the_model() {
+        let model = model_double("{\"basic\": 12}").await;
+        for classification in ["credential_or_secret", "zdr_ephemeral"] {
+            for (schema, prompt) in [
+                (Some(plan_schema()), None),
+                (None, Some("the plan")),
+            ] {
+                let mut req = request(schema, prompt);
+                req.privacy = Some(
+                    serde_json::from_value(serde_json::json!({
+                        "privacy_classification": classification
+                    }))
+                    .unwrap(),
+                );
+                let (status, body) = call(
+                    state_with_model(PAGE, Some(&model)),
+                    crate::test_support::claims_for_org("org_alpha"),
+                    req,
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{classification}");
+                let item = &body["results"][0];
+                assert_eq!(item["status"], "error", "{classification}");
+                let message = item["error"].as_str().unwrap();
+                assert!(
+                    message.starts_with("PRIVACY_POLICY") || message.starts_with("ZDR_UNAVAILABLE"),
+                    "{classification}: {message}"
+                );
+                assert!(item.get("data").is_none());
+            }
+        }
+        assert!(
+            model.received_requests().await.unwrap().is_empty(),
+            "a privacy block that forbids a model hop costs no model call"
+        );
+        // An unclassified request (the default, customer_private) still reaches it.
+        let (_, body) = call(
+            state_with_model(PAGE, Some(&model)),
+            crate::test_support::claims_for_org("org_alpha"),
+            request(Some(plan_schema()), None),
+        )
+        .await;
+        assert_eq!(body["results"][0]["status"], "ok");
+        assert_eq!(model.received_requests().await.unwrap().len(), 1);
     }
 
     #[tokio::test]

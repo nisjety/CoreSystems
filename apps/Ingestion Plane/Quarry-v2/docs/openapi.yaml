@@ -7508,11 +7508,13 @@ components:
           enum: [ok, error, skipped]
         code:
           type: string
-          enum: [MODEL_UNAVAILABLE, MODEL_RATE_LIMITED, SCHEMA_INVALID, ZDR_UNAVAILABLE, BUDGET_EXHAUSTED, EMPTY_SOURCE]
+          enum: [MODEL_UNAVAILABLE, MODEL_RATE_LIMITED, SCHEMA_INVALID, ZDR_UNAVAILABLE, BUDGET_EXHAUSTED, EMPTY_SOURCE, PRIVACY_POLICY]
           description: >-
             Absent when status is ok. ZDR_UNAVAILABLE: the request is under Zero Data Retention (skipped, no
             model call). BUDGET_EXHAUSTED: the request's call or token budget is spent (skipped).
-            EMPTY_SOURCE: the page had no text (skipped). MODEL_RATE_LIMITED: error, with retry_after_s;
+            EMPTY_SOURCE: the page had no text (skipped). PRIVACY_POLICY: the request's privacy block
+            (privacy_classification credential_or_secret or zdr_ephemeral) forbids a model hop (skipped,
+            no model call). MODEL_RATE_LIMITED: error, with retry_after_s;
             formats not yet started are skipped with the same code. MODEL_UNAVAILABLE: error, see reason.
             SCHEMA_INVALID: the json output could not be made valid (error); data.json is absent and
             schema_issues lists paths and codes.

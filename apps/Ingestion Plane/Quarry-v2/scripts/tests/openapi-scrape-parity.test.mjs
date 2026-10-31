@@ -181,7 +181,7 @@ test('the_response_documents_the_ai_fields_and_the_report_schemas', () => {
   for (const name of ['AiReport', 'AiFormatReport', 'Highlight']) component(name);
   const report = component('AiFormatReport');
   const codes = /code:\n\s+type: string\n\s+enum: \[([^\]]*)\]/.exec(report)[1].split(',').map((value) => value.trim());
-  assert.deepEqual(codes, ['MODEL_UNAVAILABLE', 'MODEL_RATE_LIMITED', 'SCHEMA_INVALID', 'ZDR_UNAVAILABLE', 'BUDGET_EXHAUSTED', 'EMPTY_SOURCE']);
+  assert.deepEqual(codes, ['MODEL_UNAVAILABLE', 'MODEL_RATE_LIMITED', 'SCHEMA_INVALID', 'ZDR_UNAVAILABLE', 'BUDGET_EXHAUSTED', 'EMPTY_SOURCE', 'PRIVACY_POLICY']);
   assert.deepEqual(propertyNames(component('AiReport')).sort(), ['highlights', 'json', 'question', 'summary', 'total']);
 });
 

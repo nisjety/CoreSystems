@@ -63,7 +63,9 @@ pub struct InlineParts {
     /// (not ZDR) or carried as base64 under the inline cap (ZDR).
     pub actions: Vec<quarry_core::scrape::ActionOutcomeView>,
     /// INNH-1: the page text for the AI formats, at most
-    /// [`InlineRequest::ai_source_max_chars`] chars (cut on a char boundary).
+    /// [`InlineRequest::ai_source_max_chars`] chars (cut on a char boundary). A
+    /// caller that must know the page was longer asks for one char more than it
+    /// will use and cuts the rest itself.
     /// Filled whenever that is asked for, whether or not `markdown` was
     /// requested and however long the text is (the inline cap does not apply).
     /// Never serialized and never stored: the caller hands it to the AI
