@@ -216,8 +216,44 @@ struct InMemoryArtifactMeta {
     id: ArtifactKind,
     org_id: String,
     kind: String,
+    run_id: String,
+    page_hash: String,
     bytes: u64,
     created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// The run and page hash a durable storage key names:
+/// `org=<org>/run=<run_id>/page=<page_hash>/<stem>.<ext>`.
+fn run_and_page_from_key(key: &str) -> (Option<String>, Option<String>) {
+    let mut run = None;
+    let mut page = None;
+    for segment in key.split('/') {
+        if let Some(r) = segment.strip_prefix("run=") {
+            run = Some(r.to_string());
+        } else if let Some(p) = segment.strip_prefix("page=") {
+            page = Some(p.to_string());
+        }
+    }
+    (run, page)
+}
+
+/// `{stem}.{ext}`: the stem is the artifact kind and never contains a dot.
+fn kind_from_key(key: &str) -> String {
+    key.rsplit('/')
+        .next()
+        .and_then(|file| file.split('.').next())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Whether a row passes the artifact-only `run_id` and `kind` filters (INNH-12).
+fn matches_artifact_filters(
+    filter: &quarry_core::pagination::ListFilter,
+    run_id: Option<&str>,
+    kind: &str,
+) -> bool {
+    filter.run_id.as_deref().map_or(true, |want| run_id == Some(want))
+        && filter.kind.as_deref().map_or(true, |want| kind == want)
 }
 
 #[derive(Default)]
@@ -256,6 +292,8 @@ impl ArtifactStore for InMemoryStore {
             id: id.clone(),
             org_id: org_id.to_string(),
             kind: kind.to_string(),
+            run_id: run_id.to_string(),
+            page_hash: page_hash.to_string(),
             bytes,
             created_at: chrono::Utc::now(),
         });
@@ -310,6 +348,7 @@ impl ArtifactStore for InMemoryStore {
             // Tenant isolation: an artifact is only listable by the org that
             // wrote it (stamped from the writer's claim at `put`).
             .filter(|m| m.org_id == org_id)
+            .filter(|m| matches_artifact_filters(filter, Some(m.run_id.as_str()), &m.kind))
             .cloned()
             .collect();
         let (window, next_cursor) = list_window(rows, filter, |m| (m.created_at, m.id.to_string()));
@@ -323,6 +362,8 @@ impl ArtifactStore for InMemoryStore {
                 sha256: None,
                 created_at: m.created_at,
                 source_url: None,
+                run_id: Some(m.run_id),
+                page_hash: Some(m.page_hash),
             })
             .collect();
         Ok(Page::new(items, next_cursor, None))
@@ -546,7 +587,10 @@ impl ArtifactStore for FilesystemStore {
         if org_id.is_empty() {
             return Ok(Page::new(Vec::new(), None, None));
         }
-        let rows = self.index_rows(org_id).await?;
+        let mut rows = self.index_rows(org_id).await?;
+        rows.retain(|row| {
+            matches_artifact_filters(filter, run_and_page_from_key(&row.key).0.as_deref(), &kind_from_key(&row.key))
+        });
         let (window, next_cursor) = list_window(rows, filter, |r| (r.created_at, r.id.to_string()));
         let mut items = Vec::with_capacity(window.len());
         for row in window {
@@ -561,14 +605,8 @@ impl ArtifactStore for FilesystemStore {
                     ))
                 }
             };
-            // `{stem}.{ext}`: the stem is the kind and never contains a dot.
-            let kind = row
-                .key
-                .rsplit('/')
-                .next()
-                .and_then(|file| file.split('.').next())
-                .unwrap_or_default()
-                .to_string();
+            let kind = kind_from_key(&row.key);
+            let (run_id, page_hash) = run_and_page_from_key(&row.key);
             items.push(ArtifactSummary {
                 artifact_id: row.id,
                 org_id: org_id.to_string(),
@@ -577,6 +615,8 @@ impl ArtifactStore for FilesystemStore {
                 sha256: None,
                 created_at: row.created_at,
                 source_url: None,
+                run_id,
+                page_hash,
             });
         }
         Ok(Page::new(items, next_cursor, None))
@@ -1111,6 +1151,130 @@ mod tests {
         let fs = assert_list_contract(&FilesystemStore::new(tmp.path()).unwrap()).await;
         let memory = assert_list_contract(&InMemoryStore::new()).await;
         assert_eq!(fs, memory);
+    }
+
+    // ---- INNH-12: the run_id and kind filters ---------------------------------
+
+    /// Two runs of `org_a` (each: html, markdown, a second page's markdown), one run of
+    /// `org_b`. Checks the filters, the run and page hash on every row, and tenancy.
+    async fn assert_run_and_kind_filters(store: &dyn ArtifactStore) {
+        let run1: RunKind = Id::new();
+        let run2: RunKind = Id::new();
+        let run_b: RunKind = Id::new();
+        for (org, run, page, kind) in [
+            ("org_a", &run1, "blake3:p1", "html"),
+            ("org_a", &run1, "blake3:p1", "markdown"),
+            ("org_a", &run1, "blake3:p2", "markdown"),
+            ("org_a", &run2, "blake3:p1", "markdown"),
+            ("org_b", &run_b, "blake3:pb", "markdown"),
+        ] {
+            store.put(org, run, page, kind, b"x".to_vec()).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+        }
+        let list = |filter: ListFilter| async move { store.list("org_a", &filter).await.unwrap().items };
+
+        let all = list(ListFilter::default()).await;
+        assert_eq!(all.len(), 4);
+        for row in &all {
+            assert!(row.run_id.is_some() && row.page_hash.is_some(), "{row:?}");
+        }
+
+        let of_run1 = list(ListFilter { run_id: Some(run1.to_string()), ..Default::default() }).await;
+        assert_eq!(of_run1.len(), 3);
+        assert!(of_run1.iter().all(|r| r.run_id.as_deref() == Some(run1.to_string().as_str())));
+
+        let md_run1 = list(ListFilter {
+            run_id: Some(run1.to_string()),
+            kind: Some("markdown".into()),
+            ..Default::default()
+        })
+        .await;
+        assert_eq!(md_run1.len(), 2);
+        assert!(md_run1.iter().all(|r| r.kind == "markdown"));
+        let mut pages: Vec<_> = md_run1.iter().filter_map(|r| r.page_hash.clone()).collect();
+        pages.sort();
+        assert_eq!(pages, ["blake3:p1", "blake3:p2"]);
+
+        let md = list(ListFilter { kind: Some("markdown".into()), ..Default::default() }).await;
+        assert_eq!(md.len(), 3, "markdown across both runs of the org");
+
+        // Paging keeps the filter: two pages of one-row windows cover the run once.
+        let first = store
+            .list(
+                "org_a",
+                &ListFilter { run_id: Some(run1.to_string()), limit: Some(2), ..Default::default() },
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.items.len(), 2);
+        let second = store
+            .list(
+                "org_a",
+                &ListFilter {
+                    run_id: Some(run1.to_string()),
+                    limit: Some(2),
+                    cursor: first.next_cursor.clone(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.items.len(), 1);
+        assert!(second.next_cursor.is_none());
+
+        // Another organization's run id lists nothing for this org, and an unknown run too.
+        let foreign = list(ListFilter { run_id: Some(run_b.to_string()), ..Default::default() }).await;
+        assert!(foreign.is_empty(), "a run of org_b is invisible to org_a: {foreign:?}");
+        let unknown = list(ListFilter { run_id: Some(RunKind::new().to_string()), ..Default::default() }).await;
+        assert!(unknown.is_empty());
+        let none_kind = list(ListFilter { kind: Some("pdf".into()), ..Default::default() }).await;
+        assert!(none_kind.is_empty());
+        // ...and org_b sees its own run through the same filter.
+        let b = store
+            .list("org_b", &ListFilter { run_id: Some(run_b.to_string()), ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(b.items.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn in_memory_store_filters_by_run_and_kind() {
+        assert_run_and_kind_filters(&InMemoryStore::new()).await;
+    }
+
+    #[tokio::test]
+    async fn fs_store_filters_by_run_and_kind() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_run_and_kind_filters(&FilesystemStore::new(tmp.path()).unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn fs_store_filters_by_run_after_a_restart() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run: RunKind = Id::new();
+        let other: RunKind = Id::new();
+        {
+            let store = FilesystemStore::new(tmp.path()).unwrap();
+            store.put("org_a", &run, "blake3:p", "markdown", b"a".to_vec()).await.unwrap();
+            store.put("org_a", &other, "blake3:q", "markdown", b"b".to_vec()).await.unwrap();
+        }
+        let reopened = FilesystemStore::new(tmp.path()).unwrap();
+        let page = reopened
+            .list("org_a", &ListFilter { run_id: Some(run.to_string()), ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].run_id.as_deref(), Some(run.to_string().as_str()));
+    }
+
+    #[test]
+    fn the_run_and_page_come_from_the_storage_key() {
+        assert_eq!(
+            run_and_page_from_key("org=o/run=run_1/page=blake3:ab/markdown.md"),
+            (Some("run_1".to_string()), Some("blake3:ab".to_string()))
+        );
+        assert_eq!(run_and_page_from_key("org=o/other"), (None, None));
+        assert_eq!(kind_from_key("org=o/run=r/page=p/extract.json"), "extract");
     }
 
     #[tokio::test]

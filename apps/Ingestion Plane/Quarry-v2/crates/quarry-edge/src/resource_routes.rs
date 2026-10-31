@@ -60,7 +60,16 @@ pub struct ListQuery {
     pub cursor: Option<String>,
     #[serde(default)]
     pub sort: Option<String>,
+    /// `GET /v1/artifacts` only (INNH-12); other lists ignore it.
+    #[serde(default)]
+    pub run_id: Option<String>,
+    /// `GET /v1/artifacts` only (INNH-12); other lists ignore it.
+    #[serde(default)]
+    pub kind: Option<String>,
 }
+
+/// The artifact kinds `GET /v1/artifacts?kind=` accepts, as `docs/openapi.yaml` lists them.
+pub const ARTIFACT_LIST_KINDS: [&str; 6] = ["markdown", "html", "raw", "pdf", "screenshot", "extract"];
 
 impl ListQuery {
     fn into_filter(self) -> Result<ListFilter, QuarryError> {
@@ -93,6 +102,8 @@ impl ListQuery {
             limit: self.limit,
             cursor: self.cursor,
             sort,
+            run_id: self.run_id,
+            kind: self.kind,
         })
     }
 }
@@ -117,6 +128,29 @@ fn err_response(request_id: &str, err: QuarryError) -> (StatusCode, Json<Envelop
 // /v1/artifacts — served locally from ArtifactStore
 // =============================================================================
 
+/// `run_id` must be a run id and `kind` one of the documented kinds: a filter that cannot match
+/// is a 400 that names the field, never an empty page that looks like "no artifacts".
+fn check_artifact_filters(filter: &ListFilter) -> Result<(), QuarryError> {
+    let bad = |field: &str, message: String| {
+        QuarryError::new(ErrorCode::BadRequest, message)
+            .with_details(serde_json::json!({ "field": field }))
+    };
+    if let Some(run_id) = &filter.run_id {
+        if run_id.parse::<quarry_core::ids::kinds::RunKind>().is_err() {
+            return Err(bad("run_id", "run_id must be a run id (run_...)".to_string()));
+        }
+    }
+    if let Some(kind) = &filter.kind {
+        if !ARTIFACT_LIST_KINDS.contains(&kind.as_str()) {
+            return Err(bad(
+                "kind",
+                format!("kind must be one of {}", ARTIFACT_LIST_KINDS.join(", ")),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub async fn list_artifacts(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
@@ -124,6 +158,7 @@ pub async fn list_artifacts(
 ) -> Result<Json<Envelope<Page<ArtifactSummary>>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = crate::request_id::current();
     let filter = q.into_filter().map_err(|e| err_response(&request_id, e))?;
+    check_artifact_filters(&filter).map_err(|e| err_response(&request_id, e))?;
     let page = state
         .artifacts
         .list(&claims.org_id, &filter)
@@ -1358,6 +1393,8 @@ mod tests {
             sort: Some("oldest".into()),
             status: Some("running".into()),
             cursor: Some("opaque".into()),
+            run_id: None,
+            kind: None,
         };
         let f = q.into_filter().unwrap();
         assert_eq!(f.status.as_deref(), Some("running"));
@@ -1367,6 +1404,35 @@ mod tests {
             quarry_core::pagination::SortDirection::Oldest
         ));
         assert!(f.created_before.is_some());
+    }
+
+    #[test]
+    fn artifact_filters_accept_a_run_id_and_a_documented_kind_only() {
+        let run = quarry_core::ids::kinds::RunKind::new().to_string();
+        let ok = ListQuery {
+            run_id: Some(run.clone()),
+            kind: Some("markdown".into()),
+            ..Default::default()
+        }
+        .into_filter()
+        .unwrap();
+        assert_eq!(ok.run_id.as_deref(), Some(run.as_str()));
+        assert_eq!(ok.kind.as_deref(), Some("markdown"));
+        assert!(check_artifact_filters(&ok).is_ok());
+        assert!(check_artifact_filters(&ListFilter::default()).is_ok());
+
+        for kind in ["meta", "MARKDOWN", "", "markdown,html"] {
+            let filter = ListFilter { kind: Some(kind.into()), ..Default::default() };
+            let err = check_artifact_filters(&filter).unwrap_err();
+            assert_eq!(err.code, ErrorCode::BadRequest, "kind={kind:?}");
+            assert_eq!(err.details.as_ref().unwrap()["field"], "kind");
+        }
+        for run_id in ["art_01", "", "not-a-run", "run_"] {
+            let filter = ListFilter { run_id: Some(run_id.into()), ..Default::default() };
+            let err = check_artifact_filters(&filter).unwrap_err();
+            assert_eq!(err.code, ErrorCode::BadRequest, "run_id={run_id:?}");
+            assert_eq!(err.details.as_ref().unwrap()["field"], "run_id");
+        }
     }
 
     #[test]

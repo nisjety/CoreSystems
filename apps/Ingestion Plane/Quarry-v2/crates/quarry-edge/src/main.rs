@@ -53,6 +53,7 @@ mod handoff;
 mod internal_auth;
 mod internal_routes;
 mod job_lifecycle_routes;
+mod job_results_routes;
 mod job_stream;
 mod crawl_policy;
 mod crawl_request;

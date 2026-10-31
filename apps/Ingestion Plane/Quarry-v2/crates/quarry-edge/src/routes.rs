@@ -159,6 +159,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/crawl/ongoing", get(crate::job_lifecycle_routes::ongoing_crawl))
         .route("/v1/crawl/:id", get(crate::job_lifecycle_routes::get_crawl))
         .route("/v1/crawl/:id/errors", get(crate::job_lifecycle_routes::crawl_errors))
+        // INNH-12: the pages a job fetched. Off unless QUARRY_EDGE__JOB_RESULTS is on.
+        .route("/v1/crawl/:id/results", get(crate::job_results_routes::crawl_results))
+        .route("/v1/batch/:id/results", get(crate::job_results_routes::batch_results))
+        .route("/v1/jobs/:id/results", get(crate::job_results_routes::job_results))
         .route("/v1/batch/ongoing", get(crate::job_lifecycle_routes::ongoing_batch))
         .route("/v1/batch/:id", get(crate::job_lifecycle_routes::get_batch))
         .route("/v1/batch/:id/errors", get(crate::job_lifecycle_routes::batch_errors))
@@ -1479,6 +1483,13 @@ pub struct InternalRunPageResult {
     /// so does every response when no page artifact was written.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub markdown_artifact_id: Option<String>,
+    /// INNH-12: id of the stored source of this page (`html`, or `raw` for a document), read
+    /// through the same org-bound `GET /v1/artifacts/{id}`. Absent whenever the markdown id is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_artifact_id: Option<String>,
+    /// INNH-12: size in bytes of the stored markdown. Absent whenever the markdown id is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
 }
 
 impl InternalRunPageResult {
@@ -1514,6 +1525,13 @@ impl InternalRunPageResult {
                 .markdown
                 .as_ref()
                 .map(|format| format.artifact_id.to_string()),
+            source_artifact_id: out
+                .formats
+                .html
+                .as_ref()
+                .or(out.formats.raw.as_ref())
+                .map(|format| format.artifact_id.to_string()),
+            bytes: out.formats.markdown.as_ref().map(|format| format.bytes),
         }
     }
 }
@@ -2975,5 +2993,42 @@ mod tests {
         assert!(result.markdown_artifact_id.is_none());
         let wire = serde_json::to_value(&result).unwrap();
         assert!(wire.get("markdown_artifact_id").is_none(), "{wire}");
+        assert!(wire.get("source_artifact_id").is_none(), "{wire}");
+        assert!(wire.get("bytes").is_none(), "{wire}");
+    }
+
+    fn output_with_formats(formats: serde_json::Value) -> NormalizedOutput {
+        let mut out = output_with_markdown(None);
+        out.formats = serde_json::from_value(formats).expect("formats");
+        out
+    }
+
+    // ---- INNH-12: the per-run results read these fields off page_fetched ----
+
+    #[test]
+    fn run_page_result_carries_the_source_artifact_and_markdown_bytes() {
+        let md = quarry_core::ids::kinds::ArtifactKind::new().to_string();
+        let html = quarry_core::ids::kinds::ArtifactKind::new().to_string();
+        let out = output_with_formats(serde_json::json!({
+            "markdown": { "artifact_id": md, "bytes": 321 },
+            "html": { "artifact_id": html, "bytes": 9000 }
+        }));
+        let wire = serde_json::to_value(InternalRunPageResult::from_output("run_1".into(), &out))
+            .unwrap();
+        assert_eq!(wire["markdown_artifact_id"], md);
+        assert_eq!(wire["source_artifact_id"], html);
+        assert_eq!(wire["bytes"], 321, "bytes is the markdown size, not the source size");
+    }
+
+    #[test]
+    fn run_page_result_source_is_the_raw_artifact_for_a_document() {
+        let md = quarry_core::ids::kinds::ArtifactKind::new().to_string();
+        let raw = quarry_core::ids::kinds::ArtifactKind::new().to_string();
+        let out = output_with_formats(serde_json::json!({
+            "markdown": { "artifact_id": md, "bytes": 5 },
+            "raw": { "artifact_id": raw, "bytes": 77 }
+        }));
+        let result = InternalRunPageResult::from_output("run_1".into(), &out);
+        assert_eq!(result.source_artifact_id.as_deref(), Some(raw.as_str()));
     }
 }

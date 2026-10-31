@@ -420,6 +420,8 @@ const PENDING_FEATURES: &[&str] = &[
     // agent attachment to a person's live run is refused for a ZDR run (WS8.F).
     "job_error_urls",
     "agent_attach",
+    // INNH-12: a job results read names the URL and title of every page the job fetched.
+    "job_result_urls",
 ];
 
 fn refusals_named_by_the_matrix() -> (BTreeSet<&'static str>, BTreeSet<&'static str>) {

@@ -25,6 +25,7 @@ pub mod handoff;
 pub mod internal_auth;
 pub mod internal_routes;
 pub mod job_lifecycle_routes;
+pub mod job_results_routes;
 pub mod job_stream;
 pub mod limits;
 pub mod map_routes;

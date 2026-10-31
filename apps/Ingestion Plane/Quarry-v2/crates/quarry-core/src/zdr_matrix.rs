@@ -300,6 +300,25 @@ pub const ROWS: &[Row] = &[
         log: Log::Unverified,
     },
     Row {
+        id: "job_results",
+        routes: &[
+            "/v1/crawl/{id}/results",
+            "/v1/batch/{id}/results",
+            "/v1/jobs/{id}/results",
+        ],
+        treatment: Treatment::Refused {
+            code: "FORBIDDEN",
+            feature: "job_result_urls",
+        },
+        status: Status::Enforced,
+        enforced_by: &[
+            "job_results::a_zdr_token_is_403_with_the_reason_and_control_is_not_called",
+            "job_results::flag_off_is_501_and_control_is_not_called",
+        ],
+        basis: "job_results_routes::gate refuses a caller whose token floor is ZDR before it asks Control Plane anything: a row is the URL, title and artifact ids of a page the job fetched (INNH-12), read from control's page_fetched events. Dark behind QUARRY_EDGE__JOB_RESULTS (501 off, which wins over the refusal); a service principal is refused 403 by the route scope. No ZDR job exists to have results (crawl and batch are refused at handoff) and a ZDR run stores no artifact, so the ids are absent for it as well. Page content is not in the response: it is read by id through the artifacts row, which binds the read to the org",
+        log: Log::Unverified,
+    },
+    Row {
         id: "job_control",
         routes: &[
             "/v1/crawl/{id}/pause",

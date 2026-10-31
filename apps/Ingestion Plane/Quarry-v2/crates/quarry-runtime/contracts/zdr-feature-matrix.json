@@ -304,6 +304,28 @@
       "treatment": "refused"
     },
     {
+      "basis": "job_results_routes::gate refuses a caller whose token floor is ZDR before it asks Control Plane anything: a row is the URL, title and artifact ids of a page the job fetched (INNH-12), read from control's page_fetched events. Dark behind QUARRY_EDGE__JOB_RESULTS (501 off, which wins over the refusal); a service principal is refused 403 by the route scope. No ZDR job exists to have results (crawl and batch are refused at handoff) and a ZDR run stores no artifact, so the ids are absent for it as well. Page content is not in the response: it is read by id through the artifacts row, which binds the read to the org",
+      "detail": {
+        "code": "FORBIDDEN",
+        "feature": "job_result_urls"
+      },
+      "enforced_by": [
+        "job_results::a_zdr_token_is_403_with_the_reason_and_control_is_not_called",
+        "job_results::flag_off_is_501_and_control_is_not_called"
+      ],
+      "id": "job_results",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/crawl/{id}/results",
+        "/v1/batch/{id}/results",
+        "/v1/jobs/{id}/results"
+      ],
+      "status": "enforced",
+      "treatment": "refused"
+    },
+    {
       "basis": "job_lifecycle_routes::control_request writes {action, actor, actor_type} to Control Plane and answers the job record; dark behind QUARRY_EDGE__JOB_CONTROL (501 off); a service principal is refused 403. Cancel is DELETE on the crawl or batch path shared with the lifecycle read",
       "detail": {
         "reason": "a control verb carries an action word and the actor id, no page content; a ZDR organization can only hold jobs that pre-date its ZDR, and cancelling one is wind-down"

@@ -94,6 +94,14 @@ pub struct ArtifactSummary {
     /// single source URL (e.g. AI-generated extract artifacts).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_url: Option<String>,
+    /// The run that wrote the artifact (`run_...`), read from its storage key (INNH-12).
+    /// `GET /v1/artifacts?run_id=` filters on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    /// The page the artifact belongs to: the hash of the page's URL and content fingerprint,
+    /// so a changed page in a later run has a different one (INNH-12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_hash: Option<String>,
 }
 
 // =============================================================================
@@ -337,6 +345,51 @@ pub struct JobErrorsView {
     pub robots_blocked: Vec<JobBlockedView>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_seq: Option<u64>,
+}
+
+/// One page a job fetched (INNH-12): a row of `GET /v1/jobs/{id}/results`, read from the
+/// job's `page_fetched` events. It carries the page URL and closed metadata plus the
+/// artifact ids; the content stays behind `GET /v1/artifacts/{id}`. Every field after
+/// `fetched_at` is absent when the event predates it or nothing was stored.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct JobResultView {
+    /// Event sequence number of the row; the cursor is the last row's `seq`.
+    pub seq: u64,
+    /// The URL the page was requested at.
+    pub url: String,
+    /// HTTP status of the fetch.
+    pub status: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub fetched_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub word_count: Option<u64>,
+    /// `static` | `tls` | `browser`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver: Option<String>,
+    /// Stored markdown of the page: read it with `GET /v1/artifacts/{id}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub markdown_artifact_id: Option<String>,
+    /// Stored source bytes (html, or the original document): same read route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_artifact_id: Option<String>,
+    /// Size in bytes of the stored markdown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+}
+
+/// `GET /v1/jobs/{id}/results` (and the crawl and batch aliases). `next_seq` is set when
+/// the page was full: pass it back as `after_seq` to read the rest. A `latest=true` read
+/// whose scan reached its ceiling says so in `scan_capped`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct JobResultsView {
+    pub items: Vec<JobResultView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub scan_capped: bool,
 }
 
 // =============================================================================
@@ -760,6 +813,8 @@ mod tests {
             sha256: Some("blake3:abc".into()),
             created_at: Utc::now(),
             source_url: Some("https://example.com".into()),
+            run_id: None,
+            page_hash: None,
         };
         let s = serde_json::to_string(&a).unwrap();
         // Field names MUST be snake_case to match the wire shape every
