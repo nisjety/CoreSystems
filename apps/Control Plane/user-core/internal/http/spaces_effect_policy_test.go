@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/database"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/spaces"
@@ -75,13 +76,22 @@ func (httpTxAuditOutbox) EnqueueAuditTx(ctx context.Context, tx pgx.Tx, eventID,
 	return err
 }
 
+// newLiveSpaceRepo builds a Space repository for the live tests wired the way
+// cmd/server/main.go wires it: policy writes are actor-aware and fail closed
+// without an in-transaction audit outbox, so a test that seeds a policy through
+// UpsertEffectPolicy needs the sink too.
+func newLiveSpaceRepo(pool *pgxpool.Pool) *spaces.Repository {
+	repo := spaces.NewRepository(&database.DB{Pool: pool})
+	repo.SetPolicyAuditOutbox(httpTxAuditOutbox{})
+	return repo
+}
+
 // Live: drives the real handler against a real repository. Gated on
 // TEST_DATABASE_URL via the shared d12Pool helper.
 func TestUpsertSpaceEffectPolicyTreatsAbsentAndNullEntitlementsAsNotStatedLive(t *testing.T) {
 	pool := d12Pool(t)
 	ctx := context.Background()
-	repo := spaces.NewRepository(&database.DB{Pool: pool})
-	repo.SetPolicyAuditOutbox(httpTxAuditOutbox{})
+	repo := newLiveSpaceRepo(pool)
 	s := &Server{}
 	s.SetSpaceRepository(repo)
 

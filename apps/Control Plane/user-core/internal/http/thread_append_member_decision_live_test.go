@@ -10,7 +10,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/database"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/spaces"
 )
 
@@ -40,7 +39,7 @@ func t12Subjects() []string {
 
 func TestThreadAppendMemberDecisionMatrix(t *testing.T) {
 	pool := d12Pool(t)
-	repo := spaces.NewRepository(&database.DB{Pool: pool})
+	repo := newLiveSpaceRepo(pool)
 	public := d12SigningEnv(t)
 	ctx := context.Background()
 

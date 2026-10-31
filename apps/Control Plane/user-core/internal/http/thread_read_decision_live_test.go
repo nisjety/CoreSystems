@@ -15,7 +15,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/database"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/spaces"
 )
 
@@ -191,7 +190,7 @@ func d12VerifyToken(t *testing.T, token string, public ed25519.PublicKey) spaces
 
 func TestIssueThreadReadDecisionPersonalOwnerGetsAnOwnScheduledThreadReadLive(t *testing.T) {
 	pool := d12Pool(t)
-	repo := spaces.NewRepository(&database.DB{Pool: pool})
+	repo := newLiveSpaceRepo(pool)
 	d12Seed(t, pool, repo, true)
 	public := d12SigningEnv(t)
 	s := &Server{}
@@ -228,7 +227,7 @@ func TestIssueThreadReadDecisionPersonalOwnerGetsAnOwnScheduledThreadReadLive(t 
 
 func TestIssueThreadReadDecisionRefusesAnOrgPeerForAPersonalSpaceLive(t *testing.T) {
 	pool := d12Pool(t)
-	repo := spaces.NewRepository(&database.DB{Pool: pool})
+	repo := newLiveSpaceRepo(pool)
 	d12Seed(t, pool, repo, true)
 	d12SigningEnv(t)
 	s := &Server{}
@@ -254,7 +253,7 @@ func TestIssueThreadReadDecisionRefusesAnOrgPeerForAPersonalSpaceLive(t *testing
 // any org is in until an operator provisions that column.
 func TestIssueThreadReadDecisionNeedsTheOrgsThreadReadEntitlementLive(t *testing.T) {
 	pool := d12Pool(t)
-	repo := spaces.NewRepository(&database.DB{Pool: pool})
+	repo := newLiveSpaceRepo(pool)
 	d12Seed(t, pool, repo, false)
 	d12SigningEnv(t)
 	s := &Server{}
@@ -272,7 +271,7 @@ func TestIssueThreadReadDecisionNeedsTheOrgsThreadReadEntitlementLive(t *testing
 // answers for a room.
 func TestIssueThreadReadDecisionSharedRoomPathIsUnchangedLive(t *testing.T) {
 	pool := d12Pool(t)
-	repo := spaces.NewRepository(&database.DB{Pool: pool})
+	repo := newLiveSpaceRepo(pool)
 	d12Seed(t, pool, repo, true)
 	public := d12SigningEnv(t)
 	s := &Server{}

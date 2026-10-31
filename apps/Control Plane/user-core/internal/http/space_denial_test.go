@@ -11,7 +11,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/database"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/spaces"
 )
 
@@ -211,7 +210,7 @@ func TestWriteSpaceIssuerDenialAddsTheCodeOnlyForTypedRefusals(t *testing.T) {
 // shared d12 seed helpers.
 func TestThreadReadOwnScheduledFallbackReportsThePersonalSpaceDenialLive(t *testing.T) {
 	pool := d12Pool(t)
-	repo := spaces.NewRepository(&database.DB{Pool: pool})
+	repo := newLiveSpaceRepo(pool)
 	d12Seed(t, pool, repo, false) // thread_read_entitled off
 	d12SigningEnv(t)
 	s := &Server{}

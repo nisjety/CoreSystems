@@ -10,7 +10,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/database"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/spaces"
 )
 
@@ -31,7 +30,7 @@ const (
 
 func TestArchivedRoomAnswersOfTheGatewayRoutesLive(t *testing.T) {
 	pool := d12Pool(t)
-	repo := spaces.NewRepository(&database.DB{Pool: pool})
+	repo := newLiveSpaceRepo(pool)
 	d12SigningEnv(t)
 	ctx := context.Background()
 
