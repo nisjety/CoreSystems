@@ -212,6 +212,32 @@ Field errors (400, in `details.fields[]`, not in `details.reason`; each carries 
 
 Not errors: a model failure, a rate limit, a schema the output could not satisfy, a ZDR request and an empty page are `data.ai.<kind>` entries inside a 200 (`status`, `code`, `reason`): codes `MODEL_UNAVAILABLE`, `MODEL_RATE_LIMITED`, `SCHEMA_INVALID`, `ZDR_UNAVAILABLE`, `BUDGET_EXHAUSTED`, `EMPTY_SOURCE`; reasons `model_lane_denied`, `model_lane_unauthorized`, `model_rejected_request`, `upstream_unavailable`, `timeout`, `transport`, `bad_reply`, `not_json`, `too_large`, `deadline`.
 
+## Webhook subscriptions: 400, 403, 409 and 429 reasons (INNH-5)
+
+`POST /v1/webhook-subscriptions` and its sibling routes. `error.details` carries `field` and `reason`, both short lowercase tokens; nothing else of control's body is passed on.
+
+| status and code | `details.field` | `details.reason` | meaning | what a caller does |
+|---|---|---|---|---|
+| 400 `BAD_REQUEST` | `url` | `url_invalid` | empty, not an absolute URL, no host, or a port outside 1 to 65535 | fix the URL |
+| 400 | `url` | `url_too_long` | over 2048 characters | shorten it |
+| 400 | `url` | `url_not_https` | the scheme is not `https` | serve the endpoint over TLS |
+| 400 | `url` | `url_userinfo` | the URL carries `user:password@` | use a header-free endpoint; the signature is the authentication |
+| 400 | `url` | `url_fragment` | the URL carries `#...` | remove it |
+| 400 | `url` | `url_private_address` | the host is, or resolves to, a private, loopback, link-local, metadata or carrier-grade-NAT address (one bad address among good ones refuses it) | use a public address |
+| 400 | `url` | `url_unresolvable` | the host did not resolve | check the DNS name |
+| 400 | `events` | `events_empty` | no event named | name `change_detected` |
+| 400 | `events` | `events_unsupported` | an event outside the closed list (`*`, a run event, the dotted subject) | use `change_detected` |
+| 400 | `description` | `description_too_long` | over 200 characters | shorten it |
+| 400 | `body` | `body_invalid` | the body is not JSON of the documented shape, or has an unknown field | send only the documented fields |
+| 400 | `body` | `empty_patch` | a `PATCH` named no field | name `active`, `events` or `description` |
+| 400 | `status`, `limit`, `cursor` | `status_unsupported`, `limit_invalid`, `cursor_invalid` | a bad query value on a list | fix the query |
+| 403 `FORBIDDEN` | | `webhook_off_process` | the caller is under Zero Data Retention (create, patch, retry only) | none: a ZDR organization cannot subscribe |
+| 409 `CONFLICT` | | `subscription_exists` | the organization has a subscription with this URL and these events | use the existing one |
+| 409 | | `delivery_not_retryable` | the delivery is pending, in flight or delivered (`details.status` says which) | none |
+| 429 `RATE_LIMITED` | | `subscription_limit` (`details.limit` is 10) | the organization holds the maximum | delete one first |
+
+501 `UNSUPPORTED` means a switch is off: the message names `QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS` or, when control has it off, `QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS`. 404 `NOT_FOUND` is one answer for an unknown, a foreign and a malformed id.
+
 ## 403 `FORBIDDEN`: an action an agent may not take (WS9.B, D2-012)
 
 The agent is the one the verified token gives (a service principal, or a person's token that says `agent`), on the step route, its `interact` alias, the browser socket's `action` message (an error frame with the same `code` and `details`) and the attached delegate lane. Nothing is consumed: no budget step, no approval, no receipt. Not retryable by the same caller.

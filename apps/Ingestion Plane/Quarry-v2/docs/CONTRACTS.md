@@ -116,17 +116,44 @@ An open agent run has its own trace. Its events are numbered densely per run fro
 
 Flags: `QUARRY_EDGE__TRACE_RING_EVENTS` (default 512; `0` disables the ring, so a resume that missed events gets `replay_gap`) and `QUARRY_EDGE__TRACE_RING_MAX_BYTES` (default 1 MiB, must be at least 1). An unparsable value aborts boot.
 
-## 4. Webhook payload
+## 4. Webhook delivery: what a subscriber's endpoint receives (INNH-5, 2026-10-31)
+
+This section used to describe a `{delivery_id, signature, event}` wrapper signed with an "org webhook secret". Neither was ever built. What control sends is below; it is what `internal/dispatcher` does and what its tests pin. The subscription API that creates the endpoint's registration is the section "Webhook subscriptions" further down.
+
+**Request.** `POST <the subscription's url>`, `Content-Type: application/json`, one header `X-Quarry-Signature`, and the body below. No redirect is followed. The connection is made to an address vetted at connect time: a private, loopback, link-local, metadata or carrier-grade-NAT address is refused (a blocked target is dead-lettered at once, `last_error` is `blocked_target`). The timeout is 30 seconds.
+
+**Body** is the control event as JSON, byte for byte what was signed:
 
 ```json
 {
-  "delivery_id": "whk_...",
-  "signature": "sha256=<hmac>",
-  "event": { <event envelope> }
+  "event_id": "evt_...",
+  "run_id": "run_...",
+  "job_id": "job_...",
+  "type": "change_detected",
+  "ts": "2026-10-31T10:00:06Z",
+  "seq": 0,
+  "payload": {
+    "subject": "quarry.change.detected",
+    "emitted_at": "2026-10-31T10:00:06Z",
+    "source_url": "https://example.com/pricing",
+    "org_id": "org_...",
+    "status": "changed",
+    "new_baseline": { "baseline_id": "bln_...", "fingerprint": "blake3:...", "artifact_id": "art_...", "captured_at": "..." },
+    "prev_baseline": { "baseline_id": "bln_...", "fingerprint": "blake3:...", "captured_at": "..." },
+    "diff_id": "diff_...",
+    "checked_at": "2026-10-31T10:00:05Z"
+  },
+  "idempotency_key": "..."
 }
 ```
 
-HMAC over raw body using org webhook secret. Retries: exp backoff, max 24h, DLQ to `quarry-control`.
+`type` is the stored event type (`change_detected`); `payload.subject` keeps the dotted subject `quarry.change.detected`. `run_id` and `job_id` are present only when the event belongs to one. `new_baseline`, `prev_baseline`, `diff_id` and `artifact_id` are present when the change monitor recorded them (see "Change text diff"). No page text is in the body; `GET /v1/change/diff?diff_id=` reads it, org-scoped. A page URL and two content fingerprints are in it, which is why a Zero Data Retention organization cannot subscribe.
+
+**Signature.** `X-Quarry-Signature: t=<unix seconds>,v1=<hex>`, where `<hex>` is the lowercase hex of HMAC-SHA256 keyed with the subscription secret (the whole `whsec_...` string, as UTF-8 bytes) over the ASCII string `<t>` + `.` + the raw request body. To verify: split the header on `,`, read `t` and `v1`, recompute over the raw bytes you received (not a re-serialised JSON), compare in constant time, and reject a `t` more than 5 minutes from your clock (replay). The timestamp is that of this attempt, so a retry carries a fresh signature over the same body. After `rotate-secret` the old secret stops verifying at once.
+
+**Outcome and retries.** A `2xx` is delivered. `408`, `429` and `5xx` and a transport failure are retried after 5 s, 30 s, 5 min and 1 h; the fifth failed attempt makes the delivery `dlq`. Any other `4xx` is `dlq` at once. A `dlq` delivery is visible in the delivery log and can be re-queued from the API; it is not retried on its own. Delivery is at least once and not ordered: de-duplicate on `event_id`. One detected change reaches control by more than one path; control keeps one delivery per subscription for it (the key is the org, the URL and the new baseline),; that de-duplication applies only when the event names a baseline id.
+
+**Tenancy.** An event is delivered only to the active subscriptions of the organization that owns it. An event whose owner is unknown is delivered to nobody. A subscription without an organization (rows from before migration 025) receives nothing, and the dispatcher re-checks that at send time.
 
 ## 5. Artifact naming
 
@@ -840,6 +867,43 @@ A baseline recorded before the flag has no `artifact_id`. The first change after
 **ZDR.** A ZDR run stores no markdown, so `run_page` returns no id and nothing is kept; the record route also ignores a markdown id on a `zdr: true` body (the baseline row of an observe-mode ZDR body is still written, with no text). Row `change_diff_read` in `ZDR_MATRIX.md`: refused. No hash of a page is ever returned as a stand-in.
 
 **Not in this version.** `POST /v1/change/check` takes a caller-supplied fingerprint, fetches nothing and stores nothing, so it has no text diff; only scheduled monitors do. No consumer exists for `POST /v1/change/refresh`. The artifact janitor deletes by age only: if it is armed, old baselines lose their text (`artifact_gone`) until it learns to spare baseline artifacts. A retried record activity can write a second baseline (the record route ignores the idempotency key).
+
+## Webhook subscriptions: the API (INNH-5, 2026-10-31)
+
+A subscription is an HTTPS endpoint that receives `change_detected` events of the caller's organization. Off, nothing below exists: `QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS` and `QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS` are unset in the default composes. The edge routes answer 501 while the edge switch is off, and the edge reports control's plain 404 (switch off there) as 501 naming `QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS`. The fan-out tenancy fix and the retirement of the old global routes are not behind a switch: they close a hole that has no legitimate user.
+
+Edge routes (bearer; the organization is the token's, a caller-supplied `org_id` is ignored; control mirrors them under the same paths with `?org_id=` and the internal HMAC):
+
+| Method and path | Answer |
+|---|---|
+| `POST /v1/webhook-subscriptions` | 201 `data`: the subscription plus `secret` |
+| `GET /v1/webhook-subscriptions?limit&cursor` | 200 `data: {items, next_cursor?}` |
+| `GET /v1/webhook-subscriptions/{id}` | 200 `data`: the subscription |
+| `PATCH /v1/webhook-subscriptions/{id}` | 200 `data`; body names at least one of `active`, `events`, `description` |
+| `DELETE /v1/webhook-subscriptions/{id}` | 204, no body |
+| `POST /v1/webhook-subscriptions/{id}/rotate-secret` | 200 `data: {id, secret, secret_hint}` |
+| `GET /v1/webhook-subscriptions/{id}/deliveries?status&limit&cursor` | 200 `data: {items, next_cursor?}` |
+| `POST /v1/webhook-subscriptions/{id}/deliveries/{delivery_id}/retry` | 202 `data`: the delivery, `pending` |
+
+Create body: `{ "url": "https://hooks.example.com/q", "events": ["change_detected"], "description": "prod" }`; an unknown field is a 400. A subscription is:
+
+```json
+{ "id": "whk_...", "url": "...", "events": ["change_detected"], "active": true, "description": "prod",
+  "secret_hint": "whsec_...ab12", "created_at": "2026-10-31T10:00:00Z",
+  "last_delivery": { "status": "success", "at": "2026-10-31T10:05:00Z", "event_id": "evt_..." } }
+```
+
+`description` and `last_delivery` are absent when empty. A delivery is `{ id, event_id, event_type, status, attempt, next_attempt_at?, last_error?, created_at }`; there is no payload in it, and `last_error` is a closed token: `http_<status>`, `timeout`, `blocked_target`, `transport`, `inactive`, `error`.
+
+- **Secret.** Minted by control (32 random bytes, `whsec_` + 64 hex characters). Returned by create and by rotate-secret and by nothing else: the reads are typed views with no secret field, and the edge rebuilds every answer from a typed view as well. Control stores it in plaintext (the HMAC needs the key); see the owner decision in `RUNBOOKS.md`.
+- **URL.** `https` only; no user info or fragment; at most 2048 characters; every address the host resolves to must be public (checked at create with the egress guard, and again at every connect). The URL cannot be edited; delete and create.
+- **Events.** A closed list, `change_detected` today. The stored event type is `change_detected`; the `quarry.change.detected` subject appears in the delivery body only. Run-finished events (INNH-13) join the list without a contract change.
+- **Limits.** 10 subscriptions per organization (429 `subscription_limit`); the same URL with the same events twice is a 409 `subscription_exists`.
+- **Errors.** 400 with `error.details.field` and `error.details.reason` (`docs/ERROR_REASONS.md`); 404 for an unknown, foreign or malformed id (one answer); 403 for a service principal and for a Zero Data Retention caller on create, patch and retry (`details.reason` is `webhook_off_process`; reads, delete and rotate-secret stay open so an organization can wind down); 409 `delivery_not_retryable` for a delivery that is pending, in flight or delivered.
+- **Retention.** A delivery row holds the event payload. Finished deliveries (`success`, `failed`, `dlq`) are deleted after 14 days (`QUARRY_CONTROL__WEBHOOK_DELIVERY_RETENTION_DAYS`, 1 to 3650). Deleting a subscription deletes its deliveries. Organization erasure deletes both tables for the organization.
+- **Retired.** `GET/POST /v1/webhooks`, `GET /v1/webhooks/{id}` and `/v1/webhook-deliveries...` on control answer 410 `GONE`: they listed every organization's rows and returned secrets in cleartext, and nothing called them. `POST /v1/webhooks/change` (the edge's signed receiver) is unchanged.
+
+**Not in this version.** A test-ping route; auto-disable after repeated dead letters; two secrets during a rotation (the old one stops at once); encryption of the secret at rest; a per-subscription rate limit; run-finished and job events (the store and fan-out are ready, the list is closed).
 
 ## Crawl scope and robots: planned status and vocabulary (WS14.S0, 2026-10-23)
 

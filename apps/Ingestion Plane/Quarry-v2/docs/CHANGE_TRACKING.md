@@ -103,6 +103,14 @@ statically impossible.
 `quarry.change.detected` (mirrors the cluster #7 subject taxonomy).
 Payload mirrors the HTTP response from `/v1/change/check`.
 
+The edge posts it to control (`POST /v1/webhooks/change?org_id=<org>`, internal HMAC), where it
+becomes a `change_detected` event and is delivered to the **webhook subscriptions of that
+organization** (INNH-5): an organization registers an HTTPS endpoint with
+`POST /v1/webhook-subscriptions` (dark behind `QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS` and
+`QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS`). What the endpoint receives, how it is signed and how
+failures are retried is `docs/CONTRACTS.md` section 4; the API is "Webhook subscriptions" there.
+Under Zero Data Retention nothing is emitted, and a ZDR organization cannot create a subscription.
+
 ## Tests
 
 `crates/quarry-core/src/change_history.rs`:

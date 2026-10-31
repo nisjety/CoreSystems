@@ -3455,8 +3455,433 @@ paths:
           description: A service principal, or a ZDR organization with the flag on (action probe).
         '404':
           description: Not found, or not visible to the caller under enforce.
+  /v1/webhook-subscriptions:
+    post:
+      operationId: create_webhook_subscription
+      summary: Subscribe an HTTPS endpoint to change events (INNH-5)
+      description: |
+        Registers a webhook for the caller's organization. Quarry sends the endpoint a signed
+        `POST` for every event type named in `events`; v1 has one: `change_detected` (the stored
+        event type; the `payload.subject` of the delivery stays `quarry.change.detected`).
+        The delivery format, the signature and the retry rules are in `docs/CONTRACTS.md`,
+        section 4.
+
+        The response carries the HMAC `secret` (`whsec_` and 64 hex characters). It is shown
+        here once and by `rotate-secret`; no read returns it again, only `secret_hint`.
+
+        The URL must be `https`, carry no credentials or fragment, be at most 2048 characters,
+        and resolve only to public addresses (a private, loopback, link-local, metadata or
+        carrier-grade-NAT address is refused; every delivery is vetted again at connect time).
+        An organization holds at most 10 subscriptions. Unknown body fields are a 400.
+
+        Off unless the edge runs with `QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS` on and control with
+        `QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS` on (501 otherwise). A Zero Data Retention
+        caller gets 403 (`details.reason` is `webhook_off_process`): a subscription pushes page
+        URLs off-process.
+      tags:
+      - webhooks
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWebhookSubscription'
+      responses:
+        '201':
+          description: The subscription and its secret, once.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/WebhookSubscriptionCreated'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '400':
+          description: A field is invalid. `error.details.field` is `url`, `events`, `description` or `body`; `error.details.reason` is one of `url_invalid`, `url_too_long`, `url_not_https`, `url_userinfo`, `url_fragment`, `url_private_address`, `url_unresolvable`, `events_empty`, `events_unsupported`, `description_too_long`, `body_invalid`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '403':
+          description: The token's ZDR floor is set (`error.details.reason` is `webhook_off_process`), or the caller is a service principal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '409':
+          description: The organization already has a subscription with this URL and these events (`error.details.reason` is `subscription_exists`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '429':
+          description: The organization holds the maximum of 10 subscriptions (`error.details.reason` is `subscription_limit`, `error.details.limit` is 10).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: Not enabled (QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS on the edge, QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS on control; the message names the one that is off).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+    get:
+      operationId: list_webhook_subscriptions
+      summary: List the organization's webhook subscriptions (INNH-5)
+      description: Newest first. Never returns a secret. Each item carries the status of its latest delivery in `last_delivery`.
+      tags:
+      - webhooks
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+      - name: cursor
+        in: query
+        required: false
+        description: The `next_cursor` of the previous page.
+        schema:
+          type: string
+          maxLength: 256
+      responses:
+        '200':
+          description: One page of subscriptions.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/WebhookSubscriptionList'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '400':
+          description: A bad `limit` or `cursor` (`error.details.field`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: Not enabled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/webhook-subscriptions/{subscription_id}:
+    get:
+      operationId: get_webhook_subscription
+      summary: Read one webhook subscription (INNH-5)
+      tags:
+      - webhooks
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/WebhookSubscriptionId'
+      responses:
+        '200':
+          description: The subscription. No secret.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/WebhookSubscription'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '404':
+          description: Unknown id, an id of another organization (the same answer), or a malformed id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: Not enabled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+    patch:
+      operationId: update_webhook_subscription
+      summary: Pause, resume or change the events of a subscription (INNH-5)
+      description: |
+        Names at least one of `active`, `events`, `description`. The URL is not editable: delete
+        the subscription and create a new one, so every target goes through the create-time
+        check. Refused for a Zero Data Retention caller (403, `webhook_off_process`), because it
+        can resume pushing.
+      tags:
+      - webhooks
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/WebhookSubscriptionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateWebhookSubscription'
+      responses:
+        '200':
+          description: The subscription after the change.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/WebhookSubscription'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '400':
+          description: No field named (`reason` is `empty_patch`), an unsupported event, a description over 200 characters, or an unknown field (`body_invalid`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '403':
+          description: Zero Data Retention (`error.details.reason` is `webhook_off_process`), or a service principal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '404':
+          description: Unknown or foreign id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: Not enabled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+    delete:
+      operationId: delete_webhook_subscription
+      summary: Delete a subscription and its delivery log (INNH-5)
+      description: A hard delete. Pending deliveries of the subscription are dropped with it. Open to a Zero Data Retention caller (wind-down).
+      tags:
+      - webhooks
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/WebhookSubscriptionId'
+      responses:
+        '204':
+          description: Deleted. No body.
+        '404':
+          description: Unknown or foreign id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: Not enabled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/webhook-subscriptions/{subscription_id}/rotate-secret:
+    post:
+      operationId: rotate_webhook_subscription_secret
+      summary: Mint a new secret for a subscription (INNH-5)
+      description: The old secret stops working at once; deliveries already queued are signed with the new one. The new secret is in this response only.
+      tags:
+      - webhooks
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/WebhookSubscriptionId'
+      responses:
+        '200':
+          description: The new secret, once.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/WebhookSecretRotated'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '404':
+          description: Unknown or foreign id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: Not enabled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/webhook-subscriptions/{subscription_id}/deliveries:
+    get:
+      operationId: list_webhook_deliveries
+      summary: The delivery log of a subscription (INNH-5)
+      description: |
+        Newest first. A delivery shows its status and attempt count, never the payload or the
+        raw error: `last_error` is `http_<status>`, `timeout`, `blocked_target`, `transport`,
+        `inactive` or `error`. A delivery is `dlq` after five failed attempts or at once on a
+        4xx other than 408 and 429. Finished deliveries are deleted after 14 days.
+      tags:
+      - webhooks
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/WebhookSubscriptionId'
+      - name: status
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - pending
+          - in_flight
+          - success
+          - failed
+          - dlq
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          type: string
+          maxLength: 256
+      responses:
+        '200':
+          description: One page of deliveries.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/WebhookDeliveryList'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '400':
+          description: A bad `status`, `limit` or `cursor` (`error.details.field`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '404':
+          description: Unknown or foreign subscription id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: Not enabled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/webhook-subscriptions/{subscription_id}/deliveries/{delivery_id}/retry:
+    post:
+      operationId: retry_webhook_delivery
+      summary: Re-queue a failed delivery (INNH-5)
+      description: Only a `failed` or `dlq` delivery can be retried (409 `delivery_not_retryable` otherwise). The attempt count restarts at zero. Refused for a Zero Data Retention caller.
+      tags:
+      - webhooks
+      security:
+      - bearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/WebhookSubscriptionId'
+      - name: delivery_id
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^whkd_'
+      responses:
+        '202':
+          description: The delivery, now pending.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/WebhookDeliveryView'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '403':
+          description: Zero Data Retention (`webhook_off_process`), or a service principal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '404':
+          description: Unknown or foreign subscription or delivery id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '409':
+          description: The delivery is pending, in flight or delivered (`error.details.reason` is `delivery_not_retryable`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: Not enabled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
 components:
   parameters:
+    WebhookSubscriptionId:
+      name: subscription_id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^whk_'
+      description: A webhook subscription id (`whk_...`) of the caller's organization
     AgentRunId:
       name: run_id
       in: path
@@ -8262,6 +8687,183 @@ components:
               type: string
             message:
               type: string
+    CreateWebhookSubscription:
+      type: object
+      additionalProperties: false
+      required:
+      - url
+      - events
+      properties:
+        url:
+          type: string
+          format: uri
+          maxLength: 2048
+          description: An `https` URL that resolves to public addresses only.
+        events:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            enum:
+            - change_detected
+          description: Stored event types. `change_detected` is the only one in v1; run-finished events will be added without a contract change.
+        description:
+          type: string
+          maxLength: 200
+    UpdateWebhookSubscription:
+      type: object
+      additionalProperties: false
+      properties:
+        active:
+          type: boolean
+        events:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            enum:
+            - change_detected
+        description:
+          type: string
+          maxLength: 200
+    WebhookLastDelivery:
+      type: object
+      required:
+      - status
+      - at
+      - event_id
+      properties:
+        status:
+          type: string
+          enum:
+          - pending
+          - in_flight
+          - success
+          - failed
+          - dlq
+        at:
+          type: string
+          format: date-time
+        event_id:
+          type: string
+    WebhookSubscription:
+      type: object
+      description: A webhook subscription. It has no secret field.
+      required:
+      - id
+      - url
+      - events
+      - active
+      - secret_hint
+      - created_at
+      properties:
+        id:
+          type: string
+          pattern: '^whk_'
+        url:
+          type: string
+          format: uri
+        events:
+          type: array
+          items:
+            type: string
+        active:
+          type: boolean
+        description:
+          type: string
+        secret_hint:
+          type: string
+          description: '`whsec_...` and the last four characters of the secret.'
+        created_at:
+          type: string
+          format: date-time
+        last_delivery:
+          $ref: '#/components/schemas/WebhookLastDelivery'
+    WebhookSubscriptionCreated:
+      allOf:
+      - $ref: '#/components/schemas/WebhookSubscription'
+      - type: object
+        required:
+        - secret
+        properties:
+          secret:
+            type: string
+            description: The HMAC key, `whsec_` and 64 hex characters. Shown here and by rotate-secret only.
+    WebhookSecretRotated:
+      type: object
+      required:
+      - id
+      - secret
+      - secret_hint
+      properties:
+        id:
+          type: string
+        secret:
+          type: string
+        secret_hint:
+          type: string
+    WebhookSubscriptionList:
+      type: object
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/WebhookSubscription'
+        next_cursor:
+          type: string
+          description: Present when more rows remain. Pass it back as `cursor`.
+    WebhookDeliveryView:
+      type: object
+      description: One delivery of an event to a subscription. No payload body.
+      required:
+      - id
+      - event_id
+      - event_type
+      - status
+      - attempt
+      - created_at
+      properties:
+        id:
+          type: string
+          pattern: '^whkd_'
+        event_id:
+          type: string
+        event_type:
+          type: string
+        status:
+          type: string
+          enum:
+          - pending
+          - in_flight
+          - success
+          - failed
+          - dlq
+        attempt:
+          type: integer
+          minimum: 0
+        next_attempt_at:
+          type: string
+          format: date-time
+          description: Present while the delivery is pending.
+        last_error:
+          type: string
+          description: '`http_<status>`, `timeout`, `blocked_target`, `transport`, `inactive` or `error`.'
+        created_at:
+          type: string
+          format: date-time
+    WebhookDeliveryList:
+      type: object
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/WebhookDeliveryView'
+        next_cursor:
+          type: string
 tags:
 - name: search
   description: Tavily-lineage web discovery
@@ -8283,3 +8885,5 @@ tags:
   description: Versioned URL change tracking — baselines, checks, promotion, refresh
 - name: schedules
   description: Cron / one-shot / change-monitor schedules
+- name: webhooks
+  description: Webhook subscriptions for change events (INNH-5)

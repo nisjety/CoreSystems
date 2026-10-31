@@ -448,3 +448,37 @@ test("the change text diff switch is read by the code, documented, and not turne
     assert.ok(value === undefined || composeDefault(value) === "0", `${compose} does not turn the text diff on`);
   }
 });
+
+// ----------------------------------------------------------------------------- webhook subscriptions (INNH-5)
+
+test("the webhook subscription switches are read by the code, documented, and not turned on in a compose", () => {
+  const edgeSource = read(join(quarry, "crates", "quarry-edge", "src", "webhook_subscription_routes.rs"));
+  const controlSource = read(join(quarry, "services", "quarry-control", "internal", "resources", "webhook_subscriptions.go"));
+  const edgeName = "QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS";
+  const controlName = "QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS";
+  assert.ok(edgeSource.includes(`pub const ENV_WEBHOOK_SUBSCRIPTIONS: &str = "${edgeName}";`), "the edge reads its switch");
+  assert.ok(controlSource.includes(`getenv("${controlName}")`), "control reads its switch");
+  const docs = [
+    ["RUNBOOKS", paths.runbooks],
+    ["CONTRACTS", join(quarry, "docs", "CONTRACTS.md")],
+    ["openapi", paths.openapi],
+  ];
+  for (const [label, path] of docs) {
+    const text = read(path);
+    for (const name of [edgeName, controlName]) {
+      assert.ok(text.includes(name), `${label} names ${name}`);
+    }
+    // Every spelling of a switch in a document is one the code reads.
+    for (const match of text.matchAll(/QUARRY_(?:EDGE|CONTROL)__?WEBHOOK_SUBSCRIPTION[A-Z0-9_]*/g)) {
+      const spelled = match[0].replace(/_+$/, "");
+      assert.ok([edgeName, controlName].includes(spelled), `${label} names ${match[0]}, which the code does not read`);
+    }
+  }
+  // Dark by default: a compose leaves both out (edge: unset or 0).
+  for (const compose of [paths.compose, join(quarry, "deploy", "compose", "docker-compose.yml")]) {
+    const text = read(compose);
+    assert.ok(!text.includes(controlName), `${compose} does not set the control switch`);
+    const value = environmentOf(quarryEdgeBlock(text)).get(edgeName);
+    assert.ok(value === undefined || composeDefault(value) === "0", `${compose} does not turn the subscriptions on`);
+  }
+});
