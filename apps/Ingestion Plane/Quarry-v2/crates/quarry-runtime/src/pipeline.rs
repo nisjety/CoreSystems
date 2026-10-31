@@ -71,6 +71,16 @@ pub struct InlineParts {
     /// Never serialized and never stored: the caller hands it to the AI
     /// engine and drops it.
     pub ai_source: Option<String>,
+    /// INNH-7: the challenge classifier flagged the page as a bot wall (a CAPTCHA
+    /// widget, a WAF interstitial). Set whatever `QUARRY_CHALLENGE_ENFORCE` says: in
+    /// `log` mode (the default) the run still succeeds, and this tells a caller that
+    /// the output is not content (the URL result cache never stores it). Never
+    /// serialized.
+    pub bot_wall_suspected: bool,
+    /// INNH-7: `soft_404::detect` fired (a 2xx body that says "page not found").
+    /// The run still succeeds; the URL result cache never stores such a page. Never
+    /// serialized.
+    pub soft_404: bool,
 }
 
 /// What [`PageRunner::persist_captures`] made of one run's captures. The refs
@@ -1136,10 +1146,12 @@ impl PageRunner {
         // shouldn't be ingested as content. Flag here and emit a
         // dedicated event so downstream consumers can drop it from
         // indexing without a content heuristic at every callsite.
+        let mut soft_404_flagged = false;
         if let Some(reason) = (!is_doc)
             .then(|| quarry_transform::soft_404::detect(resp.status, resp.body.len(), &body_text))
             .flatten()
         {
+            soft_404_flagged = true;
             self.emit_page_event(
                 run_id.clone(),
                 EventType::PageBlocked,
@@ -1194,6 +1206,7 @@ impl PageRunner {
         // run under `QUARRY_CHALLENGE_CLASSIFIER=legacy` is not classified at all.
         // `QUARRY_CHALLENGE_ENFORCE=log` counts the page by reason and lets it
         // through. Nothing here logs the URL or the host, ZDR or not.
+        let mut bot_wall_flagged = false;
         if !is_doc && is_markup_content_type(ct.as_deref()) {
             let challenge_config = scrape_challenge_config();
             if let Some(reason) = crate::challenge::classify_fetched(
@@ -1206,6 +1219,9 @@ impl PageRunner {
             .and_then(|signal| signal.block_reason)
             {
                 let reason = reason.as_str();
+                // INNH-7: remembered in every mode; in `log` mode the run goes on and
+                // the caller (the URL result cache) must still know this is a wall.
+                bot_wall_flagged = true;
                 if challenge_config.enforce == crate::challenge::EnforceMode::Enforce {
                     tracing::info!(reason, status = resp.status, "quarry.challenge.scrape_refused");
                     self.emit_page_event(
@@ -1587,6 +1603,8 @@ impl PageRunner {
         // no extractable text, or one cut at the parser cap, says so.
         let inline = {
             let mut parts = InlineParts::default();
+            parts.bot_wall_suspected = bot_wall_flagged;
+            parts.soft_404 = soft_404_flagged;
             let zdr = self.zdr.is_active();
             parts.screenshot = captured.inline_screenshot.take();
             parts.pdf = captured.inline_pdf.take();
@@ -3275,6 +3293,34 @@ mod scrape_challenge_tests {
         // No content type reads as HTML.
         let (result, _) = scrape(ZdrMode::Off, 200, None, CF_INTERSTITIAL).await;
         assert_eq!(result.expect_err("html").code, ErrorCode::ChallengeDetected);
+    }
+
+    /// INNH-7: in `log` mode (the shipped default) a bot wall and a soft-404 return an
+    /// Ok output, so the inline parts carry the verdict the URL result cache needs.
+    #[tokio::test]
+    async fn log_mode_still_flags_a_bot_wall_and_a_soft_404_on_the_inline_parts() {
+        const SOFT_404: &str = "<html><head><title>Oops</title></head><body><h1>Page not found</h1><p>Sorry.</p></body></html>";
+        let _config = Installed::new(ChallengeConfig::from_values(None, Some("log")));
+        let inline_of = |body: &'static str| async move {
+            let (runner, _rx, _) = runner_for(ZdrMode::Off, 200, Some("text/html"), body);
+            let run_id: RunKind = quarry_core::ids::Id::new();
+            runner
+                .run_with_inline(&run_id, &target(), None)
+                .await
+                .expect("log mode returns an output")
+                .1
+        };
+        let wall = inline_of(TURNSTILE_PAGE).await;
+        assert!(wall.bot_wall_suspected && !wall.soft_404, "{wall:?}");
+        let wall = inline_of(CF_INTERSTITIAL).await;
+        assert!(wall.bot_wall_suspected, "{wall:?}");
+        let soft = inline_of(SOFT_404).await;
+        assert!(soft.soft_404 && !soft.bot_wall_suspected, "{soft:?}");
+        // Ordinary pages carry neither flag.
+        for body in [ARTICLE, LOGIN_PAGE, CONTACT_WITH_WIDGET] {
+            let page = inline_of(body).await;
+            assert!(!page.bot_wall_suspected && !page.soft_404, "{page:?}");
+        }
     }
 
     #[tokio::test]

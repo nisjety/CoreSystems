@@ -934,7 +934,7 @@ async fn scrape_with(
             // INNH-7: the URL result cache. A key exists only for a non-ZDR, cacheable
             // request on a stack with a cache; the write honours `cache.mode` and its TTL.
             if let (Some(key), Some(cache)) = (result_key.as_ref(), state.cache.as_ref()) {
-                if should_write(&req.cache) && crate::scrape_cache::is_storable(&out) {
+                if should_write(&req.cache) && crate::scrape_cache::is_storable(&out, &inline) {
                     let ttl = effective_ttl(&req.cache, DEFAULT_TTL_SECS);
                     let entry = crate::cache::CachedScrape {
                         output: out.clone(),

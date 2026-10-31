@@ -2021,7 +2021,7 @@ Needs Redis (`REDIS_URL`): without it `max_age` is ignored with the warning `cac
 
 **Metric.** `quarry_cache_requests_total{cache="scrape", outcome="hit|miss|error"}` counts reads of the URL result cache; a request that did not consult it counts nothing.
 
-**What is never cached** (the response says `max_age_ignored`, or `max_age_ignored_zdr` under ZDR): captures, actions, AI formats, the browser driver, a custom web policy, `ingest`, a private privacy class, a non-2xx page. ZDR neither reads nor writes it and computes no key.
+**What is never cached** (the response says `max_age_ignored`, or `max_age_ignored_zdr` under ZDR): captures, actions, AI formats, the browser driver, a custom web policy, `ingest`, a private privacy class, a non-2xx page, and a 2xx page the run flagged as a bot wall (the challenge classifier, also under the default `QUARRY_CHALLENGE_ENFORCE=log` where the page is returned) or as a soft-404 ("page not found" in a 200). ZDR neither reads nor writes it and computes no key.
 
 **Limits to know.** The TTL caps the effective `max_age`. A stored result whose artifacts expired is a miss (the page is fetched again). A hit is not metered as `scrape.page`; whether it should be is an open product decision. A redirect is keyed by the URL as requested, not the final one. The trailing slash and the query order are part of the URL identity.
 

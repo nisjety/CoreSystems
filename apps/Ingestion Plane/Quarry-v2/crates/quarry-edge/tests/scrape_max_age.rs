@@ -120,6 +120,12 @@ impl Edge {
 /// `redis: true` wires the page cache to Redis and returns `None` when none is
 /// reachable (the case skips); `redis: false` is a stack with no cache.
 async fn spawn_edge(redis: bool, status: u16) -> Option<Edge> {
+    spawn_edge_serving(redis, status, None).await
+}
+
+/// Like [`spawn_edge`], serving `body` (with the nonce in a comment so the page stays
+/// unique) instead of the ordinary page when one is given.
+async fn spawn_edge_serving(redis: bool, status: u16, body: Option<&'static str>) -> Option<Edge> {
     init();
     let conn = if redis {
         let Some(conn) = try_redis().await else {
@@ -140,7 +146,10 @@ async fn spawn_edge(redis: bool, status: u16) -> Option<Edge> {
     let fetches = Arc::new(AtomicUsize::new(0));
     let driver = Arc::new(PageDriver {
         status,
-        body: page(&nonce),
+        body: match body {
+            Some(fixed) => format!("{fixed}<!-- {nonce} -->"),
+            None => page(&nonce),
+        },
         fetches: fetches.clone(),
     });
     let state = AppState {
@@ -500,6 +509,44 @@ async fn a_result_that_is_not_2xx_is_never_written() {
     assert!(edge.fetches() >= 1);
     assert!(!exists(&edge, &key).await, "a 404 must not be cached");
     purge(&edge, &[&key]).await;
+}
+
+// A 200 bot wall and a 200 "page not found" body. `QUARRY_CHALLENGE_ENFORCE` is NOT set
+// in this binary, so the run is under the shipped default (`log`): the pipeline returns
+// an Ok output for both. They must still never be written, and the next `max_age` call
+// must fetch again instead of serving them as a fresh hit.
+const TURNSTILE_WALL: &str = r#"<html><head><title>Turnstile Test</title></head><body><h1>Demo</h1><div class="cf-turnstile" data-sitekey="1x00000000000000000000AA"></div><script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script></body></html>"#;
+const WAF_INTERSTITIAL_200: &str = r#"<!DOCTYPE html><html lang="en-US"><head><title>Just a moment...</title></head><body class="no-js"><h2 id="challenge-running">Checking if the site connection is secure</h2><div id="challenge-stage"></div><script>window._cf_chl_opt={cvId:'3'};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1?ray=8abc';</script><script src="https://challenges.cloudflare.com/turnstile/v0/g/abc/api.js"></script></body></html>"#;
+const SOFT_404_PAGE: &str = "<html><head><title>Oops</title></head><body><h1>Page not found</h1><p>Sorry.</p></body></html>";
+
+#[tokio::test]
+async fn a_bot_wall_or_a_soft_404_is_never_written_under_the_default_log_mode() {
+    assert!(
+        std::env::var_os("QUARRY_CHALLENGE_ENFORCE").is_none(),
+        "this guard is about the shipped default; unset QUARRY_CHALLENGE_ENFORCE"
+    );
+    for (name, body) in [
+        ("a captcha widget page", TURNSTILE_WALL),
+        ("a WAF interstitial served as 200", WAF_INTERSTITIAL_200),
+        ("a soft-404", SOFT_404_PAGE),
+    ] {
+        let Some(edge) = spawn_edge_serving(true, 200, Some(body)).await else { return };
+        let key = key_for(DEV_ORG, &edge.url, json!({}));
+        let request = json!({ "url": edge.url, "max_age": 60_000 });
+
+        let (status, first) = post(&edge, request.clone()).await;
+        assert_eq!(status, 200, "{name}: log mode returns the page, {first}");
+        assert_eq!(edge.fetches(), 1, "{name}");
+        assert!(!exists(&edge, &key).await, "{name}: it must not be cached");
+
+        // The next call inside the window fetches again; it is not a hit.
+        let (status, second) = post(&edge, request).await;
+        assert_eq!(status, 200, "{name}: {second}");
+        assert_eq!(state_of(&second), "miss", "{name}: {second}");
+        assert_eq!(edge.fetches(), 2, "{name}: refetched, not served from the cache");
+        assert!(!exists(&edge, &key).await, "{name}");
+        purge(&edge, &[&key]).await;
+    }
 }
 
 #[tokio::test]

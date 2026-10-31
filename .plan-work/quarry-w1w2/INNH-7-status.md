@@ -76,6 +76,18 @@ Status line above is the result. Everything is behind the new default-off flag `
 - `max_age` larger than the entry TTL behaves as the TTL (documented).
 - Under ZDR no key is computed at all (not even a hashed URL), per ADR topic 4.
 
+## Review fixes (2026-10-31, one pass)
+BLOCKER 1 (bot walls and soft-404s were cached under the default). The shipped default is `QUARRY_CHALLENGE_ENFORCE=log`: the pipeline only logs `would_refuse_scrape` and returns Ok, and a soft-404 only emits an event, so the earlier claim that the run fails first was wrong and `is_storable` (2xx, non-browser, markdown artifact) let both through. Fixed: `InlineParts` (quarry-runtime `pipeline.rs`) has two new never-serialized booleans, `bot_wall_suspected` (set whenever the challenge classifier gives a block reason, in every mode, before the enforce branch) and `soft_404` (set where `soft_404::detect` fires). `scrape_cache::is_storable(output, inline)` refuses when either is set; `routes.rs` passes `&inline`. A browser escalation keeps the existing refusal. CONTRACTS.md 9.1, RUNBOOKS.md ("What is never cached"), the `scrape_cache.rs` header and the openapi `max_age` text now say what is true. The sentence "default enforce mode fails the run" is removed from 'Not verified'. Under `enforce` nothing changed (the run fails before any write).
+Tests: quarry-runtime `log_mode_still_flags_a_bot_wall_and_a_soft_404_on_the_inline_parts` (Turnstile page, WAF interstitial served as 200, soft-404 flagged under `log`; article, login and contact-form-with-recaptcha pages not flagged); quarry-edge unit `a_bot_wall_or_a_soft_404_is_never_stored_even_though_the_run_succeeded` (+ the old `is_storable` test updated); Redis test `scrape_max_age::a_bot_wall_or_a_soft_404_is_never_written_under_the_default_log_mode` (three bodies at the default mode: 200 answered, no `quarry:scrape:*` key, second `max_age` call is a `miss` with a second fetch, no key afterwards). Run results: see "Tests (review fixes)".
+BLOCKER 2 (openapi). `Alias actionsOnError.` was a continuation of the `max_age` text. Moved to the end of the `actions_on_error` description; `max_age` keeps its one `Alias maxAge.`. Guard added: `openapi-scrape-parity.test.mjs` `an_alias_note_sits_in_the_description_of_the_property_it_names` (every "Alias <camel>." sentence must sit in the property whose snake_case name it is; the two properties spelled out). Node: 10 of 10 pass.
+
+## Tests (review fixes)
+Same container recipe as above (`qtest-lane.sh a`, Debian `redis-server` started inside, `REQUIRE_CONTRACT=1`). The first attempt of the day failed to compile `quarry-runtime` (a stale-target `ArtifactSummary` error unrelated to this change; a later `cargo check` and the rerun were clean).
+- quarry-runtime `cargo test -p quarry-runtime --lib challenge`: 53 passed (includes the new `log_mode_still_flags_a_bot_wall_and_a_soft_404_on_the_inline_parts`).
+- quarry-edge `--lib scrape_cache`: 12 passed (new: `a_bot_wall_or_a_soft_404_is_never_stored_even_though_the_run_succeeded`; `only_a_2xx_non_browser_result_with_a_markdown_artifact_is_stored` updated for the new signature).
+- `tests/scrape_max_age.rs` (Redis): 15 passed (14 + the new default-log-mode guard). `scrape_max_age_off` 3, `cache_policy` 10, `zdr_feature_matrix` 14: all passed.
+- Node `openapi-scrape-parity.test.mjs`: 10 of 10 (new alias-note guard).
+
 ## Commits
 - 31d9ad15f feat(quarry-edge): max_age on POST /v1/scrape with an org-scoped URL result cache (INNH-7): code, tests, docs, goldens, compose files.
 - the commit that adds this status, the progress file and the depth lines (docs(plan-work): INNH-7 status, progress and depth findings): see git log innh/lane-a.
@@ -97,7 +109,6 @@ Run in the lane-a container (`qtest-lane.sh a`, shared warm target) with a Debia
 
 ## Not verified
 - No real stack: no live Redis memory behaviour, no real origin, no gateway call. Redis was a Debian `redis-server` in the build container.
-- With `QUARRY_CHALLENGE_ENFORCE=log` (validation period) a bot-wall page passes the gate and WOULD be cached; the default `enforce` mode fails the run. The write site is after the challenge gate because a challenge page fails the run in the pipeline before an `Ok` output exists (read from the code, and the run-level challenge tests are the existing ones); no new test plants a challenge page and checks the cache.
 - Charset: a hit rebuilds `html`/`rawHtml` with the stored `Content-Type` charset, as a run does; only utf-8 was tested.
 - `clippy` was not run. `rustfmt --check` was run on the touched files: the repo's existing code in scrape.rs / routes.rs was already not rustfmt-clean (INNH-1 left it so) and the new code was left in the file's own style, not reformatted.
 - The Model Plane's vendored copy of `scrape-options.schema.json` (RUNBOOKS says it vendors the golden) was not found under apps/ in this worktree and was not touched; if it exists elsewhere it now lacks `max_age`.

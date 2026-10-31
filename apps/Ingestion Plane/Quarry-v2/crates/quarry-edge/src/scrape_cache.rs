@@ -18,8 +18,12 @@
 //! - The entry holds no inline text. A hit rebuilds markdown, html and rawHtml from the
 //!   stored artifacts of the original run, so a missing artifact is a miss (the page is
 //!   fetched again), never a 500 and never a partial answer.
-//! - Only a 2xx result of the static or TLS driver is written, and only after the run
-//!   passed the challenge gate (a challenge page fails the run, so it never gets here).
+//! - Only a 2xx result of the static or TLS driver is written, and never a page the
+//!   run itself flagged as not content: the pipeline marks a bot wall
+//!   (`InlineParts::bot_wall_suspected`) and a soft-404 (`InlineParts::soft_404`) in
+//!   every `QUARRY_CHALLENGE_ENFORCE` mode. Under the shipped default (`log`) such a
+//!   page does NOT fail the run (it returns Ok), so the flags, not the run's success,
+//!   are what keep it out of the cache. `enforce` fails the run before any write.
 
 use chrono::{DateTime, Utc};
 use quarry_core::output::DriverKind;
@@ -117,11 +121,16 @@ pub fn is_fresh(age_ms: u64, max_age_ms: u64) -> bool {
 }
 
 /// Whether a fresh result may be stored: a 2xx page from a driver that fetched it
-/// without a browser. A browser-served result (an escalation) stays out in this version.
-pub fn is_storable(output: &quarry_core::output::NormalizedOutput) -> bool {
+/// without a browser, which the run did not flag as a bot wall or a soft-404. A
+/// browser-served result (an escalation) stays out in this version. The flags come
+/// from `inline` because in the default `log` challenge mode a bot wall or a
+/// "page not found" body still returns a successful output.
+pub fn is_storable(output: &quarry_core::output::NormalizedOutput, inline: &InlineParts) -> bool {
     (200..300).contains(&output.status)
         && output.driver.kind != DriverKind::Browser
         && output.formats.markdown.is_some()
+        && !inline.bot_wall_suspected
+        && !inline.soft_404
 }
 
 /// Rebuild the inline parts a request asked for from the artifacts of the run that
@@ -358,13 +367,30 @@ mod tests {
 
     #[test]
     fn only_a_2xx_non_browser_result_with_a_markdown_artifact_is_stored() {
-        assert!(is_storable(&output(200, "static", true)));
-        assert!(is_storable(&output(204, "tls", true)));
-        assert!(!is_storable(&output(404, "static", true)));
-        assert!(!is_storable(&output(500, "static", true)));
-        assert!(!is_storable(&output(301, "static", true)));
-        assert!(!is_storable(&output(200, "browser", true)));
-        assert!(!is_storable(&output(200, "static", false)));
+        let clean = InlineParts::default();
+        assert!(is_storable(&output(200, "static", true), &clean));
+        assert!(is_storable(&output(204, "tls", true), &clean));
+        assert!(!is_storable(&output(404, "static", true), &clean));
+        assert!(!is_storable(&output(500, "static", true), &clean));
+        assert!(!is_storable(&output(301, "static", true), &clean));
+        assert!(!is_storable(&output(200, "browser", true), &clean));
+        assert!(!is_storable(&output(200, "static", false), &clean));
+    }
+
+    #[test]
+    fn a_bot_wall_or_a_soft_404_is_never_stored_even_though_the_run_succeeded() {
+        let ok = output(200, "static", true);
+        let wall = InlineParts {
+            bot_wall_suspected: true,
+            ..InlineParts::default()
+        };
+        let soft = InlineParts {
+            soft_404: true,
+            ..InlineParts::default()
+        };
+        assert!(!is_storable(&ok, &wall));
+        assert!(!is_storable(&ok, &soft));
+        assert!(is_storable(&ok, &InlineParts::default()));
     }
 
     const ORG: &str = "org_rehydrate";

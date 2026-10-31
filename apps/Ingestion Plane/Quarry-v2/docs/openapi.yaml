@@ -6828,6 +6828,7 @@ components:
             What to do when an action fails. abort stops the run and answers with the
             outcome of every action in error.details.actions; continue goes on to the
             next action. There is no retry: a replayed click or type can submit twice.
+            Alias actionsOnError.
         max_age:
           type: integer
           minimum: 0
@@ -6854,7 +6855,8 @@ components:
             on; 400 out_of_range above 30 days, invalid_type for a non-integer.
             Not on crawl, batch or run_page. cache.max_age_s is a different
             thing: the TTL, in seconds, of the entry this request writes.
-            Alias actionsOnError.
+            A 2xx page the run flagged as a bot wall or a soft-404 is returned
+            as usual but never written, so the next call fetches again.
       description: >-
         Fields not listed here are unknown: ignored with an unknown_field warning
         (and Deprecation and Sunset headers) unless the edge runs strict, where they
