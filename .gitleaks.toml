@@ -66,6 +66,11 @@ paths = [
 # merely *contains* one of these words is still caught only if it is
 # dominated by it.
 regexes = [
+  # Public Web Push test values (WS16-S6), matched exactly: the auth secret of the RFC 8291 Appendix A
+  # test vector (notification-core webpush/encryption_test.go), and a VAPID PUBLIC key the SPA's
+  # push-subscription test hands to subscribe(). Neither is a credential; a different value still flags.
+  '''^BTBZMqHH6r4Tts7J_aSIgg$''',
+  '''^BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8$''',
   '''(?i)\b(your[-_ ]?(api[-_ ]?)?(key|token|secret|password)|change[-_ ]?me|placeholder|replace[-_ ]?me|example[-_ ]?(key|token|secret)?|dummy|sample|redacted|todo|tbd|<[a-z0-9_ -]+>|\$\{[^}]+\}|xxxxx+|token[-_ ]?here|secret[-_ ]?here)\b''',
   # Test-only fixtures & env-var NAME references (not secret values), all in
   # *_test.go: NATS auth table tests reference the env-var identifier they read

@@ -91,6 +91,31 @@ func IsNativeType(notificationType string) bool {
 	return ok
 }
 
+// pushChannel is the channel a Web Push wake-up is gated on.
+const pushChannel = "push"
+
+// scheduledRunOutcomeType is the type capability-core sends when a scheduled run finishes.
+const scheduledRunOutcomeType = "modelplane.scheduled_run_outcome"
+
+// pushOutcomes are the scheduled-run outcomes that wait on their owner. A completed run and a failed run stay in
+// the feed: DEC-38 keeps those opt-in, and the push channel is set per type, so the outcome decides here.
+var pushOutcomes = map[string]struct{}{
+	"needs_review":    {},
+	"paused_expired":  {},
+	"paused_failures": {},
+}
+
+func isWaitingOutcome(payload map[string]any) bool {
+	outcome, _ := payload["outcome"].(string)
+	_, waiting := pushOutcomes[outcome]
+	return waiting
+}
+
+func payloadString(payload map[string]any, key string) string {
+	value, _ := payload[key].(string)
+	return value
+}
+
 type Recipient struct {
 	Kind string `json:"kind"`
 	ID   string `json:"id"`
@@ -220,6 +245,7 @@ type Service struct {
 	recipientResolver RecipientResolver
 	preferenceGate    PreferenceGate
 	nativeDelivery    bool
+	pushNotifier      PushNotifier
 }
 
 // FeedSinkParams is the input to the feed-sink hook. Plain struct so
@@ -288,6 +314,26 @@ func WithPreferenceGate(gate PreferenceGate) Option {
 // stores them under the native provider. It must match the runtime the service is built with.
 func WithNativeDelivery() Option {
 	return func(s *Service) { s.nativeDelivery = true }
+}
+
+// PushNotifier is the optional Web Push hook. It receives the recipient, the type and the thread of a native
+// notification that was submitted. It sends content-free wake-ups, and it cannot change the accepted result.
+type PushNotifier interface {
+	NotifyPush(ctx context.Context, notice PushNotice)
+}
+
+// PushNotice names what a Web Push wake-up is about. It carries no content: a push only asks the user to open the
+// feed, and the feed holds the copy.
+type PushNotice struct {
+	OrganizationID string
+	RecipientID    string
+	Type           string
+	ThreadID       string
+}
+
+// WithPushNotifier registers the Web Push hook. Without it no push is sent.
+func WithPushNotifier(notifier PushNotifier) Option {
+	return func(s *Service) { s.pushNotifier = notifier }
 }
 
 // WithDeliveryQueue enables the durable outbox path. It is intentionally an
@@ -593,7 +639,38 @@ func (s *Service) dispatchAndFinalize(
 		s.feedSink(ctx, feedParams)
 	}
 
+	s.notifyPush(ctx, submittedRequest)
 	return buildAcceptedResponse(submittedRequest), nil
+}
+
+// notifyPush hands a submitted native notification to the Web Push hook. Only the waiting states push, only with the
+// push channel on, and never for a zero-retention request. The hook returns at once; its sends run in the background.
+func (s *Service) notifyPush(ctx context.Context, request *StoredRequest) {
+	if s.pushNotifier == nil || !s.nativeDelivery || !IsNativeType(request.Type) || request.RetentionMode == RetentionModeZDR {
+		return
+	}
+	if request.Type == scheduledRunOutcomeType && !isWaitingOutcome(request.Payload) {
+		return
+	}
+	gate, ok := s.preferenceGate.(ChannelPreferenceGate)
+	if !ok {
+		return
+	}
+	enabled, err := gate.IsEnabled(ctx, request.OrganizationID, request.RecipientID, request.Type, pushChannel, true)
+	if err != nil {
+		log.Printf("notification-core: push preference check failed for request %s: %v", request.ID, err)
+		return
+	}
+	if !enabled {
+		return
+	}
+	notice := PushNotice{
+		OrganizationID: request.OrganizationID,
+		RecipientID:    request.RecipientID,
+		Type:           request.Type,
+		ThreadID:       payloadString(request.Payload, "thread_id"),
+	}
+	s.pushNotifier.NotifyPush(ctx, notice)
 }
 
 // extractDisplayFields pulls common display fields out of the payload by

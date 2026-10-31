@@ -795,6 +795,14 @@ services:
             # for run-watch notifications (AUTO-2). Empty disables this
             # principal entirely, matching support-worker's optional pattern.
             NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN: ${NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN:-}
+            # Web Push (WS16-S6), off by default and read as the literal "true". The VAPID pair and the
+            # subscription key are minted and persisted by scripts/run-application-plane.sh, never typed by hand.
+            # Only this service receives the private key; the gateway and the browser never do.
+            NOTIFICATION_WEB_PUSH_ENABLED: ${NOTIFICATION_WEB_PUSH_ENABLED:-false}
+            NOTIFICATION_VAPID_PUBLIC_KEY: ${NOTIFICATION_VAPID_PUBLIC_KEY:-}
+            NOTIFICATION_VAPID_PRIVATE_KEY: ${NOTIFICATION_VAPID_PRIVATE_KEY:-}
+            NOTIFICATION_VAPID_SUBJECT: ${NOTIFICATION_VAPID_SUBJECT:-mailto:ops@verevon.local}
+            NOTIFICATION_PUSH_SUBSCRIPTION_KEY: ${NOTIFICATION_PUSH_SUBSCRIPTION_KEY:-}
             # Cross-plane org-deletion subscriber: a SECOND, narrowly-scoped NATS
             # identity (notification-core-gdpr) on the shared Control-Plane broker,
             # kept distinct from NATS_URL/NATS_SHARED_URL/VEREVON_NATS_URL above,

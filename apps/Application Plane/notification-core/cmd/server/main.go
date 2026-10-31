@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -23,6 +24,7 @@ import (
 	"github.com/I-Dacosta/AquatiqCMS/apps/notification-core/internal/preferences"
 	runtimeclient "github.com/I-Dacosta/AquatiqCMS/apps/notification-core/internal/runtime"
 	"github.com/I-Dacosta/AquatiqCMS/apps/notification-core/internal/subscribers"
+	"github.com/I-Dacosta/AquatiqCMS/apps/notification-core/internal/webpush"
 )
 
 func main() {
@@ -186,6 +188,26 @@ func main() {
 		dispatcher = runtimeclient.NewComposite(runtime, runtimeclient.NewNativeAdapter())
 		notificationOptions = append(notificationOptions, notification.WithNativeDelivery())
 	}
+	// Web Push (WS16-S6) is opt-in. With NOTIFICATION_WEB_PUSH_ENABLED unset the subscription routes answer as
+	// unavailable and no push leaves this process.
+	var pushSubscriptions httpserver.PushSubscriptions
+	if cfg.WebPushEnabled {
+		vapidKeys, err := webpush.LoadVAPID(cfg.VAPIDPublicKey, cfg.VAPIDPrivateKey)
+		if err != nil {
+			log.Fatalf("configure web push: %v", err)
+		}
+		pushStore, err := webpush.NewStore(db.Pool, cfg.PushSubscriptionKey)
+		if err != nil {
+			log.Fatalf("configure web push store: %v", err)
+		}
+		pushSender := webpush.NewSender(vapidKeys, cfg.VAPIDSubject, &http.Client{
+			Timeout: 10 * time.Second,
+			// A push service answers; it never redirects. Following one would let it aim the signed POST elsewhere.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		})
+		pushSubscriptions = webpush.NewService(vapidKeys, pushStore)
+		notificationOptions = append(notificationOptions, notification.WithPushNotifier(webpush.NewNotifier(pushStore, pushSender)))
+	}
 	notificationService := notification.NewService(repository, dispatcher, publisher, notificationOptions...)
 
 	handler := httpserver.NewHandler(cfg, httpserver.HandlerDeps{
@@ -196,6 +218,7 @@ func main() {
 		Preferences:        prefSvc,
 		Channels:           channelsSvc,
 		Recipients:         subSvc,
+		Push:               pushSubscriptions,
 	})
 	delegationVerifier, err := delegation.NewVerifier(delegation.Config{
 		Audience: "notification-core",

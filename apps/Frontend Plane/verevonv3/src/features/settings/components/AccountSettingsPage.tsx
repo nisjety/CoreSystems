@@ -1,6 +1,7 @@
 import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
 import { ChatGptSubscriptionPanel } from '@/features/integrations/components/ChatGptSubscriptionPanel'
 import { MailTaskAddressSection } from '@/features/settings/components/MailTaskAddressSection'
+import { NotificationChannelsSection } from '@/features/settings/components/NotificationChannelsSection'
 import { PasskeySecuritySection } from '@/features/settings/components/PasskeySecuritySection'
 import { PrivacyDataSection } from '@/features/settings/components/PrivacyDataSection'
 import { TwoFactorEnrollmentSection } from '@/features/settings/components/TwoFactorEnrollmentSection'
@@ -38,7 +39,6 @@ type FormState = {
   theme: string
   status: string
   emailNotifications: boolean
-  pushNotifications: boolean
 }
 
 type LoadState =
@@ -61,7 +61,6 @@ const emptyForm: FormState = {
   theme: 'system',
   status: 'online',
   emailNotifications: true,
-  pushNotifications: true,
 }
 
 function getProviderRows(i18n: ReturnType<typeof useI18n>) {
@@ -99,7 +98,6 @@ function formFrom(profile: UserProfile, preferences: UserPreferences): FormState
     theme: preferences.theme || emptyForm.theme,
     status: profile.status || emptyForm.status,
     emailNotifications: preferences.notifications?.email ?? emptyForm.emailNotifications,
-    pushNotifications: preferences.notifications?.push ?? emptyForm.pushNotifications,
   }
 }
 
@@ -167,7 +165,6 @@ export default function AccountSettingsPage() {
           theme: current.theme,
           notifications: {
             email: current.emailNotifications,
-            push: current.pushNotifications,
           },
         }),
       ])
@@ -254,6 +251,7 @@ export default function AccountSettingsPage() {
       />
       <PreferencesSection form={form} onField={updateField} />
       <AvailabilitySection form={form} onField={updateField} />
+      <NotificationChannelsSection />
       <ConnectedAccountsSection profile={profile} />
       <ChatGptSubscriptionSection />
       <TwoFactorEnrollmentSection />
@@ -456,12 +454,6 @@ function AvailabilitySection(props: {
       description: i18n.tr('Send konto- og supportoppdateringer til den primære e-posten din.', 'Send account and support updates to your primary email.'),
       enabled: props.form().emailNotifications,
       onChange: (checked: boolean) => props.onField('emailNotifications', checked),
-    },
-    {
-      title: i18n.tr('Push-varsler', 'Push notifications'),
-      description: i18n.tr('Vis nettleservarsler for samtaler tildelt deg.', 'Show browser notifications for assigned conversations.'),
-      enabled: props.form().pushNotifications,
-      onChange: (checked: boolean) => props.onField('pushNotifications', checked),
     },
   ]
 
