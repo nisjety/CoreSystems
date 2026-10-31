@@ -36,6 +36,7 @@ fn kind_from_str(kind: &str) -> QuarryResult<artifact_meta::ArtifactKind> {
         "meta" | "meta.json" => Ok(K::Meta),
         "scrape_record" | "scrape_record.json" => Ok(K::ScrapeRecord),
         "screenshot_jpeg" | "screenshot.jpg" => Ok(K::ScreenshotJpeg),
+        "change_diff" | "change_diff.json" => Ok(K::ChangeDiff),
         other => Err(QuarryError::new(
             ErrorCode::BadRequest,
             format!("unknown artifact kind: {other}"),

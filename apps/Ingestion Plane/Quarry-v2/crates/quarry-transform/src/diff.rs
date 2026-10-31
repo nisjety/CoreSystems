@@ -6,7 +6,7 @@
 //! renumbered. It is sufficient for `change.detected` event payloads and for
 //! scoring change-detection precision in Phase 8 evals.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -48,6 +48,31 @@ pub enum DiffOp {
     },
 }
 
+/// Indexes (into `values`) of one longest strictly increasing subsequence.
+fn longest_increasing_subsequence(values: &[usize]) -> Vec<usize> {
+    let mut tails: Vec<usize> = Vec::new();
+    let mut before: Vec<Option<usize>> = vec![None; values.len()];
+    for (k, &v) in values.iter().enumerate() {
+        let pos = tails.partition_point(|&t| values[t] < v);
+        if pos > 0 {
+            before[k] = Some(tails[pos - 1]);
+        }
+        if pos == tails.len() {
+            tails.push(k);
+        } else {
+            tails[pos] = k;
+        }
+    }
+    let mut out = Vec::new();
+    let mut cur = tails.last().copied();
+    while let Some(k) = cur {
+        out.push(k);
+        cur = before[k];
+    }
+    out.reverse();
+    out
+}
+
 /// Result of paragraph-level diff. `is_real_delta` is `false` when the only
 /// changes are paragraphs being moved (no add/remove).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -76,8 +101,37 @@ pub fn diff_paragraphs(prev: &str, current: &str, max_chars: usize) -> SemanticD
     let prev_fps: Vec<String> = prev_chunks.iter().map(fp).collect();
     let curr_fps: Vec<String> = curr_chunks.iter().map(fp).collect();
 
-    let prev_set: HashSet<&String> = prev_fps.iter().collect();
+    // First index of each paragraph in `prev`: one pass, so a page of many paragraphs is not
+    // quadratic (the diff runs inside a request).
+    let mut prev_first: HashMap<&String, usize> = HashMap::with_capacity(prev_fps.len());
+    for (j, hash) in prev_fps.iter().enumerate() {
+        prev_first.entry(hash).or_insert(j);
+    }
     let curr_set: HashSet<&String> = curr_fps.iter().collect();
+
+    // A paragraph is `moved` only when its place among the paragraphs both texts hold changed:
+    // the shared paragraphs that keep their relative order (a longest increasing run of their
+    // old positions) stay in place, so an inserted or dropped paragraph does not make every
+    // paragraph after it "moved". A repeated paragraph counts at its first appearance only.
+    let mut seen: HashSet<&String> = HashSet::new();
+    let mut shared: Vec<(usize, usize)> = Vec::new(); // (index in current, index in prev)
+    for (i, hash) in curr_fps.iter().enumerate() {
+        if let Some(&j) = prev_first.get(hash) {
+            if seen.insert(hash) {
+                shared.push((i, j));
+            }
+        }
+    }
+    let old_positions: Vec<usize> = shared.iter().map(|&(_, j)| j).collect();
+    let in_place: HashSet<usize> = longest_increasing_subsequence(&old_positions)
+        .into_iter()
+        .map(|k| shared[k].0)
+        .collect();
+    let moved_from: HashMap<usize, usize> = shared
+        .iter()
+        .filter(|(i, _)| !in_place.contains(i))
+        .copied()
+        .collect();
 
     let mut ops = Vec::new();
     let mut added = 0usize;
@@ -86,7 +140,7 @@ pub fn diff_paragraphs(prev: &str, current: &str, max_chars: usize) -> SemanticD
     let mut unchanged = 0usize;
 
     for (i, (chunk, hash)) in curr_chunks.iter().zip(curr_fps.iter()).enumerate() {
-        if !prev_set.contains(hash) {
+        if !prev_first.contains_key(hash) {
             ops.push(DiffOp::Added {
                 index: i,
                 fingerprint: hash.clone(),
@@ -96,9 +150,8 @@ pub fn diff_paragraphs(prev: &str, current: &str, max_chars: usize) -> SemanticD
             continue;
         }
         // Same content; check if it moved.
-        let prev_index = prev_fps.iter().position(|h| h == hash);
-        match prev_index {
-            Some(j) if j != i => {
+        match moved_from.get(&i) {
+            Some(&j) => {
                 ops.push(DiffOp::Moved {
                     from: j,
                     to: i,
@@ -106,7 +159,7 @@ pub fn diff_paragraphs(prev: &str, current: &str, max_chars: usize) -> SemanticD
                 });
                 moved += 1;
             }
-            _ => unchanged += 1,
+            None => unchanged += 1,
         }
     }
     for (j, (chunk, hash)) in prev_chunks.iter().zip(prev_fps.iter()).enumerate() {
@@ -183,6 +236,43 @@ mod tests {
         assert_eq!(d.added, 0);
         assert_eq!(d.removed, 0);
         assert!(!d.is_real_delta());
+    }
+
+    #[test]
+    fn an_inserted_paragraph_does_not_make_the_rest_moved() {
+        let d = diff_paragraphs(
+            "alpha\n\nbeta\n\ngamma",
+            "intro\n\nalpha\n\nbeta\n\ngamma",
+            256,
+        );
+        assert_eq!((d.added, d.removed, d.moved, d.unchanged), (1, 0, 0, 3));
+    }
+
+    #[test]
+    fn a_dropped_paragraph_does_not_make_the_rest_moved() {
+        let d = diff_paragraphs("one\n\ntwo\n\nthree\n\nfour", "two\n\nthree\n\nfour", 256);
+        assert_eq!((d.added, d.removed, d.moved, d.unchanged), (0, 1, 0, 3));
+    }
+
+    #[test]
+    fn one_paragraph_that_changed_place_is_the_only_move() {
+        let d = diff_paragraphs("a\n\nb\n\nc\n\nd\n\ne", "a\n\nc\n\nd\n\ne\n\nb", 256);
+        assert_eq!((d.added, d.removed, d.moved, d.unchanged), (0, 0, 1, 4));
+        assert!(!d.is_real_delta());
+    }
+
+    #[test]
+    fn a_repeated_paragraph_is_not_reported_as_moved() {
+        let d = diff_paragraphs("x\n\nsame\n\ny", "x\n\nsame\n\ny\n\nsame", 256);
+        assert_eq!((d.added, d.removed, d.moved), (0, 0, 0));
+    }
+
+    #[test]
+    fn a_long_multibyte_paragraph_does_not_panic_the_diff() {
+        let old = "\u{00e5}".repeat(300);
+        let new = format!("{old}\n\nny");
+        let d = diff_paragraphs(&old, &new, 64);
+        assert!(d.added >= 1);
     }
 
     #[test]

@@ -30,6 +30,10 @@ pub enum ArtifactKind {
     /// WS13.3: a JPEG screenshot (a screenshot with `quality` set). Its own kind, so
     /// the PNG `Screenshot` kind keeps meaning PNG.
     ScreenshotJpeg,
+    /// INNH-4: the paragraph diff between two baselines of a monitored URL, JSON. It holds
+    /// page text (capped added and removed paragraphs), so it is written only for a
+    /// non-ZDR monitor and only behind `QUARRY_EDGE__CHANGE_TEXT_DIFF`.
+    ChangeDiff,
 }
 
 impl ArtifactKind {
@@ -56,6 +60,7 @@ impl ArtifactKind {
             Self::Meta => "meta.json",
             Self::ScrapeRecord => "scrape.json",
             Self::ScreenshotJpeg => "jpg",
+            Self::ChangeDiff => "change_diff.json",
         }
     }
 }
@@ -91,6 +96,7 @@ fn kind_stem(kind: ArtifactKind) -> &'static str {
         ArtifactKind::Meta => "meta",
         ArtifactKind::ScrapeRecord => "scrape_record",
         ArtifactKind::ScreenshotJpeg => "screenshot_jpeg",
+        ArtifactKind::ChangeDiff => "change_diff",
     }
 }
 
@@ -181,11 +187,19 @@ mod content_type_tests {
             ArtifactKind::Meta,
             ArtifactKind::ScrapeRecord,
             ArtifactKind::ScreenshotJpeg,
+            ArtifactKind::ChangeDiff,
         ] {
             let key = object_key("acme", "run_1", "page_1", kind);
             let declared = content_type_for_key(&key);
             assert!(!declared.is_empty(), "{kind:?} produced no content type");
         }
+    }
+
+    #[test]
+    fn a_change_diff_is_json_and_its_key_names_the_kind() {
+        let key = object_key("acme", "run_1", "page_1", ArtifactKind::ChangeDiff);
+        assert!(key.ends_with("/change_diff.change_diff.json"), "{key}");
+        assert_eq!(content_type_for_key(&key), "application/json");
     }
 
     #[test]
