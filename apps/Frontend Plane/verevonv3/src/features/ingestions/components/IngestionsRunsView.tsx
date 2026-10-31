@@ -7,13 +7,19 @@ import { VerevonInput } from '@/shared/ui/verevon/VerevonInput'
 import { VerevonSegmented, VerevonSegmentedButton } from '@/shared/ui/verevon/VerevonSegmented'
 import { VerevonSelect } from '@/shared/ui/verevon/VerevonSelect'
 import {
+  getIngestionArtifactText,
   getIngestionJob,
   getIngestionJobErrors,
+  getIngestionJobResults,
+  type ArtifactText,
   type EvidenceTimeline,
   type JobDetail,
   type JobErrors,
+  type JobResultItem,
+  type JobResultsPage,
   type RunItem,
 } from '@/shared/api/ingestions-client'
+import { jobResultsMessage } from '@/features/ingestions/lib/errors'
 import {
   countRunsByGroup,
   filterRuns,
@@ -562,10 +568,160 @@ function RunDetail(props: {
             )}
           </Show>
         </Show>
+        <RunResults runId={props.run.id} />
         <Show when={statLines().length === 0 && !errorsLoading() && !errors()}>
           <pre class="ingestions-json-pre">{JSON.stringify(props.run.stats, null, 2)}</pre>
         </Show>
       </Show>
     </aside>
+  )
+}
+
+/** The pages a run fetched, one page at a time, as Apify's dataset lists them. A page's markdown is read on demand. */
+function RunResults(props: { runId: string }) {
+  const i18n = useI18n()
+  const tr = i18n.tr
+  const [page, setPage] = createSignal<JobResultsPage | null>(null)
+  const [cursor, setCursor] = createSignal<number | undefined>(undefined)
+  const [earlier, setEarlier] = createSignal<Array<number | undefined>>([])
+  const [latest, setLatest] = createSignal(false)
+  const [loading, setLoading] = createSignal(false)
+  const [error, setError] = createSignal<string | null>(null)
+  const [opened, setOpened] = createSignal<JobResultItem | null>(null)
+  const [markdown, setMarkdown] = createSignal<ArtifactText | null>(null)
+  const [markdownError, setMarkdownError] = createSignal<string | null>(null)
+
+  createEffect(
+    () => `${props.runId}|${cursor() ?? ''}|${latest()}`,
+    () => {
+      const controller = new AbortController()
+      setLoading(true)
+      setError(null)
+      getIngestionJobResults(props.runId, { afterSeq: cursor(), latest: latest(), limit: 50 }, controller.signal)
+        .then(setPage)
+        .catch((cause: unknown) => {
+          if (controller.signal.aborted) return
+          setPage(null)
+          setError(jobResultsMessage(cause, tr, { no: 'Kunne ikke hente sidene.', en: 'Could not load the pages.' }))
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) setLoading(false)
+        })
+      return () => controller.abort()
+    },
+  )
+
+  function toggleLatest(next: boolean) {
+    setEarlier([])
+    setCursor(undefined)
+    setLatest(next)
+  }
+
+  function nextPage() {
+    const next = page()?.nextSeq
+    if (next === null || next === undefined) return
+    setEarlier([...earlier(), cursor()])
+    setCursor(next)
+  }
+
+  function previousPage() {
+    const stack = earlier()
+    if (stack.length === 0) return
+    setCursor(stack[stack.length - 1])
+    setEarlier(stack.slice(0, -1))
+  }
+
+  async function openPage(item: JobResultItem) {
+    setOpened(item)
+    setMarkdown(null)
+    setMarkdownError(null)
+    if (!item.markdownArtifactId) return
+    try {
+      setMarkdown(await getIngestionArtifactText(item.markdownArtifactId))
+    } catch {
+      setMarkdownError(tr('Teksten er ikke lenger lagret, eller den kan ikke vises.', 'The text is no longer stored, or it cannot be shown.'))
+    }
+  }
+
+  return (
+    <>
+      <h3 class="ingestions-section-title">{tr('Sider som ble hentet', 'Pages fetched')}</h3>
+      <label class="ingestions-toggle">
+        <input type="checkbox" checked={latest()} onChange={(event) => toggleLatest(event.currentTarget.checked)} />
+        <span>
+          <strong>{tr('Bare siste henting per URL', 'Latest fetch per URL only')}</strong>
+        </span>
+      </label>
+      <Show when={error()}>{(message) => <div class="ingestions-alert" role="alert">{message()}</div>}</Show>
+      <Show when={!error() && page()}>
+        {(view) => (
+          <>
+            <Show when={view().scanCapped}>
+              <p class="ingestions-muted">
+                {tr('Kjøringen er så stor at bare de første sidene er gått gjennom.', 'The run is so large that only the first pages were checked.')}
+              </p>
+            </Show>
+            <Show
+              when={view().items.length > 0}
+              fallback={
+                <p class="ingestions-muted">
+                  {loading() ? tr('Laster sider …', 'Loading pages…') : tr('Ingen sider er hentet ennå.', 'No pages have been fetched yet.')}
+                </p>
+              }
+            >
+              <ul class="ingestions-error-list">
+                <For each={view().items}>
+                  {(item) => (
+                    <li>
+                      <button type="button" class="ingestions-truncate" onClick={() => void openPage(item)}>
+                        {item.url}
+                      </button>
+                      <span class="ingestions-mono">
+                        {[item.status, item.wordCount !== null ? `${item.wordCount} ord` : null, item.driver].filter(Boolean).join(' · ')}
+                      </span>
+                    </li>
+                  )}
+                </For>
+              </ul>
+            </Show>
+            <div class="ingestions-meta-row">
+              <Button size="xs" variant="ghost" disabled={earlier().length === 0 || loading()} onClick={previousPage}>
+                {tr('Forrige', 'Previous')}
+              </Button>
+              <Button size="xs" variant="ghost" disabled={view().nextSeq === null || loading()} onClick={nextPage}>
+                {tr('Neste', 'Next')}
+              </Button>
+            </div>
+          </>
+        )}
+      </Show>
+      <Show when={opened()}>
+        {(item) => (
+          <div class="ingestions-code-card">
+            <span class="ingestions-truncate">{item().url}</span>
+            <Show
+              when={markdown()}
+              fallback={
+                <p class="ingestions-muted">
+                  {markdownError() ??
+                    (item().markdownArtifactId
+                      ? tr('Laster tekst …', 'Loading text…')
+                      : tr('Ingen tekst er lagret for denne siden.', 'No text is stored for this page.'))}
+                </p>
+              }
+            >
+              {(text) => (
+                <>
+                  <pre class="ingestions-json-pre">{text().content.slice(0, 20_000)}</pre>
+                  <Show when={text().truncated || text().content.length > 20_000}>
+                    <p class="ingestions-muted">{tr('Teksten er kuttet i visningen.', 'The text is cut short in this view.')}</p>
+                  </Show>
+                </>
+              )}
+            </Show>
+          </div>
+        )}
+      </Show>
+    </>
   )
 }

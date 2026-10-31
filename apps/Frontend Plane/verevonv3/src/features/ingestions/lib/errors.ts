@@ -34,6 +34,7 @@ export function scrapeSwitchFor(error: unknown, requested: readonly ScrapeFormat
     if (field.code !== 'feature_disabled') continue
     const path = typeof field.path === 'string' ? field.path : ''
     if (path === 'actions') return 'QUARRY_EDGE__SCRAPE_ACTIONS'
+    if (path === 'max_age') return 'QUARRY_EDGE__SCRAPE_MAX_AGE'
     if (!/^formats(\[\d+\])?$/.test(path)) continue
     const wantsAi = requested.some(isAiFormat)
     const wantsCapture = requested.some((format) => format === 'screenshot' || format === 'pdf')
@@ -43,6 +44,17 @@ export function scrapeSwitchFor(error: unknown, requested: readonly ScrapeFormat
     if (/screenshot|pdf|capture/i.test(message)) return 'QUARRY_EDGE__SCRAPE_CAPTURE'
     if (/json|summary|question|highlight/i.test(message)) return 'QUARRY_EDGE__AI_FORMATS'
     return wantsAi ? 'QUARRY_EDGE__AI_FORMATS' : 'QUARRY_EDGE__SCRAPE_CAPTURE'
+  }
+  return null
+}
+
+/** The crawl switch behind a refusal of `sitemap` or `scrape_options`, or `null`. */
+export function crawlSwitchFor(error: unknown): string | null {
+  for (const field of fieldsOf(error)) {
+    if (field.code !== 'unsupported_option' && field.code !== 'feature_disabled') continue
+    const path = typeof field.path === 'string' ? field.path : ''
+    if (path === 'sitemap') return 'QUARRY_EDGE__CRAWL_SITEMAP'
+    if (path === 'scrape_options' || path.startsWith('scrape_options.')) return 'QUARRY_EDGE__CRAWL_SCRAPE_OPTIONS'
   }
   return null
 }
@@ -116,7 +128,7 @@ export function playgroundErrorMessage(
   }
   const ai = aiRefusalMessage(error, tr)
   if (ai) return ai
-  const switchName = scrapeSwitchFor(error, context.requested ?? [])
+  const switchName = scrapeSwitchFor(error, context.requested ?? []) ?? crawlSwitchFor(error)
   if (switchName) {
     return tr(
       `Denne funksjonen er slått av på Quarry-edge. Slå på ${switchName} der, og kjør på nytt.`,
@@ -169,5 +181,81 @@ export function aiCodeMessage(code: string | null, tr: Tr, retryAfterSeconds?: n
       return code
         ? tr(`Ukjent status fra modellen (${code}).`, `Unknown status from the model (${code}).`)
         : tr('Modellen ga ingen forklaring.', 'The model gave no reason.')
+  }
+}
+
+/** Copy for a refused read of a run's pages (`/results`): the switch, ZDR, or the generic failure. */
+export function jobResultsMessage(error: unknown, tr: Tr, fallback: { no: string; en: string }): string {
+  if (isUnsupported(error)) {
+    return tr(
+      'Sidelisten for kjøringer er ikke slått på på Quarry-edge. Slå på QUARRY_EDGE__JOB_RESULTS der, og kjør på nytt.',
+      'The per-run page list is not switched on in Quarry-edge. Turn on QUARRY_EDGE__JOB_RESULTS there and run again.',
+    )
+  }
+  if (error instanceof ApiError && error.status === 403 && reasonOf(error) === 'job_result_urls') {
+    return tr(
+      'Sidelisten er ikke tilgjengelig under dataskjerming (ZDR), fordi adressene til sidene ikke lagres.',
+      'The page list is not available under zero data retention (ZDR), because page addresses are not stored.',
+    )
+  }
+  return translateApiError(error, tr, fallback)
+}
+
+/** Copy for a refused change diff (`/v1/change/diff`): the switch, ZDR, or the generic failure. */
+export function changeDiffMessage(error: unknown, tr: Tr, fallback: { no: string; en: string }): string {
+  if (isUnsupported(error)) {
+    return tr(
+      'Endringsdiff er ikke slått på på Quarry-edge. Slå på QUARRY_EDGE__CHANGE_TEXT_DIFF der, og kjør på nytt.',
+      'Change diffs are not switched on in Quarry-edge. Turn on QUARRY_EDGE__CHANGE_TEXT_DIFF there and run again.',
+    )
+  }
+  if (error instanceof ApiError && error.status === 403) {
+    return tr(
+      'Endringsdiff er ikke tilgjengelig under dataskjerming (ZDR).',
+      'Change diffs are not available under zero data retention (ZDR).',
+    )
+  }
+  return translateApiError(error, tr, fallback)
+}
+
+/** Why Quarry could not compare two versions of a page, in product copy. `null` when the diff is available. */
+export function diffReasonMessage(reason: string | null | undefined, tr: Tr): string | null {
+  switch (reason) {
+    case 'no_previous_version':
+      return tr('Det finnes bare én lagret versjon, så det er ingenting å sammenligne med ennå.', 'Only one stored version exists, so there is nothing to compare with yet.')
+    case 'no_previous_text':
+      return tr('Forrige versjon ble lagret uten tekst, så endringen kan ikke vises.', 'The previous version was stored without text, so the change cannot be shown.')
+    case 'no_text':
+      return tr('Siden har ingen tekst å sammenligne.', 'The page has no text to compare.')
+    case 'artifact_gone':
+      return tr('Teksten til en av versjonene er utgått og er ikke lenger lagret.', 'The text of one of the versions has expired and is no longer stored.')
+    default:
+      return null
+  }
+}
+
+/** Why a search has no answer, in product copy. `null` when the answer is ok or was not asked for. */
+export function answerStatusMessage(status: string | null | undefined, reason: string | null | undefined, tr: Tr): string | null {
+  switch (status) {
+    case 'no_sources':
+      return tr('Fant ingen kilder å svare fra.', 'No sources to answer from.')
+    case 'skipped_zdr':
+      return tr('Svar er av under dataskjerming (ZDR).', 'Answers are off under zero data retention (ZDR).')
+    case 'unavailable':
+      if (reason === 'synthesis_disabled') {
+        return tr(
+          'Svar er ikke slått på på Quarry-edge. Slå på QUARRY_EDGE__ANSWER_SYNTHESIS der.',
+          'Answers are not switched on in Quarry-edge. Turn on QUARRY_EDGE__ANSWER_SYNTHESIS there.',
+        )
+      }
+      if (reason === 'model_plane_auth_refused') {
+        return tr(
+          'Modellplanen avviste nøkkelen for svar. Sjekk tilgangen til svar.',
+          'The model plane refused the key for answers. Check the grant for answers.',
+        )
+      }
+      return tr('Svar er ikke tilgjengelig akkurat nå.', 'An answer is not available right now.')
+    default:
+      return null
   }
 }

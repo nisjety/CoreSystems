@@ -34,6 +34,14 @@ export type AiReportView = {
   total: { calls: number; inputTokens: number; outputTokens: number }
 }
 
+/** How a scrape answered `max_age` (INNH-7). `hit` came from a stored result; `ignoredReason` says why a requested `max_age` was not used. */
+export type ScrapeCacheView = {
+  state: 'hit' | 'miss' | 'bypass' | null
+  cachedAt: string | null
+  ageMs: number | null
+  ignoredReason: 'max_age_ignored_zdr' | 'max_age_ignored' | 'cache_unavailable' | null
+}
+
 export type ScrapeView = {
   requestedUrl: string
   finalUrl: string
@@ -66,6 +74,8 @@ export type ScrapeView = {
   highlights: ScrapeHighlight[]
   /** Per-format status and the call total; `null` when no AI format was asked for. */
   ai: AiReportView | null
+  /** How `max_age` was answered; `state` is null when the edge sent no cache fields. */
+  cache: ScrapeCacheView
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -78,6 +88,20 @@ function text(value: unknown): string {
 
 function num(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+const CACHE_STATES = ['hit', 'miss', 'bypass'] as const
+const IGNORED_CACHE_CODES = ['max_age_ignored_zdr', 'max_age_ignored', 'cache_unavailable'] as const
+
+function readCache(data: Record<string, unknown>): ScrapeCacheView {
+  const effective = record(data.effective_options)
+  const codes = Array.isArray(data.warnings) ? data.warnings.map((warning) => text(record(warning).code)) : []
+  return {
+    state: CACHE_STATES.find((state) => state === text(effective.cache_state)) ?? null,
+    cachedAt: text(effective.cached_at) || null,
+    ageMs: num(effective.cache_age_ms),
+    ignoredReason: IGNORED_CACHE_CODES.find((code) => codes.includes(code)) ?? null,
+  }
 }
 
 export function toScrapeView(result: ScrapeResult | unknown, requestedUrl: string): ScrapeView {
@@ -98,7 +122,10 @@ export function toScrapeView(result: ScrapeResult | unknown, requestedUrl: strin
     .map(([format, value]) => ({ format, artifactId: text(record(value).artifact_id), bytes: num(record(value).bytes) }))
     .filter((entry) => entry.artifactId.length > 0)
   const warnings = Array.isArray(data.warnings)
-    ? data.warnings.map((warning) => (typeof warning === 'string' ? warning : text(record(warning).message) || text(record(warning).code))).filter(Boolean)
+    ? data.warnings
+        .map((warning) => (typeof warning === 'string' ? warning : text(record(warning).message) || text(record(warning).code)))
+        .filter(Boolean)
+        .filter((warning) => !(IGNORED_CACHE_CODES as readonly string[]).includes(warning))
     : []
 
   return {
@@ -128,6 +155,7 @@ export function toScrapeView(result: ScrapeResult | unknown, requestedUrl: strin
     answer: text(data.answer) || null,
     highlights: readHighlights(data.highlights),
     ai: readAiReport(data.ai),
+    cache: readCache(data),
   }
 }
 

@@ -31,7 +31,7 @@ mangler. **Mangler** = Quarry har det ikke ennå; se avsnittet "Mangler i Quarry
 | Scrape: nettleserhandlinger (klikk, skriv, rull, velg, trykk, vent) | `actions`, `actions_on_error` | Flagg `QUARRY_EDGE__SCRAPE_ACTIONS` | `scrape_actions.rs`, `ScrapeAction` i `quarry-core/src/scrape_actions.rs` |
 | Scrape: utdragsmodus (Quarry har mer enn Firecrawl) | `extractor`: `readability`, `clean_full`, `raw` | Koblet | `scrape.rs` |
 | Scrape: fjern base64-bilder (Quarry) | `remove_base64_images` | Koblet | |
-| Scrape: maks alder / cache | cache-policy finnes i Quarry, men scrape-endepunktet tar ikke imot `maxAge` i dag | Mangler (se under) | `quarry-core/src/cache.rs` |
+| Scrape: maks alder / cache | `max_age` i millisekunder; svaret viser `cache_state`, `cached_at` og `cache_age_ms` | Flagg `QUARRY_EDGE__SCRAPE_MAX_AGE` (live: av). Koblet i Verevon: «Bruk lagret resultat opptil», og kilden vises under resultatet | `scrape_cache.rs` (Quarry), `playground.ts`, `scrape-view.ts` |
 | Scrape: JSON-format med skjema per side | `formats: {type:'json', schema}` | Flagg `QUARRY_EDGE__AI_FORMATS` (live: av). Koblet i Verevon; Quarry-siden på `quarryv2-next` (a8331b38c, 15ca48ed8, d4fa6ee08) | `quarry-core/src/scrape.rs`, `playground.ts`, `IngestionsPlaygroundResult.tsx` |
 | Scrape: sammendrag, spørsmål, høydepunkter | `formats: {type:'summary'}`, `{type:'question',question}`, `{type:'highlights',query}` | Flagg `QUARRY_EDGE__AI_FORMATS` (live: av). Koblet i Verevon | samme |
 | Scrape: branding (farger, logo) | feltet `branding` finnes i svaret | Koblet (vises i JSON og metadata) | `pipeline.rs` |
@@ -40,11 +40,11 @@ mangler. **Mangler** = Quarry har det ikke ennå; se avsnittet "Mangler i Quarry
 | Search: nettsøk | `POST /v1/search` | Koblet | `search.rs` |
 | Search: tidsrom, emne, domener, eksakt treff | `time_range`, `topic`, `include_domains`, `exclude_domains`, `exact_match` | Koblet | `search.rs` |
 | Search: marked og språk (Quarry) | `country`, `language` | Koblet (lagt til i denne runden) | `search.rs` |
-| Search: svar generert fra treffene | `include_answer` | Mangler svarleverandør (se under) | `answer_routes.rs` |
+| Search: svar generert fra treffene | `include_answer`, `answer_status`, `answer_reason` | Koblet i Verevon: viser svaret, eller hvorfor det mangler. Bryter `QUARRY_EDGE__ANSWER_SYNTHESIS` (live: ikke slått på) | `search.rs`, `errors.ts` (`answerStatusMessage`) |
 | Search: skrape alle treff | `POST /v1/batch` med treffene | Koblet | |
 | Crawl: følg lenker, dybde, stier, underdomener | `max_pages`, `max_depth`, `include_paths`, `exclude_paths`, `allow_subdomains` | Koblet | `crawl_request.rs` |
-| Crawl: sitemap | `sitemap` (kun `skip` støttes) | Mangler | `crawl_request.rs:56` |
-| Crawl: skrape-valg per side | `scrape_options` | Mangler | `crawl_request.rs:61` |
+| Crawl: sitemap | `sitemap`: `skip`, `include`, `only` | Flagg `QUARRY_EDGE__CRAWL_SITEMAP` (live: av). Koblet i Verevon | `knowledge/quarry.rs` (`normalize_crawl_body_for`), `playground.ts` |
+| Crawl: skrape-valg per side | `scrape_options` | Flagg `QUARRY_EDGE__CRAWL_SCRAPE_OPTIONS` (live: av). Koblet i Verevon: innholdsvalgene gjelder hver side | `knowledge/quarry.rs`, `playground.ts` |
 | Crawl: pause, gjenoppta, avbryt | `POST /v1/crawl/{id}/pause` m.fl. | Flagg `QUARRY_EDGE__JOB_CONTROL` | `job_lifecycle_routes.rs` |
 | Batch: liste med URL-er | `POST /v1/batch` | Koblet, også pause/avbryt | |
 | Extract: strukturert data med JSON-skjema | `POST /v1/extract`, `schema` | Flagg `QUARRY_EDGE__AI_FORMATS=1` + `MODEL_PLANE_URL` (live: 501 med hint) | `extract_routes.rs` |
@@ -53,13 +53,13 @@ mangler. **Mangler** = Quarry har det ikke ennå; se avsnittet "Mangler i Quarry
 | Agent: direkte Quarry-API uten Verevon | krever nettleser-grant fra gatewayen | Mangler (se under) | `agent_routes/lifecycle.rs` |
 | Monitor: sjekk side for endring | `POST /v1/change/check` | Koblet | `change_routes.rs` |
 | Monitor: gjentakende overvåker (time, dag, uke) | `POST /v1/schedules` med `target_kind=change_monitor` | Koblet (opprett/stopp) | `monitoring.rs` |
-| Monitor: tekstdiff mellom versjoner | ingen tekst lagres, bare fingeravtrykk | Mangler (se under) | `change_routes.rs` |
+| Monitor: tekstdiff mellom versjoner | `GET /v1/change/diff` | Flagg `QUARRY_EDGE__CHANGE_TEXT_DIFF` (live: av). Koblet i Verevon: «Vis endringen» | `monitoring.rs`, `ChangeDiffPanel.tsx` |
 | Monitor: varsel i appen | `change_detected` via control | Koblet (listes i Overvåking) | `notify/` |
-| Monitor: varsel på e-post / webhook | webhook sendes til control, men ingen abonnements-API | Mangler (se under) | `change_webhook.rs` |
+| Monitor: varsel på e-post / webhook | `/v1/webhook-subscriptions` | API på lanen bak `QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS` (av). Ingen UI ennå: sikkerhetsgjennomgang pågår | |
 | Tidsplaner: cron, pause, utløs | `/v1/schedules` | Koblet; lagring er av på live (se under) | `schedules.rs` |
 | Jobber: liste, status, feil per URL, robots-blokkert | `/v1/jobs/{id}`, `/v1/jobs/{id}/errors` | Koblet (ny i denne runden) | `ingestions/jobs.rs` |
 | Jobber: opprinnelse (manuell eller tidsplan) | `origin`, `schedule_id` | Koblet (ny i denne runden) | `ingestions/runs.rs` |
-| Jobber: kostnad per kjøring | `credits` på jobbsvar og jobbrader | Flagg `QUARRY_CONTROL__JOB_CREDITS` (live: av). Koblet i Verevon; Quarry-siden på `quarryv2-next` (6bbd99763) | `ingestions/runs.rs` (`to_credits`), `jobs.rs` |
+| Kjøring: sider som ble hentet (Apify-datasett) | `GET /v1/jobs/{id}/results`, `/v1/crawl/{id}/results`, `/v1/batch/{id}/results` | Flagg `QUARRY_EDGE__JOB_RESULTS` (live: av). Koblet i Verevon: «Sider som ble hentet», med markdown per side | `ingestions/jobs.rs`, `IngestionsRunsView.tsx` |
 | Forbruk: kreditter for perioden | `GET /v1/team/credit-usage` | Koblet (ny i denne runden) | `ingestions/jobs.rs` |
 | Parse: dokument (PDF, DOCX) til Markdown | intern opptak, ikke offentlig parse-rute | Mangler (se under) | `pipeline.rs:1043` |
 | Browser-økter og profiler | `/api/v1/browser/*` | Koblet i Nettleser (ikke i denne siden) | `browser.rs` |
@@ -77,52 +77,34 @@ slås på, virker funksjonen uten endring i koden.
 | `QUARRY_SCHEDULE_CAPABILITIES` (JSON) | tidsplantyper, utløs og backfill | tom: lagring av tidsplaner er av |
 | `QUARRY_EDGE__AI_FORMATS=1` + `MODEL_PLANE_URL` | AI-formater på scrape (json, summary, question, highlights) og strukturert uttrekk | av: AI-formater gir 400 `feature_disabled`, `/v1/extract` gir 501 med hint |
 | `QUARRY_CONTROL__JOB_CREDITS=on` | kreditter per jobb (`credits`), default av | av: feltet mangler i svaret, og siden sier det |
+| `QUARRY_EDGE__SCRAPE_MAX_AGE=on` | `max_age` på scrape, med Redis for hurtiglageret | av: 400 `feature_disabled` på `max_age` |
+| `QUARRY_EDGE__CRAWL_SITEMAP=on` | `sitemap` på crawl | av: 400 `unsupported_option` på `sitemap` |
+| `QUARRY_EDGE__CRAWL_SCRAPE_OPTIONS=on` | `scrape_options` på crawl | av: 400 `unsupported_option` på `scrape_options` |
+| `QUARRY_EDGE__CHANGE_TEXT_DIFF=on` | `GET /v1/change/diff` og markdown på basislinjer | av: 501 |
+| `QUARRY_EDGE__JOB_RESULTS=on` | sider per kjøring | av: 501 |
+| `QUARRY_EDGE__ANSWER_SYNTHESIS=on` | svar i søk (`answer_status`) | av: `answer_status` er `unavailable` med `synthesis_disabled` |
+| `QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS=on` | abonnement på endringswebhook | av: 501 (ingen UI ennå) |
 
 Ingen av disse er slått på i denne runden. Å slå dem på er en konfigurasjonsendring
 på den delte live-stacken, og det må godkjennes av eieren.
 
 ## Mangler i Quarry
 
-Hver linje peker til stedet i Quarry-koden, slik at arbeidet kan starte der.
+Hver linje peker til stedet i Quarry-koden. Nummereringen er den samme som før, så den kan sammenlignes med tidligere versjoner av dette dokumentet. Quarry-punktene fra den andre leveransen står i parentes der de tilsvarer en linje her.
 
-0. **Live-gatewayen er ikke oppdatert med denne runden.** Den kjører build fra `14299e659`. Gateway-endringene for AI-formater, uttrekk-prompt og kreditter (se nedenfor) er bare testet med cargo og wiremock, ikke på live. Å bytte live krever eierens godkjenning.
-1. **Scrape-formatene `json`, `summary`, `question`, `highlights`: levert på `quarryv2-next`, ikke på live. Åpne blokkere i Quarry:** (a) `ai.<fmt>.truncated_input` settes ikke for sider over 60 000 tegn; (b) en personvernblokk på forespørselen (`credential_or_secret`, `zdr_ephemeral`) respekteres ikke. Fiksen gjør alle formater til `skipped` og kan legge til koden `PRIVACY_POLICY`. Ikke slå på AI-formater på live før (b) er lukket, siden en forespørsel med personvernblokk ellers kan sende innhold til modellen. Opprinnelig punkt: Reservert i
-   `quarry-core/src/scrape.rs:306` (`RESERVED`), og avvist med `reserved_format`.
-   Må: fjerne fra reservert liste, koble `AiFormatRunner` (`quarry-runtime/src/ai_formats.rs`)
-   til scrape-svaret, og legge til kontrakttester. Krever modellplanen.
-2. **Fri `prompt` på `/v1/extract`: levert** (5f1ac3ca2). Prompten brukes nå, også uten skjema. Verevon sender den videre.
-3. **Tekstdiff for overvåking.** `record_check` lagrer `artifact_id: None` på
-   basislinjen (`change_routes.rs`), og diff-artefakten er bare fingeravtrykk-overgangen.
-   Må: lagre markdown-artefakten for hver ny eller endret basislinje, sette
-   `artifact_id`, og ha et endepunkt som gir to versjoner å sammenligne.
-4. **Abonnement på endringswebhook.** `change_webhook.rs` sender
-   `quarry.change.detected` til control, men gatewayen har ingen rute for å
-   opprette, liste eller slette abonnement, og SPA-en har ingen UI for det.
-   Må: abonnements-API i control, rute i gatewayen, og en UI-flate.
-5. **Sitemap og skrape-valg for crawl.** `crawl_request.rs:56` og `:61` avviser
-   dem med `unsupported_option`. Må: implementere sitemap-oppdagelse og
-   `scrape_options` per side.
-6. **Maks alder (cache) på scrape.** Cache-policyen finnes (`quarry-core/src/cache.rs`),
-   men scrape-svaret viser bare `cache_state: bypass` og tar ikke imot `maxAge`.
-   Må: godta `max_age` på scrape og respektere den.
-7. **Svar i søk.** `include_answer` gir `answer: null` på live, og `/v1/answer`
-   svarer 501 når ingen svar-pipeline er satt opp (`answer_routes.rs`).
-   Må: konfigurere en svarleverandør på edge. Dette er en konfigurasjon, ikke kode.
-8. **Kostnad per kjøring.** `JobSummary` og `JobStatusView` har ingen kredittfelt,
-   og `/v1/team/credit-usage` er bare summert for teamet. Må: skrive kreditter per
-   jobb i jobbposten (eller hendelsene) og eksponere dem.
-9. **Direkte agent-API for Quarry-kallere.** `/v1/agent/runs` krever `grant_id`
-   fra gatewayen (`agent_routes/lifecycle.rs`), så en ekstern klient kan ikke starte
-   en agent direkte. Må: en grant-utstedelse som kan brukes av en API-nøkkel.
-10. **Parse av dokumenter til Markdown.** Pipeline-en leser PDF og DOCX
-    (`pipeline.rs:1043`), men bare som opptak til kunnskapsbasen. Må: en offentlig
-    rute som returnerer Markdown uten å lagre.
-11. **Resultater per side for en jobb.** Det finnes ingen rute som gir sidene en
-    crawl eller batch hentet. Feil og hendelser finnes, og sidene havner i
-    Kunnskap når `ingest` er på. `ListFilter` for artefakter har heller ikke
-    `run_id`. Må: filtrer artefakter på kjørings-ID, eller en resultatrute per jobb.
-12. **Schedule-kinds på live.** `QUARRY_SCHEDULE_CAPABILITIES` er tom, så
-    siden kan ikke lagre tidsplaner. Må: konfigurasjon, etter at utførelsen er verifisert.
+0. **Live-gatewayen er ikke oppdatert.** Den kjører build fra `14299e659`. Endringene fra `b2bf63e2a` og fra denne runden er testet med cargo, wiremock og vitest, ikke på live. Å bytte live krever eierens godkjenning.
+1. **AI-formater på scrape (`json`, `summary`, `question`, `highlights`).** Levert på `quarryv2-next` og på lanen `innh/lane-a` (336b1da1b). Begge blokkerne er lukket: `truncated_input` settes over 60 000 tegn, og en personvernblokk (`credential_or_secret`, `zdr_ephemeral`) gir `skipped` med `PRIVACY_POLICY` uten modellkall. Fortsatt av på live: `QUARRY_EDGE__AI_FORMATS` er ikke slått på, og modellplanen er ikke koblet.
+2. **Fri `prompt` på `/v1/extract`: levert** (5f1ac3ca2). Prompten brukes nå, også uten skjema.
+3. **Tekstdiff for overvåking (Quarry-punkt 4).** Levert på `innh/lane-b` (c9cca3667, 9455099e3, 96c5dc9c3): markdown-artefakt på basislinjen og `GET /v1/change/diff`, bak `QUARRY_EDGE__CHANGE_TEXT_DIFF` (av). SQL-en er ikke prøvd mot Postgres.
+4. **Abonnement på endringswebhook (Quarry-punkt 5).** API-et er bygget på `innh/lane-b` bak `QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS` (av). Ingen UI i Verevon ennå: sikkerhetsgjennomgangen i Quarry er ikke ferdig, og Quarry sender endelig form.
+5. **Sitemap og skrape-valg for crawl (Quarry-punkt 6).** Levert på `innh/lane-c` bak to flagg (av). Rulles ut i rekkefølgen i RUNBOOKS: orkestratoren først, så edge-flagget.
+6. **Maks alder på scrape (Quarry-punkt 7).** Levert på `innh/lane-a` (31d9ad15f, 5119e6ef8): `max_age` i millisekunder og `cache_state` i svaret, bak `QUARRY_EDGE__SCRAPE_MAX_AGE` (av). Uten Redis gir den `bypass` med advarselen `cache_unavailable`.
+7. **Svar i søk (Quarry-punkt 8a).** Levert på `innh/lane-d` (ab65682aa, 0aa5cbbb7): `answer_status` og `answer_reason`. Live svarer `synthesis_disabled` helt til bryteren `QUARRY_EDGE__ANSWER_SYNTHESIS` er slått på. Det er en konfigurasjon, ikke kode.
+8. **Kostnad per kjøring.** Levert på `quarryv2-next` (6bbd99763), bak `QUARRY_CONTROL__JOB_CREDITS` (av).
+9. **Direkte agent-API for Quarry-kallere.** `/v1/agent/runs` krever `grant_id` fra gatewayen (`agent_routes/lifecycle.rs`), så en ekstern klient kan ikke starte en agent direkte. Designnotat for API-nøkkelgrants ligger på `innh/lane-d` (a7ceb6da8, punkt 10 i Quarry-listen). Ikke bygget.
+10. **Parse av dokumenter til Markdown.** Pipeline-en leser PDF og DOCX (`pipeline.rs:1043`), men bare som opptak til kunnskapsbasen. Må: en offentlig rute som returnerer Markdown uten å lagre. Quarry-sesjonen bygger dette nå.
+11. **Resultater per side for en jobb (Quarry-punkt 12).** Levert på `innh/lane-b` (cc2596c7a, 4f2a1bc3c): `GET /v1/jobs/{id}/results`, `/v1/crawl/{id}/results` og `/v1/batch/{id}/results`, bak `QUARRY_EDGE__JOB_RESULTS` (av), og `GET /v1/artifacts?run_id=&kind=`. Ikke prøvd mot et stack.
+12. **Schedule-kinds på live.** `QUARRY_SCHEDULE_CAPABILITIES` er tom, så siden kan ikke lagre tidsplaner. Må: konfigurasjon, etter at utførelsen er verifisert.
 
 ## Endringer i denne runden
 
@@ -164,3 +146,29 @@ ikke AI-formater på. Skjermbilde av AI-svar på live er ikke tatt.
 - Frontend: alle stubber er borte. Kostnad, opprinnelse og "per side" er erstattet
   med ekte data eller er fjernet. Tekstdiff og e-post/webhook er ikke i siden.
   Det som mangler, står i denne filen.
+
+## Endringer i runden etter (andre leveranse fra Quarry)
+
+Gateway (`apps/gateway`):
+- `GET /api/v1/monitoring/diff` går til `/v1/change/diff` og gir `sourceUrl`, `from`, `to`, `diffId`, `available`, `reason`, `diff` og `markdown`.
+- `GET /api/ingestions/jobs/{id}/results` gir `items` (`seq`, `url`, `status`, `markdownArtifactId` m.fl.), `nextSeq` og `scanCapped`.
+- `GET /api/ingestions/artifacts/{id}` gir tekst for `text/*` og `application/json`, kuttet på 1 MiB. ZDR gir samme svar som skjermbilder.
+- Crawl: `sitemap` og `scrape_options` sendes videre, med hvitelisting. Ukjente nøkler i `scrape_options` avvises. Verdier utenfor området avvises før Quarry.
+- Søk: `answerStatus` og `answerReason` går til siden og inn i hurtiglageret.
+- Scrape: `max_age` går uendret videre. Testen i `knowledge/quarry.rs` låser det.
+
+Frontend:
+- Scrape: «Bruk lagret resultat opptil (minutter)». Resultatet sier når det kom fra et lagret resultat, og hvorfor det ble hentet på nytt.
+- Crawl: sitemap-valg, og rensing per side (hovedinnhold, utdragsmodus, base64, inkluder og ekskluder tagger). Standardvalgene sendes ikke.
+- Søk: svarstatus med tekst for hver årsak (`no_sources`, `skipped_zdr`, `unavailable` med `synthesis_disabled` eller `model_plane_auth_refused`).
+- Kjøring, utdata: «Sider som ble hentet», side for side, med markdown per side.
+- Overvåking: «Vis endringen» under siste sjekk og under tidslinjen. Viser lagt til, fjernet og flyttet avsnitt; avsnittsnummer vises fra 1.
+- Overvåking: teksten under tidslinjen var utdatert og er skrevet om.
+- Feilmeldinger navngir bryterne: `QUARRY_EDGE__SCRAPE_MAX_AGE`, `QUARRY_EDGE__CRAWL_SITEMAP`, `QUARRY_EDGE__CRAWL_SCRAPE_OPTIONS`, `QUARRY_EDGE__JOB_RESULTS`, `QUARRY_EDGE__CHANGE_TEXT_DIFF` og `QUARRY_EDGE__ANSWER_SYNTHESIS`. ZDR-tekst for sider og diff.
+
+Ikke verifisert:
+- Ingen av flaggene er slått på live, og ingen kall er gjort mot en Quarry med flaggene på.
+- Ingen skjermbilder: nettleseren er utlogget. Tomme og feilede tilstander er bare testet i vitest.
+- Quarry-punktene 3, 10 og vurderingen av punkt 13 er ikke levert ennå.
+
+Tester: Gateway (bin-suiten, cargo): 849 bestått, 0 feilet. Hele SPA-vitest: 3963 bestått, 1 feilet (BrowserBlockedNotice, filen og importene er ikke endret i denne grenen), 2 testfiler kan ikke kjøres (workspace-pakkene @quarry/client og @verevon/remote-core mangler i worktreet). Typecheck: 33 feil, samme som baseline. Lint på endrede filer: rent. Gateway-kontrakttester (node): 26 bestått. Ingestions- og i18n-suiter: 175 bestått.

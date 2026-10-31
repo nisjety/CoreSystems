@@ -19,8 +19,8 @@ import { VerevonSegmented, VerevonSegmentedButton } from '@/shared/ui/verevon/Ve
 import type { DiscoveredPage } from '@/shared/api/knowledge-client'
 import type { WebSearchCitation, WebSearchResult } from '@/shared/api/search-client'
 import type { ExtractItem } from '@/shared/api/ingestions-client'
-import type { AiFormatEntry, AiReportView, ScrapeView } from '@/features/ingestions/lib/scrape-view'
-import { aiCodeMessage } from '@/features/ingestions/lib/errors'
+import type { AiFormatEntry, AiReportView, ScrapeCacheView, ScrapeView } from '@/features/ingestions/lib/scrape-view'
+import { aiCodeMessage, answerStatusMessage } from '@/features/ingestions/lib/errors'
 import { shortFingerprint } from '@/features/ingestions/lib/monitoring'
 import { formatDuration } from '@/features/ingestions/lib/runs'
 import {
@@ -43,6 +43,9 @@ export type PlaygroundResult =
       answer: string | null
       citations: WebSearchCitation[]
       answerRequested: boolean
+      /** quarry's answer status (ok, no_sources, skipped_zdr, unavailable); absent on older answers. */
+      answerStatus?: string | null
+      answerReason?: string | null
     }
   | { kind: 'job'; endpoint: 'crawl' | 'batch'; id: string; target: string; acceptedAt: string }
   | { kind: 'agent'; url: string; goal: string; runId: string; threadId: string; sessionId: string }
@@ -340,6 +343,13 @@ function ScrapeResultView(props: {
           {tr('Siden kunne ikke legges i Kunnskap. Prøv igjen om litt.', 'The page could not be added to Knowledge. Try again shortly.')}
         </div>
       </Show>
+      <Show when={cacheNote(props.view.cache, tr)}>
+        {(note) => (
+          <p class="ingestions-muted" role="status">
+            {note()}
+          </p>
+        )}
+      </Show>
       <Show when={props.view.warnings.length > 0}>
         <div class="ingestions-warning-box">
           <ul>
@@ -499,6 +509,33 @@ const AI_FORMAT_LABELS: Record<AiFormatEntry['format'], (tr: (no: string, en: st
 }
 
 /** What each AI format did on this scrape: its status, the reason in product copy, and what the caller must check. */
+/** The note under a scrape that asked for `max_age`: served from a stored result, or why the page was fetched again. */
+function cacheNote(cache: ScrapeCacheView, tr: (no: string, en: string) => string): string | null {
+  switch (cache.ignoredReason) {
+    case 'max_age_ignored_zdr':
+      return tr(
+        'Lagrede resultater brukes ikke under dataskjerming (ZDR). Siden ble hentet på nytt.',
+        'Stored results are not used under zero data retention (ZDR). The page was fetched again.',
+      )
+    case 'max_age_ignored':
+      return tr(
+        'Et lagret resultat kan ikke brukes for denne forespørselen, for eksempel med nettlesersteg, skjermbilder eller AI-formater. Siden ble hentet på nytt.',
+        'A stored result cannot be used for this request, for example with browser steps, captures or AI formats. The page was fetched again.',
+      )
+    case 'cache_unavailable':
+      return tr(
+        'Hurtiglageret er ikke tilgjengelig på Quarry-edge, så siden ble hentet på nytt.',
+        'The result cache is not available on Quarry-edge, so the page was fetched again.',
+      )
+    default:
+      break
+  }
+  if (cache.state !== 'hit') return null
+  if (cache.ageMs === null) return tr('Fra lagret resultat.', 'From a stored result.')
+  const minutes = Math.max(0, Math.round(cache.ageMs / 60_000))
+  return tr(`Fra lagret resultat, ${minutes} min gammelt.`, `From a stored result, ${minutes} min old.`)
+}
+
 function AiReportPanel(props: { report: AiReportView }) {
   const i18n = useI18n()
   const tr = i18n.tr
@@ -726,10 +763,11 @@ function SearchResultView(props: {
           when={props.search.answer}
           fallback={
             <div class="ingestions-warning-box">
-              {tr(
-                'Quarry ga ikke noe svar. Svar krever en svarleverandør på Quarry-edge; treffene under er likevel gyldige.',
-                'Quarry returned no answer. An answer needs an answer provider on Quarry-edge; the hits below are still valid.',
-              )}
+              {answerStatusMessage(props.search.answerStatus, props.search.answerReason, tr) ??
+                tr(
+                  'Quarry ga ikke noe svar. Svar krever en svarleverandør på Quarry-edge; treffene under er likevel gyldige.',
+                  'Quarry returned no answer. An answer needs an answer provider on Quarry-edge; the hits below are still valid.',
+                )}
             </div>
           }
         >

@@ -1,4 +1,4 @@
-import type { CrawlRequest, ScrapeRequest } from '@/shared/api/knowledge-client'
+import type { CrawlPageScrapeOptions, CrawlRequest, ScrapeRequest } from '@/shared/api/knowledge-client'
 import type { WebSearchFilters } from '@/shared/api/search-client'
 
 /**
@@ -57,6 +57,8 @@ export type PlaygroundState = {
   excludeTags: string
   waitMs: string
   timeoutMs: string
+  /** Scrape: serve a stored result up to this many minutes old. Blank always fetches. */
+  maxAgeMinutes: string
   actions: PlaygroundAction[]
   actionsOnError: 'abort' | 'continue'
   schema: string
@@ -72,6 +74,8 @@ export type PlaygroundState = {
   /** The `highlights` AI format: what to find on the page. */
   aiHighlightQuery: string
   maxPages: string
+  /** Crawl: whether sitemap URLs are discovered (`include`), used alone (`only`) or ignored (`skip`). */
+  sitemap: 'skip' | 'include' | 'only'
   maxDepth: string
   includePaths: string
   excludePaths: string
@@ -106,6 +110,7 @@ export const defaultPlaygroundState: PlaygroundState = {
   excludeTags: '',
   waitMs: '',
   timeoutMs: '',
+  maxAgeMinutes: '',
   actions: [],
   actionsOnError: 'abort',
   schema: '',
@@ -117,6 +122,7 @@ export const defaultPlaygroundState: PlaygroundState = {
   aiQuestion: '',
   aiHighlightQuery: '',
   maxPages: '10',
+  sitemap: 'skip',
   maxDepth: '',
   includePaths: '',
   excludePaths: '',
@@ -303,6 +309,9 @@ export function aiFormatsFromState(state: PlaygroundState, ingest = false): Arra
   return out
 }
 
+/** Quarry's ceiling for `max_age`: 30 days, in minutes. */
+export const MAX_AGE_MINUTES = 43_200
+
 /** The scrape body for `scrapeUrl` (`/api/v1/knowledge/scrape` → `/v1/scrape`). */
 export function scrapeRequestFromState(state: PlaygroundState, ingest = false): ScrapeRequest {
   const formats: Array<string | Record<string, unknown>> = [
@@ -315,6 +324,7 @@ export function scrapeRequestFromState(state: PlaygroundState, ingest = false): 
   const excludeTags = splitList(state.excludeTags)
   const waitMs = boundedInt(state.waitMs, 0, 30_000)
   const timeoutMs = boundedInt(state.timeoutMs, 1_000, 120_000)
+  const maxAgeMinutes = boundedInt(state.maxAgeMinutes, 1, MAX_AGE_MINUTES)
   const built = buildActions(state.actions)
   return {
     url: state.url.trim(),
@@ -327,6 +337,7 @@ export function scrapeRequestFromState(state: PlaygroundState, ingest = false): 
     ...(excludeTags.length ? { exclude_tags: excludeTags } : {}),
     ...(waitMs ? { render: { waitForTimeoutMs: waitMs } } : {}),
     ...(timeoutMs ? { timeout_ms: timeoutMs } : {}),
+    ...(maxAgeMinutes ? { max_age: maxAgeMinutes * 60_000 } : {}),
     ...(built.ok && built.actions.length ? { actions: built.actions, actions_on_error: state.actionsOnError } : {}),
     ...(state.formats.includes('screenshot') || state.formats.includes('pdf')
       ? {
@@ -340,11 +351,31 @@ export function scrapeRequestFromState(state: PlaygroundState, ingest = false): 
   }
 }
 
+/**
+ * The cleaning every page of a crawl gets. Quarry needs `only_main_content` and
+ * `extractor` to agree, so a non-readability extractor sends `only_main_content: false`.
+ * `undefined` when every option is the default, so the request stays as it was.
+ */
+export function crawlScrapeOptionsFromState(state: PlaygroundState): CrawlPageScrapeOptions | undefined {
+  const readability = state.extractor === 'readability'
+  const includeTags = splitList(state.includeTags)
+  const excludeTags = splitList(state.excludeTags)
+  const options: CrawlPageScrapeOptions = {
+    ...(readability && state.onlyMainContent ? {} : { only_main_content: false }),
+    ...(readability ? {} : { extractor: state.extractor }),
+    ...(state.removeBase64Images ? { remove_base64_images: true } : {}),
+    ...(includeTags.length ? { include_tags: includeTags } : {}),
+    ...(excludeTags.length ? { exclude_tags: excludeTags } : {}),
+  }
+  return Object.keys(options).length ? options : undefined
+}
+
 /** The crawl body for `startCrawl` (`/api/v1/knowledge/crawl` → `/v1/crawl`). */
 export function crawlRequestFromState(state: PlaygroundState): CrawlRequest {
   const includePaths = splitList(state.includePaths)
   const excludePaths = splitList(state.excludePaths)
   const maxDepth = boundedInt(state.maxDepth, 1, 10)
+  const scrapeOptions = crawlScrapeOptionsFromState(state)
   return {
     url: state.url.trim(),
     maxPages: boundedInt(state.maxPages, 1, 50) ?? 10,
@@ -352,6 +383,8 @@ export function crawlRequestFromState(state: PlaygroundState): CrawlRequest {
     ...(includePaths.length ? { includePaths } : {}),
     ...(excludePaths.length ? { excludePaths } : {}),
     ...(state.allowSubdomains ? { allowSubdomains: true } : {}),
+    ...(state.sitemap !== 'skip' ? { sitemap: state.sitemap } : {}),
+    ...(scrapeOptions ? { scrapeOptions } : {}),
     ingest: state.ingest,
   }
 }
@@ -439,6 +472,8 @@ export function quarryRequestFor(state: PlaygroundState): QuarryRequest {
           ...(crawl.includePaths ? { include_paths: crawl.includePaths } : {}),
           ...(crawl.excludePaths ? { exclude_paths: crawl.excludePaths } : {}),
           ...(crawl.allowSubdomains ? { allow_subdomains: true } : {}),
+          ...(crawl.sitemap ? { sitemap: crawl.sitemap } : {}),
+          ...(crawl.scrapeOptions ? { scrape_options: crawl.scrapeOptions } : {}),
           ...(crawl.ingest ? { ingest: true } : {}),
         },
       }

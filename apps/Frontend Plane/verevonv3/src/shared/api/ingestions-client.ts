@@ -360,3 +360,53 @@ export function getIngestionJobErrors(
 export function getIngestionUsage(period: string, signal?: AbortSignal) {
   return requestJson<CreditUsage>(`/api/ingestions/usage?period=${encodeURIComponent(period)}`, { signal })
 }
+
+/** One page a run fetched (the Apify dataset row). Optional fields are null when Quarry did not record them. */
+export interface JobResultItem {
+  seq: number
+  url: string
+  status: number | null
+  contentType: string | null
+  title: string | null
+  fetchedAt: string | null
+  wordCount: number | null
+  driver: string | null
+  markdownArtifactId: string | null
+  sourceArtifactId: string | null
+  bytes: number | null
+}
+
+export interface JobResultsPage {
+  items: JobResultItem[]
+  /** The cursor for the next page; null on the last page. */
+  nextSeq: number | null
+  /** True when `latest` stopped scanning early on a very large run. */
+  scanCapped: boolean
+}
+
+/** The pages a crawl, batch or other job fetched. Quarry answers 501 while `QUARRY_EDGE__JOB_RESULTS` is off and 403 under ZDR. */
+export function getIngestionJobResults(
+  id: string,
+  options: { afterSeq?: number; limit?: number; latest?: boolean } = {},
+  signal?: AbortSignal,
+) {
+  const query = new URLSearchParams()
+  if (options.afterSeq !== undefined) query.set('afterSeq', String(options.afterSeq))
+  if (options.limit !== undefined) query.set('limit', String(options.limit))
+  if (options.latest) query.set('latest', 'true')
+  const suffix = query.size > 0 ? `?${query.toString()}` : ''
+  return requestJson<JobResultsPage>(`/api/ingestions/jobs/${encodeURIComponent(id)}/results${suffix}`, { signal })
+}
+
+/** A text artifact, such as a fetched page's markdown, capped at 1 MiB by the gateway. */
+export interface ArtifactText {
+  id: string
+  contentType: string
+  content: string
+  bytes: number
+  truncated: boolean
+}
+
+export function getIngestionArtifactText(artifactId: string, signal?: AbortSignal) {
+  return requestJson<ArtifactText>(`/api/ingestions/artifacts/${encodeURIComponent(artifactId)}`, { signal })
+}

@@ -6,7 +6,9 @@ import {
   buildActions,
   codeSnippet,
   crawlRequestFromState,
+  crawlScrapeOptionsFromState,
   defaultPlaygroundState,
+  MAX_AGE_MINUTES,
   missingInput,
   newAction,
   parseSchema,
@@ -303,5 +305,50 @@ describe('AI formats and extract prompt (INNH-1, INNH-2)', () => {
 
   it('has no AI report when no AI format was asked for', () => {
     expect(toScrapeView({ data: { markdown: 'x' } }, 'https://a.no').ai).toBeNull()
+  })
+})
+
+describe('max_age, sitemap and crawl cleaning (INNH-6, INNH-7)', () => {
+  it('sends the freshness of a stored scrape in milliseconds, and nothing when blank', () => {
+    expect(scrapeRequestFromState(state({ url: 'https://a.no', maxAgeMinutes: '5' })).max_age).toBe(300_000)
+    expect(scrapeRequestFromState(state({ url: 'https://a.no', maxAgeMinutes: '' })).max_age).toBeUndefined()
+    expect(scrapeRequestFromState(state({ url: 'https://a.no', maxAgeMinutes: '999999' })).max_age).toBe(MAX_AGE_MINUTES * 60_000)
+  })
+
+  it('sends the sitemap mode and the per-page cleaning of a crawl, and leaves the defaults out', () => {
+    const plain = crawlRequestFromState(state({ endpoint: 'crawl', url: 'https://a.no' }))
+    expect(plain.sitemap).toBeUndefined()
+    expect(plain.scrapeOptions).toBeUndefined()
+    const cleaned = crawlRequestFromState(
+      state({ endpoint: 'crawl', url: 'https://a.no', sitemap: 'only', onlyMainContent: false, includeTags: 'main, article', excludeTags: 'nav' }),
+    )
+    expect(cleaned.sitemap).toBe('only')
+    expect(cleaned.scrapeOptions).toEqual({ only_main_content: false, include_tags: ['main', 'article'], exclude_tags: ['nav'] })
+  })
+
+  it('makes a non-readability extractor agree with only_main_content, as Quarry requires', () => {
+    expect(crawlScrapeOptionsFromState(state({ extractor: 'raw' }))).toEqual({ only_main_content: false, extractor: 'raw' })
+    expect(crawlScrapeOptionsFromState(state({ extractor: 'readability', onlyMainContent: true }))).toBeUndefined()
+    expect(crawlScrapeOptionsFromState(state({ extractor: 'readability', onlyMainContent: false }))).toEqual({ only_main_content: false })
+  })
+
+  it('puts the sitemap and the cleaning into the crawl snippet body under the names Quarry uses', () => {
+    const request = quarryRequestFor(state({ endpoint: 'crawl', url: 'https://a.no', sitemap: 'include', extractor: 'clean_full' }))
+    expect(request.body).toMatchObject({ sitemap: 'include', scrape_options: { only_main_content: false, extractor: 'clean_full' } })
+  })
+
+  it('reads how a scrape answered max_age, and keeps the cache codes out of the warning list', () => {
+    const hit = toScrapeView(
+      { data: { markdown: 'x', effective_options: { cache_state: 'hit', cached_at: '2026-10-31T10:00:00Z', cache_age_ms: 300_000 }, warnings: [] } },
+      'https://a.no',
+    )
+    expect(hit.cache).toEqual({ state: 'hit', cachedAt: '2026-10-31T10:00:00Z', ageMs: 300_000, ignoredReason: null })
+    const zdr = toScrapeView(
+      { data: { markdown: 'x', effective_options: { cache_state: 'bypass' }, warnings: [{ code: 'max_age_ignored_zdr', field: 'max_age' }] } },
+      'https://a.no',
+    )
+    expect(zdr.cache.ignoredReason).toBe('max_age_ignored_zdr')
+    expect(zdr.warnings).toEqual([])
+    expect(toScrapeView({ data: {} }, 'https://a.no').cache).toEqual({ state: null, cachedAt: null, ageMs: null, ignoredReason: null })
   })
 })

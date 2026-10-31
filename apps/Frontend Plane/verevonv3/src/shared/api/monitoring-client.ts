@@ -136,6 +136,54 @@ export async function deleteMonitor(id: string, signal?: AbortSignal): Promise<v
  * Newest-first baseline chain for `url`. Empty until baselines accrue — never a
  * synthesized entry.
  */
+/** One paragraph-level operation. `added` and `removed` carry `index` and `text`; `moved` carries `from` and `to`. */
+export interface ChangeDiffOp {
+  op: 'added' | 'removed' | 'moved'
+  index: number | null
+  from: number | null
+  to: number | null
+  text: string | null
+}
+
+export interface ChangeTextDiff {
+  format: 'paragraph'
+  /** False when the page bytes changed but its text did not. */
+  realDelta: boolean
+  added: number
+  removed: number
+  moved: number
+  unchanged: number
+  ops: ChangeDiffOp[]
+  truncated: boolean
+}
+
+export type ChangeDiffReason = 'no_previous_version' | 'no_previous_text' | 'no_text' | 'artifact_gone'
+
+/** A diff between two stored versions of a page. `available` is false with a `reason` when there is nothing to compare. */
+export interface ChangeDiff {
+  sourceUrl: string
+  from: BaselineSnapshot | null
+  to: BaselineSnapshot | null
+  diffId: string | null
+  available: boolean
+  reason: ChangeDiffReason | null
+  diff: ChangeTextDiff | null
+  markdown: { from: string | null; to: string | null; truncated: boolean } | null
+}
+
+/** Compare two stored versions of `url` (the latest two by default), or read a stored diff by `diffId`. */
+export function getChangeDiff(
+  input: { url: string; from?: string; to?: string; diffId?: string; includeMarkdown?: boolean },
+  signal?: AbortSignal,
+): Promise<ChangeDiff> {
+  const query = new URLSearchParams({ url: input.url })
+  if (input.from) query.set('from', input.from)
+  if (input.to) query.set('to', input.to)
+  if (input.diffId) query.set('diffId', input.diffId)
+  if (input.includeMarkdown) query.set('include', 'markdown')
+  return requestJson<ChangeDiff>(`/api/v1/monitoring/diff?${query.toString()}`, { signal })
+}
+
 export function getChangeHistory(
   url: string,
   limit = 50,

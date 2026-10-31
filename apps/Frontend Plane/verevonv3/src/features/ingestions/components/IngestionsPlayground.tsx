@@ -31,6 +31,7 @@ import {
   endpointGroups,
   extractTemplateSchema,
   isAiFormat,
+  MAX_AGE_MINUTES,
   newAction,
   quarryRequestFor,
   type ActionType,
@@ -204,9 +205,22 @@ export function IngestionsPlayground(props: {
           s.excludeTags.trim(),
           s.waitMs.trim(),
           s.timeoutMs.trim(),
+          s.maxAgeMinutes.trim(),
         ].filter(Boolean).length
       case 'crawl':
-        return [s.maxDepth.trim(), s.includePaths.trim(), s.excludePaths.trim(), s.allowSubdomains, s.ingest].filter(Boolean).length
+        return [
+          s.maxDepth.trim(),
+          s.includePaths.trim(),
+          s.excludePaths.trim(),
+          s.allowSubdomains,
+          s.ingest,
+          s.sitemap !== 'skip',
+          !s.onlyMainContent,
+          s.extractor !== 'readability',
+          s.removeBase64Images,
+          s.includeTags.trim(),
+          s.excludeTags.trim(),
+        ].filter(Boolean).length
       case 'map':
         return [s.mapSearch.trim(), s.allowSubdomains].filter(Boolean).length
       case 'search':
@@ -715,7 +729,7 @@ export function IngestionsPlayground(props: {
 
         <Show when={panel() === 'options'}>
           <div class="ingestions-pg__panel ingestions-options-grid" role="group" aria-label={tr('Alternativer', 'Options')}>
-            <Show when={endpoint() === 'scrape'}>
+            <Show when={endpoint() === 'scrape' || endpoint() === 'crawl'}>
               <label class="ingestions-toggle">
                 <input
                   type="checkbox"
@@ -757,14 +771,28 @@ export function IngestionsPlayground(props: {
                 {tr('Ekskluder tagger', 'Exclude tags')}
                 <VerevonInput value={props.state.excludeTags} onInput={(event) => props.onChange({ excludeTags: event.currentTarget.value })} placeholder="nav, footer" />
               </label>
-              <label class="ingestions-field">
-                {tr('Vent før henting (ms)', 'Wait before fetch (ms)')}
-                <VerevonInput type="number" min="0" max="30000" value={props.state.waitMs} onInput={(event) => props.onChange({ waitMs: event.currentTarget.value })} placeholder="0" />
-              </label>
-              <label class="ingestions-field">
-                {tr('Tidsavbrudd (ms)', 'Timeout (ms)')}
-                <VerevonInput type="number" min="1000" max="120000" value={props.state.timeoutMs} onInput={(event) => props.onChange({ timeoutMs: event.currentTarget.value })} placeholder="55000" />
-              </label>
+              <Show when={endpoint() === 'scrape'}>
+                <label class="ingestions-field">
+                  {tr('Vent før henting (ms)', 'Wait before fetch (ms)')}
+                  <VerevonInput type="number" min="0" max="30000" value={props.state.waitMs} onInput={(event) => props.onChange({ waitMs: event.currentTarget.value })} placeholder="0" />
+                </label>
+                <label class="ingestions-field">
+                  {tr('Tidsavbrudd (ms)', 'Timeout (ms)')}
+                  <VerevonInput type="number" min="1000" max="120000" value={props.state.timeoutMs} onInput={(event) => props.onChange({ timeoutMs: event.currentTarget.value })} placeholder="55000" />
+                </label>
+                <label class="ingestions-field">
+                  {tr('Bruk lagret resultat opptil (minutter)', 'Use a stored result up to (minutes)')}
+                  <VerevonInput
+                    id="ingestions-max-age"
+                    type="number"
+                    min="1"
+                    max={MAX_AGE_MINUTES}
+                    value={props.state.maxAgeMinutes}
+                    onInput={(event) => props.onChange({ maxAgeMinutes: event.currentTarget.value })}
+                    placeholder={tr('Hent alltid', 'Always fetch')}
+                  />
+                </label>
+              </Show>
             </Show>
             <Show when={endpoint() === 'crawl'}>
               <label class="ingestions-field">
@@ -774,6 +802,17 @@ export function IngestionsPlayground(props: {
               <label class="ingestions-field">
                 {tr('Maks dybde', 'Max depth')}
                 <VerevonInput type="number" min="1" max="10" value={props.state.maxDepth} onInput={(event) => props.onChange({ maxDepth: event.currentTarget.value })} placeholder="—" />
+              </label>
+              <label class="ingestions-field">
+                {tr('Sitemap', 'Sitemap')}
+                <VerevonSelect
+                  value={props.state.sitemap}
+                  onChange={(event) => props.onChange({ sitemap: event.currentTarget.value as PlaygroundState['sitemap'] })}
+                >
+                  <option value="skip">{tr('Hopp over sitemap', 'Skip the sitemap')}</option>
+                  <option value="include">{tr('Sidene fra lenkene og sitemap', 'Pages from links and the sitemap')}</option>
+                  <option value="only">{tr('Bare sidene i sitemap', 'Only the pages in the sitemap')}</option>
+                </VerevonSelect>
               </label>
               <label class="ingestions-field">
                 {tr('Inkluder stier', 'Include paths')}

@@ -1388,3 +1388,41 @@
 .ingestions-list-card--unread {
   border-left: 3px solid var(--ing-accent);
 }
+
+/* Pages a run fetched (INNH-12) and the change diff (INNH-4). */
+.ingestions-error-list button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.ingestions-change-diff {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.ingestions-diff-ops {
+  display: grid;
+  gap: 0.375rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ingestions-diff-op {
+  display: grid;
+  gap: 0.125rem;
+}
+
+.ingestions-diff-op--added strong {
+  color: var(--ing-good);
+}
+
+.ingestions-diff-op--removed strong {
+  color: var(--ing-bad);
+}

@@ -18,6 +18,7 @@ import {
 import { changeCount, changeTimeline, shortFingerprint } from '@/features/ingestions/lib/monitoring'
 import { describeCron } from '@/features/ingestions/lib/cron'
 import { EmptyState, relativeTime } from '@/features/ingestions/components/ingestions-ui'
+import { ChangeDiffPanel } from '@/features/ingestions/components/ChangeDiffPanel'
 import { listNotifications, type Notification as AppNotification } from '@/shared/api/notifications-client'
 
 /** The in-product notifications Quarry sends when a monitored page changes. */
@@ -197,6 +198,9 @@ export function IngestionsMonitoringView(props: {
                 <h3>{tr('Siste sjekk', 'Latest check')}</h3>
                 <ChangeStatusBadge status={result().status} />
               </div>
+              <Show when={result().status === 'changed' && result().diffId}>
+                <ChangeDiffPanel url={result().sourceUrl} diffId={result().diffId} />
+              </Show>
               <div class="ingestions-meta-row ingestions-meta-row--spread">
                 <span class="ingestions-truncate">{result().sourceUrl}</span>
                 <span>{relativeTime(result().checkedAt, i18n)}</span>
@@ -342,6 +346,9 @@ export function IngestionsMonitoringView(props: {
               when={!history.loading}
               fallback={<div class="ingestions-empty-box">{tr('Laster historikk …', 'Loading history…')}</div>}
             >
+              <Show when={timeline().length > 1 && watchedUrl()}>
+                {(url) => <ChangeDiffPanel url={url()} />}
+              </Show>
               <ol class="ingestions-timeline">
                 <For
                   each={timeline()}
@@ -369,8 +376,8 @@ export function IngestionsMonitoringView(props: {
               </ol>
               <p class="ingestions-pg__note">
                 {tr(
-                  'Quarry lagrer ett fingeravtrykk per basislinje, ikke teksten. Tidslinjen viser derfor når innholdet endret seg, ikke hva som endret seg.',
-                  'Quarry keeps one fingerprint per baseline, not the text. The timeline therefore shows when the content changed, not what changed.',
+                  'Tidslinjen viser når innholdet endret seg. «Vis endringen» viser hvilke avsnitt som ble lagt til, fjernet eller flyttet, når Quarry har tekstdiff slått på.',
+                  'The timeline shows when the content changed. "Show the change" lists the paragraphs added, removed or moved, when Quarry has text diffs switched on.',
                 )}
               </p>
             </Show>

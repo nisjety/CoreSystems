@@ -322,11 +322,16 @@ pub(crate) async fn search_web(
                 .map(Value::from)
                 .unwrap_or(Value::Null);
             let citations = data.get("citations").cloned().unwrap_or_else(|| json!([]));
+            // INNH-8: why there is or is not an answer (ok, no_sources, skipped_zdr, unavailable).
+            let answer_status = data.get("answer_status").cloned().unwrap_or(Value::Null);
+            let answer_reason = data.get("answer_reason").cloned().unwrap_or(Value::Null);
             let cached_payload = json!({
                 "mode": "search",
                 "results": results,
                 "answer": answer,
                 "citations": citations,
+                "answerStatus": answer_status,
+                "answerReason": answer_reason,
             });
             if let (Some(key), Some(scope), true) =
                 (key.as_deref(), admission.scope(), admission.may_write)

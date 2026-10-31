@@ -399,6 +399,8 @@ export default function VerevonIngestionsPage() {
             answer: payload.answer ?? null,
             citations: payload.citations ?? [],
             answerRequested: state.searchIncludeAnswer,
+            answerStatus: payload.answerStatus ?? null,
+            answerReason: payload.answerReason ?? null,
           })
           break
         }
