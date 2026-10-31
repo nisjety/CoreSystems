@@ -10,6 +10,7 @@ use tracing::{info, warn};
 
 mod approval_delivery;
 mod attention;
+mod attention_events;
 mod attention_grpc;
 mod audit_publisher;
 mod auth;
@@ -219,6 +220,19 @@ async fn main() -> Result<()> {
         },
     ));
 
+    let attention_events_pool = pool.clone();
+    let attention_events_handle = tokio::spawn(async move {
+        // Off by default: the task parks and makes no database read. Parking rather than
+        // returning keeps the select below from reading its end as a failure.
+        if !attention_events::enabled() {
+            std::future::pending::<()>().await;
+        }
+        supervise_background("session-core attention event sweep", move || {
+            let pool = attention_events_pool.clone();
+            async move { attention_events::run(pool).await }
+        })
+        .await
+    });
     let shutdown = shutdown_signal();
 
     tokio::select! {
@@ -234,6 +248,7 @@ async fn main() -> Result<()> {
         result = semantic_reconciliation_handle => result??,
         result = terminalization_handle => result??,
         result = tool_ledger_handle => result??,
+        result = attention_events_handle => result??,
         () = shutdown => {},
     }
 

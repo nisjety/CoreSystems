@@ -9,6 +9,7 @@ use serde_json::Value;
 
 const MATRIX: &str = include_str!("../../../../api/contracts/zdr-posture-matrix.json");
 const ATTENTION_SOURCE: &str = include_str!("../src/attention.rs");
+const EVENTS_SOURCE: &str = include_str!("../src/attention_events.rs");
 
 #[test]
 fn the_crate_gate_permits_only_the_persistent_class() {
@@ -72,5 +73,30 @@ fn enforcement_rows_resolve_to_retention_classes_and_only_persistent_is_permitte
     assert!(
         refused_rows > 0,
         "at least one row exercises the refused case"
+    );
+}
+
+#[test]
+fn the_announcement_gate_permits_only_the_persistent_class() {
+    // `RUN_ATTENTION` rows are written only through `attention_events::enqueue_permitted`. Like the
+    // mark-seen gate above, this pins the gate's expression, since a binary crate's test cannot call it.
+    assert!(
+        EVENTS_SOURCE.contains(
+            "RetentionClass::from_storage(retention_class) == Some(RetentionClass::Persistent)"
+        ),
+        "enqueue_permitted must permit exactly the persistent class"
+    );
+}
+
+#[test]
+fn the_announcement_sweep_covers_the_origins_the_list_covers() {
+    let origins = r#"const LISTED_ORIGINS: [&str; 2] = ["chat", "agent_run"];"#;
+    assert!(
+        ATTENTION_SOURCE.contains(origins),
+        "the attention list covers chat and agent_run threads"
+    );
+    assert!(
+        EVENTS_SOURCE.contains(origins),
+        "the announcement sweep covers the same origins as the list"
     );
 }
