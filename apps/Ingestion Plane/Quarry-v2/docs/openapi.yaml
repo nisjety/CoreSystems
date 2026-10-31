@@ -2600,6 +2600,114 @@ paths:
                     $ref: '#/components/schemas/ResponseMeta'
                   error:
                     $ref: '#/components/schemas/ErrorDetail'
+  /v1/change/diff:
+    get:
+      operationId: change_diff
+      summary: The two versions of a tracked page and the paragraph diff between them (INNH-4)
+      description: |
+        Returns the stored text of two baselines of a tracked URL and the paragraph diff between
+        them. A baseline keeps its page text only for a change monitor, only when the edge runs
+        with `QUARRY_EDGE__CHANGE_TEXT_DIFF` on, and never under Zero Data Retention.
+
+        Pick the pair one way: `url` alone compares the latest two baselines; `url` with `from`
+        and `to` compares two named baselines of that url (any two, in the order given);
+        `diff_id` reads the diff a `quarry.change.detected` event announced (`url` may be added
+        and must then be the diff's url). `include=markdown` adds the two pages' text, each cut
+        at 1 MiB.
+
+        The diff is paragraph-level and set-based: a paragraph is added when the newer text has
+        it and the older does not, removed in the opposite case, moved when it kept its text but
+        changed its place among the paragraphs both versions hold (an inserted paragraph does
+        not make the rest move). Whitespace and line endings are ignored. `real_delta` is false
+        when nothing was added or removed, which is the honest answer for a page whose raw
+        bytes changed (an ad, a timestamp in the markup) and whose text did not. The diff holds
+        at most 500 ops and 2 KB of text per op; the counts are complete and `truncated` says
+        whether anything was cut.
+
+        When the pair has no readable text the answer is 200 with `available: false` and a
+        `reason`: `no_previous_version` (the url has one baseline), `no_previous_text` (the older
+        baseline was recorded before text was kept), `no_text` (the newer one has none) or
+        `artifact_gone` (a stored page was evicted or cannot be read). The two sides' metadata
+        is returned either way.
+
+        An id of another organization answers 404 exactly like an id that does not exist.
+        501 when the edge runs without the flag; 403 for a Zero Data Retention caller.
+      tags:
+      - change-tracking
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: url
+        in: query
+        description: The tracked URL. Required unless `diff_id` is given.
+        schema:
+          type: string
+          format: uri
+      - name: from
+        in: query
+        description: The older baseline id (`bln_...`). Needs `to` and `url`.
+        schema:
+          type: string
+          maxLength: 128
+      - name: to
+        in: query
+        description: The newer baseline id (`bln_...`). Needs `from` and `url`.
+        schema:
+          type: string
+          maxLength: 128
+      - name: diff_id
+        in: query
+        description: A stored diff id (`diff_...`), as `quarry.change.detected` and `ChangeRecord.diff_id` carry it. Cannot be combined with `from` or `to`.
+        schema:
+          type: string
+          maxLength: 128
+      - name: include
+        in: query
+        description: '`markdown` adds the stored text of both versions.'
+        schema:
+          type: string
+          enum:
+          - markdown
+      responses:
+        '200':
+          description: The two versions and the diff, or why there is no diff
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/ChangeDiffView'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+                  error:
+                    $ref: '#/components/schemas/ErrorDetail'
+        '400':
+          description: Neither `url` nor `diff_id`; `from` without `to`; `diff_id` with `from` or `to`; baselines of different urls or the same baseline twice; an unknown `include`; an id over 128 characters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '403':
+          description: The caller is under Zero Data Retention. Stored page text is not readable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '404':
+          description: No baseline for this org and url, or an unknown baseline or diff id, or one that belongs to another organization
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: Change text diffs are not enabled on this edge (QUARRY_EDGE__CHANGE_TEXT_DIFF), or the edge has no baseline store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
   /v1/change/snapshot:
     post:
       operationId: promote_tracked_result_to_snapshot
@@ -3978,6 +4086,7 @@ components:
         artifact_id:
           type: string
           nullable: true
+          description: The stored markdown of this version (INNH-4). Set on a baseline a change monitor recorded with QUARRY_EDGE__CHANGE_TEXT_DIFF on; absent on older baselines and always under Zero Data Retention.
         prev_baseline_id:
           type: string
           nullable: true
@@ -4015,10 +4124,143 @@ components:
         diff_id:
           type: string
           nullable: true
-          description: Present only for status=changed
+          description: Present only for status=changed. A monitor's change event carries it with QUARRY_EDGE__CHANGE_TEXT_DIFF on (`GET /v1/change/diff?diff_id=`).
         checked_at:
           type: string
           format: date-time
+    ChangeDiffView:
+      type: object
+      description: The data of GET /v1/change/diff (INNH-4)
+      required:
+      - source_url
+      - from
+      - to
+      - diff_id
+      - available
+      properties:
+        source_url:
+          type: string
+          format: uri
+        from:
+          nullable: true
+          description: The older version. null when the url has one baseline only.
+          allOf:
+          - $ref: '#/components/schemas/ChangeDiffSide'
+        to:
+          $ref: '#/components/schemas/ChangeDiffSide'
+        diff_id:
+          type: [string, 'null']
+          description: The stored diff record of the pair. null when none was stored (the pair is not a change the monitor recorded, or it was recorded before text diffs); the diff is then computed for this request.
+        available:
+          type: boolean
+          description: True when `diff` is present.
+        reason:
+          $ref: '#/components/schemas/ChangeDiffUnavailable'
+        diff:
+          $ref: '#/components/schemas/ParagraphDiff'
+        markdown:
+          $ref: '#/components/schemas/ChangeDiffMarkdown'
+    ChangeDiffSide:
+      type: object
+      required:
+      - baseline_id
+      - fingerprint
+      - captured_at
+      - artifact_id
+      properties:
+        baseline_id:
+          type: string
+        fingerprint:
+          type: string
+          description: blake3 of the raw page bytes
+        captured_at:
+          type: string
+          format: date-time
+        artifact_id:
+          type: [string, 'null']
+          description: The stored markdown (`GET /v1/artifacts/{id}`). null for a baseline recorded without text.
+    ChangeDiffUnavailable:
+      type: string
+      description: Why a diff is not available. Absent when it is.
+      enum:
+      - no_previous_version
+      - no_previous_text
+      - no_text
+      - artifact_gone
+    ChangeDiffMarkdown:
+      type: object
+      description: Only with include=markdown. Each text is cut at 1 MiB.
+      required:
+      - from
+      - to
+      - truncated
+      properties:
+        from:
+          type: [string, 'null']
+        to:
+          type: [string, 'null']
+        truncated:
+          type: boolean
+    ParagraphDiff:
+      type: object
+      required:
+      - format
+      - real_delta
+      - added
+      - removed
+      - moved
+      - unchanged
+      - ops
+      - truncated
+      properties:
+        format:
+          type: string
+          enum:
+          - paragraph
+        real_delta:
+          type: boolean
+          description: False when no paragraph was added or removed.
+        added:
+          type: integer
+        removed:
+          type: integer
+        moved:
+          type: integer
+        unchanged:
+          type: integer
+        ops:
+          type: array
+          maxItems: 500
+          description: Added and removed ops first, then moved ones.
+          items:
+            $ref: '#/components/schemas/TextDiffOp'
+        truncated:
+          type: boolean
+          description: An op was dropped, a text was cut at 2 KB, or an input page was cut at 1 MiB. The counts are complete.
+    TextDiffOp:
+      type: object
+      required:
+      - op
+      properties:
+        op:
+          type: string
+          enum:
+          - added
+          - removed
+          - moved
+        index:
+          type: integer
+          description: For added, the paragraph's position in the newer text; for removed, in the older text.
+        text:
+          type: string
+          maxLength: 2048
+          description: For added and removed. Cut at 2 KB on a character boundary.
+        from:
+          type: integer
+          description: For moved, the paragraph's position in the older text.
+        to:
+          type: integer
+          description: For moved, its position in the newer text.
     OverlapPolicy:
       type: string
       enum:

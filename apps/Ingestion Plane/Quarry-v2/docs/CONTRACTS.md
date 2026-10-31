@@ -477,6 +477,8 @@ Denial reasons are emitted as `page.blocked` payloads or stored in crawl status 
 
 ### Change detail artifact
 
+This is a planned shape and nothing produces it. What a change monitor stores, with `QUARRY_EDGE__CHANGE_TEXT_DIFF` on, is the paragraph diff in "Change text diff" below.
+
 ```json
 {
   "status": "new | changed | unchanged",
@@ -792,6 +794,52 @@ Model output is untrusted and checked by Quarry, not by the model: `json` is val
 **Time budget.** Sources are read one after another and every model call is paid. After 50 seconds from the start of the request a source that has not been read by the model answers status `error` with a message that names the budget, instead of the router cutting the whole request at 60 seconds. Send fewer URLs per request, or `max_urls` lower.
 
 **Not in this version.** No per-call output cap and no `cost_usd` (WS16.S1). No LLM usage metric: metering is unchanged (`quarry.extract.url` per `ok` or `fetched` source). The Verevon gateway re-adding `prompt` to its own contract is the Innhenting session's change. The model lane for a deployed stack (a grant on the Model Plane, decision X-7) is not built, so a deployed stack still cannot run this arm.
+
+## Change text diff: stored page text, the paragraph diff and `GET /v1/change/diff` (INNH-4, 2026-10-31)
+
+A change monitor (a schedule with `target_kind=change_monitor`) used to keep a fingerprint per version and nothing a person could read. With `QUARRY_EDGE__CHANGE_TEXT_DIFF` on (default off) it keeps the page text and the difference between two versions. Off, nothing below exists: the recorder is what it was and `GET /v1/change/diff` answers 501. The flag is read per request.
+
+**What is stored.** `PageRunner` already writes a `markdown` artifact on every non-ZDR page run. `POST /v1/internal/run_page` now returns its id as `markdown_artifact_id` (general: any caller, and the per-run results of a crawl, can use it; absent when nothing was stored, always so under ZDR). The orchestrator passes it on `POST /v1/internal/change/record`. With the flag on and the body not `zdr: true`, a new or changed check:
+1. checks the id is a markdown artifact the body's `org_id` can read (a 400 otherwise, nothing saved; another org's id reads as not found, so it fails here);
+2. saves the new baseline with `artifact_id` set to it (an unchanged check saves nothing);
+3. on a change, computes the paragraph diff of the older baseline's markdown and the new one and stores it as an artifact of kind `change_diff` (extension `change_diff.json`, `application/json`), then a `DiffRecord` with `format: "json"`, `artifact_id` pointing at it and `summary` (at most 1 KB, for example `+3 -1 paragraphs, 2 moved`, `no paragraph change (the page markup changed, its text did not)` or `text diff unavailable: no_previous_text`);
+4. puts the saved baseline in `ChangeRecord.new_baseline` and the diff record in `ChangeRecord.diff_id` before the event and the webhook go out. Both were empty before: the `change_detected` event's idempotency key ended in an empty baseline id. The `quarry.change.detected` body is the same `ChangeRecord` plus `subject` and `emitted_at`; it now carries `new_baseline` (with `artifact_id`) and `diff_id`. No page text is in it.
+
+A baseline recorded before the flag has no `artifact_id`. The first change after it stores an unavailable diff (`reason: no_previous_text`) and the next one diffs. Unchanged, unreachable and ZDR-declared results persist no text.
+
+**The stored diff** (artifact kind `change_diff`, field names pinned by `quarry-core` `change_history`):
+
+```json
+{
+  "version": 1,
+  "source_url": "https://example.com/pricing",
+  "from_baseline_id": "bln_...", "to_baseline_id": "bln_...",
+  "from_fingerprint": "blake3:...", "to_fingerprint": "blake3:...",
+  "available": true,
+  "reason": "no_previous_text",
+  "diff": {
+    "format": "paragraph", "real_delta": true,
+    "added": 1, "removed": 1, "moved": 0, "unchanged": 14,
+    "ops": [
+      { "op": "added", "index": 6, "text": "Pro plan: 12 EUR per seat" },
+      { "op": "removed", "index": 6, "text": "Pro plan: 10 EUR per seat" },
+      { "op": "moved", "from": 2, "to": 5 }
+    ],
+    "truncated": false
+  }
+}
+```
+
+`reason` is present only when `available` is false (then there is no `diff`). The diff is paragraph-level and set-based: paragraphs are blocks separated by a blank line (a block over 8192 bytes is cut into units), compared by a hash of their text with whitespace collapsed and line endings ignored. `added`: in the new text and not the old; `removed`: the opposite; `moved`: kept its text but changed place among the paragraphs both texts hold (an inserted or dropped paragraph does not make the rest move; a repeated paragraph counts once). `real_delta` is `added + removed > 0`. The change fingerprint is still the raw-byte one, so a page whose bytes changed and whose text did not (an ad, a timestamp in the markup) is `status: changed` with `real_delta: false`; switching the monitor to a text fingerprint is a separate slice. Caps: 500 ops (added and removed first, then moved), 2048 bytes of text per op (cut on a character boundary), 1 MiB of markdown read per side; the counts are always complete and `truncated` says anything was cut.
+
+**`GET /v1/change/diff`** (bearer; org from the token). Query: `url`; `from` and `to` (baseline ids, together, with `url`); `diff_id`; `include=markdown`.
+- `url` alone: the latest two baselines. `url` + `from` + `to`: those two, in that order. `diff_id`: the diff a webhook announced (optionally with its `url`).
+- 200 `data`: `{ source_url, from: {baseline_id, fingerprint, captured_at, artifact_id|null} | null, to: {...}, diff_id: string|null, available, reason?, diff?, markdown?: {from, to, truncated} }`. `diff_id` is the stored record when the pair has one and its artifact reads back (the diff the webhook announced); otherwise the diff is computed from the two stored pages for this request and `diff_id` is null. `reason` is one of `no_previous_version` (one baseline; `from` is null), `no_previous_text`, `no_text`, `artifact_gone` (retention evicted a page; a stored diff still answers, it holds its own text). `markdown` only with `include=markdown`, each text cut at 1 MiB.
+- 400: no `url` and no `diff_id`; `from` without `to`; `diff_id` with `from` or `to`; baselines of another url than `url`, or the same baseline twice; `include` other than `markdown`; an id over 128 characters. 404 (`NOT_FOUND`, one message): no baseline for the org and url, or an unknown baseline or diff id, or one of another organization; there is no 403 for another tenant. 501: the flag is off (the message names `QUARRY_EDGE__CHANGE_TEXT_DIFF`) or the edge has no baseline store. 403: a Zero Data Retention caller (the token's floor or the body flag), refused like a stored scrape record: stored page text is not readable under ZDR.
+
+**ZDR.** A ZDR run stores no markdown, so `run_page` returns no id and nothing is kept; the record route also ignores a markdown id on a `zdr: true` body (the baseline row of an observe-mode ZDR body is still written, with no text). Row `change_diff_read` in `ZDR_MATRIX.md`: refused. No hash of a page is ever returned as a stand-in.
+
+**Not in this version.** `POST /v1/change/check` takes a caller-supplied fingerprint, fetches nothing and stores nothing, so it has no text diff; only scheduled monitors do. No consumer exists for `POST /v1/change/refresh`. The artifact janitor deletes by age only: if it is armed, old baselines lose their text (`artifact_gone`) until it learns to spare baseline artifacts. A retried record activity can write a second baseline (the record route ignores the idempotency key).
 
 ## Crawl scope and robots: planned status and vocabulary (WS14.S0, 2026-10-23)
 

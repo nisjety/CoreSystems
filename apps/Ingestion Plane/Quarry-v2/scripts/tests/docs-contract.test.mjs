@@ -421,3 +421,30 @@ test("the whole-file check refuses a duplicate key and accepts a folded quoted s
   assert.throws(() => parseYamlSubset("a:\n  b: 1\n  b: 2\n"), /duplicate key "b"/);
   assert.doesNotThrow(() => parseYamlSubset("a:\n  d: 'one\n\n    two'\n  e:\n  - x\n"));
 });
+
+// ----------------------------------------------------------------------------- change text diff (INNH-4)
+
+test("the change text diff switch is read by the code, documented, and not turned on in a compose", () => {
+  const source = read(join(quarry, "crates", "quarry-edge", "src", "change_diff.rs"));
+  assert.match(source, /pub const ENV_CHANGE_TEXT_DIFF: &str = "QUARRY_EDGE__CHANGE_TEXT_DIFF";/, "the code reads the switch");
+  const name = "QUARRY_EDGE__CHANGE_TEXT_DIFF";
+  const docs = [
+    ["RUNBOOKS", paths.runbooks],
+    ["CONTRACTS", join(quarry, "docs", "CONTRACTS.md")],
+    ["openapi", paths.openapi],
+    ["openapi-internal", join(quarry, "docs", "openapi-internal.yaml")],
+  ];
+  for (const [label, path] of docs) {
+    const text = read(path);
+    assert.ok(text.includes(name), `${label} names ${name}`);
+    // Every spelling of the switch in a document is the one the code reads.
+    for (const match of text.matchAll(/QUARRY_EDGE__?CHANGE_TEXT_[A-Z0-9_]*/g)) {
+      assert.equal(match[0].replace(/_+$/, ""), name, `${label} names ${match[0]}, which the code does not read`);
+    }
+  }
+  // Dark by default: a compose either leaves it out or sets it to 0.
+  for (const compose of [paths.compose, join(quarry, "deploy", "compose", "docker-compose.yml")]) {
+    const value = environmentOf(quarryEdgeBlock(read(compose))).get(name);
+    assert.ok(value === undefined || composeDefault(value) === "0", `${compose} does not turn the text diff on`);
+  }
+});

@@ -1,6 +1,6 @@
 {
   "_comment": "Routes the edge registers that neither docs/openapi.yaml nor docs/openapi-internal.yaml describes, each with the reason. A new route must be documented in one of those files or added here with a reason; an entry that becomes documented or stops existing must be removed (scripts/tests/openapi-route-coverage.test.mjs).",
-  "route_registrations": 108,
+  "route_registrations": 109,
   "route_registrations_note": "Re-pinned by D-B3-openapi-sdk (D2-003) from 86 to 108: the W2 .route(...) registrations are documented or allowlisted; three internal routes were added and six documented routes removed from the allowlist. OPENAPI-INTERNAL (decision 3.13): the eight /v1/internal/* routes are documented in docs/openapi-internal.yaml and left this list; the count is unchanged.",
   "routes": [
     {

@@ -43,6 +43,10 @@ Returns the most-recent `BaselineSnapshot` for the URL, or 404.
 Paginated list of baselines, newest-first, walking the `prev_baseline_id`
 chain.
 
+### `GET /v1/change/diff` (INNH-4, behind `QUARRY_EDGE__CHANGE_TEXT_DIFF`)
+
+The two versions of a tracked page and the paragraph diff between them: `?url=` (latest two), `?url=&from=&to=` (two named baselines), `?diff_id=` (the diff a `quarry.change.detected` event announced), `&include=markdown` (the stored text of both). The contract, caps, the unavailable reasons and the ZDR rule are in `docs/CONTRACTS.md`, "Change text diff". Off by default (501); only change monitors keep text, and nothing is kept under ZDR.
+
 ## Data model
 
 ```rust

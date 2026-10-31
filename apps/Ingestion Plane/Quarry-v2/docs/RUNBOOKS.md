@@ -1989,6 +1989,29 @@ This section corrects and extends "Profile owner and ACL check (WS17.P2, unit W2
 
 **Evidence owed (stack session, not run here).** Everything above is proven by tests against a strict double of the gateway's chat route (`tests/ai_formats.rs`, `tests/ai_formats_off.rs`, `tests/ai_formats_real_token.rs`); no real Model Plane gateway has been called. On a side-by-side stack with the dev bypass and two hand-minted dev tokens: a scrape with `["markdown", {"type":"json","schema":...}, "summary"]` returns the fields and `data.ai.total.calls: 2`; the same with `zdr: true` returns `skipped` / `ZDR_UNAVAILABLE` and the gateway's log shows no call; with the switch off it is `400 feature_disabled`. The page-cache test (`an_ai_request_never_reads_or_writes_the_page_cache`) needs a Redis and skips without one.
 
+## Change text diff: enable, disable, read and retention (INNH-4, built, NOT run, 2026-10-31)
+
+A change monitor can keep the page text of each version and a paragraph diff between them, and `GET /v1/change/diff` returns both. The contract is `docs/CONTRACTS.md`, "Change text diff". It is off: `QUARRY_EDGE__CHANGE_TEXT_DIFF` is unset in the default composes, which is off, and no compose line is needed.
+
+**Enable.** Set `QUARRY_EDGE__CHANGE_TEXT_DIFF=1` (also `true`, `yes`, `on`) on the edge and restart it. The edge must be the `postgres-queue` build with `DATABASE_URL` (the baseline store), as for any change recording. Deploy the edge before the orchestrator: the edge accepts `markdown_artifact_id` on the record call and returns it from `run_page`, the orchestrator only forwards it, and an old orchestrator simply sends none (the baseline then has no text and its first change is an unavailable diff, `no_previous_text`).
+
+**Disable.** Unset the variable or set it to `0` and restart. Recording goes back to the one-line fingerprint note and baselines without text; `GET /v1/change/diff` answers 501. Baselines and diffs already stored stay (they are readable again when the flag returns). Nothing needs a migration either way.
+
+**What a person sees.** A monitored page changes: the `change_detected` event and the `quarry.change.detected` webhook carry `diff_id` and `new_baseline`; `GET /v1/change/diff?diff_id=...` returns the added and removed paragraphs (`real_delta` false means the bytes changed and the text did not: an ad or a timestamp). The first change after enabling, for a page that was already monitored, answers `available: false`, `reason: no_previous_text`; the next one has a diff.
+
+**Answers.**
+| Answer | Reason |
+|---|---|
+| 501 `UNSUPPORTED`, message names `QUARRY_EDGE__CHANGE_TEXT_DIFF` | the flag is off |
+| 403 `FORBIDDEN` | the caller is under Zero Data Retention |
+| 404 `NOT_FOUND` | no baseline for the url, or an unknown id, or an id of another organization (the same message) |
+| 200, `available: false`, `reason` | `no_previous_version` (one baseline), `no_previous_text` (recorded before text was kept), `no_text`, `artifact_gone` (a stored page was evicted) |
+| 400 on `POST /v1/internal/change/record` | `markdown_artifact_id` is not a markdown artifact of that org; nothing was saved, the activity fails and Temporal retries it |
+
+**Retention.** The page text lives in the artifact store like any page artifact. The artifact janitor deletes by age only; it is dry-run by default (`QUARRY_RETENTION_DRY_RUN` is not `false`). Arming it would delete the markdown of old baselines, and `GET /v1/change/diff` then answers `artifact_gone` for a pair whose diff was not stored (a stored diff keeps its own text). Do not arm it for a deployment that uses text diffs until it spares baseline artifacts. Organization erasure (`org_erasure.rs`) has no baseline handling today, so baseline rows are not removed by it: check that before offering text diffs to a customer who can ask for erasure.
+
+**ZDR.** A ZDR run stores no markdown, returns no `markdown_artifact_id`, and a `zdr: true` record body keeps no text or diff even in observe mode (`QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES` off), where its baseline row is still written. Reads are refused for a ZDR caller. To check by hand on a side-by-side stack: schedule a monitor on a fixture page, edit one paragraph, wait for the change, read `GET /v1/change/diff?diff_id=` with the id from the event, and confirm the edited paragraph is `added` and the old one `removed`; repeat with an ad-rotation fixture and confirm `real_delta: false`. Not done here: only unit tests with an in-memory store, no real Postgres or Temporal.
+
 ## `/v1/extract` with a `prompt` (INNH-2, built, NOT run, 2026-10-31)
 
 `POST /v1/extract` now sends `prompt` to the model: with `schema` as extra instructions, alone as a free-form JSON object (`data`, status `ok`). The contract is `docs/CONTRACTS.md`, "`/v1/extract`: the `prompt` takes effect". This arm has no switch of its own: it runs when `MODEL_PLANE_URL` is set and the edge holds a model credential (`MODEL_PLANE_TOKEN`, or the Auth Core minted path). It calls the gateway's `/v1/invoke`, not the `/v1/ai/chat` lane of the scrape AI formats, so `QUARRY_EDGE__AI_FORMATS` does not gate it. On a deployed stack the lane is ungranted until WS16.S1 to S3 and decision X-7, so a call there fails per source with a `403`-derived error string; do not point a deployed edge at a gateway for this.

@@ -1,0 +1,15 @@
+# INNH depth findings, lane b
+
+One line per finding, tagged with the item. Things worth doing later; none is needed to close the item's gap.
+
+INNH-4 | Bug fixed on the way: `quarry_transform::chunk::paragraph_chunks` cut long paragraphs by byte index and panicked on a multi-byte character at the cut. `pipeline.rs` calls it with 1000 on every page's markdown, so a page with a paragraph over 1000 bytes and non-ASCII text could hit it. Now cut on a character boundary (3 unit tests). Worth a look at whether the pipeline call is guarded anywhere and whether a live page ever hit it.
+INNH-4 | The change fingerprint is still the raw-byte one (`content_fingerprint(&resp.body)`), so ad or timestamp churn is `status: changed` with `real_delta: false`. Switching the monitor to `text_fingerprint(&md)` needs a re-baseline plan for existing monitors (the E3.5 slice).
+INNH-4 | `POST /v1/change/check` takes a caller-supplied fingerprint, fetches nothing and stores nothing, so an ad hoc check has no text diff; making it fetch-and-record is its own item. `POST /v1/change/refresh` enqueues `change_refresh` rows that nothing consumes.
+INNH-4 | The artifact janitor (`services/quarry-control/internal/janitor/janitor.go`) deletes by age only, dry-run by default. Arming it deletes the text of old baselines (`artifact_gone` on the read route); it needs a baseline-provenance guard first. Org erasure (`org_erasure.rs`) has no baseline handling at all.
+INNH-4 | `record_internal` ignores the Idempotency-Key header, so a retried CheckChange activity can write a second baseline and a second diff record for one change. `find_diff` takes the newest, so reads are stable, but the history gets a duplicate row.
+INNH-4 | `load_latest` and `load_history` order by `captured_at DESC` only; two baselines saved in the same microsecond tie. The default pair of `GET /v1/change/diff` inherits that. The `prev_baseline_id` chain is the exact order.
+INNH-4 | The paragraph diff is set-based (a repeated paragraph counts once; a list or table is one block). A word-level diff inside a changed paragraph would let the UI highlight the edit; ops are capped at 500, so a very large rewrite is truncated and a paged ops read may be wanted.
+INNH-4 | Storage grows by one markdown artifact per new or changed baseline plus a small JSON diff. A compaction rule (keep the last N texts per url) is not designed.
+INNH-4 | `verify_markdown_artifact` reads the whole artifact to learn its key (`get_with_key`); a key-only lookup on the store trait would make the check cheap.
+INNH-4 | The SQL of `load_baseline`, `load_diff` and `find_diff` has Postgres-gated tests that skip without `DATABASE_URL`; none ran here. Run them once on a side-by-side Postgres (`REQUIRE_CONTRACT=1`).
+INNH-4 | `quarry_transform::diff::diff_paragraphs` now reports `moved` only for paragraphs that changed place among the shared ones (longest increasing run), and looks paragraphs up in a map instead of a scan per paragraph. Its only callers are the new text diff and the unit tests.
