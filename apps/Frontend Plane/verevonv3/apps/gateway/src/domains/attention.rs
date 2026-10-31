@@ -2,20 +2,28 @@
 //! and the route that marks one thread read.
 //!
 //! Thin authenticated proxy to model-gateway's attention surface (`GET
-//! /v1/attention`, `POST /v1/threads/{id}/seen`), which reads the state Session
-//! Core derives. Org and user come from the verified session, never from the
-//! request, so a client cannot read or mark another person's threads. The answer
-//! is re-keyed to the SPA's camelCase and carries identifiers and the closed state
-//! only. The attention stream (WS16 S5) and web push (WS16 S6) are not served yet,
-//! so `capabilities` reports both off.
+//! /v1/attention`, `POST /v1/threads/{id}/seen`, and the live stream `GET
+//! /v1/attention/stream`), which reads the state Session Core derives. Org and user
+//! come from the verified session, never from the request, so a client cannot read or
+//! mark another person's threads. The answer is re-keyed to the SPA's camelCase and
+//! carries identifiers and the closed state only. The stream is relayed as it arrives,
+//! under a per-person cap held by this process. Web push (WS16 S6) is not served yet, so
+//! `capabilities.push` reports off.
+
+use std::{
+    collections::HashMap,
+    sync::{LazyLock, Mutex, PoisonError},
+};
 
 use axum::{
+    body::Body,
     extract::{Extension, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
+use futures_util::StreamExt;
 use reqwest::Method;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -29,16 +37,77 @@ use crate::{
     envelope::{error, ok},
     middleware::{require_session, AuthenticatedUser},
     rate_limit::rate_limit_middleware,
+    upstream::{authorized_org_id, proxy_sse_stream_with_session},
 };
 
 pub(crate) fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/api/v1/attention", get(get_attention))
         .route("/api/v1/attention/seen", post(mark_seen))
+        .route("/api/v1/attention/stream", get(stream_attention))
         // Ordered like run_watchers.rs: `require_session` runs first and inserts the
         // AuthenticatedUser that the rate limiter keys on.
         .route_layer(axum::middleware::from_fn(rate_limit_middleware))
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
+}
+
+/// The most attention streams one person may hold through this process at once. A stream past the cap
+/// is refused, so one browser profile with many tabs cannot take every connection the proxy has.
+const MAX_STREAMS_PER_USER: usize = 4;
+
+/// The attention streams this process holds open, per organization and user.
+static STREAMS: LazyLock<StreamLimiter> =
+    LazyLock::new(|| StreamLimiter::new(MAX_STREAMS_PER_USER));
+
+struct StreamLimiter {
+    limit: usize,
+    open: Mutex<HashMap<(String, String), usize>>,
+}
+
+impl StreamLimiter {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            open: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// A slot for one more stream of this person, or `None` when the person already holds the cap.
+    fn acquire(&'static self, org_id: &str, user_id: &str) -> Option<StreamPermit> {
+        let key = (org_id.to_owned(), user_id.to_owned());
+        let mut open = self.open.lock().unwrap_or_else(PoisonError::into_inner);
+        let count = open.entry(key.clone()).or_insert(0);
+        if *count >= self.limit {
+            return None;
+        }
+        *count += 1;
+        Some(StreamPermit {
+            limiter: self,
+            key,
+        })
+    }
+
+    fn release(&self, key: &(String, String)) {
+        let mut open = self.open.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(count) = open.get_mut(key) {
+            *count -= 1;
+            if *count == 0 {
+                open.remove(key);
+            }
+        }
+    }
+}
+
+/// One open attention stream. Dropping it frees the slot.
+struct StreamPermit {
+    limiter: &'static StreamLimiter,
+    key: (String, String),
+}
+
+impl Drop for StreamPermit {
+    fn drop(&mut self) {
+        self.limiter.release(&self.key);
+    }
 }
 
 /// Model Gateway's `GET /v1/attention` answer, as the proxy reads it.
@@ -50,6 +119,9 @@ struct UpstreamAttention {
     items: Vec<UpstreamItem>,
     #[serde(default)]
     counts: UpstreamCounts,
+    /// Whether Session Core serves the live stream (WS16 S5). Absent or false keeps the browser polling.
+    #[serde(default)]
+    stream: bool,
 }
 
 #[derive(Deserialize)]
@@ -160,6 +232,60 @@ async fn mark_seen(
     Json(ok(json!({ "threadId": thread_id }))).into_response()
 }
 
+/// `GET /api/v1/attention/stream`: the caller's attention stream, relayed from Model Gateway as it
+/// arrives (WS16 S5). A stream past the cap is refused before it opens, and its slot is freed when the
+/// stream ends.
+async fn stream_attention(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+) -> Response {
+    let org_id = authorized_org_id(&state, &user).await;
+    let Some(permit) = STREAMS.acquire(&org_id, &user.user_id) else {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(error(
+                "attention_stream_limit",
+                "Too many attention streams are open for this account.",
+            )),
+        )
+            .into_response();
+    };
+    let token = model_token(&state, &user, &headers).await;
+    let session_token = match required_session_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(failure) => return delegated_auth_unavailable(failure).into_response(),
+    };
+    let response = proxy_sse_stream_with_session(
+        &state,
+        Method::GET,
+        &stream_url(&state.model_gateway_url),
+        None,
+        token.as_deref(),
+        Some(session_token.as_str()),
+        None,
+        None,
+        Some((user.user_id.as_str(), org_id.as_str())),
+        false,
+    )
+    .await;
+    hold_permit(response, permit)
+}
+
+/// Keeps the stream's slot until the body ends, so a stream counts for as long as the browser keeps it.
+fn hold_permit(response: Response, permit: StreamPermit) -> Response {
+    let (parts, body) = response.into_parts();
+    let held = body.into_data_stream().map(move |chunk| {
+        let _held = &permit;
+        chunk
+    });
+    Response::from_parts(parts, Body::from_stream(held))
+}
+
+fn stream_url(base: &str) -> String {
+    format!("{base}/v1/attention/stream")
+}
+
 fn seen_url(base: &str, thread_id: &str) -> String {
     format!("{base}/v1/threads/{}/seen", urlencoding::encode(thread_id))
 }
@@ -189,7 +315,7 @@ fn attention_view(upstream: UpstreamAttention) -> Value {
             "working": upstream.counts.working,
             "unseen": upstream.counts.unseen,
         },
-        "capabilities": { "stream": false, "push": false },
+        "capabilities": { "stream": upstream.stream, "push": false },
     })
 }
 
@@ -255,5 +381,30 @@ mod tests {
             seen_url("http://model-gateway", "a/b c"),
             "http://model-gateway/v1/threads/a%2Fb%20c/seen"
         );
+    }
+
+    #[test]
+    fn the_listing_names_the_stream_only_when_model_gateway_serves_it() {
+        let view = attention_view(upstream(json!({ "enabled": true, "stream": true })));
+        assert_eq!(view["capabilities"]["stream"], true);
+        assert_eq!(view["capabilities"]["push"], false);
+    }
+
+    #[test]
+    fn the_stream_is_relayed_from_the_model_gateway_route() {
+        assert_eq!(
+            stream_url("http://model-gateway"),
+            "http://model-gateway/v1/attention/stream"
+        );
+    }
+
+    #[test]
+    fn a_person_holds_the_stream_cap_per_organization_and_a_slot_frees_on_drop() {
+        let limiter: &'static StreamLimiter = Box::leak(Box::new(StreamLimiter::new(1)));
+        let held = limiter.acquire("org-1", "user-1").expect("the first stream");
+        assert!(limiter.acquire("org-1", "user-1").is_none());
+        assert!(limiter.acquire("org-2", "user-1").is_some());
+        drop(held);
+        assert!(limiter.acquire("org-1", "user-1").is_some());
     }
 }

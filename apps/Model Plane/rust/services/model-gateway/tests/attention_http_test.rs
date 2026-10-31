@@ -1,5 +1,6 @@
-//! The attention routes of model-gateway (WS16 S1): `GET /v1/attention` and
-//! `POST /v1/threads/{thread_id}/seen`. Session Core is a double here, so each test states what the
+//! The attention routes of model-gateway (WS16 S1, S5): `GET /v1/attention`,
+//! `POST /v1/threads/{thread_id}/seen` and the live stream `GET /v1/attention/stream`. Session Core is
+//! a double here, so each test states what the
 //! owner's threads look like and what Session Core answers, and checks what the gateway sent.
 
 use axum::{
@@ -11,9 +12,10 @@ use model_gateway::{http_routes::build_router, state::AppState};
 use mp_contracts::model_plane::v1::{
     attention_service_client::AttentionServiceClient,
     attention_service_server::{AttentionService, AttentionServiceServer},
-    AttentionCounts, AttentionItem, AttentionReason, AttentionState, ListAttentionRequest,
-    ListAttentionResponse, MarkThreadSeenRequest, MarkThreadSeenResponse, StreamAttentionRequest,
-    StreamAttentionResponse,
+    stream_attention_response::Frame as StreamFrame,
+    AttentionCounts, AttentionHeartbeat, AttentionItem, AttentionReason, AttentionSnapshot,
+    AttentionState, AttentionThreadChanged, ListAttentionRequest, ListAttentionResponse,
+    MarkThreadSeenRequest, MarkThreadSeenResponse, StreamAttentionRequest, StreamAttentionResponse,
 };
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
@@ -43,13 +45,18 @@ struct AttentionDouble {
     list_answer: ListAttentionResponse,
     /// The refusal `MarkThreadSeen` answers with, when set.
     mark_refusal: Option<(tonic::Code, &'static str)>,
+    /// The frames `StreamAttention` sends, in order.
+    stream_frames: Vec<StreamAttentionResponse>,
+    /// The refusal `StreamAttention` answers with, when set.
+    stream_refusal: Option<(tonic::Code, &'static str)>,
     list_calls: Arc<Mutex<Vec<ListAttentionRequest>>>,
     mark_calls: Arc<Mutex<Vec<MarkThreadSeenRequest>>>,
 }
 
 #[tonic::async_trait]
 impl AttentionService for AttentionDouble {
-    type StreamAttentionStream = futures::stream::Empty<Result<StreamAttentionResponse, Status>>;
+    type StreamAttentionStream =
+        futures::stream::Iter<std::vec::IntoIter<Result<StreamAttentionResponse, Status>>>;
 
     async fn list_attention(
         &self,
@@ -76,9 +83,12 @@ impl AttentionService for AttentionDouble {
         &self,
         _request: TonicRequest<StreamAttentionRequest>,
     ) -> Result<Response<Self::StreamAttentionStream>, Status> {
-        Err(Status::unimplemented(
-            "the attention stream is served from WS16 S5",
-        ))
+        if let Some((code, message)) = self.stream_refusal {
+            return Err(Status::new(code, message));
+        }
+        let frames: Vec<Result<StreamAttentionResponse, Status>> =
+            self.stream_frames.iter().cloned().map(Ok).collect();
+        Ok(Response::new(futures::stream::iter(frames)))
     }
 }
 
@@ -282,6 +292,7 @@ async fn list_relays_the_closed_state_and_scopes_the_caller() {
                 working: 1,
                 unseen: 1,
             }),
+            ..Default::default()
         },
         ..AttentionDouble::default()
     };
@@ -484,4 +495,179 @@ async fn attention_routes_need_the_session_credential() {
     assert_eq!(mark_status, StatusCode::UNAUTHORIZED);
     assert!(calls.list_calls.lock().unwrap().is_empty());
     assert!(calls.mark_calls.lock().unwrap().is_empty());
+}
+
+/// Sends one request as the caller and keeps the body as text, for a server-sent event stream.
+async fn send_text(
+    app: Router,
+    uri: &str,
+    model_bearer: &str,
+    session_bearer: &str,
+) -> (StatusCode, String) {
+    let request = Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header(AUTHORIZATION, format!("Bearer {model_bearer}"))
+        .header(
+            "x-session-authorization",
+            format!("Bearer {session_bearer}"),
+        )
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    (status, String::from_utf8(body.to_vec()).unwrap())
+}
+
+/// The events of a server-sent body as (name, id, data) triples, in order.
+fn sse_events(body: &str) -> Vec<(String, String, Value)> {
+    body.split("\n\n")
+        .filter(|block| !block.trim().is_empty())
+        .map(|block| {
+            let field = |name: &str| {
+                block
+                    .lines()
+                    .find_map(|line| line.strip_prefix(&format!("{name}: ")))
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            let data: Value = serde_json::from_str(&field("data")).expect("json data");
+            (field("event"), field("id"), data)
+        })
+        .collect()
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn stream_relays_each_frame_as_a_named_event_with_its_epoch_and_sequence() {
+    let _auth = AuthFixture::start().await;
+    let (model, session) = user_tokens("org-1", "user-1");
+    let double = AttentionDouble {
+        stream_frames: vec![
+            StreamAttentionResponse {
+                epoch: "epoch-a".into(),
+                seq: 1,
+                frame: Some(StreamFrame::Snapshot(AttentionSnapshot {
+                    items: vec![AttentionItem {
+                        thread_id: "thread-1".into(),
+                        state: AttentionState::NeedsApproval as i32,
+                        reason: AttentionReason::Approval as i32,
+                        since: None,
+                        unseen: false,
+                        run_id: "run-1".into(),
+                    }],
+                    counts: Some(AttentionCounts {
+                        needs_you: 1,
+                        working: 0,
+                        unseen: 0,
+                    }),
+                })),
+            },
+            StreamAttentionResponse {
+                epoch: "epoch-a".into(),
+                seq: 2,
+                frame: Some(StreamFrame::ThreadChanged(AttentionThreadChanged {
+                    item: Some(AttentionItem {
+                        thread_id: "thread-1".into(),
+                        state: AttentionState::Idle as i32,
+                        ..Default::default()
+                    }),
+                    counts: Some(AttentionCounts::default()),
+                })),
+            },
+            StreamAttentionResponse {
+                epoch: "epoch-a".into(),
+                seq: 3,
+                frame: Some(StreamFrame::Heartbeat(AttentionHeartbeat {})),
+            },
+        ],
+        ..Default::default()
+    };
+    let app = build_router(make_state(spawn_attention_double(double).await), None);
+
+    let (status, body) = send_text(app, "/v1/attention/stream", &model, &session).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let events = sse_events(&body);
+    let names: Vec<&str> = events.iter().map(|event| event.0.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "attention_snapshot",
+            "attention_changed",
+            "attention_heartbeat"
+        ]
+    );
+    let ids: Vec<&str> = events.iter().map(|event| event.1.as_str()).collect();
+    assert_eq!(ids, ["epoch-a:1", "epoch-a:2", "epoch-a:3"]);
+    assert_eq!(
+        events[0].2,
+        json!({
+            "items": [{
+                "thread_id": "thread-1",
+                "state": "needs_approval",
+                "reason": "approval",
+                "unseen": false,
+                "run_id": "run-1",
+            }],
+            "counts": {"needs_you": 1, "working": 0, "unseen": 0},
+        })
+    );
+    assert_eq!(
+        events[1].2,
+        json!({
+            "item": {"thread_id": "thread-1", "state": "idle", "unseen": false},
+            "counts": {"needs_you": 0, "working": 0, "unseen": 0},
+        })
+    );
+    assert_eq!(events[2].2, json!({}));
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn stream_relays_the_refusal_session_core_sends() {
+    let _auth = AuthFixture::start().await;
+    let (model, session) = user_tokens("org-1", "user-1");
+    let double = AttentionDouble {
+        stream_refusal: Some((tonic::Code::FailedPrecondition, "attention_stream_disabled")),
+        ..Default::default()
+    };
+    let app = build_router(make_state(spawn_attention_double(double).await), None);
+
+    let (status, _body) = send_text(app, "/v1/attention/stream", &model, &session).await;
+
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn the_listing_names_the_stream_only_when_session_core_serves_it() {
+    let _auth = AuthFixture::start().await;
+    let (model, session) = user_tokens("org-1", "user-1");
+    let served = AttentionDouble {
+        list_answer: ListAttentionResponse {
+            enabled: true,
+            stream_enabled: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let app = build_router(make_state(spawn_attention_double(served).await), None);
+    let (status, body) = send(app, "GET", "/v1/attention", &model, Some(session.as_str())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["stream"], true);
+
+    // With the stream switched off the listing carries no new key, so its bytes are unchanged.
+    let switched_off = AttentionDouble {
+        list_answer: ListAttentionResponse {
+            enabled: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let app = build_router(make_state(spawn_attention_double(switched_off).await), None);
+    let (status, body) = send(app, "GET", "/v1/attention", &model, Some(session.as_str())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.get("stream").is_none());
 }

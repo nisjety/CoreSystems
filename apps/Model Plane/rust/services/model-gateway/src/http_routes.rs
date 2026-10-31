@@ -3,14 +3,17 @@
 //! Public routes: /healthz, /readyz, /version, /metrics
 //! Auth-gated routes: invoke endpoints, orchestration read endpoints, run-event SSE
 
-use std::{env, fmt::Write as _};
+use std::{convert::Infallible, env, fmt::Write as _};
 
 use axum::{
     body::{Body, Bytes},
     extract::{DefaultBodyLimit, Path, Query, State},
     http::{header::CONTENT_TYPE, HeaderMap, HeaderValue, StatusCode},
     middleware,
-    response::{IntoResponse, Redirect, Response},
+    response::{
+        sse::{Event as SseEvent, Sse},
+        IntoResponse, Redirect, Response,
+    },
     routing::{delete, get, post, put},
     Extension, Json, Router,
 };
@@ -43,6 +46,7 @@ use mp_events::{envelope::Envelope, publisher::EventPublisher, subjects};
 use mp_ids::new_ulid;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -252,6 +256,8 @@ pub fn build_router_with_readiness(
         // The attention state of the caller's threads (build plan WS16 S1). It is off by
         // default, and the response says so rather than failing.
         .route("/v1/attention", get(list_attention))
+        // The per-person live view of the same state (WS16 S5), relayed as server-sent events.
+        .route("/v1/attention/stream", get(stream_attention))
         // Marks one thread read (WS16 S1). A zero-retention caller's read state stays on the
         // client, so Session Core refuses that caller here.
         .route("/v1/threads/:thread_id/seen", post(mark_thread_seen))
@@ -9884,6 +9890,10 @@ struct AttentionCountsResponse {
 struct ListAttentionResponse {
     /// False while the attention switch is off; the items and counts are then empty.
     enabled: bool,
+    /// Whether the live stream is served (WS16 S5). Omitted while it is off, so the listing reads as
+    /// it did before the stream existed.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    stream: bool,
     items: Vec<AttentionItemResponse>,
     counts: AttentionCountsResponse,
 }
@@ -10285,27 +10295,119 @@ async fn list_attention(
         .map_err(|error| session_thread_error("session-core list_attention failed", &error))?
         .into_inner();
 
-    let counts = response.counts.unwrap_or_default();
     Ok(Json(ListAttentionResponse {
         enabled: response.enabled,
+        stream: response.stream_enabled,
         items: response
             .items
             .into_iter()
-            .map(|item| AttentionItemResponse {
-                thread_id: item.thread_id,
-                state: attention_state_name(item.state),
-                reason: attention_reason_name(item.reason),
-                since: item.since.map(|value| timestamp_to_rfc3339(Some(value))),
-                unseen: item.unseen,
-                run_id: item.run_id,
-            })
+            .map(attention_item_response)
             .collect(),
-        counts: AttentionCountsResponse {
-            needs_you: counts.needs_you,
-            working: counts.working,
-            unseen: counts.unseen,
-        },
+        counts: attention_counts_response(response.counts.unwrap_or_default()),
     }))
+}
+
+/// `GET /v1/attention/stream`: the caller's attention stream as server-sent events (WS16 S5). Each frame
+/// is one event named for its kind, with `<epoch>:<seq>` as its id. Session Core refuses the stream
+/// before its first frame (switch off, cap reached, zero-retention caller), and the refusal reaches the
+/// browser as Session Core sent it.
+async fn stream_attention(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+) -> Result<Sse<ReceiverStream<Result<SseEvent, Infallible>>>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::StreamAttentionRequest;
+
+    let mut frames = state
+        .attention_client
+        .clone()
+        .stream_attention(authenticated_session_request(
+            StreamAttentionRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|error| session_thread_error("session-core stream_attention failed", &error))?
+        .into_inner();
+
+    // The relay ends when Session Core ends the stream or the browser leaves. Dropping `frames` then
+    // releases Session Core's side of the stream.
+    let (tx, rx) = tokio::sync::mpsc::channel(ATTENTION_STREAM_BUFFER);
+    tokio::spawn(async move {
+        while let Ok(Some(frame)) = frames.message().await {
+            let Some(event) = attention_stream_event(frame) else {
+                continue;
+            };
+            if tx.send(Ok(event)).await.is_err() {
+                break;
+            }
+        }
+    });
+    Ok(Sse::new(ReceiverStream::new(rx)))
+}
+
+/// The frames a stream holds while the browser reads them.
+const ATTENTION_STREAM_BUFFER: usize = 16;
+
+/// One frame of the attention stream as a server-sent event. The name is the frame's kind; the id is
+/// `<epoch>:<seq>`, so a restarted replica reads as a new epoch rather than as a gap in the old sequence.
+fn attention_stream_event(
+    frame: mp_contracts::model_plane::v1::StreamAttentionResponse,
+) -> Option<SseEvent> {
+    use mp_contracts::model_plane::v1::stream_attention_response::Frame;
+
+    let id = format!("{}:{}", frame.epoch, frame.seq);
+    let (name, data) = match frame.frame? {
+        Frame::Snapshot(snapshot) => (
+            "attention_snapshot",
+            json!({
+                "items": snapshot.items.into_iter().map(attention_item_response).collect::<Vec<_>>(),
+                "counts": attention_counts_response(snapshot.counts.unwrap_or_default()),
+            }),
+        ),
+        Frame::ThreadChanged(changed) => (
+            "attention_changed",
+            json!({
+                "item": attention_item_response(changed.item.unwrap_or_default()),
+                "counts": attention_counts_response(changed.counts.unwrap_or_default()),
+            }),
+        ),
+        Frame::Resync(_) => ("attention_resync", json!({})),
+        Frame::Heartbeat(_) => ("attention_heartbeat", json!({})),
+    };
+    Some(
+        SseEvent::default()
+            .event(name)
+            .id(id)
+            .data(data.to_string()),
+    )
+}
+
+/// One listed thread as the browser reads it (WS16 S1, S5).
+fn attention_item_response(
+    item: mp_contracts::model_plane::v1::AttentionItem,
+) -> AttentionItemResponse {
+    AttentionItemResponse {
+        thread_id: item.thread_id,
+        state: attention_state_name(item.state),
+        reason: attention_reason_name(item.reason),
+        since: item.since.map(|value| timestamp_to_rfc3339(Some(value))),
+        unseen: item.unseen,
+        run_id: item.run_id,
+    }
+}
+
+/// The counts behind the badge, as the browser reads them (WS16 S1, S5).
+fn attention_counts_response(
+    counts: mp_contracts::model_plane::v1::AttentionCounts,
+) -> AttentionCountsResponse {
+    AttentionCountsResponse {
+        needs_you: counts.needs_you,
+        working: counts.working,
+        unseen: counts.unseen,
+    }
 }
 
 /// Marks one of the caller's threads read (WS16 S1). Session Core refuses a zero-retention or

@@ -14,9 +14,13 @@ import {
   routeFromPath,
   type WorkspaceIdentity,
 } from '@/features/core/lib/shell-data'
+import { readThreadDeepLink } from '@/features/chat/lib/chat-thread-deep-link'
+import { createAttentionStore, navbarRefreshDelayMs, type AttentionStore, type AttentionStreamHealth } from '@/features/core/lib/attention-store'
 import { CoreWorkspaceContext } from '@/features/core/lib/workspace-context'
+import { getAttention, type AttentionItem } from '@/shared/api/attention-client'
 import { getNavbarData, type NavbarPayload } from '@/shared/api/navbar-client'
 import { getDeletionStatus } from '@/shared/api/org-deletion-client'
+import { useI18n } from '@/shared/i18n'
 import { getSession, type SessionState } from '@/shared/session/session-store'
 
 /** Extra height the fixed org-deletion banner (Flow C) occupies below the
@@ -46,6 +50,40 @@ export function CoreShell(props: { children?: JSX.Element }) {
   const sidebarWidth = () => (sidebarExpanded() ? expandedSidebarWidth() : SIDEBAR_MINIMIZED_WIDTH)
   const workspace = createMemo(() => resolveWorkspaceIdentity(session, navbarData.latest ?? navbarData()))
 
+  // The attention stream (WS16 S5) is read by a store that lives as long as the shell. The navbar keeps the
+  // cadence it always had until the server says it serves the stream.
+  const i18n = useI18n()
+  const [streamSupported, setStreamSupported] = createSignal(false)
+  const [streamHealth, setStreamHealth] = createSignal<AttentionStreamHealth>('connecting')
+  const [waitingNotice, setWaitingNotice] = createSignal('')
+  let attentionStream: AttentionStore | undefined
+  let refreshTimer: number | undefined
+  let waitingRefetch: number | undefined
+  const scheduleRefresh = () => {
+    window.clearTimeout(refreshTimer)
+    refreshTimer = window.setTimeout(() => {
+      void refetchNavbar()
+      scheduleRefresh()
+    }, navbarRefreshDelayMs({
+      streamSupported: streamSupported(),
+      streamLive: streamHealth() === 'live',
+      hidden: document.hidden,
+    }))
+  }
+  // However many threads start waiting together, the navbar refreshes once. The notice is only for a visible
+  // tab that is not already showing that thread.
+  const announceWaiting = (item: AttentionItem) => {
+    if (waitingRefetch === undefined) {
+      waitingRefetch = window.setTimeout(() => {
+        waitingRefetch = undefined
+        void refetchNavbar()
+      }, 0)
+    }
+    if (document.visibilityState === 'visible' && readThreadDeepLink(window.location.search) !== item.threadId) {
+      setWaitingNotice(i18n.tr('En samtale venter på svaret ditt.', 'A conversation is waiting for your reply.'))
+    }
+  }
+
   createEffect(
     () => {
       if (navbarData.latest?.theme?.configured === false) return undefined
@@ -62,14 +100,6 @@ export function CoreShell(props: { children?: JSX.Element }) {
   createEffect(
     () => undefined,
     () => {
-      let refreshTimer: number | undefined
-      const scheduleRefresh = () => {
-        window.clearTimeout(refreshTimer)
-        refreshTimer = window.setTimeout(() => {
-          void refetchNavbar()
-          scheduleRefresh()
-        }, document.hidden ? 180_000 : 60_000)
-      }
       const handleVisibilityChange = () => {
         if (!document.hidden) void refetchNavbar()
       }
@@ -79,6 +109,32 @@ export function CoreShell(props: { children?: JSX.Element }) {
       return () => {
         window.clearTimeout(refreshTimer)
         document.removeEventListener('visibilitychange', handleVisibilityChange)
+      }
+    },
+  )
+
+  // The next navbar refresh is scheduled again whenever the stream's health changes, so it uses the new cadence.
+  createEffect(streamHealth, () => scheduleRefresh())
+
+  // The stream is opened only once the server says it serves one; until then the shell makes no stream request.
+  createEffect(
+    () => undefined,
+    () => {
+      let disposed = false
+      void getAttention()
+        .then((listing) => {
+          if (disposed || !listing.capabilities.stream) return
+          attentionStream = createAttentionStore({ onWaiting: announceWaiting })
+          attentionStream.subscribe(setStreamHealth)
+          setStreamSupported(true)
+          attentionStream.start()
+        })
+        .catch(() => undefined)
+      return () => {
+        disposed = true
+        window.clearTimeout(waitingRefetch)
+        attentionStream?.stop()
+        attentionStream = undefined
       }
     },
   )
@@ -115,6 +171,13 @@ export function CoreShell(props: { children?: JSX.Element }) {
             onRefetch={() => void refetchDeletionStatus()}
           />
         </Show>
+        <div
+          role="status"
+          aria-live="polite"
+          style={{ position: 'absolute', width: '1px', height: '1px', overflow: 'hidden', clip: 'rect(0 0 0 0)', 'white-space': 'nowrap' }}
+        >
+          {waitingNotice()}
+        </div>
         <Show when={chatAppearanceActive('navigation') && sidebarExpanded()}>
           <button type="button" class="core-sidebar-mobile-scrim" aria-label="Close navigation" onClick={() => setSidebarExpanded(false)} />
         </Show>
