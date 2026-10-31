@@ -2197,6 +2197,48 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-884 | WS20-S8 | live-proof | P1 | docker-compose.yml passthrough for CRON_CONTRACT_GUARDS_ENABLED (shared file, lead_todo) | done c85c8f962 |
 | D2-885 | WS20-S8 | follow-up | P3 | 28 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-33.json | open |
 
+
+### Wave-mode batch W2-34 (2026-10-31)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-886 | WS17-S6 | follow-up | P1 | ForkAction is mounted in ChatMessages without onForked, and the action does not refresh the sidebar. A successful per-message fork opens nothing, and the copy appears only after a reload or a later refresh. Wire onForked (open the copy, refresh the list) before the flag is enabled; this needs use-chat-controller.ts, which this slice does not own. | open |
+| D2-887 | WS17-S6 | test-gap | P1 | The model-gateway fork route (fork_thread in http_routes.rs; fork_route_tests at line 16770) has not compiled or run in this worktree. Blocked by lead_todo 0. | open |
+| D2-888 | WS17-S6 | test-gap | P1 | The copied-row predicate in message_search.rs is not applied (lead_todo 3). Owner search and RECALL return copied turns as duplicates until it lands. search_excludes_copied_rows_unless_thread_scoped is not written. | open |
+| D2-889 | WS17-S6 | risk | P1 | The in-repo python stub set cannot import sessions_pb2: attention_pb2.py is absent, and runs_pb2.py lacks RunContextStatus. HEAD already fails the same way. No test catches it, because the python tests do not import sessions_pb2. Any Python consumer of ForkThread will fail at import. | open |
+| D2-890 | WS17-S6 | risk | P1 | Copied turns carry source metadata that may reference Quarry artifact ids, and authorization of those ids on fork is not determined. Verify before enabling SESSION_CORE_THREAD_FORK_ENABLED. | open |
+| D2-891 | WS17-S6 | follow-up | P1 | ChatMessages.tsx mounts <ForkAction> without onForked, and ForkAction neither navigates nor refreshes the sidebar, so a successful 'Fork from here' visibly does nothing until a reload; wire onForked (open copy + refresh list) via the chat controller before the flag flips. | open |
+| D2-892 | WS17-S6 | test-gap | P1 | message_search.rs lacks the `copied_from_message_id IS NULL unless thread-scoped` predicate, and search_excludes_copied_rows_unless_thread_scoped is missing (lead_todo 3, a shared file), so owner search and RECALL return copied turns as duplicates once forks exist. | open |
+| D2-893 | WS17-S6 | follow-up | P1 | The row's delete UX 'N forks keep their own copy' is not implemented anywhere, and no API returns a source thread's fork count. The plan names deleting_source_leaves_fork_and_deleting_fork_leaves_source, and that test is not written in thread_fork.rs. | open |
+| D2-894 | WS17-S6 | follow-up | P3 | 29 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-34.json | open |
+| D2-895 | WS22-S4 | live-proof | P1 | Live proof owed on a rebuilt execution-core: with the switch enabled, a Space inline turn that creates a file gets a space workspace part and the lease's overlay rows hold the file, with no _verevon_main.py row; with the switch off the result has no workspace part. | open |
+| D2-896 | WS22-S4 | risk | P1 | Deleted files never reach the overlay because SnapshotRequest has no deletion list, so a file a run removes keeps its overlay row; a future promote caller would resurrect it in the Space, so a tombstone contract is needed before any promote caller exists. | open |
+| D2-897 | WS22-S4 | live-proof | P1 | Not yet proven on a live stack: a switched-on Space inline step writes overlay rows queried by lease, and a switched-off step yields no workspace part. | open |
+| D2-898 | WS22-S4 | live-proof | P1 | Live proof on a rebuilt execution-core (compose.sh with the live env chain). With the switch off, a Space inline code_interpreter turn returns no workspace part. With EXECUTION_CORE_SPACE_WORKSPACE_WRITE_THROUGH=enabled, the turn returns scope space, state synced and durability run_overlay, and the lease's workspace_files overlay rows hold the created file with no _verevon_main.py row. A ZDR Space turn is refused up front and writes no overlay row. | open |
+| D2-899 | WS22-S4 | live-proof | P1 | The compose env line goes in apps/Model Plane/deploy/docker-compose.yml with an empty default: EXECUTION_CORE_SPACE_WORKSPACE_WRITE_THROUGH: ${EXECUTION_CORE_SPACE_WORKSPACE_WRITE_THROUGH:-}. Coordinate it with WS22-S3's hunk in the same file. | open |
+| D2-900 | WS22-S4 | live-proof | P1 | The ledger entry with the DEC-24 honest limit goes in apps/Model Plane/docs/decisions/ledger.md (a shared file; the lead applies the implementer's lead_todo text). | open |
+| D2-901 | WS22-S4 | live-proof | P1 | Commit only the four owned execution-core files. The worktree also holds sibling-slice edits. | open |
+| D2-902 | WS22-S4 | live-proof | P1 | Commit only the four owned files. The worktree carries sibling-slice edits (apps/Application Plane/docker-compose.yml, the verevonv3 gateway shared.rs, model-gateway tool_loop.rs and tools.rs, sessions.proto and sessions.pb.go) that are not part of this slice. | open |
+| D2-903 | WS22-S4 | follow-up | P3 | 18 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-34.json | open |
+| D2-904 | WS16-S7 | decision | P1 | SESSION_CORE_ATTENTION_ENABLED stays off: D2-738, D2-739 and D2-740 are open live-proof rows against it, and D2-733 to D2-737 are open test-gap or risk rows, so the flip waits for the lead's live proof. | open |
+| D2-905 | WS16-S7 | decision | P1 | SESSION_CORE_ATTENTION_EVENTS_ENABLED stays off: D2-751, D2-752, D2-755 and D2-756 are open design risks (no high-water mark, no lock between the read and the insert, no still-requested re-check) and D2-754 and D2-757 need live proof. | open |
+| D2-906 | WS16-S7 | decision | P1 | The rail and tab badge (S2, which has no switch of its own) stay dark while SESSION_CORE_ATTENTION_ENABLED is off: D2-787, D2-789 and D2-791 to D2-794 are open live-proof rows, and the attention-sidebar e2e spec has not run. | open |
+| D2-907 | WS16-S7 | decision | P1 | NOTIFICATION_NATIVE_TYPES_ENABLED and CAPABILITY_CORE_ATTENTION_NOTIFY_ENABLED stay off: D2-796 to D2-803 are open, covering the missing still-requested re-check, the owner's gate decisions and the switch order that D2-799 and D2-803 describe. | open |
+| D2-908 | WS16-S7 | decision | P1 | SESSION_CORE_ATTENTION_STREAM_ENABLED stays off: D2-833 and D2-837 ask the owner to confirm the navbar cadence, D2-834 needs DEC-38 D3 confirmed by Application Plane and Space, and D2-838 and D2-839 need live proof. | open |
+| D2-909 | WS16-S7 | decision | P1 | NOTIFICATION_WEB_PUSH_ENABLED stays off: D2-860 (the queued delivery worker never pushes), D2-861 (subscriptions outlive a purged organisation) and D2-863 (Chrome's visible-window rule) are open, as are D2-862, D2-864 and D2-865; the P0 D2-859 is closed in f959e921b. | open |
+| D2-910 | WS16-S7 | risk | P1 | The run-status chip, legacyStateFromRunStatus and the flag-off branches stay in place because they still serve the UI with the attention switches off; the function has four live readers, of which CoreSidebar.tsx:1106 and chat-organization.ts:57 are owned and AgentRunConsole.tsx:2147 and space-thread-presentation.ts:30 are not. | open |
+| D2-911 | WS16-S7 | decision | P1 | DEC-11 orders failed above running, but session-core attention.rs precedence() and the FE ATTENTION_PRECEDENCE both put working above failed; the owner rules on it (D2-815, D2-820). The batch decisions_defaults quote DEC-11, but the built code and its tests pin the other order, and changing it needs session-core edits outside this slice's ownership. | open |
+| D2-912 | WS16-S7 | follow-up | P3 | 33 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-34.json | open |
+| D2-913 | WS22-S3 | risk | P1 | get_audience_token deliberately does not cache model-service tokens ('Mint on every request'), so with the switch on every non-ZDR personal turn adds one auth-core round trip; measure this before default-on, and consider the lazy mint or a cache keyed by session generation and active org. | open |
+| D2-914 | WS22-S3 | risk | P1 | The minted bearer lasts about the auth-core TTL (300 s default), so a later code_interpreter call in a long agentic turn may present an expired bearer and fail with an error instead of degrading to ephemeral; the degrade path covers only an absent bearer (not verified against execution-core's exp handling). | open |
+| D2-915 | WS22-S3 | decision | P1 | DEC-23 (a) names an org flag and quota on the delegated bearer, and (b) requires the Control decision model.thread.sandbox_workspace before default-on and before billed or persistent compute; this slice gates only on env switches. | open |
+| D2-916 | WS22-S3 | follow-up | P1 | The model-gateway lib-test build fails on the shared worktree from 11:58 because WS17-S6 references state.thread_fork_client from http_routes.rs without the state.rs field; no model-gateway test can compile until that lands. | open |
+| D2-917 | WS22-S3 | live-proof | P1 | The five live evidence items in lead_todo (cross-turn persistence, second-user isolation, no Space thread rows, ZDR typed refusal, restart survival) are not run; docker was not allowed. | open |
+| D2-918 | WS22-S3 | follow-up | P1 | The shared worktree's model-gateway crate does not compile (http_routes.rs:11182 uses state.thread_fork_client, from WS17-S6, with no AppState field), so this slice was verified only in an isolated copy with http_routes.rs at HEAD; re-run the model-gateway lib and all-targets tests in the tree once WS17-S6 lands. | open |
+| D2-919 | WS22-S3 | risk | P1 | The BFF judges ZDR by turn_requests_zdr (x-zdr header or body zdr only), so a turn that is ZDR by org policy but sent without the flag still mints the sandbox-manager bearer. model-gateway's effective zdr still keeps the thread_id out, but the row's literal 'ZDR turns mint no bearer' does not hold for org-policy ZDR. | open |
+| D2-920 | WS22-S3 | risk | P1 | With SANDBOX_THREAD_WORKSPACE_ENABLED on, every non-ZDR personal turn makes one uncached auth-core round trip whether or not code_interpreter is offered (the lazy mint was not built); measure this before default-on. | open |
+| D2-921 | WS22-S3 | follow-up | P3 | 24 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-34.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -2388,3 +2430,6 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS16-S6 | zdr, auth, policy | W2-33 | no |
 | WS22-S2 | zdr, data-loss, authority | W2-33 | no |
 | WS20-S8 | authority, policy | W2-33 | no |
+| WS17-S6 | zdr, auth, data-loss | W2-34 | no |
+| WS22-S4 | data-loss, authority | W2-34 | no |
+| WS22-S3 | auth, zdr, authority | W2-34 | no |
