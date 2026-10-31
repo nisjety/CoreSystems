@@ -242,20 +242,48 @@ export function answerStatusMessage(status: string | null | undefined, reason: s
     case 'skipped_zdr':
       return tr('Svar er av under dataskjerming (ZDR).', 'Answers are off under zero data retention (ZDR).')
     case 'unavailable':
-      if (reason === 'synthesis_disabled') {
-        return tr(
-          'Svar er ikke slått på på Quarry-edge. Slå på QUARRY_EDGE__ANSWER_SYNTHESIS der.',
-          'Answers are not switched on in Quarry-edge. Turn on QUARRY_EDGE__ANSWER_SYNTHESIS there.',
-        )
-      }
-      if (reason === 'model_plane_auth_refused') {
-        return tr(
-          'Modellplanen avviste nøkkelen for svar. Sjekk tilgangen til svar.',
-          'The model plane refused the key for answers. Check the grant for answers.',
-        )
-      }
-      return tr('Svar er ikke tilgjengelig akkurat nå.', 'An answer is not available right now.')
+      return answerReasonMessage(reason, tr)
     default:
       return null
+  }
+}
+
+/** Copy for each `answer_reason` Quarry gives with an `unavailable` answer; a reason this build does not know gets the generic line. */
+function answerReasonMessage(reason: string | null | undefined, tr: Tr): string {
+  switch (reason) {
+    case 'synthesis_disabled':
+      return tr(
+        'Svar er ikke slått på på Quarry-edge. Slå på QUARRY_EDGE__ANSWER_SYNTHESIS der.',
+        'Answers are not switched on in Quarry-edge. Turn on QUARRY_EDGE__ANSWER_SYNTHESIS there.',
+      )
+    case 'zdr_unavailable':
+      return tr('Svar er ikke tilgjengelig under dataskjerming (ZDR).', 'Answers are not available under zero data retention (ZDR).')
+    case 'model_path_refused':
+      return tr(
+        'Quarry-edge nektet modellstien for svar ved oppstart. Sjekk konfigurasjonen der.',
+        'Quarry-edge refused the model path for answers at startup. Check its configuration.',
+      )
+    case 'no_search_provider':
+      return tr('Ingen søkeleverandør er koblet til svar på Quarry-edge.', 'No search provider is connected to answers on Quarry-edge.')
+    case 'no_model_plane_url':
+      return tr(
+        'QUARRY_EDGE__MODEL_PLANE_URL er ikke satt, så svar kan ikke lages. Sett den der og kjør på nytt.',
+        'QUARRY_EDGE__MODEL_PLANE_URL is not set, so answers cannot be made. Set it there and run again.',
+      )
+    case 'model_client_init_failed':
+      return tr('Modellklienten for svar kunne ikke startes på Quarry-edge.', 'The model client for answers could not start on Quarry-edge.')
+    case 'model_plane_auth_refused':
+      return tr(
+        'Modellplanen avviste nøkkelen for svar. Sjekk tilgangen til svar.',
+        'The model plane refused the key for answers. Check the grant for answers.',
+      )
+    case 'model_plane_rate_limited':
+      return tr('Modellen er travel. Prøv igjen om litt.', 'The model is busy. Try again shortly.')
+    case 'model_plane_error':
+      return tr('Modellen svarte ikke. Prøv igjen senere.', 'The model did not answer. Try again later.')
+    case 'answer_search_failed':
+      return tr('Søket svaret bygger på feilet. Prøv igjen.', 'The search the answer is built on failed. Try again.')
+    default:
+      return tr('Svar er ikke tilgjengelig akkurat nå.', 'An answer is not available right now.')
   }
 }

@@ -105,6 +105,26 @@ describe('switches and copy for the batch 2 contracts (INNH-4, INNH-6, INNH-7, I
     expect(answerStatusMessage(undefined, undefined, tr)).toBeNull()
   })
 
+  it('gives each of the ten answer reasons its own copy, and a generic line for one it does not know', () => {
+    const reasons = [
+      'synthesis_disabled',
+      'zdr_unavailable',
+      'model_path_refused',
+      'no_search_provider',
+      'no_model_plane_url',
+      'model_client_init_failed',
+      'model_plane_auth_refused',
+      'model_plane_rate_limited',
+      'model_plane_error',
+      'answer_search_failed',
+    ]
+    const copies = reasons.map((reason) => answerStatusMessage('unavailable', reason, tr))
+    expect(new Set(copies).size).toBe(reasons.length)
+    expect(copies[1]).toContain('ZDR')
+    expect(copies[4]).toContain('QUARRY_EDGE__MODEL_PLANE_URL')
+    expect(answerStatusMessage('unavailable', 'something_new', tr)).toBe('Svar er ikke tilgjengelig akkurat nå.')
+  })
+
   it('gives the privacy refusal its own copy', () => {
     expect(aiCodeMessage('PRIVACY_POLICY', tr)).toContain('Personverninnstillingene')
   })

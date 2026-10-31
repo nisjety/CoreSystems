@@ -160,7 +160,7 @@ Gateway (`apps/gateway`):
 Frontend:
 - Scrape: «Bruk lagret resultat opptil (minutter)». Resultatet sier når det kom fra et lagret resultat, og hvorfor det ble hentet på nytt.
 - Crawl: sitemap-valg, og rensing per side (hovedinnhold, utdragsmodus, base64, inkluder og ekskluder tagger). Standardvalgene sendes ikke.
-- Søk: svarstatus med tekst for hver årsak (`no_sources`, `skipped_zdr`, `unavailable` med `synthesis_disabled` eller `model_plane_auth_refused`).
+- Søk: svarstatus med tekst for hver av de ti `answer_reason`-verdiene Quarry kan gi med `unavailable`, og for `no_sources` og `skipped_zdr`. Ukjente årsaker får en generell tekst.
 - Kjøring, utdata: «Sider som ble hentet», side for side, med markdown per side.
 - Overvåking: «Vis endringen» under siste sjekk og under tidslinjen. Viser lagt til, fjernet og flyttet avsnitt; avsnittsnummer vises fra 1.
 - Overvåking: teksten under tidslinjen var utdatert og er skrevet om.
