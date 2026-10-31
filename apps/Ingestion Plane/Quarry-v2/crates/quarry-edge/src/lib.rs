@@ -12,6 +12,8 @@ pub mod change_webhook;
 pub mod config;
 pub mod crawl_policy;
 pub mod crawl_request;
+pub mod crawl_scrape;
+pub mod crawl_sitemap;
 pub mod batch_check;
 pub mod control_client;
 pub mod drain;

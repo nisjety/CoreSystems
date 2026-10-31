@@ -539,6 +539,19 @@ pub const ROWS: &[Row] = &[
         log: Log::Unverified,
     },
     Row {
+        id: "internal_crawl_sitemap",
+        routes: &["/v1/internal/crawl/sitemap"],
+        treatment: Treatment::Inert {
+            reason: "reads the public sitemap files of a crawl's site and answers URLs and counts; it stores nothing, and a crawl is never ZDR (the handoff refuses it), so a body that declares zdr is a 400",
+        },
+        status: Status::Enforced,
+        enforced_by: &[
+            "crawl_sitemap::the_route_checks_the_token_the_org_binding_and_the_body",
+        ],
+        basis: "crawl_sitemap::internal_sitemap (INNH-6a, dark behind QUARRY_EDGE__CRAWL_SITEMAP) fetches robots.txt through the shared gate and each sitemap file through the guarded driver chain, then returns the URLs the crawl scope and robots allow; it writes no artifact, event, cache entry or record. The robots rules it reads are cached by the gate as for any page",
+        log: Log::Unverified,
+    },
+    Row {
         id: "internal_schedule_preflight",
         routes: &["/v1/internal/schedules/preflight"],
         treatment: Treatment::Inert {

@@ -612,6 +612,24 @@
       "treatment": "honored"
     },
     {
+      "basis": "crawl_sitemap::internal_sitemap (INNH-6a, dark behind QUARRY_EDGE__CRAWL_SITEMAP) fetches robots.txt through the shared gate and each sitemap file through the guarded driver chain, then returns the URLs the crawl scope and robots allow; it writes no artifact, event, cache entry or record. The robots rules it reads are cached by the gate as for any page",
+      "detail": {
+        "reason": "reads the public sitemap files of a crawl's site and answers URLs and counts; it stores nothing, and a crawl is never ZDR (the handoff refuses it), so a body that declares zdr is a 400"
+      },
+      "enforced_by": [
+        "crawl_sitemap::the_route_checks_the_token_the_org_binding_and_the_body"
+      ],
+      "id": "internal_crawl_sitemap",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/internal/crawl/sitemap"
+      ],
+      "status": "enforced",
+      "treatment": "inert"
+    },
+    {
       "basis": "schedule_preflight::preflight checks the runtime token and the run binding, then returns the S2 answer. It does NOT check the ZDR posture at fire time (WS15.S4 is not built), so an organization that turns ZDR on later keeps its schedules firing: that is the schedules row's gap, not a second one",
       "detail": {
         "reason": "answers allow with the posture unchecked and stores nothing; it carries a schedule id and an org id"

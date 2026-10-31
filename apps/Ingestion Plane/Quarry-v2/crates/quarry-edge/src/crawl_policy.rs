@@ -78,6 +78,53 @@ impl CrawlScopeSwitch {
     }
 }
 
+/// INNH-6a: `sitemap: include|only` on `/v1/crawl` and the internal discovery route.
+pub const ENV_CRAWL_SITEMAP: &str = "QUARRY_EDGE__CRAWL_SITEMAP";
+/// INNH-6b: `scrape_options` on `/v1/crawl` and `scrape` on `/v1/internal/run_page`.
+pub const ENV_CRAWL_SCRAPE_OPTIONS: &str = "QUARRY_EDGE__CRAWL_SCRAPE_OPTIONS";
+
+/// The two default-off crawl features of INNH-6, one flag per half. With a flag off the
+/// handoff answers the 400 `unsupported_option` it always did for that option.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CrawlFeatures {
+    /// `sitemap: include|only` is accepted and `/v1/internal/crawl/sitemap` is served.
+    pub sitemap: bool,
+    /// `scrape_options` is accepted and `scrape` is honoured by `run_page`.
+    pub scrape_options: bool,
+}
+
+/// `on`, `1` or `true` (any case) turn a flag on. Anything else, including a typo, is off.
+fn flag_is_on(value: Option<String>) -> bool {
+    matches!(
+        value.as_deref().map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("on" | "1" | "true")
+    )
+}
+
+impl CrawlFeatures {
+    /// Read the flags through a lookup, so tests need no process environment.
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
+        Self {
+            sitemap: flag_is_on(lookup(ENV_CRAWL_SITEMAP)),
+            scrape_options: flag_is_on(lookup(ENV_CRAWL_SCRAPE_OPTIONS)),
+        }
+    }
+
+    /// The flags the process runs with, read once. A unit test of this crate reads
+    /// the environment every time instead, so it can change a flag between cases.
+    pub fn current() -> Self {
+        #[cfg(test)]
+        {
+            Self::from_lookup(|name| std::env::var(name).ok())
+        }
+        #[cfg(not(test))]
+        {
+            static FEATURES: OnceLock<CrawlFeatures> = OnceLock::new();
+            *FEATURES.get_or_init(|| Self::from_lookup(|name| std::env::var(name).ok()))
+        }
+    }
+}
+
 /// The scope a handoff stamps into the orchestrator payload (`scope`,
 /// `scope_mode`, `robots`) and echoes back as `HandoffAck.effective`.
 #[derive(Debug, Clone, PartialEq, Eq)]

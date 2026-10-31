@@ -13,7 +13,7 @@ This describes behaviour. It does not change it. A **gap** is a place where ZDR 
 | refused | the request is refused with a message naming ZDR |
 | inert | ZDR does not apply: nothing of the caller's content is stored, or the route is not reachable with ZDR |
 
-6 of 36 rows are gaps.
+6 of 37 rows are gaps.
 
 | Feature | Routes | Treatment | Status | Log |
 |---|---|---|---|---|
@@ -49,6 +49,7 @@ This describes behaviour. It does not change it. A **gap** is a place where ZDR 
 | `graphql` | `/graphql`<br>`/graphql/schema`<br>`/graphql/playground` | inert: a read-only API over records that exist | enforced | log-unverified |
 | `operations` | `/health`<br>`/ready`<br>`/version` | inert: process state; carries no caller content | enforced | log-unverified |
 | `internal_run_page` | `/v1/internal/run_page` | honored | enforced | log-unverified |
+| `internal_crawl_sitemap` | `/v1/internal/crawl/sitemap` | inert: reads the public sitemap files of a crawl's site and answers URLs and counts; it stores nothing, and a crawl is never ZDR (the handoff refuses it), so a body that declares zdr is a 400 | enforced | log-unverified |
 | `internal_schedule_preflight` | `/v1/internal/schedules/preflight` | inert: answers allow with the posture unchecked and stores nothing; it carries a schedule id and an org id | enforced | log-unverified |
 | `internal_org_profile_purge` | `/v1/internal/orgs/{org}/profiles` | inert: erases the organization's profile families and answers counts only; it stores nothing | enforced | log-unverified |
 | `internal_page_images` | `/v1/internal/page-images/{org}/{doc}/{page}/{hash}` | inert: serves a stored page image by content hash; a ZDR run stores none | enforced | log-unverified |
@@ -88,6 +89,7 @@ This describes behaviour. It does not change it. A **gap** is a place where ZDR 
 - `graphql`: the GraphQL schema resolves queries from existing stores and mutates none
 - `operations`: routes::health, ready and version
 - `internal_run_page`: routes::internal_run_page builds the runner with ZdrMode from the orchestrator's request
+- `internal_crawl_sitemap`: crawl_sitemap::internal_sitemap (INNH-6a, dark behind QUARRY_EDGE__CRAWL_SITEMAP) fetches robots.txt through the shared gate and each sitemap file through the guarded driver chain, then returns the URLs the crawl scope and robots allow; it writes no artifact, event, cache entry or record. The robots rules it reads are cached by the gate as for any page Tests: `crawl_sitemap::the_route_checks_the_token_the_org_binding_and_the_body`.
 - `internal_schedule_preflight`: schedule_preflight::preflight checks the runtime token and the run binding, then returns the S2 answer. It does NOT check the ZDR posture at fire time (WS15.S4 is not built), so an organization that turns ZDR on later keeps its schedules firing: that is the schedules row's gap, not a second one
 - `internal_org_profile_purge`: internal_routes::purge_org_profiles checks the shared internal token, walks the org erasure families in AppState and reports row, tombstone and cache-key counts (WS17.E3); it is how a ZDR organization's erasure is carried out, so it is never refused
 - `internal_page_images`: resource_routes::get_page_image reads the content-addressed store
