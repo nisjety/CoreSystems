@@ -66,6 +66,8 @@ import {
   type ComposerAttachment,
   type ComposerToolId,
   type GeneratedFile,
+  type GeneratedFileCheck,
+  type GeneratedFileCheckLevel,
   type QueuedInput,
   type StreamAttachment,
   type StreamFailureAction,
@@ -1628,6 +1630,30 @@ export function normalizeArtifact(event: { id?: string; kind?: string; title?: s
   }
 }
 
+function isGeneratedFileCheckLevel(value: unknown): value is GeneratedFileCheckLevel {
+  return value === 'passed' || value === 'warnings' || value === 'failed' || value === 'skipped'
+}
+
+/**
+ * The structural check the gateway attached to a generated file, read as the
+ * wire sends it. A malformed check is no check at all: the file still arrives,
+ * and no chip is shown for a verdict the gateway did not give.
+ */
+export function normalizeGeneratedFileCheck(value: unknown): GeneratedFileCheck | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const record = value as Record<string, unknown>
+  if (!isGeneratedFileCheckLevel(record.level) || !Array.isArray(record.checks)) return undefined
+  const checks: GeneratedFileCheck['checks'] = []
+  for (const item of record.checks as unknown[]) {
+    if (!item || typeof item !== 'object') continue
+    const finding = item as Record<string, unknown>
+    if (typeof finding.id === 'string' && typeof finding.message === 'string' && isGeneratedFileCheckLevel(finding.level)) {
+      checks.push({ id: finding.id, level: finding.level, message: finding.message })
+    }
+  }
+  return { level: record.level, checks }
+}
+
 export function normalizeGeneratedFile(event: {
   id?: string
   name?: string
@@ -1635,14 +1661,17 @@ export function normalizeGeneratedFile(event: {
   type?: string
   url?: string
   size?: number
+  check?: unknown
 }): GeneratedFile | null {
   if (!event.url || !event.name) return null
+  const check = normalizeGeneratedFileCheck(event.check)
   return {
     id: event.id ?? event.url,
     name: event.name,
     mime: event.mime ?? event.type ?? 'application/octet-stream',
     size: event.size ?? 0,
     url: event.url,
+    ...(check ? { check } : {}),
   }
 }
 

@@ -421,6 +421,7 @@ fn knowledge_search_failure(status: &tonic::Status, data_plane_mode: Option<&str
 pub(crate) fn tool_artifact_events(
     outcome: &ToolOutcome,
     known_kind: Option<crate::artifacts::ArtifactKind>,
+    office: &mut OfficeDelivery,
 ) -> (Vec<ChatEvent>, Option<String>) {
     if outcome.error.is_some() {
         return (Vec::new(), None);
@@ -432,7 +433,7 @@ pub(crate) fn tool_artifact_events(
         "create_artifact" | "update_artifact" | "result_query" => {
             authored_artifact_events(outcome, known_kind)
         }
-        "code_interpreter" => code_interpreter_events(outcome),
+        "code_interpreter" => code_interpreter_events(outcome, office),
         _ => (Vec::new(), None),
     }
 }
@@ -549,7 +550,66 @@ fn extract_json_object(s: &str) -> Option<Value> {
         .ok()
 }
 
-fn code_interpreter_events(outcome: &ToolOutcome) -> (Vec<ChatEvent>, Option<String>) {
+/// Which Office files this turn has held back under the enforce switch. Off, every file is delivered with its
+/// check. On, a file that failed the structural check is held back the first time its name fails in the turn, so
+/// the model can repair it and run it again. A second failure of that name is delivered with its check, so a file
+/// the model cannot fix still reaches the user, marked as failed.
+#[derive(Debug, Default)]
+pub(crate) struct OfficeDelivery {
+    enforce: bool,
+    held: BTreeSet<String>,
+}
+
+/// The switch that holds back failed Office files. Only the literal `true` enables it.
+const VERIFY_ENFORCE_ENV: &str = "CODE_INTERPRETER_VERIFY_ENFORCE";
+
+impl OfficeDelivery {
+    /// The delivery state for one turn, with the switch read from the environment.
+    #[must_use]
+    pub(crate) fn for_turn() -> Self {
+        Self {
+            enforce: enforce_from(std::env::var(VERIFY_ENFORCE_ENV).ok().as_deref()),
+            held: BTreeSet::new(),
+        }
+    }
+
+    /// Whether the file is held back rather than delivered. Only the first failure of a name in the turn is held.
+    fn holds_back(&mut self, name: &str, check: Option<&OfficeVerification>) -> bool {
+        let failed = check.is_some_and(|report| report.level == VerificationLevel::Failed);
+        self.enforce && failed && self.held.insert(name.to_owned())
+    }
+}
+
+/// Whether the enforce switch is on. Only the literal `true` enables it, so an unset or misspelt value keeps every
+/// file delivered.
+#[must_use]
+fn enforce_from(raw: Option<&str>) -> bool {
+    raw.map(str::trim) == Some("true")
+}
+
+/// The report the verifier made of the file `name`, if it made one. A report that does not parse is no check at
+/// all, so the file carries no verdict rather than a guessed one.
+fn office_report_for(payload: &Value, name: &str) -> Option<OfficeVerification> {
+    let report = payload
+        .get("verification")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|element| element.get("name").and_then(Value::as_str) == Some(name))?;
+    let kind = OfficeKind::from_file_name(name)?;
+    OfficeVerification::from_untrusted_json(&report.to_string(), name, kind).ok()
+}
+
+/// What the model is told about the files a `code_interpreter` call delivered when none was held back.
+const DELIVERED_FILES_NOTE: &str = "\nThese files were delivered to the user as downloadable artifacts, which already appear as download cards below your message — the user can click them right now. Confirm what you produced in plain text (e.g. \"Fil lagret: name.xlsx (N bytes), tilgjengelig for nedlasting nedenfor.\"); NEVER write a markdown link, a bare URL, or a \"sandbox:/\" path for one of these files — no such link exists and it will not work.";
+
+/// What the model is told when the enforce switch held a file back: it was not delivered, so the model must not say
+/// the user has it.
+const WITHHELD_FILES_NOTE: &str = "\nThe files listed under files_withheld failed the structural Office check and were NOT delivered to the user: do not say the user has them, and regenerate each one with code_interpreter before you mention it again. A file listed under files_delivered was delivered as a downloadable artifact, which already appears as a download card below your message. Confirm what you produced in plain text, and NEVER write a markdown link, a bare URL, or a \"sandbox:/\" path for a file — no such link exists and it will not work.";
+
+fn code_interpreter_events(
+    outcome: &ToolOutcome,
+    office: &mut OfficeDelivery,
+) -> (Vec<ChatEvent>, Option<String>) {
     let Some(payload) = extract_json_object(&outcome.output) else {
         return (Vec::new(), None);
     };
@@ -566,6 +626,7 @@ fn code_interpreter_events(outcome: &ToolOutcome) -> (Vec<ChatEvent>, Option<Str
 
     let mut events = Vec::new();
     let mut listed = Vec::new();
+    let mut withheld = Vec::new();
     for (index, file) in files.iter().enumerate() {
         let name = file
             .get("name")
@@ -595,6 +656,12 @@ fn code_interpreter_events(outcome: &ToolOutcome) -> (Vec<ChatEvent>, Option<Str
             ));
             continue;
         }
+        let check = office_report_for(&payload, &name);
+        if office.holds_back(&name, check.as_ref()) {
+            // Held back, not delivered: the model repairs the file and runs it again.
+            withheld.push(format!("{name} ({mime}, {bytes} bytes)"));
+            continue;
+        }
         // A `data:` URI is the established way this gateway hands generated
         // bytes to the browser (the image-generation path does exactly this),
         // so a generated document needs no new storage or route.
@@ -614,6 +681,7 @@ fn code_interpreter_events(outcome: &ToolOutcome) -> (Vec<ChatEvent>, Option<Str
             &mime,
             &data_uri,
             bytes,
+            check,
         ));
         listed.push(format!("{name} ({mime}, {bytes} bytes)"));
     }
@@ -636,11 +704,17 @@ fn code_interpreter_events(outcome: &ToolOutcome) -> (Vec<ChatEvent>, Option<Str
         "exit_code": exit_code,
         "files_delivered": listed,
     });
+    // Present only when the enforce switch held a file back, so the summary is unchanged otherwise.
+    if !withheld.is_empty() {
+        summary["files_withheld"] = serde_json::json!(withheld);
+    }
     let repair = add_office_checks(&payload, &mut summary);
     let mut text = summary.to_string();
-    text.push_str(
-        "\nThese files were delivered to the user as downloadable artifacts, which already appear as download cards below your message — the user can click them right now. Confirm what you produced in plain text (e.g. \"Fil lagret: name.xlsx (N bytes), tilgjengelig for nedlasting nedenfor.\"); NEVER write a markdown link, a bare URL, or a \"sandbox:/\" path for one of these files — no such link exists and it will not work.",
-    );
+    text.push_str(if withheld.is_empty() {
+        DELIVERED_FILES_NOTE
+    } else {
+        WITHHELD_FILES_NOTE
+    });
     if repair {
         text.push_str(OFFICE_REPAIR_SENTENCE);
     }
@@ -7630,6 +7704,8 @@ pub async fn run_tool_rounds_for_model_with_attachments(
         String,
         crate::artifacts::ArtifactKind,
     > = std::collections::HashMap::new();
+    // The Office files this turn has delivered or held back under the verifier's switch (WS19-S3).
+    let mut office_delivery = OfficeDelivery::for_turn();
     // The question this turn is about, snapshotted BEFORE the loop starts
     // appending tool context: the last thing the user actually wrote. A
     // `web_search` is judged against the query the model composed (that is what
@@ -8515,7 +8591,8 @@ pub async fn run_tool_rounds_for_model_with_attachments(
             let artifact_kind_hint =
                 artifact_id_of(&outcome).and_then(|id| state.artifact_versions.kind_of(thread_id, &id)
                     .or_else(|| authored_artifact_kinds.get(&id).copied()));
-            let (artifact_events, rewritten) = tool_artifact_events(&outcome, artifact_kind_hint);
+            let (artifact_events, rewritten) =
+                tool_artifact_events(&outcome, artifact_kind_hint, &mut office_delivery);
             let checked_artifact_ids: Vec<&String> = artifact_events.iter().filter_map(|event| match event {
                     ChatEvent::Artifact { id, content, .. } if result_checks.iter().any(|check| check["artifactId"] == *id
                         && check["contentHash"] == crate::result_validation::content_hash(content)) => Some(id),
@@ -12695,7 +12772,8 @@ mod tests {
             1,
         );
         let outcome = outcome_for("create_artifact", payload);
-        let (events, rewritten) = tool_artifact_events(&outcome, None);
+        let (events, rewritten) =
+            tool_artifact_events(&outcome, None, &mut OfficeDelivery::default());
 
         assert_eq!(events.len(), 1);
         match &events[0] {
@@ -12739,7 +12817,11 @@ mod tests {
         let payload = updated_artifact_payload("landing", "", "<html></html>", 2);
         let outcome = outcome_for("update_artifact", payload);
         let (events, rewritten) =
-            tool_artifact_events(&outcome, Some(crate::artifacts::ArtifactKind::Html));
+            tool_artifact_events(
+                &outcome,
+                Some(crate::artifacts::ArtifactKind::Html),
+                &mut OfficeDelivery::default(),
+            );
         match &events[0] {
             ChatEvent::Artifact { kind, version, .. } => {
                 assert_eq!(kind, "html", "the remembered kind must win");
@@ -12788,7 +12870,8 @@ mod tests {
         })
         .to_string();
         let outcome = outcome_for("code_interpreter", payload);
-        let (events, rewritten) = tool_artifact_events(&outcome, None);
+        let (events, rewritten) =
+            tool_artifact_events(&outcome, None, &mut OfficeDelivery::default());
 
         assert_eq!(events.len(), 2, "one artifact + one attachment");
         match &events[0] {
@@ -12874,7 +12957,8 @@ mod tests {
         // JSON — this is the part the old code could not parse.
         let prefixed_output = format!("[source: org-internal]\n{payload}");
         let outcome = outcome_for("code_interpreter", prefixed_output);
-        let (events, rewritten) = tool_artifact_events(&outcome, None);
+        let (events, rewritten) =
+            tool_artifact_events(&outcome, None, &mut OfficeDelivery::default());
 
         assert_eq!(
             events.len(),
@@ -12933,7 +13017,11 @@ mod tests {
         })
         .to_string();
         let (_events, summary) =
-            tool_artifact_events(&outcome_for("code_interpreter", with_report), None);
+            tool_artifact_events(
+                &outcome_for("code_interpreter", with_report),
+                None,
+                &mut OfficeDelivery::default(),
+            );
         let summary = summary.expect("a summary for delivered files");
         assert!(
             summary.contains(
@@ -12961,10 +13049,160 @@ mod tests {
         })
         .to_string();
         let (_events, summary) =
-            tool_artifact_events(&outcome_for("code_interpreter", without_report), None);
+            tool_artifact_events(
+                &outcome_for("code_interpreter", without_report),
+                None,
+                &mut OfficeDelivery::default(),
+            );
         let summary = summary.expect("a summary for delivered files");
         assert!(!summary.contains("office_checks"), "{summary}");
         assert!(!summary.contains("Regenerate each failed file"));
+    }
+
+    /// A `code_interpreter` result that delivers one Office file and the verifier's report on it.
+    fn one_office_file(name: &str, level: &str, checks: Value) -> String {
+        serde_json::json!({
+            "stdout": "",
+            "stderr": "",
+            "exit_code": 0,
+            "files": [{
+                "name": name,
+                "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "bytes": 4096,
+                "content_b64": "QUFBQUFBQUFBQQ",
+            }],
+            "verification": [{
+                "name": name,
+                "kind": "docx",
+                "level": level,
+                "checks": checks,
+                "stats": {},
+            }],
+        })
+        .to_string()
+    }
+
+    fn container_fault() -> Value {
+        serde_json::json!([{
+            "id": "container",
+            "level": "failed",
+            "message": "the file is not a readable zip package",
+        }])
+    }
+
+    /// With the enforce switch on, a failed Office file is held back the first time its name fails in a turn, so the
+    /// model can repair it. The second failure of that name is delivered with its check, marked failed.
+    #[test]
+    fn a_failed_file_is_withheld_once_then_delivered() {
+        let mut office = OfficeDelivery {
+            enforce: true,
+            ..OfficeDelivery::default()
+        };
+        let broken = one_office_file("deck.docx", "failed", container_fault());
+
+        let (events, text) = tool_artifact_events(
+            &outcome_for("code_interpreter", broken.clone()),
+            None,
+            &mut office,
+        );
+        assert!(events.is_empty(), "the first failure is held back, not delivered: {events:?}");
+        let text = text.expect("the model is still told what was held back");
+        assert!(text.contains("files_withheld"), "{text}");
+        assert!(text.contains("were NOT delivered"), "{text}");
+        assert!(text.contains("Regenerate each failed file"), "{text}");
+
+        let (events, text) =
+            tool_artifact_events(&outcome_for("code_interpreter", broken), None, &mut office);
+        assert_eq!(events.len(), 2, "the second failure of the same name is delivered: {events:?}");
+        match &events[1] {
+            ChatEvent::Attachment { name, check: Some(report), .. } => {
+                assert_eq!(name, "deck.docx");
+                assert_eq!(report.level, VerificationLevel::Failed);
+            }
+            other => panic!("expected an attachment carrying its failed check, got {other:?}"),
+        }
+        let text = text.expect("a summary for the delivered file");
+        assert!(text.contains("These files were delivered"), "{text}");
+        assert!(!text.contains("files_withheld"), "{text}");
+
+        // The hold is per name: a different file that fails in the same turn is held back too.
+        let other = one_office_file("sheet.docx", "failed", container_fault());
+        let (events, _) =
+            tool_artifact_events(&outcome_for("code_interpreter", other), None, &mut office);
+        assert!(events.is_empty(), "a new failing name is held back: {events:?}");
+    }
+
+    /// With the switch off, which is the default, a failed file is delivered as it always was and its check says it
+    /// failed. Nothing is held back, however often the same file fails.
+    #[test]
+    fn enforce_off_delivers_failed_with_check() {
+        let broken = one_office_file("deck.docx", "failed", container_fault());
+        let mut office = OfficeDelivery::default();
+        for _ in 0..2 {
+            let (events, text) =
+                tool_artifact_events(&outcome_for("code_interpreter", broken.clone()), None, &mut office);
+            assert_eq!(events.len(), 2, "with the switch off nothing is held back: {events:?}");
+            match &events[1] {
+                ChatEvent::Attachment { check: Some(report), .. } => {
+                    assert_eq!(report.level, VerificationLevel::Failed);
+                }
+                other => panic!("expected an attachment carrying its failed check, got {other:?}"),
+            }
+            let text = text.expect("a summary for the delivered file");
+            assert!(text.contains("These files were delivered"), "{text}");
+            assert!(!text.contains("files_withheld"), "{text}");
+            assert!(text.contains("Regenerate each failed file"), "{text}");
+        }
+    }
+
+    /// A delivered file carries the verifier's report for its own name only. A file the verifier reported on nothing
+    /// carries no check, so no chip can say it was checked.
+    #[test]
+    fn a_delivered_file_carries_only_its_own_report() {
+        let file = |name: &str| {
+            serde_json::json!({
+                "name": name,
+                "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "bytes": 4096,
+                "content_b64": "QUFBQUFBQUFBQQ",
+            })
+        };
+        let payload = serde_json::json!({
+            "stdout": "",
+            "stderr": "",
+            "exit_code": 0,
+            "files": [file("letter.docx"), file("notes.docx")],
+            "verification": [{
+                "name": "letter.docx",
+                "kind": "docx",
+                "level": "passed",
+                "checks": [],
+                "stats": { "paragraphs": 4 },
+            }],
+        })
+        .to_string();
+        let (events, _) = tool_artifact_events(
+            &outcome_for("code_interpreter", payload),
+            None,
+            &mut OfficeDelivery::default(),
+        );
+        let checks: Vec<Option<VerificationLevel>> = events
+            .iter()
+            .filter_map(|event| match event {
+                ChatEvent::Attachment { check, .. } => Some(check.as_ref().map(|report| report.level)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(checks, vec![Some(VerificationLevel::Passed), None]);
+    }
+
+    #[test]
+    fn only_the_literal_true_switches_enforcement_on() {
+        assert!(enforce_from(Some("true")));
+        assert!(enforce_from(Some(" true ")));
+        for off in [None, Some(""), Some("TRUE"), Some("1"), Some("yes"), Some("false")] {
+            assert!(!enforce_from(off), "{off:?} must not switch enforcement on");
+        }
     }
 
     #[test]
@@ -12973,7 +13211,8 @@ mod tests {
             "code_interpreter",
             "[source: org-internal]\nsandbox unavailable, no output produced".to_owned(),
         );
-        let (events, rewritten) = tool_artifact_events(&outcome, None);
+        let (events, rewritten) =
+            tool_artifact_events(&outcome, None, &mut OfficeDelivery::default());
         assert!(events.is_empty());
         assert!(rewritten.is_none());
     }
@@ -12990,7 +13229,8 @@ mod tests {
         })
         .to_string();
         let outcome = outcome_for("code_interpreter", payload);
-        let (events, rewritten) = tool_artifact_events(&outcome, None);
+        let (events, rewritten) =
+            tool_artifact_events(&outcome, None, &mut OfficeDelivery::default());
         assert!(events.is_empty());
         assert!(
             rewritten.is_none(),
@@ -13016,7 +13256,8 @@ mod tests {
         })
         .to_string();
         let outcome = outcome_for("code_interpreter", payload);
-        let (events, rewritten) = tool_artifact_events(&outcome, None);
+        let (events, rewritten) =
+            tool_artifact_events(&outcome, None, &mut OfficeDelivery::default());
         assert!(
             events.is_empty(),
             "no artifact may be emitted for bytes we do not have"
@@ -13031,7 +13272,8 @@ mod tests {
     fn failed_outcomes_produce_no_artifacts() {
         let mut outcome = outcome_for("create_artifact", "{}".to_owned());
         outcome.error = Some("boom".to_owned());
-        let (events, rewritten) = tool_artifact_events(&outcome, None);
+        let (events, rewritten) =
+            tool_artifact_events(&outcome, None, &mut OfficeDelivery::default());
         assert!(events.is_empty());
         assert!(rewritten.is_none());
     }
@@ -13041,7 +13283,8 @@ mod tests {
     #[test]
     fn unrelated_tools_are_untouched() {
         let outcome = outcome_for("web_search", r#"[{"url":"https://a"}]"#.to_owned());
-        let (events, rewritten) = tool_artifact_events(&outcome, None);
+        let (events, rewritten) =
+            tool_artifact_events(&outcome, None, &mut OfficeDelivery::default());
         assert!(events.is_empty());
         assert!(rewritten.is_none());
     }

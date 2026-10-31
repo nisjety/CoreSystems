@@ -410,6 +410,8 @@ export type ChatAttachmentEvent = {
   type?: string
   url?: string
   size?: number
+  /** The gateway's structural check of an Office or PDF file, as sent; the normalizer validates it. */
+  check?: unknown
 }
 /**
  * How a turn's cost was reached. `subscription` means a user-owned model
@@ -1668,6 +1670,7 @@ function dispatchAgUiEvent(
             type: str(value.type),
             url: str(value.url),
             size: num(value.size),
+            check: value.check,
           })
           break
         case 'reasoning_delta':
@@ -1909,6 +1912,7 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
         type: str(payload.type),
         url: str(payload.url),
         size: num(payload.size),
+        check: payload.check,
       })
       break
     case 'reasoning_delta':

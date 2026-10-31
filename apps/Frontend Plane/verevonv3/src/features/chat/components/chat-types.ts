@@ -146,12 +146,26 @@ export type Citation = {
   origin?: 'web' | 'knowledge' | 'connector'
 }
 
+export type GeneratedFileCheckLevel = 'passed' | 'warnings' | 'failed' | 'skipped'
+
+/**
+ * The gateway's structural check of a generated Office or PDF file: what the
+ * check found in the file's container. It never says the file opens in Office,
+ * and no surface may say it does. A `skipped` check has no verdict.
+ */
+export type GeneratedFileCheck = {
+  level: GeneratedFileCheckLevel
+  checks: { id: string; level: GeneratedFileCheckLevel; message: string }[]
+}
+
 export type GeneratedFile = {
   id: string
   name: string
   mime: string
   size: number
   url: string
+  /** Present only when `code_interpreter` ran the structural check on this file. */
+  check?: GeneratedFileCheck
 }
 
 export type GeneratedImagePreview = {

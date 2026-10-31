@@ -7323,6 +7323,7 @@ fn image_gen_stream(
                         mime: generated_image_mime(&content).to_owned(),
                         url: content.clone(),
                         size: generated_image_size(&content),
+                        check: None,
                     };
                     if attachment.should_emit(&features) {
                         let _ = tx.send(Ok(attachment.to_sse(&request_id))).await;

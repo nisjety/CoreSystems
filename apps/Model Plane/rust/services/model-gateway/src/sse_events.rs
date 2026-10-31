@@ -268,6 +268,9 @@ pub enum ChatEvent {
         mime: String,
         url: String,
         size: i64,
+        /// The structural check of a generated Office or PDF file, when the
+        /// verifier made one. Carried on this frame, not in a new event name.
+        check: Option<mp_contracts::office_verification::OfficeVerification>,
     },
     /// Usage/latency/cost/confidence for the insight chip + reasoning popover.
     Usage {
@@ -679,8 +682,15 @@ impl ChatEvent {
                 mime,
                 url,
                 size,
+                check,
             } => {
-                json!({ "id": id, "name": name, "type": mime, "url": url, "size": size })
+                let mut attachment =
+                    json!({ "id": id, "name": name, "type": mime, "url": url, "size": size });
+                // Optional, and only where the verifier ran: an attachment with no check keeps its old keys.
+                if let Some(report) = check {
+                    attachment["check"] = serde_json::to_value(report).unwrap_or_else(|_| json!({}));
+                }
+                attachment
             }
             ChatEvent::Usage {
                 input_tokens,
@@ -2487,8 +2497,40 @@ mod tests {
             mime: "image/png".into(),
             url: "blob:1".into(),
             size: 99,
+            check: None,
         };
         assert_eq!(att.payload("r")["type"], "image/png");
+    }
+
+    /// The check rides on the attachment frame only when the verifier made one, and it carries the report's
+    /// own level and findings. Nothing in the frame says the file was verified in Office.
+    #[test]
+    fn attachment_event_carries_check_only_when_present() {
+        let report = mp_contracts::office_verification::OfficeVerification::from_untrusted_json(
+            r#"{"kind":"docx","level":"warnings","checks":[{"id":"rels","level":"warnings","message":"a relationship points nowhere"}],"stats":{"paragraphs":2}}"#,
+            "letter.docx",
+            mp_contracts::office_verification::OfficeKind::Docx,
+        )
+        .expect("a well-formed report");
+        let attachment = |check| ChatEvent::Attachment {
+            id: "a".into(),
+            name: "letter.docx".into(),
+            mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document".into(),
+            url: "data:application/octet-stream;base64,AA".into(),
+            size: 2,
+            check,
+        };
+
+        let plain = attachment(None).payload("r");
+        assert!(plain.get("check").is_none(), "no verifier ran, so the key is absent: {plain}");
+        assert_eq!(plain["size"], 2);
+
+        let checked = attachment(Some(report)).payload("r");
+        assert_eq!(checked["check"]["level"], "warnings");
+        assert_eq!(checked["check"]["checks"][0]["id"], "rels");
+        assert_eq!(checked["check"]["checks"][0]["message"], "a relationship points nowhere");
+        assert_eq!(checked["check"]["stats"]["paragraphs"], 2);
+        assert_eq!(checked["name"], "letter.docx");
     }
 
     #[test]
@@ -3034,6 +3076,16 @@ mod payload_contract {
         text.to_owned()
     }
 
+    /// The structural check of a generated file that failed, the optional `check` key the full attachment sample sets.
+    fn office_check() -> mp_contracts::office_verification::OfficeVerification {
+        mp_contracts::office_verification::OfficeVerification::from_untrusted_json(
+            r#"{"kind":"docx","level":"failed","checks":[{"id":"container","level":"failed","message":"the file is not a readable zip package"}],"stats":{}}"#,
+            "f.docx",
+            mp_contracts::office_verification::OfficeKind::Docx,
+        )
+        .expect("a well-formed report")
+    }
+
     fn citation(full: bool) -> ChatEvent {
         ChatEvent::Citation {
             id: s("c1"),
@@ -3271,8 +3323,15 @@ mod payload_contract {
             grounding(true),
             ChatEvent::Artifact { id: s("a1"), kind: s("document"), title: s(""), content: s(""), version: 1 },
             ChatEvent::Artifact { id: s("a1"), kind: s("code"), title: s("T"), content: s("body"), version: 2 },
-            ChatEvent::Attachment { id: s("f1"), name: s("f.png"), mime: s("image/png"), url: s("blob:1"), size: 0 },
-            ChatEvent::Attachment { id: s("f1"), name: s("f.png"), mime: s("image/png"), url: s("blob:1"), size: 2048 },
+            ChatEvent::Attachment { id: s("f1"), name: s("f.png"), mime: s("image/png"), url: s("blob:1"), size: 0, check: None },
+            ChatEvent::Attachment {
+                id: s("f1"),
+                name: s("f.docx"),
+                mime: s("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+                url: s("data:application/octet-stream;base64,AA"),
+                size: 2048,
+                check: Some(office_check()),
+            },
             usage(false),
             usage(true),
             usage_progress(1, None, Some(crate::pricing::CostBasis::Subscription), 0),
