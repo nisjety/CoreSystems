@@ -5,7 +5,7 @@ import { Match, Show, Switch } from 'solid-js'
 import { threadStatus, formatWhen } from '@/features/spaces/lib/space-thread-presentation'
 import { ApiError } from '@/shared/api/http'
 import { getSpaceThreadTranscript } from '@/shared/api/spaces-client'
-import type { SpaceRosterMember, SpaceThread } from '@/shared/api/spaces-client'
+import type { SpaceAgent, SpaceRosterMember, SpaceThread } from '@/shared/api/spaces-client'
 import { useI18n } from '@/shared/i18n'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import { SpaceRestrictedNotice } from '../SpaceRestrictedNotice'
@@ -41,6 +41,8 @@ export interface SpaceThreadPanelProps {
   readonly viewerSubjectId?: () => string | undefined
   /** Room-level fallback name for an assistant turn that recorded no persona. */
   readonly agentName: string
+  /** The room roster's agents, so an agent turn here has the same colour as in the timeline. */
+  readonly agents?: () => readonly SpaceAgent[]
   /**
    * The pane's reply composer (WS01-S7b), drawn under the turns. The page passes it only while
    * `features.human_posts` is on; absent, the panel stays read-only. Not drawn for a thread that
@@ -89,6 +91,13 @@ export function SpaceThreadPanel(props: SpaceThreadPanelProps) {
         {(thread) => (
           <p class="verevon-space-thread-panel__meta">
             <span class="verevon-space-status">{threadStatus(thread(), i18n.tr)}</span>
+            <Show when={(thread().reply_count ?? 0) > 0}>
+              <span class="verevon-space-thread-panel__replies">
+                {thread().reply_count === 1
+                  ? i18n.tr('1 svar', '1 reply')
+                  : i18n.tr(`${thread().reply_count} svar`, `${thread().reply_count} replies`)}
+              </span>
+            </Show>
             <Show when={when()}>
               {(at) => <time>{formatWhen(at())}</time>}
             </Show>
@@ -144,6 +153,7 @@ export function SpaceThreadPanel(props: SpaceThreadPanelProps) {
                 roster={props.roster}
                 viewerSubjectId={props.viewerSubjectId}
                 agentName={props.agentName}
+                agents={props.agents}
               />
             </div>
           </Show>

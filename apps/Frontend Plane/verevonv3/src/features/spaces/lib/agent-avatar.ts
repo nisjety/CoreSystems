@@ -60,3 +60,15 @@ export function agentAvatarColor(agent: SpaceAgent | undefined): string | undefi
   if (!agent?.identity_published) return undefined
   return validAvatarColor(agent.avatar_color)
 }
+
+// A fixed, readable palette. A member's tint is derived from their subject id, so the same
+// person has the same colour in the header stack, the timeline, the reply summary and the thread
+// pane. Presentation only: the initials are always there, so colour is never the only signal.
+const MEMBER_TINTS = ['#d85a30', '#2f7d6d', '#4a6fa5', '#9a5b9c', '#b7791f', '#5b6b7a'] as const
+
+/** The tint for one member, stable across renders and reloads. */
+export function memberTint(subjectId: string): string {
+  let hash = 0
+  for (let i = 0; i < subjectId.length; i += 1) hash = (hash * 31 + subjectId.charCodeAt(i)) >>> 0
+  return MEMBER_TINTS[hash % MEMBER_TINTS.length] ?? MEMBER_TINTS[0]
+}

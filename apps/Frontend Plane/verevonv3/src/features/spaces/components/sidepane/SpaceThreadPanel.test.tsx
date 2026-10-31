@@ -57,6 +57,44 @@ describe('SpaceThreadPanel (WS01-S7a)', () => {
     expect(screen.queryByRole('textbox')).toBeNull()
   })
 
+  it('says how many replies the thread has beside its status', async () => {
+    spacesClient.getSpaceThreadTranscript.mockResolvedValue({ turns: [{ role: 'user', content: 'Hei' }] })
+    renderPanel('thr_1', {
+      thread: () => ({ thread_id: 'thr_1', space_id: 'room-1', latest_run_status: 'completed', reply_count: 6 }),
+    })
+    await screen.findByText('Hei')
+    expect(document.querySelector('.verevon-space-thread-panel__replies')?.textContent).toBe('6 svar')
+  })
+
+  it('says "1 svar" for one reply and nothing for none', async () => {
+    spacesClient.getSpaceThreadTranscript.mockResolvedValue({ turns: [{ role: 'user', content: 'Hei' }] })
+    renderPanel('thr_1', {
+      thread: () => ({ thread_id: 'thr_1', space_id: 'room-1', reply_count: 1 }),
+    })
+    await screen.findByText('Hei')
+    expect(document.querySelector('.verevon-space-thread-panel__replies')?.textContent).toBe('1 svar')
+    cleanup()
+    renderPanel('thr_1', {
+      thread: () => ({ thread_id: 'thr_1', space_id: 'room-1', reply_count: 0 }),
+    })
+    await screen.findByText('Hei')
+    expect(document.querySelector('.verevon-space-thread-panel__replies')).toBeNull()
+  })
+
+  // The timeline draws Verevon in the agent's colour; the pane used to draw the same turn in neutral black.
+  it('draws an agent turn in the agent colour when the room agents are handed over', async () => {
+    spacesClient.getSpaceThreadTranscript.mockResolvedValue({
+      turns: [{ role: 'assistant', content: 'Alt er klart.', agentName: 'Lagerhjelpen' }],
+    })
+    renderPanel('thr_1', {
+      agents: () => [{ agent_ref: 'a1', subject_id: 'agent-1', name: 'Lagerhjelpen', status: 'active', identity_published: true, avatar_color: '#d85a30' }],
+    })
+    await screen.findByText('Alt er klart.')
+    const avatar = document.querySelector('.verevon-agent-avatar') as HTMLElement
+    expect(avatar.classList.contains('verevon-agent-avatar--neutral')).toBe(false)
+    expect(avatar.style.background).toMatch(/#d85a30|rgb\(216, 90, 48\)/i)
+  })
+
   it('says a thread with no readable turns has no content yet', async () => {
     spacesClient.getSpaceThreadTranscript.mockResolvedValue({ turns: [{ role: 'system', content: 'x' }] })
     renderPanel()

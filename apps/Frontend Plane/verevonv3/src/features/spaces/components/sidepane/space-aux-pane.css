@@ -33,8 +33,10 @@
 }
 
 .verevon-space-auxpane:focus-visible {
-  outline: 2px solid var(--verevon-accent);
-  outline-offset: -2px;
+  /* The pane takes focus when it opens, programmatically, so a ring or an edge here is not a focus
+     cue the reader asked for; it read as a stray accent or error line. The separator carries the
+     keyboard focus cue (below). */
+  outline: none;
 }
 
 .verevon-space-auxpane__separator {
@@ -47,9 +49,12 @@
   touch-action: none;
 }
 
-.verevon-space-auxpane__separator:hover,
-.verevon-space-auxpane__separator:focus-visible {
+.verevon-space-auxpane__separator:hover {
   background: var(--verevon-border-strong);
+}
+
+.verevon-space-auxpane__separator:focus-visible {
+  background: var(--verevon-accent);
   outline: none;
 }
 
@@ -189,6 +194,7 @@
   .verevon-space-auxpane__separator {
     display: none;
   }
+
 }
 
 @media (prefers-reduced-motion: no-preference) {

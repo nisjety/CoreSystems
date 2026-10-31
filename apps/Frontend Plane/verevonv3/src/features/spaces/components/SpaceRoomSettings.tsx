@@ -25,6 +25,8 @@ export interface SpaceRoomSettingsProps {
   /** The room's `kind` and `lifecycle`: only an active, named room has editable details. */
   readonly kind: string
   readonly lifecycle: string
+  /** An archived room is read-only for everyone, its name and topic included. */
+  readonly archived?: boolean
   /** The room's `features.room_details`. Absent or off, nothing renders. */
   readonly enabled: boolean
   /** Called with the stored values after a save, so the page can show them without a reload. */
@@ -32,7 +34,8 @@ export interface SpaceRoomSettingsProps {
 }
 
 /**
- * The room's name and topic, editable by an owner or manager (WS04-S2). Presentation only: the
+ * The room's name and topic, editable by an owner or manager (WS04-S2). It lives in the room
+ * details panel opened from the header, not in the header itself. Presentation only: the
  * gateway re-checks the role from Control on every write and Application normalizes the text, so
  * hiding this form for anyone else is courtesy, not security. The topic is a display label and
  * is never sent to a model.
@@ -46,7 +49,11 @@ export function SpaceRoomSettings(props: SpaceRoomSettingsProps) {
   const [error, setError] = createSignal('')
 
   const visible = () =>
-    props.enabled && props.kind === 'room' && props.lifecycle === 'active' && canEditRoomDetails(props.role)
+    props.enabled
+    && props.archived !== true
+    && props.kind === 'room'
+    && props.lifecycle === 'active'
+    && canEditRoomDetails(props.role)
 
   function begin() {
     setName(props.name)

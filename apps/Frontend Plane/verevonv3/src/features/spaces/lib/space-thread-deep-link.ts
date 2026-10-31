@@ -9,6 +9,8 @@
  * inside `features/chat`: a Space thread must never route into Chat.
  */
 
+import { spaceRoomFeatureWithDevOverride } from './space-room-features'
+
 const MAX_THREAD_ID_LENGTH = 200
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHARACTERS = /[\u0000-\u001F\u007F]/
@@ -43,14 +45,10 @@ export function spaceThreadHref(spaceRef: string, threadId: string | null | unde
 }
 
 /**
- * Build-time switch for the thread pane until the BFF delivers
- * `features.thread_pane` (WS01-S5). On in dev, off in production unless
- * `VITE_SPACE_THREAD_PANE_UI=true`; `VITE_SPACE_THREAD_PANE_UI=false` turns it
- * off in dev too. A rollout control only, never an authorization input.
+ * Whether the thread pane opens: the room's `features.thread_pane` from the context read
+ * (WS01-S5). `VITE_SPACE_THREAD_PANE_UI=true|false` is an explicit override in a dev build only.
+ * A rollout control, never an authorization input.
  */
 export function spaceThreadPaneEnabled(): boolean {
-  const flag = import.meta.env.VITE_SPACE_THREAD_PANE_UI
-  if (flag === 'true') return true
-  if (flag === 'false') return false
-  return import.meta.env.DEV === true
+  return spaceRoomFeatureWithDevOverride('thread_pane', import.meta.env.VITE_SPACE_THREAD_PANE_UI)
 }

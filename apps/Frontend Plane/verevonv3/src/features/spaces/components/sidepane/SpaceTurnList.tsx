@@ -8,9 +8,10 @@ import type { SpaceAgent, SpaceRosterMember, SpaceThread } from '@/shared/api/sp
 import { useI18n } from '@/shared/i18n'
 import { AgentAvatar } from '../AgentAvatar'
 import { SpaceIdentityHoverCard } from '../SpaceIdentityHoverCard'
-import { agentAvatarColor, agentForName } from '../../lib/agent-avatar'
+import { agentAvatarColor, agentForName, memberTint } from '../../lib/agent-avatar'
 import { agentCardModel, memberCardModel } from '../../lib/agent-activity'
 import type { IdentityCardModel } from '../../lib/agent-activity'
+import { continuesTurnGroup, formatTurnTime } from '../../lib/space-thread-presentation'
 
 /**
  * The rows of one thread, read-only. Extracted from the room timeline so the
@@ -36,6 +37,8 @@ export type TranscriptTurn = {
   readonly authorSubjectId?: string
   /** The server's message id, when it sent one. */
   readonly messageId?: string
+  /** When the server stored this turn, as an ISO-8601 UTC string. Absent when it sent none. */
+  readonly createdAt?: string
   /** Artifacts this assistant turn persisted (already through the room's gate). */
   readonly artifacts?: readonly ChatArtifact[]
 }
@@ -68,12 +71,18 @@ export function normalizeTranscriptTurns(
     const authorSubjectId = typeof record.authorSubjectId === 'string' && record.authorSubjectId.trim()
       ? record.authorSubjectId.trim()
       : undefined
+    // Already normalized by the transcript client; re-checked here so a turn from any other source
+    // can never carry something that is not a time.
+    const createdAt = typeof record.createdAt === 'string' && Number.isFinite(Date.parse(record.createdAt))
+      ? new Date(record.createdAt).toISOString()
+      : undefined
     normalized.push({
       role,
       content,
       ...(agentName ? { agentName } : {}),
       ...(authorSubjectId ? { authorSubjectId } : {}),
       ...(messageId ? { messageId } : {}),
+      ...(createdAt ? { createdAt } : {}),
       ...(artifacts.length > 0 ? { artifacts } : {}),
     })
     if (normalized.length >= maxTurns) break
@@ -108,6 +117,19 @@ export function resolveAuthorName(
   return isViewer ? `${name} ${tr('(deg)', '(you)')}` : name
 }
 
+/** A post's run status, said beside the author of its first row (nothing is said for a finished post). */
+export type PostStatus = {
+  readonly label: string
+  readonly tone: 'active' | 'failed' | 'neutral'
+}
+
+/** What the first row of a post carries beside its author, when the turn itself has no time. */
+export type PostHeadMeta = {
+  /** The post's date ("27. okt."), shown only when the first turn has no time of its own. */
+  readonly dateLabel?: string
+  readonly status?: PostStatus
+}
+
 export interface SpaceTurnListProps {
   readonly turns: () => readonly TranscriptTurn[]
   readonly roster: () => readonly SpaceRosterMember[]
@@ -133,6 +155,8 @@ export interface SpaceTurnListProps {
    * artifacts are not shown and an artifact-only turn renders no row at all.
    */
   readonly onOpenArtifact?: (artifactId: string) => void
+  /** The room timeline's post date and status, drawn in the header of the first row. */
+  readonly headMeta?: () => PostHeadMeta | undefined
 }
 
 export function SpaceTurnList(props: SpaceTurnListProps) {
@@ -169,56 +193,77 @@ export function SpaceTurnList(props: SpaceTurnListProps) {
   }
   const visibleTurns = () =>
     props.turns().filter((turn) => turn.content.length > 0 || (props.onOpenArtifact && (turn.artifacts?.length ?? 0) > 0))
+  // The turn's own recorded persona wins; the room-level heuristic (single active agent, else
+  // 'Verevon') covers turns persisted before attribution existed. A human turn is named by the
+  // subject the server recorded, never by who happens to be reading.
+  const nameOf = (turn: TranscriptTurn) => (turn.role === 'assistant' ? turn.agentName ?? props.agentName : authorOf(turn))
   return (
     <For each={visibleTurns()}>
-      {(turn) => (
-        <div class="verevon-room-turn" data-role={turn.role}>
-          <Show
-            when={turn.role === 'assistant'}
-            fallback={
-              <span class="verevon-room-turn__avatar" aria-hidden="true">{initials(authorOf(turn))}</span>
-            }
-          >
-            <AgentAvatar
-              kind="agent"
-              size={30}
-              name={turn.agentName ?? props.agentName}
-              color={agentAvatarColor(agentForName(props.agents?.() ?? [], turn.agentName ?? props.agentName))}
-            />
-          </Show>
-          <div class="verevon-room-turn__content">
-            <PostTurnHeader
-              // The turn's own recorded persona wins; the room-level
-              // heuristic (single active agent, else 'Verevon') covers
-              // turns persisted before attribution existed. A human turn
-              // is named by the subject the server recorded, never by who
-              // happens to be reading.
-              author={turn.role === 'assistant' ? turn.agentName ?? props.agentName : authorOf(turn)}
-              isAgent={turn.role === 'assistant'}
-              card={cardFor(turn)}
-            />
+      {(turn, index) => {
+        // Slack-style grouping: a turn by the same author within five minutes of the one above it
+        // drops its avatar and name and sits under that turn's text.
+        const grouped = () => continuesTurnGroup(visibleTurns()[index() - 1], turn, props.agentName)
+        const time = () => formatTurnTime(turn.createdAt)
+        return (
+          <div class="verevon-room-turn" data-role={turn.role} data-grouped={grouped() ? 'true' : undefined}>
             <Show
-              when={turn.role === 'assistant'}
-              fallback={<p class="verevon-room-turn__plain">{turn.content}</p>}
+              when={!grouped()}
+              fallback={
+                <span class="verevon-room-turn__gutter">
+                  <Show when={time()}>
+                    {(at) => (
+                      <time class="verevon-room-turn__time" datetime={at().iso} title={at().full}>{at().short}</time>
+                    )}
+                  </Show>
+                </span>
+              }
             >
-              <Show when={turn.content}>
-                <div class="verevon-room-turn__markdown">
-                  <ChatMarkdown content={turn.content} />
-                </div>
+              <Show
+                when={turn.role === 'assistant'}
+                fallback={<MemberAvatar name={authorOf(turn)} subjectId={turn.authorSubjectId} />}
+              >
+                <AgentAvatar
+                  kind="agent"
+                  size={30}
+                  name={turn.agentName ?? props.agentName}
+                  color={agentAvatarColor(agentForName(props.agents?.() ?? [], turn.agentName ?? props.agentName))}
+                />
               </Show>
             </Show>
-            <Show when={props.onOpenArtifact && turn.role === 'assistant' && (turn.artifacts?.length ?? 0) > 0}>
-              <div class="verevon-space-artifact-chips">
-                <For each={turn.artifacts}>
-                  {(artifact) => (
-                    <SpaceArtifactChip artifact={artifact} onOpen={(id) => props.onOpenArtifact?.(id)} />
-                  )}
-                </For>
-              </div>
-            </Show>
+            <div class="verevon-room-turn__content">
+              <Show when={!grouped()}>
+                <PostTurnHeader
+                  author={nameOf(turn)}
+                  isAgent={turn.role === 'assistant'}
+                  card={cardFor(turn)}
+                  time={turn.createdAt}
+                  dateLabel={index() === 0 ? props.headMeta?.()?.dateLabel : undefined}
+                  status={index() === 0 ? props.headMeta?.()?.status : undefined}
+                />
+              </Show>
+              <Show
+                when={turn.role === 'assistant'}
+                fallback={<p class="verevon-room-turn__plain">{turn.content}</p>}
+              >
+                <Show when={turn.content}>
+                  <div class="verevon-room-turn__markdown">
+                    <ChatMarkdown content={turn.content} />
+                  </div>
+                </Show>
+              </Show>
+              <Show when={props.onOpenArtifact && turn.role === 'assistant' && (turn.artifacts?.length ?? 0) > 0}>
+                <div class="verevon-space-artifact-chips">
+                  <For each={turn.artifacts}>
+                    {(artifact) => (
+                      <SpaceArtifactChip artifact={artifact} onOpen={(id) => props.onOpenArtifact?.(id)} />
+                    )}
+                  </For>
+                </div>
+              </Show>
+            </div>
           </div>
-        </div>
-      )}
+        )
+      }}
     </For>
   )
 }
@@ -228,8 +273,15 @@ export function PostTurnHeader(props: {
   readonly isAgent?: boolean
   /** When present, the name opens the identity hover card. */
   readonly card?: IdentityCardModel
+  /** The turn's ISO time. Shown as a short time beside the name; absent or unreadable shows none. */
+  readonly time?: string
+  /** A date to show in the time's place when the turn has no time of its own (an older post). */
+  readonly dateLabel?: string
+  /** The post's run status, when there is something to say beyond "finished". */
+  readonly status?: PostStatus
 }) {
   const i18n = useI18n()
+  const at = () => formatTurnTime(props.time)
   return (
     <div class="verevon-room-turn__header">
       <strong class="verevon-room-turn__author">
@@ -243,7 +295,50 @@ export function PostTurnHeader(props: {
           {i18n.tr('Agent', 'Agent')}
         </span>
       </Show>
+      <Show
+        when={at()}
+        fallback={
+          <Show when={props.dateLabel}>
+            {(label) => <span class="verevon-room-turn__time">{label()}</span>}
+          </Show>
+        }
+      >
+        {(time) => <time class="verevon-room-turn__time" datetime={time().iso} title={time().full}>{time().short}</time>}
+      </Show>
+      <Show when={props.status}>
+        {(status) => (
+          <span
+            class={[
+              {
+                'verevon-space-status': true,
+                'verevon-room-turn__status': true,
+                'verevon-space-status--failed': status().tone === 'failed',
+                'verevon-space-status--active': status().tone === 'active',
+              },
+            ]}
+          >
+            {status().label}
+          </span>
+        )}
+      </Show>
     </div>
+  )
+}
+
+/**
+ * A person's initials in their own colour: the tint the header's member stack uses, derived from the
+ * subject id, so one person looks the same in every place the room draws them. Without a subject id
+ * (an unattributed turn) the avatar stays neutral.
+ */
+export function MemberAvatar(props: { readonly name: string; readonly subjectId?: string }) {
+  return (
+    <span
+      class="verevon-room-turn__avatar"
+      aria-hidden="true"
+      style={props.subjectId ? { '--avatar-hue': memberTint(props.subjectId) } : undefined}
+    >
+      {initials(props.name)}
+    </span>
   )
 }
 

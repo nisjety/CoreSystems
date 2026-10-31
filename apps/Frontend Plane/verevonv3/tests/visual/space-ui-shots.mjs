@@ -26,8 +26,14 @@ const membership = (role = 'owner') => ({
 const space = { space_ref: SPACE, name: 'Innkjøp og leverandører', kind: 'room', lifecycle: 'active', topic: 'Ukentlig oppfølging av innkjøp, avtaler og leveranser', is_organization_room: false }
 const context = {
   space, membership: membership(),
-  features: { human_posts: true, thread_pane: true, send_idempotency: true, connectivity_banner: true, room_details: true, people_search: true, room_artifacts: true },
+  features: { human_posts: true, thread_pane: true, send_idempotency: true, connectivity_banner: true, room_details: true, people_search: true, room_artifacts: true, room_archive: true },
   limits: { post_max_chars: 4000 },
+}
+// ARCHIVED=1 serves the room as archived (the context says so and the membership carries Control's state).
+const ARCHIVED = process.env.ARCHIVED === '1'
+if (ARCHIVED) {
+  context.archived = true
+  context.membership = { ...context.membership, state: 'archived', archived_at: '2026-10-30T14:00:00Z' }
 }
 const threads = [
   { thread_id: 'thr_1', space_id: SPACE, owner_subject_id: ME.id, title: 'Rammeavtale med Nordic Pack', preview: 'Kan noen sjekke prisene mot forrige kvartal før vi svarer?', updated_at: iso(4), latest_run_status: 'completed', reply_count: 6, last_author_subject_id: 'user_ola' },
@@ -35,6 +41,8 @@ const threads = [
   { thread_id: 'thr_3', space_id: SPACE, owner_subject_id: 'user_kari', title: 'Budsjett 2027: pakkemateriell', preview: 'Tallene er lagt inn i regnearket, se vedlegget.', updated_at: iso(180), latest_run_status: 'completed', reply_count: 11, last_author_subject_id: 'user_kari' },
   { thread_id: 'thr_4', space_id: SPACE, owner_subject_id: ME.id, title: 'Ny leverandør: kvalitetssikring', preview: 'Godkjent av kvalitet i går.', updated_at: iso(60 * 26), latest_run_status: 'completed', reply_count: 2, last_author_subject_id: ME.id },
 ]
+// IDLE=1 serves a room where no agent is working, so the pulse column's collapsed state can be seen.
+if (process.env.IDLE === '1') for (const thread of threads) thread.latest_run_status = 'completed'
 const roster = [
   { subject_type: 'user', subject_id: ME.id, role: 'owner', revision: 1, display_name: 'Sara Nilsen' },
   { subject_type: 'user', subject_id: 'user_ola', role: 'manager', revision: 1, display_name: 'Ola Hansen' },
@@ -70,6 +78,9 @@ function answer(url, method) {
   if (p === `/api/v1/spaces/${SPACE}/roster`) return ok({ members: roster, writer_api: true })
   if (p === `/api/v1/spaces/${SPACE}/agents`) return ok({ agents: [{ subject_id: 'agent_verevon', role: 'editor', revision: 1, identity_published: true, binding_ref: 'b1', agent_ref: 'agent_verevon', name: 'Verevon', title: 'Innkjøpsassistent', description: 'Sammenligner priser og lager utkast.', status: 'active', definition_status: 'active', trigger_modes: ['mention'], allowed_tools: [], approval_mode: 'auto', avatar_color: '#d85a30', delivery_targets: [], updated_at: 1 }] })
   if (p.startsWith(`/api/v1/spaces/${SPACE}/threads/`) && p.endsWith('/transcript')) return ok({ transcript: { ...transcript, threadId: p.split('/')[6] } })
+  if (p === `/api/v1/spaces/${SPACE}/archive` || p === `/api/v1/spaces/${SPACE}/unarchive`) {
+    return ok({ state: p.endsWith('/unarchive') ? 'active' : 'archived', changed: true, archived_at: p.endsWith('/unarchive') ? null : '2026-10-31T09:30:00Z' })
+  }
   if (p === `/api/v1/spaces/${SPACE}/presence`) return ok({ members: [] })
   if (p === `/api/v1/spaces/${SPACE}/membership`) return ok(membership())
   if (p === `/api/v1/spaces/${SPACE}/instructions`) return ok({ instructions: '' })
@@ -106,8 +117,8 @@ async function inspect(page) {
 }
 
 const browser = await chromium.launch()
-async function shoot(name, { width, height, path = `/spaces/${SPACE}`, after } = {}) {
-  const context = await browser.newContext({ viewport: { width, height }, locale: 'nb-NO', colorScheme: 'light' })
+async function shoot(name, { width, height, path = `/spaces/${SPACE}`, after, dark = false } = {}) {
+  const context = await browser.newContext({ viewport: { width, height }, locale: 'nb-NO', colorScheme: dark ? 'dark' : 'light' })
   const page = await context.newPage()
   page.on('pageerror', (error) => console.log(`[${name}] pageerror:`, String(error).slice(0, 200)))
   page.on('console', (m) => { if (m.type() === 'error') console.log(`[${name}] console.error:`, m.text().slice(0, 200)) })
@@ -125,6 +136,7 @@ async function shoot(name, { width, height, path = `/spaces/${SPACE}`, after } =
   if (process.env.INSPECT === name) await inspect(page)
   // EVAL=<js expression> prints its value for the first shot (or EVAL_SHOT): a quick computed-style probe.
   if (process.env.EVAL && name === (process.env.EVAL_SHOT ?? '01-room-desktop')) console.log('EVAL', await page.evaluate(process.env.EVAL))
+  if (dark) await page.evaluate(() => document.documentElement.classList.add('dark'))
   if (after) await after(page)
   await page.waitForTimeout(600)
   await page.screenshot({ path: join(OUT, `${name}.png`) })
@@ -134,8 +146,20 @@ async function shoot(name, { width, height, path = `/spaces/${SPACE}`, after } =
 
 await shoot('01-room-desktop', { width: 1440, height: 900 })
 await shoot('02-thread-pane-desktop', { width: 1440, height: 900, path: `/spaces/${SPACE}?thread_id=thr_1` })
-// The shell opens its sidebar drawer over the room on a first visit at phone width; close it to see the room.
-await shoot('03-room-mobile', { width: 390, height: 844, after: async (page) => { await page.mouse.click(31, 25); await page.waitForTimeout(700) } })
+// The details button opens the room details panel (name, topic, facts, members, archive).
+await shoot('04-details-desktop', { width: 1440, height: 900, after: async (page) => { await page.getByRole('button', { name: 'Romdetaljer' }).click() } })
+// At phone width a room opened on a first visit starts with the sidebar drawer closed (CoreShell).
+await shoot('03-room-mobile', { width: 390, height: 844 })
+await shoot('05-details-mobile', { width: 390, height: 844, after: async (page) => { await page.getByRole('button', { name: 'Romdetaljer' }).click() } })
+
+// Dark mode (the Space page keeps its own tokens, so every surface needs a look), a laptop width with a thread
+// open (the room, the pane and the sidebar share 1280px) and a phone with a thread open.
+await shoot('06-room-dark', { width: 1440, height: 900, dark: true })
+await shoot('07-thread-dark', { width: 1440, height: 900, path: `/spaces/${SPACE}?thread_id=thr_1`, dark: true })
+await shoot('08-details-dark', { width: 1440, height: 900, dark: true, after: async (page) => { await page.getByRole('button', { name: 'Romdetaljer' }).click() } })
+await shoot('10-thread-laptop', { width: 1280, height: 800, path: `/spaces/${SPACE}?thread_id=thr_1` })
+await shoot('11-room-mobile-dark', { width: 390, height: 844, dark: true })
+await shoot('12-thread-mobile', { width: 390, height: 844, path: `/spaces/${SPACE}?thread_id=thr_1` })
 
 await browser.close()
 if (missing.size) console.log('UNMOCKED:\n' + [...missing].sort().join('\n'))

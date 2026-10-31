@@ -112,3 +112,55 @@ export function formatWhenWithTime(value?: string): string {
     return value
   }
 }
+
+/**
+ * A turn's time, for the header beside the author: "14:32" in the reader's local time, with the full
+ * date and time for the tooltip and the machine-readable `datetime`. Undefined when the server sent no
+ * time (or one that is not a time): a row then renders without one rather than with an invented one.
+ */
+export function formatTurnTime(value: string | undefined): { iso: string; short: string; full: string } | undefined {
+  if (!value) return undefined
+  const at = new Date(value)
+  if (!Number.isFinite(at.getTime())) return undefined
+  return {
+    iso: at.toISOString(),
+    short: at.toLocaleTimeString('nb-NO', { hour: '2-digit', minute: '2-digit' }),
+    full: at.toLocaleString('nb-NO', { dateStyle: 'long', timeStyle: 'short' }),
+  }
+}
+
+/** Consecutive turns by the same author within this window share one avatar and name (Slack's grouping). */
+export const TURN_GROUP_WINDOW_MS = 5 * 60_000
+
+/** The fields of a turn that decide who wrote it and when. */
+export type GroupableTurn = {
+  readonly role: 'user' | 'assistant'
+  readonly agentName?: string
+  readonly authorSubjectId?: string
+  readonly createdAt?: string
+}
+
+/**
+ * Whether `turn` continues the group that `previous` started: the same author, close enough in time.
+ *
+ * "Same author" is what the server recorded, never a guess: a member turn needs the same recorded
+ * `authorSubjectId` (two unattributed turns are two unknown authors, not one), an agent turn needs the
+ * same persona name (the room-level `fallbackAgentName` stands in for an unrecorded one). A member and
+ * an agent never group. Both turns need a time and the gap must be 0 to 5 minutes, so a turn without a
+ * time starts its own group: the grouping never claims something the record does not show.
+ */
+export function continuesTurnGroup(
+  previous: GroupableTurn | undefined,
+  turn: GroupableTurn,
+  fallbackAgentName: string,
+): boolean {
+  if (!previous || previous.role !== turn.role) return false
+  if (turn.role === 'assistant') {
+    if ((previous.agentName ?? fallbackAgentName) !== (turn.agentName ?? fallbackAgentName)) return false
+  } else if (!turn.authorSubjectId || previous.authorSubjectId !== turn.authorSubjectId) {
+    return false
+  }
+  if (!previous.createdAt || !turn.createdAt) return false
+  const gap = new Date(turn.createdAt).getTime() - new Date(previous.createdAt).getTime()
+  return Number.isFinite(gap) && gap >= 0 && gap <= TURN_GROUP_WINDOW_MS
+}

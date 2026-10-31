@@ -175,7 +175,7 @@
 .verevon-room-post__summary-avatars > * {
   width: 22px;
   height: 22px;
-  margin-left: -6px;
+  margin-left: -4px;
   border: 2px solid var(--verevon-surface);
   box-sizing: content-box;
   font-size: 9px;
@@ -218,8 +218,8 @@
 
 .verevon-room-post__summary-when {
   flex: none;
-  color: var(--verevon-text-subtle);
-  font-size: 11px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
 }
 
 /* Phone width: the preview keeps the words and drops the author, so no name is cut mid-way. */
@@ -231,4 +231,554 @@
   .verevon-room-post__summary-last strong {
     display: none;
   }
+}
+
+/* ── Timeline reads like Slack and Teams (U3) ──────────────────────────────── */
+
+/* Calm and dense: a post is a quiet row of the record, not a card on a card. Same surface and ink as
+   before (the post has no dark variant), a hairline border, a small radius and tight spacing. */
+.verevon-room-timeline {
+  gap: 6px;
+}
+
+.verevon-room-post {
+  --verevon-turn-gap: 8px;
+  gap: var(--verevon-turn-gap);
+  padding: 10px 14px 6px;
+  border-color: color-mix(in srgb, var(--verevon-border) 70%, transparent);
+  border-radius: 10px;
+  position: relative;
+}
+
+.verevon-space-thread-panel__turns {
+  --verevon-turn-gap: 14px;
+}
+
+/* The meta row under a post: no second rule inside the card, just quiet small text. */
+.verevon-room-post__meta {
+  border-top: 0;
+  padding-top: 0;
+}
+
+/* A post that is new since the reader arrived: a slim accent bar on its left edge instead of a chip. */
+.verevon-room-post[data-unread] {
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--verevon-accent-ink) 55%, transparent);
+}
+
+/* The label stays in the accessibility tree ("Ny" on each new post); the divider line is the visual. */
+.verevon-room-post__flag--new {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  padding: 0;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* With only the hidden "new" label inside, the flags row takes no space. */
+.verevon-room-post__flags:not(:has(.verevon-room-post__flag--pinned)) {
+  display: contents;
+}
+
+/* "New messages": one line across the room above the first new post (Slack's red line). */
+.verevon-room-new-divider-item {
+  list-style: none;
+}
+
+.verevon-room-new-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 6px 0 2px;
+  color: var(--verevon-accent-ink);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+.verevon-room-new-divider::before,
+.verevon-room-new-divider::after {
+  content: '';
+  height: 1px;
+  background: color-mix(in srgb, var(--verevon-accent-ink) 45%, transparent);
+}
+
+.verevon-room-new-divider::before {
+  flex: 0 0 12px;
+}
+
+.verevon-room-new-divider::after {
+  flex: 1 1 auto;
+}
+
+/* The time beside an author's name. Muted ink that holds contrast on the post's surface. */
+.verevon-room-turn__time {
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* A turn that continues the group above: no avatar, no name, and a narrow gap under the turn above.
+   Its own time shows in the avatar column on hover or focus, the way Slack does. */
+.verevon-room-turn[data-grouped] {
+  margin-top: calc(2px - var(--verevon-turn-gap, 8px));
+}
+
+.verevon-room-turn__gutter {
+  display: flex;
+  min-height: 22px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.verevon-room-turn__gutter .verevon-room-turn__time {
+  font-size: 10px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.verevon-room-turn:hover .verevon-room-turn__gutter .verevon-room-turn__time,
+.verevon-room-turn:focus-within .verevon-room-turn__gutter .verevon-room-turn__time {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .verevon-room-turn__gutter .verevon-room-turn__time {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .verevon-room-turn__gutter .verevon-room-turn__time {
+    transition: none;
+  }
+}
+
+/* The reply summary row sits under the text column; keep its indent in step with the tighter post. */
+.verevon-room-post__summary {
+  margin-top: -2px;
+}
+
+/* ── Dark mode: the Space tokens ───────────────────────────────────────────────
+   --verevon-surface and --verevon-text keep their light values on every page but chat, so the room's
+   cards, composer, thread pane, details popover and markdown stayed white (with dark ink) on the dark
+   canvas. Same scope trick as `.dark .verevon-chat-page`: redefine the tokens once here and everything
+   the room draws with them follows, with no per-component rule. */
+.dark .space-page.verevon-space {
+  --verevon-surface: #1f2024;
+  --verevon-surface-soft: #2b2d33;
+  --verevon-surface-muted: #34363d;
+  --verevon-text: #f7f4ee;
+  --verevon-text-muted: #b4b0a6;
+  --verevon-text-subtle: #8a867c;
+  --verevon-border: rgb(255 255 255 / 10%);
+  --verevon-border-soft: rgb(255 255 255 / 6%);
+  --verevon-border-strong: rgb(255 255 255 / 18%);
+  --verevon-accent-ink: #f0936a;
+  --verevon-j-text: #f7f4ee;
+  --verevon-j-text-soft: #cfcabd;
+}
+
+/* ── Flat rows: the room reads like Slack and Teams, not a card list ───────────
+   A post is a row of the record: a hairline under it, a soft wash on hover, and the actions that only
+   matter when you point at it (Reply, Pin) shown then. The status line says something only when the
+   run is not simply finished. */
+.verevon-space .verevon-room-timeline {
+  gap: 0;
+}
+
+.verevon-space .verevon-room-post {
+  border-color: transparent;
+  border-bottom-color: var(--verevon-border-soft);
+  border-radius: 8px;
+  background: transparent;
+  padding: 8px 12px 4px;
+  transition: background-color 120ms ease;
+}
+
+.verevon-space .verevon-room-post:hover,
+.verevon-space .verevon-room-post:focus-within {
+  background: var(--verevon-surface-soft);
+}
+
+/* New is carried by the "Nye meldinger" divider above the first new post; a bar on each row is noise. */
+.verevon-space .verevon-room-post[data-unread] {
+  box-shadow: none;
+}
+
+/* The post whose thread is open in the pane stays marked while it is up. */
+.verevon-space .verevon-room-post[data-open] {
+  background: var(--verevon-surface-soft);
+  box-shadow: inset 3px 0 0 var(--verevon-accent);
+}
+
+.verevon-space .verevon-room-post__reply,
+.verevon-space .verevon-room-post__pin {
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.verevon-space .verevon-room-post:hover .verevon-room-post__reply,
+.verevon-space .verevon-room-post:hover .verevon-room-post__pin,
+.verevon-space .verevon-room-post:focus-within .verevon-room-post__reply,
+.verevon-space .verevon-room-post:focus-within .verevon-room-post__pin,
+.verevon-space .verevon-room-post[data-open] .verevon-room-post__reply,
+.verevon-space .verevon-room-post[data-open] .verevon-room-post__pin,
+.verevon-space .verevon-room-post__pin[aria-pressed='true'] {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .verevon-space .verevon-room-post__reply,
+  .verevon-space .verevon-room-post__pin {
+    opacity: 1;
+  }
+}
+
+/* "Fullført" on every row repeats what the row already shows. It stays in the accessibility tree. */
+.verevon-space .verevon-room-post[data-run-status='completed'] .verevon-space-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ── The agent's working row ───────────────────────────────────────────────────
+   The dots are one 4px element whose box-shadows reach 14px to the right; without room for them they
+   were drawn over the first letter of the text. */
+.verevon-room-turn__working-dots {
+  margin-right: 14px;
+}
+
+/* ── Header: the avatar stack keeps both letters ───────────────────────────────
+   A 24px avatar stepped 17px hid the right letter of every pair under the next avatar. */
+.verevon-space-header__avatar {
+  margin-left: -4px;
+}
+
+.verevon-space-header__avatar:first-child {
+  margin-left: 0;
+}
+
+/* The room's name is kept whole up to a reasonable length; the topic is what gives way. */
+@media (min-width: 761px) {
+  .verevon-space .verevon-space-header h1 {
+    flex: 0 1 auto;
+    max-width: 28ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .verevon-space .verevon-space-header__topic {
+    flex: 1 1 0;
+  }
+}
+
+/* ── The room pulse only appears when it has something to say ──────────────────
+   An idle room drew a 270px column of one "nothing is happening" card and two small counters. */
+.verevon-space .verevon-space-workroom:not(:has(.verevon-space-pulse-card--active, .verevon-space-pulse[data-attention])) {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.verevon-space .verevon-space-workroom:not(:has(.verevon-space-pulse-card--active, .verevon-space-pulse[data-attention])) > .verevon-space-pulse {
+  display: none;
+}
+
+.verevon-space .verevon-space-pulse__note {
+  display: none;
+}
+
+.verevon-space .verevon-space-pulse-stats dt {
+  color: var(--verevon-text-muted);
+  font-size: 11px;
+}
+
+/* ── Composer: Send beside the box, not on a row of its own ────────────────────
+   In the room's own composer the textarea and Send share a row (grid; dense packing lets the button,
+   which comes last in the DOM, fill the cell beside the textarea while hints and notices keep their own
+   full-width rows). The thread pane is narrower and keeps Send stacked under the box. */
+.verevon-space-view--conversations > .verevon-space-room-composer form {
+  display: grid;
+  grid-auto-flow: row dense;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.verevon-space-view--conversations > .verevon-space-room-composer form > * {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.verevon-space-view--conversations > .verevon-space-room-composer form > .verevon-space-room-composer__modes {
+  justify-self: start;
+}
+
+.verevon-space-view--conversations > .verevon-space-room-composer form > textarea {
+  grid-column: 1;
+  min-height: 64px;
+  border-radius: 12px;
+}
+
+.verevon-space-view--conversations > .verevon-space-room-composer form > button[type='submit'] {
+  grid-column: 2;
+  align-self: end;
+  padding: 8px 18px;
+}
+
+/* A disabled Send is quiet and legible, not a washed-out pill that looks broken. */
+.verevon-space .verevon-space-room-composer button[type='submit']:disabled {
+  border-color: transparent;
+  background: var(--verevon-surface-muted);
+  color: var(--verevon-text-subtle);
+  opacity: 1;
+}
+
+.verevon-space .verevon-space-thread-panel__composer textarea {
+  min-height: 76px;
+}
+
+/* ── Laptop width with a thread open ───────────────────────────────────────────
+   The sidebar, the room and the pane share 1280px. A narrower pane gives the timeline room, and the
+   room's own mode toggle yields to the pane's (two "Send til rommet / Spør Verevon" switches at once). */
+@media (min-width: 761px) and (max-width: 1360px) {
+  .verevon-space .verevon-space-workroom[data-aux-open] {
+    padding-right: min(var(--verevon-space-auxpane-width, 416px), 340px);
+  }
+
+  .verevon-space .verevon-space-auxpane {
+    max-width: 340px;
+  }
+}
+
+.verevon-space .verevon-space-workroom[data-aux-open] .verevon-space-view--conversations > .verevon-space-room-composer .verevon-space-room-composer__modes {
+  display: none;
+}
+
+/* ── Phone width ───────────────────────────────────────────────────────────────
+   The tab row scrolls sideways: it fades out at the edge so a cut-off word reads as "more", not as a
+   mistake. The reply summary has no use for the desktop avatar indent. */
+@media (max-width: 1100px) {
+  .verevon-space .verevon-space-tabs {
+    -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent);
+    mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent);
+    scroll-snap-type: x proximity;
+  }
+
+  .verevon-space .verevon-space-tab {
+    scroll-snap-align: start;
+  }
+}
+
+@media (max-width: 520px) {
+  .verevon-room-post__summary {
+    width: 100%;
+    margin-left: 0;
+  }
+}
+
+/* ── Visual pass (W1 close) ────────────────────────────────────────────────────
+   Appended on purpose: each block below overrides an earlier rule of equal specificity in this sheet or
+   in global.css. */
+
+/* ── Tablet with a thread open: the pane is a sheet over the room ──────────────
+   Between a phone and a laptop the sidebar, a 340px reservation and the rail left the room about 220px:
+   the title ran under the avatars, the tabs were cut mid-word and the composer showed one word per line.
+   The pane overlays the room instead, as it does on a phone, and the room keeps its width. */
+@media (min-width: 761px) and (max-width: 1100px) {
+  .verevon-space .verevon-space-workroom[data-aux-open] {
+    padding-right: 0;
+  }
+
+  .verevon-space .verevon-space-auxpane {
+    width: min(380px, 92%) !important;
+    max-width: none;
+    box-shadow: -12px 0 32px rgb(0 0 0 / 14%);
+  }
+
+  /* Its width is fixed here, so the drag edge would do nothing. */
+  .verevon-space .verevon-space-auxpane__separator {
+    display: none;
+  }
+}
+
+/* ── Header: the title is the part that gives way, the people never overlap it ─ */
+.verevon-space .verevon-space-header__title {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.verevon-space .verevon-space-header h1 {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.verevon-space .verevon-space-header__actions,
+.verevon-space .verevon-space-header__people {
+  flex: none;
+}
+
+/* ── Posts: the time and the status sit beside the author ──────────────────────
+   Slack and Teams put the time next to the name. The footer line under each post kept only the
+   actions (Reply, Open thread, Pin); on a pointer device they are a small toolbar on the post's top
+   right edge, shown on hover or focus, so a quiet post takes no line for them. */
+.verevon-room-turn__status {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+/* A finished post says nothing visible; the label stays for assistive tech. */
+.verevon-room-post__status-quiet {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.verevon-room-post__meta,
+.verevon-room-post__meta time {
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-room-post__meta:not(:has(button)):not(:has([role='alert'])) {
+  display: none;
+}
+
+@media (hover: hover) {
+  .verevon-space .verevon-room-post__meta:not(:has([role='alert'])) {
+    position: absolute;
+    top: 4px;
+    right: 10px;
+    z-index: 1;
+    gap: 2px;
+    padding: 2px 4px;
+    border: 1px solid var(--verevon-border);
+    border-radius: 8px;
+    background: var(--verevon-surface);
+    box-shadow: 0 1px 4px rgb(0 0 0 / 8%);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 120ms ease;
+  }
+
+  .verevon-space .verevon-room-post:hover .verevon-room-post__meta,
+  .verevon-space .verevon-room-post:focus-within .verevon-room-post__meta,
+  .verevon-space .verevon-room-post[data-open] .verevon-room-post__meta {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+/* ── One person, one colour ────────────────────────────────────────────────────
+   The header's member stack gives each person a tint from their subject id. The timeline, the reply
+   summary and the thread pane drew the same people as grey circles. They use that tint now: a light
+   wash with dark initials, and a deeper wash with light initials on the dark canvas. A turn with no
+   recorded author has no hue and keeps the neutral circle. */
+.verevon-room-turn__avatar {
+  background: color-mix(in srgb, var(--avatar-hue, var(--verevon-text-muted)) 18%, var(--verevon-surface));
+  color: color-mix(in srgb, var(--avatar-hue, var(--verevon-text-muted)) 78%, #000);
+}
+
+.dark .space-page.verevon-space .verevon-room-turn__avatar {
+  background: color-mix(in srgb, var(--avatar-hue, var(--verevon-text-muted)) 30%, #171717);
+  color: color-mix(in srgb, var(--avatar-hue, var(--verevon-text-muted)) 55%, #fff);
+}
+
+/* ── One agent, one look ───────────────────────────────────────────────────────
+   The Rompuls card draws the agent with the same avatar as the timeline; an idle room shows it dimmed. */
+.verevon-space-pulse-card__avatar {
+  flex: none;
+}
+
+.verevon-space-pulse-card:not(.verevon-space-pulse-card--active) .verevon-space-pulse-card__avatar {
+  opacity: 0.55;
+}
+
+/* ── Composer: no resize grip, anywhere ────────────────────────────────────── */
+.verevon-space .verevon-space-room-composer textarea {
+  resize: none;
+}
+
+/* ── Phone: the conversation gets the screen ───────────────────────────────────
+   The title row, a three-row box and a stack of strips left room for two posts. The title stays for
+   assistive tech; the Start button is the row. The box is one line that grows with its text, the
+   working strip is one line, and the Send/Ask switch is a compact control. */
+@media (max-width: 760px) {
+  .verevon-space-view--conversations > .verevon-space-view__heading {
+    justify-content: flex-end;
+    margin-bottom: 8px;
+  }
+
+  .verevon-space-view--conversations > .verevon-space-view__heading > div:first-child {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .verevon-space-view--conversations > .verevon-space-room-composer form > textarea {
+    height: 44px;
+    min-height: 44px;
+    max-height: 140px;
+  }
+
+  @supports (field-sizing: content) {
+    .verevon-space-view--conversations > .verevon-space-room-composer form > textarea {
+      height: auto;
+      field-sizing: content;
+    }
+  }
+
+  .verevon-space-view--conversations > .verevon-space-room-composer form > button[type='submit'] {
+    padding: 8px 14px;
+  }
+
+  .verevon-space-room-composer__working {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .verevon-space-room-composer__working-dot {
+    display: inline-block;
+    margin-right: 8px;
+    vertical-align: middle;
+  }
+
+  .verevon-space-room-composer__modes {
+    gap: 0;
+  }
+
+  .verevon-space-room-composer__modes button {
+    padding: 3px 9px;
+    font-size: 11px;
+  }
+}
+
+/* ── Dark mode: the frame around the room and the profile disc ─────────────────
+   The product shell is the frame: it shows as a 5px strip along the right and bottom of the room's card,
+   and it only had its light colour, so a thin light line ran along those edges. It takes the top bar's
+   dark colour here. The profile disc's fallback gradient was light too and glared against the top bar. */
+html.dark:has(.space-page.verevon-space),
+.dark body:has(.space-page.verevon-space),
+.dark .core-product-shell:has(.space-page.verevon-space) {
+  background: var(--verevon-dark-sidebar, #34363d);
+}
+
+.dark .core-navbar__profile-avatar {
+  background: linear-gradient(135deg, #34363d, #3b2e29);
+  color: #f7f4ee;
 }

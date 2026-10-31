@@ -9,6 +9,7 @@ import {
   spaceSendIdempotencyEnabled,
   watchBrowserConnectivity,
 } from './space-connectivity'
+import { clearSpaceRoomFeatures, publishSpaceRoomFeatures } from './space-room-features'
 
 const setNavigatorOnline = (online: boolean) => {
   Object.defineProperty(window.navigator, 'onLine', { configurable: true, get: () => online })
@@ -97,7 +98,9 @@ describe('space connectivity state (WS01-S8)', () => {
   })
 })
 
-describe('build-time switches (WS01-S8)', () => {
+describe('dev overrides of the BFF switches (WS01-S8)', () => {
+  afterEach(() => clearSpaceRoomFeatures())
+
   it('the banner follows VITE_SPACE_CONNECTIVITY_BANNER_UI, true and false both explicit', () => {
     vi.stubEnv('VITE_SPACE_CONNECTIVITY_BANNER_UI', 'true')
     expect(spaceConnectivityBannerEnabled()).toBe(true)
@@ -112,10 +115,13 @@ describe('build-time switches (WS01-S8)', () => {
     expect(spaceSendIdempotencyEnabled()).toBe(false)
   })
 
-  it('an unset switch is on only in dev: production builds default off', () => {
+  it('an unset switch follows the context features: off until the room says on', () => {
     vi.stubEnv('VITE_SPACE_CONNECTIVITY_BANNER_UI', '')
     vi.stubEnv('VITE_SPACE_SEND_IDEMPOTENCY_API', '')
-    expect(spaceConnectivityBannerEnabled()).toBe(import.meta.env.DEV === true)
-    expect(spaceSendIdempotencyEnabled()).toBe(import.meta.env.DEV === true)
+    expect(spaceConnectivityBannerEnabled()).toBe(false)
+    expect(spaceSendIdempotencyEnabled()).toBe(false)
+    publishSpaceRoomFeatures({ connectivity_banner: true, send_idempotency: true })
+    expect(spaceConnectivityBannerEnabled()).toBe(true)
+    expect(spaceSendIdempotencyEnabled()).toBe(true)
   })
 })

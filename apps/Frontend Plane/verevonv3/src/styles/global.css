@@ -2067,6 +2067,13 @@ h3 {
   line-height: 20px;
 }
 
+/* The group headings take the dark surface's own colour as ink, and the panel title has none: both were
+   near-invisible on the dark sidebar. */
+.dark .verevon-sidebar-group-title,
+.dark .verevon-sidebar-title {
+  color: var(--verevon-sidebar-text);
+}
+
 .verevon-sidebar-row {
   font-size: 13px;
   font-weight: 500;

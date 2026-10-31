@@ -2,6 +2,7 @@ import { flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { ChatStreamHandlers } from '@/shared/api/chat-client'
+import { ApiError } from '@/shared/api/http'
 
 type StreamCall = { request: Record<string, unknown>; handlers: ChatStreamHandlers; signal: AbortSignal }
 
@@ -83,6 +84,28 @@ describe('space send ids', () => {
     expect(newSpaceSendId()).not.toBe(id)
   })
 
+  // The server's send-id shape: an alphanumeric first character, then 15 to 63 of [A-Za-z0-9_-].
+  const SERVER_SHAPE = /^[A-Za-z0-9][A-Za-z0-9_-]{15,63}$/
+
+  it('never starts with an underscore or a dash, whatever the id source returns', () => {
+    for (const source of ['_-_abcdef0123456789abcdef01234567', '--------------------------------', '-_a1b2c3d4e5f6a7b8c9d0e1f2']) {
+      vi.stubGlobal('crypto', { randomUUID: () => source })
+      const id = newSpaceSendId()
+      expect(id).toMatch(SERVER_SHAPE)
+    }
+    vi.unstubAllGlobals()
+  })
+
+  it('stays inside the server shape on the fallback path and for a short or long source', () => {
+    vi.stubGlobal('crypto', { randomUUID: () => { throw new Error('no crypto') } })
+    expect(newSpaceSendId()).toMatch(SERVER_SHAPE)
+    vi.stubGlobal('crypto', { randomUUID: () => 'ab' })
+    expect(newSpaceSendId()).toMatch(SERVER_SHAPE)
+    vi.stubGlobal('crypto', { randomUUID: () => 'a'.repeat(100) })
+    expect(newSpaceSendId()).toMatch(SERVER_SHAPE)
+    vi.unstubAllGlobals()
+  })
+
   it('names the session key of a new-thread send from its id', () => {
     expect(spaceSendSessionKey('abc')).toBe('space-post-abc')
   })
@@ -122,6 +145,45 @@ describe('space send pipeline (P-SPA2)', () => {
       flush()
       expect(stages).toEqual(['started', 'settled'])
       expect(pipeline.exchange()).toMatchObject({ status: 'error', errorMessage: 'boom' })
+    })
+
+    it('describes a thrown ApiError with its code and typed details, not its English message', async () => {
+      const described: unknown[] = []
+      const host = { spaceRef: 'room', onExchangeSettled: vi.fn(), onClearReplyTarget: vi.fn(), onArtifact: vi.fn() }
+      const pipeline = createSpaceSendPipeline({
+        host,
+        resolveTier: async () => ({ tier: undefined, source: 'intent-mode' }),
+        describeError: (event) => {
+          described.push(event)
+          return `described:${event.code}`
+        },
+        sendIdempotency: () => false,
+      })
+      streamChat.mockRejectedValueOnce(
+        new ApiError('Forbidden for English ops reasons', 403, 'space_thread_not_authorized', null, {
+          reason: 'space_role_below_floor',
+          resolvable_by: 'space_manager',
+        }),
+      )
+      await pipeline.send(input())
+      flush()
+      expect(pipeline.exchange()).toMatchObject({
+        status: 'error',
+        errorCode: 'space_thread_not_authorized',
+        errorMessage: 'described:space_thread_not_authorized',
+      })
+      expect(described[0]).toMatchObject({
+        code: 'space_thread_not_authorized',
+        details: { reason: 'space_role_below_floor', resolvable_by: 'space_manager' },
+      })
+    })
+
+    it('keeps a plain Error message and sets no error code for it', async () => {
+      const { pipeline } = pipelineWith()
+      streamChat.mockRejectedValueOnce(new Error('offline'))
+      await pipeline.send(input())
+      flush()
+      expect(pipeline.exchange()?.errorCode).toBeUndefined()
     })
   })
 

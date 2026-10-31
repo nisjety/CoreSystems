@@ -1222,12 +1222,40 @@ describe('SpaceRoomComposer — a fixed reply target (WS01-S7b)', () => {
 
   it('hides the cancel-reply button when the target is the surface itself (the thread pane)', () => {
     renderWithTarget(true)
-    expect(screen.getByText(/Svarer i/)).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Avbryt svar' })).toBeNull()
+  })
+
+  // The pane title names the thread, so the pane's box does not repeat it in a chip and does not talk
+  // about "the room" (it is a reply in the conversation).
+  it('in the thread pane the box talks about the conversation, with no "Svarer i" chip', () => {
+    renderWithTarget(true)
+    expect(screen.queryByText(/Svarer i/)).toBeNull()
+    expect(screen.getByRole('textbox').getAttribute('placeholder')).toMatch(/^Svar i samtalen/)
+    expect(screen.getByRole('textbox').getAttribute('placeholder')).not.toMatch(/rommet/)
+  })
+
+  it('with human posts on, the pane offers "Svar i samtalen" where the room says "Send til rommet"', () => {
+    render(() => (
+      <SpaceRoomComposer
+        spaceRef="room-1"
+        roster={() => []}
+        agents={() => []}
+        threads={() => [{ thread_id: 'thr_7', space_id: 'room-1', owner_subject_id: 'user-me' }] as never}
+        humanPostsEnabled={() => true}
+        viewerRole={() => 'editor'}
+        viewerSubjectId={() => 'user-me'}
+        replyTarget={() => ({ threadId: 'thr_7', title: 'Innkjøp' })}
+        replyTargetFixed
+      />
+    ))
+    expect(screen.getAllByRole('radio').map((radio) => radio.textContent)).toEqual(['Svar i samtalen', 'Spør Verevon'])
+    expect(screen.getByRole('textbox').getAttribute('placeholder')).toMatch(/^Svar i samtalen\. Agenten svarer ikke/)
   })
 
   it('keeps the cancel-reply button for the room composer', () => {
     renderWithTarget(undefined)
+    expect(screen.getByText(/Svarer i/)).toBeTruthy()
+    expect(screen.getByRole('textbox').getAttribute('placeholder')).not.toMatch(/Svar i samtalen/)
     expect(screen.getByRole('button', { name: 'Avbryt svar' })).toBeTruthy()
     cleanup()
     renderWithTarget(false)

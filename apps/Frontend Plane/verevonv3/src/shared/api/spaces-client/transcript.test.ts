@@ -83,6 +83,48 @@ describe('getSpaceThreadTranscript turn mapping (WS07-S11)', () => {
   })
 })
 
+describe('getSpaceThreadTranscript turn time', () => {
+  it('maps the server created_at to a normalized ISO createdAt', async () => {
+    stubFetch(
+      200,
+      transcript([{ role: 'user', content: 'hei', created_at: '2026-10-31T09:30:15.250+00:00' }]),
+    )
+    const [turn] = (await getSpaceThreadTranscript('room', 't1')).turns
+    expect(turn?.createdAt).toBe('2026-10-31T09:30:15.250Z')
+  })
+
+  it('accepts the camelCase createdAt and normalizes an offset to UTC', async () => {
+    stubFetch(200, transcript([{ role: 'assistant', content: 'ok', createdAt: '2026-10-31T11:30:15+02:00' }]))
+    const [turn] = (await getSpaceThreadTranscript('room', 't1')).turns
+    expect(turn?.createdAt).toBe('2026-10-31T09:30:15.000Z')
+  })
+
+  it('leaves createdAt off when it is missing or not a time, and keeps the turn', async () => {
+    stubFetch(
+      200,
+      transcript([
+        { role: 'user', content: 'a' },
+        { role: 'user', content: 'b', created_at: 'yesterday-ish' },
+        { role: 'user', content: 'c', created_at: '' },
+        { role: 'user', content: 'd', created_at: 1793439015 },
+      ]),
+    )
+    const { turns } = await getSpaceThreadTranscript('room', 't1')
+    expect(turns.map((t) => t.content)).toEqual(['a', 'b', 'c', 'd'])
+    for (const turn of turns) expect(turn).not.toHaveProperty('createdAt')
+  })
+
+  it('prefers created_at over createdAt when both parse', async () => {
+    stubFetch(
+      200,
+      transcript([
+        { role: 'user', content: 'x', created_at: '2026-10-31T09:00:00Z', createdAt: '2026-10-31T10:00:00Z' },
+      ]),
+    )
+    expect((await getSpaceThreadTranscript('room', 't1')).turns[0]?.createdAt).toBe('2026-10-31T09:00:00.000Z')
+  })
+})
+
 describe('getSpaceThreads shared_read (WS07-S4)', () => {
   const threads = (extra: Record<string, unknown>) => ({
     data: { space: { space_id: 's' }, membership: { role: 'owner' }, threads: [], ...extra },

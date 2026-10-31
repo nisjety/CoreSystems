@@ -351,6 +351,38 @@ describe('SpaceRoomTimeline — thread pane entry and read states (WS01-S7a)', (
   })
 })
 
+describe('SpaceRoomTimeline — what the stylesheet keys on', () => {
+  const posts = [
+    { thread_id: 't1', space_id: 'room-1', title: 'Innkjøp', preview: 'Første', latest_run_status: 'completed' },
+    { thread_id: 't2', space_id: 'room-1', title: 'Levering', preview: 'Andre', latest_run_status: 'running' },
+  ]
+
+  // The open thread's post stays marked while the pane is up (a wash and an accent edge in the sheet).
+  it('marks only the post whose thread is open in the pane', async () => {
+    renderRoom(posts, [agent], { onOpenThread: vi.fn(), openThreadId: () => 't2' })
+    await screen.findByText('Andre')
+    const rows = document.querySelectorAll('.verevon-room-post')
+    expect(rows.length).toBe(2)
+    expect(rows[0]?.hasAttribute('data-open')).toBe(false)
+    expect(rows[1]?.getAttribute('data-open')).toBe('true')
+  })
+
+  it('marks no post open while no pane is open', async () => {
+    renderRoom(posts, [agent], { onOpenThread: vi.fn(), openThreadId: () => null })
+    await screen.findByText('Andre')
+    expect(document.querySelectorAll('[data-open]').length).toBe(0)
+  })
+
+  // A finished run's status line is quiet in the sheet; the attribute is what it keys on.
+  it('carries the run status on the post so a finished post can be quiet', async () => {
+    renderRoom(posts)
+    await screen.findByText('Andre')
+    const rows = document.querySelectorAll('.verevon-room-post')
+    expect(rows[0]?.getAttribute('data-run-status')).toBe('completed')
+    expect(rows[1]?.getAttribute('data-run-status')).toBe('running')
+  })
+})
+
 describe('SpaceRoomTimeline — a thread with replies folds to a summary row (WS01-S7b, U2)', () => {
   const post = { thread_id: 't1', space_id: 'room-1', title: 'Innkjøp', latest_run_status: 'completed' }
   const turnsOf = (n: number) =>

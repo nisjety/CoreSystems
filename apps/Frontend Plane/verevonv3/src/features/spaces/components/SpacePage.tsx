@@ -3,7 +3,7 @@ import { useNavigate, useParams, useSearchParams } from '@solidjs/router'
 // the vendored Solid 2 icon barrel carries no Puzzle glyph, and lucide-solid
 // itself is Solid 1-only, so it cannot be imported here.
 import { Blocks, Bot, Clock3, Loader2, MessageCircle, Sparkles, Users } from '@/shared/icons'
-import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
+import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'solid-js'
 
 import { createResource, type ResourceAccessor } from '@/shared/lib/create-resource-compat'
 import {
@@ -37,7 +37,7 @@ import {
 } from '../lib/space-thread-presentation'
 import { AgentAvatar } from './AgentAvatar'
 import { SpaceIdentityHoverCard } from './SpaceIdentityHoverCard'
-import { agentAvatarColor } from '../lib/agent-avatar'
+import { agentAvatarColor, agentForName } from '../lib/agent-avatar'
 import { agentCardModel } from '../lib/agent-activity'
 import { SpaceBindAgentDialog } from './SpaceBindAgentDialog'
 import { SpaceCockpit } from './SpaceCockpit'
@@ -51,7 +51,8 @@ import {
 import { canRemove, countActiveOwners } from '../lib/space-roles'
 import { SpaceCreateAgentDialog } from './SpaceCreateAgentDialog'
 import { SpaceRoomComposer } from './SpaceRoomComposer'
-import { SpaceRoomSettings } from './SpaceRoomSettings'
+import { SpaceArchivedBanner, SpaceArchivedNotice, canArchiveRoom } from './SpaceRoomArchive'
+import { SpaceRoomHeader } from './SpaceRoomHeader'
 import { SpaceRoomTimeline, roomAgentName } from './SpaceRoomTimeline'
 import {
   SpaceAuxPane,
@@ -60,6 +61,14 @@ import {
 import { SpaceThreadPanel } from './sidepane/SpaceThreadPanel'
 import { spaceThreadPaneEnabled } from '../lib/space-thread-deep-link'
 import { roomArtifactsEnabled } from '../lib/room-artifacts'
+import {
+  clearSpaceRoomFeatures,
+  contextFeatureOn,
+  primeSpaceRoomFeatures,
+  publishSpaceRoomFeatures,
+  roomIsArchived,
+  type SpaceRoomFeatures,
+} from '../lib/space-room-features'
 import { createRoomLiveArtifacts, type RoomLiveArtifacts } from '../lib/room-live-artifacts'
 import { SpaceArtifactsTab } from './SpaceArtifactsTab'
 import { resolveOpenSpacePane } from '../lib/space-pane-registry'
@@ -73,6 +82,7 @@ import { SpaceActivityPanel } from './SpaceActivityPanel'
 import { SpaceKnowledgePanel } from './SpaceKnowledgePanel'
 import { SpaceWorkPanel } from './SpaceWorkPanel'
 import './space-room-layout.css'
+import './space-room-header.css'
 
 // Mirrors the gateway's own gate (`CREATE_AGENT_ROLES`): creation is a
 // governed grant, so only roles that may grant get the entry points. The
@@ -130,7 +140,9 @@ export default function SpacePage() {
   // request: the pane resolves it through the Space transcript route, which
   // asks Control, so a pasted or stale link can only land on a named state.
   const [searchParams, setSearchParams] = useSearchParams()
-  const threadPaneEnabled = spaceThreadPaneEnabled()
+  // `features.thread_pane` from the context read (a dev build may override it); reactive, because the
+  // context is read again every 30 s.
+  const threadPaneEnabled = () => spaceThreadPaneEnabled()
   const selectedThreadId = createMemo(() => {
     const pane = resolveOpenSpacePane(searchParams)
     return pane?.id === 'thread' ? pane.value : null
@@ -141,7 +153,16 @@ export default function SpacePage() {
   const liveArtifacts = createRoomLiveArtifacts()
   const openThread = (threadId: string) => setSearchParams({ thread_id: threadId })
   const closeThread = () => setSearchParams({ thread_id: undefined }, { replace: true })
+  // The context read also carries the room's rollout flags (`features`), which drive the UI switches that
+  // used to be build-time.
   const [context, { refetch: refetchContext }] = createResource(spaceRef, getSpaceContext)
+  // Tracking readers (the tab strip, the thread pane) hear about a changed flag from this effect; a
+  // child that reads a flag once in its body is covered by the prime where the room renders.
+  createEffect(
+    () => (context.error ? undefined : context()?.features),
+    (features) => publishSpaceRoomFeatures(features),
+  )
+  onCleanup(clearSpaceRoomFeatures)
   const [threadsUnavailable, setThreadsUnavailable] = createSignal(false)
   let latestThreadRequest = 0
   const [threads, { refetch: refetchThreads }] = createResource(spaceRef, async (ref) => {
@@ -466,6 +487,24 @@ export default function SpacePage() {
     },
   )
 
+  const roomCanArchive = (ctx: {
+    features?: SpaceRoomFeatures
+    membership: { role: string }
+    space: { kind: string; is_organization_room?: boolean }
+  }) =>
+    canArchiveRoom({
+      role: ctx.membership.role,
+      kind: ctx.space.kind,
+      isOrganizationRoom: ctx.space.is_organization_room,
+      featureOn: contextFeatureOn(ctx, 'room_archive'),
+    })
+  // An archive or unarchive changes the room's state for everyone: re-read the context (the banner,
+  // composer and details follow it) and the listing.
+  const refreshAfterArchiveChange = () => {
+    void Promise.resolve(refetchContext()).catch(() => undefined)
+    void Promise.resolve(refetchThreads()).catch(() => undefined)
+  }
+
   return (
     <section class="space-page verevon-space" aria-labelledby="space-title">
       <Show when={context.loading}>
@@ -481,228 +520,246 @@ export default function SpacePage() {
         </div>
       </Show>
       <Show when={context.error ? undefined : context()}>
-        {(current) => (
-          <div
-            class="verevon-space-workroom"
-            data-aux-open={selectedThreadId() ? 'true' : undefined}
-            style={{ '--verevon-space-auxpane-width': `${auxPaneWidth()}px` }}
-          >
-            <main class="verevon-space-canvas">
-              <header class="verevon-space-header">
-                <div class="verevon-space-header__title">
-                  <p class="verevon-space-eyebrow">{spaceWorkroomLabel(current().space.kind, i18n.tr)}</p>
-                  <h1 id="space-title">{spaceDisplayName(current().space, i18n.tr)}</h1>
-                  <Show when={current().space.topic?.trim()}>
-                    {(topic) => <p class="verevon-space-header__topic">{topic()}</p>}
-                  </Show>
-                  <SpaceRoomSettings
-                    spaceRef={current().space.space_ref}
-                    name={current().space.name}
-                    topic={current().space.topic}
-                    role={current().membership.role}
-                    kind={current().space.kind}
-                    lifecycle={current().space.lifecycle}
-                    enabled={current().features?.room_details === true}
-                    onSaved={() => {
-                      void refetchContext()
-                    }}
-                  />
-                  <div class="verevon-space-meta" aria-label={i18n.tr('Status for rommet', 'Current Space status')}>
-                    <span>{spaceKindLabel(current().space.kind, i18n.tr)}</span>
-                    <span aria-hidden="true">·</span>
-                    <span>{spaceLifecycleLabel(current().space.lifecycle, i18n.tr)}</span>
-                    <span aria-hidden="true">·</span>
-                    <span>{i18n.tr('Din rolle: ', 'Your role: ')}{spaceRoleLabel(current().membership.role, i18n.tr)}</span>
-                    <Show when={hereSentence(presenceReading(), i18n.tr)}>
-                      {(sentence) => (
-                        <>
-                          <span aria-hidden="true">·</span>
+        {(current) => {
+          // Before the room's children render, so one that reads a flag once in its body sees it.
+          primeSpaceRoomFeatures(current().features)
+          return (
+            <div
+              class="verevon-space-workroom"
+              data-aux-open={selectedThreadId() ? 'true' : undefined}
+              style={{ '--verevon-space-auxpane-width': `${auxPaneWidth()}px` }}
+            >
+              <main class="verevon-space-canvas">
+                <SpaceRoomHeader
+                  spaceRef={current().space.space_ref}
+                  name={spaceDisplayName(current().space, i18n.tr)}
+                  topic={current().space.topic}
+                  kind={current().space.kind}
+                  lifecycle={current().space.lifecycle}
+                  role={current().membership.role}
+                  isOrganizationRoom={current().space.is_organization_room}
+                  archived={roomIsArchived(current())}
+                  roomDetailsEnabled={current().features?.room_details === true}
+                  roomArchiveEnabled={contextFeatureOn(current(), 'room_archive')}
+                  roster={roster.error ? undefined : roster()}
+                  facts={[
+                    { label: i18n.tr('Type', 'Type'), value: spaceKindLabel(current().space.kind, i18n.tr) },
+                    {
+                      label: i18n.tr('Status', 'Status'),
+                      value: roomIsArchived(current())
+                        ? i18n.tr('Arkivert', 'Archived')
+                        : spaceLifecycleLabel(current().space.lifecycle, i18n.tr),
+                    },
+                    { label: i18n.tr('Din rolle', 'Your role'), value: spaceRoleLabel(current().membership.role, i18n.tr) },
+                  ]}
+                  status={
+                    <div class="verevon-space-meta" aria-label={i18n.tr('Status for rommet', 'Current Space status')}>
+                      <Show when={hereSentence(presenceReading(), i18n.tr)}>
+                        {(sentence) => (
                           <span class="verevon-space-presence">
                             <span class="verevon-space-presence__dot" aria-hidden="true" />
                             {sentence()}
                           </span>
-                        </>
-                      )}
-                    </Show>
-                    <Show when={streamState() === 'live' || streamState() === 'degraded'}>
-                      <span aria-hidden="true">·</span>
-                    </Show>
-                    <SpaceLiveIndicator state={streamState} />
-                  </div>
-                </div>
-              </header>
+                        )}
+                      </Show>
+                      <SpaceLiveIndicator state={streamState} />
+                    </div>
+                  }
+                  onOpenMembers={() => {
+                    window.location.hash = 'medlemmer'
+                  }}
+                  onSaved={() => {
+                    void refetchContext()
+                  }}
+                  onArchiveChanged={refreshAfterArchiveChange}
+                />
 
-              <Show when={threadsUnavailable()}>
-                <p class="verevon-space-projection-error" role="alert">
-                  {i18n.tr(
-                    'Samtaleaktiviteten i rommet er midlertidig utilgjengelig. Din bekreftede tilgang til rommet er uendret.',
-                    'Space conversation activity is temporarily unavailable. Your confirmed Space access remains unchanged.',
-                  )}
-                </p>
-              </Show>
+                <Show when={roomIsArchived(current())}>
+                  <SpaceArchivedBanner
+                    spaceRef={current().space.space_ref}
+                    canUnarchive={roomCanArchive(current())}
+                    onChanged={refreshAfterArchiveChange}
+                  />
+                </Show>
 
-              <SpaceCreateAgentDialog
-                spaceRef={current().space.space_ref}
-                open={createAgentOpen}
-                onClose={() => setCreateAgentOpen(false)}
-                onCreated={() => {
-                  void refetchAgents()
-                }}
-              />
-              <SpaceBindAgentDialog
-                spaceRef={current().space.space_ref}
-                open={bindAgentOpen}
-                onClose={() => setBindAgentOpen(false)}
-                onBound={() => {
-                  void refetchAgents()
-                }}
-              />
-              <SpaceCockpit
-                tabs={{
-                  chat: (
-                    <SpaceConversationPanel
-                      spaceRef={current().space.space_ref}
-                      spaceName={spaceDisplayName(current().space, i18n.tr)}
-                      viewerSubjectId={() => current().membership.subject_id}
-                      threads={currentThreads}
-                      liveArtifacts={liveArtifacts}
-                      sharedReadAvailable={sharedReadAvailable}
-                      loading={() => threads.loading}
-                      unavailable={threadsUnavailable}
-                      roster={() => (roster.error ? [] : roster() ?? [])}
-                      agents={() => (agents.error ? [] : agents() ?? [])}
-                      unreadThreadIds={unreadIds}
-                      journal={sendJournal}
-                      humanPostsEnabled={() => current().features?.human_posts === true}
-                      viewerRole={() => current().membership.role}
-                      postMaxChars={() => current().limits?.post_max_chars}
-                      onOpenThread={threadPaneEnabled ? (thread) => openThread(thread.thread_id) : undefined}
-                      typingSentence={() => typingSentence(presenceReading(), i18n.tr)}
-                      onTyping={noteTyping}
-                      onExchangeSettled={() => {
-                        void refetchThreads()
-                      }}
-                      onCreateAgent={
-                        canCreateAgent(current().membership.role)
-                          ? () => setCreateAgentOpen(true)
-                          : undefined
-                      }
-                    />
-                  ),
-                  arbeid: <SpaceWorkPanel spaceRef={current().space.space_ref} />,
-                  kunnskap: <SpaceKnowledgePanel spaceRef={current().space.space_ref} />,
-                  artefakter: (
-                    <SpaceArtifactsTab spaceRef={current().space.space_ref} live={liveArtifacts} />
-                  ),
-                  aktivitet: (
-                    <SpaceActivityPanel
-                      spaceRef={current().space.space_ref}
-                      threads={currentThreads}
-                      threadsLoading={() => threads.loading}
-                    />
-                  ),
-                  agent: (
-                    <>
-                      <SpaceInstructionsSection
+                <Show when={threadsUnavailable()}>
+                  <p class="verevon-space-projection-error" role="alert">
+                    {i18n.tr(
+                      'Samtaleaktiviteten i rommet er midlertidig utilgjengelig. Din bekreftede tilgang til rommet er uendret.',
+                      'Space conversation activity is temporarily unavailable. Your confirmed Space access remains unchanged.',
+                    )}
+                  </p>
+                </Show>
+
+                <SpaceCreateAgentDialog
+                  spaceRef={current().space.space_ref}
+                  open={createAgentOpen}
+                  onClose={() => setCreateAgentOpen(false)}
+                  onCreated={() => {
+                    void refetchAgents()
+                  }}
+                />
+                <SpaceBindAgentDialog
+                  spaceRef={current().space.space_ref}
+                  open={bindAgentOpen}
+                  onClose={() => setBindAgentOpen(false)}
+                  onBound={() => {
+                    void refetchAgents()
+                  }}
+                />
+                <SpaceCockpit
+                  tabs={{
+                    chat: (
+                      <SpaceConversationPanel
                         spaceRef={current().space.space_ref}
-                        role={current().membership.role}
-                      />
-                      <SpaceAgentPanel
-                        agents={agents}
+                        spaceName={spaceDisplayName(current().space, i18n.tr)}
+                        viewerSubjectId={() => current().membership.subject_id}
                         threads={currentThreads}
+                        liveArtifacts={liveArtifacts}
+                        sharedReadAvailable={sharedReadAvailable}
+                        loading={() => threads.loading}
+                        unavailable={threadsUnavailable}
                         roster={() => (roster.error ? [] : roster() ?? [])}
-                        spaceRef={current().space.space_ref}
-                        canGovern={canCreateAgent(current().membership.role)}
-                        onChanged={() => {
-                          void refetchAgents()
+                        agents={() => (agents.error ? [] : agents() ?? [])}
+                        unreadThreadIds={unreadIds}
+                        journal={sendJournal}
+                        humanPostsEnabled={() => current().features?.human_posts === true}
+                        archived={() => roomIsArchived(current())}
+                        viewerRole={() => current().membership.role}
+                        postMaxChars={() => current().limits?.post_max_chars}
+                        onOpenThread={threadPaneEnabled() ? (thread) => openThread(thread.thread_id) : undefined}
+                        openThreadId={selectedThreadId}
+                        typingSentence={() => typingSentence(presenceReading(), i18n.tr)}
+                        onTyping={noteTyping}
+                        onExchangeSettled={() => {
+                          void refetchThreads()
                         }}
                         onCreateAgent={
                           canCreateAgent(current().membership.role)
                             ? () => setCreateAgentOpen(true)
                             : undefined
                         }
-                        onBindAgent={
-                          canCreateAgent(current().membership.role)
-                            ? () => setBindAgentOpen(true)
-                            : undefined
+                      />
+                    ),
+                    arbeid: <SpaceWorkPanel spaceRef={current().space.space_ref} />,
+                    kunnskap: <SpaceKnowledgePanel spaceRef={current().space.space_ref} />,
+                    artefakter: (
+                      <SpaceArtifactsTab spaceRef={current().space.space_ref} live={liveArtifacts} />
+                    ),
+                    aktivitet: (
+                      <SpaceActivityPanel
+                        spaceRef={current().space.space_ref}
+                        threads={currentThreads}
+                        threadsLoading={() => threads.loading}
+                      />
+                    ),
+                    agent: (
+                      <>
+                        <SpaceInstructionsSection
+                          spaceRef={current().space.space_ref}
+                          role={current().membership.role}
+                        />
+                        <SpaceAgentPanel
+                          agents={agents}
+                          threads={currentThreads}
+                          roster={() => (roster.error ? [] : roster() ?? [])}
+                          spaceRef={current().space.space_ref}
+                          canGovern={canCreateAgent(current().membership.role)}
+                          onChanged={() => {
+                            void refetchAgents()
+                          }}
+                          onCreateAgent={
+                            canCreateAgent(current().membership.role)
+                              ? () => setCreateAgentOpen(true)
+                              : undefined
+                          }
+                          onBindAgent={
+                            canCreateAgent(current().membership.role)
+                              ? () => setBindAgentOpen(true)
+                              : undefined
+                          }
+                        />
+                      </>
+                    ),
+                    medlemmer: (
+                      <SpaceMembersPanel
+                        spaceRef={current().space.space_ref}
+                        role={current().membership.role}
+                        kind={current().space.kind}
+                        orgId={current().membership.org_id}
+                        actorId={current().membership.subject_id}
+                        writerApi={writerApi()}
+                        peopleSearch={current().features?.people_search === true}
+                        isOrganizationRoom={current().space.is_organization_room}
+                        archived={roomIsArchived(current())}
+                        onMembersChanged={() => {
+                          void refetchRoster()
+                        }}
+                        roster={roster}
+                        deletionError={deletionError}
+                        deletionReceipt={deletionReceipt}
+                        deletionSubmitting={deletionSubmitting}
+                        onRequestDeletion={requestDeletion}
+                      />
+                    ),
+                  }}
+                />
+              </main>
+
+              <SpacePulse activeRun={activeRun} threads={currentThreads} agents={() => (agents.error ? [] : agents() ?? [])} />
+
+              <Show when={selectedThreadId()}>
+                {(threadId) => {
+                  const thread = () => currentThreads().find((item) => item.thread_id === threadId())
+                  return (
+                    <SpaceAuxPane
+                      label={thread() ? threadTitle(thread() as SpaceThread, i18n.tr) : i18n.tr('Tråd', 'Thread')}
+                      width={auxPaneWidth()}
+                      onWidthChange={setAuxPaneWidth}
+                      onClose={closeThread}
+                    >
+                      <SpaceThreadPanel
+                        spaceRef={current().space.space_ref}
+                        threadId={threadId()}
+                        thread={thread}
+                        roster={() => (roster.error ? [] : roster() ?? [])}
+                        viewerSubjectId={() => current().membership.subject_id}
+                        agentName={roomAgentName(agents.error ? [] : agents() ?? [])}
+                        agents={() => (agents.error ? [] : agents() ?? [])}
+                        footer={
+                          roomIsArchived(current()) ? (
+                            <SpaceArchivedNotice />
+                          ) : current().features?.human_posts === true ? (
+                            <SpaceRoomComposer
+                              spaceRef={current().space.space_ref}
+                              roster={() => (roster.error ? [] : roster() ?? [])}
+                              agents={() => (agents.error ? [] : agents() ?? [])}
+                              threads={currentThreads}
+                              onExchangeSettled={() => {
+                                void refetchThreads()
+                              }}
+                              replyTarget={() => ({
+                                threadId: threadId(),
+                                title: thread() ? threadTitle(thread() as SpaceThread, i18n.tr) : i18n.tr('Tråd', 'Thread'),
+                                awaitingApproval: thread()?.latest_run_status === AWAITING_APPROVAL_RUN_STATUS,
+                              })}
+                              replyTargetFixed
+                              humanPostsEnabled={() => current().features?.human_posts === true}
+                              viewerSubjectId={() => current().membership.subject_id}
+                              viewerRole={() => current().membership.role}
+                              postMaxChars={() => current().limits?.post_max_chars}
+                              journal={sendJournal}
+                            />
+                          ) : undefined
                         }
                       />
-                    </>
-                  ),
-                  medlemmer: (
-                    <SpaceMembersPanel
-                      spaceRef={current().space.space_ref}
-                      role={current().membership.role}
-                      kind={current().space.kind}
-                      orgId={current().membership.org_id}
-                      actorId={current().membership.subject_id}
-                      writerApi={writerApi()}
-                      peopleSearch={current().features?.people_search === true}
-                      isOrganizationRoom={current().space.is_organization_room}
-                      onMembersChanged={() => {
-                        void refetchRoster()
-                      }}
-                      roster={roster}
-                      deletionError={deletionError}
-                      deletionReceipt={deletionReceipt}
-                      deletionSubmitting={deletionSubmitting}
-                      onRequestDeletion={requestDeletion}
-                    />
-                  ),
+                    </SpaceAuxPane>
+                  )
                 }}
-              />
-            </main>
-
-            <SpacePulse activeRun={activeRun} threads={currentThreads} />
-
-            <Show when={selectedThreadId()}>
-              {(threadId) => {
-                const thread = () => currentThreads().find((item) => item.thread_id === threadId())
-                return (
-                  <SpaceAuxPane
-                    label={thread() ? threadTitle(thread() as SpaceThread, i18n.tr) : i18n.tr('Tråd', 'Thread')}
-                    width={auxPaneWidth()}
-                    onWidthChange={setAuxPaneWidth}
-                    onClose={closeThread}
-                  >
-                    <SpaceThreadPanel
-                      spaceRef={current().space.space_ref}
-                      threadId={threadId()}
-                      thread={thread}
-                      roster={() => (roster.error ? [] : roster() ?? [])}
-                      viewerSubjectId={() => current().membership.subject_id}
-                      agentName={roomAgentName(agents.error ? [] : agents() ?? [])}
-                      footer={
-                        current().features?.human_posts === true ? (
-                          <SpaceRoomComposer
-                            spaceRef={current().space.space_ref}
-                            roster={() => (roster.error ? [] : roster() ?? [])}
-                            agents={() => (agents.error ? [] : agents() ?? [])}
-                            threads={currentThreads}
-                            onExchangeSettled={() => {
-                              void refetchThreads()
-                            }}
-                            replyTarget={() => ({
-                              threadId: threadId(),
-                              title: thread() ? threadTitle(thread() as SpaceThread, i18n.tr) : i18n.tr('Tråd', 'Thread'),
-                              awaitingApproval: thread()?.latest_run_status === AWAITING_APPROVAL_RUN_STATUS,
-                            })}
-                            replyTargetFixed
-                            humanPostsEnabled={() => current().features?.human_posts === true}
-                            viewerSubjectId={() => current().membership.subject_id}
-                            viewerRole={() => current().membership.role}
-                            postMaxChars={() => current().limits?.post_max_chars}
-                            journal={sendJournal}
-                          />
-                        ) : undefined
-                      }
-                    />
-                  </SpaceAuxPane>
-                )
-              }}
-            </Show>
-          </div>
-        )}
+              </Show>
+            </div>
+          )
+        }}
       </Show>
     </section>
   )
@@ -731,17 +788,21 @@ function SpaceConversationPanel(props: {
   readonly onTyping?: () => void
   /** Opens a post in the read-only side pane; absent while the pane is off. */
   readonly onOpenThread?: (thread: SpaceThread) => void
+  /** The thread open in the side pane; its post stays marked in the timeline. */
+  readonly openThreadId?: () => string | null | undefined
   /** The room's in-memory store of this browser's own live artifacts (owned by the page, shared with the Artifacts tab). */
   readonly liveArtifacts: RoomLiveArtifacts
   /** The send journal the page owns (WS01-S6): the composer records sends here, the timeline draws them. */
   readonly journal?: SpaceSendJournal
   /** The room's `features.human_posts`. Off, the composer is the single ask-the-agent box it was. */
   readonly humanPostsEnabled?: () => boolean
+  /** The room is archived: it stays readable, and the composer gives way to a read-only notice. */
+  readonly archived?: () => boolean
   readonly viewerRole?: () => string | undefined
   readonly postMaxChars?: () => number | undefined
 }) {
   const i18n = useI18n()
-  const artifactsOn = roomArtifactsEnabled()
+  const artifactsOn = () => roomArtifactsEnabled()
   const noteLiveArtifact = props.liveArtifacts.note
   let focusComposer: (() => void) | undefined
   const [replyTarget, setReplyTarget] = createSignal<
@@ -771,10 +832,12 @@ function SpaceConversationPanel(props: {
             'The shared record for people and agent work connected to this Space.',
           )}</p>
         </div>
-        <button type="button" class="verevon-space-secondary-action" onClick={() => focusComposer?.()}>
-          <Sparkles size={15} aria-hidden="true" />
-          {i18n.tr('Start en samtale', 'Start a conversation')}
-        </button>
+        <Show when={props.archived?.() !== true}>
+          <button type="button" class="verevon-space-secondary-action" onClick={() => focusComposer?.()}>
+            <Sparkles size={15} aria-hidden="true" />
+            {i18n.tr('Start en samtale', 'Start a conversation')}
+          </button>
+        </Show>
       </div>
 
       <Show when={props.loading()}>
@@ -802,7 +865,7 @@ function SpaceConversationPanel(props: {
             viewerSubjectId={props.viewerSubjectId}
             threads={props.threads}
             sharedReadAvailable={props.sharedReadAvailable}
-            liveArtifacts={artifactsOn ? props.liveArtifacts.forThread : undefined}
+            liveArtifacts={artifactsOn() ? props.liveArtifacts.forThread : undefined}
             roster={props.roster}
             agents={props.agents}
             onStartConversation={() => focusComposer?.()}
@@ -820,6 +883,7 @@ function SpaceConversationPanel(props: {
             collapseLongThreads={props.humanPostsEnabled}
             onApprovalSettled={props.onExchangeSettled}
             onOpenThread={props.onOpenThread}
+            openThreadId={props.openThreadId}
             pendingPosts={props.journal ? () => props.journal?.forSpace(props.spaceRef) ?? [] : undefined}
             unreadThreadIds={props.unreadThreadIds}
             // A pin or retitle changes the server's order and names; re-read
@@ -829,24 +893,26 @@ function SpaceConversationPanel(props: {
         </Show>
       </Show>
 
-      <SpaceRoomComposer
-        spaceRef={props.spaceRef}
-        roster={props.roster}
-        agents={props.agents}
-        threads={props.threads}
-        onExchangeSettled={props.onExchangeSettled}
-        registerFocusHandle={(focus) => { focusComposer = focus }}
-        typingSentence={props.typingSentence}
-        onTyping={props.onTyping}
-        replyTarget={replyTargetWithStatus}
-        onClearReplyTarget={() => setReplyTarget(undefined)}
-        onArtifact={artifactsOn ? noteLiveArtifact : undefined}
-        humanPostsEnabled={props.humanPostsEnabled}
-        viewerSubjectId={props.viewerSubjectId}
-        viewerRole={props.viewerRole}
-        postMaxChars={props.postMaxChars}
-        journal={props.journal}
-      />
+      <Show when={props.archived?.() !== true} fallback={<SpaceArchivedNotice />}>
+        <SpaceRoomComposer
+          spaceRef={props.spaceRef}
+          roster={props.roster}
+          agents={props.agents}
+          threads={props.threads}
+          onExchangeSettled={props.onExchangeSettled}
+          registerFocusHandle={(focus) => { focusComposer = focus }}
+          typingSentence={props.typingSentence}
+          onTyping={props.onTyping}
+          replyTarget={replyTargetWithStatus}
+          onClearReplyTarget={() => setReplyTarget(undefined)}
+          onArtifact={artifactsOn() ? noteLiveArtifact : undefined}
+          humanPostsEnabled={props.humanPostsEnabled}
+          viewerSubjectId={props.viewerSubjectId}
+          viewerRole={props.viewerRole}
+          postMaxChars={props.postMaxChars}
+          journal={props.journal}
+        />
+      </Show>
     </section>
   )
 }
@@ -1417,6 +1483,8 @@ function SpaceMembersPanel(props: {
    * An older gateway omits the field entirely, and showing the editor on that
    * silence would offer a door the server then refuses to open. */
   readonly isOrganizationRoom: boolean | undefined
+  /** An archived room's membership is frozen: no editor, role selects, removal or leaving. */
+  readonly archived?: boolean
   readonly onMembersChanged?: () => void
   readonly roster: ResourceAccessor<readonly SpaceRosterMember[]>
   readonly deletionError: () => string
@@ -1430,7 +1498,7 @@ function SpaceMembersPanel(props: {
   const activeOwners = () => countActiveOwners(props.roster.error ? [] : props.roster() ?? [])
   // Offered only for a named room somebody made, and only when the server said the writer is on.
   const writerRoom = () =>
-    props.writerApi && props.kind !== 'personal' && props.isOrganizationRoom === false
+    props.archived !== true && props.writerApi && props.kind !== 'personal' && props.isOrganizationRoom === false
 
   return (
     <section class="verevon-space-view" aria-labelledby="space-members-title">
@@ -1477,7 +1545,8 @@ function SpaceMembersPanel(props: {
           exactly one member by construction. */}
       <Show
         when={
-          canGrantSpaceMembership(props.role)
+          props.archived !== true
+          && canGrantSpaceMembership(props.role)
           && props.kind !== 'personal'
           && props.isOrganizationRoom === false
         }
@@ -1491,6 +1560,15 @@ function SpaceMembersPanel(props: {
           writerApi={props.writerApi}
           peopleSearch={props.peopleSearch}
         />
+      </Show>
+
+      <Show when={props.archived === true}>
+        <p class="verevon-space-member-controls__derived">
+          {i18n.tr(
+            'Rommet er arkivert. Medlemmer kan ikke endres før arkiveringen fjernes.',
+            'The room is archived. Members cannot be changed until it is unarchived.',
+          )}
+        </p>
       </Show>
 
       <Show when={props.isOrganizationRoom === true}>
@@ -1540,7 +1618,8 @@ function SpaceMembersPanel(props: {
                       && (writerRoom()
                         ? member.subject_id !== props.actorId
                           && canRemove(props.role, member.role, false, activeOwners()) === null
-                        : canGrantSpaceMembership(props.role)
+                        : props.archived !== true
+                          && canGrantSpaceMembership(props.role)
                           && props.kind !== 'personal'
                           && props.isOrganizationRoom === false
                           && member.role !== 'owner')
@@ -1626,11 +1705,29 @@ function SpaceMembersPanel(props: {
 function SpacePulse(props: {
   readonly activeRun: () => SpaceThread | undefined
   readonly threads: () => readonly SpaceThread[]
+  readonly agents: () => readonly SpaceAgent[]
 }) {
   const i18n = useI18n()
+  // The same agent, in the same avatar, as in the timeline: the room's single active agent by name
+  // (else the product name, neutral), never a separate icon tile that looks like a different thing.
+  const agentName = () => roomAgentName(props.agents())
+  const agentAvatar = () => (
+    <AgentAvatar
+      kind="agent"
+      size={28}
+      class="verevon-space-pulse-card__avatar"
+      name={agentName()}
+      color={agentAvatarColor(agentForName(props.agents(), agentName()))}
+    />
+  )
 
   return (
-    <aside class="verevon-space-pulse" aria-labelledby="space-pulse-title">
+    <aside
+      class="verevon-space-pulse"
+      aria-labelledby="space-pulse-title"
+      // The stylesheet keeps the column only while it has something to say: live work or an approval wait.
+      data-attention={props.threads().some((thread) => thread.latest_run_status === 'awaiting_approval') ? 'true' : undefined}
+    >
       <div class="verevon-space-pulse__heading">
         <div>
           <p class="verevon-space-eyebrow">{i18n.tr('Kort oppsummert', 'At a glance')}</p>
@@ -1652,7 +1749,7 @@ function SpacePulse(props: {
         when={props.activeRun()}
         fallback={
           <div class="verevon-space-pulse-card">
-            <span class="verevon-space-pulse-card__icon" aria-hidden="true"><Bot size={17} /></span>
+            {agentAvatar()}
             <div>
               <strong>{i18n.tr('Ingen agentarbeid er aktivt', 'No agent work is active')}</strong>
               <p>{i18n.tr('Når arbeid starter i en samtale, vises tilstanden her.', 'When work starts in a conversation, its state appears here.')}</p>
@@ -1662,7 +1759,7 @@ function SpacePulse(props: {
       >
         {(run) => (
           <div class="verevon-space-pulse-card verevon-space-pulse-card--active">
-            <span class="verevon-space-pulse-card__icon" aria-hidden="true"><Bot size={17} /></span>
+            {agentAvatar()}
             <span>
               <strong>{i18n.tr('Verevon jobber', 'Verevon is working')}</strong>
               <span>{threadTitle(run(), i18n.tr)}</span>
@@ -1813,8 +1910,4 @@ function deliveryStatusMark(status: string): string {
 
 function channelLabel(channel: string, tr: (no: string, en: string) => string): string {
   return translatedEnumLabel(channel, CHANNEL_LABELS, tr)
-}
-
-function spaceWorkroomLabel(kind: string, tr: (no: string, en: string) => string): string {
-  return kind === 'personal' ? tr('Personlig rom', 'Personal room') : tr('Delt arbeidsrom', 'Shared workroom')
 }

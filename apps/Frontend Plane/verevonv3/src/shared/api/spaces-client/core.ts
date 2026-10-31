@@ -1,6 +1,7 @@
 import type { ChatArtifact } from '@/features/chat/components/chat-types'
 import { roomArtifactsFromMetadata } from '@/features/spaces/lib/room-artifacts'
 import { ApiError, requestJson } from '../http'
+import { readSpaceDenial } from '../space-denials'
 
 export type SpaceMembership = {
   space_ref: string
@@ -687,6 +688,12 @@ export type SpaceThreadTurn = {
   /** The server's id for this message, when it sent one. */
   readonly messageId?: string
   /**
+   * When the server stored this turn, as an ISO-8601 UTC string (`2026-10-31T09:30:15.250Z`).
+   * Absent when the server sent none or sent something that is not a time; a row must then
+   * render without a time rather than with an invented one.
+   */
+  readonly createdAt?: string
+  /**
    * Artifacts the turn persisted, already through the room's kind and size
    * gate (`roomArtifactsFromMetadata`). Only ever set on assistant turns.
    */
@@ -696,6 +703,13 @@ export type SpaceThreadTurn = {
 export type SpaceThreadTranscript = {
   readonly threadId: string
   readonly turns: readonly SpaceThreadTurn[]
+}
+
+/** A server time as a normalized ISO string, or undefined when it is missing or not a time. */
+function normalizeTurnTime(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value.trim()) return undefined
+  const ms = Date.parse(value.trim())
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined
 }
 
 function normalizeSpaceThreadTurns(value: unknown): readonly SpaceThreadTurn[] {
@@ -728,12 +742,14 @@ function normalizeSpaceThreadTurns(value: unknown): readonly SpaceThreadTurn[] {
         : typeof record.authorSubjectId === 'string' && record.authorSubjectId.trim()
           ? record.authorSubjectId.trim()
           : undefined
+    const createdAt = normalizeTurnTime(record.created_at) ?? normalizeTurnTime(record.createdAt)
     turns.push({
       role,
       content,
       ...(agentName ? { agentName } : {}),
       ...(authorSubjectId ? { authorSubjectId } : {}),
       ...(messageId ? { messageId } : {}),
+      ...(createdAt ? { createdAt } : {}),
       ...(artifacts.length > 0 ? { artifacts } : {}),
     })
   }
@@ -778,16 +794,30 @@ export async function getSpaceThreadTranscript(
  */
 export type SpaceTranscriptLoad =
   | { readonly state: 'ok'; readonly threadId: string; readonly turns: readonly SpaceThreadTurn[] }
-  | { readonly state: 'restricted' }
+  | { readonly state: 'restricted'; readonly denial?: SpaceTranscriptDenial }
   | { readonly state: 'missing' }
   | { readonly state: 'error' }
+
+/**
+ * The typed Space denial a 403 carried (`code` and `details`, as the gateway sent them). Only set
+ * when `space-denials.ts` can read a reason from it; read it back through that module, which
+ * accepts nothing its vocabulary does not know.
+ */
+export type SpaceTranscriptDenial = {
+  readonly code: string | null
+  readonly details: Readonly<Record<string, unknown>> | null
+}
 
 export async function loadSpaceTranscript(spaceRef: string, threadId: string): Promise<SpaceTranscriptLoad> {
   try {
     const snapshot = await getSpaceThreadTranscript(spaceRef, threadId)
     return { state: 'ok', threadId: snapshot.threadId, turns: snapshot.turns }
   } catch (error) {
-    if (error instanceof ApiError && error.status === 403) return { state: 'restricted' }
+    if (error instanceof ApiError && error.status === 403) {
+      return readSpaceDenial(error)
+        ? { state: 'restricted', denial: { code: error.code, details: error.details } }
+        : { state: 'restricted' }
+    }
     if (error instanceof ApiError && error.status === 404) return { state: 'missing' }
     return { state: 'error' }
   }

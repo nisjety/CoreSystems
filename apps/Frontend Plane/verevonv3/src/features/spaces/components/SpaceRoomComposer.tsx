@@ -507,12 +507,17 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
     await sent
   }
 
+  // The thread pane's composer is aimed at one thread for as long as the pane is open; the pane title
+  // already names that thread, so the box talks about "the conversation", not "the room".
+  const inThread = () => props.replyTargetFixed === true && props.replyTarget?.() !== undefined
+
   const slotContext: SpaceComposerSlotContext = {
     get spaceRef() { return props.spaceRef },
     orgId,
     mode: effectiveMode,
     setMode: setPickedMode,
     modes: offeredModes,
+    inThread,
     disabled: () => submitting() || blockedByApproval() || postBusy(),
     text,
     setText,
@@ -649,7 +654,7 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
       <SpaceConnectivityBanner />
 
       <form onSubmit={(event) => { event.preventDefault(); void submitMessage() }}>
-        <Show when={props.replyTarget?.()}>
+        <Show when={inThread() ? undefined : props.replyTarget?.()}>
           {(target) => (
             <p class="verevon-space-room-composer__reply">
               {i18n.tr('Svarer i', 'Replying in')} «{target().title}»
@@ -766,14 +771,24 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
                   'This conversation is waiting on an approval.',
                 )
               : humanPostsActive() && effectiveMode() === 'post'
-                ? i18n.tr(
-                    'Skriv til rommet. Meldingen din vises for alle uten at agenten svarer. @ nevner noen, / velger en ferdighet.',
-                    'Write to the room. Your message shows for everyone without the agent replying. @ mentions someone, / picks a skill.',
-                  )
-                : i18n.tr(
-                    'Skriv i rommet. @ nevner noen, / velger en ferdighet.',
-                    'Write in the room. @ mentions someone, / picks a skill.',
-                  )
+                ? inThread()
+                  ? i18n.tr(
+                      'Svar i samtalen. Agenten svarer ikke. @ nevner noen, / velger en ferdighet.',
+                      'Reply in the thread. The agent will not reply. @ mentions someone, / picks a skill.',
+                    )
+                  : i18n.tr(
+                      'Skriv til rommet. Agenten svarer ikke. @ nevner noen, / velger en ferdighet.',
+                      'Write to the room. The agent will not reply. @ mentions someone, / picks a skill.',
+                    )
+                : inThread()
+                  ? i18n.tr(
+                      'Svar i samtalen. @ nevner noen, / velger en ferdighet.',
+                      'Reply in the thread. @ mentions someone, / picks a skill.',
+                    )
+                  : i18n.tr(
+                      'Skriv i rommet. @ nevner noen, / velger en ferdighet.',
+                      'Write in the room. @ mentions someone, / picks a skill.',
+                    )
           }
           rows={2}
           disabled={submitting() || blockedByApproval() || postBusy() || roleBlocked()}

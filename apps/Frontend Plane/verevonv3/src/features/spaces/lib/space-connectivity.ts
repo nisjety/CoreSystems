@@ -1,5 +1,7 @@
 import { createSignal, untrack } from 'solid-js'
 
+import { spaceRoomFeatureWithDevOverride } from './space-room-features'
+
 /**
  * What the room's composer may honestly say about the connection (WS01-S8,
  * F-t1-033). Two facts feed it and neither is guessed:
@@ -67,27 +69,20 @@ export function watchBrowserConnectivity(): () => void {
 }
 
 /**
- * Build-time switch for the connectivity banner until the BFF delivers
- * `features.connectivity_banner` (WS01-S5). On in dev, off in production unless
- * `VITE_SPACE_CONNECTIVITY_BANNER_UI=true`; `=false` turns it off in dev too. A
- * rollout control only, never an authorization input.
+ * Whether the connectivity banner shows: the room's `features.connectivity_banner` from the
+ * context read (WS01-S5). `VITE_SPACE_CONNECTIVITY_BANNER_UI=true|false` is an explicit
+ * override in a dev build only. A rollout control, never an authorization input.
  */
 export function spaceConnectivityBannerEnabled(): boolean {
-  const flag = import.meta.env.VITE_SPACE_CONNECTIVITY_BANNER_UI
-  if (flag === 'true') return true
-  if (flag === 'false') return false
-  return import.meta.env.DEV === true
+  return spaceRoomFeatureWithDevOverride('connectivity_banner', import.meta.env.VITE_SPACE_CONNECTIVITY_BANNER_UI)
 }
 
 /**
- * Build-time switch for the send key on the agent path until the BFF delivers
- * `features.send_idempotency` (WS01-S5). Same rule as the banner switch, with
- * `VITE_SPACE_SEND_IDEMPOTENCY_API`. With it off a room send is byte-identical
- * to before: no `idempotency_key`, no `session_key`, no resume.
+ * Whether a room send on the agent path carries its key: the room's `features.send_idempotency`
+ * from the context read (WS01-S5). `VITE_SPACE_SEND_IDEMPOTENCY_API=true|false` is an explicit
+ * override in a dev build only. With it off a room send is byte-identical to before: no
+ * `idempotency_key`, no `session_key`, no resume.
  */
 export function spaceSendIdempotencyEnabled(): boolean {
-  const flag = import.meta.env.VITE_SPACE_SEND_IDEMPOTENCY_API
-  if (flag === 'true') return true
-  if (flag === 'false') return false
-  return import.meta.env.DEV === true
+  return spaceRoomFeatureWithDevOverride('send_idempotency', import.meta.env.VITE_SPACE_SEND_IDEMPOTENCY_API)
 }

@@ -6,6 +6,7 @@ import {
   spaceThreadHref,
   spaceThreadPaneEnabled,
 } from './space-thread-deep-link'
+import { clearSpaceRoomFeatures, publishSpaceRoomFeatures } from './space-room-features'
 
 afterEach(() => {
   vi.unstubAllEnvs()
@@ -76,10 +77,20 @@ describe('spaceThreadHref (WS01-S7a)', () => {
 })
 
 describe('spaceThreadPaneEnabled', () => {
-  it('follows the build flag, with the explicit values winning over dev', () => {
+  afterEach(() => clearSpaceRoomFeatures())
+
+  it('follows the dev override, with the explicit values winning over the room', () => {
     vi.stubEnv('VITE_SPACE_THREAD_PANE_UI', 'true')
     expect(spaceThreadPaneEnabled()).toBe(true)
     vi.stubEnv('VITE_SPACE_THREAD_PANE_UI', 'false')
+    publishSpaceRoomFeatures({ thread_pane: true })
     expect(spaceThreadPaneEnabled()).toBe(false)
+  })
+
+  it('follows features.thread_pane when there is no override', () => {
+    vi.stubEnv('VITE_SPACE_THREAD_PANE_UI', '')
+    expect(spaceThreadPaneEnabled()).toBe(false)
+    publishSpaceRoomFeatures({ thread_pane: true })
+    expect(spaceThreadPaneEnabled()).toBe(true)
   })
 })

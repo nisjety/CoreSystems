@@ -17,6 +17,8 @@
  */
 import type { ChatArtifact } from '@/features/chat/components/chat-types'
 
+import { spaceRoomFeatureWithDevOverride } from './space-room-features'
+
 /** Exactly the kinds Model Plane persists for a turn. */
 export const ROOM_ARTIFACT_KINDS = ['document', 'code', 'html'] as const
 export type RoomArtifactKind = (typeof ROOM_ARTIFACT_KINDS)[number]
@@ -71,14 +73,10 @@ export function roomArtifactFromEvent(event: {
 }
 
 /**
- * Build-time switch for the room artifact surfaces until the BFF delivers
- * `features.room_artifacts` (WS07-S9). On in dev, off in production unless
- * `VITE_SPACE_ROOM_ARTIFACTS_UI=true`; `=false` turns it off in dev too. A
- * rollout control only, never an authorization input.
+ * Whether the room artifact surfaces show: the room's `features.room_artifacts` from the
+ * context read (WS07-S9). `VITE_SPACE_ROOM_ARTIFACTS_UI=true|false` is an explicit override in a
+ * dev build only. A rollout control, never an authorization input.
  */
 export function roomArtifactsEnabled(): boolean {
-  const flag = import.meta.env.VITE_SPACE_ROOM_ARTIFACTS_UI
-  if (flag === 'true') return true
-  if (flag === 'false') return false
-  return import.meta.env.DEV === true
+  return spaceRoomFeatureWithDevOverride('room_artifacts', import.meta.env.VITE_SPACE_ROOM_ARTIFACTS_UI)
 }

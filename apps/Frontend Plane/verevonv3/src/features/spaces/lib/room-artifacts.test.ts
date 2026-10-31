@@ -8,6 +8,7 @@ import {
   roomArtifactsEnabled,
   roomArtifactsFromMetadata,
 } from './room-artifacts'
+import { clearSpaceRoomFeatures, publishSpaceRoomFeatures } from './space-room-features'
 
 afterEach(() => {
   vi.unstubAllEnvs()
@@ -131,23 +132,28 @@ describe('roomArtifactFromEvent (WS07-S11)', () => {
 })
 
 describe('roomArtifactsEnabled (WS07-S11)', () => {
-  it('is on when the env override is "true", even outside dev', () => {
+  afterEach(() => clearSpaceRoomFeatures())
+
+  it('is on when the dev override is "true", whatever the room says', () => {
     vi.stubEnv('VITE_SPACE_ROOM_ARTIFACTS_UI', 'true')
-    vi.stubEnv('DEV', false)
+    vi.stubEnv('DEV', true)
     expect(roomArtifactsEnabled()).toBe(true)
   })
 
-  it('is off when the env override is "false", even in dev', () => {
+  it('is off when the dev override is "false", even if the room says on', () => {
+    publishSpaceRoomFeatures({ room_artifacts: true })
     vi.stubEnv('VITE_SPACE_ROOM_ARTIFACTS_UI', 'false')
     vi.stubEnv('DEV', true)
     expect(roomArtifactsEnabled()).toBe(false)
   })
 
-  it('follows DEV when there is no override: off in production, on in dev', () => {
+  it('follows features.room_artifacts when there is no override, and ignores the override in production', () => {
     vi.stubEnv('VITE_SPACE_ROOM_ARTIFACTS_UI', '')
-    vi.stubEnv('DEV', false)
     expect(roomArtifactsEnabled()).toBe(false)
-    vi.stubEnv('DEV', true)
+    publishSpaceRoomFeatures({ room_artifacts: true })
+    expect(roomArtifactsEnabled()).toBe(true)
+    vi.stubEnv('VITE_SPACE_ROOM_ARTIFACTS_UI', 'false')
+    vi.stubEnv('DEV', false)
     expect(roomArtifactsEnabled()).toBe(true)
   })
 })

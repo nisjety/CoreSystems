@@ -82,6 +82,8 @@ export interface SpaceComposerSlotContext {
   readonly setMode: (id: SpaceComposerModeId) => void
   /** The modes the composer offers right now (a subset of the registry; one means no switch is shown). */
   readonly modes: () => readonly SpaceComposerModeEntry[]
+  /** The box is aimed at one thread (the thread pane's composer), not at the room. Absent means the room. */
+  readonly inThread?: () => boolean
   /** A send is in flight, or the thread is gated; entries disable themselves. */
   readonly disabled: () => boolean
   readonly text: () => string

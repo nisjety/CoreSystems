@@ -11,6 +11,7 @@ import {
   type ChatErrorEvent,
   type ChatStreamHandlers,
 } from '@/shared/api/chat-client'
+import { ApiError } from '@/shared/api/http'
 import { OPENAI_CODEX_SUBSCRIPTION_PROVIDER } from '@/shared/api/chatgpt-subscription-client'
 import type { Skill } from '@/shared/api/skills-client'
 import { updateSpaceThreadPresentation } from '@/shared/api/spaces-client'
@@ -40,23 +41,58 @@ import {
  *   that is acceptance, not an error, and the room's projection shows the run.
  *
  * The id matches the `client_send_id` shape the human-post routes take
- * (`^[A-Za-z0-9_-]{16,64}$`), so one id can name a send on either path.
+ * (`^[A-Za-z0-9][A-Za-z0-9_-]{15,63}$`), so one id can name a send on either path.
  */
 const MAX_RESUMES = 3
 const RESUME_BACKOFF_MS = [1000, 2000, 4000]
 
-/** The stable name of one send: 32 hex characters, no dashes. */
+/**
+ * The stable name of one send: 32 hex characters, no dashes. Whatever the source produced, the
+ * result always matches the server's send-id shape (`^[A-Za-z0-9][A-Za-z0-9_-]{15,63}$`), which
+ * requires an alphanumeric first character and 16 to 64 characters in all.
+ */
 export function newSpaceSendId(): string {
+  let raw: string
   try {
-    return crypto.randomUUID().replace(/-/g, '')
+    raw = crypto.randomUUID().replace(/-/g, '')
   } catch {
-    return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 14)}${Math.random().toString(36).slice(2, 14)}`.padEnd(16, '0')
+    raw = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 14)}${Math.random().toString(36).slice(2, 14)}`
   }
+  return toSendIdShape(raw)
+}
+
+/** Forces a candidate into the send-id shape: allowed characters only, alphanumeric first, 16 to 64 long. */
+function toSendIdShape(candidate: string): string {
+  const id = candidate.replace(/[^A-Za-z0-9_-]/g, '').replace(/^[_-]+/, '').slice(0, 64)
+  return id.padEnd(16, '0')
 }
 
 /** The session key of a send that opens a new thread. */
 export function spaceSendSessionKey(sendId: string): string {
   return `space-post-${sendId}`
+}
+
+/**
+ * What a thrown failure (thread create, a refused request before any stream) shows. An `ApiError`
+ * goes through the same describer as a streamed error event, so a typed Space denial reads as the
+ * presenter's copy and next step there too, not as the gateway's English text.
+ */
+function thrownFailure(
+  error: unknown,
+  describeError: (event: ChatErrorEvent) => string,
+): { errorCode?: string; errorMessage: string } {
+  if (error instanceof ApiError) {
+    return {
+      ...(error.code ? { errorCode: error.code } : {}),
+      errorMessage: describeError({
+        code: error.code ?? 'request_failed',
+        message: error.message,
+        ...(error.feature ? { feature: error.feature } : {}),
+        ...(error.details ? { details: error.details } : {}),
+      }),
+    }
+  }
+  return { errorMessage: error instanceof Error ? error.message : String(error) }
 }
 
 function waitOrAbort(ms: number, signal: AbortSignal): Promise<void> {
@@ -424,7 +460,7 @@ export function createSpaceSendPipeline(options: SpaceSendPipelineOptions): Spac
       // An abort we caused is not a failure. Anything else still is.
       if (!(error instanceof DOMException && error.name === 'AbortError') && !controller.signal.aborted) {
         setExchange((current) => current && current.status === 'streaming'
-          ? { ...current, status: 'error', errorMessage: error instanceof Error ? error.message : String(error) }
+          ? { ...current, status: 'error', ...thrownFailure(error, options.describeError) }
           : current)
       }
     } finally {

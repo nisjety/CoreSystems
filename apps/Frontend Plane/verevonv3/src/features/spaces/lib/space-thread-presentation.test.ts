@@ -7,7 +7,10 @@ import {
   ACTIVE_RUN_STATUSES,
   AWAITING_APPROVAL_RUN_STATUS,
   LIVE_RUN_STATUSES,
+  TURN_GROUP_WINDOW_MS,
+  continuesTurnGroup,
   formatRelativeWhen,
+  formatTurnTime,
   threadStatus,
 } from './space-thread-presentation'
 
@@ -97,5 +100,70 @@ describe('formatRelativeWhen (reply summary)', () => {
     expect(formatRelativeWhen(undefined, now)).toBe('')
     expect(formatRelativeWhen('', now)).toBe('')
     expect(formatRelativeWhen('not a date', now)).toBe('')
+  })
+})
+
+describe('formatTurnTime', () => {
+  // Built from local components so the expectation holds in any time zone.
+  const local = new Date(2026, 9, 31, 14, 32, 5)
+
+  it('gives a short HH:MM, the full date and time, and the ISO instant', () => {
+    const shown = formatTurnTime(local.toISOString())
+    expect(shown?.short).toBe('14:32')
+    expect(shown?.iso).toBe(local.toISOString())
+    expect(shown?.full).toMatch(/2026/)
+    expect(shown?.full).toMatch(/14:32/)
+  })
+
+  it('shows nothing, rather than an invented time, when there is none or it is unreadable', () => {
+    expect(formatTurnTime(undefined)).toBeUndefined()
+    expect(formatTurnTime('')).toBeUndefined()
+    expect(formatTurnTime('not a time')).toBeUndefined()
+  })
+})
+
+describe('continuesTurnGroup', () => {
+  const at = (minutes: number, seconds = 0) => new Date(Date.UTC(2026, 9, 31, 9, minutes, seconds)).toISOString()
+  const human = (id: string | undefined, createdAt: string | undefined) => ({
+    role: 'user' as const,
+    authorSubjectId: id,
+    createdAt,
+  })
+  const agent = (name: string | undefined, createdAt: string | undefined) => ({
+    role: 'assistant' as const,
+    agentName: name,
+    createdAt,
+  })
+
+  it('groups the same member within five minutes, and not past it', () => {
+    expect(continuesTurnGroup(human('u1', at(0)), human('u1', at(2)), 'Verevon')).toBe(true)
+    expect(continuesTurnGroup(human('u1', at(0)), human('u1', at(5)), 'Verevon')).toBe(true)
+    expect(continuesTurnGroup(human('u1', at(0)), human('u1', at(5, 1)), 'Verevon')).toBe(false)
+    expect(TURN_GROUP_WINDOW_MS).toBe(300_000)
+  })
+
+  it('starts a new group for a different member or an unattributed turn', () => {
+    expect(continuesTurnGroup(human('u1', at(0)), human('u2', at(1)), 'Verevon')).toBe(false)
+    expect(continuesTurnGroup(human(undefined, at(0)), human(undefined, at(1)), 'Verevon')).toBe(false)
+    expect(continuesTurnGroup(human('u1', at(0)), human(undefined, at(1)), 'Verevon')).toBe(false)
+  })
+
+  it('groups the same agent persona, using the room name for an unrecorded one', () => {
+    expect(continuesTurnGroup(agent('Lagerhjelpen', at(0)), agent('Lagerhjelpen', at(1)), 'Verevon')).toBe(true)
+    expect(continuesTurnGroup(agent(undefined, at(0)), agent(undefined, at(1)), 'Verevon')).toBe(true)
+    expect(continuesTurnGroup(agent(undefined, at(0)), agent('Verevon', at(1)), 'Verevon')).toBe(true)
+    expect(continuesTurnGroup(agent('Lagerhjelpen', at(0)), agent('Innkjøp', at(1)), 'Verevon')).toBe(false)
+  })
+
+  it('never groups an agent with a member', () => {
+    expect(continuesTurnGroup(human('u1', at(0)), agent('Verevon', at(1)), 'Verevon')).toBe(false)
+    expect(continuesTurnGroup(agent('Verevon', at(0)), human('u1', at(1)), 'Verevon')).toBe(false)
+  })
+
+  it('does not group what it cannot prove: a missing or backwards time, or the first turn', () => {
+    expect(continuesTurnGroup(undefined, human('u1', at(1)), 'Verevon')).toBe(false)
+    expect(continuesTurnGroup(human('u1', undefined), human('u1', at(1)), 'Verevon')).toBe(false)
+    expect(continuesTurnGroup(human('u1', at(0)), human('u1', undefined), 'Verevon')).toBe(false)
+    expect(continuesTurnGroup(human('u1', at(3)), human('u1', at(1)), 'Verevon')).toBe(false)
   })
 })

@@ -15,8 +15,8 @@ import { SpaceApprovalPanel } from './SpaceApprovalPanel'
 import { agentAvatarColor, agentForName } from '../lib/agent-avatar'
 import { agentCardModel, memberCardModel } from '../lib/agent-activity'
 import type { IdentityCardModel } from '../lib/agent-activity'
-import { PostTurnHeader, SpaceTurnList, initials, normalizeTranscriptTurns, resolveAuthorName } from './sidepane/SpaceTurnList'
-import type { TranscriptTurn } from './sidepane/SpaceTurnList'
+import { MemberAvatar, PostTurnHeader, SpaceTurnList, normalizeTranscriptTurns, resolveAuthorName } from './sidepane/SpaceTurnList'
+import type { PostHeadMeta, PostStatus, TranscriptTurn } from './sidepane/SpaceTurnList'
 import { SpaceRestrictedNotice } from './SpaceRestrictedNotice'
 import { SpacePendingNewPost, SpacePendingReplies } from './SpacePendingPost'
 import type { SpaceJournalEntry } from '../lib/space-send-journal'
@@ -25,6 +25,7 @@ import { SpaceArtifactSheet } from './SpaceArtifactSheet'
 import { roomItems } from '@/features/spaces/lib/room-artifact-items'
 import { roomArtifactsEnabled } from '@/features/spaces/lib/room-artifacts'
 import type { ChatArtifact } from '@/features/chat/components/chat-types'
+import { presentSpaceDenialText, isSpaceDenial } from '@/shared/api/space-denials'
 import { loadSpaceTranscript, updateSpaceThreadPresentation } from '@/shared/api/spaces-client'
 import type { SpaceAgent, SpaceRosterMember, SpaceThread } from '@/shared/api/spaces-client'
 import { useI18n } from '@/shared/i18n'
@@ -83,6 +84,8 @@ export interface SpaceRoomTimelineProps {
   /** When provided, every post offers "Open thread" — the read-only side pane
    * bound to `?thread_id=`. Absent while the pane is switched off. */
   readonly onOpenThread?: (thread: SpaceThread) => void
+  /** The thread open in the side pane, so its post stays marked while the pane is up. */
+  readonly openThreadId?: () => string | null | undefined
   /**
    * Whether this reader may read the room's other conversations (the listing's
    * `shared_read.available`). `false` shows one restricted notice above the
@@ -131,6 +134,13 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
   )
 
   const agentName = createMemo(() => roomAgentName(props.agents()))
+  // The "new messages" divider goes once, above the first post (oldest first) that is new since the
+  // reader arrived; the posts after it are new too, so one line says it for all of them.
+  const firstUnreadId = createMemo(() => {
+    const unread = props.unreadThreadIds?.()
+    if (!unread || unread.size === 0) return undefined
+    return orderedThreads().find((thread) => unread.has(thread.thread_id))?.thread_id
+  })
   const sharedRead = () => props.sharedReadAvailable?.() !== false
   const artifactsOn = roomArtifactsEnabled()
   const pendingNewPosts = () =>
@@ -157,6 +167,14 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
       <ol class="verevon-room-timeline" aria-label={i18n.tr('Samtaler i rommet', 'Room conversations')}>
         <For each={orderedThreads()}>
           {(thread) => (
+            <>
+            <Show when={firstUnreadId() === thread.thread_id}>
+              <li class="verevon-room-new-divider-item" role="presentation">
+                <div class="verevon-room-new-divider" role="separator" aria-label={i18n.tr('Nye meldinger', 'New messages')}>
+                  <span aria-hidden="true">{i18n.tr('Nye meldinger', 'New messages')}</span>
+                </div>
+              </li>
+            </Show>
             <SpaceRoomPost
               spaceRef={props.spaceRef}
               thread={thread}
@@ -169,6 +187,7 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
               artifactsOn={artifactsOn}
               liveArtifacts={props.liveArtifacts}
               unread={() => props.unreadThreadIds?.().has(thread.thread_id) === true}
+              open={() => props.openThreadId?.() === thread.thread_id}
               onPresentationChanged={props.onPresentationChanged}
               onReply={props.onReply}
               onOpenThread={props.onOpenThread}
@@ -176,6 +195,7 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
               pendingReplies={() => pendingRepliesFor(thread.thread_id)}
               collapse={() => props.collapseLongThreads?.() === true && props.onOpenThread !== undefined}
             />
+            </>
           )}
         </For>
         <For each={pendingNewPosts()}>{(entry) => <SpacePendingNewPost entry={entry} />}</For>
@@ -203,6 +223,8 @@ function SpaceRoomPost(props: {
   readonly onApprovalSettled?: () => void
   /** New since the reader arrived — see `SpaceRoomTimelineProps.unreadThreadIds`. */
   readonly unread?: () => boolean
+  /** This post's thread is the one open in the side pane. */
+  readonly open?: () => boolean
   readonly onPresentationChanged?: () => void
   readonly onOpenThread?: (thread: SpaceThread) => void
   /** This browser's own replies to this thread that the transcript does not show yet. */
@@ -226,9 +248,13 @@ function SpaceRoomPost(props: {
       // declined, a real answer), `missing` (404) and `error` (retryable) are
       // said out loud instead of being swallowed into the preview.
       const load = await loadSpaceTranscript(spaceRef, threadId)
-      return load.state === 'ok'
-        ? { state: 'ok' as const, turns: normalizeTranscriptTurns(load.turns as readonly unknown[] | undefined) }
-        : { state: load.state, turns: [] as readonly TranscriptTurn[] }
+      if (load.state === 'ok') {
+        return { state: 'ok' as const, turns: normalizeTranscriptTurns(load.turns as readonly unknown[] | undefined) }
+      }
+      // A 403 may carry a typed Space denial (why Control said no, and who can fix it). Kept so the
+      // post can say that, not only the generic "not shared with you".
+      const denial = load.state === 'restricted' ? load.denial : undefined
+      return { state: load.state, turns: [] as readonly TranscriptTurn[], denial }
     },
   )
   // With the artifact surfaces off an artifact-only turn has nothing to show,
@@ -253,6 +279,12 @@ function SpaceRoomPost(props: {
     props.artifactsOn ? roomItems([...turns(), { artifacts: pendingLive() }]) : [],
   )
   const readState = () => transcript()?.state
+  // The typed denial a 403 carried, when it carried one this build understands; else undefined and the
+  // thread notice speaks (shared reads off for the Space).
+  const typedDenial = (): unknown => {
+    const denial = (transcript() as { denial?: unknown } | undefined)?.denial
+    return isSpaceDenial(denial) ? denial : undefined
+  }
   // A thread with replies folds to its root message plus one summary row that opens the pane. The
   // count is what the pane will show (every turn after the root, agent answers included); until the
   // transcript has loaded the projection's `reply_count` stands in.
@@ -273,14 +305,14 @@ function SpaceRoomPost(props: {
   // the server recorded; an unnamed author is one participant, not one per turn.
   const replyParticipants = () => {
     const seen = new Set<string>()
-    const out: { key: string; agent: boolean; name: string }[] = []
+    const out: { key: string; agent: boolean; name: string; subjectId?: string }[] = []
     for (const turn of replyTurns()) {
       const agent = turn.role === 'assistant'
       const name = replyAuthorName(turn)
       const key = `${agent ? 'agent' : 'user'}\u0000${agent ? name : turn.authorSubjectId ?? ''}`
       if (seen.has(key)) continue
       seen.add(key)
-      out.push({ key, agent, name })
+      out.push({ key, agent, name, subjectId: turn.authorSubjectId })
     }
     return out
   }
@@ -342,6 +374,21 @@ function SpaceRoomPost(props: {
     props.thread.latest_run_status === AWAITING_APPROVAL_RUN_STATUS
     && Boolean(props.thread.latest_run_id?.trim())
   const when = () => props.thread.updated_at ?? props.thread.latest_run_updated_at
+  // The status and the date sit beside the author of the post's first row, where Slack and Teams put
+  // the time, not in a footer line. A finished post, or one with no run, says nothing visible (the
+  // quiet label below keeps it in the accessibility tree), and a working post says it on the agent's
+  // working row instead of on the first row.
+  const quiet = () => !props.thread.latest_run_status || props.thread.latest_run_status === 'completed'
+  const statusTone = (): PostStatus['tone'] => (isFailed() ? 'failed' : isWorking() ? 'active' : 'neutral')
+  const statusNow = (): PostStatus | undefined =>
+    quiet() ? undefined : { label: threadStatus(props.thread, i18n.tr), tone: statusTone() }
+  const headMeta = (): PostHeadMeta => {
+    const at = when()
+    return {
+      ...(at ? { dateLabel: formatWhen(at) } : {}),
+      ...(isWorking() ? {} : { status: statusNow() }),
+    }
+  }
   // Pinning is owner-bound in Session Core, so the control is offered only to
   // the member who started the post. Anyone else sees the pin, not the button:
   // a control that would be refused every time is a control that lies.
@@ -380,10 +427,13 @@ function SpaceRoomPost(props: {
       data-failed={isFailed() || undefined}
       data-pinned={props.thread.pinned === true ? 'true' : undefined}
       data-unread={props.unread?.() ? 'true' : undefined}
+      data-open={props.open?.() ? 'true' : undefined}
+      data-run-status={props.thread.latest_run_status ?? undefined}
     >
       {/* Pinned and new are facts about the post, stated before its content so
-          a reader scanning the room sees them first — the way Slack's pin and
-          "new" markers sit above a message rather than in its footer. */}
+          a reader scanning the room sees them first. "New" is drawn once for the whole room as the
+          divider line above the first new post; each new post keeps this label for assistive tech
+          only (the stylesheet hides it visually), so the fact is still stated per post. */}
       <Show when={props.thread.pinned === true || props.unread?.()}>
         <div class="verevon-room-post__flags">
           <Show when={props.thread.pinned === true}>
@@ -403,9 +453,14 @@ function SpaceRoomPost(props: {
         when={turns().length > 0}
         fallback={
           <div class="verevon-room-turn">
-            <span class="verevon-room-turn__avatar" aria-hidden="true">{initials(starterName())}</span>
+            <MemberAvatar name={starterName()} subjectId={props.thread.owner_subject_id} />
             <div class="verevon-room-turn__content">
-              <PostTurnHeader author={starterName()} card={starterCard()} />
+              <PostTurnHeader
+                author={starterName()}
+                card={starterCard()}
+                dateLabel={headMeta().dateLabel}
+                status={headMeta().status}
+              />
               <p class="verevon-room-turn__plain">
                 {(props.thread.preview && stripMarkdownPreview(props.thread.preview))
                   || props.thread.title?.trim()
@@ -414,7 +469,13 @@ function SpaceRoomPost(props: {
                     : i18n.tr('Samtalen har ikke noe lesbart innhold ennå.', 'This conversation has no readable content yet.'))}
               </p>
               <Show when={readState() === 'restricted'}>
-                <SpaceRestrictedNotice variant="thread" />
+                <Show when={typedDenial()} fallback={<SpaceRestrictedNotice variant="thread" />}>
+                  {(denial) => (
+                    <p class="verevon-space-inline-status" role="status" data-denial="typed">
+                      {presentSpaceDenialText(denial(), i18n.tr)}
+                    </p>
+                  )}
+                </Show>
               </Show>
               <Show when={readState() === 'missing'}>
                 <p class="verevon-space-inline-status" role="status">
@@ -442,6 +503,7 @@ function SpaceRoomPost(props: {
           threads={props.threads}
           threadId={props.thread.thread_id}
           onOpenArtifact={props.artifactsOn ? setOpenArtifactId : undefined}
+          headMeta={headMeta}
         />
       </Show>
 
@@ -461,7 +523,7 @@ function SpaceRoomPost(props: {
                 {(participant) => (
                   <Show
                     when={participant.agent}
-                    fallback={<span class="verevon-room-turn__avatar">{initials(participant.name)}</span>}
+                    fallback={<MemberAvatar name={participant.name} subjectId={participant.subjectId} />}
                   >
                     <AgentAvatar
                       kind="agent"
@@ -535,7 +597,7 @@ function SpaceRoomPost(props: {
             color={agentAvatarColor(agentForName(props.agents(), props.agentName))}
           />
           <div class="verevon-room-turn__content">
-            <PostTurnHeader author={props.agentName} isAgent card={workingCard()} />
+            <PostTurnHeader author={props.agentName} isAgent card={workingCard()} status={statusNow()} />
             <p class="verevon-room-turn__working">
               <span class="verevon-room-turn__working-dots" aria-hidden="true" />
               {props.thread.latest_run_status === 'queued'
@@ -547,22 +609,12 @@ function SpaceRoomPost(props: {
       </Show>
 
       <div class="verevon-room-post__meta">
-        <span
-          class={[
-            {
-              'verevon-space-status': true,
-              'verevon-space-status--failed': isFailed(),
-              // Defined in the sheet since the cockpit shipped and never
-              // applied by anything — a working post read in the same grey as
-              // a finished one.
-              'verevon-space-status--active': isWorking(),
-            },
-          ]}
-        >
-          {threadStatus(props.thread, i18n.tr)}
-        </span>
-        <Show when={when()}>
-          {(at) => <time>{formatWhen(at())}</time>}
+        {/* Only the finished (or run-less) post keeps its status here, hidden by the stylesheet but
+            read by assistive tech; any other status is said beside the author above. */}
+        <Show when={quiet()}>
+          <span class="verevon-space-status verevon-room-post__status-quiet">
+            {threadStatus(props.thread, i18n.tr)}
+          </span>
         </Show>
         <Show when={props.onReply}>
           {(reply) => (

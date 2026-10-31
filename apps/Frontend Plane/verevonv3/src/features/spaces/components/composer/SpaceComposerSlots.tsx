@@ -48,6 +48,11 @@ export function SkillScope(props: { readonly scope: Skill['scope'] }) {
  */
 function ModeSwitchEntry(props: { readonly ctx: SpaceComposerSlotContext }) {
   const i18n = useI18n()
+  // In the thread pane the first choice is a reply to that thread, not a post to the room.
+  const label = (mode: { readonly id: string; readonly labelNo: string; readonly labelEn: string }) =>
+    mode.id === 'post' && props.ctx.inThread?.() === true
+      ? i18n.tr('Svar i samtalen', 'Reply in thread')
+      : i18n.tr(mode.labelNo, mode.labelEn)
   return (
     <div
       class="verevon-space-room-composer__modes"
@@ -64,7 +69,7 @@ function ModeSwitchEntry(props: { readonly ctx: SpaceComposerSlotContext }) {
             disabled={props.ctx.disabled()}
             onClick={() => props.ctx.setMode(mode.id)}
           >
-            {i18n.tr(mode.labelNo, mode.labelEn)}
+            {label(mode)}
           </button>
         )}
       </For>
