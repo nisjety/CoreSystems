@@ -22,6 +22,8 @@
 //! send only known fields; the `quarry.scrape.unknown_field` log line shows who
 //! still does not.
 
+pub mod ai_formats;
+
 use std::sync::OnceLock;
 
 use axum::http::{HeaderName, HeaderValue};
@@ -150,6 +152,7 @@ impl ScrapeSettings {
             default_inline_bytes: self.inline_max_bytes,
             captures_enabled: crate::scrape_actions::capture_mode().enabled(),
             actions_enabled: crate::scrape_actions::actions_mode().enabled(),
+            ai_formats_enabled: ai_formats::enabled(),
             ..ScrapeLimits::default()
         }
     }

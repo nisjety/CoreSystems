@@ -93,6 +93,9 @@ services:
       # Read only when the explicit cross-plane development bypass is enabled.
       QUARRY_EDGE__DATA_PLANE_SERVICE_TOKEN: ${DATA_PLANE_SERVICE_TOKEN:-}
       QUARRY_EDGE__MODEL_PLANE_TOKEN: ${MODEL_PLANE_TOKEN:-}
+      # Development bypass only: the second token of the chat lane (aud inference-core), read by
+      # the AI formats of POST /v1/scrape. Unset, the one token above goes in both headers.
+      QUARRY_EDGE__MODEL_PLANE_INFERENCE_TOKEN: ${MODEL_PLANE_INFERENCE_TOKEN:-}
       # Model Plane gateway, opt-in: empty (the default) keeps it off, and quarry-edge reads
       # an empty value as unset. Set MODEL_PLANE_URL, with QUARRY_SERVICE_API_KEY, to opt in.
       QUARRY_EDGE__MODEL_PLANE_URL: ${MODEL_PLANE_URL:-}
@@ -101,6 +104,11 @@ services:
       QUARRY_EDGE__SEMANTIC_RERANK: "${QUARRY_EDGE_SEMANTIC_RERANK:-0}"
       QUARRY_EDGE__LLM_CLASSIFY_INTENT: "${QUARRY_EDGE_LLM_CLASSIFY_INTENT:-0}"
       QUARRY_EDGE__PAGE_TITLE_ENRICH: "${QUARRY_EDGE_PAGE_TITLE_ENRICH:-0}"
+      # AI formats of POST /v1/scrape (json, summary, question, highlights; INNH-1): off. Needs
+      # MODEL_PLANE_URL and, today, the development credential above; a deployed stack has no
+      # Model Plane credential for this lane yet (decision X-7). Refused under ZDR (ADR-4).
+      QUARRY_EDGE__AI_FORMATS: "${QUARRY_EDGE_AI_FORMATS:-0}"
+      QUARRY_EDGE__AI_FORMATS_ZDR: ${QUARRY_EDGE_AI_FORMATS_ZDR:-refuse}
       # ADR-6 (owner ruling 2026-10-28): scrape-time actions default off; see the Ingestion compose.
       QUARRY_EDGE__SCRAPE_ACTIONS: "${QUARRY_EDGE_SCRAPE_ACTIONS:-off}"
       # SmartRouter web-search primary. Quarry-v2 owns its searxng (defined

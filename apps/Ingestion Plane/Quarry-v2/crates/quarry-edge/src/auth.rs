@@ -222,6 +222,13 @@ pub struct WebPolicyClaim {
 /// `scrape:write` for ingest; a user token does not need it.
 pub const SCOPE_SCRAPE_INTERACT: &str = "scrape:interact";
 
+/// INNH-1: the scope a service principal needs to send AI formats (`json`,
+/// `summary`, `question`, `highlights`) on `POST /v1/scrape`. They spend model
+/// money, so a service gets them only by name. The check lives in the scrape
+/// handler (`scrape_contract::ai_formats::check_principal`); a user token needs
+/// no scope.
+pub const SCOPE_EXTRACT_AI: &str = "extract:ai";
+
 pub const WEB_POLICY_CLAIM_VERSION: u64 = 1;
 
 /// The top-level fields of a version 1 claim. Anything else is an unknown key.

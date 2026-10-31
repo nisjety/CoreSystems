@@ -203,6 +203,35 @@ fn every_test_a_row_cites_exists() {
     assert!(missing.is_empty(), "tests the matrix cites that do not exist:\n  {}", missing.join("\n  "));
 }
 
+/// INNH-1 U3: the AI formats of `/v1/scrape` are refused under ZDR (ADR-4), and the
+/// matrix says so with the tests that fail if that stops being true. The model call
+/// is the one place page text would leave the process for a third party, so the
+/// scrape rows pin it by name.
+#[test]
+fn the_scrape_rows_pin_the_ai_format_zdr_refusal() {
+    let row = |id: &str| ROWS.iter().find(|row| row.id == id).unwrap_or_else(|| panic!("no `{id}` row"));
+
+    let scrape = row("scrape");
+    for needle in ["json, summary, question, highlights", "ZDR_UNAVAILABLE", "no Model Plane call", "ADR-4"] {
+        assert!(scrape.basis.contains(needle), "the scrape basis no longer says `{needle}`");
+    }
+    for test in [
+        "ai_formats::zdr_skips_every_format_with_no_model_call_and_stores_nothing",
+        "ai_formats_real_token::a_zdr_org_user_gets_every_format_skipped_even_when_the_body_says_zdr_false",
+    ] {
+        assert!(scrape.enforced_by.contains(&test), "the scrape row does not cite {test}");
+    }
+
+    let stream = row("scrape_stream");
+    assert!(stream.basis.contains("unsupported_in_stream"), "the stream basis no longer says it refuses AI formats");
+    assert!(
+        stream
+            .enforced_by
+            .contains(&"ai_formats::the_stream_route_refuses_ai_formats_before_any_fetch"),
+        "the stream row does not cite the stream refusal test"
+    );
+}
+
 #[test]
 fn every_enforced_honouring_row_cites_a_test_or_says_why_it_cannot() {
     use quarry_core::zdr_matrix::{Status, Treatment};

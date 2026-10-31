@@ -272,16 +272,32 @@ pub fn run_timeout_details(has_actions: bool, deadline_ms: u64) -> serde_json::V
     }
 }
 
+/// The router's deadline for a request. `POST /v1/scrape` gets 125 s while
+/// actions are on (WS13.5) or the AI formats are on (INNH-1: the fetch keeps its
+/// own cap and the model phase has 45 s of its own, so 60 s would cut an AI
+/// request); everything else keeps 60 s.
+pub fn route_deadline(
+    scrape_route: bool,
+    actions_enabled: bool,
+    ai_formats_enabled: bool,
+) -> std::time::Duration {
+    if scrape_route && (actions_enabled || ai_formats_enabled) {
+        ACTIONS_ROUTE_DEADLINE
+    } else {
+        DEFAULT_ROUTE_DEADLINE
+    }
+}
+
 /// WS13.5: the router's deadline, path-aware. `POST /v1/scrape` gets 125 s while
 /// actions are on, so the handler's 115 s bound answers first; every other route
 /// keeps its 60 s. The refusal is the empty 408 that `TimeoutLayer` gives.
 pub async fn path_deadline(request: Request, next: Next) -> Response {
     let actions_route = request.method() == Method::POST && request.uri().path() == "/v1/scrape";
-    let limit = if actions_route && actions_mode().enabled() {
-        ACTIONS_ROUTE_DEADLINE
-    } else {
-        DEFAULT_ROUTE_DEADLINE
-    };
+    let limit = route_deadline(
+        actions_route,
+        actions_mode().enabled(),
+        crate::scrape_contract::ai_formats::enabled(),
+    );
     match tokio::time::timeout(limit, next.run(request)).await {
         Ok(response) => response,
         Err(_) => StatusCode::REQUEST_TIMEOUT.into_response(),
@@ -341,6 +357,19 @@ mod actions_tests {
         let details = run_timeout_details(true, 115_000);
         assert_eq!(details["reason"], "actions_deadline");
         assert!(run_timeout_details(false, 55_000).get("reason").is_none());
+    }
+
+    #[test]
+    fn the_scrape_route_gets_125_seconds_when_actions_or_ai_formats_are_on() {
+        let secs = |scrape, actions, ai| route_deadline(scrape, actions, ai).as_secs();
+        assert_eq!(secs(true, false, false), 60, "both off: unchanged");
+        assert_eq!(secs(true, true, false), 125);
+        assert_eq!(secs(true, false, true), 125, "INNH-1: the AI phase needs the room");
+        assert_eq!(secs(true, true, true), 125);
+        assert_eq!(secs(false, true, true), 60, "no other route is lengthened");
+        assert_eq!(secs(false, false, false), 60);
+        // 55 s fetch cap + 45 s model phase fits under the router's deadline.
+        assert!(55 + quarry_runtime::ai_scrape::DEFAULT_PHASE_DEADLINE.as_secs() < 125);
     }
 }
 

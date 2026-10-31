@@ -93,6 +93,8 @@ to the three Quarry services.
 | `QUARRY_CROSS_PLANE_AUTH_DEV_BYPASS` | `0` | Explicit local-only legacy static-token escape hatch; production refuses it |
 | `MODEL_PLANE_URL` | (unset: opt-in) | Model Plane gateway URL. Unset keeps every Model Plane feature off (answer synthesis, AI formats, audio, search suggest, autoprompt, rerank, intent, page titles). Set it together with `QUARRY_SERVICE_API_KEY`. |
 | `QUARRY_EDGE_AUTOPROMPT`, `QUARRY_EDGE_SEMANTIC_RERANK`, `QUARRY_EDGE_LLM_CLASSIFY_INTENT`, `QUARRY_EDGE_PAGE_TITLE_ENRICH` | `0` | Model Plane switches (decision 3.12 of 2026-10-27). Each one also needs `MODEL_PLANE_URL`. |
+| `QUARRY_EDGE_AI_FORMATS` | `0` | AI formats of `POST /v1/scrape` (`json`, `summary`, `question`, `highlights`; INNH-1). `on`, `1` or `true` enables; anything else is off. Needs `MODEL_PLANE_URL` and, today, the development credential `MODEL_PLANE_TOKEN` (and optionally `MODEL_PLANE_INFERENCE_TOKEN`); a deployed stack has no Model Plane credential for this lane yet (decision X-7). Refused under ZDR. See `docs/RUNBOOKS.md`, "Scrape AI formats". |
+| `QUARRY_EDGE_AI_FORMATS_ZDR` | `refuse` | Only `refuse` takes effect in v1 (ADR-4); `allow` is reserved and ignored. |
 | `QUARRY_EDGE_SCRAPE_ACTIONS` | `off` | Scrape-time actions (ADR-6): `off`, `user` (dev and evidence stacks only) or `on` (gated; see `docs/RUNBOOKS.md`). |
 | `QUARRY_EDGE__BROWSER_GRANT_VALIDATOR_GRPC_URL` | (unset) | BrowserBroker gRPC endpoint for grant validation (`http://browser-broker:9095` on inter-plane-bus). Needs the `grpc` feature. (Corrected 2026-10-16: the old name `BROWSER_BROKER_GRPC` was never read by any code.) |
 | `BROWSERLESS_URL` / `BROWSERLESS_TOKEN` | (unset) | Browserless cloud browser |

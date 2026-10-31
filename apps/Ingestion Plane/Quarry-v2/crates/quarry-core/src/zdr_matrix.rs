@@ -80,6 +80,8 @@ pub const ROWS: &[Row] = &[
             "zdr_claim_floor::scrape_runs_as_zdr_for_a_zdr_org_user_and_not_for_a_registry_zdr_service",
             "zdr_log_capture::scrape_meter_metadata_under_zdr_has_no_url_or_fingerprint",
             "routes::tests::a_zdr_scrape_has_no_scrape_id_and_stores_no_artifact",
+            "ai_formats::zdr_skips_every_format_with_no_model_call_and_stores_nothing",
+            "ai_formats_real_token::a_zdr_org_user_gets_every_format_skipped_even_when_the_body_says_zdr_false",
         ],
         basis: "no artifact, page-cache entry, scrape record or durable event; the text comes back in the response (default format markdown), cut at max_inline_bytes. The AI formats (json, summary, question, highlights; INNH-1, dark behind QUARRY_EDGE__AI_FORMATS) are refused under ZDR (ADR-4): each is answered status skipped, code ZDR_UNAVAILABLE inside the 200, with no Model Plane call, so no page text leaves for a model; QUARRY_EDGE__AI_FORMATS_ZDR accepts only refuse in v1 and the engine refuses a ZDR input as well",
         log: Log::Canary {
@@ -93,6 +95,7 @@ pub const ROWS: &[Row] = &[
         status: Status::Enforced,
         enforced_by: &[
             "zdr_claim_floor::scrape_stream_runs_as_zdr_for_a_zdr_org_user_and_not_for_a_registry_zdr_service",
+            "ai_formats::the_stream_route_refuses_ai_formats_before_any_fetch",
         ],
         basis: "the run's posture is the request flag raised by the token floor; page events go to live subscribers only. The AI formats are not served on the stream at all (400 unsupported_in_stream, INNH-1), so no model call can happen on this route",
         log: Log::Canary {

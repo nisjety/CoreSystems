@@ -613,6 +613,34 @@ async fn scrape_with(
             ));
         }
     }
+    // INNH-1: AI formats (json, summary, question, highlights). The flag is already
+    // on when any is present (the resolve above refused them otherwise). Who may ask
+    // and whether a model can be reached are decided here, before the page is
+    // fetched: a refused request spends no fetch. Under ZDR the model is never
+    // reached, so its availability is not asked.
+    let ai_specs: Vec<quarry_core::ai_spec::AiSpec> =
+        resolved.ai_specs().into_iter().cloned().collect();
+    if !ai_specs.is_empty() {
+        let refusal = crate::scrape_contract::ai_formats::check_principal(
+            &claims,
+            req.initiated_by.as_deref(),
+            crate::scrape_contract::ai_formats::first_ai_index(parsed.value.get("formats")),
+        )
+        .and_then(|()| {
+            if zdr.is_active() {
+                Ok(())
+            } else {
+                crate::scrape_contract::ai_formats::availability(&state)
+            }
+        });
+        if let Err(error) = refusal {
+            return Err((
+                StatusCode::from_u16(error.code.http_status())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(Envelope::<()>::err(&request_id, error)).into_response(),
+            ));
+        }
+    }
     let privacy = effective_privacy(req.privacy.clone(), zdr);
     // Tenant isolation: ignore any client-supplied org_id and use the
     // verified JWT claim. The `ScrapeRequest.org_id` field is preserved
@@ -767,8 +795,10 @@ async fn scrape_with(
             remove_base64_images: resolved.remove_base64_images,
             extractor: resolved.extractor,
         },
-        // U3 sets this when the request carries AI formats.
-        ai_source_max_chars: None,
+        // INNH-1: the page text the AI formats read, cut to the model's input cap.
+        // Asked for only when the request carries an AI format.
+        ai_source_max_chars: (!ai_specs.is_empty())
+            .then(|| crate::scrape_contract::ai_formats::settings().max_input_chars),
     };
     let tombstone_started = chrono::Utc::now();
     // The caller's bound, never past the table's cap, so the typed Timeout
@@ -836,6 +866,24 @@ async fn scrape_with(
                     scrape_usage_metadata(&state.usage, &claims, &out, zdr, &privacy),
                 ))
                 .await;
+            // INNH-1: the AI formats read the page text and answer inline only. The
+            // result is never stored: not in the scrape record below, not in the
+            // cache (these requests never touch it), not in an artifact or event.
+            // A model failure leaves the scrape a 200 with the failure in `ai`.
+            let (ai_fields, ai_report) = if ai_specs.is_empty() {
+                (quarry_runtime::ai_scrape::AiFields::default(), None)
+            } else {
+                let (fields, report) = crate::scrape_contract::ai_formats::run_ai_formats(
+                    &state,
+                    &org_id,
+                    &ai_specs,
+                    inline.ai_source.as_deref().unwrap_or(""),
+                    zdr.is_active(),
+                    &request_id,
+                )
+                .await;
+                (fields, Some(report))
+            };
             let mut warnings = unknown_warnings;
             warnings.extend(inline.warnings);
             let effective_options = effective(cache_state);
@@ -882,12 +930,11 @@ async fn scrape_with(
                 pdf: inline.pdf,
                 captures: inline.captures,
                 actions: inline.actions,
-                // INNH-1 U3 fills these; until then no AI format reaches here.
-                json: None,
-                summary: None,
-                answer: None,
-                highlights: None,
-                ai: None,
+                json: ai_fields.json,
+                summary: ai_fields.summary,
+                answer: ai_fields.answer,
+                highlights: ai_fields.highlights,
+                ai: ai_report,
             }))
         }
         Err(err) => {
@@ -1863,6 +1910,17 @@ async fn scrape_stream(
             let error = QuarryError::new(
                 ErrorCode::BadRequest,
                 "screenshot and pdf formats are not served on the stream route",
+            )
+            .with_details(serde_json::json!({ "reason": "unsupported_in_stream" }));
+            yield Ok(Event::default().event("error").data(serde_json::to_string(&error).unwrap_or_default()));
+            return;
+        }
+        // INNH-1: the stream serves no AI formats. Refused whatever the switch says,
+        // before any fetch, so a caller learns it is the route and not the flag.
+        if crate::scrape_contract::ai_formats::requests_ai_format(req.formats.as_ref()) {
+            let error = QuarryError::new(
+                ErrorCode::BadRequest,
+                "AI formats are not served on the stream route",
             )
             .with_details(serde_json::json!({ "reason": "unsupported_in_stream" }));
             yield Ok(Event::default().event("error").data(serde_json::to_string(&error).unwrap_or_default()));

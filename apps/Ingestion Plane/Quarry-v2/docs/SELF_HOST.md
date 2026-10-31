@@ -95,6 +95,20 @@ When a scrape request includes `"ingest": true` and an `org_id`, Quarry posts to
 
 Every model-gateway call a Quarry feature makes (intent classification, autoprompt, the semantic reranker, page titles, AI formats and answer synthesis through `model-invoke`; streamed answers and AI formats through `model-stream`; audio through `model-audio`) is a row of `crates/quarry-runtime/contracts/cross-plane-token-requests.json`, and every such row is `granted: false` (QB-T17). The registry gives quarry-edge no model-gateway audience, and the gateway's `authorize_principal_route` (`apps/Model Plane/rust/services/model-gateway/src/auth.rs`) refuses service principals on `/v1/invoke` and `/v1/invoke/stream`. Flipping a row's `granted` alone therefore does not open a Model Plane path: each call is refused and its feature degrades. The org-bound model lane is not built (build plan, WS16).
 
+**Scrape AI formats (`json`, `summary`, `question`, `highlights`; INNH-1).** `POST /v1/scrape` can answer these inline from the page text through the Model Plane gateway's `POST /v1/ai/chat`. They are off: `QUARRY_EDGE__AI_FORMATS` must be `on`, `1` or `true` (anything else is off), and the committed composes default it to `0`. This is the E1 path, for a development or side-by-side stack only:
+
+| Env | Default | Notes |
+|-----|---------|-------|
+| `QUARRY_EDGE__AI_FORMATS` | off | The switch. Off, every AI format is `400 feature_disabled` at its index. |
+| `QUARRY_EDGE__MODEL_PLANE_URL` | unset | Required. Unset with the switch on: `501 model_plane_unavailable`, decided before the page is fetched. |
+| `QUARRY_EDGE__MODEL_PLANE_TOKEN` | unset | The development credential, honoured only under the cross-plane auth dev bypass (`main.rs`). With a URL and no credential: `501 model_lane_not_granted`. |
+| `QUARRY_EDGE__MODEL_PLANE_INFERENCE_TOKEN` | unset | Development only: the token for the `inference-core` audience, sent as `x-inference-authorization`. Unset, the one token above goes in both headers. |
+| `QUARRY_EDGE__AI_FORMATS_ZDR` | `refuse` | Only `refuse` takes effect (ADR-4): under ZDR every AI format is answered `skipped` / `ZDR_UNAVAILABLE` and no model is called. `allow` is reserved, logged once as ignored. |
+| `QUARRY_EDGE__AI_FORMATS_MODEL_JSON`, `QUARRY_EDGE__AI_FORMATS_MODEL_TEXT` | `verevon-balance`, `verevon-budget` | Routing aliases, never vendor model ids. |
+| `QUARRY_EDGE__AI_FORMATS_MAX_INPUT_CHARS`, `..._MAX_TOTAL_TOKENS`, `..._MAX_CALLS`, `..._CONCURRENCY` | 60,000; 200,000; 8; 4 | Per request caps (the first can only be lowered, to 1,000 at least; calls 1 to 8; concurrency 1 to 4; 16 calls in flight per process). |
+
+A deployed stack cannot turn this on yet. The Quarry to Model Plane grant for the chat lane (decision X-7: two audiences, `model-gateway` and `inference-core`, retention `tenant`, and the two manifest rows set `granted: true`) and the metered service lane on the gateway (WS16.S1) are owner decisions that are not made; until then Quarry holds no credential for this lane outside the dev bypass. A user token may ask; a service principal needs the scope `extract:ai` (no registry principal holds it); a request labelled `initiated_by: "agent"` is refused. The contract is `docs/CONTRACTS.md`, "Scrape AI formats"; the operator steps are in `docs/RUNBOOKS.md`.
+
 **Page-title enrichment (`page_extracted`).** When a fetched page has no usable `<title>` (missing, or generic such as the host name, "Home", "Forside"), `PageRunner` asks `/v1/invoke` for a clean ≤ 60-char title and a one-sentence summary from a bounded excerpt, and emits them on the `page_extracted` event with `title_source: "model"`. Configuration:
 
 | Env | Default | Notes |

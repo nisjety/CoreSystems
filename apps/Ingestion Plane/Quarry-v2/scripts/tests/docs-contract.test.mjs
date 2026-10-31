@@ -20,7 +20,7 @@ import { parseYamlSubset } from "../yaml-subset.mjs";
 const OPTION_B =
   "option B (the Data Plane rerank wire and config) exists only as uncommitted edits in C:/dev/CoresSystem (branch main); see .plan-work/quarry-w1w2/depth/D-D-B3-openapi-sdk.md";
 const QB_T17 =
-  "QB-T17: answer synthesis, AI extract formats, search suggest and audio have no switch in config.rs and run whenever QUARRY_EDGE__MODEL_PLANE_URL is set, so the seven switches this test pins include four that do not exist. Stays pending until the QB-T17 gate lands (model_plane_gate.rs is not on this branch); see decision 3.12 in .plan-work/quarry-w1w2/DECISIONS-ROUND-2026-10-27.md";
+  "QB-T17: answer synthesis, search suggest, audio and the AI formats of /v1/extract have no switch in config.rs and run whenever QUARRY_EDGE__MODEL_PLANE_URL is set, so the six switches this test pins include four that do not exist (the AI formats of /v1/scrape have theirs, QUARRY_EDGE__AI_FORMATS, pinned by its own test below). Stays pending until the QB-T17 gate lands (model_plane_gate.rs is not on this branch); see decision 3.12 in .plan-work/quarry-w1w2/DECISIONS-ROUND-2026-10-27.md";
 const pending = (name, reason, fn) => test(name, { todo: reason }, fn);
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -227,7 +227,6 @@ pending("the Model Plane switches default off, as the docs say (QB-T17)", QB_T17
     "QUARRY_EDGE__LLM_CLASSIFY_INTENT",
     "QUARRY_EDGE__PAGE_TITLE_ENRICH",
     "QUARRY_EDGE__ANSWER_SYNTHESIS",
-    "QUARRY_EDGE__AI_FORMATS",
     "QUARRY_EDGE__SEARCH_SUGGEST",
     "QUARRY_EDGE__MODEL_AUDIO",
   ]) {
@@ -298,6 +297,67 @@ pending("the integration table does not list the semantic reranker among the Mod
     .find((candidate) => candidate.includes("refuses the three Model Plane rows"));
   assert.ok(line, "the Model Plane refusal sentence is present");
   assert.doesNotMatch(line, /semantic reranker/i, "the reranker no longer calls the Model Plane");
+});
+
+// ----------------------------------------------------------------------------- scrape AI formats (INNH-1)
+
+const aiFormatsSource = () => read(join(quarry, "crates", "quarry-edge", "src", "scrape_contract", "ai_formats.rs"));
+
+// The names the edge reads for the AI formats: the string constants of ai_formats.rs.
+const aiFormatsEnvNames = () => {
+  const names = [...aiFormatsSource().matchAll(/pub const ENV_[A-Z_]+: &str = "([A-Z0-9_]+)";/g)].map((m) => m[1]);
+  assert.ok(names.includes("QUARRY_EDGE__AI_FORMATS"), "the code reads QUARRY_EDGE__AI_FORMATS");
+  return names;
+};
+
+test("the AI formats of /v1/scrape are off in the Ingestion compose and in the deploy compose", () => {
+  const deployCompose = join(quarry, "deploy", "compose", "docker-compose.yml");
+  for (const [label, text] of [
+    ["Ingestion compose", read(paths.compose)],
+    ["deploy compose", read(deployCompose)],
+  ]) {
+    const env = environmentOf(quarryEdgeBlock(text));
+    assert.equal(composeDefault(env.get("QUARRY_EDGE__AI_FORMATS")), "0", `${label}: QUARRY_EDGE__AI_FORMATS defaults to 0`);
+    assert.equal(composeDefault(env.get("QUARRY_EDGE__AI_FORMATS_ZDR")), "refuse", `${label}: the ZDR value is refuse`);
+  }
+});
+
+test("every QUARRY_EDGE__AI_FORMATS name in the docs and the composes is read by the code", () => {
+  const read_by_code = new Set(aiFormatsEnvNames());
+  const deploy = join(quarry, "deploy", "compose");
+  const files = [
+    paths.compose,
+    join(deploy, "docker-compose.yml"),
+    join(deploy, "README.md"),
+    ...currentDocs().map((doc) => doc.path),
+    paths.openapi,
+  ];
+  let seen = 0;
+  for (const path of new Set(files)) {
+    const text = read(path);
+    // The compose variable form (`QUARRY_EDGE_AI_FORMATS`, one underscore) feeds the double-underscore name.
+    for (const match of text.matchAll(/QUARRY_EDGE__?AI_FORMATS[A-Z0-9_]*/g)) {
+      const name = match[0].replace(/_+$/, "").replace(/^QUARRY_EDGE_AI/, "QUARRY_EDGE__AI");
+      seen += 1;
+      assert.ok(read_by_code.has(name), `${path} names ${name}, which ai_formats.rs does not read`);
+    }
+  }
+  assert.ok(seen >= 6, "the check found the names it is about");
+});
+
+test("the runbook and the self-host guide document every name the AI formats read, and the 501 reasons", () => {
+  const runbook = read(paths.runbooks);
+  const selfHost = read(paths.selfHost);
+  const names = aiFormatsEnvNames();
+  for (const name of ["QUARRY_EDGE__AI_FORMATS", "QUARRY_EDGE__AI_FORMATS_ZDR", "QUARRY_EDGE__MODEL_PLANE_INFERENCE_TOKEN"]) {
+    assert.ok(names.includes(name), `the code reads ${name}`);
+    assert.ok(selfHost.includes(name), `SELF_HOST documents ${name}`);
+  }
+  assert.ok(runbook.includes("QUARRY_EDGE__AI_FORMATS") || runbook.includes("QUARRY_EDGE_AI_FORMATS"), "RUNBOOKS names the switch");
+  for (const reason of ["model_plane_unavailable", "model_lane_not_granted", "extract_ai_scope_required", "unsupported_in_stream"]) {
+    assert.ok(runbook.includes(reason), `RUNBOOKS names ${reason}`);
+    assert.ok(read(join(quarry, "docs", "ERROR_REASONS.md")).includes(reason), `ERROR_REASONS names ${reason}`);
+  }
 });
 
 // ----------------------------------------------------------------------------- openapi
