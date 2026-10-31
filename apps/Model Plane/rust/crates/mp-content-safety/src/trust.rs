@@ -35,6 +35,8 @@ const TOOL_TRUST: &[(&str, TrustClass)] = &[
     ("web.search", TrustClass::ExternalWeb),
     ("web.read", TrustClass::ExternalWeb),
     ("browser_agent", TrustClass::BrowserScraped),
+    ("browser.open", TrustClass::BrowserScraped),
+    ("browser.observe", TrustClass::BrowserScraped),
     ("read_provider_action", TrustClass::ConnectorContent),
     ("execute_provider_action", TrustClass::ConnectorContent),
 ];
@@ -94,7 +96,9 @@ mod tests {
         for name in ["web_search", "web_fetch", "fetch_url", "web.search", "web.read"] {
             assert_eq!(TrustClass::classify(name), TrustClass::ExternalWeb, "{name}");
         }
-        assert_eq!(TrustClass::classify("browser_agent"), TrustClass::BrowserScraped);
+        for name in ["browser_agent", "browser.open", "browser.observe"] {
+            assert_eq!(TrustClass::classify(name), TrustClass::BrowserScraped, "{name}");
+        }
         for name in ["read_provider_action", "execute_provider_action"] {
             assert_eq!(TrustClass::classify(name), TrustClass::ConnectorContent, "{name}");
         }

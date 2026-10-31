@@ -3235,6 +3235,57 @@ export function GeneratedImagePreviews(props: { previews: GeneratedImagePreview[
  * working path for a data URI, so that is the primary control here; the
  * open-in-tab affordance survives only for real http(s) URLs, where it works.
  */
+/**
+ * WS19-S3: the gateway's structural check of a generated file, as a chip. The
+ * check reads the file's container only, so neither the label nor its title may
+ * say the file opens in Office. A `skipped` check, or none, shows nothing.
+ */
+function GeneratedFileCheckChip(props: { check?: GeneratedFile['check'] }) {
+  const i18n = useI18n()
+  const chip = () => {
+    switch (props.check?.level) {
+      case 'passed':
+        return {
+          level: 'passed',
+          label: i18n.tr('Kontrollert', 'Checked'),
+          title: i18n.tr(
+            'Filstrukturen er kontrollert. Det betyr ikke at Office åpner filen.',
+            'The file structure was checked. This does not mean Office opens the file.',
+          ),
+        }
+      case 'warnings':
+        return {
+          level: 'warnings',
+          label: i18n.tr('Advarsler', 'Warnings'),
+          title: i18n.tr(
+            'Kontrollen av filstrukturen fant advarsler. Det er ikke prøvd om Office åpner filen.',
+            'The file structure check found warnings. Whether Office opens the file was not tried.',
+          ),
+        }
+      case 'failed':
+        return {
+          level: 'failed',
+          label: i18n.tr('Feil funnet', 'Errors found'),
+          title: i18n.tr(
+            'Kontrollen av filstrukturen fant feil. Det er ikke prøvd om Office åpner filen.',
+            'The file structure check found errors. Whether Office opens the file was not tried.',
+          ),
+        }
+      default:
+        return undefined
+    }
+  }
+  return (
+    <Show when={chip()}>
+      {(c) => (
+        <span class={`verevon-chat-generated-file__check verevon-chat-generated-file__check--${c().level}`} title={c().title}>
+          {c().label}
+        </span>
+      )}
+    </Show>
+  )
+}
+
 export function GeneratedFiles(props: { files: GeneratedFile[] }) {
   const i18n = useI18n()
   return (
@@ -3252,6 +3303,7 @@ export function GeneratedFiles(props: { files: GeneratedFile[] }) {
                 <Show when={bytes() > 0}><span>{formatBytes(bytes())}</span></Show>
                 <Download size={12} />
               </a>
+              <GeneratedFileCheckChip check={file.check} />
               <Show when={remote()}>
                 <a
                   class="verevon-chat-generated-file__open"

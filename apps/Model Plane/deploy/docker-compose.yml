@@ -638,6 +638,9 @@ services:
       SANDBOX_MANAGER_AUTH_AUDIENCE: ${SANDBOX_MANAGER_AUTH_AUDIENCE:-sandbox-manager}
       # WS22-S3: forward thread_id to code_interpreter. Off by default (literal true).
       SANDBOX_THREAD_WORKSPACE_ENABLED: ${SANDBOX_THREAD_WORKSPACE_ENABLED:-false}
+      # WS19-S3: hold a file whose structural check failed once per turn so the model can
+      # repair it. Off until a corpus run shows under 2 percent false failures.
+      CODE_INTERPRETER_VERIFY_ENFORCE: ${CODE_INTERPRETER_VERIFY_ENFORCE:-false}
       MEMORY_SERVICE_URL: http://model-plane-session-core-1:9091
       # Legacy env name retained for older gateway builds; memory authority is
       # session-core, which syncs to Letta through LETTA_MEMORY_ADDR below.

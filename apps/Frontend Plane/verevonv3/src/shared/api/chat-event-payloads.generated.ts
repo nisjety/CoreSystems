@@ -15,6 +15,7 @@ export type ChatEventPayloads = {
   }
   /** Rust variants: Attachment. */
   attachment: {
+    check?: Record<string, unknown>
     id: string
     name: string
     size: number

@@ -51,6 +51,7 @@ export type ZdrFeatureKey =
   | 'speech_transcription'
   | 'browser_run'
   | 'browser_run_control'
+  | 'browser_tool'
   | 'translation'
   | 'document_analysis'
   | 'language_analysis'
@@ -66,7 +67,7 @@ export type Translate = (noText: string, enText: string) => string
 type Copy = { readonly no: string; readonly en: string }
 
 /** The sha256 of `./contracts/zdr-refusals.json`. Changing the golden changes this too. */
-export const ZDR_REFUSALS_CONTRACT_SHA256 = '066c5876e676b0b796922944e824e86f4c63070f0d830c9da86f33ff018d0249'
+export const ZDR_REFUSALS_CONTRACT_SHA256 = '025c8c19838b969d4c8ac667d15b6b3d7893a2d368f534602b6acadc0a9ad724'
 
 export type ZdrRefusalText = {
   /** Norwegian. A feature refusal names the feature with `{feature}`. */
@@ -178,6 +179,7 @@ export const FEATURE_LABELS: Record<ZdrFeatureKey, Copy> = {
   speech_transcription: { no: 'transkribering av tale', en: 'speech transcription' },
   browser_run: { no: 'nettleserkjøringer', en: 'browser runs' },
   browser_run_control: { no: 'kontroll av nettleserkjøringer', en: 'browser run controls' },
+  browser_tool: { no: 'nettleserverktøy', en: 'browser tools' },
   translation: { no: 'oversettelse', en: 'translation' },
   document_analysis: { no: 'dokumentanalyse', en: 'document analysis' },
   language_analysis: { no: 'språkanalyse', en: 'language analysis' },

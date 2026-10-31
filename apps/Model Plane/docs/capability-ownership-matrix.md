@@ -76,6 +76,7 @@ Legend — **Owner** = single system of record. **Relay** = ingress/enforcement 
 | Channels (Slack/Discord/…) / voice | **bridge-core** (Go) | session-core | gateway ingress | NATS | ✅ (`channel/`,`voice/` exist) |
 | IDE bridge / remote sessions | **bridge-core** (`session/`) | — | gateway WS | — | 🟡 partial; reuse Verevon JWT |
 | Browser grants | **browser-broker** (Go) | in-mem + Redis target | — | — | ✅ |
+| Do-loop browser session (browser.open/observe/close) | **execution-core** (browser_session.rs: grant from browser-broker, run on Quarry; site decision at broker mint) | in-memory per run | released at run end and cancel | capability-core `cap.browser.observe` / `cap.browser.act` | source-verified, switch off |
 | Cost / usage ledger | **cost-core** (Go) | Postgres | gateway emits `usage.*` | NATS | ✅ |
 | Run-cost meter and ceiling warnings | **model-gateway** (per-turn meter and run ceilings; WS27-S1 and S6, not yet built) | none for the meter (per turn); durable rows stay in **cost-core** (Postgres) | gateway emits the `usage` and `usage_progress` frames; cost-core prices nothing on the stream | NATS usage | single owner: one meter in the gateway, one ledger in cost-core; an unknown price is null |
 | Fine-tuning jobs | **session-core** (persist) + **model-gateway** (Azure) | Postgres | poller | NATS finetune | ✅ (Wave 7) |
