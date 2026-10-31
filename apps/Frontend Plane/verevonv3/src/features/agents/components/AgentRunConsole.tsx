@@ -94,6 +94,7 @@ import {
   approvalKindLabel,
   approvalReason,
 } from '@/shared/approvals/approval-copy'
+import { isStoppedRunStatus, legacyStateFromRunStatus } from '@/shared/chat/thread-status'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -953,7 +954,11 @@ export default function AgentRunConsole() {
             />
 
             <Show when={hasTrust()}>
-              <TrustPanel citations={state.citations} usage={state.usage} />
+              <TrustPanel
+              citations={state.citations}
+              usage={state.usage}
+              quotaRefreshKey={`${state.runId ?? ''}:${state.status}`}
+            />
             </Show>
 
             <Show when={activeRunId()}>
@@ -1477,7 +1482,7 @@ function AnswerPanel(props: {
 
 // ── Trust panel ───────────────────────────────────────────────────────────────
 
-function TrustPanel(props: { citations: Citation[]; usage: RunUsage | null }) {
+function TrustPanel(props: { citations: Citation[]; usage: RunUsage | null; quotaRefreshKey: string }) {
   const i18n = useI18n()
   return (
     <div class="verevon-run-panel verevon-run-trust">
@@ -1489,7 +1494,7 @@ function TrustPanel(props: { citations: Citation[]; usage: RunUsage | null }) {
           <>
             <p class="verevon-run-trust__subhead">{i18n.tr('Bruk', 'Usage')}</p>
             {/* Tokens and cost live in the meter, which says "included in the subscription" or "price unavailable" rather than a bare zero. */}
-            <RunCostMeter meter={usage()} quotaRefreshKey={`${state.runId ?? ''}:${state.status}`} />
+            <RunCostMeter meter={usage()} quotaRefreshKey={props.quotaRefreshKey} />
             <div class="verevon-run-trust__usage">
               <Show when={usage().confidence != null}>
                 <UsageStat label={i18n.tr('Konfidens', 'Confidence')} value={`${Math.round((usage().confidence ?? 0) * 100)}%`} />
@@ -2132,21 +2137,23 @@ function normalizeStatusTone(status?: string): 'ok' | 'warn' | 'error' | 'neutra
   return 'neutral'
 }
 
-/** Map a backend run status string onto the console's `RunStatus` union. */
+/**
+ * Map a backend run status string onto the console's `RunStatus` union. The
+ * attention vocabulary decides the state; a stop is checked first because that
+ * vocabulary reads a cancelled run as idle, and the console names it.
+ */
 function statusToRunStatus(status: string): RunStatus {
-  switch (status.toLowerCase()) {
-    case 'running':
-    case 'queued':
+  if (isStoppedRunStatus(status)) return 'cancelled'
+  switch (legacyStateFromRunStatus(status)) {
+    case 'working':
       return 'running'
-    case 'paused':
-    case 'awaiting_approval':
+    case 'needs_approval':
+    case 'needs_input':
       return 'paused'
     case 'completed':
       return 'done'
     case 'failed':
       return 'failed'
-    case 'cancelled':
-      return 'cancelled'
     default:
       return 'idle'
   }

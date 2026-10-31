@@ -1,5 +1,5 @@
 import { chatOrganizationActionSchema, chatOrganizationSchema, type ChatOrganization, type ChatOrganizationAction } from '@/shared/actions/chat-organization'
-import { isWaitingState, legacyStateFromRunStatus } from '@/shared/attention/attention-state'
+import { isWaitingState, legacyStateFromRunStatus } from '@/shared/chat/thread-status'
 import { LocalizedError } from '@/shared/i18n/errors'
 import { readClientValue, writeClientJson } from '@/shared/session/client-storage'
 import type { ChatThreadHistoryItem } from './chat-thread-history'

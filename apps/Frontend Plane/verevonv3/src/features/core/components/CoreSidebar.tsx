@@ -81,7 +81,7 @@ import {
   type ChatThreadSession,
 } from '@/shared/api/chat-client'
 import { ATTENTION_CHANGED_EVENT, getAttention, type AttentionSnapshot } from '@/shared/api/attention-client'
-import { legacyStateFromRunStatus } from '@/shared/attention/attention-state'
+import { legacyStateFromRunStatus } from '@/shared/chat/thread-status'
 import { getModelEntitlement } from '@/shared/api/model-entitlement-client'
 import { useI18n, translateApiError } from '@/shared/i18n'
 import { createResource } from '@/shared/lib/create-resource-compat'

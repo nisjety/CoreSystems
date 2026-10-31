@@ -857,3 +857,33 @@ describe('AgentRunConsole zero-retention refusal', () => {
     expect(shown).not.toContain('Server operator text')
   })
 })
+
+// A history row replays its stored status into the header pill. The console maps
+// that status onto its own RunStatus union, so a stop must read as stopped and a
+// queued run as running, not both as idle.
+describe('AgentRunConsole history replay status', () => {
+  beforeEach(() => {
+    mockStreamRunEvents.mockReset().mockReturnValue(new Promise<void>(() => {}))
+    mockListApprovals.mockReset().mockResolvedValue([])
+    mockGetRun.mockReset().mockResolvedValue(null)
+    mockGetRunProofBundle.mockReset().mockResolvedValue(null)
+    mockGetRunWatchStatus.mockReset().mockResolvedValue({ watching: false })
+    mockListRuns.mockReset().mockResolvedValue({ runs: [], hasMore: false })
+  })
+
+  it.each([
+    ['queued', 'Kjører'],
+    ['awaiting_approval', 'Satt på pause for godkjenning'],
+    ['completed', 'Fullført'],
+    ['cancelled', 'Kansellert'],
+  ])('replays a %s run with the header reading the matching state', async (status, label) => {
+    mockListSystemRuns.mockResolvedValue({
+      runs: [{ ...runDetail(), runId: 'run_history', goal: 'Replayed goal', status, createdAt: '2026-08-08T09:00:00Z' }],
+      hasMore: false,
+    })
+    renderConsole()
+    fireEvent.click(screen.getByRole('tab', { name: /planlagte/i }))
+    fireEvent.click(await screen.findByRole('button', { name: /replayed goal/i }))
+    await waitFor(() => expect(document.querySelector('.verevon-run-console__status')?.textContent).toBe(label))
+  })
+})
