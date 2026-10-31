@@ -197,6 +197,21 @@ These reasons come from `POST /v1/scrape` (and the stream, where noted). The sta
 
 Field errors (400, in `errors[]`, not in `details.reason`): `feature_disabled`, `action_denied`, `unknown_action_type`, `invalid_action`, `too_many_actions`, `too_many_captures`, `too_many`, `unsupported_format`, `selector_too_long`, `text_too_long`. Each carries a path and never a value.
 
+## Scrape AI formats (INNH-1)
+
+These come from `POST /v1/scrape` (and the stream, where noted) when a request names `json`, `summary`, `question` or `highlights` in `formats`. The edge answers the first three before it fetches the page. Contract: `docs/CONTRACTS.md` section "Scrape AI formats". The request-level reasons are decided by the edge (INNH-1 U3); the field codes by the contract in `quarry-core` (INNH-1 U1).
+
+| reason | status and code | meaning | what a caller does |
+|---|---|---|---|
+| `extract_ai_scope_required` | 403 `FORBIDDEN` (`details.field` is `formats[i]`) | a service principal without the scope `extract:ai`, or a request labelled `initiated_by: "agent"`, asked for an AI format. A relayed agent request must not spend model money outside its run budget | send the request from the user's own token |
+| `model_plane_unavailable` | 501 `UNSUPPORTED` | AI formats are on but `QUARRY_EDGE__MODEL_PLANE_URL` is unset | the operator sets it; send no AI format meanwhile |
+| `model_lane_not_granted` | 501 `UNSUPPORTED` | AI formats are on and the URL is set but this deployment has no usable model credential (the Quarry to Model Plane grant, decision X-7, is not built) | send no AI format |
+| `unsupported_in_stream` | 400 `BAD_REQUEST` | an AI format on `POST /v1/scrape/stream` | use `POST /v1/scrape` |
+
+Field errors (400, in `details.fields[]`, not in `details.reason`; each carries a path and never a value): `feature_disabled` (at `formats[i]` while `QUARRY_EDGE__AI_FORMATS` is not on), `too_many` (two of one kind), `missing_field` (a bare `json`, `question` or `highlights`, or an absent `schema`, `question` or `query`), `empty`, `text_too_long` (a prompt or question over 10,000 characters, a query over 1,000), `out_of_range` (`max_chars`, `max_highlights`, `max_chars_each`), `invalid_value` (`language`), `invalid_type`, `unknown_field`, `schema_root_not_object`, `schema_too_large`, `schema_too_complex`, `schema_keyword_not_supported` (at the keyword's path). `reserved_format` no longer exists.
+
+Not errors: a model failure, a rate limit, a schema the output could not satisfy, a ZDR request and an empty page are `data.ai.<kind>` entries inside a 200 (`status`, `code`, `reason`): codes `MODEL_UNAVAILABLE`, `MODEL_RATE_LIMITED`, `SCHEMA_INVALID`, `ZDR_UNAVAILABLE`, `BUDGET_EXHAUSTED`, `EMPTY_SOURCE`; reasons `model_lane_denied`, `model_lane_unauthorized`, `model_rejected_request`, `upstream_unavailable`, `timeout`, `transport`, `bad_reply`, `not_json`, `too_large`, `deadline`.
+
 ## 403 `FORBIDDEN`: an action an agent may not take (WS9.B, D2-012)
 
 The agent is the one the verified token gives (a service principal, or a person's token that says `agent`), on the step route, its `interact` alias, the browser socket's `action` message (an error frame with the same `code` and `details`) and the attached delegate lane. Nothing is consumed: no budget step, no approval, no receipt. Not retryable by the same caller.

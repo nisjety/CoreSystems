@@ -216,6 +216,10 @@ paths:
             QUARRY_CHALLENGE_CLASSIFIER=v2 (the default; legacy does not classify a scrape). The
             refusal itself is switched on with QUARRY_CHALLENGE_ENFORCE=enforce; under the default
             log the page is returned as before and only counted by reason in a log line.
+            An AI format (json, summary, question, highlights) asked for by a service principal
+            without the extract:ai scope, or on a request labelled initiated_by "agent", is code
+            FORBIDDEN with details.reason extract_ai_scope_required and details.field formats[i];
+            nothing is fetched.
           content:
             application/json:
               schema:
@@ -232,7 +236,10 @@ paths:
           description: >-
             The browser cannot do what was asked: a capture or actions on a browser that
             cannot run them, or no browser wired on the endpoint. Code UNSUPPORTED,
-            details.reason browser_capability_unavailable.
+            details.reason browser_capability_unavailable. Also code UNSUPPORTED for an AI
+            format when the endpoint has no model: details.reason model_plane_unavailable
+            (QUARRY_EDGE__MODEL_PLANE_URL is unset) or model_lane_not_granted (no usable model
+            credential on this deployment). Answered before the page is fetched.
           content:
             application/json:
               schema:
@@ -313,7 +320,11 @@ paths:
 
         per-step events (page_fetched, change_detected, artifact_written, etc.)
 
-        followed by the final result or error.
+        followed by the final result or error. Captures, actions and the AI formats
+
+        are not served here: the error event is BAD_REQUEST with details.reason
+
+        unsupported_in_stream.
 
         '
       tags:
@@ -6678,7 +6689,17 @@ components:
             last two are in every response already). Naming formats makes the
             request non-default: it neither reads nor writes the page cache. Under
             ZDR the default is `["markdown"]`. `json`, `summary`, `question` and
-            `highlights` are reserved and rejected with `reserved_format`.
+            `highlights` (INNH-1, see ScrapeAiFormat and CONTRACTS.md "Scrape AI
+            formats") ask a model about the page: objects, and `summary` also as the
+            string. Refused with 400 `feature_disabled` at `formats[i]` while
+            QUARRY_EDGE__AI_FORMATS is not `on`, and at most one of each kind
+            (`too_many`). The bare strings `json`, `question` and `highlights` are
+            400 `missing_field` at `formats[i].schema`, `.question` and `.query`. The
+            result is inline only (`json`, `summary`, `answer`, `highlights` on the
+            response, a report in `ai`); it is never stored, cached or put in an
+            event. Under Zero Data Retention every AI format is answered `skipped`
+            with code `ZDR_UNAVAILABLE` and no model is called. A model failure never
+            fails the scrape: it is an `error` or `skipped` entry in `ai` inside the 200.
             `screenshot` and `pdf` are captures (WS13.4b), given as a string or as an
             object `{"type": "screenshot"}` or `{"type": "pdf"}` with options (see
             CONTRACTS.md section 10). Refused with 400 `feature_disabled` at `formats`
@@ -6686,7 +6707,7 @@ components:
           items:
             oneOf:
             - type: string
-              enum: [markdown, html, rawHtml, links, metadata, screenshot, pdf]
+              enum: [markdown, html, rawHtml, links, metadata, screenshot, pdf, summary]
             - type: object
               required:
               - type
@@ -6694,6 +6715,7 @@ components:
                 type:
                   type: string
                   enum: [screenshot, pdf]
+            - $ref: '#/components/schemas/ScrapeAiFormat'
         only_main_content:
           type: boolean
           default: true
@@ -7317,6 +7339,229 @@ components:
               written, so the bytes stay inline in the response.
             items:
               $ref: '#/components/schemas/ScrapeActionOutcome'
+          json:
+            type: object
+            description: >-
+              INNH-1. The json AI format's result, inline only. Present only when ai.json.status is
+              ok, and then it validates against the schema of the request. Never stored. Model output
+              derived from page text: untrusted data.
+          summary:
+            type: string
+            description: >-
+              INNH-1. The summary AI format's result, at most max_chars characters, cut on a
+              character boundary. Present when ai.summary.status is ok. Untrusted data (it cannot be
+              verified against the page).
+          answer:
+            type: string
+            description: >-
+              INNH-1. The question AI format's answer, at most 10,000 characters. Present when
+              ai.question.status is ok and ai.question.found is true. Untrusted data; ai.question.grounded
+              says whether the model's supporting quote is verbatim on the page.
+          highlights:
+            type: array
+            description: >-
+              INNH-1. The highlights AI format's result: exact spans of the page text, in page order and
+              not overlapping. May be empty (an honest "nothing found"). start and end are Unicode scalar
+              (char) offsets, end-exclusive, into the AI source text (the page markdown before any
+              inline truncation).
+            items:
+              $ref: '#/components/schemas/Highlight'
+          ai:
+            $ref: '#/components/schemas/AiReport'
+    ScrapeAiFormat:
+      description: >-
+        An AI format of a scrape (INNH-1). Unknown keys in the object are 400 unknown_field. Every field
+        error is 400 with details.fields[] {path, code, message} and never echoes a value. A json schema
+        may use only the keywords type, properties, required, items, enum, minItems, maxItems, minLength,
+        maxLength, minimum, maximum, additionalProperties (true or false), description and title
+        ($schema, $id and $comment are dropped); any other keyword (for example $ref, anyOf, oneOf, allOf,
+        not, const, pattern, format) is 400 schema_keyword_not_supported at its path, because the
+        validator would ignore it. The schema root must be an object schema; at most 65,536 bytes,
+        10 levels and 200 properties (schema_root_not_object, schema_too_large, schema_too_complex).
+      oneOf:
+      - type: object
+        required: [type, schema]
+        additionalProperties: false
+        properties:
+          type:
+            type: string
+            enum: [json]
+          schema:
+            type: object
+            description: JSON Schema the output must satisfy. Root type object.
+          prompt:
+            type: string
+            minLength: 1
+            maxLength: 10000
+            description: Extra instruction for the extraction. The caller's own text.
+      - type: object
+        required: [type]
+        additionalProperties: false
+        properties:
+          type:
+            type: string
+            enum: [summary]
+          max_chars:
+            type: integer
+            minimum: 200
+            maximum: 10000
+            default: 2000
+          language:
+            type: string
+            pattern: '^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?$'
+            description: Language of the summary. Default the page's own language.
+      - type: object
+        required: [type, question]
+        additionalProperties: false
+        properties:
+          type:
+            type: string
+            enum: [question]
+          question:
+            type: string
+            minLength: 1
+            maxLength: 10000
+      - type: object
+        required: [type, query]
+        additionalProperties: false
+        properties:
+          type:
+            type: string
+            enum: [highlights]
+          query:
+            type: string
+            minLength: 1
+            maxLength: 1000
+          max_highlights:
+            type: integer
+            minimum: 1
+            maximum: 10
+            default: 3
+          max_chars_each:
+            type: integer
+            minimum: 40
+            maximum: 1000
+            default: 300
+    Highlight:
+      type: object
+      required: [text, start, end]
+      description: >-
+        An exact span of the page text. start and end are Unicode scalar (char) offsets, end-exclusive,
+        into the AI source text; text is the slice (8 to max_chars_each characters).
+      properties:
+        text:
+          type: string
+        start:
+          type: integer
+          minimum: 0
+        end:
+          type: integer
+          minimum: 0
+    AiFormatReport:
+      type: object
+      required: [status, untrusted_source]
+      description: >-
+        What one AI format did. A model failure is a status in a 200 body, never an HTTP error:
+        ok (a result field is present), error (a model call was made and failed) or skipped
+        (no model call was made for this format). These codes are strings in the body, not wire
+        error codes.
+      properties:
+        status:
+          type: string
+          enum: [ok, error, skipped]
+        code:
+          type: string
+          enum: [MODEL_UNAVAILABLE, MODEL_RATE_LIMITED, SCHEMA_INVALID, ZDR_UNAVAILABLE, BUDGET_EXHAUSTED, EMPTY_SOURCE]
+          description: >-
+            Absent when status is ok. ZDR_UNAVAILABLE: the request is under Zero Data Retention (skipped, no
+            model call). BUDGET_EXHAUSTED: the request's call or token budget is spent (skipped).
+            EMPTY_SOURCE: the page had no text (skipped). MODEL_RATE_LIMITED: error, with retry_after_s;
+            formats not yet started are skipped with the same code. MODEL_UNAVAILABLE: error, see reason.
+            SCHEMA_INVALID: the json output could not be made valid (error); data.json is absent and
+            schema_issues lists paths and codes.
+        reason:
+          type: string
+          enum: [model_lane_denied, model_lane_unauthorized, model_rejected_request, upstream_unavailable, timeout, transport, bad_reply, not_json, too_large, deadline]
+        retry_after_s:
+          type: integer
+          minimum: 0
+          description: MODEL_RATE_LIMITED only.
+        model:
+          type: string
+          description: The model the gateway answered with (a routing alias, or what it resolved to).
+        usage:
+          type: object
+          required: [input_tokens, output_tokens]
+          properties:
+            input_tokens:
+              type: integer
+              minimum: 0
+            output_tokens:
+              type: integer
+              minimum: 0
+        truncated_input:
+          type: boolean
+          description: The page text was cut to the input budget before it was sent.
+        untrusted_source:
+          type: boolean
+          description: True on every ok entry. The output was derived from page text and is data, never instructions.
+        schema_valid:
+          type: boolean
+          description: json only. When true, data.json validates against the schema of the request.
+        repair:
+          type: string
+          enum: [none, local, model]
+          description: json only. none, a local fix (a code fence, a trailing comma) or one extra model call that carries the invalid output and the schema, never the page.
+        schema_issues:
+          type: array
+          maxItems: 20
+          description: json only. Where the output broke the schema. Paths and codes, never values.
+          items:
+            type: object
+            required: [path, code]
+            properties:
+              path:
+                type: string
+              code:
+                type: string
+        found:
+          type: boolean
+          description: question only. False when the page does not answer the question (no answer field).
+        grounded:
+          type: boolean
+          description: question only. True when the model's supporting quote is verbatim on the page.
+        dropped:
+          type: integer
+          minimum: 0
+          description: highlights only. Model quotes that are not on the page, dropped.
+    AiReport:
+      type: object
+      required: [total]
+      description: >-
+        data.ai: one entry per AI format asked for, and a total. Token usage is reported; nothing is billed
+        for it in this version.
+      properties:
+        json:
+          $ref: '#/components/schemas/AiFormatReport'
+        summary:
+          $ref: '#/components/schemas/AiFormatReport'
+        question:
+          $ref: '#/components/schemas/AiFormatReport'
+        highlights:
+          $ref: '#/components/schemas/AiFormatReport'
+        total:
+          type: object
+          required: [calls, input_tokens, output_tokens]
+          properties:
+            calls:
+              type: integer
+              minimum: 0
+            input_tokens:
+              type: integer
+              minimum: 0
+            output_tokens:
+              type: integer
+              minimum: 0
     ScrapeActionOutcome:
       type: object
       required: [index, type, status, duration_ms]

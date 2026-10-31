@@ -173,7 +173,8 @@
             "links",
             "metadata",
             "screenshot",
-            "pdf"
+            "pdf",
+            "summary"
           ]
         },
         {
@@ -188,6 +189,99 @@
           },
           "required": [
             "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "prompt": {
+              "type": "string",
+              "maxLength": 10000,
+              "minLength": 1
+            },
+            "schema": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "object"
+                }
+              }
+            },
+            "type": {
+              "const": "json"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "schema"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "language": {
+              "type": "string",
+              "pattern": "^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?$"
+            },
+            "max_chars": {
+              "type": "integer",
+              "maximum": 10000,
+              "minimum": 200
+            },
+            "type": {
+              "const": "summary"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "question": {
+              "type": "string",
+              "maxLength": 10000,
+              "minLength": 1
+            },
+            "type": {
+              "const": "question"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "question"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "max_chars_each": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 40
+            },
+            "max_highlights": {
+              "type": "integer",
+              "maximum": 10,
+              "minimum": 1
+            },
+            "query": {
+              "type": "string",
+              "maxLength": 1000,
+              "minLength": 1
+            },
+            "type": {
+              "const": "highlights"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "query"
           ]
         }
       ]

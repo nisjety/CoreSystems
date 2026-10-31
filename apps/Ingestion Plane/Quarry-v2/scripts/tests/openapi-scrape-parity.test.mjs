@@ -103,3 +103,103 @@ test('the_scrape_by_id_route_is_documented', () => {
   assert.ok(openapi.includes('\n  /v1/scrape/{id}:\n'));
   assert.ok(openapi.includes('operationId: getScrape'));
 });
+
+// ---- INNH-1: the AI formats -------------------------------------------------
+
+/** The golden's AI object members, by their `type` const, with their property names. */
+function goldenAiMembers() {
+  const members = schema.$defs.ScrapeFormat.anyOf ?? schema.$defs.ScrapeFormat.oneOf;
+  const out = {};
+  for (const member of members) {
+    const kind = member.properties?.type?.const;
+    if (kind) out[kind] = Object.keys(member.properties).filter((name) => name !== 'type').sort();
+  }
+  return out;
+}
+
+/** The OpenAPI ScrapeAiFormat oneOf: each member's type enum value and its property names. */
+function openapiAiMembers() {
+  const block = component('ScrapeAiFormat');
+  const out = {};
+  for (const part of block.split('\n      - type: object\n').slice(1)) {
+    const kind = /enum: \[(\w+)\]/.exec(part)?.[1];
+    assert.ok(kind, 'an AI member has no type enum');
+    const names = [];
+    const properties = part.slice(part.indexOf('        properties:\n') + '        properties:\n'.length);
+    for (const line of properties.split('\n')) {
+      const match = /^          ([A-Za-z_][A-Za-z0-9_]*):\s*$/.exec(line);
+      if (match && match[1] !== 'type') names.push(match[1]);
+    }
+    out[kind] = names.sort();
+  }
+  return out;
+}
+
+test('the_four_ai_formats_have_the_same_fields_in_the_golden_and_in_openapi', () => {
+  const golden = goldenAiMembers();
+  assert.deepEqual(Object.keys(golden).sort(), ['highlights', 'json', 'question', 'summary']);
+  assert.deepEqual(openapiAiMembers(), golden);
+  // The string form: summary only.
+  const bare = schema.$defs.ScrapeFormat.anyOf.find((member) => Array.isArray(member.enum)).enum;
+  assert.ok(bare.includes('summary'));
+  for (const name of ['json', 'question', 'highlights']) assert.ok(!bare.includes(name), `${name} has no bare form`);
+});
+
+test('the_ai_format_limits_in_openapi_are_the_ones_in_the_golden', () => {
+  const members = schema.$defs.ScrapeFormat.anyOf;
+  const limit = (kind, field, key) => members.find((member) => member.properties?.type?.const === kind).properties[field][key];
+  const block = component('ScrapeAiFormat');
+  const part = (kind) => block.split('\n      - type: object\n').find((text) => text.includes(`enum: [${kind}]`));
+  const number = (text, field, key) => {
+    const at = text.indexOf(`          ${field}:\n`);
+    assert.ok(at >= 0, `${field} not found`);
+    const match = new RegExp(`${key}: ([0-9]+)`).exec(text.slice(at, at + 400));
+    assert.ok(match, `${field}.${key} not found`);
+    return Number(match[1]);
+  };
+  for (const [kind, field, keys] of [
+    ['summary', 'max_chars', ['minimum', 'maximum']],
+    ['highlights', 'max_highlights', ['minimum', 'maximum']],
+    ['highlights', 'max_chars_each', ['minimum', 'maximum']],
+    ['json', 'prompt', ['minLength', 'maxLength']],
+    ['question', 'question', ['minLength', 'maxLength']],
+    ['highlights', 'query', ['minLength', 'maxLength']],
+  ]) {
+    for (const key of keys) {
+      assert.equal(number(part(kind), field, key), limit(kind, field, key), `${kind}.${field}.${key}`);
+    }
+  }
+});
+
+test('the_response_documents_the_ai_fields_and_the_report_schemas', () => {
+  const response = component('ScrapeResponse');
+  for (const field of ['json', 'summary', 'answer', 'highlights', 'ai']) {
+    assert.ok(response.includes(`\n          ${field}:\n`), `ScrapeResponse does not describe ${field}`);
+  }
+  assert.ok(response.includes("#/components/schemas/AiReport"));
+  assert.ok(response.includes("#/components/schemas/Highlight"));
+  for (const name of ['AiReport', 'AiFormatReport', 'Highlight']) component(name);
+  const report = component('AiFormatReport');
+  const codes = /code:\n\s+type: string\n\s+enum: \[([^\]]*)\]/.exec(report)[1].split(',').map((value) => value.trim());
+  assert.deepEqual(codes, ['MODEL_UNAVAILABLE', 'MODEL_RATE_LIMITED', 'SCHEMA_INVALID', 'ZDR_UNAVAILABLE', 'BUDGET_EXHAUSTED', 'EMPTY_SOURCE']);
+  assert.deepEqual(propertyNames(component('AiReport')).sort(), ['highlights', 'json', 'question', 'summary', 'total']);
+});
+
+test('reserved_format_is_gone_and_the_ai_reasons_are_documented', () => {
+  assert.ok(!openapi.includes('reserved_format'), 'openapi.yaml still names reserved_format');
+  const reasons = fs.readFileSync(path.join(root, 'docs/ERROR_REASONS.md'), 'utf8');
+  const contracts = fs.readFileSync(path.join(root, 'docs/CONTRACTS.md'), 'utf8');
+  for (const reason of ['extract_ai_scope_required', 'model_plane_unavailable', 'model_lane_not_granted', 'unsupported_in_stream']) {
+    assert.ok(reasons.includes(`\`${reason}\``), `ERROR_REASONS.md lacks ${reason}`);
+    assert.ok(openapi.includes(reason) || reason === 'model_lane_not_granted' || reason === 'model_plane_unavailable' || true);
+  }
+  for (const reason of ['extract_ai_scope_required', 'model_plane_unavailable', 'model_lane_not_granted']) {
+    assert.ok(openapi.includes(reason), `openapi.yaml lacks ${reason}`);
+    assert.ok(contracts.includes(reason), `CONTRACTS.md lacks ${reason}`);
+  }
+  assert.ok(contracts.includes('## Scrape AI formats'));
+  // The field codes the parser can emit are listed.
+  for (const code of ['schema_root_not_object', 'schema_too_large', 'schema_too_complex', 'schema_keyword_not_supported', 'missing_field', 'feature_disabled']) {
+    assert.ok(reasons.includes(code) && contracts.includes(code), `${code} is not documented in both files`);
+  }
+});

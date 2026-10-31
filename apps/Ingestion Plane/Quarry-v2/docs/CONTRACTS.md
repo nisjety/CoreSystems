@@ -274,7 +274,7 @@ Today `formats` holds `html`, `markdown`, `raw`, `links`, `screenshot`, `pdf` an
 
 ### Requested formats schema
 
-What `POST /v1/scrape` accepts today is in 9.1: `markdown`, `html`, `rawHtml`, `links` and `metadata`, where `links` and `metadata` change nothing because both are in every response. `json`, `screenshot`, `summary`, `question` and `highlights` are reserved and refused with 400 `reserved_format`. Any other name, and any object form such as `{ "type": "json" }`, is refused with 400 `unsupported_format`. The example and the rules below are the target design for the formats not built yet.
+What `POST /v1/scrape` accepts today is in 9.1: `markdown`, `html`, `rawHtml`, `links` and `metadata`, where `links` and `metadata` change nothing because both are in every response. `screenshot` and `pdf` (WS13.4b) and `json`, `summary`, `question` and `highlights` (INNH-1, "Scrape AI formats" below) are accepted as strings or objects behind their flags, each refused with 400 `feature_disabled` at its field while its flag is off; the bare strings `json`, `question` and `highlights` are 400 `missing_field`. `reserved_format` no longer exists. Any other name, and any object whose `type` is not one of these six, is refused with 400 `unsupported_format`. The example and the rules below are the target design for the formats not built yet.
 
 ```json
 {
@@ -651,9 +651,9 @@ Which agent opened a tab. Every request that carries the initiator hint takes it
 
 > WS13.8: this section lists the inline formats of v1. `screenshot` and `pdf` (WS13.4b) and `actions` (WS13.5) are described in section 10 below. Each is refused with 400 `feature_disabled` at its field until its flag is on.
 
-Root-level, all optional, snake_case with a camelCase alias: `formats` (`markdown`, `html`, `rawHtml`, `links`, `metadata`; `links` and `metadata` change nothing, since both are already in every response), `only_main_content`, `include_tags`, `exclude_tags`, `remove_base64_images`, `extractor` (`readability`, `clean_full`, `raw`), `timeout_ms` (1000 to 55000, default 55000), `max_inline_bytes` (1 to 8 MiB, default 1 MiB).
+Root-level, all optional, snake_case with a camelCase alias: `formats` (`markdown`, `html`, `rawHtml`, `links`, `metadata`; `links` and `metadata` change nothing, since both are already in every response; `screenshot` and `pdf` are in section 10 and the AI formats `json`, `summary`, `question` and `highlights` in "Scrape AI formats"), `only_main_content`, `include_tags`, `exclude_tags`, `remove_base64_images`, `extractor` (`readability`, `clean_full`, `raw`), `timeout_ms` (1000 to 55000, default 55000), `max_inline_bytes` (1 to 8 MiB, default 1 MiB).
 
-All eight are applied. `exclude_tags` (CSS selectors) removes every match and its subtree. `include_tags` keeps only the matching subtrees, in document order, each once; an explicit selection beats the main-content heuristic, so the heuristic does not run on it, and a list that matches nothing gives empty markdown and the warning `include_tags_matched_nothing`, never the whole page. The selection is then cleaned the way `clean_full` cleans a page (lazy images resolved, inline images stripped), whatever `extractor` and `remove_base64_images` say. A selector that does not parse is a 400 `invalid_selector` at `include_tags[i]` or `exclude_tags[i]`. `only_main_content` (default true) and `extractor` say one thing two ways: `readability` is the main-content heuristic, `clean_full` keeps the whole body minus head, scripts, styles, noscript, templates and iframes (lazy images resolved, inline images stripped) and `raw` converts the document as it is. An unset one follows the other; setting them to disagree is a 400 `conflicts_with_only_main_content` on `extractor`. `remove_base64_images` strips inline `data:` images on the readability and raw paths too. With default options the markdown is byte-identical to what a scrape returned before these options existed. `html` is the HTML the markdown was made from (after exclusion, inclusion and cleaning); `rawHtml` is the document as fetched. `effective_options.ignored_fields` now lists only unknown request keys. `json`, `screenshot`, `summary`, `question` and `highlights` are reserved: a 400 `reserved_format`.
+All eight are applied. `exclude_tags` (CSS selectors) removes every match and its subtree. `include_tags` keeps only the matching subtrees, in document order, each once; an explicit selection beats the main-content heuristic, so the heuristic does not run on it, and a list that matches nothing gives empty markdown and the warning `include_tags_matched_nothing`, never the whole page. The selection is then cleaned the way `clean_full` cleans a page (lazy images resolved, inline images stripped), whatever `extractor` and `remove_base64_images` say. A selector that does not parse is a 400 `invalid_selector` at `include_tags[i]` or `exclude_tags[i]`. `only_main_content` (default true) and `extractor` say one thing two ways: `readability` is the main-content heuristic, `clean_full` keeps the whole body minus head, scripts, styles, noscript, templates and iframes (lazy images resolved, inline images stripped) and `raw` converts the document as it is. An unset one follows the other; setting them to disagree is a 400 `conflicts_with_only_main_content` on `extractor`. `remove_base64_images` strips inline `data:` images on the readability and raw paths too. With default options the markdown is byte-identical to what a scrape returned before these options existed. `html` is the HTML the markdown was made from (after exclusion, inclusion and cleaning); `rawHtml` is the document as fetched. `effective_options.ignored_fields` now lists only unknown request keys. The AI formats (`json`, `summary`, `question`, `highlights`) are in "Scrape AI formats" below; `reserved_format` is gone.
 
 Response additions on `data`: `markdown`, `html`, `raw_html` (inline, only when asked for; `markdown` also by default under ZDR), `truncated[]` (ZDR: cut at the cap), `omitted[]` (not ZDR: over the cap, read the `formats.*` artifact), `warnings[]`, `effective_options`. `formats.*` artifact references are unchanged. A request that names `formats`, `include_tags`, `exclude_tags`, `remove_base64_images`, `only_main_content: false` or an `extractor` other than `readability` neither reads nor writes the page cache. So does a request whose `signals` select the browser driver (any `actions`, `screenshot`, `pdf`, `prior_block_signals` of 2 or more under `QUARRY_BLOCK_ESCALATION=legacy` (the field is deprecated and ignored under `honest`), or `profile_required`): a cached static result cannot carry what the browser renders or captures. `timeout_ms` and `max_inline_bytes` change delivery, not the result, so they do not bypass it. ZDR never touches it.
 
@@ -702,6 +702,72 @@ The gateway's `POST /api/v1/knowledge/crawl` returns the edge's `limits` under `
 Why it is deferred: the WS5.B definition of done allows the step to be "landed or explicitly deferred"; the open question on it (plan X-14, and the WS5.B default) records the deferral; and routing extract through the content sniff would change the per-source result of a batch, which needs a contract decision the plan has not taken. The W1 criteria for documents (SC6) are measured on `/v1/scrape`.
 
 To pick it up: route `fetch_page` in `crates/quarry-edge/src/extract_routes.rs` through `quarry_transform::sniff::detect` and `quarry_runtime::content_route::parse_document`, answer a document it cannot read with a typed per-source `UNSUPPORTED_MEDIA` that uses the reason codes of `/v1/scrape`, and test that a PDF in a batch fails only its own source.
+
+## Scrape AI formats: `json`, `summary`, `question`, `highlights` (INNH-1, U1 contract, 2026-10-31)
+
+Status: the contract and its parser are built and tested in `quarry-core` (`ai_spec.rs`, `scrape.rs`). The engine (`quarry-runtime`) and the edge wiring are INNH-1 units U2 and U3 and are not built yet; until then the flag below does not exist in the edge, so every AI format is `400 feature_disabled`. Nothing is enabled on any stack. The design and its decisions are `.plan-work/quarry-w1w2/INNH-1-design.md`.
+
+**Request (additive, `POST /v1/scrape`).** `formats[]` items may be these objects. Unknown keys inside an object are 400 `unknown_field` at `formats[i]`, as for `screenshot` and `pdf`.
+
+```json
+{ "type": "json",       "schema": { "...": "..." }, "prompt": "optional" }
+{ "type": "summary",    "max_chars": 2000, "language": "nb" }
+{ "type": "question",   "question": "..." }
+{ "type": "highlights", "query": "...", "max_highlights": 3, "max_chars_each": 300 }
+"summary"
+```
+
+`"summary"` as a string means the defaults. The strings `"json"`, `"question"` and `"highlights"` cannot be honoured (each has a required input) and are 400 `missing_field` at `formats[i].schema`, `formats[i].question` and `formats[i].query`. `reserved_format` no longer exists: while the flag is off the four formats are 400 `feature_disabled` at `formats[i]` (the same step `screenshot` took in WS13.4b).
+
+All field errors are 400 `BAD_REQUEST` with `details.fields[] {path, code, message}`; a value is never echoed.
+
+| Field | Rule | Code |
+|---|---|---|
+| any AI kind | at most one of each kind per request | `too_many` at `formats[i]` |
+| `json.schema` | required; a JSON object; root `"type": "object"`; at most 65,536 bytes serialized; at most 10 levels (`properties` and `items` each add one, the root is 1); at most 200 `properties` entries in all | `missing_field`, `invalid_type`, `schema_root_not_object`, `schema_too_large`, `schema_too_complex` at `formats[i].schema` |
+| `json.schema` keywords | allowed: `type`, `properties`, `required`, `items` (one schema), `enum`, `minItems`, `maxItems`, `minLength`, `maxLength`, `minimum`, `maximum`, `additionalProperties` (`true` or `false`), `description`, `title`; `$schema`, `$id` and `$comment` are dropped; anything else is refused | `schema_keyword_not_supported` at `formats[i].schema.<path to the keyword>`; a wrong value type is `invalid_type` or `invalid_value` at the keyword |
+| `json.prompt` | optional string, 1 to 10,000 characters | `empty`, `text_too_long`, `invalid_type` |
+| `summary.max_chars` | optional integer, 200 to 10,000, default 2,000 | `out_of_range`, `invalid_type` |
+| `summary.language` | optional, `[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?`; default the page's own language | `invalid_value` |
+| `question.question` | required string, 1 to 10,000 characters | `missing_field`, `empty`, `text_too_long` |
+| `highlights.query` | required string, 1 to 1,000 characters | `missing_field`, `empty`, `text_too_long` |
+| `highlights.max_highlights` | optional integer, 1 to 10, default 3 | `out_of_range` |
+| `highlights.max_chars_each` | optional integer, 40 to 1,000, default 300 | `out_of_range` |
+| any AI kind, flag off | | `feature_disabled` at `formats[i]` |
+
+The schema keywords that the validator in `quarry_core::json_schema` ignores (`$ref`, `anyOf`, `oneOf`, `allOf`, `not`, `const`, `pattern`, `format`, `if`/`then`/`else`, `patternProperties`, `dependent*`, `default`, `uniqueItems`, ...) are refused rather than accepted, because a schema Quarry cannot check would make `schema_valid: true` a lie. Widening the validator is a separate slice.
+
+`effective_options.formats` lists an AI format by its wire name only (`json`, `summary`, `question`, `highlights`): no schema, prompt, question or query is echoed or stored. A request with an AI format is not a default request: it neither reads nor writes the page cache, and `canonical_options_key` carries one `ai:<kind>:<hash16>` per AI format (the first 16 hex digits of blake3 over the spec as canonical JSON, keys sorted, defaults filled in, `$schema`/`$id`/`$comment` dropped), so a future result cache cannot confuse two specs and the content never appears in a key. A request without an AI format keeps the key it had before.
+
+**Request errors decided by the edge, before the page is fetched (INNH-1 U3, not built yet).** 403 `FORBIDDEN` `details.reason: extract_ai_scope_required` (a service principal without the scope `extract:ai`, or a request labelled `initiated_by: "agent"`); 501 `UNSUPPORTED` `model_plane_unavailable` (no `QUARRY_EDGE__MODEL_PLANE_URL`) or `model_lane_not_granted` (no usable model credential); `POST /v1/scrape/stream` refuses any AI format with `unsupported_in_stream`. Reasons are in `docs/ERROR_REASONS.md`. ZDR is never a request error for an AI format: the scrape succeeds and each AI entry says `ZDR_UNAVAILABLE`.
+
+**Response (`data`, all optional, present only when asked for).**
+
+| Field | Type | Present when |
+|---|---|---|
+| `json` | object | `ai.json.status` is `ok`; then it always validates against the request's schema |
+| `summary` | string, at most `max_chars` characters (cut on a character boundary) | `ai.summary.status` is `ok` |
+| `answer` | string, at most 10,000 characters | `ai.question.status` is `ok` and `ai.question.found` |
+| `highlights` | `[{text, start, end}]`, in page order, not overlapping, each 8 to `max_chars_each` characters | `ai.highlights.status` is `ok`; may be `[]`, an honest empty result |
+| `ai` | `AiReport` | any AI format was asked for |
+
+`start` and `end` are Unicode scalar (char) offsets, end-exclusive, into the AI source text: the page markdown Quarry produced, before any inline truncation (the same as `data.markdown` when that came back whole; otherwise the `formats.markdown` artifact). `text` is the exact slice. A `json` output that still fails the schema after repair is not put in `data.json`; invalid data travels only as `schema_issues` (paths and codes).
+
+`ai` is `{json?, summary?, question?, highlights?: AiFormatReport, total: {calls, input_tokens, output_tokens}}`. An `AiFormatReport` is `{status, code?, reason?, retry_after_s?, model?, usage?: {input_tokens, output_tokens}, truncated_input?, untrusted_source, schema_valid?, repair?, schema_issues?, found?, grounded?, dropped?}`:
+
+- `status` `ok`: the result field is present. `skipped`: no model call was made for this format (`ZDR_UNAVAILABLE`, `BUDGET_EXHAUSTED`, `EMPTY_SOURCE`, or `MODEL_RATE_LIMITED` for formats not started when a sibling was rate limited). `error`: a call was made and failed (`MODEL_UNAVAILABLE` with a `reason`, `MODEL_RATE_LIMITED` with `retry_after_s`, `SCHEMA_INVALID` with `schema_issues`).
+- `reason` is one of `model_lane_denied`, `model_lane_unauthorized`, `model_rejected_request`, `upstream_unavailable`, `timeout`, `transport`, `bad_reply`, `not_json`, `too_large`, `deadline`.
+- A model failure never fails the scrape: the status stays 200 with the page fields. The codes are strings inside a 200 body, not wire `ErrorCode`s.
+- `untrusted_source` is true on every `ok` entry: the output is model text derived from the page and is data, never instructions. `repair` (`none`, `local`, `model`) says how a `json` output was made valid; the one model repair call carries the invalid output, the issues and the schema, never the page. `grounded` says the model's supporting quote for an `answer` is verbatim on the page; `dropped` counts highlight quotes that are not on the page.
+- `model` is what the gateway answered with (a routing alias or what it resolved to), never a vendor id chosen by the caller. `cost_usd` is added to `usage` when the Model Plane returns it.
+
+Model output is untrusted and checked by Quarry, not by the model: `json` is validated against the caller's schema after a local repair and at most one model repair; `highlights` and the `question` quote are verified verbatim against the page text (whitespace runs, no-break spaces and typographic quotes are folded, minimum 8 characters, de-duplicated, non-overlapping); `summary` cannot be verified and is labelled. The page reaches the model inside a per-call random delimiter it cannot know, with rules that call it data. AI output is inline only: never an artifact, never in the scrape record (`GET /v1/scrape/{id}` has no AI fields), never in the page cache, an event, a log or a span.
+
+**Zero Data Retention.** Effective ZDR (the token floor or the body flag) plus any AI format: every AI entry is `skipped` with `ZDR_UNAVAILABLE`, no Model Plane call is made, nothing is written, and the page itself is returned as an ordinary ZDR scrape. `QUARRY_EDGE__AI_FORMATS_ZDR` accepts only `refuse` in v1 (ADR-4); `allow` is reserved and behaves as `refuse`. The rows `scrape` and `scrape_stream` in `docs/ZDR_MATRIX.md` say so.
+
+**Flags (INNH-1 U3; read once; default off).** `QUARRY_EDGE__AI_FORMATS` (`on`, `1` or `true` enables; anything else is off, so a typo never widens the endpoint), `QUARRY_EDGE__AI_FORMATS_ZDR` (`refuse`), `QUARRY_EDGE__AI_FORMATS_MODEL_JSON` (routing alias, default `verevon-balance`), `QUARRY_EDGE__AI_FORMATS_MODEL_TEXT` (default `verevon-budget`), `QUARRY_EDGE__AI_FORMATS_MAX_INPUT_CHARS` (1,000 to 80,000, default 60,000), `QUARRY_EDGE__AI_FORMATS_MAX_TOTAL_TOKENS` (default 200,000), `QUARRY_EDGE__AI_FORMATS_MAX_CALLS` (1 to 8, default 8) and `QUARRY_EDGE__AI_FORMATS_CONCURRENCY` (1 to 4, default 4). They are described in the edge units; this unit only adds the `ScrapeLimits::ai_formats_enabled` switch that makes the contract refuse the formats while it is off.
+
+**Not in this version.** No billing for AI formats (token usage is reported only; pricing is an owner decision). No result cache. Not on `/v1/scrape/stream`, `/v1/extract` (INNH-2 and 3), crawl or batch. The Model Plane lane for a deployed stack (a grant for Quarry on `/v1/ai/chat`, decision X-7) is not built: a deployed stack cannot turn the flag on until it is.
 
 ## Crawl scope and robots: planned status and vocabulary (WS14.S0, 2026-10-23)
 

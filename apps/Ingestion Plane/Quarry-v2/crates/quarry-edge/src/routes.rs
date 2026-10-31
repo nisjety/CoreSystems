@@ -880,6 +880,12 @@ async fn scrape_with(
                 pdf: inline.pdf,
                 captures: inline.captures,
                 actions: inline.actions,
+                // INNH-1 U3 fills these; until then no AI format reaches here.
+                json: None,
+                summary: None,
+                answer: None,
+                highlights: None,
+                ai: None,
             }))
         }
         Err(err) => {
