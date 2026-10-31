@@ -1091,6 +1091,30 @@ A key grant backs only its key's runs: a person (the owner included), another pe
 
 **Audit.** Quarry has no durable audit stream. The trail is Auth Core (who got a token), the BrowserBroker (who got a grant) and Quarry's receipts, which name `apikey:<key_id>` per step. Quarry logs `agent.run.started` and `agent.run.refused` with ids only (run, organization, key, grant, ZDR flag, class, reason): never a host, a token or the key.
 
+## `POST /v1/parse`: a PDF or DOCX to text, nothing stored (INNH-11, built, 2026-10-31)
+
+Status: built and tested in tests, dark. Default off: `QUARRY_EDGE__PARSE_ROUTE` (`on`, `1`, `true` or `yes`, read per request). With it off the route answers 501 `UNSUPPORTED` with `details {reason: "parse_route_disabled", env: "QUARRY_EDGE__PARSE_ROUTE"}`, after the auth chain. It is on no stack. Code: `crates/quarry-edge/src/parse_routes.rs`, `routes.rs` (its own router, because the body is up to 25 MiB), `auth.rs` (the scope), `crates/quarry-runtime/src/content_route.rs` (`parse_document_info`, the page facts).
+
+**Request.** The body is the document's raw bytes. Not a URL (a URL is `POST /v1/scrape` with `QUARRY_EDGE__DOC_ROUTING=on`), and not multipart: multipart is out of v1 (it needs a multipart parser in the edge, and the gateway can forward raw bytes). `Content-Type` is absent, `application/octet-stream`, `application/pdf` or `application/vnd.openxmlformats-officedocument.wordprocessingml.document`; any other type is a 415 before the body is read. The bytes decide the kind (`quarry_transform::sniff`, magic numbers only): a PDF marker in the first kilobyte, or a ZIP whose `[Content_Types].xml` names WordprocessingML. A declared PDF or DOCX type that the bytes contradict is a 415 `content_type_mismatch`; bytes that are neither are a 415 `unsupported_media` with `details.detected`. No header is read for a filename and none is echoed, stored or logged. No JSON body.
+
+**Response 200**, in the typed envelope, with `Cache-Control: no-store`:
+```
+{ "data": { "markdown": "...", "kind": "pdf" | "docx", "bytes": 1599, "structure": "plain",
+            "truncated": false, "pages": 1, "warnings": [ { "code": "...", "message": "..." } ] },
+  "meta": { "request_id": "..." } }
+```
+`pages` is for a PDF only (absent for a DOCX, never null). `structure` is always `plain`: the text is paragraphs, with no headings, lists or tables marked up, and a PDF whose text sits in `Tj` and `TJ` runs loses its layout. `warnings` is always present, usually empty: `document_has_no_text_layer` (no page of the PDF has a text layer, a scan, so the text is empty), `some_pages_have_no_text_layer` (a mixed PDF; the message says how many pages), `document_has_no_text` (a DOCX with no text), `truncated_at_8mib` (the text was cut at 8 MiB, `truncated` is true). There is no OCR. **No redaction is applied** (`pii.rs` is not wired): personal data in a document comes back as it is, to the authenticated caller. No artifact id, no scrape id: nothing was kept to point at.
+
+**Errors**, in the standard envelope: 400 `empty_body` (or `body_unreadable`); 413 `too_large` with `max_bytes`, by the declared `Content-Length` before the body is read, or by the bytes when none was declared (the limit is 25 MiB, the parsers' own; `QUARRY_EDGE__PARSE_MAX_BYTES` lowers it, never raises it); 415 as above, and `pdf_parse_failed`, `docx_parse_failed` or `too_large` from the parser (a file it cannot read, or that its limits stopped), each with `details.kind` and `details.supported: ["pdf","docx"]`; 429 `RATE_LIMITED` with `Retry-After`; 501 as above, or `isolation_required`; 504 `TIMEOUT` (the 15 second deadline). 401 and 403 come from the auth chain.
+
+**Limits.** One organisation may have `QUARRY_EDGE__PARSE_CONCURRENCY_PER_ORG` parses in flight (default 1, at most 8) and the process `QUARRY_EDGE__PARSE_MAX_INFLIGHT` uploads (default 4, at most 32); past either the answer is a 429 (`org_parse_busy`, `parse_capacity`) with `retry_after_seconds` 2 and `Retry-After: 2`, before the body is read. A request that has a slot then waits at most 3 seconds for one of the two process-wide parse slots (shared with the scrape pipeline): past that, 429 `parser_busy` with `Retry-After: 5`. The parse itself: a child process under 768 MiB of address space, 20 s of CPU and 16 file descriptors, the 15 second deadline, the 8 MiB text cap, 25 MiB of input.
+
+**Isolation.** The route refuses to serve (501 `isolation_required`) while documents would be parsed inside the edge process (`QUARRY_EDGE__DOC_PARSE_ISOLATION=inprocess`, or an edge that is not a Unix `quarry-edge-rs`): a hostile file could take the edge down. `QUARRY_EDGE__PARSE_ALLOW_INPROCESS=1` lifts that for a single-tenant development box. The boot line `document parse route is on` reports `isolation` and `serving`.
+
+**Auth.** A user token needs no scope. A service principal needs `parse:write` (like `scrape:write`, it is not in the scope registry of the Control Plane yet: a cross-plane ask, see the INNH-11 status). No other scope stands in for it.
+
+**ZDR and storage.** The handler takes no `AppState`: it has no artifact store, cache, index, event sink, usage meter or ingest to write to, and a test reads its source to keep it so. It logs nothing about a request. A ZDR caller is served the same way. See the row `parse` in `docs/ZDR_MATRIX.md`. **Billing:** the route is not metered in this version (no usage record, no Lago metric); the owner decides whether a parse is billable.
+
 ## Crawl scope and robots: planned status and vocabulary (WS14.S0, 2026-10-23)
 
 Read this with `docs/CRAWL_SCOPE_ROBOTS.md`, which is the contract for WS14. The examples earlier in this file that show crawl and map scope fields, and the crawl denial reason schema, describe the target shape. They are not what the edge applies today.

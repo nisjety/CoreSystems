@@ -66,6 +66,7 @@ mod crawl_sitemap;
 mod batch_check;
 mod limits;
 mod map_routes;
+mod parse_routes;
 mod metrics;
 mod model_plane_gate;
 mod policy_baseline;
@@ -180,6 +181,14 @@ async fn run() -> anyhow::Result<()> {
     telemetry::init_telemetry();
     // Choose (and log) how documents are parsed before the first one arrives.
     quarry_runtime::content_route::parse_backend();
+    if parse_routes::route_enabled() {
+        // INNH-11: the parse route serves uploads, so it also reports whether it may.
+        tracing::info!(
+            isolation = quarry_runtime::content_route::parse_backend().label(),
+            serving = !parse_routes::blocked_by_isolation(),
+            "document parse route is on"
+        );
+    }
 
     // Production safety net: `QUARRY_EDGE_AUTH_DEV_BYPASS=1` accepts any
     // bearer without verifying it against auth-core's JWKS. That's fine

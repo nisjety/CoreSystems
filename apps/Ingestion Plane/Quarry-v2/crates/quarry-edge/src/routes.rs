@@ -151,6 +151,16 @@ pub fn router(state: AppState) -> Router {
         .layer(middleware::from_fn(crate::zdr_log::mark_floor))
         .layer(middleware::from_fn(crate::auth::require_auth));
 
+    // INNH-11 — POST /v1/parse. Its own router: the body is a whole document, up to 25 MiB,
+    // past the 1 MB cap of the surface below. The handler enforces the limit itself, so a
+    // refusal is the typed envelope, and it takes no AppState: it has nothing to store to.
+    // The auth chain is the surface's. Served only with QUARRY_EDGE__PARSE_ROUTE on.
+    let parse_upload = Router::new()
+        .route("/v1/parse", post(crate::parse_routes::parse))
+        .layer(middleware::from_fn(crate::auth::require_service_route_scope))
+        .layer(middleware::from_fn(crate::zdr_log::mark_floor))
+        .layer(middleware::from_fn(crate::auth::require_auth));
+
     // Protected surface — every /v1/* route. The auth middleware
     // verifies an `Authorization: Bearer <jwt>` against the Control
     // Plane's `auth-core` JWKS (or dev-bypass), then inserts `Claims`
@@ -391,6 +401,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .merge(limited)
         .merge(profile_import)
+        .merge(parse_upload)
         .layer(middleware::from_fn(crate::retry_after::retry_after_header))
         // Method and path only: tower-http's default span records the full URI,
         // query string included.

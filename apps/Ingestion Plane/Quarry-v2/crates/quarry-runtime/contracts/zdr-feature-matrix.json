@@ -204,6 +204,25 @@
       "treatment": "honored"
     },
     {
+      "basis": "parse_routes::parse (INNH-11, dark behind QUARRY_EDGE__PARSE_ROUTE) reads the body, sniffs it and parses it through content_route in the isolated child; it logs nothing about the request and reads no filename header. The response carries Cache-Control: no-store. No redaction is applied to the returned text",
+      "detail": {
+        "reason": "reads the PDF or DOCX bytes the caller uploaded, answers their text and stores nothing: no artifact, cache entry, index row, event, usage record or ingest; the handler takes no AppState"
+      },
+      "enforced_by": [
+        "parse_route::nothing_is_stored_for_a_standard_or_a_zdr_caller",
+        "parse_route::the_handler_cannot_reach_a_store"
+      ],
+      "id": "parse",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/parse"
+      ],
+      "status": "enforced",
+      "treatment": "inert"
+    },
+    {
       "basis": "map_routes::map touches no cache, artifact store, index or event sink",
       "detail": {
         "reason": "reads robots and sitemaps and returns links; nothing is stored"

@@ -13,7 +13,7 @@ This describes behaviour. It does not change it. A **gap** is a place where ZDR 
 | refused | the request is refused with a message naming ZDR |
 | inert | ZDR does not apply: nothing of the caller's content is stored, or the route is not reachable with ZDR |
 
-6 of 43 rows are gaps.
+6 of 44 rows are gaps.
 
 | Feature | Routes | Treatment | Status | Log |
 |---|---|---|---|---|
@@ -28,6 +28,7 @@ This describes behaviour. It does not change it. A **gap** is a place where ZDR 
 | `search_suggest` | `/v1/search/suggest` | degraded: the partial query is sent to the Model Plane without the ZDR posture | **gap**: unassigned: forward the posture, or refuse under ZDR | log-unverified |
 | `answer` | `/v1/answer`<br>`/v1/answer/stream` | refused (`FORBIDDEN`, `answer_synthesis`) | enforced | log-unverified |
 | `extract` | `/v1/extract` | honored | enforced | log-unverified |
+| `parse` | `/v1/parse` | inert: reads the PDF or DOCX bytes the caller uploaded, answers their text and stores nothing: no artifact, cache entry, index row, event, usage record or ingest; the handler takes no AppState | enforced | log-unverified |
 | `map` | `/v1/map` | inert: reads robots and sitemaps and returns links; nothing is stored | enforced | log-unverified |
 | `audit_page` | `/v1/audit/page` | inert: fetches robots and one page and returns bounded evidence; nothing is stored | enforced | log-unverified |
 | `audio` | `/v1/audio` | honored | enforced | log-unverified |
@@ -74,6 +75,7 @@ This describes behaviour. It does not change it. A **gap** is a place where ZDR 
 - `search_suggest`: search_routes::suggest calls the Model Plane and never reads the token's ZDR floor Tests: `zdr_gap_rows::gap_rows_currently_violate_search_suggest`.
 - `answer`: answer_routes::answer_run and ::answer_stream refuse a request under effective ZDR (the body flag or the token's floor) with a 403 FORBIDDEN, reason zdr_unavailable, before the deployment's gate, the answer cache and the pipeline start: no search, no page fetch and no Model Plane call, because the model hop carries no ZDR posture (ADR-4) and would take the query and the page text. A refused ZDR run leaves only a metadata-only tombstone (outcome refused). include_answer on /v1/search is not refused: it is answered answer_status skipped_zdr, with the search itself run under ZDR and no model call Tests: `zdr_claim_floor::answer_is_refused_for_a_zdr_org_user_and_runs_as_before_otherwise`, `zdr_claim_floor::answer_stream_is_refused_for_a_zdr_org_user_and_runs_as_before_otherwise`, `answer_provider_status::a_zdr_answer_is_refused_before_the_pipeline_starts_and_nothing_reaches_the_model`.
 - `extract`: the page runs carry the effective ZDR posture, so no artifact or durable page event is written. A schema or a prompt (INNH-2) would send page text to the Model Plane, whose invoke call has no ZDR posture (ADR-4), so under ZDR each source is answered status error, ZDR_UNAVAILABLE, with no Model Plane call; the harvested structured data still returns; the engine refuses a ZDR call as well Tests: `zdr_claim_floor::extract_runs_as_zdr_for_a_zdr_org_user_and_not_for_a_registry_zdr_service`, `zdr_claim_floor::extract_with_a_prompt_or_schema_never_reaches_the_model_for_a_zdr_org_user`, `extract_routes::a_zdr_request_never_reaches_the_model`, `ai_formats::extraction_under_zdr_is_refused_before_any_request`.
+- `parse`: parse_routes::parse (INNH-11, dark behind QUARRY_EDGE__PARSE_ROUTE) reads the body, sniffs it and parses it through content_route in the isolated child; it logs nothing about the request and reads no filename header. The response carries Cache-Control: no-store. No redaction is applied to the returned text Tests: `parse_route::nothing_is_stored_for_a_standard_or_a_zdr_caller`, `parse_route::the_handler_cannot_reach_a_store`.
 - `map`: map_routes::map touches no cache, artifact store, index or event sink
 - `audit_page`: audit_page::capture touches no cache, artifact store, index or event sink
 - `audio`: audio_routes::raise_to_zdr_floor forwards the posture to the Model Plane, which owns retention for audio Tests: `zdr_claim_floor::audio_forwards_the_floored_posture_to_the_model_plane`, `zdr_claim_floor::audio_transcription_forwards_the_floored_posture_to_the_model_plane`.
