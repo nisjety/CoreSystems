@@ -40,6 +40,9 @@
 use std::collections::BTreeSet;
 
 use mp_contracts::approval_cause::{self, CauseCode};
+use mp_contracts::loop_guard::{
+    call_signature, CallOutcome, CallRecord, LoopGuard, LoopGuardMode, Verdict,
+};
 use mp_contracts::model_plane::v1::{
     self as pb, inference_core_client::InferenceCoreClient,
     managed_run_lifecycle_client::ManagedRunLifecycleClient,
@@ -315,6 +318,17 @@ const SUBSCRIPTION_REFUSED_REPLY: &str =
 /// the limit passed, so there is no answer to offer, only the way forward.
 const RUN_TIME_LIMIT_REPLY: &str =
     "This run stopped at its time limit before it could reach an answer, and nothing further was started. Try a narrower request.";
+
+/// The reply persisted when the Do loop's loop guard ended the run (WS25-S2): its tool calls kept
+/// repeating or failing without progress. It says what happened and claims nothing the run did not
+/// produce. The typed reason is `RunAgentResponse.loop_stop_code`; the terminal receipt keeps
+/// `execution_failed` (WS25-D9).
+const LOOP_DETECTED_REPLY: &str =
+    "This run stopped because its tool calls kept repeating without making progress, so nothing further was run. Try a narrower request.";
+
+/// `RunAgentResponse.loop_stop_code` of a run the loop guard stopped. `model-gateway` reads the same
+/// spelling, and `cross_service_loop_contract.rs` pins the two together.
+const LOOP_DETECTED_CODE: &str = "loop_detected";
 
 /// Cap on the `CompleteStep.output` payload (the durable step record); the full
 /// answer still lives in the appended assistant message.
@@ -634,6 +648,10 @@ enum RoundsOutcome {
     /// allowed to finish; the run ends honestly with what it has, as a failed
     /// run that says it stopped at its time limit.
     OutOfTime,
+    /// The Do loop's loop guard ended this loop on a loop of calls that kept repeating or failing
+    /// without progress (WS25-S2). The root run finalizes it as a failed run with a fixed reply; a
+    /// delegated loop turns it into a typed child result, and its parent carries on.
+    LoopDetected,
 }
 
 struct RoundsResult {
@@ -1828,6 +1846,7 @@ async fn run_agent_with_route_parkable(
     // A typed subscription failure ends the run with its code on the response
     // and the terminal receipt, and with NO assistant message from here: the
     // gateway words the reason for the user and persists that one.
+    let mut loop_stop_code: Option<&'static str> = None;
     let (final_answer, success, refusal) = match rounds.outcome {
         // Paused, not finished: the approval is already durable and the run
         // stays non-terminal. Resume re-invokes `run_agent`.
@@ -1858,6 +1877,13 @@ async fn run_agent_with_route_parkable(
         // through `finalize` like any other failed run, so the reply and the
         // managed receipt are written while the credentials still work.
         RoundsOutcome::OutOfTime => (RUN_TIME_LIMIT_REPLY.to_owned(), false, None),
+        // The loop guard ended the run's own loop (WS25-S2): a failed run with the fixed reply and no
+        // subscription refusal. The typed reason rides on the response; the receipt keeps
+        // `execution_failed` (WS25-D9).
+        RoundsOutcome::LoopDetected => {
+            loop_stop_code = Some(LOOP_DETECTED_CODE);
+            (LOOP_DETECTED_REPLY.to_owned(), false, None)
+        }
         RoundsOutcome::InferFailed(Some(refusal)) => {
             (SUBSCRIPTION_REFUSED_REPLY.to_owned(), false, Some(refusal))
         }
@@ -1881,6 +1907,7 @@ async fn run_agent_with_route_parkable(
         rounds.grounded,
         compaction_triggered,
         refusal.as_ref(),
+        loop_stop_code,
         context.usage.snapshot(),
         session_bearer.as_deref(),
         terminal_tokens,
@@ -2694,6 +2721,11 @@ async fn run_rounds(
         (None, Some(parked)) => std::mem::take(&mut parked.attempted_retrievals),
         (None, None) => BTreeSet::new(),
     };
+    // The loop guard (WS25-S2) judges this loop's calls by the shared rules of `mp_contracts::loop_guard`.
+    // It is per turn and in memory, outside the fold, so a restored or parked loop starts it afresh, and
+    // a delegated child builds its own. With the switch off nothing is built.
+    let guard_mode = loop_guard_mode();
+    let mut loop_guard = guard_mode.observes().then(LoopGuard::new);
     // Run-scoped, NOT round-scoped: the ceiling bounds how many delegations this
     // run opens in TOTAL, so three per round for four rounds is bounded exactly
     // like twelve at once. Deliberately independent of the round budget — see
@@ -4498,6 +4530,59 @@ async fn run_rounds(
             });
         }
 
+        // The loop guard judges the round's calls now that each has its outcome (WS25-S2). Shadow logs
+        // a verdict and changes nothing. Enforce reminds the model in this round's tool context, or ends
+        // the loop on a stop: the calls that stopped it already ran once, and none starts after it. A run
+        // that a route or a refusal has already stopped keeps that stop.
+        let mut reminder: Option<&'static str> = None;
+        if let Some(guard) = loop_guard.as_mut() {
+            let verdict = guard.observe_round(&loop_guard_records(
+                &response.tool_calls,
+                &outcomes,
+                paused_index,
+            ));
+            if verdict != Verdict::Continue {
+                info!(
+                    run_id = %req.run_id,
+                    depth = ctx.depth,
+                    mode = guard_mode.label(),
+                    verdict = verdict.label(),
+                    "run_agent: loop guard verdict"
+                );
+            }
+            match verdict {
+                Verdict::Continue => {}
+                Verdict::Remind { text, .. } => {
+                    if guard_mode.enforces() {
+                        reminder = Some(text);
+                    }
+                }
+                Verdict::Stop(stop) => {
+                    if guard_mode.enforces()
+                        && !ctx.route.is_stopped()
+                        && ctx.refusal.latched().is_none()
+                    {
+                        // The audit keeps the stop's reason and the hash of the call it names,
+                        // never the call's arguments.
+                        info!(
+                            run_id = %req.run_id,
+                            depth = ctx.depth,
+                            reason = stop.reason.label(),
+                            signature_hash = %stop.signature_hash,
+                            "run_agent: loop guard stopped the loop"
+                        );
+                        return Ok(RoundsResult {
+                            compaction_triggered,
+                            outcome: RoundsOutcome::LoopDetected,
+                            rounds_executed,
+                            delegated_rounds,
+                            grounded,
+                        });
+                    }
+                }
+            }
+        }
+
         // Carry the model's interim reasoning forward, then append the framed
         // tool outcomes so the next round can answer from them.
         if !response.content.trim().is_empty() {
@@ -4511,7 +4596,7 @@ async fn run_rounds(
         messages.push(pb::ChatMessage {
             compaction_summary: String::new(),
             role: "user".to_owned(),
-            content: format_tool_context(&outcomes),
+            content: format_tool_context(&outcomes, reminder),
             name: String::new(),
         });
 
@@ -5660,6 +5745,14 @@ async fn run_delegated_child(
                     Err(format!(
                         "subagent '{label}' stopped at the run's time limit without reaching \
                          an answer"
+                    )),
+                    rounds,
+                ),
+                // The child's own loop guard ended its loop (WS25-S2). That is a typed child result: the
+                // parent is not stopped by it, and reads this one tool result and carries on.
+                RoundsOutcome::LoopDetected => (
+                    Err(format!(
+                        "subagent '{label}' stopped because its tool calls kept repeating without making progress"
                     )),
                     rounds,
                 ),
@@ -6876,8 +6969,9 @@ fn tool_context_cap(tool_name: &str) -> usize {
 
 /// Frame a round of tool outcomes as a context message appended to the
 /// conversation, so the model can answer from them on the next inference
-/// (mirrors `model-gateway::tool_loop::format_tool_context`).
-fn format_tool_context(outcomes: &[ToolStepResult]) -> String {
+/// (mirrors `model-gateway::tool_loop::format_tool_context`). A loop-guard reminder (WS25-S2) follows
+/// the outcomes in the same message, so the model reads it with the results it refers to.
+fn format_tool_context(outcomes: &[ToolStepResult], reminder: Option<&str>) -> String {
     use std::fmt::Write as _;
     let mut s = String::from(
         "Tool results for your previous request (use these to answer; do not call the same tool \
@@ -6899,7 +6993,78 @@ does not exist:\n",
             }
         }
     }
+    if let Some(reminder) = reminder {
+        let _ = writeln!(s, "\n{reminder}");
+    }
     s
+}
+
+/// The round's calls as the loop guard reads them: each call the model asked for, with how it ended.
+/// `outcomes` holds one entry per call except the one a pause holds back (`paused`), in call order,
+/// so the two are walked together. A suppressed duplicate reads as an error; the guard's rules count
+/// a call that gave no result the same way.
+fn loop_guard_records(
+    calls: &[pb::ToolCall],
+    outcomes: &[ToolStepResult],
+    paused: Option<usize>,
+) -> Vec<CallRecord> {
+    calls
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| Some(*index) != paused)
+        .zip(outcomes)
+        .map(|((_, call), outcome)| CallRecord {
+            tool: call.name.clone(),
+            signature: call_signature(&call.name, &call.arguments_json),
+            outcome: if outcome.error.is_some() {
+                CallOutcome::Err
+            } else {
+                CallOutcome::Ok
+            },
+        })
+        .collect()
+}
+
+/// `LOOP_GUARD_MODE` (WS25-S2), read once per process so the mode cannot change under a run. Unset is
+/// off: no guard is built and the loop runs as it always did. Shadow, and any value the shared parser
+/// does not know, logs verdicts and changes nothing; enforce reminds the model and ends a looping loop.
+const LOOP_GUARD_ENV: &str = "LOOP_GUARD_MODE";
+
+#[cfg(test)]
+thread_local! {
+    /// A test's override of `LOOP_GUARD_MODE` (see [`LoopGuardSwitch`]).
+    static TEST_LOOP_GUARD_MODE: std::cell::Cell<Option<LoopGuardMode>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Holds the loop guard's mode at a fixed value for the current test thread, then restores it.
+#[cfg(test)]
+struct LoopGuardSwitch;
+
+#[cfg(test)]
+impl LoopGuardSwitch {
+    fn set(mode: LoopGuardMode) -> Self {
+        TEST_LOOP_GUARD_MODE.with(|cell| cell.set(Some(mode)));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for LoopGuardSwitch {
+    fn drop(&mut self) {
+        TEST_LOOP_GUARD_MODE.with(|cell| cell.set(None));
+    }
+}
+
+fn loop_guard_mode() -> LoopGuardMode {
+    #[cfg(test)]
+    if let Some(forced) = TEST_LOOP_GUARD_MODE.with(std::cell::Cell::get) {
+        return forced;
+    }
+    static MODE: std::sync::OnceLock<LoopGuardMode> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| {
+        LoopGuardMode::from_env_value(std::env::var(LOOP_GUARD_ENV).ok().as_deref())
+    })
 }
 
 /// The `operation` a connector call names, when it is a well-formed name.
@@ -7402,6 +7567,7 @@ async fn pause_for_approval(
         retry_after_ms: None,
         resets_at: String::new(),
         park_reason: String::new(),
+        loop_stop_code: String::new(),
         // The caller that holds the loop's tally sets it.
         usage: None,
     })
@@ -7665,6 +7831,9 @@ async fn finalize(
     // apology would be wrong for a usage limit, and the gateway persists the
     // explanation it words from the code, so the thread carries exactly one.
     refusal: Option<&crate::subscription_refusal::Refusal>,
+    // The closed code of a loop-guard stop (WS25-S2), when the Do loop's guard ended the run. It rides
+    // on the response only: the terminal receipt keeps `execution_failed` (WS25-D9).
+    loop_stop_code: Option<&'static str>,
     // What the run's rounds spent, reported on the response whatever the outcome.
     usage: pb::RunUsage,
     bearer: Option<&str>,
@@ -7758,6 +7927,7 @@ async fn finalize(
         run_id = %req.run_id,
         status = %status,
         failure_code = refusal.map_or("", |refusal| refusal.code),
+        loop_stop_code = loop_stop_code.unwrap_or_default(),
         "run_agent: run finalized"
     );
 
@@ -7773,6 +7943,7 @@ async fn finalize(
             .and_then(crate::subscription_refusal::Refusal::resets_at_label)
             .unwrap_or_default(),
         park_reason: String::new(),
+        loop_stop_code: loop_stop_code.unwrap_or_default().to_owned(),
         usage: Some(usage),
     })
 }
@@ -12286,6 +12457,199 @@ mod tests {
                  the request's model, not the environment's"
             );
         }
+    }
+
+    // --- The Do loop's loop guard (`mp_contracts::loop_guard`, WS25-S2) ---
+
+    /// Eight rounds of the same failing call, then an answer that only a loop which never stops
+    /// would reach.
+    fn repeated_failing_rounds(answer: &str) -> Vec<Scripted> {
+        let mut script: Vec<Scripted> = (0..8)
+            .map(|index| Scripted::ToolCalls {
+                content: String::new(),
+                calls: vec![failing_tool_call(&format!("wx-{index}"))],
+            })
+            .collect();
+        script.push(Scripted::Answer(answer.to_owned()));
+        script
+    }
+
+    #[tokio::test]
+    async fn a_failing_call_repeated_eight_times_ends_the_run_loop_detected() {
+        let _guard = LoopGuardSwitch::set(LoopGuardMode::Enforce);
+        let req = pb::RunAgentRequest {
+            max_rounds: 12,
+            ..sample_request()
+        };
+        let (result, observed, rec) = drive_with_route(
+            req,
+            Switches::OFF,
+            COMPOSE_AGENT_MODEL,
+            repeated_failing_rounds("a late answer"),
+            Serving::Legacy,
+        )
+        .await;
+
+        let response = result.expect("a stopped loop still ends the run with a response");
+        assert_eq!(response.status, "failed");
+        assert_eq!(response.final_output, LOOP_DETECTED_REPLY);
+        assert_eq!(response.loop_stop_code, LOOP_DETECTED_CODE);
+        assert_eq!(response.failure_code, "", "a loop stop is not a subscription refusal");
+        assert_eq!(response.rounds_executed, 8, "the eighth round ended the loop");
+        assert_eq!(observed.lock().unwrap().len(), 8, "no ninth inference call was made");
+
+        let rec = rec.lock().unwrap();
+        assert_eq!(rec.appended_assistant, vec![LOOP_DETECTED_REPLY.to_owned()]);
+        assert_eq!(rec.managed_terminal_outcomes.len(), 1);
+        assert_eq!(rec.managed_terminal_outcomes[0].2, pb::TerminalOutcome::Failed as i32);
+        assert_eq!(
+            rec.managed_terminal_outcomes[0].3, "execution_failed",
+            "the receipt keeps the generic code (WS25-D9)"
+        );
+    }
+
+    #[tokio::test]
+    async fn shadow_logs_the_same_loop_and_changes_nothing() {
+        let _guard = LoopGuardSwitch::set(LoopGuardMode::Shadow);
+        let req = pb::RunAgentRequest {
+            max_rounds: 12,
+            ..sample_request()
+        };
+        let (result, observed, _rec) = drive_with_route(
+            req,
+            Switches::OFF,
+            COMPOSE_AGENT_MODEL,
+            repeated_failing_rounds("a late answer"),
+            Serving::Legacy,
+        )
+        .await;
+
+        let response = result.expect("the run answers");
+        assert_eq!(response.status, "completed");
+        assert_eq!(response.final_output, "a late answer");
+        assert_eq!(response.loop_stop_code, "", "shadow names no stop");
+        assert_eq!(
+            response.rounds_executed, 9,
+            "eight tool rounds and the answer, as with the guard off"
+        );
+        assert_eq!(observed.lock().unwrap().len(), 9);
+    }
+
+    #[tokio::test]
+    async fn a_loop_guard_stop_never_redispatches_a_write() {
+        // Each round asks for the effectful `delete_records` with the same arguments. The ledger
+        // reserves every dispatch once, so the reservations are the writes that ran: eight, all of
+        // them before the stop and none after it.
+        let _guard = LoopGuardSwitch::set(LoopGuardMode::Enforce);
+        let _ledger = runtime_loop::effect::LedgerSwitch::set(true);
+        let req = pb::RunAgentRequest {
+            mode: "auto".to_owned(),
+            max_rounds: 12,
+            ..sample_request()
+        };
+        let mut script: Vec<Scripted> = (0..8)
+            .map(|_| one_call("delete_records", r#"{"table":"customers"}"#))
+            .collect();
+        script.push(Scripted::Answer("a late answer".to_owned()));
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let policy = CountingPolicy::new();
+        let inference_channel = spawn_inference_channel(script).await;
+
+        let response = drive_persistent(
+            &rec,
+            req,
+            vec![delete_records_tool()],
+            &policy,
+            inference_channel,
+        )
+        .await
+        .expect("a stopped loop still ends the run with a response");
+        assert_eq!(response.status, "failed");
+        assert_eq!(response.loop_stop_code, LOOP_DETECTED_CODE);
+        assert_eq!(response.rounds_executed, 8, "the eighth write's round ended the loop");
+        assert_eq!(
+            rec.lock().unwrap().reservations.len(),
+            8,
+            "one reservation per write, and none after the stop"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_child_loop_stop_does_not_stop_the_parent() {
+        // The parent delegates; the child repeats a failing call until its own guard stops it. The
+        // stop reaches the parent as one failed delegation, and the parent answers.
+        let _guard = LoopGuardSwitch::set(LoopGuardMode::Enforce);
+        let req = pb::RunAgentRequest {
+            max_rounds: 12,
+            ..sample_request()
+        };
+        let mut script = vec![Scripted::ToolCalls {
+            content: "Delegating.".to_owned(),
+            calls: vec![subagent_call(
+                "sub-1",
+                r#"{"goal":"Find the Bergen weather","max_rounds":10}"#,
+            )],
+        }];
+        script.extend(repeated_failing_rounds(
+            "The child could not finish; here is what I have.",
+        ));
+        let (result, observed, _rec) = drive_with_route(
+            req,
+            Switches::OFF,
+            COMPOSE_AGENT_MODEL,
+            script,
+            Serving::Legacy,
+        )
+        .await;
+
+        let response = result.expect("the parent answers after its child stops");
+        assert_eq!(response.status, "completed");
+        assert_eq!(response.loop_stop_code, "", "the child's stop is not the run's");
+        assert_eq!(response.rounds_executed, 10, "two parent rounds and eight child rounds");
+        assert_eq!(observed.lock().unwrap().len(), 10);
+    }
+
+    #[test]
+    fn loop_guard_records_pair_each_call_with_its_outcome_and_skip_a_held_back_call() {
+        let calls = [
+            failing_tool_call("wx-a"),
+            subagent_call("sub-b", r#"{"goal":"look it up"}"#),
+            failing_tool_call("wx-c"),
+        ];
+        let outcomes = [
+            ToolStepResult {
+                name: "yr_weather".to_owned(),
+                output: "clear".to_owned(),
+                error: None,
+            },
+            ToolStepResult {
+                name: "subagent.task".to_owned(),
+                output: String::new(),
+                error: Some("refused".to_owned()),
+            },
+        ];
+        let records = loop_guard_records(&calls, &outcomes, Some(2));
+        assert_eq!(records.len(), 2, "the call a pause holds back has no record");
+        assert_eq!(records[0].tool, "yr_weather");
+        assert_eq!(records[0].outcome, CallOutcome::Ok);
+        assert_eq!(records[1].tool, "subagent.task");
+        assert_eq!(records[1].outcome, CallOutcome::Err);
+    }
+
+    #[test]
+    fn a_loop_guard_reminder_follows_the_tool_results_in_the_same_context_message() {
+        let outcomes = [ToolStepResult {
+            name: "yr_weather".to_owned(),
+            output: "clear".to_owned(),
+            error: None,
+        }];
+        let plain = format_tool_context(&outcomes, None);
+        assert!(!plain.contains(mp_contracts::loop_guard::REMIND_FIRST));
+        let framed = format_tool_context(&outcomes, Some(mp_contracts::loop_guard::REMIND_FIRST));
+        assert_eq!(
+            framed,
+            format!("{plain}\n{}\n", mp_contracts::loop_guard::REMIND_FIRST)
+        );
     }
 
     // --- The run's reasoning level (`runtime_loop::run_effort`, WS11 S8) ---
@@ -21369,20 +21733,26 @@ mod tests {
         assert!(CONTEXT_CHARS > MAX_TOOL_CONTEXT_CHARS);
 
         let output = "x".repeat(MERGE_BUDGET_CHARS);
-        let framed_digest = format_tool_context(&[ToolStepResult {
-            name: RESEARCH_TOOL_NAME.to_owned(),
-            output: output.clone(),
-            error: None,
-        }]);
+        let framed_digest = format_tool_context(
+            &[ToolStepResult {
+                name: RESEARCH_TOOL_NAME.to_owned(),
+                output: output.clone(),
+                error: None,
+            }],
+            None,
+        );
         assert!(
             !framed_digest.contains("[truncated:"),
             "a digest at its own budget must survive the loop's framing"
         );
-        let framed_other = format_tool_context(&[ToolStepResult {
-            name: "web_search".to_owned(),
-            output,
-            error: None,
-        }]);
+        let framed_other = format_tool_context(
+            &[ToolStepResult {
+                name: "web_search".to_owned(),
+                output,
+                error: None,
+            }],
+            None,
+        );
         assert!(
             framed_other.contains("[truncated:"),
             "the same size from an ordinary tool is still cut"
@@ -26310,6 +26680,7 @@ mod tests {
                 retry_after_ms: None,
                 resets_at: "2099-01-01T00:00:00Z".to_owned(),
                 park_reason: "provider_exhausted".to_owned(),
+                loop_stop_code: String::new(),
                 usage: Some(usage),
             },
             "the failed round stays charged, and a park carries no answer and no failure code"

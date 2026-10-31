@@ -11355,6 +11355,25 @@ fn agent_subscription_failure(
     })
 }
 
+/// The loop guard's code on `RunAgentResponse.loop_stop_code` (WS25-S2), spelled as execution-core
+/// writes it. execution-core's cross-service contract test pins the two spellings together.
+const LOOP_DETECTED_CODE: &str = "loop_detected";
+
+/// What the frame of a run the loop guard stopped says (WS25-S2). The code stays `agent_run_failed`,
+/// because the run-end codes are a closed list the SPA shares: a loop stop is told by its words.
+const LOOP_STOPPED_MESSAGE: &str =
+    "The agent stopped because its tool calls kept repeating without making progress.";
+
+/// The words of a failed agent run's error frame: the generic line, or, for a run the loop guard
+/// stopped, the line that says why.
+fn agent_failure_message(response: &RunAgentResponse) -> &'static str {
+    if response.loop_stop_code.trim() == LOOP_DETECTED_CODE {
+        LOOP_STOPPED_MESSAGE
+    } else {
+        "The governed agent run failed."
+    }
+}
+
 fn classify_agentic_run_outcome(status: &str) -> AgenticRunOutcome {
     match status {
         "completed" => AgenticRunOutcome::Completed,
@@ -12508,13 +12527,18 @@ fn agentic_run_stream(
                             spend,
                         )
                     }
-                    None => run_end_error_event(
-                        &request_id,
-                        &run.run_id,
-                        "agent_run_failed",
-                        "The governed agent run failed.",
-                        spend,
-                    ),
+                    None => {
+                        // Bound first: the run-end contract reads the call's arguments only up
+                        // to the first `)`, so a nested call would hide `spend`.
+                        let message = agent_failure_message(&response);
+                        run_end_error_event(
+                            &request_id,
+                            &run.run_id,
+                            "agent_run_failed",
+                            message,
+                            spend,
+                        )
+                    }
                 };
                 let _ = tx.send(Ok(event)).await;
                 return;
@@ -13779,13 +13803,14 @@ fn publish_implicit_dissatisfaction(
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_persona_message, agent_subscription_failure, approved_plan_is_for,
+        agent_failure_message, agent_persona_message, agent_subscription_failure, approved_plan_is_for,
         authored_instructions_message, build_stream_envelope, build_usage_envelope,
         classify_agentic_run_outcome, dispatch_never_reached_execution_core,
         format_approved_plan_block, frame_cost_usd, is_confirmed_agent_dispatch_rejection,
         latest_proposed_plan, orchestration_event_to_step_update, sanitize_follow_up_suggestions,
         sanitize_thread_title, stream_ended_with_no_content, turn_call_rows, turn_usage,
         turn_usage_complete_enabled, usage_progress_enabled, AgenticRunOutcome, PlanState,
+        LOOP_DETECTED_CODE, LOOP_STOPPED_MESSAGE,
     };
     use crate::http_routes::InvokeRequest;
     use crate::state::AppState;
@@ -16229,6 +16254,34 @@ mod tests {
             header(&dispatch(true, Some(&browser))),
             None,
             "a zero-retention run never carries one"
+        );
+    }
+
+    #[test]
+    fn a_loop_stop_is_worded_as_one_and_an_unknown_code_is_the_generic_failure() {
+        use mp_contracts::model_plane::v1::RunAgentResponse;
+        let stopped = RunAgentResponse {
+            status: "failed".to_owned(),
+            loop_stop_code: LOOP_DETECTED_CODE.to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(agent_failure_message(&stopped), LOOP_STOPPED_MESSAGE);
+        assert!(
+            agent_subscription_failure(&stopped, true).is_none(),
+            "a loop stop carries no subscription code"
+        );
+        let unknown = RunAgentResponse {
+            status: "failed".to_owned(),
+            loop_stop_code: "loop_exploded".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(
+            agent_failure_message(&unknown),
+            "The governed agent run failed."
+        );
+        assert_eq!(
+            agent_failure_message(&RunAgentResponse::default()),
+            "The governed agent run failed."
         );
     }
 
@@ -20752,7 +20805,8 @@ mod continue_run_tests {
         }
         let stream = squash(&stream_code());
         for code in CONTINUE_SPENT_RUN_END_FRAMES {
-            let call = format!("run_end_error_event( &request_id, &run.run_id, \"{code}\", \"");
+            // The message may be a literal or a bound value (a loop stop's wording, WS25-S2).
+            let call = format!("run_end_error_event( &request_id, &run.run_id, \"{code}\", ");
             assert_eq!(stream.matches(&call).count(), 1, "{code}: exactly one site");
             let at = stream.find(&call).expect("the call is in the stream");
             let call = &stream[at..];

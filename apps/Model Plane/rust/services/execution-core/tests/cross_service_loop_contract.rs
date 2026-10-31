@@ -45,6 +45,7 @@ use std::path::{Path, PathBuf};
 /// `services/`.
 const AGENT_LOOP: &str = "src/runtime_loop/agent.rs";
 const INLINE_LOOP: &str = "../model-gateway/src/tool_loop.rs";
+const GATEWAY_SSE: &str = "../model-gateway/src/sse.rs";
 
 fn read(relative: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative);
@@ -569,10 +570,9 @@ fn the_attachment_pins_go_red_when_either_side_drifts() {
     );
 }
 
-/// The gateway's inline loop judges a loop by the shared guard (WS25-S1), so the two loops cannot
-/// drift apart on what a repeat is. Neither loop may import the other: they are separate
-/// deployments, and CLAUDE.md keeps the two dispatch loops apart on purpose. The Do loop's own
-/// import of the guard arrives with WS25-S2; until then this pins the inline half.
+/// Both loops judge a loop by the shared guard (WS25-S1 for the inline loop, WS25-S2 for the Do
+/// loop), so the two cannot drift apart on what a repeat is. Neither loop may import the other:
+/// they are separate deployments, and CLAUDE.md keeps the two dispatch loops apart on purpose.
 #[test]
 fn the_inline_loop_judges_loops_by_the_shared_guard_and_neither_loop_imports_the_other() {
     let inline = read(INLINE_LOOP);
@@ -582,6 +582,12 @@ fn the_inline_loop_judges_loops_by_the_shared_guard_and_neither_loop_imports_the
             .iter()
             .any(|line| line.contains("mp_contracts::loop_guard")),
         "the inline loop must judge loops by mp_contracts::loop_guard, not a private copy of it"
+    );
+    assert!(
+        code_lines(&agent)
+            .iter()
+            .any(|line| line.contains("mp_contracts::loop_guard")),
+        "the Do loop must judge loops by mp_contracts::loop_guard, not a private copy of it"
     );
     assert!(
         !code_lines(&inline)
@@ -594,5 +600,23 @@ fn the_inline_loop_judges_loops_by_the_shared_guard_and_neither_loop_imports_the
             .iter()
             .any(|line| line.contains("model_gateway::")),
         "execution-core must not reach into model-gateway"
+    );
+}
+
+/// The Do loop's typed stop crosses from execution-core to the gateway as one closed token, in
+/// `RunAgentResponse.loop_stop_code`. Each side names it in its own constant, so the two spellings
+/// are pinned to each other here (WS25-S2).
+#[test]
+fn the_loop_stop_code_is_spelled_the_same_by_execution_core_and_the_gateway() {
+    let pinned = "const LOOP_DETECTED_CODE: &str = \"loop_detected\";";
+    let agent = read(AGENT_LOOP);
+    let sse = read(GATEWAY_SSE);
+    assert!(
+        code_lines(&agent).iter().any(|line| line.contains(pinned)),
+        "execution-core must name the loop stop as the gateway reads it"
+    );
+    assert!(
+        code_lines(&sse).iter().any(|line| line.contains(pinned)),
+        "model-gateway must read the loop stop under the spelling execution-core writes"
     );
 }

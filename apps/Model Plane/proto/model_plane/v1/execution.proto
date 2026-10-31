@@ -376,6 +376,14 @@ message RunAgentResponse {
   // `failure_code` is empty.
   string park_reason = 11;
 
+  // Why the run's own loop guard ended it, as a closed token: "loop_detected" when
+  // the Do loop's loop guard stopped this run's loop (WS25-S2). A delegated loop's
+  // stop is a child result, so it never sets this field. Empty for every other
+  // outcome. The run appended its fixed reply and its terminal receipt still says
+  // "execution_failed"; this field alone names the stop. It is not `failure_code`,
+  // which is taken by the subscription vocabulary (tag 6).
+  string loop_stop_code = 10;
+
   // What this invocation of the run's loop spent on inference: every round of the
   // run and of the subagents it delegated to, summed. Counts and ids only, never
   // content. Unset when the executor predates the field, which is not the same as
