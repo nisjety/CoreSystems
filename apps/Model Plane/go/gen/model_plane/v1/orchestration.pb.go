@@ -1236,7 +1236,8 @@ type ApprovalCause struct {
 	RuleId string `protobuf:"bytes,4,opt,name=rule_id,json=ruleId,proto3" json:"rule_id,omitempty"`
 	// Browser risk category the Model proposed an action under (`browser_action_risk`).
 	RiskCategory string `protobuf:"bytes,5,opt,name=risk_category,json=riskCategory,proto3" json:"risk_category,omitempty"`
-	// Scopes the decider may grant: `once`, `thread`, `run`. Stubbed to `once`.
+	// Scopes the decider may grant: `once`, `thread`, `run`. Computed by the server from the
+	// code and the call's facts (build plan WS13 S6); a sender's list is never kept.
 	ScopeOptions []string `protobuf:"bytes,6,rep,name=scope_options,json=scopeOptions,proto3" json:"scope_options,omitempty"`
 	// True when granting needs a recent re-authentication (WS13 S5).
 	StepUpRequired bool `protobuf:"varint,7,opt,name=step_up_required,json=stepUpRequired,proto3" json:"step_up_required,omitempty"`
@@ -6156,6 +6157,510 @@ func (x *AnswerRunQuestionResponse) GetQuestion() *RunQuestion {
 	return nil
 }
 
+// A standing grant as its owner sees it. It never carries an argument value.
+type ApprovalScopeGrant struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Grant identifier (ULID, prefix `apg_`).
+	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// The thread the grant covers.
+	ThreadId string `protobuf:"bytes,2,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
+	// The run a run grant covers. Empty for a thread grant.
+	RunId string `protobuf:"bytes,3,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	// THREAD or RUN.
+	Scope ApprovalScope `protobuf:"varint,4,opt,name=scope,proto3,enum=model_plane.v1.ApprovalScope" json:"scope,omitempty"`
+	// The tool the grant releases.
+	ToolName string `protobuf:"bytes,5,opt,name=tool_name,json=toolName,proto3" json:"tool_name,omitempty"`
+	// Tool and operation, never argument values.
+	ActionKey string `protobuf:"bytes,6,opt,name=action_key,json=actionKey,proto3" json:"action_key,omitempty"`
+	// The declared effect class the grant was created under.
+	EffectClass string `protobuf:"bytes,7,opt,name=effect_class,json=effectClass,proto3" json:"effect_class,omitempty"`
+	// The approval whose decision created the grant.
+	CreatedFromApprovalId string `protobuf:"bytes,8,opt,name=created_from_approval_id,json=createdFromApprovalId,proto3" json:"created_from_approval_id,omitempty"`
+	// The closed cause code of that approval.
+	CauseCode string `protobuf:"bytes,9,opt,name=cause_code,json=causeCode,proto3" json:"cause_code,omitempty"`
+	// When the grant was created.
+	CreatedAt *timestamppb.Timestamp `protobuf:"bytes,10,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	// When the grant stops releasing calls.
+	ExpiresAt *timestamppb.Timestamp `protobuf:"bytes,11,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	// When the owner revoked it. Unset while it is live.
+	RevokedAt *timestamppb.Timestamp `protobuf:"bytes,12,opt,name=revoked_at,json=revokedAt,proto3" json:"revoked_at,omitempty"`
+	// How many calls it has released.
+	UseCount int64 `protobuf:"varint,13,opt,name=use_count,json=useCount,proto3" json:"use_count,omitempty"`
+	// When it last released a call. Unset until its first use.
+	LastUsedAt    *timestamppb.Timestamp `protobuf:"bytes,14,opt,name=last_used_at,json=lastUsedAt,proto3" json:"last_used_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ApprovalScopeGrant) Reset() {
+	*x = ApprovalScopeGrant{}
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[68]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ApprovalScopeGrant) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ApprovalScopeGrant) ProtoMessage() {}
+
+func (x *ApprovalScopeGrant) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[68]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ApprovalScopeGrant.ProtoReflect.Descriptor instead.
+func (*ApprovalScopeGrant) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_orchestration_proto_rawDescGZIP(), []int{68}
+}
+
+func (x *ApprovalScopeGrant) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *ApprovalScopeGrant) GetThreadId() string {
+	if x != nil {
+		return x.ThreadId
+	}
+	return ""
+}
+
+func (x *ApprovalScopeGrant) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *ApprovalScopeGrant) GetScope() ApprovalScope {
+	if x != nil {
+		return x.Scope
+	}
+	return ApprovalScope_APPROVAL_SCOPE_UNSPECIFIED
+}
+
+func (x *ApprovalScopeGrant) GetToolName() string {
+	if x != nil {
+		return x.ToolName
+	}
+	return ""
+}
+
+func (x *ApprovalScopeGrant) GetActionKey() string {
+	if x != nil {
+		return x.ActionKey
+	}
+	return ""
+}
+
+func (x *ApprovalScopeGrant) GetEffectClass() string {
+	if x != nil {
+		return x.EffectClass
+	}
+	return ""
+}
+
+func (x *ApprovalScopeGrant) GetCreatedFromApprovalId() string {
+	if x != nil {
+		return x.CreatedFromApprovalId
+	}
+	return ""
+}
+
+func (x *ApprovalScopeGrant) GetCauseCode() string {
+	if x != nil {
+		return x.CauseCode
+	}
+	return ""
+}
+
+func (x *ApprovalScopeGrant) GetCreatedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return nil
+}
+
+func (x *ApprovalScopeGrant) GetExpiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ExpiresAt
+	}
+	return nil
+}
+
+func (x *ApprovalScopeGrant) GetRevokedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.RevokedAt
+	}
+	return nil
+}
+
+func (x *ApprovalScopeGrant) GetUseCount() int64 {
+	if x != nil {
+		return x.UseCount
+	}
+	return 0
+}
+
+func (x *ApprovalScopeGrant) GetLastUsedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.LastUsedAt
+	}
+	return nil
+}
+
+type UseApprovalScopeGrantRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Server-authoritative org scope of the run.
+	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// The run's owner. A grant matches only this user.
+	UserId string `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	// The run's thread.
+	ThreadId string `protobuf:"bytes,3,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
+	// The run the call belongs to.
+	RunId string `protobuf:"bytes,4,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	// The tool the pause would hold.
+	ToolName string `protobuf:"bytes,5,opt,name=tool_name,json=toolName,proto3" json:"tool_name,omitempty"`
+	// Tool and operation of the call, from the pause's cause.
+	ActionKey string `protobuf:"bytes,6,opt,name=action_key,json=actionKey,proto3" json:"action_key,omitempty"`
+	// The call's declared effect class under the run, from the signed capability decision.
+	EffectClass   string `protobuf:"bytes,7,opt,name=effect_class,json=effectClass,proto3" json:"effect_class,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UseApprovalScopeGrantRequest) Reset() {
+	*x = UseApprovalScopeGrantRequest{}
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[69]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UseApprovalScopeGrantRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UseApprovalScopeGrantRequest) ProtoMessage() {}
+
+func (x *UseApprovalScopeGrantRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[69]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UseApprovalScopeGrantRequest.ProtoReflect.Descriptor instead.
+func (*UseApprovalScopeGrantRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_orchestration_proto_rawDescGZIP(), []int{69}
+}
+
+func (x *UseApprovalScopeGrantRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *UseApprovalScopeGrantRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *UseApprovalScopeGrantRequest) GetThreadId() string {
+	if x != nil {
+		return x.ThreadId
+	}
+	return ""
+}
+
+func (x *UseApprovalScopeGrantRequest) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *UseApprovalScopeGrantRequest) GetToolName() string {
+	if x != nil {
+		return x.ToolName
+	}
+	return ""
+}
+
+func (x *UseApprovalScopeGrantRequest) GetActionKey() string {
+	if x != nil {
+		return x.ActionKey
+	}
+	return ""
+}
+
+func (x *UseApprovalScopeGrantRequest) GetEffectClass() string {
+	if x != nil {
+		return x.EffectClass
+	}
+	return ""
+}
+
+type UseApprovalScopeGrantResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The grant that released the call. Empty when no live grant matches.
+	GrantId       string `protobuf:"bytes,1,opt,name=grant_id,json=grantId,proto3" json:"grant_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UseApprovalScopeGrantResponse) Reset() {
+	*x = UseApprovalScopeGrantResponse{}
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[70]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UseApprovalScopeGrantResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UseApprovalScopeGrantResponse) ProtoMessage() {}
+
+func (x *UseApprovalScopeGrantResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[70]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UseApprovalScopeGrantResponse.ProtoReflect.Descriptor instead.
+func (*UseApprovalScopeGrantResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_orchestration_proto_rawDescGZIP(), []int{70}
+}
+
+func (x *UseApprovalScopeGrantResponse) GetGrantId() string {
+	if x != nil {
+		return x.GrantId
+	}
+	return ""
+}
+
+type ListApprovalScopeGrantsRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Server-authoritative org scope.
+	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// The thread whose grants are listed.
+	ThreadId      string `protobuf:"bytes,2,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListApprovalScopeGrantsRequest) Reset() {
+	*x = ListApprovalScopeGrantsRequest{}
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[71]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListApprovalScopeGrantsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListApprovalScopeGrantsRequest) ProtoMessage() {}
+
+func (x *ListApprovalScopeGrantsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[71]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListApprovalScopeGrantsRequest.ProtoReflect.Descriptor instead.
+func (*ListApprovalScopeGrantsRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_orchestration_proto_rawDescGZIP(), []int{71}
+}
+
+func (x *ListApprovalScopeGrantsRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *ListApprovalScopeGrantsRequest) GetThreadId() string {
+	if x != nil {
+		return x.ThreadId
+	}
+	return ""
+}
+
+type ListApprovalScopeGrantsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Grants        []*ApprovalScopeGrant  `protobuf:"bytes,1,rep,name=grants,proto3" json:"grants,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListApprovalScopeGrantsResponse) Reset() {
+	*x = ListApprovalScopeGrantsResponse{}
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[72]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListApprovalScopeGrantsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListApprovalScopeGrantsResponse) ProtoMessage() {}
+
+func (x *ListApprovalScopeGrantsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[72]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListApprovalScopeGrantsResponse.ProtoReflect.Descriptor instead.
+func (*ListApprovalScopeGrantsResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_orchestration_proto_rawDescGZIP(), []int{72}
+}
+
+func (x *ListApprovalScopeGrantsResponse) GetGrants() []*ApprovalScopeGrant {
+	if x != nil {
+		return x.Grants
+	}
+	return nil
+}
+
+type RevokeApprovalScopeGrantRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Server-authoritative org scope.
+	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// The grant to revoke.
+	GrantId       string `protobuf:"bytes,2,opt,name=grant_id,json=grantId,proto3" json:"grant_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RevokeApprovalScopeGrantRequest) Reset() {
+	*x = RevokeApprovalScopeGrantRequest{}
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[73]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RevokeApprovalScopeGrantRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RevokeApprovalScopeGrantRequest) ProtoMessage() {}
+
+func (x *RevokeApprovalScopeGrantRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[73]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RevokeApprovalScopeGrantRequest.ProtoReflect.Descriptor instead.
+func (*RevokeApprovalScopeGrantRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_orchestration_proto_rawDescGZIP(), []int{73}
+}
+
+func (x *RevokeApprovalScopeGrantRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *RevokeApprovalScopeGrantRequest) GetGrantId() string {
+	if x != nil {
+		return x.GrantId
+	}
+	return ""
+}
+
+type RevokeApprovalScopeGrantResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The grant as it stands after the revocation.
+	Grant         *ApprovalScopeGrant `protobuf:"bytes,1,opt,name=grant,proto3" json:"grant,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RevokeApprovalScopeGrantResponse) Reset() {
+	*x = RevokeApprovalScopeGrantResponse{}
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[74]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RevokeApprovalScopeGrantResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RevokeApprovalScopeGrantResponse) ProtoMessage() {}
+
+func (x *RevokeApprovalScopeGrantResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[74]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RevokeApprovalScopeGrantResponse.ProtoReflect.Descriptor instead.
+func (*RevokeApprovalScopeGrantResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_orchestration_proto_rawDescGZIP(), []int{74}
+}
+
+func (x *RevokeApprovalScopeGrantResponse) GetGrant() *ApprovalScopeGrant {
+	if x != nil {
+		return x.Grant
+	}
+	return nil
+}
+
 type OrchestrationEvent_PlanTransitioned struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	PlanId        string                 `protobuf:"bytes,1,opt,name=plan_id,json=planId,proto3" json:"plan_id,omitempty"`
@@ -6168,7 +6673,7 @@ type OrchestrationEvent_PlanTransitioned struct {
 
 func (x *OrchestrationEvent_PlanTransitioned) Reset() {
 	*x = OrchestrationEvent_PlanTransitioned{}
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[68]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[75]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6180,7 +6685,7 @@ func (x *OrchestrationEvent_PlanTransitioned) String() string {
 func (*OrchestrationEvent_PlanTransitioned) ProtoMessage() {}
 
 func (x *OrchestrationEvent_PlanTransitioned) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[68]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[75]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6236,7 +6741,7 @@ type OrchestrationEvent_TodoTransitioned struct {
 
 func (x *OrchestrationEvent_TodoTransitioned) Reset() {
 	*x = OrchestrationEvent_TodoTransitioned{}
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[69]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[76]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6248,7 +6753,7 @@ func (x *OrchestrationEvent_TodoTransitioned) String() string {
 func (*OrchestrationEvent_TodoTransitioned) ProtoMessage() {}
 
 func (x *OrchestrationEvent_TodoTransitioned) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[69]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[76]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6313,7 +6818,7 @@ type OrchestrationEvent_ApprovalStateChanged struct {
 
 func (x *OrchestrationEvent_ApprovalStateChanged) Reset() {
 	*x = OrchestrationEvent_ApprovalStateChanged{}
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[70]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[77]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6325,7 +6830,7 @@ func (x *OrchestrationEvent_ApprovalStateChanged) String() string {
 func (*OrchestrationEvent_ApprovalStateChanged) ProtoMessage() {}
 
 func (x *OrchestrationEvent_ApprovalStateChanged) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[70]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[77]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6428,7 +6933,7 @@ type OrchestrationEvent_SubagentAttached struct {
 
 func (x *OrchestrationEvent_SubagentAttached) Reset() {
 	*x = OrchestrationEvent_SubagentAttached{}
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[71]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[78]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6440,7 +6945,7 @@ func (x *OrchestrationEvent_SubagentAttached) String() string {
 func (*OrchestrationEvent_SubagentAttached) ProtoMessage() {}
 
 func (x *OrchestrationEvent_SubagentAttached) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[71]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[78]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6510,7 +7015,7 @@ type OrchestrationEvent_SubagentStopped struct {
 
 func (x *OrchestrationEvent_SubagentStopped) Reset() {
 	*x = OrchestrationEvent_SubagentStopped{}
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[72]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[79]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6522,7 +7027,7 @@ func (x *OrchestrationEvent_SubagentStopped) String() string {
 func (*OrchestrationEvent_SubagentStopped) ProtoMessage() {}
 
 func (x *OrchestrationEvent_SubagentStopped) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[72]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[79]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6569,7 +7074,7 @@ type OrchestrationEvent_RunPausedForApproval struct {
 
 func (x *OrchestrationEvent_RunPausedForApproval) Reset() {
 	*x = OrchestrationEvent_RunPausedForApproval{}
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[73]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[80]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6581,7 +7086,7 @@ func (x *OrchestrationEvent_RunPausedForApproval) String() string {
 func (*OrchestrationEvent_RunPausedForApproval) ProtoMessage() {}
 
 func (x *OrchestrationEvent_RunPausedForApproval) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[73]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[80]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6621,7 +7126,7 @@ type OrchestrationEvent_RunResumedAfterApproval struct {
 
 func (x *OrchestrationEvent_RunResumedAfterApproval) Reset() {
 	*x = OrchestrationEvent_RunResumedAfterApproval{}
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[74]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[81]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6633,7 +7138,7 @@ func (x *OrchestrationEvent_RunResumedAfterApproval) String() string {
 func (*OrchestrationEvent_RunResumedAfterApproval) ProtoMessage() {}
 
 func (x *OrchestrationEvent_RunResumedAfterApproval) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[74]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[81]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6686,7 +7191,7 @@ type OrchestrationEvent_BrowserActionDispatched struct {
 
 func (x *OrchestrationEvent_BrowserActionDispatched) Reset() {
 	*x = OrchestrationEvent_BrowserActionDispatched{}
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[75]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[82]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6698,7 +7203,7 @@ func (x *OrchestrationEvent_BrowserActionDispatched) String() string {
 func (*OrchestrationEvent_BrowserActionDispatched) ProtoMessage() {}
 
 func (x *OrchestrationEvent_BrowserActionDispatched) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[75]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[82]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6784,7 +7289,7 @@ type OrchestrationEvent_BrowserObservationReceived struct {
 
 func (x *OrchestrationEvent_BrowserObservationReceived) Reset() {
 	*x = OrchestrationEvent_BrowserObservationReceived{}
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[76]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[83]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6796,7 +7301,7 @@ func (x *OrchestrationEvent_BrowserObservationReceived) String() string {
 func (*OrchestrationEvent_BrowserObservationReceived) ProtoMessage() {}
 
 func (x *OrchestrationEvent_BrowserObservationReceived) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[76]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[83]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6882,7 +7387,7 @@ type OrchestrationEvent_BrowserRunPaused struct {
 
 func (x *OrchestrationEvent_BrowserRunPaused) Reset() {
 	*x = OrchestrationEvent_BrowserRunPaused{}
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[77]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[84]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6894,7 +7399,7 @@ func (x *OrchestrationEvent_BrowserRunPaused) String() string {
 func (*OrchestrationEvent_BrowserRunPaused) ProtoMessage() {}
 
 func (x *OrchestrationEvent_BrowserRunPaused) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[77]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[84]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6935,7 +7440,7 @@ type OrchestrationEvent_BrowserRunResumed struct {
 
 func (x *OrchestrationEvent_BrowserRunResumed) Reset() {
 	*x = OrchestrationEvent_BrowserRunResumed{}
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[78]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[85]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6947,7 +7452,7 @@ func (x *OrchestrationEvent_BrowserRunResumed) String() string {
 func (*OrchestrationEvent_BrowserRunResumed) ProtoMessage() {}
 
 func (x *OrchestrationEvent_BrowserRunResumed) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[78]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[85]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7016,7 +7521,7 @@ type OrchestrationEvent_BrowserActionApprovalRequired struct {
 
 func (x *OrchestrationEvent_BrowserActionApprovalRequired) Reset() {
 	*x = OrchestrationEvent_BrowserActionApprovalRequired{}
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[79]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[86]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7028,7 +7533,7 @@ func (x *OrchestrationEvent_BrowserActionApprovalRequired) String() string {
 func (*OrchestrationEvent_BrowserActionApprovalRequired) ProtoMessage() {}
 
 func (x *OrchestrationEvent_BrowserActionApprovalRequired) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[79]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[86]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7129,7 +7634,7 @@ type OrchestrationEvent_BrowserActionDecided struct {
 
 func (x *OrchestrationEvent_BrowserActionDecided) Reset() {
 	*x = OrchestrationEvent_BrowserActionDecided{}
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[80]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[87]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7141,7 +7646,7 @@ func (x *OrchestrationEvent_BrowserActionDecided) String() string {
 func (*OrchestrationEvent_BrowserActionDecided) ProtoMessage() {}
 
 func (x *OrchestrationEvent_BrowserActionDecided) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[80]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[87]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7216,7 +7721,7 @@ type OrchestrationEvent_ApprovalContinuationVerified struct {
 
 func (x *OrchestrationEvent_ApprovalContinuationVerified) Reset() {
 	*x = OrchestrationEvent_ApprovalContinuationVerified{}
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[81]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[88]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7228,7 +7733,7 @@ func (x *OrchestrationEvent_ApprovalContinuationVerified) String() string {
 func (*OrchestrationEvent_ApprovalContinuationVerified) ProtoMessage() {}
 
 func (x *OrchestrationEvent_ApprovalContinuationVerified) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[81]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[88]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7291,7 +7796,7 @@ type OrchestrationEvent_RunParked struct {
 
 func (x *OrchestrationEvent_RunParked) Reset() {
 	*x = OrchestrationEvent_RunParked{}
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[82]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[89]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7303,7 +7808,7 @@ func (x *OrchestrationEvent_RunParked) String() string {
 func (*OrchestrationEvent_RunParked) ProtoMessage() {}
 
 func (x *OrchestrationEvent_RunParked) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[82]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[89]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7338,7 +7843,7 @@ type OrchestrationEvent_RunResumed struct {
 
 func (x *OrchestrationEvent_RunResumed) Reset() {
 	*x = OrchestrationEvent_RunResumed{}
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[83]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[90]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7350,7 +7855,7 @@ func (x *OrchestrationEvent_RunResumed) String() string {
 func (*OrchestrationEvent_RunResumed) ProtoMessage() {}
 
 func (x *OrchestrationEvent_RunResumed) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[83]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[90]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7396,7 +7901,7 @@ type OrchestrationEvent_QuestionAsked struct {
 
 func (x *OrchestrationEvent_QuestionAsked) Reset() {
 	*x = OrchestrationEvent_QuestionAsked{}
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[84]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[91]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7408,7 +7913,7 @@ func (x *OrchestrationEvent_QuestionAsked) String() string {
 func (*OrchestrationEvent_QuestionAsked) ProtoMessage() {}
 
 func (x *OrchestrationEvent_QuestionAsked) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[84]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[91]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7466,7 +7971,7 @@ type OrchestrationEvent_QuestionAnswered struct {
 
 func (x *OrchestrationEvent_QuestionAnswered) Reset() {
 	*x = OrchestrationEvent_QuestionAnswered{}
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[85]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[92]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7478,7 +7983,7 @@ func (x *OrchestrationEvent_QuestionAnswered) String() string {
 func (*OrchestrationEvent_QuestionAnswered) ProtoMessage() {}
 
 func (x *OrchestrationEvent_QuestionAnswered) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[85]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[92]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7543,7 +8048,7 @@ type OrchestrationEvent_RunUsageProgress struct {
 
 func (x *OrchestrationEvent_RunUsageProgress) Reset() {
 	*x = OrchestrationEvent_RunUsageProgress{}
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[86]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[93]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7555,7 +8060,7 @@ func (x *OrchestrationEvent_RunUsageProgress) String() string {
 func (*OrchestrationEvent_RunUsageProgress) ProtoMessage() {}
 
 func (x *OrchestrationEvent_RunUsageProgress) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_orchestration_proto_msgTypes[86]
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[93]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8176,7 +8681,50 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\x04skip\x18\x04 \x01(\bR\x04skip\x12.\n" +
 	"\x13answered_message_id\x18\x05 \x01(\tR\x11answeredMessageId\"T\n" +
 	"\x19AnswerRunQuestionResponse\x127\n" +
-	"\bquestion\x18\x01 \x01(\v2\x1b.model_plane.v1.RunQuestionR\bquestion*\x87\x02\n" +
+	"\bquestion\x18\x01 \x01(\v2\x1b.model_plane.v1.RunQuestionR\bquestion\"\xd0\x04\n" +
+	"\x12ApprovalScopeGrant\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
+	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x15\n" +
+	"\x06run_id\x18\x03 \x01(\tR\x05runId\x123\n" +
+	"\x05scope\x18\x04 \x01(\x0e2\x1d.model_plane.v1.ApprovalScopeR\x05scope\x12\x1b\n" +
+	"\ttool_name\x18\x05 \x01(\tR\btoolName\x12\x1d\n" +
+	"\n" +
+	"action_key\x18\x06 \x01(\tR\tactionKey\x12!\n" +
+	"\feffect_class\x18\a \x01(\tR\veffectClass\x127\n" +
+	"\x18created_from_approval_id\x18\b \x01(\tR\x15createdFromApprovalId\x12\x1d\n" +
+	"\n" +
+	"cause_code\x18\t \x01(\tR\tcauseCode\x129\n" +
+	"\n" +
+	"created_at\x18\n" +
+	" \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
+	"\n" +
+	"expires_at\x18\v \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\x129\n" +
+	"\n" +
+	"revoked_at\x18\f \x01(\v2\x1a.google.protobuf.TimestampR\trevokedAt\x12\x1b\n" +
+	"\tuse_count\x18\r \x01(\x03R\buseCount\x12<\n" +
+	"\flast_used_at\x18\x0e \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"lastUsedAt\"\xe1\x01\n" +
+	"\x1cUseApprovalScopeGrantRequest\x12\x15\n" +
+	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x17\n" +
+	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x1b\n" +
+	"\tthread_id\x18\x03 \x01(\tR\bthreadId\x12\x15\n" +
+	"\x06run_id\x18\x04 \x01(\tR\x05runId\x12\x1b\n" +
+	"\ttool_name\x18\x05 \x01(\tR\btoolName\x12\x1d\n" +
+	"\n" +
+	"action_key\x18\x06 \x01(\tR\tactionKey\x12!\n" +
+	"\feffect_class\x18\a \x01(\tR\veffectClass\":\n" +
+	"\x1dUseApprovalScopeGrantResponse\x12\x19\n" +
+	"\bgrant_id\x18\x01 \x01(\tR\agrantId\"T\n" +
+	"\x1eListApprovalScopeGrantsRequest\x12\x15\n" +
+	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1b\n" +
+	"\tthread_id\x18\x02 \x01(\tR\bthreadId\"]\n" +
+	"\x1fListApprovalScopeGrantsResponse\x12:\n" +
+	"\x06grants\x18\x01 \x03(\v2\".model_plane.v1.ApprovalScopeGrantR\x06grants\"S\n" +
+	"\x1fRevokeApprovalScopeGrantRequest\x12\x15\n" +
+	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x19\n" +
+	"\bgrant_id\x18\x02 \x01(\tR\agrantId\"\\\n" +
+	" RevokeApprovalScopeGrantResponse\x128\n" +
+	"\x05grant\x18\x01 \x01(\v2\".model_plane.v1.ApprovalScopeGrantR\x05grant*\x87\x02\n" +
 	"\tPlanState\x12\x1a\n" +
 	"\x16PLAN_STATE_UNSPECIFIED\x10\x00\x12\x14\n" +
 	"\x10PLAN_STATE_DRAFT\x10\x01\x12\x17\n" +
@@ -8286,7 +8834,11 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\x0fStreamRunEvents\x12&.model_plane.v1.StreamRunEventsRequest\x1a\".model_plane.v1.OrchestrationEvent0\x01\x12}\n" +
 	"\x18RecordOrchestrationEvent\x12/.model_plane.v1.RecordOrchestrationEventRequest\x1a0.model_plane.v1.RecordOrchestrationEventResponse2{\n" +
 	"\x1bOrchestratorWorkflowService\x12\\\n" +
-	"\rStartWorkflow\x12$.model_plane.v1.StartWorkflowRequest\x1a%.model_plane.v1.StartWorkflowResponseB\xba\x01\n" +
+	"\rStartWorkflow\x12$.model_plane.v1.StartWorkflowRequest\x1a%.model_plane.v1.StartWorkflowResponse2\x8c\x03\n" +
+	"\x19ApprovalScopeGrantService\x12t\n" +
+	"\x15UseApprovalScopeGrant\x12,.model_plane.v1.UseApprovalScopeGrantRequest\x1a-.model_plane.v1.UseApprovalScopeGrantResponse\x12z\n" +
+	"\x17ListApprovalScopeGrants\x12..model_plane.v1.ListApprovalScopeGrantsRequest\x1a/.model_plane.v1.ListApprovalScopeGrantsResponse\x12}\n" +
+	"\x18RevokeApprovalScopeGrant\x12/.model_plane.v1.RevokeApprovalScopeGrantRequest\x1a0.model_plane.v1.RevokeApprovalScopeGrantResponseB\xba\x01\n" +
 	"\x12com.model_plane.v1B\x12OrchestrationProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3"
 
 var (
@@ -8302,7 +8854,7 @@ func file_model_plane_v1_orchestration_proto_rawDescGZIP() []byte {
 }
 
 var file_model_plane_v1_orchestration_proto_enumTypes = make([]protoimpl.EnumInfo, 12)
-var file_model_plane_v1_orchestration_proto_msgTypes = make([]protoimpl.MessageInfo, 87)
+var file_model_plane_v1_orchestration_proto_msgTypes = make([]protoimpl.MessageInfo, 94)
 var file_model_plane_v1_orchestration_proto_goTypes = []any{
 	(PlanState)(0),                                           // 0: model_plane.v1.PlanState
 	(PlanStepState)(0),                                       // 1: model_plane.v1.PlanStepState
@@ -8384,58 +8936,65 @@ var file_model_plane_v1_orchestration_proto_goTypes = []any{
 	(*ListRunQuestionsResponse)(nil),                         // 77: model_plane.v1.ListRunQuestionsResponse
 	(*AnswerRunQuestionRequest)(nil),                         // 78: model_plane.v1.AnswerRunQuestionRequest
 	(*AnswerRunQuestionResponse)(nil),                        // 79: model_plane.v1.AnswerRunQuestionResponse
-	(*OrchestrationEvent_PlanTransitioned)(nil),              // 80: model_plane.v1.OrchestrationEvent.PlanTransitioned
-	(*OrchestrationEvent_TodoTransitioned)(nil),              // 81: model_plane.v1.OrchestrationEvent.TodoTransitioned
-	(*OrchestrationEvent_ApprovalStateChanged)(nil),          // 82: model_plane.v1.OrchestrationEvent.ApprovalStateChanged
-	(*OrchestrationEvent_SubagentAttached)(nil),              // 83: model_plane.v1.OrchestrationEvent.SubagentAttached
-	(*OrchestrationEvent_SubagentStopped)(nil),               // 84: model_plane.v1.OrchestrationEvent.SubagentStopped
-	(*OrchestrationEvent_RunPausedForApproval)(nil),          // 85: model_plane.v1.OrchestrationEvent.RunPausedForApproval
-	(*OrchestrationEvent_RunResumedAfterApproval)(nil),       // 86: model_plane.v1.OrchestrationEvent.RunResumedAfterApproval
-	(*OrchestrationEvent_BrowserActionDispatched)(nil),       // 87: model_plane.v1.OrchestrationEvent.BrowserActionDispatched
-	(*OrchestrationEvent_BrowserObservationReceived)(nil),    // 88: model_plane.v1.OrchestrationEvent.BrowserObservationReceived
-	(*OrchestrationEvent_BrowserRunPaused)(nil),              // 89: model_plane.v1.OrchestrationEvent.BrowserRunPaused
-	(*OrchestrationEvent_BrowserRunResumed)(nil),             // 90: model_plane.v1.OrchestrationEvent.BrowserRunResumed
-	(*OrchestrationEvent_BrowserActionApprovalRequired)(nil), // 91: model_plane.v1.OrchestrationEvent.BrowserActionApprovalRequired
-	(*OrchestrationEvent_BrowserActionDecided)(nil),          // 92: model_plane.v1.OrchestrationEvent.BrowserActionDecided
-	(*OrchestrationEvent_ApprovalContinuationVerified)(nil),  // 93: model_plane.v1.OrchestrationEvent.ApprovalContinuationVerified
-	(*OrchestrationEvent_RunParked)(nil),                     // 94: model_plane.v1.OrchestrationEvent.RunParked
-	(*OrchestrationEvent_RunResumed)(nil),                    // 95: model_plane.v1.OrchestrationEvent.RunResumed
-	(*OrchestrationEvent_QuestionAsked)(nil),                 // 96: model_plane.v1.OrchestrationEvent.QuestionAsked
-	(*OrchestrationEvent_QuestionAnswered)(nil),              // 97: model_plane.v1.OrchestrationEvent.QuestionAnswered
-	(*OrchestrationEvent_RunUsageProgress)(nil),              // 98: model_plane.v1.OrchestrationEvent.RunUsageProgress
-	(*timestamppb.Timestamp)(nil),                            // 99: google.protobuf.Timestamp
-	(*structpb.Struct)(nil),                                  // 100: google.protobuf.Struct
-	(*VerificationResult)(nil),                               // 101: model_plane.v1.VerificationResult
-	(*GetRunProofBundleRequest)(nil),                         // 102: model_plane.v1.GetRunProofBundleRequest
-	(*GetVerificationMetricsRequest)(nil),                    // 103: model_plane.v1.GetVerificationMetricsRequest
-	(*GetRunProofBundleResponse)(nil),                        // 104: model_plane.v1.GetRunProofBundleResponse
-	(*GetVerificationMetricsResponse)(nil),                   // 105: model_plane.v1.GetVerificationMetricsResponse
+	(*ApprovalScopeGrant)(nil),                               // 80: model_plane.v1.ApprovalScopeGrant
+	(*UseApprovalScopeGrantRequest)(nil),                     // 81: model_plane.v1.UseApprovalScopeGrantRequest
+	(*UseApprovalScopeGrantResponse)(nil),                    // 82: model_plane.v1.UseApprovalScopeGrantResponse
+	(*ListApprovalScopeGrantsRequest)(nil),                   // 83: model_plane.v1.ListApprovalScopeGrantsRequest
+	(*ListApprovalScopeGrantsResponse)(nil),                  // 84: model_plane.v1.ListApprovalScopeGrantsResponse
+	(*RevokeApprovalScopeGrantRequest)(nil),                  // 85: model_plane.v1.RevokeApprovalScopeGrantRequest
+	(*RevokeApprovalScopeGrantResponse)(nil),                 // 86: model_plane.v1.RevokeApprovalScopeGrantResponse
+	(*OrchestrationEvent_PlanTransitioned)(nil),              // 87: model_plane.v1.OrchestrationEvent.PlanTransitioned
+	(*OrchestrationEvent_TodoTransitioned)(nil),              // 88: model_plane.v1.OrchestrationEvent.TodoTransitioned
+	(*OrchestrationEvent_ApprovalStateChanged)(nil),          // 89: model_plane.v1.OrchestrationEvent.ApprovalStateChanged
+	(*OrchestrationEvent_SubagentAttached)(nil),              // 90: model_plane.v1.OrchestrationEvent.SubagentAttached
+	(*OrchestrationEvent_SubagentStopped)(nil),               // 91: model_plane.v1.OrchestrationEvent.SubagentStopped
+	(*OrchestrationEvent_RunPausedForApproval)(nil),          // 92: model_plane.v1.OrchestrationEvent.RunPausedForApproval
+	(*OrchestrationEvent_RunResumedAfterApproval)(nil),       // 93: model_plane.v1.OrchestrationEvent.RunResumedAfterApproval
+	(*OrchestrationEvent_BrowserActionDispatched)(nil),       // 94: model_plane.v1.OrchestrationEvent.BrowserActionDispatched
+	(*OrchestrationEvent_BrowserObservationReceived)(nil),    // 95: model_plane.v1.OrchestrationEvent.BrowserObservationReceived
+	(*OrchestrationEvent_BrowserRunPaused)(nil),              // 96: model_plane.v1.OrchestrationEvent.BrowserRunPaused
+	(*OrchestrationEvent_BrowserRunResumed)(nil),             // 97: model_plane.v1.OrchestrationEvent.BrowserRunResumed
+	(*OrchestrationEvent_BrowserActionApprovalRequired)(nil), // 98: model_plane.v1.OrchestrationEvent.BrowserActionApprovalRequired
+	(*OrchestrationEvent_BrowserActionDecided)(nil),          // 99: model_plane.v1.OrchestrationEvent.BrowserActionDecided
+	(*OrchestrationEvent_ApprovalContinuationVerified)(nil),  // 100: model_plane.v1.OrchestrationEvent.ApprovalContinuationVerified
+	(*OrchestrationEvent_RunParked)(nil),                     // 101: model_plane.v1.OrchestrationEvent.RunParked
+	(*OrchestrationEvent_RunResumed)(nil),                    // 102: model_plane.v1.OrchestrationEvent.RunResumed
+	(*OrchestrationEvent_QuestionAsked)(nil),                 // 103: model_plane.v1.OrchestrationEvent.QuestionAsked
+	(*OrchestrationEvent_QuestionAnswered)(nil),              // 104: model_plane.v1.OrchestrationEvent.QuestionAnswered
+	(*OrchestrationEvent_RunUsageProgress)(nil),              // 105: model_plane.v1.OrchestrationEvent.RunUsageProgress
+	(*timestamppb.Timestamp)(nil),                            // 106: google.protobuf.Timestamp
+	(*structpb.Struct)(nil),                                  // 107: google.protobuf.Struct
+	(*VerificationResult)(nil),                               // 108: model_plane.v1.VerificationResult
+	(*GetRunProofBundleRequest)(nil),                         // 109: model_plane.v1.GetRunProofBundleRequest
+	(*GetVerificationMetricsRequest)(nil),                    // 110: model_plane.v1.GetVerificationMetricsRequest
+	(*GetRunProofBundleResponse)(nil),                        // 111: model_plane.v1.GetRunProofBundleResponse
+	(*GetVerificationMetricsResponse)(nil),                   // 112: model_plane.v1.GetVerificationMetricsResponse
 }
 var file_model_plane_v1_orchestration_proto_depIdxs = []int32{
 	1,   // 0: model_plane.v1.PlanStep.state:type_name -> model_plane.v1.PlanStepState
-	99,  // 1: model_plane.v1.PlanStep.created_at:type_name -> google.protobuf.Timestamp
-	99,  // 2: model_plane.v1.PlanStep.updated_at:type_name -> google.protobuf.Timestamp
+	106, // 1: model_plane.v1.PlanStep.created_at:type_name -> google.protobuf.Timestamp
+	106, // 2: model_plane.v1.PlanStep.updated_at:type_name -> google.protobuf.Timestamp
 	0,   // 3: model_plane.v1.Plan.state:type_name -> model_plane.v1.PlanState
 	12,  // 4: model_plane.v1.Plan.steps:type_name -> model_plane.v1.PlanStep
-	100, // 5: model_plane.v1.Plan.metadata:type_name -> google.protobuf.Struct
-	99,  // 6: model_plane.v1.Plan.created_at:type_name -> google.protobuf.Timestamp
-	99,  // 7: model_plane.v1.Plan.updated_at:type_name -> google.protobuf.Timestamp
+	107, // 5: model_plane.v1.Plan.metadata:type_name -> google.protobuf.Struct
+	106, // 6: model_plane.v1.Plan.created_at:type_name -> google.protobuf.Timestamp
+	106, // 7: model_plane.v1.Plan.updated_at:type_name -> google.protobuf.Timestamp
 	2,   // 8: model_plane.v1.Approval.kind:type_name -> model_plane.v1.ApprovalKind
 	3,   // 9: model_plane.v1.Approval.state:type_name -> model_plane.v1.ApprovalState
-	100, // 10: model_plane.v1.Approval.context:type_name -> google.protobuf.Struct
-	99,  // 11: model_plane.v1.Approval.requested_at:type_name -> google.protobuf.Timestamp
-	99,  // 12: model_plane.v1.Approval.decided_at:type_name -> google.protobuf.Timestamp
-	99,  // 13: model_plane.v1.Approval.expires_at:type_name -> google.protobuf.Timestamp
-	99,  // 14: model_plane.v1.Approval.consumed_at:type_name -> google.protobuf.Timestamp
+	107, // 10: model_plane.v1.Approval.context:type_name -> google.protobuf.Struct
+	106, // 11: model_plane.v1.Approval.requested_at:type_name -> google.protobuf.Timestamp
+	106, // 12: model_plane.v1.Approval.decided_at:type_name -> google.protobuf.Timestamp
+	106, // 13: model_plane.v1.Approval.expires_at:type_name -> google.protobuf.Timestamp
+	106, // 14: model_plane.v1.Approval.consumed_at:type_name -> google.protobuf.Timestamp
 	15,  // 15: model_plane.v1.Approval.cause:type_name -> model_plane.v1.ApprovalCause
 	4,   // 16: model_plane.v1.Todo.state:type_name -> model_plane.v1.TodoState
 	5,   // 17: model_plane.v1.Todo.priority:type_name -> model_plane.v1.TodoPriority
-	100, // 18: model_plane.v1.Todo.metadata:type_name -> google.protobuf.Struct
-	99,  // 19: model_plane.v1.Todo.created_at:type_name -> google.protobuf.Timestamp
-	99,  // 20: model_plane.v1.Todo.updated_at:type_name -> google.protobuf.Timestamp
-	99,  // 21: model_plane.v1.Todo.completed_at:type_name -> google.protobuf.Timestamp
+	107, // 18: model_plane.v1.Todo.metadata:type_name -> google.protobuf.Struct
+	106, // 19: model_plane.v1.Todo.created_at:type_name -> google.protobuf.Timestamp
+	106, // 20: model_plane.v1.Todo.updated_at:type_name -> google.protobuf.Timestamp
+	106, // 21: model_plane.v1.Todo.completed_at:type_name -> google.protobuf.Timestamp
 	6,   // 22: model_plane.v1.LineageEdge.role:type_name -> model_plane.v1.SubagentRole
-	99,  // 23: model_plane.v1.LineageEdge.spawned_at:type_name -> google.protobuf.Timestamp
+	106, // 23: model_plane.v1.LineageEdge.spawned_at:type_name -> google.protobuf.Timestamp
 	17,  // 24: model_plane.v1.SubagentLineage.edges:type_name -> model_plane.v1.LineageEdge
 	13,  // 25: model_plane.v1.ListPlansResponse.plans:type_name -> model_plane.v1.Plan
 	13,  // 26: model_plane.v1.GetPlanResponse.plan:type_name -> model_plane.v1.Plan
@@ -8460,123 +9019,136 @@ var file_model_plane_v1_orchestration_proto_depIdxs = []int32{
 	7,   // 45: model_plane.v1.DecideApprovalRequest.decision_source:type_name -> model_plane.v1.ApprovalDecisionSource
 	8,   // 46: model_plane.v1.DecideApprovalRequest.scope:type_name -> model_plane.v1.ApprovalScope
 	14,  // 47: model_plane.v1.DecideApprovalResponse.approval:type_name -> model_plane.v1.Approval
-	99,  // 48: model_plane.v1.ApprovalDelivery.lease_expires_at:type_name -> google.protobuf.Timestamp
+	106, // 48: model_plane.v1.ApprovalDelivery.lease_expires_at:type_name -> google.protobuf.Timestamp
 	49,  // 49: model_plane.v1.ClaimApprovalDeliveriesResponse.deliveries:type_name -> model_plane.v1.ApprovalDelivery
 	9,   // 50: model_plane.v1.RecordApprovalContinuationOutcomeRequest.outcome:type_name -> model_plane.v1.ApprovalContinuationOutcome
-	101, // 51: model_plane.v1.RecordApprovalContinuationOutcomeRequest.verification:type_name -> model_plane.v1.VerificationResult
+	108, // 51: model_plane.v1.RecordApprovalContinuationOutcomeRequest.verification:type_name -> model_plane.v1.VerificationResult
 	10,  // 52: model_plane.v1.AcknowledgeApprovalDeliveryRequest.acknowledgement:type_name -> model_plane.v1.ApprovalDeliveryAcknowledgement
-	99,  // 53: model_plane.v1.AcknowledgeApprovalDeliveryResponse.next_attempt_at:type_name -> google.protobuf.Timestamp
+	106, // 53: model_plane.v1.AcknowledgeApprovalDeliveryResponse.next_attempt_at:type_name -> google.protobuf.Timestamp
 	18,  // 54: model_plane.v1.GetSubagentLineageResponse.lineage:type_name -> model_plane.v1.SubagentLineage
 	6,   // 55: model_plane.v1.AttachSubagentRequest.role:type_name -> model_plane.v1.SubagentRole
 	17,  // 56: model_plane.v1.AttachSubagentResponse.edge:type_name -> model_plane.v1.LineageEdge
 	18,  // 57: model_plane.v1.AttachSubagentResponse.lineage:type_name -> model_plane.v1.SubagentLineage
-	99,  // 58: model_plane.v1.OrchestrationEvent.at:type_name -> google.protobuf.Timestamp
-	80,  // 59: model_plane.v1.OrchestrationEvent.plan_transitioned:type_name -> model_plane.v1.OrchestrationEvent.PlanTransitioned
-	81,  // 60: model_plane.v1.OrchestrationEvent.todo_transitioned:type_name -> model_plane.v1.OrchestrationEvent.TodoTransitioned
-	82,  // 61: model_plane.v1.OrchestrationEvent.approval_state_changed:type_name -> model_plane.v1.OrchestrationEvent.ApprovalStateChanged
-	83,  // 62: model_plane.v1.OrchestrationEvent.subagent_attached:type_name -> model_plane.v1.OrchestrationEvent.SubagentAttached
-	84,  // 63: model_plane.v1.OrchestrationEvent.subagent_stopped:type_name -> model_plane.v1.OrchestrationEvent.SubagentStopped
-	85,  // 64: model_plane.v1.OrchestrationEvent.run_paused_for_approval:type_name -> model_plane.v1.OrchestrationEvent.RunPausedForApproval
-	86,  // 65: model_plane.v1.OrchestrationEvent.run_resumed_after_approval:type_name -> model_plane.v1.OrchestrationEvent.RunResumedAfterApproval
-	87,  // 66: model_plane.v1.OrchestrationEvent.browser_action_dispatched:type_name -> model_plane.v1.OrchestrationEvent.BrowserActionDispatched
-	88,  // 67: model_plane.v1.OrchestrationEvent.browser_observation_received:type_name -> model_plane.v1.OrchestrationEvent.BrowserObservationReceived
-	89,  // 68: model_plane.v1.OrchestrationEvent.browser_run_paused:type_name -> model_plane.v1.OrchestrationEvent.BrowserRunPaused
-	90,  // 69: model_plane.v1.OrchestrationEvent.browser_run_resumed:type_name -> model_plane.v1.OrchestrationEvent.BrowserRunResumed
-	91,  // 70: model_plane.v1.OrchestrationEvent.browser_action_approval_required:type_name -> model_plane.v1.OrchestrationEvent.BrowserActionApprovalRequired
-	92,  // 71: model_plane.v1.OrchestrationEvent.browser_action_decided:type_name -> model_plane.v1.OrchestrationEvent.BrowserActionDecided
-	93,  // 72: model_plane.v1.OrchestrationEvent.approval_continuation_verified:type_name -> model_plane.v1.OrchestrationEvent.ApprovalContinuationVerified
-	94,  // 73: model_plane.v1.OrchestrationEvent.run_parked:type_name -> model_plane.v1.OrchestrationEvent.RunParked
-	95,  // 74: model_plane.v1.OrchestrationEvent.run_resumed:type_name -> model_plane.v1.OrchestrationEvent.RunResumed
-	96,  // 75: model_plane.v1.OrchestrationEvent.question_asked:type_name -> model_plane.v1.OrchestrationEvent.QuestionAsked
-	97,  // 76: model_plane.v1.OrchestrationEvent.question_answered:type_name -> model_plane.v1.OrchestrationEvent.QuestionAnswered
-	98,  // 77: model_plane.v1.OrchestrationEvent.run_usage_progress:type_name -> model_plane.v1.OrchestrationEvent.RunUsageProgress
+	106, // 58: model_plane.v1.OrchestrationEvent.at:type_name -> google.protobuf.Timestamp
+	87,  // 59: model_plane.v1.OrchestrationEvent.plan_transitioned:type_name -> model_plane.v1.OrchestrationEvent.PlanTransitioned
+	88,  // 60: model_plane.v1.OrchestrationEvent.todo_transitioned:type_name -> model_plane.v1.OrchestrationEvent.TodoTransitioned
+	89,  // 61: model_plane.v1.OrchestrationEvent.approval_state_changed:type_name -> model_plane.v1.OrchestrationEvent.ApprovalStateChanged
+	90,  // 62: model_plane.v1.OrchestrationEvent.subagent_attached:type_name -> model_plane.v1.OrchestrationEvent.SubagentAttached
+	91,  // 63: model_plane.v1.OrchestrationEvent.subagent_stopped:type_name -> model_plane.v1.OrchestrationEvent.SubagentStopped
+	92,  // 64: model_plane.v1.OrchestrationEvent.run_paused_for_approval:type_name -> model_plane.v1.OrchestrationEvent.RunPausedForApproval
+	93,  // 65: model_plane.v1.OrchestrationEvent.run_resumed_after_approval:type_name -> model_plane.v1.OrchestrationEvent.RunResumedAfterApproval
+	94,  // 66: model_plane.v1.OrchestrationEvent.browser_action_dispatched:type_name -> model_plane.v1.OrchestrationEvent.BrowserActionDispatched
+	95,  // 67: model_plane.v1.OrchestrationEvent.browser_observation_received:type_name -> model_plane.v1.OrchestrationEvent.BrowserObservationReceived
+	96,  // 68: model_plane.v1.OrchestrationEvent.browser_run_paused:type_name -> model_plane.v1.OrchestrationEvent.BrowserRunPaused
+	97,  // 69: model_plane.v1.OrchestrationEvent.browser_run_resumed:type_name -> model_plane.v1.OrchestrationEvent.BrowserRunResumed
+	98,  // 70: model_plane.v1.OrchestrationEvent.browser_action_approval_required:type_name -> model_plane.v1.OrchestrationEvent.BrowserActionApprovalRequired
+	99,  // 71: model_plane.v1.OrchestrationEvent.browser_action_decided:type_name -> model_plane.v1.OrchestrationEvent.BrowserActionDecided
+	100, // 72: model_plane.v1.OrchestrationEvent.approval_continuation_verified:type_name -> model_plane.v1.OrchestrationEvent.ApprovalContinuationVerified
+	101, // 73: model_plane.v1.OrchestrationEvent.run_parked:type_name -> model_plane.v1.OrchestrationEvent.RunParked
+	102, // 74: model_plane.v1.OrchestrationEvent.run_resumed:type_name -> model_plane.v1.OrchestrationEvent.RunResumed
+	103, // 75: model_plane.v1.OrchestrationEvent.question_asked:type_name -> model_plane.v1.OrchestrationEvent.QuestionAsked
+	104, // 76: model_plane.v1.OrchestrationEvent.question_answered:type_name -> model_plane.v1.OrchestrationEvent.QuestionAnswered
+	105, // 77: model_plane.v1.OrchestrationEvent.run_usage_progress:type_name -> model_plane.v1.OrchestrationEvent.RunUsageProgress
 	65,  // 78: model_plane.v1.RecordOrchestrationEventRequest.event:type_name -> model_plane.v1.OrchestrationEvent
-	100, // 79: model_plane.v1.StartWorkflowRequest.input:type_name -> google.protobuf.Struct
+	107, // 79: model_plane.v1.StartWorkflowRequest.input:type_name -> google.protobuf.Struct
 	70,  // 80: model_plane.v1.QuestionItem.options:type_name -> model_plane.v1.QuestionOption
 	11,  // 81: model_plane.v1.RunQuestion.state:type_name -> model_plane.v1.QuestionState
 	71,  // 82: model_plane.v1.RunQuestion.items:type_name -> model_plane.v1.QuestionItem
-	99,  // 83: model_plane.v1.RunQuestion.requested_at:type_name -> google.protobuf.Timestamp
-	99,  // 84: model_plane.v1.RunQuestion.expires_at:type_name -> google.protobuf.Timestamp
-	99,  // 85: model_plane.v1.RunQuestion.answered_at:type_name -> google.protobuf.Timestamp
+	106, // 83: model_plane.v1.RunQuestion.requested_at:type_name -> google.protobuf.Timestamp
+	106, // 84: model_plane.v1.RunQuestion.expires_at:type_name -> google.protobuf.Timestamp
+	106, // 85: model_plane.v1.RunQuestion.answered_at:type_name -> google.protobuf.Timestamp
 	72,  // 86: model_plane.v1.RunQuestion.answers:type_name -> model_plane.v1.QuestionAnswerItem
 	71,  // 87: model_plane.v1.CreateRunQuestionRequest.items:type_name -> model_plane.v1.QuestionItem
 	73,  // 88: model_plane.v1.CreateRunQuestionResponse.question:type_name -> model_plane.v1.RunQuestion
 	73,  // 89: model_plane.v1.ListRunQuestionsResponse.questions:type_name -> model_plane.v1.RunQuestion
 	72,  // 90: model_plane.v1.AnswerRunQuestionRequest.answers:type_name -> model_plane.v1.QuestionAnswerItem
 	73,  // 91: model_plane.v1.AnswerRunQuestionResponse.question:type_name -> model_plane.v1.RunQuestion
-	0,   // 92: model_plane.v1.OrchestrationEvent.PlanTransitioned.from:type_name -> model_plane.v1.PlanState
-	0,   // 93: model_plane.v1.OrchestrationEvent.PlanTransitioned.to:type_name -> model_plane.v1.PlanState
-	4,   // 94: model_plane.v1.OrchestrationEvent.TodoTransitioned.from:type_name -> model_plane.v1.TodoState
-	4,   // 95: model_plane.v1.OrchestrationEvent.TodoTransitioned.to:type_name -> model_plane.v1.TodoState
-	2,   // 96: model_plane.v1.OrchestrationEvent.ApprovalStateChanged.approval_kind:type_name -> model_plane.v1.ApprovalKind
-	3,   // 97: model_plane.v1.OrchestrationEvent.ApprovalStateChanged.to:type_name -> model_plane.v1.ApprovalState
-	8,   // 98: model_plane.v1.OrchestrationEvent.ApprovalStateChanged.scope:type_name -> model_plane.v1.ApprovalScope
-	7,   // 99: model_plane.v1.OrchestrationEvent.ApprovalStateChanged.decision_source:type_name -> model_plane.v1.ApprovalDecisionSource
-	6,   // 100: model_plane.v1.OrchestrationEvent.SubagentAttached.role:type_name -> model_plane.v1.SubagentRole
-	101, // 101: model_plane.v1.OrchestrationEvent.ApprovalContinuationVerified.verification:type_name -> model_plane.v1.VerificationResult
-	99,  // 102: model_plane.v1.OrchestrationEvent.QuestionAsked.expires_at:type_name -> google.protobuf.Timestamp
-	11,  // 103: model_plane.v1.OrchestrationEvent.QuestionAnswered.state:type_name -> model_plane.v1.QuestionState
-	19,  // 104: model_plane.v1.OrchestrationCoreService.ListPlans:input_type -> model_plane.v1.ListPlansRequest
-	21,  // 105: model_plane.v1.OrchestrationCoreService.GetPlan:input_type -> model_plane.v1.GetPlanRequest
-	23,  // 106: model_plane.v1.OrchestrationCoreService.TransitionPlan:input_type -> model_plane.v1.TransitionPlanRequest
-	27,  // 107: model_plane.v1.OrchestrationCoreService.ProposePlan:input_type -> model_plane.v1.ProposePlanRequest
-	29,  // 108: model_plane.v1.OrchestrationCoreService.ListTodos:input_type -> model_plane.v1.ListTodosRequest
-	31,  // 109: model_plane.v1.OrchestrationCoreService.GetTodo:input_type -> model_plane.v1.GetTodoRequest
-	33,  // 110: model_plane.v1.OrchestrationCoreService.TransitionTodo:input_type -> model_plane.v1.TransitionTodoRequest
-	35,  // 111: model_plane.v1.OrchestrationCoreService.CreateApproval:input_type -> model_plane.v1.CreateApprovalRequest
-	41,  // 112: model_plane.v1.OrchestrationCoreService.ListApprovals:input_type -> model_plane.v1.ListApprovalsRequest
-	43,  // 113: model_plane.v1.OrchestrationCoreService.ListPendingApprovals:input_type -> model_plane.v1.OrgPendingApprovalsRequest
-	45,  // 114: model_plane.v1.OrchestrationCoreService.GetApproval:input_type -> model_plane.v1.GetApprovalRequest
-	47,  // 115: model_plane.v1.OrchestrationCoreService.DecideApproval:input_type -> model_plane.v1.DecideApprovalRequest
-	36,  // 116: model_plane.v1.OrchestrationCoreService.ConsumeApproval:input_type -> model_plane.v1.ConsumeApprovalRequest
-	50,  // 117: model_plane.v1.OrchestrationCoreService.ClaimApprovalDeliveries:input_type -> model_plane.v1.ClaimApprovalDeliveriesRequest
-	52,  // 118: model_plane.v1.OrchestrationCoreService.GetApprovalContinuation:input_type -> model_plane.v1.GetApprovalContinuationRequest
-	54,  // 119: model_plane.v1.OrchestrationCoreService.RecordApprovalContinuationStarted:input_type -> model_plane.v1.RecordApprovalContinuationStartedRequest
-	56,  // 120: model_plane.v1.OrchestrationCoreService.RecordApprovalContinuationOutcome:input_type -> model_plane.v1.RecordApprovalContinuationOutcomeRequest
-	58,  // 121: model_plane.v1.OrchestrationCoreService.AcknowledgeApprovalDelivery:input_type -> model_plane.v1.AcknowledgeApprovalDeliveryRequest
-	74,  // 122: model_plane.v1.OrchestrationCoreService.CreateRunQuestion:input_type -> model_plane.v1.CreateRunQuestionRequest
-	76,  // 123: model_plane.v1.OrchestrationCoreService.ListRunQuestions:input_type -> model_plane.v1.ListRunQuestionsRequest
-	78,  // 124: model_plane.v1.OrchestrationCoreService.AnswerRunQuestion:input_type -> model_plane.v1.AnswerRunQuestionRequest
-	60,  // 125: model_plane.v1.OrchestrationCoreService.GetSubagentLineage:input_type -> model_plane.v1.GetSubagentLineageRequest
-	62,  // 126: model_plane.v1.OrchestrationCoreService.AttachSubagent:input_type -> model_plane.v1.AttachSubagentRequest
-	102, // 127: model_plane.v1.OrchestrationCoreService.GetRunProofBundle:input_type -> model_plane.v1.GetRunProofBundleRequest
-	103, // 128: model_plane.v1.OrchestrationCoreService.GetVerificationMetrics:input_type -> model_plane.v1.GetVerificationMetricsRequest
-	64,  // 129: model_plane.v1.OrchestrationCoreService.StreamRunEvents:input_type -> model_plane.v1.StreamRunEventsRequest
-	66,  // 130: model_plane.v1.OrchestrationCoreService.RecordOrchestrationEvent:input_type -> model_plane.v1.RecordOrchestrationEventRequest
-	68,  // 131: model_plane.v1.OrchestratorWorkflowService.StartWorkflow:input_type -> model_plane.v1.StartWorkflowRequest
-	20,  // 132: model_plane.v1.OrchestrationCoreService.ListPlans:output_type -> model_plane.v1.ListPlansResponse
-	22,  // 133: model_plane.v1.OrchestrationCoreService.GetPlan:output_type -> model_plane.v1.GetPlanResponse
-	25,  // 134: model_plane.v1.OrchestrationCoreService.TransitionPlan:output_type -> model_plane.v1.TransitionPlanResponse
-	28,  // 135: model_plane.v1.OrchestrationCoreService.ProposePlan:output_type -> model_plane.v1.ProposePlanResponse
-	30,  // 136: model_plane.v1.OrchestrationCoreService.ListTodos:output_type -> model_plane.v1.ListTodosResponse
-	32,  // 137: model_plane.v1.OrchestrationCoreService.GetTodo:output_type -> model_plane.v1.GetTodoResponse
-	34,  // 138: model_plane.v1.OrchestrationCoreService.TransitionTodo:output_type -> model_plane.v1.TransitionTodoResponse
-	40,  // 139: model_plane.v1.OrchestrationCoreService.CreateApproval:output_type -> model_plane.v1.CreateApprovalResponse
-	42,  // 140: model_plane.v1.OrchestrationCoreService.ListApprovals:output_type -> model_plane.v1.ListApprovalsResponse
-	44,  // 141: model_plane.v1.OrchestrationCoreService.ListPendingApprovals:output_type -> model_plane.v1.OrgPendingApprovalsResponse
-	46,  // 142: model_plane.v1.OrchestrationCoreService.GetApproval:output_type -> model_plane.v1.GetApprovalResponse
-	48,  // 143: model_plane.v1.OrchestrationCoreService.DecideApproval:output_type -> model_plane.v1.DecideApprovalResponse
-	37,  // 144: model_plane.v1.OrchestrationCoreService.ConsumeApproval:output_type -> model_plane.v1.ConsumeApprovalResponse
-	51,  // 145: model_plane.v1.OrchestrationCoreService.ClaimApprovalDeliveries:output_type -> model_plane.v1.ClaimApprovalDeliveriesResponse
-	53,  // 146: model_plane.v1.OrchestrationCoreService.GetApprovalContinuation:output_type -> model_plane.v1.GetApprovalContinuationResponse
-	55,  // 147: model_plane.v1.OrchestrationCoreService.RecordApprovalContinuationStarted:output_type -> model_plane.v1.RecordApprovalContinuationStartedResponse
-	57,  // 148: model_plane.v1.OrchestrationCoreService.RecordApprovalContinuationOutcome:output_type -> model_plane.v1.RecordApprovalContinuationOutcomeResponse
-	59,  // 149: model_plane.v1.OrchestrationCoreService.AcknowledgeApprovalDelivery:output_type -> model_plane.v1.AcknowledgeApprovalDeliveryResponse
-	75,  // 150: model_plane.v1.OrchestrationCoreService.CreateRunQuestion:output_type -> model_plane.v1.CreateRunQuestionResponse
-	77,  // 151: model_plane.v1.OrchestrationCoreService.ListRunQuestions:output_type -> model_plane.v1.ListRunQuestionsResponse
-	79,  // 152: model_plane.v1.OrchestrationCoreService.AnswerRunQuestion:output_type -> model_plane.v1.AnswerRunQuestionResponse
-	61,  // 153: model_plane.v1.OrchestrationCoreService.GetSubagentLineage:output_type -> model_plane.v1.GetSubagentLineageResponse
-	63,  // 154: model_plane.v1.OrchestrationCoreService.AttachSubagent:output_type -> model_plane.v1.AttachSubagentResponse
-	104, // 155: model_plane.v1.OrchestrationCoreService.GetRunProofBundle:output_type -> model_plane.v1.GetRunProofBundleResponse
-	105, // 156: model_plane.v1.OrchestrationCoreService.GetVerificationMetrics:output_type -> model_plane.v1.GetVerificationMetricsResponse
-	65,  // 157: model_plane.v1.OrchestrationCoreService.StreamRunEvents:output_type -> model_plane.v1.OrchestrationEvent
-	67,  // 158: model_plane.v1.OrchestrationCoreService.RecordOrchestrationEvent:output_type -> model_plane.v1.RecordOrchestrationEventResponse
-	69,  // 159: model_plane.v1.OrchestratorWorkflowService.StartWorkflow:output_type -> model_plane.v1.StartWorkflowResponse
-	132, // [132:160] is the sub-list for method output_type
-	104, // [104:132] is the sub-list for method input_type
-	104, // [104:104] is the sub-list for extension type_name
-	104, // [104:104] is the sub-list for extension extendee
-	0,   // [0:104] is the sub-list for field type_name
+	8,   // 92: model_plane.v1.ApprovalScopeGrant.scope:type_name -> model_plane.v1.ApprovalScope
+	106, // 93: model_plane.v1.ApprovalScopeGrant.created_at:type_name -> google.protobuf.Timestamp
+	106, // 94: model_plane.v1.ApprovalScopeGrant.expires_at:type_name -> google.protobuf.Timestamp
+	106, // 95: model_plane.v1.ApprovalScopeGrant.revoked_at:type_name -> google.protobuf.Timestamp
+	106, // 96: model_plane.v1.ApprovalScopeGrant.last_used_at:type_name -> google.protobuf.Timestamp
+	80,  // 97: model_plane.v1.ListApprovalScopeGrantsResponse.grants:type_name -> model_plane.v1.ApprovalScopeGrant
+	80,  // 98: model_plane.v1.RevokeApprovalScopeGrantResponse.grant:type_name -> model_plane.v1.ApprovalScopeGrant
+	0,   // 99: model_plane.v1.OrchestrationEvent.PlanTransitioned.from:type_name -> model_plane.v1.PlanState
+	0,   // 100: model_plane.v1.OrchestrationEvent.PlanTransitioned.to:type_name -> model_plane.v1.PlanState
+	4,   // 101: model_plane.v1.OrchestrationEvent.TodoTransitioned.from:type_name -> model_plane.v1.TodoState
+	4,   // 102: model_plane.v1.OrchestrationEvent.TodoTransitioned.to:type_name -> model_plane.v1.TodoState
+	2,   // 103: model_plane.v1.OrchestrationEvent.ApprovalStateChanged.approval_kind:type_name -> model_plane.v1.ApprovalKind
+	3,   // 104: model_plane.v1.OrchestrationEvent.ApprovalStateChanged.to:type_name -> model_plane.v1.ApprovalState
+	8,   // 105: model_plane.v1.OrchestrationEvent.ApprovalStateChanged.scope:type_name -> model_plane.v1.ApprovalScope
+	7,   // 106: model_plane.v1.OrchestrationEvent.ApprovalStateChanged.decision_source:type_name -> model_plane.v1.ApprovalDecisionSource
+	6,   // 107: model_plane.v1.OrchestrationEvent.SubagentAttached.role:type_name -> model_plane.v1.SubagentRole
+	108, // 108: model_plane.v1.OrchestrationEvent.ApprovalContinuationVerified.verification:type_name -> model_plane.v1.VerificationResult
+	106, // 109: model_plane.v1.OrchestrationEvent.QuestionAsked.expires_at:type_name -> google.protobuf.Timestamp
+	11,  // 110: model_plane.v1.OrchestrationEvent.QuestionAnswered.state:type_name -> model_plane.v1.QuestionState
+	19,  // 111: model_plane.v1.OrchestrationCoreService.ListPlans:input_type -> model_plane.v1.ListPlansRequest
+	21,  // 112: model_plane.v1.OrchestrationCoreService.GetPlan:input_type -> model_plane.v1.GetPlanRequest
+	23,  // 113: model_plane.v1.OrchestrationCoreService.TransitionPlan:input_type -> model_plane.v1.TransitionPlanRequest
+	27,  // 114: model_plane.v1.OrchestrationCoreService.ProposePlan:input_type -> model_plane.v1.ProposePlanRequest
+	29,  // 115: model_plane.v1.OrchestrationCoreService.ListTodos:input_type -> model_plane.v1.ListTodosRequest
+	31,  // 116: model_plane.v1.OrchestrationCoreService.GetTodo:input_type -> model_plane.v1.GetTodoRequest
+	33,  // 117: model_plane.v1.OrchestrationCoreService.TransitionTodo:input_type -> model_plane.v1.TransitionTodoRequest
+	35,  // 118: model_plane.v1.OrchestrationCoreService.CreateApproval:input_type -> model_plane.v1.CreateApprovalRequest
+	41,  // 119: model_plane.v1.OrchestrationCoreService.ListApprovals:input_type -> model_plane.v1.ListApprovalsRequest
+	43,  // 120: model_plane.v1.OrchestrationCoreService.ListPendingApprovals:input_type -> model_plane.v1.OrgPendingApprovalsRequest
+	45,  // 121: model_plane.v1.OrchestrationCoreService.GetApproval:input_type -> model_plane.v1.GetApprovalRequest
+	47,  // 122: model_plane.v1.OrchestrationCoreService.DecideApproval:input_type -> model_plane.v1.DecideApprovalRequest
+	36,  // 123: model_plane.v1.OrchestrationCoreService.ConsumeApproval:input_type -> model_plane.v1.ConsumeApprovalRequest
+	50,  // 124: model_plane.v1.OrchestrationCoreService.ClaimApprovalDeliveries:input_type -> model_plane.v1.ClaimApprovalDeliveriesRequest
+	52,  // 125: model_plane.v1.OrchestrationCoreService.GetApprovalContinuation:input_type -> model_plane.v1.GetApprovalContinuationRequest
+	54,  // 126: model_plane.v1.OrchestrationCoreService.RecordApprovalContinuationStarted:input_type -> model_plane.v1.RecordApprovalContinuationStartedRequest
+	56,  // 127: model_plane.v1.OrchestrationCoreService.RecordApprovalContinuationOutcome:input_type -> model_plane.v1.RecordApprovalContinuationOutcomeRequest
+	58,  // 128: model_plane.v1.OrchestrationCoreService.AcknowledgeApprovalDelivery:input_type -> model_plane.v1.AcknowledgeApprovalDeliveryRequest
+	74,  // 129: model_plane.v1.OrchestrationCoreService.CreateRunQuestion:input_type -> model_plane.v1.CreateRunQuestionRequest
+	76,  // 130: model_plane.v1.OrchestrationCoreService.ListRunQuestions:input_type -> model_plane.v1.ListRunQuestionsRequest
+	78,  // 131: model_plane.v1.OrchestrationCoreService.AnswerRunQuestion:input_type -> model_plane.v1.AnswerRunQuestionRequest
+	60,  // 132: model_plane.v1.OrchestrationCoreService.GetSubagentLineage:input_type -> model_plane.v1.GetSubagentLineageRequest
+	62,  // 133: model_plane.v1.OrchestrationCoreService.AttachSubagent:input_type -> model_plane.v1.AttachSubagentRequest
+	109, // 134: model_plane.v1.OrchestrationCoreService.GetRunProofBundle:input_type -> model_plane.v1.GetRunProofBundleRequest
+	110, // 135: model_plane.v1.OrchestrationCoreService.GetVerificationMetrics:input_type -> model_plane.v1.GetVerificationMetricsRequest
+	64,  // 136: model_plane.v1.OrchestrationCoreService.StreamRunEvents:input_type -> model_plane.v1.StreamRunEventsRequest
+	66,  // 137: model_plane.v1.OrchestrationCoreService.RecordOrchestrationEvent:input_type -> model_plane.v1.RecordOrchestrationEventRequest
+	68,  // 138: model_plane.v1.OrchestratorWorkflowService.StartWorkflow:input_type -> model_plane.v1.StartWorkflowRequest
+	81,  // 139: model_plane.v1.ApprovalScopeGrantService.UseApprovalScopeGrant:input_type -> model_plane.v1.UseApprovalScopeGrantRequest
+	83,  // 140: model_plane.v1.ApprovalScopeGrantService.ListApprovalScopeGrants:input_type -> model_plane.v1.ListApprovalScopeGrantsRequest
+	85,  // 141: model_plane.v1.ApprovalScopeGrantService.RevokeApprovalScopeGrant:input_type -> model_plane.v1.RevokeApprovalScopeGrantRequest
+	20,  // 142: model_plane.v1.OrchestrationCoreService.ListPlans:output_type -> model_plane.v1.ListPlansResponse
+	22,  // 143: model_plane.v1.OrchestrationCoreService.GetPlan:output_type -> model_plane.v1.GetPlanResponse
+	25,  // 144: model_plane.v1.OrchestrationCoreService.TransitionPlan:output_type -> model_plane.v1.TransitionPlanResponse
+	28,  // 145: model_plane.v1.OrchestrationCoreService.ProposePlan:output_type -> model_plane.v1.ProposePlanResponse
+	30,  // 146: model_plane.v1.OrchestrationCoreService.ListTodos:output_type -> model_plane.v1.ListTodosResponse
+	32,  // 147: model_plane.v1.OrchestrationCoreService.GetTodo:output_type -> model_plane.v1.GetTodoResponse
+	34,  // 148: model_plane.v1.OrchestrationCoreService.TransitionTodo:output_type -> model_plane.v1.TransitionTodoResponse
+	40,  // 149: model_plane.v1.OrchestrationCoreService.CreateApproval:output_type -> model_plane.v1.CreateApprovalResponse
+	42,  // 150: model_plane.v1.OrchestrationCoreService.ListApprovals:output_type -> model_plane.v1.ListApprovalsResponse
+	44,  // 151: model_plane.v1.OrchestrationCoreService.ListPendingApprovals:output_type -> model_plane.v1.OrgPendingApprovalsResponse
+	46,  // 152: model_plane.v1.OrchestrationCoreService.GetApproval:output_type -> model_plane.v1.GetApprovalResponse
+	48,  // 153: model_plane.v1.OrchestrationCoreService.DecideApproval:output_type -> model_plane.v1.DecideApprovalResponse
+	37,  // 154: model_plane.v1.OrchestrationCoreService.ConsumeApproval:output_type -> model_plane.v1.ConsumeApprovalResponse
+	51,  // 155: model_plane.v1.OrchestrationCoreService.ClaimApprovalDeliveries:output_type -> model_plane.v1.ClaimApprovalDeliveriesResponse
+	53,  // 156: model_plane.v1.OrchestrationCoreService.GetApprovalContinuation:output_type -> model_plane.v1.GetApprovalContinuationResponse
+	55,  // 157: model_plane.v1.OrchestrationCoreService.RecordApprovalContinuationStarted:output_type -> model_plane.v1.RecordApprovalContinuationStartedResponse
+	57,  // 158: model_plane.v1.OrchestrationCoreService.RecordApprovalContinuationOutcome:output_type -> model_plane.v1.RecordApprovalContinuationOutcomeResponse
+	59,  // 159: model_plane.v1.OrchestrationCoreService.AcknowledgeApprovalDelivery:output_type -> model_plane.v1.AcknowledgeApprovalDeliveryResponse
+	75,  // 160: model_plane.v1.OrchestrationCoreService.CreateRunQuestion:output_type -> model_plane.v1.CreateRunQuestionResponse
+	77,  // 161: model_plane.v1.OrchestrationCoreService.ListRunQuestions:output_type -> model_plane.v1.ListRunQuestionsResponse
+	79,  // 162: model_plane.v1.OrchestrationCoreService.AnswerRunQuestion:output_type -> model_plane.v1.AnswerRunQuestionResponse
+	61,  // 163: model_plane.v1.OrchestrationCoreService.GetSubagentLineage:output_type -> model_plane.v1.GetSubagentLineageResponse
+	63,  // 164: model_plane.v1.OrchestrationCoreService.AttachSubagent:output_type -> model_plane.v1.AttachSubagentResponse
+	111, // 165: model_plane.v1.OrchestrationCoreService.GetRunProofBundle:output_type -> model_plane.v1.GetRunProofBundleResponse
+	112, // 166: model_plane.v1.OrchestrationCoreService.GetVerificationMetrics:output_type -> model_plane.v1.GetVerificationMetricsResponse
+	65,  // 167: model_plane.v1.OrchestrationCoreService.StreamRunEvents:output_type -> model_plane.v1.OrchestrationEvent
+	67,  // 168: model_plane.v1.OrchestrationCoreService.RecordOrchestrationEvent:output_type -> model_plane.v1.RecordOrchestrationEventResponse
+	69,  // 169: model_plane.v1.OrchestratorWorkflowService.StartWorkflow:output_type -> model_plane.v1.StartWorkflowResponse
+	82,  // 170: model_plane.v1.ApprovalScopeGrantService.UseApprovalScopeGrant:output_type -> model_plane.v1.UseApprovalScopeGrantResponse
+	84,  // 171: model_plane.v1.ApprovalScopeGrantService.ListApprovalScopeGrants:output_type -> model_plane.v1.ListApprovalScopeGrantsResponse
+	86,  // 172: model_plane.v1.ApprovalScopeGrantService.RevokeApprovalScopeGrant:output_type -> model_plane.v1.RevokeApprovalScopeGrantResponse
+	142, // [142:173] is the sub-list for method output_type
+	111, // [111:142] is the sub-list for method input_type
+	111, // [111:111] is the sub-list for extension type_name
+	111, // [111:111] is the sub-list for extension extendee
+	0,   // [0:111] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_orchestration_proto_init() }
@@ -8613,9 +9185,9 @@ func file_model_plane_v1_orchestration_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_orchestration_proto_rawDesc), len(file_model_plane_v1_orchestration_proto_rawDesc)),
 			NumEnums:      12,
-			NumMessages:   87,
+			NumMessages:   94,
 			NumExtensions: 0,
-			NumServices:   2,
+			NumServices:   3,
 		},
 		GoTypes:           file_model_plane_v1_orchestration_proto_goTypes,
 		DependencyIndexes: file_model_plane_v1_orchestration_proto_depIdxs,

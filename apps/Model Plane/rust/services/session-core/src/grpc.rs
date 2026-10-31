@@ -14,6 +14,7 @@ use mp_contracts::dataplane::retrieval_v2::{
 };
 use mp_contracts::model_plane::v1::{
     self as pb,
+    approval_scope_grant_service_server::ApprovalScopeGrantServiceServer,
     attention_service_server::AttentionServiceServer,
     finetune_jobs_server::FinetuneJobsServer,
     learning_governance_service_server::{LearningGovernanceService, LearningGovernanceServiceServer},
@@ -9849,6 +9850,13 @@ pub async fn serve(
         }
     };
 
+    // Standing approval scopes refuse to boot without their audit rows (build plan K3-2), rather
+    // than failing each grant call at run time.
+    crate::orchestration_grpc::check_scope_grant_startup().map_err(anyhow::Error::msg)?;
+    // The grant service (build plan WS13 S6) shares the store but never the event replay, so it
+    // gets its own instance.
+    let approval_scope_grants =
+        crate::orchestration_grpc::OrchestrationGrpc::new(pool.clone(), events_tx.clone());
     let orchestration =
         crate::orchestration_grpc::OrchestrationGrpc::new_from_env(pool.clone(), events_tx).await;
 
@@ -9922,6 +9930,10 @@ pub async fn serve(
         ))
         .add_service(OrchestrationCoreServiceServer::with_interceptor(
             orchestration,
+            auth.clone(),
+        ))
+        .add_service(ApprovalScopeGrantServiceServer::with_interceptor(
+            approval_scope_grants,
             auth.clone(),
         ))
         .add_service(FinetuneJobsServer::with_interceptor(finetune, auth.clone()))

@@ -256,6 +256,7 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'approvals.decide': exempt('irreversible_destructive', 'destructive'),
   'chat.clear_threads': exempt('irreversible_destructive', 'destructive'),
   'chat.delete_thread': exempt('no_owner_executor', 'context_write'),
+  'chat.mark_thread_seen': exempt('no_owner_executor', 'context_write'),
   'chat.save_thread_snapshot': exempt('no_owner_executor', 'context_write', { eligible: true }),
   'chat.submit_feedback': exempt('no_owner_executor', 'context_write', { eligible: true }),
   'chat.upload_document': exempt('no_owner_executor', 'external_write'),

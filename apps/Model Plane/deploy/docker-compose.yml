@@ -363,6 +363,9 @@ services:
       # runs Space-scoped. Off by default (today's unscoped Do search). Deploy execution-core first, and turn on
       # MODEL_GATEWAY_SPACE_APPEND_RETRIEVAL before this switch.
       AGENTIC_SPACE_RETRIEVAL_ENABLED: ${AGENTIC_SPACE_RETRIEVAL_ENABLED:-false}
+      # Inline tool-loop guard (WS25-S1): off, shadow or enforce. Unset is off; the plan's shadow
+      # release is an owner flip, not this file's default.
+      LOOP_GUARD_MODE: ${LOOP_GUARD_MODE:-}
       # WS11-S5: derive the reasoning level once in the gateway and send it to inference-core. Off by default; only the
       # literal `true` turns it on. Roll out in this order: inference-core adapter flags on first, then this switch. With
       # this on and the adapter flags off, a deep request sends budget 0 and a level nothing renders (no thinking).

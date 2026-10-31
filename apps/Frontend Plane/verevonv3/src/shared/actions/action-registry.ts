@@ -1280,6 +1280,10 @@ const chatDeleteThreadInput = z.object({
   threadId: z.string().min(1),
 })
 
+const chatMarkThreadSeenInput = z.object({
+  threadId: z.string().trim().min(1),
+})
+
 const chatSaveThreadSnapshotInput = z.object({
   threadId: z.string().min(1),
   title: z.string().trim().optional(),
@@ -3379,6 +3383,18 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: false,
     inputSchema: chatDeleteThreadInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.mark_thread_seen',
+    label: 'Mark chat thread seen',
+    description:
+      "Mark one of the caller's threads read. Owner-only; refused for zero-retention and temporary chats, which keep read state on the client. Never model-executable.",
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatMarkThreadSeenInput,
     outputSchema: envelopeStatusOutput,
   },
   {

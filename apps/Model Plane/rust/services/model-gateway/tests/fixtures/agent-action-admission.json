@@ -462,6 +462,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "chat.mark_thread_seen",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:4860c8e55b7bb12054ce389533cd465ee8b04e7374c30962f956690fcbe5f882",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "chat.queue_invocation_input",
       "registry": true,
       "access": "none",
