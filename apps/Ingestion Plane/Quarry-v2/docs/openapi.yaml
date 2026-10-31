@@ -6905,14 +6905,78 @@ components:
             crawl under the seed URL's directory (reported as `same_directory_only`).
         sitemap:
           type: string
-          enum: [skip]
-          description: WS14.S6. Only `skip` is accepted; any other value is a 400 `unsupported_option` (F-t2-041).
+          enum: [skip, include, only]
+          default: skip
+          description: >-
+            WS14.S6, INNH-6a. `skip` (absent) follows links only. `include` also seeds the crawl
+            with the URLs of the site's sitemaps (the robots.txt `Sitemap:` lines, else /sitemap.xml;
+            gzip and indexes are read, within bounds), one level below the seed. `only` crawls the
+            seed and the sitemap's URLs and follows no page link. Every sitemap URL goes through the
+            crawl scope (host, include/exclude paths, extensions), robots.txt and the page bound
+            before it is queued, and again when its page runs. A sitemap on another host is never
+            fetched. Dark: with QUARRY_EDGE__CRAWL_SITEMAP off, `include` and `only` are a 400
+            `unsupported_option`. Needs the crawl scope switch on (QUARRY_EDGE__CRAWL_SCOPE_MODE
+            observe or enforce). The counts (`discovered`, `seeded`, `skipped`) are in the
+            `run_completed` event as `sitemap`; when the discovery fails, `only` ends with
+            `run_failed` code `sitemap_unavailable` and `include` goes on with links only.
         ignore_query_parameters:
           type: boolean
           description: WS14.S6. Reserved; any value is a 400 `unsupported_option` (F-t2-041).
         scrape_options:
           type: object
-          description: WS14.S6. Reserved; any value is a 400 `unsupported_option` until WS5 slice 4 (references only).
+          description: >-
+            INNH-6b. The per-page extraction options, applied to every page the crawl fetches.
+            Dark: with QUARRY_EDGE__CRAWL_SCRAPE_OPTIONS off the field is a 400 `unsupported_option`.
+            The same validators as /v1/scrape; the same limits (32 selectors of 256 characters,
+            `timeout_ms` 1000 to 55000) and the same camelCase aliases. Only the options that can
+            apply per page are accepted: `actions`, `actions_on_error`, `max_inline_bytes`,
+            `screenshot`, `pdf`, `json`, `summary`, `question`, `highlights` and capture or AI
+            `formats` are a 400 `unsupported_option` with the path (`scrape_options.actions`). The
+            stored markdown and html artifacts of each page, and the text `ingest: true` sends to
+            the Data Plane, are the cleaned content. Links are discovered from the whole page
+            whatever `include_tags` and `exclude_tags` cut. A page cleaned differently from the
+            default neither reads nor writes the page cache. `data.effective.scrape_options` echoes
+            the resolved form.
+          properties:
+            formats:
+              type: array
+              items:
+                type: string
+                enum: [markdown, html, rawHtml, links, metadata]
+              description: >-
+                Accepted for parity with /v1/scrape. A crawl page stores its artifacts whatever the
+                list says, so it changes nothing that is stored.
+            only_main_content:
+              type: boolean
+              description: Default true (the main-content extractor). false keeps the whole body. Alias onlyMainContent.
+            include_tags:
+              type: array
+              maxItems: 32
+              items:
+                type: string
+                maxLength: 256
+              description: CSS selectors; only the matching parts are kept. Alias includeTags.
+            exclude_tags:
+              type: array
+              maxItems: 32
+              items:
+                type: string
+                maxLength: 256
+              description: CSS selectors removed before extraction. Alias excludeTags.
+            remove_base64_images:
+              type: boolean
+              description: Alias removeBase64Images.
+            extractor:
+              type: string
+              enum: [readability, clean_full, raw]
+              description: >-
+                `readability` goes with only_main_content true; `clean_full` and `raw` go with
+                false. A disagreement is a 400 `conflicts_with_only_main_content`.
+            timeout_ms:
+              type: integer
+              minimum: 1000
+              maximum: 55000
+              description: The bound on one page's run. Alias timeoutMs.
         ignore_robots_txt:
           type: boolean
           description: >-
@@ -7208,6 +7272,23 @@ components:
               type: array
               items:
                 type: string
+            sitemap:
+              type: string
+              enum: [include, only]
+              description: INNH-6a. Present only when the request asked for `include` or `only`.
+            scrape_options:
+              type: object
+              description: INNH-6b. Present only when the request had scrape_options. The resolved, canonical form the pages run with.
+            request_warnings:
+              type: array
+              items:
+                type: object
+                properties:
+                  code:
+                    type: string
+                  field:
+                    type: string
+              description: Keys the request carried that nothing read (lenient mode); a key inside scrape_options is named `scrape_options.<key>`.
         limits:
           type: object
           description: >-

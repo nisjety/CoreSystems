@@ -142,9 +142,9 @@ Accepted options and their spellings (canonical first):
 | `include_paths` | `include_paths`, `includePaths` | array of strings (D3 grammar) |
 | `exclude_paths` | `exclude_paths`, `excludePaths` | array of strings (D3 grammar) |
 | `deny_extensions` | `deny_extensions`, `denyExtensions` | array of alphanumeric extensions, at most 16 characters each |
-| `sitemap` | `sitemap` | only `skip`; anything else 400 `unsupported_option` (F-t2-041) |
+| `sitemap` | `sitemap` | `skip` (default); `include` and `only` with `QUARRY_EDGE__CRAWL_SITEMAP` on (INNH-6a, needs the scope switch on); otherwise 400 `unsupported_option` (F-t2-041) |
 | `ignore_query_parameters` | both spellings | any value 400 `unsupported_option` (F-t2-041) |
-| `scrape_options` | both spellings | any value 400 `unsupported_option` until WS5 slice 4 |
+| `scrape_options` | both spellings | with `QUARRY_EDGE__CRAWL_SCRAPE_OPTIONS` on (INNH-6b): the per-page extraction subset of `/v1/scrape`; otherwise any value 400 `unsupported_option` until WS5 slice 4 |
 | `ignore_robots_txt` | `ignore_robots_txt`, `ignoreRobotsTxt`, `ignoreRobots` | `true` is 403 `policy_denied` (WS14.S7 owns the entitlement); `false` accepted |
 
 Refused in both modes (400 `reserved_field`): `headers`, `proxy`, `proxy_url`, `skip_tls_verification`, `stealth`, `mobile`, `webhook`, `delay`, `max_concurrency` (and their camel forms). Two spellings of one option: 400 `invalid_option`.

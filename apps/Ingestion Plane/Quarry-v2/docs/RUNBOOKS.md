@@ -2004,3 +2004,22 @@ What a caller sees:
 | 200, item `error`, message names the "request time budget" | 50 s passed before the model read this source; send fewer URLs |
 
 Nothing in a log or a response carries the prompt text; log lines carry lengths only. To check by hand on a side-by-side stack: send a page with a schema and a prompt, read the request the gateway receives (the prompt before the `<<<PAGE-` line, the page inside), then repeat with `"zdr": true` and confirm the gateway sees no request. Not done here: no real gateway was called.
+
+## Crawl `sitemap` and `scrape_options`: enable, disable and read the result (INNH-6, built, NOT run, 2026-10-31)
+
+`POST /v1/crawl` accepts `sitemap: include|only` and `scrape_options` (per-page cleaning). Both are dark. The contract is `docs/CONTRACTS.md`, "Crawl `sitemap` and `scrape_options`". The request errors are in `docs/ERROR_REASONS.md`.
+
+**Enable (a development or side-by-side stack only; the owner decides, not the compose file).** Each flag is read once, so it takes a restart of the edge. The orchestrator needs nothing: it acts on the job params.
+1. Sitemap: `QUARRY_EDGE__CRAWL_SITEMAP=on`. The crawl scope must be on (`QUARRY_EDGE__CRAWL_SCOPE_MODE` is `observe`, the default, or `enforce`). The orchestrator reaches the edge's `POST /v1/internal/crawl/sitemap` with the runtime token and the internal secret it already uses for `run_page`.
+2. Scrape options: `QUARRY_EDGE__CRAWL_SCRAPE_OPTIONS=on`.
+3. Edge before orchestrator when both are rolled: the edge ignores the options of an old orchestrator (nothing is stamped on its jobs), and a new orchestrator against an old edge ends a sitemap or scrape-options crawl with `sitemap_unavailable` (`only`), a links-only crawl (`include`) or `edge_scrape_options_unsupported`.
+
+**Disable.** Unset the flag and restart the edge. The handoff answers 400 `unsupported_option` again. A crawl already running keeps its params: with the sitemap flag off the discovery route answers 501 (an `include` crawl goes on with links, an `only` crawl ends with `sitemap_unavailable`); with the scrape flag off `run_page` ignores `scrape` and does not echo it, so the orchestrator ends the crawl with `edge_scrape_options_unsupported`.
+
+**Read the result.** `data.effective.sitemap` and `data.effective.scrape_options` on the ack. The job's `run_completed` event carries `sitemap` (`discovered`, `seeded`, `skipped{out_of_scope, robots_disallowed, duplicate, cap, invalid, sitemaps_refused, sitemaps_unavailable}`, `sitemaps_fetched`, `nested_fetched`, `truncated`). A high `sitemaps_refused` means the robots.txt names a sitemap on another host or an internal address: that is refused on purpose. `truncated: true` means a bound stopped the read (20 files, 100,000 entries or 30 seconds). A stored markdown artifact is the cleaned text: compare one with and without `exclude_tags` to see the difference.
+
+**Limits to know.** Sitemap URLs are queued at depth 1; the in-memory frontier (an orchestrator without the edge queue credentials) takes at most 500 of them. Sitemap files are not metered. A page cleaned with non-default options skips the page cache, so a repeat crawl fetches those pages again.
+
+**Tests (Linux container, `qtest-lane.sh`).** `cargo test -p quarry-edge --lib crawl_` (65 before the integration files), `--test crawl_sitemap`, `--test crawl_options_on`, `--test crawl_options_off`, `--test crawl_sitemap_scope_off`, `--test web_policy_routes`, `--test zdr_feature_matrix`; Go: `GOWORK=off go test ./...` in `services/quarry-orchestrator`; `node --test scripts/tests/*.test.mjs`.
+
+**Evidence owed (stack session).** On a side-by-side stack with the crawl fixture (`deploy/compose/crawl-fixture/`) and a sitemap that lists a page no link reaches: `sitemap: include` finds it and `skip` does not; `scrape_options.exclude_tags: ["nav"]` removes the nav text from a stored markdown artifact. The in-flight replay of a history recorded before the marker is not tested (there is no recorded history to replay).

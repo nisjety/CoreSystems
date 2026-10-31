@@ -1,8 +1,11 @@
 # Sitemap parsing: gzip bodies and robots `Sitemap:` lines (E3.7.4)
 
 Status: pure parsing in `crates/quarry-transform/src/sitemap.rs`, built dark.
-No route calls these functions yet. Discovery through `/v1/map` still reads
-plain `/sitemap.xml` and its nested indexes only.
+INNH-6a calls `parse_body` and the robots `Sitemap:` lines (the parsed `RobotsTxt.sitemaps` of the
+robots gate) from `POST /v1/internal/crawl/sitemap` (`crates/quarry-edge/src/crawl_sitemap.rs`),
+behind `QUARRY_EDGE__CRAWL_SITEMAP`; see `docs/CONTRACTS.md`, "Crawl `sitemap` and
+`scrape_options`". `/v1/map` still reads plain `/sitemap.xml` and its nested indexes only.
+The route decodes XML entities and CDATA in `<loc>` itself (`xml_unescape`); `parse` is unchanged.
 
 ## What the module does now
 
