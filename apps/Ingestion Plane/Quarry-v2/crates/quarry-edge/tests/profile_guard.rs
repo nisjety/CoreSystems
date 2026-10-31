@@ -51,6 +51,8 @@ fn user_claims(scopes: &[&str], zdr: Option<bool>) -> Claims {
         aud: None,
         scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
         zdr,
+        key_id: None,
+        acting_user_id: None,
     }
 }
 
@@ -70,6 +72,8 @@ fn service_claims() -> Claims {
         aud: None,
         scopes: vec![IMPORT_SCOPE.to_owned(), "quarry:profiles:read".to_owned()],
         zdr: Some(true),
+        key_id: None,
+        acting_user_id: None,
     }
 }
 

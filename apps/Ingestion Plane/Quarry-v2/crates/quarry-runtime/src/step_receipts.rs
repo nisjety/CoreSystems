@@ -304,6 +304,10 @@ pub enum AgentIdentityBasis {
     /// hint (the gateway sends one for an action the model proposed through the
     /// person's own session). Which agent it was is only what the caller said.
     UserSession,
+    /// Verified (INNH-10): the call carried an API key's own signed token, and
+    /// `principal_id` is that token's actor, `apikey:<key_id>`. The key id is the
+    /// verified part; there is never a person behind the call.
+    ApiKey,
 }
 
 /// Which agent was behind an operation an agent initiated. Ids and classes only:
@@ -311,7 +315,7 @@ pub enum AgentIdentityBasis {
 /// allow ids.
 ///
 /// `principal_id` is the only verified part, and only for
-/// `AgentIdentityBasis::ServicePrincipal`. `ai_run_id` and `label` are what the
+/// `AgentIdentityBasis::ServicePrincipal` and `AgentIdentityBasis::ApiKey`. `ai_run_id` and `label` are what the
 /// caller supplied (identifier-shaped, bounded): advisory, never used for an
 /// authorization decision.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -334,7 +338,10 @@ impl AgentIdentity {
     /// True when `principal_id` was established from a verified token.
     #[must_use]
     pub fn is_verified(&self) -> bool {
-        self.basis == AgentIdentityBasis::ServicePrincipal && self.principal_id.is_some()
+        matches!(
+            self.basis,
+            AgentIdentityBasis::ServicePrincipal | AgentIdentityBasis::ApiKey
+        ) && self.principal_id.is_some()
     }
 }
 

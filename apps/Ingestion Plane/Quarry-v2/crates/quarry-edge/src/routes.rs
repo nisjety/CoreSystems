@@ -139,6 +139,9 @@ pub fn router(state: AppState) -> Router {
         .layer(DefaultBodyLimit::max(crate::profile_routes::IMPORT_MAX_BYTES))
         .layer(RequestBodyLimitLayer::new(crate::profile_routes::IMPORT_MAX_BYTES))
         .layer(middleware::from_fn(crate::auth::require_service_route_scope))
+        // INNH-10: an `api_key` principal is held to its route allow-list (dark behind
+        // QUARRY_EDGE__API_KEY_AGENT_RUNS; user and service tokens pass through untouched).
+        .layer(middleware::from_fn(crate::api_key::require_api_key_route_fence))
         .layer(middleware::from_fn(crate::zdr_log::mark_floor))
         .layer(middleware::from_fn(crate::auth::require_auth));
 
@@ -327,6 +330,8 @@ pub fn router(state: AppState) -> Router {
         .layer(middleware::from_fn(
             crate::auth::require_service_route_scope,
         ))
+        // INNH-10: the API-key route fence, beside the service scope (see the profile router).
+        .layer(middleware::from_fn(crate::api_key::require_api_key_route_fence))
         // After require_auth (which inserts the claims), before the handler: a
         // user of a ZDR org is marked ZDR for the log from the first line.
         .layer(middleware::from_fn(crate::zdr_log::mark_floor))
@@ -2327,6 +2332,8 @@ mod tests {
             aud: None,
             scopes: Vec::new(),
             zdr: None,
+            key_id: None,
+            acting_user_id: None,
         }
     }
 

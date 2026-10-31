@@ -196,6 +196,8 @@ async fn activate_ignored_for_service_token() {
             aud: None,
             scopes: Vec::new(),
             zdr: None,
+            key_id: None,
+            acting_user_id: None,
         });
         next.run(req).await
     }

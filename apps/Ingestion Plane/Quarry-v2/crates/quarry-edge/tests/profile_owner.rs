@@ -50,6 +50,8 @@ fn claims(user: &str) -> Claims {
         // tested in `profile_guard.rs`.
         scopes: vec![IMPORT_SCOPE.to_owned()],
         zdr: None,
+        key_id: None,
+        acting_user_id: None,
     }
 }
 

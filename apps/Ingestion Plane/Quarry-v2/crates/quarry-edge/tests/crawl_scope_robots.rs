@@ -364,6 +364,8 @@ fn claims_for_org(org_id: &str) -> quarry_edge::auth::Claims {
         aud: None,
         scopes: Vec::new(),
         zdr: None,
+        key_id: None,
+        acting_user_id: None,
     }
 }
 

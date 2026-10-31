@@ -381,6 +381,8 @@ mod tests {
             scopes: vec![],
             zdr: None,
             web_policy: None,
+            key_id: None,
+            acting_user_id: None,
         }
     }
 

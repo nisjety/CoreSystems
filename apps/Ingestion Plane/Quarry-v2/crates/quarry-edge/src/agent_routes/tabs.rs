@@ -207,12 +207,13 @@ pub async fn new_tab(
             &state,
             &entry.org_id,
             grant_id,
+            entry.key_id.as_deref(),
             &entry.constraints.allowed_domains,
             &entry.nav_policy,
         )
         .await
             .map_err(|error| driver_err(&request_id, error))?;
-    } else if state.require_browser_grants {
+    } else if state.require_browser_grants || entry.key_id.is_some() {
         return Err(status_err(
             StatusCode::FORBIDDEN,
             &request_id,

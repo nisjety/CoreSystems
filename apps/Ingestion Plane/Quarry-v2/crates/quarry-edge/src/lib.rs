@@ -1,4 +1,5 @@
 pub mod agent_routes;
+pub mod api_key;
 pub mod fleet_routes;
 pub mod answer_routes;
 pub mod answer_status;

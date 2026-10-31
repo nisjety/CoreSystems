@@ -27,6 +27,8 @@ fn claims(org_id: &str) -> Claims {
         scopes: Vec::new(),
         zdr: None,
         web_policy: None,
+        key_id: None,
+        acting_user_id: None,
     }
 }
 

@@ -188,6 +188,8 @@ pub fn claims_for_org(org_id: &str) -> Claims {
         aud: None,
         scopes: Vec::new(),
         zdr: None,
+        key_id: None,
+        acting_user_id: None,
     }
 }
 
@@ -241,6 +243,7 @@ pub fn insert_live_run(state: &AppState, claims: &Claims) -> crate::agent_routes
         run_id: Id::new(),
         org_id: claims.org_id.clone(),
         actor_id: claims.actor_id().to_string(),
+        key_id: claims.key_id().map(str::to_owned),
         session: BrowserSession {
             lease: lease.clone(),
             tab_pin: None,

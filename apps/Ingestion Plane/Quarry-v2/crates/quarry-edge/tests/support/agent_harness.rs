@@ -174,6 +174,43 @@ pub fn zdr_member_token() -> String {
     token("user_in_zdr_org", |_| {})
 }
 
+/// INNH-10: an `api_key` principal token for the quarry audience, as auth-core's key exchange
+/// would mint it: `sub = apikey:<key_id>`, the key id, the owning user, the single scope
+/// `browser:agent`, and no `user_id`. It is a member of the standard org. `tweak` edits the
+/// claim map (a scope, an expiry, the ZDR posture).
+pub fn api_key_token(
+    key_id: &str,
+    owner: &str,
+    tweak: impl FnOnce(&mut serde_json::Map<String, Value>),
+) -> String {
+    token("user_in_standard_org", |claims| {
+        claims.remove("user_id");
+        claims.remove("email");
+        claims.insert("sub".into(), json!(format!("apikey:{key_id}")));
+        claims.insert("principal_type".into(), json!("api_key"));
+        claims.insert("key_id".into(), json!(key_id));
+        claims.insert("acting_user_id".into(), json!(owner));
+        claims.insert("scopes".into(), json!(["browser:agent"]));
+        claims.insert("zdr".into(), json!(false));
+        tweak(claims);
+    })
+}
+
+/// INNH-10: the key `key-1`, owned by `user-golden` (the standard org's member).
+pub fn key_token() -> String {
+    api_key_token("key-1", "user-golden", |_| {})
+}
+
+/// INNH-10: a second key of the same owner.
+pub fn other_key_token() -> String {
+    api_key_token("key-2", "user-golden", |_| {})
+}
+
+/// The unix time now, for a token expiry a test sets.
+pub fn now_unix() -> i64 {
+    unix_now()
+}
+
 /// execution-core: a service principal holding `browser:execute`, in the standard org.
 pub fn service_token() -> String {
     token("service_execution_core", |_| {})

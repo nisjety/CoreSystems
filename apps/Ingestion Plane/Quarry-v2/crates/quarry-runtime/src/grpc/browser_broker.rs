@@ -307,6 +307,7 @@ pub(crate) fn inactive_validation(grant_id: &str) -> GrantValidation {
         denied_domains: Vec::new(),
         absolute_expires_at: None,
         resource_id: String::new(),
+        key_id: String::new(),
     }
 }
 
@@ -337,6 +338,10 @@ pub(crate) fn validation_from_response(resp: ValidateGrantResponse) -> GrantVali
         denied_domains: resp.denied_domains,
         absolute_expires_at: resp.absolute_expires_at.and_then(prost_ts_to_chrono),
         resource_id: resp.resource_id,
+        // INNH-10: the vendored `proto/browser.proto` has no `key_id` on `ValidateGrantResponse`
+        // yet (the Model Plane owner picks the field number, ask MP-2). Until it is vendored this
+        // is always empty, so no API-key run is admitted through the gRPC validator: it fails closed.
+        key_id: String::new(),
     }
 }
 

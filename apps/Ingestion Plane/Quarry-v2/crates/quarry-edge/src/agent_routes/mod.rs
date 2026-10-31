@@ -48,6 +48,8 @@ mod projection;
 #[cfg(feature = "browser-agent")]
 mod lifecycle;
 #[cfg(feature = "browser-agent")]
+mod api_key_runs;
+#[cfg(feature = "browser-agent")]
 mod close;
 #[cfg(feature = "browser-agent")]
 mod queries;

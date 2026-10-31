@@ -28,6 +28,7 @@ mod fleet_routes;
 mod answer_routes;
 mod answer_status;
 mod api_error;
+mod api_key;
 mod budget;
 mod audio_routes;
 mod audit_page;
@@ -363,8 +364,14 @@ async fn run() -> anyhow::Result<()> {
             .as_deref()
             .is_some_and(|credential| !credential.trim().is_empty()),
         dev_bypass: cfg.cross_plane_auth_dev_bypass,
+        api_key_runs: run_limits::api_key_agent_runs_enabled(),
     })
     .map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
+    if run_limits::api_key_agent_runs_enabled() {
+        tracing::warn!(
+            "QUARRY_EDGE__API_KEY_AGENT_RUNS is on: API-key principals may start fenced agent runs under key grants"
+        );
+    }
     match grant_validator_choice {
         grant_boot::ValidatorChoice::Grpc => {}
         grant_boot::ValidatorChoice::Http => tracing::warn!(
