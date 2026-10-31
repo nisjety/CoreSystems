@@ -64,6 +64,8 @@ fn allowed_routes() -> Vec<(Method, String, Option<Value>)> {
 /// Routes a person or a service can reach that a key cannot.
 fn refused_routes() -> Vec<(Method, String, Option<Value>)> {
     vec![
+        // INNH-11: the document parse route is not an agent route; a key is refused there too.
+        (Method::POST, "/v1/parse".to_owned(), None),
         (Method::POST, format!("/v1/agent/runs/{RUN}/interact"), Some(json!({ "action": wait_action() }))),
         (Method::GET, format!("/v1/agent/runs/{RUN}/browser-session"), None),
         (Method::POST, format!("/v1/agent/runs/{RUN}/browser-session/control"), Some(json!({}))),

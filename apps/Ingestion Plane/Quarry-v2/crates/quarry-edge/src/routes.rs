@@ -158,6 +158,11 @@ pub fn router(state: AppState) -> Router {
     let parse_upload = Router::new()
         .route("/v1/parse", post(crate::parse_routes::parse))
         .layer(middleware::from_fn(crate::auth::require_service_route_scope))
+        // INNH-10 x INNH-11: an `api_key` principal is held to its allow-list here too; /v1/parse
+        // is not on it, so a key is refused (403 `api_key_route_refused`). This router's layers
+        // also wrap the fallback of the merged router, so the fence must be here for an unknown
+        // path to be answered 403 to a key, as the other two routers do.
+        .layer(middleware::from_fn(crate::api_key::require_api_key_route_fence))
         .layer(middleware::from_fn(crate::zdr_log::mark_floor))
         .layer(middleware::from_fn(crate::auth::require_auth));
 

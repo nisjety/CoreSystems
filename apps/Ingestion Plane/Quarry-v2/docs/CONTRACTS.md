@@ -1111,7 +1111,7 @@ Status: built and tested in tests, dark. Default off: `QUARRY_EDGE__PARSE_ROUTE`
 
 **Isolation.** The route refuses to serve (501 `isolation_required`) while documents would be parsed inside the edge process (`QUARRY_EDGE__DOC_PARSE_ISOLATION=inprocess`, or an edge that is not a Unix `quarry-edge-rs`): a hostile file could take the edge down. `QUARRY_EDGE__PARSE_ALLOW_INPROCESS=1` lifts that for a single-tenant development box. The boot line `document parse route is on` reports `isolation` and `serving`.
 
-**Auth.** A user token needs no scope. A service principal needs `parse:write` (like `scrape:write`, it is not in the scope registry of the Control Plane yet: a cross-plane ask, see the INNH-11 status). No other scope stands in for it.
+**Auth.** A user token needs no scope. A service principal needs `parse:write` (like `scrape:write`, it is not in the scope registry of the Control Plane yet: a cross-plane ask, see the INNH-11 status). No other scope stands in for it. An `api_key` principal (INNH-10) is refused with 403 `api_key_route_refused`: the route is not on a key's allow-list.
 
 **ZDR and storage.** The handler takes no `AppState`: it has no artifact store, cache, index, event sink, usage meter or ingest to write to, and a test reads its source to keep it so. It logs nothing about a request. A ZDR caller is served the same way. See the row `parse` in `docs/ZDR_MATRIX.md`. **Billing:** the route is not metered in this version (no usage record, no Lago metric); the owner decides whether a parse is billable.
 
