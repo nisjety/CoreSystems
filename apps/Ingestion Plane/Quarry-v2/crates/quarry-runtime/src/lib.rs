@@ -12,6 +12,8 @@ pub mod fleet;
 pub mod action_runtime;
 pub mod agent_loop;
 pub mod ai_formats;
+pub mod ai_scrape;
+pub mod ai_verify;
 pub mod answer;
 pub mod artifact_store;
 pub mod browser_driver;

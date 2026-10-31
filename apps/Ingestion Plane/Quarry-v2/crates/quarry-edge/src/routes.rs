@@ -767,6 +767,8 @@ async fn scrape_with(
             remove_base64_images: resolved.remove_base64_images,
             extractor: resolved.extractor,
         },
+        // U3 sets this when the request carries AI formats.
+        ai_source_max_chars: None,
     };
     let tombstone_started = chrono::Utc::now();
     // The caller's bound, never past the table's cap, so the typed Timeout
