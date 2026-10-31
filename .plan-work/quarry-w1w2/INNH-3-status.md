@@ -23,7 +23,7 @@ Guard: `scripts/tests/docs-contract.test.mjs`: every `QUARRY_EDGE__`/`QUARRY_EDG
 ZDR: no change to ZDR behaviour (the 501s are skipped for a ZDR request; the `extract` matrix row and golden files are untouched, so no regeneration).
 
 ## Commits
-(see the line appended below after the commit)
+- b2f213b3c feat(quarry-edge): exact /v1/extract 501 texts, lane-refused stop, enablement runbook and env-name guard (INNH-3)
 
 ## Tests (counts)
 - `cargo test -p quarry-edge --lib extract_routes`: 28 passed (7 new: the real-setting checker, schema/prompt with no URL (unset, empty, blank: exact texts, exact key set, zero fetches), URL with no credential (zero fetches, URL not echoed, markdown route unaffected), ZDR never gets the 501, gateway 403 and 401 -> one 501 after exactly one fetch and one model call and nothing metered, 500 on source 1 and 200 on source 2 stays per source, refusal after an extracted source stays per source; the INNH-2 501 test now pins {code, error, hint, next_actions}).
