@@ -38,7 +38,7 @@ use mp_contracts::model_plane::v1::{
     TransitionPlanRequest, TransitionTodoRequest, TranslateTextRequest, TranslationInput,
     VerificationMetrics, VerificationStatus,
 };
-use mp_contracts::approval_cause::{CauseCode, SCOPE_ONCE};
+use mp_contracts::approval_cause::{self, CauseCode, SCOPE_ONCE, SCOPE_RUN, SCOPE_THREAD};
 use mp_events::{envelope::Envelope, publisher::EventPublisher, subjects};
 use mp_ids::new_ulid;
 use serde::{Deserialize, Serialize};
@@ -1929,20 +1929,78 @@ struct DecideApprovalBody {
     scope: String,
 }
 
-/// The decide body's scope: absent or `once` is the one decision that exists today. Anything
-/// else, a well-formed `thread` or `run` included, is refused rather than silently narrowed
-/// to `once`, so a client never believes it granted more than it did.
-fn require_once_scope(scope: &str) -> Result<(), HttpJsonError> {
-    if scope.is_empty() || scope == SCOPE_ONCE {
-        return Ok(());
+/// The scope a decision may carry (build plan WS13 S6). `once` is always available. A standing
+/// scope needs the switch, a granting decision, and an approval whose cause offers that scope: the
+/// server says what is offered, and a client never picks a scope it was not offered.
+fn checked_decision_scope(
+    requested: &str,
+    target: ApprovalState,
+    offered: &[String],
+) -> Result<&'static str, HttpJsonError> {
+    checked_decision_scope_with(
+        requested,
+        target,
+        offered,
+        approval_cause::scope_grants_enabled(),
+    )
+}
+
+fn checked_decision_scope_with(
+    requested: &str,
+    target: ApprovalState,
+    offered: &[String],
+    grants_enabled: bool,
+) -> Result<&'static str, HttpJsonError> {
+    let scope = match requested {
+        "" | SCOPE_ONCE => return Ok(SCOPE_ONCE),
+        SCOPE_THREAD => SCOPE_THREAD,
+        SCOPE_RUN => SCOPE_RUN,
+        _ => {
+            return Err(scope_refusal(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "scope_not_offered",
+                "That scope is not offered for this approval.",
+            ))
+        }
+    };
+    if !matches!(target, ApprovalState::Granted) {
+        return Err(scope_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "scope_not_applicable",
+            "A scope applies to a grant only.",
+        ));
     }
-    Err((
-        StatusCode::UNPROCESSABLE_ENTITY,
-        Json(json!({ "error": {
-            "code": "scope_not_enabled",
-            "message": "Only a decision for this one call is available.",
-        } })),
-    ))
+    if !grants_enabled {
+        return Err(scope_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "scope_not_enabled",
+            "Standing scopes are not enabled on this deployment.",
+        ));
+    }
+    if !offered.iter().any(|candidate| candidate == scope) {
+        return Err(scope_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "scope_not_offered",
+            "That scope is not offered for this approval.",
+        ));
+    }
+    Ok(scope)
+}
+
+fn scope_refusal(status: StatusCode, code: &'static str, message: &'static str) -> HttpJsonError {
+    (
+        status,
+        Json(json!({ "error": { "code": code, "message": message } })),
+    )
+}
+
+/// The proto scope a checked decision scope name stands for.
+fn approval_scope_code(scope: &str) -> i32 {
+    match scope {
+        SCOPE_THREAD => ApprovalScope::Thread as i32,
+        SCOPE_RUN => ApprovalScope::Run as i32,
+        _ => ApprovalScope::Once as i32,
+    }
 }
 
 /// The approval step-up switch (build plan WS13 S5). `off` changes nothing; `shadow` counts a grant
@@ -2028,6 +2086,7 @@ fn user_decision_request(
     user_id: &str,
     org_id: &str,
     reason: String,
+    scope: &str,
 ) -> DecideApprovalRequest {
     DecideApprovalRequest {
         approval_id,
@@ -2038,7 +2097,7 @@ fn user_decision_request(
         // JWT org, never a client-suppliable value.
         org_id: org_id.to_owned(),
         decision_source: ApprovalDecisionSource::User as i32,
-        scope: ApprovalScope::Once as i32,
+        scope: approval_scope_code(scope),
     }
 }
 
@@ -2062,7 +2121,6 @@ async fn decide_approval(
             ))
         }
     };
-    require_once_scope(&body.scope)?;
     let prior_approval = if matches!(target_state, ApprovalState::Granted) {
         state
             .orchestration_client
@@ -2081,6 +2139,13 @@ async fn decide_approval(
     } else {
         None
     };
+    // The scope is checked against what this approval's cause offers, once the approval is known.
+    let offered = prior_approval
+        .as_ref()
+        .and_then(|approval| approval.cause.as_ref())
+        .map(|cause| cause.scope_options.clone())
+        .unwrap_or_default();
+    let scope = checked_decision_scope(&body.scope, target_state, &offered)?;
     let step_up_claim = step_up.and_then(|Extension(VerifiedStepUp(claim))| claim);
     if step_up_missing(
         target_state,
@@ -2114,6 +2179,7 @@ async fn decide_approval(
                 &claims.user_id,
                 &claims.org_id,
                 body.reason,
+                scope,
             ),
             &session_bearer,
         )?)
@@ -7097,6 +7163,16 @@ fn approval_value(approval: &Approval) -> Value {
     })
 }
 
+/// The scopes this process offers a person (build plan WS13 S6): `once` alone while standing scopes
+/// are off, so a card never offers a scope the decide route would refuse.
+fn offered_scope_options(cause: &ApprovalCause) -> Vec<String> {
+    if approval_cause::scope_grants_enabled() {
+        cause.scope_options.clone()
+    } else {
+        vec![SCOPE_ONCE.to_owned()]
+    }
+}
+
 /// The part of an approval's cause a browser may read. An allowlist: the stored cause also
 /// holds the call digest and the action key, which are for the gate and the audit trail, and
 /// the approval's `context` (tool arguments) never reaches this projection at all. The code
@@ -7109,7 +7185,7 @@ fn approval_cause_value(cause: &ApprovalCause) -> Value {
         "effect_class": empty_to_null(&cause.effect_class),
         "risk_category": empty_to_null(&cause.risk_category),
         "rule_id": empty_to_null(&cause.rule_id),
-        "scope_options": cause.scope_options,
+        "scope_options": offered_scope_options(cause),
         "step_up_required": step_up_projected(cause, ApprovalStepUpGate::from_env()),
     })
 }
@@ -7386,6 +7462,7 @@ mod approval_value_tests {
             "user-1",
             "org-1",
             body.reason,
+            "once",
         );
         assert_eq!(request.decision_source, ApprovalDecisionSource::User as i32);
         assert_eq!(request.scope, ApprovalScope::Once as i32);
@@ -7411,15 +7488,69 @@ mod approval_value_tests {
     }
 
     #[test]
-    fn a_decision_scope_other_than_once_is_refused_until_grants_exist() {
-        assert!(require_once_scope("").is_ok());
-        assert!(require_once_scope("once").is_ok());
-        for scope in ["thread", "run", "Once", " once", "forever"] {
-            let (status, Json(body)) =
-                require_once_scope(scope).expect_err("a standing scope must be refused");
+    fn a_decision_scope_other_than_once_is_refused_while_grants_are_off() {
+        let offered = vec![SCOPE_ONCE.to_owned(), SCOPE_THREAD.to_owned()];
+        assert_eq!(
+            checked_decision_scope_with("", ApprovalState::Granted, &offered, false).expect("once"),
+            SCOPE_ONCE
+        );
+        for scope in ["thread", "run"] {
+            let (status, Json(body)) = checked_decision_scope_with(
+                scope,
+                ApprovalState::Granted,
+                &offered,
+                false,
+            )
+            .expect_err("a standing scope is refused while grants are off");
             assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{scope}");
             assert_eq!(body["error"]["code"], "scope_not_enabled", "{scope}");
         }
+    }
+
+    #[test]
+    fn decide_refuses_a_scope_the_server_did_not_offer() {
+        let once_only = vec![SCOPE_ONCE.to_owned()];
+        let (status, Json(body)) = checked_decision_scope_with(
+            "thread",
+            ApprovalState::Granted,
+            &once_only,
+            true,
+        )
+        .expect_err("a scope the cause does not offer is refused");
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"]["code"], "scope_not_offered");
+
+        let offered = vec![
+            SCOPE_ONCE.to_owned(),
+            SCOPE_THREAD.to_owned(),
+            SCOPE_RUN.to_owned(),
+        ];
+        assert_eq!(
+            checked_decision_scope_with("thread", ApprovalState::Granted, &offered, true)
+                .expect("offered"),
+            SCOPE_THREAD
+        );
+        assert_eq!(
+            checked_decision_scope_with("run", ApprovalState::Granted, &offered, true)
+                .expect("offered"),
+            SCOPE_RUN
+        );
+        let (_, Json(body)) = checked_decision_scope_with(
+            "forever",
+            ApprovalState::Granted,
+            &offered,
+            true,
+        )
+        .expect_err("an unknown scope is refused");
+        assert_eq!(body["error"]["code"], "scope_not_offered");
+        let (_, Json(body)) = checked_decision_scope_with(
+            "thread",
+            ApprovalState::Denied,
+            &offered,
+            true,
+        )
+        .expect_err("a denial carries no scope");
+        assert_eq!(body["error"]["code"], "scope_not_applicable");
     }
 
     #[test]

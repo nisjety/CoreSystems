@@ -1004,6 +1004,9 @@ pub struct DecisionRecord<'a> {
     pub source: &'a str,
     pub scope: &'a str,
     pub audit: bool,
+    /// The lifetime, in seconds, of the standing grant this decision creates. Read only when
+    /// `scope` is a standing scope (build plan WS13 S6).
+    pub grant_ttl_secs: i64,
 }
 
 /// The record of a caller that states no source: `unattributed`, one call only, not audited.
@@ -1011,6 +1014,7 @@ const UNATTRIBUTED_DECISION: DecisionRecord<'static> = DecisionRecord {
     source: "unattributed",
     scope: "once",
     audit: false,
+    grant_ttl_secs: mp_contracts::approval_cause::THREAD_GRANT_TTL_DEFAULT_SECS,
 };
 
 pub async fn decide_approval(
@@ -1136,6 +1140,12 @@ pub async fn decide_approval_recorded(
         None
     };
 
+    // A standing scope leaves its grant in this transaction, so the decision and the grant are
+    // recorded together or not at all (build plan WS13 S6). A replay changes nothing.
+    if updated && status == "granted" && record.scope != "once" {
+        create_scope_grant(&mut transaction, id, org_id, record).await?;
+    }
+
     if updated && record.audit {
         let (kind, run_id, owner_user_id, metadata): (String, String, String, JsonValue) =
             sqlx::query_as(APPROVAL_AUDIT_CONTEXT_SQL)
@@ -1176,6 +1186,311 @@ pub async fn decide_approval_recorded(
         delivery_id,
         loop_owned,
     })
+}
+
+/// Why a standing scope could not be recorded with its decision (build plan WS13 S6). The
+/// decision is refused with it: a grant is created in the decision's transaction or not at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeGrantRefusal {
+    /// The approval's cause does not offer the scope the decider chose.
+    NotOffered,
+    /// The thread is a Space thread, or the run has none. A standing scope waits for the Space
+    /// session to confirm owner-only semantics (DEC-06, WS13 D9).
+    NotAvailable,
+}
+
+impl ScopeGrantRefusal {
+    /// The closed token the refusal reaches the caller as.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::NotOffered => "scope_not_offered",
+            Self::NotAvailable => "scope_not_available_in_space",
+        }
+    }
+}
+
+impl std::fmt::Display for ScopeGrantRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.code())
+    }
+}
+
+impl std::error::Error for ScopeGrantRefusal {}
+
+/// The approval's owner, run, thread and cause, read in the decision's own transaction.
+const APPROVAL_GRANT_CONTEXT_SQL: &str = "SELECT a.user_id, a.run_id, r.thread_id, \
+     COALESCE(t.space_id, ''), a.metadata, r.retention_class \
+     FROM approvals a \
+     JOIN runs r ON r.id = a.run_id \
+     LEFT JOIN threads t ON t.id = r.thread_id \
+     WHERE a.id = $1 AND a.org_id = $2";
+
+const INSERT_APPROVAL_SCOPE_GRANT_SQL: &str = "INSERT INTO approval_scope_grants \
+     (id, org_id, user_id, thread_id, run_id, scope, tool_name, action_key, effect_class, \
+      cause_code, created_from_approval_id, expires_at) \
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now() + make_interval(secs => $12)) \
+     ON CONFLICT (org_id, user_id, thread_id, scope, COALESCE(run_id, ''), action_key) \
+     WHERE revoked_at IS NULL \
+     DO UPDATE SET expires_at = GREATEST(approval_scope_grants.expires_at, EXCLUDED.expires_at)";
+
+/// Record the standing grant one granted decision creates (build plan WS13 S6), in the decision's
+/// transaction. The scope must be one the cause offers, and the thread must be an ordinary one.
+/// An unrevoked grant for the same owner, thread, scope, run and action is reused: the decision
+/// only extends its expiry, so an expired grant is renewed instead of silently blocking a new one.
+/// A run that keeps no state (zero retention or waived) never gets a grant (DEC-32).
+async fn create_scope_grant(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    approval_id: &str,
+    org_id: &str,
+    record: &DecisionRecord<'_>,
+) -> Result<()> {
+    let (owner, run_id, thread_id, space_id, metadata, retention_class): (
+        String,
+        String,
+        Option<String>,
+        String,
+        JsonValue,
+        String,
+    ) = sqlx::query_as(APPROVAL_GRANT_CONTEXT_SQL)
+        .bind(approval_id)
+        .bind(org_id)
+        .fetch_one(&mut **transaction)
+        .await?;
+    let cause = mp_contracts::approval_cause::from_metadata(&metadata).unwrap_or_default();
+    if !cause.scope_options.iter().any(|offered| offered == record.scope) {
+        return Err(ScopeGrantRefusal::NotOffered.into());
+    }
+    if retention_class != "persistent" {
+        return Err(ScopeGrantRefusal::NotAvailable.into());
+    }
+    let thread_id = match thread_id {
+        Some(thread_id) if space_id.is_empty() => thread_id,
+        _ => return Err(ScopeGrantRefusal::NotAvailable.into()),
+    };
+    let run_scope =
+        (record.scope == mp_contracts::approval_cause::SCOPE_RUN).then_some(run_id.as_str());
+    sqlx::query(INSERT_APPROVAL_SCOPE_GRANT_SQL)
+        .bind(format!("apg_{}", mp_ids::new_ulid()))
+        .bind(org_id)
+        .bind(&owner)
+        .bind(&thread_id)
+        .bind(run_scope)
+        .bind(record.scope)
+        .bind(&cause.tool)
+        .bind(&cause.action_key)
+        .bind(&cause.effect_class)
+        .bind(&cause.code)
+        .bind(approval_id)
+        .bind(record.grant_ttl_secs as f64)
+        .execute(&mut **transaction)
+        .await?;
+    Ok(())
+}
+
+/// The call a standing grant is asked to release (build plan WS13 S6). No argument value is part
+/// of the match: the owner, thread, tool, action key and declared class are the whole of it.
+#[derive(Debug, Clone, Copy)]
+pub struct ScopeGrantUse<'a> {
+    pub org_id: &'a str,
+    pub user_id: &'a str,
+    pub thread_id: &'a str,
+    pub run_id: &'a str,
+    pub tool_name: &'a str,
+    pub action_key: &'a str,
+    pub effect_class: &'a str,
+}
+
+/// The atomic match and count of one standing release. The grant must be live and unexpired for
+/// this owner and thread, name this tool, action and class, and cover this run (a run grant names
+/// one; a thread grant covers any). The run must be a live run of this owner and thread, and a
+/// child agent never matches a grant.
+const USE_APPROVAL_SCOPE_GRANT_SQL: &str = "UPDATE approval_scope_grants \
+     SET use_count = use_count + 1, last_used_at = now() \
+     WHERE id = ( \
+         SELECT g.id FROM approval_scope_grants g \
+         JOIN runs r ON r.id = $4 \
+         WHERE g.org_id = $1 AND g.user_id = $2 AND g.thread_id = $3 \
+           AND g.tool_name = $5 AND g.action_key = $6 AND g.effect_class = $7 \
+           AND g.revoked_at IS NULL AND g.expires_at > now() \
+           AND (g.scope = 'thread' OR g.run_id = $4) \
+           AND r.org_id = $1 AND r.user_id = $2 AND r.thread_id = $3 \
+           AND r.status NOT IN ('completed', 'failed', 'cancelled') \
+           AND r.retention_class = 'persistent' \
+           AND NOT EXISTS (SELECT 1 FROM subagent_edges e WHERE e.child_run_id = $4) \
+         ORDER BY g.created_at, g.id \
+         LIMIT 1 \
+     ) \
+     RETURNING id, scope, cause_code, use_count";
+
+/// Audit event name of a call released by a standing grant (build plan WS13 S6).
+const EVENT_APPROVAL_AUTO_RELEASED: &str = "approval_auto_released";
+
+/// The audit event id of one release. Each use is its own event, so the id names the grant and
+/// the use count, and a retried outbox insert is ignored.
+fn approval_auto_released_event_id(grant_id: &str, use_count: i64) -> String {
+    let digest = blake3::hash(format!("{grant_id}\0{use_count}").as_bytes());
+    format!("grant:session-core:{digest}")
+}
+
+/// The FLAT audit body of one release by a standing grant. It is content-free like the decision
+/// row: the grant, the tool and its declared class, never an argument.
+fn approval_auto_released_body(
+    call: &ScopeGrantUse<'_>,
+    grant_id: &str,
+    cause_code: &str,
+    scope: &str,
+    use_count: i64,
+) -> JsonValue {
+    serde_json::json!({
+        "event_id": approval_auto_released_event_id(grant_id, use_count),
+        "occurred_at": Utc::now().to_rfc3339(),
+        "org_id": call.org_id,
+        "user_id": call.user_id,
+        "plane": "model",
+        "producer": "session-core",
+        "event": EVENT_APPROVAL_AUTO_RELEASED,
+        "subject": call.run_id,
+        "resource_id": grant_id,
+        "outcome": "released",
+        "details": {
+            "cause_code": cause_code,
+            "tool": call.tool_name,
+            "effect_class": call.effect_class,
+            "scope": scope,
+            "decision_source": "standing_grant",
+            "use_count": use_count,
+        },
+    })
+}
+
+/// Release one call under a live standing grant, if one matches (build plan WS13 S6). The count
+/// and the audit row are written in one transaction, so a release whose audit row cannot be
+/// written does not happen, and the caller pauses the call as it did before grants.
+///
+/// # Errors
+///
+/// Returns an error if the update or the audit insert fails.
+pub async fn use_approval_scope_grant(
+    pool: &Pool,
+    call: &ScopeGrantUse<'_>,
+) -> Result<Option<String>> {
+    if call.org_id.trim().is_empty() || call.user_id.trim().is_empty() {
+        bail!("org_id and user_id are required");
+    }
+    let mut transaction = pool.begin().await?;
+    let used: Option<(String, String, String, i64)> = sqlx::query_as(USE_APPROVAL_SCOPE_GRANT_SQL)
+        .bind(call.org_id)
+        .bind(call.user_id)
+        .bind(call.thread_id)
+        .bind(call.run_id)
+        .bind(call.tool_name)
+        .bind(call.action_key)
+        .bind(call.effect_class)
+        .fetch_optional(&mut *transaction)
+        .await?;
+    let Some((grant_id, scope, cause_code, use_count)) = used else {
+        return Ok(None);
+    };
+    let body = approval_auto_released_body(call, &grant_id, &cause_code, &scope, use_count);
+    sqlx::query(INSERT_APPROVAL_AUDIT_OUTBOX_SQL)
+        .bind(approval_auto_released_event_id(&grant_id, use_count))
+        .bind(
+            crate::audit_publisher::audit_subject_for_event(EVENT_APPROVAL_AUTO_RELEASED)
+                .unwrap_or_default(),
+        )
+        .bind(&body)
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    Ok(Some(grant_id))
+}
+
+/// One standing grant as its owner reads it (build plan WS13 S6).
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ApprovalScopeGrantRow {
+    pub id: String,
+    pub thread_id: String,
+    pub run_id: Option<String>,
+    pub scope: String,
+    pub tool_name: String,
+    pub action_key: String,
+    pub effect_class: String,
+    pub cause_code: String,
+    pub created_from_approval_id: String,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub use_count: i64,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+const APPROVAL_SCOPE_GRANT_COLUMNS: &str = "id, thread_id, run_id, scope, tool_name, action_key, \
+     effect_class, cause_code, created_from_approval_id, created_at, expires_at, revoked_at, \
+     use_count, last_used_at";
+
+/// The owner's grants in one thread, oldest first. Owner-bound by org and user, so another
+/// person's grants in the same thread are never listed.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn list_approval_scope_grants(
+    pool: &Pool,
+    org_id: &str,
+    user_id: &str,
+    thread_id: &str,
+) -> Result<Vec<ApprovalScopeGrantRow>> {
+    let sql = format!(
+        "SELECT {APPROVAL_SCOPE_GRANT_COLUMNS} FROM approval_scope_grants \
+         WHERE org_id = $1 AND user_id = $2 AND thread_id = $3 \
+         ORDER BY created_at, id LIMIT 200"
+    );
+    Ok(sqlx::query_as::<_, ApprovalScopeGrantRow>(&sql)
+        .bind(org_id)
+        .bind(user_id)
+        .bind(thread_id)
+        .fetch_all(pool)
+        .await?)
+}
+
+/// Revoke one of the owner's live grants (build plan WS13 S6). A grant that is already revoked is
+/// returned as it stands, so a retried revocation is harmless. `None` when the owner has no such
+/// grant.
+///
+/// # Errors
+///
+/// Returns an error if a query fails.
+pub async fn revoke_approval_scope_grant(
+    pool: &Pool,
+    org_id: &str,
+    user_id: &str,
+    grant_id: &str,
+) -> Result<Option<ApprovalScopeGrantRow>> {
+    let revoke = format!(
+        "UPDATE approval_scope_grants SET revoked_at = now(), revoked_by = $3 \
+         WHERE id = $1 AND org_id = $2 AND user_id = $3 AND revoked_at IS NULL \
+         RETURNING {APPROVAL_SCOPE_GRANT_COLUMNS}"
+    );
+    let revoked = sqlx::query_as::<_, ApprovalScopeGrantRow>(&revoke)
+        .bind(grant_id)
+        .bind(org_id)
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await?;
+    if revoked.is_some() {
+        return Ok(revoked);
+    }
+    let read = format!(
+        "SELECT {APPROVAL_SCOPE_GRANT_COLUMNS} FROM approval_scope_grants \
+         WHERE id = $1 AND org_id = $2 AND user_id = $3"
+    );
+    Ok(sqlx::query_as::<_, ApprovalScopeGrantRow>(&read)
+        .bind(grant_id)
+        .bind(org_id)
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await?)
 }
 
 /// The call an approval authorised, read from its retained descriptor.
@@ -3055,6 +3370,7 @@ mod approval_decision_db_tests {
             source: "user",
             scope: "once",
             audit: true,
+            grant_ttl_secs: 3600,
         };
         let write = decide_approval_recorded(
             &pool,
@@ -3100,6 +3416,7 @@ mod approval_decision_db_tests {
             source: "user",
             scope: "once",
             audit: true,
+            grant_ttl_secs: 3600,
         };
         for attempt in 0..2 {
             let write = decide_approval_recorded(
@@ -3130,6 +3447,7 @@ mod approval_decision_db_tests {
             source: "posture_auto",
             scope: "once",
             audit: false,
+            grant_ttl_secs: 3600,
         };
         decide_approval_recorded(
             &pool,
@@ -4645,5 +4963,497 @@ mod run_question_db_tests {
             .await
             .expect("count");
         assert_eq!(left, 0, "the question and its answer are erased with the run");
+    }
+}
+
+/// Build plan WS13 S6: standing approval scopes. The pure check runs anywhere; the database checks
+/// run with `DATABASE_URL=... cargo test -p session-core --bin session-core approval_scope_grant -- --ignored --test-threads=1`
+/// against a scratch Postgres (the database name must say it is a test database).
+#[cfg(test)]
+mod approval_scope_grant_db_tests {
+    use super::*;
+    use sqlx::postgres::PgPoolOptions;
+
+    async fn scratch_pool() -> Option<Pool> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return None;
+        };
+        assert!(url.contains("test"), "the scratch database name must say test");
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&url)
+            .await
+            .expect("connect pg");
+        sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
+        Some(pool)
+    }
+
+    /// An approval requested for one call, in a fresh org, with the run and thread it belongs to.
+    #[derive(Clone)]
+    struct Pending {
+        approval_id: String,
+        org: String,
+        user: String,
+        thread_id: String,
+        run_id: String,
+    }
+
+    async fn seed_run(pool: &Pool, tag: &str, thread_id: &str, org: &str, user: &str) -> String {
+        let run_id = format!("sg-r-{tag}-{}", mp_ids::new_ulid());
+        sqlx::query("INSERT INTO runs (id,thread_id,goal,org_id,user_id) VALUES ($1,$2,'g',$3,$4)")
+            .bind(&run_id)
+            .bind(thread_id)
+            .bind(org)
+            .bind(user)
+            .execute(pool)
+            .await
+            .expect("seed run");
+        run_id
+    }
+
+    async fn pending(pool: &Pool, tag: &str, code: &str, tool: &str, class: &str) -> Pending {
+        let sfx = mp_ids::new_ulid();
+        let (thread_id, org, user) =
+            (format!("sg-t-{tag}-{sfx}"), format!("sg-org-{sfx}"), "u1".to_owned());
+        sqlx::query("INSERT INTO threads (id,session_key,org_id,user_id) VALUES ($1,$1,$2,$3)")
+            .bind(&thread_id)
+            .bind(&org)
+            .bind(&user)
+            .execute(pool)
+            .await
+            .expect("seed thread");
+        let run_id = seed_run(pool, tag, &thread_id, &org, &user).await;
+        let approval_id = format!("appr_{}", mp_ids::new_ulid());
+        let metadata = serde_json::json!({
+            "cause": {"code": code, "tool": tool, "effect_class": class, "action_key": tool}
+        });
+        request_approval(
+            pool,
+            &approval_id,
+            &run_id,
+            None,
+            "tool_call",
+            &user,
+            &org,
+            &user,
+            "",
+            &metadata,
+            None,
+            Some(Utc::now() + chrono::Duration::minutes(5)),
+            "",
+        )
+        .await
+        .expect("request approval")
+        .expect("inserted");
+        Pending {
+            approval_id,
+            org,
+            user,
+            thread_id,
+            run_id,
+        }
+    }
+
+    async fn decide(pool: &Pool, p: &Pending, scope: &str) -> Result<ApprovalDecisionWrite> {
+        let record = DecisionRecord {
+            source: "user",
+            scope,
+            audit: true,
+            grant_ttl_secs: 3600,
+        };
+        decide_approval_recorded(
+            pool,
+            &p.approval_id,
+            &p.org,
+            Some(p.user.as_str()),
+            "granted",
+            &p.user,
+            "ok",
+            &record,
+        )
+        .await
+    }
+
+    /// The owner's call under the approval's own run and thread: a read the consent gate held.
+    fn call(p: &Pending) -> ScopeGrantUse<'_> {
+        ScopeGrantUse {
+            org_id: &p.org,
+            user_id: &p.user,
+            thread_id: &p.thread_id,
+            run_id: &p.run_id,
+            tool_name: "knowledge_search",
+            action_key: "knowledge_search",
+            effect_class: "read",
+        }
+    }
+
+    async fn grant_count(pool: &Pool, org: &str) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM approval_scope_grants WHERE org_id = $1")
+            .bind(org)
+            .fetch_one(pool)
+            .await
+            .expect("count grants")
+    }
+
+    async fn grant_id(pool: &Pool, org: &str) -> String {
+        sqlx::query_scalar(
+            "SELECT id FROM approval_scope_grants WHERE org_id = $1 ORDER BY created_at LIMIT 1",
+        )
+        .bind(org)
+        .fetch_one(pool)
+        .await
+        .expect("the grant")
+    }
+
+    async fn status_of(pool: &Pool, approval_id: &str) -> String {
+        sqlx::query_scalar("SELECT status FROM approvals WHERE id = $1")
+            .bind(approval_id)
+            .fetch_one(pool)
+            .await
+            .expect("status")
+    }
+
+    #[test]
+    fn a_release_row_names_its_grant_and_never_carries_an_argument() {
+        let call = ScopeGrantUse {
+            org_id: "org",
+            user_id: "u1",
+            thread_id: "t1",
+            run_id: "r1",
+            tool_name: "knowledge_search",
+            action_key: "knowledge_search",
+            effect_class: "read",
+        };
+        let body = approval_auto_released_body(&call, "apg_1", "consent_to_disclose", "thread", 2);
+        assert_eq!(body["event"], EVENT_APPROVAL_AUTO_RELEASED);
+        assert_eq!(body["resource_id"], "apg_1");
+        assert_eq!(body["details"]["use_count"], 2);
+        assert_eq!(body["details"]["decision_source"], "standing_grant");
+        assert!(body["details"].get("tool_input").is_none());
+        assert!(body["details"].get("arguments").is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn a_thread_grant_is_created_in_the_decision_transaction() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let p = pending(&pool, "create", "consent_to_disclose", "knowledge_search", "read").await;
+        decide(&pool, &p, "thread").await.expect("decide");
+        let (scope, thread_id): (String, String) =
+            sqlx::query_as("SELECT scope, thread_id FROM approval_scope_grants WHERE org_id = $1")
+                .bind(&p.org)
+                .fetch_one(&pool)
+                .await
+                .expect("grant row");
+        assert_eq!((scope.as_str(), thread_id.as_str()), ("thread", p.thread_id.as_str()));
+        assert_eq!(status_of(&pool, &p.approval_id).await, "granted");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn a_grant_is_refused_for_an_ineligible_cause() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let p = pending(
+            &pool,
+            "ineligible",
+            "provider_write",
+            "execute_provider_action",
+            "external_write",
+        )
+        .await;
+        let Err(error) = decide(&pool, &p, "thread").await else {
+            panic!("a scope the cause does not offer must be refused");
+        };
+        assert_eq!(
+            error.downcast_ref::<ScopeGrantRefusal>(),
+            Some(&ScopeGrantRefusal::NotOffered)
+        );
+        assert_eq!(grant_count(&pool, &p.org).await, 0);
+        assert_eq!(
+            status_of(&pool, &p.approval_id).await,
+            "requested",
+            "the refused decision is not recorded"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn a_replayed_decision_creates_one_grant() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let p = pending(&pool, "replay", "consent_to_disclose", "knowledge_search", "read").await;
+        decide(&pool, &p, "thread").await.expect("first decision");
+        let replay = decide(&pool, &p, "thread").await.expect("replay");
+        assert!(!replay.updated, "a replay changes nothing");
+        assert_eq!(grant_count(&pool, &p.org).await, 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn a_grant_expires() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let p = pending(&pool, "expiry", "consent_to_disclose", "knowledge_search", "read").await;
+        decide(&pool, &p, "thread").await.expect("decide");
+        sqlx::query(
+            "UPDATE approval_scope_grants SET expires_at = now() - interval '1 second' WHERE org_id = $1",
+        )
+        .bind(&p.org)
+        .execute(&pool)
+        .await
+        .expect("age the grant");
+        let used = use_approval_scope_grant(&pool, &call(&p)).await.expect("use");
+        assert_eq!(used, None, "an expired grant releases nothing");
+    }
+
+    // The unique index covers every unrevoked grant, so an expired one must be renewed by the
+    // next identical decision rather than leave that decision with no grant at all.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn a_new_decision_renews_an_expired_grant() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let p = pending(&pool, "renew", "consent_to_disclose", "knowledge_search", "read").await;
+        decide(&pool, &p, "thread").await.expect("decide");
+        sqlx::query(
+            "UPDATE approval_scope_grants SET expires_at = now() - interval '1 second' WHERE org_id = $1",
+        )
+        .bind(&p.org)
+        .execute(&pool)
+        .await
+        .expect("age the grant");
+        let again = Pending {
+            approval_id: format!("appr_{}", mp_ids::new_ulid()),
+            ..p.clone()
+        };
+        let metadata = serde_json::json!({
+            "cause": {"code": "consent_to_disclose", "tool": "knowledge_search", "effect_class": "read", "action_key": "knowledge_search"}
+        });
+        request_approval(
+            &pool,
+            &again.approval_id,
+            &again.run_id,
+            None,
+            "tool_call",
+            &again.user,
+            &again.org,
+            &again.user,
+            "",
+            &metadata,
+            None,
+            Some(Utc::now() + chrono::Duration::minutes(5)),
+            "",
+        )
+        .await
+        .expect("request approval")
+        .expect("inserted");
+        decide(&pool, &again, "thread").await.expect("decide again");
+        let grants: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM approval_scope_grants WHERE org_id = $1")
+                .bind(&p.org)
+                .fetch_one(&pool)
+                .await
+                .expect("count grants");
+        assert_eq!(grants, 1, "the expired grant is renewed, not duplicated");
+        let used = use_approval_scope_grant(&pool, &call(&p)).await.expect("use");
+        assert!(used.is_some(), "the renewed grant releases the next call");
+    }
+
+    // DEC-32: a thread grant never releases a call of a run that keeps no state, even in the
+    // grant's own thread. (The receipt is immutable, so the zero-retention run is a second run.)
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn a_thread_grant_never_releases_a_run_that_keeps_no_state() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let p = pending(&pool, "nostate", "consent_to_disclose", "knowledge_search", "read").await;
+        decide(&pool, &p, "thread").await.expect("decide");
+        let zdr_run = format!("sg-r-zdr-{}", mp_ids::new_ulid());
+        sqlx::query(
+            "INSERT INTO runs (id,thread_id,goal,org_id,user_id,retention_class) \
+             VALUES ($1,$2,'g',$3,$4,'zdr')",
+        )
+        .bind(&zdr_run)
+        .bind(&p.thread_id)
+        .bind(&p.org)
+        .bind(&p.user)
+        .execute(&pool)
+        .await
+        .expect("seed a zero-retention run in the thread");
+        let as_zdr = ScopeGrantUse {
+            run_id: zdr_run.as_str(),
+            ..call(&p)
+        };
+        assert_eq!(use_approval_scope_grant(&pool, &as_zdr).await.expect("use"), None);
+        assert!(use_approval_scope_grant(&pool, &call(&p)).await.expect("use").is_some());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn a_revoked_grant_is_not_matched() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let p = pending(&pool, "revoke", "consent_to_disclose", "knowledge_search", "read").await;
+        decide(&pool, &p, "thread").await.expect("decide");
+        let id = grant_id(&pool, &p.org).await;
+        let revoked = revoke_approval_scope_grant(&pool, &p.org, &p.user, &id)
+            .await
+            .expect("revoke")
+            .expect("the owner's grant");
+        assert!(revoked.revoked_at.is_some());
+        let used = use_approval_scope_grant(&pool, &call(&p)).await.expect("use");
+        assert_eq!(used, None, "a revoked grant releases nothing");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn a_grant_in_another_thread_or_for_another_user_is_not_matched() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let p = pending(&pool, "scope", "consent_to_disclose", "knowledge_search", "read").await;
+        decide(&pool, &p, "thread").await.expect("decide");
+        let other_thread = ScopeGrantUse {
+            thread_id: "sg-another-thread",
+            ..call(&p)
+        };
+        assert_eq!(use_approval_scope_grant(&pool, &other_thread).await.expect("use"), None);
+        let other_user = ScopeGrantUse {
+            user_id: "u2",
+            ..call(&p)
+        };
+        assert_eq!(use_approval_scope_grant(&pool, &other_user).await.expect("use"), None);
+        assert!(use_approval_scope_grant(&pool, &call(&p)).await.expect("use").is_some());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn grants_are_erased_with_the_thread() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let p = pending(&pool, "erase", "consent_to_disclose", "knowledge_search", "read").await;
+        decide(&pool, &p, "thread").await.expect("decide");
+        assert_eq!(grant_count(&pool, &p.org).await, 1);
+        sqlx::query("DELETE FROM approvals WHERE run_id = $1")
+            .bind(&p.run_id)
+            .execute(&pool)
+            .await
+            .expect("erase the approval");
+        sqlx::query("DELETE FROM runs WHERE id = $1")
+            .bind(&p.run_id)
+            .execute(&pool)
+            .await
+            .expect("erase the run");
+        sqlx::query("DELETE FROM threads WHERE id = $1")
+            .bind(&p.thread_id)
+            .execute(&pool)
+            .await
+            .expect("erase the thread");
+        assert_eq!(grant_count(&pool, &p.org).await, 0, "the grant goes with its thread");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn a_child_agent_never_consumes_a_thread_grant() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let p = pending(&pool, "child", "consent_to_disclose", "knowledge_search", "read").await;
+        decide(&pool, &p, "thread").await.expect("decide");
+        let child = seed_run(&pool, "child-run", &p.thread_id, &p.org, &p.user).await;
+        sqlx::query("INSERT INTO subagent_edges (parent_run_id, child_run_id) VALUES ($1, $2)")
+            .bind(&p.run_id)
+            .bind(&child)
+            .execute(&pool)
+            .await
+            .expect("attach the child");
+        let as_child = ScopeGrantUse {
+            run_id: child.as_str(),
+            ..call(&p)
+        };
+        assert_eq!(use_approval_scope_grant(&pool, &as_child).await.expect("use"), None);
+        assert!(use_approval_scope_grant(&pool, &call(&p)).await.expect("use").is_some());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn a_run_grant_dies_with_its_run() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let p = pending(&pool, "run-scope", "consent_to_disclose", "knowledge_search", "read").await;
+        decide(&pool, &p, "run").await.expect("decide");
+        assert!(use_approval_scope_grant(&pool, &call(&p)).await.expect("use").is_some());
+        sqlx::query("UPDATE runs SET status = 'completed' WHERE id = $1")
+            .bind(&p.run_id)
+            .execute(&pool)
+            .await
+            .expect("end the run");
+        assert_eq!(use_approval_scope_grant(&pool, &call(&p)).await.expect("use"), None);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn a_grant_is_refused_in_a_space_thread() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let p = pending(&pool, "space", "consent_to_disclose", "knowledge_search", "read").await;
+        sqlx::query(
+            "UPDATE threads SET space_id = $2, origin = 'space', space_decision_ref = 'dec-t', \
+             recipient_audience_ref = 'aud-t', privacy_policy_ref = 'pp-t', \
+             resource_authorization_ref = 'ra-t', authority_revision = 1, \
+             recipient_audience_revision = 1, recipient_audience_hash = 'test-audience' \
+             WHERE id = $1",
+        )
+            .bind(&p.thread_id)
+            .bind("sp-grants-test")
+            .execute(&pool)
+            .await
+            .expect("make a Space thread");
+        let Err(error) = decide(&pool, &p, "thread").await else {
+            panic!("a standing scope in a Space thread must be refused");
+        };
+        assert_eq!(
+            error.downcast_ref::<ScopeGrantRefusal>(),
+            Some(&ScopeGrantRefusal::NotAvailable)
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn a_release_is_counted_and_audited_in_its_own_transaction() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let p = pending(&pool, "audit", "consent_to_disclose", "knowledge_search", "read").await;
+        decide(&pool, &p, "thread").await.expect("decide");
+        let grant = use_approval_scope_grant(&pool, &call(&p))
+            .await
+            .expect("use")
+            .expect("a match");
+        let uses: i64 = sqlx::query_scalar("SELECT use_count FROM approval_scope_grants WHERE id = $1")
+            .bind(&grant)
+            .fetch_one(&pool)
+            .await
+            .expect("use count");
+        assert_eq!(uses, 1);
+        let audited: i64 = sqlx::query_scalar("SELECT count(*) FROM session_audit_outbox WHERE event_id = $1")
+            .bind(approval_auto_released_event_id(&grant, 1))
+            .fetch_one(&pool)
+            .await
+            .expect("count audit rows");
+        assert_eq!(audited, 1, "the release has its audit row");
     }
 }

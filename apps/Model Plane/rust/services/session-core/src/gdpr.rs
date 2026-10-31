@@ -141,6 +141,8 @@ pub struct PurgeSummary {
     pub todos: u64,
     pub plan_steps: u64,
     pub approvals: u64,
+    /// Standing approval grants erased with the organization (build plan WS13 S6).
+    pub approval_scope_grants: u64,
     pub plans: u64,
     pub memory_index: u64,
     pub messages: u64,
@@ -185,6 +187,7 @@ impl PurgeSummary {
             + self.todos
             + self.plan_steps
             + self.approvals
+            + self.approval_scope_grants
             + self.plans
             + self.memory_index
             + self.messages
@@ -279,6 +282,14 @@ pub async fn purge_organization_data(
     .execute(&mut *tx)
     .await?
     .rows_affected();
+
+    // Standing grants reference their approval, run and thread, so they go before any of them.
+    summary.approval_scope_grants =
+        sqlx::query("DELETE FROM approval_scope_grants WHERE org_id = $1")
+            .bind(org_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
 
     // `approvals` references both `plans` and `runs` — delete before either.
     // `approval_delivery_outbox` cascades from `approvals` automatically.
@@ -633,6 +644,7 @@ mod tests {
             todos: 1,
             plan_steps: 1,
             approvals: 1,
+            approval_scope_grants: 1,
             plans: 1,
             memory_index: 1,
             messages: 1,
@@ -668,7 +680,7 @@ mod tests {
         };
         assert_eq!(
             summary.total(),
-            28,
+            29,
             "total() must count only Postgres rows; semantic-tier counts belong \
              to erasure_is_complete(), not to this sum"
         );

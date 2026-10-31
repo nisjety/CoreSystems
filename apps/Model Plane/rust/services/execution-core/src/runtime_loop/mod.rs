@@ -29,7 +29,8 @@ use std::sync::Arc;
 
 use mp_contracts::approval_cause::{self, CauseCode};
 use mp_contracts::model_plane::v1::{
-    self as pb, orchestration_core_service_client::OrchestrationCoreServiceClient,
+    self as pb, approval_scope_grant_service_client::ApprovalScopeGrantServiceClient,
+    orchestration_core_service_client::OrchestrationCoreServiceClient,
 };
 use tonic::transport::Channel;
 
@@ -380,6 +381,95 @@ mod connector_taint_tests {
         assert!(!tainted_egress_held(false, false, "web_fetch"), "a clean run is not held");
         assert!(!tainted_egress_held(true, false, "read_provider_action"), "a read is not egress");
         assert!(!tainted_egress_held(true, false, "knowledge_search"));
+    }
+}
+
+/// The call a standing grant (build plan WS13 S6) may release from a pause, and whose owner it is.
+/// Carries the identifiers, the declared class and the run's retention, never an argument value.
+#[derive(Clone, Copy)]
+struct StandingCall<'a> {
+    channel: Option<&'a Channel>,
+    org_id: &'a str,
+    user_id: &'a str,
+    thread_id: &'a str,
+    run_id: &'a str,
+    tool_name: &'a str,
+    tool_input: &'a str,
+    effect_class: &'a str,
+    zdr: bool,
+    waived: bool,
+}
+
+impl StandingCall<'_> {
+    /// Whether a pause of `cause` on this call may be lifted by a standing grant at all: the switch
+    /// is on, the run is neither ZDR nor waived, and the cause, tool and declared class are
+    /// eligible.
+    fn grantable(&self, cause: CauseCode) -> bool {
+        self.grantable_with_switch(approval_cause::scope_grants_enabled(), cause)
+    }
+
+    /// `grantable` with the switch given, so the gate is tested without reading the environment. A
+    /// ZDR or waived run never asks: a release would write an audit row naming the run, which the
+    /// ZDR clause forbids, and a waived run counts as ZDR (DEC-32).
+    fn grantable_with_switch(&self, switch_on: bool, cause: CauseCode) -> bool {
+        switch_on
+            && !self.zdr
+            && !self.waived
+            && offers_standing_scope(cause, self.tool_name, self.tool_input, self.effect_class)
+    }
+
+    /// Ask the session whether a live grant releases this call. Asked once for the whole pause. An
+    /// absent session, a missing owner or a failed call leaves the pause in place.
+    async fn released(&self) -> bool {
+        let Some(channel) = self.channel else {
+            return false;
+        };
+        if self.user_id.trim().is_empty() || self.thread_id.is_empty() {
+            return false;
+        }
+        match ApprovalScopeGrantServiceClient::new(channel.clone())
+            .use_approval_scope_grant(standing_request(self))
+            .await
+        {
+            Ok(response) => !response.into_inner().grant_id.is_empty(),
+            Err(status) => {
+                tracing::warn!(
+                    run_id = self.run_id,
+                    tool = self.tool_name,
+                    code = ?status.code(),
+                    "standing grant not used; the call pauses"
+                );
+                false
+            }
+        }
+    }
+}
+
+/// Whether a pause of `cause` on this call offers a standing scope (build plan WS13 S6), by the
+/// eligibility rule in mp-contracts. The switch is not read here, so the rule stands on its own.
+fn offers_standing_scope(
+    cause: CauseCode,
+    tool_name: &str,
+    tool_input: &str,
+    effect_class: &str,
+) -> bool {
+    approval_cause::for_call_with_class(cause, "", tool_name, tool_input, effect_class)
+        .scope_options
+        .iter()
+        .any(|scope| scope.as_str() != approval_cause::SCOPE_ONCE)
+}
+
+/// The request a standing grant is asked with: the owner, the run's thread and the call's tool,
+/// action key and class. The action key names the tool and its operation, never an argument.
+fn standing_request(call: &StandingCall<'_>) -> pb::UseApprovalScopeGrantRequest {
+    pb::UseApprovalScopeGrantRequest {
+        org_id: call.org_id.to_owned(),
+        user_id: call.user_id.to_owned(),
+        thread_id: call.thread_id.to_owned(),
+        run_id: call.run_id.to_owned(),
+        tool_name: call.tool_name.trim().to_owned(),
+        action_key: approval_cause::action_key(call.tool_name, call.tool_input),
+        effect_class: call.effect_class.to_owned(),
     }
 }
 
@@ -771,6 +861,9 @@ async fn execute_step_inner(
     space_retrieval: crate::knowledge_tools::SpaceRetrieval<'_>,
 ) -> StepOutcome {
     let released = release.is_some_and(|r| r.covers(step_id, tool_name, tool_input));
+    // A capability pause that a standing grant may cover (build plan WS13 S6). It is held until the
+    // hook and permission gates have answered, so a grant is never spent on a call a later gate holds.
+    let mut deferred_pause: Option<CauseCode> = None;
     // An MCP tool carries the call's content to a third-party server, so it is
     // never reached under ZDR or on a waived route. Refused before the registry
     // is asked about it: once `TOOL_CLASS_GATE` binds `mcp__` names, the
@@ -873,7 +966,7 @@ async fn execute_step_inner(
                     user_id,
                     run_id,
                 );
-                let Some(approval) = &grant_approval else {
+                if grant_approval.is_none() {
                     // capability-core answers `ask` for a high-risk capability, and,
                     // once the tool class gate names the tool, for a tool whose class
                     // or approval floor asks. The second is the same pause the
@@ -887,20 +980,37 @@ async fn execute_step_inner(
                     } else {
                         CauseCode::CapabilityHighRisk
                     };
-                    return StepOutcome::awaiting_approval(cause);
-                };
-                // Metadata only: no URL, domain, goal or prompt.
-                tracing::info!(
-                    run_id,
-                    step_id,
-                    plan_id = %approval.plan_id,
-                    decision_id = %approval.decision_id,
-                    capability_version = %approval.capability_version,
-                    approval_basis = "browser_run_grant",
-                    grant_kind = "run",
-                    grant_ref = %approval.grant_ref,
-                    "high-risk capability ask satisfied by a broker-validated browser run grant"
-                );
+                    let standing = StandingCall {
+                        channel: session_channel.as_ref(),
+                        org_id,
+                        user_id,
+                        thread_id,
+                        run_id,
+                        tool_name,
+                        tool_input,
+                        effect_class: &signed_class.class,
+                        zdr,
+                        waived,
+                    };
+                    if !standing.grantable(cause) {
+                        return StepOutcome::awaiting_approval(cause);
+                    }
+                    deferred_pause = Some(cause);
+                }
+                if let Some(approval) = &grant_approval {
+                    // Metadata only: no URL, domain, goal or prompt.
+                    tracing::info!(
+                        run_id,
+                        step_id,
+                        plan_id = %approval.plan_id,
+                        decision_id = %approval.decision_id,
+                        capability_version = %approval.capability_version,
+                        approval_basis = "browser_run_grant",
+                        grant_kind = "run",
+                        grant_ref = %approval.grant_ref,
+                        "high-risk capability ask satisfied by a broker-validated browser run grant"
+                    );
+                }
             }
             // The user approved this exact call: the ask gate is satisfied.
         }
@@ -978,15 +1088,36 @@ async fn execute_step_inner(
     // Under `TOOL_CLASS_GATE` the run's declared class and approval floor decide
     // instead of the name (`permission::RunGate`); with the gate off this is
     // `evaluate_call` exactly.
-    match permission::RunGate::for_run(org_id, run_id).evaluate_call(mode, tool_name, tool_input) {
-        PermissionDecision::Deny => return StepOutcome::permission_denied(),
-        PermissionDecision::AwaitApproval if !released => {
-            return StepOutcome::awaiting_approval(permission_pause_cause(
-                permission::RunGate::for_run(org_id, run_id),
-                tool_name,
-            ));
+    let permission_decision =
+        permission::RunGate::for_run(org_id, run_id).evaluate_call(mode, tool_name, tool_input);
+    if matches!(permission_decision, PermissionDecision::Deny) {
+        return StepOutcome::permission_denied();
+    }
+    let permission_pause = (!released
+        && matches!(permission_decision, PermissionDecision::AwaitApproval))
+    .then(|| permission_pause_cause(permission::RunGate::for_run(org_id, run_id), tool_name));
+    // The pause the gate returns is the capability pause when there is one, as it always was. A
+    // standing grant releases it only when every pause held for this call is one a grant may cover.
+    if let Some(cause) = deferred_pause.or(permission_pause) {
+        let standing = StandingCall {
+            channel: session_channel.as_ref(),
+            org_id,
+            user_id,
+            thread_id,
+            run_id,
+            tool_name,
+            tool_input,
+            effect_class: &signed_class.class,
+            zdr,
+            waived,
+        };
+        let mut covered = standing.grantable(cause);
+        if let (Some(_), Some(second)) = (deferred_pause, permission_pause) {
+            covered = covered && standing.grantable(second);
         }
-        PermissionDecision::AwaitApproval | PermissionDecision::Allow => {}
+        if !covered || !standing.released().await {
+            return StepOutcome::awaiting_approval(cause);
+        }
     }
 
     // Browser-agent returns a structured lifecycle result, not a generic tool
@@ -4863,5 +4994,125 @@ mod tests {
         // The decision that agrees with the view goes on as far as the credential.
         let agreed = call(SignedToolClass::new("read", "none"), "run-stale-view").await;
         assert!(agreed.contains("credential"), "{agreed}");
+    }
+}
+
+#[cfg(test)]
+mod standing_grant_gate_tests {
+    use super::*;
+
+    fn call<'a>(tool_name: &'a str, tool_input: &'a str, effect_class: &'a str) -> StandingCall<'a> {
+        StandingCall {
+            channel: None,
+            org_id: "org-standing",
+            user_id: "u1",
+            thread_id: "t1",
+            run_id: "r1",
+            tool_name,
+            tool_input,
+            effect_class,
+            zdr: false,
+            waived: false,
+        }
+    }
+
+    #[test]
+    fn a_standing_release_passes_only_the_exact_tool_and_operation() {
+        let send = r#"{"operation":"message.send","body":{"text":"hi"}}"#;
+        let request = standing_request(&call("execute_provider_action", send, "external_write"));
+        assert_eq!(request.action_key, "execute_provider_action:message.send");
+        assert_eq!(request.tool_name, "execute_provider_action");
+        assert_eq!(request.org_id, "org-standing");
+        assert_eq!(request.user_id, "u1");
+        let delete = standing_request(&call(
+            "execute_provider_action",
+            r#"{"operation":"message.delete"}"#,
+            "external_write",
+        ));
+        assert_ne!(
+            request.action_key, delete.action_key,
+            "another operation is another key"
+        );
+        let read = standing_request(&call("knowledge_search", "{}", "read"));
+        assert_eq!(read.action_key, "knowledge_search");
+        assert!(!request.action_key.contains("text"), "no argument value is sent");
+    }
+
+    #[test]
+    fn owner_effect_is_never_released_by_a_grant() {
+        for (tool, class) in [
+            ("tickets.create", "read"),
+            ("tickets.create", "external_write"),
+            ("mcp__srv__pay", "read"),
+        ] {
+            assert!(
+                !offers_standing_scope(CauseCode::OwnerEffectReserved, tool, "{}", class),
+                "{tool} {class}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_provider_write_is_never_released_by_a_grant() {
+        let write = r#"{"operation":"message.send"}"#;
+        for code in [CauseCode::ProviderWrite, CauseCode::AutoPostureProviderWrite] {
+            assert!(
+                !offers_standing_scope(code, "execute_provider_action", write, "external_write"),
+                "{code:?}"
+            );
+        }
+        assert!(
+            !offers_standing_scope(CauseCode::ConsentToDisclose, "execute_provider_action", write, "read"),
+            "a connected-account write is bound to its own receipt, whatever the class"
+        );
+    }
+
+    #[test]
+    fn a_hook_ask_is_not_satisfied_by_a_grant() {
+        assert!(!offers_standing_scope(CauseCode::HookAsk, "knowledge_search", "{}", "read"));
+        assert!(!offers_standing_scope(
+            CauseCode::BrowserActionRisk,
+            "browser_agent",
+            "{}",
+            "read"
+        ));
+    }
+
+    #[test]
+    fn a_read_under_a_consent_pause_is_offered_a_standing_scope() {
+        assert!(offers_standing_scope(
+            CauseCode::ConsentToDisclose,
+            "knowledge_search",
+            "{}",
+            "read"
+        ));
+        assert!(
+            !offers_standing_scope(CauseCode::ConsentToDisclose, "knowledge_search", "{}", ""),
+            "a call that states no class is offered once only"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_standing_grant_needs_a_session_to_ask() {
+        assert!(
+            !call("knowledge_search", "{}", "read").released().await,
+            "with no session there is nothing to ask, so the call pauses"
+        );
+    }
+
+    #[test]
+    fn a_zdr_or_waived_run_never_asks_for_a_standing_release() {
+        let read = call("knowledge_search", "{}", "read");
+        assert!(
+            read.grantable_with_switch(true, CauseCode::ConsentToDisclose),
+            "the control: an eligible read on an ordinary run is offered a standing scope"
+        );
+        for (zdr, waived) in [(true, false), (false, true), (true, true)] {
+            let retained = StandingCall { zdr, waived, ..read };
+            assert!(
+                !retained.grantable_with_switch(true, CauseCode::ConsentToDisclose),
+                "zdr={zdr} waived={waived}: eligible and switched on, yet no release is asked"
+            );
+        }
     }
 }

@@ -38,6 +38,15 @@ export type {
 
 export type ApprovalDecision = 'approve' | 'reject'
 
+/**
+ * How far an approval decision reaches (build plan WS13 S6). `once` is the one decision that always
+ * exists; `thread` and `run` are standing grants, which the server offers only where the approval's
+ * cause allows them and the deployment has switched them on.
+ */
+export type ApprovalScope = 'once' | 'thread' | 'run'
+
+const APPROVAL_SCOPES: readonly ApprovalScope[] = ['once', 'thread', 'run']
+
 /** A pending/decided approval as reported by model-gateway's orchestration API. */
 export type Approval = {
   id: string
@@ -152,16 +161,22 @@ export async function decideApproval(
   decision: ApprovalDecision,
   reason?: string,
   signal?: AbortSignal,
+  scope: ApprovalScope = 'once',
 ): Promise<Approval | null> {
   const checked = orchestrationDecideApprovalInput.safeParse({ approvalId, decision, reason: reason ?? '' })
-  if (!checked.success) {
+  if (!checked.success || !APPROVAL_SCOPES.includes(scope)) {
     throw new ApiError('Ugyldig godkjenningsavgjørelse.', 400, 'invalid_approval_decision')
   }
   const payload = await requestJson<{ approval?: RawApproval }>(
     `/api/v1/orchestration/approvals/${encodeURIComponent(approvalId)}/decide`,
     {
       method: 'POST',
-      body: JSON.stringify({ decision, reason: checked.data.reason ?? '' }),
+      // The scope is sent only when it stands beyond this one call: the one decision carries no field.
+      body: JSON.stringify(
+        scope === 'once'
+          ? { decision, reason: checked.data.reason ?? '' }
+          : { decision, reason: checked.data.reason ?? '', scope },
+      ),
       signal,
     },
   )

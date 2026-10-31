@@ -465,7 +465,8 @@ message ApprovalCause {
   // Browser risk category the Model proposed an action under (`browser_action_risk`).
   string risk_category = 5;
 
-  // Scopes the decider may grant: `once`, `thread`, `run`. Stubbed to `once`.
+  // Scopes the decider may grant: `once`, `thread`, `run`. Computed by the server from the
+  // code and the call's facts (build plan WS13 S6); a sender's list is never kept.
   repeated string scope_options = 6;
 
   // True when granting needs a recent re-authentication (WS13 S5).
@@ -1722,4 +1723,123 @@ message AnswerRunQuestionRequest {
 message AnswerRunQuestionResponse {
   // The answered or skipped question.
   RunQuestion question = 1;
+}
+
+// --- Approval scope grants (build plan WS13 S6) ---
+
+// A standing release for one eligible call, given by a "this thread" or "this run" decision.
+// Served by session-core. It is its own service rather than a method of
+// OrchestrationCoreService, so the implementations of that service, and their test doubles,
+// need no change.
+service ApprovalScopeGrantService {
+  // Atomically matches one live grant for a call and counts the use. The caller is an
+  // execution-core service principal acting for the run's owner. An empty grant_id means no
+  // grant matched, and the call pauses as it did before grants existed.
+  rpc UseApprovalScopeGrant(UseApprovalScopeGrantRequest) returns (UseApprovalScopeGrantResponse);
+
+  // The verified caller's own grants in one thread.
+  rpc ListApprovalScopeGrants(ListApprovalScopeGrantsRequest)
+      returns (ListApprovalScopeGrantsResponse);
+
+  // Revokes one of the verified caller's live grants. Revocation takes effect at once.
+  rpc RevokeApprovalScopeGrant(RevokeApprovalScopeGrantRequest)
+      returns (RevokeApprovalScopeGrantResponse);
+}
+
+// A standing grant as its owner sees it. It never carries an argument value.
+message ApprovalScopeGrant {
+  // Grant identifier (ULID, prefix `apg_`).
+  string id = 1;
+
+  // The thread the grant covers.
+  string thread_id = 2;
+
+  // The run a run grant covers. Empty for a thread grant.
+  string run_id = 3;
+
+  // THREAD or RUN.
+  ApprovalScope scope = 4;
+
+  // The tool the grant releases.
+  string tool_name = 5;
+
+  // Tool and operation, never argument values.
+  string action_key = 6;
+
+  // The declared effect class the grant was created under.
+  string effect_class = 7;
+
+  // The approval whose decision created the grant.
+  string created_from_approval_id = 8;
+
+  // The closed cause code of that approval.
+  string cause_code = 9;
+
+  // When the grant was created.
+  google.protobuf.Timestamp created_at = 10;
+
+  // When the grant stops releasing calls.
+  google.protobuf.Timestamp expires_at = 11;
+
+  // When the owner revoked it. Unset while it is live.
+  google.protobuf.Timestamp revoked_at = 12;
+
+  // How many calls it has released.
+  int64 use_count = 13;
+
+  // When it last released a call. Unset until its first use.
+  google.protobuf.Timestamp last_used_at = 14;
+}
+
+message UseApprovalScopeGrantRequest {
+  // Server-authoritative org scope of the run.
+  string org_id = 1;
+
+  // The run's owner. A grant matches only this user.
+  string user_id = 2;
+
+  // The run's thread.
+  string thread_id = 3;
+
+  // The run the call belongs to.
+  string run_id = 4;
+
+  // The tool the pause would hold.
+  string tool_name = 5;
+
+  // Tool and operation of the call, from the pause's cause.
+  string action_key = 6;
+
+  // The call's declared effect class under the run, from the signed capability decision.
+  string effect_class = 7;
+}
+
+message UseApprovalScopeGrantResponse {
+  // The grant that released the call. Empty when no live grant matches.
+  string grant_id = 1;
+}
+
+message ListApprovalScopeGrantsRequest {
+  // Server-authoritative org scope.
+  string org_id = 1;
+
+  // The thread whose grants are listed.
+  string thread_id = 2;
+}
+
+message ListApprovalScopeGrantsResponse {
+  repeated ApprovalScopeGrant grants = 1;
+}
+
+message RevokeApprovalScopeGrantRequest {
+  // Server-authoritative org scope.
+  string org_id = 1;
+
+  // The grant to revoke.
+  string grant_id = 2;
+}
+
+message RevokeApprovalScopeGrantResponse {
+  // The grant as it stands after the revocation.
+  ApprovalScopeGrant grant = 1;
 }

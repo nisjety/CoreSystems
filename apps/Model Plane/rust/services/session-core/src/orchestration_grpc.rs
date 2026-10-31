@@ -19,6 +19,7 @@ use futures::{Stream, StreamExt};
 use mp_contracts::approval_cause::{self, CauseCode};
 use mp_contracts::model_plane::v1::{
     self as proto,
+    approval_scope_grant_service_server::ApprovalScopeGrantService,
     orchestration_core_service_server::{OrchestrationCoreService, OrchestrationCoreServiceServer},
     orchestration_event,
 };
@@ -382,6 +383,67 @@ const APPROVAL_AUDIT_EVENTS_ENV: &str = "APPROVAL_AUDIT_EVENTS_ENABLED";
 
 fn approval_audit_switch_from(value: Option<&str>) -> bool {
     value.is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
+}
+
+/// Standing approval scopes may act only with the approval audit events on (build plan K3-2): every
+/// standing release has its audit row, or there is no standing release. `Err` names the refused
+/// combination.
+fn scope_grants_require_audit(
+    grants_enabled: bool,
+    audit_enabled: bool,
+) -> Result<(), &'static str> {
+    if grants_enabled && !audit_enabled {
+        return Err("APPROVAL_SCOPE_GRANTS_ENABLED=true needs APPROVAL_AUDIT_EVENTS_ENABLED=true");
+    }
+    Ok(())
+}
+
+/// The startup form of [`scope_grants_require_audit`], read from the environment once at boot.
+pub(crate) fn check_scope_grant_startup() -> Result<(), &'static str> {
+    scope_grants_require_audit(
+        approval_cause::scope_grants_enabled(),
+        approval_audit_events_enabled(),
+    )
+}
+
+/// A refused standing scope reaches the caller as its typed token; any other store failure is
+/// internal (build plan WS13 S6).
+fn decision_error_status(error: anyhow::Error) -> Status {
+    match error.downcast_ref::<store::ScopeGrantRefusal>() {
+        Some(refusal) => Status::failed_precondition(refusal.code()),
+        None => Status::internal(error.to_string()),
+    }
+}
+
+/// The verified caller's own user, after its org is checked. Every grant call binds to this owner.
+fn grant_owner(caller: &VerifiedIdentity, org_id: &str) -> Result<String, Status> {
+    validate_approval_org(org_id)?;
+    caller.authorize_org(org_id)?;
+    caller
+        .user_id()
+        .map(str::to_owned)
+        .ok_or_else(|| Status::permission_denied("user-bound approval credential required"))
+}
+
+/// The owner's view of one standing grant. It names the tool, its action key and its class, and
+/// never an argument.
+fn approval_scope_grant_proto(row: &store::ApprovalScopeGrantRow) -> proto::ApprovalScopeGrant {
+    proto::ApprovalScopeGrant {
+        id: row.id.clone(),
+        thread_id: row.thread_id.clone(),
+        run_id: row.run_id.clone().unwrap_or_default(),
+        scope: approval_scope_from_str(&row.scope),
+        tool_name: row.tool_name.clone(),
+        action_key: row.action_key.clone(),
+        effect_class: row.effect_class.clone(),
+        created_from_approval_id: row.created_from_approval_id.clone(),
+        cause_code: row.cause_code.clone(),
+        created_at: Some(ts(row.created_at)),
+        expires_at: Some(ts(row.expires_at)),
+        revoked_at: row.revoked_at.map(ts),
+        use_count: row.use_count,
+        last_used_at: row.last_used_at.map(ts),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2525,6 +2587,123 @@ fn question_answered_event(row: &store::RunQuestionRow) -> proto::OrchestrationE
 // Service implementation
 // ---------------------------------------------------------------------------
 
+/// The standing approval grants (build plan WS13 S6). A release is a service call for the run's
+/// owner, and listing or revoking is the owner's own. Every query is bound to the owner and the
+/// org, and a ZDR credential is refused by the operation scope.
+#[tonic::async_trait]
+impl ApprovalScopeGrantService for OrchestrationGrpc {
+    async fn use_approval_scope_grant(
+        &self,
+        request: Request<proto::UseApprovalScopeGrantRequest>,
+    ) -> Result<Response<proto::UseApprovalScopeGrantResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::UseApprovalScopeGrantResponse>, Status> = async {
+            let caller = identity(&request)?;
+            retention_receipt::refuse_zdr_continuation(&caller)?;
+            authorize_operation(&caller, "approval:grant_use")?;
+            if !caller.is_service() {
+                return Err(Status::permission_denied(
+                    "service identity required to release a call under a grant",
+                ));
+            }
+            let req = request.into_inner();
+            validate_approval_org(&req.org_id)?;
+            caller.authorize_org(&req.org_id)?;
+            if req.user_id.trim().is_empty() || req.thread_id.is_empty() || req.run_id.is_empty() {
+                return Err(Status::invalid_argument(
+                    "user_id, thread_id and run_id are required",
+                ));
+            }
+            if req.tool_name.trim().is_empty() || req.action_key.is_empty() {
+                return Err(Status::invalid_argument(
+                    "tool_name and action_key are required",
+                ));
+            }
+            // A release is never granted while the switch is off, whatever the caller sent.
+            if !approval_cause::scope_grants_enabled() {
+                return Ok(Response::new(proto::UseApprovalScopeGrantResponse {
+                    grant_id: String::new(),
+                }));
+            }
+            scope_grants_require_audit(true, approval_audit_events_enabled())
+                .map_err(Status::failed_precondition)?;
+            let grant_id = store::use_approval_scope_grant(
+                &self.pool,
+                &store::ScopeGrantUse {
+                    org_id: &req.org_id,
+                    user_id: &req.user_id,
+                    thread_id: &req.thread_id,
+                    run_id: &req.run_id,
+                    tool_name: req.tool_name.trim(),
+                    action_key: &req.action_key,
+                    effect_class: &req.effect_class,
+                },
+            )
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+            Ok(Response::new(proto::UseApprovalScopeGrantResponse {
+                grant_id: grant_id.unwrap_or_default(),
+            }))
+        }
+        .await;
+        record_metrics("use_approval_scope_grant", started, result.is_ok());
+        result
+    }
+
+    async fn list_approval_scope_grants(
+        &self,
+        request: Request<proto::ListApprovalScopeGrantsRequest>,
+    ) -> Result<Response<proto::ListApprovalScopeGrantsResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::ListApprovalScopeGrantsResponse>, Status> = async {
+            let caller = identity(&request)?;
+            retention_receipt::refuse_zdr_continuation(&caller)?;
+            authorize_operation(&caller, "approval:grant_manage")?;
+            let req = request.into_inner();
+            let owner = grant_owner(&caller, &req.org_id)?;
+            authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Read).await?;
+            let rows =
+                store::list_approval_scope_grants(&self.pool, &req.org_id, &owner, &req.thread_id)
+                    .await
+                    .map_err(|error| Status::internal(error.to_string()))?;
+            Ok(Response::new(proto::ListApprovalScopeGrantsResponse {
+                grants: rows.iter().map(approval_scope_grant_proto).collect(),
+            }))
+        }
+        .await;
+        record_metrics("list_approval_scope_grants", started, result.is_ok());
+        result
+    }
+
+    async fn revoke_approval_scope_grant(
+        &self,
+        request: Request<proto::RevokeApprovalScopeGrantRequest>,
+    ) -> Result<Response<proto::RevokeApprovalScopeGrantResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::RevokeApprovalScopeGrantResponse>, Status> = async {
+            let caller = identity(&request)?;
+            retention_receipt::refuse_zdr_continuation(&caller)?;
+            authorize_operation(&caller, "approval:grant_manage")?;
+            let req = request.into_inner();
+            let owner = grant_owner(&caller, &req.org_id)?;
+            if req.grant_id.is_empty() {
+                return Err(Status::invalid_argument("grant_id is required"));
+            }
+            let row =
+                store::revoke_approval_scope_grant(&self.pool, &req.org_id, &owner, &req.grant_id)
+                    .await
+                    .map_err(|error| Status::internal(error.to_string()))?
+                    .ok_or_else(|| Status::not_found("approval grant not found"))?;
+            Ok(Response::new(proto::RevokeApprovalScopeGrantResponse {
+                grant: Some(approval_scope_grant_proto(&row)),
+            }))
+        }
+        .await;
+        record_metrics("revoke_approval_scope_grant", started, result.is_ok());
+        result
+    }
+}
+
 #[tonic::async_trait]
 #[allow(clippy::too_many_lines)]
 impl OrchestrationCoreService for OrchestrationGrpc {
@@ -3633,6 +3812,16 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 .ok_or_else(|| Status::invalid_argument("invalid decision source"))?;
             let scope = approval_scope_to_str(req.scope)
                 .ok_or_else(|| Status::invalid_argument("invalid decision scope"))?;
+            if scope != "once" {
+                if new_status != "granted" {
+                    return Err(Status::invalid_argument("a scope applies to a grant only"));
+                }
+                if !approval_cause::scope_grants_enabled() {
+                    return Err(Status::failed_precondition("scope_not_enabled"));
+                }
+                scope_grants_require_audit(true, approval_audit_events_enabled())
+                    .map_err(Status::failed_precondition)?;
+            }
             let decision_write = store::decide_approval_recorded(
                 &self.pool,
                 &req.approval_id,
@@ -3645,10 +3834,11 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                     source,
                     scope,
                     audit: approval_audit_events_enabled(),
+                    grant_ttl_secs: approval_cause::thread_grant_ttl_secs(),
                 },
             )
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(decision_error_status)?;
             let updated = decision_write.updated;
             if updated {
                 metrics::counter!("mp_session_approval_decisions_total", "source" => source)
@@ -8673,5 +8863,31 @@ mod tests {
             assert_eq!(db.status_of(&plan.id).await, "approved");
             db.cleanup().await;
         }
+    }
+}
+
+#[cfg(test)]
+mod approval_scope_grant_tests {
+    use super::*;
+
+    #[test]
+    fn grants_flag_requires_audit_flag() {
+        assert!(scope_grants_require_audit(false, false).is_ok());
+        assert!(scope_grants_require_audit(false, true).is_ok());
+        assert!(scope_grants_require_audit(true, true).is_ok());
+        assert!(
+            scope_grants_require_audit(true, false).is_err(),
+            "grants without the approval audit trail are refused"
+        );
+    }
+
+    #[test]
+    fn a_refused_scope_reaches_the_caller_as_its_typed_token() {
+        let status =
+            decision_error_status(anyhow::Error::from(store::ScopeGrantRefusal::NotOffered));
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(status.message(), "scope_not_offered");
+        let other = decision_error_status(anyhow::anyhow!("database unavailable"));
+        assert_eq!(other.code(), tonic::Code::Internal);
     }
 }

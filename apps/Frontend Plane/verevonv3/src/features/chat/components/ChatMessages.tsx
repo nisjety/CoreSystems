@@ -3,6 +3,7 @@ import { RunNotifyButton } from './RunNotifyButton'
 import {
   type Approval,
   type ApprovalDecision,
+  type ApprovalScope,
   type PlanStepEdit,
 } from '@/shared/api/orchestration-client'
 import {
@@ -2111,31 +2112,53 @@ export function FollowUpChips(props: { suggestions: string[]; onSelect?: (text: 
   )
 }
 
+/**
+ * Whether the card offers a standing scope for this approval (build plan WS13 S6). The server's
+ * `scope_options` is the offer: it lists a standing scope only where the cause allows one and the
+ * deployment has switched standing scopes on, so the card never offers what the decide route refuses.
+ */
+function offersStandingScope(approval: Approval, scope: Exclude<ApprovalScope, 'once'>): boolean {
+  return approval.cause?.scopeOptions.includes(scope) ?? false
+}
+
 export function ApprovalRequests(props: {
   approvals: Approval[]
-  onDecide: (approvalId: string, decision: ApprovalDecision) => void
+  onDecide: (approvalId: string, decision: ApprovalDecision, scope?: ApprovalScope) => void
 }) {
   const i18n = useI18n()
   // An approval whose cause asks for a fresh password confirmation before it is granted (build
   // plan WS13 S5). Only the grant asks; a denial never does.
   const [confirming, setConfirming] = createSignal<string | null>(null)
+  // The standing scope a confirmed grant carries. A standing scope is only ever chosen by its own
+  // control, so the one decision stays what a plain approval means.
+  const [confirmingScope, setConfirmingScope] = createSignal<ApprovalScope | undefined>(undefined)
   const [password, setPassword] = createSignal('')
   const [confirmError, setConfirmError] = createSignal<string | null>(null)
   const [confirmBusy, setConfirmBusy] = createSignal(false)
 
   const cancelConfirmation = () => {
     setConfirming(null)
+    setConfirmingScope(undefined)
     setPassword('')
     setConfirmError(null)
   }
 
-  const approve = (approval: Approval) => {
+  const decide = (approvalId: string, decision: ApprovalDecision, scope?: ApprovalScope) => {
+    if (scope) {
+      props.onDecide(approvalId, decision, scope)
+    } else {
+      props.onDecide(approvalId, decision)
+    }
+  }
+
+  const approve = (approval: Approval, scope?: ApprovalScope) => {
     if (approval.cause?.stepUpRequired) {
       setConfirmError(null)
+      setConfirmingScope(scope)
       setConfirming(approval.id)
       return
     }
-    props.onDecide(approval.id, 'approve')
+    decide(approval.id, 'approve', scope)
   }
 
   const confirmationFailure = (error: unknown): string => {
@@ -2166,8 +2189,9 @@ export function ApprovalRequests(props: {
       setConfirmBusy(false)
       setPassword('')
     }
+    const scope = confirmingScope()
     cancelConfirmation()
-    props.onDecide(approval.id, 'approve')
+    decide(approval.id, 'approve', scope)
   }
 
   return (
@@ -2193,6 +2217,24 @@ export function ApprovalRequests(props: {
                   >
                     {i18n.tr('Godkjenn', 'Approve')}
                   </button>
+                  <Show when={offersStandingScope(approval, 'thread')}>
+                    <button
+                      type="button"
+                      class="verevon-chat-approval__approve"
+                      onClick={() => approve(approval, 'thread')}
+                    >
+                      {i18n.tr('Godkjenn for denne tråden', 'Approve for this thread')}
+                    </button>
+                  </Show>
+                  <Show when={offersStandingScope(approval, 'run')}>
+                    <button
+                      type="button"
+                      class="verevon-chat-approval__approve"
+                      onClick={() => approve(approval, 'run')}
+                    >
+                      {i18n.tr('Godkjenn for denne kjøringen', 'Approve for this run')}
+                    </button>
+                  </Show>
                   <button
                     type="button"
                     class="verevon-chat-approval__reject"
