@@ -8,6 +8,7 @@ import { searchChatThreads, type ChatSearchHit } from '@/shared/api/chat-client'
 import { applyChatOrganizationAction, chatDateGroup, chatOrganizationStorageKey, emptyChatOrganization, readChatOrganization, saveChatOrganization, selectOrganizedChats } from '@/features/chat/lib/chat-organization'
 import type { ChatThreadHistoryItem } from '@/features/chat/lib/chat-thread-history'
 import { ChatWorkLinks } from './ChatWorkLinks'
+import { ChatAttentionSections, type AttentionSectionRows } from './ChatAttentionSections'
 import { ChatSearchResults, nextSearchIndex, SEARCH_DEBOUNCE_MS, SEARCH_MIN_CHARS, searchListboxId, searchOptionId, type ChatSearchStatus } from './ChatSearchResults'
 import './chat-sidebar-organizer.css'
 
@@ -22,6 +23,8 @@ export function ChatSidebarOrganizer(props: {
   loading: boolean
   onNewChat: () => void
   renderRow: (item: ChatThreadHistoryItem, onMove?: () => void) => JSX.Element
+  /** The Waiting, Working and Unseen rail above the list. Absent while the archive is shown. */
+  attentionSections?: AttentionSectionRows
   /** More chats can be shown; the caller reveals the next page when asked. */
   hasMore?: boolean
   onLoadMore?: () => void
@@ -295,6 +298,7 @@ export function ChatSidebarOrganizer(props: {
       <Show when={searchOpen() && query().trim().length >= SEARCH_MIN_CHARS}>
         <ChatSearchResults idPrefix={SEARCH_ID_PREFIX} hits={serverHits()} status={serverStatus()} activeIndex={activeHit()} onOpen={openSearchHit} onActiveChange={(index) => setActiveHit(index)} />
       </Show>
+      <Show when={props.attentionSections}>{(sections) => <ChatAttentionSections sections={sections()} renderRow={props.renderRow} onMove={beginMove} />}</Show>
       <nav class="chat-organizer__list core-chat-sidebar__sessions" aria-label={i18n.tr('Chat-samtaler', 'Chat conversations')}>
         <Show when={!props.loading} fallback={<p class="chat-organizer__empty">{i18n.tr('Laster samtaler …', 'Loading chats…')}</p>}>
           <Show when={groups().length} fallback={<p class="chat-organizer__empty">{i18n.tr('Ingen samtaler passer dette utvalget.', 'No chats match this view.')}</p>}>

@@ -119,6 +119,7 @@ fn build_router(state: config::AppState) -> Router {
         .merge(domains::learning::router(state.clone()))
         .merge(domains::mail_task::router(state.clone()))
         .merge(domains::anbud::router(state.clone()))
+        .merge(domains::attention::router(state.clone()))
         .merge(domains::marketing::router(state.clone()))
         .merge(domains::mcp::router(state.clone()))
         .merge(domains::memory::router(state.clone()))

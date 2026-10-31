@@ -49,6 +49,7 @@ import {
   isSupportChatThread,
 } from '@/shared/chat/support-chat-thread'
 import { readThreadDeepLink } from '@/features/chat/lib/chat-thread-deep-link'
+import { announceAttentionChanged } from '@/shared/api/attention-client'
 import {
   readChatRunPanelCollapsed,
   writeChatRunPanelCollapsed,
@@ -621,8 +622,24 @@ export function useChatController() {
    */
   const markThreadRead = (threadId: string | null | undefined) => {
     if (!threadId || isTemporaryThread(threadId) || isForeignOriginThread(threadId) || isSupportChatThread(threadId)) return
-    void markChatThreadRead(threadId).catch(() => undefined)
+    // The attention rail reads the same unread flag, so it is told when the flag moved.
+    void markChatThreadRead(threadId).then(() => announceAttentionChanged(), () => undefined)
   }
+  // A reply that finished while the page was hidden stays unseen until the person returns to that
+  // thread (WS16 S2). The thread must still be the open one when they do.
+  let seenOnReturnThreadId: string | null = null
+  const markSeenOnReturn = () => {
+    if (document.visibilityState === 'hidden' || !seenOnReturnThreadId) return
+    const threadId = seenOnReturnThreadId
+    seenOnReturnThreadId = null
+    if (threadId === untrack(() => state.threadId)) markThreadRead(threadId)
+  }
+  document.addEventListener('visibilitychange', markSeenOnReturn)
+  window.addEventListener('focus', markSeenOnReturn)
+  onCleanup(() => {
+    document.removeEventListener('visibilitychange', markSeenOnReturn)
+    window.removeEventListener('focus', markSeenOnReturn)
+  })
   const isForeignOriginThread = (threadId: string | null | undefined): boolean =>
     Boolean(threadId) && foreignOriginThreadIds().has(threadId as string)
   const markThreadForeignOrigin = (threadId: string) => {
@@ -3183,7 +3200,10 @@ export function useChatController() {
             if (projection.accepts()) resendUntakenQueuedInputs()
             updateLocalRunHint(activeThreadId, 'completed', state.turns.find((turn) => turn.id === assistantId)?.runId)
             // Mark read at stream end, not per delta, and only while the owner is still on this thread.
-            if (projection.accepts()) markThreadRead(activeThreadId)
+            if (projection.accepts()) {
+              if (document.visibilityState === 'hidden') seenOnReturnThreadId = activeThreadId
+              else markThreadRead(activeThreadId)
+            }
             addAnswerVerificationStep(assistantId, turnTitle, tools.includes('search') || tools.includes('research'))
             // Proof is committed after the run settles. Read the server-owned
             // bundle once it is available so effectful turns become immutable

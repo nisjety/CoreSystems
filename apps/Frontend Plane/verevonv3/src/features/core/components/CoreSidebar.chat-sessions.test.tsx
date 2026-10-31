@@ -421,3 +421,62 @@ describe('ChatSidebarPanel mail-task origin badge', () => {
     expect(ordinaryRow?.textContent).not.toContain('Fra e-post')
   })
 })
+
+describe('ChatSidebarPanel run-status chip', () => {
+  beforeEach(() => {
+    Object.defineProperty(window, 'localStorage', {
+      configurable: true,
+      value: createStorageMock(),
+    })
+    Object.defineProperty(window, 'sessionStorage', {
+      configurable: true,
+      value: createStorageMock(),
+    })
+    window.localStorage.clear()
+    window.sessionStorage.clear()
+
+    upsertChatThreadHistory({
+      threadId: 'thread-running',
+      title: 'Running chat',
+      preview: 'Preview',
+      updatedAt: '2026-06-17T09:00:00.000Z',
+      latestRunStatus: 'running',
+    })
+    upsertChatThreadHistory({
+      threadId: 'thread-failed',
+      title: 'Failed chat',
+      preview: 'Preview',
+      updatedAt: '2026-06-17T08:00:00.000Z',
+      latestRunStatus: 'timed_out',
+    })
+    upsertChatThreadHistory({
+      threadId: 'thread-done',
+      title: 'Completed chat',
+      preview: 'Preview',
+      updatedAt: '2026-06-17T07:00:00.000Z',
+      latestRunStatus: 'completed',
+    })
+
+    chatClient.listChatThreads.mockReset().mockReturnValue(new Promise(() => {}))
+    chatClient.saveChatThreadSnapshot.mockReset().mockResolvedValue(null)
+    chatClient.clearChatThreads.mockReset().mockResolvedValue(undefined)
+    chatClient.deleteChatThread.mockReset().mockResolvedValue([])
+  })
+
+  afterEach(() => {
+    cleanup()
+    clearActiveChatThreadId()
+    clearChatThreadHistory()
+  })
+
+  it('labels an active or failed run from the shared attention states and shows no chip for a completed one', async () => {
+    renderChatSidebar()
+    await screen.findByText('Running chat')
+
+    const chipText = (title: string) => screen.getByText(title).closest('.core-chat-session')?.textContent ?? ''
+    expect(chipText('Running chat')).toContain('Pågår')
+    expect(chipText('Failed chat')).toContain('Mislyktes')
+    expect(chipText('Completed chat')).not.toContain('Pågår')
+    expect(chipText('Completed chat')).not.toContain('Mislyktes')
+  })
+})
