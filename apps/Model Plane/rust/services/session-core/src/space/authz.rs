@@ -445,16 +445,10 @@ mod tests {
         let suffix = mp_ids::new_ulid();
         let org = format!("org-authz-{suffix}");
         let thread_id = format!("thread-authz-{suffix}");
-        sqlx::query(
-            "INSERT INTO threads (id, org_id, user_id, session_key, space_id, created_at) \
-             VALUES ($1, $2, 'owner-1', $3, 'space-1', now())",
-        )
-        .bind(&thread_id)
-        .bind(&org)
-        .bind(format!("key-{suffix}"))
-        .execute(&pool)
-        .await
-        .expect("seed thread");
+        // The shared seed carries the full authority context the schema's Space checks require
+        // (origin 'space' and the recipient-audience revision and hash).
+        crate::space::test_support::seed_space_thread(&pool, &org, "space-1", &thread_id, "owner-1")
+            .await;
         let member = VerifiedIdentity::user_for_test(&org, "member-2");
         let req = pb::AppendMessageRequest {
             thread_id: thread_id.clone(),

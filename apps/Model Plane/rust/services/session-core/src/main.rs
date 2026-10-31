@@ -13,6 +13,7 @@ mod audit_publisher;
 mod auth;
 mod compaction;
 mod continuation_crypto;
+mod decision_keys;
 mod dream_extractor;
 mod dreaming;
 mod finetune_grpc;
@@ -75,6 +76,9 @@ async fn main() -> Result<()> {
     // Authentication configuration and JWKS are mandatory and loaded before
     // any listener/background worker starts. A missing issuer/audience or an
     // unavailable verification keyset therefore fails startup closed.
+    // Control Space decision keys (F11): log the configured ids with a public-key fingerprint,
+    // and fail start-up when a key set is configured but unparseable.
+    decision_keys::boot_check()?;
     let grpc_auth = auth::JwtVerifier::from_env().await?;
     let prom_handle = PrometheusBuilder::new().install_recorder()?;
 

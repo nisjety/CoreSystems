@@ -1076,9 +1076,7 @@ fn verify_scheduled_run_decision_with_keys(
         .and_then(|raw| String::from_utf8(raw).ok())
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
-    let key = keys
-        .get(&key_id)
-        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let key = crate::decision_keys::lookup_key(&keys, &key_id)?;
     let payload = URL_SAFE_NO_PAD
         .decode(parts[2])
         .map_err(|_| Status::permission_denied("invalid Control scheduled-run decision payload"))?;
@@ -1165,9 +1163,7 @@ fn verify_mail_task_thread_decision_with_keys(
         .and_then(|raw| String::from_utf8(raw).ok())
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
-    let key = keys
-        .get(&key_id)
-        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let key = crate::decision_keys::lookup_key(&keys, &key_id)?;
     let payload = URL_SAFE_NO_PAD.decode(parts[2]).map_err(|_| {
         Status::permission_denied("invalid Control mail-task thread decision payload")
     })?;
@@ -1372,9 +1368,7 @@ fn verify_scheduled_run_execution_decision_with_keys(
         .and_then(|raw| String::from_utf8(raw).ok())
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
-    let key = keys
-        .get(&key_id)
-        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let key = crate::decision_keys::lookup_key(&keys, &key_id)?;
     let payload = URL_SAFE_NO_PAD.decode(parts[2]).map_err(|_| {
         Status::permission_denied("invalid Control scheduled-run execution decision payload")
     })?;
@@ -2377,7 +2371,7 @@ fn validate_append_space_context_shape(req: &pb::AppendMessageRequest) -> Result
 /// of `{ key_id: url_safe_base64_ed25519_public_key }`; any token bearing an
 /// unlisted key id fails closed. The singular variables remain a deliberately
 /// compatible bootstrap form for deployments that have not started rotation.
-fn configured_control_space_decision_keys() -> Result<BTreeMap<String, VerifyingKey>, Status> {
+pub(crate) fn configured_control_space_decision_keys() -> Result<BTreeMap<String, VerifyingKey>, Status> {
     if let Ok(raw) = env::var("CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON") {
         let encoded_keys: BTreeMap<String, String> = serde_json::from_str(&raw).map_err(|_| {
             Status::failed_precondition("Control Space decision public key set is invalid")
@@ -2711,9 +2705,7 @@ fn verify_thread_space_decision_with_keys(
         .and_then(|raw| String::from_utf8(raw).ok())
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
-    let key = keys
-        .get(&key_id)
-        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let key = crate::decision_keys::lookup_key(&keys, &key_id)?;
     verify_thread_space_decision_with_key(req, &key_id, key, now)
 }
 
@@ -2971,9 +2963,7 @@ pub(crate) fn verify_space_stream_decision(
         .and_then(|raw| String::from_utf8(raw).ok())
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
-    let key = keys
-        .get(&key_id)
-        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let key = crate::decision_keys::lookup_key(&keys, &key_id)?;
     verify_thread_read_claims_with_key(
         token,
         decision_ref,
@@ -3023,9 +3013,7 @@ pub(crate) fn verify_thread_read_space_decision(
         .and_then(|raw| String::from_utf8(raw).ok())
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
-    let key = keys
-        .get(&key_id)
-        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let key = crate::decision_keys::lookup_key(&keys, &key_id)?;
     verify_thread_read_space_decision_with_key(
         token,
         decision_ref,
@@ -3168,9 +3156,7 @@ pub(crate) fn verify_append_space_decision(
         .and_then(|raw| String::from_utf8(raw).ok())
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
-    let key = keys
-        .get(&key_id)
-        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let key = crate::decision_keys::lookup_key(&keys, &key_id)?;
     verify_append_space_decision_with_key(req, org_id, user_id, &key_id, key, Utc::now())
 }
 
@@ -16430,6 +16416,8 @@ mod tests {
                 "service_audience": super::MAIL_TASK_THREAD_PREPARE_AUDIENCE,
                 "action_id": super::MAIL_TASK_THREAD_PREPARE_ACTION,
                 "nonce": nonce,
+                // Required since the mail-task decision began stating ZDR; Control always sends false.
+                "zero_data_retention": false,
                 "issued_at": Utc::now().to_rfc3339(),
                 "expires_at": (Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
             });
