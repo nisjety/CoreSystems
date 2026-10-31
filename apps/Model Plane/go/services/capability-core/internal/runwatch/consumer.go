@@ -135,10 +135,11 @@ const (
 // Notifier subscribes to run-lifecycle events and, for each terminal event,
 // notifies every pending watcher of that run.
 type Notifier struct {
-	store     SubscriptionStore
-	notify    NotifyClient
-	now       func() time.Time
-	attention *attentionNotify
+	store            SubscriptionStore
+	notify           NotifyClient
+	now              func() time.Time
+	attention        *attentionNotify
+	scheduledOutcome bool
 }
 
 // NewNotifier constructs a Notifier. Both dependencies are required: without
@@ -213,6 +214,12 @@ func (n *Notifier) process(ctx context.Context, data []byte) outcome {
 			return outcomeAck
 		}
 		return n.processAttention(ctx, &env)
+	}
+	if env.EventType == scheduledRunOutcomeEventType {
+		if !n.scheduledOutcome {
+			return outcomeAck
+		}
+		return n.processScheduledOutcome(ctx, &env)
 	}
 	notifyType, ok := terminalNotificationType(env.EventType)
 	if !ok {

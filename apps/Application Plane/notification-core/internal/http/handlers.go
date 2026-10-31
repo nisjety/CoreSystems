@@ -216,11 +216,12 @@ func isNotificationTypeAuthorized(serviceID, notificationType string) bool {
 			"sla.breach":      {},
 		},
 		"capability-core": {
-			"modelplane.run_completed":  {},
-			"modelplane.run_failed":     {},
-			"modelplane.needs_approval": {},
-			"modelplane.needs_input":    {},
-			"modelplane.plan_ready":     {},
+			"modelplane.run_completed":         {},
+			"modelplane.run_failed":            {},
+			"modelplane.needs_approval":        {},
+			"modelplane.needs_input":           {},
+			"modelplane.plan_ready":            {},
+			"modelplane.scheduled_run_outcome": {},
 		},
 	}
 	_, ok := allowed[serviceID][notificationType]

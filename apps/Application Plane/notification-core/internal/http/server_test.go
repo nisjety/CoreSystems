@@ -527,6 +527,7 @@ func TestServicePrincipalsHaveExplicitNotificationTypeAllowlists(t *testing.T) {
 		"modelplane.needs_approval",
 		"modelplane.needs_input",
 		"modelplane.plan_ready",
+		"modelplane.scheduled_run_outcome",
 	} {
 		if !isNotificationTypeAuthorized("capability-core", notificationType) {
 			t.Fatalf("capability-core type %q rejected, want authorized", notificationType)
@@ -534,6 +535,11 @@ func TestServicePrincipalsHaveExplicitNotificationTypeAllowlists(t *testing.T) {
 	}
 	if isNotificationTypeAuthorized("capability-core", "ticket.assigned") {
 		t.Fatal("capability-core can request a support-worker notification type")
+	}
+	for _, service := range []string{"verevon-gateway", "support-worker"} {
+		if isNotificationTypeAuthorized(service, "modelplane.scheduled_run_outcome") {
+			t.Fatalf("%s can request a capability-core scheduled-run outcome notice", service)
+		}
 	}
 }
 
@@ -603,6 +609,36 @@ func TestCreateNotificationRequestAcceptsCapabilityCoreAttentionNotification(t *
 		"type":"modelplane.needs_approval",
 		"retention_mode":"standard",
 		"payload":{"title":"Approval needed","body":"A run in one of your chats is waiting for your approval.","thread_id":"thread_9","run_id":"run_789","kind":"needs_approval"}
+	}`)
+	request, err := stdhttp.NewRequest(stdhttp.MethodPost, server.URL+"/api/v1/notification-requests", bytes.NewReader(requestBody))
+	if err != nil {
+		t.Fatalf("NewRequest error = %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	signTestRequestAs(t, request, requestBody, "capability-core", testCapabilityCoreDelegationSecret, "", "org_123", "")
+
+	response, err := stdhttp.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("POST /api/v1/notification-requests error = %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != stdhttp.StatusAccepted {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("POST /api/v1/notification-requests status = %d, want %d, body = %s", response.StatusCode, stdhttp.StatusAccepted, body)
+	}
+}
+
+func TestCreateNotificationRequestAcceptsCapabilityCoreScheduledRunOutcome(t *testing.T) {
+	handler := NewHandler(&config.Config{ServiceName: "notification-core"}, HandlerDeps{Notifications: newTestNotificationService(nil)})
+	server := httptest.NewServer(newRouter(handler, newTestVerifierWithCapabilityCore(t)))
+	defer server.Close()
+
+	requestBody := []byte(`{
+		"organization_id":"org_123",
+		"recipient":{"kind":"user","id":"user_456"},
+		"type":"modelplane.scheduled_run_outcome",
+		"retention_mode":"standard",
+		"payload":{"title":"Scheduled run needs review","body":"A scheduled run in one of your chats needs your review.","message_key":"modelplane.scheduled_run_outcome.needs_review","cta_href":"/chat?thread=thread_9","thread_id":"thread_9","run_id":"run_789","outcome":"needs_review"}
 	}`)
 	request, err := stdhttp.NewRequest(stdhttp.MethodPost, server.URL+"/api/v1/notification-requests", bytes.NewReader(requestBody))
 	if err != nil {
