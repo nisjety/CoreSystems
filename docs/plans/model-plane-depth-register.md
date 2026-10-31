@@ -2004,6 +2004,39 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-722 | WS23-S8.code | live-proof | P1 | No live proof: rebuild execution-core, set the attestation keys on the proof stack only, use dedicated accounts (DEC-27), run draft email, approve, send, read-back and deny, and check the approval row, the integration-corev2 receipt and the audit rows. | open |
 | D2-723 | WS23-S8.code | risk | P2 | The exchange guard keys on the ':write' suffix; a write-capable scope named without it would pass if a tokenExchange row ever listed it. Validate exchange scopes at load time or keep an explicit exchange allowlist. provider_write_contract.rs tests a Rust replica of the Go verifier, so a shared golden vector is needed to catch drift. list_provider_actions still lists every org connection inside a turn with a selection (pre-existing). | open |
 
+
+### Wave-mode batch W2-29 (2026-10-31)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-724 | WS27-S4 | live-proof | P1 | No live proof yet: the meter has not been seen on a rebuilt frontend with MODEL_GATEWAY_USAGE_PROGRESS on, so the DoD evidence (a 3-round tool turn climbing and ending equal to the usage frame, subscription and unknown-model turns, screenshots, SSE transcript) is owed. | open |
+| D2-725 | WS27-S4 | risk | P1 | Mixed-basis money copy outside this slice: a turn mixing metered and subscription calls has no cost_basis on the wire, so MessageMetricsBadge and the Details popover in ChatMessages.tsx (not owned) still print the metered sum as the turn's cost with no qualifier. Only the new meter says 'token-priced calls only'. | open |
+| D2-726 | WS27-S4 | risk | P1 | Mixed-basis turns (no cost_basis on the wire) are labelled 'token-priced calls only' only in the new meter. MessageMetricsBadge and the Details popover in ChatMessages.tsx (not owned) still show the metered sum as the turn's cost. This should be fixed before the progress switch is turned on by default. | open |
+| D2-727 | WS27-S4 | live-proof | P1 | ChatPage.tsx (not owned) must pass `meter={activeRunTurn()?.meter}` to StepsPanel and ChatLiveRunPanel. Until the lead applies those two shared-edit lines, the chat Work panel and the live rail never get meter data, so the chat half of the row is mounted but not fed. | open |
+| D2-728 | WS27-S4 | live-proof | P1 | playwright.config.ts (not owned): the CHAT_WORKSPACE_SPECS regex needs `cost-meter` added so tests/e2e/chat-cost-meter.spec.ts runs in the chat project. The spec has not been run; it needs the signed-in dev stack and a second dev server. | open |
+| D2-729 | WS27-S4 | live-proof | P1 | Live proof is owed (rebuilt model-gateway with MODEL_GATEWAY_USAGE_PROGRESS=true, frontend container restart, a 3-round tool turn in chat and in /agents/runs, a subscription turn and an unknown-model turn, screenshots and the SSE transcript). | open |
+| D2-730 | WS27-S4 | live-proof | P1 | The DoD flip of MODEL_GATEWAY_USAGE_PROGRESS to default true in apps/Model Plane/deploy/docker-compose.yml is lead-owned and should happen only after the live proof. | open |
+| D2-731 | WS27-S4 | live-proof | P1 | Live proof, lead-run, not done here: rebuild model-gateway with MODEL_GATEWAY_USAGE_PROGRESS=true on a test stack; restart the verevonv3 frontend container (bind mount, Vite needs a restart); run a 3-round tool turn in a planned chat turn and in /agents/runs; confirm the meter climbs with calls and that its last figures equal the usage frame; confirm a subscription turn reads 'Included in the subscription' and an unknown-model turn reads 'Price unavailable'; capture screenshots and the SSE transcript. | open |
+| D2-732 | WS27-S4 | follow-up | P3 | 22 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-29.json | open |
+| D2-733 | WS16-S1 | test-gap | P1 | Session-core code and tests are unverified. The crate cannot compile until proto_shim.rs has the RunUsageProgress arm (lead_todo 1). Nothing in session-core may be claimed passing yet. | open |
+| D2-734 | WS16-S1 | test-gap | P1 | model-gateway lib and attention_http_test are not compiled past the missing AppState field (E0609 at http_routes.rs:10143 and :10199). The item and counts mapping after the client call and the test file have been checked only by reading and rustfmt. The first real compile is after lead_todo 2 and 3. | open |
+| D2-735 | WS16-S1 | risk | P1 | Until the shared state.rs and offline_downstreams.rs lines land, model-gateway does not compile at all, so every lib test in that crate is blocked, not just the attention ones. Do not commit this worktree before those lines are applied. | open |
+| D2-736 | WS16-S1 | test-gap | P1 | Session-core attention.rs, attention_grpc.rs, the ListThreads enrich and tests/attention_zdr_matrix.rs have never compiled or run in this worktree (mp-orchestration E0004), so nothing in session-core can be claimed passing. | open |
+| D2-737 | WS16-S1 | test-gap | P1 | model-gateway's list_attention and mark_thread_seen handlers, and tests/attention_http_test.rs, have been checked only by reading. The first real compile and test run comes after the state.rs and offline_downstreams.rs edits. | open |
+| D2-738 | WS16-S1 | live-proof | P1 | Rebuild session-core and model-gateway, then show seeded states on /v1/threads and /v1/attention with the switch on. | open |
+| D2-739 | WS16-S1 | live-proof | P1 | Check byte for byte that switch-off responses for ListThreads and /v1/threads are unchanged. | open |
+| D2-740 | WS16-S1 | live-proof | P1 | Live Do-mode gated action: psql shows runs.status='running' and approvals.status='requested', and a curl through the BFF returns attention_state:"needs_approval". Then decide, then re-read. | open |
+| D2-741 | WS16-S1 | follow-up | P3 | 27 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-29.json | open |
+| D2-742 | WS27-S9 | decision | P1 | Confirm the gating. With MODEL_GATEWAY_USAGE_PROGRESS on and EXECUTION_RUN_USAGE_PROGRESS off, the final usage frame is still priced from its legs (cost_usd, cost_basis, cost_by_category and unpriced_calls change from null). | open |
+| D2-743 | WS27-S9 | decision | P1 | Waived (ZDR) Do runs get no pricing, but execution-core still publishes their counts. The owner must confirm that DEC-18 D4 covers waived runs. | open |
+| D2-744 | WS27-S9 | live-proof | P1 | Not done. See lead_todo 4 for the deploy order and the captures to take. | open |
+| D2-745 | WS27-S9 | test-gap | P1 | The model-gateway lib tests could not be re-run in this verify pass. model-gateway (lib test) no longer compiles because of another batch's uncommitted edit: http_routes.rs:10199 uses `attention_client`, which AppState does not have. The implementer's earlier green runs (follow_agentic_run, usage_progress, full lib 2533 passed) are therefore not reconfirmed against the current tree. | open |
+| D2-746 | WS27-S9 | decision | P1 | With MODEL_GATEWAY_USAGE_PROGRESS on and EXECUTION_RUN_USAGE_PROGRESS off, the final Do-run usage frame changes from a null cost to cost_usd, basis and category priced from the legs. The final frame's pricing follows the gateway switch, not the slice's own flag. The owner must confirm that this coupling is intended. | open |
+| D2-747 | WS27-S9 | decision | P1 | execution-core publishes RunUsageProgress counts for ZDR and waived runs too; only the gateway suppresses pricing for them (agent_usage is None when zdr or retention_class is set). The event carries counts and ids only and is never persisted, but the owner should confirm that DEC-18 D4 covers this. | open |
+| D2-748 | WS27-S9 | live-proof | P1 | The shared edit to proto_shim.rs (see required_fixes) is not applied yet, so session-core is not compiled or tested with this slice. | open |
+| D2-749 | WS27-S9 | live-proof | P1 | shared-edit apps/Model Plane/deploy/docker-compose.yml: pass through `EXECUTION_RUN_USAGE_PROGRESS: ${EXECUTION_RUN_USAGE_PROGRESS:-false}` for execution-core. Not present yet. | open |
+| D2-750 | WS27-S9 | follow-up | P3 | 19 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-29.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -2180,3 +2213,6 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS21-S7 | authority, auth, cross-branch: the Quarry-side grant issuance endpoint and Quarry-to-broker identity are built on local branch quarryv2, not on model-plane; build against the contract with a stub and leave the live proof to the lead after quarryv2 merges | W2-27 | no |
 | WS27-S6 | money, policy | W2-28 | no |
 | WS24-S9 | zdr | W2-28 | no |
+| WS27-S4 | money | W2-29 | no |
+| WS16-S1 | zdr, auth, authority | W2-29 | no |
+| WS27-S9 | money, zdr | W2-29 | no |
