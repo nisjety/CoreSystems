@@ -2,7 +2,7 @@
 
 import { render } from '@solidjs/testing-library'
 import { createSignal, flush } from 'solid-js'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RunCostMeter, applyUsageProgress, applyUsageTotal } from './RunCostMeter'
 import type { RunMeter } from './chat-types'
 
@@ -211,5 +211,104 @@ describe('RunCostMeter reducers (WS27-S4)', () => {
     const total = applyUsageTotal(undefined, { calls: 1, costUsd: 0, costBasis: 'subscription' })
     expect(total.costUsd).toBeUndefined()
     expect(total.costByCategory).toBeUndefined()
+  })
+})
+
+describe('RunCostMeter organisation allowance (WS27-S10)', () => {
+  const metric = 'ai.metered.input_tokens'
+  const quota = { org_id: 'org_1', metric, limit: 1000, used: 850, remaining: 150, is_exceeded: false, utilization: 0.85 }
+
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    vi.unstubAllGlobals()
+  })
+
+  function readoutOn(): void {
+    vi.stubEnv('VITE_QUOTA_READOUT', 'true')
+    vi.stubEnv('VITE_QUOTA_READOUT_METRIC', metric)
+  }
+
+  function quotaFetch(body: Record<string, unknown>, status = 200) {
+    const fetchMock = vi.fn<(input: string, init?: RequestInit) => Promise<Response>>(
+      async () => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    return fetchMock
+  }
+
+  async function settle(): Promise<void> {
+    flush()
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    flush()
+  }
+
+  it('reads nothing and shows no line while the readout is off, even with a metric named', async () => {
+    vi.stubEnv('VITE_QUOTA_READOUT', 'false')
+    vi.stubEnv('VITE_QUOTA_READOUT_METRIC', metric)
+    const fetchMock = quotaFetch(quota)
+    const view = meter(undefined)
+    await settle()
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(view.textContent).toBe('')
+  })
+
+  it('reads the allowance when the meter opens, and again only when the refresh key changes, never per frame', async () => {
+    readoutOn()
+    const fetchMock = quotaFetch(quota)
+    const [value, setValue] = createSignal<RunMeter | undefined>({ calls: 1, inputTokens: 10 })
+    const [key, setKey] = createSignal('thread-1:0')
+    render(() => <RunCostMeter meter={value()} quotaRefreshKey={key()} />)
+    await settle()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock.mock.calls[0]?.[0]).toContain(`/api/v1/billing/quotas/${metric}`)
+
+    setValue({ calls: 2, inputTokens: 40 })
+    setValue({ calls: 3, inputTokens: 90 })
+    await settle()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    setKey('thread-1:1')
+    await settle()
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('states the organisation share on its own and warns at 80 percent', async () => {
+    readoutOn()
+    quotaFetch(quota)
+    const view = meter(undefined)
+    await vi.waitFor(() => expect(view.textContent).toMatch(/85 ?% (brukt|used)/))
+    expect(view.textContent).toMatch(/Organisasjonens kvote|Organisation allowance/)
+    const warning = view.querySelector('[data-allowance-warning]')
+    expect(warning?.getAttribute('data-allowance-warning')).toBe('near')
+    expect(warning?.getAttribute('aria-live')).toBe('polite')
+    expect(warning?.textContent?.trim()).not.toBe('')
+  })
+
+  it('says the allowance is used up once it is exceeded', async () => {
+    readoutOn()
+    quotaFetch({ ...quota, used: 1100, remaining: 0, is_exceeded: true, utilization: 1 })
+    const view = meter(undefined)
+    await vi.waitFor(() => expect(view.textContent).toMatch(/100 ?% (brukt|used)/))
+    expect(view.querySelector('[data-allowance-warning]')?.getAttribute('data-allowance-warning')).toBe('exceeded')
+  })
+
+  it('stays silent below 80 percent', async () => {
+    readoutOn()
+    quotaFetch({ ...quota, used: 300, remaining: 700, utilization: 0.3 })
+    const view = meter(undefined)
+    await vi.waitFor(() => expect(view.textContent).toMatch(/30 ?% (brukt|used)/))
+    const warning = view.querySelector('[data-allowance-warning]')
+    expect(warning?.getAttribute('data-allowance-warning')).toBe('')
+    expect(warning?.textContent).toBe('')
+  })
+
+  it('shows no line when the read is refused', async () => {
+    readoutOn()
+    const fetchMock = quotaFetch({ error: { code: 'forbidden', message: 'Forbidden' } }, 403)
+    const view = meter(undefined)
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    await settle()
+    expect(view.querySelector('.verevon-run-cost-meter__allowance')).toBeNull()
+    expect(view.textContent).toBe('')
   })
 })

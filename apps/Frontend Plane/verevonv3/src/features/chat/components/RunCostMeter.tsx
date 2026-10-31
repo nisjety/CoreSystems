@@ -5,10 +5,15 @@
  * the gateway could not state reads as "price unavailable", a subscription call reads as included in the
  * subscription and never as $0, and a share the gateway could not compute reads as unknown. Nothing here
  * estimates a cost.
+ *
+ * The organisation's allowance (WS27-S10) sits beneath it as a secondary line. It is billing-core's share for
+ * the whole organisation, not this run's cost, and the line says so.
  */
 
 import { createMemo, For, Show } from 'solid-js'
 import type { ChatUsageEvent, ChatUsagePhase, ChatUsageProgressEvent } from '@/shared/api/chat-client'
+import { getBillingQuota, quotaReadoutMetric } from '@/shared/api/billing-quota'
+import { createResource } from '@/shared/lib/create-resource-compat'
 import { useI18n } from '@/shared/i18n'
 import { localeIntl } from '@/shared/i18n/locales'
 import { formatUsd } from './chat-media-markdown'
@@ -84,6 +89,9 @@ function fillToken(fraction: number | undefined): string {
   return 'var(--verevon-accent)'
 }
 
+/** The allowance's warning line: the same 80 percent the run ceiling warns at (WS27-S6). */
+const ALLOWANCE_WARNING_AT = 0.8
+
 /** The warning chip's look. Applied only while a warning is set, so an empty warning region takes no space. */
 const WARNING_CHIP_STYLE = {
   margin: '0',
@@ -104,9 +112,26 @@ function CostPart(props: { label: string; usd: number }) {
   )
 }
 
-export function RunCostMeter(props: { meter?: RunMeter }) {
+export function RunCostMeter(props: {
+  meter?: RunMeter
+  /** Changes when a turn settles or the thread changes. The allowance is read again then, never per frame. */
+  quotaRefreshKey?: string
+}) {
   const i18n = useI18n()
   const count = (value: number) => value.toLocaleString(localeIntl(i18n.locale()))
+
+  // Read when the meter opens and when the key changes; with the readout off, or no metric named, nothing is read.
+  // A failed read leaves no share, and `latest` keeps the last reading on screen while the next one loads.
+  const allowanceMetric = quotaReadoutMetric() ?? ''
+  const [allowanceRead] = createResource(
+    () => (allowanceMetric === '' ? undefined : { refreshKey: props.quotaRefreshKey ?? '' }),
+    () => getBillingQuota(allowanceMetric).catch(() => undefined),
+  )
+  const allowanceShare = () => {
+    const status = allowanceRead.latest
+    return status === undefined ? undefined : percentOf(status.utilization)
+  }
+  const hasAllowance = () => allowanceShare() !== undefined
 
   const hasTotals = () => {
     const meter = props.meter
@@ -205,8 +230,33 @@ export function RunCostMeter(props: { meter?: RunMeter }) {
     }
   })
 
+  // Warns at 80 percent or once the allowance is exceeded. The text is a memo for the same reason as the run's.
+  const allowanceWarning = createMemo((): 'exceeded' | 'near' | undefined => {
+    const status = allowanceRead.latest
+    if (status === undefined) return undefined
+    if (status.is_exceeded) return 'exceeded'
+    return status.utilization >= ALLOWANCE_WARNING_AT ? 'near' : undefined
+  })
+
+  const allowanceWarningText = createMemo(() => {
+    switch (allowanceWarning()) {
+      case 'exceeded':
+        return i18n.tr('Organisasjonens kvote er brukt opp.', 'The organisation has used up its allowance.')
+      case 'near':
+        return i18n.tr('Organisasjonens kvote er over 80 % brukt.', 'The organisation has used over 80% of its allowance.')
+      default:
+        return ''
+    }
+  })
+
+  const allowanceLine = createMemo(() => {
+    const share = allowanceShare()
+    if (share === undefined) return ''
+    return i18n.tr(`Organisasjonens kvote: ${share} % brukt`, `Organisation allowance: ${share}% used`)
+  })
+
   return (
-    <Show when={hasTotals() || hasCap()}>
+    <Show when={hasTotals() || hasCap() || hasAllowance()}>
       <div
         class="verevon-run-cost-meter"
         role="group"
@@ -282,6 +332,20 @@ export function RunCostMeter(props: { meter?: RunMeter }) {
           >
             {warningText()}
           </p>
+        </Show>
+        <Show when={hasAllowance()}>
+          <div class="verevon-run-cost-meter__allowance" style={{ display: 'flex', 'flex-direction': 'column', gap: '4px' }}>
+            <span>{allowanceLine()}</span>
+            {/* Persistent so a screen reader hears the allowance warning when it arrives, and silent otherwise. */}
+            <p
+              class="verevon-run-cost-meter__allowance-warning"
+              aria-live="polite"
+              data-allowance-warning={allowanceWarning() ?? ''}
+              style={allowanceWarning() ? WARNING_CHIP_STYLE : { margin: '0' }}
+            >
+              {allowanceWarningText()}
+            </p>
+          </div>
         </Show>
       </div>
     </Show>
