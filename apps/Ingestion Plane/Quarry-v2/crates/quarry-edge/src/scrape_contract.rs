@@ -63,7 +63,14 @@ pub struct ScrapeSettings {
     /// `QUARRY_EDGE__SCRAPE_RECORDS=0` stops storing a record per scrape and
     /// omits `scrape_id`.
     pub records_enabled: bool,
+    /// INNH-7: `QUARRY_EDGE__SCRAPE_MAX_AGE=on` (or `1`, `true`) accepts `max_age`
+    /// and runs the URL result cache. Off by default: a request carrying `max_age`
+    /// is a 400 `feature_disabled` at `max_age`, and nothing is written to the cache.
+    pub max_age_enabled: bool,
 }
+
+/// The environment name of the `max_age` switch.
+pub const ENV_SCRAPE_MAX_AGE: &str = "QUARRY_EDGE__SCRAPE_MAX_AGE";
 
 impl Default for ScrapeSettings {
     fn default() -> Self {
@@ -128,12 +135,20 @@ impl ScrapeSettings {
                 .as_deref(),
             Some("0" | "false" | "off")
         );
+        let max_age_enabled = matches!(
+            lookup(ENV_SCRAPE_MAX_AGE)
+                .as_deref()
+                .map(|value| value.trim().to_ascii_lowercase())
+                .as_deref(),
+            Some("on" | "1" | "true")
+        );
         Self {
             strict_validation,
             strict_after,
             inline_max_bytes,
             options_enabled,
             records_enabled,
+            max_age_enabled,
         }
     }
 
@@ -153,6 +168,7 @@ impl ScrapeSettings {
             captures_enabled: crate::scrape_actions::capture_mode().enabled(),
             actions_enabled: crate::scrape_actions::actions_mode().enabled(),
             ai_formats_enabled: ai_formats::enabled(),
+            max_age_enabled: self.max_age_enabled,
             ..ScrapeLimits::default()
         }
     }
@@ -480,6 +496,38 @@ mod tests {
         assert!(env(&[]).options_enabled);
         assert!(env(&[]).records_enabled);
         assert!(!env(&[("QUARRY_EDGE__SCRAPE_RECORDS", "0")]).records_enabled);
+
+        // INNH-7: the max_age switch is off unless it says on.
+        assert!(!env(&[]).max_age_enabled);
+        for on in ["on", "ON", "1", "true", " on "] {
+            let settings = ScrapeSettings::from_lookup(|name| (name == ENV_SCRAPE_MAX_AGE).then(|| on.to_owned()));
+            assert!(settings.max_age_enabled, "{on}");
+            assert!(settings.limits().max_age_enabled);
+        }
+        for off in ["off", "0", "false", "", "enabled"] {
+            let settings = ScrapeSettings::from_lookup(|name| (name == ENV_SCRAPE_MAX_AGE).then(|| off.to_owned()));
+            assert!(!settings.max_age_enabled, "{off}");
+            assert!(!settings.limits().max_age_enabled);
+        }
+    }
+
+    #[test]
+    fn max_age_is_a_known_option_key_in_both_modes_and_off_with_the_kill_switch() {
+        let body = json!({ "url": "https://example.com", "max_age": 60000, "maxAge": 60000 });
+        let parsed = parse(body.clone(), &strict()).unwrap();
+        assert!(parsed.unknown_keys.is_empty());
+        assert_eq!(parsed.options.max_age, Some(60000));
+        let parsed = parse(json!({ "url": "https://example.com", "maxAge": 5 }), &lenient()).unwrap();
+        assert_eq!(parsed.options.max_age, Some(5));
+        // Kill switch for option keys: max_age is an unknown key again (lenient: ignored,
+        // strict: 400), never silently applied.
+        let off = ScrapeSettings { options_enabled: false, ..ScrapeSettings::default() };
+        let parsed = parse(json!({ "url": "https://example.com", "maxAge": 5 }), &off).unwrap();
+        assert_eq!(parsed.unknown_keys, vec!["maxAge"]);
+        assert_eq!(parsed.options.max_age, None);
+        let strict_off = ScrapeSettings { options_enabled: false, strict_validation: true, ..ScrapeSettings::default() };
+        let errors = parse(json!({ "url": "https://example.com", "maxAge": 5 }), &strict_off).unwrap_err();
+        assert_eq!(errors[0].code, "unknown_field");
     }
 
     #[test]

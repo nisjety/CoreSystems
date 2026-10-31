@@ -58,7 +58,7 @@ Gap closure now follows the phase system in Section 14. The `Owner Phase` column
 | Geo / `location.country` | ✅ | 🟡 Locale threading is implemented and chromiumoxide country proxy routing exists, but provider-wide geo proof is still pending | **V2 partial gap** |
 | `storeInCache` per-request | ✅ | ✅ (cache layer in edge) | Equivalent |
 | `zeroDataRetention` | ✅ | ✅ Scrape fast path bypasses cache, artifacts, and durable event publishing while preserving live SSE fanout | Equivalent for `/v1/scrape`; future async/indexing features must preserve it |
-| `maxAge` cache control | ✅ | ✅ | Equivalent |
+| `maxAge` cache control | ✅ | 🟡 Built, dark (INNH-7, `QUARRY_EDGE__SCRAPE_MAX_AGE`, off by default): `max_age` (ms, alias `maxAge`) on `POST /v1/scrape` serves an org-scoped stored result for the same canonical URL and options, rebuilt from its artifacts; no browser, capture, action, AI-format or ZDR request is cached; crawl and batch have no `max_age`. Before INNH-7 this row said Equivalent, which was false: the page cache could only be hit with a body fingerprint | **V2 partial gap** (scrape only, behind a flag) |
 
 ### 2.3 Progress Update — 2026-05-03
 

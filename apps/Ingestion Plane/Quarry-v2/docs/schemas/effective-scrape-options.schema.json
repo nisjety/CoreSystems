@@ -15,8 +15,24 @@
         }
       ]
     },
+    "cache_age_ms": {
+      "description": "INNH-7: on a `max_age` hit, how old the served result was, in milliseconds.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
     "cache_state": {
       "$ref": "#/$defs/CacheState"
+    },
+    "cached_at": {
+      "description": "INNH-7: on a `max_age` hit, when the served result was fetched (RFC 3339).",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "doc_routing": {
       "type": "string"
@@ -48,6 +64,15 @@
       "items": {
         "type": "string"
       }
+    },
+    "max_age": {
+      "description": "INNH-7: the `max_age` the request asked for, in milliseconds.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
     },
     "max_inline_bytes": {
       "type": "integer",

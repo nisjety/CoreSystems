@@ -121,7 +121,7 @@ impl InlineRequest {
 /// Put `text` inline if it fits the cap. Over the cap, ZDR cuts it on a
 /// character boundary (and says so); otherwise the field is left out and named,
 /// because a stored artifact holds it.
-fn offer_inline(
+pub fn offer_inline(
     field: &str,
     text: &str,
     max_bytes: usize,

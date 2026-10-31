@@ -348,7 +348,7 @@ Measured on 2026-10-18 with `cargo test -p quarry-transform --test clean_html_co
 
 ## Page cache bypass and the Redis-gated cache tests (WS5.D)
 
-The page cache (`quarry:page:{org}:{fingerprint}`) holds only the result of a default scrape. A request with options other than the defaults (`formats`, `include_tags`, `exclude_tags`, an `extractor` other than `readability`, `only_main_content` false, `remove_base64_images`), or whose `signals` select the browser driver (any `actions`, `screenshot`, `pdf`, `prior_block_signals` of 2 or more under `QUARRY_BLOCK_ESCALATION=legacy` (ignored under `honest`), or `profile_required`), neither reads nor writes it. ZDR never does. The response's `effective_options.cache_state` says which happened: `hit`, `miss` or `bypass`.
+The page cache (`quarry:page:{org}:{fingerprint}`) holds only the result of a default scrape. (INNH-7 added a second, separate cache for `max_age`: see "Scrape `max_age`" at the end of this file; the rules in this section are about the page cache and are unchanged.) A request with options other than the defaults (`formats`, `include_tags`, `exclude_tags`, an `extractor` other than `readability`, `only_main_content` false, `remove_base64_images`), or whose `signals` select the browser driver (any `actions`, `screenshot`, `pdf`, `prior_block_signals` of 2 or more under `QUARRY_BLOCK_ESCALATION=legacy` (ignored under `honest`), or `profile_required`), neither reads nor writes it. ZDR never does. The response's `effective_options.cache_state` says which happened: `hit`, `miss` or `bypass`.
 
 `crates/quarry-edge/tests/cache_policy.rs` (9 cases) needs a Redis at `REDIS_URL` (default `redis://127.0.0.1:6379`) and skips each case without one. The `cargo-check` job of `quarry-v2-ci.yml` runs it, and the Redis case of `zdr_claim_floor.rs`, in the step "Page-cache and ZDR cache gates (Redis)" against a `redis:7-alpine` service published on host port 6380, with `REQUIRE_CONTRACT=1`, so there an unreachable Redis is a failure instead of a skip. The step "Test workspace" of the same job keeps the default address, where nothing listens, so its cache cases still skip. The workflow has not run on GitHub Actions (nothing was pushed); the gate was checked locally against a Redis service (`7fffb2ac`). Any other job that provides a Redis should set `REQUIRE_CONTRACT=1` for the same reason.
 
@@ -2004,3 +2004,25 @@ What a caller sees:
 | 200, item `error`, message names the "request time budget" | 50 s passed before the model read this source; send fewer URLs |
 
 Nothing in a log or a response carries the prompt text; log lines carry lengths only. To check by hand on a side-by-side stack: send a page with a schema and a prompt, read the request the gateway receives (the prompt before the `<<<PAGE-` line, the page inside), then repeat with `"zdr": true` and confirm the gateway sees no request. Not done here: no real gateway was called.
+
+## Scrape `max_age`: enable, disable and what to look at (INNH-7, built, NOT run, 2026-10-31)
+
+`POST /v1/scrape` accepts `max_age` (milliseconds, alias `maxAge`): serve a stored result for the same organization, canonical URL and options if it is at most that old, else fetch. The contract is in CONTRACTS.md 9.1 ("`max_age`") and `docs/openapi.yaml` (`ScrapeRequest.max_age`).
+
+| Variable | Default | Effect |
+|---|---|---|
+| `QUARRY_EDGE__SCRAPE_MAX_AGE` | `off` (compose: `QUARRY_EDGE_SCRAPE_MAX_AGE`, default `off`) | `on`, `1` or `true` accepts `max_age` and writes the URL result cache; any other value is off. Read once at process start. |
+
+Needs Redis (`REDIS_URL`): without it `max_age` is ignored with the warning `cache_unavailable`. No other setting is needed. The Innhenting gateway does not send `max_age` yet; turning the switch on changes nothing for a request that does not carry it, except that every cacheable success is also written to Redis (about the size of a page-cache entry: the output without page text) for `cache.max_age_s`, default 3600 s.
+
+**Turn on.** Set `QUARRY_EDGE_SCRAPE_MAX_AGE=on` for the edge and restart it. Check: scrape a page twice with `{"url": "...", "max_age": 60000}`; the second answer has `data.effective_options.cache_state: "hit"`, `cached_at`, `cache_age_ms`, the original `data.fetched_at` and no `scrape_id`, and the origin saw one request. `redis-cli --scan --pattern 'quarry:scrape:*'` lists the entries (the org id is in the key; the rest is a hash; no URL is stored in a key).
+
+**Turn off.** Unset it or set it to `off` and restart: a request with `max_age` is a 400 `feature_disabled` at `max_age`, nothing new is written, and existing entries expire by their TTL (they are never read while the switch is off). To drop them at once: `redis-cli --scan --pattern 'quarry:scrape:*' | xargs redis-cli del`.
+
+**Metric.** `quarry_cache_requests_total{cache="scrape", outcome="hit|miss|error"}` counts reads of the URL result cache; a request that did not consult it counts nothing.
+
+**What is never cached** (the response says `max_age_ignored`, or `max_age_ignored_zdr` under ZDR): captures, actions, AI formats, the browser driver, a custom web policy, `ingest`, a private privacy class, a non-2xx page. ZDR neither reads nor writes it and computes no key.
+
+**Limits to know.** The TTL caps the effective `max_age`. A stored result whose artifacts expired is a miss (the page is fetched again). A hit is not metered as `scrape.page`; whether it should be is an open product decision. A redirect is keyed by the URL as requested, not the final one. The trailing slash and the query order are part of the URL identity.
+
+**Tests.** `crates/quarry-edge/tests/scrape_max_age.rs` (Redis, `REQUIRE_CONTRACT=1` makes an unreachable Redis a failure), `tests/scrape_max_age_off.rs` (no Redis), unit tests in `cache.rs`, `scrape_cache.rs`, `scrape_contract.rs` and `quarry-core` (`scrape.rs`, `cache.rs`). The `quarry-v2-ci.yml` step "Page-cache and ZDR cache gates (Redis)" runs `cache_policy.rs`; `scrape_max_age.rs` is not in it yet (an owner/CI decision, recorded in INNH-7-status.md).

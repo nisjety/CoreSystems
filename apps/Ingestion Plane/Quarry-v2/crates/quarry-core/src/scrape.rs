@@ -499,12 +499,19 @@ pub struct ScrapeOptions {
     /// `abort` (the default) or `continue`. There is no retry: a replayed click
     /// or type can submit twice.
     pub actions_on_error: Option<ActionOnError>,
+    /// INNH-7: serve a stored result no older than this many milliseconds
+    /// instead of fetching. Absent: no read of the URL result cache. `0`: never
+    /// read it (but still write). Accepted only while `ScrapeLimits::max_age_enabled`.
+    pub max_age: Option<u64>,
 }
+
+/// The longest `max_age` a request may ask for: 30 days, in milliseconds.
+pub const MAX_AGE_CEILING_MS: u64 = 2_592_000_000;
 
 /// Request keys the options own: each field in snake_case and its camelCase
 /// alias. A body key that is neither one of these nor a key of the request
 /// itself is unknown. A unit test pins this against a fully populated value.
-const OPTION_KEYS: [(&str, &str); 10] = [
+const OPTION_KEYS: [(&str, &str); 11] = [
     ("formats", "formats"),
     ("only_main_content", "onlyMainContent"),
     ("include_tags", "includeTags"),
@@ -515,6 +522,7 @@ const OPTION_KEYS: [(&str, &str); 10] = [
     ("max_inline_bytes", "maxInlineBytes"),
     ("actions", "actions"),
     ("actions_on_error", "actionsOnError"),
+    ("max_age", "maxAge"),
 ];
 
 /// Keys a body may carry that are never a scrape option and never lenient: they
@@ -604,6 +612,7 @@ impl ScrapeOptions {
                     )),
                 },
                 "timeout_ms" => read_u64(snake, value, &mut options.timeout_ms, &mut errors),
+                "max_age" => read_u64(snake, value, &mut options.max_age, &mut errors),
                 "max_inline_bytes" => {
                     read_u64(snake, value, &mut options.max_inline_bytes, &mut errors)
                 }
@@ -754,6 +763,28 @@ impl ScrapeOptions {
                 limits.default_inline_bytes
             }
         };
+        // INNH-7: `max_age` is a read-freshness bound in milliseconds. Off by default:
+        // a request for it is `feature_disabled`, never a 200 that silently refetches.
+        let max_age_ms = match self.max_age {
+            None => None,
+            Some(_) if !limits.max_age_enabled => {
+                errors.push(FieldError::new(
+                    "max_age",
+                    "feature_disabled",
+                    "max_age is not enabled on this endpoint",
+                ));
+                None
+            }
+            Some(value) if value <= MAX_AGE_CEILING_MS => Some(value),
+            Some(_) => {
+                errors.push(FieldError::new(
+                    "max_age",
+                    "out_of_range",
+                    format!("max_age must be between 0 and {MAX_AGE_CEILING_MS} milliseconds"),
+                ));
+                None
+            }
+        };
         let wants_capture = formats
             .iter()
             .any(|format| matches!(format, ScrapeFormat::Screenshot(_) | ScrapeFormat::Pdf(_)));
@@ -863,6 +894,7 @@ impl ScrapeOptions {
             ignored_fields: Vec::new(),
             capture,
             actions,
+            max_age_ms,
         })
     }
 }
@@ -1058,6 +1090,9 @@ pub struct ScrapeLimits {
     /// only when this is set. Off by default: a request for one is
     /// `feature_disabled` at `formats[i]`. INNH-1 sets it from `QUARRY_EDGE__AI_FORMATS`.
     pub ai_formats_enabled: bool,
+    /// `max_age` is accepted only when this is set. Off by default: a request for
+    /// it is `feature_disabled` at `max_age`. INNH-7 sets it from `QUARRY_EDGE__SCRAPE_MAX_AGE`.
+    pub max_age_enabled: bool,
 }
 
 impl Default for ScrapeLimits {
@@ -1075,6 +1110,7 @@ impl Default for ScrapeLimits {
             captures_enabled: false,
             actions_enabled: false,
             ai_formats_enabled: false,
+            max_age_enabled: false,
         }
     }
 }
@@ -1099,6 +1135,11 @@ pub struct ResolvedScrapeOptions {
     pub capture: CapturePlan,
     /// The actions, checked. `None` when the request has none.
     pub actions: Option<ValidatedActions>,
+    /// INNH-7: how old, in milliseconds, a stored result may be and still be served.
+    /// `None`: the request did not ask for the URL result cache. `Some(0)`: it must
+    /// not be read. It is never part of [`Self::canonical_options_key`]: the key names
+    /// what a result IS, `max_age` only says how stale a reader tolerates.
+    pub max_age_ms: Option<u64>,
 }
 
 impl ResolvedScrapeOptions {
@@ -1135,9 +1176,20 @@ impl ResolvedScrapeOptions {
         self.is_default()
     }
 
+    /// INNH-7: whether the URL result cache (`quarry:scrape:{org}:...`, read by `max_age`)
+    /// may serve or store this request. Wider than [`Self::cache_admissible`]: named
+    /// formats, selectors and an extractor are fine, because [`Self::canonical_options_key`]
+    /// is part of the key and each distinct option set is its own entry. A capture or
+    /// an action changes what the page holds (and needs the browser), and an AI format
+    /// answers from a model: none of those is ever cached. The caller adds what the
+    /// options cannot see: ZDR, the driver plan, the web policy and the privacy block.
+    pub fn result_cache_admissible(&self) -> bool {
+        self.capture.is_empty() && self.actions.is_none() && self.ai_specs().is_empty()
+    }
+
     /// A stable key for the options that change the result, independent of the
-    /// key order in the request, of `zdr`, `timeout_ms` and `max_inline_bytes`.
-    /// For a URL-keyed result cache: `quarry:scrape:{org}:{blake3(url, key)}`.
+    /// key order in the request, of `zdr`, `timeout_ms`, `max_inline_bytes` and
+    /// `max_age`. For the URL-keyed result cache: `quarry:scrape:{org}:{blake3(url, key)}`.
     pub fn canonical_options_key(&self) -> String {
         let mut formats: Vec<&str> = self
             .formats
@@ -1220,9 +1272,26 @@ pub struct EffectiveScrapeOptions {
     /// The actions as counts only: never a text or a selector.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actions: Option<ActionsSummary>,
+    /// INNH-7: the `max_age` the request asked for, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_age: Option<u64>,
+    /// INNH-7: on a `max_age` hit, when the served result was fetched (RFC 3339).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_at: Option<String>,
+    /// INNH-7: on a `max_age` hit, how old the served result was, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_age_ms: Option<u64>,
 }
 
 impl EffectiveScrapeOptions {
+    /// Mark this as the echo of a result served from the URL result cache.
+    pub fn served_from_cache(mut self, cached_at: chrono::DateTime<chrono::Utc>, age_ms: u64) -> Self {
+        self.cache_state = CacheState::Hit;
+        self.cached_at = Some(cached_at.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true));
+        self.cache_age_ms = Some(age_ms);
+        self
+    }
+
     pub fn new(
         resolved: &ResolvedScrapeOptions,
         zdr: bool,
@@ -1248,6 +1317,9 @@ impl EffectiveScrapeOptions {
             doc_routing: doc_routing.to_owned(),
             strict,
             actions: resolved.actions.as_ref().map(ValidatedActions::summary),
+            max_age: resolved.max_age_ms,
+            cached_at: None,
+            cache_age_ms: None,
         }
     }
 }
@@ -1454,6 +1526,7 @@ mod tests {
             max_inline_bytes: Some(1),
             actions: Some(vec![]),
             actions_on_error: Some(ActionOnError::Continue),
+            max_age: Some(1),
         };
         let value = serde_json::to_value(&full).unwrap();
         let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
@@ -1472,6 +1545,118 @@ mod tests {
         );
         assert!(names.contains(&"onlyMainContent") && names.contains(&"maxInlineBytes"));
         assert!(names.contains(&"actionsOnError") && names.contains(&"actions"));
+        assert!(names.contains(&"maxAge") && names.contains(&"max_age"));
+        assert_eq!(OPTION_KEYS.len(), 11);
+    }
+
+    // ---- INNH-7: max_age
+
+    fn max_age_limits() -> ScrapeLimits {
+        ScrapeLimits { max_age_enabled: true, ..enabled_limits() }
+    }
+
+    fn resolve_max_age(body: serde_json::Value) -> Result<ResolvedScrapeOptions, Vec<FieldError>> {
+        ScrapeOptions::from_value(&body)?.resolve(false, &max_age_limits())
+    }
+
+    #[test]
+    fn max_age_parses_from_snake_and_camel_case() {
+        assert_eq!(ScrapeOptions::from_value(&json!({ "max_age": 5000 })).unwrap().max_age, Some(5000));
+        assert_eq!(ScrapeOptions::from_value(&json!({ "maxAge": 5000 })).unwrap().max_age, Some(5000));
+        // The same value under both spellings is fine; different values conflict.
+        assert_eq!(
+            ScrapeOptions::from_value(&json!({ "max_age": 7, "maxAge": 7 })).unwrap().max_age,
+            Some(7)
+        );
+        let errors = ScrapeOptions::from_value(&json!({ "max_age": 1, "maxAge": 2 })).unwrap_err();
+        assert_eq!(errors[0].code, "conflicting_aliases");
+        assert_eq!(errors[0].path, "max_age");
+        // Absent and null are both "not asked".
+        assert_eq!(ScrapeOptions::from_value(&json!({})).unwrap().max_age, None);
+        assert_eq!(ScrapeOptions::from_value(&json!({ "max_age": null })).unwrap().max_age, None);
+    }
+
+    #[test]
+    fn max_age_must_be_a_non_negative_integer() {
+        for bad in [json!("5000"), json!(-1), json!(1.5), json!(true), json!([1])] {
+            let errors = ScrapeOptions::from_value(&json!({ "max_age": bad })).unwrap_err();
+            assert_eq!(errors[0].code, "invalid_type", "{bad}");
+            assert_eq!(errors[0].path, "max_age");
+        }
+    }
+
+    #[test]
+    fn max_age_is_bounded_to_thirty_days() {
+        assert_eq!(MAX_AGE_CEILING_MS, 30 * 24 * 60 * 60 * 1000);
+        assert_eq!(resolve_max_age(json!({ "max_age": 0 })).unwrap().max_age_ms, Some(0));
+        assert_eq!(
+            resolve_max_age(json!({ "max_age": MAX_AGE_CEILING_MS })).unwrap().max_age_ms,
+            Some(MAX_AGE_CEILING_MS)
+        );
+        let errors = resolve_max_age(json!({ "max_age": MAX_AGE_CEILING_MS + 1 })).unwrap_err();
+        assert_eq!(errors[0].code, "out_of_range");
+        assert_eq!(errors[0].path, "max_age");
+    }
+
+    #[test]
+    fn max_age_is_feature_disabled_while_its_flag_is_off() {
+        let errors = ScrapeOptions::from_value(&json!({ "max_age": 1000 }))
+            .unwrap()
+            .resolve(false, &ScrapeLimits::default())
+            .unwrap_err();
+        assert_eq!(errors[0].code, "feature_disabled");
+        assert_eq!(errors[0].path, "max_age");
+        // A request without it is not affected by the flag.
+        let resolved = ScrapeOptions::from_value(&json!({ "formats": ["markdown"] }))
+            .unwrap()
+            .resolve(false, &ScrapeLimits::default())
+            .unwrap();
+        assert_eq!(resolved.max_age_ms, None);
+    }
+
+    #[test]
+    fn max_age_never_rotates_the_options_key() {
+        let without = resolve_max_age(json!({ "formats": ["markdown"], "include_tags": ["main"] })).unwrap();
+        let with = resolve_max_age(json!({ "formats": ["markdown"], "include_tags": ["main"], "max_age": 60000 })).unwrap();
+        let zero = resolve_max_age(json!({ "formats": ["markdown"], "include_tags": ["main"], "max_age": 0 })).unwrap();
+        assert_eq!(without.canonical_options_key(), with.canonical_options_key());
+        assert_eq!(without.canonical_options_key(), zero.canonical_options_key());
+        // ...and it does not make a default request non-default.
+        assert!(resolve_max_age(json!({ "max_age": 1 })).unwrap().is_default());
+    }
+
+    #[test]
+    fn the_result_cache_admits_options_but_not_captures_actions_or_ai() {
+        let admissible = |body: serde_json::Value| resolve_max_age(body).unwrap().result_cache_admissible();
+        assert!(admissible(json!({})));
+        assert!(admissible(json!({ "formats": ["markdown", "html"] })));
+        assert!(admissible(json!({ "include_tags": ["main"], "exclude_tags": [".nav"] })));
+        assert!(admissible(json!({ "extractor": "raw" })));
+        assert!(!admissible(json!({ "formats": ["screenshot"] })));
+        assert!(!admissible(json!({ "formats": [{ "type": "pdf" }] })));
+        assert!(!admissible(json!({ "actions": [{ "type": "press", "key": "Enter" }] })));
+        assert!(!admissible(json!({ "formats": ["markdown", { "type": "summary" }] })));
+        assert!(!admissible(json!({ "formats": [{ "type": "question", "question": "Who?" }] })));
+    }
+
+    #[test]
+    fn effective_options_echo_max_age_and_a_cache_hit() {
+        let resolved = resolve_max_age(json!({ "max_age": 1500 })).unwrap();
+        let miss = EffectiveScrapeOptions::new(&resolved, false, CacheState::Miss, "shadow", false, &[]);
+        let value = serde_json::to_value(&miss).unwrap();
+        assert_eq!(value["max_age"], 1500);
+        assert_eq!(value["cache_state"], "miss");
+        assert!(value.get("cached_at").is_none() && value.get("cache_age_ms").is_none());
+        let when = chrono::DateTime::parse_from_rfc3339("2026-10-01T12:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        let hit = miss.served_from_cache(when, 900);
+        let value = serde_json::to_value(&hit).unwrap();
+        assert_eq!(value["cache_state"], "hit");
+        assert_eq!(value["cached_at"], "2026-10-01T12:00:00Z");
+        assert_eq!(value["cache_age_ms"], 900);
+        // A request without max_age echoes none.
+        let plain = resolve_max_age(json!({})).unwrap();
+        let value = serde_json::to_value(EffectiveScrapeOptions::new(&plain, false, CacheState::Bypass, "shadow", false, &[])).unwrap();
+        assert!(value.get("max_age").is_none());
     }
 
     #[test]

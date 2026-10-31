@@ -70,6 +70,7 @@ mod run_limits;
 mod schedule_preflight;
 mod schedule_routes;
 mod scrape_actions;
+mod scrape_cache;
 mod scrape_contract;
 mod scrape_routes;
 mod search_routes;

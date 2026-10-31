@@ -718,6 +718,99 @@ async fn scrape_with(
         }
     }
 
+    // INNH-7: the URL result cache, behind QUARRY_EDGE__SCRAPE_MAX_AGE. Read when the
+    // request carries `max_age`; written after every cacheable success, so a later
+    // request can read it. The same gates the page cache has run first (the web
+    // policy above, ZDR below); ZDR is answered before a key exists.
+    let mut max_age_warnings: Vec<quarry_core::scrape::ScrapeWarning> = Vec::new();
+    let inline_request = quarry_runtime::InlineRequest {
+        markdown: resolved.wants(ScrapeFormat::Markdown),
+        html: resolved.wants(ScrapeFormat::Html),
+        raw_html: resolved.wants(ScrapeFormat::RawHtml),
+        max_bytes: resolved.max_inline_bytes,
+        clean: quarry_transform::clean_html::CleanOptions {
+            only_main_content: resolved.only_main_content,
+            include_tags: resolved.include_tags.clone(),
+            exclude_tags: resolved.exclude_tags.clone(),
+            remove_base64_images: resolved.remove_base64_images,
+            extractor: resolved.extractor,
+        },
+        // INNH-1: the page text the AI formats read. One char more than the
+        // model's input cap, so the engine does the cut and can tell a page that
+        // is over the cap (`truncated_input`) from one of exactly the cap. Asked
+        // for only when the request carries an AI format and a model hop is allowed.
+        ai_source_max_chars: (!ai_specs.is_empty() && ai_model_hop_allowed).then(|| {
+            crate::scrape_contract::ai_formats::settings()
+                .max_input_chars
+                .saturating_add(1)
+        }),
+    };
+    let mut result_key: Option<String> = None;
+    if settings.max_age_enabled {
+        let eligibility = crate::scrape_cache::eligibility(&crate::scrape_cache::Request {
+            resolved: &resolved,
+            zdr_blocks_cache: quarry_core::zdr::guard(zdr, quarry_core::zdr::WriteKind::Cache)
+                .is_err(),
+            driver: plan.driver,
+            default_web_policy: crate::web_policy_edge::is_default(&decision),
+            privacy: &privacy,
+            ingest: req.ingest.unwrap_or(false),
+        });
+        if eligibility == crate::scrape_cache::Eligibility::Eligible {
+            result_key = state.cache.as_ref().and_then(|_| {
+                crate::cache::PageCache::result_key(
+                    &org_id,
+                    url.as_str(),
+                    &resolved.canonical_options_key(),
+                )
+            });
+            if result_key.is_none() && resolved.max_age_ms.is_some() {
+                max_age_warnings.push(crate::scrape_cache::unavailable_warning());
+            }
+        } else if resolved.max_age_ms.is_some() {
+            max_age_warnings.extend(eligibility.warning());
+        }
+    }
+    if let (Some(key), Some(max_age_ms), Some(cache)) =
+        (result_key.as_ref(), resolved.max_age_ms, state.cache.as_ref())
+    {
+        if max_age_ms > 0 && should_read(&req.cache) {
+            cache_state = CacheState::Miss;
+            if let Some(cached) = cache.get_result(key).await {
+                let now = chrono::Utc::now();
+                let age_ms = crate::scrape_cache::age_ms(cached.output.fetched_at, now);
+                if crate::scrape_cache::is_fresh(age_ms, max_age_ms) {
+                    // A stored result whose artifacts are gone is a miss, not an error.
+                    if let Some(parts) = crate::scrape_cache::rehydrate(
+                        state.artifacts.as_ref(),
+                        &org_id,
+                        &cached,
+                        &inline_request,
+                    )
+                    .await
+                    {
+                        let fetched_at = cached.output.fetched_at;
+                        let mut data = quarry_core::scrape::ScrapeResponse::from_output(cached.output);
+                        data.markdown = parts.markdown;
+                        data.html = parts.html;
+                        data.raw_html = parts.raw_html;
+                        data.truncated = parts.truncated;
+                        data.omitted = parts.omitted;
+                        let mut warnings = unknown_warnings.clone();
+                        warnings.extend(max_age_warnings);
+                        warnings.extend(parts.warnings);
+                        data.warnings = warnings;
+                        // Not metered as a scrape.page (the page cache does not either) and
+                        // no new record: `scrape_id` is absent on a hit.
+                        data.effective_options =
+                            Some(effective(CacheState::Hit).served_from_cache(fetched_at, age_ms));
+                        return Ok(finish(data));
+                    }
+                }
+            }
+        }
+    }
+
     // WS13.4b: a capture needs the browser. Without one, refuse with 501 rather
     // than hand the plan to the default driver, which would drop the capture.
     // WS13.5: actions need it for the same reason (the default driver would run the
@@ -786,28 +879,6 @@ async fn scrape_with(
 
     let run_id: RunKind = quarry_core::ids::Id::new();
     let prev_fp = req.prev_fingerprint.clone();
-    let inline_request = quarry_runtime::InlineRequest {
-        markdown: resolved.wants(ScrapeFormat::Markdown),
-        html: resolved.wants(ScrapeFormat::Html),
-        raw_html: resolved.wants(ScrapeFormat::RawHtml),
-        max_bytes: resolved.max_inline_bytes,
-        clean: quarry_transform::clean_html::CleanOptions {
-            only_main_content: resolved.only_main_content,
-            include_tags: resolved.include_tags.clone(),
-            exclude_tags: resolved.exclude_tags.clone(),
-            remove_base64_images: resolved.remove_base64_images,
-            extractor: resolved.extractor,
-        },
-        // INNH-1: the page text the AI formats read. One char more than the
-        // model's input cap, so the engine does the cut and can tell a page that
-        // is over the cap (`truncated_input`) from one of exactly the cap. Asked
-        // for only when the request carries an AI format and a model hop is allowed.
-        ai_source_max_chars: (!ai_specs.is_empty() && ai_model_hop_allowed).then(|| {
-            crate::scrape_contract::ai_formats::settings()
-                .max_input_chars
-                .saturating_add(1)
-        }),
-    };
     let tombstone_started = chrono::Utc::now();
     // The caller's bound, never past the table's cap, so the typed Timeout
     // reaches the caller before the router's own limit drops the request.
@@ -860,6 +931,21 @@ async fn scrape_with(
                     }
                 }
             }
+            // INNH-7: the URL result cache. A key exists only for a non-ZDR, cacheable
+            // request on a stack with a cache; the write honours `cache.mode` and its TTL.
+            if let (Some(key), Some(cache)) = (result_key.as_ref(), state.cache.as_ref()) {
+                if should_write(&req.cache) && crate::scrape_cache::is_storable(&out) {
+                    let ttl = effective_ttl(&req.cache, DEFAULT_TTL_SECS);
+                    let entry = crate::cache::CachedScrape {
+                        output: out.clone(),
+                        warnings: inline.warnings.clone(),
+                    };
+                    if let Err(e) = cache.put_result(key, &entry, ttl).await {
+                        // zdr-log-ok: reached only with a result key, which a ZDR request never has (scrape_cache::eligibility); the redis error text is what an operator needs
+                        tracing::warn!(error = %e, "scrape result cache put failed");
+                    }
+                }
+            }
             crate::metrics::record_scrape("ok");
             // P3 / cluster #billing — meter a scrape.page event on
             // success. Skipped on error so unsuccessful fetches don't
@@ -894,6 +980,7 @@ async fn scrape_with(
                 (fields, Some(report))
             };
             let mut warnings = unknown_warnings;
+            warnings.extend(max_age_warnings);
             warnings.extend(inline.warnings);
             let effective_options = effective(cache_state);
             // One small record per non-ZDR scrape, so the result can be read

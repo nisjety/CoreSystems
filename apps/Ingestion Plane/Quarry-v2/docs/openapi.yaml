@@ -6828,6 +6828,32 @@ components:
             What to do when an action fails. abort stops the run and answers with the
             outcome of every action in error.details.actions; continue goes on to the
             next action. There is no retry: a replayed click or type can submit twice.
+        max_age:
+          type: integer
+          minimum: 0
+          maximum: 2592000000
+          description: >-
+            INNH-7. Serve a stored result no older than this many milliseconds
+            (Firecrawl's maxAge) instead of fetching. Alias maxAge. Absent: the
+            result cache is not read and the request behaves as before. 0: it is
+            not read (the fresh result is still written). N: the result stored for
+            the same organization, canonical URL (fragment and tracking parameters
+            dropped) and options (formats, selectors, extractor), if it was fetched
+            at most N ms ago; otherwise the page is fetched and the entry replaced.
+            A hit makes no fetch, is not metered as scrape.page, has no scrape_id,
+            keeps the ORIGINAL data.fetched_at, and says so in
+            effective_options (cache_state hit, cached_at, cache_age_ms); markdown,
+            html and rawHtml are rebuilt from the stored artifacts, and a result
+            whose artifacts are gone is a miss. Entries live for cache.max_age_s
+            (default 3600 s), so a max_age beyond that behaves as that TTL. Never
+            served or written for ZDR (warning max_age_ignored_zdr), captures,
+            actions, AI formats, the browser driver, a non-default web policy,
+            ingest, or a private privacy class (warning max_age_ignored); with no
+            cache backend it is ignored with the warning cache_unavailable. 400
+            feature_disabled at max_age while QUARRY_EDGE__SCRAPE_MAX_AGE is not
+            on; 400 out_of_range above 30 days, invalid_type for a non-integer.
+            Not on crawl, batch or run_page. cache.max_age_s is a different
+            thing: the TTL, in seconds, of the entry this request writes.
             Alias actionsOnError.
       description: >-
         Fields not listed here are unknown: ignored with an unknown_field warning
@@ -6943,7 +6969,11 @@ components:
         max_age_s:
           type: integer
           default: 0
-          description: Custom TTL in seconds (0 = use default 3600s)
+          description: >-
+            The TTL in seconds of a result this request writes to the cache (0 = use
+            the default 3600 s). It is not the freshness a read requires: that is the
+            request's max_age, in milliseconds. `mode` may be left out (INNH-7: it was
+            required by the Rust type although documented as defaulting to read_write).
     DriverSignals:
       type: object
       properties:
@@ -7326,7 +7356,7 @@ components:
             description: Inline fields left out for exceeding max_inline_bytes (not ZDR); read the matching formats.* artifact.
           effective_options:
             type: object
-            description: The options the response was produced with, including ignored_fields, cache_state (hit, miss, bypass), doc_routing and strict. With actions, `actions` is a summary (count, types, total_wait_ms, capture_count, on_error), never a selector or a typed text.
+            description: The options the response was produced with, including ignored_fields, cache_state (hit, miss, bypass), doc_routing and strict. With max_age, `max_age` (echo, in ms) and, on a result served from the cache, `cached_at` (RFC 3339, the original fetch) and `cache_age_ms`. With actions, `actions` is a summary (count, types, total_wait_ms, capture_count, on_error), never a selector or a typed text.
           warnings:
             type: array
             items:

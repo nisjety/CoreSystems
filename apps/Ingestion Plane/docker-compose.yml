@@ -191,6 +191,10 @@ services:
       # Under ZDR the AI formats are refused (ADR-4); "refuse" is the only value
       # that takes effect in v1.
       QUARRY_EDGE__AI_FORMATS_ZDR: ${QUARRY_EDGE_AI_FORMATS_ZDR:-refuse}
+      # max_age on POST /v1/scrape (INNH-7): "off" here. "on" accepts it and runs the
+      # org-scoped URL result cache (needs Redis); never read or written under ZDR. An
+      # owner turns it on, not this file. See docs/RUNBOOKS.md (Quarry-v2), "Scrape max_age".
+      QUARRY_EDGE__SCRAPE_MAX_AGE: "${QUARRY_EDGE_SCRAPE_MAX_AGE:-off}"
       # Autoprompt: rewrite verbose Research/Comparative queries before fan-out.
       QUARRY_EDGE__AUTOPROMPT: "${QUARRY_EDGE_AUTOPROMPT:-0}"
       QUARRY_EDGE__AUTOPROMPT_MODEL: ${QUARRY_AUTOPROMPT_MODEL:-}

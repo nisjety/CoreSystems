@@ -109,6 +109,9 @@ services:
       # Model Plane credential for this lane yet (decision X-7). Refused under ZDR (ADR-4).
       QUARRY_EDGE__AI_FORMATS: "${QUARRY_EDGE_AI_FORMATS:-0}"
       QUARRY_EDGE__AI_FORMATS_ZDR: ${QUARRY_EDGE_AI_FORMATS_ZDR:-refuse}
+      # max_age on POST /v1/scrape (INNH-7): off. `on` accepts it and runs the URL result cache
+      # (needs Redis); never read or written under ZDR.
+      QUARRY_EDGE__SCRAPE_MAX_AGE: "${QUARRY_EDGE_SCRAPE_MAX_AGE:-off}"
       # ADR-6 (owner ruling 2026-10-28): scrape-time actions default off; see the Ingestion compose.
       QUARRY_EDGE__SCRAPE_ACTIONS: "${QUARRY_EDGE_SCRAPE_ACTIONS:-off}"
       # SmartRouter web-search primary. Quarry-v2 owns its searxng (defined

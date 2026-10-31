@@ -219,3 +219,7 @@ The agent is the one the verified token gives (a service principal, or a person'
 | reason | `details.denied_action` | meaning | what a caller does |
 |---|---|---|---|
 | `agent_reload_denied` | `reload` | a page reload proposed by an agent; reload is a person's action | navigate to the URL instead, or leave it to the person |
+
+## Scrape `max_age` (INNH-7)
+
+Field errors (400, in `details.fields[]`, not in `details.reason`; each carries a path and never a value): `feature_disabled` (at `max_age` while `QUARRY_EDGE__SCRAPE_MAX_AGE` is not on), `out_of_range` (at `max_age`, above 2592000000 ms), `invalid_type` (at `max_age`, not a non-negative integer), `conflicting_aliases` (`max_age` and `maxAge` with different values). Not errors, and the scrape is a 200: the warnings `max_age_ignored_zdr` (ZDR never reads or writes the result cache), `max_age_ignored` (a capture, actions, an AI format, the browser, a custom web policy, ingest or a private privacy class is never cached) and `cache_unavailable` (no cache backend on this deployment), each with `field: "max_age"`.
