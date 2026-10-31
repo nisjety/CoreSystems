@@ -84,3 +84,6 @@ Node (`node --test scripts/tests/*.test.mjs`): 60 tests, 48 pass, 0 fail, 12 tod
 - Real network behaviour: the DNS public-address guard and the static driver's `max_body_bytes` read are the production ones but the integration tests use the in-memory fixture driver (which has no DNS and ignores the body cap).
 - A real 50k-URL sitemap and the 5000-page queue path were not exercised.
 - The gateway/SPA side; SDK regeneration.
+
+## Review fix (2026-10-31, docs only)
+RUNBOOKS.md step 3 of the INNH-6 enable list gave the rollout order backwards. Now: orchestrator first (inert without the params; an old edge still answers 400 `unsupported_option`), then the edge flag. Reason: the edge stamps `sitemap` and `scrape_options` on the job params (`crawl_handoff`) and echoes them in `data.effective`; an old orchestrator ignores unknown params and would crawl links-only with default cleaning while the ack says otherwise. The clause that a new orchestrator against an old edge ends a new crawl with `sitemap_unavailable` is dropped (the old edge refuses at the handoff; only an in-flight crawl can see it). The intro line now says the orchestrator needs no flag, only the new build. No code change; `node --test scripts/tests/*.test.mjs` unchanged (60 tests, 48 pass, 0 fail, 12 todo).
