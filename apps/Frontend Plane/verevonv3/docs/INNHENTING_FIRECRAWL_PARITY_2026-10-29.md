@@ -47,7 +47,7 @@ mangler. **Mangler** = Quarry har det ikke ennå; se avsnittet "Mangler i Quarry
 | Crawl: skrape-valg per side | `scrape_options` | Flagg `QUARRY_EDGE__CRAWL_SCRAPE_OPTIONS` (live: av). Koblet i Verevon: innholdsvalgene gjelder hver side | `knowledge/quarry.rs`, `playground.ts` |
 | Crawl: pause, gjenoppta, avbryt | `POST /v1/crawl/{id}/pause` m.fl. | Flagg `QUARRY_EDGE__JOB_CONTROL` | `job_lifecycle_routes.rs` |
 | Batch: liste med URL-er | `POST /v1/batch` | Koblet, også pause/avbryt | |
-| Extract: strukturert data med JSON-skjema | `POST /v1/extract`, `schema` | Flagg `QUARRY_EDGE__AI_FORMATS=1` + `MODEL_PLANE_URL` (live: 501 med hint) | `extract_routes.rs` |
+| Extract: strukturert data med JSON-skjema | `POST /v1/extract`, `schema` | Flagg `QUARRY_EDGE__AI_FORMATS=1` + `MODEL_PLANE_URL` (live: 501). Koblet i Verevon: årsaken og neste steg | `extract_routes.rs`, `errors.ts` |
 | Extract: fri prompt | `prompt` | Koblet i Verevon. Quarry-siden bruker den (5f1ac3ca2, ingen flagg) | `extract_routes.rs`, `runs.rs` (`extract_prompt`) |
 | Agent: autonom nettleseragent | `/v1/agent/runs` via Verevon | Koblet via `ingestions.start_agent_run` | `dispatchers.rs`, `browser.rs` |
 | Agent: direkte Quarry-API uten Verevon | krever nettleser-grant fra gatewayen | Mangler (se under) | `agent_routes/lifecycle.rs` |
@@ -55,7 +55,7 @@ mangler. **Mangler** = Quarry har det ikke ennå; se avsnittet "Mangler i Quarry
 | Monitor: gjentakende overvåker (time, dag, uke) | `POST /v1/schedules` med `target_kind=change_monitor` | Koblet (opprett/stopp) | `monitoring.rs` |
 | Monitor: tekstdiff mellom versjoner | `GET /v1/change/diff` | Flagg `QUARRY_EDGE__CHANGE_TEXT_DIFF` (live: av). Koblet i Verevon: «Vis endringen» | `monitoring.rs`, `ChangeDiffPanel.tsx` |
 | Monitor: varsel i appen | `change_detected` via control | Koblet (listes i Overvåking) | `notify/` |
-| Monitor: varsel på e-post / webhook | `/v1/webhook-subscriptions` | API på lanen bak `QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS` (av). Ingen UI ennå: sikkerhetsgjennomgang pågår | |
+| Monitor: varsel på e-post / webhook | `/v1/webhook-subscriptions` | Koblet i Verevon: «Webhooks» under Overvåking. Flagg `QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS` (og `QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS`), av på live | `ingestions/webhooks.rs`, `ChangeWebhooksPanel.tsx` |
 | Tidsplaner: cron, pause, utløs | `/v1/schedules` | Koblet; lagring er av på live (se under) | `schedules.rs` |
 | Jobber: liste, status, feil per URL, robots-blokkert | `/v1/jobs/{id}`, `/v1/jobs/{id}/errors` | Koblet (ny i denne runden) | `ingestions/jobs.rs` |
 | Jobber: opprinnelse (manuell eller tidsplan) | `origin`, `schedule_id` | Koblet (ny i denne runden) | `ingestions/runs.rs` |
@@ -75,7 +75,7 @@ slås på, virker funksjonen uten endring i koden.
 | `QUARRY_EDGE__SCRAPE_CAPTURE=on` | skjermbilde og PDF | av |
 | `QUARRY_EDGE__JOB_CONTROL=on` | pause, gjenoppta og avbryt av crawl og batch | av |
 | `QUARRY_SCHEDULE_CAPABILITIES` (JSON) | tidsplantyper, utløs og backfill | tom: lagring av tidsplaner er av |
-| `QUARRY_EDGE__AI_FORMATS=1` + `MODEL_PLANE_URL` | AI-formater på scrape (json, summary, question, highlights) og strukturert uttrekk | av: AI-formater gir 400 `feature_disabled`, `/v1/extract` gir 501 med hint |
+| `QUARRY_EDGE__AI_FORMATS=1` + `MODEL_PLANE_URL` | AI-formater på scrape (json, summary, question, highlights) og strukturert uttrekk | av: AI-formater gir 400 `feature_disabled`, `/v1/extract` gir 501 (`UNSUPPORTED`, med `next_actions`) |
 | `QUARRY_CONTROL__JOB_CREDITS=on` | kreditter per jobb (`credits`), default av | av: feltet mangler i svaret, og siden sier det |
 | `QUARRY_EDGE__SCRAPE_MAX_AGE=on` | `max_age` på scrape, med Redis for hurtiglageret | av: 400 `feature_disabled` på `max_age` |
 | `QUARRY_EDGE__CRAWL_SITEMAP=on` | `sitemap` på crawl | av: 400 `unsupported_option` på `sitemap` |
@@ -83,7 +83,7 @@ slås på, virker funksjonen uten endring i koden.
 | `QUARRY_EDGE__CHANGE_TEXT_DIFF=on` | `GET /v1/change/diff` og markdown på basislinjer | av: 501 |
 | `QUARRY_EDGE__JOB_RESULTS=on` | sider per kjøring | av: 501 |
 | `QUARRY_EDGE__ANSWER_SYNTHESIS=on` | svar i søk (`answer_status`) | av: `answer_status` er `unavailable` med `synthesis_disabled` |
-| `QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS=on` | abonnement på endringswebhook | av: 501 (ingen UI ennå) |
+| `QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS=on` (og `QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS=on`) | abonnement på endringswebhook, med UI | av: 501, og meldingen navngir bryteren |
 
 Ingen av disse er slått på i denne runden. Å slå dem på er en konfigurasjonsendring
 på den delte live-stacken, og det må godkjennes av eieren.
@@ -96,15 +96,16 @@ Hver linje peker til stedet i Quarry-koden. Nummereringen er den samme som før,
 1. **AI-formater på scrape (`json`, `summary`, `question`, `highlights`).** Levert på `quarryv2-next` og på lanen `innh/lane-a` (336b1da1b). Begge blokkerne er lukket: `truncated_input` settes over 60 000 tegn, og en personvernblokk (`credential_or_secret`, `zdr_ephemeral`) gir `skipped` med `PRIVACY_POLICY` uten modellkall. Fortsatt av på live: `QUARRY_EDGE__AI_FORMATS` er ikke slått på, og modellplanen er ikke koblet.
 2. **Fri `prompt` på `/v1/extract`: levert** (5f1ac3ca2). Prompten brukes nå, også uten skjema.
 3. **Tekstdiff for overvåking (Quarry-punkt 4).** Levert på `innh/lane-b` (c9cca3667, 9455099e3, 96c5dc9c3): markdown-artefakt på basislinjen og `GET /v1/change/diff`, bak `QUARRY_EDGE__CHANGE_TEXT_DIFF` (av). SQL-en er ikke prøvd mot Postgres.
-4. **Abonnement på endringswebhook (Quarry-punkt 5).** API-et er bygget på `innh/lane-b` bak `QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS` (av). Ingen UI i Verevon ennå: sikkerhetsgjennomgangen i Quarry er ikke ferdig, og Quarry sender endelig form.
+4. **Abonnement på endringswebhook (Quarry-punkt 5).** Kontrakten er endelig: sikkerhetsgjennomgangen fant ingen blokkere. Gatewayen og siden er bygget i denne runden (se nederst). Bak `QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS` og `QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS`, begge av. Leveringen er forsøk med nye forsøk. Quarry har ikke bakt inn garantert levering ennå, så siden lover den ikke.
 5. **Sitemap og skrape-valg for crawl (Quarry-punkt 6).** Levert på `innh/lane-c` bak to flagg (av). Rulles ut i rekkefølgen i RUNBOOKS: orkestratoren først, så edge-flagget.
 6. **Maks alder på scrape (Quarry-punkt 7).** Levert på `innh/lane-a` (31d9ad15f, 5119e6ef8): `max_age` i millisekunder og `cache_state` i svaret, bak `QUARRY_EDGE__SCRAPE_MAX_AGE` (av). Uten Redis gir den `bypass` med advarselen `cache_unavailable`.
 7. **Svar i søk (Quarry-punkt 8a).** Levert på `innh/lane-d` (ab65682aa, 0aa5cbbb7): `answer_status` og `answer_reason`. Live svarer `synthesis_disabled` helt til bryteren `QUARRY_EDGE__ANSWER_SYNTHESIS` er slått på. Det er en konfigurasjon, ikke kode.
 8. **Kostnad per kjøring.** Levert på `quarryv2-next` (6bbd99763), bak `QUARRY_CONTROL__JOB_CREDITS` (av).
-9. **Direkte agent-API for Quarry-kallere.** `/v1/agent/runs` krever `grant_id` fra gatewayen (`agent_routes/lifecycle.rs`), så en ekstern klient kan ikke starte en agent direkte. Designnotat for API-nøkkelgrants ligger på `innh/lane-d` (a7ceb6da8, punkt 10 i Quarry-listen). Ikke bygget.
-10. **Parse av dokumenter til Markdown.** Pipeline-en leser PDF og DOCX (`pipeline.rs:1043`), men bare som opptak til kunnskapsbasen. Må: en offentlig rute som returnerer Markdown uten å lagre. Quarry-sesjonen bygger dette nå.
+9. **Direkte agent-API for Quarry-kallere.** `/v1/agent/runs` krever `grant_id` fra gatewayen (`agent_routes/lifecycle.rs`), så en ekstern klient kan ikke starte en agent direkte. Quarry-punkt 10 (agentkjøringer med API-nøkkel) er bygget på Quarry-siden bak `QUARRY_EDGE__API_KEY_AGENT_RUNS` (av). Gatewayen mangler sin halvdel, og Auth Core mangler utstedelse av nøkler. Begge venter på eierens beslutninger OD-1 til OD-17. Ingenting å koble i Verevon ennå.
+10. **Parse av dokumenter til Markdown.** Pipeline-en leser PDF og DOCX (`pipeline.rs:1043`), men bare som opptak til kunnskapsbasen. Må: en offentlig rute som returnerer Markdown uten å lagre. Quarry-punkt 11 (`POST /v1/parse`) er bygget, men ikke committet ennå.
 11. **Resultater per side for en jobb (Quarry-punkt 12).** Levert på `innh/lane-b` (cc2596c7a, 4f2a1bc3c): `GET /v1/jobs/{id}/results`, `/v1/crawl/{id}/results` og `/v1/batch/{id}/results`, bak `QUARRY_EDGE__JOB_RESULTS` (av), og `GET /v1/artifacts?run_id=&kind=`. Ikke prøvd mot et stack.
 12. **Schedule-kinds på live.** `QUARRY_SCHEDULE_CAPABILITIES` er tom, så siden kan ikke lagre tidsplaner. Må: konfigurasjon, etter at utførelsen er verifisert.
+13. **Vurdering av Quarry-punkt 13 (avbryt, nytt forsøk, eksport, kjøringsferdig-webhook).** Anbefalt rekkefølge: avbryt først (bygget bak `QUARRY_EDGE__JOB_CONTROL`, ikke prøvd på stack), så kjøringsferdig-webhook (1 til 1,5 dager, bare en ny hendelse i listen), så JSON-eksport hvis eieren vil ha den (paginert JSON og resultatruten finnes), og til slutt nytt forsøk (bare agentkjøringer kan gjenopptas i dag). Ingen kode i Verevon for dette ennå.
 
 ## Endringer i denne runden
 
@@ -172,3 +173,19 @@ Ikke verifisert:
 - Quarry-punktene 3, 10 og vurderingen av punkt 13 er ikke levert ennå.
 
 Tester: Gateway (bin-suiten, cargo): 849 bestått, 0 feilet. Hele SPA-vitest: 3963 bestått, 1 feilet (BrowserBlockedNotice, filen og importene er ikke endret i denne grenen), 2 testfiler kan ikke kjøres (workspace-pakkene @quarry/client og @verevon/remote-core mangler i worktreet). Typecheck: 33 feil, samme som baseline. Lint på endrede filer: rent. Gateway-kontrakttester (node): 26 bestått. Ingestions- og i18n-suiter: 175 bestått.
+
+## Endringer i runden etter (tredje leveranse fra Quarry)
+
+Gateway (`apps/gateway`):
+- `/api/ingestions/webhooks` (GET, POST), `/api/ingestions/webhooks/{id}` (PATCH, DELETE), `…/rotate-secret` (POST), `…/deliveries` (GET) og `…/deliveries/{delivery_id}/retry` (POST) går til `/v1/webhook-subscriptions`. Hendelsen er fast `change_detected`. Svarene som bærer hemmeligheten (opprett og roter) får `Cache-Control: no-store`. PATCH slipper bare `active` og `description`.
+
+Frontend:
+- Overvåking: «Webhooks» under varslene. Opprett (https-adresse, valgfri beskrivelse), pause og aktiver, roter hemmelighet og slett (begge med bekreftelse), og leveringslogg med «Send på nytt» for feilede og gitte opp leveringer.
+- Hemmeligheten vises én gang, i minnet, og lagres ikke i nettleseren. Skjemaet skjules for ZDR-organisasjoner. Lesing, pause, rotasjon og sletting er åpne for dem.
+- Feilmeldinger: bryteren som er av, ZDR, grensen på 10, duplikat og hver feltgrunn fra Quarry (`docs/ERROR_REASONS.md`).
+- Strukturert uttrekk: 501 viser hvilken av de fire årsakene som gjelder (Quarry skiller dem bare på teksten i `error`), og neste steg: kjør uten skjema og prompt for Markdown. `hint` vises ikke, fordi den er tekst til operatørene.
+
+Ikke verifisert:
+- Ingen webhook-bryter er slått på, og ingen kall er gjort mot en Quarry med dem på.
+- Leveringsstatusene `pending`, `in_flight`, `success`, `failed` og `dlq` er antatt fra kontrakten. De er ikke sett på et ekte stack.
+- Ingen skjermbilde av webhook-panelet: nettleseren er utlogget.

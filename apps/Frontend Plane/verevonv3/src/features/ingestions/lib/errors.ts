@@ -114,6 +114,46 @@ function aiRefusalMessage(error: unknown, tr: Tr): string | null {
   return null
 }
 
+/**
+ * Why `POST /v1/extract` refused a schema or a prompt with 501. Quarry gives these no
+ * `details.reason`, so the cause is read from the `error` text the edge sets. The next step
+ * is the one Quarry's `next_actions` gives: the same request without the schema and prompt.
+ */
+function extractRefusalMessage(error: unknown, tr: Tr): string {
+  const text = error instanceof ApiError ? error.message : ''
+  let reason: string
+  if (text.includes('QUARRY_EDGE__AI_FORMATS is off')) {
+    reason = tr(
+      'Strukturert uttrekk er slått av på Quarry-edge (QUARRY_EDGE__AI_FORMATS).',
+      'Structured extraction is switched off in Quarry-edge (QUARRY_EDGE__AI_FORMATS).',
+    )
+  } else if (text.includes('QUARRY_EDGE__MODEL_PLANE_URL is not set')) {
+    reason = tr(
+      'Modellplanen er ikke koblet til Quarry-edge (QUARRY_EDGE__MODEL_PLANE_URL mangler).',
+      'The model plane is not connected to Quarry-edge (QUARRY_EDGE__MODEL_PLANE_URL is not set).',
+    )
+  } else if (text.includes('holds no model credential')) {
+    reason = tr(
+      'Denne installasjonen har ingen modellnøkkel for strukturert uttrekk.',
+      'This installation has no model credential for structured extraction.',
+    )
+  } else if (text.includes('refused this service')) {
+    reason = tr(
+      'Modellplanen avviste Quarry-edge ved første modellkall. Det ble ikke belastet noe.',
+      'The model plane refused Quarry-edge on the first model call. Nothing was metered.',
+    )
+  } else {
+    reason =
+      text ||
+      tr('Strukturert uttrekk er ikke tilgjengelig på denne installasjonen.', 'Structured extraction is not available on this installation.')
+  }
+  const next = tr(
+    'Fjern JSON-skjemaet og prompten, og kjør på nytt, for å få Markdown.',
+    'Remove the JSON schema and the prompt, and run again, to get Markdown.',
+  )
+  return `${reason} ${next}`
+}
+
 export function playgroundErrorMessage(
   error: unknown,
   tr: Tr,
@@ -121,10 +161,7 @@ export function playgroundErrorMessage(
   context: { endpoint?: string; requested?: readonly ScrapeFormat[] } = {},
 ): string {
   if (context.endpoint === 'extract' && isUnsupported(error)) {
-    return tr(
-      'Strukturert uttrekk er ikke slått på på Quarry-edge. Det krever QUARRY_EDGE__AI_FORMATS=1 og en modellplan. Fjern JSON-skjemaet for å få Markdown.',
-      'Structured extraction is not switched on in Quarry-edge. It needs QUARRY_EDGE__AI_FORMATS=1 and a model plane. Remove the JSON schema to get Markdown.',
-    )
+    return extractRefusalMessage(error, tr)
   }
   const ai = aiRefusalMessage(error, tr)
   if (ai) return ai
@@ -286,4 +323,66 @@ function answerReasonMessage(reason: string | null | undefined, tr: Tr): string 
     default:
       return tr('Svar er ikke tilgjengelig akkurat nå.', 'An answer is not available right now.')
   }
+}
+
+/** Copy for each field-level reason a webhook create, patch or retry is refused for (`docs/ERROR_REASONS.md`). */
+const WEBHOOK_REASONS: Record<string, { no: string; en: string }> = {
+  url_invalid: { no: 'Adressen er ikke en gyldig absolutt URL.', en: 'The address is not a valid absolute URL.' },
+  url_too_long: { no: 'Adressen er for lang. Høyst 2048 tegn.', en: 'The address is too long. At most 2048 characters.' },
+  url_not_https: { no: 'Adressen må bruke https.', en: 'The address must use https.' },
+  url_userinfo: {
+    no: 'Adressen kan ikke ha brukernavn og passord. Bruk et endepunkt uten dem; signaturen er autentiseringen.',
+    en: 'The address cannot carry a username and password. Use an endpoint without them; the signature is the authentication.',
+  },
+  url_fragment: { no: 'Fjern #-delen fra adressen.', en: 'Remove the #-part from the address.' },
+  url_private_address: {
+    no: 'Adressen peker til en privat eller intern adresse. Bruk en offentlig adresse.',
+    en: 'The address points to a private or internal address. Use a public one.',
+  },
+  url_unresolvable: { no: 'Vertsnavnet kunne ikke slås opp. Sjekk DNS-navnet.', en: 'The host name could not be resolved. Check the DNS name.' },
+  events_empty: { no: 'Velg hendelsen change_detected.', en: 'Choose the change_detected event.' },
+  events_unsupported: { no: 'Hendelsen støttes ikke. Bruk change_detected.', en: 'That event is not supported. Use change_detected.' },
+  description_too_long: { no: 'Beskrivelsen er for lang. Høyst 200 tegn.', en: 'The description is too long. At most 200 characters.' },
+  body_invalid: { no: 'Forespørselen har felt som ikke støttes.', en: 'The request has fields that are not supported.' },
+  empty_patch: { no: 'Velg minst ett felt å endre.', en: 'Choose at least one field to change.' },
+}
+
+/** Why a webhook call was refused: the switch, ZDR, a limit or duplicate, a bad field, or the generic failure. */
+export function webhookErrorMessage(error: unknown, tr: Tr, fallback: { no: string; en: string }): string {
+  if (isUnsupported(error)) {
+    return tr(
+      'Webhooks er ikke slått på på Quarry. Slå på QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS der (og QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS hvis den er av), og prøv igjen.',
+      'Webhooks are not switched on in Quarry. Turn on QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS there (and QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS if it is off), and try again.',
+    )
+  }
+  if (error instanceof ApiError) {
+    const reason = reasonOf(error)
+    if (error.status === 403 && reason === 'webhook_off_process') {
+      return tr(
+        'Webhooks er ikke tilgjengelig under dataskjerming (ZDR). Eksisterende kan du fortsatt se, slette og rotere.',
+        'Webhooks are not available under zero data retention (ZDR). You can still view, delete and rotate existing ones.',
+      )
+    }
+    if (error.status === 409 && reason === 'subscription_exists') {
+      return tr(
+        'Det finnes allerede en webhook for denne adressen med denne hendelsen.',
+        'A webhook for this address with this event already exists.',
+      )
+    }
+    if (error.status === 409 && reason === 'delivery_not_retryable') {
+      return tr(
+        'Leveringen kan ikke sendes på nytt nå. Den er allerede levert eller er i gang.',
+        'The delivery cannot be sent again now. It has already been delivered or is in progress.',
+      )
+    }
+    if (error.status === 429 && reason === 'subscription_limit') {
+      return tr(
+        'Du har nådd grensen på 10 webhooks. Slett en før du oppretter en ny.',
+        'You have reached the limit of 10 webhooks. Delete one before creating another.',
+      )
+    }
+    const copy = error.status === 400 && reason ? WEBHOOK_REASONS[reason] : undefined
+    if (copy) return tr(copy.no, copy.en)
+  }
+  return translateApiError(error, tr, fallback)
 }

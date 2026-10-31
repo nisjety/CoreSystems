@@ -19,6 +19,7 @@ import { changeCount, changeTimeline, shortFingerprint } from '@/features/ingest
 import { describeCron } from '@/features/ingestions/lib/cron'
 import { EmptyState, relativeTime } from '@/features/ingestions/components/ingestions-ui'
 import { ChangeDiffPanel } from '@/features/ingestions/components/ChangeDiffPanel'
+import { ChangeWebhooksPanel } from '@/features/ingestions/components/ChangeWebhooksPanel'
 import { listNotifications, type Notification as AppNotification } from '@/shared/api/notifications-client'
 
 /** The in-product notifications Quarry sends when a monitored page changes. */
@@ -46,6 +47,7 @@ function presetLabel(preset: MonitorPreset, tr: (no: string, en: string) => stri
 export function IngestionsMonitoringView(props: {
   monitors: ChangeMonitor[] | null
   onMonitorsChanged: () => Promise<void>
+  orgId: string
 }) {
   const i18n = useI18n()
   const tr = i18n.tr
@@ -318,6 +320,8 @@ export function IngestionsMonitoringView(props: {
             </For>
           </div>
         </section>
+
+        <ChangeWebhooksPanel orgId={props.orgId} />
 
         <section class="verevon-panel ingestions-card ingestions-runs-panel">
           <div class="ingestions-card__header">

@@ -1426,3 +1426,74 @@
 .ingestions-diff-op--removed strong {
   color: var(--ing-bad);
 }
+
+/* Change webhooks (INNH-5): the create form, the secret shown once, and the delivery log. */
+.ingestions-webhook-form {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.ingestions-list-card--paused {
+  opacity: 0.72;
+}
+
+.ingestions-secret-once {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.875rem;
+  border: 1px solid var(--ing-accent);
+  border-radius: 0.5rem;
+  background: var(--ing-accent-soft);
+}
+
+.ingestions-secret-once__value {
+  display: block;
+  padding: 0.5rem 0.625rem;
+  border-radius: 0.375rem;
+  background: var(--ing-surface-sunken);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.ingestions-webhook-deliveries {
+  margin-top: 0.5rem;
+}
+
+.ingestions-webhook-deliveries__list {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ingestions-webhook-delivery {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  padding: 0.5rem 0;
+  border-top: 1px solid var(--ing-border);
+}
+
+.ingestions-webhook-delivery > .ingestions-min-width {
+  flex: 1 1 12rem;
+}
+
+.ingestions-webhook-docs {
+  margin-top: 0.5rem;
+  font-size: 0.875rem;
+  color: var(--ing-text-muted);
+}
+
+.ingestions-webhook-docs summary {
+  cursor: pointer;
+  color: var(--ing-text);
+}
+
+.ingestions-webhook-docs ol {
+  margin: 0.5rem 0;
+  padding-left: 1.25rem;
+  display: grid;
+  gap: 0.25rem;
+}

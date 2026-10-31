@@ -800,7 +800,7 @@ export default function VerevonIngestionsPage() {
         </Show>
 
         <Show when={activeView() === 'monitoring'}>
-          <IngestionsMonitoringView monitors={monitors()} onMonitorsChanged={reloadMonitors} />
+          <IngestionsMonitoringView monitors={monitors()} onMonitorsChanged={reloadMonitors} orgId={orgId()} />
         </Show>
 
         <Show when={activeView() === 'sources'}>
