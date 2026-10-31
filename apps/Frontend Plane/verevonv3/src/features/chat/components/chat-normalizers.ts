@@ -66,6 +66,7 @@ import {
   type ComposerAttachment,
   type ComposerToolId,
   type GeneratedFile,
+  type GeneratedFilePreview,
   type GeneratedFileCheck,
   type GeneratedFileCheckLevel,
   type QueuedInput,
@@ -1654,6 +1655,24 @@ export function normalizeGeneratedFileCheck(value: unknown): GeneratedFileCheck 
   return { level: record.level, checks }
 }
 
+/**
+ * The rendered PDF copy the gateway attached to a generated Office file, read as
+ * the wire sends it. Anything but a PDF `data:` URI with its page facts is no
+ * preview, and only PNG `data:` thumbnails are kept, so the frame never loads a URL.
+ */
+export function normalizeGeneratedFilePreview(value: unknown): GeneratedFilePreview | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const record = value as Record<string, unknown>
+  if (record.mime !== 'application/pdf') return undefined
+  if (typeof record.url !== 'string' || !record.url.startsWith('data:application/pdf;base64,')) return undefined
+  if (typeof record.pages !== 'number' || typeof record.fonts_substituted !== 'boolean') return undefined
+  if (!Array.isArray(record.thumbs)) return undefined
+  const thumbs = (record.thumbs as unknown[]).filter(
+    (thumb): thumb is string => typeof thumb === 'string' && thumb.startsWith('data:image/png;base64,'),
+  )
+  return { mime: 'application/pdf', url: record.url, pages: record.pages, fontsSubstituted: record.fonts_substituted, thumbs }
+}
+
 export function normalizeGeneratedFile(event: {
   id?: string
   name?: string
@@ -1662,9 +1681,11 @@ export function normalizeGeneratedFile(event: {
   url?: string
   size?: number
   check?: unknown
+  preview?: unknown
 }): GeneratedFile | null {
   if (!event.url || !event.name) return null
   const check = normalizeGeneratedFileCheck(event.check)
+  const preview = normalizeGeneratedFilePreview(event.preview)
   return {
     id: event.id ?? event.url,
     name: event.name,
@@ -1672,6 +1693,7 @@ export function normalizeGeneratedFile(event: {
     size: event.size ?? 0,
     url: event.url,
     ...(check ? { check } : {}),
+    ...(preview ? { preview } : {}),
   }
 }
 

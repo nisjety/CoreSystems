@@ -23,7 +23,7 @@ The roadmap marks most phases ❌. **The code says otherwise.** This is the root
 | P7 knowledge plane ❌ | **Partial — routes live** | gateway `/v1/graph/entities`,`/v1/graph/expand`,`/v1/wiki/pages`; dataplane protos `graph_v1`,`wiki_v1`,`knowledge_v2` |
 | P8 token efficiency ❌ | **Partial** | gateway `/v1/toon/encode`; execution-core compaction hook; `session-core/compaction.rs` |
 | MCP / plugins "not started" | **Registries EXIST (in-mem)** | gateway `runtime_registries.rs`: mcp (Wave 10g), plugins (10h), commands+hooks+permissions (10i) |
-| Plan mode / approvals ❌ | **EXIST (in-mem, gateway)** | `coordinator.rs` (PlanModeStore, TeamWorkerStore), `approvals.rs` (ApprovalStore). The plan-mode rung grant has a durable carrier in session-core (`threads` columns, migration 0050, `ThreadAutonomy.GetThreadGrant`) behind `MODEL_GATEWAY_DURABLE_PLAN_GRANT`, default off; the in-memory `PlanModeStore` grant stays as the rollback path and as the write-failure fallback. |
+| Plan mode / approvals ❌ | **EXIST (in-mem, gateway)** | `coordinator.rs` (PlanModeStore, TeamWorkerStore), `approvals.rs` (ApprovalStore). The plan-mode rung grant has a durable carrier in session-core (`threads` columns, migration 0050, `ThreadAutonomy.GetThreadGrant`) behind `MODEL_GATEWAY_DURABLE_PLAN_GRANT`, default off; the in-memory `PlanModeStore` grant stays as the rollback path and as the write-failure fallback. Approve then execute (WS14-S2): the gateway claims the plan and binds the thread grant to the execute run through session-core `ThreadAutonomy.BindGrantToRun`, behind `MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE` (off). |
 
 **Conclusion:** Model Plane v1 is ~80–90% feature-complete against its own roadmap. The remaining work is **harmonization + a few genuine gaps**, not greenfield phases.
 
@@ -76,7 +76,7 @@ Legend — **Owner** = single system of record. **Relay** = ingress/enforcement 
 | Channels (Slack/Discord/…) / voice | **bridge-core** (Go) | session-core | gateway ingress | NATS | ✅ (`channel/`,`voice/` exist) |
 | IDE bridge / remote sessions | **bridge-core** (`session/`) | — | gateway WS | — | 🟡 partial; reuse Verevon JWT |
 | Browser grants | **browser-broker** (Go) | in-mem + Redis target | — | — | ✅ |
-| Do-loop browser session (browser.open/observe/close) | **execution-core** (browser_session.rs: grant from browser-broker, run on Quarry; site decision at broker mint) | in-memory per run | released at run end and cancel | capability-core `cap.browser.observe` / `cap.browser.act` | source-verified, switch off |
+| Do-loop browser session (browser.open/observe/close; browser.act behind `EXECUTION_DO_BROWSER_ACT_ENABLED`, off) | **execution-core** (browser_session.rs: grant from browser-broker, run on Quarry; site decision at broker mint) | in-memory per run | released at run end and cancel | capability-core `cap.browser.observe` / `cap.browser.act` | source-verified, switch off |
 | Cost / usage ledger | **cost-core** (Go) | Postgres | gateway emits `usage.*` | NATS | ✅ |
 | Run-cost meter and ceiling warnings | **model-gateway** (per-turn meter and run ceilings; WS27-S1 and S6, not yet built) | none for the meter (per turn); durable rows stay in **cost-core** (Postgres) | gateway emits the `usage` and `usage_progress` frames; cost-core prices nothing on the stream | NATS usage | single owner: one meter in the gateway, one ledger in cost-core; an unknown price is null |
 | Fine-tuning jobs | **session-core** (persist) + **model-gateway** (Azure) | Postgres | poller | NATS finetune | ✅ (Wave 7) |

@@ -251,6 +251,10 @@ the owner's direct Anthropic API key with `claude-sonnet-5-5`. Live-verified in 
 
 The attention state, the rail and badge, the typed RUN_ATTENTION events, the notification path, the per-user stream and Web Push are built behind switches that all default off: SESSION_CORE_ATTENTION_ENABLED, SESSION_CORE_ATTENTION_EVENTS_ENABLED, SESSION_CORE_ATTENTION_STREAM_ENABLED, CAPABILITY_CORE_ATTENTION_NOTIFY_ENABLED, NOTIFICATION_NATIVE_TYPES_ENABLED and NOTIFICATION_WEB_PUSH_ENABLED. No compose file turns one on, and no slice has live evidence. The attention capability stays source_only until candidate and rollback evidence exists.
 
+## Approve then execute, Office preview, browser act (2026-10-31): source-verified, switches off
+
+WS14-S2 binds the thread grant to the execute run behind MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE (off); its behaviour tests and ZDR goldens are still missing. WS19-S5 shows a PDF preview of generated Office files only when CODE_INTERPRETER_OFFICE_VERIFY=render. WS21-S5b offers browser.act behind EXECUTION_DO_BROWSER_ACT_ENABLED (off) and must stay off until Quarry's K3-6 read_only test passes; site consent is not built.
+
 ## Do browser and generated-file checks (2026-10-31): source-verified, switches off
 
 WS21-S5a's Do-loop browser.open, browser.observe and browser.close are built behind EXECUTION_DO_BROWSER_ENABLED (off). No live proof: the broker refuses read-only grants outside ZDR, so a non-ZDR open fails closed until that policy is decided, and Quarry's grant issuance is on quarryv2. WS19-S3's check chip shows only when CODE_INTERPRETER_OFFICE_VERIFY runs; CODE_INTERPRETER_VERIFY_ENFORCE stays off until the false-failure corpus run.

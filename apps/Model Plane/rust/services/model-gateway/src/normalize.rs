@@ -598,6 +598,7 @@ mod tests {
             generate_image: false,
             plan_mode: false,
             execute_granted: false,
+            approved_plan_id: None,
             tools: Vec::new(),
             org_name: None,
             user_name: None,

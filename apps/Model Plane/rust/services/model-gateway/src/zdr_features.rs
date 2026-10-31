@@ -135,6 +135,7 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
     // An execute turn runs an executing loop under a plan grant. A ZDR turn keeps no
     // plan and no grant, so it is refused through the `agentic` feature it rides on.
     ("execute_granted", refused_feature("agentic")),
+    ("approved_plan_id", refused_feature("agentic")),
     // A client's own tool definitions. Those the composer derives from its
     // actions are declared here too, so an action is refused the same way.
     ("tools", refused_feature("client_tools")),
@@ -242,6 +243,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         generate_image: _,
         plan_mode: _,
         execute_granted: _,
+        approved_plan_id: _,
         tools: _,
         org_name: _,
         user_name: _,
@@ -284,6 +286,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         "generate_image",
         "plan_mode",
         "execute_granted",
+        "approved_plan_id",
         "tools",
         "org_name",
         "user_name",
@@ -322,6 +325,9 @@ pub fn refusal(request: &InvokeRequest) -> Option<Refusal> {
         return feature("agentic");
     }
     if request.execute_granted {
+        return feature("agentic");
+    }
+    if request.approved_plan_id.as_deref().is_some_and(|id| !id.trim().is_empty()) {
         return feature("agentic");
     }
     if request.regenerate_of_message_id.as_deref().is_some_and(|id| !id.trim().is_empty())

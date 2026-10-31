@@ -28190,6 +28190,46 @@ body.verevon-chat-canvas-resizing * {
 
 /* Sandboxed preview of untrusted model-generated HTML (see ArtifactHtmlPreview
    — the iframe carries `sandbox="allow-scripts"` and no `allow-same-origin`). */
+.verevon-chat-artifact-office {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+
+.verevon-chat-artifact-office__notice {
+  margin: 0;
+  font-size: 12px;
+  color: var(--verevon-e-muted);
+}
+
+.verevon-chat-artifact-office__pages {
+  display: flex;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  overflow-x: auto;
+  list-style: none;
+}
+
+.verevon-chat-artifact-office__pages button {
+  padding: 2px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  cursor: pointer;
+}
+
+.verevon-chat-artifact-office__pages button[aria-current="page"] {
+  border-color: var(--accent);
+}
+
+.verevon-chat-artifact-office__pages img {
+  display: block;
+  height: 96px;
+  width: auto;
+}
+
 .verevon-chat-artifact-frame {
   overflow: hidden;
   border: 0;

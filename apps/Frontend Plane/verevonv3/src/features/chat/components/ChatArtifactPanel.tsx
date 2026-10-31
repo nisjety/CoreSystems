@@ -37,6 +37,7 @@ import {
   onCleanup,
 } from 'solid-js'
 import { extraArtifactRenderers } from './artifact-renderers'
+import { officePdfRenderer } from './ArtifactOfficePreview'
 import {
   ChatMarkdown,
   DiffView,
@@ -75,6 +76,8 @@ import {
 } from './chat-types'
 import { sandboxHtmlDocument } from '@/shared/lib/sandbox-html'
 import { useI18n } from '@/shared/i18n'
+
+extraArtifactRenderers.register(officePdfRenderer)
 
 const KIND_ICONS: Record<ArtifactRenderKind, IconComponent> = {
   binary: FileSpreadsheet,
@@ -421,7 +424,16 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
           >
           <Switch fallback={<ArtifactPlainText content={displayed().content} />}>
             <Match when={extraRenderer()?.component}>
-              {(component) => <Dynamic component={component()} artifact={displayed()} />}
+              {(component) => (
+                <Dynamic
+                  component={component()}
+                  artifact={displayed()}
+                  file={props.item.file}
+                  fallback={() => (
+                    <Show when={fileMeta()}>{(meta) => <ArtifactFileCard meta={meta()} title={title()} />}</Show>
+                  )}
+                />
+              )}
             </Match>
             <Match when={renderKind() === 'code'}>
               <ArtifactCodeView content={displayed().content} language={artifactLanguage(displayed())} />

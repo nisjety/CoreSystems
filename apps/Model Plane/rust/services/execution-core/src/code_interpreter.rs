@@ -198,6 +198,10 @@ struct CodeResult {
     /// Office files the verifier did not check, so the model can say so.
     #[serde(skip_serializing_if = "is_zero")]
     verification_unchecked: usize,
+    /// The verifier's rendered copies of checked files, for the viewer only; the delivered
+    /// files stay the sandbox's bytes. Empty unless the render layer ran.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    previews: Vec<office_verify::FilePreview>,
 }
 
 fn is_zero(count: &usize) -> bool {
@@ -728,6 +732,7 @@ async fn run_in_root(
         files,
         verification: office.reports,
         verification_unchecked: office.unchecked,
+        previews: office.previews,
     })
     .map_err(|error| format!("code_interpreter could not encode its result: {error}"))
 }
@@ -1017,6 +1022,7 @@ mod tests {
             ],
             verification: Vec::new(),
             verification_unchecked: 0,
+            previews: Vec::new(),
         };
         assert_eq!(
             serde_json::to_string(&result).expect("serializes"),

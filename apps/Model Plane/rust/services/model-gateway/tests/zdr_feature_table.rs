@@ -265,6 +265,19 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
             refused("agentic"),
         ),
         ("execute_granted", with("execute_granted", json!(false)), None),
+        // WS14-S2: naming an approved plan asks for an execute run, so a ZDR turn refuses it
+        // through `agentic` like `execute_granted`; a blank id names no plan.
+        (
+            "approved_plan_id",
+            with("approved_plan_id", json!("plan-1")),
+            refused("agentic"),
+        ),
+        (
+            "approved_plan_id",
+            with("approvedPlanId", json!("plan-1")),
+            refused("agentic"),
+        ),
+        ("approved_plan_id", with("approved_plan_id", json!("  ")), None),
         (
             "tools",
             with(

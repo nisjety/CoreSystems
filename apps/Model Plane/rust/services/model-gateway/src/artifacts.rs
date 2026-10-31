@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 
-use crate::sse_events::ChatEvent;
+use crate::sse_events::{AttachmentPreview, ChatEvent};
 
 /// Artifact kinds the chat client knows how to render. Kept as an enum here
 /// (rather than free-form strings at each call site) so a typo cannot silently
@@ -486,6 +486,7 @@ pub fn attachment_event(
     data_uri: &str,
     size: i64,
     check: Option<mp_contracts::office_verification::OfficeVerification>,
+    preview: Option<AttachmentPreview>,
 ) -> ChatEvent {
     ChatEvent::Attachment {
         id: id.to_owned(),
@@ -494,6 +495,7 @@ pub fn attachment_event(
         url: data_uri.to_owned(),
         size,
         check,
+        preview,
     }
 }
 
@@ -807,6 +809,7 @@ mod tests {
             "data:application/x;base64,AA",
             2,
             None,
+            None,
         ) {
             ChatEvent::Attachment {
                 id,
@@ -815,6 +818,7 @@ mod tests {
                 url,
                 size,
                 check,
+                preview: _,
             } => {
                 assert_eq!(id, "f1");
                 assert_eq!(name, "r.xlsx");

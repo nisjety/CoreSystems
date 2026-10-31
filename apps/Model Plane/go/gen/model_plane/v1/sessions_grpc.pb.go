@@ -2007,6 +2007,7 @@ var SessionRetentionService_ServiceDesc = grpc.ServiceDesc{
 
 const (
 	ThreadAutonomy_GetThreadGrant_FullMethodName = "/model_plane.v1.ThreadAutonomy/GetThreadGrant"
+	ThreadAutonomy_BindGrantToRun_FullMethodName = "/model_plane.v1.ThreadAutonomy/BindGrantToRun"
 )
 
 // ThreadAutonomyClient is the client API for ThreadAutonomy service.
@@ -2025,6 +2026,15 @@ type ThreadAutonomyClient interface {
 	// "no grant" is an answer, not an error. Read-only; it spends nothing. Refused
 	// for a caller that does not own the thread, and never answers for another org.
 	GetThreadGrant(ctx context.Context, in *GetThreadGrantRequest, opts ...grpc.CallOption) (*GetThreadGrantResponse, error)
+	// Bind the thread's live grant to the run that executes the plan it was
+	// approved with (WS14 S2, approve then execute). One statement copies the
+	// rung, the justification and the plan id onto the run's record, and it
+	// matches only while the thread still holds exactly that plan and the grant
+	// has not lapsed, so the rung is never one the caller stated. Refused with
+	// FAILED_PRECONDITION `plan_grant_unavailable` otherwise, and for a
+	// zero-retention or waived credential. Session Core does not spend the plan:
+	// the gateway's APPROVED -> EXECUTING compare-and-swap is the single-use guard.
+	BindGrantToRun(ctx context.Context, in *BindGrantToRunRequest, opts ...grpc.CallOption) (*BindGrantToRunResponse, error)
 }
 
 type threadAutonomyClient struct {
@@ -2039,6 +2049,16 @@ func (c *threadAutonomyClient) GetThreadGrant(ctx context.Context, in *GetThread
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetThreadGrantResponse)
 	err := c.cc.Invoke(ctx, ThreadAutonomy_GetThreadGrant_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *threadAutonomyClient) BindGrantToRun(ctx context.Context, in *BindGrantToRunRequest, opts ...grpc.CallOption) (*BindGrantToRunResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BindGrantToRunResponse)
+	err := c.cc.Invoke(ctx, ThreadAutonomy_BindGrantToRun_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -2061,6 +2081,15 @@ type ThreadAutonomyServer interface {
 	// "no grant" is an answer, not an error. Read-only; it spends nothing. Refused
 	// for a caller that does not own the thread, and never answers for another org.
 	GetThreadGrant(context.Context, *GetThreadGrantRequest) (*GetThreadGrantResponse, error)
+	// Bind the thread's live grant to the run that executes the plan it was
+	// approved with (WS14 S2, approve then execute). One statement copies the
+	// rung, the justification and the plan id onto the run's record, and it
+	// matches only while the thread still holds exactly that plan and the grant
+	// has not lapsed, so the rung is never one the caller stated. Refused with
+	// FAILED_PRECONDITION `plan_grant_unavailable` otherwise, and for a
+	// zero-retention or waived credential. Session Core does not spend the plan:
+	// the gateway's APPROVED -> EXECUTING compare-and-swap is the single-use guard.
+	BindGrantToRun(context.Context, *BindGrantToRunRequest) (*BindGrantToRunResponse, error)
 	mustEmbedUnimplementedThreadAutonomyServer()
 }
 
@@ -2073,6 +2102,9 @@ type UnimplementedThreadAutonomyServer struct{}
 
 func (UnimplementedThreadAutonomyServer) GetThreadGrant(context.Context, *GetThreadGrantRequest) (*GetThreadGrantResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetThreadGrant not implemented")
+}
+func (UnimplementedThreadAutonomyServer) BindGrantToRun(context.Context, *BindGrantToRunRequest) (*BindGrantToRunResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method BindGrantToRun not implemented")
 }
 func (UnimplementedThreadAutonomyServer) mustEmbedUnimplementedThreadAutonomyServer() {}
 func (UnimplementedThreadAutonomyServer) testEmbeddedByValue()                        {}
@@ -2113,6 +2145,24 @@ func _ThreadAutonomy_GetThreadGrant_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ThreadAutonomy_BindGrantToRun_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BindGrantToRunRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ThreadAutonomyServer).BindGrantToRun(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ThreadAutonomy_BindGrantToRun_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ThreadAutonomyServer).BindGrantToRun(ctx, req.(*BindGrantToRunRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ThreadAutonomy_ServiceDesc is the grpc.ServiceDesc for ThreadAutonomy service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -2123,6 +2173,10 @@ var ThreadAutonomy_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetThreadGrant",
 			Handler:    _ThreadAutonomy_GetThreadGrant_Handler,
+		},
+		{
+			MethodName: "BindGrantToRun",
+			Handler:    _ThreadAutonomy_BindGrantToRun_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

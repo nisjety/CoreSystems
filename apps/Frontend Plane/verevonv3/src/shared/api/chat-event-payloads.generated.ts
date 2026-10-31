@@ -18,6 +18,7 @@ export type ChatEventPayloads = {
     check?: Record<string, unknown>
     id: string
     name: string
+    preview?: Record<string, unknown>
     size: number
     type: string
     url: string
