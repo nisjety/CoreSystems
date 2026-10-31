@@ -613,6 +613,10 @@ impl ExecutionService {
                 self.cas_client.as_ref(),
                 &self.sandbox_tokens,
                 self.process_host.as_deref(),
+                // A scheduled run is always Space-scoped (`validate_scheduled_step_bindings` requires
+                // its Space) and carries no retrieval decision, so its knowledge search is withheld
+                // rather than run organisation-wide (WS18-S5; WS20 owns a decision for these runs).
+                crate::knowledge_tools::SpaceRetrieval::Withheld,
                 None,
                 Some(runtime_loop::scheduled_agent::loop_scope(&contract)),
             ),
@@ -1783,6 +1787,13 @@ impl ExecutionCore for ExecutionService {
         } else {
             None
         };
+        // The Space retrieval the gateway authorised for this run's knowledge search (WS18-S5). It is
+        // read before the request is consumed, and a header that is not valid text is withheld, not
+        // ignored: a decision nobody can read must not turn into an organisation-wide search.
+        let space_retrieval_header = request
+            .metadata()
+            .get(crate::knowledge_tools::SPACE_RETRIEVAL_HEADER)
+            .map(|value| value.to_str().unwrap_or_default().to_owned());
         let mut req = request.into_inner();
         caller.authorize(&req.org_id, Some(&req.user_id))?;
         self.authorize_run(&caller, &req.run_id, &session_bearer)
@@ -1835,6 +1846,7 @@ impl ExecutionCore for ExecutionService {
             self.cas_client.as_ref(),
             &self.sandbox_tokens,
             self.process_host.as_deref(),
+            crate::knowledge_tools::SpaceRetrieval::from_header(space_retrieval_header.as_deref()),
         )
         .await?;
         Ok(Response::new(response))

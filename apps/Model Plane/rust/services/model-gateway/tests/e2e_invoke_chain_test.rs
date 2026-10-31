@@ -2097,6 +2097,10 @@ async fn spawn_rejecting_execution_mock() -> ExecutionCoreClient<tonic::transpor
 /// Every `RunAgentRequest` a mock Execution Core received, in order.
 type CapturedRunAgentRequests = Arc<Mutex<Vec<mpv1::RunAgentRequest>>>;
 
+/// The `x-space-retrieval-authorization` header of each `RunAgent` a mock Execution Core received, in
+/// order: `None` where the request carried none.
+type CapturedSpaceRetrievals = Arc<Mutex<Vec<Option<String>>>>;
+
 /// A mock Execution Core that records each `RunAgent` request and then refuses
 /// it (`PermissionDenied`, a CONFIRMED pre-dispatch rejection, so the prepared
 /// run is terminalized and the stream ends). What the test asserts on is what
@@ -2104,6 +2108,7 @@ type CapturedRunAgentRequests = Arc<Mutex<Vec<mpv1::RunAgentRequest>>>;
 /// is unreachable on the agentic chat path.
 struct CapturingExecutionCore {
     captured: CapturedRunAgentRequests,
+    space_retrievals: CapturedSpaceRetrievals,
 }
 
 #[tonic::async_trait]
@@ -2112,6 +2117,11 @@ impl ExecutionCore for CapturingExecutionCore {
         &self,
         request: TReq<mpv1::RunAgentRequest>,
     ) -> Result<Response<mpv1::RunAgentResponse>, Status> {
+        let space_retrieval = request
+            .metadata()
+            .get("x-space-retrieval-authorization")
+            .map(|value| value.to_str().unwrap_or_default().to_owned());
+        self.space_retrievals.lock().unwrap().push(space_retrieval);
         self.captured.lock().unwrap().push(request.into_inner());
         Err(Status::permission_denied(
             "run agent captured, then refused before it began",
@@ -2159,11 +2169,21 @@ impl ExecutionCore for CapturingExecutionCore {
 async fn spawn_capturing_execution_mock(
     captured: CapturedRunAgentRequests,
 ) -> ExecutionCoreClient<tonic::transport::Channel> {
+    spawn_capturing_execution_mock_with_headers(captured, Arc::default()).await
+}
+
+async fn spawn_capturing_execution_mock_with_headers(
+    captured: CapturedRunAgentRequests,
+    space_retrievals: CapturedSpaceRetrievals,
+) -> ExecutionCoreClient<tonic::transport::Channel> {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         Server::builder()
-            .add_service(ExecutionCoreServer::new(CapturingExecutionCore { captured }))
+            .add_service(ExecutionCoreServer::new(CapturingExecutionCore {
+                captured,
+                space_retrievals,
+            }))
             .serve_with_incoming(TcpListenerStream::new(listener))
             .await
             .ok();
@@ -4835,6 +4855,86 @@ async fn invoke_stream_agentic_off_the_subscription_pins_no_route_even_with_the_
     assert_eq!(captured[0].provider_hint, "");
     assert_eq!(captured[0].subscription_connection_id, "");
     assert_eq!(captured[0].model, "m", "the request's model is unchanged");
+}
+
+/// A Space-scoped Do run's `RunAgent` carries the Space retrieval its turn authorised, and only then (WS18-S5).
+/// With `AGENTIC_SPACE_RETRIEVAL_ENABLED` off no run carries the header. With it on, a Space-scoped run carries
+/// its Control decision, or an empty value when its turn holds none (execution-core withholds that run's
+/// search); a run that is not Space-scoped carries none. Only the literal `true` enables it.
+#[tokio::test]
+#[serial_test::serial]
+async fn agentic_dispatch_forwards_the_space_retrieval_decision_only_when_scoped() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+
+    async fn retrieval_headers_for(switch: Option<&str>, body: String) -> Vec<Option<String>> {
+        let _switch = EnvGuard::set("AGENTIC_SPACE_RETRIEVAL_ENABLED", switch);
+        let client = spawn_mock(MockOk::default()).await;
+        let (mock_session, _session_handles) = MockSessionCore::new();
+        let session_client = spawn_session_mock(mock_session).await;
+        let (mut state, _publisher) = make_state(client, session_client).await;
+        let captured: CapturedRunAgentRequests = Arc::new(Mutex::new(Vec::new()));
+        let space_retrievals: CapturedSpaceRetrievals = Arc::new(Mutex::new(Vec::new()));
+        state.execution_client =
+            spawn_capturing_execution_mock_with_headers(captured.clone(), space_retrievals.clone())
+                .await;
+        let (app, _delegated_jwks) = authenticated_user_router(
+            build_router(state, None),
+            "org_placeholder",
+            "user_placeholder",
+        )
+        .await;
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/invoke/stream")
+            .header(AUTHORIZATION, "Bearer dev")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let headers = space_retrievals.lock().unwrap().clone();
+        assert_eq!(
+            captured.lock().unwrap().len(),
+            headers.len(),
+            "one header is read for each RunAgent that arrived"
+        );
+        headers
+    }
+
+    let scoped = |retrieval_token: &str| {
+        format!(
+            r#"{{"content":"summarise our project documents","model":"m","features":["agentic"],"space_context":{{"space_id":"room-1","space_decision_ref":"decision-1","recipient_audience_ref":"audience-1","recipient_audience_revision":1,"recipient_audience_hash":"sha256:audience-1","privacy_policy_ref":"privacy-1","authority_revision":1,"resource_authorization_ref":"resource-1","space_decision_token":"space-token","retrieval_decision_token":"{retrieval_token}","action_schema_hash":"sha256:schema","payload_digest":"sha256:payload","idempotency_key":"idem-1"}}}}"#
+        )
+    };
+    let plain = r#"{"content":"plan this safely","model":"m","features":["agentic"]}"#;
+
+    assert_eq!(
+        retrieval_headers_for(None, scoped("retrieval-token-1")).await,
+        vec![None],
+        "with the switch off, a Space-scoped run leaves exactly as it did before the switch"
+    );
+    assert_eq!(
+        retrieval_headers_for(Some("1"), scoped("retrieval-token-1")).await,
+        vec![None],
+        "only the literal true enables the switch"
+    );
+    assert_eq!(
+        retrieval_headers_for(Some("true"), scoped("retrieval-token-1")).await,
+        vec![Some("retrieval-token-1".to_owned())],
+        "a Space-scoped run carries its decision"
+    );
+    assert_eq!(
+        retrieval_headers_for(Some("true"), scoped("")).await,
+        vec![Some(String::new())],
+        "a Space-scoped run whose turn holds no decision says so, so its search is withheld"
+    );
+    assert_eq!(
+        retrieval_headers_for(Some("true"), plain.to_owned()).await,
+        vec![None],
+        "a run that is not Space-scoped carries no header"
+    );
 }
 
 /// The `RunAgent` request one agentic turn sends, for the budget test below.

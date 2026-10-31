@@ -450,6 +450,9 @@ struct LoopContext<'a> {
     /// specific bearer must be user-bound. Read only by the `code_interpreter`
     /// dispatch arm in `run_rounds`, and only when `req.space_id` is set.
     sandbox_bearer: Option<&'a str>,
+    /// The run's Space retrieval for `knowledge_search` (WS18-S5), as the gateway authorised it. A
+    /// delegated child shares its parent's: it runs in the same Space.
+    space_retrieval: crate::knowledge_tools::SpaceRetrieval<'a>,
     /// The run's verified browser bearer (WS21-S2): present only when the request carried one and
     /// the browser switch is on. It names the user's broker grants, so no delegated child receives
     /// it (DEC-19 D10).
@@ -759,6 +762,7 @@ pub(crate) async fn run_agent(
     cas_client: Option<&crate::workspace_cas::CasClient>,
     sandbox_tokens: &crate::sandbox_lease::SandboxManagerTokenProvider,
     process_host: Option<&crate::process_host::ProcessHost>,
+    space_retrieval: crate::knowledge_tools::SpaceRetrieval<'_>,
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
     // A park resume (WS03 S8-6) is decided FIRST, before any tool is listed: its tool set is
     // derived without an MCP server or a caller, and nothing is claimed before it is.
@@ -807,6 +811,7 @@ pub(crate) async fn run_agent(
         cas_client,
         sandbox_tokens,
         process_host,
+        space_retrieval,
         None,
         None,
     )
@@ -911,6 +916,9 @@ async fn resume_parked_run(
         cas_client,
         sandbox_tokens,
         process_host,
+        // A park resume refuses a Space-scoped run (`park::admit`), so the loop it runs has no
+        // Space retrieval to authorise.
+        crate::knowledge_tools::SpaceRetrieval::Organisation,
         Some(super::park::ParkClaimed { claimed }),
         None,
     )
@@ -1431,6 +1439,8 @@ async fn run_agent_with_tools(
         cas_client,
         sandbox_tokens,
         process_host,
+        // A tool set nobody derived is a test driver: it authorises no Space retrieval.
+        crate::knowledge_tools::SpaceRetrieval::Organisation,
         None,
         None,
     )
@@ -1484,6 +1494,7 @@ pub(crate) async fn run_agent_with_offered(
     cas_client: Option<&crate::workspace_cas::CasClient>,
     sandbox_tokens: &crate::sandbox_lease::SandboxManagerTokenProvider,
     process_host: Option<&crate::process_host::ProcessHost>,
+    space_retrieval: crate::knowledge_tools::SpaceRetrieval<'_>,
     park: Option<super::park::ParkClaimed>,
     scheduled: Option<super::scheduled_agent::LoopScope>,
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
@@ -1546,6 +1557,7 @@ pub(crate) async fn run_agent_with_offered(
         cas_client,
         sandbox_tokens,
         process_host,
+        space_retrieval,
         route,
         deadline,
         tools.derivable,
@@ -1601,6 +1613,8 @@ async fn run_agent_with_route(
         cas_client,
         sandbox_tokens,
         process_host,
+        // A tool set nobody derived is a test driver: it authorises no Space retrieval.
+        crate::knowledge_tools::SpaceRetrieval::Organisation,
         route,
         deadline,
         false,
@@ -1635,6 +1649,7 @@ async fn run_agent_with_route_parkable(
     cas_client: Option<&crate::workspace_cas::CasClient>,
     sandbox_tokens: &crate::sandbox_lease::SandboxManagerTokenProvider,
     process_host: Option<&crate::process_host::ProcessHost>,
+    space_retrieval: crate::knowledge_tools::SpaceRetrieval<'_>,
     route: crate::agent_route::ModelRoute,
     deadline: crate::run_budget::RunDeadline,
     derivable: bool,
@@ -1777,6 +1792,7 @@ async fn run_agent_with_route_parkable(
         capability_policy,
         terminal_tokens,
         sandbox_bearer: sandbox_bearer.as_deref(),
+        space_retrieval,
         browser_bearer: browser_bearer.as_deref(),
         capability_client,
         sandbox_manager_client,
@@ -4140,6 +4156,8 @@ async fn run_rounds(
                             // The connections the run's person selected (WS23-S4). A delegated child
                             // runs the same request, so it reads the same selection.
                             connector_scope_of(req),
+                            // The run's Space retrieval for `knowledge_search` (WS18-S5).
+                            ctx.space_retrieval,
                         )
                         .await;
                         // The ledger's word first: a call that holds an effectful reservation
@@ -5529,6 +5547,8 @@ async fn run_delegated_child(
         capability_policy: parent.capability_policy,
         terminal_tokens: parent.terminal_tokens,
         sandbox_bearer: parent.sandbox_bearer,
+        // A delegated child runs in its parent's Space, so it searches under the parent's decision.
+        space_retrieval: parent.space_retrieval,
         // A delegated child never receives the browser bearer (DEC-19 D10).
         browser_bearer: None,
         capability_client: parent.capability_client,
@@ -11902,6 +11922,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("ordinary agent run should succeed");
@@ -11992,6 +12013,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("ZDR agent run should succeed");
@@ -12067,6 +12089,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("tier-constrained agent run should succeed");
@@ -13583,6 +13606,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await;
         let progress = rec.lock().unwrap().run_usage_progress.clone();
@@ -13832,6 +13856,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("inference failure should be finalized as a response");
@@ -13905,6 +13930,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect_err("a missing durable terminal receipt must fail the agent run");
@@ -13977,6 +14003,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("multi-tool agent run should succeed");
@@ -14439,6 +14466,7 @@ mod tests {
                 None,
                 &test_sandbox_tokens(),
                 None,
+                crate::knowledge_tools::SpaceRetrieval::Organisation,
             )
             .await
             .expect("a refused call inside a subagent must not fail the run");
@@ -17480,6 +17508,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("a delegating run must not fail because bookkeeping did");
@@ -17568,6 +17597,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("a ZDR delegation still runs");
@@ -17642,6 +17672,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("a delegating run must not fail because bookkeeping did");
@@ -17723,6 +17754,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("a delegating agent run should succeed");
@@ -18134,6 +18166,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("the run completes");
@@ -18219,6 +18252,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("a delegating agent run should succeed");
@@ -18402,6 +18436,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("a delegating agent run should succeed");
@@ -18494,6 +18529,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("a refused nested delegation must not fail the run");
@@ -18696,6 +18732,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("a refused record read inside a subagent must not fail the run");
@@ -18780,6 +18817,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("a refused plan.propose inside a subagent must not fail the run");
@@ -18871,6 +18909,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("a refused rung must not fail the run");
@@ -18956,6 +18995,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("a refused risky tool inside a subagent must not fail the run");
@@ -19057,6 +19097,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("a refused call inside a subagent must not fail the run");
@@ -19129,6 +19170,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("a truncated round must not fail the run");
@@ -19293,6 +19335,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("a refused plan-mode tool call must not fail the run");
@@ -19461,6 +19504,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("a failed delegation must not fail the parent run");
@@ -19656,6 +19700,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("a delegating run completes");
@@ -19704,6 +19749,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("a failed run is a response");
@@ -19930,6 +19976,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("an exhausted run is still finalized");
@@ -20026,6 +20073,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("a resumed delegation completes the run");
@@ -20109,6 +20157,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("a refused replay must not fail the run");
@@ -20177,6 +20226,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("an in-flight replay must not fail the run");
@@ -20253,6 +20303,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("a refused delegation must not fail the run");
@@ -20336,6 +20387,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("an exhausted run is still finalized");
@@ -20769,6 +20821,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("a fan-out run completes");
@@ -20870,6 +20923,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("a fan-out run completes");
@@ -20918,6 +20972,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("a fan-out run completes")
@@ -21547,6 +21602,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("a delegating run is finalized")
@@ -22190,6 +22246,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("a failed delegation must not fail the parent run");
@@ -22261,6 +22318,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("a delegating run is finalized");
@@ -22345,6 +22403,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await
         .expect("an exhausted run is still finalized");
@@ -26027,6 +26086,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
             route,
             deadline,
             how.derivable,
@@ -27170,6 +27230,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
             route,
             credential_deadline_already_spent(std::time::Instant::now()),
             true,
@@ -27512,6 +27573,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await;
         AgentRun {
@@ -28291,6 +28353,7 @@ mod tests {
             None,
             &test_sandbox_tokens(),
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
             Some(runtime_loop::park::ParkClaimed { claimed }),
             None,
         )
@@ -28956,6 +29019,7 @@ mod tests {
             None,
             &sandbox_tokens,
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
         ));
         // The run reaches its registration after its tool offer is resolved, so wait for the
         // files to appear (bounded) while the run is held in inference.

@@ -473,6 +473,8 @@ pub async fn execute_step(
         None,
         true,
         &[],
+        // The compatibility entry point has no run, so no Space retrieval was authorised for it.
+        crate::knowledge_tools::SpaceRetrieval::Organisation,
     )
     .await
 }
@@ -541,6 +543,8 @@ pub(crate) async fn execute_step_with_browser_grant(
         None,
         true,
         &[],
+        // The direct single-step RPC has no run, so no Space retrieval was authorised for it.
+        crate::knowledge_tools::SpaceRetrieval::Organisation,
     )
     .await
 }
@@ -613,6 +617,9 @@ pub(crate) async fn execute_step_with_subagent(
         None,
         true,
         &[],
+        // Only tests call this wrapper. The agent loop calls `execute_step_with_result_handles`
+        // directly with its run's own Space retrieval, so this one authorises none.
+        crate::knowledge_tools::SpaceRetrieval::Organisation,
     )
     .await
 }
@@ -662,6 +669,9 @@ pub(crate) async fn execute_step_with_result_handles(
     // The connections the run's person selected (WS23-S4). A caller with no run passes none, so a
     // connector read through it is refused.
     connector_scope: &[String],
+    // The run's Space retrieval for `knowledge_search` (WS18-S5). The agent loop passes its run's; a
+    // caller with no run passes `Organisation`.
+    space_retrieval: crate::knowledge_tools::SpaceRetrieval<'_>,
 ) -> StepOutcome {
     execute_step_inner(
         tool_name,
@@ -690,6 +700,7 @@ pub(crate) async fn execute_step_with_result_handles(
         result_store,
         read_run_inputs,
         connector_scope,
+        space_retrieval,
     )
     .await
 }
@@ -756,6 +767,8 @@ async fn execute_step_inner(
     read_run_inputs: bool,
     // The connections the run's person selected (WS23-S4); see `execute_step_with_result_handles`.
     connector_scope: &[String],
+    // The run's Space retrieval for `knowledge_search` (WS18-S5); see `execute_knowledge_search`.
+    space_retrieval: crate::knowledge_tools::SpaceRetrieval<'_>,
 ) -> StepOutcome {
     let released = release.is_some_and(|r| r.covers(step_id, tool_name, tool_input));
     // An MCP tool carries the call's content to a third-party server, so it is
@@ -1111,6 +1124,7 @@ async fn execute_step_inner(
             waived,
             min_privacy_tier,
             data_plane_bearer,
+            space_retrieval,
         )
         .await
     } else if tool_name == SAVE_MEMORY_TOOL {
@@ -1876,11 +1890,15 @@ struct KnowledgeInputValidated {
     route: KnowledgeRoute,
 }
 
+/// The typed reason a Space-scoped run's search is refused when it holds no decision (WS18-S5).
+const PROJECT_KNOWLEDGE_UNAVAILABLE: &str = "project knowledge unavailable";
+
 /// `knowledge_search` tool — input JSON
 /// `{"query": String, "top_k"?: i32, "route"?: "hybrid"}`.
 /// Retrieves the org's own ingested knowledge (RAG) via Data Plane v2. `org_id`
 /// comes from the run context (verified), never the model's input, so a tool
 /// call cannot cross tenant boundaries. Read-only (no approval gate).
+#[allow(clippy::too_many_arguments)]
 async fn execute_knowledge_search(
     tool_input: &str,
     org_id: &str,
@@ -1895,10 +1913,23 @@ async fn execute_knowledge_search(
     // `knowledge_tools::build_request`.
     min_privacy_tier: i32,
     data_plane_bearer: Option<&str>,
+    // The run's Space retrieval (WS18-S5). A Space-scoped run with no decision is
+    // refused here, before any call, so it can never fall through to the
+    // organisation-wide search below.
+    space_retrieval: crate::knowledge_tools::SpaceRetrieval<'_>,
 ) -> tool_bridge::ToolExecution {
     let input = match parse_knowledge_input(tool_input) {
         Ok(i) => i,
         Err(e) => return tool_error(e),
+    };
+    let space_decision = match space_retrieval {
+        crate::knowledge_tools::SpaceRetrieval::Organisation => None,
+        crate::knowledge_tools::SpaceRetrieval::Scoped(decision) => Some(decision),
+        crate::knowledge_tools::SpaceRetrieval::Withheld => {
+            return tool_error(crate::knowledge_tools::format_degraded_error(
+                PROJECT_KNOWLEDGE_UNAVAILABLE,
+            ));
+        }
     };
     if org_id.trim().is_empty() {
         return tool_error("knowledge_search requires a run org_id (tenant scope)".to_owned());
@@ -1925,6 +1956,7 @@ async fn execute_knowledge_search(
             waived,
             min_privacy_tier,
             data_plane_bearer,
+            space_decision,
         )
         .await
     {
@@ -1969,6 +2001,33 @@ mod knowledge_route_tests {
     fn blank_query_is_rejected_before_retrieval() {
         let error = parse_knowledge_input(r#"{"query":"  "}"#).expect_err("blank query rejected");
         assert!(error.contains("non-empty"));
+    }
+
+    /// A Space-scoped run with no decision is refused before any call, with the typed degraded
+    /// envelope (WS18-S5). It is refused whatever the endpoint is configured as, because the
+    /// refusal comes before the endpoint is read: the search can never fall through to the
+    /// organisation's own.
+    #[tokio::test]
+    async fn a_space_run_with_no_decision_refuses_knowledge_search_before_any_call() {
+        let input = r#"{"query":"quarterly revenue"}"#;
+        let out = execute_knowledge_search(
+            input,
+            "org-1",
+            "user-1",
+            false,
+            false,
+            0,
+            Some("user-token"),
+            crate::knowledge_tools::SpaceRetrieval::Withheld,
+        )
+        .await;
+        assert!(out.output.is_empty(), "no result is produced: {}", out.output);
+        let error = out.error.expect("a withheld search is a tool error");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&error).expect("the refusal is a typed JSON envelope");
+        assert_eq!(parsed["status"], "degraded");
+        assert_eq!(parsed["degraded"], true);
+        assert_eq!(parsed["reason"], PROJECT_KNOWLEDGE_UNAVAILABLE);
     }
 }
 
@@ -2708,6 +2767,7 @@ mod connector_tool_tests {
                     None,
                     true,
                     &[],
+                    crate::knowledge_tools::SpaceRetrieval::Organisation,
                 )
                 .await;
                 assert_eq!(out.status, "failed", "{tool} zdr={zdr} waived={waived}");
@@ -2752,7 +2812,7 @@ mod connector_tool_tests {
         let out = execute_step_inner(
             EXECUTE_PROVIDER_ACTION_TOOL, input, "ask", "", "org-1", "user-1", "run-1", "step-1", "",
             None, None, None, false, false, 0, None, None, None, &NoPolicy, None, None, None, None,
-            None, true, &selected,
+            None, true, &selected, crate::knowledge_tools::SpaceRetrieval::Organisation,
         )
         .await;
         assert_eq!(out.status, "failed");

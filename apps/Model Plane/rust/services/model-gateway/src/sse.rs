@@ -143,6 +143,32 @@ fn space_append_retrieval_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> 
     get(SPACE_APPEND_RETRIEVAL_VAR).is_some_and(|value| value == "true")
 }
 
+/// The switch that lets a Do run's `knowledge_search` retrieve under the Space decision its turn holds
+/// (WS18-S5). Opt-in: only the literal `true` enables it. Off, a Do run searches the organisation's own
+/// knowledge, as it always has. execution-core reads no switch of its own: this one decides whether the
+/// run carries the Space retrieval header at all.
+const SPACE_AGENTIC_RETRIEVAL_VAR: &str = "AGENTIC_SPACE_RETRIEVAL_ENABLED";
+
+fn space_agentic_retrieval_enabled() -> bool {
+    space_agentic_retrieval_enabled_with(&|key| std::env::var(key).ok())
+}
+
+fn space_agentic_retrieval_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    get(SPACE_AGENTIC_RETRIEVAL_VAR).is_some_and(|value| value == "true")
+}
+
+/// The Space retrieval a Do run's `knowledge_search` is authorised with, forwarded to execution-core in
+/// `x-space-retrieval-authorization` (WS18-S5). `None` (no header) for a run that is not Space-scoped and
+/// for every run while the switch is off, so those runs leave exactly as before. A Space-scoped run with
+/// the switch on carries its decision, or an empty value when its turn holds none: execution-core refuses
+/// that run's search rather than let it run organisation-wide. The decision is a request-only credential.
+fn agentic_space_retrieval(space_id: &str, decision: Option<&str>, enabled: bool) -> Option<String> {
+    if !enabled || space_id.is_empty() {
+        return None;
+    }
+    Some(decision.unwrap_or_default().trim().to_owned())
+}
+
 /// The Space retrieval decision a turn's grounding is scoped by. A scoped thread's first message
 /// carries `space_context`; a later one carries `space_append_context`, which is read only while the
 /// switch is on. An empty token is the BFF's FORBIDDEN answer, which `retrieval::scoped_retrieval_token`
@@ -2189,6 +2215,17 @@ pub async fn invoke_stream_sse(
             .or(req.space_append_context.as_ref())
             .map(|context| context.space_id.clone())
             .unwrap_or_default();
+        // The Space retrieval the run's `knowledge_search` is authorised with (WS18-S5): the decision the
+        // turn's own retrieval reads, with the same fallback to an append turn's.
+        let agentic_space_retrieval = agentic_space_retrieval(
+            &agentic_space_id,
+            space_retrieval_decision(
+                req.space_context.as_ref(),
+                req.space_append_context.as_ref(),
+                space_append_retrieval_enabled(),
+            ),
+            space_agentic_retrieval_enabled(),
+        );
         // A turn on the ChatGPT subscription pins the run to it, so the loop
         // can neither fall back to its default (paid) route nor run on another
         // provider. Every other turn leaves the route empty and the request
@@ -2222,6 +2259,7 @@ pub async fn invoke_stream_sse(
             model_bearer,
             inference_bearer,
             agentic_space_id,
+            agentic_space_retrieval,
             sandbox_bearer,
             // The Do turn's browser bearer, forwarded only on a run that keeps no ZDR (WS21-S2).
             browser_bearer,
@@ -10129,7 +10167,7 @@ fn posture_floor(claims: &crate::auth::Claims) -> crate::profile::ApprovalPostur
 
 /// Build the independently authenticated Execution Core request. Failure here
 /// is deterministic and happens before any remote dispatch attempt.
-#[allow(clippy::result_large_err)]
+#[allow(clippy::result_large_err, clippy::too_many_arguments)]
 fn authenticated_run_agent_request(
     request: RunAgentRequest,
     execution_bearer: &VerifiedExecutionBearer,
@@ -10138,6 +10176,7 @@ fn authenticated_run_agent_request(
     inference_bearer: &VerifiedInferenceBearer,
     sandbox_bearer: Option<&VerifiedSandboxBearer>,
     browser_bearer: Option<&VerifiedBrowserBearer>,
+    space_retrieval: Option<&str>,
 ) -> Result<tonic::Request<RunAgentRequest>, tonic::Status> {
     let zdr = request.zdr;
     let authorization = format!("Bearer {}", execution_bearer.as_str())
@@ -10192,6 +10231,16 @@ fn authenticated_run_agent_request(
                 .map_err(|_| {
                     tonic::Status::unauthenticated("malformed verified browser credential")
                 })?,
+        );
+    }
+    // Present only for a Space-scoped run while the switch is on (WS18-S5). Its value is the Control
+    // retrieval decision, or empty for a run that holds none, which execution-core refuses to search under.
+    if let Some(space_retrieval) = space_retrieval {
+        request.metadata_mut().insert(
+            "x-space-retrieval-authorization",
+            space_retrieval.parse().map_err(|_| {
+                tonic::Status::unauthenticated("malformed space retrieval decision")
+            })?,
         );
     }
     Ok(request)
@@ -10794,6 +10843,9 @@ fn spawn_run_dispatch(
     session_bearer: &VerifiedModelBearer,
     inference_bearer: &VerifiedInferenceBearer,
     space_id: &str,
+    // The Space retrieval the run's `knowledge_search` is authorised with (WS18-S5); see
+    // `agentic_space_retrieval`. `None` leaves the request without the header.
+    space_retrieval: Option<&str>,
     sandbox_bearer: Option<&VerifiedSandboxBearer>,
     browser_bearer: Option<&VerifiedBrowserBearer>,
     // plan-gate §2.4: the plan approved together with this thread's grant,
@@ -10913,6 +10965,7 @@ fn spawn_run_dispatch(
         inference_bearer,
         sandbox_bearer,
         browser_bearer,
+        space_retrieval,
     )?;
     Ok(tokio::spawn(async move {
         let result = execution_client
@@ -11607,6 +11660,9 @@ fn agentic_run_stream(
     // Space-scoped turn (see `auth::VerifiedSandboxBearer`'s doc for why the
     // governed agent loop needs it too, not only the inline ExecuteStep path).
     space_id: String,
+    // The Space retrieval the run's `knowledge_search` is authorised with (WS18-S5). `None` for a run that
+    // is not Space-scoped, for a continuation, and with the switch off; see `agentic_space_retrieval`.
+    space_retrieval: Option<String>,
     sandbox_bearer: Option<VerifiedSandboxBearer>,
     // The browser bearer of a Do turn that may be offered the browser tools (WS21-S2). `None` for
     // every continuation, which never forwards one, and for every turn with the switch off.
@@ -11755,6 +11811,7 @@ fn agentic_run_stream(
             &model_bearer,
             &inference_bearer,
             &space_id,
+            space_retrieval.as_deref(),
             sandbox_bearer.as_ref(),
             browser_bearer.as_ref(),
             plan_context.as_deref(),
@@ -15964,6 +16021,7 @@ mod tests {
             &super::VerifiedInferenceBearer::for_test("inference-token"),
             None,
             None,
+            None,
         )
         .expect("build execution request");
 
@@ -16014,6 +16072,7 @@ mod tests {
             &super::VerifiedInferenceBearer::for_test("inference-token"),
             Some(&super::VerifiedSandboxBearer::for_test("sandbox-token")),
             None,
+            None,
         )
         .expect("build execution request");
 
@@ -16040,6 +16099,7 @@ mod tests {
                 &super::VerifiedInferenceBearer::for_test("inference-token"),
                 None,
                 browser,
+                None,
             )
             .expect("build execution request")
         };
@@ -17915,6 +17975,7 @@ fn run_agent_request_is_buildable(
         inference_bearer,
         None,
         None,
+        None,
     )
     .map(|_| ())
 }
@@ -18641,6 +18702,9 @@ pub(crate) async fn continue_run(
             model_bearer,
             inference_bearer,
             String::new(),
+            // A continuation is never Space-scoped here (its authority is the pause's), so it carries no
+            // Space retrieval (WS18-S5).
+            None,
             None,
             // A continuation never forwards a browser bearer (WS21-S2).
             None,
@@ -20439,6 +20503,7 @@ mod continue_run_tests {
                 &inference,
                 None,
                 None,
+                None,
             )
             .expect_err(broken);
             assert_eq!(launch.code(), refused.code(), "{broken}: the pre-check is the launch's check");
@@ -20535,6 +20600,7 @@ mod continue_run_tests {
             session,
             inference,
             String::new(),
+            None,
             None,
             None,
             AgentRoute::default(),
@@ -21953,6 +22019,7 @@ mod continue_run_tests {
             String::new(),
             None,
             None,
+            None,
             AgentRoute::default(),
             None,
             Some(continue_resume("", "claim-1", "park")),
@@ -22958,6 +23025,83 @@ mod do_attachment_tests {
         assert!(space_append_retrieval_enabled_with(&|key| {
             (key == SPACE_APPEND_RETRIEVAL_VAR).then(|| "true".to_owned())
         }));
+    }
+
+    #[test]
+    fn the_agentic_space_retrieval_switch_is_strict() {
+        for value in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("TRUE"),
+            Some(" true"),
+            Some("yes"),
+            Some("false"),
+        ] {
+            let value = value.map(str::to_owned);
+            assert!(
+                !space_agentic_retrieval_enabled_with(&|_| value.clone()),
+                "{value:?}"
+            );
+        }
+        assert!(space_agentic_retrieval_enabled_with(&|key| {
+            (key == SPACE_AGENTIC_RETRIEVAL_VAR).then(|| "true".to_owned())
+        }));
+    }
+
+    /// The header follows the Space and the switch alone: a run that is not Space-scoped, or any run with the
+    /// switch off, carries none; a Space-scoped run with the switch on carries its decision, and an empty value
+    /// when its turn holds none (WS18-S5).
+    #[test]
+    fn a_do_run_carries_its_space_retrieval_only_when_scoped_and_switched_on() {
+        assert_eq!(agentic_space_retrieval("room-1", Some("decision-1"), false), None);
+        assert_eq!(agentic_space_retrieval("", Some("decision-1"), true), None);
+        assert_eq!(agentic_space_retrieval("", None, true), None);
+        assert_eq!(
+            agentic_space_retrieval("room-1", Some("decision-1"), true),
+            Some("decision-1".to_owned())
+        );
+        assert_eq!(
+            agentic_space_retrieval("room-1", Some(" decision-1 "), true),
+            Some("decision-1".to_owned())
+        );
+        assert_eq!(
+            agentic_space_retrieval("room-1", Some(""), true),
+            Some(String::new()),
+            "a forbidden decision is passed empty, so the run's search is withheld"
+        );
+        assert_eq!(
+            agentic_space_retrieval("room-1", None, true),
+            Some(String::new()),
+            "a Space run with no decision is withheld, never left without the header"
+        );
+    }
+
+    #[test]
+    fn execution_dispatch_forwards_the_space_retrieval_only_when_present() {
+        let header = |space_retrieval: Option<&str>| {
+            super::authenticated_run_agent_request(
+                super::RunAgentRequest::default(),
+                &super::VerifiedExecutionBearer::for_test("execution-token"),
+                &super::VerifiedBearer::for_test("data-token"),
+                &super::VerifiedModelBearer::for_test("session-token"),
+                &super::VerifiedInferenceBearer::for_test("inference-token"),
+                None,
+                None,
+                space_retrieval,
+            )
+            .expect("build execution request")
+            .metadata()
+            .get("x-space-retrieval-authorization")
+            .map(|value| value.to_str().expect("ascii metadata").to_owned())
+        };
+        assert_eq!(header(None), None, "a run that is not Space-scoped carries no header");
+        assert_eq!(header(Some("decision-1")), Some("decision-1".to_owned()));
+        assert_eq!(
+            header(Some("")),
+            Some(String::new()),
+            "a Space-scoped run with no decision says so, rather than sending none"
+        );
     }
 
     fn space_decision(retrieval_token: &str) -> crate::session_flow::ThreadSpaceContext {
