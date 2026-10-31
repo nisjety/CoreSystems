@@ -2239,6 +2239,30 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-920 | WS22-S3 | risk | P1 | With SANDBOX_THREAD_WORKSPACE_ENABLED on, every non-ZDR personal turn makes one uncached auth-core round trip whether or not code_interpreter is offered (the lazy mint was not built); measure this before default-on. | open |
 | D2-921 | WS22-S3 | follow-up | P3 | 24 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-34.json | open |
 
+
+### Wave-mode batch W2-35 (2026-10-31)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-922 | WS19-S3 | live-proof | P1 | The live DoD evidence is not run: corrupt and clean docx turns with the verifier on, enforce off and on, the SSE attachment frames and both chip screenshots. | open |
+| D2-923 | WS19-S3 | test-gap | P1 | The false-failed rate of the structural check is unmeasured. The corpus run that gates enabling CODE_INTERPRETER_VERIFY_ENFORCE was not done, so the switch must stay off. | open |
+| D2-924 | WS19-S3 | decision | P1 | Confirm the enforce policy before enabling it. A name that fails twice in one turn is delivered as failed, so an unrepairable file still reaches the user, marked failed. | open |
+| D2-925 | WS19-S3 | risk | P1 | With enforce on, a held file reaches the user only if the model runs code_interpreter again in the same turn. If the turn hits its tool-round limit, or the model gives up after a first failure, the file is never delivered and the turn sends no user-visible notice. Decide whether a held file is flushed (delivered, marked failed) at turn end before enabling CODE_INTERPRETER_VERIFY_ENFORCE. | open |
+| D2-926 | WS19-S3 | test-gap | P1 | Nobody has measured how often the structural check marks a valid file failed. The plan allows enforce only once a corpus run shows under 2 percent false failures, so CODE_INTERPRETER_VERIFY_ENFORCE must stay off. | open |
+| D2-927 | WS19-S3 | decision | P1 | Enforce policy as built: the second failure of a name in a turn is delivered marked failed, and the hold is keyed by file name only. A model that renames the broken file gets a fresh hold each time. The owner should confirm this before the switch is turned on. | open |
+| D2-928 | WS19-S3 | live-proof | P1 | Shared edit for the lead: regenerate the SSE golden. I checked that the only change is attachment.keys.check = {types:[object], presence:optional}: I parsed the left and right sides of the panic, and no other event or top-level key differs. Steps: run MP_UPDATE_GOLDEN=1 for sse_event_payload_golden; refresh the .sha256 of apps/Model Plane/api/contracts/sse-event-payloads.json; copy the golden and its .sha256 to the SPA at src/shared/api/contracts/; run gen-chat-event-types.mjs, then its --check; update the pinned digest in scripts/tests/zdr-contract-sync.test.sh. Until this lands, model-gateway --lib sse_event_payload_golden (1 test) and chat-event-contract.test.ts (3 tests) fail. | open |
+| D2-929 | WS19-S3 | live-proof | P1 | Shared edit for the lead: the row's generated-file chip is not built yet. ChatMessages.tsx GeneratedFiles needs i18n.tr chips 'Kontrollert', 'Advarsler' and 'Feil funnet', with no chip for skipped or for a missing check, and wording that never says 'verified in Office'. Chip tests go in ChatMessages.generated-files.test.tsx, plus a CSS rule in global.css if no existing badge class fits. None of these files is in the slice's ownership set. The chip is part of the row's DoD. | open |
+| D2-930 | WS19-S3 | follow-up | P3 | 16 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-35.json | open |
+| D2-931 | WS21-S5a | risk | P1 | The broker's AcquireGrant refuses read_only grants unless the run is ZDR (server.go lines 150-152, FailedPrecondition, re-confirmed this round). Do runs are never ZDR, so every non-ZDR browser.open fails closed with browser_grant_refused until the owner or broker decides the read-only policy. | open |
+| D2-932 | WS21-S5a | risk | P1 | cap.browser.observe is attested ready while non-ZDR opens are refused, so the health signal over-claims until the read-only policy is decided. | open |
+| D2-933 | WS21-S5a | decision | P1 | The legacy ExecuteStep names browser.observe and browser.act now evaluate cap.browser.observe and cap.browser.act. That changes the switch-off behaviour of the alias. Byte-identical switch-off needs a path-aware capability decision, which is a policy trait change outside this slice. | open |
+| D2-934 | WS21-S5a | follow-up | P1 | S5b needs a broker reason that separates ask from deny before browser_site_consent and PolicyAsk can exist. | open |
+| D2-935 | WS21-S5a | follow-up | P1 | The browser_session_opened orchestration event is not emitted. The S6 live panel depends on it, and the Do loop passes no event sink. | open |
+| D2-936 | WS21-S5a | risk | P1 | The DEC-02 bearer expiry margin and the park path for an expired bearer are not implemented; the auth.rs bearer carries no expiry. | open |
+| D2-937 | WS21-S5a | risk | P1 | Page text is not classified BrowserScraped in mp-content-safety TOOL_TRUST. Until the shared edit lands, only the in-tool untrusted wrapper frames it. | open |
+| D2-938 | WS21-S5a | live-proof | P1 | No rebuilt-stack proof exists. Quarry-side grant issuance and Quarry-to-broker identity live on quarryv2 and must merge before browser.open can be proven end to end. | open |
+| D2-939 | WS21-S5a | follow-up | P3 | 24 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-35.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -2433,3 +2457,5 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS17-S6 | zdr, auth, data-loss | W2-34 | no |
 | WS22-S4 | data-loss, authority | W2-34 | no |
 | WS22-S3 | auth, zdr, authority | W2-34 | no |
+| WS19-S3 | policy, zdr | W2-35 | no |
+| WS21-S5a | authority, zdr, policy, cross-branch: the Quarry-side grant issuance endpoint and Quarry-to-broker identity are built on local branch quarryv2, not on model-plane; build against the contract with a stub and leave the live proof to the lead after quarryv2 merges | W2-35 | no |
