@@ -932,6 +932,8 @@ services:
       # WS17-S3: the conversation search query path (SearchMessages). Off by default; the index itself is built
       # by migration 0055 either way.
       SESSION_CORE_MESSAGE_SEARCH_ENABLED: ${SESSION_CORE_MESSAGE_SEARCH_ENABLED:-false}
+      # WS16-S1: attention state on thread listings, ListAttention and MarkThreadSeen. Off by default; only true turns it on.
+      SESSION_CORE_ATTENTION_ENABLED: ${SESSION_CORE_ATTENTION_ENABLED:-false}
       # WS17-S8: the persisted message tree (versions, branch and rewind). Off by default; set it together with
       # MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED on model-gateway. Build the 0061 indexes CONCURRENTLY first on a
       # populated messages table.
@@ -1262,6 +1264,9 @@ services:
       # before it runs and finalized after, and a call that cannot be reserved is not
       # run. OFF by default. Needs session-core's migration 0048.
       EXECUTION_EFFECT_LEDGER_ENABLED: ${EXECUTION_EFFECT_LEDGER_ENABLED:-false}
+      # WS27-S9: publish a run_usage_progress event per Do round, so model-gateway can stream per-round usage. Off by
+      # default; only the literal `true`. Deploy before turning MODEL_GATEWAY_USAGE_PROGRESS on for Do runs.
+      EXECUTION_RUN_USAGE_PROGRESS: ${EXECUTION_RUN_USAGE_PROGRESS:-false}
       # WS11-S8: a Do run's rounds use the turn's effort level (RunAgentRequest field 21).
       # Only the literal `true` turns it on; off, every round sends no level, as before.
       EXECUTION_CORE_RUN_EFFORT: ${EXECUTION_CORE_RUN_EFFORT:-false}

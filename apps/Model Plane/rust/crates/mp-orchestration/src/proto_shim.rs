@@ -635,7 +635,9 @@ impl TryFrom<ProtoOrchestrationEvent> for OrchestrationEvent {
                 resumed_segment: p.resumed_segment,
                 at,
             },
-            ProtoEvent::QuestionAsked(_) | ProtoEvent::QuestionAnswered(_) => {
+            ProtoEvent::QuestionAsked(_)
+            | ProtoEvent::QuestionAnswered(_)
+            | ProtoEvent::RunUsageProgress(_) => {
                 return Err(ShimError::UnsupportedEvent);
             }
         })

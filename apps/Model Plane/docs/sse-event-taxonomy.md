@@ -100,3 +100,4 @@ the wire but not written yet.
 | `run_resumed` | 25 | ✅ |
 | `question_asked` | 27 | not yet |
 | `question_answered` | 28 | not yet |
+| `run_usage_progress` | 29 | not yet |

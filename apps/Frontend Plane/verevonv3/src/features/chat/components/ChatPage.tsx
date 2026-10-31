@@ -785,6 +785,7 @@ export default function ChatPage() {
           steps={state.taskSteps}
           threadId={state.threadId}
           toolCalls={activeRunTurn()?.toolCalls}
+          meter={activeRunTurn()?.meter}
           screen={latestScreen()}
           events={uiEvents()}
           onStopTask={handleStop}
@@ -1214,6 +1215,7 @@ export default function ChatPage() {
         onToggleCollapsed={toggleRunPanel}
         orgId={session.activeOrg?.id}
         runId={liveRunId()}
+        meter={activeRunTurn()?.meter}
         zdr={isActiveThreadTemporary()}
         onRefreshApprovals={(runId) => void refreshApprovalsForRun(runId)}
         navigation={liveRailNavigation()}
