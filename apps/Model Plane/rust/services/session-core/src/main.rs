@@ -49,6 +49,7 @@ mod space_deletion_reconciler;
 mod space_membership_nats;
 mod store;
 mod terminalization;
+mod thread_fork;
 mod tool_ledger;
 
 #[tokio::main]

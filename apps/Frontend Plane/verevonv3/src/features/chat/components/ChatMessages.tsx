@@ -1,3 +1,4 @@
+import { ForkAction, threadForkEnabled } from './ForkAction'
 import { formatResetTime, refreshResetTimeWording, workStepLabel } from './chat-normalizers'
 import { RunNotifyButton } from './RunNotifyButton'
 import {
@@ -801,6 +802,9 @@ export function AssistantMessage(props: {
             <MessageAction label={props.copied ? 'Copied' : 'Copy'} onClick={props.onCopy}>
               {props.copied ? <Check size={14} /> : <Copy size={14} />}
             </MessageAction>
+            <Show when={threadForkEnabled() && !props.temporaryChat && Boolean(props.threadId) && props.message.role === 'assistant' && !props.message.streaming}>
+              <ForkAction threadId={props.threadId ?? ''} messageId={props.message.id} />
+            </Show>
             <Show when={canRemember()}>
               <MessageAction
                 label={remembered() === 'saved' ? i18n.tr('Husket', 'Remembered') : i18n.tr('Husk dette', 'Remember this')}

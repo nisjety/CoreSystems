@@ -28,6 +28,7 @@ use mp_contracts::model_plane::v1::{
     session_core_server::{SessionCore, SessionCoreServer},
     session_retention_service_server::{SessionRetentionService, SessionRetentionServiceServer},
     thread_autonomy_server::{ThreadAutonomy, ThreadAutonomyServer},
+    thread_fork_service_server::ThreadForkServiceServer,
 };
 use mp_contracts::run_origin::{RunOrigin, ORIGIN_METADATA_KEY};
 use mp_contracts::zdr_refusal::Refusal;
@@ -7962,6 +7963,7 @@ impl SessionCore for SessionService {
                 starred: bool,
                 unread: bool,
                 last_read_at: DateTime<Utc>,
+                forked_from_thread_id: Option<String>,
             }
             let mut rows: Vec<ThreadListRow> = sqlx::query_as(
                 "WITH page AS (
@@ -7970,7 +7972,8 @@ impl SessionCore for SessionService {
                            t.origin, t.user_id, t.persona_enabled, t.archived_at,
                            (t.starred_at IS NOT NULL) AS starred,
                            (t.last_assistant_at IS NOT NULL AND t.last_assistant_at > t.last_read_at) AS unread,
-                           t.last_read_at
+                           t.last_read_at,
+                           t.forked_from_thread_id
                     FROM threads t
                     WHERE t.org_id = $1
                       AND ($6::BIGINT IS NULL
@@ -8006,7 +8009,8 @@ impl SessionCore for SessionService {
                     page.archived_at,
                     page.starred,
                     page.unread,
-                    page.last_read_at
+                    page.last_read_at,
+                    page.forked_from_thread_id
                  FROM page
                  LEFT JOIN LATERAL (
                     SELECT content
@@ -8084,6 +8088,7 @@ impl SessionCore for SessionService {
                             starred,
                             unread,
                             last_read_at,
+                            forked_from_thread_id,
                         } = row;
                         let fallback_title = if session_key.trim().is_empty() {
                             "Verevon Chat"
@@ -8113,6 +8118,7 @@ impl SessionCore for SessionService {
                             starred,
                             unread,
                             last_read_at: Some(to_proto_timestamp(last_read_at)),
+                            forked_from_thread_id: forked_from_thread_id.unwrap_or_default(),
                             attention_state: pb::AttentionState::Unspecified as i32,
                             attention_since: None,
                             attention_unseen: false,
@@ -9901,6 +9907,7 @@ pub async fn serve(
         enabled: crate::message_search::message_search_enabled(),
     };
     let message_tree = crate::message_tree::MessageTreeGrpc { pool: pool.clone() };
+    let thread_fork = crate::thread_fork::ThreadForkGrpc { pool: pool.clone() };
 
     let session = SessionService {
         pool,
@@ -9953,6 +9960,10 @@ pub async fn serve(
         ))
         .add_service(MessageTreeServiceServer::with_interceptor(
             message_tree,
+            auth.clone(),
+        ))
+        .add_service(ThreadForkServiceServer::with_interceptor(
+            thread_fork,
             auth.clone(),
         ))
         .add_service(LearningGovernanceServiceServer::with_interceptor(

@@ -289,6 +289,8 @@ pub fn build_router_with_readiness(
         .route("/v1/threads/:thread_id/messages", get(list_thread_messages))
         // Move a thread's active branch: a version switch or a rewind (build plan WS17 S8).
         .route("/v1/threads/:thread_id/branch", post(branch_thread))
+        // Start a new thread from a copy of this one, up to an assistant turn (build plan WS17 S6).
+        .route("/v1/threads/:thread_id/fork", post(fork_thread))
         // Read-only replay of Session Core's canonical event log. The route
         // exposes envelope metadata only; Any payload bytes remain inside the
         // owning plane and cannot become an accidental browser data channel.
@@ -9931,6 +9933,9 @@ struct ThreadSummaryResponse {
     /// `true` here for a pre-persona session-core replica during a rolling
     /// deploy — fail open, never silently disable persona fleet-wide.
     persona_enabled: bool,
+    /// The thread this one was forked from; omitted for a thread that was not forked.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    forked_from_thread_id: String,
     /// Set when the owner archived the thread; omitted for an active thread.
     #[serde(skip_serializing_if = "String::is_empty")]
     archived_at: String,
@@ -10194,6 +10199,7 @@ async fn list_threads(
             updated_at: timestamp_to_rfc3339(thread.updated_at),
             pinned: thread.pinned,
             space_id: thread.space_id,
+            forked_from_thread_id: thread.forked_from_thread_id,
             latest_run_id: thread.latest_run_id,
             latest_run_status: thread.latest_run_status,
             latest_run_updated_at: thread
@@ -11135,6 +11141,95 @@ pub(crate) fn history_versions_disabled() -> HttpJsonError {
     )
 }
 
+/// Body of `POST /v1/threads/{id}/fork`: the assistant turn the copy ends with, and an optional
+/// title for the new thread.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ForkThreadBody {
+    from_message_id: String,
+    #[serde(default)]
+    title: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ForkThreadResponse {
+    thread_id: String,
+    forked_from_thread_id: String,
+    copied_message_count: u32,
+}
+
+/// Start a new thread from a copy of this one, up to an assistant turn (build plan WS17 S6). A
+/// zero-retention caller is refused before anything is written. Session Core decides the rest: the
+/// switch, the owner, a Space or waived source, and whether the turn lies on the active path.
+async fn fork_thread(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(thread_id): Path<String>,
+    Json(body): Json<ForkThreadBody>,
+) -> Result<Json<ForkThreadResponse>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::ForkThreadRequest;
+
+    require_non_zdr_durable_mutation(&claims)?;
+    let thread_id = thread_id.trim();
+    if thread_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "thread_id is required"})),
+        ));
+    }
+    let response = state
+        .thread_fork_client
+        .clone()
+        .fork_thread(authenticated_session_request(
+            ForkThreadRequest {
+                org_id: claims.org_id.clone(),
+                thread_id: thread_id.to_owned(),
+                from_message_id: body.from_message_id,
+                title: body.title,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|error| fork_thread_error(&error))?
+        .into_inner();
+
+    Ok(Json(ForkThreadResponse {
+        thread_id: response.new_thread_id,
+        forked_from_thread_id: thread_id.to_owned(),
+        copied_message_count: response.copied_message_count,
+    }))
+}
+
+/// Session Core's refusals of a fork, as the typed codes the client acts on. A switch that is off
+/// answers 503 `history_fork_disabled`. A source that cannot be forked answers 409
+/// `history_fork_refused`, carrying Session Core's reason.
+pub(crate) fn fork_thread_error(error: &tonic::Status) -> HttpJsonError {
+    match error.code() {
+        tonic::Code::Unavailable if error.message() == "thread_fork_disabled" => {
+            history_fork_disabled()
+        }
+        tonic::Code::FailedPrecondition => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": {
+                "code": "history_fork_refused",
+                "message": error.message(),
+            }})),
+        ),
+        _ => session_thread_error("session-core fork_thread failed", error),
+    }
+}
+
+pub(crate) fn history_fork_disabled() -> HttpJsonError {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error": {
+            "code": "history_fork_disabled",
+            "message": "forking is not enabled on this deployment",
+        }})),
+    )
+}
+
 #[derive(Debug, Deserialize)]
 struct ReplayThreadEventsQuery {
     /// Resume after this event id (exclusive). Empty means from the beginning.
@@ -11254,6 +11349,7 @@ fn durable_thread_event_type(event: &Event) -> String {
             Some("THREAD_PRESENTATION_UPDATED")
         }
         "type.googleapis.com/model_plane.v1.ThreadArchived" => Some("THREAD_ARCHIVED"),
+        "type.googleapis.com/model_plane.v1.ThreadForked" => Some("THREAD_FORKED"),
         _ => None,
     };
 
@@ -16667,5 +16763,38 @@ mod run_replay_projection_tests {
             r#"{"run_id":"run-1"}"#,
         );
         assert!(project_run_replay_event("run-1", unrelated).is_none());
+    }
+}
+
+#[cfg(test)]
+mod fork_route_tests {
+    use super::*;
+
+    #[test]
+    fn fork_body_reads_camel_case_defaults_the_title_and_refuses_unknown_fields() {
+        let body: ForkThreadBody =
+            serde_json::from_value(json!({"fromMessageId": "turn-4"})).unwrap();
+        assert_eq!(body.from_message_id, "turn-4");
+        assert!(body.title.is_empty());
+        assert!(serde_json::from_value::<ForkThreadBody>(
+            json!({"fromMessageId": "turn-4", "copyEverything": true})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn fork_refusals_answer_typed_codes() {
+        let (status, Json(body)) = fork_thread_error(&tonic::Status::unavailable(
+            "thread_fork_disabled",
+        ));
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "history_fork_disabled");
+
+        let (status, Json(body)) = fork_thread_error(&tonic::Status::failed_precondition(
+            "fork_source_not_forkable",
+        ));
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "history_fork_refused");
+        assert_eq!(body["error"]["message"], "fork_source_not_forkable");
     }
 }

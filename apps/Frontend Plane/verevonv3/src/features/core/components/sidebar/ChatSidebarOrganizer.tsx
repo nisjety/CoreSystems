@@ -7,6 +7,7 @@ import type { ChatOrganizationAction } from '@/shared/actions/chat-organization'
 import { searchChatThreads, type ChatSearchHit } from '@/shared/api/chat-client'
 import { applyChatOrganizationAction, chatDateGroup, chatOrganizationStorageKey, emptyChatOrganization, readChatOrganization, saveChatOrganization, selectOrganizedChats } from '@/features/chat/lib/chat-organization'
 import type { ChatThreadHistoryItem } from '@/features/chat/lib/chat-thread-history'
+import { threadForkEnabled } from '@/features/chat/components/ForkAction'
 import { ChatWorkLinks } from './ChatWorkLinks'
 import { ChatAttentionSections, type AttentionSectionRows } from './ChatAttentionSections'
 import { ChatSearchResults, nextSearchIndex, SEARCH_DEBOUNCE_MS, SEARCH_MIN_CHARS, searchListboxId, searchOptionId, type ChatSearchStatus } from './ChatSearchResults'
@@ -34,6 +35,8 @@ export function ChatSidebarOrganizer(props: {
   starredThreadIds?: ReadonlySet<string>
   /** Threads holding a reply the owner has not read; each one shows an unread dot. */
   unreadThreadIds?: ReadonlySet<string>
+  /** Threads copied from another chat (WS17 S6); each one shows a Forked chip while forking is on. */
+  forkedThreadIds?: ReadonlySet<string>
 }) {
   const i18n = useI18n()
   const session = getSession()
@@ -321,6 +324,9 @@ export function ChatSidebarOrganizer(props: {
                     onDragStart={(event) => startDrag(event, item)} onDragEnd={endDrag}>
                     <Show when={props.unreadThreadIds?.has(item.threadId)}>
                       <span class="chat-organizer__unread" role="img" aria-label={i18n.tr('Ulest svar', 'Unread reply')} title={i18n.tr('Et svar du ikke har lest', 'A reply you have not read')} style={{ display: 'inline-block', width: '0.5rem', height: '0.5rem', 'border-radius': '999px', background: 'currentColor', 'flex-shrink': '0' }} />
+                    </Show>
+                    <Show when={threadForkEnabled() && props.forkedThreadIds?.has(item.threadId)}>
+                      <span class="verevon-trust-chip" title={i18n.tr('Denne samtalen er en kopi av en annen samtale.', 'This chat is a copy of another chat.')}>{i18n.tr('Forgrenet', 'Forked')}</span>
                     </Show>
                     {props.renderRow(item, () => beginMove(item))}
                   </div>

@@ -55,6 +55,11 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/chat/threads/{thread_id}/rewind",
             post(json_handlers::rewind_thread),
         )
+        // Start a new thread from a copy of this one, up to an assistant turn (build plan WS17 S6).
+        .route(
+            "/api/v1/chat/threads/{thread_id}/fork",
+            post(history::fork_thread),
+        )
         .route(
             "/api/v1/chat/stream/resume/{request_id}",
             get(streams::resume_stream),

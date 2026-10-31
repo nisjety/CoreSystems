@@ -1315,6 +1315,7 @@ async fn load_pending_messages(
          JOIN threads t ON t.id = m.thread_id \
          WHERE m.role IN ('user', 'assistant') \
            AND m.on_active_path \
+           AND m.copied_from_message_id IS NULL \
            AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND m.created_at <= c.extract_after) \
            AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND c.memory_state <> 'on' AND $2) \
            AND (NOT $2 OR t.memory_resumed_at IS NULL OR m.created_at > t.memory_resumed_at) \
@@ -3009,6 +3010,43 @@ mod tests {
             .map(|message| message.message_id)
             .collect();
         assert_eq!(pending, vec![active]);
+    }
+
+    /// A fork's copied turns are the source's turns again. Dreaming extracts from the source
+    /// alone: a copied turn is never pending, even though it sits on its thread's active path.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn dreaming_skips_copied_rows() {
+        let pool = disposable_pool().await;
+        let org = format!("copied-rows-{}", new_ulid());
+        let source = seed_thread(&pool, &org, "user-a").await;
+        let fork = seed_thread(&pool, &org, "user-a").await;
+        let (original, copied) = (new_ulid(), new_ulid());
+        sqlx::query("INSERT INTO messages (id, thread_id, role, content) VALUES ($1, $2, 'user', 'Jeg heter Ima.')")
+            .bind(&original)
+            .bind(&source)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO messages (id, thread_id, role, content, copied_from_message_id)
+             VALUES ($1, $2, 'user', 'Jeg heter Ima.', $3)",
+        )
+        .bind(&copied)
+        .bind(&fork)
+        .bind(&original)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let pending: Vec<String> = load_pending_messages(&pool, 100_000)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|message| message.thread_id == source || message.thread_id == fork)
+            .map(|message| message.message_id)
+            .collect();
+        assert_eq!(pending, vec![original]);
     }
 
     /// D1-570: Dreaming neither reads nor is shown what a thread said while it was off, once the

@@ -89,6 +89,9 @@ struct ChatThreadSummary {
     /// Whether the thread has an unread reply. Present only with an attention state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     attention_unseen: Option<bool>,
+    /// The thread this one was forked from, when it is a fork (build plan WS17 S6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    forked_from_thread_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -222,6 +225,8 @@ struct DurableThreadSummary {
     attention_since: String,
     #[serde(default, alias = "attentionUnseen")]
     attention_unseen: bool,
+    #[serde(default, alias = "forkedFromThreadId")]
+    forked_from_thread_id: String,
 }
 
 pub(super) async fn list_threads(
@@ -510,6 +515,84 @@ pub(crate) async fn clear_threads(
     Json(ok(ThreadsResponse { sessions: vec![] })).into_response()
 }
 
+/// The body of `POST /api/v1/chat/threads/{id}/fork`: the assistant turn to copy up to, and a title.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct ForkThreadBody {
+    from_message_id: String,
+    #[serde(default)]
+    title: String,
+}
+
+/// Start a new chat thread from a copy of this one, up to an assistant turn (build plan WS17 S6).
+/// Only a chat thread the caller owns can be forked here: the lookup keeps a Space or Support
+/// thread out of this route. Session Core makes the copy and decides whether it may be made; the
+/// answer is the new thread's session.
+pub(super) async fn fork_thread(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(thread_id): Path<String>,
+    Json(body): Json<ForkThreadBody>,
+) -> Response {
+    if let Err(response) = scope_for(&state, &user).await {
+        return response;
+    }
+    let thread_id = normalize_id(&thread_id);
+    if thread_id.is_empty() {
+        return bad_request("thread_id is required.");
+    }
+    let from_message_id = body.from_message_id.trim().to_owned();
+    if from_message_id.is_empty() {
+        return bad_request("from_message_id is required.");
+    }
+    match read_durable_thread(&state, &user, &headers, &thread_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return thread_not_found(),
+        Err(response) => return response,
+    }
+    let url = format!(
+        "{}/v1/threads/{}/fork",
+        state.model_gateway_url,
+        urlencoding::encode(&thread_id),
+    );
+    let token = shared::model_token(&state, &user, &headers).await;
+    let session_token = match shared::required_session_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error).into_response(),
+    };
+    let (status, Json(payload)) = shared::proxy_model_json_with_session(
+        &state,
+        Method::POST,
+        &url,
+        Some(json!({ "fromMessageId": from_message_id, "title": body.title.trim() })),
+        token.as_deref(),
+        Some(&session_token),
+        &user,
+    )
+    .await;
+    if !status.is_success() {
+        return (status, Json(payload)).into_response();
+    }
+    let new_thread_id = payload["thread_id"].as_str().unwrap_or_default().trim().to_owned();
+    if new_thread_id.is_empty() {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(error("fork_unavailable", "The fork did not name a thread.")),
+        )
+            .into_response();
+    }
+    match read_durable_thread(&state, &user, &headers, &new_thread_id).await {
+        Ok(Some(session)) => Json(ok(ThreadResponse {
+            session,
+            transcript: None,
+        }))
+        .into_response(),
+        Ok(None) => thread_not_found(),
+        Err(response) => response,
+    }
+}
+
 /// Hide one chat thread from the ordinary list. Its transcript and audit
 /// evidence stay; `unarchive_thread` brings it back.
 pub(super) async fn archive_thread(
@@ -732,6 +815,8 @@ fn durable_to_summary(item: DurableThreadSummary, now: &str) -> Option<ChatThrea
         unread: item.unread,
         // The attention fields are present only with a state: a flag-off replica sends none.
         attention_unseen: (!item.attention_state.is_empty()).then_some(item.attention_unseen),
+        forked_from_thread_id: Some(item.forked_from_thread_id.trim().to_owned())
+            .filter(|value| !value.is_empty()),
         attention_state: Some(item.attention_state.trim().to_owned())
             .filter(|value| !value.is_empty()),
         attention_since: Some(item.attention_since.trim().to_owned())
@@ -1366,6 +1451,7 @@ mod tests {
                 attention_state: String::new(),
                 attention_since: String::new(),
                 attention_unseen: false,
+                forked_from_thread_id: String::new(),
             },
             now,
         )
@@ -1390,6 +1476,7 @@ mod tests {
                 attention_state: String::new(),
                 attention_since: String::new(),
                 attention_unseen: false,
+                forked_from_thread_id: String::new(),
             },
             now,
         )
@@ -1433,6 +1520,7 @@ mod tests {
                     attention_state: String::new(),
                     attention_since: String::new(),
                     attention_unseen: false,
+                    forked_from_thread_id: String::new(),
                 },
                 now,
             )
@@ -1481,6 +1569,7 @@ mod tests {
                 attention_state: String::new(),
                 attention_since: String::new(),
                 attention_unseen: false,
+                forked_from_thread_id: String::new(),
             },
             now,
         )
@@ -1511,6 +1600,7 @@ mod tests {
                 attention_state: String::new(),
                 attention_since: String::new(),
                 attention_unseen: false,
+                forked_from_thread_id: String::new(),
             },
             "2026-08-11T12:00:00Z",
         )
@@ -1948,6 +2038,7 @@ mod thread_paging_tests {
                 attention_state: String::new(),
                 attention_since: String::new(),
                 attention_unseen: false,
+                forked_from_thread_id: String::new(),
             },
             "2026-10-28T11:00:00Z",
         )
@@ -2033,5 +2124,37 @@ mod thread_paging_tests {
         let (url, body) = archive_state_call("http://model-gateway", "thread-9", false);
         assert_eq!(url, "http://model-gateway/v1/threads/thread-9/presentation");
         assert_eq!(body, Some(json!({ "archived": false })));
+    }
+}
+
+#[cfg(test)]
+mod fork_handler_tests {
+    use super::*;
+
+    #[test]
+    fn fork_body_reads_camel_case_and_refuses_unknown_fields() {
+        let body: ForkThreadBody =
+            serde_json::from_value(json!({"fromMessageId": "turn-4"})).unwrap();
+        assert_eq!(body.from_message_id, "turn-4");
+        assert!(body.title.is_empty());
+        assert!(serde_json::from_value::<ForkThreadBody>(
+            json!({"fromMessageId": "turn-4", "copyAll": true})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_fork_carries_its_source_and_a_thread_that_is_not_forked_carries_none() {
+        let forked: DurableThreadSummary = serde_json::from_value(
+            json!({"threadId": "thread-fork", "forkedFromThreadId": "thread-source"}),
+        )
+        .unwrap();
+        let summary = durable_to_summary(forked, "2026-10-31T00:00:00Z").unwrap();
+        assert_eq!(summary.forked_from_thread_id.as_deref(), Some("thread-source"));
+
+        let plain: DurableThreadSummary =
+            serde_json::from_value(json!({"threadId": "thread-plain"})).unwrap();
+        let summary = durable_to_summary(plain, "2026-10-31T00:00:00Z").unwrap();
+        assert!(summary.forked_from_thread_id.is_none());
     }
 }

@@ -1275,6 +1275,10 @@ message ThreadSummary {
   // moves it to one microsecond before the newest assistant message.
   google.protobuf.Timestamp last_read_at = 22;
 
+  // The thread this one was forked from (build plan WS17 S6). Empty for a thread that was
+  // not forked, so a flag-off response carries nothing new.
+  string forked_from_thread_id = 19;
+
   // The derived attention state of the thread (WS16 S1). Unspecified while the attention switch
   // is off, so a flag-off response carries nothing new.
   AttentionState attention_state = 16;
@@ -1953,4 +1957,41 @@ message SetActiveLeafResponse {
   string active_leaf_message_id = 1;
   // The turns of the active path, oldest first.
   repeated string active_path = 2;
+}
+
+// --- ThreadFork (WS17 S6) ---
+
+// ThreadForkService: copies a conversation's active path into a new thread (build plan WS17 S6).
+// A separate service, as MessageTreeService is, so that SessionCore and every mock of it stay
+// source-compatible.
+service ThreadForkService {
+  // Copy the active path of an owned thread, from its first turn up to and including a chosen
+  // assistant message, into a new thread that names its source. The copy is one transaction and
+  // writes one THREAD_FORKED event. It writes no MESSAGE_APPENDED event and extracts no memory:
+  // Dreaming skips the copied turns. Owner only, with `session:write`; a zero-retention credential
+  // is refused. Refused with unavailable `thread_fork_disabled` while
+  // SESSION_CORE_THREAD_FORK_ENABLED is not `true`, with failed_precondition for a Space thread, a
+  // thread that holds a waived run, a point that is not on the active path and a path longer than
+  // 5,000 turns.
+  rpc ForkThread(ForkThreadRequest) returns (ForkThreadResponse);
+}
+
+// The parameters of one fork.
+message ForkThreadRequest {
+  // Required. The owning org.
+  string org_id = 1;
+  // Required. The thread to copy. The caller must be its owner.
+  string thread_id = 2;
+  // Required. The assistant message the copy ends with. It must lie on the thread's active path.
+  string from_message_id = 3;
+  // Optional. The new thread's title. Empty leaves the title to be derived from the copy.
+  string title = 4;
+}
+
+// The new thread and how much of the path it took.
+message ForkThreadResponse {
+  // The new thread, which carries the lineage of its source.
+  string new_thread_id = 1;
+  // How many turns were copied, the chosen message included.
+  uint32 copied_message_count = 2;
 }

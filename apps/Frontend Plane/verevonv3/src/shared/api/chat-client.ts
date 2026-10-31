@@ -994,6 +994,8 @@ export type ChatThreadSession = {
   origin?: string
   /** Set when the owner archived the thread. Absent for an active thread. */
   archivedAt?: string
+  /** The thread this one was forked from (build plan WS17 S6). Absent for a thread that was not forked. */
+  forkedFromThreadId?: string
   /** Whether the owner starred the thread. Server-owned, like `pinned`. */
   starred?: boolean
   /**
@@ -2871,6 +2873,32 @@ async function postChatThreadArchiveState(
   return normalizeChatThreadSession(objectValue(raw)?.session)
 }
 
+/**
+ * Start a new thread from a copy of this one, up to an assistant turn (build plan WS17 S6). Resolves
+ * to the new thread's session. Rejects with the server's typed refusal: `history_fork_disabled` while
+ * forking is off, `history_fork_refused` when the source cannot be copied.
+ */
+export async function forkChatThread(
+  threadId: string,
+  input: { fromMessageId: string; title?: string },
+): Promise<ChatThreadSession | null> {
+  parseChatHistoryAction({
+    type: 'thread.fork',
+    threadId,
+    fromMessageId: input.fromMessageId,
+    ...(input.title ? { title: input.title } : {}),
+  })
+  const raw = await requestJson<unknown>(
+    `/api/v1/chat/threads/${encodeURIComponent(threadId)}/fork`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ fromMessageId: input.fromMessageId, title: input.title ?? '' }),
+    },
+  )
+  applyRetentionFrom(raw)
+  return normalizeChatThreadSession(objectValue(raw)?.session)
+}
+
 /** Where a branch move landed: the new active leaf, and the path up to it (WS17 S9). */
 export type ChatBranchMove = {
   activeLeafMessageId: string
@@ -3233,6 +3261,7 @@ function normalizeChatThreadSession(raw: unknown): ChatThreadSession | null {
     spaceRef: str(item.spaceRef) ?? str(item.space_ref),
     origin: str(item.origin),
     ...(item.starred === true ? { starred: true } : {}),
+    ...(str(item.forkedFromThreadId) ? { forkedFromThreadId: str(item.forkedFromThreadId) } : {}),
     ...(item.unread === true ? { unread: true } : {}),
     ...(attentionState ? { attentionState } : {}),
     ...(attentionState && attentionSince ? { attentionSince } : {}),
