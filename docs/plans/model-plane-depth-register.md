@@ -2070,6 +2070,39 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-776 | WS18-S5 | risk | P1 | grpc.rs execute_step (ExecuteStep RPC) passes SpaceRetrieval::Organisation even when the request carries a space_id, so a future caller routing knowledge_search through ExecuteStep in a Space would search org-wide; no shipped caller does this today. | open |
 | D2-777 | WS18-S5 | follow-up | P3 | 20 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-30.json | open |
 
+
+### Wave-mode batch W2-30 (2026-10-31)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-778 | WS16-S3 | risk | P1 | The sweep reads pending rows and inserts in a separate statement with no lock, so a decide that commits between the two leaves one RUN_ATTENTION for an approval already decided. S4 must re-check that the approval is still requested before it notifies. | open |
+| D2-779 | WS16-S3 | risk | P1 | The 600-second window drops items: a waiting row created while the sweeper is down for longer than the window is never announced after restart, because no high-water mark is kept. Needed before the switch goes on. | open |
+| D2-780 | WS16-S3 | test-gap | P1 | The seven new DB-gated tests in attention_events::db_tests compile but were not run; this slice ran no Postgres. The lead must run them with the command in lead_todo. | open |
+| D2-781 | WS16-S3 | live-proof | P1 | Live proof is owed: a rebuilt session-core with the switch on, the outbox rows published, the NATS stream message seen, and the five consumers' ignore behaviour captured in their logs. The static reads (runwatch returns outcomeAck for unmapped types, taskexec returns no task id, sessionreview returns a skipped outcome, insight-core acks unmapped types, the Convex mirror returns ignored) support the claim but do not prove it. | open |
+| D2-782 | WS16-S3 | risk | P1 | The sweep keeps no high-water mark. With the fixed 600 s window, a waiting row created while the sweeper is down (or switched off) for longer than the window is never announced. | open |
+| D2-783 | WS16-S3 | risk | P1 | The read and the insert run as separate statements with no lock. An approval decided between them still gets one RUN_ATTENTION, so the S4 notifier must re-check that the approval is still requested. | open |
+| D2-784 | WS16-S3 | live-proof | P1 | The five consumers' tolerance of the unknown RUN_ATTENTION event_type is supported only by static reads. It must be captured live before the switch goes on. | open |
+| D2-785 | WS16-S3 | live-proof | P1 | The 12 DB-gated attention tests (7 new) have not been run. Lead runs: cargo test -p session-core --bin session-core attention -- --ignored --test-threads=1 against a scratch DATABASE_URL. | open |
+| D2-786 | WS16-S3 | follow-up | P3 | 25 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-30.json | open |
+| D2-787 | WS27-S10 | decision | P1 | The existing BFF route billing_quota (apps/Frontend Plane/verevonv3/apps/gateway/src/domains/billing.rs:120-146) returns the organisation's raw limit, used and remaining to every org member; the SPA shows only the share, but the amounts are on the wire, so a trimmed projection needs a product/Control decision before the flag is switched on. | open |
+| D2-788 | WS27-S10 | decision | P1 | The metric is one build-time value per deployment (VITE_QUOTA_READOUT_METRIC), not the per-org BFF setting WS27-D9 recommends; per-org naming needs a BFF change or the owner's ruling before orgs with different metrics are switched on. | open |
+| D2-789 | WS27-S10 | follow-up | P1 | The after-a-turn refresh needs the three shared call-site edits in lead_todo; until they land the readout reads once per mount, so a settled turn's effect on the allowance is not shown until the panel remounts. | open |
+| D2-790 | WS27-S10 | live-proof | P1 | The slice DoD (a non-admin member sees live utilization) needs a rebuilt frontend with the two VITE values, a restarted frontend container, an allowance set in a test org, and member and admin screenshots; none of that ran here. | open |
+| D2-791 | WS27-S10 | risk | P1 | Pre-existing: apps/gateway/scripts/action-surface-contract.test.mjs fails at HEAD because 14 registry ids have no dispatcher literal in handlers.rs (approvals.decide, audit.create_siem_destination, audit.delete_siem_destination, audit.export_log, audit.update_siem_destination, audit.verify_chain, chat.answer_question, chat.execute_approved_plan, chat.run.continue, chat.set_connector_scope, integrations.browse_connection, integrations.fetch_connection_content, mcp.approve_tool, tools.set_policy), so pnpm test is red regardless of this slice. | open |
+| D2-792 | WS27-S10 | decision | P1 | The metric is one build-time value per deployment (VITE_QUOTA_READOUT_METRIC), not an org-configured setting as WS27-D9 / the row's 'metric name org-configured via env/setting' suggests; orgs with different metrics cannot be served without a BFF change. | open |
+| D2-793 | WS27-S10 | follow-up | P1 | RunCostMeter accepts quotaRefreshKey, but no host passes it yet, so the row's 'fetched once per thread open and after a turn' refresh only works after the lead applies the three shared call-site edits. | open |
+| D2-794 | WS27-S10 | risk | P1 | Pre-existing at HEAD: apps/gateway/scripts/action-surface-contract.test.mjs fails (registry ids without dispatcher literals). action-registry.ts and apps/gateway are unmodified in this tree, so the failure is not caused by this slice, but the plan's second test command and pnpm test stay red. | open |
+| D2-795 | WS27-S10 | follow-up | P3 | 17 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-30.json | open |
+| D2-796 | WS18-S5 | risk | P0 | Cross-Space read in committed code: the owner document inventory tool knowledge_list_documents (src/owner_reads.rs execute; offered at runtime_loop/agent.rs ~1188-1192 when MODEL_ACTION_ADMISSION=table and the run is not ZDR) has no Space condition, so a Space-scoped Do run lists the whole organisation's document titles. The S5 decision does not reach it. Close it (scope or refuse for space_id non-empty) before MODEL_ACTION_ADMISSION=table is enabled in any Space-capable deployment. Owner: WS24-S8. | open |
+| D2-797 | WS18-S5 | follow-up | P1 | The S3 knowledge receipt (retrieval / not_entitled frame after connected) is not emitted for Do runs, so the badge and the visible 'project not searched' state do not exist yet. The WS18-S3 owner must wire it into agentic_run_stream before the switch is enabled for users. | open |
+| D2-798 | WS18-S5 | risk | P1 | ExecuteStep RPC (grpc.rs execute_step) passes SpaceRetrieval::Organisation for every step, so a direct caller that sends knowledge_search with a non-empty space_id would search org-wide. No shipped gateway caller does this (tools.rs and browser_run.rs send only code_interpreter and browser tools), so it is unreachable today. Withhold Space-scoped knowledge_search there before any caller routes it through ExecuteStep. | open |
+| D2-799 | WS18-S5 | live-proof | P1 | Decision TTL (WS18-D8) is unmeasured, and the expired-decision path (Data Plane PermissionDenied mapped to a degraded tool error) has no test. Measure the TTL against a multi-minute Do run and prove a live run outliving its decision degrades visibly, before enabling AGENTIC_SPACE_RETRIEVAL_ENABLED. | open |
+| D2-800 | WS18-S5 | risk | P1 | Rollout ordering: an execution-core built before this slice ignores x-space-retrieval-authorization and runs Space-scoped searches organisation-wide. Deploy execution-core first, then set the gateway switch. Never set the switch on a gateway that is ahead of execution-core. | open |
+| D2-801 | WS18-S5 | risk | P1 | owner_reads.rs knowledge_list_documents (offered under MODEL_ACTION_ADMISSION=table) has no Space condition, so a Space-scoped Do run can list org-wide document titles; scope or refuse it for non-empty space_id before table admission is enabled in a Space-capable deployment (WS24-S8 owner). Not reachable with defaults; implementer flagged it as P0. | open |
+| D2-802 | WS18-S5 | follow-up | P1 | The S3 knowledge receipt frame (retrieval/not_entitled after connected) named in the S5 row is not emitted because WS18-S3 is unbuilt; the visible 'project not searched' state is missing until it is wired into agentic_run_stream. | open |
+| D2-803 | WS18-S5 | risk | P1 | grpc.rs execute_step (ExecuteStep RPC) passes SpaceRetrieval::Organisation even when the request carries a space_id, so a future caller routing knowledge_search through ExecuteStep in a Space would search org-wide; no shipped caller does this today. | open |
+| D2-804 | WS18-S5 | follow-up | P3 | 20 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-30.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -2249,5 +2282,7 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS27-S4 | money | W2-29 | no |
 | WS16-S1 | zdr, auth, authority | W2-29 | no |
 | WS27-S9 | money, zdr | W2-29 | no |
+| WS16-S3 | zdr, audit, authority | W2-30 | no |
+| WS18-S5 | authority, policy, zdr | W2-30 | no |
 | WS16-S3 | zdr, audit, authority | W2-30 | no |
 | WS18-S5 | authority, policy, zdr | W2-30 | no |
