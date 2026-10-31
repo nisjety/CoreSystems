@@ -80,3 +80,15 @@ func TestRunPageDecodesTheMarkdownArtifactID(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "art_01MD", page.MarkdownArtifactID)
 }
+
+// INNH-12: RunPage also decodes the source artifact id and the markdown size, which the
+// workflow puts on page_fetched.
+func TestRunPageDecodesTheSourceArtifactAndBytes(t *testing.T) {
+	srv, _ := pageAndRecord(t, `{"status":200,"fingerprint":"blake3:fresh","links":[],"markdown_artifact_id":"art_01MD","source_artifact_id":"art_01SRC","bytes":2048}`)
+	page, err := newChangeActivities(srv).RunPage(context.Background(), RunPageInput{
+		RunID: "run_1", URL: "https://example.com/p", OrgID: "org_a",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "art_01SRC", page.SourceArtifactID)
+	require.Equal(t, uint64(2048), page.Bytes)
+}

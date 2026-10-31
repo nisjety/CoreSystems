@@ -226,6 +226,11 @@ type RunPageResult struct {
 	// nothing was stored (ZDR, or a runtime that predates the field). General on purpose: the
 	// change monitor keeps it on a baseline and the per-run results of a crawl read it (INNH-12).
 	MarkdownArtifactID string `json:"markdown_artifact_id,omitempty"`
+	// SourceArtifactID is the stored source of this page (html, or the original document), and
+	// Bytes the size of the stored markdown (INNH-12). Both are empty whenever
+	// MarkdownArtifactID is: they ride the page_fetched event so the per-run results can list them.
+	SourceArtifactID string `json:"source_artifact_id,omitempty"`
+	Bytes            uint64 `json:"bytes,omitempty"`
 }
 
 // RunPage executes a single page via Quarry Runtime.

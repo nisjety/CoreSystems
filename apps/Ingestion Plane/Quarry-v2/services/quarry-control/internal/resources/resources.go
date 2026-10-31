@@ -55,6 +55,7 @@ func MountJobs(r chi.Router, db store.DB, opts ...JobsOption) {
 		r.Get("/ongoing", jobsOngoing(db))
 		r.Get("/{id}/summary", jobSummary(db))
 		r.Get("/{id}/errors", jobErrors(db))
+		r.Get("/{id}/results", jobResults(db))
 		r.Post("/{id}/control", controlJob(db))
 	})
 }
