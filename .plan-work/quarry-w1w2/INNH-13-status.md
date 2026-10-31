@@ -1,8 +1,20 @@
 # INNH-13: Assess only: retry/resurrect of a failed run, run-finished webhooks, per-run log/event export as JSON, abort for crawl and batch
 
-Status: not started (assess only, lowest priority; nothing to build now)
+Status: assessed (2026-10-31, lane D; assess only, no code; nothing to build now)
 Lane: D. Estimate for the assessment: 0.5 d. Build estimates per sub-item below.
 Verified by reading quarryv2-next. Nothing was built or run. Docker is off; the 2 failing orchestrator tests and 1 control test were taken from W2-closeout.md, not re-run. Paths under `apps/Ingestion Plane/Quarry-v2`.
+
+## Re-check 2026-10-31 (lane D, against innh/lane-d tree and innh/lane-b)
+Verified by reading; nothing run, Docker untouched. Recommendation order: (d) proof first, (b) small add-on to INNH-5, (c) skip or tiny, (a) URL-level retry only if the owner asks.
+
+| Part | Exists (file:line) | Missing | Effort | Depends on | Recommendation |
+|---|---|---|---|---|---|
+| (a) retry/resurrect | Agent runs only: `crates/quarry-edge/src/agent_routes/lifecycle.rs:160-200` (resume_run_id; openapi.yaml:4340). Per-URL `retryable` flag: `quarry-control/internal/resources/jobs_lifecycle.go:64,249`. Webhook delivery retry only. No retry/rerun route for crawl/batch/scrape/extract (openapi grep: none) | New job from failed/retryable URLs of a terminal job (parent_job_id, idempotency, admission, quota, ZDR refusal) | 3 to 4 d for URL-level retry; 5+ d for true frontier resurrect | Frontier durability (W3 E3.x) for the 5+ d variant; INNH-12 results route helps pick URLs | Build URL-level retry only, later, behind QUARRY_EDGE__JOB_RETRY. Do not promise Apify-style resurrect. |
+| (b) run-finished webhooks | Terminal events for every kind: `resources.go:245-264` (run_completed/failed/cancelled/timed_out). Dispatcher: HMAC, SafeClient, 5 attempts. CHANGED by INNH-5 on innh/lane-b: tenancy gap is CLOSED (`org_id` on webhooks, migration 025, `fanoutWebhooks(db, ev, orgID)` at lane-b `resources.go:641`, org from the run's job, dispatcher re-check), tenant API `/v1/webhook-subscriptions` (control + edge `webhook_subscription_routes.rs`, flags `QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS`, `QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS`), secret once, delivery log | Only `change_detected` is in the closed events list. Add `run_finished` (map the four terminal events, one payload `{job_id, kind, status, counts, started_at, finished_at, statistics}`, no URLs or page content), payload builder, de-dup per job, ZDR note (ZDR orgs cannot create subscriptions, so none fire), openapi/CONTRACTS/ERROR_REASONS, tests | 1 to 1.5 d (was 4 to 5 d before INNH-5) | INNH-5 merged first. INNH-5 depth note: per-event subscription query in the event path, cache or queue if run events join | Do it after INNH-5 lands; extend the existing list rather than a second API. Reconcile path name: INNH-5 chose `/v1/webhook-subscriptions` (supersedes the proposal below). |
+| (c) per-run JSON log/event export | Paged JSON: `/v1/runs/{run_id}/events` (openapi.yaml:2445), `/v1/jobs/{id}/events` (:2504), `/v1/crawl/{id}/events` (:2575), `/v1/batch/{id}/events` (:2610), SSE follow behind QUARRY_EDGE__JOB_STREAM_FOLLOW. Agent receipts/devtools routes. INNH-12 (lane-b): `GET /v1/jobs/{id}/results` per-page rows with artifact ids | One-call bounded export (NDJSON or single document) with a cap | 0.5 to 1 d, optional | none (INNH-12 for the results half) | Skip for now; clients page today. If wanted: `?format=ndjson` on the jobs events route. |
+| (d) abort crawl/batch end to end | Edge: `routes.rs:169-174` (DELETE /v1/crawl/:id, /v1/batch/:id, pause/resume), `job_lifecycle_routes.rs:346` (QUARRY_EDGE__JOB_CONTROL, off = 501), handlers :487, :514. Control `POST /v1/jobs/{id}/control`; orchestrator control loop (QUARRY_JOB_CONTROL_LOOP), grace QUARRY_CANCEL_GRACE_S. W2-closeout.md:46 (U28) | Proof: 1 control + 2 orchestrator tests failing (Pause-twice, timeouts env, from W2-closeout, not re-run); no stack run of cancel running/paused crawl, batch, forced cancel, timeout; gateway proxy (WS15.L5, other session) | 1 to 1.5 d | Docker/side-by-side stack; owner approval for the two live flags | Do first: fix the 3 tests, run the stack proof. This is the only part where code exists but the claim is unproven. |
+
+Notes from the re-check: the "CRITICAL cross-tenant webhook" risk in the Risks section is fixed on innh/lane-b (not on this branch until merged); the "webhooks have no organization" lines under "What exists (b)" describe quarryv2-next before INNH-5. The effort for (b) above replaces the 4 to 5 d estimate below.
 
 ## What exists
 (a) RETRY/RESURRECT FROM LAST STATE
@@ -66,7 +78,7 @@ None for the assessment. For later builds:
 - Abort: forced cancel after the 120 s grace terminates the workflow without cleanup, which can leave partial artifacts and unreleased browser slots; timeout and cancel precedence untested live.
 
 ## Commits
-(none yet)
+(assessment commit only; no code)
 
 ## Tests (counts)
 (none yet)
