@@ -1,6 +1,6 @@
 # INNH-10: Direct agent API for API-key callers: grant issuance (SECURITY-SENSITIVE; design first)
 
-Status: not started (design note first: `.plan-work/quarry-w1w2/INNH-10-design.md`, then one Opus security review, then build behind a default-off flag)
+Status: designed, build pending (design note `.plan-work/quarry-w1w2/INNH-10-design.md`, 2026-10-31; next: owner decisions OD-1..OD-17, then one Opus security review, then Quarry units U1-U4 behind `QUARRY_EDGE__API_KEY_AGENT_RUNS`, default 0)
 Lane: D (design). Plan home: not in the plan. Estimate: 9 d (Quarry side is the small part; broker, auth-core and model-gateway belong to other owners).
 Verified by reading quarryv2-next and the Model Plane / Control Plane trees. Nothing was built or run. Paths under `apps/Ingestion Plane/Quarry-v2` unless stated.
 
@@ -67,6 +67,9 @@ SECURITY (highest-risk item of the list):
 - ZDR: a ZDR grant may only back a ZDR run (lifecycle.rs:337); keys in ZDR orgs produce ephemeral runs only, no checkpoint, no resume, no durable receipts beyond metadata tombstones, host list omitted from responses and logs.
 - Audit: grant issue/deny/revoke are durable audit events with key id and never log the key, the host list under ZDR, or tokens.
 - Cross-tenant: org comes only from the verified token (Quarry and broker both enforce); the exchange must refuse an orgId different from the key's reference.
+
+## Design (2026-10-31)
+`INNH-10-design.md` resolves D1-D7 as recommendations: a new auth-core principal type `api_key` (sub `apikey:<key_id>`, `acting_user_id` = key owner, scope `browser:agent`, TTL at most 120 s) minted only through a gateway-only exchange; BrowserBroker stays the only grant issuer (key grant = allow-list session grant stamped with key_id, mandatory budget, 600-900 s, no renew); the Verevon gateway composes exchange, grant and run. Quarry side: U1 principal + route fence, U2 start-run binding, U3 per-step and per-key rules, U4 docs + ZDR matrix row. Asks: CP-1..CP-4 (auth-core), MP-1..MP-3 (broker, model-gateway), GW-1..GW-2 (gateway). Owner decisions: section 13 of the design note.
 
 ## Commits
 (none yet)
