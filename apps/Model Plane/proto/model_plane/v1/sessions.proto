@@ -1133,6 +1133,10 @@ message SessionMessage {
   // "turn" or "post" (see AppendMessageRequest.post_kind). Rows written before
   // the column existed read as "turn".
   string post_kind = 11;
+  // When this turn was stored (messages.created_at). A room shows a time beside
+  // each message and this is the only source for it; absent only when a caller
+  // built the message without reading it from the store.
+  google.protobuf.Timestamp created_at = 12;
 }
 
 message ListConversationResponse {

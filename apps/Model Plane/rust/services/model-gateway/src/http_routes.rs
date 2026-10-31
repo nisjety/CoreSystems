@@ -6796,6 +6796,15 @@ fn prost_ts_to_rfc3339(ts: &prost_types::Timestamp) -> Value {
     }
 }
 
+/// The RFC3339 time of a transcript turn, or `None` when session-core sent none (or one that
+/// cannot be represented), so the field is left off rather than invented.
+fn message_created_at(ts: Option<&prost_types::Timestamp>) -> Option<String> {
+    match prost_ts_to_rfc3339(ts?) {
+        Value::String(rfc3339) => Some(rfc3339),
+        _ => None,
+    }
+}
+
 /// Flatten a prost `Struct` into plain JSON for the wire envelope.
 fn prost_struct_to_json(s: &prost_types::Struct) -> Value {
     let map = s
@@ -9180,6 +9189,10 @@ struct ThreadMessage {
     /// (`turn`, or a row from before post kinds), so a turn keeps the shape it always had.
     #[serde(skip_serializing_if = "String::is_empty")]
     post_kind: String,
+    /// When session-core stored this turn, as RFC3339. A room shows a time beside each
+    /// message. Omitted when session-core sent none, so a reader never sees a made-up time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_at: Option<String>,
     /// The turn's persisted evidence, flattened so its keys (today
     /// `grounding`) sit directly on the message the way the live SSE path
     /// delivers them. Omitted entirely for turns recorded before metadata was
@@ -10076,6 +10089,7 @@ async fn list_thread_messages(
                 agent_name: m.agent_name,
                 author_subject_id: m.author_subject_id,
                 post_kind: if m.post_kind == "post" { m.post_kind } else { String::new() },
+                created_at: message_created_at(m.created_at.as_ref()),
                 metadata: crate::room_metadata::visible_metadata(
                     m.metadata.as_ref().map(prost_struct_to_json).and_then(
                         |value| match value {
@@ -15290,6 +15304,7 @@ mod space_post_wire_tests {
             agent_name: String::new(),
             author_subject_id: "user-2".to_owned(),
             post_kind: post_kind.to_owned(),
+            created_at: None,
             metadata: None,
         }
     }
@@ -15314,6 +15329,26 @@ mod space_post_wire_tests {
             reply_count,
             last_author_subject_id: last_author.to_owned(),
         }
+    }
+
+    #[test]
+    fn thread_message_json_carries_created_at_as_rfc3339_and_omits_it_when_unset() {
+        // 2026-10-31T09:30:15.250Z
+        let stored = prost_types::Timestamp {
+            seconds: 1_793_439_015,
+            nanos: 250_000_000,
+        };
+        let mut stamped = message("post");
+        stamped.created_at = message_created_at(Some(&stored));
+        let body = serde_json::to_value(stamped).expect("serialises");
+        let created_at = body["created_at"].as_str().expect("created_at is a string");
+        let parsed = chrono::DateTime::parse_from_rfc3339(created_at).expect("RFC3339");
+        assert_eq!(parsed.timestamp(), 1_793_439_015);
+        assert_eq!(parsed.timestamp_subsec_millis(), 250);
+        // A row session-core sent no time for keeps the shape it always had.
+        assert_eq!(message_created_at(None), None);
+        let unset = serde_json::to_value(message("")).expect("serialises");
+        assert!(unset.get("created_at").is_none(), "{unset}");
     }
 
     #[test]

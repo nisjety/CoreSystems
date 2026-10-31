@@ -185,7 +185,7 @@ fn clamp_conversation_page_limit(limit: u32) -> i64 {
 }
 
 /// One stored turn as the transcript reads it: id, role, content, persona,
-/// metadata, author and post kind.
+/// metadata, author, post kind and when it was stored.
 type ConversationRow = (
     String,
     String,
@@ -194,14 +194,27 @@ type ConversationRow = (
     Option<serde_json::Value>,
     Option<String>,
     String,
+    DateTime<Utc>,
 );
 
 fn session_message_from_row(
-    (message_id, role, content, agent_name, metadata, author_subject_id, post_kind): ConversationRow,
+    (
+        message_id,
+        role,
+        content,
+        agent_name,
+        metadata,
+        author_subject_id,
+        post_kind,
+        created_at,
+    ): ConversationRow,
 ) -> pb::SessionMessage {
     pb::SessionMessage {
         message_id,
         post_kind,
+        // `messages.created_at` is NOT NULL, so every stored turn has a time; a
+        // room shows it beside the message.
+        created_at: Some(to_proto_timestamp(created_at)),
         role,
         content,
         agent_name: agent_name.unwrap_or_default(),
@@ -276,7 +289,7 @@ async fn conversation_page_rows(
     fetch: i64,
 ) -> Result<Vec<ConversationRow>, Status> {
     sqlx::query_as::<_, ConversationRow>(
-        "SELECT m.id::text, m.role, m.content, m.agent_name, m.metadata, m.author_subject_id, m.post_kind
+        "SELECT m.id::text, m.role, m.content, m.agent_name, m.metadata, m.author_subject_id, m.post_kind, m.created_at
          FROM messages m
          JOIN threads t ON t.id = m.thread_id
          WHERE m.thread_id = $1 AND t.org_id = $2
@@ -8020,7 +8033,7 @@ impl SessionCore for SessionService {
                 // `m.id` is selected so a caller can name one earlier turn
                 // durably (message pinning). It was always in the table; this
                 // read simply never returned it.
-                "SELECT m.id::text, m.role, m.content, m.agent_name, m.metadata, m.author_subject_id, m.post_kind
+                "SELECT m.id::text, m.role, m.content, m.agent_name, m.metadata, m.author_subject_id, m.post_kind, m.created_at
                  FROM messages m
                  JOIN threads t ON t.id = m.thread_id
                  WHERE m.thread_id = $1 AND t.org_id = $2
@@ -20788,7 +20801,35 @@ mod thread_list_db_tests {
 
 #[cfg(test)]
 mod conversation_page_tests {
-    use super::{clamp_conversation_page_limit, conversation_tail_page};
+    use super::{
+        clamp_conversation_page_limit, conversation_tail_page, session_message_from_row,
+        ConversationRow,
+    };
+    use chrono::{TimeZone, Utc};
+
+    #[test]
+    fn a_stored_turn_carries_the_time_it_was_stored() {
+        let stored = Utc.with_ymd_and_hms(2026, 10, 31, 9, 30, 15).unwrap()
+            + chrono::Duration::milliseconds(250);
+        let row: ConversationRow = (
+            "m-1".to_owned(),
+            "user".to_owned(),
+            "hello".to_owned(),
+            None,
+            None,
+            Some("sub-1".to_owned()),
+            "post".to_owned(),
+            stored,
+        );
+        let message = session_message_from_row(row);
+        let created_at = message.created_at.expect("created_at is set on every row");
+        assert_eq!(created_at.seconds, stored.timestamp());
+        assert_eq!(created_at.nanos, 250_000_000);
+        // The other columns are unaffected by the new one.
+        assert_eq!(message.message_id, "m-1");
+        assert_eq!(message.post_kind, "post");
+        assert_eq!(message.author_subject_id, "sub-1");
+    }
 
     #[test]
     fn a_positive_page_limit_is_clamped_to_the_page_bounds() {
@@ -21087,6 +21128,39 @@ mod conversation_page_db_tests {
             .await
             .expect("owner page");
         assert_eq!(owner.len(), 4);
+
+        cleanup(&pool, &[thread.as_str()]).await;
+    }
+
+    /// The transcript reads carry the stored time of every turn, paged or not.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn list_conversation_carries_created_at_against_real_pg() {
+        let pool = connect().await;
+        let suffix = new_ulid();
+        let org = format!("conv-time-{suffix}");
+        let thread = format!("conv-time-thread-{suffix}");
+        let ids = seed_turns(&pool, &org, "reader", &thread, 3).await;
+        // Pin the middle turn to a known instant so the value is checked, not just its presence.
+        sqlx::query("UPDATE messages SET created_at = '2026-10-31T09:30:15.250Z' WHERE id = $1")
+            .bind(&ids[1])
+            .execute(&pool)
+            .await
+            .unwrap();
+        let svc = service(pool.clone());
+
+        for limit in [0_u32, 10] {
+            let page = read(&svc, &org, "reader", &thread, limit, "")
+                .await
+                .expect("transcript read");
+            assert_eq!(page.messages.len(), 3);
+            for message in &page.messages {
+                assert!(message.created_at.is_some(), "limit {limit}: {message:?}");
+            }
+            let pinned = page.messages[1].created_at.as_ref().unwrap();
+            assert_eq!(pinned.seconds, 1_793_439_015, "limit {limit}");
+            assert_eq!(pinned.nanos, 250_000_000, "limit {limit}");
+        }
 
         cleanup(&pool, &[thread.as_str()]).await;
     }
