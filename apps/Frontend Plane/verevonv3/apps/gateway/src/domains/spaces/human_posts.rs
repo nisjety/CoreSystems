@@ -1482,6 +1482,303 @@ mod tests {
         assert_eq!(model_calls(&fx).await.len(), model_before, "no model-gateway call");
     }
 
+    // The Dragonfly path of the post ceiling. The tests above run the in-process fallback (the
+    // test state has no cache). These need a real server and are `#[ignore]`d by default:
+    //
+    //   docker run --rm -d --name space-leftovers-dragonfly -p 127.0.0.1:<port>:6379 \
+    //     docker.dragonflydb.io/dragonflydb/dragonfly      (redis:7-alpine works too)
+    //   SPACE_LIMITER_REDIS_URL=redis://127.0.0.1:<port> \
+    //     cargo test -- --ignored post_ceiling_redis --test-threads=1
+    //
+    // Every test names its own org and user, so a run never needs a flush and never meets a
+    // bucket another run left behind.
+
+    const REDIS_URL_ENV: &str = "SPACE_LIMITER_REDIS_URL";
+
+    /// `(host:port, userinfo-with-@-or-empty)` of the server under test.
+    fn redis_endpoint() -> (String, String) {
+        let url = std::env::var(REDIS_URL_ENV)
+            .unwrap_or_else(|_| panic!("set {REDIS_URL_ENV} to a throwaway Dragonfly or Redis"));
+        let rest = url.trim().split_once("://").map_or(url.trim(), |(_, rest)| rest);
+        let rest = rest.split('/').next().unwrap_or(rest);
+        match rest.rsplit_once('@') {
+            Some((userinfo, host)) => (host.to_owned(), format!("{userinfo}@")),
+            None => (rest.to_owned(), String::new()),
+        }
+    }
+
+    async fn redis_cache(host: &str, userinfo: &str) -> crate::cache::ResultCache {
+        let cache = crate::cache::ResultCache::connect(Some(&format!("redis://{userinfo}{host}"))).await;
+        assert!(
+            cache.connection().is_some(),
+            "no connection to {host}: the Dragonfly path would silently not run"
+        );
+        cache
+    }
+
+    /// An org id and a user id nobody else has used.
+    fn fresh_ids(tag: &str) -> (String, String) {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let unique = format!("{tag}-{}-{nanos}", std::process::id());
+        (format!("org-{unique}"), format!("user-{unique}"))
+    }
+
+    /// Whether the limiter's bucket for this caller exists in the server: proof the answer came
+    /// from Dragonfly and not from the in-process fallback.
+    async fn bucket_in_server(cache: &crate::cache::ResultCache, org: &str, user: &str) -> bool {
+        let mut conn = cache.connection().expect("connected");
+        let key = format!("verevon:gw:ratelimit:space-post:{org}:{user}");
+        redis::cmd("EXISTS")
+            .arg(key)
+            .query_async::<i64>(&mut conn)
+            .await
+            .expect("EXISTS")
+            == 1
+    }
+
+    #[tokio::test]
+    #[ignore = "needs SPACE_LIMITER_REDIS_URL (a throwaway Dragonfly or Redis)"]
+    async fn post_ceiling_redis_is_one_bucket_across_create_and_reply_then_a_typed_429() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (host, userinfo) = redis_endpoint();
+        let cache = redis_cache(&host, &userinfo).await;
+        let fx = default_fixture().await;
+        mount_decision(&fx, "thread-decision").await;
+        mount_decision(&fx, "thread-append-decision").await;
+        mount_model(&fx, "/v1/threads", stored(false)).await;
+        mount_model(&fx, "/v1/threads/thread-1/messages", stored(false)).await;
+        // The fixture's session-context answers org-1, so the bucket is `space-post:org-1:<user>`.
+        let (_, user_id) = fresh_ids("shared");
+        let user = caller(&user_id);
+        let headers = session_headers();
+        // Two posts a minute: one create and one reply spend the same two tokens.
+        let limiter = RateLimiter::from_cache_with_rpm(&cache, 2.0);
+        let (status, Json(body)) = submit_post_limited(
+            &fx.state, &limiter, &user, &headers, "space-room", None, &post("first"),
+        )
+        .await;
+        assert_eq!(status.as_u16(), 201, "{body}");
+        let (status, Json(body)) = submit_post_limited(
+            &fx.state, &limiter, &user, &headers, "space-room", Some("thread-1"), &post("second"),
+        )
+        .await;
+        assert_eq!(status.as_u16(), 201, "{body}");
+        assert!(bucket_in_server(&cache, "org-1", &user_id).await, "bucket lives in the server");
+        let control_before = control_calls(&fx).await.len();
+        let model_before = model_calls(&fx).await.len();
+        for thread in [None, Some("thread-1")] {
+            let (status, Json(body)) = submit_post_limited(
+                &fx.state, &limiter, &user, &headers, "space-room", thread, &post("third"),
+            )
+            .await;
+            assert_eq!(status.as_u16(), 429, "{body}");
+            assert_eq!(body["error"]["code"], "rate_limited");
+            assert!(body["error"]["details"]["retry_after_seconds"].as_u64().unwrap() >= 1);
+        }
+        assert_eq!(control_calls(&fx).await.len(), control_before, "no Control call");
+        assert_eq!(model_calls(&fx).await.len(), model_before, "no model-gateway call");
+    }
+
+    #[tokio::test]
+    #[ignore = "needs SPACE_LIMITER_REDIS_URL (a throwaway Dragonfly or Redis)"]
+    async fn post_ceiling_redis_keeps_a_bucket_per_user_and_per_org_across_replicas() {
+        let (host, userinfo) = redis_endpoint();
+        let cache = redis_cache(&host, &userinfo).await;
+        // Two limiters on one server are two gateway replicas: the ceiling is fleet-wide.
+        let replica_a = RateLimiter::from_cache_with_rpm(&cache, 2.0);
+        let replica_b = RateLimiter::from_cache_with_rpm(&cache, 2.0);
+        let (org_1, user_1) = fresh_ids("iso-a");
+        let (org_2, user_2) = fresh_ids("iso-b");
+        assert!(check_post_ceiling(&replica_a, &org_1, &user_1).await.is_ok());
+        assert!(check_post_ceiling(&replica_b, &org_1, &user_1).await.is_ok());
+        let (status, Json(body)) = check_post_ceiling(&replica_a, &org_1, &user_1)
+            .await
+            .expect_err("two replicas spend one bucket");
+        assert_eq!(status.as_u16(), 429);
+        assert_eq!(body["error"]["code"], "rate_limited");
+        assert!(body["error"]["details"]["retry_after_seconds"].as_u64().unwrap() >= 1);
+        assert!(check_post_ceiling(&replica_b, &org_1, &user_1).await.is_err());
+        // Another user in the same org, and the same user in another org, are untouched.
+        assert!(check_post_ceiling(&replica_a, &org_1, &user_2).await.is_ok());
+        assert!(check_post_ceiling(&replica_a, &org_2, &user_1).await.is_ok());
+        for (org, user) in [(&org_1, &user_1), (&org_1, &user_2), (&org_2, &user_1)] {
+            assert!(bucket_in_server(&cache, org, user).await, "{org}/{user}");
+        }
+        // The org id is trimmed into the key, as the route sends it.
+        assert!(check_post_ceiling(&replica_a, &format!(" {org_1} "), &user_1).await.is_err());
+    }
+
+    /// A TCP forwarder to the server under test that can be cut, standing in for "Redis goes
+    /// down" without touching the container.
+    struct CutProxy {
+        addr: std::net::SocketAddr,
+        accept: tokio::task::JoinHandle<()>,
+        live: std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    }
+
+    impl CutProxy {
+        async fn start(upstream: String) -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            let live = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let tracked = live.clone();
+            let accept = tokio::spawn(async move {
+                while let Ok((mut inbound, _)) = listener.accept().await {
+                    let upstream = upstream.clone();
+                    let pipe = tokio::spawn(async move {
+                        if let Ok(mut outbound) = tokio::net::TcpStream::connect(&upstream).await {
+                            let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                        }
+                    });
+                    tracked.lock().unwrap().push(pipe);
+                }
+            });
+            Self { addr, accept, live }
+        }
+
+        /// Close the listener and every open connection: the server is now unreachable.
+        fn cut(&self) {
+            self.accept.abort();
+            for pipe in self.live.lock().unwrap().drain(..) {
+                pipe.abort();
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "needs SPACE_LIMITER_REDIS_URL (a throwaway Dragonfly or Redis)"]
+    async fn post_ceiling_redis_outage_falls_back_to_the_in_process_bucket_not_to_no_ceiling() {
+        let (host, userinfo) = redis_endpoint();
+        let proxy = CutProxy::start(host).await;
+        let cache = redis_cache(&proxy.addr.to_string(), &userinfo).await;
+        let limiter = RateLimiter::from_cache_with_rpm(&cache, 2.0);
+        let (org, user) = fresh_ids("outage");
+        // Up: the server decides.
+        assert!(check_post_ceiling(&limiter, &org, &user).await.is_ok());
+        assert!(check_post_ceiling(&limiter, &org, &user).await.is_ok());
+        assert!(check_post_ceiling(&limiter, &org, &user).await.is_err());
+        assert!(bucket_in_server(&cache, &org, &user).await);
+        // Down: no 5xx and no stall (each call gives up after the limiter's own 500 ms deadline),
+        // and the ceiling is still a ceiling. The in-process bucket starts full, so the first two
+        // posts of the outage land and the third is the typed 429. This is `rate_limit.rs`'s
+        // documented degrade: a Dragonfly blip does not reject posts, and it does not lift the cap.
+        proxy.cut();
+        let started = std::time::Instant::now();
+        assert!(check_post_ceiling(&limiter, &org, &user).await.is_ok());
+        assert!(check_post_ceiling(&limiter, &org, &user).await.is_ok());
+        let (status, Json(body)) = check_post_ceiling(&limiter, &org, &user)
+            .await
+            .expect_err("the in-process bucket still refuses the third post");
+        assert_eq!(status.as_u16(), 429);
+        assert_eq!(body["error"]["code"], "rate_limited");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "an outage must not hold a post open: {:?}",
+            started.elapsed()
+        );
+        // Another caller is still on its own bucket during the outage.
+        let (other_org, other_user) = fresh_ids("outage-other");
+        assert!(check_post_ceiling(&limiter, &other_org, &other_user).await.is_ok());
+    }
+
+    /// A RESP peer that answers every command with an error, like a Redis that is up but refusing
+    /// work (LOADING, OOM, READONLY). Returns its address and the command names it has seen.
+    async fn erroring_redis() -> (std::net::SocketAddr, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = seen.clone();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let record = record.clone();
+                tokio::spawn(async move {
+                    let (read, mut write) = stream.into_split();
+                    let mut read = tokio::io::BufReader::new(read);
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        if read.read_line(&mut line).await.unwrap_or(0) == 0 {
+                            return;
+                        }
+                        let Some(count) =
+                            line.trim_end().strip_prefix('*').and_then(|n| n.parse::<usize>().ok())
+                        else {
+                            return;
+                        };
+                        let mut name = String::new();
+                        for index in 0..count {
+                            line.clear();
+                            if read.read_line(&mut line).await.unwrap_or(0) == 0 {
+                                return;
+                            }
+                            let Some(len) =
+                                line.trim_end().strip_prefix('$').and_then(|n| n.parse::<usize>().ok())
+                            else {
+                                return;
+                            };
+                            let mut data = vec![0u8; len + 2];
+                            if read.read_exact(&mut data).await.is_err() {
+                                return;
+                            }
+                            if index == 0 {
+                                name = String::from_utf8_lossy(&data[..len]).to_uppercase();
+                            }
+                        }
+                        record.lock().unwrap().push(name);
+                        if write.write_all(b"-ERR refusing work\r\n").await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        (addr, seen)
+    }
+
+    #[tokio::test]
+    async fn post_ceiling_with_a_redis_that_answers_errors_is_the_in_process_bucket() {
+        // Connected, but every command fails: the limiter's `Ok(Err)` branch, not the timeout and
+        // not the no-connection one. The ceiling must still hold, as a typed 429, with no 5xx.
+        let (addr, seen) = erroring_redis().await;
+        let cache = crate::cache::ResultCache::connect(Some(&format!("redis://{addr}"))).await;
+        assert!(cache.connection().is_some(), "the erroring peer must still count as connected");
+        let limiter = RateLimiter::from_cache_with_rpm(&cache, 2.0);
+        let started = std::time::Instant::now();
+        assert!(check_post_ceiling(&limiter, "org-1", "user-errors").await.is_ok());
+        assert!(check_post_ceiling(&limiter, "org-1", "user-errors").await.is_ok());
+        let (status, Json(body)) = check_post_ceiling(&limiter, "org-1", "user-errors")
+            .await
+            .expect_err("a Redis that errors is not a Redis that lifts the cap");
+        assert_eq!(status.as_u16(), 429);
+        assert_eq!(body["error"]["code"], "rate_limited");
+        assert!(body["error"]["details"]["retry_after_seconds"].as_u64().unwrap() >= 1);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
+        assert!(
+            seen.lock().unwrap().iter().any(|name| name.starts_with("EVAL")),
+            "the limiter must have tried the server first: {:?}",
+            seen.lock().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn post_ceiling_with_an_unreachable_cache_is_the_in_process_bucket() {
+        // Startup with the cache down: `ResultCache::connect` yields no connection (nothing
+        // listens on port 1), so the limiter is purely in-process and still caps the user.
+        let cache = crate::cache::ResultCache::connect(Some("redis://127.0.0.1:1")).await;
+        assert!(cache.connection().is_none());
+        let limiter = RateLimiter::from_cache_with_rpm(&cache, 2.0);
+        assert!(check_post_ceiling(&limiter, "org-1", "user-down").await.is_ok());
+        assert!(check_post_ceiling(&limiter, "org-1", "user-down").await.is_ok());
+        let (status, Json(body)) = check_post_ceiling(&limiter, "org-1", "user-down")
+            .await
+            .expect_err("no cache is not no ceiling");
+        assert_eq!(status.as_u16(), 429);
+        assert_eq!(body["error"]["code"], "rate_limited");
+    }
+
     #[test]
     fn a_model_gateway_error_is_bounded_before_it_reaches_the_browser() {
         let long = "m".repeat(1000);
