@@ -39,6 +39,7 @@ import type {
   GeneratedFile,
   GeneratedImagePreview,
   Citation,
+  LifecycleNotice,
   StreamFailureAction,
 } from '@/features/chat/components/chat-types'
 import type { Approval, ApprovalDecision } from '@/shared/api/orchestration-client'
@@ -118,6 +119,11 @@ export type ConversationNode =
    * nothing was recalled.
    */
   | { kind: 'source-scope'; scope: 'knowledge_only' | 'web_only'; excludedTools: string[] }
+  /**
+   * What the gateway did to this turn while it ran (retries, compaction, context changes, a reduced answer).
+   * One node per turn, holding every notice in arrival order, so the transcript keys it once.
+   */
+  | { kind: 'lifecycle-notices'; notices: LifecycleNotice[] }
   | { kind: 'truncated'; stopReason: string }
   | { kind: 'tool-chips'; tools: ComposerToolId[] }
   | { kind: 'attachments'; attachments: ComposerAttachment[] }

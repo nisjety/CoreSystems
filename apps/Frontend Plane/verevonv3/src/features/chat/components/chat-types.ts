@@ -312,6 +312,37 @@ export type RunMeter = {
 }
 
 /**
+ * A run lifecycle notice on one turn (WS15): something the gateway did to the turn or to a tool call while it
+ * ran, from the `retry_scheduled`, `compaction`, `context_change` and `retrieval_notice` frames. Only the
+ * gateway's counts and closed tokens are kept, never text. Session-only: `turnsToTranscript` does not copy it,
+ * so nothing is stored locally or on the server, and a reload shows none.
+ */
+export type LifecycleNotice =
+  /** `callId` is the tool call the retry was matched to when it arrived, if one was out. */
+  | { kind: 'retry'; tool?: string; attempt: number; maxAttempts: number; reason: string; callId?: string }
+  | { kind: 'compaction'; scope: string; outcome: string }
+  | { kind: 'context'; change: string; messagesDropped?: number }
+  /** `wordingKey` is the gateway's catalogued key for why the answer was reduced. */
+  | { kind: 'retrieval'; wordingKey: string }
+
+/** The most notices one turn keeps. The oldest go first. */
+export const LIFECYCLE_NOTICE_CAP = 20
+
+/**
+ * `notices` with `notice` appended. An exact repeat of a notice the turn already holds is not added again: a
+ * resumed stream replays what the turn saw. The list keeps its newest `LIFECYCLE_NOTICE_CAP` entries.
+ */
+export function addLifecycleNotice(
+  notices: readonly LifecycleNotice[] | undefined,
+  notice: LifecycleNotice,
+): LifecycleNotice[] {
+  const held = notices ?? []
+  const key = JSON.stringify(notice)
+  if (held.some((item) => JSON.stringify(item) === key)) return [...held]
+  return [...held, notice].slice(-LIFECYCLE_NOTICE_CAP)
+}
+
+/**
  * One conversation turn as the chat renders it.
  *
  * Every field is named. Server message metadata is never spread onto a turn:
@@ -440,6 +471,11 @@ export type ChatTurn = {
    * that disappears on reopen reads as though the recall never happened.
    */
   recalledMemories?: RecalledMemory[]
+  /**
+   * The run lifecycle notices this turn has had, in arrival order, capped (see `LifecycleNotice`). Session-only:
+   * `turnsToTranscript` drops it. Absent means none.
+   */
+  lifecycle?: LifecycleNotice[]
   /**
    * Why generation stopped, when the backend reported it. `'stream_incomplete'`
    * means the provider connection broke before any proper termination signal,

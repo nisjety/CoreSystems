@@ -185,6 +185,7 @@ import type {
   TaskStepStatus,
   ThreadPlanGrant,
 } from './chat-types'
+import { addLifecycleNotice } from './chat-types'
 import { applyUsageProgress, applyUsageTotal } from './RunCostMeter'
 import type { ChatEffectClass } from '@/shared/chat/effect-class'
 import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
@@ -193,6 +194,7 @@ import { readPinnedMessages, togglePinnedMessage } from '../lib/chat-pinned-mess
 import { CHAT_SURFACE_IDS, chatSurfaceSpec, isChatTab } from '../lib/chat-surfaces'
 import { createSnapshotWriter, flushOnPageLifecycle, parseSnapshotThrottleMs } from '../lib/snapshot-throttle'
 import { nextFollowState, virtualizeTranscript } from '../lib/transcript-window'
+import { isToolCallRunning } from '../lib/stream-activity'
 
 /**
  * WS09 S3. `VITE_CHAT_SNAPSHOT_THROTTLE_MS` is the cadence of the local transcript
@@ -3821,6 +3823,56 @@ export function useChatController() {
             'done',
           ),
         )
+      },
+      // Run lifecycle notices (WS15). Each frame records something the gateway did, as counts and closed tokens;
+      // `addLifecycleNotice` keeps them in arrival order, drops an exact replay and caps the list.
+      onRetryScheduled: (event: Parameters<NonNullable<ChatStreamHandlers['onRetryScheduled']>>[0]) => {
+        setState((s) => {
+          const turn = s.turns.find((t) => t.id === assistantId)
+          if (!turn) return
+          // The frame names the tool, not the call: the retry belongs to the newest call of that tool still out.
+          const call = [...(turn.toolCalls ?? [])]
+            .reverse()
+            .find((item) => item.name === event.tool && isToolCallRunning(item))
+          turn.lifecycle = addLifecycleNotice(turn.lifecycle, {
+            kind: 'retry',
+            tool: event.tool,
+            attempt: event.attempt,
+            maxAttempts: event.maxAttempts,
+            reason: event.reason,
+            callId: call?.id,
+          })
+        })
+      },
+      onCompaction: (event: Parameters<NonNullable<ChatStreamHandlers['onCompaction']>>[0]) => {
+        setState((s) => {
+          const turn = s.turns.find((t) => t.id === assistantId)
+          if (turn) {
+            turn.lifecycle = addLifecycleNotice(turn.lifecycle, {
+              kind: 'compaction',
+              scope: event.scope,
+              outcome: event.outcome,
+            })
+          }
+        })
+      },
+      onContextChange: (event: Parameters<NonNullable<ChatStreamHandlers['onContextChange']>>[0]) => {
+        setState((s) => {
+          const turn = s.turns.find((t) => t.id === assistantId)
+          if (turn) {
+            turn.lifecycle = addLifecycleNotice(turn.lifecycle, {
+              kind: 'context',
+              change: event.change,
+              messagesDropped: event.messagesDropped,
+            })
+          }
+        })
+      },
+      onRetrievalNotice: (event: Parameters<NonNullable<ChatStreamHandlers['onRetrievalNotice']>>[0]) => {
+        setState((s) => {
+          const turn = s.turns.find((t) => t.id === assistantId)
+          if (turn) turn.lifecycle = addLifecycleNotice(turn.lifecycle, { kind: 'retrieval', wordingKey: event.wordingKey })
+        })
       },
     } satisfies Partial<ChatStreamHandlers>
   }

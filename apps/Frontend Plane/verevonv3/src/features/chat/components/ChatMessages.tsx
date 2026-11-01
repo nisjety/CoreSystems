@@ -1,5 +1,5 @@
 import { ForkAction, threadForkEnabled } from './ForkAction'
-import { formatResetTime, refreshResetTimeWording, workStepLabel } from './chat-normalizers'
+import { formatResetTime, humanizeToolName, refreshResetTimeWording, workStepLabel } from './chat-normalizers'
 import { RunNotifyButton } from './RunNotifyButton'
 import {
   type Approval,
@@ -130,6 +130,7 @@ import {
   type GeneratedFile,
   type GeneratedImagePreview,
   type IconComponent,
+  type LifecycleNotice,
   type MarkdownBlock,
   type MarkdownListItem,
   type MarkdownQuoteLine,
@@ -138,7 +139,7 @@ import {
 } from './chat-types'
 import type { VersionBadge } from '@/features/chat/lib/chat-versions'
 import type { ServerVersionBadge } from '@/features/chat/lib/chat-versions-server'
-import { streamActivityLabel, type StreamActivity } from '@/features/chat/lib/stream-activity'
+import { streamActivityLabel, type StreamActivity, type Translator } from '@/features/chat/lib/stream-activity'
 import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { approvalHeadline, approvalReason } from '@/shared/approvals/approval-copy'
@@ -277,6 +278,10 @@ const CHAT_NODE_REGISTRY = createConversationNodeRegistry({
     render: (node) => (
       <SourceScopeNotice scope={node.scope} excludedTools={node.excludedTools} />
     ),
+  },
+  'lifecycle-notices': {
+    kind: 'lifecycle-notices',
+    render: (node) => <LifecycleNotices notices={node.notices} />,
   },
   truncated: {
     kind: 'truncated',
@@ -3833,6 +3838,122 @@ export function TruncatedAnswerNotice(props: { stopReason: string }) {
 }
 
 /**
+ * What the gateway did to this turn while it ran (WS15): a retry, a compaction, a context change, a reduced answer.
+ * One plain note per notice, in the order they happened. Nothing here asks for an action, and nothing is an alarm.
+ */
+export function LifecycleNotices(props: { notices: LifecycleNotice[] }) {
+  const i18n = useI18n()
+  return (
+    <div class="verevon-chat-lifecycle-notices">
+      <For each={props.notices}>
+        {(notice) => (
+          <p class="verevon-chat-lifecycle-notice" role="note">
+            <Info size={12} />
+            {lifecycleNoticeSentence(notice, i18n)}
+          </p>
+        )}
+      </For>
+    </div>
+  )
+}
+
+/**
+ * The sentence a lifecycle notice reads as, shown and announced alike. It is built from the notice's counts and the
+ * gateway's closed tokens only. A token this build does not know reads as the generic sentence, and a summary that
+ * failed is never worded as one that worked.
+ */
+export function lifecycleNoticeSentence(notice: LifecycleNotice, i18n: Translator): string {
+  switch (notice.kind) {
+    case 'retry':
+      return retrySentence(notice, i18n)
+    case 'compaction':
+      return compactionSentence(notice, i18n)
+    case 'context':
+      return contextSentence(notice, i18n)
+    case 'retrieval':
+      return retrievalSentence(notice, i18n)
+  }
+}
+
+/** For a token this build does not know: the context changed, which is the one thing certain about it. */
+const adjustedSentence = (i18n: Translator) => i18n.tr('Konteksten ble justert.', 'Context was adjusted.')
+
+function retrySentence(notice: Extract<LifecycleNotice, { kind: 'retry' }>, i18n: Translator): string {
+  const tool = notice.tool ? humanizeToolName(notice.tool) : i18n.tr('verktøyet', 'the tool')
+  const attempt = i18n.tr(`(forsøk ${notice.attempt} av ${notice.maxAttempts})`, `(attempt ${notice.attempt} of ${notice.maxAttempts})`)
+  switch (notice.reason) {
+    case 'timeout':
+      return i18n.tr(`Prøver ${tool} på nytt etter tidsavbrudd ${attempt}.`, `Retrying ${tool} after a timeout ${attempt}.`)
+    case 'connection':
+      return i18n.tr(`Prøver ${tool} på nytt etter en tilkoblingsfeil ${attempt}.`, `Retrying ${tool} after a connection error ${attempt}.`)
+    case 'upstream_unavailable':
+      return i18n.tr(
+        `Prøver ${tool} på nytt etter at tjenesten var utilgjengelig ${attempt}.`,
+        `Retrying ${tool} after the service was unavailable ${attempt}.`,
+      )
+    case 'rate_limited':
+      return i18n.tr(`Prøver ${tool} på nytt etter for mange forespørsler ${attempt}.`, `Retrying ${tool} after too many requests ${attempt}.`)
+    case 'other':
+      return i18n.tr(`Prøver ${tool} på nytt etter en midlertidig feil ${attempt}.`, `Retrying ${tool} after a temporary error ${attempt}.`)
+    default:
+      return i18n.tr(`Prøver ${tool} på nytt ${attempt}.`, `Retrying ${tool} ${attempt}.`)
+  }
+}
+
+function compactionSentence(notice: Extract<LifecycleNotice, { kind: 'compaction' }>, i18n: Translator): string {
+  if (notice.scope === 'tool_results' && notice.outcome === 'cleared') {
+    return i18n.tr(
+      'Gamle verktøyresultater ble fjernet for å få plass i konteksten.',
+      'Old tool results were removed to fit the context.',
+    )
+  }
+  if (notice.scope === 'history') {
+    switch (notice.outcome) {
+      case 'summarized':
+        return i18n.tr('Eldre meldinger ble oppsummert for å få plass i konteksten.', 'Older messages were summarized to fit the context.')
+      case 'reused':
+        return i18n.tr('En tidligere oppsummering av eldre meldinger ble brukt igjen.', 'An earlier summary of older messages was reused.')
+      case 'truncated':
+        return i18n.tr(
+          'Oppsummeringen av eldre meldinger mislyktes, så de ble kuttet for å få plass.',
+          'Summarizing older messages failed, so they were cut to fit the context.',
+        )
+    }
+  }
+  return adjustedSentence(i18n)
+}
+
+function contextSentence(notice: Extract<LifecycleNotice, { kind: 'context' }>, i18n: Translator): string {
+  switch (notice.change) {
+    case 'history_shed': {
+      const dropped = notice.messagesDropped ?? 0
+      if (dropped === 1) return i18n.tr('1 eldre melding ble utelatt fra konteksten.', '1 older message was left out of the context.')
+      if (dropped > 1) {
+        return i18n.tr(`${dropped} eldre meldinger ble utelatt fra konteksten.`, `${dropped} older messages were left out of the context.`)
+      }
+      return i18n.tr('Eldre meldinger ble utelatt fra konteksten.', 'Older messages were left out of the context.')
+    }
+    case 'skills_truncated':
+      return i18n.tr('Instruksjonene for en ferdighet ble kortet ned.', 'The instructions for a skill were shortened.')
+    case 'run_context_skipped':
+      return i18n.tr('En del av kjørekonteksten ble hoppet over.', 'Part of the run context was skipped.')
+    default:
+      return adjustedSentence(i18n)
+  }
+}
+
+/** A reduced answer is told as one, whatever the reason: the generic wording covers a key this build does not word. */
+function retrievalSentence(notice: Extract<LifecycleNotice, { kind: 'retrieval' }>, i18n: Translator): string {
+  if (notice.wordingKey === 'retrieval.zdr_dense_unavailable') {
+    return i18n.tr(
+      'Svaret bygger bare på tekstsøk i kildene, fordi semantisk søk ikke er tilgjengelig under Zero Data Retention.',
+      'The answer uses text search in the sources only, because semantic search is not available under Zero Data Retention.',
+    )
+  }
+  return i18n.tr('Svaret ble laget ut fra et begrenset søk i kildene.', 'The answer was produced from a reduced search of the sources.')
+}
+
+/**
  * Per-turn retrieval-source filter receipt (chat-wave2 scope spec §2.2's
  * "shown in the receipt" requirement) — a small disclosure chip next to the
  * other per-turn notices (verification, memory recall), never a silent
@@ -4176,6 +4297,7 @@ export function ThinkingDots(props: {
    */
   runId?: string
 }) {
+  const i18n = useI18n()
   const mountedAt = Date.now()
   /**
    * The turn's own start, not this component's.
@@ -4216,7 +4338,7 @@ export function ThinkingDots(props: {
           the first second, and unlike the counter it cannot read as a stall. */}
       <Show when={props.activity}>
         {(activity) => (
-          <small class="verevon-chat-thinking__activity">{streamActivityLabel(activity())}</small>
+          <small class="verevon-chat-thinking__activity">{streamActivityLabel(activity(), i18n)}</small>
         )}
       </Show>
       <Show when={elapsedMs() >= THINKING_ELAPSED_THRESHOLD_MS}>

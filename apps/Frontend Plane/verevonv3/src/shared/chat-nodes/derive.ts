@@ -39,7 +39,7 @@ function answerState(turn: ChatTurn, displayContent: string): AnswerState {
     // Spread rather than `activity: … ?? undefined`: a turn that has reported
     // no activity derives a node with no such key at all, so "nothing known
     // yet" and "some activity" stay distinguishable by shape.
-    const activity = deriveStreamActivity(turn.toolCalls)
+    const activity = deriveStreamActivity(turn.toolCalls, turn.lifecycle)
     // `runId` is spread for the same reason: a turn the stream has not yet named
     // a run for derives the shape it always did.
     return {
@@ -176,6 +176,11 @@ export function deriveConversationNodes(
     if (applied) {
       nodes.push({ kind: 'source-scope', scope: applied.scope, excludedTools: applied.excludedTools })
     }
+  }
+  // Shown while the turn waits too: a retry is most useful while the answer is still pending. A turn with no
+  // notice derives no node at all, so a plain stream's list is unchanged.
+  if (turn.lifecycle && turn.lifecycle.length > 0) {
+    nodes.push({ kind: 'lifecycle-notices', notices: turn.lifecycle })
   }
   if (!waiting && !errored && turn.stopReason) {
     nodes.push({ kind: 'truncated', stopReason: turn.stopReason })

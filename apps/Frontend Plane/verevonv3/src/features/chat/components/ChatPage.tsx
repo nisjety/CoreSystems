@@ -33,6 +33,7 @@ import {
   DateDivider,
   EmptyChatState,
   MessageBlock,
+  lifecycleNoticeSentence,
   rungLabel,
 } from './ChatMessages'
 import {
@@ -632,8 +633,8 @@ export default function ChatPage() {
     const pending = [...state.turns]
       .reverse()
       .find((turn) => turn.role === 'assistant' && turn.status === 'waiting')
-    const activity = deriveStreamActivity(pending?.toolCalls)
-    return activity ? ` ${streamActivityLabel(activity)}.` : ''
+    const activity = deriveStreamActivity(pending?.toolCalls, pending?.lifecycle)
+    return activity ? ` ${streamActivityLabel(activity, i18n)}.` : ''
   }
   createEffect(
     () => {
@@ -675,6 +676,17 @@ export default function ChatPage() {
       // Solid 2 runs a cleanup RETURNED from the effect fn; `onCleanup` inside
       // one is silently dropped.
       return () => clearInterval(heartbeat)
+    },
+  )
+  /**
+   * One polite sentence per lifecycle notice on the turn that is waiting: a retry, a compaction, a context change or
+   * a reduced answer is said once, as it arrives. The heartbeat above keeps the same live region for the rest of the
+   * wait, so it does not repeat a notice. A plain stream has no notice and says nothing here.
+   */
+  createEffect(
+    () => state.turns.findLast((turn) => turn.role === 'assistant' && turn.status === 'waiting')?.lifecycle?.at(-1),
+    (notice) => {
+      if (notice) setStreamAnnouncement(lifecycleNoticeSentence(notice, i18n))
     },
   )
 
