@@ -2541,6 +2541,21 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-1156 | WS13-S8 | live-proof | P1 | cargo test --workspace --no-fail-fast and full pnpm test not run (CI) | open |
 | D2-1157 | WS13-S8 | follow-up | P3 | 23 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-45.json | open |
 
+
+### Wave-mode batch W2-46 (2026-11-01)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-1158 | WS14-S5 | decision | P1 | The question apply has no authority or tool snapshot. Approvals keep one in approvals.continuation_descriptor_json; a question has no such row. Stage 2 needs the pause fold written for an input pause (PauseFold in fold.rs) and check_fold (resume.rs ~1204 refuses any pending kind but Approval) and restore_in_place (resume.rs ~1595 builds an approval pause_ref) extended. Stage 1 needs the tools and authority from the same snapshot or a full gateway rebuild of the turn. Choose the carrier before building the pause: the pause fold (needs the checkpoint flags on) or a descriptor column on run_questions (amends 0071 again). | open |
+| D2-1159 | WS14-S5 | risk | P1 | Migration 0071 was amended in place after commit e94252c1b. If any database applied the earlier file, sqlx checksum validation stops session-core at startup. Confirm before merge (carried from round one). | open |
+| D2-1160 | WS14-S5 | decision | P1 | A question pause has no authority or tool snapshot to resume under (approvals keep one in continuation_descriptor_json). The owner or lead must pick the carrier before the executor pause is built: the pause fold, or a descriptor column on run_questions, which would amend 0071 again. | open |
+| D2-1161 | WS14-S5 | risk | P1 | Migration 0071 was amended in place after commit e94252c1b (it adds consumed_claim_hash and changes the CHECK). Any database that applied the earlier file will fail sqlx checksum validation, and session-core will not start. | open |
+| D2-1162 | WS14-S5 | risk | P1 | consume_run_question checks neither the run status nor any spend window. After the one-hour answered-hold in has_pending_resume_question lapses, recovery can terminalize the run while its answer can still be spent. A run-status predicate or an answered_at window in the CAS would close this. | open |
+| D2-1163 | WS14-S5 | live-proof | P1 | Register RunQuestionConsumeServiceServer in session-core/src/grpc.rs (shared edit). Until then ConsumeRunQuestion answers UNIMPLEMENTED. | open |
+| D2-1164 | WS14-S5 | live-proof | P1 | Go buf generate for orchestration.proto (RunQuestionConsumeService), then go build and go vet each service that imports model_plane/v1. | open |
+| D2-1165 | WS14-S5 | live-proof | P1 | Add AGENT_ASK_USER_RESUME_ENABLED (default false) to the execution-core block of deploy/docker-compose.yml. | open |
+| D2-1166 | WS14-S5 | follow-up | P3 | 16 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-46.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -2758,3 +2773,4 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS13-S7 | policy, authority, audit | W2-44 | no |
 | WS14-S5 | authority, audit | W2-45 | no |
 | WS13-S8 | zdr | W2-45 | no |
+| WS14-S5 | authority, audit | W2-46 | no |
