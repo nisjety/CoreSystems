@@ -2353,6 +2353,39 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-1010 | WS22-S6 | follow-up | P1 | The row names the chip 'Workspace: kept / not kept / conflict', but it is not built: onSandboxState and lifecycle.sandbox have no renderer. | open |
 | D2-1011 | WS22-S6 | follow-up | P3 | 30 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-38.json | open |
 
+
+### Wave-mode batch W2-39 (2026-11-01)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-1012 | WS25-S8 | risk | P1 | Do runs, tool calls and browser runs read hook rules through the synchronous hook_context_json and do_run_org_policy. In durable mode a run that does not first await ensure_org_hooks reads no snapshot (empty context, which fails open) or one past its D8 bound. The refusal must be wired before HOOKS_DURABLE is switched on. | open |
+| D2-1013 | WS25-S8 | test-gap | P1 | Nothing routes gRPC RegisterHook or ListHooks to the durable proxies, because grpc.rs is not in this slice's ownership. Durable mode is unreachable from gRPC, so the DoD evidence cannot be produced until the shared edit lands. | open |
+| D2-1014 | WS25-S8 | risk | P1 | In durable mode, hook_context_json/do_run_org_policy fall back to the in-memory `inner` map (empty) for an org with no snapshot, so a Do run that does not first await ensure_org_hooks fails open; the ensure-and-refuse wiring in sse.rs/tools.rs/browser_run.rs must land before HOOKS_DURABLE=true. | open |
+| D2-1015 | WS25-S8 | test-gap | P1 | proxy_register_hook, proxy_list_hooks, ensure_org_hooks and hooks_durable have no production caller yet (grpc.rs is not owned by this slice), so the row's DoD evidence cannot be produced until the shared edit lands. | open |
+| D2-1016 | WS25-S8 | live-proof | P1 | The gRPC RegisterHook/ListHooks dispatch in grpc.rs is not wired to proxy_register_hook/proxy_list_hooks (shared edit, see lead_todo). Until it lands, durable mode cannot be reached and the row's 'handle_register_hook/handle_list_hooks proxy' deliverable is only reachable from tests. | open |
+| D2-1017 | WS25-S8 | live-proof | P1 | The Do-run (sse.rs), code_interpreter (tools.rs) and browser_run.rs paths must await ensure_org_hooks and refuse on Err before HOOKS_DURABLE can be turned on (shared edits). | open |
+| D2-1018 | WS25-S8 | live-proof | P1 | buf generate, buf lint and buf breaking for gateway.proto Hook fields 9 and 10 have not been run, and the Go/TS gen is not regenerated. | open |
+| D2-1019 | WS25-S8 | live-proof | P1 | TestOrgHooksAgainstPostgres has not been run through the DB harness. | open |
+| D2-1020 | WS25-S8 | follow-up | P3 | 29 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-39.json | open |
+| D2-1021 | WS17-S5 | risk | P1 | A thread the person set to memory off (threads.memory_mode='off') is not honoured by recall: the offer and the arm read only the user-level GetMemoryControls, and session-core RECALL does not check the current thread's mode. Close it (session-core WS17-S3/S5 owner) before the switch goes on. | open |
+| D2-1022 | WS17-S5 | risk | P1 | Name-keyed trust classification is missing: TrustClass::classify("recall_conversations") returns OrgInternal until trust.rs maps the tool. The recall outcome is explicitly PriorConversation, but any other name-keyed path (parked-handle read-back, execution-core provenance) would frame it as org-internal. Fixed by the trust.rs shared edit. | open |
+| D2-1023 | WS17-S5 | live-proof | P1 | Appendix B N1 evidence is not run: no rebuilt images, no running stack, no flagged end-to-end turn. Lead to run per the lead_todo steps. | open |
+| D2-1024 | WS17-S5 | risk | P1 | Recall reads only the user-level GetMemoryControls (use_allowed/reason). It ignores a thread-level memory_mode='off', and it does not use the plan's D5 consumer memory_control::resolve, so a thread or org state that resolve would refuse can still allow recall. | open |
+| D2-1025 | WS17-S5 | live-proof | P1 | There is no runtime evidence yet: no rebuilt images, no flagged end-to-end turn, and no check that a second user's chat never appears. | open |
+| D2-1026 | WS17-S5 | live-proof | P1 | Live proof (plan DoD evidence): rebuild session-core and model-gateway, turn SESSION_CORE_MESSAGE_SEARCH_ENABLED and MODEL_GATEWAY_RECALL_CONVERSATIONS_ENABLED on in a test stack, and capture a transcript showing the tool round, provenance prior-conversation, a poisoned snippet that is not obeyed, and no chat from a second user. | open |
+| D2-1027 | WS17-S5 | live-proof | P1 | Shared edits are owed outside the ownership set: crates/mp-content-safety/src/trust.rs needs ("recall_conversations", TrustClass::PriorConversation) in TOOL_TRUST plus a classify assertion, and services/model-gateway/src/prompt_context.rs needs "recall_conversations" in CONDITIONAL_TOOLS ([&str; 4]) and its doc comment. | open |
+| D2-1028 | WS17-S5 | live-proof | P1 | Run cargo test -p model-gateway --all-targets and the workspace fmt gate in a clean target. runtime_registries.rs and hook_proxy_zdr_test.rs are WS25-S8 work in the same worktree, so commit this slice's files on their own. | open |
+| D2-1029 | WS17-S5 | follow-up | P3 | 28 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-39.json | open |
+| D2-1030 | WS21-S6 | risk | P1 | The consent card and the remember path cannot run end to end: browser_site_consent is absent from the closed approval cause vocabulary (approval-causes.json, mp-contracts approval_cause.rs, SPA approval-copy.ts APPROVAL_CAUSE_CODES); the SPA causeCodeOf maps unknown codes to unclassified_gate, and model-gateway projects no host or max level. | open |
+| D2-1031 | WS21-S6 | test-gap | P1 | The gateway remember decide hook in orchestration.rs is not built, so 'host from approval record only' and the remembered-choice write have no test; the decide body does not yet accept a remember field. | open |
+| D2-1032 | WS21-S6 | follow-up | P1 | The settings sections are unreachable and typecheck fails until WorkspaceSettingsPage.tsx gets the two ids and Match branches (shared edit); negative-render test fails for browser-sites until then. | open |
+| D2-1033 | WS21-S6 | follow-up | P1 | The live run panel is not bound to browser_session_opened: no execution-core producer exists, and the existing frame and takeover routes are keyed by browser session id, so the quarry_run_id mapping is undecided. | open |
+| D2-1034 | WS21-S6 | risk | P1 | Pref writes and policy writes emit no WS06 audit event (browser_site_pref_changed, host and level only), which K3-11 lists as an S6 dependency. | open |
+| D2-1035 | WS21-S6 | follow-up | P1 | Three parts of the row are not built: the action-registry contracts ('FIRST'), the orchestration.rs remember-on-decide hook, and the ChatLiveRunPanel binding. BrowserSiteConsentCard is exported but mounted nowhere, so today it is reachable only from its test. All four are blocked by unbuilt dependencies (cause vocabulary, browser_session_opened producer) or by shared files outside the ownership set; the switch cannot be turned on until they land. | open |
+| D2-1036 | WS21-S6 | follow-up | P1 | Pending shared edit to WorkspaceSettingsPage.tsx. Without it, tsc6 -p tsconfig.app.json reports TS2739 at line 206 (missing 'browser-sites' and 'org-browser-policy'), and src/features/settings has one failing negative-render test. | open |
+| D2-1037 | WS21-S6 | live-proof | P1 | Apply the WorkspaceSettingsPage.tsx shared edit (imports, 'browser-sites'/'org-browser-policy' Record keys near line 243, two Match branches near line 506). Until then typecheck fails with TS2739 at line 206, which I reproduced, and the negative-render test fails for 'browser-sites', as the implementer reported. | open |
+| D2-1038 | WS21-S6 | follow-up | P3 | 31 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-39.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -2556,3 +2589,5 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS22-S5 | data-loss, policy, authority | W2-37 | no |
 | WS15-S5 | zdr | W2-38 | no |
 | WS25-S3 | authority, policy | W2-38 | no |
+| WS25-S8 | policy, authority, audit, zdr | W2-39 | no |
+| WS17-S5 | zdr, policy, audit | W2-39 | no |
