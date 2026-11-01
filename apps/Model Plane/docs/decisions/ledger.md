@@ -22,6 +22,20 @@ with a pointer forward. Newest first.
 
 ---
 
+## 2026-11-01 - Shared browser sessions: human_browse and attach grants, renewal by presence, per-tab control (WS8.A)
+
+**Status: decided (ADR-3 and X-13 taken as ratified at the plan defaults, owner order 2026-11-01 "stop asking / just do it"); this entry records the WS8.A spike and the decision, the runtime lands behind default-off switches in WS8.C to WS8.G.** Records D8-1 to D8-3, D8-5 and D8-7 of `docs/plans/quarry-browser-build-plan-2026-10-14.md`.
+
+**Decision (D8-1, option 1).** The browser-broker issues a `human_browse` grant kind (open public web minus a broker deny-list, renewable by user presence through `RenewGrant`) and a run-bound `attach` child grant. Agent attach to a user's visible tab uses a service principal, never the user's token. Quarry keeps an attach registry and per-tab control. Rejected: the OD13 delegated bearer (`aud=quarry`) for attach, and the RFC 8693 delegation claim (`acting_user_id`), which would authorise the service on every live session of the user and says nothing about hosts or TTL; that claim is deferred, not adopted.
+
+**Proto allocation.** `browser.proto` field numbers 50-59 belong to WS8 (`policy_mode`, `denied_domains`, `absolute_expires_at`, `resource_id`, `RenewGrant`). Confirmed unused in `proto/model_plane/v1/browser.proto` and in Quarry's vendored copy (40-44 used) on 2026-10-23. No second grant API and no derive purpose outside the one `Derive` allow-list.
+
+**X-13 bounds (D8-5, D8-7).** Human steps on non-ZDR runs persist metadata-only receipts (typed text `[redacted]`, query and fragment dropped, no observation, checkpoint URL stripped); browsing history is not stored in Verevon. Attach shares the user's jar with per-tab egress equal to the attach list; take-over is implicit (a user action on the attached tab takes control back, Quarry answers the agent with `USER_TOOK_OVER`).
+
+**Spike facts (code read at Quarry HEAD 2ac764f1; live measurements still owed).** A new tab is activated on creation (`chromiumoxide.rs:1423`); actions reach only the active tab; the egress policy is per session, not per tab; page hygiene applies focus emulation to every page at attach. The five spike tests (`background_tab_does_not_change_active_tab`, `pinned_session_acts_on_pinned_tab_while_other_tab_is_active`, `per_tab_policy_blocks_in_agent_tab_only`, `background_tab_is_not_throttled`, `measure_two_tab_rss`) live in `.plan-work/quarry-w1w2/spike/` and were compile-checked, never run. Owed: the background-throttle and two-tab RSS runs (`CHROMIUMOXIDE_TEST=1`), the F3 `domain_grant_blocked` count, and broker validation latency at 20 actions/s, which decides whether `QUARRY_EDGE__GRANT_VALIDATION_CACHE_MS` stays 0.
+
+**Open item.** The SPA sends `actor:'agent'` under the user's session (`KnowledgeComposer.tsx:1050`) and the gateway does not check the caller class for agent calls. That path is not a pattern for attach; execution-core attaches only through the service principal.
+
 ## 2026-10-27 - WS04-S9: evidence script written; no run-control switch flipped; the in-memory grant half stays (WS04-S9)
 
 **Status: deferred, all five WS04 switches off.** Nothing is flipped until a PASS evidence file exists.
