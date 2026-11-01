@@ -27280,14 +27280,24 @@ body.verevon-chat-canvas-resizing * {
 
 .verevon-chat-memory-recall-notice svg,
 .verevon-chat-truncated-notice svg,
-.verevon-chat-source-scope-notice svg {
+.verevon-chat-source-scope-notice svg,
+.verevon-chat-lifecycle-notice svg {
   flex-shrink: 0;
 }
 
 /* Per-turn retrieval-source filter receipt (chat-wave2 scope spec §2.2).
    Same neutral, informational tone as memory-recall above — a filter the
    user chose, reported back, not a warning. */
-.verevon-chat-source-scope-notice {
+/* Turn lifecycle notes (WS15-S5): a retried tool, a compaction, a trimmed
+   context. Informational, in the same tone as the source-scope receipt. */
+.verevon-chat-lifecycle-notices {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.verevon-chat-source-scope-notice,
+.verevon-chat-lifecycle-notice {
   display: inline-flex;
   width: fit-content;
   align-items: center;

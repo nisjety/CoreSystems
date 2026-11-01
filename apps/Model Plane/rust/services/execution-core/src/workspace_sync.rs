@@ -559,7 +559,8 @@ mod tests {
         AcquireLeaseRequest, AcquireLeaseResponse, ActivateLeaseRequest, ActivateLeaseResponse,
         AppendProcessOutputRequest, AppendProcessOutputResponse,
         ApplyThreadWorkspaceChangesRequest, ApplyThreadWorkspaceChangesResponse,
-        DeleteThreadWorkspaceRequest, DeleteThreadWorkspaceResponse, GetProcessRequest,
+        DeleteThreadWorkspaceRequest, DeleteThreadWorkspaceResponse, GetLeaseStatusRequest,
+        GetLeaseStatusResponse, GetProcessRequest,
         GetProcessResponse, GetThreadWorkspaceRequest, GetThreadWorkspaceResponse,
         GetWorkspaceManifestRequest, GetWorkspaceManifestResponse, ListProcessesRequest,
         ListProcessesResponse, PromoteWorkspaceRequest, PromoteWorkspaceResponse,
@@ -808,6 +809,13 @@ mod tests {
             &self,
             _: Request<DeleteThreadWorkspaceRequest>,
         ) -> Result<Response<DeleteThreadWorkspaceResponse>, Status> {
+            unused()
+        }
+
+        async fn get_lease_status(
+            &self,
+            _: Request<GetLeaseStatusRequest>,
+        ) -> Result<Response<GetLeaseStatusResponse>, Status> {
             unused()
         }
     }

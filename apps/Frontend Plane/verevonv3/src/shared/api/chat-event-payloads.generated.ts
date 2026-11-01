@@ -141,6 +141,13 @@ export type ChatEventPayloads = {
     run_id: string
     status: string
   }
+  /** Rust variants: SandboxState. */
+  sandbox_state: {
+    cause?: string
+    request_id: string
+    scope: string
+    state: string
+  }
   /** Rust variants: SourceScopeApplied. */
   source_scope_applied: {
     excluded_tools: unknown[]

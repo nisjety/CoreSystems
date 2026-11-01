@@ -370,6 +370,8 @@ services:
       # Inline tool-loop guard (WS25-S1): off, shadow or enforce. Unset is off; the plan's shadow
       # release is an owner flip, not this file's default.
       LOOP_GUARD_MODE: ${LOOP_GUARD_MODE:-}
+      # WS25-S3: org hooks in Do runs (off, shadow or enforce; unset is off, an unknown value is enforce).
+      HOOKS_DO_RUNS: ${HOOKS_DO_RUNS:-}
       # WS11-S5: derive the reasoning level once in the gateway and send it to inference-core. Off by default; only the
       # literal `true` turns it on. Roll out in this order: inference-core adapter flags on first, then this switch. With
       # this on and the adapter flags off, a deep request sends budget 0 and a level nothing renders (no thinking).
@@ -1295,6 +1297,8 @@ services:
       # WS25-S2: the Do-loop guard (off, shadow or enforce; unset is off). Collect shadow data before enforce:
       # legitimate repeats such as polling stop at the eighth identical call.
       LOOP_GUARD_MODE: ${LOOP_GUARD_MODE:-}
+      # WS25-S3: a non-empty malformed hook context denies the call (hook_context_malformed). Off by default.
+      HOOKS_FAIL_CLOSED: ${HOOKS_FAIL_CLOSED:-}
       # WS11-S8: a Do run's rounds use the turn's effort level (RunAgentRequest field 21).
       # Only the literal `true` turns it on; off, every round sends no level, as before.
       EXECUTION_CORE_RUN_EFFORT: ${EXECUTION_CORE_RUN_EFFORT:-false}

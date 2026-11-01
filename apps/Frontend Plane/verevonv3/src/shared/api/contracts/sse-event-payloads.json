@@ -663,6 +663,38 @@
         }
       }
     },
+    "sandbox_state": {
+      "family": "steps",
+      "variants": [
+        "SandboxState"
+      ],
+      "keys": {
+        "cause": {
+          "types": [
+            "string"
+          ],
+          "presence": "optional"
+        },
+        "request_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "scope": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "state": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        }
+      }
+    },
     "source_scope_applied": {
       "family": "citations",
       "variants": [

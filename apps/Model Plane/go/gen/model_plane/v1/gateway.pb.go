@@ -6827,13 +6827,17 @@ type Hook struct {
 	// Deprecated: Marked as deprecated in model_plane/v1/gateway.proto.
 	CallbackUrl string `protobuf:"bytes,4,opt,name=callback_url,json=callbackUrl,proto3" json:"callback_url,omitempty"`
 	Enabled     bool   `protobuf:"varint,5,opt,name=enabled,proto3" json:"enabled,omitempty"`
-	// What this rule does when it matches: "deny" blocks the call outright,
-	// "ask" escalates it to human approval, "allow" (or anything unrecognised)
-	// permits it. Empty means allow — a rule with no decision must not silently
-	// become a block.
+	// What this rule does when it matches: "deny" blocks the call outright and
+	// "ask" escalates it to human approval. The registry stores only those two: an
+	// "allow" rule would add nothing, since allow never overrides a deny, and anything
+	// unrecognised is read as "ask", never as allow.
 	Decision string `protobuf:"bytes,6,opt,name=decision,proto3" json:"decision,omitempty"`
 	// Human-readable reason surfaced to the user on deny/ask.
-	Reason        string `protobuf:"bytes,7,opt,name=reason,proto3" json:"reason,omitempty"`
+	Reason string `protobuf:"bytes,7,opt,name=reason,proto3" json:"reason,omitempty"`
+	// Evaluation order of the rules the gateway forwards: higher first, then by hook_id.
+	// Strictest-wins makes the order irrelevant to the verdict; this fixes the serialised
+	// context, so one registry always sends the same bytes.
+	Priority      int32 `protobuf:"varint,8,opt,name=priority,proto3" json:"priority,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -6916,6 +6920,13 @@ func (x *Hook) GetReason() string {
 		return x.Reason
 	}
 	return ""
+}
+
+func (x *Hook) GetPriority() int32 {
+	if x != nil {
+		return x.Priority
+	}
+	return 0
 }
 
 type RegisterHookRequest struct {
@@ -9683,7 +9694,7 @@ const file_model_plane_v1_gateway_proto_rawDesc = "" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x1f\n" +
 	"\voutput_json\x18\x02 \x01(\tR\n" +
 	"outputJson\x12#\n" +
-	"\rerror_message\x18\x03 \x01(\tR\ferrorMessage\"\xc9\x01\n" +
+	"\rerror_message\x18\x03 \x01(\tR\ferrorMessage\"\xe5\x01\n" +
 	"\x04Hook\x12\x17\n" +
 	"\ahook_id\x18\x01 \x01(\tR\x06hookId\x12\x14\n" +
 	"\x05event\x18\x02 \x01(\tR\x05event\x12\x1d\n" +
@@ -9692,7 +9703,8 @@ const file_model_plane_v1_gateway_proto_rawDesc = "" +
 	"\fcallback_url\x18\x04 \x01(\tB\x02\x18\x01R\vcallbackUrl\x12\x18\n" +
 	"\aenabled\x18\x05 \x01(\bR\aenabled\x12\x1a\n" +
 	"\bdecision\x18\x06 \x01(\tR\bdecision\x12\x16\n" +
-	"\x06reason\x18\a \x01(\tR\x06reason\"u\n" +
+	"\x06reason\x18\a \x01(\tR\x06reason\x12\x1a\n" +
+	"\bpriority\x18\b \x01(\x05R\bpriority\"u\n" +
 	"\x13RegisterHookRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +
