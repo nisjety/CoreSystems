@@ -271,8 +271,10 @@ func TestThreadWorkspaceRPCsAreRefusedWhileTheSwitchIsOff(t *testing.T) {
 	wantCode(t, err, codes.FailedPrecondition, "DeleteThreadWorkspace while off")
 }
 
-func TestDeleteThreadWorkspaceIsUnimplementedUntilRetention(t *testing.T) {
+// TestDeleteThreadWorkspaceRefusesUntilErasureIsWired: with the switch on but no
+// erasure path wired, the erase is refused before any row is touched (WS22-S5).
+func TestDeleteThreadWorkspaceRefusesUntilErasureIsWired(t *testing.T) {
 	h := newThreadHarness(true, threadworkspace.Limits{MaxFiles: 8, MaxBytes: 1 << 20})
 	_, err := h.s.DeleteThreadWorkspace(context.Background(), &DeleteThreadWorkspaceRequest{ThreadId: "thread-1", OrgId: "org-1"})
-	wantCode(t, err, codes.Unimplemented, "DeleteThreadWorkspace with the switch on")
+	wantCode(t, err, codes.FailedPrecondition, "DeleteThreadWorkspace with the switch on and no erasure wired")
 }

@@ -86,6 +86,11 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/chat/threads/{thread_id}/context",
             get(json_handlers::get_thread_context),
         )
+        // The files a thread keeps across runs, and the user's reset of them (WS22-S5).
+        .route(
+            "/api/v1/chat/threads/{thread_id}/workspace",
+            get(json_handlers::get_thread_workspace).delete(json_handlers::reset_thread_workspace),
+        )
         // Browser-run screenshots. The id is Quarry-v2's artifact id, which the
         // Model Plane already carries on BrowserObservationReceived.
         .route(

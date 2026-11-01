@@ -38,6 +38,7 @@ import {
 import {
   ArtifactsPanel,
 } from './ChatArtifactPanel'
+import { ThreadWorkspacePanel } from './ThreadWorkspacePanel'
 import {
   ChatHeader,
   ChatTabs,
@@ -1019,6 +1020,9 @@ export default function ChatPage() {
             onNewChat={startNewChat}
             onRegenerate={regenerateLatest}
           />
+        </Show>
+        <Show when={hasMessages() && state.threadId && !isActiveThreadTemporary()}>
+          <ThreadWorkspacePanel threadId={state.threadId ?? ''} />
         </Show>
 
         <Switch>

@@ -10,6 +10,7 @@ import (
 	"github.com/triodelab/model-plane/pkg/authctx"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/authz"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/lease"
+	"github.com/triodelab/model-plane/services/sandbox-manager/internal/objectstore"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/telemetry"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/threadworkspace"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/workspace"
@@ -59,6 +60,11 @@ type Server struct {
 	// where the thread RPCs refuse rather than serve state a restart discards.
 	threads      ThreadWorkspaceStore
 	threadLimits threadworkspace.Limits
+	// threadErase deletes a thread's rows and threadBlobs its blobs (WS22-S5).
+	// Both stay nil until WithThreadErasure wires them, and DeleteThreadWorkspace
+	// refuses before it removes anything while either is nil.
+	threadErase ThreadEraser
+	threadBlobs threadworkspace.BlobEraser
 }
 
 // NewServer constructs a Server with the given stores. Space capability
@@ -96,6 +102,15 @@ func (s *Server) WithThreadWorkspace(enabled bool, store ThreadWorkspaceStore, l
 	s.threadWorkspaceEnabled = enabled
 	s.threads = store
 	s.threadLimits = limits
+	return s
+}
+
+// WithThreadErasure wires the erase path (WS22-S5): the rows eraser and the blob
+// store that holds a thread's bytes. Without both, DeleteThreadWorkspace refuses
+// before it removes anything.
+func (s *Server) WithThreadErasure(rows ThreadEraser, blobs threadworkspace.BlobEraser) *Server {
+	s.threadErase = rows
+	s.threadBlobs = blobs
 	return s
 }
 
@@ -491,18 +506,54 @@ func (s *Server) ApplyThreadWorkspaceChanges(ctx context.Context, req *ApplyThre
 	}, nil
 }
 
-// DeleteThreadWorkspace erases a thread's workspace. Its implementation arrives
-// with the retention sweeper (WS22-S5), which also owns the object-store
-// prefix delete, so until then it only reports whether the switch is on.
-func (s *Server) DeleteThreadWorkspace(ctx context.Context, _ *DeleteThreadWorkspaceRequest) (*DeleteThreadWorkspaceResponse, error) {
+// ThreadEraser is the rows half of erasure. threadworkspace.Eraser is the
+// production implementation.
+type ThreadEraser interface {
+	Erase(ctx context.Context, orgID, ownerID, threadID string) (int64, error)
+}
+
+// DeleteThreadWorkspace erases the caller's own thread workspace (WS22-S5). The
+// rows go first and the blobs under the thread's prefix after them. A blob
+// failure is reported, and a retry finds no rows and removes the prefix again,
+// so the erase always finishes. Only a user may erase, and only their own
+// threads: the rows are keyed by the caller's identity and no request field
+// names an owner.
+func (s *Server) DeleteThreadWorkspace(ctx context.Context, req *DeleteThreadWorkspaceRequest) (*DeleteThreadWorkspaceResponse, error) {
 	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "DeleteThreadWorkspace")))
-	if _, err := s.principal(ctx); err != nil {
+	principal, err := s.principal(ctx)
+	if err != nil {
 		return nil, err
 	}
 	if !s.threadWorkspaceEnabled || s.threads == nil {
 		return nil, status.Error(codes.FailedPrecondition, "thread workspace is not enabled")
 	}
-	return nil, status.Error(codes.Unimplemented, "thread workspace erasure arrives with the retention sweeper (WS22-S5)")
+	if principal.PrincipalType != "user" {
+		return nil, status.Error(codes.PermissionDenied, "a thread workspace belongs to a user, not a service principal")
+	}
+	if req.GetOrgId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "org_id is required")
+	}
+	if req.GetOrgId() != principal.OrganizationID {
+		return nil, status.Error(codes.PermissionDenied, "organization does not match verified identity")
+	}
+	prefix, err := objectstore.ThreadPrefix(principal.OrganizationID, req.GetThreadId())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "thread_id must be a plain key segment")
+	}
+	if s.threadErase == nil || s.threadBlobs == nil {
+		return nil, status.Error(codes.FailedPrecondition, "thread workspace erasure requires the object store")
+	}
+	files, err := s.threadErase.Erase(ctx, principal.OrganizationID, principal.ActorID, req.GetThreadId())
+	if errors.Is(err, threadworkspace.ErrThreadShared) {
+		return nil, status.Error(codes.PermissionDenied, "this thread is not yours to erase")
+	}
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "erase thread workspace rows: %v", err)
+	}
+	if _, err := s.threadBlobs.DeleteThreadBlobs(ctx, principal.OrganizationID, req.GetThreadId()); err != nil {
+		return nil, status.Errorf(codes.Internal, "thread workspace rows are erased but its blobs were not removed; retry the erase: %v", err)
+	}
+	return &DeleteThreadWorkspaceResponse{FilesDeleted: files, ObjectPrefix: prefix}, nil
 }
 
 // Health reports serving status.

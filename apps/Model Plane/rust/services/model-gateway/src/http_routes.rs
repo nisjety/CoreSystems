@@ -21,6 +21,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::Utc;
 use metrics_exporter_prometheus::PrometheusHandle;
 use mp_contracts::model_plane::v1::{
+    AcquireLeaseRequest, DeleteThreadWorkspaceRequest, GetThreadWorkspaceRequest,
     AnalyzeDocumentRequest, AnalyzeImageRequest, AnalyzeLanguageRequest, AnswerRunQuestionRequest,
     Approval, ApprovalCause, ApprovalDecisionSource, ApprovalKind, ApprovalProof, ApprovalScope,
     ApprovalState, BatchTranslateTextRequest,
@@ -270,6 +271,10 @@ pub fn build_router_with_readiness(
         // that?" was unreachable.
         .route("/v1/threads/:thread_id/context", get(get_thread_context))
         .route("/v1/threads/:thread_id", delete(delete_thread))
+        .route(
+            "/v1/threads/:thread_id/workspace",
+            get(get_thread_workspace).delete(delete_thread_workspace),
+        )
         // Control-authorized internal deletion adapter. This is deliberately
         // outside the browser/BFF API and is allowed only for the exact
         // deletion coordinator service by auth::authorize_principal_route.
@@ -6324,6 +6329,153 @@ async fn read_process_output(
         "gap_before": response.gap_before,
         "retained_from_seq": response.retained_from_seq,
     })))
+}
+
+/// Lifetime of the thread lease a workspace read acquires. Execution-core's own
+/// thread lease uses the same hour, and every acquire slides it, so a read never
+/// shortens a lease a live run holds.
+const THREAD_WORKSPACE_LEASE_TTL_SECS: i64 = 3_600;
+
+/// `GET /v1/threads/{thread_id}/workspace`: the files one thread keeps across runs
+/// (WS22-S5, DEC-23), each with its content hash and size, never its content.
+///
+/// The workspace is read through a lease, so this acquires the caller's thread
+/// lease first. Acquire is idempotent for the same user and thread, and it carries
+/// the caller's ZDR posture, so a ZDR caller is refused before any lease row is
+/// written. The bearer is the user-bound `aud=sandbox-manager` credential the BFF
+/// attaches per request, and sandbox-manager binds every row to that user.
+async fn get_thread_workspace(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedSandboxBearer,
+    Path(thread_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let thread_id = require_url_safe_thread_id(&thread_id)?;
+    let zdr = crate::zdr_posture::zdr_or_refuse(&claims, &crate::zdr_posture::Route::plain(false))?;
+    let mut sandbox = state.sandbox_client.clone();
+    let lease = sandbox
+        .acquire_lease(authenticated_sandbox_request(
+            AcquireLeaseRequest {
+                org_id: claims.org_id.clone(),
+                scope_type: "thread".to_owned(),
+                scope_id: thread_id.clone(),
+                ttl: Some(prost_types::Duration {
+                    seconds: THREAD_WORKSPACE_LEASE_TTL_SECS,
+                    nanos: 0,
+                }),
+                zdr,
+                ..Default::default()
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| grpc_status_to_http(&e))?
+        .into_inner();
+    let response = sandbox
+        .get_thread_workspace(authenticated_sandbox_request(
+            GetThreadWorkspaceRequest {
+                lease_id: lease.lease_id,
+                backend_id: lease.backend_id,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| grpc_status_to_http(&e))?
+        .into_inner();
+
+    Ok(Json(json!({
+        "thread_id": thread_id,
+        "revision": response.revision,
+        "files": response.entries.iter().map(|entry| json!({
+            "path": entry.path,
+            "content_hash": entry.content_hash,
+            "size_bytes": entry.size_bytes,
+        })).collect::<Vec<_>>(),
+    })))
+}
+
+/// `DELETE /v1/threads/{thread_id}/workspace`: the user's reset of one thread's
+/// files (WS22-S5). Sandbox-manager removes the thread's rows and then its blobs,
+/// and only the caller's own thread. A thread that holds nothing is a successful
+/// no-op, so a retry finishes an erase whose blob removal failed the first time.
+/// Erasure is not refused under ZDR, because a ZDR thread holds nothing to erase.
+async fn delete_thread_workspace(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedSandboxBearer,
+    Path(thread_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let thread_id = require_url_safe_thread_id(&thread_id)?;
+    let response = state
+        .sandbox_client
+        .clone()
+        .delete_thread_workspace(authenticated_sandbox_request(
+            DeleteThreadWorkspaceRequest {
+                thread_id: thread_id.clone(),
+                org_id: claims.org_id.clone(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| grpc_status_to_http(&e))?
+        .into_inner();
+
+    Ok(Json(json!({
+        "thread_id": thread_id,
+        "files_deleted": response.files_deleted,
+        "object_prefix": response.object_prefix,
+    })))
+}
+
+/// A thread id the workspace path accepts: the plain key segment the object store
+/// keys blobs by (letters, digits, `_` and `-`, at most 128 bytes). It is refused
+/// here, before any RPC, so a crafted id never reaches a blob prefix.
+fn require_url_safe_thread_id(raw: &str) -> Result<String, HttpJsonError> {
+    let thread_id = raw.trim();
+    if thread_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "thread_id is required" })),
+        ));
+    }
+    if thread_id.len() > 128
+        || !thread_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "thread_id must be a plain key segment" })),
+        ));
+    }
+    Ok(thread_id.to_owned())
+}
+
+#[cfg(test)]
+mod thread_workspace_route_tests {
+    use super::*;
+
+    #[test]
+    fn a_thread_id_is_a_plain_key_segment_or_it_is_refused_before_any_rpc() {
+        assert_eq!(
+            require_url_safe_thread_id(" thr_01J9-abc ").unwrap(),
+            "thr_01J9-abc"
+        );
+        let long = "a".repeat(129);
+        for bad in [
+            "",
+            "   ",
+            "thread/1",
+            "../thr",
+            "thr.1",
+            "thr 1",
+            "thr%2F1",
+            long.as_str(),
+        ] {
+            let (status, _) = require_url_safe_thread_id(bad).unwrap_err();
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad:?}");
+        }
+    }
 }
 
 /// The same URL-safety rule `/v1/cron` applies, and for the same reason: this
