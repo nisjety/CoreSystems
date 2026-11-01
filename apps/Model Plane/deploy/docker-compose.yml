@@ -2038,6 +2038,21 @@ services:
       AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
       BROWSER_BROKER_SERVICE_API_KEY: ${BROWSER_BROKER_SERVICE_API_KEY:-}
       BROWSER_BROKER_QUARRY_READY_URL: ${BROWSER_BROKER_QUARRY_READY_URL:-${QUARRY_EDGE_URL:-http://quarry-edge:8082}/ready}
+      # API-key grants (INNH-10 MP-2, internal/server/key_grants.go). OFF unless
+      # exactly 1, true or on. A key grant lives KEY_GRANT_TTL_SECONDS (clamped
+      # 30-900 s, never renewed); one key holds at most MAX_ACTIVE_GRANTS_PER_KEY
+      # live grants, which also count against the owner's cap. With the switch on
+      # the broker refuses to start without KEY_REVOKE_NATS_URL (the bus carrying
+      # Auth Core's api_key_revoked event, stream KEY_REVOKE_STREAM, durable
+      # browser-broker-api-key-revoked pre-provisioned), and disables key grants
+      # for the process if it cannot bind there.
+      BROWSER_BROKER_KEY_GRANTS_ENABLED: ${BROWSER_BROKER_KEY_GRANTS_ENABLED:-0}
+      BROWSER_BROKER_KEY_GRANT_TTL_SECONDS: ${BROWSER_BROKER_KEY_GRANT_TTL_SECONDS:-600}
+      BROWSER_BROKER_MAX_ACTIVE_GRANTS_PER_KEY: ${BROWSER_BROKER_MAX_ACTIVE_GRANTS_PER_KEY:-2}
+      BROWSER_BROKER_KEY_REVOKE_NATS_URL: ${BROWSER_BROKER_KEY_REVOKE_NATS_URL:-}
+      BROWSER_BROKER_KEY_REVOKE_NATS_USER: ${BROWSER_BROKER_KEY_REVOKE_NATS_USER:-}
+      BROWSER_BROKER_KEY_REVOKE_NATS_PASSWORD: ${BROWSER_BROKER_KEY_REVOKE_NATS_PASSWORD:-}
+      BROWSER_BROKER_KEY_REVOKE_STREAM: ${BROWSER_BROKER_KEY_REVOKE_STREAM:-VEREVON_CONTROL_OBSERVABILITY}
     # The entrypoint's migrations need postgres, so wait for it to be healthy;
     # otherwise a first boot before it answers fails and restarts the container.
     depends_on:

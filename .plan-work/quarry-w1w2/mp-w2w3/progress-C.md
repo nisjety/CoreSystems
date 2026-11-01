@@ -66,6 +66,12 @@ Tests: `internal/keyrevoke/consumer_test.go` (4: top-level/details/both, 10 malf
 Tests run: `GOWORK=off go test -count=1 -v ./...` PASS=385 FAIL=0, `go vet ./...` clean.
 Not verified: against a real NATS/JetStream (no bus may be started here); workspace-mode `go build` offline fails on a pre-existing go.work.sum gap (grpc -> x/sys v0.40.0), the Docker build has network.
 
+### Slice MP-2e: compose env, release secret, contract test (commit: see git log, `chore(browser-broker): key grant compose env ... (INNH-10 MP-2e)`)
+
+Built: `deploy/docker-compose.yml` broker block, appended after the last broker env line (no other hunk there): `BROWSER_BROKER_KEY_GRANTS_ENABLED:-0`, `_KEY_GRANT_TTL_SECONDS:-600`, `_MAX_ACTIVE_GRANTS_PER_KEY:-2`, `_KEY_REVOKE_NATS_URL/_USER/_PASSWORD:-` (empty), `_KEY_REVOKE_STREAM:-VEREVON_CONTROL_OBSERVABILITY`. Production overlay untouched (inherits 0). `scripts/release-artifact.sh` (outside lane, one line, `git diff` was empty): `BROWSER_BROKER_KEY_REVOKE_NATS_PASSWORD` in `RUNTIME_SECRET_KEYS`, so a release never signs it as public config. `scripts/tests/browser-grant-contract.test.mjs`: new test "INNH-10: key_id is field 60 ..." (key_id = 60 on the two responses only, generated Go has it twice, switch default off in Go and compose, TTL/cap defaults match, production never on, 0005 idempotent, down deletes key grants before the column).
+Tests run: `node --test scripts/tests/browser-grant-contract.test.mjs`: tests 33, pass 30, fail 3 (the same 3 as the base: tests 1, 6, 15; the new one passes). `bash -n scripts/release-artifact.sh` OK.
+Not done: `deploy/.env.example` (rule 7, asked in MP-ASKS).
+
 ## MP-3 contract (model-gateway, lane B builds it; what the broker will expect)
 
 - Routes: `POST /v1/browser/key-grants`, `DELETE /v1/browser/key-grants/:grant_id`. Accept ONLY an api_key principal (`PrincipalKind::ApiKey`), refuse user and service (403); api_key refused on every other route. Ingress needs CP-1 audience `model-gateway` (ask below); the delegated bearer to the broker is the `aud=browser-broker` key token with the same `sub`, `org_id`, `key_id`, `zdr`.
