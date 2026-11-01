@@ -856,7 +856,14 @@ type AgentResume struct {
 	// An opaque token for the consume; the same token replays safely.
 	ClaimToken string `protobuf:"bytes,7,opt,name=claim_token,json=claimToken,proto3" json:"claim_token,omitempty"`
 	// Which segment of the run this is (2 for the first continuation).
-	SegmentNo     uint32 `protobuf:"varint,8,opt,name=segment_no,json=segmentNo,proto3" json:"segment_no,omitempty"`
+	SegmentNo uint32 `protobuf:"varint,8,opt,name=segment_no,json=segmentNo,proto3" json:"segment_no,omitempty"`
+	// The `resume` question a continuation answers (build plan WS14 S5): its `q_` id. Set only
+	// together with `answer_json`, and only by the `/continue` of a run paused for that question;
+	// an approval continuation leaves both empty.
+	QuestionId string `protobuf:"bytes,10,opt,name=question_id,json=questionId,proto3" json:"question_id,omitempty"`
+	// The owner's answer to `question_id`, as the `user_question` answer JSON. It is data, never an
+	// instruction and never a grant, and the shared contract bounds it.
+	AnswerJson    string `protobuf:"bytes,11,opt,name=answer_json,json=answerJson,proto3" json:"answer_json,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -945,6 +952,20 @@ func (x *AgentResume) GetSegmentNo() uint32 {
 		return x.SegmentNo
 	}
 	return 0
+}
+
+func (x *AgentResume) GetQuestionId() string {
+	if x != nil {
+		return x.QuestionId
+	}
+	return ""
+}
+
+func (x *AgentResume) GetAnswerJson() string {
+	if x != nil {
+		return x.AnswerJson
+	}
+	return ""
 }
 
 // RunContext - what the gateway hands an agent run beyond its goal.
@@ -2170,7 +2191,7 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"\x0fpolicy_revision\x18\x02 \x01(\x03R\x0epolicyRevision\x12#\n" +
 	"\rpolicy_digest\x18\x03 \x01(\tR\fpolicyDigest\"7\n" +
 	"\x0eConnectorScope\x12%\n" +
-	"\x0econnection_ids\x18\x01 \x03(\tR\rconnectionIds\"\x83\x02\n" +
+	"\x0econnection_ids\x18\x01 \x03(\tR\rconnectionIds\"\xc5\x02\n" +
 	"\vAgentResume\x12\x12\n" +
 	"\x04mode\x18\x01 \x01(\tR\x04mode\x12\x1f\n" +
 	"\vapproval_id\x18\x02 \x01(\tR\n" +
@@ -2182,7 +2203,12 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"\vclaim_token\x18\a \x01(\tR\n" +
 	"claimToken\x12\x1d\n" +
 	"\n" +
-	"segment_no\x18\b \x01(\rR\tsegmentNoJ\x04\b\t\x10\n" +
+	"segment_no\x18\b \x01(\rR\tsegmentNo\x12\x1f\n" +
+	"\vquestion_id\x18\n" +
+	" \x01(\tR\n" +
+	"questionId\x12\x1f\n" +
+	"\vanswer_json\x18\v \x01(\tR\n" +
+	"answerJsonJ\x04\b\t\x10\n" +
 	"\"\xd5\x01\n" +
 	"\n" +
 	"RunContext\x123\n" +
