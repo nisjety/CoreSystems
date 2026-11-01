@@ -17,6 +17,8 @@ export const workspaceSettingsSectionIds = [
   'cron',
   'quotas',
   'model-access',
+  'browser-sites',
+  'org-browser-policy',
   'memory',
   'learning',
 ] as const
@@ -158,6 +160,20 @@ export const workspaceSettingsSections: SectionDetail[] = [
     title: 'Modelltilgang',
     description: 'Hvilke AI-modeller medlemmene kan bruke, og hvor mye resonnering de kan be om. Håndheves av Model Plane; en modell som ikke er tillatt vises ikke i modellvelgeren.',
     saveLabel: 'Lagre modelltilgang',
+  },
+  {
+    id: 'browser-sites',
+    label: 'Nettsider for agenten',
+    title: 'Nettsider for agenten',
+    description: 'Nettsidene agenten kan åpne for deg, og hva du har valgt. Administratoren kan begrense dem; valget ditt kan aldri gi mer tilgang.',
+    saveLabel: 'Lagre valg',
+  },
+  {
+    id: 'org-browser-policy',
+    label: 'Nettleserpolicy',
+    title: 'Nettleserpolicy',
+    description: 'Hvilke nettsider agenten kan åpne for medlemmene. Bare eiere og administratorer kan endre policyen.',
+    saveLabel: 'Lagre nettleserpolicy',
   },
   {
     id: 'memory',

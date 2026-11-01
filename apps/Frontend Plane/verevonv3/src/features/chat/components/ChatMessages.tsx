@@ -2130,6 +2130,87 @@ function offersStandingScope(approval: Approval, scope: Exclude<ApprovalScope, '
   return approval.cause?.scopeOptions.includes(scope) ?? false
 }
 
+/** What a member may choose for a site the agent asks to open (WS21-S6). */
+export type BrowserSiteConsentChoice = 'allow_this_run' | 'remember_read' | 'remember_act' | 'deny'
+
+/**
+ * The choices a browser-site consent card offers for one host. The card never offers more than the
+ * admin's ceiling for that host, and it never appears under zero data retention, where the agent
+ * browser is refused before any consent is asked.
+ */
+export function browserSiteConsentChoices(
+  maxLevel: 'read' | 'act',
+  zdr: boolean,
+): BrowserSiteConsentChoice[] {
+  if (zdr) return []
+  return maxLevel === 'act'
+    ? ['allow_this_run', 'remember_read', 'remember_act', 'deny']
+    : ['allow_this_run', 'remember_read', 'deny']
+}
+
+export function browserSiteConsentLabel(
+  choice: BrowserSiteConsentChoice,
+  i18n: { tr: (noText: string, enText: string) => string },
+): string {
+  switch (choice) {
+    case 'allow_this_run':
+      return i18n.tr('Tillat for denne kjøringen', 'Allow for this run')
+    case 'remember_read':
+      return i18n.tr('Husk: bare lesing', 'Remember: reading only')
+    case 'remember_act':
+      return i18n.tr('Husk: lesing og handling', 'Remember: reading and acting')
+    case 'deny':
+      return i18n.tr('Ikke tillat', 'Do not allow')
+  }
+}
+
+/**
+ * WS21-S6: asks the member whether the agent may open one site. The host and the ceiling come from
+ * the approval's cause, the record the server keeps, never from text on the page.
+ */
+export function BrowserSiteConsentCard(props: {
+  host: string
+  maxLevel: 'read' | 'act'
+  zdr: boolean
+  onDecide: (choice: BrowserSiteConsentChoice) => void
+}) {
+  const i18n = useI18n()
+  const choices = () => browserSiteConsentChoices(props.maxLevel, props.zdr)
+  return (
+    <Show when={choices().length > 0}>
+      <div
+        class="verevon-chat-approval__consent"
+        role="group"
+        aria-label={i18n.tr('Nettside for agenten', 'Site for the agent')}
+      >
+        <p class="verevon-chat-approval__detail">
+          {i18n.tr(
+            `Agenten vil åpne ${props.host}. Skal den få lov?`,
+            `The agent wants to open ${props.host}. Allow it?`,
+          )}
+        </p>
+        <div class="verevon-chat-approval__actions">
+          <For each={choices()}>
+            {(choice) => (
+              <button
+                type="button"
+                class={
+                  choice === 'deny'
+                    ? 'verevon-chat-approval__reject'
+                    : 'verevon-chat-approval__approve'
+                }
+                onClick={() => props.onDecide(choice)}
+              >
+                {browserSiteConsentLabel(choice, i18n)}
+              </button>
+            )}
+          </For>
+        </div>
+      </div>
+    </Show>
+  )
+}
+
 export function ApprovalRequests(props: {
   approvals: Approval[]
   onDecide: (approvalId: string, decision: ApprovalDecision, scope?: ApprovalScope) => void
