@@ -767,7 +767,7 @@ mod tests {
         const ENTRY_POINTS: &[(&str, &str)] = &[
             ("sse.rs", "invoke_stream_sse"),
             ("http_routes.rs", "invoke"),
-            ("http_routes.rs", "ai_chat"),
+            ("http_routes.rs", "ai_chat_with"),
             ("http_routes.rs", "recommend_plan"),
             ("http_routes.rs", "ai_embeddings"),
             ("http_routes.rs", "ai_dictate"),
@@ -986,7 +986,7 @@ mod tests {
             ),
             (
                 "http_routes.rs",
-                "ai_chat",
+                "ai_chat_with",
                 "the request's route (zdr_or_refuse)",
             ),
             (
