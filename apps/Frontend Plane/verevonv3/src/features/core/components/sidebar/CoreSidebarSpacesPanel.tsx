@@ -89,12 +89,14 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
   })
   const normalizedQuery = createMemo(() => query().trim().toLocaleLowerCase())
   const personalSpaces = createMemo(() => (spaces() ?? []).filter((space) => space.kind === 'personal'))
-  // Channels, Slack-shaped: the organization's own room pins to the top, the
-  // rest keep the server's order. Sorted copy — never mutate the resource value.
+  // Channels, Slack-shaped: the organization's own room pins to the top, archived
+  // rooms sink to the bottom, the rest keep the server's order. Sorted copy —
+  // never mutate the resource value.
   const otherSpaces = createMemo(() => (spaces() ?? [])
     .filter((space) => space.kind !== 'personal')
     .slice()
-    .sort((a, b) => Number(b.is_organization_room === true) - Number(a.is_organization_room === true)))
+    .sort((a, b) => Number(a.archived === true) - Number(b.archived === true)
+      || Number(b.is_organization_room === true) - Number(a.is_organization_room === true)))
   const visiblePersonalSpaces = createMemo(() => personalSpaces().filter((space) => matchesSpace(space, normalizedQuery(), i18n.tr)))
   const visibleOtherSpaces = createMemo(() => otherSpaces().filter((space) => matchesSpace(space, normalizedQuery(), i18n.tr)))
   const visibleThreads = createMemo(() => (threads()?.threads ?? []).filter((thread) => matchesThread(thread, normalizedQuery())))
@@ -258,6 +260,7 @@ function SpaceLink(props: { space: SpaceSummary; active: boolean }) {
       aria-current={props.active ? 'page' : undefined}
       class={cn('core-sidebar-panel-link', props.active && 'verevon-sidebar-panel-active core-sidebar-panel-link--active')}
       data-working={working() ? 'true' : undefined}
+      data-archived={props.space.archived === true ? 'true' : undefined}
     >
       <Show
         when={props.space.kind === 'personal'}
@@ -268,6 +271,9 @@ function SpaceLink(props: { space: SpaceSummary; active: boolean }) {
       <span class="core-sidebar-panel-link__label verevon-sidebar-row-strong">
         {spaceDisplayName(props.space, i18n.tr)}
       </span>
+      <Show when={props.space.archived === true}>
+        <span class="core-sidebar-archived-tag">{i18n.tr('Arkivert', 'Archived')}</span>
+      </Show>
       <Show when={working()}>
         <span
           class="core-sidebar-working-dot"

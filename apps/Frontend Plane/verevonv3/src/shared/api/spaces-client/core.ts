@@ -31,6 +31,9 @@ export type SpaceSummary = {
   is_organization_room?: boolean
   /** The room's one-line topic (WS04-S2). Absent or null when none is set. A label, not authority. */
   topic?: string | null
+  /** True when Control's index says the room is archived (WS04-S7). `lifecycle` stays `active`
+   * for an archived room, so read this instead. Absent on older gateways and the fallback listing. */
+  archived?: boolean
 }
 
 /** A server-composed lifecycle + current-membership read. It contains no

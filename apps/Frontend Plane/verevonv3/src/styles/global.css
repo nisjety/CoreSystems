@@ -48766,6 +48766,20 @@ so it
   margin-left: auto;
 }
 
+/* An archived room stays in the list, quieter, with a small trailing tag. */
+.core-sidebar-panel-link[data-archived] .core-sidebar-panel-link__label {
+  opacity: 0.62;
+}
+
+.core-sidebar-archived-tag {
+  flex: none;
+  margin-left: auto;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--verevon-sidebar-text, currentColor);
+  opacity: 0.6;
+}
+
 @media (prefers-reduced-motion: no-preference) {
   .verevon-space-room-composer__working-dot,
   .core-sidebar-working-dot {

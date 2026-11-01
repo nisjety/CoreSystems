@@ -128,6 +128,23 @@ describe('SpacesExpandedSidebarPanel', () => {
     expect(await screen.findByRole('link', { name: /Åpne samtale uten tittel/i })).toBeTruthy()
   })
 
+  it('keeps an archived room listed last with a quiet Arkivert tag', async () => {
+    spacesClient.listSpaces.mockResolvedValue([
+      personalSpace,
+      { space_ref: 'space_old', name: 'Old room', kind: 'room', lifecycle: 'active', archived: true },
+      { space_ref: 'space_shared', name: 'Launch room', kind: 'room', lifecycle: 'active', archived: false },
+    ])
+    renderSpacesSidebar()
+
+    const archived = await screen.findByRole('link', { name: /Old room/ })
+    expect(archived.getAttribute('data-archived')).toBe('true')
+    expect(archived.textContent).toContain('Arkivert')
+    const live = screen.getByRole('link', { name: 'Launch room' })
+    expect(live.getAttribute('data-archived')).toBeNull()
+    // Archived sinks below the live room, whatever the server order.
+    expect(live.compareDocumentPosition(archived) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
   // Item 1b: Slack's channel dot, for agent work. The sidebar fetches nothing
   // extra for it — the Space page publishes the projection it already polls.
   it('shows a working dot on a room whose published projection has a live run', async () => {

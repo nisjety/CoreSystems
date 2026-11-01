@@ -275,8 +275,8 @@ pub(crate) async fn inject_personal_thread_context(
         None,
     )
     .await;
-    // A personal Space's issuer sends its refusals as 503; a refusal is a decline here, not an
-    // outage (D1-214), so a retrieval entitlement that is off still degrades the turn.
+    // An older Control's personal-Space issuer sends its refusals as 503; a refusal is a decline
+    // here, not an outage (D1-214), so a retrieval entitlement that is off still degrades the turn.
     let retrieval_status = denial::refusal_status(retrieval_status, &retrieval_response);
     // A decline carries its reason as a code from a closed set (D1-242), so the turn that answers
     // ungrounded can say why. Absent on a grant, which keeps the context as it was.
@@ -2981,6 +2981,9 @@ async fn list_personal_spaces(
                         .and_then(Value::as_str)
                         .unwrap_or("active"),
                     "role": entry.get("role").and_then(Value::as_str).unwrap_or_default(),
+                    // From Control's index, not the label: the label's lifecycle stays
+                    // `active` for an archived room (WS04-S7). Archived rooms stay listed.
+                    "archived": entry.get("state").and_then(Value::as_str) == Some("archived"),
                     // Display fact from the Application labels (the same source
                     // as `name`): lets the surface render the org-wide channel
                     // distinctly. Absent label -> false, never a guess.
@@ -11376,6 +11379,35 @@ mod ws03_s5_ws04_gateway_tests {
         assert_eq!(by_ref("space-room")["topic"], "Ukens leveranser");
         assert!(by_ref("space-plain")["topic"].is_null());
         assert!(by_ref("space-plain").as_object().unwrap().contains_key("topic"));
+    }
+
+    /// WS04-S7: an archived room stays listed and says so, from Control's index state even
+    /// though its Application label still reads `active`.
+    #[tokio::test]
+    async fn the_space_list_marks_an_archived_room_from_control_state() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body) = json_route(
+            "/api/v1/spaces",
+            |_| {},
+            json!([
+                {"space_ref": "space-room", "kind": "room", "role": "owner", "state": "archived"},
+                {"space_ref": "space-plain", "kind": "room", "role": "editor", "state": "active"},
+                {"space_ref": "space-old", "kind": "room", "role": "editor"}
+            ]),
+            json!([
+                {"spaceRef": "space-room", "name": "Leveranse", "kind": "room", "lifecycle": "active"},
+                {"spaceRef": "space-plain", "name": "Kantine", "kind": "room", "lifecycle": "active"},
+                {"spaceRef": "space-old", "name": "Gammel", "kind": "room", "lifecycle": "active"}
+            ]),
+        )
+        .await;
+        assert_eq!(status, 200);
+        let spaces = body["data"]["spaces"].as_array().expect("spaces");
+        let by_ref = |space_ref: &str| spaces.iter().find(|space| space["space_ref"] == space_ref).expect("space");
+        assert_eq!(by_ref("space-room")["archived"], true);
+        assert_eq!(by_ref("space-room")["lifecycle"], "active");
+        assert_eq!(by_ref("space-plain")["archived"], false);
+        assert_eq!(by_ref("space-old")["archived"], false);
     }
 
     /// WS04-S2: the single-Space projection carries the topic too.

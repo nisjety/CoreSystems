@@ -16,10 +16,11 @@
 //!
 //! One status correction applies with the flag on or off ([`refusal_status`]):
 //! Control's catalogue answers every refusal 403 and only
-//! `space_authority_unavailable` 503, but five personal-Space issuers pass 503 as
-//! the status of every non-membership refusal. A well-formed refusal that arrives
-//! as 503 is therefore reported as 403, so a retry loop never spins on a refusal
-//! and a declined retrieval degrades the turn instead of failing it.
+//! `space_authority_unavailable` 503. Before D1-214 was fixed in Control, five
+//! personal-Space issuers passed 503 as the status of every non-membership refusal;
+//! an older Control still may. A well-formed refusal that arrives as 503 is
+//! therefore reported as 403, so a retry loop never spins on a refusal and a
+//! declined retrieval degrades the turn instead of failing it.
 
 use axum::{http::StatusCode, Json};
 use serde_json::{json, Map, Value};
@@ -168,8 +169,8 @@ pub(crate) fn map_control_denial(
 
 /// The status a Control decision answer is reported with. A 503 whose body carries a
 /// well-formed refusal reason other than `space_authority_unavailable` is a refusal that Control
-/// sent with the wrong status (the personal-Space issuers pass 503 for every non-membership
-/// refusal), so it is 403, as the catalogue says. Everything else keeps its status: a real
+/// sent with the wrong status (the personal-Space issuers of an older Control pass 503 for
+/// every non-membership refusal; current Control sends 403), so it is 403, as the catalogue says. Everything else keeps its status: a real
 /// outage, a 503 without a reason (older Control) and every other code. Independent of
 /// `space_denials_typed`, and never widens anything: it only turns an error into a clearer error.
 pub(crate) fn refusal_status(status: StatusCode, body: &Value) -> StatusCode {
