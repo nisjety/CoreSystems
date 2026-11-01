@@ -30,9 +30,28 @@ func TestUnknownPrincipalTypeSeesNoGrantOfItsOrg(t *testing.T) {
 		if _, err := stranger.ValidateGrant(context.Background(), &ValidateGrantRequest{GrantId: acquired.GetGrantId()}); status.Code(err) != codes.NotFound {
 			t.Fatalf("type %q validate code = %v, want NotFound", kind, status.Code(err))
 		}
-		if _, err := stranger.RevokeGrant(context.Background(), &RevokeGrantRequest{GrantId: acquired.GetGrantId()}); status.Code(err) != codes.NotFound {
-			t.Fatalf("type %q revoke code = %v, want NotFound", kind, status.Code(err))
+		// An api_key is refused outright while key grants are off (the
+		// default here); either way nothing is revoked.
+		want := codes.NotFound
+		if kind == "api_key" {
+			want = codes.PermissionDenied
 		}
+		if _, err := stranger.RevokeGrant(context.Background(), &RevokeGrantRequest{GrantId: acquired.GetGrantId()}); status.Code(err) != want {
+			t.Fatalf("type %q revoke code = %v, want %v", kind, status.Code(err), want)
+		}
+	}
+	// Switch on, a key without a matching key id still sees nothing.
+	cfg := DefaultConfig()
+	cfg.KeyGrantsEnabled = true
+	keyed := NewServerWithConfig(store, cfg)
+	keyed.principal = func(context.Context) (authctx.Principal, error) {
+		return authctx.Principal{OrganizationID: "org1", ActorID: "user1", PrincipalType: "api_key", KeyID: "key-1", Scopes: []string{"browser:agent"}}, nil
+	}
+	if _, err := keyed.RevokeGrant(context.Background(), &RevokeGrantRequest{GrantId: acquired.GetGrantId()}); status.Code(err) != codes.NotFound {
+		t.Fatalf("key revoke of the owner's grant code = %v, want NotFound", status.Code(err))
+	}
+	if _, err := keyed.ValidateGrant(context.Background(), &ValidateGrantRequest{GrantId: acquired.GetGrantId()}); status.Code(err) != codes.NotFound {
+		t.Fatalf("key validate of the owner's grant code = %v, want NotFound", status.Code(err))
 	}
 	if _, err := owner.ValidateGrant(context.Background(), &ValidateGrantRequest{GrantId: acquired.GetGrantId()}); err != nil {
 		t.Fatalf("the grant must still be live for its owner: %v", err)

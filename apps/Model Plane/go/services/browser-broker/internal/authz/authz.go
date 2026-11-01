@@ -20,10 +20,15 @@ const (
 	ScopeRead  = "browser:read"
 	ScopeWrite = "browser:write"
 
-	// PrincipalUser and PrincipalService are the authctx principal types this
-	// broker authorizes.
+	// ScopeAgent is the only scope an api_key principal uses here (INNH-10):
+	// it lets a key acquire an allow-list session grant and revoke its own.
+	ScopeAgent = "browser:agent"
+
+	// PrincipalUser, PrincipalService and PrincipalAPIKey are the authctx
+	// principal types this broker authorizes.
 	PrincipalUser    = "user"
 	PrincipalService = "service"
+	PrincipalAPIKey  = authctx.PrincipalTypeAPIKey
 )
 
 // NewVerifierFromEnv loads trust material eagerly. It rejects attempts to
@@ -36,6 +41,10 @@ func NewVerifierFromEnv() (*authctx.Verifier, error) {
 		Audiences: []string{Audience},
 		Issuer:    os.Getenv("AUTH_CORE_ISSUER"),
 		JWKSURL:   os.Getenv("AUTH_CORE_JWKS_URL"),
+		// INNH-10: the shape is verified here; Authorize and the server decide
+		// what a key may do (nothing while BROWSER_BROKER_KEY_GRANTS_ENABLED is
+		// off).
+		AcceptAPIKey: true,
 	})
 }
 
@@ -87,12 +96,66 @@ func Authorize(principal authctx.Principal, method string, request any) error {
 			return errors.New("required browser scope is missing")
 		}
 		return nil
+	case PrincipalAPIKey:
+		return authorizeAPIKey(principal, method, request)
 	default:
 		// A principal type this broker was not taught is refused outright. It
 		// used to fall through to the scoped-service branch, whose owner filter
 		// is the organization-wide empty one (fail open).
 		return errors.New("unsupported browser principal type")
 	}
+}
+
+// authorizeAPIKey is the whole of what an api_key principal may call (INNH-10
+// MP-1): AcquireGrant for an ordinary allow-list session grant (no grant_kind,
+// so never human_browse; no sensitive scopes and no parent, so never a
+// sensitive approval) and RevokeGrant (the handler limits it to the key's own
+// grants). Every other method, RenewGrant and DeriveRunGrant included, is
+// refused, and both need scope browser:agent. The broker switch
+// (BROWSER_BROKER_KEY_GRANTS_ENABLED) is checked by the handlers.
+func authorizeAPIKey(principal authctx.Principal, method string, request any) error {
+	if principal.KeyID == "" {
+		return errors.New("api key principal has no key id")
+	}
+	if !principal.HasScope(ScopeAgent) {
+		return errors.New("required browser scope is missing")
+	}
+	switch method {
+	case "/model_plane.v1.BrowserBroker/AcquireGrant":
+		req, ok := request.(*mpv1.AcquireGrantRequest)
+		if !ok || req == nil {
+			return errors.New("malformed api key grant request")
+		}
+		return APIKeyAcquireShape(req)
+	case "/model_plane.v1.BrowserBroker/RevokeGrant":
+		return nil
+	default:
+		return errors.New("method is not available to an api key")
+	}
+}
+
+// APIKeyAcquireShape refuses an AcquireGrant request an api_key may never make:
+// a grant kind (human_browse), a sensitive approval scope, or a parent grant.
+func APIKeyAcquireShape(req *mpv1.AcquireGrantRequest) error {
+	if req.GetGrantKind() != "" {
+		return errors.New("an api key acquires an ordinary session grant only")
+	}
+	if len(req.GetAllowedActions()) != 0 || len(req.GetAllowedFrameIds()) != 0 || len(req.GetAllowedDialogIds()) != 0 ||
+		len(req.GetAllowedArtifactIds()) != 0 || req.GetParentGrantId() != "" {
+		return errors.New("an api key cannot acquire a sensitive approval")
+	}
+	return nil
+}
+
+// KeyMatches reports whether a grant with keyID is visible to principal under
+// the key rule: an api_key principal sees only grants stamped with its own key
+// (OwnerFilter alone would show it every grant of its owner). Other principal
+// types are not narrowed here; the owner filter applies to them.
+func KeyMatches(principal authctx.Principal, keyID string) bool {
+	if principal.PrincipalType != PrincipalAPIKey {
+		return true
+	}
+	return principal.KeyID != "" && keyID == principal.KeyID
 }
 
 // Principal returns the cryptographically verified caller or fails closed.
@@ -111,12 +174,19 @@ const noOwner = "\x00unknown-principal"
 
 // OwnerFilter pins users to their own records. A service with an explicit
 // method scope may access any owner inside its verified organization: the
-// empty filter is a service's alone. Every other principal type gets a filter
-// that matches no grant. It used to get "" for anything that was not a user,
-// i.e. any owner in the org: fail open.
+// empty filter is a service's alone. An api_key is pinned to its owning user
+// here, and every handler that reads or revokes a grant for it also applies
+// KeyMatches, so it reaches its own key's grants only. Every other principal
+// type gets a filter that matches no grant. It used to get "" for anything that
+// was not a user, i.e. any owner in the org: fail open.
 func OwnerFilter(principal authctx.Principal) string {
 	switch principal.PrincipalType {
 	case PrincipalUser:
+		return principal.ActorID
+	case PrincipalAPIKey:
+		if principal.ActorID == "" {
+			return noOwner
+		}
 		return principal.ActorID
 	case PrincipalService:
 		return ""

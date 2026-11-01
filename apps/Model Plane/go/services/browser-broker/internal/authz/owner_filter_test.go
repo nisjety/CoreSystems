@@ -18,7 +18,10 @@ func TestOwnerFilter_OnlyAServiceGetsTheOrgWideFilter(t *testing.T) {
 	}{
 		{"user is pinned to itself", authctx.Principal{OrganizationID: "org-a", ActorID: "user-a", PrincipalType: "user"}, "user-a"},
 		{"service is org wide", authctx.Principal{OrganizationID: "org-a", ActorID: "service:quarry", PrincipalType: "service"}, ""},
-		{"api_key is never org wide", authctx.Principal{OrganizationID: "org-a", ActorID: "user-a", PrincipalType: "api_key"}, noOwner},
+		// MP-1: an api_key is pinned to its owner here; KeyMatches narrows it
+		// to its own key in every handler.
+		{"api_key is pinned to its owner", authctx.Principal{OrganizationID: "org-a", ActorID: "user-a", PrincipalType: "api_key", KeyID: "k1"}, "user-a"},
+		{"api_key without owner matches nothing", authctx.Principal{OrganizationID: "org-a", PrincipalType: "api_key", KeyID: "k1"}, noOwner},
 		{"unknown type matches nothing", authctx.Principal{OrganizationID: "org-a", ActorID: "x", PrincipalType: "robot"}, noOwner},
 		{"empty type matches nothing", authctx.Principal{OrganizationID: "org-a", ActorID: "x"}, noOwner},
 		{"case variant is not a service", authctx.Principal{OrganizationID: "org-a", ActorID: "x", PrincipalType: "Service"}, noOwner},

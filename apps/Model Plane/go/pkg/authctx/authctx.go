@@ -31,13 +31,48 @@ type principalContextKey struct{}
 // Principal is identity proven by an Auth Core signature. Request headers,
 // query strings, and bodies are never used to construct it.
 type Principal struct {
-	OrganizationID         string
+	OrganizationID string
+	// ActorID is the user id of a user, the service id of a service, and for
+	// an api_key principal the key's owning user (acting_user_id), used for
+	// owner accounting only. An api_key principal is never a person: check
+	// PrincipalType (or KeyID) before treating ActorID as one.
 	ActorID                string
 	PrincipalType          string
 	Scopes                 []string
 	ZeroDataRetention      bool
 	RetentionPolicyPresent bool
+	// KeyID is the API key id of an api_key principal (INNH-10), empty for
+	// every other type. It names the key, it is never the key.
+	KeyID string
+	// KeyHostCeiling is an api_key token's key_hosts claim, as signed (not yet
+	// normalized): the hosts a grant for this key may hold at most.
+	KeyHostCeiling []string
+	// KeyBudgetCeiling is an api_key token's key_budget claim: the most a
+	// grant for this key may bound. Zero on a dimension means no ceiling was
+	// signed for it, which a consumer must treat as refuse, not unbounded.
+	KeyBudgetCeiling KeyBudget
 }
+
+// KeyBudget is the budget ceiling an api_key token carries (micro-USD, steps,
+// wall-clock seconds).
+type KeyBudget struct {
+	MicroUSD    int64 `json:"micro_usd"`
+	MaxSteps    int32 `json:"max_steps"`
+	MaxRuntimeS int32 `json:"max_runtime_s"`
+}
+
+// PrincipalTypeAPIKey is the INNH-10 principal minted by Auth Core's API-key
+// exchange. A Verifier accepts it only when its Config opts in (AcceptAPIKey).
+const PrincipalTypeAPIKey = "api_key"
+
+// APIKeySubjectPrefix prefixes an api_key token's sub: "apikey:<key_id>".
+const APIKeySubjectPrefix = "apikey:"
+
+const (
+	maxKeyIDBytes      = 128
+	maxKeyHostCeiling  = 32
+	maxKeyHostNameSize = 253
+)
 
 // HasScope reports whether the immutable verified principal has scope.
 func (p Principal) HasScope(scope string) bool {
@@ -52,6 +87,11 @@ type Config struct {
 	JWKSURL      string
 	PublicKeyPEM []byte
 	HTTPClient   *http.Client
+	// AcceptAPIKey admits principal_type=api_key (INNH-10). Off by default, so
+	// every service that does not opt in keeps refusing the type as
+	// unsupported: none of them was written for a principal that is neither a
+	// person nor a registered service.
+	AcceptAPIKey bool
 }
 
 type claims struct {
@@ -61,15 +101,21 @@ type claims struct {
 	PrincipalType string   `json:"principal_type"`
 	Scopes        []string `json:"scopes"`
 	ZDR           *bool    `json:"zdr"`
+	// INNH-10 api_key claims (Auth Core CP-1).
+	KeyID        string     `json:"key_id"`
+	ActingUserID string     `json:"acting_user_id"`
+	KeyHosts     []string   `json:"key_hosts"`
+	KeyBudget    *KeyBudget `json:"key_budget"`
 	jwt.RegisteredClaims
 }
 
 // Verifier is immutable verification state loaded before a service starts.
 type Verifier struct {
-	audiences []string
-	issuer    string
-	static    *rsa.PublicKey
-	keys      map[string]*rsa.PublicKey
+	audiences    []string
+	issuer       string
+	static       *rsa.PublicKey
+	keys         map[string]*rsa.PublicKey
+	acceptAPIKey bool
 }
 
 // HTTPAuthorizer performs service-specific authorization after authentication.
@@ -88,9 +134,10 @@ func NewVerifier(config Config) (*Verifier, error) {
 		return nil, errors.New("authctx: at least one audience and an issuer are required")
 	}
 	verifier := &Verifier{
-		audiences: audiences,
-		issuer:    issuer,
-		keys:      map[string]*rsa.PublicKey{},
+		audiences:    audiences,
+		issuer:       issuer,
+		keys:         map[string]*rsa.PublicKey{},
+		acceptAPIKey: config.AcceptAPIKey,
 	}
 	if len(config.PublicKeyPEM) > 0 {
 		key, err := jwt.ParseRSAPublicKeyFromPEM(config.PublicKeyPEM)
@@ -113,7 +160,8 @@ func NewVerifier(config Config) (*Verifier, error) {
 }
 
 // Verify validates signature, algorithm, issuer, lifetime, audience, and an
-// unambiguous user or service identity.
+// unambiguous user or service identity (or, when the Config opted in, an
+// api_key identity of the exact INNH-10 shape).
 func (v *Verifier) Verify(raw string) (Principal, error) {
 	parsedClaims := &claims{}
 	parsed, err := jwt.ParseWithClaims(
@@ -158,7 +206,24 @@ func (v *Verifier) Verify(raw string) (Principal, error) {
 		principal.ZeroDataRetention = *parsedClaims.ZDR
 	}
 	subject := strings.TrimSpace(parsedClaims.Subject)
+	// key_id names an API key; on any other principal type it would make the
+	// identity ambiguous, so it is refused rather than ignored.
+	if principal.PrincipalType != PrincipalTypeAPIKey && parsedClaims.KeyID != "" {
+		return Principal{}, errors.New("authentication token has ambiguous identity")
+	}
 	switch principal.PrincipalType {
+	case PrincipalTypeAPIKey:
+		if !v.acceptAPIKey {
+			return Principal{}, errors.New("authentication token has unsupported principal type")
+		}
+		keyPrincipal, err := apiKeyPrincipal(parsedClaims)
+		if err != nil {
+			return Principal{}, err
+		}
+		principal.ActorID = keyPrincipal.ActorID
+		principal.KeyID = keyPrincipal.KeyID
+		principal.KeyHostCeiling = keyPrincipal.KeyHostCeiling
+		principal.KeyBudgetCeiling = keyPrincipal.KeyBudgetCeiling
 	case "user":
 		principal.ActorID = strings.TrimSpace(parsedClaims.UserID)
 		if principal.ActorID == "" || strings.TrimSpace(parsedClaims.ServiceID) != "" || subject != principal.ActorID {
@@ -176,6 +241,56 @@ func (v *Verifier) Verify(raw string) (Principal, error) {
 	return principal, nil
 }
 
+// apiKeyPrincipal checks the INNH-10 api_key token shape exactly: sub is
+// "apikey:<key_id>", key_id is 1 to 128 printable non-space ASCII bytes,
+// acting_user_id (the key's owner) is present, and user_id and service_id are
+// absent. The key's host ceiling is bounded (at most 32 names, each at most 253
+// bytes) and a budget ceiling may not be negative. Anything else is refused.
+func apiKeyPrincipal(c *claims) (Principal, error) {
+	ambiguous := errors.New("authentication token has ambiguous api key identity")
+	if !validKeyID(c.KeyID) || c.Subject != APIKeySubjectPrefix+c.KeyID {
+		return Principal{}, ambiguous
+	}
+	owner := strings.TrimSpace(c.ActingUserID)
+	if owner == "" || owner != c.ActingUserID || strings.HasPrefix(owner, APIKeySubjectPrefix) ||
+		strings.TrimSpace(c.UserID) != "" || strings.TrimSpace(c.ServiceID) != "" {
+		return Principal{}, ambiguous
+	}
+	if len(c.KeyHosts) > maxKeyHostCeiling {
+		return Principal{}, errors.New("authentication token has an unbounded api key host ceiling")
+	}
+	for _, host := range c.KeyHosts {
+		if host == "" || len(host) > maxKeyHostNameSize {
+			return Principal{}, errors.New("authentication token has an unbounded api key host ceiling")
+		}
+	}
+	principal := Principal{
+		ActorID:        owner,
+		KeyID:          c.KeyID,
+		KeyHostCeiling: append([]string(nil), c.KeyHosts...),
+	}
+	if c.KeyBudget != nil {
+		if c.KeyBudget.MicroUSD < 0 || c.KeyBudget.MaxSteps < 0 || c.KeyBudget.MaxRuntimeS < 0 {
+			return Principal{}, errors.New("authentication token has a negative api key budget ceiling")
+		}
+		principal.KeyBudgetCeiling = *c.KeyBudget
+	}
+	return principal, nil
+}
+
+// validKeyID reports a bounded, printable key id (0x21-0x7e, no space).
+func validKeyID(id string) bool {
+	if id == "" || len(id) > maxKeyIDBytes {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		if id[i] < 0x21 || id[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
 // HTTPMiddleware authenticates a bearer token, rejects forged identity
 // headers, canonicalizes downstream identity headers, and runs authorizer.
 func (v *Verifier) HTTPMiddleware(authorizer HTTPAuthorizer) func(http.Handler) http.Handler {
@@ -189,6 +304,14 @@ func (v *Verifier) HTTPMiddleware(authorizer HTTPAuthorizer) func(http.Handler) 
 			principal, err := v.Verify(raw)
 			if err != nil {
 				writeHTTPAuthError(w, http.StatusUnauthorized, "invalid authentication token")
+				return
+			}
+			// The HTTP path forwards X-User-ID downstream, which would name the
+			// key's owner as if the person had called. No HTTP entry point is
+			// built for an api_key principal (INNH-10 is gRPC to the broker), so
+			// it is refused here even when the verifier opted in.
+			if principal.PrincipalType == PrincipalTypeAPIKey {
+				writeHTTPAuthError(w, http.StatusForbidden, "request is not authorized")
 				return
 			}
 			if conflicts(r.Header.Get("X-Org-ID"), principal.OrganizationID) ||
@@ -246,6 +369,7 @@ func PrincipalFromContext(ctx context.Context) (Principal, bool) {
 		return Principal{}, false
 	}
 	principal.Scopes = append([]string(nil), principal.Scopes...)
+	principal.KeyHostCeiling = append([]string(nil), principal.KeyHostCeiling...)
 	return principal, true
 }
 
@@ -268,6 +392,7 @@ func ContextWithPrincipal(ctx context.Context, principal Principal) context.Cont
 func withPrincipal(ctx context.Context, principal Principal) context.Context {
 	copy := principal
 	copy.Scopes = append([]string(nil), principal.Scopes...)
+	copy.KeyHostCeiling = append([]string(nil), principal.KeyHostCeiling...)
 	return context.WithValue(ctx, principalContextKey{}, copy)
 }
 

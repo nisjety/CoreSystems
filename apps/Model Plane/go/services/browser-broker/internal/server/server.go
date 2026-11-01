@@ -94,6 +94,11 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 	if err != nil {
 		return nil, err
 	}
+	// An API key (INNH-10) has its own path and never reaches the user or
+	// service rules below.
+	if principal.PrincipalType == authz.PrincipalAPIKey {
+		return s.acquireKeyGrant(ctx, req, scopeURL, principal)
+	}
 	// grant_kind (WS8.C): "" is the ordinary path below; human_browse is a
 	// different grant with its own rules; anything else is refused.
 	switch req.GetGrantKind() {
@@ -218,6 +223,10 @@ func (s *Server) RevokeGrant(ctx context.Context, req *RevokeGrantRequest) (*Rev
 	if req.GetGrantId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "grant_id is required")
 	}
+	if err := s.keyMayRevoke(ctx, principal, req.GetGrantId()); err != nil {
+		telemetry.GrantsRevokedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", grantOutcome(err))))
+		return nil, mapErr(err)
+	}
 	if err := s.grants.RevokeScoped(
 		ctx, req.GetGrantId(), principal.OrganizationID, authz.OwnerFilter(principal), req.GetReason(),
 	); err != nil {
@@ -240,6 +249,9 @@ func (s *Server) ValidateGrant(ctx context.Context, req *ValidateGrantRequest) (
 		return nil, status.Error(codes.InvalidArgument, "grant_id is required")
 	}
 	g, err := s.grants.GetScoped(ctx, req.GetGrantId(), principal.OrganizationID, authz.OwnerFilter(principal))
+	if err == nil {
+		err = s.keyGrantLive(principal, g)
+	}
 	if err != nil {
 		telemetry.GrantsValidatedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", grantOutcome(err))))
 		return nil, mapErr(err)
@@ -287,6 +299,10 @@ func (s *Server) DeriveRunGrant(ctx context.Context, req *DeriveRunGrantRequest)
 	principal, err := s.principal(ctx)
 	if err != nil {
 		return nil, err
+	}
+	// A key grant is never derived from (INNH-10), and a key never derives.
+	if principal.PrincipalType == authz.PrincipalAPIKey {
+		return nil, status.Error(codes.PermissionDenied, "an api key cannot derive a run grant")
 	}
 	if req.GetParentGrantId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "parent_grant_id is required")
