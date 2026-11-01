@@ -179,6 +179,7 @@
       "capability:health:global:write",
       "capability:read",
       "extract:read",
+      "parse:write",
       "sandbox:read",
       "sandbox:write",
       "scrape:write",
@@ -194,6 +195,7 @@
       "quarry": [
         "browser:execute",
         "extract:read",
+        "parse:write",
         "scrape:write",
         "search:read"
       ],
@@ -206,6 +208,9 @@
         "session:heartbeat",
         "session:terminalize"
       ]
+    },
+    "webPolicyByAudience": {
+      "quarry": "tenant"
     }
   },
   "finspo-core": {
@@ -339,6 +344,9 @@
         "session:heartbeat",
         "session:terminalize"
       ]
+    },
+    "webPolicyByAudience": {
+      "quarry": "tenant"
     }
   },
   "model-gateway-mail-task-bridge": {
@@ -407,19 +415,28 @@
     "tenancy": "directory",
     "audiences": [
       "browser-broker",
-      "data-plane"
+      "data-plane",
+      "inference-core",
+      "ingestion",
+      "model-gateway"
     ],
     "consumerEnv": "QUARRY_SERVICE_API_KEY",
     "orgIds": [],
     "retentionByAudience": {
       "browser-broker": "zdr",
-      "data-plane": "persistent"
+      "data-plane": "persistent",
+      "inference-core": "tenant",
+      "ingestion": "zdr",
+      "model-gateway": "tenant"
     },
     "scopes": [
       "browser:read",
       "data:read",
       "data:rerank",
       "documents:write",
+      "inference:invoke",
+      "integration:otp:read",
+      "models:invoke",
       "org:data:read_all"
     ],
     "scopesByAudience": {
@@ -431,6 +448,16 @@
         "data:rerank",
         "documents:write",
         "org:data:read_all"
+      ],
+      "inference-core": [
+        "inference:invoke",
+        "models:invoke"
+      ],
+      "ingestion": [
+        "integration:otp:read"
+      ],
+      "model-gateway": [
+        "models:invoke"
       ]
     }
   },
@@ -503,7 +530,11 @@
       "model-gateway": [
         "mail-task:prepare-thread"
       ]
-    }
+    },
+    "apiKeyExchange": [
+      "browser-broker",
+      "quarry"
+    ]
   },
   "verevon-gateway-retention-decision": {
     "tenancy": "directory",
