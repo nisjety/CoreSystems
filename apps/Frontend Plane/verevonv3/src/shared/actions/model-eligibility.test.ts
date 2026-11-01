@@ -47,4 +47,16 @@ describe('model eligibility characterisation', () => {
     expect(isModelExecutableAction('brreg.lookup_organization')).toBe(false)
     expect(isModelExecutableAction('shipping.get_quotes')).toBe(false)
   })
+
+  it('never admits the Space post or entitlement actions to the model (WS01-S5, WS03-S4)', () => {
+    for (const id of [
+      'spaces.create_post',
+      'spaces.reply_in_thread',
+      'spaces.set_effect_entitlements',
+      'spaces.apply_effect_preset',
+    ]) {
+      expect(actionRegistry.map((action) => action.id), id).toContain(id)
+      expect(isModelExecutableAction(id), id).toBe(false)
+    }
+  })
 })

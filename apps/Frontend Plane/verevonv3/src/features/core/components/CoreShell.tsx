@@ -18,6 +18,7 @@ import { CoreWorkspaceContext } from '@/features/core/lib/workspace-context'
 import { getNavbarData, type NavbarPayload } from '@/shared/api/navbar-client'
 import { getDeletionStatus } from '@/shared/api/org-deletion-client'
 import { getSession, type SessionState } from '@/shared/session/session-store'
+import { RegionBoundary } from '@/shared/ui/resilience/RegionBoundary'
 
 /** Extra height the fixed org-deletion banner (Flow C) occupies below the
  * navbar — added to `--dashboard-navbar-height` so `.core-main`'s top
@@ -30,7 +31,9 @@ export function CoreShell(props: { children?: JSX.Element }) {
   // One-time peek to seed the initial signal value; the reactive read for
   // ongoing updates is activeRoute (below), a proper createMemo.
   const initialRoute = untrack(() => routeFromPath(location.pathname))
-  const [sidebarExpanded, setSidebarExpanded] = createSignal(defaultSidebarExpandedForRoute(initialRoute))
+  const [sidebarExpanded, setSidebarExpanded] = createSignal(
+    defaultSidebarExpandedForRoute(initialRoute, { pathname: untrack(() => location.pathname), phone: isPhoneViewport() }),
+  )
   const [searchOpen, setSearchOpen] = createSignal(false)
   const [navbarData, { refetch: refetchNavbar }] = createResource(fetchNavbarData)
   const orgId = createMemo(() => session.activeOrg?.id ?? null)
@@ -45,6 +48,22 @@ export function CoreShell(props: { children?: JSX.Element }) {
   const expandedSidebarWidth = () => activeRoute() === '/support' ? 303 : SIDEBAR_EXPANDED_WIDTH
   const sidebarWidth = () => (sidebarExpanded() ? expandedSidebarWidth() : SIDEBAR_MINIMIZED_WIDTH)
   const workspace = createMemo(() => resolveWorkspaceIdentity(session, navbarData.latest ?? navbarData()))
+
+  // At phone width the expanded sidebar is a drawer laid over the page. Picking a room or a
+  // conversation from it (or from the rooms index) navigates to an open room; the drawer has done
+  // its job then, and left open it hides the room the person just chose. Only a change of
+  // location counts (the first run is the page the person arrived on, whose default is decided
+  // above), only a destination that is an open room, and only at phone width: desktop keeps its
+  // column, and a rail tap to another section keeps the drawer open for that section's list.
+  let lastNavigationKey = untrack(() => `${location.pathname}${location.search}`)
+  createEffect(
+    () => `${location.pathname}${location.search}`,
+    (key) => {
+      if (key === lastNavigationKey) return
+      lastNavigationKey = key
+      if (isPhoneViewport() && isOpenRoomPath(location.pathname)) setSidebarExpanded(false)
+    },
+  )
 
   createEffect(
     () => {
@@ -99,16 +118,18 @@ export function CoreShell(props: { children?: JSX.Element }) {
           '--verevon-sidebar-accent': workspace().accentColor || undefined,
         }}
       >
-        <CoreNavbar
-          activeRoute={activeRoute()}
-          navbarData={navbarData.latest ?? navbarData()}
-          onNavbarRefresh={() => void refetchNavbar()}
-          searchOpen={searchOpen()}
-          onSearchOpenChange={setSearchOpen}
-          workspace={workspace()}
-          sidebarExpanded={sidebarExpanded()}
-          onSidebarToggle={() => setSidebarExpanded((expanded) => !expanded)}
-        />
+        <RegionBoundary region="navbar" compact>
+          <CoreNavbar
+            activeRoute={activeRoute()}
+            navbarData={navbarData.latest ?? navbarData()}
+            onNavbarRefresh={() => void refetchNavbar()}
+            searchOpen={searchOpen()}
+            onSearchOpenChange={setSearchOpen}
+            workspace={workspace()}
+            sidebarExpanded={sidebarExpanded()}
+            onSidebarToggle={() => setSidebarExpanded((expanded) => !expanded)}
+          />
+        </RegionBoundary>
         <Show when={deletionBannerVisible()}>
           <OrgDeletionBanner
             status={deletionStatus.latest ?? deletionStatus()}
@@ -118,17 +139,21 @@ export function CoreShell(props: { children?: JSX.Element }) {
         <Show when={chatAppearanceActive('navigation') && sidebarExpanded()}>
           <button type="button" class="core-sidebar-mobile-scrim" aria-label="Close navigation" onClick={() => setSidebarExpanded(false)} />
         </Show>
-        <CoreSidebar
-          activeRoute={activeRoute()}
-          expanded={sidebarExpanded()}
-          expandedWidth={expandedSidebarWidth()}
-          onExpandedChange={setSidebarExpanded}
-          onOpenSearch={() => setSearchOpen(true)}
-        />
+        <RegionBoundary region="sidebar" compact>
+          <CoreSidebar
+            activeRoute={activeRoute()}
+            expanded={sidebarExpanded()}
+            expandedWidth={expandedSidebarWidth()}
+            onExpandedChange={setSidebarExpanded}
+            onOpenSearch={() => setSearchOpen(true)}
+          />
+        </RegionBoundary>
         <main class="core-main">
           <div class="verevon-workspace-panel dashboard-main-panel core-main__panel">
             <CoreWorkspaceContext value={workspace}>
-              {props.children}
+              <RegionBoundary region="outlet" resetKey={() => location.pathname}>
+                {props.children}
+              </RegionBoundary>
             </CoreWorkspaceContext>
           </div>
         </main>
@@ -254,7 +279,32 @@ function isOrgStyleName(name: string): boolean {
   return /^[A-ZÆØÅ0-9 ]{2,40}$/.test(name) && !/[a-zæøå]/.test(name)
 }
 
-function defaultSidebarExpandedForRoute(route: ReturnType<typeof routeFromPath>) {
+/** Below this width the expanded sidebar is a drawer laid over the page, not a column beside it. */
+const PHONE_MEDIA_QUERY = '(max-width: 767px)'
+
+function isPhoneViewport(): boolean {
+  try {
+    return typeof window !== 'undefined' && window.matchMedia?.(PHONE_MEDIA_QUERY).matches === true
+  } catch {
+    return false
+  }
+}
+
+/** An open room (`/spaces/:id`), as opposed to the rooms index at `/spaces`. */
+function isOpenRoomPath(pathname: string): boolean {
+  return /^\/spaces\/[^/]+/.test(pathname)
+}
+
+/**
+ * Whether the sidebar starts expanded on a first visit. On a phone the expanded sidebar covers the
+ * whole page, so a room opened by link or reload starts with the drawer closed: the person came for
+ * the room, and the menu button is one tap away. The rooms index keeps its list open.
+ */
+export function defaultSidebarExpandedForRoute(
+  route: ReturnType<typeof routeFromPath>,
+  options: { readonly pathname?: string; readonly phone?: boolean } = {},
+) {
+  if (options.phone === true && isOpenRoomPath(options.pathname ?? '')) return false
   return route === '/spaces' ||
     route === '/support' ||
     route === '/social' ||

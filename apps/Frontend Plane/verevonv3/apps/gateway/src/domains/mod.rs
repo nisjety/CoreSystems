@@ -13,6 +13,7 @@ pub mod briefs;
 pub mod browser;
 pub mod browser_evidence;
 pub mod chat;
+pub mod client_config;
 pub mod cost;
 pub mod eval;
 pub mod finetune;

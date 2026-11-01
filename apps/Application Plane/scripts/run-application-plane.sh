@@ -135,4 +135,16 @@ case " ${*:-} " in
     ;;
 esac
 
+# F10: warn (never fail) when the convex-gateway / convex-subscriber image is older
+# than the files baked into it. Skipped when this invocation builds, since the
+# image is then fresh by construction.
+case " ${*:-} " in
+  *" build "*|*" --build "*) ;;
+  *" up "*|*" start "*|*" restart "*)
+    # shellcheck source=convex-image-staleness.sh
+    source "$root/scripts/convex-image-staleness.sh"
+    warn_if_convex_image_stale "$root" || true
+    ;;
+esac
+
 exec docker compose "${compose_env_args[@]}" -f docker-compose.yml "$@"

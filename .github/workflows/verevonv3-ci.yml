@@ -413,9 +413,34 @@ jobs:
           docker buildx build
           --target production
           --build-context 'quarry-client=../../Ingestion Plane/Quarry-v2/sdks/typescript'
+          --build-arg SOURCE_REVISION=${{ github.sha }}
+          --build-arg BUILD_DATE=${{ github.event.head_commit.timestamp || github.event.repository.updated_at }}
           --tag verevonv3-ci:${{ github.sha }}
           --load
           .
+
+      # WS07-S2: the nginx config (with the shared security-headers snippet) must
+      # parse in the image that ships, and the cache/header rules must hold.
+      - name: nginx config test in the built image
+        run: docker run --rm --entrypoint nginx verevonv3-ci:${{ github.sha }} -t
+
+      - name: Header smoke (version.json, index.html, assets)
+        run: |
+          cid=$(docker run -d -p 8080:8080 verevonv3-ci:${{ github.sha }})
+          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+          curl --silent --fail --retry 20 --retry-connrefused --retry-delay 1 --output /dev/null http://localhost:8080/index.html
+          vj=$(curl -sI http://localhost:8080/version.json)
+          echo "$vj"
+          echo "$vj" | grep -i '^cache-control: no-store'
+          echo "$vj" | grep -i '^content-type: application/json'
+          echo "$vj" | grep -i '^content-security-policy:'
+          ix=$(curl -sI http://localhost:8080/index.html)
+          echo "$ix" | grep -i '^cache-control: no-cache'
+          echo "$ix" | grep -i '^x-content-type-options: nosniff'
+          wd=$(curl -sI http://localhost:8080/boot-watchdog.js)
+          echo "$wd" | grep -i '^cache-control: no-cache'
+          asset=$(curl -s http://localhost:8080/index.html | grep -o '/assets/[^"]*\.js' | head -1)
+          curl -sI "http://localhost:8080$asset" | grep -i 'immutable'
 
   # Interactive demo (stage 04). The committed bundle must equal a fresh build, and the built demo
   # must pass its privacy probe. Scripts and budgets: scripts/build-product-demo.mjs and

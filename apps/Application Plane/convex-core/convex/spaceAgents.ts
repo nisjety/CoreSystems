@@ -396,6 +396,8 @@ export const upsertSpaceAgentBinding = internalMutation({
 
 const MAX_AGENT_NAME_LENGTH = 60;
 const MAX_AGENT_INSTRUCTIONS_LENGTH = 4000;
+// WS07-S7: presentation-only avatar colour, stored only as #rrggbb.
+const AVATAR_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
 
 /**
  * The in-room create flow (`SPACE_AGENT_SCOPE_PLAN` §UI-3b), step 1 of 2.
@@ -438,7 +440,10 @@ export const createSpaceAgentForGateway = mutation({
     const agentId = await ctx.db.insert("agents", {
       orgId: organization._id,
       name,
-      avatarColor: args.avatarColor?.trim() || undefined,
+      avatarColor: (() => {
+        const colour = args.avatarColor?.trim();
+        return colour && AVATAR_COLOR_PATTERN.test(colour) ? colour : undefined;
+      })(),
       useCase: "other",
       status: "active",
       // Room agents answer through the room's own stream; the definition's

@@ -7,6 +7,8 @@ import { StaleBuildNotice } from '@/app/shell/StaleBuildNotice'
 import { CoreShell } from '@/features/core/components/CoreShell'
 import { SESSION_EXPIRED_EVENT } from '@/shared/api/http'
 import { I18nProvider, translateApiError, useI18n } from '@/shared/i18n'
+import { ClientContractBanner } from '@/shared/ui/resilience/ClientContractBanner'
+import { NewVersionBanner } from '@/shared/ui/resilience/NewVersionBanner'
 import { clearSession, loadSession } from '@/shared/session/session-store'
 
 export function AppShell(props: { children?: JSX.Element }) {
@@ -44,6 +46,8 @@ export function AppShell(props: { children?: JSX.Element }) {
           </Show>
         </Errored>
         <StaleBuildNotice />
+        <NewVersionBanner />
+        <ClientContractBanner />
       </QueryProvider>
     </I18nProvider>
   )

@@ -161,6 +161,130 @@ pub(crate) struct AppState {
     /// gap, not an oversight, and what unblocks it.
     pub(crate) mail_task_pipeline:
         Option<std::sync::Arc<dyn crate::domains::mail_task::MailTaskPipeline>>,
+    /// Space feature flags (P-GW1). Read once in `build_state`, never in a handler, and never an
+    /// authorization input: a flag only decides whether a route or UI surface exists.
+    #[allow(dead_code, reason = "first reader is the next Space slice that adds a flag")]
+    pub(crate) space_features: SpaceFeatureFlags,
+}
+
+/// Space feature flags carried on `AppState`. Every Space slice that adds a flag appends ONE
+/// field here (alphabetical), one line in [`SpaceFeatureFlags::from_env`], and nothing else:
+/// `Default` is all-off, so test literals never name the field and `AppState::for_tests()` needs
+/// no edit. Production default is OFF; development may default ON (see [`space_flag`]).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SpaceFeatureFlags {
+    /// `GATEWAY_SPACE_APPEND_RETRIEVAL` (WS18-S2): a follow-up turn of a scoped thread fetches its own
+    /// retrieval decision and carries the token (empty on a decline, which suppresses grounding).
+    /// Read once in `build_state`, and only the literal `true` turns it on: unlike the other Space flags
+    /// it never defaults on in development, so every other value leaves the follow-up as it was.
+    pub(crate) append_retrieval: bool,
+    /// `SPACE_DENIALS_TYPED` (WS03-S5): map Control's typed Space denials to the browser envelope.
+    /// Off restores pass-through. A rollout control, never an authorization input.
+    pub(crate) denials_typed: bool,
+    /// `CLIENT_VERSION_POLICY` / `CLIENT_MIN_CONTRACT` (WS07-S3): the stale-client contract the
+    /// public `/api/v1/client-config` route reports. Unlike the booleans its default is `banner`,
+    /// never off. Carried here (not as an `AppState` field) so no test literal needs an edit.
+    pub(crate) client_policy: crate::client_contract::ClientPolicy,
+    /// `CSP_REPORT_LOG_HOSTS` (WS07-S6): log the blocked ORIGIN (scheme and host, never a path
+    /// or query) of each CSP report, for a host inventory. Forced off when `APP_ENV` is
+    /// production (see `dev_only_flag`); the counters never carry a URL either way.
+    pub(crate) csp_report_log_hosts: bool,
+    /// `SPACE_CONNECTIVITY_BANNER_UI` (WS01-S5): reported to the SPA as `features.connectivity_banner`
+    /// (the offline versus service-down banner). A rollout control, never an authorization input.
+    pub(crate) connectivity_banner_ui: bool,
+    /// `SPACE_HUMAN_POSTS_API` (WS01-S5): the two human-post routes (`POST .../threads` and
+    /// `POST .../threads/{thread_id}/messages`) and `features.human_posts`. Off answers 404
+    /// `space_human_posts_disabled`. A rollout control, never an authorization input: Control's
+    /// decision and Session Core's member gate decide who may post, and a Zero Data Retention org
+    /// is refused whatever this says.
+    pub(crate) human_posts_api: bool,
+    /// `SPACE_MEMBERSHIP_WRITER_API` (WS04-S6): room member add, role change and leave go to
+    /// Control's actor-carrying writer, then the audience reconcile. Off keeps the legacy
+    /// Convex-then-declare path (emergency stop only: it cannot remove a member added through
+    /// Control). A rollout control, never an authorization input; Control decides every role.
+    pub(crate) membership_writer_api: bool,
+    /// `SPACE_POLICY_ADMIN_API` (WS03-S4): the three org-admin Space effect-policy routes and
+    /// the console that reads them. Off answers 404 `space_policy_admin_disabled`. A rollout
+    /// control, never an authorization input; Control's role check and write switch decide.
+    pub(crate) policy_admin_api: bool,
+    /// `SPACE_REALTIME_STREAM` (WS02-S4): `GET /api/v1/spaces/{space_ref}/events`, the validating
+    /// relay of the Space event stream. Off answers 404 `space_stream_disabled` and the SPA stays
+    /// on its 6 s poll. A rollout control, never an authorization input; an org under Zero Data
+    /// Retention gets `poll_only` even when on.
+    pub(crate) realtime_stream: bool,
+    /// `SPACE_ROOM_DETAILS_UI` (WS04-S2): `PATCH /api/v1/spaces/{space_ref}` (room name and topic),
+    /// the `spaces.update_room_details` action and `features.room_details`. Off answers 404
+    /// `feature_disabled`. A rollout control, never an authorization input: Control's live role
+    /// (owner or manager) decides who may rename. The topic is a label, so Zero Data Retention
+    /// organizations are unaffected.
+    pub(crate) room_details_ui: bool,
+    /// `SPACE_PEOPLE_SEARCH_API` (WS04-S3): `GET /api/v1/directory/people`, the people search the
+    /// room member picker uses. Off answers 404 `feature_disabled`. A rollout control, never an
+    /// authorization input: Control's directory read (signed delegation, scope
+    /// `directory:read:self`) decides what the caller may see.
+    pub(crate) people_search_api: bool,
+    /// `SPACE_ROOM_ARCHIVE_API` (WS04-S7): `POST /api/v1/spaces/{space_ref}/archive` and
+    /// `/unarchive` (Control's archive state) and `features.room_archive`. Off answers 404
+    /// `feature_disabled`; an archived room still reads and still refuses writes, because that is
+    /// Control's state, not this flag. A rollout control, never an authorization input: Control's
+    /// live role (owner or manager) decides who may archive. No content moves, so Zero Data
+    /// Retention organizations are unaffected.
+    pub(crate) room_archive_api: bool,
+    /// `SPACE_ROOM_ARTIFACTS_API` (WS07-S9): `GET /api/v1/spaces/{space_ref}/artifacts`, the room
+    /// artifact aggregate, and `features.room_artifacts`. Off answers 404
+    /// `space_room_artifacts_disabled` and the SPA hides the chips and the tab. A rollout control,
+    /// never an authorization input: Control's shared-read decision and Session Core's audience
+    /// ceiling decide what the caller may list.
+    pub(crate) room_artifacts: bool,
+    /// `SPACE_SEND_IDEMPOTENCY_API` (WS01-S5): reported to the SPA as `features.send_idempotency`
+    /// (the SPA attaches a client send id to an agent-path send so a retry cannot double-post).
+    /// Session Core's dedupe is inert without a key. A rollout control, never an authorization input.
+    pub(crate) send_idempotency_api: bool,
+    /// `SPACE_THREAD_PANE_UI` (WS01-S5): reported to the SPA as `features.thread_pane` (the right-hand
+    /// thread pane and `?thread_id=` deep link). A rollout control, never an authorization input.
+    pub(crate) thread_pane_ui: bool,
+}
+
+impl SpaceFeatureFlags {
+    pub(crate) fn from_env() -> Self {
+        Self {
+            append_retrieval: env::var("GATEWAY_SPACE_APPEND_RETRIEVAL").is_ok_and(|value| value == "true"),
+            denials_typed: space_flag("SPACE_DENIALS_TYPED"),
+            client_policy: crate::client_contract::ClientPolicy::from_env(),
+            csp_report_log_hosts: dev_only_flag("CSP_REPORT_LOG_HOSTS"),
+            connectivity_banner_ui: space_flag("SPACE_CONNECTIVITY_BANNER_UI"),
+            human_posts_api: space_flag("SPACE_HUMAN_POSTS_API"),
+            membership_writer_api: space_flag("SPACE_MEMBERSHIP_WRITER_API"),
+            policy_admin_api: space_flag("SPACE_POLICY_ADMIN_API"),
+            realtime_stream: space_flag("SPACE_REALTIME_STREAM"),
+            room_details_ui: space_flag("SPACE_ROOM_DETAILS_UI"),
+            people_search_api: space_flag("SPACE_PEOPLE_SEARCH_API"),
+            room_archive_api: space_flag("SPACE_ROOM_ARCHIVE_API"),
+            room_artifacts: space_flag("SPACE_ROOM_ARTIFACTS_API"),
+            send_idempotency_api: space_flag("SPACE_SEND_IDEMPOTENCY_API"),
+            thread_pane_ui: space_flag("SPACE_THREAD_PANE_UI"),
+        }
+    }
+}
+
+/// One Space flag: `1|true|yes|on` turns it on; unset falls back to ON in development and OFF
+/// when `APP_ENV` is production. Same rule as every other dev-defaulted gateway flag.
+#[allow(dead_code, reason = "first consumer is the next Space slice that adds a flag")]
+pub(crate) fn space_flag(key: &str) -> bool {
+    env_bool(
+        key,
+        dev_flags_allowed(&env::var("APP_ENV").unwrap_or_default()),
+    )
+}
+
+#[cfg(test)]
+impl AppState {
+    /// A complete, offline `AppState` for tests. Prefer this plus struct-update syntax over a
+    /// fresh literal so a new field never has to be added to every test.
+    #[allow(dead_code, reason = "used by Space slice tests as they land")]
+    pub(crate) fn for_tests() -> Self {
+        crate::tests::test_state(false)
+    }
 }
 
 /// Which optional parts of the Ingestions schedules surface this installation
@@ -359,6 +483,7 @@ pub(crate) async fn build_state() -> Result<AppState> {
         mail_task_nats_password: optional_env("VEREVON_GATEWAY_MAIL_TASK_NATS_PASSWORD"),
         // See the field doc comment: no production wiring yet.
         mail_task_pipeline: None,
+        space_features: SpaceFeatureFlags::from_env(),
     })
 }
 
@@ -883,6 +1008,193 @@ mod tests {
             1,
             "declared exactly once"
         );
+    }
+
+    /// Runs `body` with the given env vars set (and restored), serialised on the shared lock.
+    fn with_env<T>(vars: &[(&str, Option<&str>)], body: impl FnOnce() -> T) -> T {
+        let _guard = super::TEST_ENV_LOCK.blocking_lock();
+        let saved: Vec<(String, Option<String>)> = vars
+            .iter()
+            .map(|(key, _)| ((*key).to_owned(), std::env::var(key).ok()))
+            .collect();
+        for (key, value) in vars {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        let out = body();
+        for (key, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        out
+    }
+
+    /// P-GW1: a default-built flag set has every Space flag off, so a test literal that never names
+    /// the field and `AppState::for_tests()` can never accidentally turn a route on.
+    #[test]
+    fn space_feature_flags_default_has_every_flag_off() {
+        let flags = super::SpaceFeatureFlags::default();
+        assert!(!flags.denials_typed);
+        assert!(!flags.csp_report_log_hosts);
+        assert!(!flags.connectivity_banner_ui);
+        assert!(!flags.human_posts_api);
+        assert!(!flags.membership_writer_api);
+        assert!(!flags.policy_admin_api);
+        assert!(!flags.realtime_stream);
+        assert!(!flags.room_details_ui);
+        assert!(!flags.people_search_api);
+        assert!(!flags.room_archive_api);
+        assert!(!flags.room_artifacts);
+        assert!(!flags.send_idempotency_api);
+        assert!(!flags.thread_pane_ui);
+    }
+
+    /// P-GW1 / WS01-S5 / WS03-S4: an unset Space flag is OFF under `APP_ENV=production`, ON in
+    /// development, and an explicit value wins in both.
+    #[test]
+    fn space_flag_is_off_in_production_when_unset_and_on_in_dev() {
+        let key = "SPACE_TEST_ONLY_FLAG_P_GW1";
+        with_env(&[("APP_ENV", Some("production")), (key, None)], || {
+            assert!(!super::space_flag(key));
+        });
+        with_env(&[("APP_ENV", Some("prod")), (key, None)], || {
+            assert!(!super::space_flag(key));
+        });
+        with_env(&[("APP_ENV", Some("development")), (key, None)], || {
+            assert!(super::space_flag(key));
+        });
+        with_env(&[("APP_ENV", Some("production")), (key, Some("true"))], || {
+            assert!(super::space_flag(key));
+        });
+        with_env(&[("APP_ENV", Some("development")), (key, Some("off"))], || {
+            assert!(!super::space_flag(key));
+        });
+    }
+
+    /// WS07-S6: `CSP_REPORT_LOG_HOSTS` is a dev-only flag: it follows its variable outside
+    /// production and stays off under `APP_ENV=production` or `prod` even when set to true.
+    #[test]
+    fn csp_report_log_hosts_is_a_dev_only_flag() {
+        with_env(&[("APP_ENV", Some("production")), ("CSP_REPORT_LOG_HOSTS", Some("true"))], || {
+            assert!(!super::SpaceFeatureFlags::from_env().csp_report_log_hosts);
+        });
+        with_env(&[("APP_ENV", Some("prod")), ("CSP_REPORT_LOG_HOSTS", Some("true"))], || {
+            assert!(!super::SpaceFeatureFlags::from_env().csp_report_log_hosts);
+        });
+        with_env(&[("APP_ENV", Some("development")), ("CSP_REPORT_LOG_HOSTS", Some("true"))], || {
+            assert!(super::SpaceFeatureFlags::from_env().csp_report_log_hosts);
+        });
+        // Unset is off in every environment: it is not a `space_flag` (no dev default of on).
+        with_env(&[("APP_ENV", Some("development")), ("CSP_REPORT_LOG_HOSTS", None)], || {
+            assert!(!super::SpaceFeatureFlags::from_env().csp_report_log_hosts);
+        });
+    }
+
+    /// WS01-S5 and WS03-S4: the human-post, thread-pane, send-idempotency, connectivity-banner and
+    /// policy-admin flags are off in production when their variable is unset, on in development,
+    /// and honour an explicit value.
+    #[test]
+    fn ws01_and_ws03_flags_follow_the_space_flag_rule() {
+        let keys = [
+            "SPACE_HUMAN_POSTS_API",
+            "SPACE_THREAD_PANE_UI",
+            "SPACE_SEND_IDEMPOTENCY_API",
+            "SPACE_CONNECTIVITY_BANNER_UI",
+            "SPACE_POLICY_ADMIN_API",
+            "SPACE_REALTIME_STREAM",
+        ];
+        let unset = |app_env: &'static str| -> Vec<(&'static str, Option<&'static str>)> {
+            let mut vars = vec![("APP_ENV", Some(app_env))];
+            vars.extend(keys.iter().map(|key| (*key, None)));
+            vars
+        };
+        with_env(&unset("production"), || {
+            let flags = super::SpaceFeatureFlags::from_env();
+            assert!(!flags.human_posts_api);
+            assert!(!flags.thread_pane_ui);
+            assert!(!flags.send_idempotency_api);
+            assert!(!flags.connectivity_banner_ui);
+            assert!(!flags.policy_admin_api);
+            assert!(!flags.realtime_stream);
+        });
+        with_env(&unset("development"), || {
+            let flags = super::SpaceFeatureFlags::from_env();
+            assert!(flags.human_posts_api);
+            assert!(flags.thread_pane_ui);
+            assert!(flags.send_idempotency_api);
+            assert!(flags.connectivity_banner_ui);
+            assert!(flags.policy_admin_api);
+            assert!(flags.realtime_stream);
+        });
+        let mut explicit = unset("production");
+        explicit.retain(|(key, _)| *key != "SPACE_POLICY_ADMIN_API");
+        explicit.push(("SPACE_POLICY_ADMIN_API", Some("true")));
+        with_env(&explicit, || {
+            let flags = super::SpaceFeatureFlags::from_env();
+            assert!(flags.policy_admin_api, "explicit true wins in production");
+            assert!(!flags.human_posts_api, "the others stay off");
+        });
+        let mut explicit_off = unset("development");
+        explicit_off.retain(|(key, _)| *key != "SPACE_POLICY_ADMIN_API");
+        explicit_off.push(("SPACE_POLICY_ADMIN_API", Some("false")));
+        with_env(&explicit_off, || {
+            assert!(!super::SpaceFeatureFlags::from_env().policy_admin_api);
+        });
+    }
+
+    /// WS03-S5, WS04-S2, WS04-S3 and WS04-S6: the typed-denial, room-details, people-search and
+    /// membership-writer flags are off in production when unset, on in development, and honour an
+    /// explicit value in both.
+    #[test]
+    fn ws03_s5_and_ws04_flags_follow_the_space_flag_rule() {
+        let keys = [
+            "SPACE_DENIALS_TYPED",
+            "SPACE_ROOM_DETAILS_UI",
+            "SPACE_PEOPLE_SEARCH_API",
+            "SPACE_MEMBERSHIP_WRITER_API",
+            "SPACE_ROOM_ARCHIVE_API",
+        ];
+        let vars = |app_env: &'static str, value: Option<&'static str>| {
+            let mut vars = vec![("APP_ENV", Some(app_env))];
+            vars.extend(keys.iter().map(|key| (*key, value)));
+            vars
+        };
+        with_env(&vars("production", None), || {
+            let flags = super::SpaceFeatureFlags::from_env();
+            assert!(!flags.denials_typed);
+            assert!(!flags.room_details_ui);
+            assert!(!flags.people_search_api);
+            assert!(!flags.membership_writer_api);
+            assert!(!flags.room_archive_api);
+        });
+        with_env(&vars("development", None), || {
+            let flags = super::SpaceFeatureFlags::from_env();
+            assert!(flags.denials_typed);
+            assert!(flags.room_details_ui);
+            assert!(flags.people_search_api);
+            assert!(flags.membership_writer_api);
+            assert!(flags.room_archive_api);
+        });
+        with_env(&vars("production", Some("true")), || {
+            let flags = super::SpaceFeatureFlags::from_env();
+            assert!(flags.denials_typed);
+            assert!(flags.room_details_ui);
+            assert!(flags.people_search_api);
+            assert!(flags.membership_writer_api);
+            assert!(flags.room_archive_api);
+        });
+        with_env(&vars("development", Some("false")), || {
+            let flags = super::SpaceFeatureFlags::from_env();
+            assert!(!flags.denials_typed);
+            assert!(!flags.room_details_ui);
+            assert!(!flags.people_search_api);
+            assert!(!flags.membership_writer_api);
+            assert!(!flags.room_archive_api);
+        });
     }
 }
 

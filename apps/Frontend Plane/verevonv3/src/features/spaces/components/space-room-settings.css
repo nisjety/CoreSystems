@@ -1,0 +1,49 @@
+/* Room name and topic (WS04-S2). Lives beside the component rather than in global.css so it
+   does not touch that file's uncommitted lines. */
+
+.verevon-space-header__topic {
+  margin: 4px 0 0;
+  max-width: 68ch;
+  color: var(--verevon-text-muted);
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.verevon-space-room-settings {
+  margin-top: 8px;
+}
+
+.verevon-space-room-settings__form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 520px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 12px;
+  background: var(--verevon-surface);
+  padding: 10px 12px;
+}
+
+.verevon-space-room-settings__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-space-room-settings__field input {
+  border: 1px solid var(--verevon-border);
+  border-radius: 8px;
+  background: var(--verevon-surface);
+  padding: 7px 10px;
+  color: var(--verevon-text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.verevon-space-room-settings__actions {
+  display: flex;
+  gap: 8px;
+}

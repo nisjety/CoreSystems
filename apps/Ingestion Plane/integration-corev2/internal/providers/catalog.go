@@ -152,6 +152,15 @@ func OpenAICodexSubscription() Provider {
 func WithReadiness(catalog []Provider, readiness map[string][]string) []Provider {
 	out := make([]Provider, 0, len(catalog))
 	for _, provider := range catalog {
+		if provider.AuthType == "inbound_scim" {
+			// SCIM provisioning is not implemented in this service (WS05-S2):
+			// never report it as ready or as missing configuration.
+			provider.MissingConfig = []string{}
+			provider.Configured = false
+			provider.Status = "unavailable"
+			out = append(out, provider)
+			continue
+		}
 		missing := append([]string{}, readiness[provider.Key]...)
 		provider.MissingConfig = missing
 		if len(missing) == 0 {
@@ -161,7 +170,7 @@ func WithReadiness(catalog []Provider, readiness map[string][]string) []Provider
 			provider.Configured = false
 			provider.Status = "missing_config"
 		}
-		if len(missing) == 0 && !provider.DirectOAuthReady && provider.AuthType != "inbound_scim" {
+		if len(missing) == 0 && !provider.DirectOAuthReady {
 			provider.Status = "manual_or_admin_config"
 		}
 		out = append(out, provider)

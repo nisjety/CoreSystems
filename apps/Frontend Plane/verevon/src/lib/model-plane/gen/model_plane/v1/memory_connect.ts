@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { DeleteMemoryRequest, DeleteMemoryResponse, IndexMemoryRequest, IndexMemoryResponse, ListMemoryRequest, ListMemoryResponse, MemoryHealthRequest, MemoryHealthResponse, SearchMemoryRequest, SearchMemoryResponse } from "./memory_pbjs";
+import { DeleteMemoryRequest, DeleteMemoryResponse, GetMemoryControlsRequest, GetMemoryControlsResponse, IndexMemoryRequest, IndexMemoryResponse, ListMemoryRequest, ListMemoryResponse, MemoryHealthRequest, MemoryHealthResponse, ResetMemoryRequest, ResetMemoryResponse, SearchMemoryRequest, SearchMemoryResponse, SetMemoryControlsRequest, SetMemoryControlsResponse } from "./memory_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 
 /**
@@ -73,6 +73,43 @@ export const MemoryService = {
       name: "Health",
       I: MemoryHealthRequest,
       O: MemoryHealthResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * The user's memory state and what it currently allows. Readable by a ZDR
+     * caller (it answers reason "zdr"), which writes nothing.
+     *
+     * @generated from rpc model_plane.v1.MemoryService.GetMemoryControls
+     */
+    getMemoryControls: {
+      name: "GetMemoryControls",
+      I: GetMemoryControlsRequest,
+      O: GetMemoryControlsResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Set the user's own memory state (on, paused, off). User callers only, for
+     * themselves; refused for a ZDR or waived credential.
+     *
+     * @generated from rpc model_plane.v1.MemoryService.SetMemoryControls
+     */
+    setMemoryControls: {
+      name: "SetMemoryControls",
+      I: SetMemoryControlsRequest,
+      O: SetMemoryControlsResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Erase every durable memory the caller owns, with its supersession lineage
+     * and semantic copies, in one confirmed step. Org-owned memory is left alone.
+     * Open to a ZDR caller too: erasure only removes, and pre-ZDR rows may exist.
+     *
+     * @generated from rpc model_plane.v1.MemoryService.ResetMemory
+     */
+    resetMemory: {
+      name: "ResetMemory",
+      I: ResetMemoryRequest,
+      O: ResetMemoryResponse,
       kind: MethodKind.Unary,
     },
   }

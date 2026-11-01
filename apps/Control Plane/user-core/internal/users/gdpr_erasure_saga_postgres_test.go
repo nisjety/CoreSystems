@@ -73,6 +73,13 @@ func newErasurePostgresFixture(t *testing.T) (*pgxpool.Pool, *Repository) {
 		CREATE TABLE provider_accounts (id TEXT PRIMARY KEY, user_id TEXT NOT NULL);
 		CREATE TABLE user_api_keys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL);
 		CREATE TABLE user_activity_log (id TEXT PRIMARY KEY, user_id TEXT NOT NULL);
+		-- WS04-S4: the local erasure stage pseudonymises the membership ledger, so the
+		-- fixture carries its id columns (no FK to registered_spaces here).
+		CREATE TABLE space_membership_events (
+			event_id TEXT PRIMARY KEY, space_ref TEXT NOT NULL, org_id TEXT NOT NULL, space_seq BIGINT NOT NULL,
+			action TEXT NOT NULL, actor_kind TEXT NOT NULL, actor_id TEXT NOT NULL,
+			subject_type TEXT, subject_id TEXT
+		);
 		CREATE TABLE user_org_memberships (
 			id TEXT PRIMARY KEY, user_id TEXT NOT NULL, org_id TEXT NOT NULL,
 			role TEXT NOT NULL, status TEXT NOT NULL, invited_by TEXT,

@@ -16,3 +16,6 @@ interface ImportMetaEnv {
 interface ImportMeta {
 	readonly env: ImportMetaEnv;
 }
+
+/** Compile-time build id from vite.config.ts `define` (`dev` outside an image build). */
+declare const __VEREVON_BUILD_ID__: string;

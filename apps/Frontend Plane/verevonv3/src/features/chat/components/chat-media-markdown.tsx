@@ -39,6 +39,7 @@ import {
 } from './chat-types'
 import { useI18n } from '@/shared/i18n'
 import { isSafeLinkHref } from '../lib/safe-href'
+import { linkHost, looksSpoofed, safeHref } from '@/shared/lib/safe-link'
 
 export function collectArtifactItems(turns: ChatTurn[]): ArtifactPanelItem[] {
   const byId = new Map<string, ArtifactPanelItem>()
@@ -1378,14 +1379,20 @@ export function parseInline(text: string, citations?: readonly Citation[]): Arra
       // autolinks these; trim trailing sentence punctuation off the link so
       // "... se https://example.com." doesn't pull the period into the href.
       const { url, trailing } = splitUrlTrailingPunctuation(token)
-      nodes.push(<a href={url} target="_blank" rel="noopener noreferrer">{url}</a>)
+      nodes.push(<a href={url} title={url} target="_blank" rel="noopener noreferrer">{url}</a>)
       if (trailing) nodes.push(trailing)
     } else {
       const link = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(token)
       const label = unescapeMarkdown(link?.[1] ?? '')
       const target = link?.[2] ?? ''
       if (!link) nodes.push(token)
-      else if (isSafeLinkHref(target)) nodes.push(<a href={target} target="_blank" rel="noopener noreferrer">{label}</a>)
+      else if (safeHref(target)) {
+        const href = safeHref(target) as string
+        nodes.push(<a href={href} title={href} target="_blank" rel="noopener noreferrer">{label}</a>)
+        // Visible text that reads as a different site than the real target
+        // shows where the link actually goes.
+        if (looksSpoofed(label, href)) nodes.push(` (→ ${linkHost(href)})`)
+      }
       // The model wrote this target, so an unsafe one keeps its visible label as
       // inert text rather than becoming a link to javascript:, data: or file:.
       else nodes.push(<span class="verevon-chat-link-blocked" title={i18n.tr('Lenke blokkert: ukjent adresse', 'Link blocked: unsupported address')}>{label}</span>)

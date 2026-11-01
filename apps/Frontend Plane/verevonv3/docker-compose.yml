@@ -220,6 +220,37 @@ services:
       # WS10-S5: the model entitlement admin routes (policy read, write and explain). Only the literal `true`
       # enables them; do not enable before the matcher and the model-gateway admission are deployed.
       MODEL_ENTITLEMENT_ADMIN_ENABLED: ${MODEL_ENTITLEMENT_ADMIN_ENABLED:-false}
+      # WS03-S5: map Control's typed Space denials to the browser envelope. Off restores pass-through.
+      # A rollout control only; it never decides who may do anything.
+      SPACE_DENIALS_TYPED: ${SPACE_DENIALS_TYPED:-true}
+      # WS03-S4: the three org-admin Space policy routes (404 when off). A rollout control only;
+      # Control's role check and its SPACE_POLICY_ADMIN_WRITES switch decide who may change what.
+      SPACE_POLICY_ADMIN_API: ${SPACE_POLICY_ADMIN_API:-true}
+      # WS04-S6: room member add, role change and leave on Control's writer (then the audience
+      # reconcile). Off resumes the legacy Convex path (emergency stop only). Control also needs the
+      # spaces:membership:act scope on this gateway's credential; without it every call is 403.
+      SPACE_MEMBERSHIP_WRITER_API: ${SPACE_MEMBERSHIP_WRITER_API:-true}
+      # WS02-S4: the Space event stream relay (404 space_stream_disabled when off; the SPA then keeps
+      # its 6 s poll). A rollout control only; Control's decision and Session Core's gate decide
+      # who may stream, and an org under Zero Data Retention gets poll_only even when on.
+      SPACE_REALTIME_STREAM: ${SPACE_REALTIME_STREAM:-true}
+      # WS01-S5: human posts in a room (POST .../threads and .../threads/{id}/messages; 404 when off) and
+      # the SPA feature flags the room context reports. Rollout controls only: Control's decision and
+      # Session Core's member gate decide who may post, and a Zero Data Retention org is refused regardless.
+      # SPACE_HUMAN_POSTS_API must match model-gateway's flag of the same name, which gates the same call.
+      SPACE_HUMAN_POSTS_API: ${SPACE_HUMAN_POSTS_API:-true}
+      SPACE_THREAD_PANE_UI: ${SPACE_THREAD_PANE_UI:-true}
+      SPACE_SEND_IDEMPOTENCY_API: ${SPACE_SEND_IDEMPOTENCY_API:-true}
+      SPACE_CONNECTIVITY_BANNER_UI: ${SPACE_CONNECTIVITY_BANNER_UI:-true}
+      # WS04-S2: room name and topic (PATCH /api/v1/spaces/{space_ref}). Rollout control only; the
+      # caller's live Control role (owner or manager) decides who may rename.
+      SPACE_ROOM_DETAILS_UI: ${SPACE_ROOM_DETAILS_UI:-true}
+      # WS04-S3: people search for the member picker (GET /api/v1/directory/people). Rollout control
+      # only; Control's directory read under the signed delegation decides what the caller sees.
+      SPACE_PEOPLE_SEARCH_API: ${SPACE_PEOPLE_SEARCH_API:-true}
+      # WS07-S9: the room artifact aggregate route; a rollout control only (Control's shared-read
+      # decision and Session Core's audience ceiling decide what is listed).
+      SPACE_ROOM_ARTIFACTS_API: ${SPACE_ROOM_ARTIFACTS_API:-true}
     ports:
       - "${VEREVON_BIND_ADDRESS:-127.0.0.1}:3185:3185"
     networks:

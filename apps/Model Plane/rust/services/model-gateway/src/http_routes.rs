@@ -318,6 +318,8 @@ pub fn build_router_with_readiness(
         .merge(crate::browser_run::router())
         // A signed-in user's browser grant (issue / release); the broker mints it.
         .merge(crate::browser_grants::router())
+        // Space room routes /v1/spaces/* (one file per feature under space_routes/).
+        .merge(crate::space_routes::router())
         // AI modality routes  /v1/ai/*
         .merge(ai_routes())
         // App-Plane proxies (capabilities/tasks/cron/memory/skills)
@@ -958,7 +960,7 @@ fn should_resume_granted_approval(
     ))
 }
 
-fn require_non_zdr_durable_mutation(claims: &Claims) -> Result<(), HttpJsonError> {
+pub(crate) fn require_non_zdr_durable_mutation(claims: &Claims) -> Result<(), HttpJsonError> {
     let zdr = crate::zdr_posture::zdr_or_refuse(claims, &crate::zdr_posture::Route::plain(false))?;
     if !zdr {
         return Ok(());
@@ -6977,6 +6979,15 @@ fn prost_ts_to_rfc3339(ts: &prost_types::Timestamp) -> Value {
     }
 }
 
+/// The RFC3339 time of a transcript turn, or `None` when session-core sent none (or one that
+/// cannot be represented), so the field is left off rather than invented.
+fn message_created_at(ts: Option<&prost_types::Timestamp>) -> Option<String> {
+    match prost_ts_to_rfc3339(ts?) {
+        Value::String(rfc3339) => Some(rfc3339),
+        _ => None,
+    }
+}
+
 /// Flatten a prost `Struct` into plain JSON for the wire envelope.
 fn prost_struct_to_json(s: &prost_types::Struct) -> Value {
     let map = s
@@ -9577,6 +9588,14 @@ struct ThreadMessage {
     /// string". Presentation identity, never an authority claim.
     #[serde(skip_serializing_if = "String::is_empty")]
     author_subject_id: String,
+    /// `post` for a human message written to the room; omitted for a conversation turn
+    /// (`turn`, or a row from before post kinds), so a turn keeps the shape it always had.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    post_kind: String,
+    /// When session-core stored this turn, as RFC3339. A room shows a time beside each
+    /// message. Omitted when session-core sent none, so a reader never sees a made-up time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_at: Option<String>,
     /// The turn's persisted evidence, flattened so its keys (today
     /// `grounding`) sit directly on the message the way the live SSE path
     /// delivers them. Omitted entirely for turns recorded before metadata was
@@ -9684,6 +9703,18 @@ struct ThreadSummaryResponse {
     /// Whether the thread has a reply the owner has not read yet. This is the one
     /// unread definition (build plan DEC-11); the sidebar dot reads it as is.
     unread: bool,
+    /// Replies after the first message, under the reader's audience ceiling (Session Core's
+    /// count); omitted when zero so a thread without replies keeps its shape.
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    reply_count: u32,
+    /// Who wrote the latest human row; omitted when Session Core names none.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    last_author_subject_id: String,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Serialize)]
@@ -9940,6 +9971,8 @@ async fn list_threads(
             archived_at: timestamp_to_rfc3339(thread.archived_at),
             starred: thread.starred,
             unread: thread.unread,
+            reply_count: thread.reply_count,
+            last_author_subject_id: thread.last_author_subject_id,
         })
         .collect();
 
@@ -10469,6 +10502,14 @@ async fn list_thread_messages(
     let limit = query.limit.unwrap_or(0).min(thread_messages_page_ceiling(
         std::env::var(THREAD_MESSAGES_MAX_LIMIT_ENV).ok().as_deref(),
     ));
+    // A shared-Space read (it carries a Control decision) sees only the
+    // allowlisted metadata keys (WS07-S9a); the owner's Chat read is unchanged.
+    let space_read_decision_ref = query.space_read_decision_ref.unwrap_or_default();
+    let legacy_metadata_passthrough = crate::room_metadata::legacy_passthrough(
+        std::env::var(crate::room_metadata::LEGACY_PASSTHROUGH_ENV)
+            .ok()
+            .as_deref(),
+    );
 
     let response = state
         .session_client
@@ -10478,13 +10519,17 @@ async fn list_thread_messages(
                 org_id: claims.org_id.clone(),
                 thread_id: trimmed.to_owned(),
                 space_id: query.space_id.unwrap_or_default(),
-                space_read_decision_ref: query.space_read_decision_ref.unwrap_or_default(),
+                space_read_decision_ref: space_read_decision_ref.clone(),
                 space_read_decision_token: query.space_read_decision_token.unwrap_or_default(),
                 // The transcript a client shows is the active path; turns on other
                 // branches are not read through this route.
                 include_inactive: false,
                 limit,
                 before_message_id: before,
+                // The UI transcript route is the only reader that shows human posts. Every
+                // other caller keeps the default (false), so a post never reaches model
+                // context or reattach_context.
+                include_human_posts: true,
             },
             &bearer,
         )?)
@@ -10512,6 +10557,8 @@ async fn list_thread_messages(
                     include_inactive: true,
                     limit: 0,
                     before_message_id: String::new(),
+                    // A personal thread holds no human posts; the internal read keeps them out.
+                    ..Default::default()
                 },
                 &bearer,
             )?)
@@ -10536,11 +10583,17 @@ async fn list_thread_messages(
                 content: m.content,
                 agent_name: m.agent_name,
                 author_subject_id: m.author_subject_id,
-                metadata: m.metadata.as_ref().map(prost_struct_to_json).and_then(
-                    |value| match value {
-                        Value::Object(map) if !map.is_empty() => Some(map),
-                        _ => None,
-                    },
+                post_kind: if m.post_kind == "post" { m.post_kind } else { String::new() },
+                created_at: message_created_at(m.created_at.as_ref()),
+                metadata: crate::room_metadata::visible_metadata(
+                    m.metadata.as_ref().map(prost_struct_to_json).and_then(
+                        |value| match value {
+                            Value::Object(map) if !map.is_empty() => Some(map),
+                            _ => None,
+                        },
+                    ),
+                    &space_read_decision_ref,
+                    legacy_metadata_passthrough,
                 ),
                 version: (m.sibling_count > 0).then(|| ThreadMessageVersion {
                     siblings: sibling_ids
@@ -10863,6 +10916,14 @@ struct MemorySummaryResponse {
     /// unknown row "stated" would be the one wrong answer: it is the claim a
     /// user would rely on when deciding whether to keep it.
     provenance: &'static str,
+    /// Closed vocabulary; omitted for an ordinary row. "room_origin_unverified" marks a
+    /// row learned in a shared room before containment: listed to its owner, never
+    /// recalled (WS17-S2).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    withheld_reason: String,
+    /// Space the withheld row was learned in (an id, never content); omitted when empty.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    origin_space_ref: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -10910,6 +10971,8 @@ async fn list_memories(
             content: entry.content,
             updated_at: timestamp_to_rfc3339(entry.updated_at),
             provenance: memory_provenance_label(entry.provenance),
+            withheld_reason: entry.withheld_reason,
+            origin_space_ref: entry.origin_space_ref,
         })
         .collect();
 
@@ -15916,6 +15979,8 @@ mod thread_messages_page_tests {
                 content: "hi".to_owned(),
                 agent_name: String::new(),
                 author_subject_id: String::new(),
+                post_kind: String::new(),
+                created_at: None,
                 metadata: None,
                 version: None,
             }],
@@ -15940,6 +16005,8 @@ mod thread_messages_page_tests {
             content: "answer".to_owned(),
             agent_name: String::new(),
             author_subject_id: String::new(),
+            post_kind: String::new(),
+            created_at: None,
             metadata: None,
             version: Some(ThreadMessageVersion {
                 siblings: Vec::new(),
@@ -16217,5 +16284,157 @@ mod run_replay_projection_tests {
             r#"{"run_id":"run-1"}"#,
         );
         assert!(project_run_replay_event("run-1", unrelated).is_none());
+    }
+}
+
+#[cfg(test)]
+mod space_post_wire_tests {
+    use super::*;
+
+    fn message(post_kind: &str) -> ThreadMessage {
+        ThreadMessage {
+            message_id: "m-1".to_owned(),
+            role: "user".to_owned(),
+            content: "hello".to_owned(),
+            agent_name: String::new(),
+            author_subject_id: "user-2".to_owned(),
+            post_kind: post_kind.to_owned(),
+            created_at: None,
+            metadata: None,
+            version: None,
+        }
+    }
+
+    fn summary(reply_count: u32, last_author: &str) -> ThreadSummaryResponse {
+        ThreadSummaryResponse {
+            thread_id: "t-1".to_owned(),
+            session_key: "k".to_owned(),
+            title: "title".to_owned(),
+            preview: "preview".to_owned(),
+            created_at: "2026-10-27T00:00:00Z".to_owned(),
+            updated_at: "2026-10-27T00:00:00Z".to_owned(),
+            pinned: false,
+            space_id: "space-1".to_owned(),
+            owner_subject_id: "user-1".to_owned(),
+            latest_run_id: String::new(),
+            latest_run_status: String::new(),
+            latest_run_updated_at: None,
+            origin: "space".to_owned(),
+            persona_enabled: true,
+            archived_at: String::new(),
+            starred: false,
+            unread: false,
+            reply_count,
+            last_author_subject_id: last_author.to_owned(),
+        }
+    }
+
+    #[test]
+    fn thread_message_json_carries_created_at_as_rfc3339_and_omits_it_when_unset() {
+        // 2026-10-31T09:30:15.250Z
+        let stored = prost_types::Timestamp {
+            seconds: 1_793_439_015,
+            nanos: 250_000_000,
+        };
+        let mut stamped = message("post");
+        stamped.created_at = message_created_at(Some(&stored));
+        let body = serde_json::to_value(stamped).expect("serialises");
+        let created_at = body["created_at"].as_str().expect("created_at is a string");
+        let parsed = chrono::DateTime::parse_from_rfc3339(created_at).expect("RFC3339");
+        assert_eq!(parsed.timestamp(), 1_793_439_015);
+        assert_eq!(parsed.timestamp_subsec_millis(), 250);
+        // A row session-core sent no time for keeps the shape it always had.
+        assert_eq!(message_created_at(None), None);
+        let unset = serde_json::to_value(message("")).expect("serialises");
+        assert!(unset.get("created_at").is_none(), "{unset}");
+    }
+
+    #[test]
+    fn thread_message_json_omits_post_kind_for_turns_and_carries_it_for_posts() {
+        // The handler maps a turn (or a row from before post kinds) to an empty kind, which is
+        // omitted, so a turn keeps the shape it always had.
+        let turn = serde_json::to_value(message("")).expect("serialises");
+        assert!(turn.get("post_kind").is_none(), "{turn}");
+        assert_eq!(turn["author_subject_id"], "user-2");
+        let post = serde_json::to_value(message("post")).expect("serialises");
+        assert_eq!(post["post_kind"], "post");
+        assert_eq!(post["author_subject_id"], "user-2");
+        assert_eq!(post["message_id"], "m-1");
+    }
+
+    #[test]
+    fn thread_summary_omits_reply_count_when_zero_and_last_author_when_empty() {
+        let quiet = serde_json::to_value(summary(0, "")).expect("serialises");
+        assert!(quiet.get("reply_count").is_none(), "{quiet}");
+        assert!(quiet.get("last_author_subject_id").is_none(), "{quiet}");
+        let busy = serde_json::to_value(summary(3, "user-2")).expect("serialises");
+        assert_eq!(busy["reply_count"], 3);
+        assert_eq!(busy["last_author_subject_id"], "user-2");
+        // One of the two alone is carried independently of the other.
+        let only_author = serde_json::to_value(summary(0, "user-9")).expect("serialises");
+        assert!(only_author.get("reply_count").is_none());
+        assert_eq!(only_author["last_author_subject_id"], "user-9");
+        let only_count = serde_json::to_value(summary(1, "")).expect("serialises");
+        assert_eq!(only_count["reply_count"], 1);
+        assert!(only_count.get("last_author_subject_id").is_none());
+    }
+}
+
+#[cfg(test)]
+mod memory_withheld_json_tests {
+    use super::*;
+
+    fn summary(withheld_reason: &str, origin_space_ref: &str) -> MemorySummaryResponse {
+        MemorySummaryResponse {
+            memory_id: "mem-1".to_owned(),
+            topic: "USER".to_owned(),
+            content: "likes tea".to_owned(),
+            updated_at: "2026-10-27T12:00:00Z".to_owned(),
+            provenance: "unknown",
+            withheld_reason: withheld_reason.to_owned(),
+            origin_space_ref: origin_space_ref.to_owned(),
+        }
+    }
+
+    #[test]
+    fn memories_json_omits_withheld_fields_for_an_ordinary_row() {
+        let ordinary = serde_json::to_value(summary("", "")).expect("serialises");
+        assert!(ordinary.get("withheld_reason").is_none(), "{ordinary}");
+        assert!(ordinary.get("origin_space_ref").is_none(), "{ordinary}");
+        // The shape an older SPA reads is unchanged.
+        for key in ["memory_id", "topic", "content", "updated_at", "provenance"] {
+            assert!(ordinary.get(key).is_some(), "{key} must stay: {ordinary}");
+        }
+    }
+
+    #[test]
+    fn memories_json_carries_withheld_reason_and_origin_space_when_set() {
+        let withheld = serde_json::to_value(summary("room_origin_unverified", "space-room-1")).expect("serialises");
+        assert_eq!(withheld["withheld_reason"], "room_origin_unverified");
+        assert_eq!(withheld["origin_space_ref"], "space-room-1");
+    }
+
+    #[test]
+    fn memories_json_carries_each_withheld_field_independently() {
+        let only_reason = serde_json::to_value(summary("room_origin_unverified", "")).expect("serialises");
+        assert_eq!(only_reason["withheld_reason"], "room_origin_unverified");
+        assert!(only_reason.get("origin_space_ref").is_none());
+        let only_space = serde_json::to_value(summary("", "space-room-1")).expect("serialises");
+        assert!(only_space.get("withheld_reason").is_none());
+        assert_eq!(only_space["origin_space_ref"], "space-room-1");
+    }
+
+    #[test]
+    fn the_listing_envelope_still_serialises_with_withheld_rows_inside() {
+        let body = serde_json::to_value(ListMemoriesResponse {
+            memories: vec![summary("room_origin_unverified", "space-room-1"), summary("", "")],
+            degraded: false,
+            degradation_reason: String::new(),
+        })
+        .expect("serialises");
+        let rows = body["memories"].as_array().expect("array");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["withheld_reason"], "room_origin_unverified");
+        assert!(rows[1].get("withheld_reason").is_none());
     }
 }

@@ -217,6 +217,12 @@ services:
       MP_COMPAT_MODE: v1_only
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: model-gateway
+      # Shared-Space transcript reads return only allowlisted metadata keys
+      # (WS07-S9a). `1` restores the old pass-through (kill switch only).
+      SPACE_ROOM_METADATA_LEGACY_PASSTHROUGH: ${SPACE_ROOM_METADATA_LEGACY_PASSTHROUGH:-false}
+      # Human post routes (WS01-S4): POST /v1/threads and POST /v1/threads/:id/messages.
+      # Off unless an explicit on-word; a rollout control, never an authorization input.
+      SPACE_HUMAN_POSTS_API: ${SPACE_HUMAN_POSTS_API:-0}
       # Empty by default = "Verevon Auto": inference-core resolves an unpinned
       # request to the configured provider's own default (per-provider), so chat
       # works with whichever provider key is set (Anthropic-only, OpenAI-only,
@@ -894,6 +900,9 @@ services:
       # fail-closed, which is the intended unprovisioned-development state.
       CONTROL_SPACE_DECISION_KEY_ID: ${CONTROL_SPACE_DECISION_KEY_ID:-}
       CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64: ${CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64:-}
+      # One live root run per Space thread (WS09-S1): a second start is refused
+      # with thread_run_active. ON by default; `false` is the kill switch.
+      SPACE_RUN_THREAD_GUARD: ${SPACE_RUN_THREAD_GUARD:-true}
       # Dedicated short-lived service-principal credentials for the optional
       # session-core -> letta-bridge path. When LETTA_MEMORY_ADDR is non-empty,
       # session-core fails startup closed unless all three are configured.
@@ -906,6 +915,26 @@ services:
       SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY: ${SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY:-}
       # Durable loop fold store (WS03 S4). Off by default: a loop keeps its fold in
       # memory and a pause cannot be resumed from the store. Sealed under the key above.
+      # Space decision ZDR flag on the legacy owner create/append paths (WS06-S2). `observe`
+      # counts and proceeds; only the exact value `enforce` refuses typed. Never an authorization input.
+      SESSION_CORE_SPACE_ZDR: ${SESSION_CORE_SPACE_ZDR:-observe}
+      # Space event log (WS02-S1): the migration-0072 triggers write ids-and-kinds rows only
+      # while this is `true` (or `1`). On here for dev; docker-compose.production.yml and
+      # docker-compose.release.yml pin it to "false". Off to on bumps every Space's generation
+      # (clients resnapshot). Never an authorization input. Zero-retention runs never write rows.
+      SPACE_REALTIME_EMIT: ${SPACE_REALTIME_EMIT:-true}
+      SPACE_EVENT_LOG_RETENTION_DAYS: ${SPACE_EVENT_LOG_RETENTION_DAYS:-14}
+      # Read by the SpaceEvents stream (WS02-S3), inert until then.
+      SPACE_STREAM_DB_POOL: ${SPACE_STREAM_DB_POOL:-8}
+      SPACE_STREAM_MAX_STREAMS: ${SPACE_STREAM_MAX_STREAMS:-5000}
+      # Space memory containment (WS17-S1): a shared-room thread learns nothing into personal or
+      # tenant memory and recalls only its own rows. ON in every environment; only an exact
+      # `0`, `false` or `off` (plus a restart) restores the old behaviour. Never an authorization input.
+      MEMORY_SPACE_CONTAINMENT: ${MEMORY_SPACE_CONTAINMENT:-1}
+      # Member append path (WS01-S3): a Space member who does not own a thread may append a human
+      # `post` to it, only with a v2 Control decision. OFF unless set; dev override turns it on.
+      # Never an authorization input.
+      SPACE_HUMAN_POSTS_CORE: ${SPACE_HUMAN_POSTS_CORE:-0}
       SESSION_CORE_LOOP_CHECKPOINT_ENABLED: ${SESSION_CORE_LOOP_CHECKPOINT_ENABLED:-false}
       # Sweep that closes a tool reservation still open long after its run ended or
       # parked, as `unknown_outcome` (WS03 S5). Off by default: turning it on changes
@@ -1242,6 +1271,17 @@ services:
     # sysctl `kernel.unprivileged_userns_clone=1` (host-level, not compose).
     security_opt:
       - seccomp=./seccomp-bwrap.json
+    # Container resource limits (WS06-S7). Starting values, calibrated by WS06-S10:
+    # the tmpfs /tmp (512m in production) counts against mem_limit, and the pids
+    # budget covers tokio's blocking pool (up to 512 threads) plus a fork-bomb margin.
+    mem_limit: ${EXECUTION_CORE_MEM_LIMIT:-3g}
+    memswap_limit: ${EXECUTION_CORE_MEM_LIMIT:-3g}
+    cpus: ${EXECUTION_CORE_CPUS:-3.0}
+    pids_limit: ${EXECUTION_CORE_PIDS_LIMIT:-1536}
+    ulimits:
+      nofile:
+        soft: 16384
+        hard: 16384
     build:
       context: ..
       dockerfile: rust/services/execution-core/Dockerfile
@@ -1251,6 +1291,13 @@ services:
       - "127.0.0.1:9093:9093"   # gRPC compatibility probe; production overlay removes host ports
     environment:
       RUST_LOG: info
+      # Sandbox spawn bounds (WS06-S7). Per-stream output cap in bytes (the child is killed
+      # past it), process-wide concurrent sandbox spawns, and how long a spawn waits for a
+      # permit before the step fails "sandbox is busy, retry later". Invalid or zero values
+      # fall back to these defaults. Starting values, calibrated by WS06-S10.
+      EXECUTION_SANDBOX_MAX_OUTPUT_BYTES: ${EXECUTION_SANDBOX_MAX_OUTPUT_BYTES:-1048576}
+      EXECUTION_SANDBOX_MAX_CONCURRENT: ${EXECUTION_SANDBOX_MAX_CONCURRENT:-8}
+      EXECUTION_SANDBOX_QUEUE_WAIT_MS: ${EXECUTION_SANDBOX_QUEUE_WAIT_MS:-5000}
       # Build plan WS03 S2: raise Do-loop approvals as loop-owned (consumed once by
       # the durable loop through ConsumeApproval) instead of the cold delivery
       # worker's. OFF by default and never for ZDR runs. Stage 1 `/continue` is

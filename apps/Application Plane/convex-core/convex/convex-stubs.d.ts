@@ -3,6 +3,7 @@ declare module "convex/values" {
 }
 
 declare module "convex/server" {
+  export const cronJobs: any;
   export const defineApp: any;
   export const defineSchema: any;
   export const defineTable: any;

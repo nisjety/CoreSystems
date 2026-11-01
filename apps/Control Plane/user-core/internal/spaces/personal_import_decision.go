@@ -74,7 +74,7 @@ func IssuePersonalImportDecision(
 		return Decision{}, err
 	}
 	if evidence.Privacy.ZeroDataRetention {
-		return Decision{}, fmt.Errorf("zero data retention forbids durable import")
+		return Decision{}, zdrForbidsDenial("import_write", "zero data retention forbids durable import")
 	}
 	if err := request.Validate(); err != nil {
 		return Decision{}, err

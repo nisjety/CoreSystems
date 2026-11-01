@@ -34,6 +34,9 @@ services:
     build: !reset null
     image: ${SESSION_CORE_RELEASE_IMAGE:?SESSION_CORE_RELEASE_IMAGE digest is required}
     pull_policy: never
+    environment:
+      # Space event log (WS02-S1): release artifacts ship with emit off.
+      SPACE_REALTIME_EMIT: "false"
   inference-core:
     build: !reset null
     image: ${INFERENCE_CORE_RELEASE_IMAGE:?INFERENCE_CORE_RELEASE_IMAGE digest is required}

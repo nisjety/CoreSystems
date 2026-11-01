@@ -12,7 +12,10 @@ import type { SpaceReadMarker, SpaceThread } from '@/shared/api/spaces-client'
  * - No marker (never caught up) badges nothing: there is no last visit to be
  *   new since, and badging every post on a first visit teaches people to
  *   ignore the badge.
- * - The reader's own posts are never new to them.
+ * - Activity the reader wrote themselves is never new to them. With
+ *   `last_author_subject_id` (WS01-S7b) that is "the latest message is mine",
+ *   so a reply from someone else in a thread I started DOES badge; without it
+ *   the older rule applies (a thread I started is never new).
  * - A post with no readable timestamp is left alone rather than guessed at.
  *
  * `asOf` is the marker snapshotted when the visit STARTED. The page advances
@@ -34,12 +37,21 @@ export function unreadThreadIds(
   for (const thread of threads) {
     const id = thread.thread_id?.trim()
     if (!id) continue
-    if (viewer && (thread.owner_subject_id ?? '').trim() === viewer) continue
+    if (viewer && lastWriterOf(thread) === viewer) continue
     const at = latestActivityMillis(thread)
     if (at === undefined) continue
     if (at > lastReadAt) out.add(id)
   }
   return out
+}
+
+/**
+ * Who wrote the latest activity: the latest message's author when the listing
+ * names one, else the thread's starter (the rule before human replies existed).
+ */
+function lastWriterOf(thread: SpaceThread): string {
+  const last = (thread.last_author_subject_id ?? '').trim()
+  return last || (thread.owner_subject_id ?? '').trim()
 }
 
 function latestActivityMillis(thread: SpaceThread): number | undefined {

@@ -33,15 +33,32 @@
 #     [--zero-data-retention] \
 #     [--thread-create-entitled] [--retrieval-read-entitled] \
 #     [--import-write-entitled] [--agent-action-entitled] [--schedule-fire-entitled] \
-#     [--thread-read-entitled]
+#     [--thread-read-entitled] [--sandbox-capability-entitled] \
+#     [--process-registry-entitled]
 #
 # --thread-read-entitled is what lets a personal Space's owner read the result
 # thread of their own schedule (and a room's current recipients read the room's
-# conversation): without it every Control thread-read decision is refused. The
-# PUT replaces the whole policy, so pass every entitlement the org should keep.
+# conversation): without it every Control thread-read decision is refused.
+#
+# Entitlements are sent ONLY when their flag is passed. An entitlement flag that
+# is not passed is left out of the request, and Control keeps the stored value
+# (a brand-new row starts with every entitlement off). A re-run can therefore
+# never clear a bit it did not mention; to turn a bit off use the org-admin
+# console, not this script. Every change is recorded (actor
+# service:control-space-policy) in space_effect_policy_events and audited
+# through the user-core audit outbox. Creating the row (the privacy attestation)
+# is an operator act and stays here.
+#
+# Where to run it: user-core listens on 3012 and has no host port mapping, so
+# no localhost:<port> works from the host. Run this inside the Control Plane
+# network, e.g.
+#   docker compose run --rm <service-with-curl> bash scripts/set-space-effect-policy.sh ...
+# or `docker exec` into a Control container that has curl, where the default
+# USER_CORE_URL (http://user-core:3012) resolves. Override USER_CORE_URL only
+# if your network names the service differently.
 set -euo pipefail
 
-USER_CORE_URL="${USER_CORE_URL:-http://localhost:3021}"
+USER_CORE_URL="${USER_CORE_URL:-http://user-core:3012}"
 : "${CONTROL_SPACE_POLICY_TOKEN:?CONTROL_SPACE_POLICY_TOKEN is required (the control-space-policy service credential)}"
 
 org_id=""
@@ -54,12 +71,16 @@ residency=""
 deletion_scope=""
 third_party_processing_allowed=false
 zero_data_retention=false
-thread_create_entitled=false
-retrieval_read_entitled=false
-import_write_entitled=false
-agent_action_entitled=false
-schedule_fire_entitled=false
-thread_read_entitled=false
+# Entitlement flags stay empty unless passed: an empty value is "not stated" and
+# the key is left out of the request body.
+thread_create_entitled=""
+retrieval_read_entitled=""
+import_write_entitled=""
+agent_action_entitled=""
+schedule_fire_entitled=""
+thread_read_entitled=""
+sandbox_capability_entitled=""
+process_registry_entitled=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -79,6 +100,8 @@ while [[ $# -gt 0 ]]; do
     --agent-action-entitled) agent_action_entitled=true; shift ;;
     --schedule-fire-entitled) schedule_fire_entitled=true; shift ;;
     --thread-read-entitled) thread_read_entitled=true; shift ;;
+    --sandbox-capability-entitled) sandbox_capability_entitled=true; shift ;;
+    --process-registry-entitled) process_registry_entitled=true; shift ;;
     *) echo "unknown argument: $1" >&2; exit 1 ;;
   esac
 done
@@ -87,6 +110,15 @@ for required in org_id privacy_policy_ref purpose lawful_basis privacy_class ret
   if [[ -z "${!required}" ]]; then
     echo "missing required --${required//_/-}" >&2
     exit 1
+  fi
+done
+
+# Send an entitlement key only when its flag was passed.
+entitlement_json=""
+for key in thread_create retrieval_read import_write agent_action schedule_fire thread_read sandbox_capability process_registry; do
+  var="${key}_entitled"
+  if [[ -n "${!var}" ]]; then
+    entitlement_json+=$',\n  "'"${key}"'_entitled": '"${!var}"
   fi
 done
 
@@ -109,13 +141,7 @@ status=$(curl -s -o "$body" -w '%{http_code}' \
   "retention_class": "${retention_class}",
   "residency": "${residency}",
   "deletion_scope": "${deletion_scope}",
-  "zero_data_retention": ${zero_data_retention},
-  "thread_create_entitled": ${thread_create_entitled},
-  "retrieval_read_entitled": ${retrieval_read_entitled},
-  "import_write_entitled": ${import_write_entitled},
-  "agent_action_entitled": ${agent_action_entitled},
-  "schedule_fire_entitled": ${schedule_fire_entitled},
-  "thread_read_entitled": ${thread_read_entitled}
+  "zero_data_retention": ${zero_data_retention}${entitlement_json}
 }
 JSON
 )")

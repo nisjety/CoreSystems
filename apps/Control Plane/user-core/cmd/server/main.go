@@ -17,6 +17,7 @@ import (
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/clients"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/config"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/database"
+	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/directory"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/grpc"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/handlers"
 	httpserver "github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/http"
@@ -379,9 +380,17 @@ func main() {
 	// Plane services (documents-api, retrieval) can resolve grants cross-plane.
 	aclRepo := users.NewAclRepository(db)
 	httpServer := httpserver.NewServer(userService, aclRepo, sharedPublisher, redisClient, httpPort)
-	httpServer.SetSpaceRepository(spaces.NewRepository(db))
+	spaceRepo := spaces.NewRepository(db)
+	// WS03-S1: effect-policy changes insert their audit outbox row on the
+	// change's own transaction; unwired, policy writes fail closed.
+	spaceRepo.SetPolicyAuditOutbox(users.NewSpaceAuditEnqueuer(userRepo))
+	httpServer.SetSpaceRepository(spaceRepo)
 	// WS20-S4: stored-consent schedule contracts. Strict literal true; off by default.
 	httpServer.SetScheduleContractsEnabled(os.Getenv("SCHEDULE_CONTRACT_ENABLED") == "true")
+	// WS03-S3: org-admin Space policy writes. Strict literal true; off by default.
+	httpServer.SetSpacePolicyAdminWrites(os.Getenv("SPACE_POLICY_ADMIN_WRITES") == "true")
+	// WS04-S3: people search for the Space member picker (one SQL join in user-core).
+	httpServer.SetPeopleDirectory(directory.NewStore(db))
 	httpServer.SetAuthInternalCredential(serviceCredential)
 	// Personal inbound-mail alias (chat-wave2 mail-task spec). The service is
 	// always wired; every route stays 503 on its own until

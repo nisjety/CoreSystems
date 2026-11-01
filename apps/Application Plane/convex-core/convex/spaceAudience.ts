@@ -29,6 +29,24 @@ function concat(parts: readonly Uint8Array[]): Uint8Array {
   return output;
 }
 
+/**
+ * Code point order: the same order as Control's `sort.Strings` over UTF-8
+ * bytes. `localeCompare` is locale- and case-aware, so for ids that mix case or
+ * contain `_` and `-` it disagrees with Control, and Control then rejects the
+ * snapshot for a hash mismatch (WS04-S5, V23).
+ */
+export function compareCodePoints(left: string, right: string): number {
+  const a = Array.from(left);
+  const b = Array.from(right);
+  const shared = Math.min(a.length, b.length);
+  for (let index = 0; index < shared; index += 1) {
+    const x = a[index].codePointAt(0) as number;
+    const y = b[index].codePointAt(0) as number;
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return a.length === b.length ? 0 : a.length < b.length ? -1 : 1;
+}
+
 export function canonicalRecipientSubjectIds(recipientSubjectIds: readonly string[]): readonly string[] {
   if (recipientSubjectIds.length === 0) {
     throw new Error('recipient audience must not be empty');
@@ -37,7 +55,7 @@ export function canonicalRecipientSubjectIds(recipientSubjectIds: readonly strin
   if (canonical.some((id) => !id)) {
     throw new Error('recipient audience contains an empty subject');
   }
-  canonical.sort((left, right) => left.localeCompare(right));
+  canonical.sort(compareCodePoints);
   if (canonical.some((id, index) => id === canonical[index - 1])) {
     throw new Error('recipient audience contains a duplicate subject');
   }

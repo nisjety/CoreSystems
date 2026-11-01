@@ -74,6 +74,14 @@ use super::dispatchers::{
     dispatch_studio_create_project, dispatch_studio_export_social_draft,
     dispatch_studio_save_project,
 };
+use super::dispatchers_spaces::ws01::{dispatch_spaces_create_post, dispatch_spaces_reply_in_thread};
+use super::dispatchers_spaces::ws04::{
+    dispatch_spaces_change_member_role, dispatch_spaces_leave_room,
+    dispatch_spaces_update_room_details,
+};
+use super::dispatchers_spaces::ws03::{
+    dispatch_spaces_apply_effect_preset, dispatch_spaces_set_effect_entitlements,
+};
 use super::dispatchers::{
     dispatch_brreg_lookup, dispatch_connect_source, dispatch_conversation_csat_preference,
     dispatch_conversation_follow, dispatch_crawl_site, dispatch_import_source,
@@ -545,6 +553,33 @@ pub(super) async fn execute_action(
         "spaces.create_room" => dispatch_space_create_room(&state, &user, &body.input).await,
         "spaces.add_member" => dispatch_space_add_member(&state, &user, &body.input).await,
         "spaces.remove_member" => dispatch_space_remove_member(&state, &user, &body.input).await,
+        "spaces.create_post" => {
+            dispatch_spaces_create_post(&state, &user, &headers, &body.input).await
+        }
+        "spaces.reply_in_thread" => {
+            dispatch_spaces_reply_in_thread(&state, &user, &headers, &body.input).await
+        }
+        "spaces.change_member_role" => {
+            dispatch_spaces_change_member_role(&state, &user, &body.input, &body.idempotency_key)
+                .await
+        }
+        "spaces.leave_room" => dispatch_spaces_leave_room(&state, &user, &body.input).await,
+        "spaces.update_room_details" => {
+            dispatch_spaces_update_room_details(&state, &user, &body.input).await
+        }
+        "spaces.set_effect_entitlements" => {
+            dispatch_spaces_set_effect_entitlements(
+                &state,
+                &user,
+                &body.input,
+                &body.idempotency_key,
+            )
+            .await
+        }
+        "spaces.apply_effect_preset" => {
+            dispatch_spaces_apply_effect_preset(&state, &user, &body.input, &body.idempotency_key)
+                .await
+        }
         // Social actions -> social-core via the dedicated dispatchers (real
         // ApprovalState is enforced by social-core before publish/schedule).
         "social.create_draft" => dispatch_social_create_draft(&state, &user, &body.input).await,

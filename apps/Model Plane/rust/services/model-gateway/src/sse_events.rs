@@ -2809,6 +2809,25 @@ fn usage_carries_cache_tokens_and_omits_them_when_zero() {
             })
         );
     }
+
+    /// A declined retrieval's reason (D1-242) travels as the same event: a client that opted into
+    /// nothing hears it, and the payload is the typed code and the wording key only.
+    #[test]
+    fn a_retrieval_decline_notice_is_the_same_control_event_with_a_code_and_a_key() {
+        let event = ChatEvent::RetrievalNotice {
+            notice: crate::retrieval_metadata::RetrievalDeclineReason::EntitlementOff.notice(),
+        };
+        assert_eq!(event.name(), "retrieval_notice");
+        assert!(event.should_emit(&families(&[])));
+        assert_eq!(
+            event.payload("req-d"),
+            json!({
+                "code": "retrieval_declined_entitlement_off",
+                "wording_key": "retrieval.declined.entitlement_off",
+                "request_id": "req-d",
+            })
+        );
+    }
 }
 
 #[cfg(test)]

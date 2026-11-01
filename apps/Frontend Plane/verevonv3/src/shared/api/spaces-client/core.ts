@@ -1,4 +1,11 @@
-import { requestJson } from './http'
+import type { ChatArtifact } from '@/features/chat/components/chat-types'
+import { roomArtifactsFromMetadata } from '@/features/spaces/lib/room-artifacts'
+import {
+  spaceRetrievalDeclineReason,
+  type SpaceRetrievalDeclineReason,
+} from '@/features/spaces/lib/space-retrieval-decline'
+import { ApiError, requestJson } from '../http'
+import { readSpaceDenial } from '../space-denials'
 
 export type SpaceMembership = {
   space_ref: string
@@ -26,6 +33,11 @@ export type SpaceSummary = {
    * ACTION on this must test `=== false`, never `!value`: the room whose
    * membership is derived is the one where an editor would silently fail. */
   is_organization_room?: boolean
+  /** The room's one-line topic (WS04-S2). Absent or null when none is set. A label, not authority. */
+  topic?: string | null
+  /** True when Control's index says the room is archived (WS04-S7). `lifecycle` stays `active`
+   * for an archived room, so read this instead. Absent on older gateways and the fallback listing. */
+  archived?: boolean
 }
 
 /** A server-composed lifecycle + current-membership read. It contains no
@@ -33,6 +45,24 @@ export type SpaceSummary = {
 export type SpaceContext = {
   space: SpaceSummary
   membership: SpaceMembership
+  /**
+   * Server rollout flags (WS01-S5) the UI reads to show or hide a control. Absent on an older
+   * gateway, which means "off". Presentation only, never an authorization input.
+   */
+  features?: {
+    human_posts?: boolean
+    thread_pane?: boolean
+    send_idempotency?: boolean
+    connectivity_banner?: boolean
+    /** WS04-S2: the owner or manager may edit the room's name and topic. */
+    room_details?: boolean
+    /** WS04-S3: the member picker searches the people directory instead of listing the org. */
+    people_search?: boolean
+  }
+  /** Server-stated bounds (WS01-S5). Absent on an older gateway: use the documented defaults. */
+  limits?: {
+    post_max_chars?: number
+  }
 }
 
 /** Owner-bound conversation index for the selected Space. The BFF has already
@@ -56,6 +86,10 @@ export type SpaceThread = {
    * which already orders pinned posts first. Absent on an older gateway.
    */
   pinned?: boolean
+  /** Replies after the first message (WS01-S1). Absent until Session Core returns it. */
+  reply_count?: number
+  /** Who wrote the latest message (WS01-S1). Absent means unknown, never "you". */
+  last_author_subject_id?: string
 }
 
 /**
@@ -73,8 +107,18 @@ export type SpaceThreads = {
   membership: SpaceMembership
   threads: readonly SpaceThread[]
   read_marker?: SpaceReadMarker
+  /**
+   * Whether this caller may read the other members' conversations in this room
+   * (Control's shared-read decision, relayed by the BFF). `getSpaceThreads`
+   * always fills it: an older gateway that does not say defaults to
+   * `{ available: true }` so nothing changes there. `available: false` is an
+   * answer, not an error.
+   */
+  shared_read?: SpaceSharedRead
   unavailable?: readonly SpaceWorkGap[]
 }
+
+export type SpaceSharedRead = { readonly available: boolean }
 
 /** Actor-filtered owner contracts available in a Space. This is an availability
  * view only: each owner plane reauthorizes the exact resource at execution. */
@@ -161,7 +205,15 @@ export async function getSpaceThreads(spaceRef: string): Promise<SpaceThreads> {
     threads: readonly SpaceThread[]
     read_marker?: unknown
     unavailable?: unknown
+    shared_read?: unknown
   }>(`/api/v1/spaces/${encodeURIComponent(spaceRef)}/threads`)
+  // Only an explicit `available: false` restricts; absent or malformed keeps
+  // today's behaviour (the transcript route still decides per read).
+  const sharedRead = response.shared_read
+  const shared_read: SpaceSharedRead = {
+    available:
+      !(sharedRead && typeof sharedRead === 'object' && (sharedRead as { available?: unknown }).available === false),
+  }
   const marker = response.read_marker
   const lastReadAt =
     marker && typeof marker === 'object' ? (marker as { last_read_at?: unknown }).last_read_at : undefined
@@ -176,6 +228,7 @@ export async function getSpaceThreads(spaceRef: string): Promise<SpaceThreads> {
     membership: response.membership,
     threads: response.threads,
     ...(read_marker ? { read_marker } : {}),
+    shared_read,
     unavailable: workGaps(response.unavailable),
   }
 }
@@ -266,6 +319,11 @@ export type SpaceWorkGap = {
    */
   readonly code?: string
   readonly reason: string
+  /**
+   * Why Control declined, when it said (`space_denials_typed`): `reason`,
+   * `resolvable_by` and the allowlisted keys. Read through `space-denials.ts`.
+   */
+  readonly details?: Readonly<Record<string, unknown>>
 }
 
 /**
@@ -309,7 +367,10 @@ function workGaps(value: unknown): SpaceWorkGap[] {
     const section = typeof record.section === 'string' ? record.section : ''
     const reason = typeof record.reason === 'string' ? record.reason : ''
     const code = typeof record.code === 'string' && record.code.trim() ? record.code.trim() : undefined
-    if (section && reason) gaps.push({ section, reason, ...(code ? { code } : {}) })
+    const details = record.details && typeof record.details === 'object' && !Array.isArray(record.details)
+      ? (record.details as Readonly<Record<string, unknown>>)
+      : undefined
+    if (section && reason) gaps.push({ section, reason, ...(code ? { code } : {}), ...(details ? { details } : {}) })
   }
   return gaps
 }
@@ -602,6 +663,20 @@ export async function getSpaceRoster(spaceRef: string): Promise<readonly SpaceRo
   return response.members
 }
 
+/**
+ * The roster plus whether the gateway's Control member writer is on (WS04-S6). `writerApi` is
+ * true only when the server said so; absence (an older gateway, the flag off) is false, so the
+ * role and leave controls stay hidden rather than offering calls the server refuses.
+ */
+export async function getSpaceRosterView(
+  spaceRef: string,
+): Promise<{ members: readonly SpaceRosterMember[]; writerApi: boolean }> {
+  const response = await requestJson<{ members: readonly SpaceRosterMember[]; writer_api?: boolean }>(
+    `/api/v1/spaces/${encodeURIComponent(spaceRef)}/roster`,
+  )
+  return { members: response.members, writerApi: response.writer_api === true }
+}
+
 /** One turn of a Space thread, as the room reads it. */
 export type SpaceThreadTurn = {
   readonly role: 'user' | 'assistant' | 'system' | 'tool'
@@ -617,11 +692,37 @@ export type SpaceThreadTurn = {
    * every transcript was owner-bound and one name was always right by accident.
    */
   readonly authorSubjectId?: string
+  /** The server's id for this message, when it sent one. */
+  readonly messageId?: string
+  /**
+   * When the server stored this turn, as an ISO-8601 UTC string (`2026-10-31T09:30:15.250Z`).
+   * Absent when the server sent none or sent something that is not a time; a row must then
+   * render without a time rather than with an invented one.
+   */
+  readonly createdAt?: string
+  /**
+   * Artifacts the turn persisted, already through the room's kind and size
+   * gate (`roomArtifactsFromMetadata`). Only ever set on assistant turns.
+   */
+  readonly artifacts?: readonly ChatArtifact[]
+  /**
+   * Why this assistant turn answered without the organisation's knowledge, when Control declined
+   * retrieval for the Space (D1-242): the code Model Plane stored on the answer, read back through the
+   * closed set. Absent on every other turn and on a code outside the set.
+   */
+  readonly retrievalDeclined?: SpaceRetrievalDeclineReason
 }
 
 export type SpaceThreadTranscript = {
   readonly threadId: string
   readonly turns: readonly SpaceThreadTurn[]
+}
+
+/** A server time as a normalized ISO string, or undefined when it is missing or not a time. */
+function normalizeTurnTime(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value.trim()) return undefined
+  const ms = Date.parse(value.trim())
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined
 }
 
 function normalizeSpaceThreadTurns(value: unknown): readonly SpaceThreadTurn[] {
@@ -633,7 +734,16 @@ function normalizeSpaceThreadTurns(value: unknown): readonly SpaceThreadTurn[] {
     const role = record.role
     const content = typeof record.content === 'string' ? record.content.trim() : ''
     if (role !== 'user' && role !== 'assistant' && role !== 'system' && role !== 'tool') continue
-    if (!content) continue
+    // An artifact-only assistant turn (the agent replied with the artifact and
+    // no prose) is kept: it is the turn the room's chip hangs on.
+    const artifacts = role === 'assistant' ? roomArtifactsFromMetadata(record.artifacts) : []
+    if (!content && artifacts.length === 0) continue
+    const messageId =
+      typeof record.message_id === 'string' && record.message_id.trim()
+        ? record.message_id.trim()
+        : typeof record.messageId === 'string' && record.messageId.trim()
+          ? record.messageId.trim()
+          : undefined
     const agentName = typeof record.agent_name === 'string' && record.agent_name.trim()
       ? record.agent_name.trim()
       : typeof record.agentName === 'string' && record.agentName.trim()
@@ -645,11 +755,20 @@ function normalizeSpaceThreadTurns(value: unknown): readonly SpaceThreadTurn[] {
         : typeof record.authorSubjectId === 'string' && record.authorSubjectId.trim()
           ? record.authorSubjectId.trim()
           : undefined
+    const createdAt = normalizeTurnTime(record.created_at) ?? normalizeTurnTime(record.createdAt)
+    const retrievalDeclined =
+      role === 'assistant' && typeof record.retrievalDeclined === 'string'
+        ? spaceRetrievalDeclineReason(record.retrievalDeclined)
+        : undefined
     turns.push({
       role,
       content,
       ...(agentName ? { agentName } : {}),
       ...(authorSubjectId ? { authorSubjectId } : {}),
+      ...(messageId ? { messageId } : {}),
+      ...(createdAt ? { createdAt } : {}),
+      ...(artifacts.length > 0 ? { artifacts } : {}),
+      ...(retrievalDeclined ? { retrievalDeclined } : {}),
     })
   }
   return turns
@@ -679,6 +798,46 @@ export async function getSpaceThreadTranscript(
   return {
     threadId: response.transcript?.threadId ?? threadId,
     turns: normalizeSpaceThreadTurns(response.transcript?.turns),
+  }
+}
+
+/**
+ * Every way reading one Space thread can end, as a value instead of a thrown
+ * error, so a caller cannot forget a case (the room used to swallow the 403
+ * together with every other failure).
+ *
+ * - `restricted`: 403, Control declined the shared read (a real answer).
+ * - `missing`: 404, the thread is not (or no longer) there for this caller.
+ * - `error`: anything else (network, 5xx); worth a retry, never a silent preview.
+ */
+export type SpaceTranscriptLoad =
+  | { readonly state: 'ok'; readonly threadId: string; readonly turns: readonly SpaceThreadTurn[] }
+  | { readonly state: 'restricted'; readonly denial?: SpaceTranscriptDenial }
+  | { readonly state: 'missing' }
+  | { readonly state: 'error' }
+
+/**
+ * The typed Space denial a 403 carried (`code` and `details`, as the gateway sent them). Only set
+ * when `space-denials.ts` can read a reason from it; read it back through that module, which
+ * accepts nothing its vocabulary does not know.
+ */
+export type SpaceTranscriptDenial = {
+  readonly code: string | null
+  readonly details: Readonly<Record<string, unknown>> | null
+}
+
+export async function loadSpaceTranscript(spaceRef: string, threadId: string): Promise<SpaceTranscriptLoad> {
+  try {
+    const snapshot = await getSpaceThreadTranscript(spaceRef, threadId)
+    return { state: 'ok', threadId: snapshot.threadId, turns: snapshot.turns }
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 403) {
+      return readSpaceDenial(error)
+        ? { state: 'restricted', denial: { code: error.code, details: error.details } }
+        : { state: 'restricted' }
+    }
+    if (error instanceof ApiError && error.status === 404) return { state: 'missing' }
+    return { state: 'error' }
   }
 }
 
@@ -723,6 +882,8 @@ export type SpaceAgent = {
   trigger_modes?: readonly ('mention' | 'group')[]
   allowed_tools?: readonly string[]
   approval_mode?: 'auto' | 'require_confirmation' | 'blocked'
+  /** Presentation-only `#rrggbb`; the gateway drops anything else. Never an authorization input. */
+  avatar_color?: string
   delivery_targets: readonly SpaceAgentDeliveryTarget[]
   updated_at?: number
 }
@@ -951,6 +1112,19 @@ export async function createRoom(name: string): Promise<SpaceSummary> {
 }
 
 /**
+ * Where the recipient audience stands after a membership write (WS04-S6). `pending`: applied or
+ * waiting for acknowledgement, so a new member may need a moment before they can read. `current`:
+ * nothing to change. `unconfirmed`: the reconcile call failed; the change stands and a cron
+ * heals it. Absent on the legacy path.
+ */
+export type SpaceAudienceState = 'pending' | 'current' | 'unconfirmed'
+
+function audienceStateOf(audience: { state?: unknown } | undefined): SpaceAudienceState | undefined {
+  const state = audience?.state
+  return state === 'pending' || state === 'current' || state === 'unconfirmed' ? state : undefined
+}
+
+/**
  * Add one person to a named room.
  *
  * Gated to the room's owner or manager, the same floor as granting an agent:
@@ -965,15 +1139,25 @@ export async function createRoom(name: string): Promise<SpaceSummary> {
 export async function addSpaceMember(
   spaceRef: string,
   memberId: string,
-): Promise<{ memberCount: number; changed: boolean }> {
-  const response = await requestJson<{ member_count?: number; changed?: boolean }>(
-    `/api/v1/spaces/${encodeURIComponent(spaceRef)}/members`,
-    {
-      method: 'POST',
-      body: JSON.stringify({ member_id: memberId }),
-    },
-  )
-  return { memberCount: response.member_count ?? 0, changed: response.changed === true }
+  role?: string,
+): Promise<{ memberCount: number; changed: boolean; role?: string; audience?: SpaceAudienceState }> {
+  const response = await requestJson<{
+    member_count?: number
+    changed?: boolean
+    role?: string
+    audience?: { state?: unknown }
+  }>(`/api/v1/spaces/${encodeURIComponent(spaceRef)}/members`, {
+    method: 'POST',
+    // `role` is honoured only with the Control member writer on (WS04-S6); absent means
+    // Control's default.
+    body: JSON.stringify(role ? { member_id: memberId, role } : { member_id: memberId }),
+  })
+  return {
+    memberCount: response.member_count ?? 0,
+    changed: response.changed === true,
+    role: response.role,
+    audience: audienceStateOf(response.audience),
+  }
 }
 
 /**
@@ -986,12 +1170,21 @@ export async function addSpaceMember(
 export async function removeSpaceMember(
   spaceRef: string,
   memberId: string,
-): Promise<{ memberCount: number; changed: boolean }> {
-  const response = await requestJson<{ member_count?: number; changed?: boolean }>(
-    `/api/v1/spaces/${encodeURIComponent(spaceRef)}/members/${encodeURIComponent(memberId)}`,
-    { method: 'DELETE' },
-  )
-  return { memberCount: response.member_count ?? 0, changed: response.changed === true }
+): Promise<{ memberCount: number; changed: boolean; left?: boolean; audience?: SpaceAudienceState }> {
+  const response = await requestJson<{
+    member_count?: number
+    changed?: boolean
+    left?: boolean
+    audience?: { state?: unknown }
+  }>(`/api/v1/spaces/${encodeURIComponent(spaceRef)}/members/${encodeURIComponent(memberId)}`, {
+    method: 'DELETE',
+  })
+  return {
+    memberCount: response.member_count ?? 0,
+    changed: response.changed === true,
+    left: response.left,
+    audience: audienceStateOf(response.audience),
+  }
 }
 
 /**

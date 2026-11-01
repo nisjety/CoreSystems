@@ -190,6 +190,7 @@ fn test_state(quarry_edge_url: String) -> AppState {
         continue_park_form: false,
         model_entitlement_admin_enabled: false,
         mail_task_pipeline: None,
+        space_features: Default::default(),
     }
 }
 

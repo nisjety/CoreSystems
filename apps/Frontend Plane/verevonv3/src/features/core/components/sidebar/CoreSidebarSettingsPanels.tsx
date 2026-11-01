@@ -10,6 +10,7 @@ import {
   Fingerprint,
   Globe2,
   KeyRound,
+  Layers,
   Package,
   Plug,
   Route,
@@ -21,14 +22,16 @@ import {
   User,
   UsersRound,
 } from '@/shared/icons'
-import { createEffect, createSignal, For, Show, type Component } from 'solid-js'
+import { createEffect, createMemo, createSignal, For, Show, type Component } from 'solid-js'
 import type { LucideProps } from '@/shared/icons'
 import { Dynamic } from '@solidjs/web'
 import { SidebarPanelTitle } from '@/features/core/components/sidebar/CoreSidebarPrimitives'
 import { useI18n } from '@/shared/i18n'
 import { cn } from '@/shared/lib/cn'
 import { getSession } from '@/shared/session/session-store'
-import { hasPlatformAdminAccess } from '@/shared/session/access'
+import { hasPlatformAdminAccess, hasWorkspaceAdminAccess } from '@/shared/session/access'
+import { createResource } from '@/shared/lib/create-resource-compat'
+import { probeSpacePolicyAdminAvailable } from '@/shared/api/space-policy-client'
 
 type SettingsIcon = Component<LucideProps>
 type SettingsLinkSection = { id: string; label: string; icon: SettingsIcon; href: string }
@@ -52,6 +55,7 @@ const settingsSidebarSections: SettingsLinkSection[] = [
   { id: 'integrations', label: 'Integrations', icon: Plug, href: '/settings/integrations' },
   { id: 'router-policy', label: 'Router policy', icon: Route, href: '/settings/router-policy' },
   { id: 'model-access', label: 'Modelltilgang', icon: BrainCircuit, href: '/settings/model-access' },
+  { id: 'space-policy', label: 'Rom-policy', icon: Layers, href: '/settings/space-policy' },
   { id: 'finetune', label: 'Fine-tune jobs', icon: TestTubeDiagonal, href: '/settings/finetune' },
   { id: 'mcp', label: 'MCP-servere', icon: ServerCog, href: '/settings/mcp' },
   { id: 'skills', label: 'Ferdigheter', icon: Sparkles, href: '/settings/skills' },
@@ -86,6 +90,19 @@ export function SettingsExpandedSidebarPanel(props: { modelAccessEnabled: boolea
   const i18n = useI18n()
   const location = useLocation()
   const activeSectionId = () => getSettingsActiveSectionId(location.pathname)
+  // Room policy is listed only while the gateway reports the admin API on (WS03-S6): only an admin is
+  // asked, the answer is kept with the org it was asked for, and any error or mismatch means off.
+  const session = getSession()
+  const spacePolicyOrgId = () =>
+    hasWorkspaceAdminAccess(session) && session.activeOrg?.id ? session.activeOrg.id : undefined
+  const [spacePolicy] = createResource(
+    spacePolicyOrgId,
+    async (orgId) => ({ orgId, available: await probeSpacePolicyAdminAvailable(orgId) }),
+  )
+  const spacePolicyEnabled = createMemo(() => {
+    const answer = spacePolicy()
+    return !spacePolicy.error && answer !== undefined && answer.orgId === spacePolicyOrgId() && answer.available
+  })
 
   return (
     <div class="core-sidebar-dedicated-panel">
@@ -99,7 +116,8 @@ export function SettingsExpandedSidebarPanel(props: { modelAccessEnabled: boolea
         sections={localizedSettingsSections(i18n).filter(
           (section) =>
             (section.id !== 'platform-users' || hasPlatformAdminAccess(getSession())) &&
-            (section.id !== 'model-access' || props.modelAccessEnabled),
+            (section.id !== 'model-access' || props.modelAccessEnabled) &&
+            (section.id !== 'space-policy' || spacePolicyEnabled()),
         )}
         activeSectionId={activeSectionId()}
       />
@@ -276,6 +294,8 @@ function settingsSectionLabel(id: string, fallback: string, i18n: ReturnType<typ
       return i18n.tr('Router-policy', 'Router policy')
     case 'model-access':
       return i18n.tr('Modelltilgang', 'Model access')
+    case 'space-policy':
+      return i18n.tr('Rom-policy', 'Room policy')
     case 'finetune':
       return i18n.tr('Finjusteringsjobber', 'Fine-tune jobs')
     case 'mcp':

@@ -18,6 +18,7 @@
 // (shared/api/model-entitlement-refusals.ts).
 
 import { isModelEntitlementCode, modelEntitlementPresentation } from '@/shared/api/model-entitlement-refusals'
+import { isSpaceDenial, presentSpaceDenialText } from '@/shared/api/space-denials'
 import { en as enStrings } from './en'
 import { no as noStrings } from './no'
 
@@ -103,6 +104,7 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
 
   // Inbox / tickets / conversations
   thread_id_required: { no: 'Ingen samtale er valgt.', en: 'No conversation is selected.' },
+  thread_run_active: { no: 'Agenten jobber allerede i denne samtalen. Meldingen er lagt ut. Prøv igjen når den er ferdig.', en: 'An agent is already working in this conversation. Your message was posted. Try again when it finishes.' },
   conversation_membership_required: { no: 'Du har ikke tilgang til denne samtalen.', en: 'You do not have access to this conversation.' },
   conversation_upstream_target_rejected: { no: 'Meldingen kunne ikke sendes til mottakeren.', en: 'The message could not be delivered to the recipient.' },
   // A channel send is not a normal retry: the provider may have received it
@@ -126,7 +128,10 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   scrape_artifact_unsupported: { no: 'Denne filtypen kan ikke vises eller lastes ned her.', en: 'This file type cannot be shown or downloaded here.' },
   scrape_artifact_failed: { no: 'Kunne ikke hente bildet eller PDF-filen. Prøv igjen.', en: 'Could not fetch the image or PDF. Try again.' },
   scrape_artifact_too_large: { no: 'Filen er for stor til å vises.', en: 'The file is too large to show.' },
-  feature_disabled: { no: 'Denne funksjonen er ikke slått på for organisasjonen din.', en: 'This feature is not enabled for your organization.' },
+  feature_disabled: {
+    no: 'Denne funksjonen er ikke slått på for deg ennå.',
+    en: 'This feature is not turned on for you yet.',
+  },
   browser_capability_unavailable: { no: 'Denne nettleserfunksjonen er ikke tilgjengelig akkurat nå.', en: 'This browser capability is not available right now.' },
   heavy_browser_busy: { no: 'Nettleseren er opptatt med en tung oppgave. Prøv igjen om litt.', en: 'The browser is busy with a heavy task. Try again shortly.' },
   action_failed: { no: 'Handlingen kunne ikke utføres.', en: 'The action could not be completed.' },
@@ -454,12 +459,12 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     en: 'This space could not be found, or you do not have access to it. Go back to the overview and pick another space.',
   },
   space_read_not_authorized: {
-    no: 'Du har ikke tilgang til å lese samtalen i dette rommet. Be en eier eller leder av rommet om tilgang.',
-    en: 'You do not have access to read the conversation in this space. Ask an owner or manager of the space for access.',
+    no: 'Du har ikke tilgang til å lese samtalen i dette rommet. Organisasjonen kan ha slått av delt lesing, eller du trenger tilgang fra en eier eller leder av rommet.',
+    en: 'You do not have access to read the conversation in this space. The organization may have turned off shared reading, or you need access from an owner or manager of the space.',
   },
   space_lifecycle_unavailable: {
-    no: 'Rommets status kunne ikke hentes akkurat nå. Prøv igjen om litt.',
-    en: 'The status of this space could not be fetched right now. Try again shortly.',
+    no: 'Rommet kunne ikke kontrolleres akkurat nå. Ingenting ble endret. Hvis du skrev en melding, er den beholdt; prøv igjen om litt.',
+    en: 'The room could not be checked right now. Nothing was changed. If you were writing a message, it is kept; try again shortly.',
   },
   space_deletion_unavailable: {
     no: 'Slettingen av rommet kunne ikke kontrolleres akkurat nå. Prøv igjen om litt.',
@@ -502,8 +507,8 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     en: 'Choose a member first.',
   },
   member_not_found: {
-    no: 'Fant ikke dette medlemmet i organisasjonen.',
-    en: 'This member was not found in the organization.',
+    no: 'Fant ikke dette medlemmet. Personen er kanskje ikke medlem lenger; last inn på nytt.',
+    en: 'This member was not found. The person may no longer be a member; reload.',
   },
   thread_presentation_owner_only: {
     no: 'Bare den som startet innlegget kan endre tittelen eller feste det.',
@@ -530,8 +535,8 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     en: 'The message cannot be empty. Write something and try again.',
   },
   active_membership_required: {
-    no: 'Du må være aktivt medlem av organisasjonen for å gjøre dette.',
-    en: 'You need to be an active member of the organization to do this.',
+    no: 'Du er ikke lenger aktivt medlem, så du kan ikke gjøre dette. Ingenting ble sendt eller endret.',
+    en: 'You are no longer an active member, so you cannot do this. Nothing was sent or changed.',
   },
   owner_grant_role_required: {
     no: 'Bare en eier eller administrator i organisasjonen kan styre hva agenter har lov til å gjøre.',
@@ -674,8 +679,8 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     en: 'Similar tickets are unavailable until the organization rules and permissions can be checked. Try again shortly.',
   },
   thread_not_found: {
-    no: 'Fant ikke samtalen. Den kan være slettet.',
-    en: 'The conversation was not found. It may have been deleted.',
+    no: 'Fant ikke samtalen. Den kan være slettet. Hvis du skrev en melding, ble den ikke sendt.',
+    en: 'The conversation was not found. It may have been deleted. If you were writing a message, it was not sent.',
   },
 
   // Knowledge, SharePoint and search (gateway `knowledge/*.rs`, `search.rs`, `insights.rs`).
@@ -881,8 +886,8 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     en: 'The theme is not valid. Choose light, dark or the system theme.',
   },
   invalid_request: {
-    no: 'Forespørselen mangler noe eller er ugyldig. Sjekk og prøv igjen.',
-    en: 'The request is missing something or is not valid. Check it and try again.',
+    no: 'Forespørselen mangler noe eller er ugyldig. Ingenting er endret. Sjekk og prøv igjen.',
+    en: 'The request is missing something or is not valid. Nothing was changed. Check it and try again.',
   },
   no_sources_registered: {
     no: 'Ingen kilder er valgt for denne tilkoblingen ennå. Velg et bibliotek først.',
@@ -985,6 +990,56 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   unsupported_notice: { no: 'Formatet på kunngjøringen støttes ikke.', en: 'This notice format is not supported.' },
   unreadable_notice: { no: 'Kunngjøringen kunne ikke leses.', en: 'The notice could not be read.' },
   not_an_opportunity: { no: 'Dette er en tildeling, ikke et anbud du kan by på.', en: 'This is an award, not a tender you can bid on.' },
+
+  // ---- Space room codes (P-SPA1) ----------------------------------------
+  // Each Space workstream adds its codes ONLY under its own banner, keys sorted
+  // within the banner, so two workstreams never edit the same lines. Copy for a
+  // zero-retention or model-entitlement refusal does not go here: it comes from
+  // the catalogue modules above.
+
+  // WS01 human posts and threads
+  idempotency_key_conflict: { no: 'Denne meldingen er allerede sendt med et annet innhold. Skriv den på nytt og send igjen.', en: 'This message was already sent with different text. Write it again and send.' },
+  invalid_client_send_id: { no: 'Meldingen kunne ikke sendes på en trygg måte. Last inn på nytt og prøv igjen.', en: 'The message could not be sent safely. Reload and try again.' },
+  invalid_post: { no: 'Meldingen er tom eller for lang. Ingenting ble sendt.', en: 'The message is empty or too long. Nothing was sent.' },
+  managed_run_already_started: { no: 'Meldingen var allerede mottatt. Svaret vises i rommet.', en: 'This message was already received. The reply shows in the room.' },
+  post_not_stored: { no: 'Samtalen ble opprettet, men meldingen ble ikke lagret. Prøv igjen; den sendes bare én gang.', en: 'The conversation was created but the message was not saved. Try again; it will only be sent once.' },
+  session_unavailable: { no: 'Samtaletjenesten er utilgjengelig akkurat nå. Meldingen din er beholdt; prøv igjen om litt.', en: 'The conversation service is unavailable right now. Your message is kept; try again shortly.' },
+  space_authority_stale: { no: 'Tilgangen din i rommet ble endret mens du skrev. Prøv igjen; hvis det fortsetter, last inn rommet på nytt.', en: 'Your access to the room changed while you were writing. Try again; if it keeps happening, reload the room.' },
+  space_decision_unavailable: { no: 'Kunne ikke bekrefte at du kan skrive her akkurat nå. Meldingen din er beholdt; prøv igjen om litt.', en: 'We could not confirm that you may post here right now. Your message is kept; try again shortly.' },
+  space_human_posts_disabled: { no: 'Å skrive til rommet uten agent er ikke slått på ennå. Bruk Spør Verevon.', en: 'Posting to the room without the agent is not turned on yet. Use Ask Verevon.' },
+  space_post_not_authorized: { no: 'Rollen din i dette rommet tillater ikke å skrive her. Be en eier eller leder om redigeringstilgang.', en: 'Your role in this room does not allow posting here. Ask an owner or manager for edit access.' },
+  thread_state_conflict: { no: 'Samtalen kan ikke ta imot nye meldinger akkurat nå. Prøv igjen om litt.', en: 'The conversation cannot take new messages right now. Try again shortly.' },
+
+  // WS02 realtime stream
+  space_stream_capacity: { no: 'Live-oppdateringer er midlertidig full. Rommet oppdateres hvert par sekunder.', en: 'Live updates are temporarily at capacity. The room is refreshing every few seconds.' },
+  space_stream_disabled: { no: 'Live-oppdateringer er ikke slått på. Rommet oppdateres hvert par sekunder.', en: 'Live updates are not turned on. The room is refreshing every few seconds.' },
+  space_stream_forbidden: { no: 'Live-oppdateringer er ikke tilgjengelige for deg i dette rommet.', en: 'Live updates are not available to you in this room.' },
+  space_stream_unavailable: { no: 'Live-oppdateringer er midlertidig utilgjengelige. Rommet oppdateres hvert par sekunder.', en: 'Live updates are temporarily unavailable. The room is refreshing every few seconds.' },
+
+  // WS03 policy and denials
+
+  // WS04 membership and room administration
+  directory_unavailable: { no: 'Personsøket er utilgjengelig akkurat nå. Prøv igjen om litt.', en: 'People search is unavailable right now. Try again shortly.' },
+  idempotency_key_reused: { no: 'Denne forespørselen er allerede brukt til noe annet. Last inn på nytt og prøv igjen.', en: 'This request was already used for something else. Reload and try again.' },
+  member_not_in_organization: { no: 'Personen er ikke med i organisasjonen, så de kan ikke legges til i rommet.', en: 'That person is not in the organization, so they cannot be added to the room.' },
+  room_archived: { no: 'Rommet er arkivert. Medlemmer kan ikke endres.', en: 'The room is archived. Members cannot be changed.' },
+  room_delegation_required: { no: 'Du har ikke tilgang til å endre medlemmer her.', en: 'You do not have access to change members here.' },
+  room_details_invalid: { no: 'Navnet eller emnet er ikke gyldig. Ingenting er endret.', en: 'The room name or topic is not valid. Nothing was changed.' },
+  room_details_unavailable: { no: 'Navnet og emnet kunne ikke lagres. Ingenting er endret. Prøv igjen om litt.', en: 'The name and topic could not be saved. Nothing was changed. Try again shortly.' },
+  room_not_active: { no: 'Rommet er ikke aktivt, så navn og emne kan ikke endres.', en: 'The room is not active, so its name and topic cannot be changed.' },
+  space_kind_not_editable: { no: 'Navn og emne kan bare endres på et vanlig rom, ikke på et personlig rom.', en: 'The name and topic can only be changed on a regular room, not a personal Space.' },
+  room_elevated_role_requires_owner: { no: 'Bare en eier kan gi, endre eller fjerne rollen leder eller eier.', en: 'Only an owner can grant, change or remove a manager or owner.' },
+  room_member_changed: { no: 'Medlemmet ble endret av noen andre. Listen er lastet på nytt; prøv igjen.', en: 'That member was changed by someone else. The list was reloaded; try again.' },
+  room_not_found: { no: 'Fant ikke rommet, eller du har ikke tilgang til det.', en: 'The room was not found, or you do not have access to it.' },
+  room_personal_space: { no: 'Et personlig rom har bare én eier og kan ikke ha flere medlemmer.', en: 'A personal Space has one owner and cannot have other members.' },
+  room_role_forbidden: { no: 'Rollen din i dette rommet tillater ikke dette.', en: 'Your role in this room does not allow that.' },
+  room_roster_derived: { no: 'Medlemmene i dette rommet følger organisasjonen og redigeres ikke her.', en: 'The members of this room follow the organization and are not edited here.' },
+  room_sole_owner: { no: 'Rommet må ha minst én eier. Gjør noen andre til eier først.', en: 'The room needs at least one owner. Make someone else an owner first.' },
+  space_authority_unavailable: { no: 'Kunne ikke bekrefte tilgangen akkurat nå. Ingenting er endret. Prøv igjen om litt.', en: 'Access could not be confirmed right now. Nothing was changed. Try again shortly.' },
+
+  // WS05 org security
+
+  // WS07 resilience and content hardening
 }
 
 /**
@@ -1105,6 +1160,18 @@ function describe(
       code,
       kind,
       message: shown.next === null ? shown.message : `${shown.message} ${shown.next}`,
+      resumable: like?.resumable === true,
+      retryAfterSeconds,
+    }
+  }
+
+  // A typed Space denial (WS03): the reason, not the operation code, says why. A
+  // message the SPA wrote itself (LocalizedError) still wins.
+  if (isSpaceDenial(err) && !(err instanceof LocalizedError)) {
+    return {
+      code,
+      kind,
+      message: presentSpaceDenialText(err, tr),
       resumable: like?.resumable === true,
       retryAfterSeconds,
     }

@@ -623,13 +623,17 @@ mod tests {
         // it first wrote, a receipt replay finds its own answer, the existence check counts any
         // turn, a cursor resolves to a position and never to content, and a sibling count is how
         // many versions a turn has, inactive ones included. Erasing a thread removes every turn.
-        const WRITER_SIDE: [&str; 6] = [
+        // The bootstrap-send replay check is a resend lookup too: it asks whether this
+        // client_message_id was already stored, on any branch.
+        const WRITER_SIDE: [&str; 8] = [
             "SELECT id, sequence, role, content FROM messages",
+            "SELECT id, sequence, role, content, post_kind, author_subject_id FROM messages",
             "SELECT id FROM messages",
             "SELECT EXISTS(SELECT 1 FROM messages WHERE thread_id = $1)",
             "WHERE m.id = $1 AND m.thread_id = $2",
             "SELECT COUNT(*) FROM messages AS s",
             "DELETE FROM messages",
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE thread_id = $1 AND client_message_id = $2)",
         ];
         let sources = [
             ("grpc.rs", include_str!("grpc.rs")),

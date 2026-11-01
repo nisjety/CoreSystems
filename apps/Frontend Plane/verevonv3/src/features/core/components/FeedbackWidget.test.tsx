@@ -46,6 +46,17 @@ describe('FeedbackWidget', () => {
     flush()
     expect(screen.queryByRole('dialog')).toBeNull()
   })
+  it('keeps the trigger off the Space room and opens feedback from the navbar menu event', () => {
+    setSessionUser({ id: 'user-1', email: 'ada@example.com', name: 'Ada', emailVerified: true })
+    flush()
+    markSessionOnboardingComplete({ id: 'org-1', name: 'Verevon', role: 'member' })
+    flush()
+    renderWidget('/spaces/space_room_1')
+    expect(screen.queryByRole('button', { name: 'Tilbakemelding' })).toBeNull()
+    window.dispatchEvent(new Event(OPEN_FEEDBACK_EVENT))
+    flush()
+    expect(screen.getByRole('dialog', { name: 'Meld friksjon' })).toBeTruthy()
+  })
   it('does not render the trigger when there is no active organization', () => {
     renderWidget()
 

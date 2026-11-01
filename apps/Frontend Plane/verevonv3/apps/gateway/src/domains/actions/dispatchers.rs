@@ -928,7 +928,7 @@ fn ticket_remap(input: &Value, pairs: &[(&str, &str)]) -> serde_json::Map<String
     out
 }
 
-fn ticket_string<'a>(input: &'a Value, key: &str) -> &'a str {
+pub(super) fn ticket_string<'a>(input: &'a Value, key: &str) -> &'a str {
     input
         .get(key)
         .and_then(Value::as_str)
@@ -958,7 +958,7 @@ fn ticket_classification_body(input: &Value) -> serde_json::Map<String, Value> {
     body
 }
 
-fn ticket_bad_request(message: &str) -> Response {
+pub(super) fn ticket_bad_request(message: &str) -> Response {
     (
         StatusCode::BAD_REQUEST,
         Json(error("invalid_input", message)),
@@ -6178,7 +6178,10 @@ pub(super) async fn dispatch_space_add_member(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
         PathExtractor(space_ref.to_owned()),
-        Json(json!({ "member_id": member_id })),
+        Json(match ticket_string(input, "role") {
+            "" => json!({ "member_id": member_id }),
+            role => json!({ "member_id": member_id, "role": role }),
+        }),
     )
     .await;
     owner_json_response_to_envelope("spaces.add_member", user, status, payload)

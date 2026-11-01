@@ -1,24 +1,43 @@
-import { createMemo, createSignal, For, Show } from 'solid-js'
+import { createMemo, createSignal, For, onCleanup, Show } from 'solid-js'
 
 import { ChatMarkdown } from '@/features/chat/components/ChatMessages'
-import { cancelInvocation, streamChat } from '@/shared/api/chat-client'
+import type { ChatArtifact } from '@/features/chat/components/chat-types'
 import { listAvailableSkills, MAX_PICKED_SKILLS, type Skill } from '@/shared/api/skills-client'
-import { WandSparkles, X } from '@/shared/icons'
+import { WandSparkles } from '@/shared/icons'
 import {
-  updateSpaceThreadPresentation,
+  SPACE_POST_MAX_CHARS_DEFAULT,
   type SpaceAgent,
   type SpaceRosterMember,
   type SpaceThread,
 } from '@/shared/api/spaces-client'
 import { useI18n } from '@/shared/i18n'
 import { translateApiError } from '@/shared/i18n/errors'
-import { beginOwnStream, endOwnStream, liveThreadsIn, ownStream } from '../lib/space-live-work'
+import { liveThreadsIn, ownStream } from '../lib/space-live-work'
+import { agentAvatarColor } from '../lib/agent-avatar'
+import { AgentAvatar } from './AgentAvatar'
 import { threadTitle } from '../lib/space-thread-presentation'
-import { AiModelPicker } from '@/shared/components/AiModelPicker'
+import {
+  type SpaceComposerModeEntry,
+  type SpaceComposerModeId,
+  type SpaceComposerSlotContext,
+  visibleSpaceComposerModes,
+} from '../lib/space-composer-registry'
+import { createSpaceSendPipeline } from '../lib/space-send-pipeline'
+import { spaceRetrievalDeclineCopy } from '../lib/space-retrieval-decline'
+import { createSpacePostSender } from '../lib/space-post-sender'
+import { createSpaceSendJournal, type SpaceSendJournal } from '../lib/space-send-journal'
+import { canPostInSpace, postLength } from '../lib/space-posting'
+import { SpaceConnectivityBanner } from './SpaceConnectivityBanner'
+import {
+  SkillScope,
+  SpaceComposerChipSlot,
+  SpaceComposerToolbarSlot,
+} from './composer/SpaceComposerSlots'
 import { createTurnPrivacyTierResolver } from '@/features/dashboard/home/submit-privacy-tier'
 import { readAiModelSelection, type AiModelSelection } from '@/shared/ai/model-selection'
 import { OPENAI_CODEX_SUBSCRIPTION_PROVIDER } from '@/shared/api/chatgpt-subscription-client'
 import { getSession } from '@/shared/session/session-store'
+import './space-send.css'
 
 /**
  * The room's own composer — buzz's "the channel is the workspace" plus Grok's
@@ -72,6 +91,8 @@ type MentionCandidate = {
   readonly kind: 'person' | 'agent'
   /** Only present for `kind: 'agent'` — the Control subject id to invoke. */
   readonly subjectId?: string
+  /** Validated avatar colour for `kind: 'agent'`; absent renders neutral. */
+  readonly color?: string
 }
 
 /**
@@ -83,27 +104,6 @@ type MentionCandidate = {
 type PickerItem =
   | { readonly kind: 'mention'; readonly candidate: MentionCandidate }
   | { readonly kind: 'skill'; readonly skill: Skill }
-
-type Exchange = {
-  readonly userContent: string
-  assistantContent: string
-  /**
-   * `stopped` is its own state, not an error and not done. A server-side stop
-   * used to reach `onDone` and render a halted answer as a finished one; the
-   * transport now emits `stopped` separately, and this composer keeps the
-   * distinction all the way to the screen.
-   */
-  status: 'streaming' | 'done' | 'error' | 'stopped'
-  errorMessage?: string
-  /**
-   * The gateway's error code, kept beside the message so a refusal the room
-   * can act on — the spend hard stop — renders as what it is, with the way
-   * out, rather than as a generic "the reply stopped".
-   */
-  errorCode?: string
-  /** Whether the stop was recorded server-side, or only cut the local read. */
-  stopRecorded?: boolean
-}
 
 export interface SpaceRoomComposerProps {
   readonly spaceRef: string
@@ -121,6 +121,8 @@ export interface SpaceRoomComposerProps {
    * `onClearReplyTarget` — on success, or when the member dismisses it. */
   readonly replyTarget?: () => { threadId: string; title: string; awaitingApproval?: boolean } | undefined
   readonly onClearReplyTarget?: () => void
+  /** The reply target is the surface itself (the thread pane's composer): no "cancel reply" control. */
+  readonly replyTargetFixed?: boolean
   /**
    * The room's threads, for the "someone else's agent is working" line above
    * the textarea. Read through the live-work store's projection, which the page
@@ -135,6 +137,31 @@ export interface SpaceRoomComposerProps {
   readonly typingSentence?: () => string | undefined
   /** This member is typing. The page decides how often that reaches the server. */
   readonly onTyping?: () => void
+  /**
+   * A live artifact from this member's own turn, with the thread it landed in.
+   * The page keeps it in memory until the next transcript read; nothing here
+   * stores it. Absent while the room artifact surfaces are off.
+   */
+  readonly onArtifact?: (artifact: ChatArtifact, threadId: string) => void
+  /**
+   * Human posts (WS01-S6). `humanPostsEnabled` is the room's `features.human_posts`: off, the box is
+   * byte-for-byte today's single "ask the agent" composer. On, Send posts the message as the
+   * member's own words with no model run, and Ask Verevon is the explicit second mode. None of
+   * these props authorizes anything; Control decides per send.
+   */
+  readonly humanPostsEnabled?: () => boolean
+  /** The reading member's Control subject: Ask is offered in a thread only when they started it. */
+  readonly viewerSubjectId?: () => string | undefined
+  /** The member's role; a role below editor gets a disabled box with the reason stated. */
+  readonly viewerRole?: () => string | undefined
+  /** The reply target's starter, when the caller knows it; otherwise read from `threads`. */
+  readonly threadOwnerSubjectId?: () => string | undefined
+  /** `limits.post_max_chars` from the room context. */
+  readonly postMaxChars?: () => number | undefined
+  /** SD-16: which mode a fresh box starts in while posts are on. Defaults to Send (post). */
+  readonly defaultSendMode?: 'post' | 'ask'
+  /** The room's send journal (the page shares it with the timeline for optimistic rows). */
+  readonly journal?: SpaceSendJournal
 }
 
 export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
@@ -158,17 +185,92 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   const [activeIndex, setActiveIndex] = createSignal(0)
   let skillsLoading = false
   const pickerId = `room-picker-${Math.random().toString(36).slice(2, 8)}`
-  const [submitting, setSubmitting] = createSignal(false)
-  const [exchange, setExchange] = createSignal<Exchange | undefined>(undefined)
+  // The member's own pick between Send and Ask; `effectiveMode` below is what the box does.
+  const [pickedMode, setPickedMode] = createSignal<SpaceComposerModeId | undefined>(undefined)
+  const [zdrRefused, setZdrRefused] = createSignal(false)
   let textareaRef: HTMLTextAreaElement | undefined
-  // The in-flight turn's transport handles. `requestId` arrives on the
-  // `connected` frame and is the only thing the cancel endpoint accepts.
-  let abortController: AbortController | undefined
-  let liveRequestId: string | undefined
-  // The thread the in-flight turn is in, from the `connected` frame — the id a
-  // new post gets is minted server-side, so it is only known once the stream
-  // announces it.
-  let liveThreadId: string | undefined
+  // The send path (in-flight handles, exchange state, Stop) lives in the send
+  // pipeline; the composer keeps the box, the pickers and the chosen chips.
+  const pipeline = createSpaceSendPipeline({
+    host: props,
+    resolveTier: privacyTiers.resolve,
+    // Known codes get the room's own words, and a typed Space denial (its
+    // details name the reason) gets the denial copy and next step; an unknown
+    // code keeps the server's message rather than a generic line that hides it.
+    describeError: (event) => translateApiError({ code: event.code, details: event.details, feature: event.feature }, i18n.tr, {
+      no: event.message,
+      en: event.message,
+    }),
+  })
+  const submitting = pipeline.submitting
+  const exchange = pipeline.exchange
+
+  // Human posts (WS01-S6): their own transport, journal and states beside the streamed turn.
+  const journal = props.journal ?? createSpaceSendJournal()
+  const postSender = createSpacePostSender({
+    journal,
+    spaceRef: () => props.spaceRef,
+    describeError: (error) => translateApiError(error, i18n.tr, {
+      no: 'Meldingen ble ikke sendt. Den er beholdt i boksen; prøv igjen.',
+      en: 'The message was not sent. It is kept in the box; try again.',
+    }),
+    baselineUpdatedAt: (threadId) => props.threads?.().find((thread) => thread.thread_id === threadId)?.updated_at,
+    onAccepted: (entry) => {
+      // Cleared only now, on acceptance: until then the words are still here to retry or edit.
+      if (text().trim() === entry.content) setText('')
+      props.onClearReplyTarget?.()
+      props.onExchangeSettled?.()
+    },
+    onZdrRefused: () => setZdrRefused(true),
+  })
+  onCleanup(postSender.dispose)
+  const humanPostsActive = () => props.humanPostsEnabled?.() === true
+  const roleMayPost = () => canPostInSpace(props.viewerRole?.())
+  // Flag on and a role below editor: nothing is offered. Control would refuse every send, so the
+  // box says so instead of accepting text it cannot send.
+  const roleBlocked = () => humanPostsActive() && !roleMayPost()
+  const postMax = () => {
+    const limit = props.postMaxChars?.()
+    return typeof limit === 'number' && Number.isFinite(limit) && limit > 0 ? limit : SPACE_POST_MAX_CHARS_DEFAULT
+  }
+  const replyThreadOwner = () => {
+    const explicit = props.threadOwnerSubjectId?.()
+    if (explicit !== undefined) return explicit
+    const targetId = props.replyTarget?.()?.threadId
+    return targetId ? props.threads?.().find((thread) => thread.thread_id === targetId)?.owner_subject_id : undefined
+  }
+  // A member-invoked run stays owner-gated: Ask is offered in a reply only to the thread's starter.
+  const askAvailable = () => {
+    if (!props.replyTarget?.()) return true
+    const viewer = props.viewerSubjectId?.()?.trim()
+    const owner = replyThreadOwner()?.trim()
+    return Boolean(viewer) && viewer === owner
+  }
+  // An agent mention or a picked skill can only be a question to the agent.
+  const impliesAsk = () => Boolean(mentionedAgentRef()) || pickedSkills().length > 0
+  const offeredModes = createMemo<readonly SpaceComposerModeEntry[]>(() => {
+    const registered = visibleSpaceComposerModes()
+    const ask = registered.filter((entry) => entry.id === 'ask')
+    if (!humanPostsActive()) return ask
+    if (roleBlocked()) return []
+    const post = registered.filter((entry) => entry.id === 'post')
+    return [
+      ...(!zdrRefused() && !impliesAsk() ? post : []),
+      ...(askAvailable() ? ask : []),
+    ]
+  })
+  const effectiveMode = (): SpaceComposerModeId => {
+    const offered = offeredModes()
+    const wanted = pickedMode() ?? (humanPostsActive() ? (props.defaultSendMode ?? 'post') : 'ask')
+    return offered.some((entry) => entry.id === wanted) ? wanted : (offered[0]?.id ?? 'ask')
+  }
+  const nothingOffered = () => humanPostsActive() && offeredModes().length === 0
+  const postBusy = () => postSender.busy()
+  const postFailure = () => {
+    const entry = postSender.current()
+    return entry?.stage === 'failed' ? entry : undefined
+  }
+  const overLimit = () => effectiveMode() === 'post' && postLength(text().trim()) > postMax()
 
   // Threads the server currently reports as working in this room, minus the
   // one this browser is streaming itself (that one has its own indicator in
@@ -196,6 +298,7 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
         label: agent.name as string,
         kind: 'agent' as const,
         subjectId: agent.subject_id,
+        color: agentAvatarColor(agent),
       }))
     return [...agents, ...people]
   })
@@ -369,154 +472,59 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   // A thread paused on a human decision does not take new input. Sending into
   // it would queue a message behind a gate the same person is standing at, and
   // the reply would arrive after an answer they have not given yet.
-  const blockedByApproval = () => props.replyTarget?.()?.awaitingApproval === true
+  // A human post starts no run, so it is not queued behind the gate; only a turn for the agent is.
+  const blockedByApproval = () => props.replyTarget?.()?.awaitingApproval === true && effectiveMode() !== 'post'
   const subscriptionIncompatible = () => selectedModel().provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER
     && (Boolean(mentionedAgentRef()) || pickedSkills().length > 0)
 
   async function submitMessage(): Promise<void> {
     const content = text().trim()
-    if (!content || submitting() || blockedByApproval() || subscriptionIncompatible()) return
+    if (!content || nothingOffered()) return
+    if (effectiveMode() === 'post') {
+      if (submitting() || postBusy() || overLimit()) return
+      closePicker()
+      await postSender.send({ content, replyThreadId: props.replyTarget?.()?.threadId })
+      return
+    }
+    if (submitting() || postBusy() || blockedByApproval() || subscriptionIncompatible()) return
 
-    setSubmitting(true)
     closePicker()
-    const agentRef = mentionedAgentRef()
-    const picked = pickedSkills()
-    const modelSelection = selectedModel()
-    const replyThreadId = props.replyTarget?.()?.threadId
-    setExchange({ userContent: content, assistantContent: '', status: 'streaming' })
+    // A post that failed earlier and is now being asked instead is not retried behind the new send.
+    postSender.discard()
+    const input = {
+      content,
+      mode: 'ask' as const,
+      model: selectedModel(),
+      mentionedAgentRef: mentionedAgentRef(),
+      skills: pickedSkills(),
+      replyThreadId: props.replyTarget?.()?.threadId,
+    }
+    // The pipeline raises `submitting` and the exchange block synchronously,
+    // before its first await; the box is cleared right after, as before.
+    const sent = pipeline.send(input)
     setText('')
     setMentionedAgentRef(undefined)
     setPickedSkills([])
-    const controller = new AbortController()
-    abortController = controller
-    liveRequestId = undefined
-    liveThreadId = replyThreadId
-    const openedNewThread = !replyThreadId
-    beginOwnStream({ spaceRef: props.spaceRef, threadId: replyThreadId })
-
-    try {
-      // May wait (bounded) for a catalogue still loading. A Stop in that
-      // window has already said so on the exchange; send nothing.
-      const turnTier = await privacyTiers.resolve(modelSelection.model, modelSelection.provider)
-      if (controller.signal.aborted) return
-      await streamChat(
-        {
-          content,
-          model: modelSelection.model,
-          provider: modelSelection.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER
-            ? modelSelection.provider
-            : undefined,
-          subscriptionConnectionId: modelSelection.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER
-            ? modelSelection.subscriptionConnectionId
-            : undefined,
-          minPrivacyTier: turnTier.tier,
-          spaceRef: props.spaceRef,
-          mentionedAgentRef: agentRef,
-          threadId: replyThreadId,
-          // Picked skills ride as actions; chat-client puts their ids on the
-          // wire as `skill_ids`, never as tool specs.
-          actions: picked.length > 0
-            ? picked.map((skill) => ({ id: skill.id, name: skill.name, kind: 'skill' as const }))
-            : undefined,
-        },
-        {
-          onConnected: (event) => {
-            if (event.requestId?.trim()) liveRequestId = event.requestId.trim()
-            if (event.threadId?.trim()) liveThreadId = event.threadId.trim()
-          },
-          onTitle: ({ title }) => {
-            // Only for a thread this browser opened: the title event fires on a
-            // first exchange, and only the owner may write presentation. Writing
-            // it back is what makes the room's other members see the same name
-            // on their next poll instead of the raw first message.
-            const name = title?.trim()
-            const threadId = liveThreadId
-            if (!openedNewThread || !name || !threadId) return
-            const settled = props.onExchangeSettled
-            void updateSpaceThreadPresentation(props.spaceRef, threadId, { title: name })
-              .then(() => settled?.())
-              .catch(() => undefined)
-          },
-          onMessage: ({ content: delta }) => {
-            setExchange((current) => current && { ...current, assistantContent: current.assistantContent + delta })
-          },
-          onDone: () => {
-            // A stop that already landed must not be overwritten by a trailing
-            // `done`: the server emits `stopped` and may still close the
-            // stream normally afterwards.
-            setExchange((current) =>
-              current && current.status === 'streaming' ? { ...current, status: 'done' } : current,
-            )
-            props.onClearReplyTarget?.()
-            props.onExchangeSettled?.()
-          },
-          onStopped: () => {
-            setExchange((current) =>
-              current && { ...current, status: 'stopped', stopRecorded: true },
-            )
-          },
-          onError: (event) => {
-            setExchange((current) => current && {
-              ...current,
-              status: 'error',
-              errorCode: event.code,
-              // Known codes get the room's own words; an unknown one keeps the
-              // server's message rather than a generic line that hides it.
-              errorMessage: translateApiError({ code: event.code, feature: event.feature }, i18n.tr, {
-                no: event.message,
-                en: event.message,
-              }),
-            })
-          },
-        },
-        controller.signal,
-      )
-    } catch (error) {
-      // An abort we caused is not a failure. Anything else still is.
-      if (!(error instanceof DOMException && error.name === 'AbortError') && !controller.signal.aborted) {
-        setExchange((current) => current && current.status === 'streaming'
-          ? { ...current, status: 'error', errorMessage: error instanceof Error ? error.message : String(error) }
-          : current)
-      }
-    } finally {
-      if (abortController === controller) abortController = undefined
-      endOwnStream()
-      setSubmitting(false)
-    }
+    await sent
   }
 
-  /**
-   * Stop the turn in flight.
-   *
-   * Aborting the read is instant and local. Cancelling by `requestId` is what
-   * records the stop: it flips the run to `cancelled` in Session Core, which is
-   * what every other member's projection shows on its next poll. Without a
-   * `requestId` there is nothing to cancel with, and the exchange says so
-   * rather than claiming a stop it cannot prove.
-   */
-  async function stopMessage(): Promise<void> {
-    const controller = abortController
-    const requestId = liveRequestId
-    if (!controller) return
-    controller.abort()
-    setExchange((current) =>
-      current && current.status === 'streaming'
-        ? { ...current, status: 'stopped', stopRecorded: false }
-        : current,
-    )
-    if (!requestId) return
-    try {
-      await cancelInvocation(requestId)
-      setExchange((current) => current && current.status === 'stopped' ? { ...current, stopRecorded: true } : current)
-    } catch {
-      // Recorded state stays false: the run may well finish server-side, and
-      // saying "stopped" without proof is the one thing this must not do.
-    } finally {
-      // Re-read the projection either way, so the post's status follows the
-      // server rather than this browser's belief.
-      props.onClearReplyTarget?.()
-      props.onExchangeSettled?.()
-    }
+  // The thread pane's composer is aimed at one thread for as long as the pane is open; the pane title
+  // already names that thread, so the box talks about "the conversation", not "the room".
+  const inThread = () => props.replyTargetFixed === true && props.replyTarget?.() !== undefined
+
+  const slotContext: SpaceComposerSlotContext = {
+    get spaceRef() { return props.spaceRef },
+    orgId,
+    mode: effectiveMode,
+    setMode: setPickedMode,
+    modes: offeredModes,
+    inThread,
+    disabled: () => submitting() || blockedByApproval() || postBusy(),
+    text,
+    setText,
+    focus: () => textareaRef?.focus(),
+    model: { catalogue: privacyTiers.catalogue, onChange: setSelectedModel },
+    skills: { picked: pickedSkills, remove: removeSkill },
   }
 
   return (
@@ -538,6 +546,18 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
                 {(content) => <ChatMarkdown content={content()} />}
               </Show>
             </div>
+            {/* The turn answered without the organisation's knowledge because Control declined
+                retrieval for this Space. The reason is a closed code; the words are the room's. */}
+            <Show when={current().retrievalDeclined}>
+              {(reason) => (
+                <p class="verevon-space-room-exchange__stopped" role="status">
+                  {i18n.tr(
+                    spaceRetrievalDeclineCopy(reason()).no,
+                    spaceRetrievalDeclineCopy(reason()).en,
+                  )}
+                </p>
+              )}
+            </Show>
             {/* The spend hard stop is a refusal BEFORE the run starts — Model
                 Plane's pre-flight budget guard — so it is not "the reply
                 stopped": nothing was replied. It says what stopped it and where
@@ -554,6 +574,14 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
                       )}
                     </Show>
                     {current().errorMessage}
+                    {/* A dropped connection leaves the outcome unknown, so the send
+                        can be repeated under its own key: the room gets it once. */}
+                    <Show when={current().retryable && !submitting()}>
+                      {' '}
+                      <button type="button" onClick={() => { void pipeline.retry() }}>
+                        {i18n.tr('Prøv igjen', 'Try again')}
+                      </button>
+                    </Show>
                   </p>
                 </Show>
               }
@@ -573,7 +601,7 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
               <p class="verevon-space-room-exchange__stopped" role="status">
                 {current().stopRecorded
                   ? i18n.tr('Stoppet av deg. Rommet ser dette som stoppet.', 'Stopped by you. The room records it as stopped.')
-                  : liveRequestId
+                  : pipeline.liveRequestId()
                     ? i18n.tr('Stoppet her. Registrerer stoppet …', 'Stopped here. Recording the stop…')
                     : i18n.tr(
                         'Avbrutt før svaret startet. Kjøringen kan fortsatt fullføre på tjenersiden.',
@@ -581,11 +609,21 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
                       )}
               </p>
             </Show>
+            {/* The server already had this send (a retry of one it took): accepted,
+                not failed. The run shows in the room, not in this block. */}
+            <Show when={current().acceptedEarlier}>
+              <p class="verevon-space-room-exchange__stopped" role="status">
+                {i18n.tr(
+                  'Meldingen var allerede mottatt. Svaret vises i rommet.',
+                  'This message was already received. The reply shows in the room.',
+                )}
+              </p>
+            </Show>
             <Show when={current().status === 'streaming'}>
               <button
                 type="button"
                 class="verevon-space-room-exchange__stop"
-                onClick={() => { void stopMessage() }}
+                onClick={() => { void pipeline.stop() }}
               >
                 {i18n.tr('Stopp', 'Stop')}
               </button>
@@ -626,18 +664,22 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
         </p>
       </Show>
 
+      <SpaceConnectivityBanner />
+
       <form onSubmit={(event) => { event.preventDefault(); void submitMessage() }}>
-        <Show when={props.replyTarget?.()}>
+        <Show when={inThread() ? undefined : props.replyTarget?.()}>
           {(target) => (
             <p class="verevon-space-room-composer__reply">
               {i18n.tr('Svarer i', 'Replying in')} «{target().title}»
-              <button
-                type="button"
-                onClick={() => props.onClearReplyTarget?.()}
-                aria-label={i18n.tr('Avbryt svar', 'Cancel reply')}
-              >
-                ✕
-              </button>
+              <Show when={!props.replyTargetFixed}>
+                <button
+                  type="button"
+                  onClick={() => props.onClearReplyTarget?.()}
+                  aria-label={i18n.tr('Avbryt svar', 'Cancel reply')}
+                >
+                  ✕
+                </button>
+              </Show>
             </p>
           )}
         </Show>
@@ -649,28 +691,29 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
             )}
           </p>
         </Show>
-        <AiModelPicker orgId={orgId} class="verevon-space-room-composer__model-picker" catalogue={privacyTiers.catalogue} onChange={setSelectedModel} />
-        <Show when={pickedSkills().length > 0}>
-          <ul class="verevon-space-room-skills" aria-label={i18n.tr('Valgte ferdigheter', 'Chosen skills')}>
-            <For each={pickedSkills()}>
-              {(skill) => (
-                <li class="verevon-space-room-skill-chip">
-                  <WandSparkles class="verevon-space-room-skill-chip__icon" aria-hidden="true" />
-                  <span>{skill.name}</span>
-                  <SkillScope scope={skill.scope} />
-                  <button
-                    type="button"
-                    class="verevon-space-room-skill-chip__remove"
-                    onClick={() => removeSkill(skill.id)}
-                    aria-label={i18n.tr(`Fjern ferdigheten ${skill.name}`, `Remove the skill ${skill.name}`)}
-                  >
-                    <X aria-hidden="true" />
-                  </button>
-                </li>
-              )}
-            </For>
-          </ul>
+        <Show when={roleBlocked()}>
+          <p class="verevon-space-room-composer__blocked" role="status">
+            {i18n.tr(
+              'Du har lesetilgang i dette rommet og kan ikke skrive. Be en eier eller leder om redigeringstilgang.',
+              'You have read access in this room and cannot post. Ask an owner or manager for edit access.',
+            )}
+          </p>
         </Show>
+        <Show when={!roleBlocked() && nothingOffered()}>
+          <p class="verevon-space-room-composer__blocked" role="status">
+            {i18n.tr(
+              'Du kan ikke starte agenten i en annens samtale. Fjern agenten eller ferdigheten for å skrive en melding.',
+              'You cannot start the agent in someone else\'s conversation. Remove the agent or skill to write a message.',
+            )}
+          </p>
+        </Show>
+        <Show when={humanPostsActive() && zdrRefused()}>
+          <p class="verevon-space-room-composer__blocked" role="status">
+            {translateApiError({ code: 'zdr_durable_mutation_forbidden' }, i18n.tr)}
+          </p>
+        </Show>
+        <SpaceComposerToolbarSlot ctx={slotContext} />
+        <SpaceComposerChipSlot ctx={slotContext} />
         <Show when={pickerOpen()}>
           <ul
             id={pickerId}
@@ -698,9 +741,12 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
                       when={item.kind === 'skill' ? item.skill : undefined}
                       fallback={
                         <>
-                          <span class="verevon-space-room-mentions__kind" aria-hidden="true">
-                            {item.kind === 'mention' && item.candidate.kind === 'agent' ? '●' : '·'}
-                          </span>
+                          <Show
+                            when={item.kind === 'mention' && item.candidate.kind === 'agent' ? item.candidate : undefined}
+                            fallback={<span class="verevon-space-room-mentions__kind" aria-hidden="true">·</span>}
+                          >
+                            {(agent) => <AgentAvatar kind="agent" size={18} name={agent().label} color={agent().color} />}
+                          </Show>
                           {item.kind === 'mention' ? item.candidate.label : ''}
                         </>
                       }
@@ -737,14 +783,56 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
                   'Denne samtalen venter på en godkjenning.',
                   'This conversation is waiting on an approval.',
                 )
-              : i18n.tr(
-                  'Skriv i rommet. @ nevner noen, / velger en ferdighet.',
-                  'Write in the room. @ mentions someone, / picks a skill.',
-                )
+              : humanPostsActive() && effectiveMode() === 'post'
+                ? inThread()
+                  ? i18n.tr(
+                      'Svar i samtalen. Agenten svarer ikke. @ nevner noen, / velger en ferdighet.',
+                      'Reply in the thread. The agent will not reply. @ mentions someone, / picks a skill.',
+                    )
+                  : i18n.tr(
+                      'Skriv til rommet. Agenten svarer ikke. @ nevner noen, / velger en ferdighet.',
+                      'Write to the room. The agent will not reply. @ mentions someone, / picks a skill.',
+                    )
+                : inThread()
+                  ? i18n.tr(
+                      'Svar i samtalen. @ nevner noen, / velger en ferdighet.',
+                      'Reply in the thread. @ mentions someone, / picks a skill.',
+                    )
+                  : i18n.tr(
+                      'Skriv i rommet. @ nevner noen, / velger en ferdighet.',
+                      'Write in the room. @ mentions someone, / picks a skill.',
+                    )
           }
           rows={2}
-          disabled={submitting() || blockedByApproval()}
+          disabled={submitting() || blockedByApproval() || postBusy() || roleBlocked()}
         />
+        {/* A human post that did not land (WS01-S6). The text is still in the box; Retry repeats
+            the same send under its own key, so a post whose answer was lost lands once. */}
+        <Show when={postFailure()}>
+          {(entry) => (
+            <p class="verevon-space-projection-error verevon-space-room-composer__post-failure" role="alert">
+              {i18n.tr('Meldingen ble ikke sendt. ', 'The message was not sent. ')}
+              {entry().failure?.message}
+              <Show when={entry().failure?.retryable}>
+                <button type="button" onClick={() => { void postSender.retry() }}>
+                  {i18n.tr('Prøv igjen', 'Try again')}
+                </button>
+              </Show>
+              <button type="button" onClick={() => postSender.discard()}>
+                {i18n.tr('Forkast', 'Discard')}
+              </button>
+            </p>
+          )}
+        </Show>
+        <Show when={effectiveMode() === 'post' && postLength(text().trim()) > postMax() * 0.8}>
+          <p
+            class={overLimit() ? 'verevon-space-room-composer__blocked' : 'verevon-space-room-composer__hint'}
+            role={overLimit() ? 'alert' : undefined}
+          >
+            {postLength(text().trim())} / {postMax()}
+            {overLimit() ? i18n.tr(' tegn. Meldingen er for lang.', ' characters. The message is too long.') : ''}
+          </p>
+        </Show>
         <Show when={mentionedAgentRef()}>
           <p class="verevon-space-room-composer__hint">
             {i18n.tr('Vil invokere en agent når du sender.', 'Will invoke an agent when you send.')}
@@ -766,35 +854,17 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
             )}
           </p>
         </Show>
-        <button type="submit" disabled={submitting() || blockedByApproval() || subscriptionIncompatible() || !text().trim()}>
-          {i18n.tr('Send', 'Send')}
+        <button
+          type="submit"
+          disabled={
+            submitting() || blockedByApproval() || subscriptionIncompatible() || !text().trim()
+            || postBusy() || roleBlocked() || nothingOffered() || overLimit()
+          }
+        >
+          {humanPostsActive() && effectiveMode() === 'ask' ? i18n.tr('Spør Verevon', 'Ask Verevon') : i18n.tr('Send', 'Send')}
         </button>
       </form>
     </div>
   )
 }
 
-/**
- * The scope a skill actually has. Two values exist in the registry — `org`
- * and `user` — and both are stated; anything else is left unbadged rather than
- * guessed. There is deliberately no "this room": the registry has no Space
- * scope to promise.
- */
-function SkillScope(props: { readonly scope: Skill['scope'] }) {
-  const i18n = useI18n()
-  const label = () =>
-    props.scope === 'user'
-      ? i18n.tr('Personlig', 'Personal')
-      : props.scope === 'org'
-        ? i18n.tr('Organisasjon', 'Organization')
-        : undefined
-  return (
-    <Show when={label()}>
-      {(text) => (
-        <span class="verevon-space-room-skill-scope" data-scope={props.scope}>
-          {text()}
-        </span>
-      )}
-    </Show>
-  )
-}

@@ -3952,6 +3952,7 @@ async fn dispatch_tool_with_cost(
                     // Unpaged (WS09-S8): the whole conversation in sequence order.
                     limit: 0,
                     before_message_id: String::new(),
+                    ..Default::default()
                 },
                 session_bearer,
             );

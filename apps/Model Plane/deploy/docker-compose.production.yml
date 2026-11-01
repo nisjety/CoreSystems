@@ -68,6 +68,8 @@ services:
       SESSION_CORE_SERVICE_ID: ${SESSION_CORE_SERVICE_ID:?SESSION_CORE_SERVICE_ID is required}
       SESSION_CORE_SERVICE_API_KEY: ${SESSION_CORE_SERVICE_API_KEY:?SESSION_CORE_SERVICE_API_KEY is required}
       SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY: ${SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY:?SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY is required}
+      # Space event log (WS02-S1): off in production until the rollout order turns it on.
+      SPACE_REALTIME_EMIT: "false"
   inference-core:
     <<: *hardened-service
     ports: !reset []
@@ -83,6 +85,16 @@ services:
     # to execute sandbox payloads.
     tmpfs:
       - /tmp:rw,nosuid,size=512m
+    # Container limits (WS06-S7), restated for the production profile; the tmpfs
+    # above counts against mem_limit.
+    mem_limit: ${EXECUTION_CORE_MEM_LIMIT:-3g}
+    memswap_limit: ${EXECUTION_CORE_MEM_LIMIT:-3g}
+    cpus: ${EXECUTION_CORE_CPUS:-3.0}
+    pids_limit: ${EXECUTION_CORE_PIDS_LIMIT:-1536}
+    ulimits:
+      nofile:
+        soft: 16384
+        hard: 16384
     environment:
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
       AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}

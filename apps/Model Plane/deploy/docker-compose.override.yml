@@ -14,11 +14,14 @@ services:
       FINETUNE_ENABLED: "1"
       FINETUNE_ORG_BUDGET_USD: "50"
       FINETUNE_PER_JOB_BUDGET_USD: "20"
+      SPACE_HUMAN_POSTS_API: "1"
 
   session-core:
     environment:
       RUST_LOG: debug
       COMPACTION_THRESHOLD: "200000"
+      SPACE_RUN_THREAD_GUARD: "true"
+      SPACE_HUMAN_POSTS_CORE: "1"
 
   inference-core:
     environment:

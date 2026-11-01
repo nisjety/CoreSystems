@@ -500,6 +500,56 @@ paths:
               schema:
                 $ref: "#/components/schemas/OrchestrationEvent"
 
+  /v1/spaces/{space_id}/events:
+    get:
+      operationId: streamSpaceEvents
+      tags: [events]
+      summary: Stream a shared Space's change events via SSE (ids and kinds only)
+      description: >
+        Resumable per-Space tail of thread, post and run-state changes. Frames carry ids and
+        closed words only, never content; the client refetches through the authorized read path.
+        Authority is a Control decision for the audience model-plane-space-stream, sent in the
+        x-space-decision-ref and x-space-decision-token headers, plus a user principal. A ZDR
+        caller or decision gets connected with mode poll_only, then closing zdr_poll_only.
+        The vocabulary is pinned by api/contracts/space-events.json; see docs/space-event-stream.md.
+      parameters:
+        - name: space_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: x-space-decision-ref
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: x-space-decision-token
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: Last-Event-ID
+          in: header
+          required: false
+          description: "Cursor `<generation>.<seq>` of the last processed frame."
+          schema:
+            type: string
+      responses:
+        "200":
+          description: SSE stream (connected, space_event, heartbeat, cursor_too_old, closing, error)
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          description: unauthorized
+        "403":
+          description: space_stream_forbidden (bad, expired or wrong-audience decision, or not a user principal)
+        "503":
+          description: space_stream_capacity (with Retry-After) or space_stream_unavailable
+
   # ===========================================================================
   # AI modalities
   # ===========================================================================

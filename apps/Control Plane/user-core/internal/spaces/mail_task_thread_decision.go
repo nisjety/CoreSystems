@@ -54,6 +54,10 @@ type MailTaskThreadDecision struct {
 	ServiceAudience   string    `json:"service_audience"`
 	ActionID          string    `json:"action_id"`
 	Nonce             string    `json:"nonce"`
+	// ZeroDataRetention is always false on a decision that exists: Control refuses to issue one for a ZDR
+	// org. It is signed anyway so Session Core can require the statement and refuse a true one (the same
+	// explicit claim the scheduled-run decision carries), rather than rely on Control alone.
+	ZeroDataRetention bool      `json:"zero_data_retention"`
 	IssuedAt          time.Time `json:"issued_at"`
 	ExpiresAt         time.Time `json:"expires_at"`
 }
@@ -93,6 +97,9 @@ func (d MailTaskThreadDecision) Validate() error {
 	}
 	if d.ActionID != mailTaskThreadPrepareAction {
 		return fmt.Errorf("mail task thread decision action is invalid")
+	}
+	if d.ZeroDataRetention {
+		return fmt.Errorf("zero data retention forbids a mail task thread decision")
 	}
 	if d.SessionKey != MailTaskSessionKey(d.OrgID, d.ProviderMessageID) {
 		return fmt.Errorf("mail task thread decision session key does not match its own org/message")
@@ -150,6 +157,7 @@ func IssueMailTaskThreadDecision(policy EffectPolicy, key SigningKey, orgID, use
 		ServiceAudience:   mailTaskThreadPrepareAudience,
 		ActionID:          mailTaskThreadPrepareAction,
 		Nonce:             nonce,
+		ZeroDataRetention: false,
 		IssuedAt:          now.UTC(),
 		ExpiresAt:         now.UTC().Add(mailTaskDecisionLifetime),
 	}

@@ -601,8 +601,14 @@ type AppendMessageRequest struct {
 	// derived from content, and never sent for a zero-retention turn (such a
 	// credential cannot append at all). Empty = no receipt, today's behaviour.
 	ClientMessageId string `protobuf:"bytes,18,opt,name=client_message_id,json=clientMessageId,proto3" json:"client_message_id,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// What kind of row this is in the room: "" and "turn" are today's
+	// conversation turn (the owner's prompt, the agent's answer); "post" is a
+	// human message written to the room and never sent to the agent. Posts are
+	// kept out of model context, agent memory and Dreaming (see
+	// ListConversationRequest.include_human_posts). Any other value is refused.
+	PostKind      string `protobuf:"bytes,19,opt,name=post_kind,json=postKind,proto3" json:"post_kind,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *AppendMessageRequest) Reset() {
@@ -757,6 +763,13 @@ func (x *AppendMessageRequest) GetAgentName() string {
 func (x *AppendMessageRequest) GetClientMessageId() string {
 	if x != nil {
 		return x.ClientMessageId
+	}
+	return ""
+}
+
+func (x *AppendMessageRequest) GetPostKind() string {
+	if x != nil {
+		return x.PostKind
 	}
 	return ""
 }
@@ -3972,8 +3985,13 @@ type ListConversationRequest struct {
 	// `on_active_path = false` (WS17 S8). Off, the read is the active path only, and
 	// every prompt, learning and Dreaming reader leaves it off.
 	IncludeInactive bool `protobuf:"varint,8,opt,name=include_inactive,json=includeInactive,proto3" json:"include_inactive,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Human posts (post_kind "post") are filtered out of every read unless the
+	// caller sets this. False is the default so every caller, the model-callable
+	// reattach_context included, is contained without doing anything; only the
+	// UI transcript route opts in.
+	IncludeHumanPosts bool `protobuf:"varint,9,opt,name=include_human_posts,json=includeHumanPosts,proto3" json:"include_human_posts,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *ListConversationRequest) Reset() {
@@ -4062,6 +4080,13 @@ func (x *ListConversationRequest) GetIncludeInactive() bool {
 	return false
 }
 
+func (x *ListConversationRequest) GetIncludeHumanPosts() bool {
+	if x != nil {
+		return x.IncludeHumanPosts
+	}
+	return false
+}
+
 // One conversation turn. Named SessionMessage (not ThreadMessage, which the
 // gateway proto already defines in this package) to avoid a name collision.
 type SessionMessage struct {
@@ -4104,7 +4129,14 @@ type SessionMessage struct {
 	SiblingCount uint32 `protobuf:"varint,9,opt,name=sibling_count,json=siblingCount,proto3" json:"sibling_count,omitempty"`
 	// True when the turn is on the active path: the chain from the first turn to the
 	// thread's active leaf. Only inactive turns are read with `include_inactive`.
-	OnActivePath  bool `protobuf:"varint,10,opt,name=on_active_path,json=onActivePath,proto3" json:"on_active_path,omitempty"`
+	OnActivePath bool `protobuf:"varint,10,opt,name=on_active_path,json=onActivePath,proto3" json:"on_active_path,omitempty"`
+	// "turn" or "post" (see AppendMessageRequest.post_kind). Rows written before
+	// the column existed read as "turn".
+	PostKind string `protobuf:"bytes,11,opt,name=post_kind,json=postKind,proto3" json:"post_kind,omitempty"`
+	// When this turn was stored (messages.created_at). A room shows a time beside
+	// each message and this is the only source for it; absent only when a caller
+	// built the message without reading it from the store.
+	CreatedAt     *timestamppb.Timestamp `protobuf:"bytes,12,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4207,6 +4239,20 @@ func (x *SessionMessage) GetOnActivePath() bool {
 		return x.OnActivePath
 	}
 	return false
+}
+
+func (x *SessionMessage) GetPostKind() string {
+	if x != nil {
+		return x.PostKind
+	}
+	return ""
+}
+
+func (x *SessionMessage) GetCreatedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return nil
 }
 
 type ListConversationResponse struct {
@@ -4461,9 +4507,16 @@ type ThreadSummary struct {
 	Unread bool `protobuf:"varint,21,opt,name=unread,proto3" json:"unread,omitempty"`
 	// The owner's last read of the thread. Mark-read sets it to now; mark-unread
 	// moves it to one microsecond before the newest assistant message.
-	LastReadAt    *timestamppb.Timestamp `protobuf:"bytes,22,opt,name=last_read_at,json=lastReadAt,proto3" json:"last_read_at,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	LastReadAt *timestamppb.Timestamp `protobuf:"bytes,22,opt,name=last_read_at,json=lastReadAt,proto3" json:"last_read_at,omitempty"`
+	// Human replies in the thread: user rows after the first, counted under the
+	// same audience ceiling as the rest of the read so a count never reveals a
+	// row the reader could not open. Presentation only.
+	ReplyCount uint32 `protobuf:"varint,23,opt,name=reply_count,json=replyCount,proto3" json:"reply_count,omitempty"`
+	// Author subject of the latest human row the reader may see; empty when
+	// there is none. Presentation only, never a grant.
+	LastAuthorSubjectId string `protobuf:"bytes,24,opt,name=last_author_subject_id,json=lastAuthorSubjectId,proto3" json:"last_author_subject_id,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *ThreadSummary) Reset() {
@@ -4620,6 +4673,20 @@ func (x *ThreadSummary) GetLastReadAt() *timestamppb.Timestamp {
 		return x.LastReadAt
 	}
 	return nil
+}
+
+func (x *ThreadSummary) GetReplyCount() uint32 {
+	if x != nil {
+		return x.ReplyCount
+	}
+	return 0
+}
+
+func (x *ThreadSummary) GetLastAuthorSubjectId() string {
+	if x != nil {
+		return x.LastAuthorSubjectId
+	}
+	return ""
 }
 
 type ListThreadsResponse struct {
@@ -8235,7 +8302,7 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x14CreateThreadResponse\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x129\n" +
 	"\n" +
-	"created_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"\xa3\x06\n" +
+	"created_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"\xc0\x06\n" +
 	"\x14AppendMessageRequest\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x12\x12\n" +
 	"\x04role\x18\x02 \x01(\tR\x04role\x12\x18\n" +
@@ -8256,7 +8323,8 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x0fidempotency_key\x18\x10 \x01(\tR\x0eidempotencyKey\x12\x1d\n" +
 	"\n" +
 	"agent_name\x18\x11 \x01(\tR\tagentName\x12*\n" +
-	"\x11client_message_id\x18\x12 \x01(\tR\x0fclientMessageId\"v\n" +
+	"\x11client_message_id\x18\x12 \x01(\tR\x0fclientMessageId\x12\x1b\n" +
+	"\tpost_kind\x18\x13 \x01(\tR\bpostKind\"v\n" +
 	"\x15AppendMessageResponse\x12\x1a\n" +
 	"\bsequence\x18\x01 \x01(\x04R\bsequence\x12\x1d\n" +
 	"\n" +
@@ -8512,7 +8580,7 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"updated_at\x18\x11 \x01(\tR\tupdatedAt\x12\x1a\n" +
 	"\brevision\x18\x12 \x01(\x03R\brevision\"M\n" +
 	"\x17ListAgentSkillsResponse\x122\n" +
-	"\x06skills\x18\x01 \x03(\v2\x1a.model_plane.v1.AgentSkillR\x06skills\"\xc7\x02\n" +
+	"\x06skills\x18\x01 \x03(\v2\x1a.model_plane.v1.AgentSkillR\x06skills\"\xf7\x02\n" +
 	"\x17ListConversationRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x19\n" +
@@ -8521,7 +8589,8 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x19space_read_decision_token\x18\x05 \x01(\tR\x16spaceReadDecisionToken\x12\x14\n" +
 	"\x05limit\x18\x06 \x01(\rR\x05limit\x12*\n" +
 	"\x11before_message_id\x18\a \x01(\tR\x0fbeforeMessageId\x12)\n" +
-	"\x10include_inactive\x18\b \x01(\bR\x0fincludeInactive\"\xfd\x02\n" +
+	"\x10include_inactive\x18\b \x01(\bR\x0fincludeInactive\x12.\n" +
+	"\x13include_human_posts\x18\t \x01(\bR\x11includeHumanPosts\"\xd5\x03\n" +
 	"\x0eSessionMessage\x12\x12\n" +
 	"\x04role\x18\x01 \x01(\tR\x04role\x12\x18\n" +
 	"\acontent\x18\x02 \x01(\tR\acontent\x12\x1d\n" +
@@ -8535,7 +8604,10 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x0fsibling_ordinal\x18\b \x01(\rR\x0esiblingOrdinal\x12#\n" +
 	"\rsibling_count\x18\t \x01(\rR\fsiblingCount\x12$\n" +
 	"\x0eon_active_path\x18\n" +
-	" \x01(\bR\fonActivePath\"q\n" +
+	" \x01(\bR\fonActivePath\x12\x1b\n" +
+	"\tpost_kind\x18\v \x01(\tR\bpostKind\x129\n" +
+	"\n" +
+	"created_at\x18\f \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"q\n" +
 	"\x18ListConversationResponse\x12:\n" +
 	"\bmessages\x18\x01 \x03(\v2\x1e.model_plane.v1.SessionMessageR\bmessages\x12\x19\n" +
 	"\bhas_more\x18\x02 \x01(\bR\ahasMore\"\x92\x03\n" +
@@ -8551,7 +8623,7 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\tthread_id\x18\t \x01(\tR\bthreadId\x129\n" +
 	"\barchived\x18\n" +
 	" \x01(\x0e2\x1d.model_plane.v1.ArchiveFilterR\barchived\x12!\n" +
-	"\fstarred_only\x18\v \x01(\bR\vstarredOnly\"\xdd\x05\n" +
+	"\fstarred_only\x18\v \x01(\bR\vstarredOnly\"\xb3\x06\n" +
 	"\rThreadSummary\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x12\x1f\n" +
 	"\vsession_key\x18\x02 \x01(\tR\n" +
@@ -8576,7 +8648,10 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\astarred\x18\x14 \x01(\bR\astarred\x12\x16\n" +
 	"\x06unread\x18\x15 \x01(\bR\x06unread\x12<\n" +
 	"\flast_read_at\x18\x16 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
-	"lastReadAt\"o\n" +
+	"lastReadAt\x12\x1f\n" +
+	"\vreply_count\x18\x17 \x01(\rR\n" +
+	"replyCount\x123\n" +
+	"\x16last_author_subject_id\x18\x18 \x01(\tR\x13lastAuthorSubjectId\"o\n" +
 	"\x13ListThreadsResponse\x127\n" +
 	"\athreads\x18\x01 \x03(\v2\x1d.model_plane.v1.ThreadSummaryR\athreads\x12\x1f\n" +
 	"\vnext_cursor\x18\x02 \x01(\tR\n" +
@@ -9087,126 +9162,127 @@ var file_model_plane_v1_sessions_proto_depIdxs = []int32{
 	37,  // 15: model_plane.v1.GetContextAssemblyResponse.segments:type_name -> model_plane.v1.ContextSegment
 	45,  // 16: model_plane.v1.ListAgentSkillsResponse.skills:type_name -> model_plane.v1.AgentSkill
 	101, // 17: model_plane.v1.SessionMessage.metadata:type_name -> google.protobuf.Struct
-	48,  // 18: model_plane.v1.ListConversationResponse.messages:type_name -> model_plane.v1.SessionMessage
-	2,   // 19: model_plane.v1.ListThreadsRequest.archived:type_name -> model_plane.v1.ArchiveFilter
-	102, // 20: model_plane.v1.ThreadSummary.created_at:type_name -> google.protobuf.Timestamp
-	102, // 21: model_plane.v1.ThreadSummary.updated_at:type_name -> google.protobuf.Timestamp
-	102, // 22: model_plane.v1.ThreadSummary.latest_run_updated_at:type_name -> google.protobuf.Timestamp
-	102, // 23: model_plane.v1.ThreadSummary.archived_at:type_name -> google.protobuf.Timestamp
-	102, // 24: model_plane.v1.ThreadSummary.last_read_at:type_name -> google.protobuf.Timestamp
-	51,  // 25: model_plane.v1.ListThreadsResponse.threads:type_name -> model_plane.v1.ThreadSummary
-	102, // 26: model_plane.v1.ArchiveThreadResponse.archived_at:type_name -> google.protobuf.Timestamp
-	103, // 27: model_plane.v1.SetRunModeRequest.granted_rung:type_name -> model_plane.v1.AutonomyRung
-	103, // 28: model_plane.v1.SetRunModeResponse.granted_rung:type_name -> model_plane.v1.AutonomyRung
-	75,  // 29: model_plane.v1.CountWaivedRunsResponse.counts:type_name -> model_plane.v1.WaivedRunCount
-	102, // 30: model_plane.v1.WaivedRunCount.last_used_at:type_name -> google.protobuf.Timestamp
-	103, // 31: model_plane.v1.GetThreadGrantResponse.granted_rung:type_name -> model_plane.v1.AutonomyRung
-	102, // 32: model_plane.v1.GetThreadGrantResponse.expires_at:type_name -> google.protobuf.Timestamp
-	104, // 33: model_plane.v1.RecordRunContextRequest.status:type_name -> model_plane.v1.RunContextStatus
-	102, // 34: model_plane.v1.SaveLoopCheckpointRequest.park_until:type_name -> google.protobuf.Timestamp
-	87,  // 35: model_plane.v1.ListToolActionsResponse.actions:type_name -> model_plane.v1.ToolActionState
-	3,   // 36: model_plane.v1.SearchMessagesRequest.purpose:type_name -> model_plane.v1.SearchPurpose
-	2,   // 37: model_plane.v1.SearchMessagesRequest.archived:type_name -> model_plane.v1.ArchiveFilter
-	102, // 38: model_plane.v1.SearchHit.created_at:type_name -> google.protobuf.Timestamp
-	90,  // 39: model_plane.v1.SearchMessagesResponse.hits:type_name -> model_plane.v1.SearchHit
-	4,   // 40: model_plane.v1.DecideSkillProposalRequest.decision:type_name -> model_plane.v1.SkillDecision
-	102, // 41: model_plane.v1.LearningLedgerEntry.created_at:type_name -> google.protobuf.Timestamp
-	97,  // 42: model_plane.v1.ListLearningLedgerResponse.entries:type_name -> model_plane.v1.LearningLedgerEntry
-	5,   // 43: model_plane.v1.SessionCore.CreateThread:input_type -> model_plane.v1.CreateThreadRequest
-	7,   // 44: model_plane.v1.SessionCore.AppendMessage:input_type -> model_plane.v1.AppendMessageRequest
-	9,   // 45: model_plane.v1.SessionCore.StartRun:input_type -> model_plane.v1.StartRunRequest
-	11,  // 46: model_plane.v1.SessionCore.StartScheduledRun:input_type -> model_plane.v1.StartScheduledRunRequest
-	12,  // 47: model_plane.v1.SessionCore.PrepareScheduledRunThread:input_type -> model_plane.v1.PrepareScheduledRunThreadRequest
-	14,  // 48: model_plane.v1.SessionCore.PrepareUserOwnedThread:input_type -> model_plane.v1.PrepareUserOwnedThreadRequest
-	26,  // 49: model_plane.v1.SessionCore.CompleteStep:input_type -> model_plane.v1.CompleteStepRequest
-	28,  // 50: model_plane.v1.SessionCore.ReserveToolAction:input_type -> model_plane.v1.ReserveToolActionRequest
-	30,  // 51: model_plane.v1.SessionCore.FinalizeToolAction:input_type -> model_plane.v1.FinalizeToolActionRequest
-	32,  // 52: model_plane.v1.SessionCore.SaveCheckpoint:input_type -> model_plane.v1.SaveCheckpointRequest
-	80,  // 53: model_plane.v1.SessionCore.SaveLoopCheckpoint:input_type -> model_plane.v1.SaveLoopCheckpointRequest
-	82,  // 54: model_plane.v1.SessionCore.ClaimLoopCheckpoint:input_type -> model_plane.v1.ClaimLoopCheckpointRequest
-	84,  // 55: model_plane.v1.SessionCore.CloseLoopCheckpoint:input_type -> model_plane.v1.CloseLoopCheckpointRequest
-	86,  // 56: model_plane.v1.SessionCore.ListToolActions:input_type -> model_plane.v1.ListToolActionsRequest
-	34,  // 57: model_plane.v1.SessionCore.ReplayThread:input_type -> model_plane.v1.ReplayThreadRequest
-	35,  // 58: model_plane.v1.SessionCore.GetContextAssembly:input_type -> model_plane.v1.GetContextAssemblyRequest
-	38,  // 59: model_plane.v1.SessionCore.CompactNow:input_type -> model_plane.v1.CompactNowRequest
-	42,  // 60: model_plane.v1.SessionCore.UpsertAgentSkill:input_type -> model_plane.v1.UpsertAgentSkillRequest
-	44,  // 61: model_plane.v1.SessionCore.ListAgentSkills:input_type -> model_plane.v1.ListAgentSkillsRequest
-	40,  // 62: model_plane.v1.SessionCore.SetAgentSkillEnabled:input_type -> model_plane.v1.SetAgentSkillEnabledRequest
-	47,  // 63: model_plane.v1.SessionCore.ListConversation:input_type -> model_plane.v1.ListConversationRequest
-	50,  // 64: model_plane.v1.SessionCore.ListThreads:input_type -> model_plane.v1.ListThreadsRequest
-	53,  // 65: model_plane.v1.SessionCore.UpdateThreadPresentation:input_type -> model_plane.v1.UpdateThreadPresentationRequest
-	55,  // 66: model_plane.v1.SessionCore.ArchiveThread:input_type -> model_plane.v1.ArchiveThreadRequest
-	57,  // 67: model_plane.v1.SessionCore.ArchiveThreads:input_type -> model_plane.v1.ArchiveThreadsRequest
-	59,  // 68: model_plane.v1.SessionCore.DeleteThread:input_type -> model_plane.v1.DeleteThreadRequest
-	61,  // 69: model_plane.v1.SessionCore.DeleteThreads:input_type -> model_plane.v1.DeleteThreadsRequest
-	63,  // 70: model_plane.v1.SessionCore.DeleteSpaceThreads:input_type -> model_plane.v1.DeleteSpaceThreadsRequest
-	65,  // 71: model_plane.v1.SessionCore.SetRunMode:input_type -> model_plane.v1.SetRunModeRequest
-	67,  // 72: model_plane.v1.SessionCore.ClaimScheduledStep:input_type -> model_plane.v1.ClaimScheduledStepRequest
-	69,  // 73: model_plane.v1.SessionCore.RecordScheduledStepReceipt:input_type -> model_plane.v1.RecordScheduledStepReceiptRequest
-	78,  // 74: model_plane.v1.SessionCore.RecordRunContext:input_type -> model_plane.v1.RecordRunContextRequest
-	71,  // 75: model_plane.v1.SessionCore.RecordScheduledRunResult:input_type -> model_plane.v1.RecordScheduledRunResultRequest
-	16,  // 76: model_plane.v1.ManagedRunLifecycle.StartManagedRun:input_type -> model_plane.v1.StartManagedRunRequest
-	18,  // 77: model_plane.v1.ManagedRunLifecycle.RecordTerminalOutcome:input_type -> model_plane.v1.RecordTerminalOutcomeRequest
-	22,  // 78: model_plane.v1.ManagedRunLifecycle.HeartbeatManagedRun:input_type -> model_plane.v1.HeartbeatManagedRunRequest
-	20,  // 79: model_plane.v1.ManagedRunLifecycle.RecordRunOutput:input_type -> model_plane.v1.RecordRunOutputRequest
-	24,  // 80: model_plane.v1.ManagedRunLifecycle.CompleteDirectRunWithMessage:input_type -> model_plane.v1.CompleteDirectRunWithMessageRequest
-	73,  // 81: model_plane.v1.SessionRetentionService.CountWaivedRuns:input_type -> model_plane.v1.CountWaivedRunsRequest
-	76,  // 82: model_plane.v1.ThreadAutonomy.GetThreadGrant:input_type -> model_plane.v1.GetThreadGrantRequest
-	89,  // 83: model_plane.v1.MessageSearch.SearchMessages:input_type -> model_plane.v1.SearchMessagesRequest
-	99,  // 84: model_plane.v1.MessageTreeService.SetActiveLeaf:input_type -> model_plane.v1.SetActiveLeafRequest
-	92,  // 85: model_plane.v1.LearningGovernanceService.DecideSkillProposal:input_type -> model_plane.v1.DecideSkillProposalRequest
-	94,  // 86: model_plane.v1.LearningGovernanceService.UndoLearningEntry:input_type -> model_plane.v1.UndoLearningEntryRequest
-	96,  // 87: model_plane.v1.LearningGovernanceService.ListLearningLedger:input_type -> model_plane.v1.ListLearningLedgerRequest
-	6,   // 88: model_plane.v1.SessionCore.CreateThread:output_type -> model_plane.v1.CreateThreadResponse
-	8,   // 89: model_plane.v1.SessionCore.AppendMessage:output_type -> model_plane.v1.AppendMessageResponse
-	10,  // 90: model_plane.v1.SessionCore.StartRun:output_type -> model_plane.v1.StartRunResponse
-	10,  // 91: model_plane.v1.SessionCore.StartScheduledRun:output_type -> model_plane.v1.StartRunResponse
-	13,  // 92: model_plane.v1.SessionCore.PrepareScheduledRunThread:output_type -> model_plane.v1.PrepareScheduledRunThreadResponse
-	15,  // 93: model_plane.v1.SessionCore.PrepareUserOwnedThread:output_type -> model_plane.v1.PrepareUserOwnedThreadResponse
-	27,  // 94: model_plane.v1.SessionCore.CompleteStep:output_type -> model_plane.v1.CompleteStepResponse
-	29,  // 95: model_plane.v1.SessionCore.ReserveToolAction:output_type -> model_plane.v1.ReserveToolActionResponse
-	31,  // 96: model_plane.v1.SessionCore.FinalizeToolAction:output_type -> model_plane.v1.FinalizeToolActionResponse
-	33,  // 97: model_plane.v1.SessionCore.SaveCheckpoint:output_type -> model_plane.v1.SaveCheckpointResponse
-	81,  // 98: model_plane.v1.SessionCore.SaveLoopCheckpoint:output_type -> model_plane.v1.SaveLoopCheckpointResponse
-	83,  // 99: model_plane.v1.SessionCore.ClaimLoopCheckpoint:output_type -> model_plane.v1.ClaimLoopCheckpointResponse
-	85,  // 100: model_plane.v1.SessionCore.CloseLoopCheckpoint:output_type -> model_plane.v1.CloseLoopCheckpointResponse
-	88,  // 101: model_plane.v1.SessionCore.ListToolActions:output_type -> model_plane.v1.ListToolActionsResponse
-	105, // 102: model_plane.v1.SessionCore.ReplayThread:output_type -> model_plane.v1.Event
-	36,  // 103: model_plane.v1.SessionCore.GetContextAssembly:output_type -> model_plane.v1.GetContextAssemblyResponse
-	39,  // 104: model_plane.v1.SessionCore.CompactNow:output_type -> model_plane.v1.CompactNowResponse
-	43,  // 105: model_plane.v1.SessionCore.UpsertAgentSkill:output_type -> model_plane.v1.UpsertAgentSkillResponse
-	46,  // 106: model_plane.v1.SessionCore.ListAgentSkills:output_type -> model_plane.v1.ListAgentSkillsResponse
-	41,  // 107: model_plane.v1.SessionCore.SetAgentSkillEnabled:output_type -> model_plane.v1.SetAgentSkillEnabledResponse
-	49,  // 108: model_plane.v1.SessionCore.ListConversation:output_type -> model_plane.v1.ListConversationResponse
-	52,  // 109: model_plane.v1.SessionCore.ListThreads:output_type -> model_plane.v1.ListThreadsResponse
-	54,  // 110: model_plane.v1.SessionCore.UpdateThreadPresentation:output_type -> model_plane.v1.UpdateThreadPresentationResponse
-	56,  // 111: model_plane.v1.SessionCore.ArchiveThread:output_type -> model_plane.v1.ArchiveThreadResponse
-	58,  // 112: model_plane.v1.SessionCore.ArchiveThreads:output_type -> model_plane.v1.ArchiveThreadsResponse
-	60,  // 113: model_plane.v1.SessionCore.DeleteThread:output_type -> model_plane.v1.DeleteThreadResponse
-	62,  // 114: model_plane.v1.SessionCore.DeleteThreads:output_type -> model_plane.v1.DeleteThreadsResponse
-	64,  // 115: model_plane.v1.SessionCore.DeleteSpaceThreads:output_type -> model_plane.v1.DeleteSpaceThreadsResponse
-	66,  // 116: model_plane.v1.SessionCore.SetRunMode:output_type -> model_plane.v1.SetRunModeResponse
-	68,  // 117: model_plane.v1.SessionCore.ClaimScheduledStep:output_type -> model_plane.v1.ClaimScheduledStepResponse
-	70,  // 118: model_plane.v1.SessionCore.RecordScheduledStepReceipt:output_type -> model_plane.v1.RecordScheduledStepReceiptResponse
-	79,  // 119: model_plane.v1.SessionCore.RecordRunContext:output_type -> model_plane.v1.RecordRunContextResponse
-	72,  // 120: model_plane.v1.SessionCore.RecordScheduledRunResult:output_type -> model_plane.v1.RecordScheduledRunResultResponse
-	17,  // 121: model_plane.v1.ManagedRunLifecycle.StartManagedRun:output_type -> model_plane.v1.StartManagedRunResponse
-	19,  // 122: model_plane.v1.ManagedRunLifecycle.RecordTerminalOutcome:output_type -> model_plane.v1.RecordTerminalOutcomeResponse
-	23,  // 123: model_plane.v1.ManagedRunLifecycle.HeartbeatManagedRun:output_type -> model_plane.v1.HeartbeatManagedRunResponse
-	21,  // 124: model_plane.v1.ManagedRunLifecycle.RecordRunOutput:output_type -> model_plane.v1.RecordRunOutputResponse
-	25,  // 125: model_plane.v1.ManagedRunLifecycle.CompleteDirectRunWithMessage:output_type -> model_plane.v1.CompleteDirectRunWithMessageResponse
-	74,  // 126: model_plane.v1.SessionRetentionService.CountWaivedRuns:output_type -> model_plane.v1.CountWaivedRunsResponse
-	77,  // 127: model_plane.v1.ThreadAutonomy.GetThreadGrant:output_type -> model_plane.v1.GetThreadGrantResponse
-	91,  // 128: model_plane.v1.MessageSearch.SearchMessages:output_type -> model_plane.v1.SearchMessagesResponse
-	100, // 129: model_plane.v1.MessageTreeService.SetActiveLeaf:output_type -> model_plane.v1.SetActiveLeafResponse
-	93,  // 130: model_plane.v1.LearningGovernanceService.DecideSkillProposal:output_type -> model_plane.v1.DecideSkillProposalResponse
-	95,  // 131: model_plane.v1.LearningGovernanceService.UndoLearningEntry:output_type -> model_plane.v1.UndoLearningEntryResponse
-	98,  // 132: model_plane.v1.LearningGovernanceService.ListLearningLedger:output_type -> model_plane.v1.ListLearningLedgerResponse
-	88,  // [88:133] is the sub-list for method output_type
-	43,  // [43:88] is the sub-list for method input_type
-	43,  // [43:43] is the sub-list for extension type_name
-	43,  // [43:43] is the sub-list for extension extendee
-	0,   // [0:43] is the sub-list for field type_name
+	102, // 18: model_plane.v1.SessionMessage.created_at:type_name -> google.protobuf.Timestamp
+	48,  // 19: model_plane.v1.ListConversationResponse.messages:type_name -> model_plane.v1.SessionMessage
+	2,   // 20: model_plane.v1.ListThreadsRequest.archived:type_name -> model_plane.v1.ArchiveFilter
+	102, // 21: model_plane.v1.ThreadSummary.created_at:type_name -> google.protobuf.Timestamp
+	102, // 22: model_plane.v1.ThreadSummary.updated_at:type_name -> google.protobuf.Timestamp
+	102, // 23: model_plane.v1.ThreadSummary.latest_run_updated_at:type_name -> google.protobuf.Timestamp
+	102, // 24: model_plane.v1.ThreadSummary.archived_at:type_name -> google.protobuf.Timestamp
+	102, // 25: model_plane.v1.ThreadSummary.last_read_at:type_name -> google.protobuf.Timestamp
+	51,  // 26: model_plane.v1.ListThreadsResponse.threads:type_name -> model_plane.v1.ThreadSummary
+	102, // 27: model_plane.v1.ArchiveThreadResponse.archived_at:type_name -> google.protobuf.Timestamp
+	103, // 28: model_plane.v1.SetRunModeRequest.granted_rung:type_name -> model_plane.v1.AutonomyRung
+	103, // 29: model_plane.v1.SetRunModeResponse.granted_rung:type_name -> model_plane.v1.AutonomyRung
+	75,  // 30: model_plane.v1.CountWaivedRunsResponse.counts:type_name -> model_plane.v1.WaivedRunCount
+	102, // 31: model_plane.v1.WaivedRunCount.last_used_at:type_name -> google.protobuf.Timestamp
+	103, // 32: model_plane.v1.GetThreadGrantResponse.granted_rung:type_name -> model_plane.v1.AutonomyRung
+	102, // 33: model_plane.v1.GetThreadGrantResponse.expires_at:type_name -> google.protobuf.Timestamp
+	104, // 34: model_plane.v1.RecordRunContextRequest.status:type_name -> model_plane.v1.RunContextStatus
+	102, // 35: model_plane.v1.SaveLoopCheckpointRequest.park_until:type_name -> google.protobuf.Timestamp
+	87,  // 36: model_plane.v1.ListToolActionsResponse.actions:type_name -> model_plane.v1.ToolActionState
+	3,   // 37: model_plane.v1.SearchMessagesRequest.purpose:type_name -> model_plane.v1.SearchPurpose
+	2,   // 38: model_plane.v1.SearchMessagesRequest.archived:type_name -> model_plane.v1.ArchiveFilter
+	102, // 39: model_plane.v1.SearchHit.created_at:type_name -> google.protobuf.Timestamp
+	90,  // 40: model_plane.v1.SearchMessagesResponse.hits:type_name -> model_plane.v1.SearchHit
+	4,   // 41: model_plane.v1.DecideSkillProposalRequest.decision:type_name -> model_plane.v1.SkillDecision
+	102, // 42: model_plane.v1.LearningLedgerEntry.created_at:type_name -> google.protobuf.Timestamp
+	97,  // 43: model_plane.v1.ListLearningLedgerResponse.entries:type_name -> model_plane.v1.LearningLedgerEntry
+	5,   // 44: model_plane.v1.SessionCore.CreateThread:input_type -> model_plane.v1.CreateThreadRequest
+	7,   // 45: model_plane.v1.SessionCore.AppendMessage:input_type -> model_plane.v1.AppendMessageRequest
+	9,   // 46: model_plane.v1.SessionCore.StartRun:input_type -> model_plane.v1.StartRunRequest
+	11,  // 47: model_plane.v1.SessionCore.StartScheduledRun:input_type -> model_plane.v1.StartScheduledRunRequest
+	12,  // 48: model_plane.v1.SessionCore.PrepareScheduledRunThread:input_type -> model_plane.v1.PrepareScheduledRunThreadRequest
+	14,  // 49: model_plane.v1.SessionCore.PrepareUserOwnedThread:input_type -> model_plane.v1.PrepareUserOwnedThreadRequest
+	26,  // 50: model_plane.v1.SessionCore.CompleteStep:input_type -> model_plane.v1.CompleteStepRequest
+	28,  // 51: model_plane.v1.SessionCore.ReserveToolAction:input_type -> model_plane.v1.ReserveToolActionRequest
+	30,  // 52: model_plane.v1.SessionCore.FinalizeToolAction:input_type -> model_plane.v1.FinalizeToolActionRequest
+	32,  // 53: model_plane.v1.SessionCore.SaveCheckpoint:input_type -> model_plane.v1.SaveCheckpointRequest
+	80,  // 54: model_plane.v1.SessionCore.SaveLoopCheckpoint:input_type -> model_plane.v1.SaveLoopCheckpointRequest
+	82,  // 55: model_plane.v1.SessionCore.ClaimLoopCheckpoint:input_type -> model_plane.v1.ClaimLoopCheckpointRequest
+	84,  // 56: model_plane.v1.SessionCore.CloseLoopCheckpoint:input_type -> model_plane.v1.CloseLoopCheckpointRequest
+	86,  // 57: model_plane.v1.SessionCore.ListToolActions:input_type -> model_plane.v1.ListToolActionsRequest
+	34,  // 58: model_plane.v1.SessionCore.ReplayThread:input_type -> model_plane.v1.ReplayThreadRequest
+	35,  // 59: model_plane.v1.SessionCore.GetContextAssembly:input_type -> model_plane.v1.GetContextAssemblyRequest
+	38,  // 60: model_plane.v1.SessionCore.CompactNow:input_type -> model_plane.v1.CompactNowRequest
+	42,  // 61: model_plane.v1.SessionCore.UpsertAgentSkill:input_type -> model_plane.v1.UpsertAgentSkillRequest
+	44,  // 62: model_plane.v1.SessionCore.ListAgentSkills:input_type -> model_plane.v1.ListAgentSkillsRequest
+	40,  // 63: model_plane.v1.SessionCore.SetAgentSkillEnabled:input_type -> model_plane.v1.SetAgentSkillEnabledRequest
+	47,  // 64: model_plane.v1.SessionCore.ListConversation:input_type -> model_plane.v1.ListConversationRequest
+	50,  // 65: model_plane.v1.SessionCore.ListThreads:input_type -> model_plane.v1.ListThreadsRequest
+	53,  // 66: model_plane.v1.SessionCore.UpdateThreadPresentation:input_type -> model_plane.v1.UpdateThreadPresentationRequest
+	55,  // 67: model_plane.v1.SessionCore.ArchiveThread:input_type -> model_plane.v1.ArchiveThreadRequest
+	57,  // 68: model_plane.v1.SessionCore.ArchiveThreads:input_type -> model_plane.v1.ArchiveThreadsRequest
+	59,  // 69: model_plane.v1.SessionCore.DeleteThread:input_type -> model_plane.v1.DeleteThreadRequest
+	61,  // 70: model_plane.v1.SessionCore.DeleteThreads:input_type -> model_plane.v1.DeleteThreadsRequest
+	63,  // 71: model_plane.v1.SessionCore.DeleteSpaceThreads:input_type -> model_plane.v1.DeleteSpaceThreadsRequest
+	65,  // 72: model_plane.v1.SessionCore.SetRunMode:input_type -> model_plane.v1.SetRunModeRequest
+	67,  // 73: model_plane.v1.SessionCore.ClaimScheduledStep:input_type -> model_plane.v1.ClaimScheduledStepRequest
+	69,  // 74: model_plane.v1.SessionCore.RecordScheduledStepReceipt:input_type -> model_plane.v1.RecordScheduledStepReceiptRequest
+	78,  // 75: model_plane.v1.SessionCore.RecordRunContext:input_type -> model_plane.v1.RecordRunContextRequest
+	71,  // 76: model_plane.v1.SessionCore.RecordScheduledRunResult:input_type -> model_plane.v1.RecordScheduledRunResultRequest
+	16,  // 77: model_plane.v1.ManagedRunLifecycle.StartManagedRun:input_type -> model_plane.v1.StartManagedRunRequest
+	18,  // 78: model_plane.v1.ManagedRunLifecycle.RecordTerminalOutcome:input_type -> model_plane.v1.RecordTerminalOutcomeRequest
+	22,  // 79: model_plane.v1.ManagedRunLifecycle.HeartbeatManagedRun:input_type -> model_plane.v1.HeartbeatManagedRunRequest
+	20,  // 80: model_plane.v1.ManagedRunLifecycle.RecordRunOutput:input_type -> model_plane.v1.RecordRunOutputRequest
+	24,  // 81: model_plane.v1.ManagedRunLifecycle.CompleteDirectRunWithMessage:input_type -> model_plane.v1.CompleteDirectRunWithMessageRequest
+	73,  // 82: model_plane.v1.SessionRetentionService.CountWaivedRuns:input_type -> model_plane.v1.CountWaivedRunsRequest
+	76,  // 83: model_plane.v1.ThreadAutonomy.GetThreadGrant:input_type -> model_plane.v1.GetThreadGrantRequest
+	89,  // 84: model_plane.v1.MessageSearch.SearchMessages:input_type -> model_plane.v1.SearchMessagesRequest
+	99,  // 85: model_plane.v1.MessageTreeService.SetActiveLeaf:input_type -> model_plane.v1.SetActiveLeafRequest
+	92,  // 86: model_plane.v1.LearningGovernanceService.DecideSkillProposal:input_type -> model_plane.v1.DecideSkillProposalRequest
+	94,  // 87: model_plane.v1.LearningGovernanceService.UndoLearningEntry:input_type -> model_plane.v1.UndoLearningEntryRequest
+	96,  // 88: model_plane.v1.LearningGovernanceService.ListLearningLedger:input_type -> model_plane.v1.ListLearningLedgerRequest
+	6,   // 89: model_plane.v1.SessionCore.CreateThread:output_type -> model_plane.v1.CreateThreadResponse
+	8,   // 90: model_plane.v1.SessionCore.AppendMessage:output_type -> model_plane.v1.AppendMessageResponse
+	10,  // 91: model_plane.v1.SessionCore.StartRun:output_type -> model_plane.v1.StartRunResponse
+	10,  // 92: model_plane.v1.SessionCore.StartScheduledRun:output_type -> model_plane.v1.StartRunResponse
+	13,  // 93: model_plane.v1.SessionCore.PrepareScheduledRunThread:output_type -> model_plane.v1.PrepareScheduledRunThreadResponse
+	15,  // 94: model_plane.v1.SessionCore.PrepareUserOwnedThread:output_type -> model_plane.v1.PrepareUserOwnedThreadResponse
+	27,  // 95: model_plane.v1.SessionCore.CompleteStep:output_type -> model_plane.v1.CompleteStepResponse
+	29,  // 96: model_plane.v1.SessionCore.ReserveToolAction:output_type -> model_plane.v1.ReserveToolActionResponse
+	31,  // 97: model_plane.v1.SessionCore.FinalizeToolAction:output_type -> model_plane.v1.FinalizeToolActionResponse
+	33,  // 98: model_plane.v1.SessionCore.SaveCheckpoint:output_type -> model_plane.v1.SaveCheckpointResponse
+	81,  // 99: model_plane.v1.SessionCore.SaveLoopCheckpoint:output_type -> model_plane.v1.SaveLoopCheckpointResponse
+	83,  // 100: model_plane.v1.SessionCore.ClaimLoopCheckpoint:output_type -> model_plane.v1.ClaimLoopCheckpointResponse
+	85,  // 101: model_plane.v1.SessionCore.CloseLoopCheckpoint:output_type -> model_plane.v1.CloseLoopCheckpointResponse
+	88,  // 102: model_plane.v1.SessionCore.ListToolActions:output_type -> model_plane.v1.ListToolActionsResponse
+	105, // 103: model_plane.v1.SessionCore.ReplayThread:output_type -> model_plane.v1.Event
+	36,  // 104: model_plane.v1.SessionCore.GetContextAssembly:output_type -> model_plane.v1.GetContextAssemblyResponse
+	39,  // 105: model_plane.v1.SessionCore.CompactNow:output_type -> model_plane.v1.CompactNowResponse
+	43,  // 106: model_plane.v1.SessionCore.UpsertAgentSkill:output_type -> model_plane.v1.UpsertAgentSkillResponse
+	46,  // 107: model_plane.v1.SessionCore.ListAgentSkills:output_type -> model_plane.v1.ListAgentSkillsResponse
+	41,  // 108: model_plane.v1.SessionCore.SetAgentSkillEnabled:output_type -> model_plane.v1.SetAgentSkillEnabledResponse
+	49,  // 109: model_plane.v1.SessionCore.ListConversation:output_type -> model_plane.v1.ListConversationResponse
+	52,  // 110: model_plane.v1.SessionCore.ListThreads:output_type -> model_plane.v1.ListThreadsResponse
+	54,  // 111: model_plane.v1.SessionCore.UpdateThreadPresentation:output_type -> model_plane.v1.UpdateThreadPresentationResponse
+	56,  // 112: model_plane.v1.SessionCore.ArchiveThread:output_type -> model_plane.v1.ArchiveThreadResponse
+	58,  // 113: model_plane.v1.SessionCore.ArchiveThreads:output_type -> model_plane.v1.ArchiveThreadsResponse
+	60,  // 114: model_plane.v1.SessionCore.DeleteThread:output_type -> model_plane.v1.DeleteThreadResponse
+	62,  // 115: model_plane.v1.SessionCore.DeleteThreads:output_type -> model_plane.v1.DeleteThreadsResponse
+	64,  // 116: model_plane.v1.SessionCore.DeleteSpaceThreads:output_type -> model_plane.v1.DeleteSpaceThreadsResponse
+	66,  // 117: model_plane.v1.SessionCore.SetRunMode:output_type -> model_plane.v1.SetRunModeResponse
+	68,  // 118: model_plane.v1.SessionCore.ClaimScheduledStep:output_type -> model_plane.v1.ClaimScheduledStepResponse
+	70,  // 119: model_plane.v1.SessionCore.RecordScheduledStepReceipt:output_type -> model_plane.v1.RecordScheduledStepReceiptResponse
+	79,  // 120: model_plane.v1.SessionCore.RecordRunContext:output_type -> model_plane.v1.RecordRunContextResponse
+	72,  // 121: model_plane.v1.SessionCore.RecordScheduledRunResult:output_type -> model_plane.v1.RecordScheduledRunResultResponse
+	17,  // 122: model_plane.v1.ManagedRunLifecycle.StartManagedRun:output_type -> model_plane.v1.StartManagedRunResponse
+	19,  // 123: model_plane.v1.ManagedRunLifecycle.RecordTerminalOutcome:output_type -> model_plane.v1.RecordTerminalOutcomeResponse
+	23,  // 124: model_plane.v1.ManagedRunLifecycle.HeartbeatManagedRun:output_type -> model_plane.v1.HeartbeatManagedRunResponse
+	21,  // 125: model_plane.v1.ManagedRunLifecycle.RecordRunOutput:output_type -> model_plane.v1.RecordRunOutputResponse
+	25,  // 126: model_plane.v1.ManagedRunLifecycle.CompleteDirectRunWithMessage:output_type -> model_plane.v1.CompleteDirectRunWithMessageResponse
+	74,  // 127: model_plane.v1.SessionRetentionService.CountWaivedRuns:output_type -> model_plane.v1.CountWaivedRunsResponse
+	77,  // 128: model_plane.v1.ThreadAutonomy.GetThreadGrant:output_type -> model_plane.v1.GetThreadGrantResponse
+	91,  // 129: model_plane.v1.MessageSearch.SearchMessages:output_type -> model_plane.v1.SearchMessagesResponse
+	100, // 130: model_plane.v1.MessageTreeService.SetActiveLeaf:output_type -> model_plane.v1.SetActiveLeafResponse
+	93,  // 131: model_plane.v1.LearningGovernanceService.DecideSkillProposal:output_type -> model_plane.v1.DecideSkillProposalResponse
+	95,  // 132: model_plane.v1.LearningGovernanceService.UndoLearningEntry:output_type -> model_plane.v1.UndoLearningEntryResponse
+	98,  // 133: model_plane.v1.LearningGovernanceService.ListLearningLedger:output_type -> model_plane.v1.ListLearningLedgerResponse
+	89,  // [89:134] is the sub-list for method output_type
+	44,  // [44:89] is the sub-list for method input_type
+	44,  // [44:44] is the sub-list for extension type_name
+	44,  // [44:44] is the sub-list for extension extendee
+	0,   // [0:44] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_sessions_proto_init() }

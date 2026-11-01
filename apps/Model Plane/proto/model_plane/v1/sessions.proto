@@ -430,6 +430,13 @@ message AppendMessageRequest {
   // derived from content, and never sent for a zero-retention turn (such a
   // credential cannot append at all). Empty = no receipt, today's behaviour.
   string client_message_id = 18;
+
+  // What kind of row this is in the room: "" and "turn" are today's
+  // conversation turn (the owner's prompt, the agent's answer); "post" is a
+  // human message written to the room and never sent to the agent. Posts are
+  // kept out of model context, agent memory and Dreaming (see
+  // ListConversationRequest.include_human_posts). Any other value is refused.
+  string post_kind = 19;
 }
 
 message AppendMessageResponse {
@@ -1105,6 +1112,12 @@ message ListConversationRequest {
   // `on_active_path = false` (WS17 S8). Off, the read is the active path only, and
   // every prompt, learning and Dreaming reader leaves it off.
   bool include_inactive = 8;
+
+  // Human posts (post_kind "post") are filtered out of every read unless the
+  // caller sets this. False is the default so every caller, the model-callable
+  // reattach_context included, is contained without doing anything; only the
+  // UI transcript route opts in.
+  bool include_human_posts = 9;
 }
 
 // One conversation turn. Named SessionMessage (not ThreadMessage, which the
@@ -1150,6 +1163,13 @@ message SessionMessage {
   // True when the turn is on the active path: the chain from the first turn to the
   // thread's active leaf. Only inactive turns are read with `include_inactive`.
   bool on_active_path = 10;
+  // "turn" or "post" (see AppendMessageRequest.post_kind). Rows written before
+  // the column existed read as "turn".
+  string post_kind = 11;
+  // When this turn was stored (messages.created_at). A room shows a time beside
+  // each message and this is the only source for it; absent only when a caller
+  // built the message without reading it from the store.
+  google.protobuf.Timestamp created_at = 12;
 }
 
 message ListConversationResponse {
@@ -1273,6 +1293,13 @@ message ThreadSummary {
   // The owner's last read of the thread. Mark-read sets it to now; mark-unread
   // moves it to one microsecond before the newest assistant message.
   google.protobuf.Timestamp last_read_at = 22;
+  // Human replies in the thread: user rows after the first, counted under the
+  // same audience ceiling as the rest of the read so a count never reveals a
+  // row the reader could not open. Presentation only.
+  uint32 reply_count = 23;
+  // Author subject of the latest human row the reader may see; empty when
+  // there is none. Presentation only, never a grant.
+  string last_author_subject_id = 24;
 }
 
 message ListThreadsResponse {

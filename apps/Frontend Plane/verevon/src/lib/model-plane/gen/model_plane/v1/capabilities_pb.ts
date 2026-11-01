@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file model_plane/v1/capabilities.proto.
  */
 export const file_model_plane_v1_capabilities: GenFile = /*@__PURE__*/
-  fileDesc("CiFtb2RlbF9wbGFuZS92MS9jYXBhYmlsaXRpZXMucHJvdG8SDm1vZGVsX3BsYW5lLnYxIl4KF0xpc3RDYXBhYmlsaXRpZXNSZXF1ZXN0EhMKC2tpbmRfZmlsdGVyGAEgASgJEg0KBXF1ZXJ5GAIgASgJEhAKCGFmdGVyX2lkGAMgASgJEg0KBWxpbWl0GAQgASgNImQKGExpc3RDYXBhYmlsaXRpZXNSZXNwb25zZRI2CgxjYXBhYmlsaXRpZXMYASADKAsyIC5tb2RlbF9wbGFuZS52MS5DYXBhYmlsaXR5RGV0YWlsEhAKCGhhc19tb3JlGAIgASgIIkkKFEdldENhcGFiaWxpdHlSZXF1ZXN0EhUKDWNhcGFiaWxpdHlfaWQYASABKAkSGgoSdmVyc2lvbl9jb25zdHJhaW50GAIgASgJIv0CChBDYXBhYmlsaXR5RGV0YWlsEhUKDWNhcGFiaWxpdHlfaWQYASABKAkSDAoEbmFtZRgCIAEoCRIMCgRraW5kGAMgASgJEg8KB3ZlcnNpb24YBCABKAkSEwoLZGVzY3JpcHRpb24YBSABKAkSEgoKcmlza19sZXZlbBgGIAEoCRIRCglsYXp5X2xvYWQYByABKAgSDQoFc2NvcGUYCCABKAkSDQoFc3RhdGUYCSABKAkSEwoLcmVhc29uX2NvZGUYCiABKAkSDgoGcmVhc29uGAsgASgJEhkKEXJlcXVpcmVzX2FwcHJvdmFsGAwgASgIEhYKDmV4ZWN1dGlvbl9tb2RlGA0gASgJEhIKCmNvc3RfY2xhc3MYDiABKAkSGQoRaGVhbHRoX2NoZWNrZWRfYXQYDyABKAkSMQoMcHJpdmFjeV90aWVyGBAgASgOMhsubW9kZWxfcGxhbmUudjEuUHJpdmFjeVRpZXISEQoJcmVzaWRlbmN5GBEgASgJIm8KFUV2YWx1YXRlUG9saWN5UmVxdWVzdBIVCg1jYXBhYmlsaXR5X2lkGAEgASgJEg4KBnJ1bl9pZBgCIAEoCRIQCghhZ2VudF9pZBgDIAEoCRIOCgZvcmdfaWQYBCABKAkSDQoFc2NvcGUYBSABKAkingEKFkV2YWx1YXRlUG9saWN5UmVzcG9uc2USEAoIZGVjaXNpb24YASABKAkSDgoGcmVhc29uGAIgASgJEhYKDmJ1ZGdldF9jb250ZXh0GAMgASgJEhMKC2RlY2lzaW9uX2lkGAQgASgJEhoKEmNhcGFiaWxpdHlfdmVyc2lvbhgFIAEoCRIZChFkZWNpc2lvbl9ldmlkZW5jZRgGIAEoCSIuChpWYWxpZGF0ZVNraWxsQnVuZGxlUmVxdWVzdBIQCghza2lsbF9pZBgBIAEoCSJyChtWYWxpZGF0ZVNraWxsQnVuZGxlUmVzcG9uc2USDQoFdmFsaWQYASABKAgSDgoGZXJyb3JzGAIgAygJEjQKCmNhcGFiaWxpdHkYAyABKAsyIC5tb2RlbF9wbGFuZS52MS5DYXBhYmlsaXR5RGV0YWlsIlQKGkNoZWNrU2tpbGxQcm9tb3Rpb25SZXF1ZXN0EhAKCHNraWxsX2lkGAEgASgJEhIKCmZyb21fc2NvcGUYAiABKAkSEAoIdG9fc2NvcGUYAyABKAkiTQobQ2hlY2tTa2lsbFByb21vdGlvblJlc3BvbnNlEg4KBnBhc3NlZBgBIAEoCBIOCgZjaGVja3MYAiADKAkSDgoGcmVhc29uGAMgASgJIk0KE1Byb21vdGVTa2lsbFJlcXVlc3QSEAoIc2tpbGxfaWQYASABKAkSEgoKZnJvbV9zY29wZRgCIAEoCRIQCgh0b19zY29wZRgDIAEoCSJ+ChRQcm9tb3RlU2tpbGxSZXNwb25zZRIQCghwcm9tb3RlZBgBIAEoCBIOCgZjaGVja3MYAiADKAkSDgoGcmVhc29uGAMgASgJEjQKCmNhcGFiaWxpdHkYBCABKAsyIC5tb2RlbF9wbGFuZS52MS5DYXBhYmlsaXR5RGV0YWlsMuwECg5DYXBhYmlsaXR5Q29yZRJlChBMaXN0Q2FwYWJpbGl0aWVzEicubW9kZWxfcGxhbmUudjEuTGlzdENhcGFiaWxpdGllc1JlcXVlc3QaKC5tb2RlbF9wbGFuZS52MS5MaXN0Q2FwYWJpbGl0aWVzUmVzcG9uc2USVwoNR2V0Q2FwYWJpbGl0eRIkLm1vZGVsX3BsYW5lLnYxLkdldENhcGFiaWxpdHlSZXF1ZXN0GiAubW9kZWxfcGxhbmUudjEuQ2FwYWJpbGl0eURldGFpbBJfCg5FdmFsdWF0ZVBvbGljeRIlLm1vZGVsX3BsYW5lLnYxLkV2YWx1YXRlUG9saWN5UmVxdWVzdBomLm1vZGVsX3BsYW5lLnYxLkV2YWx1YXRlUG9saWN5UmVzcG9uc2USbgoTVmFsaWRhdGVTa2lsbEJ1bmRsZRIqLm1vZGVsX3BsYW5lLnYxLlZhbGlkYXRlU2tpbGxCdW5kbGVSZXF1ZXN0GisubW9kZWxfcGxhbmUudjEuVmFsaWRhdGVTa2lsbEJ1bmRsZVJlc3BvbnNlEm4KE0NoZWNrU2tpbGxQcm9tb3Rpb24SKi5tb2RlbF9wbGFuZS52MS5DaGVja1NraWxsUHJvbW90aW9uUmVxdWVzdBorLm1vZGVsX3BsYW5lLnYxLkNoZWNrU2tpbGxQcm9tb3Rpb25SZXNwb25zZRJZCgxQcm9tb3RlU2tpbGwSIy5tb2RlbF9wbGFuZS52MS5Qcm9tb3RlU2tpbGxSZXF1ZXN0GiQubW9kZWxfcGxhbmUudjEuUHJvbW90ZVNraWxsUmVzcG9uc2VCuQEKEmNvbS5tb2RlbF9wbGFuZS52MUIRQ2FwYWJpbGl0aWVzUHJvdG9QAVo7Z2l0aHViLmNvbS90cmlvZGVsYWIvbW9kZWwtcGxhbmUvZ2VuL2dvL21vZGVsX3BsYW5lL3YxO21wdjGiAgNNWFiqAg1Nb2RlbFBsYW5lLlYxygINTW9kZWxQbGFuZVxWMeICGU1vZGVsUGxhbmVcVjFcR1BCTWV0YWRhdGHqAg5Nb2RlbFBsYW5lOjpWMWIGcHJvdG8z", [file_model_plane_v1_inference]);
+  fileDesc("CiFtb2RlbF9wbGFuZS92MS9jYXBhYmlsaXRpZXMucHJvdG8SDm1vZGVsX3BsYW5lLnYxIl4KF0xpc3RDYXBhYmlsaXRpZXNSZXF1ZXN0EhMKC2tpbmRfZmlsdGVyGAEgASgJEg0KBXF1ZXJ5GAIgASgJEhAKCGFmdGVyX2lkGAMgASgJEg0KBWxpbWl0GAQgASgNImQKGExpc3RDYXBhYmlsaXRpZXNSZXNwb25zZRI2CgxjYXBhYmlsaXRpZXMYASADKAsyIC5tb2RlbF9wbGFuZS52MS5DYXBhYmlsaXR5RGV0YWlsEhAKCGhhc19tb3JlGAIgASgIIkkKFEdldENhcGFiaWxpdHlSZXF1ZXN0EhUKDWNhcGFiaWxpdHlfaWQYASABKAkSGgoSdmVyc2lvbl9jb25zdHJhaW50GAIgASgJIrADChBDYXBhYmlsaXR5RGV0YWlsEhUKDWNhcGFiaWxpdHlfaWQYASABKAkSDAoEbmFtZRgCIAEoCRIMCgRraW5kGAMgASgJEg8KB3ZlcnNpb24YBCABKAkSEwoLZGVzY3JpcHRpb24YBSABKAkSEgoKcmlza19sZXZlbBgGIAEoCRIRCglsYXp5X2xvYWQYByABKAgSDQoFc2NvcGUYCCABKAkSDQoFc3RhdGUYCSABKAkSEwoLcmVhc29uX2NvZGUYCiABKAkSDgoGcmVhc29uGAsgASgJEhkKEXJlcXVpcmVzX2FwcHJvdmFsGAwgASgIEhYKDmV4ZWN1dGlvbl9tb2RlGA0gASgJEhIKCmNvc3RfY2xhc3MYDiABKAkSGQoRaGVhbHRoX2NoZWNrZWRfYXQYDyABKAkSMQoMcHJpdmFjeV90aWVyGBAgASgOMhsubW9kZWxfcGxhbmUudjEuUHJpdmFjeVRpZXISEQoJcmVzaWRlbmN5GBEgASgJEhkKEXNpZGVfZWZmZWN0X2NsYXNzGBIgASgJEhYKDmFwcHJvdmFsX2Zsb29yGBMgASgJIpMBChVFdmFsdWF0ZVBvbGljeVJlcXVlc3QSFQoNY2FwYWJpbGl0eV9pZBgBIAEoCRIOCgZydW5faWQYAiABKAkSEAoIYWdlbnRfaWQYAyABKAkSDgoGb3JnX2lkGAQgASgJEg0KBXNjb3BlGAUgASgJEg8KB3VzZXJfaWQYBiABKAkSEQoJdG9vbF9uYW1lGAcgASgJIv0BChZFdmFsdWF0ZVBvbGljeVJlc3BvbnNlEhAKCGRlY2lzaW9uGAEgASgJEg4KBnJlYXNvbhgCIAEoCRIWCg5idWRnZXRfY29udGV4dBgDIAEoCRITCgtkZWNpc2lvbl9pZBgEIAEoCRIaChJjYXBhYmlsaXR5X3ZlcnNpb24YBSABKAkSGQoRZGVjaXNpb25fZXZpZGVuY2UYBiABKAkSGQoRc2lkZV9lZmZlY3RfY2xhc3MYByABKAkSFgoOYXBwcm92YWxfZmxvb3IYCCABKAkSFQoNcG9saWN5X3NvdXJjZRgJIAEoCRITCgt0b29sX2RpZ2VzdBgKIAEoCSJhChpSZXNvbHZlVG9vbEJpbmRpbmdzUmVxdWVzdBIOCgZvcmdfaWQYASABKAkSDgoGcnVuX2lkGAIgASgJEg8KB3VzZXJfaWQYAyABKAkSEgoKdG9vbF9uYW1lcxgEIAMoCSJMChtSZXNvbHZlVG9vbEJpbmRpbmdzUmVzcG9uc2USLQoIYmluZGluZ3MYASADKAsyGy5tb2RlbF9wbGFuZS52MS5Ub29sQmluZGluZyLLAQoLVG9vbEJpbmRpbmcSEQoJdG9vbF9uYW1lGAEgASgJEhUKDWNhcGFiaWxpdHlfaWQYAiABKAkSGgoSY2FwYWJpbGl0eV92ZXJzaW9uGAMgASgJEhkKEXNpZGVfZWZmZWN0X2NsYXNzGAQgASgJEhYKDmFwcHJvdmFsX2Zsb29yGAUgASgJEhMKC3Rvb2xfZGlnZXN0GAYgASgJEhQKDHJldmlld19zdGF0ZRgHIAEoCRIYChBlZmZlY3RpdmVfcG9saWN5GAggASgJIi4KGlZhbGlkYXRlU2tpbGxCdW5kbGVSZXF1ZXN0EhAKCHNraWxsX2lkGAEgASgJInIKG1ZhbGlkYXRlU2tpbGxCdW5kbGVSZXNwb25zZRINCgV2YWxpZBgBIAEoCBIOCgZlcnJvcnMYAiADKAkSNAoKY2FwYWJpbGl0eRgDIAEoCzIgLm1vZGVsX3BsYW5lLnYxLkNhcGFiaWxpdHlEZXRhaWwiVAoaQ2hlY2tTa2lsbFByb21vdGlvblJlcXVlc3QSEAoIc2tpbGxfaWQYASABKAkSEgoKZnJvbV9zY29wZRgCIAEoCRIQCgh0b19zY29wZRgDIAEoCSJNChtDaGVja1NraWxsUHJvbW90aW9uUmVzcG9uc2USDgoGcGFzc2VkGAEgASgIEg4KBmNoZWNrcxgCIAMoCRIOCgZyZWFzb24YAyABKAkiTQoTUHJvbW90ZVNraWxsUmVxdWVzdBIQCghza2lsbF9pZBgBIAEoCRISCgpmcm9tX3Njb3BlGAIgASgJEhAKCHRvX3Njb3BlGAMgASgJIn4KFFByb21vdGVTa2lsbFJlc3BvbnNlEhAKCHByb21vdGVkGAEgASgIEg4KBmNoZWNrcxgCIAMoCRIOCgZyZWFzb24YAyABKAkSNAoKY2FwYWJpbGl0eRgEIAEoCzIgLm1vZGVsX3BsYW5lLnYxLkNhcGFiaWxpdHlEZXRhaWwiLAoXTGlzdFNraWxsQnVuZGxlc1JlcXVlc3QSEQoJc2tpbGxfaWRzGAEgAygJIk8KGExpc3RTa2lsbEJ1bmRsZXNSZXNwb25zZRIzCgdidW5kbGVzGAEgAygLMiIubW9kZWxfcGxhbmUudjEuU2tpbGxCdW5kbGVTdW1tYXJ5IpABChJTa2lsbEJ1bmRsZVN1bW1hcnkSEAoIc2tpbGxfaWQYASABKAkSFwoPbWFuaWZlc3Rfc2hhMjU2GAIgASgJEhIKCmZpbGVfY291bnQYAyABKAUSEwoLdG90YWxfYnl0ZXMYBCABKAMSEgoKY3JlYXRlZF9ieRgFIAEoCRISCgpjcmVhdGVkX2F0GAYgASgJIjEKHUdldFNraWxsQnVuZGxlTWFuaWZlc3RSZXF1ZXN0EhAKCHNraWxsX2lkGAEgASgJInAKE1NraWxsQnVuZGxlTWFuaWZlc3QSEAoIc2tpbGxfaWQYASABKAkSFwoPbWFuaWZlc3Rfc2hhMjU2GAIgASgJEi4KBWZpbGVzGAMgAygLMh8ubW9kZWxfcGxhbmUudjEuU2tpbGxCdW5kbGVGaWxlImcKD1NraWxsQnVuZGxlRmlsZRIMCgRwYXRoGAEgASgJEg4KBnNoYTI1NhgCIAEoCRISCgpzaXplX2J5dGVzGAMgASgDEhIKCmV4ZWN1dGFibGUYBCABKAgSDgoGYmluYXJ5GAUgASgIIjcKE0dldFNraWxsQmxvYlJlcXVlc3QSEAoIc2tpbGxfaWQYASABKAkSDgoGc2hhMjU2GAIgASgJIicKFEdldFNraWxsQmxvYlJlc3BvbnNlEg8KB2NvbnRlbnQYASABKAwyjAgKDkNhcGFiaWxpdHlDb3JlEmUKEExpc3RDYXBhYmlsaXRpZXMSJy5tb2RlbF9wbGFuZS52MS5MaXN0Q2FwYWJpbGl0aWVzUmVxdWVzdBooLm1vZGVsX3BsYW5lLnYxLkxpc3RDYXBhYmlsaXRpZXNSZXNwb25zZRJXCg1HZXRDYXBhYmlsaXR5EiQubW9kZWxfcGxhbmUudjEuR2V0Q2FwYWJpbGl0eVJlcXVlc3QaIC5tb2RlbF9wbGFuZS52MS5DYXBhYmlsaXR5RGV0YWlsEl8KDkV2YWx1YXRlUG9saWN5EiUubW9kZWxfcGxhbmUudjEuRXZhbHVhdGVQb2xpY3lSZXF1ZXN0GiYubW9kZWxfcGxhbmUudjEuRXZhbHVhdGVQb2xpY3lSZXNwb25zZRJuChNSZXNvbHZlVG9vbEJpbmRpbmdzEioubW9kZWxfcGxhbmUudjEuUmVzb2x2ZVRvb2xCaW5kaW5nc1JlcXVlc3QaKy5tb2RlbF9wbGFuZS52MS5SZXNvbHZlVG9vbEJpbmRpbmdzUmVzcG9uc2USbgoTVmFsaWRhdGVTa2lsbEJ1bmRsZRIqLm1vZGVsX3BsYW5lLnYxLlZhbGlkYXRlU2tpbGxCdW5kbGVSZXF1ZXN0GisubW9kZWxfcGxhbmUudjEuVmFsaWRhdGVTa2lsbEJ1bmRsZVJlc3BvbnNlEm4KE0NoZWNrU2tpbGxQcm9tb3Rpb24SKi5tb2RlbF9wbGFuZS52MS5DaGVja1NraWxsUHJvbW90aW9uUmVxdWVzdBorLm1vZGVsX3BsYW5lLnYxLkNoZWNrU2tpbGxQcm9tb3Rpb25SZXNwb25zZRJZCgxQcm9tb3RlU2tpbGwSIy5tb2RlbF9wbGFuZS52MS5Qcm9tb3RlU2tpbGxSZXF1ZXN0GiQubW9kZWxfcGxhbmUudjEuUHJvbW90ZVNraWxsUmVzcG9uc2USZQoQTGlzdFNraWxsQnVuZGxlcxInLm1vZGVsX3BsYW5lLnYxLkxpc3RTa2lsbEJ1bmRsZXNSZXF1ZXN0GigubW9kZWxfcGxhbmUudjEuTGlzdFNraWxsQnVuZGxlc1Jlc3BvbnNlEmwKFkdldFNraWxsQnVuZGxlTWFuaWZlc3QSLS5tb2RlbF9wbGFuZS52MS5HZXRTa2lsbEJ1bmRsZU1hbmlmZXN0UmVxdWVzdBojLm1vZGVsX3BsYW5lLnYxLlNraWxsQnVuZGxlTWFuaWZlc3QSWQoMR2V0U2tpbGxCbG9iEiMubW9kZWxfcGxhbmUudjEuR2V0U2tpbGxCbG9iUmVxdWVzdBokLm1vZGVsX3BsYW5lLnYxLkdldFNraWxsQmxvYlJlc3BvbnNlQrkBChJjb20ubW9kZWxfcGxhbmUudjFCEUNhcGFiaWxpdGllc1Byb3RvUAFaO2dpdGh1Yi5jb20vdHJpb2RlbGFiL21vZGVsLXBsYW5lL2dlbi9nby9tb2RlbF9wbGFuZS92MTttcHYxogIDTVhYqgINTW9kZWxQbGFuZS5WMcoCDU1vZGVsUGxhbmVcVjHiAhlNb2RlbFBsYW5lXFYxXEdQQk1ldGFkYXRh6gIOTW9kZWxQbGFuZTo6VjFiBnByb3RvMw", [file_model_plane_v1_inference]);
 
 /**
  * @generated from message model_plane.v1.ListCapabilitiesRequest
@@ -146,7 +146,7 @@ export type CapabilityDetail = Message<"model_plane.v1.CapabilityDetail"> & {
   description: string;
 
   /**
-   * Risk flags: "safe", "read_only", "mutation", "dangerous".
+   * Risk level: "low", "medium", or "high"; capability-core rejects any other value.
    *
    * @generated from field: string risk_level = 6;
    */
@@ -235,6 +235,26 @@ export type CapabilityDetail = Message<"model_plane.v1.CapabilityDetail"> & {
    * @generated from field: string residency = 17;
    */
   residency: string;
+
+  /**
+   * Declared side-effect class of the capability, the strictest class of the
+   * tools it carries: "read", "sandbox_compute", "context_write",
+   * "external_write", "destructive", "owner_effect" or "unclassified". The
+   * vocabulary is closed and "unclassified" is the strictest, so an empty or
+   * unrecognised value is reported as "unclassified", never as a weaker class.
+   * Read-only: no request field sets it.
+   *
+   * @generated from field: string side_effect_class = 18;
+   */
+  sideEffectClass: string;
+
+  /**
+   * Approval floor the class implies: "none", "ask" or "durable_owner".
+   * "owner_effect" always carries "durable_owner".
+   *
+   * @generated from field: string approval_floor = 19;
+   */
+  approvalFloor: string;
 };
 
 /**
@@ -290,6 +310,27 @@ export type EvaluatePolicyRequest = Message<"model_plane.v1.EvaluatePolicyReques
    * @generated from field: string scope = 5;
    */
   scope: string;
+
+  /**
+   * The person the run acts for. Asserted by the execution-core service
+   * principal, which is the trust boundary: capability-core accepts it only from
+   * that principal and binds it into the signed decision. Empty means the
+   * caller does not assert one.
+   *
+   * @generated from field: string user_id = 6;
+   */
+  userId: string;
+
+  /**
+   * The tool being called, as the model named it. When present, the decision is
+   * made for this tool's registry binding (class, approval floor, review state)
+   * instead of the capability's ceiling, and the name is bound into the signed
+   * decision. An `mcp__` name resolves only from the registry and is denied when
+   * the registry does not hold it. Empty means a capability-level evaluation.
+   *
+   * @generated from field: string tool_name = 7;
+   */
+  toolName: string;
 };
 
 /**
@@ -349,6 +390,43 @@ export type EvaluatePolicyResponse = Message<"model_plane.v1.EvaluatePolicyRespo
    * @generated from field: string decision_evidence = 6;
    */
   decisionEvidence: string;
+
+  /**
+   * Declared side-effect class the decision was made for: the evaluated tool's
+   * class, or the capability's ceiling when no tool was named. Same vocabulary
+   * as CapabilityDetail.side_effect_class.
+   *
+   * @generated from field: string side_effect_class = 7;
+   */
+  sideEffectClass: string;
+
+  /**
+   * Approval floor the decision was made under: "none", "ask" or
+   * "durable_owner". Always at least what the class implies.
+   *
+   * @generated from field: string approval_floor = 8;
+   */
+  approvalFloor: string;
+
+  /**
+   * What produced the decision: "risk_level" (the capability's own risk),
+   * "approval_floor" (a class or floor raised it to ask), "tool_review" (the
+   * tool is not approved or is not in the registry), "capability_gate" (the
+   * capability is out of rollout, unavailable, out of scope or ungranted) or,
+   * only when TOOL_POLICY_ENFORCED is on, a stored per-tool policy:
+   * "tool_policy_never", "tool_policy_ask" or "tool_policy_allow".
+   *
+   * @generated from field: string policy_source = 9;
+   */
+  policySource: string;
+
+  /**
+   * Pinned definition digest of the evaluated MCP tool, lower-case hex. Empty
+   * for a built-in tool and for a capability-level evaluation.
+   *
+   * @generated from field: string tool_digest = 10;
+   */
+  toolDigest: string;
 };
 
 /**
@@ -357,6 +435,144 @@ export type EvaluatePolicyResponse = Message<"model_plane.v1.EvaluatePolicyRespo
  */
 export const EvaluatePolicyResponseSchema: GenMessage<EvaluatePolicyResponse> = /*@__PURE__*/
   messageDesc(file_model_plane_v1_capabilities, 5);
+
+/**
+ * ResolveToolBindings — resolve the registry bindings of the named tools.
+ *
+ * @generated from message model_plane.v1.ResolveToolBindingsRequest
+ */
+export type ResolveToolBindingsRequest = Message<"model_plane.v1.ResolveToolBindingsRequest"> & {
+  /**
+   * Tenant context; must match the verified tenant.
+   *
+   * @generated from field: string org_id = 1;
+   */
+  orgId: string;
+
+  /**
+   * Run the bindings are resolved for, for audit correlation.
+   *
+   * @generated from field: string run_id = 2;
+   */
+  runId: string;
+
+  /**
+   * The person the run acts for; same trust rule as EvaluatePolicyRequest.user_id.
+   * A user caller may only name themselves.
+   *
+   * @generated from field: string user_id = 3;
+   */
+  userId: string;
+
+  /**
+   * Tool names as the model sees them, at most 256 per request.
+   *
+   * @generated from field: repeated string tool_names = 4;
+   */
+  toolNames: string[];
+};
+
+/**
+ * Describes the message model_plane.v1.ResolveToolBindingsRequest.
+ * Use `create(ResolveToolBindingsRequestSchema)` to create a new message.
+ */
+export const ResolveToolBindingsRequestSchema: GenMessage<ResolveToolBindingsRequest> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_capabilities, 6);
+
+/**
+ * The bindings the registry holds for the requested names.
+ *
+ * @generated from message model_plane.v1.ResolveToolBindingsResponse
+ */
+export type ResolveToolBindingsResponse = Message<"model_plane.v1.ResolveToolBindingsResponse"> & {
+  /**
+   * One entry per requested name the registry holds. A name that is missing
+   * here has no binding and must not be dispatched.
+   *
+   * @generated from field: repeated model_plane.v1.ToolBinding bindings = 1;
+   */
+  bindings: ToolBinding[];
+};
+
+/**
+ * Describes the message model_plane.v1.ResolveToolBindingsResponse.
+ * Use `create(ResolveToolBindingsResponseSchema)` to create a new message.
+ */
+export const ResolveToolBindingsResponseSchema: GenMessage<ResolveToolBindingsResponse> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_capabilities, 7);
+
+/**
+ * ToolBinding is the registry's declaration of one tool: what governs it and
+ * what it is allowed to be. It carries digests and classes, never a description
+ * or a schema.
+ *
+ * @generated from message model_plane.v1.ToolBinding
+ */
+export type ToolBinding = Message<"model_plane.v1.ToolBinding"> & {
+  /**
+   * The name the binding was resolved for.
+   *
+   * @generated from field: string tool_name = 1;
+   */
+  toolName: string;
+
+  /**
+   * Capability whose policy governs the tool.
+   *
+   * @generated from field: string capability_id = 2;
+   */
+  capabilityId: string;
+
+  /**
+   * Exact capability version; for an MCP tool it changes with the pinned digest.
+   *
+   * @generated from field: string capability_version = 3;
+   */
+  capabilityVersion: string;
+
+  /**
+   * Declared side-effect class of this tool.
+   *
+   * @generated from field: string side_effect_class = 4;
+   */
+  sideEffectClass: string;
+
+  /**
+   * Approval floor of this tool, never below what its class implies.
+   *
+   * @generated from field: string approval_floor = 5;
+   */
+  approvalFloor: string;
+
+  /**
+   * Pinned definition digest, lower-case hex; empty for a built-in tool.
+   *
+   * @generated from field: string tool_digest = 6;
+   */
+  toolDigest: string;
+
+  /**
+   * MCP only: "approved", "pending" or "drifted"; empty for a built-in tool.
+   *
+   * @generated from field: string review_state = 7;
+   */
+  reviewState: string;
+
+  /**
+   * What the registry alone lets a call do today: "allow", "ask" or "deny". It
+   * does not include the per-call capability evaluation, which still applies.
+   *
+   * @generated from field: string effective_policy = 8;
+   */
+  effectivePolicy: string;
+};
+
+/**
+ * Describes the message model_plane.v1.ToolBinding.
+ * Use `create(ToolBindingSchema)` to create a new message.
+ */
+export const ToolBindingSchema: GenMessage<ToolBinding> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_capabilities, 8);
 
 /**
  * @generated from message model_plane.v1.ValidateSkillBundleRequest
@@ -375,7 +591,7 @@ export type ValidateSkillBundleRequest = Message<"model_plane.v1.ValidateSkillBu
  * Use `create(ValidateSkillBundleRequestSchema)` to create a new message.
  */
 export const ValidateSkillBundleRequestSchema: GenMessage<ValidateSkillBundleRequest> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_capabilities, 6);
+  messageDesc(file_model_plane_v1_capabilities, 9);
 
 /**
  * @generated from message model_plane.v1.ValidateSkillBundleResponse
@@ -402,7 +618,7 @@ export type ValidateSkillBundleResponse = Message<"model_plane.v1.ValidateSkillB
  * Use `create(ValidateSkillBundleResponseSchema)` to create a new message.
  */
 export const ValidateSkillBundleResponseSchema: GenMessage<ValidateSkillBundleResponse> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_capabilities, 7);
+  messageDesc(file_model_plane_v1_capabilities, 10);
 
 /**
  * @generated from message model_plane.v1.CheckSkillPromotionRequest
@@ -429,7 +645,7 @@ export type CheckSkillPromotionRequest = Message<"model_plane.v1.CheckSkillPromo
  * Use `create(CheckSkillPromotionRequestSchema)` to create a new message.
  */
 export const CheckSkillPromotionRequestSchema: GenMessage<CheckSkillPromotionRequest> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_capabilities, 8);
+  messageDesc(file_model_plane_v1_capabilities, 11);
 
 /**
  * @generated from message model_plane.v1.CheckSkillPromotionResponse
@@ -456,7 +672,7 @@ export type CheckSkillPromotionResponse = Message<"model_plane.v1.CheckSkillProm
  * Use `create(CheckSkillPromotionResponseSchema)` to create a new message.
  */
 export const CheckSkillPromotionResponseSchema: GenMessage<CheckSkillPromotionResponse> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_capabilities, 9);
+  messageDesc(file_model_plane_v1_capabilities, 12);
 
 /**
  * @generated from message model_plane.v1.PromoteSkillRequest
@@ -483,7 +699,7 @@ export type PromoteSkillRequest = Message<"model_plane.v1.PromoteSkillRequest"> 
  * Use `create(PromoteSkillRequestSchema)` to create a new message.
  */
 export const PromoteSkillRequestSchema: GenMessage<PromoteSkillRequest> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_capabilities, 10);
+  messageDesc(file_model_plane_v1_capabilities, 13);
 
 /**
  * @generated from message model_plane.v1.PromoteSkillResponse
@@ -515,7 +731,211 @@ export type PromoteSkillResponse = Message<"model_plane.v1.PromoteSkillResponse"
  * Use `create(PromoteSkillResponseSchema)` to create a new message.
  */
 export const PromoteSkillResponseSchema: GenMessage<PromoteSkillResponse> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_capabilities, 11);
+  messageDesc(file_model_plane_v1_capabilities, 14);
+
+/**
+ * @generated from message model_plane.v1.ListSkillBundlesRequest
+ */
+export type ListSkillBundlesRequest = Message<"model_plane.v1.ListSkillBundlesRequest"> & {
+  /**
+   * Empty lists every skill bundle of the caller's organization.
+   *
+   * @generated from field: repeated string skill_ids = 1;
+   */
+  skillIds: string[];
+};
+
+/**
+ * Describes the message model_plane.v1.ListSkillBundlesRequest.
+ * Use `create(ListSkillBundlesRequestSchema)` to create a new message.
+ */
+export const ListSkillBundlesRequestSchema: GenMessage<ListSkillBundlesRequest> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_capabilities, 15);
+
+/**
+ * @generated from message model_plane.v1.ListSkillBundlesResponse
+ */
+export type ListSkillBundlesResponse = Message<"model_plane.v1.ListSkillBundlesResponse"> & {
+  /**
+   * @generated from field: repeated model_plane.v1.SkillBundleSummary bundles = 1;
+   */
+  bundles: SkillBundleSummary[];
+};
+
+/**
+ * Describes the message model_plane.v1.ListSkillBundlesResponse.
+ * Use `create(ListSkillBundlesResponseSchema)` to create a new message.
+ */
+export const ListSkillBundlesResponseSchema: GenMessage<ListSkillBundlesResponse> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_capabilities, 16);
+
+/**
+ * @generated from message model_plane.v1.SkillBundleSummary
+ */
+export type SkillBundleSummary = Message<"model_plane.v1.SkillBundleSummary"> & {
+  /**
+   * @generated from field: string skill_id = 1;
+   */
+  skillId: string;
+
+  /**
+   * @generated from field: string manifest_sha256 = 2;
+   */
+  manifestSha256: string;
+
+  /**
+   * @generated from field: int32 file_count = 3;
+   */
+  fileCount: number;
+
+  /**
+   * @generated from field: int64 total_bytes = 4;
+   */
+  totalBytes: bigint;
+
+  /**
+   * @generated from field: string created_by = 5;
+   */
+  createdBy: string;
+
+  /**
+   * RFC3339 timestamp of the upload that holds this bundle.
+   *
+   * @generated from field: string created_at = 6;
+   */
+  createdAt: string;
+};
+
+/**
+ * Describes the message model_plane.v1.SkillBundleSummary.
+ * Use `create(SkillBundleSummarySchema)` to create a new message.
+ */
+export const SkillBundleSummarySchema: GenMessage<SkillBundleSummary> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_capabilities, 17);
+
+/**
+ * @generated from message model_plane.v1.GetSkillBundleManifestRequest
+ */
+export type GetSkillBundleManifestRequest = Message<"model_plane.v1.GetSkillBundleManifestRequest"> & {
+  /**
+   * @generated from field: string skill_id = 1;
+   */
+  skillId: string;
+};
+
+/**
+ * Describes the message model_plane.v1.GetSkillBundleManifestRequest.
+ * Use `create(GetSkillBundleManifestRequestSchema)` to create a new message.
+ */
+export const GetSkillBundleManifestRequestSchema: GenMessage<GetSkillBundleManifestRequest> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_capabilities, 18);
+
+/**
+ * @generated from message model_plane.v1.SkillBundleManifest
+ */
+export type SkillBundleManifest = Message<"model_plane.v1.SkillBundleManifest"> & {
+  /**
+   * @generated from field: string skill_id = 1;
+   */
+  skillId: string;
+
+  /**
+   * @generated from field: string manifest_sha256 = 2;
+   */
+  manifestSha256: string;
+
+  /**
+   * @generated from field: repeated model_plane.v1.SkillBundleFile files = 3;
+   */
+  files: SkillBundleFile[];
+};
+
+/**
+ * Describes the message model_plane.v1.SkillBundleManifest.
+ * Use `create(SkillBundleManifestSchema)` to create a new message.
+ */
+export const SkillBundleManifestSchema: GenMessage<SkillBundleManifest> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_capabilities, 19);
+
+/**
+ * @generated from message model_plane.v1.SkillBundleFile
+ */
+export type SkillBundleFile = Message<"model_plane.v1.SkillBundleFile"> & {
+  /**
+   * Relative path inside the bundle, always with forward slashes.
+   *
+   * @generated from field: string path = 1;
+   */
+  path: string;
+
+  /**
+   * @generated from field: string sha256 = 2;
+   */
+  sha256: string;
+
+  /**
+   * @generated from field: int64 size_bytes = 3;
+   */
+  sizeBytes: bigint;
+
+  /**
+   * @generated from field: bool executable = 4;
+   */
+  executable: boolean;
+
+  /**
+   * True when the file is not UTF-8 text, so a reader returns metadata only.
+   *
+   * @generated from field: bool binary = 5;
+   */
+  binary: boolean;
+};
+
+/**
+ * Describes the message model_plane.v1.SkillBundleFile.
+ * Use `create(SkillBundleFileSchema)` to create a new message.
+ */
+export const SkillBundleFileSchema: GenMessage<SkillBundleFile> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_capabilities, 20);
+
+/**
+ * @generated from message model_plane.v1.GetSkillBlobRequest
+ */
+export type GetSkillBlobRequest = Message<"model_plane.v1.GetSkillBlobRequest"> & {
+  /**
+   * @generated from field: string skill_id = 1;
+   */
+  skillId: string;
+
+  /**
+   * @generated from field: string sha256 = 2;
+   */
+  sha256: string;
+};
+
+/**
+ * Describes the message model_plane.v1.GetSkillBlobRequest.
+ * Use `create(GetSkillBlobRequestSchema)` to create a new message.
+ */
+export const GetSkillBlobRequestSchema: GenMessage<GetSkillBlobRequest> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_capabilities, 21);
+
+/**
+ * @generated from message model_plane.v1.GetSkillBlobResponse
+ */
+export type GetSkillBlobResponse = Message<"model_plane.v1.GetSkillBlobResponse"> & {
+  /**
+   * @generated from field: bytes content = 1;
+   */
+  content: Uint8Array;
+};
+
+/**
+ * Describes the message model_plane.v1.GetSkillBlobResponse.
+ * Use `create(GetSkillBlobResponseSchema)` to create a new message.
+ */
+export const GetSkillBlobResponseSchema: GenMessage<GetSkillBlobResponse> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_capabilities, 22);
 
 /**
  * CapabilityCore — policy and capability authority.
@@ -557,6 +977,19 @@ export const CapabilityCore: GenService<{
     output: typeof EvaluatePolicyResponseSchema;
   },
   /**
+   * Resolve the registry-owned binding of each named tool: the capability that
+   * governs it, its declared class and approval floor, and, for an MCP tool,
+   * its pinned definition digest and review state. This is the only source of
+   * an `mcp__` binding; a name the registry does not hold is simply absent.
+   *
+   * @generated from rpc model_plane.v1.CapabilityCore.ResolveToolBindings
+   */
+  resolveToolBindings: {
+    methodKind: "unary";
+    input: typeof ResolveToolBindingsRequestSchema;
+    output: typeof ResolveToolBindingsResponseSchema;
+  },
+  /**
    * Validate that a skill bundle exists and is structurally promotable.
    *
    * @generated from rpc model_plane.v1.CapabilityCore.ValidateSkillBundle
@@ -585,6 +1018,36 @@ export const CapabilityCore: GenService<{
     methodKind: "unary";
     input: typeof PromoteSkillRequestSchema;
     output: typeof PromoteSkillResponseSchema;
+  },
+  /**
+   * List the skill bundles an org holds, optionally narrowed to some skills.
+   *
+   * @generated from rpc model_plane.v1.CapabilityCore.ListSkillBundles
+   */
+  listSkillBundles: {
+    methodKind: "unary";
+    input: typeof ListSkillBundlesRequestSchema;
+    output: typeof ListSkillBundlesResponseSchema;
+  },
+  /**
+   * Read one skill bundle manifest: its files, digests and sizes.
+   *
+   * @generated from rpc model_plane.v1.CapabilityCore.GetSkillBundleManifest
+   */
+  getSkillBundleManifest: {
+    methodKind: "unary";
+    input: typeof GetSkillBundleManifestRequestSchema;
+    output: typeof SkillBundleManifestSchema;
+  },
+  /**
+   * Read one blob of a skill bundle by its sha256 digest.
+   *
+   * @generated from rpc model_plane.v1.CapabilityCore.GetSkillBlob
+   */
+  getSkillBlob: {
+    methodKind: "unary";
+    input: typeof GetSkillBlobRequestSchema;
+    output: typeof GetSkillBlobResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_model_plane_v1_capabilities, 0);

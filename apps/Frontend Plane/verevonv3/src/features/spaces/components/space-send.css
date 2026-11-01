@@ -1,0 +1,79 @@
+/* Space human posts: the Send/Ask switch and the optimistic row (WS01-S6). Lives beside the
+   components rather than in global.css so it does not touch that file's uncommitted lines. */
+
+.verevon-space-room-composer__modes {
+  display: inline-flex;
+  gap: 2px;
+  align-self: flex-start;
+  border: 1px solid var(--verevon-border);
+  border-radius: 10px;
+  background: var(--verevon-surface);
+  padding: 2px;
+}
+
+.verevon-space-room-composer__modes button {
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  padding: 4px 10px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.verevon-space-room-composer__modes button[aria-checked="true"] {
+  background: color-mix(in srgb, var(--verevon-text) 9%, var(--verevon-surface));
+  color: var(--verevon-text);
+  font-weight: 600;
+}
+
+.verevon-space-room-composer__modes button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.verevon-space-room-composer__modes button:focus-visible {
+  outline: 2px solid var(--verevon-accent, currentColor);
+  outline-offset: 1px;
+}
+
+/* A post that has not landed yet. Present, but visibly not part of the record: the sender sees
+   their own words at once, and the row settles into the real one when the room shows it. */
+.verevon-room-post--pending,
+.verevon-room-turn--pending {
+  opacity: 0.78;
+}
+
+.verevon-room-post--pending[data-stage="failed"],
+.verevon-room-turn--pending[data-stage="failed"] {
+  opacity: 1;
+}
+
+.verevon-room-pending__state {
+  margin: 4px 0 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-room-pending__state[data-stage="failed"] {
+  color: var(--danger, #b42318);
+}
+
+.verevon-room-pending__actions {
+  display: inline-flex;
+  gap: 8px;
+  margin-left: 8px;
+}
+
+.verevon-space-projection-error.verevon-space-room-composer__post-failure {
+  margin: 0;
+  font-size: 12px;
+}
+
+.verevon-space-room-composer__post-failure button {
+  margin-left: 6px;
+}
+
+.dark .verevon-room-pending__state[data-stage="failed"] {
+  color: #f0968f;
+}
