@@ -1071,6 +1071,7 @@ pub async fn list_run_events(
             .list_events(&claims.org_id, &parsed_run_id, limit)
             .await
             .map_err(|e| err_response(&request_id, e))?;
+        let events = scope_run_events(&claims, events).map_err(|e| err_response(&request_id, e))?;
         return Ok(Json(Envelope::ok(
             request_id,
             Page {
@@ -1090,7 +1091,7 @@ pub async fn list_run_events(
         limit: q.limit,
         ..Default::default()
     };
-    let page = forward_list::<quarry_core::job_history::JobHistoryEvent>(
+    let mut page = forward_list::<quarry_core::job_history::JobHistoryEvent>(
         &state,
         &request_id,
         &claims.org_id,
@@ -1099,7 +1100,35 @@ pub async fn list_run_events(
     )
     .await
     .map_err(|e| err_response(&request_id, e))?;
+    page.items = scope_run_events(&claims, page.items).map_err(|e| err_response(&request_id, e))?;
     Ok(Json(Envelope::ok(request_id, page)))
+}
+
+/// What a caller may read of a run's events.
+///
+/// - Another org's run is a 404. Control's `GET /v1/runs/{id}/events` resolves
+///   the run by id alone and ignores `org_id`, so the edge checks the `org_id`
+///   every event carries and refuses the whole page on any mismatch.
+/// - Under the token's ZDR floor the payload keeps only numbers, booleans and
+///   the closed string fields (D2-057, W2-U31): these are the same job events
+///   the job drain redacts, and the drain hands out the `run_id`.
+fn scope_run_events(
+    claims: &crate::auth::Claims,
+    mut events: Vec<quarry_core::job_history::JobHistoryEvent>,
+) -> Result<Vec<quarry_core::job_history::JobHistoryEvent>, QuarryError> {
+    if events.iter().any(|event| event.org_id != claims.org_id) {
+        tracing::warn!(
+            org_id = %claims.org_id,
+            "run events of another org refused at the edge"
+        );
+        return Err(QuarryError::new(ErrorCode::NotFound, "not found"));
+    }
+    if claims.effective_zdr(false) {
+        for event in &mut events {
+            event.payload = job_stream::redact_payload_for_zdr(std::mem::take(&mut event.payload));
+        }
+    }
+    Ok(events)
 }
 
 // =============================================================================
@@ -1206,6 +1235,11 @@ async fn job_events(
         .as_deref()
         .is_some_and(|v| matches!(v.trim(), "1" | "true"));
     if follow_requested && job_stream::follow_enabled() {
+        // A ZDR caller never gets the live tail: its events name page URLs (D2-057).
+        // Decided before control is asked and before a stream permit is taken.
+        if claims.effective_zdr(false) {
+            return err_response(&request_id, job_stream::zdr_follow_refusal()).into_response();
+        }
         return follow_job(state, claims, request_id, job_id, q, last_event_id, kind).await;
     }
 
@@ -1228,6 +1262,12 @@ async fn job_events(
     {
         Ok(events) => events,
         Err(e) => return err_response(&request_id, e).into_response(),
+    };
+    // The drain never returns page URLs, titles or excerpts to a ZDR caller (D2-057).
+    let events: Vec<serde_json::Value> = if claims.effective_zdr(false) {
+        events.into_iter().map(job_stream::redact_event_for_zdr).collect()
+    } else {
+        events
     };
 
     let stream = async_stream::stream! {
