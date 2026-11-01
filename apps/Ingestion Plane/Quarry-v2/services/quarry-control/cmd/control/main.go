@@ -110,6 +110,25 @@ func main() {
 		)
 	}
 	hmacVerifier := httpx.NewHMACVerifier(internalSecret, internalRequire)
+	// D2-050: the routes only the orchestrator calls (/v1/internal/jobs/*,
+	// /v1/internal/schedules/*) are verified with their own secret, so the edge's
+	// secret no longer reaches finalize. An unset QUARRY_CONTROL_INTERNAL_SECRET
+	// falls back to the edge secret (no outage during the soak) with one warning;
+	// remove the fallback after the soak.
+	controlSecret, controlSecretWarning := httpx.ControlInternalSecretPosture(
+		os.Getenv("QUARRY_CONTROL_INTERNAL_SECRET"), internalSecret)
+	orchestratorVerifier := hmacVerifier
+	if controlSecret != internalSecret {
+		orchestratorVerifier = httpx.NewHMACVerifier(controlSecret, internalRequire)
+	}
+	switch controlSecretWarning {
+	case "unset":
+		log.Warn().Msg("QUARRY_CONTROL_INTERNAL_SECRET unset: the orchestrator-only internal routes fall back to QUARRY_INTERNAL_SECRET (shared with the edge). Set it; this fallback is removed after the soak (D2-050)")
+	case "same":
+		log.Warn().Msg("QUARRY_CONTROL_INTERNAL_SECRET equals QUARRY_INTERNAL_SECRET: the orchestrator-only internal routes are not isolated from the edge. Use a distinct value (D2-050)")
+	default:
+		log.Info().Msg("orchestrator-only internal routes verify with QUARRY_CONTROL_INTERNAL_SECRET (split from the edge secret)")
+	}
 	switch {
 	case hmacVerifier.HasSecret() && internalRequire:
 		log.Info().Msg("HMAC cross-plane auth: ENFORCED (every internal request must sign)")
@@ -165,7 +184,7 @@ func main() {
 	// requests once the secret is set. /health and /ready stay
 	// outside the middleware so probes work without secrets.
 	r.Group(func(r chi.Router) {
-		r.Use(hmacVerifier.Middleware)
+		r.Use(httpx.SplitHMAC(orchestratorVerifier, hmacVerifier))
 
 		resources.MountJobs(r, db, resources.WithAdmission(admission))
 		resources.MountStores(r, db)

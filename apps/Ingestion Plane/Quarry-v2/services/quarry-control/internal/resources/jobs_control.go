@@ -12,7 +12,9 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -131,13 +133,30 @@ func runningJobs(db store.DB) http.HandlerFunc {
 	}
 }
 
+// finalizeOrgRequired reports whether QUARRY_CONTROL__FINALIZE_ORG_REQUIRED is
+// truthy (true, 1, yes, on). Default false: a finalize with no org_id is still
+// accepted, so an orchestrator that has not been redeployed keeps working. Turn it
+// on once the orchestrator sends org_id on every finalize (D2-050).
+func finalizeOrgRequired(getenv func(string) string) bool {
+	switch strings.ToLower(strings.TrimSpace(getenv("QUARRY_CONTROL__FINALIZE_ORG_REQUIRED"))) {
+	case "true", "1", "yes", "on":
+		return true
+	}
+	return false
+}
+
 // finalizeJob backs POST /v1/internal/jobs/{id}/finalize. The orchestrator sends
 // the terminal status it observed and the facts of it. Only a job that has not
 // ended changes; the event is written once, with a deterministic id.
+//
+// The call names the org it believes owns the job (body org_id, or the org_id
+// query parameter). A job of another org answers 404, exactly like a missing job,
+// and changes nothing: finalize can no longer end another org's job (D2-050).
 func finalizeJob(db store.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := quarrycontracts.ID(chi.URLParam(r, "id"))
 		var in struct {
+			OrgID       string `json:"org_id"`
 			Status      string `json:"status"`
 			Forced      bool   `json:"forced"`
 			TimeoutType string `json:"timeout_type"`
@@ -170,6 +189,19 @@ func finalizeJob(db store.DB) http.HandlerFunc {
 		finishedAt := in.FinishedAt
 		if finishedAt <= 0 {
 			finishedAt = time.Now().UnixMilli()
+		}
+		org := strings.TrimSpace(in.OrgID)
+		if org == "" {
+			org = orgFromQuery(r)
+		}
+		if org != "" {
+			if cur, ok := db.Jobs().Get(id); !ok || cur.OrgID != org {
+				httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "not found", map[string]any{"id": id})
+				return
+			}
+		} else if finalizeOrgRequired(os.Getenv) {
+			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "org_id required", nil)
+			return
 		}
 		job, changed, err := db.Jobs().Finalize(id, in.Status, reason, finishedAt)
 		if err != nil {
