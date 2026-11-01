@@ -109,7 +109,8 @@ func TestMembershipRouteKeepsItsStatusWhenResolutionFails(t *testing.T) {
 
 func TestServiceToServiceRoutesKeepPlainBodies(t *testing.T) {
 	// import-execution is called by Imports Core with a service credential, not
-	// by a delegated user: its refusals keep the plain {error} body.
+	// by a delegated user: an untyped failure (here, no database) keeps the plain
+	// {error} 503 body. A typed refusal is covered below.
 	body := `{"intent":{"org_id":"o","space_ref":"s","subject_id":"u","action_schema_hash":"sha256:ingestion-import-v1","payload_digest":"sha256:d","idempotency_key":"i","source_type":"upload"}}`
 	w, c := denialTestContext(http.MethodPost, body)
 	(&Server{spaceRepo: &spaces.Repository{}}).issuePersonalImportExecutionDecision(c)
@@ -272,5 +273,67 @@ func TestThreadReadOwnScheduledFallbackReportsThePersonalSpaceDenialLive(t *test
 	body = decodeDenialBody(t, w)
 	if w.Code != http.StatusForbidden || body["code"] != "space_membership_required" {
 		t.Fatalf("non-member: %d %v", w.Code, body)
+	}
+}
+
+// A typed refusal on a service-to-service route answers the status the denial
+// vocabulary assigns it, with the typed body, so the caller does not retry it
+// as an outage. Only space_authority_unavailable and untyped failures stay 503.
+func TestWriteSpaceEvidenceErrorAnswersTypedRefusalsWithTheVocabularyStatus(t *testing.T) {
+	for _, spec := range spaces.DenialCatalogue() {
+		t.Run(string(spec.Code), func(t *testing.T) {
+			w, c := denialTestContext(http.MethodPost, "")
+			err := fmt.Errorf("evidence: %w", &spaces.Denial{Code: spec.Code})
+			if !writeSpaceEvidenceError(c, err, "membership message", http.StatusServiceUnavailable, "route message") {
+				t.Fatal("a typed refusal was not reported as handled")
+			}
+			body := decodeDenialBody(t, w)
+			if w.Code != spec.Status {
+				t.Fatalf("status = %d, want the vocabulary's %d (%v)", w.Code, spec.Status, body)
+			}
+			if body["error"] != "route message" || body["code"] != string(spec.Code) || body["resolvable_by"] != spec.ResolvableBy {
+				t.Fatalf("typed body drifted: %v", body)
+			}
+			if _, ok := body["details"].(map[string]any); !ok {
+				t.Fatalf("details missing: %v", body)
+			}
+		})
+	}
+}
+
+func TestWriteSpaceEvidenceErrorKeepsPlainBodiesForUntypedFailuresAndMembership(t *testing.T) {
+	// No error is not a refusal.
+	_, c := denialTestContext(http.MethodPost, "")
+	if writeSpaceEvidenceError(c, nil, "m", http.StatusServiceUnavailable, "o") {
+		t.Fatal("a nil error was reported as a refusal")
+	}
+
+	// A missing membership is the plain 403 with the membership message.
+	w, c := denialTestContext(http.MethodPost, "")
+	writeSpaceEvidenceError(c, fmt.Errorf("resolve: %w", spaces.ErrNoCurrentMembership), "membership message", http.StatusServiceUnavailable, "route message")
+	body := decodeDenialBody(t, w)
+	if w.Code != http.StatusForbidden || body["error"] != "membership message" {
+		t.Fatalf("membership: %d %v", w.Code, body)
+	}
+	if _, typed := body["code"]; typed {
+		t.Fatalf("a membership miss grew a code: %v", body)
+	}
+
+	// An untyped failure stays a plain 503: Control could not answer, retry it.
+	w, c = denialTestContext(http.MethodPost, "")
+	writeSpaceEvidenceError(c, errors.New("db down"), "membership message", http.StatusServiceUnavailable, "route message")
+	body = decodeDenialBody(t, w)
+	if w.Code != http.StatusServiceUnavailable || body["error"] != "route message" {
+		t.Fatalf("untyped: %d %v", w.Code, body)
+	}
+	if _, typed := body["code"]; typed {
+		t.Fatalf("an untyped failure grew a code: %v", body)
+	}
+
+	// A route whose own status is not 503 keeps it for a typed refusal.
+	w, c = denialTestContext(http.MethodPost, "")
+	writeSpaceEvidenceError(c, &spaces.Denial{Code: spaces.DenialEntitlementOff}, "m", http.StatusConflict, "route message")
+	if w.Code != http.StatusConflict {
+		t.Fatalf("non-503 route status changed: %d", w.Code)
 	}
 }

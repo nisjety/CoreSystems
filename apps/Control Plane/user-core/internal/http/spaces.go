@@ -1517,14 +1517,29 @@ func signSpaceDecision(c *gin.Context, key spaces.SigningKey, decision spaces.De
 	return token, true
 }
 
-// writeSpaceEvidenceError maps an evidence-resolution failure to its
-// fail-closed response, returning true when the handler must stop.
+// writeSpaceEvidenceError maps an evidence-resolution failure of a
+// service-to-service route to its fail-closed response, returning true when the
+// handler must stop.
+//
+// A typed refusal found in the chain (entitlement off, role floor, kind
+// unsupported, ...) answers the status the denial vocabulary assigns it (403)
+// with the same typed body the gateway-called routes send, so a caller that
+// retries a 5xx does not retry a refusal. Only space_authority_unavailable and
+// untyped failures stay a 503, and an untyped failure keeps the plain body.
 func writeSpaceEvidenceError(c *gin.Context, err error, membershipMsg string, otherStatus int, otherMsg string) bool {
 	if errors.Is(err, spaces.ErrNoCurrentMembership) {
 		c.JSON(http.StatusForbidden, gin.H{"error": membershipMsg})
 		return true
 	}
 	if err != nil {
+		if denial, ok := spaces.AsDenial(err); ok {
+			status := otherStatus
+			if status == http.StatusServiceUnavailable {
+				status = denial.Status()
+			}
+			c.JSON(status, spaceDenialBody(otherMsg, denial))
+			return true
+		}
 		c.JSON(otherStatus, gin.H{"error": otherMsg})
 		return true
 	}
@@ -1649,7 +1664,8 @@ func (s *Server) writeSpaceDenial(c *gin.Context, err error, spaceRef string, ex
 
 // resolvePersonalThreadEvidenceTyped is resolvePersonalThreadEvidence for the
 // gateway-called personal-Space routes: same statuses and strings, typed codes.
-// Service-to-service routes keep the plain resolvePersonalThreadEvidence.
+// Service-to-service routes use resolvePersonalThreadEvidence, which types a
+// refusal too but keeps a membership miss and an untyped failure plain.
 func (s *Server) resolvePersonalThreadEvidenceTyped(c *gin.Context, spaceRef, unavailableMsg string) (spaces.PersonalThreadDecisionEvidence, bool) {
 	evidence, err := s.spaceRepo.ResolvePersonalThreadDecisionEvidence(c.Request.Context(), spaceRef, c.GetString("org_id"), c.GetString("user_id"))
 	if s.writeSpaceDenial(c, err, spaceRef, spaces.ExpectPersonal, "current personal Space authority required", http.StatusServiceUnavailable, unavailableMsg) {

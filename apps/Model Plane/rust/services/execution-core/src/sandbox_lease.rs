@@ -36,7 +36,9 @@ use mp_contracts::model_plane::v1::WorkspaceChangedFile;
 use tonic::Status;
 use tracing::warn;
 
-use crate::capability_client::{CapabilityClient, CapabilityDecisionRequest};
+use crate::capability_client::{
+    CapabilityClient, CapabilityDecisionError, CapabilityDecisionRequest,
+};
 use crate::sandbox_manager_client::{LeaseRequest, SandboxManagerClient};
 use crate::state::{HydratedWorkspace, SandboxLease, StateStore};
 use crate::workspace_cas::CasClient;
@@ -48,6 +50,18 @@ use crate::workspace_hydrate::WorkspaceFileEntry;
 /// cannot accumulate forever server-side. sandbox-manager enforces this TTL
 /// itself; this constant only chooses it.
 const LEASE_TTL: std::time::Duration = std::time::Duration::from_hours(1);
+
+/// Maps a failed capability decision request to the status the caller sees.
+/// Control's final refusal (a typed Space refusal such as entitlement off) is
+/// `PERMISSION_DENIED`, which no client retries; only "Control could not
+/// answer" stays `UNAVAILABLE`, which callers do retry.
+fn capability_decision_status(error: &CapabilityDecisionError) -> Status {
+    if error.is_final() {
+        Status::permission_denied("Space sandbox capability is not authorized")
+    } else {
+        Status::unavailable("Space sandbox capability decision unavailable")
+    }
+}
 
 /// Everything `ensure_sandbox_lease` needs beyond the step's own
 /// `run_id`/`org_id`/`user_id`. A caller constructs this ONLY after it has
@@ -130,7 +144,7 @@ pub async fn ensure_sandbox_lease(
         .await
         .map_err(|error| {
             warn!(%error, "Space sandbox capability decision unavailable");
-            Status::unavailable("Space sandbox capability decision unavailable")
+            capability_decision_status(&error)
         })?;
     let claims_json = serde_json::to_string(&claims)
         .map_err(|_| Status::internal("Space sandbox capability claims are not serializable"))?;
@@ -605,6 +619,27 @@ fn cleanup_workspace_dir(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_final_control_refusal_is_permission_denied_and_an_outage_stays_unavailable() {
+        let refused = CapabilityDecisionError::Refused {
+            status: 403,
+            code: Some("space_entitlement_off".to_owned()),
+        };
+        assert_eq!(
+            capability_decision_status(&refused).code(),
+            tonic::Code::PermissionDenied
+        );
+        for outage in [
+            CapabilityDecisionError::Unavailable("sandbox capability decision request returned 503 Service Unavailable".to_owned()),
+            CapabilityDecisionError::Unavailable("sandbox capability decision request failed: connection refused".to_owned()),
+        ] {
+            assert_eq!(
+                capability_decision_status(&outage).code(),
+                tonic::Code::Unavailable
+            );
+        }
+    }
 
     fn unroutable_sandbox_manager_client() -> SandboxManagerClient {
         SandboxManagerClient::new(

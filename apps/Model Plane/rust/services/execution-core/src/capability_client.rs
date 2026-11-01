@@ -8,9 +8,10 @@
 //! response (`/capability-profile`'s `decision` field is `Option`) — this
 //! process must never fabricate a signature it cannot obtain from Control.
 
+use std::fmt;
 use std::time::Duration;
 
-use reqwest::{Client, Url};
+use reqwest::{Client, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 
 use crate::control_http_client::{
@@ -73,6 +74,67 @@ pub struct SpaceCapabilityClaims {
     pub backup: bool,
     pub egress: String,
     pub credential_mode: String,
+}
+
+/// Why a capability decision was not obtained.
+///
+/// Control answers a typed Space refusal (entitlement off, role floor, kind
+/// unsupported) with the 4xx its denial vocabulary assigns (403) and keeps 503
+/// for "could not answer". The two must stay apart: a refusal is final, so a
+/// caller that retries it only repeats the same question, while an outage or a
+/// dead socket is worth retrying.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CapabilityDecisionError {
+    /// Control answered NO with a final 4xx. `code` is the typed denial code of
+    /// the body when it carried one (for example `space_entitlement_off`).
+    Refused { status: u16, code: Option<String> },
+    /// Control could not answer: a transport failure, a 5xx (503
+    /// `space_authority_unavailable` included), a transient 4xx (401, 408, 425,
+    /// 429) or a malformed response. Retryable.
+    Unavailable(String),
+}
+
+impl CapabilityDecisionError {
+    /// True when retrying the same request cannot change Control's answer.
+    #[must_use]
+    pub fn is_final(&self) -> bool {
+        matches!(self, Self::Refused { .. })
+    }
+}
+
+impl fmt::Display for CapabilityDecisionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Refused {
+                status,
+                code: Some(code),
+            } => write!(
+                f,
+                "sandbox capability decision request returned {status} ({code})"
+            ),
+            Self::Refused { status, code: None } => {
+                write!(f, "sandbox capability decision request returned {status}")
+            }
+            Self::Unavailable(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for CapabilityDecisionError {}
+
+/// A non-success Control status is a final refusal when it is a 4xx that
+/// retrying cannot change. 401 is the service credential (it can be rotated
+/// into place) and 408, 425 and 429 are transient by definition, so those
+/// retry like a 5xx.
+fn is_final_refusal(status: StatusCode) -> bool {
+    status.is_client_error()
+        && !matches!(
+            status,
+            StatusCode::UNAUTHORIZED
+                | StatusCode::REQUEST_TIMEOUT
+                | StatusCode::TOO_EARLY
+                | StatusCode::TOO_MANY_REQUESTS
+        )
 }
 
 /// Everything a caller needs to request one signed capability decision for
@@ -154,14 +216,17 @@ impl CapabilityClient {
     ///
     /// # Errors
     /// Returns an error for any transport failure, non-2xx response, or
-    /// malformed response body. Callers treat this the same as "no
-    /// decision available" — see `http_health::capability_profile`'s doc
-    /// comment — never as a reason to fail health/profile reporting.
+    /// malformed response body. A final 4xx is [`CapabilityDecisionError::Refused`]
+    /// and everything else is [`CapabilityDecisionError::Unavailable`]. Callers
+    /// treat both the same as "no decision available" for health/profile
+    /// reporting — see `http_health::capability_profile`'s doc comment — never
+    /// as a reason to fail it; a lease acquisition retries only the second.
     pub async fn request_decision(
         &self,
         request: &CapabilityDecisionRequest<'_>,
-    ) -> Result<(String, SpaceCapabilityClaims), String> {
-        let endpoint = service_endpoint(&self.base_url, CONTROL_SANDBOX_CAPABILITY_PATH)?;
+    ) -> Result<(String, SpaceCapabilityClaims), CapabilityDecisionError> {
+        let endpoint = service_endpoint(&self.base_url, CONTROL_SANDBOX_CAPABILITY_PATH)
+            .map_err(CapabilityDecisionError::Unavailable)?;
         let profile_digest = capability_profile_digest(request.profile);
         let body = DecisionRequest {
             intent: DecisionIntent {
@@ -186,17 +251,35 @@ impl CapabilityClient {
             .json(&body)
             .send()
             .await
-            .map_err(|error| format!("sandbox capability decision request failed: {error}"))?;
-        if !response.status().is_success() {
-            return Err(format!(
-                "sandbox capability decision request returned {}",
-                response.status()
-            ));
+            .map_err(|error| {
+                CapabilityDecisionError::Unavailable(format!(
+                    "sandbox capability decision request failed: {error}"
+                ))
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            if is_final_refusal(status) {
+                // Only the typed `code` is read from a refusal body; nothing else
+                // from it is kept.
+                let code = response
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()
+                    .and_then(|body| body.get("code")?.as_str().map(str::to_owned));
+                return Err(CapabilityDecisionError::Refused {
+                    status: status.as_u16(),
+                    code,
+                });
+            }
+            return Err(CapabilityDecisionError::Unavailable(format!(
+                "sandbox capability decision request returned {status}"
+            )));
         }
-        let envelope: DecisionResponseEnvelope = response
-            .json()
-            .await
-            .map_err(|error| format!("sandbox capability decision response malformed: {error}"))?;
+        let envelope: DecisionResponseEnvelope = response.json().await.map_err(|error| {
+            CapabilityDecisionError::Unavailable(format!(
+                "sandbox capability decision response malformed: {error}"
+            ))
+        })?;
         Ok((envelope.data.decision, envelope.data.claims))
     }
 }
@@ -291,5 +374,83 @@ mod tests {
                 credential_mode: "none".to_owned(),
             }
         );
+    }
+
+    /// Control answers a typed refusal with 403 and keeps 503 for "could not
+    /// answer": the first is final, everything else stays retryable.
+    #[tokio::test]
+    async fn request_decision_separates_a_final_refusal_from_an_outage() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let typed_refusal = serde_json::json!({
+            "error": "personal Space sandbox authority unavailable",
+            "code": "space_entitlement_off",
+            "resolvable_by": "org_admin",
+            "details": {"entitlement": "sandbox_capability"},
+        });
+        let unavailable = serde_json::json!({
+            "error": "personal Space sandbox authority unavailable",
+            "code": "space_authority_unavailable",
+            "resolvable_by": "retry",
+            "details": {},
+        });
+        let cases: Vec<(u16, serde_json::Value, bool, Option<&str>)> = vec![
+            (403, typed_refusal, true, Some("space_entitlement_off")),
+            (403, serde_json::json!({"error": "current personal Space authority required"}), true, None),
+            (400, serde_json::json!({"error": "valid space capability intent is required"}), true, None),
+            (503, unavailable, false, None),
+            (500, serde_json::json!({"error": "boom"}), false, None),
+            (401, serde_json::json!({"error": "unauthorized"}), false, None),
+            (429, serde_json::json!({"error": "slow down"}), false, None),
+        ];
+        for (status, body, want_final, want_code) in cases {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path(CONTROL_SANDBOX_CAPABILITY_PATH))
+                .respond_with(ResponseTemplate::new(status).set_body_json(body))
+                .mount(&server)
+                .await;
+            let client =
+                CapabilityClient::new_with_transport(&server.uri(), &"a".repeat(32), true)
+                    .unwrap();
+            let profile = crate::sandbox::capability_profile();
+            let error = client
+                .request_decision(&CapabilityDecisionRequest {
+                    org_id: "org-a",
+                    space_ref: "space-1",
+                    subject_id: "user-1",
+                    backend_id: "backend-1",
+                    profile: &profile,
+                    idempotency_key: "run-1",
+                })
+                .await
+                .expect_err("a non-2xx answer is an error");
+            assert_eq!(error.is_final(), want_final, "status {status}: {error}");
+            if let CapabilityDecisionError::Refused { status: got, code } = &error {
+                assert_eq!(*got, status);
+                assert_eq!(code.as_deref(), want_code);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn request_decision_treats_a_dead_socket_as_retryable() {
+        let client =
+            CapabilityClient::new_with_transport("http://127.0.0.1:1", &"a".repeat(32), true)
+                .unwrap();
+        let profile = crate::sandbox::capability_profile();
+        let error = client
+            .request_decision(&CapabilityDecisionRequest {
+                org_id: "org-a",
+                space_ref: "space-1",
+                subject_id: "user-1",
+                backend_id: "backend-1",
+                profile: &profile,
+                idempotency_key: "run-1",
+            })
+            .await
+            .expect_err("nothing listens on port 1");
+        assert!(!error.is_final(), "{error}");
     }
 }

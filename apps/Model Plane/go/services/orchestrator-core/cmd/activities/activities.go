@@ -138,7 +138,7 @@ func (a *Activities) ExecuteScheduledStepActivity(
 	defer stopHeartbeat()
 	decisionToken, err := a.AuthorizeScheduledStepActivity(ctx, intent)
 	if err != nil {
-		return StepResult{}, fmt.Errorf("authorize scheduled step: %w", err)
+		return StepResult{}, nonRetryableIfRefused(fmt.Errorf("authorize scheduled step: %w", err))
 	}
 	resp, err := mpv1.NewExecutionCoreClient(a.clients.ExecutionCore).ExecuteScheduledStep(ctx, &mpv1.ExecuteScheduledStepRequest{
 		RunId:                intent.RunID,
@@ -377,7 +377,10 @@ func (a *Activities) AuthorizeScheduledStepActivity(
 	if a.scheduledStepAuthorizer == nil {
 		return "", errors.New("Control scheduled-step authority is not configured")
 	}
-	return a.scheduledStepAuthorizer.AuthorizeScheduledStep(ctx, intent)
+	token, err := a.scheduledStepAuthorizer.AuthorizeScheduledStep(ctx, intent)
+	// A Control refusal is final: retrying the same question cannot change it.
+	// A Control outage keeps the activity's retry policy.
+	return token, nonRetryableIfRefused(err)
 }
 
 // RecordFeedback persists one operator rating. Called by the
@@ -594,7 +597,8 @@ func (a *Activities) StartScheduledRunActivity(
 		ContractDigest: contractDigest, ContractExpiresAt: contractExpiresAt,
 	})
 	if err != nil {
-		return fallback, fmt.Errorf("reauthorize prepared scheduled run %s: %w", runID, err)
+		// A Control refusal is final; an outage keeps the activity's retry policy.
+		return fallback, nonRetryableIfRefused(fmt.Errorf("reauthorize prepared scheduled run %s: %w", runID, err))
 	}
 	resp, err := mpv1.NewSessionCoreClient(a.clients.SessionCore).StartScheduledRun(ctx, &mpv1.StartScheduledRunRequest{
 		ThreadId:                      threadID,

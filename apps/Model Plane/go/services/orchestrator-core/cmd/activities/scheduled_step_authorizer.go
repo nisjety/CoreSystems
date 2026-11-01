@@ -137,7 +137,7 @@ func (a *ControlScheduledStepAuthorizer) AuthorizeScheduledStep(ctx context.Cont
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("Control scheduled-step authority rejected: status %d", response.StatusCode)
+		return "", controlRejection("Control scheduled-step authority", response)
 	}
 	var envelope struct {
 		Data struct {
