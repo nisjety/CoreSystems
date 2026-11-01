@@ -154,6 +154,8 @@ fn the_manifest_has_exactly_the_documented_shape() {
             "data-plane" => "/api/data-plane/internal-token",
             "model-gateway" => "/api/model-plane/internal-token",
             "browser-broker" => "/api/browser-broker/internal-token",
+            "inference-core" => "/api/inference-core/internal-token",
+            "ingestion" => "/api/ingestion/internal-token",
             other => panic!(
                 "row {name}: audience {other:?} is not a registry audience quarry-edge mints for"
             ),
@@ -340,12 +342,23 @@ fn rerank_never_uses_the_model_plane() {
     for row in rows() {
         let scopes = strings(&row["scopes"]);
         let model_plane = row["audience"] == "model-gateway";
+        // models:invoke travels on the two Model Plane audiences only: the
+        // gateway's own, and inference-core (the second bearer, WS16.S2).
+        let model_audience = model_plane || row["audience"] == "inference-core";
         assert_eq!(
-            model_plane,
+            model_audience,
             scopes.contains(&"models:invoke".to_owned()),
-            "row {}: models:invoke and the model-gateway audience go together",
+            "row {}: models:invoke and the Model Plane audiences go together",
             row["name"]
         );
+        if row["audience"] == "inference-core" {
+            assert_eq!(
+                scopes,
+                vec!["inference:invoke", "models:invoke"],
+                "row {}",
+                row["name"]
+            );
+        }
         if model_plane {
             assert_eq!(scopes, vec!["models:invoke"], "row {}", row["name"]);
             for file in strings(&row["used_by"]) {
@@ -356,6 +369,76 @@ fn rerank_never_uses_the_model_plane() {
                 );
             }
         }
+    }
+}
+
+// -- the WS16.S2 grant ------------------------------------------------------------
+
+#[test]
+fn model_extract_rows_are_the_only_granted_model_rows() {
+    let mut granted = Vec::new();
+    let mut closed = Vec::new();
+    for row in rows() {
+        let audience = row["audience"].as_str().unwrap();
+        if audience != "model-gateway" && audience != "inference-core" {
+            continue;
+        }
+        let name = row["name"].as_str().unwrap().to_owned();
+        if row["granted"] == true {
+            granted.push(name);
+        } else {
+            closed.push(name);
+        }
+    }
+    assert_eq!(
+        granted,
+        vec!["model-extract", "model-extract-inference"],
+        "the WS16.S2 grant opens the two extract bearers and nothing else"
+    );
+    assert_eq!(
+        closed,
+        vec!["model-invoke", "model-stream", "model-audio"],
+        "the three /v1/invoke and /v1/audio rows stay a Quarry-side closed gate"
+    );
+}
+
+#[test]
+fn the_two_extract_rows_are_exactly_the_registry_grant() {
+    let extract = row("model-extract");
+    assert_eq!(extract["audience"], "model-gateway");
+    assert_eq!(extract["mint_path"], "/api/model-plane/internal-token");
+    assert_eq!(strings(&extract["scopes"]), vec!["models:invoke"]);
+    assert_eq!(extract["reason"], "extract structured data from page text");
+
+    let inference = row("model-extract-inference");
+    assert_eq!(inference["audience"], "inference-core");
+    assert_eq!(inference["mint_path"], "/api/inference-core/internal-token");
+    assert_eq!(
+        strings(&inference["scopes"]),
+        vec!["inference:invoke", "models:invoke"]
+    );
+    // Neither row ever rides with a data-plane scope: a request is one audience.
+    for row in [&extract, &inference] {
+        for scope in strings(&row["scopes"]) {
+            assert!(
+                scope == "models:invoke" || scope == "inference:invoke",
+                "row {}: {scope} is not a Model Plane extract scope",
+                row["name"]
+            );
+        }
+    }
+}
+
+#[test]
+fn the_extract_rows_are_pending_until_the_model_client_requests_them() {
+    // WS16.S3 adds `chat_for_org` with from_manifest("model-extract") and
+    // from_manifest("model-extract-inference"), fills used_by and drops `pending`.
+    // Until then the source scan must find no call site for either.
+    for name in ["model-extract", "model-extract-inference"] {
+        let row = row(name);
+        assert!(row.get("pending").is_some(), "row {name} has no call site yet");
+        assert!(strings(&row["used_by"]).is_empty(), "row {name}");
+        assert_eq!(row["granted"], true, "row {name}");
     }
 }
 
@@ -826,6 +909,25 @@ async fn a_model_stream_asks_auth_core_for_exactly_the_stream_row() {
 
     assert_one_mint_is_row(&mints(&auth).await, "model-stream", "org_wire");
     assert_bearer_reached(&model_plane, "/v1/invoke/stream").await;
+}
+
+/// The two extract bearers: each row reaches Auth Core on its own audience's path,
+/// for the verified org, with exactly its scopes and reason. There is no call site
+/// yet (WS16.S3), so the requests are built straight from the manifest, which this
+/// file may do, and sent through the real provider.
+#[tokio::test]
+async fn a_model_extract_asks_auth_core_for_exactly_the_two_extract_rows() {
+    use crate::service_tokens::{ServiceTokenProvider, ServiceTokenRequest};
+    for name in ["model-extract", "model-extract-inference"] {
+        let server = auth_core().await;
+        let request = ServiceTokenRequest::from_manifest(name).expect(name);
+        let bearer = provider(&server)
+            .token_for_org("org_verified", &request, false)
+            .await
+            .expect("a mint for the verified org");
+        assert_eq!(bearer.expose(), MINTED);
+        assert_one_mint_is_row(&mints(&server).await, name, "org_verified");
+    }
 }
 
 /// The broker credential: exactly the `browser-grant-validate` row reaches Auth Core,

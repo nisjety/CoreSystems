@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "service_id": "quarry-edge",
-  "description": "Every Auth Core service-token request quarry-edge makes, in one file. It is read by the Rust loader (ServiceTokenRequest::from_manifest in crates/quarry-runtime/src/service_tokens.rs), by the tests that tie each row to its call site and to the request Auth Core really receives, and, as a byte-for-byte vendored copy pinned by the sha256 beside it, by Auth Core's contract spec (QB-T02, CR-T17). A token request that is not a row here cannot be built, and a row with no call site fails the source scan unless it is marked pending. Retention posture is never part of a request: Auth Core selects it from the registry and refuses a request that names one. granted=true means the registry must allow quarry-edge exactly this audience and these scopes. granted=false means the registry must refuse it today and every caller of the row degrades; flipping the field is then the only manifest change a grant needs. To change a row: edit this file, refresh cross-plane-token-requests.json.sha256, update the digest registered in scripts/tests/zdr-contract-sync.test.sh and re-vendor the copies listed there.",
+  "description": "Every Auth Core service-token request quarry-edge makes, in one file. It is read by the Rust loader (ServiceTokenRequest::from_manifest in crates/quarry-runtime/src/service_tokens.rs), by the tests that tie each row to its call site and to the request Auth Core really receives, and, as a byte-for-byte vendored copy pinned by the sha256 beside it, by Auth Core's contract spec (QB-T02, CR-T17). A token request that is not a row here cannot be built, and a row with no call site fails the source scan unless it is marked pending. Retention posture is never part of a request: Auth Core selects it from the registry and refuses a request that names one. granted=true means the registry must allow quarry-edge exactly this audience and these scopes. granted=false means this row is not open to its callers today and every caller of the row degrades: the registry refuses the request, or (the three rows model-invoke, model-stream and model-audio, since the WS16.S2 grant gave quarry-edge the model-gateway audience for the two model-extract rows) it authorizes the same audience and scopes as a granted row and the closed gate is Quarry's own. Flipping the field is then the only manifest change a grant needs. To change a row: edit this file, refresh cross-plane-token-requests.json.sha256, update the digest registered in scripts/tests/zdr-contract-sync.test.sh and re-vendor the copies listed there.",
   "rows": [
     {
       "name": "vector-retrieve",
@@ -51,7 +51,7 @@
         "QUARRY_EDGE__SEMANTIC_RERANK",
         "QUARRY_EDGE__PAGE_TITLE_ENRICH"
       ],
-      "notes": "Model Plane POST /v1/invoke, used by intent classification, autoprompt, the semantic reranker, page titles, ai-formats and answer synthesis. The registry gives quarry-edge no model-gateway audience, so Auth Core refuses the mint with 403 and each of those callers degrades (decision D16, owned by QB-T17). Flip granted only together with a registry grant."
+      "notes": "Model Plane POST /v1/invoke, used by intent classification, autoprompt, the semantic reranker, page titles, ai-formats and answer synthesis. Since the WS16.S2 grant the registry gives quarry-edge the model-gateway audience with models:invoke for the model-extract row, and Auth Core cannot tell this request from that one (same audience, same scope): the closed gate is Quarry's (model_plane_gate keeps every feature of this row off) and the gateway, which refuses a service principal on /v1/invoke. Each caller degrades (decision D16, owned by QB-T17). Flip granted only together with a decision to open these callers."
     },
     {
       "name": "model-stream",
@@ -62,7 +62,7 @@
       "granted": false,
       "used_by": ["crates/quarry-runtime/src/mp_client.rs"],
       "feature_flags": ["QUARRY_EDGE__MODEL_PLANE_URL"],
-      "notes": "Model Plane POST /v1/invoke/stream, used by streamed answers and ai-formats. Refused today for the same reason as model-invoke (D16, QB-T17)."
+      "notes": "Model Plane POST /v1/invoke/stream, used by streamed answers and ai-formats. Closed today for the same reason as model-invoke: a Quarry-side gate, not an Auth Core refusal (D16, QB-T17)."
     },
     {
       "name": "model-audio",
@@ -73,7 +73,7 @@
       "granted": false,
       "used_by": ["crates/quarry-edge/src/audio_routes.rs"],
       "feature_flags": ["QUARRY_EDGE__MODEL_PLANE_URL"],
-      "notes": "POST /v1/audio, forwarded to /v1/ai/speech and /v1/ai/transcribe. Refused today for the same reason as model-invoke (D16, QB-T17)."
+      "notes": "POST /v1/audio, forwarded to /v1/ai/speech and /v1/ai/transcribe. Closed today for the same reason as model-invoke: a Quarry-side gate, not an Auth Core refusal (D16, QB-T17)."
     },
     {
       "name": "browser-grant-validate",
@@ -85,6 +85,30 @@
       "used_by": ["crates/quarry-runtime/src/grpc/browser_broker.rs"],
       "feature_flags": ["QUARRY_EDGE__BROWSER_GRANT_VALIDATOR_GRPC_URL"],
       "notes": "The BrowserBroker ValidateGrant call for the run's grant, made on behalf of the run's verified organization (X-1, WS1.A2): a token minted for that org makes the broker look the grant up in that org, so another org's grant is not found. Scope browser:read only: acquire, revoke and derive-run need browser:write, which no principal holds. The registry lane is ZDR (validation carries no content); the request never names a retention."
+    },
+    {
+      "name": "model-extract",
+      "audience": "model-gateway",
+      "mint_path": "/api/model-plane/internal-token",
+      "scopes": ["models:invoke"],
+      "reason": "extract structured data from page text",
+      "granted": true,
+      "used_by": [],
+      "pending": "WS16.S3 adds the call site in mp_client.rs (ModelPlaneClient::chat_for_org) and removes this field",
+      "feature_flags": ["QUARRY_EDGE__MODEL_PLANE_URL", "QUARRY_EDGE__AI_FORMATS"],
+      "notes": "The first of the two tokens an AI format needs: the user-ingress bearer of POST /v1/ai/chat, minted for the verified org. WS16.S2 granted quarry-edge the model-gateway audience with models:invoke at tenant retention (the token's zdr is the org's own posture, resolved by Auth Core). It is a request of its own, never combined with a data-plane scope. It is granted together with model-extract-inference and the AI-formats gate needs both rows; model-invoke, model-stream and model-audio stay granted:false, a Quarry-side gate."
+    },
+    {
+      "name": "model-extract-inference",
+      "audience": "inference-core",
+      "mint_path": "/api/inference-core/internal-token",
+      "scopes": ["inference:invoke", "models:invoke"],
+      "reason": "authorize inference for structured page extraction",
+      "granted": true,
+      "used_by": [],
+      "pending": "WS16.S3 adds the call site in mp_client.rs (ModelPlaneClient::chat_for_org) and removes this field",
+      "feature_flags": ["QUARRY_EDGE__MODEL_PLANE_URL", "QUARRY_EDGE__AI_FORMATS"],
+      "notes": "The second token an AI format needs: the x-inference-authorization bearer of POST /v1/ai/chat, aud inference-core, minted for the verified org. WS16.S2 granted quarry-edge the inference-core audience with inference:invoke and models:invoke at tenant retention. Never held by a data-plane request."
     }
   ]
 }

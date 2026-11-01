@@ -43,6 +43,14 @@ pub enum ServiceTokenAudience {
     /// The Model Plane BrowserBroker (`ValidateGrant`), an audience of its
     /// own: its tokens carry `aud=browser-broker` and scope `browser:read`.
     BrowserBroker,
+    /// Model Plane inference-core, the second bearer of an org-bound model call
+    /// (`x-inference-authorization`, WS16.S2): its tokens carry
+    /// `aud=inference-core` and scopes `inference:invoke` and `models:invoke`.
+    InferenceCore,
+    /// integration-corev2's own verifier audience (`aud=ingestion`), for the
+    /// executor-only one-time-code read (ADR-2a, scope `integration:otp:read`).
+    /// No manifest row requests it yet: E3.1-h adds the row and the call site.
+    Ingestion,
 }
 
 impl ServiceTokenAudience {
@@ -51,6 +59,8 @@ impl ServiceTokenAudience {
             Self::DataPlane => "/api/data-plane/internal-token",
             Self::ModelPlane => "/api/model-plane/internal-token",
             Self::BrowserBroker => "/api/browser-broker/internal-token",
+            Self::InferenceCore => "/api/inference-core/internal-token",
+            Self::Ingestion => "/api/ingestion/internal-token",
         }
     }
 
@@ -62,13 +72,21 @@ impl ServiceTokenAudience {
             Self::DataPlane => "data-plane",
             Self::ModelPlane => "model-gateway",
             Self::BrowserBroker => "browser-broker",
+            Self::InferenceCore => "inference-core",
+            Self::Ingestion => "ingestion",
         }
     }
 
     fn from_registry_audience(audience: &str) -> Option<Self> {
-        [Self::DataPlane, Self::ModelPlane, Self::BrowserBroker]
-            .into_iter()
-            .find(|candidate| candidate.registry_audience() == audience)
+        [
+            Self::DataPlane,
+            Self::ModelPlane,
+            Self::BrowserBroker,
+            Self::InferenceCore,
+            Self::Ingestion,
+        ]
+        .into_iter()
+        .find(|candidate| candidate.registry_audience() == audience)
     }
 }
 
@@ -184,7 +202,8 @@ const MANIFEST_SCHEMA_VERSION: u32 = 1;
 #[serde(deny_unknown_fields)]
 pub struct TokenRequestRow {
     pub name: String,
-    /// The registry audience: `data-plane`, `model-gateway` or `browser-broker`.
+    /// The registry audience: `data-plane`, `model-gateway`, `browser-broker`,
+    /// `inference-core` or `ingestion`.
     pub audience: String,
     /// The Auth Core path that mints for that audience.
     pub mint_path: String,
@@ -791,8 +810,9 @@ mod manifest_tests {
     /// Every request a row must stand for, typed here and not read from the
     /// manifest: the first five are exactly what the call sites wrote inline
     /// before the manifest existed, so the refactor cannot change a request
-    /// unnoticed, and editing a row means editing this table too.
-    const EXPECTED_REQUESTS: [(&str, ServiceTokenAudience, &[&str], &str); 7] = [
+    /// unnoticed, and editing a row means editing this table too. The last two
+    /// are the WS16.S2 grant (the two bearers of an org-bound model call).
+    const EXPECTED_REQUESTS: [(&str, ServiceTokenAudience, &[&str], &str); 9] = [
         (
             "vector-retrieve",
             ServiceTokenAudience::DataPlane,
@@ -834,6 +854,18 @@ mod manifest_tests {
             ServiceTokenAudience::BrowserBroker,
             &["browser:read"],
             "validate verified browser grant",
+        ),
+        (
+            "model-extract",
+            ServiceTokenAudience::ModelPlane,
+            &["models:invoke"],
+            "extract structured data from page text",
+        ),
+        (
+            "model-extract-inference",
+            ServiceTokenAudience::InferenceCore,
+            &["inference:invoke", "models:invoke"],
+            "authorize inference for structured page extraction",
         ),
     ];
 
@@ -888,6 +920,8 @@ mod manifest_tests {
                 "data-plane" => ServiceTokenAudience::DataPlane,
                 "model-gateway" => ServiceTokenAudience::ModelPlane,
                 "browser-broker" => ServiceTokenAudience::BrowserBroker,
+                "inference-core" => ServiceTokenAudience::InferenceCore,
+                "ingestion" => ServiceTokenAudience::Ingestion,
                 other => panic!("row {name}: unexpected audience {other}"),
             };
             assert_eq!(request.audience(), audience, "{name}");
@@ -909,6 +943,40 @@ mod manifest_tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn every_audience_round_trips_and_mints_on_the_path_of_its_own_name() {
+        let all = [
+            ServiceTokenAudience::DataPlane,
+            ServiceTokenAudience::ModelPlane,
+            ServiceTokenAudience::BrowserBroker,
+            ServiceTokenAudience::InferenceCore,
+            ServiceTokenAudience::Ingestion,
+        ];
+        for audience in all {
+            assert_eq!(
+                ServiceTokenAudience::from_registry_audience(audience.registry_audience()),
+                Some(audience),
+                "{audience:?}"
+            );
+        }
+        // Auth Core mounts the model-gateway mint on /api/model-plane; every other
+        // audience mints on /api/<audience>/internal-token.
+        for audience in all {
+            let segment = match audience {
+                ServiceTokenAudience::ModelPlane => "model-plane",
+                other => other.registry_audience(),
+            };
+            assert_eq!(
+                audience.endpoint(),
+                format!("/api/{segment}/internal-token"),
+                "{audience:?}"
+            );
+        }
+        let names: HashSet<&str> = all.iter().map(|a| a.registry_audience()).collect();
+        assert_eq!(names.len(), all.len(), "two audiences share a registry name");
+        assert_eq!(ServiceTokenAudience::from_registry_audience("cost-core"), None);
     }
 
     #[test]
