@@ -477,6 +477,11 @@ message ApprovalCause {
 
   // Run-salted blake3 digest of the exact (tool, arguments) call.
   string call_digest = 9;
+
+  // sha256 of the MCP tool definition the person reviewed (build plan WS13 S7). Empty unless the
+  // tool is an MCP tool whose definition is pinned: only a pinned MCP tool may be offered a
+  // standing rule or a thread scope.
+  string tool_digest = 10;
 }
 
 // A durable todo record.
@@ -955,6 +960,11 @@ message DecideApprovalRequest {
 
   // How far the decision reaches (build plan WS13 S3).
   ApprovalScope scope = 7;
+
+  // "Always" (build plan WS13 S7): the gateway sets this only for a granted thread-scoped decision
+  // on a pinned MCP tool. Session-core then records a rule proposal linked to the thread grant; the
+  // rule is not in force until the person confirms it.
+  bool rule_proposed = 8;
 }
 
 message DecideApprovalResponse {

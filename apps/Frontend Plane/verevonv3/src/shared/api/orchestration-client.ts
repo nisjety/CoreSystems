@@ -162,25 +162,82 @@ export async function decideApproval(
   reason?: string,
   signal?: AbortSignal,
   scope: ApprovalScope = 'once',
+  promote = false,
 ): Promise<Approval | null> {
   const checked = orchestrationDecideApprovalInput.safeParse({ approvalId, decision, reason: reason ?? '' })
-  if (!checked.success || !APPROVAL_SCOPES.includes(scope)) {
+  // "Always" (build plan WS13 S7) is an approval of a thread grant and nothing else.
+  if (
+    !checked.success ||
+    !APPROVAL_SCOPES.includes(scope) ||
+    (promote && (decision !== 'approve' || scope !== 'thread'))
+  ) {
     throw new ApiError('Ugyldig godkjenningsavgjørelse.', 400, 'invalid_approval_decision')
   }
   const payload = await requestJson<{ approval?: RawApproval }>(
     `/api/v1/orchestration/approvals/${encodeURIComponent(approvalId)}/decide`,
     {
       method: 'POST',
-      // The scope is sent only when it stands beyond this one call: the one decision carries no field.
-      body: JSON.stringify(
-        scope === 'once'
-          ? { decision, reason: checked.data.reason ?? '' }
-          : { decision, reason: checked.data.reason ?? '', scope },
-      ),
+      // The scope and "Always" are sent only when asked for: the one decision carries neither field.
+      body: JSON.stringify({
+        decision,
+        reason: checked.data.reason ?? '',
+        ...(scope === 'once' ? {} : { scope }),
+        ...(promote ? { promote: true } : {}),
+      }),
       signal,
     },
   )
   return payload.approval ? normalizeApproval(payload.approval) : null
+}
+
+/**
+ * A rule an "Always" choice on an MCP tool's approval proposed (build plan WS13 S7). It is not a rule
+ * until the person confirms it: confirming writes a digest-pinned user-scope allow.
+ */
+export type ApprovalRuleProposal = {
+  id: string
+  capabilityId: string
+  toolName: string
+  toolDigest: string
+  createdAt: string
+}
+
+/** The lifetime a confirmed rule gets: ninety days, which the server applies to every rule (K3-10). */
+export const RULE_LIFETIME_MS = 90 * 24 * 60 * 60 * 1000
+
+/**
+ * The write that confirms a proposed rule (build plan WS13 S7): a user-scope allow pinned to the
+ * digest the person reviewed, lapsing ninety days from `now`. Pure, so what a confirm sends is
+ * checked without a network.
+ */
+export function ruleConfirmationRequest(
+  proposal: ApprovalRuleProposal,
+  now: Date,
+): { capabilityId: string; body: Record<string, unknown> } {
+  return {
+    capabilityId: proposal.capabilityId,
+    body: {
+      scope: 'user',
+      decision: 'allow',
+      pinned_digest: proposal.toolDigest,
+      reason: '',
+      expires_at: new Date(now.getTime() + RULE_LIFETIME_MS).toISOString(),
+    },
+  }
+}
+
+/** Confirm a proposed rule through the tool-policy route. The server checks the digest and the tool. */
+export async function confirmApprovalRule(
+  proposal: ApprovalRuleProposal,
+  now: Date = new Date(),
+  signal?: AbortSignal,
+): Promise<void> {
+  const { capabilityId, body } = ruleConfirmationRequest(proposal, now)
+  await requestJson<unknown>(`/api/v1/tool-policies/${encodeURIComponent(capabilityId)}`, {
+    method: 'PUT',
+    body: JSON.stringify(body),
+    signal,
+  })
 }
 
 /** Resume a run that paused for approval, after the decision is recorded. */

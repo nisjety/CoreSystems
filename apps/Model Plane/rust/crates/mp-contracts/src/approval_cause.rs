@@ -130,24 +130,31 @@ const PROVIDER_WRITE_TOOLS: [&str; 3] =
 /// The scopes a decider may grant for a pause, from its code and the call's facts (build plan
 /// WS13 S6, D4 and K3-3). Closed: `thread` and `run` are offered only where the pause is a
 /// consent, risky-call or capability gate and the call's declared class is a read, a sandbox
-/// computation or a context write. Every other pause is `once`: provider writes, owner effects,
-/// browser actions, destructive and unclassified effects, MCP tools (until a pinned digest
-/// exists), and the shell and process tools. A cause that names no class, tool or key is `once`.
+/// computation or a context write. An external write is offered the same only for a pinned MCP
+/// tool, the one kind whose definition a person reviewed, and never under the high-risk capability
+/// gate. Every other pause is `once`: provider writes, owner effects, browser actions, destructive
+/// and unclassified effects, unpinned MCP tools, and the shell and process tools. A cause that
+/// names no class, tool or key is `once`.
 #[must_use]
 pub fn eligible_scopes(cause: &ApprovalCause) -> Vec<String> {
+    let code = CauseCode::from_wire(&cause.code);
     let widening_code = matches!(
-        CauseCode::from_wire(&cause.code),
+        code,
         CauseCode::RiskyEffectUnderAsk
             | CauseCode::ConsentToDisclose
             | CauseCode::CapabilityHighRisk
     );
+    let class = SideEffectClass::from_wire(&cause.effect_class);
+    let pinned_external_write = class == SideEffectClass::ExternalWrite
+        && code != CauseCode::CapabilityHighRisk
+        && is_pinned_mcp(cause);
     let standing_class = matches!(
-        SideEffectClass::from_wire(&cause.effect_class),
+        class,
         SideEffectClass::Read | SideEffectClass::SandboxCompute | SideEffectClass::ContextWrite
-    );
+    ) || pinned_external_write;
     let keyed = !cause.tool.trim().is_empty()
         && !cause.action_key.is_empty()
-        && !is_standing_excluded(&cause.tool);
+        && !is_standing_excluded(cause);
     if widening_code && standing_class && keyed {
         vec![
             SCOPE_ONCE.to_owned(),
@@ -159,13 +166,43 @@ pub fn eligible_scopes(cause: &ApprovalCause) -> Vec<String> {
     }
 }
 
-/// Tools no standing grant may cover, whatever their class.
-fn is_standing_excluded(tool_name: &str) -> bool {
-    let tool = tool_name.trim();
-    tool.starts_with(MCP_TOOL_PREFIX)
-        || tool == "shell"
-        || tool.starts_with("process_")
-        || PROVIDER_WRITE_TOOLS.contains(&tool)
+/// Whether a cause's tool is an MCP tool whose definition is pinned: `tool_digest` is the sha256
+/// of the definition a person reviewed (build plan WS05 S5, WS13 S7). An unpinned MCP tool has no
+/// digest to bind a rule or a grant to, so it is never offered a standing scope or a rule.
+#[must_use]
+pub fn is_pinned_mcp(cause: &ApprovalCause) -> bool {
+    cause.tool.trim().starts_with(MCP_TOOL_PREFIX) && is_sha256_hex(&cause.tool_digest)
+}
+
+/// Whether a cause may become a standing rule (build plan WS13 S7): it must offer a thread grant,
+/// name a pinned MCP tool, and declare a class a person may relax, which is at most an external
+/// write (capability-core's `CanRelax` for a person). A built-in tool is never offered one.
+#[must_use]
+pub fn rule_offered(cause: &ApprovalCause) -> bool {
+    cause
+        .scope_options
+        .iter()
+        .any(|scope| scope == SCOPE_THREAD)
+        && is_pinned_mcp(cause)
+        && SideEffectClass::from_wire(&cause.effect_class) <= SideEffectClass::ExternalWrite
+}
+
+/// A sha256 digest as the registry writes it: 64 lowercase hex characters.
+fn is_sha256_hex(candidate: &str) -> bool {
+    candidate.len() == 64
+        && candidate
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Tools no standing grant may cover, whatever their class. An MCP tool is covered only while its
+/// definition is pinned.
+fn is_standing_excluded(cause: &ApprovalCause) -> bool {
+    let tool = cause.tool.trim();
+    if tool.starts_with(MCP_TOOL_PREFIX) {
+        return !is_pinned_mcp(cause);
+    }
+    tool == "shell" || tool.starts_with("process_") || PROVIDER_WRITE_TOOLS.contains(&tool)
 }
 
 /// The key a standing grant would match: the tool, plus the operation for the one tool
@@ -262,12 +299,27 @@ pub fn for_call_with_class(
     tool_input: &str,
     effect_class: &str,
 ) -> ApprovalCause {
+    for_call_with_tool(code, run_id, tool_name, tool_input, effect_class, "")
+}
+
+/// [`for_call_with_class`] for a call whose tool definition is known: `tool_digest` is the sha256
+/// of the MCP definition the person reviewed, and empty for any other call (build plan WS13 S7).
+#[must_use]
+pub fn for_call_with_tool(
+    code: CauseCode,
+    run_id: &str,
+    tool_name: &str,
+    tool_input: &str,
+    effect_class: &str,
+    tool_digest: &str,
+) -> ApprovalCause {
     let mut cause = ApprovalCause {
         code: code.as_str().to_owned(),
         tool: tool_name.trim().to_owned(),
         effect_class: effect_class.to_owned(),
         action_key: action_key(tool_name, tool_input),
         call_digest: call_digest(run_id, tool_name, tool_input),
+        tool_digest: tool_digest.to_owned(),
         ..ApprovalCause::default()
     };
     cause.scope_options = eligible_scopes(&cause);
@@ -306,6 +358,10 @@ pub fn normalized(mut cause: ApprovalCause) -> (ApprovalCause, bool) {
             *field = field.chars().take(MAX_FIELD_CHARS).collect();
         }
     }
+    // A digest that is not sha256 hex pins nothing: the tool reads as unpinned.
+    if !is_sha256_hex(&cause.tool_digest) {
+        cause.tool_digest.clear();
+    }
     cause.scope_options = eligible_scopes(&cause);
     (cause, known)
 }
@@ -323,6 +379,7 @@ pub fn to_metadata(cause: &ApprovalCause) -> Value {
         ("risk_category", &cause.risk_category),
         ("action_key", &cause.action_key),
         ("call_digest", &cause.call_digest),
+        ("tool_digest", &cause.tool_digest),
     ] {
         if !value.is_empty() {
             map.insert(key.to_owned(), Value::String(value.clone()));
@@ -370,6 +427,7 @@ pub fn from_metadata(metadata: &Value) -> Option<ApprovalCause> {
             .unwrap_or(false),
         action_key: text("action_key"),
         call_digest: text("call_digest"),
+        tool_digest: text("tool_digest"),
     };
     Some(normalized(cause).0)
 }
@@ -800,5 +858,108 @@ mod tests {
         assert_eq!(thread_grant_ttl_from(Some(" 900 ")), 900);
         assert_eq!(thread_grant_ttl_from(Some("28800")), 28800);
         assert_eq!(thread_grant_ttl_from(Some("604800")), 28800);
+    }
+
+    const PINNED: &str = "2b6a1f0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a";
+
+    fn mcp_call(code: CauseCode, class: &str, digest: &str) -> ApprovalCause {
+        for_call_with_tool(
+            code,
+            "run_1",
+            "mcp__fixture__create_note",
+            r#"{"title":"x"}"#,
+            class,
+            digest,
+        )
+    }
+
+    #[test]
+    fn a_pinned_mcp_external_write_offers_thread_and_run_under_a_widening_code() {
+        for code in [CauseCode::RiskyEffectUnderAsk, CauseCode::ConsentToDisclose] {
+            let cause = mcp_call(code, "external_write", PINNED);
+            assert_eq!(scopes(&cause), ["once", "thread", "run"], "{code:?}");
+        }
+        let high_risk_read = mcp_call(CauseCode::CapabilityHighRisk, "read", PINNED);
+        assert_eq!(scopes(&high_risk_read), ["once", "thread", "run"]);
+    }
+
+    #[test]
+    fn an_unpinned_or_malformed_mcp_digest_leaves_the_tool_once() {
+        let uppercase = PINNED.to_uppercase();
+        for digest in ["", "not-a-digest", uppercase.as_str()] {
+            for class in ["read", "external_write"] {
+                let cause = mcp_call(CauseCode::RiskyEffectUnderAsk, class, digest);
+                assert_eq!(scopes(&cause), ["once"], "{digest:?} {class}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_pinned_mcp_destructive_owner_or_high_risk_external_write_stays_once() {
+        for (code, class) in [
+            (CauseCode::RiskyEffectUnderAsk, "destructive"),
+            (CauseCode::RiskyEffectUnderAsk, "owner_effect"),
+            (CauseCode::CapabilityHighRisk, "external_write"),
+        ] {
+            let cause = mcp_call(code, class, PINNED);
+            assert_eq!(scopes(&cause), ["once"], "{code:?} {class}");
+        }
+    }
+
+    #[test]
+    fn a_digest_on_a_built_in_tool_pins_nothing() {
+        let cause = for_call_with_tool(
+            CauseCode::RiskyEffectUnderAsk,
+            "run_1",
+            "execute_provider_action",
+            r#"{"operation":"message.send"}"#,
+            "external_write",
+            PINNED,
+        );
+        assert_eq!(scopes(&cause), ["once"]);
+        assert!(!is_pinned_mcp(&cause));
+    }
+
+    #[test]
+    fn the_pin_survives_the_stored_shape_and_a_malformed_digest_is_dropped() {
+        let cause = mcp_call(CauseCode::RiskyEffectUnderAsk, "external_write", PINNED);
+        let metadata = json!({ "cause": to_metadata(&cause) });
+        assert_eq!(from_metadata(&metadata), Some(cause.clone()));
+        let (malformed, _) = normalized(ApprovalCause {
+            tool_digest: "not-a-digest".to_owned(),
+            ..cause
+        });
+        assert!(malformed.tool_digest.is_empty());
+        assert_eq!(scopes(&malformed), ["once"]);
+    }
+
+    #[test]
+    fn a_rule_is_offered_only_for_a_pinned_mcp_tool_the_person_may_relax() {
+        let offered = [
+            mcp_call(CauseCode::RiskyEffectUnderAsk, "external_write", PINNED),
+            mcp_call(CauseCode::ConsentToDisclose, "read", PINNED),
+            mcp_call(CauseCode::CapabilityHighRisk, "read", PINNED),
+        ];
+        for cause in &offered {
+            assert!(rule_offered(cause), "{cause:?}");
+        }
+        let refused = [
+            mcp_call(CauseCode::RiskyEffectUnderAsk, "destructive", PINNED),
+            mcp_call(CauseCode::RiskyEffectUnderAsk, "owner_effect", PINNED),
+            mcp_call(CauseCode::CapabilityHighRisk, "external_write", PINNED),
+            mcp_call(CauseCode::HookAsk, "external_write", PINNED),
+            mcp_call(CauseCode::RiskyEffectUnderAsk, "external_write", ""),
+            for_call_with_tool(
+                CauseCode::RiskyEffectUnderAsk,
+                "run_1",
+                "write_file",
+                "{}",
+                "external_write",
+                PINNED,
+            ),
+        ];
+        for cause in &refused {
+            assert!(!rule_offered(cause), "{cause:?}");
+        }
     }
 }

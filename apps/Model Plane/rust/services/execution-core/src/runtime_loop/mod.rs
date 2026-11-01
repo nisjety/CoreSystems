@@ -3051,6 +3051,7 @@ fn auto_posture_decision_request(
         org_id: org_id.to_owned(),
         decision_source: pb::ApprovalDecisionSource::PostureAuto as i32,
         scope: pb::ApprovalScope::Once as i32,
+        rule_proposed: false,
     }
 }
 

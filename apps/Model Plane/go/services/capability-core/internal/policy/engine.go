@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/triodelab/model-plane/services/capability-core/internal/domain"
 	"github.com/triodelab/model-plane/services/capability-core/internal/models"
@@ -234,6 +235,9 @@ type ToolPolicy struct {
 	// PinnedDigest is the tool definition an `allow` was given for; empty for a
 	// tightening policy.
 	PinnedDigest string
+	// ExpiresAt is when an `allow` lapses (build plan WS13 S7); zero for a policy
+	// that does not lapse.
+	ExpiresAt time.Time
 }
 
 // ToolPolicySource loads the active policies that apply to one person's call of
@@ -278,8 +282,8 @@ const relaxedBudget = "tokens=10000,cost_usd=0.50"
 // source as it is. Relaxing is narrower:
 // an `allow` turns the risk-level ask of an `mcp_tool` row into an allow only
 // when the tool's class and floor are within what the policy's scope may relax
-// (CanRelax) and the policy is pinned to the definition the registry pins now. An
-// `allow` for a definition that has since changed is read as an `ask`; an `allow`
+// (CanRelax) and the policy is pinned to the definition the registry pins now and has not lapsed.
+// An `allow` for a definition that has since changed, or that has lapsed, is read as an `ask`; an `allow`
 // on a built-in tool, or on a class it may not relax, is ignored. A denial from
 // Decide (a tool not approved, a gate) is never relaxed.
 func DecideWithPolicies(base *Result, capEntry *models.Capability, binding *ToolBinding, policies []ToolPolicy) *Result {
@@ -301,7 +305,7 @@ func DecideWithPolicies(base *Result, capEntry *models.Capability, binding *Tool
 			if !relaxable || !CanRelax(p.ScopeKind, binding.SideEffectClass, binding.ApprovalFloor) {
 				continue
 			}
-			if p.PinnedDigest == "" || p.PinnedDigest != binding.ToolDigest {
+			if p.PinnedDigest == "" || p.PinnedDigest != binding.ToolDigest || lapsed(p, time.Now()) {
 				ask = true
 				continue
 			}
@@ -330,6 +334,13 @@ func DecideWithPolicies(base *Result, capEntry *models.Capability, binding *Tool
 		}
 	}
 	return result
+}
+
+// lapsed reports whether a stored allow has passed its expiry (build plan WS13 S7, K3-10). A lapsed
+// allow is read as a stale one, an ask and never a relaxation; the person renews it by confirming
+// the rule again. A policy with no expiry never lapses.
+func lapsed(p ToolPolicy, now time.Time) bool {
+	return !p.ExpiresAt.IsZero() && !now.Before(p.ExpiresAt)
 }
 
 // EvaluateCapability evaluates a capability snapshot that the caller has

@@ -1007,6 +1007,9 @@ pub struct DecisionRecord<'a> {
     /// The lifetime, in seconds, of the standing grant this decision creates. Read only when
     /// `scope` is a standing scope (build plan WS13 S6).
     pub grant_ttl_secs: i64,
+    /// "Always" (build plan WS13 S7): also propose a standing rule for the person to confirm,
+    /// linked to the thread grant this decision creates. Only a granted thread decision may carry it.
+    pub rule_proposed: bool,
 }
 
 /// The record of a caller that states no source: `unattributed`, one call only, not audited.
@@ -1015,6 +1018,7 @@ const UNATTRIBUTED_DECISION: DecisionRecord<'static> = DecisionRecord {
     scope: "once",
     audit: false,
     grant_ttl_secs: mp_contracts::approval_cause::THREAD_GRANT_TTL_DEFAULT_SECS,
+    rule_proposed: false,
 };
 
 pub async fn decide_approval(
@@ -1037,6 +1041,21 @@ pub async fn decide_approval(
         &UNATTRIBUTED_DECISION,
     )
     .await
+}
+
+/// The decision record one decision leaves in `approvals.metadata.decision` (build plan WS13 S3).
+/// `rule_proposed` is written only when a rule was proposed, so every other decision stores exactly
+/// what it stored before proposals existed.
+fn decision_json(record: &DecisionRecord<'_>) -> JsonValue {
+    let mut decision = serde_json::json!({
+        "source": record.source,
+        "scope": record.scope,
+        "step_up_verified": false,
+    });
+    if record.rule_proposed {
+        decision["rule_proposed"] = JsonValue::Bool(true);
+    }
+    decision
 }
 
 /// Decide an approval and record its provenance (build plan WS13 S3): the decision's source
@@ -1067,12 +1086,13 @@ pub async fn decide_approval_recorded(
     if !matches!(status, "granted" | "denied" | "timed_out") {
         bail!("unsupported approval decision status");
     }
+    if record.rule_proposed
+        && !(status == "granted" && record.scope == mp_contracts::approval_cause::SCOPE_THREAD)
+    {
+        return Err(ScopeGrantRefusal::RuleNotOffered.into());
+    }
 
-    let decision = serde_json::json!({
-        "source": record.source,
-        "scope": record.scope,
-        "step_up_verified": false,
-    });
+    let decision = decision_json(record);
     let mut transaction = pool.begin().await?;
     let updated = sqlx::query_as::<_, (String,)>(DECIDE_APPROVAL_SQL)
         .bind(id)
@@ -1197,6 +1217,9 @@ pub enum ScopeGrantRefusal {
     /// The thread is a Space thread, or the run has none. A standing scope waits for the Space
     /// session to confirm owner-only semantics (DEC-06, WS13 D9).
     NotAvailable,
+    /// The decision asks for an "Always" rule that its cause does not allow: the call is not a
+    /// pinned MCP tool the person may relax, or the decision is not a granted thread decision.
+    RuleNotOffered,
 }
 
 impl ScopeGrantRefusal {
@@ -1206,6 +1229,7 @@ impl ScopeGrantRefusal {
         match self {
             Self::NotOffered => "scope_not_offered",
             Self::NotAvailable => "scope_not_available_in_space",
+            Self::RuleNotOffered => "rule_not_offered",
         }
     }
 }
@@ -1226,13 +1250,24 @@ const APPROVAL_GRANT_CONTEXT_SQL: &str = "SELECT a.user_id, a.run_id, r.thread_i
      LEFT JOIN threads t ON t.id = r.thread_id \
      WHERE a.id = $1 AND a.org_id = $2";
 
+/// The open proposal one "Always" decision creates, or reuses when the same tool definition is
+/// already proposed for the owner (build plan WS13 S7). A reused proposal moves to the decision
+/// that renewed it.
+const INSERT_APPROVAL_RULE_PROPOSAL_SQL: &str = "INSERT INTO approval_rule_proposals \
+     (id, org_id, user_id, created_from_approval_id, tool_name, tool_digest) \
+     VALUES ($1, $2, $3, $4, $5, $6) \
+     ON CONFLICT (org_id, user_id, tool_name, tool_digest) WHERE state = 'proposed' \
+     DO UPDATE SET created_from_approval_id = EXCLUDED.created_from_approval_id \
+     RETURNING id";
+
 const INSERT_APPROVAL_SCOPE_GRANT_SQL: &str = "INSERT INTO approval_scope_grants \
      (id, org_id, user_id, thread_id, run_id, scope, tool_name, action_key, effect_class, \
-      cause_code, created_from_approval_id, expires_at) \
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now() + make_interval(secs => $12)) \
+      cause_code, created_from_approval_id, expires_at, rule_id) \
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now() + make_interval(secs => $12), $13) \
      ON CONFLICT (org_id, user_id, thread_id, scope, COALESCE(run_id, ''), action_key) \
      WHERE revoked_at IS NULL \
-     DO UPDATE SET expires_at = GREATEST(approval_scope_grants.expires_at, EXCLUDED.expires_at)";
+     DO UPDATE SET expires_at = GREATEST(approval_scope_grants.expires_at, EXCLUDED.expires_at), \
+                   rule_id = COALESCE(EXCLUDED.rule_id, approval_scope_grants.rule_id)";
 
 /// Record the standing grant one granted decision creates (build plan WS13 S6), in the decision's
 /// transaction. The scope must be one the cause offers, and the thread must be an ordinary one.
@@ -1270,6 +1305,25 @@ async fn create_scope_grant(
     };
     let run_scope =
         (record.scope == mp_contracts::approval_cause::SCOPE_RUN).then_some(run_id.as_str());
+    // An "Always" proposes its rule only after the checks above, so a refused or non-persistent
+    // decision leaves no proposal behind (build plan WS13 S7, DEC-32).
+    let rule_id = if record.rule_proposed {
+        if !mp_contracts::approval_cause::rule_offered(&cause) {
+            return Err(ScopeGrantRefusal::RuleNotOffered.into());
+        }
+        let proposal = sqlx::query_scalar::<_, String>(INSERT_APPROVAL_RULE_PROPOSAL_SQL)
+            .bind(format!("arp_{}", mp_ids::new_ulid()))
+            .bind(org_id)
+            .bind(&owner)
+            .bind(approval_id)
+            .bind(&cause.tool)
+            .bind(&cause.tool_digest)
+            .fetch_one(&mut **transaction)
+            .await?;
+        Some(proposal)
+    } else {
+        None
+    };
     sqlx::query(INSERT_APPROVAL_SCOPE_GRANT_SQL)
         .bind(format!("apg_{}", mp_ids::new_ulid()))
         .bind(org_id)
@@ -1283,6 +1337,7 @@ async fn create_scope_grant(
         .bind(&cause.code)
         .bind(approval_id)
         .bind(record.grant_ttl_secs as f64)
+        .bind(rule_id)
         .execute(&mut **transaction)
         .await?;
     Ok(())
@@ -2944,6 +2999,38 @@ mod tests {
     }
 
     #[test]
+    fn a_decision_names_a_rule_proposal_only_when_one_was_made() {
+        let plain = DecisionRecord {
+            source: "user",
+            scope: "thread",
+            audit: false,
+            grant_ttl_secs: 3600,
+            rule_proposed: false,
+        };
+        assert_eq!(
+            decision_json(&plain),
+            serde_json::json!({ "source": "user", "scope": "thread", "step_up_verified": false })
+        );
+        let proposed = DecisionRecord {
+            rule_proposed: true,
+            ..plain
+        };
+        assert_eq!(decision_json(&proposed)["rule_proposed"], true);
+    }
+
+    #[test]
+    fn a_refused_rule_proposal_has_a_closed_token() {
+        assert_eq!(ScopeGrantRefusal::RuleNotOffered.code(), "rule_not_offered");
+    }
+
+    #[test]
+    fn the_grant_names_its_proposal_and_a_renewal_keeps_the_link() {
+        assert!(INSERT_APPROVAL_SCOPE_GRANT_SQL
+            .contains("rule_id = COALESCE(EXCLUDED.rule_id, approval_scope_grants.rule_id)"));
+        assert!(INSERT_APPROVAL_RULE_PROPOSAL_SQL.contains("WHERE state = 'proposed'"));
+    }
+
+    #[test]
     fn approval_delivery_insert_rejects_expired_grants() {
         assert!(INSERT_APPROVAL_DELIVERY_OUTBOX_SQL
             .contains("expires_at IS NULL OR expires_at > now()"));
@@ -3371,6 +3458,7 @@ mod approval_decision_db_tests {
             scope: "once",
             audit: true,
             grant_ttl_secs: 3600,
+            rule_proposed: false,
         };
         let write = decide_approval_recorded(
             &pool,
@@ -3417,6 +3505,7 @@ mod approval_decision_db_tests {
             scope: "once",
             audit: true,
             grant_ttl_secs: 3600,
+            rule_proposed: false,
         };
         for attempt in 0..2 {
             let write = decide_approval_recorded(
@@ -3448,6 +3537,7 @@ mod approval_decision_db_tests {
             scope: "once",
             audit: false,
             grant_ttl_secs: 3600,
+            rule_proposed: false,
         };
         decide_approval_recorded(
             &pool,
@@ -5061,6 +5151,7 @@ mod approval_scope_grant_db_tests {
             scope,
             audit: true,
             grant_ttl_secs: 3600,
+            rule_proposed: false,
         };
         decide_approval_recorded(
             pool,
@@ -5455,5 +5546,125 @@ mod approval_scope_grant_db_tests {
             .await
             .expect("count audit rows");
         assert_eq!(audited, 1, "the release has its audit row");
+    }
+
+    /// An "Always" on a pinned MCP tool's approval (build plan WS13 S7): the decision creates one
+    /// thread grant and one open rule proposal for the tool definition, and the grant names it.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn an_always_decision_proposes_one_rule_linked_to_its_grant() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let digest = "2b6a1f0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a";
+        let p = pending(
+            &pool,
+            "always",
+            "risky_effect_under_ask",
+            "mcp__fixture__create_note",
+            "external_write",
+        )
+        .await;
+        sqlx::query(
+            "UPDATE approvals SET metadata = jsonb_set(metadata, '{cause,tool_digest}', to_jsonb($2::text)) \
+             WHERE id = $1",
+        )
+        .bind(&p.approval_id)
+        .bind(digest)
+        .execute(&pool)
+        .await
+        .expect("pin the tool definition");
+        let record = DecisionRecord {
+            source: "user",
+            scope: "thread",
+            audit: false,
+            grant_ttl_secs: 3600,
+            rule_proposed: true,
+        };
+        decide_approval_recorded(
+            &pool,
+            &p.approval_id,
+            &p.org,
+            Some(p.user.as_str()),
+            "granted",
+            &p.user,
+            "ok",
+            &record,
+        )
+        .await
+        .expect("the decision with an Always");
+        let proposals: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM approval_rule_proposals \
+             WHERE org_id = $1 AND tool_digest = $2 AND state = 'proposed'",
+        )
+        .bind(&p.org)
+        .bind(digest)
+        .fetch_one(&pool)
+        .await
+        .expect("count proposals");
+        assert_eq!(proposals, 1, "one open proposal for the tool definition");
+        let linked: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM approval_scope_grants g \
+             JOIN approval_rule_proposals r ON r.id = g.rule_id \
+             WHERE g.org_id = $1 AND g.scope = 'thread' AND r.tool_name = 'mcp__fixture__create_note'",
+        )
+        .bind(&p.org)
+        .fetch_one(&pool)
+        .await
+        .expect("count linked grants");
+        assert_eq!(linked, 1, "the thread grant names the proposal");
+    }
+
+    /// A built-in tool never becomes a rule: the decision is refused and nothing is recorded.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn a_rule_is_not_proposed_for_a_built_in_tool() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let p = pending(
+            &pool,
+            "always-builtin",
+            "risky_effect_under_ask",
+            "knowledge_search",
+            "read",
+        )
+        .await;
+        let record = DecisionRecord {
+            source: "user",
+            scope: "thread",
+            audit: false,
+            grant_ttl_secs: 3600,
+            rule_proposed: true,
+        };
+        let refused = decide_approval_recorded(
+            &pool,
+            &p.approval_id,
+            &p.org,
+            Some(p.user.as_str()),
+            "granted",
+            &p.user,
+            "ok",
+            &record,
+        )
+        .await
+        .expect_err("a built-in tool is refused an Always");
+        assert_eq!(
+            refused.downcast_ref::<ScopeGrantRefusal>(),
+            Some(&ScopeGrantRefusal::RuleNotOffered)
+        );
+        let state: String = sqlx::query_scalar("SELECT status FROM approvals WHERE id = $1")
+            .bind(&p.approval_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read state");
+        assert_eq!(state, "requested", "the refused decision is not recorded");
+        let proposals: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM approval_rule_proposals WHERE org_id = $1")
+                .bind(&p.org)
+                .fetch_one(&pool)
+                .await
+                .expect("count proposals");
+        assert_eq!(proposals, 0);
     }
 }

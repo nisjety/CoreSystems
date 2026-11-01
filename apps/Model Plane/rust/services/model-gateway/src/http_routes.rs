@@ -2052,24 +2052,6 @@ fn rule_proposals_enabled() -> bool {
     rule_proposals_from(env::var(RULE_PROPOSALS_ENV).ok().as_deref())
 }
 
-/// The prefix every MCP tool name carries. Only an MCP tool's approval may become a rule: a person
-/// never relaxes a built-in tool, and capability-core refuses an allow for one (DEC-08, WS05 D6).
-const MCP_TOOL_PREFIX: &str = "mcp__";
-
-/// Whether an approval's cause may become a standing rule. The causes are the ones that widen to a
-/// standing grant (`approval_cause::eligible_scopes`), on an MCP tool whose declared class a person
-/// may relax: the ceiling is `external_write`, the same one capability-core's `CanRelax` uses.
-fn rule_offered_for(cause: &ApprovalCause) -> bool {
-    use mp_contracts::tool_class::SideEffectClass;
-    matches!(
-        CauseCode::from_wire(&cause.code),
-        CauseCode::RiskyEffectUnderAsk
-            | CauseCode::ConsentToDisclose
-            | CauseCode::CapabilityHighRisk
-    ) && cause.tool.trim().starts_with(MCP_TOOL_PREFIX)
-        && SideEffectClass::from_wire(&cause.effect_class) <= SideEffectClass::ExternalWrite
-}
-
 /// Whether a decision is "Always" (build plan WS13 S7): a standing rule proposed from this grant,
 /// for the person to confirm in settings. Returns `true` only for a valid ask under the switch; with
 /// the switch off `promote` is ignored. A rule is proposed from a grant of this thread on an MCP
@@ -2098,7 +2080,7 @@ fn checked_rule_proposal(
             "Always applies to a decision for this thread.",
         ));
     }
-    if !cause.is_some_and(rule_offered_for) {
+    if !cause.is_some_and(approval_cause::rule_offered) {
         return Err(scope_refusal(
             StatusCode::UNPROCESSABLE_ENTITY,
             "rule_not_offered",
@@ -2182,9 +2164,9 @@ fn step_up_required_error() -> HttpJsonError {
     )
 }
 
-/// The durable decision this gateway records for a browser decision (build plan WS13 S3). The
-/// source is always USER: the body has no field for it, so a client-supplied value cannot
-/// reach the record. The scope is ONCE, the only scope the body can name today.
+/// The durable decision this gateway records for a decision (build plan WS13 S3). The source is
+/// always USER: the body has no field for it, so a client-supplied value cannot reach the record.
+/// `rule_proposed` is set only for an "Always" this gateway accepted (build plan WS13 S7).
 fn user_decision_request(
     approval_id: String,
     target_state: ApprovalState,
@@ -2192,6 +2174,7 @@ fn user_decision_request(
     org_id: &str,
     reason: String,
     scope: &str,
+    rule_proposed: bool,
 ) -> DecideApprovalRequest {
     DecideApprovalRequest {
         approval_id,
@@ -2203,6 +2186,7 @@ fn user_decision_request(
         org_id: org_id.to_owned(),
         decision_source: ApprovalDecisionSource::User as i32,
         scope: approval_scope_code(scope),
+        rule_proposed,
     }
 }
 
@@ -2294,6 +2278,7 @@ async fn decide_approval(
                 &claims.org_id,
                 body.reason,
                 scope,
+                asks_rule,
             ),
             &session_bearer,
         )?)
@@ -2303,15 +2288,6 @@ async fn decide_approval(
     let approval = resp
         .approval
         .ok_or_else(|| not_found("approval not found"))?;
-    if asks_rule {
-        // The decision carries no rule field yet, so the thread grant is recorded and no rule is
-        // proposed. Ids only: the reason text never reaches a log line.
-        warn!(
-            approval_id = %approval.id,
-            "Always recorded as a thread grant; no rule was proposed"
-        );
-    }
-
     // A grant is durable authority, but not a restartable continuation: this
     // path never invokes a generic `ResumeRun`, since the outbox is
     // identifier-only and there is no descriptor-backed, service-only
@@ -7799,18 +7775,22 @@ mod approval_step_up_tests {
 mod approval_rule_tests {
     use super::*;
 
-    /// An MCP tool's approval as the grant eligibility offers it once the tool is pinned: a risky
-    /// call under ask, with its declared class and both scopes.
+    /// The digest the fixture tool's definition is pinned to.
+    const PINNED_DIGEST: &str = "2b6a1f0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a";
+
+    /// An MCP tool's approval as the server states it once the tool is pinned: the given code, the
+    /// declared class, the pinned digest, and the scopes the server computes from them.
     fn mcp_cause(code: &str, effect_class: &str) -> ApprovalCause {
-        ApprovalCause {
+        approval_cause::normalized(ApprovalCause {
             code: code.to_owned(),
             tool: "mcp__fixture__create_note".to_owned(),
             effect_class: effect_class.to_owned(),
-            scope_options: vec![SCOPE_ONCE.to_owned(), SCOPE_THREAD.to_owned()],
             action_key: "mcp__fixture__create_note".to_owned(),
             call_digest: "digest-of-the-exact-call".to_owned(),
+            tool_digest: PINNED_DIGEST.to_owned(),
             ..ApprovalCause::default()
-        }
+        })
+        .0
     }
 
     fn ask(
@@ -7842,7 +7822,8 @@ mod approval_rule_tests {
         .expect("the thread scope is offered");
         assert_eq!(scope, SCOPE_THREAD);
         assert!(ask(Some(&cause), scope, ApprovalState::Granted).expect("an MCP grant may ask"));
-        // The grant is the decision's own: it does not wait for the rule to be confirmed.
+        // The grant is the decision's own: it does not wait for the rule to be confirmed. The rule
+        // is proposed beside it and is in force only once the person confirms it.
         let request = user_decision_request(
             "appr-1".to_owned(),
             ApprovalState::Granted,
@@ -7850,9 +7831,14 @@ mod approval_rule_tests {
             "org-1",
             String::new(),
             scope,
+            true,
         );
         assert_eq!(request.scope, ApprovalScope::Thread as i32);
         assert_eq!(request.decision_source, ApprovalDecisionSource::User as i32);
+        assert!(
+            request.rule_proposed,
+            "the proposal travels with the decision"
+        );
     }
 
     #[test]
@@ -7881,6 +7867,17 @@ mod approval_rule_tests {
         assert_eq!(
             refusal_code(ask(None, SCOPE_THREAD, ApprovalState::Granted)),
             "rule_not_offered"
+        );
+        let mut unpinned = grant.clone();
+        unpinned.tool_digest.clear();
+        assert_eq!(
+            refusal_code(ask(
+                Some(&approval_cause::normalized(unpinned).0),
+                SCOPE_THREAD,
+                ApprovalState::Granted
+            )),
+            "rule_not_offered",
+            "an MCP tool whose definition is not pinned has no rule"
         );
         assert_eq!(
             refusal_code(ask(Some(&grant), SCOPE_ONCE, ApprovalState::Granted)),
@@ -8009,6 +8006,7 @@ mod approval_value_tests {
             "org-1",
             body.reason,
             "once",
+            false,
         );
         assert_eq!(request.decision_source, ApprovalDecisionSource::User as i32);
         assert_eq!(request.scope, ApprovalScope::Once as i32);

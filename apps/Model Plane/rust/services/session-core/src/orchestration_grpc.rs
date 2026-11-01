@@ -3838,6 +3838,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                     scope,
                     audit: approval_audit_events_enabled(),
                     grant_ttl_secs: approval_cause::thread_grant_ttl_secs(),
+                    rule_proposed: req.rule_proposed,
                 },
             )
             .await
