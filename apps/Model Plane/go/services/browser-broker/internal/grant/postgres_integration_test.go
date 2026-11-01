@@ -87,7 +87,7 @@ func applyMigration(t *testing.T, pool *pgxpool.Pool, name string) {
 	}
 }
 
-// newTestDB creates a fresh database with 0001, 0003 and 0004 applied and returns a pool on it.
+// newTestDB creates a fresh database with 0001, 0003, 0004 and 0005 applied and returns a pool on it.
 func newTestDB(t *testing.T) (*pgxpool.Pool, *pgxpool.Config) {
 	t.Helper()
 	bg := context.Background()
@@ -123,6 +123,7 @@ func newTestDB(t *testing.T) (*pgxpool.Pool, *pgxpool.Config) {
 	applyMigration(t, pool, "0001_browser_grants.up.sql")
 	applyMigration(t, pool, "0003_browser_grants_budget.up.sql")
 	applyMigration(t, pool, "0004_browser_grants_policy.up.sql")
+	applyMigration(t, pool, "0005_browser_grants_key.up.sql")
 	return pool, cfg
 }
 
@@ -818,6 +819,8 @@ func TestPg_MigrationIsRerunnable(t *testing.T) {
 	applyMigration(t, pool, "0003_browser_grants_budget.up.sql")
 	applyMigration(t, pool, "0004_browser_grants_policy.up.sql")
 	applyMigration(t, pool, "0004_browser_grants_policy.up.sql")
+	applyMigration(t, pool, "0005_browser_grants_key.up.sql")
+	applyMigration(t, pool, "0005_browser_grants_key.up.sql")
 	if _, err := store.GetScoped(ctx, before.ID, before.OrgID, before.OwnerID); err != nil {
 		t.Fatalf("a re-applied migration lost a row: %v", err)
 	}
@@ -834,10 +837,11 @@ func TestPg_MigrationIsRerunnable(t *testing.T) {
 		indexes = append(indexes, name)
 	}
 	rows.Close()
-	// 0004 adds the attach idempotency and human_browse owner indexes.
+	// 0004 adds the attach idempotency and human_browse owner indexes, 0005 the key index.
 	want := []string{"browser_grants_expiry_idx", "browser_grants_owner_active_idx", "browser_grants_parent_idx",
 		"browser_grants_pkey", "browser_grants_run_idempotency_idx",
-		"browser_grants_attach_idempotency_idx", "browser_grants_owner_human_active_idx"}
+		"browser_grants_attach_idempotency_idx", "browser_grants_owner_human_active_idx",
+		"browser_grants_key_idx"}
 	sort.Strings(want)
 	if !sameStrings(indexes, want) {
 		t.Fatalf("indexes = %v, want %v", indexes, want)
@@ -860,6 +864,7 @@ func TestPg_MigrationIsRerunnable(t *testing.T) {
 	applyMigration(t, pool, "0001_browser_grants.up.sql")
 	applyMigration(t, pool, "0003_browser_grants_budget.up.sql")
 	applyMigration(t, pool, "0004_browser_grants_policy.up.sql")
+	applyMigration(t, pool, "0005_browser_grants_key.up.sql")
 	// The table was re-created: drop connections holding cached statements.
 	pool.Reset()
 	after := session(t, store, CreateSessionParams{TTL: 10 * time.Minute})
