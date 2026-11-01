@@ -2493,6 +2493,30 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-1120 | WS25-S9 | risk | P1 | Under enforce, a cold cache means only the first admission fetches. spawn_run_dispatch then falls back to ReadOnly whenever the entry is missing (for example after ensure removed it). This is fail-closed but can silently narrow runs; the live proof should confirm runs keep their grant during normal operation. | open |
 | D2-1121 | WS25-S9 | follow-up | P3 | 32 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-43.json | open |
 
+
+### Wave-mode batch W2-44 (2026-11-01)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-1122 | WS13-S7 | risk | P1 | Always is unreachable end to end: approval_cause_for_pause (agent.rs ~7669) and the ExecuteStep pause (grpc.rs ~1570) build causes with an empty effect class and no tool digest, so eligible_scopes stays ONCE for every MCP call. | open |
+| D2-1123 | WS13-S7 | risk | P1 | Standing-grant matching ignores the tool digest: USE_APPROVAL_SCOPE_GRANT_SQL matches tool name, action key and class only. Bind grants to the digest, or revoke on drift, before enabling standing grants for MCP tools. | open |
+| D2-1124 | WS13-S7 | follow-up | P1 | The rule-use audit row tool_policy_rule_used is not built. It needs a durable sink reachable from execution-core, and capability-core EvaluatePolicy carries no ZDR posture. | open |
+| D2-1125 | WS13-S7 | follow-up | P1 | tool_policy_rule_expired is not built: an expired allow is demoted to ask silently. A sweeper or read-path writer is needed, and it must be content-free. | open |
+| D2-1126 | WS13-S7 | risk | P1 | ZDR: decide whether a ZDR or waived run may use a user rule at all, and make any rule-use row ZDR-aware before the switch is flipped. | open |
+| D2-1127 | WS13-S7 | follow-up | P1 | The proposal list, confirm and dismiss chain is missing: no list RPC, the card has no data source, and the confirm PUT needs a capability id the cause does not carry. | open |
+| D2-1128 | WS13-S7 | test-gap | P1 | DB tests are unrun: session-core an_always_decision_proposes_one_rule_linked_to_its_grant and a_rule_is_not_proposed_for_a_built_in_tool (ignored); capability-core setToolPolicySQL CASE and expires_at; migrations 0070 and capability-core 0030 are untested on Postgres. | open |
+| D2-1129 | WS13-S7 | test-gap | P1 | model-gateway approval tests have not run because the test profile is blocked by the route_note literals in grpc.rs (WS27-S7). | open |
+| D2-1130 | WS13-S7 | follow-up | P3 | 24 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-44.json | open |
+| D2-1131 | WS27-S7 | follow-up | P1 | The slice cannot pass until shared edits 1-5 land: model-gateway does not compile before shared edit 1, and the calm line cannot render until shared edits 4 and 5 land and INFERENCE_ROUTE_NOTE plus MODEL_GATEWAY_USAGE_PROGRESS are on. | open |
+| D2-1132 | WS27-S7 | live-proof | P1 | The behaviour is only observable with INFERENCE_ROUTE_NOTE and MODEL_GATEWAY_USAGE_PROGRESS both on, and with the shared edits applied. No live proof has been run. | open |
+| D2-1133 | WS27-S7 | live-proof | P1 | Live proof: deploy inference-core with INFERENCE_ROUTE_NOTE unset, then set to true, with MODEL_GATEWAY_USAGE_PROGRESS on and an org above 80% of budget_cap_usd. Confirm the final InferChunk carries route_note and the usage_progress frame carries routing. Rollback is to unset the switch. | open |
+| D2-1134 | WS27-S7 | live-proof | P1 | docker-compose.yml passthrough `INFERENCE_ROUTE_NOTE: ${INFERENCE_ROUTE_NOTE:-false}` for inference-core (a lead shared edit, the file named in the notes). | open |
+| D2-1135 | WS27-S7 | live-proof | P1 | Golden refresh: sse-event-payloads.json, its sha256, the zdr-contract-sync pinned digest and the vendored SPA copy, then regenerate the chat event types. | open |
+| D2-1136 | WS27-S7 | live-proof | P1 | Decision ledger entry: RouteNote at tags 15/16 shared with WS11, the infer_noted/infer_stream_noted side channel instead of struct fields on provider/mod.rs, and the rule that the token is cheap_fallback over tier_shifted. | open |
+| D2-1137 | WS27-S7 | live-proof | P1 | The plan's test command `cargo test -q -p inference-core --lib intent fallback` is malformed (cargo rejects two filters). The plan row should be corrected to two runs or a single regex filter. | open |
+| D2-1138 | WS27-S7 | live-proof | P1 | Golden contract (after shared edit 1 compiles): give usage_progress_with_ceiling a sixth parameter `routing: Option<&'static str>` (pass None at line 3423 and at the ceiling sample near line 3600), add one routed sample `usage_progress_with_ceiling(2, Some(0.001), Some(crate::pricing::CostBasis::Metered), 0, None, Some("tier_shifted"))` to the sample list, then in apps/Model Plane/rust run `MP_UPDATE_GOLDEN=1 CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib payload_contract`. Confirm the golden diff adds only routing (optional string) to usage_progress. Then refresh apps/Model Plane/api/contracts/sse-event-payloads.json.sha256 and the pinned digest in the repo-level scripts/tests/zdr-contract-sync.test.sh, copy the golden to apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json, and run `node scripts/gen-chat-event-types.mjs` in apps/Frontend Plane/verevonv3. | open |
+| D2-1139 | WS27-S7 | follow-up | P3 | 18 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-44.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -2707,3 +2731,4 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS14-S4 | authority, policy, zdr | W2-42 | no |
 | WS13-S7 | policy, authority, audit | W2-43 | no |
 | WS25-S9 | authority, policy | W2-43 | no |
+| WS13-S7 | policy, authority, audit | W2-44 | no |
