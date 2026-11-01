@@ -16,7 +16,10 @@ use std::time::Instant;
 use tracing::{info, warn};
 
 mod browser_risk;
+pub mod failure;
 pub mod planner_view;
+
+use failure::{ActionFailure, FailureBudget, FailureVerdict, NoProgressDetector};
 
 pub(crate) use browser_risk::{approval_poll_interval, approval_timeout_seconds};
 use browser_risk::{classify_action_risk, risk_reason};
@@ -547,6 +550,10 @@ pub struct PlanConfig {
     /// The org planner switch the gateway wrote (`on`, `off`, `unavailable`);
     /// read by the planner policy (WS11.S2). Any other value is dropped.
     pub planner_flag: Option<String>,
+    /// Consecutive failed steps that end an LLM-planned run (0 = default 3).
+    pub max_consecutive_failures: u32,
+    /// Failed steps in total that end an LLM-planned run (0 = default 8).
+    pub max_total_failures: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -559,6 +566,9 @@ pub struct AgentPlan {
     usage: BrowserLoopUsage,
     /// Tokens the most recent planner call used, the estimate for the next one.
     last_planner_tokens: u64,
+    /// Recoverable step failures (only fed when a planner is selected).
+    failures: FailureBudget,
+    no_progress: NoProgressDetector,
     /// Whether the Phase 5 run-level `PersistentCookieUse` gate has already
     /// run for this plan. Checked once, at the first `decide_next_action`
     /// call (after `start_run` has already succeeded) — never re-asked on
@@ -568,8 +578,12 @@ pub struct AgentPlan {
 
 impl AgentPlan {
     pub fn new(config: PlanConfig) -> Self {
+        let failures =
+            FailureBudget::new(config.max_consecutive_failures, config.max_total_failures);
         Self {
             config,
+            failures,
+            no_progress: NoProgressDetector::default(),
             current_step: 0,
             status: PlanStatus::Planning,
             observations: Vec::new(),
@@ -1032,19 +1046,18 @@ pub async fn run_browser_agent_loop(
                     sink.action_dispatched(&plan.config, &action).await;
                 }
                 let wire_action = crate::quarry_agent::action_to_wire(&action);
-                match client
-                    .step(crate::quarry_agent::StepParams::new(
-                        &run.run_id,
-                        &run.lease_id,
-                        &plan.config.org_id,
-                        wire_action,
-                        &constraints,
-                        zdr,
-                        &plan.config.grant_id,
-                    ))
-                    .await
+                match dispatch_step(
+                    client,
+                    &run,
+                    &plan.config,
+                    &constraints,
+                    wire_action,
+                    planner.is_some(),
+                )
+                .await
                 {
                     Ok(wire_obs) => {
+                        plan.failures.record_success();
                         let obs = crate::quarry_agent::observation_from_wire(
                             &wire_obs,
                             &action.action_id,
@@ -1087,6 +1100,53 @@ pub async fn run_browser_agent_loop(
                             resource_limit = Some(limit);
                             break limit.reason().to_owned();
                         }
+                        // With a planner, a recoverable failure is recorded for
+                        // it and the page is re-read, not the end of the run.
+                        if planner.is_some() {
+                            if let Some(kind) = crate::quarry_agent::recoverable_kind(&e) {
+                                warn!(plan_id = %plan.config.plan_id, kind = kind.as_str(), "recoverable browser step failure");
+                                let verdict = plan.failures.record(ActionFailure {
+                                    step: plan.current_step,
+                                    action_type: action.action_type.as_str(),
+                                    kind: kind.as_str(),
+                                    advice: kind.advice(),
+                                });
+                                if let FailureVerdict::Stop(reason) = verdict {
+                                    break reason;
+                                }
+                                match dispatch_step(
+                                    client,
+                                    &run,
+                                    &plan.config,
+                                    &constraints,
+                                    crate::quarry_agent::AgentAction::GetContent,
+                                    true,
+                                )
+                                .await
+                                {
+                                    Ok(wire_obs) => {
+                                        let obs = crate::quarry_agent::observation_from_wire(
+                                            &wire_obs,
+                                            &action.action_id,
+                                            &plan.config.grant_id,
+                                        );
+                                        if let Some(sink) = sink {
+                                            sink.observation_received(&plan.config, &obs).await;
+                                        }
+                                        plan.status = PlanStatus::Executing;
+                                        pending = Some(obs);
+                                        continue;
+                                    }
+                                    Err(reread) => {
+                                        if let Some(limit) = resource_limit_for_quarry_error(&reread) {
+                                            resource_limit = Some(limit);
+                                            break limit.reason().to_owned();
+                                        }
+                                        break format!("browser-agent step failed: {reread}");
+                                    }
+                                }
+                            }
+                        }
                         break format!("browser-agent step failed: {e}");
                     }
                 }
@@ -1123,6 +1183,61 @@ pub async fn run_browser_agent_loop(
         abort_reason,
         resource_limit,
         usage,
+    }
+}
+
+/// One Quarry step. With `recover` (an LLM planner is selected) a 502
+/// `DRIVER_FAILED` is replayed once, and a 429 that asks for at most 10 s is
+/// waited out and replayed once; everything else, including a 504, is returned
+/// as it came (a timed-out action is never replayed).
+async fn dispatch_step(
+    client: &crate::quarry_agent::QuarryAgentClient,
+    run: &crate::quarry_agent::StartRunResponse,
+    config: &PlanConfig,
+    constraints: &crate::quarry_agent::AgentConstraints,
+    action: crate::quarry_agent::AgentAction,
+    recover: bool,
+) -> Result<crate::quarry_agent::WireObservation, crate::quarry_agent::AgentClientError> {
+    let mut driver_retried = false;
+    let mut waited = false;
+    loop {
+        let result = client
+            .step(crate::quarry_agent::StepParams::new(
+                &run.run_id,
+                &run.lease_id,
+                &config.org_id,
+                action.clone(),
+                constraints,
+                config.zdr,
+                &config.grant_id,
+            ))
+            .await;
+        let Err(error) = &result else {
+            return result;
+        };
+        if !recover {
+            return result;
+        }
+        if !driver_retried
+            && crate::quarry_agent::recoverable_kind(error)
+                == Some(crate::quarry_agent::RecoverableKind::DriverFailed)
+        {
+            driver_retried = true;
+            continue;
+        }
+        if !waited {
+            if let Some(wait) = crate::quarry_agent::backpressure_wait(error) {
+                waited = true;
+                tokio::time::sleep(if cfg!(test) {
+                    std::time::Duration::from_millis(5)
+                } else {
+                    wait
+                })
+                .await;
+                continue;
+            }
+        }
+        return result;
     }
 }
 
@@ -1182,11 +1297,39 @@ async fn decide_next_action(
                 };
             }
             let view = last_observation.map(planner_view::PlannerView::from_observation);
-            let context = crate::llm_planner::PlannerContext {
-                config: &plan.config,
-                view: view.as_ref(),
+            // A transient or unreadable reply is retried once (the unreadable
+            // one with a corrective line); the second failure stops the run.
+            let mut attempts = 0u32;
+            let reply = loop {
+                let context = crate::llm_planner::PlannerContext {
+                    config: &plan.config,
+                    view: view.as_ref(),
+                    failures: plan.failures.recent(),
+                    retry_note: (attempts > 0).then_some(PARSE_RETRY_NOTE),
+                };
+                match planner.plan_next(&context).await {
+                    Ok(reply) => break Ok(reply),
+                    Err(e) => {
+                        attempts += 1;
+                        let retryable = matches!(
+                            e.kind,
+                            crate::llm_planner::PlannerErrorKind::Transient
+                                | crate::llm_planner::PlannerErrorKind::Parse
+                        );
+                        if !retryable || attempts >= 2 {
+                            break Err(e);
+                        }
+                        if e.kind == crate::llm_planner::PlannerErrorKind::Transient {
+                            tokio::time::sleep(if cfg!(test) {
+                                std::time::Duration::from_millis(5)
+                            } else {
+                                std::time::Duration::from_secs(1)
+                            })
+                            .await;
+                        }
+                    }
+                }
             };
-            let reply = planner.plan_next(&context).await;
             if let Ok(reply) = &reply {
                 plan.meter_planner_usage(reply.usage);
             }
@@ -1208,16 +1351,33 @@ async fn decide_next_action(
                         );
                     }
                 },
+                // A selected planner that cannot answer ends the run; it never
+                // degrades to a silent `Observe`.
                 Err(e) => {
-                    warn!(kind = e.kind.as_str(), error = %e, "llm planner failed; falling back to deterministic observe");
-                    candidate
+                    warn!(kind = e.kind.as_str(), error = %e, "llm planner failed; stopping the run");
+                    plan.status = PlanStatus::Failed;
+                    return PlanStepResult::Failed(format!(
+                        "browser planner unavailable ({})",
+                        e.kind.as_str()
+                    ));
                 }
             }
         }
     };
 
+    if planner.is_some() && plan.no_progress.observe(&action, last_observation) {
+        plan.status = PlanStatus::Failed;
+        return PlanStepResult::Failed(
+            "stopped: the same action was repeated on an unchanged page".to_owned(),
+        );
+    }
+
     gate_risky_action(plan, last_observation, action, sink).await
 }
+
+/// Appended to the planner request after an unreadable reply.
+const PARSE_RETRY_NOTE: &str =
+    "Your previous reply could not be read. Reply with ONLY one JSON object that matches the schema.";
 
 /// The planner's rule for a strong challenge ends in `done` (the schema has no
 /// separate blocked action). A `done` over a page that still carries a strong
@@ -2303,9 +2463,10 @@ mod tests {
         assert_eq!(planner.calls(), 2, "the stopped call was never made");
         assert_eq!(plan.status, PlanStatus::Failed);
 
-        // No budget: never stops.
+        // No budget: the token check never stops it (two decisions, so the
+        // no-progress detector, which needs three, stays out of it).
         let mut open = AgentPlan::new(test_config());
-        for _ in 0..4 {
+        for _ in 0..2 {
             assert!(matches!(
                 decide_next_action(&mut open, None, Some(&planner), None, None).await,
                 PlanStepResult::Action(_)

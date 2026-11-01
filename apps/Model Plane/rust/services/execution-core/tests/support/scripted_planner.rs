@@ -15,6 +15,10 @@ use execution_core::llm_planner::{
 pub struct Seen {
     pub view: Option<PlannerView>,
     pub rendered: String,
+    /// The failure lines the planner was handed (WS11.S3).
+    pub failures: Vec<String>,
+    /// The retry note, when the call was a retry.
+    pub retry_note: Option<String>,
 }
 
 #[derive(Default)]
@@ -71,6 +75,8 @@ impl ActionPlanner for ScriptedPlanner {
         self.seen.lock().expect("seen lock").push(Seen {
             view: ctx.view.cloned(),
             rendered: PlannerView::render_or_first_step(ctx.view),
+            failures: ctx.failures.iter().map(|f| f.line()).collect(),
+            retry_note: ctx.retry_note.map(str::to_owned),
         });
         // An exhausted script is `done`, so a test never loops forever.
         self.script

@@ -196,3 +196,211 @@ async fn fake_quarry_402_budget_exhausted_ends_resource_exhausted() {
     assert_eq!(quarry.step_requests().len(), 2, "no retry after the 402");
     assert_eq!(quarry.closed_runs(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// WS11.S3: recoverable failures, planner errors, no-progress.
+// ---------------------------------------------------------------------------
+
+fn quarry_error(code: &str) -> serde_json::Value {
+    serde_json::json!({
+        "data": null, "meta": {},
+        "error": {"code": code, "message": "a message that must not reach the planner",
+                  "retryable": false, "details": {}}
+    })
+}
+
+async fn run_with(
+    quarry: &FakeQuarry,
+    planner: &ScriptedPlanner,
+    config: execution_core::browser_agent::PlanConfig,
+) -> execution_core::browser_agent::BrowserAgentLoopResult {
+    let client = quarry.client();
+    run_browser_agent_loop(
+        config,
+        Some(&client),
+        Some(planner as &dyn ActionPlanner),
+        None,
+        None,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn stale_ref_recovers_after_auto_reobserve() {
+    let quarry = FakeQuarry::start().await;
+    quarry
+        .push_page(
+            "https://example.com/",
+            "Home",
+            "Home page",
+            &[("@e1", "link", "Hours", "Hours")],
+        )
+        .push_error(409, quarry_error("TARGET_REPAIR_REQUIRED"))
+        // The loop's own re-read after the stale target.
+        .push_page(
+            "https://example.com/",
+            "Home",
+            "Home page, fresh",
+            &[("@e7", "link", "Hours", "Hours")],
+        )
+        .push_page(
+            "https://example.com/hours",
+            "Hours",
+            "Open 9 to 5",
+            &[],
+        );
+    let planner = ScriptedPlanner::new()
+        .then_action(goto("https://example.com/"))
+        .then_action(click_ref("snap-1", 1, "@e1"))
+        .then_action(click_ref("snap-2", 2, "@e7"))
+        .then_done();
+
+    let result = run_with(&quarry, &planner, plan_config()).await;
+
+    assert_eq!(result.status, PlanStatus::Completed, "{}", result.summary);
+    let steps = quarry.step_requests();
+    let kinds: Vec<&str> = steps.iter().map(|s| s["action"]["type"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["navigate", "click_ref", "get_content", "click_ref"], "{steps:?}");
+    // The planner after the failure saw the fresh page and the failure line,
+    // and nothing of Quarry's message.
+    let seen = planner.seen();
+    let after = &seen[2];
+    assert!(after.rendered.contains("Home page, fresh"), "{}", after.rendered);
+    assert_eq!(after.failures.len(), 1);
+    assert!(after.failures[0].contains("stale_target"), "{:?}", after.failures);
+    assert!(!after.failures[0].contains("must not reach"));
+    assert_eq!(quarry.closed_runs(), 1);
+}
+
+#[tokio::test]
+async fn driver_failed_is_replayed_once_and_timeout_never() {
+    // 502: the same action goes out twice, the planner never sees the first.
+    let quarry = FakeQuarry::start().await;
+    quarry
+        .push_error(502, quarry_error("DRIVER_FAILED"))
+        .push_page("https://example.com/", "Home", "Home page", &[]);
+    let planner = ScriptedPlanner::new().then_action(goto("https://example.com/")).then_done();
+    let result = run_with(&quarry, &planner, plan_config()).await;
+    assert_eq!(result.status, PlanStatus::Completed, "{}", result.summary);
+    let steps = quarry.step_requests();
+    assert_eq!(steps.len(), 2);
+    assert!(steps.iter().all(|s| s["action"]["type"] == "navigate"), "{steps:?}");
+    assert!(planner.seen().iter().all(|s| s.failures.is_empty()));
+
+    // 504: not replayed; the loop re-reads the page instead.
+    let quarry = FakeQuarry::start().await;
+    quarry
+        .push_error(504, quarry_error("TIMEOUT"))
+        .push_page("https://example.com/", "Home", "Home page", &[]);
+    let planner = ScriptedPlanner::new().then_action(goto("https://example.com/")).then_done();
+    let result = run_with(&quarry, &planner, plan_config()).await;
+    assert_eq!(result.status, PlanStatus::Completed, "{}", result.summary);
+    let kinds: Vec<String> = quarry
+        .step_requests()
+        .iter()
+        .map(|s| s["action"]["type"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(kinds, ["navigate", "get_content"]);
+    assert!(planner.seen()[1].failures[0].contains("action_timeout"));
+}
+
+#[tokio::test]
+async fn a_429_is_waited_out_once_then_ends_resource_exhausted() {
+    let quarry = FakeQuarry::start().await;
+    let slow = serde_json::json!({
+        "data": null, "meta": {},
+        "error": {"code": "RATE_LIMITED", "message": "m", "retryable": true,
+                  "details": {"retry_after_seconds": 1}}
+    });
+    quarry
+        .push_error(429, slow.clone())
+        .push_page("https://example.com/", "Home", "Home page", &[]);
+    let planner = ScriptedPlanner::new().then_action(goto("https://example.com/")).then_done();
+    let result = run_with(&quarry, &planner, plan_config()).await;
+    assert_eq!(result.status, PlanStatus::Completed, "{}", result.summary);
+    assert_eq!(quarry.step_requests().len(), 2, "one replay after the wait");
+
+    let quarry = FakeQuarry::start().await;
+    quarry.push_error(429, slow.clone()).push_error(429, slow);
+    let planner = ScriptedPlanner::new().then_action(goto("https://example.com/")).then_done();
+    let result = run_with(&quarry, &planner, plan_config()).await;
+    assert_eq!(result.resource_limit, Some(BrowserResourceLimit::QuarryBackpressure));
+    assert_eq!(quarry.step_requests().len(), 2, "never a third try");
+}
+
+#[tokio::test]
+async fn consecutive_recoverable_failures_end_the_run() {
+    let quarry = FakeQuarry::start().await;
+    quarry
+        .push_error(409, quarry_error("TARGET_REPAIR_REQUIRED"))
+        .push_page("https://example.com/", "A", "page a", &[])
+        .push_error(409, quarry_error("TARGET_REPAIR_REQUIRED"))
+        .push_page("https://example.com/", "B", "page b", &[])
+        .push_error(409, quarry_error("TARGET_REPAIR_REQUIRED"));
+    let planner = ScriptedPlanner::new()
+        .then_action(click_ref("snap-1", 1, "@e1"))
+        .then_action(click_ref("snap-2", 2, "@e2"))
+        .then_action(click_ref("snap-3", 3, "@e3"))
+        .then_done();
+    let result = run_with(&quarry, &planner, plan_config()).await;
+    assert_eq!(result.status, PlanStatus::Failed);
+    assert_eq!(result.resource_limit, None);
+    assert_eq!(result.summary, "stopped after 3 consecutive failed actions");
+    assert_eq!(quarry.closed_runs(), 1);
+}
+
+#[tokio::test]
+async fn an_unusable_planner_stops_the_run_instead_of_observing() {
+    use execution_core::llm_planner::{PlannerError, PlannerErrorKind};
+    let quarry = FakeQuarry::start().await;
+    let planner = ScriptedPlanner::new()
+        .then_error(PlannerError::new(PlannerErrorKind::Unauthenticated, "bearer rejected"));
+    let result = run_with(&quarry, &planner, plan_config()).await;
+    assert_eq!(result.status, PlanStatus::Failed);
+    assert_eq!(result.summary, "browser planner unavailable (unauthenticated)");
+    assert_eq!(planner.calls(), 1, "an auth failure is not retried");
+    assert!(quarry.step_requests().is_empty(), "no silent Observe was sent");
+}
+
+#[tokio::test]
+async fn a_transient_planner_error_is_retried_once() {
+    use execution_core::llm_planner::{PlannerError, PlannerErrorKind};
+    let quarry = FakeQuarry::start().await;
+    quarry.push_page("https://example.com/", "Home", "Home page", &[]);
+    let planner = ScriptedPlanner::new()
+        .then_error(PlannerError::new(PlannerErrorKind::Transient, "unavailable"))
+        .then_action(goto("https://example.com/"))
+        .then_done();
+    let result = run_with(&quarry, &planner, plan_config()).await;
+    assert_eq!(result.status, PlanStatus::Completed, "{}", result.summary);
+    assert_eq!(planner.calls(), 3);
+
+    // Two in a row stop the run; the retry of a parse error carries the note.
+    let quarry = FakeQuarry::start().await;
+    let planner = ScriptedPlanner::new()
+        .then_error(PlannerError::new(PlannerErrorKind::Parse, "bad"))
+        .then_error(PlannerError::new(PlannerErrorKind::Parse, "bad"));
+    let result = run_with(&quarry, &planner, plan_config()).await;
+    assert_eq!(result.status, PlanStatus::Failed);
+    assert_eq!(result.summary, "browser planner unavailable (parse)");
+    let seen = planner.seen();
+    assert_eq!(seen.len(), 2);
+    assert!(seen[0].retry_note.is_none());
+    assert!(seen[1].retry_note.as_deref().is_some_and(|n| n.contains("ONLY one JSON object")));
+}
+
+#[tokio::test]
+async fn the_same_action_on_an_unchanged_page_ends_the_run() {
+    let quarry = FakeQuarry::start().await;
+    for _ in 0..4 {
+        quarry.push_page("https://example.com/", "Home", "Same page", &[]);
+    }
+    let mut planner = ScriptedPlanner::new();
+    for _ in 0..5 {
+        planner = planner.then_action(action(ActionType::Observe));
+    }
+    let result = run_with(&quarry, &planner, plan_config()).await;
+    assert_eq!(result.status, PlanStatus::Failed);
+    assert_eq!(result.summary, "stopped: the same action was repeated on an unchanged page");
+    assert!(quarry.step_requests().len() <= 3, "{}", quarry.step_requests().len());
+}

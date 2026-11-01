@@ -830,13 +830,86 @@ pub fn is_quarry_backpressure(error: &AgentClientError) -> bool {
     }
 }
 
+/// A failure the planner can work around (WS11.S3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoverableKind {
+    /// 409 `TARGET_REPAIR_REQUIRED` / `ACTION_UNKNOWN`: the page moved on.
+    StaleTarget,
+    /// 501: the driver cannot do this action.
+    UnsupportedAction,
+    /// 504 `TIMEOUT`: the action ran too long. Never replayed.
+    ActionTimeout,
+    /// 502 `DRIVER_FAILED`: the loop replays the action once.
+    DriverFailed,
+}
+
+impl RecoverableKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::StaleTarget => "stale_target",
+            Self::UnsupportedAction => "unsupported_action",
+            Self::ActionTimeout => "action_timeout",
+            Self::DriverFailed => "driver_failed",
+        }
+    }
+
+    /// Fixed advice for the planner; carries nothing from Quarry's body.
+    #[must_use]
+    pub const fn advice(self) -> &'static str {
+        match self {
+            Self::StaleTarget => "the page changed; pick a target from the fresh observation",
+            Self::UnsupportedAction => "this action is not supported; use a different action",
+            Self::ActionTimeout => "the action timed out; it was not repeated, try another approach",
+            Self::DriverFailed => "the browser driver failed twice; try another approach",
+        }
+    }
+}
+
+/// The recoverable kind of a failed Quarry call, `None` when it is not one.
+#[must_use]
+pub fn recoverable_kind(error: &AgentClientError) -> Option<RecoverableKind> {
+    let (status, code) = match error {
+        AgentClientError::Typed(typed) => (typed.status, typed.code.as_str()),
+        AgentClientError::Status { status, .. } => (*status, ""),
+        _ => return None,
+    };
+    match (status, code) {
+        (409, "TARGET_REPAIR_REQUIRED" | "ACTION_UNKNOWN") => Some(RecoverableKind::StaleTarget),
+        (504, "TIMEOUT") => Some(RecoverableKind::ActionTimeout),
+        (502, "DRIVER_FAILED") => Some(RecoverableKind::DriverFailed),
+        (501, _) => Some(RecoverableKind::UnsupportedAction),
+        _ => None,
+    }
+}
+
+/// The longest a 429 is waited out before the one replay.
+pub const MAX_BACKPRESSURE_WAIT_S: u64 = 10;
+
+/// How long to wait before replaying a 429 once: the answer's
+/// `retry_after_seconds` (1 s when absent), or `None` when it asks for more
+/// than [`MAX_BACKPRESSURE_WAIT_S`], so the run ends `resource_exhausted`.
+#[must_use]
+pub fn backpressure_wait(error: &AgentClientError) -> Option<Duration> {
+    if !is_quarry_backpressure(error) {
+        return None;
+    }
+    let seconds = match error {
+        AgentClientError::Typed(typed) => typed.retry_after_seconds.unwrap_or(1),
+        _ => 1,
+    };
+    (seconds <= MAX_BACKPRESSURE_WAIT_S).then(|| Duration::from_secs(seconds))
+}
+
 /// Classify a failed Quarry call. A 402 `BUDGET_EXHAUSTED` and any 429 are
-/// resource limits; everything else is terminal until a slice adds a
-/// recoverable arm (WS11.S3).
+/// resource limits, the recoverable kinds are recoverable, and everything else
+/// is terminal.
 #[must_use]
 pub fn classify_quarry_error(error: &AgentClientError) -> StepFailureClass {
     if quarry_budget_dimension(error).is_some() || is_quarry_backpressure(error) {
         StepFailureClass::ResourceLimit
+    } else if recoverable_kind(error).is_some() {
+        StepFailureClass::Recoverable
     } else {
         StepFailureClass::Terminal
     }
@@ -1830,6 +1903,38 @@ mod tests {
         assert!(received[0].headers.get("x-request-id").is_none());
     }
 
+    #[test]
+    fn recoverable_arms_cover_stale_timeout_driver_and_unsupported() {
+        use RecoverableKind as K;
+        for (err, kind) in [
+            (typed(409, "TARGET_REPAIR_REQUIRED", serde_json::Value::Null), K::StaleTarget),
+            (typed(409, "ACTION_UNKNOWN", serde_json::Value::Null), K::StaleTarget),
+            (typed(504, "TIMEOUT", serde_json::Value::Null), K::ActionTimeout),
+            (typed(502, "DRIVER_FAILED", serde_json::Value::Null), K::DriverFailed),
+            (typed(501, "NOT_IMPLEMENTED", serde_json::Value::Null), K::UnsupportedAction),
+            (AgentClientError::Status { status: 501, body: String::new() }, K::UnsupportedAction),
+        ] {
+            assert_eq!(recoverable_kind(&err), Some(kind), "{err:?}");
+            assert_eq!(classify_quarry_error(&err), StepFailureClass::Recoverable, "{err:?}");
+        }
+        // A kind names no page content.
+        assert!(!K::StaleTarget.advice().is_empty() && !K::ActionTimeout.as_str().is_empty());
+    }
+
+    #[test]
+    fn backpressure_wait_is_bounded_to_ten_seconds() {
+        let wait = |details| backpressure_wait(&typed(429, "RATE_LIMITED", details));
+        assert_eq!(wait(serde_json::Value::Null), Some(Duration::from_secs(1)));
+        assert_eq!(wait(serde_json::json!({"retry_after_seconds": 7})), Some(Duration::from_secs(7)));
+        assert_eq!(wait(serde_json::json!({"retry_after_seconds": 10})), Some(Duration::from_secs(10)));
+        assert_eq!(wait(serde_json::json!({"retry_after_seconds": 11})), None);
+        assert_eq!(backpressure_wait(&typed(500, "INTERNAL", serde_json::Value::Null)), None);
+        assert_eq!(
+            backpressure_wait(&AgentClientError::Status { status: 429, body: String::new() }),
+            Some(Duration::from_secs(1))
+        );
+    }
+
     fn typed(status: u16, code: &str, details: serde_json::Value) -> AgentClientError {
         AgentClientError::Typed(parse_typed_error(status, &envelope_body(code, "m", details)).unwrap())
     }
@@ -1851,11 +1956,13 @@ mod tests {
         let raw = AgentClientError::Status { status: 429, body: "slow".into() };
         assert_eq!(classify_quarry_error(&raw), StepFailureClass::ResourceLimit);
 
-        // Everything else is terminal here.
+        // Everything else is terminal.
         for err in [
             typed(402, "PAYMENT_REQUIRED", serde_json::Value::Null),
             typed(403, "FORBIDDEN", serde_json::Value::Null),
             typed(500, "INTERNAL", serde_json::Value::Null),
+            typed(409, "CONFLICT", serde_json::Value::Null),
+            typed(504, "GATEWAY_TIMEOUT", serde_json::Value::Null),
             AgentClientError::Status { status: 401, body: String::new() },
             AgentClientError::Transport("boom".into()),
         ] {

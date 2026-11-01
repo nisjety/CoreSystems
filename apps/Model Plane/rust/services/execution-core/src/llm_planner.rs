@@ -29,6 +29,7 @@ use mp_contracts::model_plane::v1::{ChatMessage, InferRequest};
 use std::sync::Arc;
 use tonic::transport::Channel;
 
+use crate::browser_agent::failure::ActionFailure;
 use crate::browser_agent::planner_view::PlannerView;
 use crate::browser_agent::{
     ActionType, BrowserAction, BrowserObservation, PlanConfig, RiskCategory,
@@ -138,6 +139,11 @@ fn resolve_planner_model() -> String {
 pub struct PlannerContext<'a> {
     pub config: &'a PlanConfig,
     pub view: Option<&'a PlannerView>,
+    /// The most recent recoverable failures, oldest first (WS11.S3). Fixed
+    /// text per failure kind; never page content or Quarry's message.
+    pub failures: &'a [ActionFailure],
+    /// A corrective line for a retry after an unreadable reply.
+    pub retry_note: Option<&'a str>,
 }
 
 /// Planner token usage for one reply, counts only.
@@ -290,7 +296,7 @@ impl LlmPlanner {
 impl ActionPlanner for LlmPlanner {
     /// Ask the model for the next action. A `done` reply is `action == "done"`.
     async fn plan_next(&self, ctx: &PlannerContext<'_>) -> Result<PlannerReply, PlannerError> {
-        let request = planner_request_from_view(ctx.config, ctx.view, &self.model, ACTION_SCHEMA);
+        let request = planner_request_with_context(ctx, &self.model, ACTION_SCHEMA);
 
         let mut grpc_request = tonic::Request::new(request);
         grpc_request.metadata_mut().insert(
@@ -394,7 +400,40 @@ pub fn planner_request_from_view(
     model: &str,
     structured_output_schema: &str,
 ) -> InferRequest {
-    let observation_text = PlannerView::render_or_first_step(view);
+    planner_request_with_context(
+        &PlannerContext {
+            config,
+            view,
+            failures: &[],
+            retry_note: None,
+        },
+        model,
+        structured_output_schema,
+    )
+}
+
+/// [`planner_request_from_view`] plus the recent failures and a retry note, as
+/// the loop hands them over. With no failures and no note the request is the
+/// one `planner_request_from_view` always built.
+#[must_use]
+pub fn planner_request_with_context(
+    ctx: &PlannerContext<'_>,
+    model: &str,
+    structured_output_schema: &str,
+) -> InferRequest {
+    let config = ctx.config;
+    let mut observation_text = PlannerView::render_or_first_step(ctx.view);
+    if !ctx.failures.is_empty() {
+        observation_text.push_str("\n\nRecent failed actions (do not repeat one unchanged):");
+        for failure in ctx.failures {
+            observation_text.push_str("\n- ");
+            observation_text.push_str(&failure.line());
+        }
+    }
+    if let Some(note) = ctx.retry_note {
+        observation_text.push_str("\n\n");
+        observation_text.push_str(note);
+    }
     let system = format!(
         "You are an autonomous web-browsing agent. Goal: {}\n{BROWSER_CHALLENGE_RULE}\n\
          Choose the SINGLE next browser action and return ONLY JSON matching the schema. \

@@ -936,6 +936,8 @@ pub(crate) struct PlanCeilings {
     ceiling_runtime_s: i32,
     default_planner_tokens: u64,
     ceiling_planner_tokens: u64,
+    max_consecutive_failures: u32,
+    max_total_failures: u32,
 }
 
 impl Default for PlanCeilings {
@@ -947,6 +949,8 @@ impl Default for PlanCeilings {
             ceiling_runtime_s: 900,
             default_planner_tokens: 200_000,
             ceiling_planner_tokens: 1_000_000,
+            max_consecutive_failures: 3,
+            max_total_failures: 8,
         }
     }
 }
@@ -1006,6 +1010,16 @@ impl PlanCeilings {
             )
             .min(ceiling_planner_tokens),
             ceiling_planner_tokens,
+            max_consecutive_failures: positive(
+                &lookup,
+                "QUARRY_BROWSER_AGENT_MAX_CONSECUTIVE_FAILURES",
+                built_in.max_consecutive_failures,
+            ),
+            max_total_failures: positive(
+                &lookup,
+                "QUARRY_BROWSER_AGENT_MAX_TOTAL_FAILURES",
+                built_in.max_total_failures,
+            ),
         }
     }
 
@@ -1142,6 +1156,8 @@ fn browser_plan_config_with(
         // No source for the credential expiry yet (see DEPTH.md).
         deadline_at: None,
         planner_flag: known_planner_flag(input.planner_flag.as_deref()),
+        max_consecutive_failures: ceilings.max_consecutive_failures,
+        max_total_failures: ceilings.max_total_failures,
     };
     browser_agent::validate_plan_config(&plan)?;
     Ok(plan)
@@ -1495,6 +1511,18 @@ mod tests {
         ]);
         assert_eq!(odd.steps(None, 0), 20);
         assert_eq!(odd.runtime_s(None, 0), 900);
+    }
+
+    #[test]
+    fn failure_budget_limits_come_from_env() {
+        assert_eq!(ceilings_with(&[]).max_consecutive_failures, 3);
+        assert_eq!(ceilings_with(&[]).max_total_failures, 8);
+        let set = ceilings_with(&[
+            ("QUARRY_BROWSER_AGENT_MAX_CONSECUTIVE_FAILURES", "5"),
+            ("QUARRY_BROWSER_AGENT_MAX_TOTAL_FAILURES", "nope"),
+        ]);
+        assert_eq!(set.max_consecutive_failures, 5);
+        assert_eq!(set.max_total_failures, 8);
     }
 
     #[test]
