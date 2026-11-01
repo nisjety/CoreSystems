@@ -112,6 +112,49 @@ describe('space send ids', () => {
 })
 
 describe('space send pipeline (P-SPA2)', () => {
+  describe('retrieval decline note (D1-242)', () => {
+    it('keeps the closed reason a declined retrieval notice states on the exchange', async () => {
+      const { pipeline } = pipelineWith()
+      streamChat.mockImplementationOnce(async (_request: unknown, handlers: ChatStreamHandlers) => {
+        handlers.onConnected?.({ requestId: 'req_1', threadId: 'thr_1' } as never)
+        handlers.onRetrievalNotice?.({ code: 'retrieval_declined_entitlement_off', wordingKey: 'retrieval.declined.entitlement_off' })
+        handlers.onMessage?.({ content: 'Hi' } as never)
+        handlers.onDone?.({} as never)
+      })
+      await pipeline.send(input())
+      flush()
+      expect(pipeline.exchange()).toMatchObject({ assistantContent: 'Hi', status: 'done', retrievalDeclined: 'entitlement_off' })
+    })
+
+    it('ignores any other notice and a reason outside the set', async () => {
+      const { pipeline } = pipelineWith()
+      streamChat.mockImplementationOnce(async (_request: unknown, handlers: ChatStreamHandlers) => {
+        handlers.onRetrievalNotice?.({ code: 'zdr_dense_unavailable', wordingKey: 'retrieval.zdr_dense_unavailable' })
+        handlers.onRetrievalNotice?.({ code: 'retrieval_declined_from_the_future', wordingKey: 'retrieval.declined.from_the_future' })
+        handlers.onMessage?.({ content: 'Hi' } as never)
+        handlers.onDone?.({} as never)
+      })
+      await pipeline.send(input())
+      flush()
+      expect(pipeline.exchange()?.retrievalDeclined).toBeUndefined()
+    })
+
+    it('starts a new send with no reason left over from the last one', async () => {
+      const { pipeline } = pipelineWith()
+      streamChat.mockImplementationOnce(async (_request: unknown, handlers: ChatStreamHandlers) => {
+        handlers.onRetrievalNotice?.({ code: 'retrieval_declined_not_authorized', wordingKey: 'retrieval.declined.not_authorized' })
+        handlers.onDone?.({} as never)
+      })
+      await pipeline.send(input())
+      streamChat.mockImplementationOnce(async (_request: unknown, handlers: ChatStreamHandlers) => {
+        handlers.onDone?.({} as never)
+      })
+      await pipeline.send(input())
+      flush()
+      expect(pipeline.exchange()?.retrievalDeclined).toBeUndefined()
+    })
+  })
+
   describe('stages', () => {
     it('emits started, accepted on connected, settled in order', async () => {
       const { pipeline, stages } = pipelineWith()

@@ -23,6 +23,7 @@ import {
   visibleSpaceComposerModes,
 } from '../lib/space-composer-registry'
 import { createSpaceSendPipeline } from '../lib/space-send-pipeline'
+import { spaceRetrievalDeclineCopy } from '../lib/space-retrieval-decline'
 import { createSpacePostSender } from '../lib/space-post-sender'
 import { createSpaceSendJournal, type SpaceSendJournal } from '../lib/space-send-journal'
 import { canPostInSpace, postLength } from '../lib/space-posting'
@@ -545,6 +546,18 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
                 {(content) => <ChatMarkdown content={content()} />}
               </Show>
             </div>
+            {/* The turn answered without the organisation's knowledge because Control declined
+                retrieval for this Space. The reason is a closed code; the words are the room's. */}
+            <Show when={current().retrievalDeclined}>
+              {(reason) => (
+                <p class="verevon-space-room-exchange__stopped" role="status">
+                  {i18n.tr(
+                    spaceRetrievalDeclineCopy(reason()).no,
+                    spaceRetrievalDeclineCopy(reason()).en,
+                  )}
+                </p>
+              )}
+            </Show>
             {/* The spend hard stop is a refusal BEFORE the run starts — Model
                 Plane's pre-flight budget guard — so it is not "the reply
                 stopped": nothing was replied. It says what stopped it and where

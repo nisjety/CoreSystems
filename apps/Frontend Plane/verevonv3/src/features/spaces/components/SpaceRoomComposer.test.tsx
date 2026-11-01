@@ -42,6 +42,7 @@ vi.mock('@/features/chat/components/ChatMessages', () => ({
 const { SpaceRoomComposer } = await import('./SpaceRoomComposer')
 
 type Handlers = {
+  onRetrievalNotice?: (event: { code: string; wordingKey: string }) => void
   onConnected?: (event: { requestId?: string; threadId?: string }) => void
   onTitle?: (event: { title: string }) => void
   onMessage?: (event: { content: string }) => void
@@ -116,6 +117,35 @@ afterEach(() => {
   vi.unstubAllEnvs()
   cleanup()
   window.localStorage.clear()
+})
+
+describe('SpaceRoomComposer — declined retrieval note (D1-242)', () => {
+  it('says why the answer does not use the knowledge, in the room words', async () => {
+    const stream = scriptedStream()
+    renderComposer()
+    await send('Hva selger vi?')
+    stream.handlers().onConnected?.({ requestId: 'req-7' })
+    stream.handlers().onRetrievalNotice?.({ code: 'retrieval_declined_entitlement_off', wordingKey: 'retrieval.declined.entitlement_off' })
+    flush()
+    stream.handlers().onMessage?.({ content: 'Jeg vet ikke.' })
+    flush()
+
+    const note = await screen.findByText(/har ikke slått på kunnskapssøk/)
+    expect(note.getAttribute('role')).toBe('status')
+  })
+
+  it('shows no note for a reason outside the set, or when nothing was declined', async () => {
+    const stream = scriptedStream()
+    renderComposer()
+    await send('Hva selger vi?')
+    stream.handlers().onRetrievalNotice?.({ code: 'retrieval_declined_from_the_future', wordingKey: 'x' })
+    flush()
+    stream.handlers().onMessage?.({ content: 'Svar.' })
+    flush()
+
+    expect(await screen.findByText('Svar.')).toBeTruthy()
+    expect(screen.queryByText(/Svaret bruker ikke organisasjonens kunnskap/)).toBeNull()
+  })
 })
 
 describe('SpaceRoomComposer — interruptible turns', () => {

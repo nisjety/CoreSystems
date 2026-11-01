@@ -16,6 +16,7 @@ import { OPENAI_CODEX_SUBSCRIPTION_PROVIDER } from '@/shared/api/chatgpt-subscri
 import type { Skill } from '@/shared/api/skills-client'
 import { updateSpaceThreadPresentation } from '@/shared/api/spaces-client'
 import { beginOwnStream, endOwnStream } from './space-live-work'
+import { spaceRetrievalDeclineReason, type SpaceRetrievalDeclineReason } from './space-retrieval-decline'
 import type { SpaceStreamedModeId } from './space-composer-registry'
 import {
   noteSendTransportLost,
@@ -156,6 +157,12 @@ export type SpaceExchange = {
    * its run is in the room's projection, and there is no stream to show here.
    */
   acceptedEarlier?: boolean
+  /**
+   * Why this turn answered without the organisation's knowledge, when Control declined retrieval
+   * for the Space (D1-242). A closed code from the turn's own `retrieval_notice`; absent otherwise.
+   * Held in memory with the exchange, never stored.
+   */
+  retrievalDeclined?: SpaceRetrievalDeclineReason
 }
 
 /** What the composer hands over when a message is sent. */
@@ -353,6 +360,13 @@ export function createSpaceSendPipeline(options: SpaceSendPipelineOptions): Spac
         void updateSpaceThreadPresentation(host.spaceRef, threadId, { title: name })
           .then(() => settled?.())
           .catch(() => undefined)
+      },
+      onRetrievalNotice: (event) => {
+        // Only a declined retrieval is this block's to state; any other notice, and a reason outside
+        // the closed set, leave the exchange as it was.
+        const reason = spaceRetrievalDeclineReason(event.code)
+        if (!reason) return
+        setExchange((current) => current && { ...current, retrievalDeclined: reason })
       },
       onArtifact: (event) => {
         const threadId = liveThreadId

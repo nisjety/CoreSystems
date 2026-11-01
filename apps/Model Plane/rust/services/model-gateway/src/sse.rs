@@ -1362,9 +1362,14 @@ pub async fn invoke_stream_sse(
                 format!("Relevant organization context:\n{context}\n\nUser: {user_content}")
             }
             None if grounding_requested && crate::retrieval::is_effectively_empty(&grounding) => {
+                // A retrieval Control declined says why (D1-242); with no reason this is the notice as it was.
                 format!(
                     "{}\n\nUser: {user_content}",
-                    crate::retrieval::NO_GROUNDING_SYSTEM_NOTICE
+                    crate::retrieval::no_grounding_notice(
+                        req.space_context
+                            .as_ref()
+                            .and_then(|context| context.retrieval_decline_reason)
+                    )
                 )
             }
             None => user_content.clone(),
@@ -2248,6 +2253,19 @@ pub async fn invoke_stream_sse(
             payload.context_block.clone()
         }
     });
+    // Why Control declined retrieval for this turn (D1-242), only when the turn goes on to answer without
+    // knowledge-base context: the same condition as the no-grounding notice below. Held for this turn alone;
+    // it is not written to the thread, the message or the run.
+    let retrieval_decline = req
+        .space_context
+        .as_ref()
+        .and_then(|context| context.retrieval_decline_reason)
+        .filter(|_| {
+            !conversation_only
+                && retrieval_scope != crate::normalize::RetrievalScope::WebOnly
+                && !assembly_supplied_grounding
+                && crate::retrieval::is_effectively_empty(&grounding)
+        });
 
     if let Some(context_block) = context_block.filter(|block| !block.is_empty()) {
         // Insert whenever assembly did not already carry evidence. Gating this on
@@ -2270,7 +2288,7 @@ pub async fn invoke_stream_sse(
         prompt.grounding = Some(ChatMessage {
             compaction_summary: String::new(),
             role: "system".to_owned(),
-            content: crate::retrieval::NO_GROUNDING_SYSTEM_NOTICE.to_owned(),
+            content: crate::retrieval::no_grounding_notice(retrieval_decline),
             name: String::new(),
         });
     }
@@ -2700,7 +2718,14 @@ pub async fn invoke_stream_sse(
         // A reduced answer says so before it streams (Z-41b). Buffered like every frame, so a resumed stream
         // replays it. Emitted even when the grounding is empty: an answer from text search that found nothing is
         // still an answer from text search only.
-        if let Some(notice) = grounding.as_ref().and_then(|payload| payload.notice) {
+        //
+        // A retrieval Control declined states its reason the same way (D1-242): a typed code and a wording key,
+        // never a sentence. It rides this frame, so a resumed stream replays it and nothing is stored.
+        if let Some(notice) = grounding
+            .as_ref()
+            .and_then(|payload| payload.notice)
+            .or_else(|| retrieval_decline.map(crate::retrieval_metadata::RetrievalDeclineReason::notice))
+        {
             emit_and_buffer(
                 &tx,
                 &stream_buffers,
