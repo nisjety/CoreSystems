@@ -26,6 +26,13 @@ const (
 	internalAPIName = "x-internal-api-key"
 )
 
+// The general integration scopes a service principal must hold to be admitted
+// on the bearer path (authenticateBearer).
+const (
+	IntegrationReadScope  = "integration:read"
+	IntegrationWriteScope = "integration:write"
+)
+
 type Config struct {
 	APIKey               string
 	APIKeyHeader         string
@@ -229,6 +236,17 @@ func authenticateBearer(c *fiber.Ctx, cfg Config, authHeader string) error {
 	}
 	if strings.TrimSpace(principal.PrincipalType) == "" {
 		principal.PrincipalType = "user"
+	}
+	// A service principal is admitted only with a general integration scope.
+	// Read routes do not check a scope of their own (mutations add
+	// integration:write on top), so without this a narrower grant on this
+	// audience, such as quarry-edge's integration:otp:read (R-13 PR 1), would
+	// read every org-wide route and connector for any organization it can mint
+	// for. A route that serves a narrower scope must admit it explicitly when it
+	// ships (E3.1-g). Checked before the single-use guard so a refused token is
+	// not consumed.
+	if principal.PrincipalType == "service" && !principal.HasScope(IntegrationReadScope) && !principal.HasScope(IntegrationWriteScope) {
+		return writeError(c, fiber.StatusForbidden, "integration_scope_required", "Service principals require integration:read or integration:write")
 	}
 	// A token that names an acting end user is a complete standalone
 	// bearer for that user's personal data, so it is honored exactly
