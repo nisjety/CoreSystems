@@ -1244,7 +1244,11 @@ type ApprovalCause struct {
 	// Tool plus operation, never argument values: the key a standing grant matches.
 	ActionKey string `protobuf:"bytes,8,opt,name=action_key,json=actionKey,proto3" json:"action_key,omitempty"`
 	// Run-salted blake3 digest of the exact (tool, arguments) call.
-	CallDigest    string `protobuf:"bytes,9,opt,name=call_digest,json=callDigest,proto3" json:"call_digest,omitempty"`
+	CallDigest string `protobuf:"bytes,9,opt,name=call_digest,json=callDigest,proto3" json:"call_digest,omitempty"`
+	// sha256 of the MCP tool definition the person reviewed (build plan WS13 S7). Empty unless the
+	// tool is an MCP tool whose definition is pinned: only a pinned MCP tool may be offered a
+	// standing rule or a thread scope.
+	ToolDigest    string `protobuf:"bytes,10,opt,name=tool_digest,json=toolDigest,proto3" json:"tool_digest,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1338,6 +1342,13 @@ func (x *ApprovalCause) GetActionKey() string {
 func (x *ApprovalCause) GetCallDigest() string {
 	if x != nil {
 		return x.CallDigest
+	}
+	return ""
+}
+
+func (x *ApprovalCause) GetToolDigest() string {
+	if x != nil {
+		return x.ToolDigest
 	}
 	return ""
 }
@@ -3503,7 +3514,11 @@ type DecideApprovalRequest struct {
 	// never forwards a client-supplied value.
 	DecisionSource ApprovalDecisionSource `protobuf:"varint,6,opt,name=decision_source,json=decisionSource,proto3,enum=model_plane.v1.ApprovalDecisionSource" json:"decision_source,omitempty"`
 	// How far the decision reaches (build plan WS13 S3).
-	Scope         ApprovalScope `protobuf:"varint,7,opt,name=scope,proto3,enum=model_plane.v1.ApprovalScope" json:"scope,omitempty"`
+	Scope ApprovalScope `protobuf:"varint,7,opt,name=scope,proto3,enum=model_plane.v1.ApprovalScope" json:"scope,omitempty"`
+	// "Always" (build plan WS13 S7): the gateway sets this only for a granted thread-scoped decision
+	// on a pinned MCP tool. Session-core then records a rule proposal linked to the thread grant; the
+	// rule is not in force until the person confirms it.
+	RuleProposed  bool `protobuf:"varint,8,opt,name=rule_proposed,json=ruleProposed,proto3" json:"rule_proposed,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3585,6 +3600,13 @@ func (x *DecideApprovalRequest) GetScope() ApprovalScope {
 		return x.Scope
 	}
 	return ApprovalScope_APPROVAL_SCOPE_UNSPECIFIED
+}
+
+func (x *DecideApprovalRequest) GetRuleProposed() bool {
+	if x != nil {
+		return x.RuleProposed
+	}
+	return false
 }
 
 type DecideApprovalResponse struct {
@@ -8306,7 +8328,7 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\vconsumed_at\x18\x0e \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"consumedAt\x12+\n" +
 	"\x11continuation_mode\x18\x0f \x01(\tR\x10continuationMode\x123\n" +
-	"\x05cause\x18\x10 \x01(\v2\x1d.model_plane.v1.ApprovalCauseR\x05cause\"\xa7\x02\n" +
+	"\x05cause\x18\x10 \x01(\v2\x1d.model_plane.v1.ApprovalCauseR\x05cause\"\xc8\x02\n" +
 	"\rApprovalCause\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\tR\x04code\x12\x12\n" +
 	"\x04tool\x18\x02 \x01(\tR\x04tool\x12!\n" +
@@ -8318,7 +8340,10 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\n" +
 	"action_key\x18\b \x01(\tR\tactionKey\x12\x1f\n" +
 	"\vcall_digest\x18\t \x01(\tR\n" +
-	"callDigest\"\x92\x04\n" +
+	"callDigest\x12\x1f\n" +
+	"\vtool_digest\x18\n" +
+	" \x01(\tR\n" +
+	"toolDigest\"\x92\x04\n" +
 	"\x04Todo\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x15\n" +
@@ -8471,7 +8496,7 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"approvalId\x12\x15\n" +
 	"\x06org_id\x18\x02 \x01(\tR\x05orgId\"K\n" +
 	"\x13GetApprovalResponse\x124\n" +
-	"\bapproval\x18\x01 \x01(\v2\x18.model_plane.v1.ApprovalR\bapproval\"\xd8\x02\n" +
+	"\bapproval\x18\x01 \x01(\v2\x18.model_plane.v1.ApprovalR\bapproval\"\xfd\x02\n" +
 	"\x15DecideApprovalRequest\x12\x1f\n" +
 	"\vapproval_id\x18\x01 \x01(\tR\n" +
 	"approvalId\x129\n" +
@@ -8481,7 +8506,8 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\x0fdecision_reason\x18\x04 \x01(\tR\x0edecisionReason\x12\x15\n" +
 	"\x06org_id\x18\x05 \x01(\tR\x05orgId\x12O\n" +
 	"\x0fdecision_source\x18\x06 \x01(\x0e2&.model_plane.v1.ApprovalDecisionSourceR\x0edecisionSource\x123\n" +
-	"\x05scope\x18\a \x01(\x0e2\x1d.model_plane.v1.ApprovalScopeR\x05scope\"N\n" +
+	"\x05scope\x18\a \x01(\x0e2\x1d.model_plane.v1.ApprovalScopeR\x05scope\x12#\n" +
+	"\rrule_proposed\x18\b \x01(\bR\fruleProposed\"N\n" +
 	"\x16DecideApprovalResponse\x124\n" +
 	"\bapproval\x18\x01 \x01(\v2\x18.model_plane.v1.ApprovalR\bapproval\"\x9c\x02\n" +
 	"\x10ApprovalDelivery\x12\x1f\n" +

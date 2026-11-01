@@ -398,6 +398,7 @@ impl InferenceCore for MockOk {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             provider_timing: None,
+            route_note: None,
         });
         // A private repair or source-review report must prove it bypassed
         // the response cache; a scripted planned round answering either
@@ -443,6 +444,7 @@ impl InferenceCore for MockOk {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 provider_timing: None,
+                route_note: None,
             }),
             Ok(InferChunk {
                 compaction_summary: String::new(),
@@ -460,6 +462,7 @@ impl InferenceCore for MockOk {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 provider_timing: None,
+                route_note: None,
             }),
         ];
         if self.stream_without_final {
@@ -972,6 +975,7 @@ impl InferenceCore for MockStreamDown {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             provider_timing: None,
+            route_note: None,
         }))
     }
 

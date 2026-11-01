@@ -1105,6 +1105,12 @@
           ],
           "presence": "always"
         },
+        "routing": {
+          "types": [
+            "string"
+          ],
+          "presence": "optional"
+        },
         "unpriced_calls": {
           "types": [
             "integer"

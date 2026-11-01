@@ -356,6 +356,10 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     no: 'Bare en avgjørelse for dette ene kallet er tilgjengelig.',
     en: 'Only a decision for this one call is available.',
   },
+  rule_requires_thread_scope: {
+    no: '«Alltid» kan bare brukes på en godkjenning for denne tråden.',
+    en: 'An Always applies only to an approval for this thread.',
+  },
   body_too_large: {
     no: 'Policyen er for stor. Kort den ned og prøv igjen.',
     en: 'The policy is too large. Shorten it and try again.',

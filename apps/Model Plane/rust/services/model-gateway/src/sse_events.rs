@@ -451,6 +451,9 @@ pub enum ChatEvent {
         /// The turn's run ceiling, on the frames that carry one (WS27-S6). `None` leaves the frame
         /// as it was before the ceiling existed.
         ceiling: Option<crate::sse_events::run_ceiling::CeilingProgress>,
+        /// How the budget moved this call's route (WS27-S7): `tier_shifted` or `cheap_fallback`, only when
+        /// inference-core's route note says the posture moved it. `None` keeps the frame's earlier shape.
+        routing: Option<&'static str>,
     },
     // ---- end usage progress (WS27) ----
     // ---- lifecycle (WS15) ----
@@ -915,6 +918,7 @@ impl ChatEvent {
                 phase,
                 snapshot,
                 ceiling,
+                routing,
             } => {
                 let mut payload = json!({
                     "calls": snapshot.calls,
@@ -949,6 +953,10 @@ impl ChatEvent {
                     if let Some(warning) = ceiling.warning {
                         payload["warning"] = json!(warning.as_str());
                     }
+                }
+                // Stated only on a call the budget moved, so an unmoved frame keeps its shape.
+                if let Some(routing) = routing {
+                    payload["routing"] = json!(routing);
                 }
                 payload
             }
@@ -1569,6 +1577,7 @@ impl RichEventSink {
         &self,
         call: &crate::usage_meter::CallUsage,
         priced: &crate::pricing::Priced,
+        routing: Option<&'static str>,
     ) {
         if !self.records_calls() {
             return;
@@ -1589,6 +1598,7 @@ impl RichEventSink {
                 phase: call.phase,
                 snapshot,
                 ceiling,
+                routing,
             })
             .await;
         }
@@ -2186,6 +2196,7 @@ mod tests {
             phase: crate::usage_meter::CallPhase::ToolRound,
             snapshot: running_total(&[(crate::pricing::CostBasis::Metered, Some(0.01))]),
             ceiling: None,
+            routing: None,
         };
         assert!(progress.should_emit(&feats));
         // Not opted in:
@@ -2263,6 +2274,7 @@ mod tests {
             phase: crate::usage_meter::CallPhase::Overhead,
             snapshot: running_total(calls),
             ceiling: None,
+            routing: None,
         }
         .payload("req-1")
         .as_object()
@@ -2336,6 +2348,7 @@ mod tests {
             phase: crate::usage_meter::CallPhase::Answer,
             snapshot: running_total(&[(crate::pricing::CostBasis::Metered, Some(0.25))]),
             ceiling: None,
+            routing: None,
         };
         assert_eq!(event.family(), Some("usage"));
         assert_eq!(event.name(), "usage_progress");
@@ -2372,8 +2385,8 @@ mod tests {
                 }),
                 source: crate::pricing::PriceSource::Exact,
             };
-            sink.record_call(&call, &priced).await;
-            sink.record_call(&call, &priced).await;
+            sink.record_call(&call, &priced, None).await;
+            sink.record_call(&call, &priced, None).await;
             drop(sink);
             let mut sent = 0;
             while rx.try_recv().is_ok() {
@@ -2423,12 +2436,12 @@ mod tests {
             }),
             source: crate::pricing::PriceSource::Exact,
         };
-        sink.record_call(&call, &priced).await;
+        sink.record_call(&call, &priced, None).await;
         assert!(
             !sink.run_ceiling_stops_tool_phase(),
             "half of the cap is not the cap"
         );
-        sink.record_call(&call, &priced).await;
+        sink.record_call(&call, &priced, None).await;
         assert!(
             sink.run_ceiling_stops_tool_phase(),
             "two calls reach the cap"
@@ -2447,6 +2460,7 @@ mod tests {
                 fraction: Some(0.8),
                 warning: Some(crate::sse_events::run_ceiling::CeilingWarning::Eighty),
             }),
+            routing: None,
         }
         .payload("req-1");
         assert_eq!(carried["ceiling_usd"], json!(0.05));
@@ -2542,6 +2556,7 @@ mod tests {
             phase: crate::usage_meter::CallPhase::Answer,
             snapshot: running_total(&[(crate::pricing::CostBasis::Metered, Some(0.01))]),
             ceiling: None,
+            routing: None,
         };
         assert_eq!(progress.name(), "usage_progress");
 
@@ -3420,7 +3435,7 @@ mod payload_contract {
         basis: Option<crate::pricing::CostBasis>,
         unpriced_calls: u32,
     ) -> ChatEvent {
-        usage_progress_with_ceiling(calls, cost_usd, basis, unpriced_calls, None)
+        usage_progress_with_ceiling(calls, cost_usd, basis, unpriced_calls, None, None)
     }
 
     /// A progress frame of the same turn, carrying the run ceiling it states.
@@ -3430,6 +3445,7 @@ mod payload_contract {
         basis: Option<crate::pricing::CostBasis>,
         unpriced_calls: u32,
         ceiling: Option<crate::sse_events::run_ceiling::CeilingProgress>,
+        routing: Option<&'static str>,
     ) -> ChatEvent {
         ChatEvent::UsageProgress {
             phase: crate::usage_meter::CallPhase::ToolRound,
@@ -3450,6 +3466,7 @@ mod payload_contract {
                 }),
             },
             ceiling,
+            routing,
         }
     }
 
@@ -3608,7 +3625,10 @@ mod payload_contract {
                     fraction: Some(0.8),
                     warning: Some(crate::sse_events::run_ceiling::CeilingWarning::Eighty),
                 }),
+                None,
             ),
+            // A frame whose call the budget moved states its routing (WS27-S7).
+            usage_progress_with_ceiling(2, Some(0.001), Some(crate::pricing::CostBasis::Metered), 0, None, Some("tier_shifted")),
             turn_timing(false),
             turn_timing(true),
             ChatEvent::Title { title: s("") },

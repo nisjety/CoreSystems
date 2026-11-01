@@ -515,6 +515,8 @@ export type ChatUsageProgressEvent = {
   fraction?: number
   /** The ceiling warning this frame is the first to carry. */
   warning?: 'run_ceiling_80' | 'run_ceiling_reached'
+  /** How the budget moved this call's route (WS27-S7), stated only on a call it moved. */
+  routing?: 'tier_shifted' | 'cheap_fallback'
 }
 
 function costBasisValue(value: unknown): ChatCostBasis | undefined {
@@ -545,6 +547,10 @@ function runCeilingWarningValue(value: unknown): 'run_ceiling_80' | 'run_ceiling
   return value === 'run_ceiling_80' || value === 'run_ceiling_reached' ? value : undefined
 }
 
+function routingValue(value: unknown): 'tier_shifted' | 'cheap_fallback' | undefined {
+  return value === 'tier_shifted' || value === 'cheap_fallback' ? value : undefined
+}
+
 /** A `usage_progress` payload, read by its closed keys and nothing else. */
 function usageProgressFrame(payload: Record<string, unknown>): ChatUsageProgressEvent {
   return {
@@ -561,6 +567,7 @@ function usageProgressFrame(payload: Record<string, unknown>): ChatUsageProgress
     ceilingTokens: num(payload.ceiling_tokens),
     fraction: num(payload.fraction),
     warning: runCeilingWarningValue(payload.warning),
+    routing: routingValue(payload.routing),
   }
 }
 

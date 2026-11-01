@@ -3388,6 +3388,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 provider_timing: None,
+                route_note: None,
             }))
         }
 
@@ -3412,6 +3413,7 @@ mod tests {
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                     provider_timing: None,
+                    route_note: None,
                 }),
                 Ok(InferChunk {
                     compaction_summary: String::new(),
@@ -3429,6 +3431,7 @@ mod tests {
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                     provider_timing: None,
+                    route_note: None,
                 }),
             ]))))
         }

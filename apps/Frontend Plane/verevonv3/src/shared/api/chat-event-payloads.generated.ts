@@ -230,6 +230,7 @@ export type ChatEventPayloads = {
     input_tokens: number
     output_tokens: number
     phase: string
+    routing?: string
     unpriced_calls?: number
     warning?: string
   }

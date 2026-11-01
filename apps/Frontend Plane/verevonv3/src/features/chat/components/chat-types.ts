@@ -310,6 +310,8 @@ export type RunMeter = {
   ceilingTokens?: number
   fraction?: number
   warning?: NonNullable<ChatUsageProgressEvent['warning']>
+  /** How the budget moved the turn's route (WS27-S7), once a call states it. */
+  routing?: NonNullable<ChatUsageProgressEvent['routing']>
 }
 
 /**
