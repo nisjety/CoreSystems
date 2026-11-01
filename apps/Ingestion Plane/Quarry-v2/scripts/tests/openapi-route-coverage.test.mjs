@@ -14,7 +14,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { documentedPaths, normalize, productionPart, registeredPaths, routesIn, routeSourceFiles } from '../openapi-routes.mjs';
+import { controlInternalRoutes, documentedPaths, normalize, productionPart, registeredPaths, routesIn, routeSourceFiles } from '../openapi-routes.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const allowlistPath = path.join(root, 'scripts/openapi-route-allowlist.json');
@@ -105,7 +105,11 @@ test('the_allowlist_holds_no_stale_entries', () => {
 });
 
 test('every_documented_path_is_still_a_route', () => {
-  const registered = new Set(registeredPaths(root).paths);
+  // The Go control service's /v1/internal routes are documented in the internal file too (D2-050).
+  const registered = new Set([
+    ...registeredPaths(root).paths,
+    ...controlInternalRoutes(root).map((entry) => entry.split(' ')[1]),
+  ]);
   const gone = documentedEverywhere().filter((route) => !registered.has(route));
   assert.deepEqual(gone, [], `documented in docs/openapi.yaml or docs/openapi-internal.yaml but not registered:\n  ${gone.join('\n  ')}`);
 });

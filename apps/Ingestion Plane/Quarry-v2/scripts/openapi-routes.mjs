@@ -60,6 +60,23 @@ export function registeredPaths(root) {
   return { paths: [...paths].sort(), registrations };
 }
 
+/**
+ * The /v1/internal routes of the Go control service (D2-050): `r.Get("/v1/internal/...", ...)` and the like in
+ * services/quarry-control/internal/resources. Returns sorted "METHOD normalized-path" entries.
+ */
+export function controlInternalRoutes(root) {
+  const dir = path.join(root, 'services/quarry-control/internal/resources');
+  const found = new Set();
+  for (const name of fs.readdirSync(dir).sort()) {
+    if (!name.endsWith('.go') || name.endsWith('_test.go')) continue;
+    const source = fs.readFileSync(path.join(dir, name), 'utf8').replace(/\r\n/g, '\n');
+    for (const match of source.matchAll(/\br\.(Get|Post|Put|Patch|Delete)\(\s*"(\/v1\/internal\/[^"]+)"/g)) {
+      found.add(`${match[1].toUpperCase()} ${normalize(match[2])}`);
+    }
+  }
+  return [...found].sort();
+}
+
 /** The keys of `paths:` in openapi.yaml, normalized. */
 export function documentedPaths(openapiText) {
   const text = openapiText.replace(/\r\n/g, '\n');
