@@ -89,6 +89,40 @@ fn zdr_refused() -> axum::response::Response {
         .into_response()
 }
 
+/// 403 for a request whose web policy cannot be decided (an unreadable token claim under
+/// `enforce`). Nothing has run. The text is the policy engine's closed message, never a URL.
+fn policy_refused(error: quarry_core::error::QuarryError) -> axum::response::Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(
+            serde_json::to_value(ErrorBody {
+                error: error.message,
+                code: quarry_core::error::ErrorCode::Forbidden.wire_name().into(),
+                hint: None,
+                reason: None,
+            })
+            .unwrap(),
+        ),
+    )
+        .into_response()
+}
+
+/// D2-055: the URL gate of one answer request. The pipeline asks it for every search-result URL
+/// before fetching it; a URL the request's web policy denies is skipped (typed
+/// `policy_denied`), counted like any other enforced denial, and never fetched. The decision is
+/// taken once, with the effective ZDR posture, so the ZDR floor applies the same as on the
+/// scrape family. The policy fingerprint is untouched: this reads the decision, it adds no layer.
+fn url_gate(
+    state: &AppState,
+    claims: &crate::auth::Claims,
+    zdr: bool,
+) -> Result<quarry_runtime::answer::UrlGate, quarry_core::error::QuarryError> {
+    let decision = crate::web_policy_edge::decide(&state.policy, claims, zdr, None)?;
+    Ok(std::sync::Arc::new(move |url: &str| {
+        crate::web_policy_edge::gate_url(&decision, url).is_ok()
+    }))
+}
+
 /// The response for a failed `AnswerPipeline::answer`. A refused service token is a 503 with a
 /// fixed message (the model gateway's own text stays out); every other failure keeps the status
 /// its error code always had and gains the closed `reason`.
@@ -181,6 +215,11 @@ async fn answer_run(
         Err(reason) => return not_configured(reason),
     };
 
+    let gate = match url_gate(&state, &claims, claims.effective_zdr(req.zdr.unwrap_or(false))) {
+        Ok(gate) => gate,
+        Err(error) => return policy_refused(error),
+    };
+
     let pipeline_req = AnswerRequest {
         query: req.query,
         top_k: req.top_k,
@@ -194,7 +233,7 @@ async fn answer_run(
         org_id: Some(claims.org_id.clone()),
     };
 
-    match pipeline.answer(pipeline_req).await {
+    match pipeline.answer_gated(pipeline_req, Some(&gate)).await {
         Ok(result) => {
             // P3 / cluster #billing — meter the synth call. quantity=1
             // for the synthesis itself; per-citation cost (sources_used)
@@ -275,6 +314,14 @@ pub async fn answer_stream(
         }
     };
 
+    let gate = match url_gate(&state, &claims, claims.effective_zdr(req.zdr.unwrap_or(false))) {
+        Ok(gate) => gate,
+        Err(error) => {
+            tombstone.status(StatusCode::FORBIDDEN.as_u16());
+            return policy_refused(error);
+        }
+    };
+
     let query = req.query.clone();
     let org_id = claims.org_id.clone();
     let user_id = claims.user_id.clone();
@@ -321,7 +368,7 @@ pub async fn answer_stream(
             }
         }
 
-        let prepared = match pipeline.prepare(&pipeline_req).await {
+        let prepared = match pipeline.prepare_gated(&pipeline_req, Some(&gate)).await {
             Ok(p) => p,
             Err(e) => {
                 tombstone.failed(&e);
