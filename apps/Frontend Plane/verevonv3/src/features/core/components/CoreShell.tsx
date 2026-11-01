@@ -49,6 +49,22 @@ export function CoreShell(props: { children?: JSX.Element }) {
   const sidebarWidth = () => (sidebarExpanded() ? expandedSidebarWidth() : SIDEBAR_MINIMIZED_WIDTH)
   const workspace = createMemo(() => resolveWorkspaceIdentity(session, navbarData.latest ?? navbarData()))
 
+  // At phone width the expanded sidebar is a drawer laid over the page. Picking a room or a
+  // conversation from it (or from the rooms index) navigates to an open room; the drawer has done
+  // its job then, and left open it hides the room the person just chose. Only a change of
+  // location counts (the first run is the page the person arrived on, whose default is decided
+  // above), only a destination that is an open room, and only at phone width: desktop keeps its
+  // column, and a rail tap to another section keeps the drawer open for that section's list.
+  let lastNavigationKey = untrack(() => `${location.pathname}${location.search}`)
+  createEffect(
+    () => `${location.pathname}${location.search}`,
+    (key) => {
+      if (key === lastNavigationKey) return
+      lastNavigationKey = key
+      if (isPhoneViewport() && isOpenRoomPath(location.pathname)) setSidebarExpanded(false)
+    },
+  )
+
   createEffect(
     () => {
       if (navbarData.latest?.theme?.configured === false) return undefined
@@ -264,7 +280,7 @@ function isOrgStyleName(name: string): boolean {
 }
 
 /** Below this width the expanded sidebar is a drawer laid over the page, not a column beside it. */
-const PHONE_MEDIA_QUERY = '(max-width: 759px)'
+const PHONE_MEDIA_QUERY = '(max-width: 767px)'
 
 function isPhoneViewport(): boolean {
   try {

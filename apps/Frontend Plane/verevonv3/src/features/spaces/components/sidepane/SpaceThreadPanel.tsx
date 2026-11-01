@@ -4,6 +4,7 @@ import { Match, Show, Switch } from 'solid-js'
 
 import { threadStatus, formatWhen } from '@/features/spaces/lib/space-thread-presentation'
 import { ApiError } from '@/shared/api/http'
+import { presentSpaceDenialText, readSpaceDenial } from '@/shared/api/space-denials'
 import { getSpaceThreadTranscript } from '@/shared/api/spaces-client'
 import type { SpaceAgent, SpaceRosterMember, SpaceThread } from '@/shared/api/spaces-client'
 import { useI18n } from '@/shared/i18n'
@@ -29,7 +30,9 @@ const MAX_PANE_TURNS = 500
 
 type PanelRead =
   | { readonly threadId: string; readonly state: 'ok'; readonly turns: readonly TranscriptTurn[] }
-  | { readonly threadId: string; readonly state: 'restricted' | 'missing' | 'error' }
+  // A 403 may carry a typed Space denial (why Control said no); kept so the pane can say that.
+  | { readonly threadId: string; readonly state: 'restricted'; readonly denial?: { code: string | null; details: Readonly<Record<string, unknown>> | null } }
+  | { readonly threadId: string; readonly state: 'missing' | 'error' }
 
 export interface SpaceThreadPanelProps {
   readonly spaceRef: string
@@ -71,7 +74,11 @@ export function SpaceThreadPanel(props: SpaceThreadPanelProps) {
           turns: normalizeTranscriptTurns(snapshot.turns as readonly unknown[], MAX_PANE_TURNS),
         }
       } catch (error) {
-        if (error instanceof ApiError && error.status === 403) return { threadId, state: 'restricted' }
+        if (error instanceof ApiError && error.status === 403) {
+          return readSpaceDenial(error)
+            ? { threadId, state: 'restricted', denial: { code: error.code, details: error.details } }
+            : { threadId, state: 'restricted' }
+        }
         if (error instanceof ApiError && error.status === 404) return { threadId, state: 'missing' }
         return { threadId, state: 'error' }
       }
@@ -112,7 +119,13 @@ export function SpaceThreadPanel(props: SpaceThreadPanelProps) {
         }
       >
         <Match when={current()?.state === 'restricted'}>
-          <SpaceRestrictedNotice variant="thread" />
+          <Show when={restrictedDenial(current())} fallback={<SpaceRestrictedNotice variant="thread" />}>
+            {(denial) => (
+              <p class="verevon-space-inline-status" role="status" data-denial="typed">
+                {presentSpaceDenialText(denial(), i18n.tr)}
+              </p>
+            )}
+          </Show>
         </Match>
         <Match when={current()?.state === 'missing'}>
           <div class="verevon-space-empty-state" role="status">
@@ -164,6 +177,10 @@ export function SpaceThreadPanel(props: SpaceThreadPanelProps) {
       </Show>
     </div>
   )
+}
+
+function restrictedDenial(value: PanelRead | undefined) {
+  return value?.state === 'restricted' ? value.denial : undefined
 }
 
 function okTurns(value: PanelRead | undefined): readonly TranscriptTurn[] {

@@ -108,6 +108,34 @@ describe('SpaceThreadPanel (WS01-S7a)', () => {
     expect(document.body.textContent ?? '').not.toMatch(/logg inn|sign in|log in/i)
   })
 
+  it('says a typed 403 in the denial presenter’s words instead of the generic notice', async () => {
+    spacesClient.getSpaceThreadTranscript.mockRejectedValue(
+      new ApiError('forbidden', 403, 'space_thread_not_authorized', null, {
+        reason: 'space_role_below_floor',
+        resolvable_by: 'space_manager',
+      }),
+    )
+    renderPanel()
+    expect(await screen.findByText(/Rollen din i dette rommet er ikke høy nok til dette/)).toBeTruthy()
+    expect(screen.queryByText(/Denne samtalen er ikke delt med deg/)).toBeNull()
+  })
+
+  it('uses the presenter’s generic line for a reason this build does not know', async () => {
+    spacesClient.getSpaceThreadTranscript.mockRejectedValue(
+      new ApiError('forbidden', 403, 'forbidden', null, { reason: 'a_newer_reason' }),
+    )
+    renderPanel()
+    expect(await screen.findByText('Dette er ikke tillatt i rommet akkurat nå.')).toBeTruthy()
+  })
+
+  it('keeps the generic notice for a 403 that carries no typed reason', async () => {
+    spacesClient.getSpaceThreadTranscript.mockRejectedValue(
+      new ApiError('forbidden', 403, 'forbidden', null, { other: 1 }),
+    )
+    renderPanel()
+    expect(await screen.findByText(/Denne samtalen er ikke delt med deg/)).toBeTruthy()
+  })
+
   it('shows the not-available state on 404', async () => {
     spacesClient.getSpaceThreadTranscript.mockRejectedValue(new ApiError('missing', 404, 'thread_not_found'))
     renderPanel()
