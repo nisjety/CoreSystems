@@ -4570,6 +4570,8 @@ pub async fn invoke_stream_sse(
                         cache_read: i64::from(cache_read_tokens),
                         cache_write: i64::from(cache_creation_tokens),
                     });
+                    // The route note rides the final chunk, so the answer's routing is read with its call (WS27-S7).
+                    let answer_routing = crate::tool_loop::route_shift(chunk.route_note.as_ref());
                     let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
                     // inference-core sets this ONLY when the provider connection
                     // broke before any proper termination signal arrived — a
@@ -5544,6 +5546,7 @@ pub async fn invoke_stream_sse(
                                 phase: crate::usage_meter::CallPhase::Answer,
                                 snapshot: turn,
                                 ceiling: sink.run_ceiling_at_turn_end(&turn, turn_metered),
+                                routing: answer_routing,
                             },
                         )
                         .await;
@@ -8529,6 +8532,7 @@ async fn run_infer_fallback(
                         phase: crate::usage_meter::CallPhase::Answer,
                         snapshot: turn,
                         ceiling: sink.run_ceiling_at_turn_end(&turn, turn_metered),
+                        routing: crate::tool_loop::route_shift(resp.route_note.as_ref()),
                     },
                 )
                 .await;
@@ -9650,7 +9654,7 @@ async fn judge_sources(
                 &route.provider_hint,
                 &route.subscription_connection_id,
             );
-            crate::tool_loop::stream_call_usage(state, sink, &call).await;
+            crate::tool_loop::stream_call_usage(state, sink, &call, None).await;
             sink.record_overhead(call);
             crate::verification::parse_verdict(&resp.content)
         }
@@ -9727,7 +9731,7 @@ async fn resample_answer(
                     &route.provider_hint,
                     &route.subscription_connection_id,
                 );
-                crate::tool_loop::stream_call_usage(state, sink, &call).await;
+                crate::tool_loop::stream_call_usage(state, sink, &call, None).await;
                 sink.record_overhead(call);
                 samples.push(resp.content);
             }
@@ -13830,6 +13834,7 @@ impl AgentRunUsage {
             phase: crate::usage_meter::CallPhase::AgentRound,
             snapshot: self.meter.record(&call, &priced),
             ceiling: None,
+            routing: None,
         }
     }
 
@@ -23614,6 +23619,28 @@ mod execute_turn_tests {
             invoke[progress..usage].contains("snapshot: turn,"),
             "the progress frame states the turn's total: {invoke}"
         );
+    }
+
+    /// The budget's routing rides only the progress frame of the call it moved: a frame that states it carries
+    /// the closed token, and one that does not keeps the shape it had before the note existed (WS27-S7).
+    #[test]
+    fn a_routed_progress_frame_states_its_routing_and_an_unrouted_one_does_not() {
+        use crate::usage_meter::CallPhase::ToolRound;
+        let snapshot = crate::usage_meter::UsageMeter::default().snapshot();
+        let routed = crate::sse_events::ChatEvent::UsageProgress {
+            phase: ToolRound,
+            snapshot,
+            ceiling: None,
+            routing: Some("tier_shifted"),
+        };
+        assert_eq!(routed.payload("req-route")["routing"], "tier_shifted");
+        let unrouted = crate::sse_events::ChatEvent::UsageProgress {
+            phase: ToolRound,
+            snapshot,
+            ceiling: None,
+            routing: None,
+        };
+        assert!(unrouted.payload("req-route").get("routing").is_none());
     }
 
     /// Only an ordinary request's flag reaches the stream; a continuation passes false; and the

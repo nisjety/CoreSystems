@@ -5757,13 +5757,31 @@ pub(crate) fn metered_call(
     }
 }
 
+/// The routing token a call's route note states on its progress frame (WS27-S7). One mapping serves every
+/// call site, so a budget move names itself the same way wherever it happened. Inference-core sets the flags
+/// only under a constrained or an exhausted budget, so a healthy or unknown one states no token.
+pub(crate) fn route_shift(
+    note: Option<&mp_contracts::model_plane::v1::RouteNote>,
+) -> Option<&'static str> {
+    let note = note?;
+    if note.cheap_fallback_forced {
+        Some("cheap_fallback")
+    } else if note.tier_shifted {
+        Some("tier_shifted")
+    } else {
+        None
+    }
+}
+
 /// Records one provider call the tool phase made and streams the turn's running total after it, when the
 /// turn's sink records calls: it streams usage progress or tracks a run ceiling (WS27-S6). The call is
-/// priced only then, so a turn with neither reads the catalogue no more often than it did before.
+/// priced only then, so a turn with neither reads the catalogue no more often than it did before. `routing`
+/// is the token the call's route note states, if any (WS27-S7).
 pub(crate) async fn stream_call_usage(
     state: &AppState,
     sink: &crate::sse_events::RichEventSink,
     call: &crate::usage_meter::CallUsage,
+    routing: Option<&'static str>,
 ) {
     if !sink.records_calls() {
         return;
@@ -5772,7 +5790,7 @@ pub(crate) async fn stream_call_usage(
         .pricing
         .priced(call.basis, &call.model, call.legs())
         .await;
-    sink.record_call(call, &priced).await;
+    sink.record_call(call, &priced, routing).await;
 }
 
 /// Keep tool selection from drafting an answer that this phase discards. This
@@ -8243,7 +8261,13 @@ pub async fn run_tool_rounds_for_model_with_attachments(
             subscription_connection_id,
         );
         if let Some(sink) = sink {
-            stream_call_usage(state, sink, &round_usage).await;
+            stream_call_usage(
+                state,
+                sink,
+                &round_usage,
+                route_shift(resp.route_note.as_ref()),
+            )
+            .await;
         }
         usage.push(round_usage);
         let truncated_call_was_finish = resp.tool_calls.last().is_some_and(|call| call.name == FINISH_TOOL_PHASE);
@@ -8461,7 +8485,7 @@ pub async fn run_tool_rounds_for_model_with_attachments(
                                 subscription_connection_id,
                             );
                             if let Some(sink) = sink {
-                                stream_call_usage(state, sink, &overhead).await;
+                                stream_call_usage(state, sink, &overhead, None).await;
                             }
                             if let Ok(mut recorded) = check_usage.lock() {
                                 recorded.push(overhead);
@@ -9020,6 +9044,24 @@ pub async fn run_tool_rounds_for_model_with_attachments(
 mod tests {
     use super::*;
     use mp_contracts::model_plane::v1 as mpv1;
+
+    /// A call the budget did not move states no token; a call it moved states the token of its move.
+    #[test]
+    fn route_shift_names_only_a_budget_move() {
+        let note = |tier_shifted, cheap_fallback_forced| mpv1::RouteNote {
+            budget_posture: "constrained".to_owned(),
+            tier_shifted,
+            cheap_fallback_forced,
+            applied_effort: String::new(),
+        };
+        assert_eq!(route_shift(None), None);
+        assert_eq!(route_shift(Some(&note(false, false))), None);
+        assert_eq!(route_shift(Some(&note(true, false))), Some("tier_shifted"));
+        assert_eq!(
+            route_shift(Some(&note(false, true))),
+            Some("cheap_fallback")
+        );
+    }
 
     /// Every tool result the audit sees is counted under its trust class and posture, so an external
     /// result that no screening pass saw appears as `not-applicable` rather than going missing.

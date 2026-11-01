@@ -5,6 +5,7 @@ import { createSignal, flush } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RunCostMeter, applyUsageProgress, applyUsageTotal } from './RunCostMeter'
 import type { RunMeter } from './chat-types'
+import type { RunRouting } from './RunCostMeter'
 
 function meter(value?: RunMeter): HTMLElement {
   const { container } = render(() => <RunCostMeter meter={value} />)
@@ -161,6 +162,14 @@ describe('RunCostMeter reducers (WS27-S4)', () => {
     expect(applyUsageProgress(later, { calls: 4, warning: 'run_ceiling_reached', fraction: 1.1 }).warning).toBe('run_ceiling_reached')
   })
 
+  it('carries the budget routing through later progress frames and into the usage total', () => {
+    const routed = applyUsageProgress(undefined, { calls: 1, inputTokens: 900, routing: 'tier_shifted' })
+    expect(routed.routing).toBe('tier_shifted')
+    expect(applyUsageProgress(routed, { calls: 2, inputTokens: 1000 }).routing).toBe('tier_shifted')
+    const total = applyUsageTotal(routed, { calls: 2, inputTokens: 1000, costUsd: 0.002, costBasis: 'metered', unpricedCalls: 0 })
+    expect(total.routing).toBe('tier_shifted')
+  })
+
   it('reads the share from the frame that states it, never from an earlier frame', () => {
     const earlier = applyUsageProgress(undefined, { calls: 1, fraction: 0.5, ceilingUsd: 0.05 })
     const later = applyUsageProgress(earlier, { calls: 2 })
@@ -211,6 +220,37 @@ describe('RunCostMeter reducers (WS27-S4)', () => {
     const total = applyUsageTotal(undefined, { calls: 1, costUsd: 0, costBasis: 'subscription' })
     expect(total.costUsd).toBeUndefined()
     expect(total.costByCategory).toBeUndefined()
+  })
+})
+
+describe('RunCostMeter routing (WS27-S7)', () => {
+  function routed(routing: RunRouting | undefined, value?: RunMeter): HTMLElement {
+    const { container } = render(() => <RunCostMeter meter={{ ...value, routing }} />)
+    return container
+  }
+
+  it('states one calm line when the budget moved the turn to a cheaper model, and never announces it', () => {
+    const view = routed('tier_shifted', { calls: 1, inputTokens: 900, outputTokens: 100 })
+    const line = view.querySelector('.verevon-run-cost-meter__routing')
+    expect(line?.getAttribute('data-routing')).toBe('tier_shifted')
+    expect(line?.textContent).toMatch(/Budsjettet|The budget/)
+    expect(line?.getAttribute('aria-live')).toBeNull()
+  })
+
+  it('says the budget is used up when the cheap fallback answered the turn', () => {
+    const view = routed('cheap_fallback', { calls: 1 })
+    expect(view.querySelector('.verevon-run-cost-meter__routing')?.getAttribute('data-routing')).toBe('cheap_fallback')
+    expect(view.textContent).toMatch(/brukt opp|used up/)
+  })
+
+  it('states nothing when the budget changed no model', () => {
+    expect(routed(undefined, { calls: 1 }).querySelector('.verevon-run-cost-meter__routing')).toBeNull()
+  })
+
+  it('states the line on its own when no totals or cap have arrived yet', () => {
+    const view = routed('tier_shifted', undefined)
+    expect(view.querySelector('.verevon-run-cost-meter__routing')).not.toBeNull()
+    expect(view.querySelector('.verevon-run-cost-meter__cap')).toBeNull()
   })
 })
 

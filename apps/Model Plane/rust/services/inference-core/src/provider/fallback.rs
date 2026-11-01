@@ -1,6 +1,6 @@
 //! Sequential fallback chain — tries providers in order with bounded retries.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
@@ -109,6 +109,77 @@ pub struct FallbackChain {
     /// `MODEL_ENTITLEMENT_MODE` says otherwise; the handlers ask it, and the
     /// chain applies the answer a request carries.
     entitlement: Arc<EntitlementGate>,
+}
+
+/// Switch for the route note (WS27-S7): what the budget did to a Verevon call, carried on the wire. Off
+/// unless the literal `true`, read once at startup, as the other inference switches are.
+const ROUTE_NOTE_ENV: &str = "INFERENCE_ROUTE_NOTE";
+
+/// Whether an explicit env value turns the route note on. Pure so the policy is unit-testable without
+/// touching the process environment.
+fn route_note_enabled_from(raw: Option<&str>) -> bool {
+    raw.map(str::trim) == Some("true")
+}
+
+/// Whether the route note is on for this process.
+fn route_note_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| route_note_enabled_from(std::env::var(ROUTE_NOTE_ENV).ok().as_deref()))
+}
+
+/// What the budget did to one Verevon-routed call (WS27-S7), kept beside its response. Closed values and
+/// booleans only, never a price or a count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RouteNote {
+    pub budget_posture: intent::BudgetPosture,
+    /// Set only when the posture moved the model one tier cheaper: the same policy at a healthy budget
+    /// would have answered with another model.
+    pub tier_shifted: bool,
+    /// Set when an exhausted budget forced the cheap fallback model.
+    pub cheap_fallback_forced: bool,
+    /// The effort level the budget clamped the call to, when it clamped it.
+    pub applied_effort: Option<effort::Level>,
+}
+
+/// The note for a decision the intent layer resolved. `tier_shifted` is read against the same policy at a
+/// healthy budget, so a mode the caller chose is never reported as a budget move.
+fn budget_route_note(
+    policy: &RoutingPolicy,
+    decision: &intent::Decision,
+    applied_effort: Option<effort::Level>,
+) -> RouteNote {
+    let healthy = intent::choose(
+        policy,
+        decision.mode,
+        decision.complexity,
+        intent::BudgetPosture::Healthy,
+    );
+    RouteNote {
+        budget_posture: decision.posture,
+        tier_shifted: decision.posture == intent::BudgetPosture::Constrained
+            && healthy != decision.model,
+        cheap_fallback_forced: decision.posture == intent::BudgetPosture::Exhausted,
+        applied_effort,
+    }
+}
+
+impl From<RouteNote> for mp_contracts::model_plane::v1::RouteNote {
+    fn from(note: RouteNote) -> Self {
+        let budget_posture = match note.budget_posture {
+            intent::BudgetPosture::Healthy => "healthy",
+            intent::BudgetPosture::Constrained => "constrained",
+            intent::BudgetPosture::Exhausted => "exhausted",
+            intent::BudgetPosture::Unknown => "unknown",
+        };
+        Self {
+            budget_posture: budget_posture.to_owned(),
+            tier_shifted: note.tier_shifted,
+            cheap_fallback_forced: note.cheap_fallback_forced,
+            applied_effort: note
+                .applied_effort
+                .map_or_else(String::new, |level| level.as_str().to_owned()),
+        }
+    }
 }
 
 /// The deployment names that gate each model family on this resource.
@@ -1063,9 +1134,13 @@ impl FallbackChain {
     }
 
     /// Resolve a Verevon intent model id (`verevon-budget`/`-balance`/`-genius`)
-    /// to a concrete model, returning a rewritten request. Returns `None` when
-    /// the intent layer is off or the model is a pinned id (pass through).
-    async fn resolve_intent(&self, req: &InferRequest) -> Option<InferRequest> {
+    /// to a concrete model, returning a rewritten request and, while the route
+    /// note is on, what the budget did to it (WS27-S7). Returns `None` when the
+    /// intent layer is off or the model is a pinned id (pass through).
+    async fn resolve_intent(
+        &self,
+        req: &InferRequest,
+    ) -> Option<(InferRequest, Option<RouteNote>)> {
         let policy = self.policy.load();
         if !policy.enabled {
             return None;
@@ -1093,7 +1168,9 @@ impl FallbackChain {
             "verevon intent resolved"
         );
         let mut rewritten = req.clone();
-        rewritten.model = decision.model;
+        rewritten.model.clone_from(&decision.model);
+        // What the budget cut, for the route note: the effort it clamped to, when a clamp fired.
+        let mut applied_effort = None;
         if effort::budget_clamp_enabled() {
             if let Some(requested) = rewritten.reasoning_effort {
                 let applied = effort::clamp_to_cap(requested, decision.effort_cap);
@@ -1109,6 +1186,7 @@ impl FallbackChain {
                         "effort clamped by budget posture"
                     );
                     rewritten.reasoning_effort = Some(applied);
+                    applied_effort = Some(applied);
                 }
             } else {
                 // A request with no level carries only the legacy budget, which is
@@ -1127,10 +1205,13 @@ impl FallbackChain {
                         "thinking budget clamped by budget posture"
                     );
                     rewritten.thinking_budget_tokens = applied;
+                    applied_effort = decision.effort_cap;
                 }
             }
         }
-        Some(rewritten)
+        let note =
+            route_note_enabled().then(|| budget_route_note(&policy, &decision, applied_effort));
+        Some((rewritten, note))
     }
 
     /// Lower a request's effort to the org's `max_effort` ceiling. model-gateway
@@ -1377,16 +1458,26 @@ impl FallbackChain {
     ///
     /// Returns `ProviderError::AllExhausted` if every provider and retry is exhausted.
     pub async fn infer(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
-        self.infer_with_response_cache(req, true).await
+        self.infer_noted(req, true)
+            .await
+            .map(|(response, _)| response)
     }
 
     /// Fresh inference for checks that must not reuse or store a completed
     /// response. Provider prefix caching and all route/privacy gates remain.
     pub async fn infer_without_response_cache(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
-        self.infer_with_response_cache(req, false).await
+        self.infer_noted(req, false)
+            .await
+            .map(|(response, _)| response)
     }
 
-    async fn infer_with_response_cache(&self, req: &InferRequest, cache_response: bool) -> Result<InferResponse, ProviderError> {
+    /// The unary call with the route note the intent layer stamped on it (WS27-S7), when the note is on.
+    /// The note is never stored with a response, so a cache hit carries the note of the call that asked.
+    pub async fn infer_noted(
+        &self,
+        req: &InferRequest,
+        cache_response: bool,
+    ) -> Result<(InferResponse, Option<RouteNote>), ProviderError> {
         let mut clock = CallClock::start();
         // A retired Claude id is answered by its successor, so the entitlement check,
         // the cache key and every rung of the ladder all name the model that serves.
@@ -1399,7 +1490,10 @@ impl FallbackChain {
         // Verevon intent layer: resolve a `verevon-*` mode to a concrete model
         // (complexity + budget) before anything else. A pinned model or a
         // disabled intent layer leaves `req` untouched.
-        let intent_req = self.resolve_intent(req).await;
+        let (intent_req, route_note) = self
+            .resolve_intent(req)
+            .await
+            .map_or((None, None), |(resolved, note)| (Some(resolved), note));
         // The ladder exists only for a model WE chose. `intent_req.is_some()` is
         // exactly that condition — see `attempt_models`.
         let ladder = intent_req.as_ref().map_or_else(Vec::new, |resolved| {
@@ -1427,7 +1521,7 @@ impl FallbackChain {
                 // The stored copy may carry the timing of the call that filled
                 // the cache; this call reached no provider at all.
                 cached.provider_timing = Some(clock.cache_hit(&cached));
-                return Ok(cached);
+                return Ok((cached, route_note));
             }
         }
 
@@ -1469,7 +1563,7 @@ impl FallbackChain {
                     .await
                 {
                     if cache_response { self.cache.put(req, &response); }
-                    return Ok(response);
+                    return Ok((response, route_note));
                 }
                 // A refused subscription is not answered by the next rung.
                 if throttle.refused() {
@@ -1835,6 +1929,19 @@ impl FallbackChain {
         &self,
         req: &InferRequest,
     ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
+        self.infer_stream_noted(req).await.map(|(rx, _)| rx)
+    }
+
+    /// The stream with the route note the intent layer stamped on it (WS27-S7), when the note is on. The
+    /// note rides the final chunk on the wire, so the caller attaches it there.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ProviderError::AllExhausted` if every provider and retry is exhausted.
+    pub async fn infer_stream_noted(
+        &self,
+        req: &InferRequest,
+    ) -> Result<(mpsc::Receiver<InferChunk>, Option<RouteNote>), ProviderError> {
         let mut clock = CallClock::start();
         // A retired Claude id is answered by its successor, as on the unary path.
         let current = super::anthropic::with_current_model(req);
@@ -1842,7 +1949,10 @@ impl FallbackChain {
         // Entitlement of a pinned model first, as on the unary path.
         let pinned = self.pinned_model(req)?;
         // Verevon intent layer — same resolution as the unary path.
-        let intent_req = self.resolve_intent(req).await;
+        let (intent_req, route_note) = self
+            .resolve_intent(req)
+            .await
+            .map_or((None, None), |(resolved, note)| (Some(resolved), note));
         let ladder = intent_req.as_ref().map_or_else(Vec::new, |resolved| {
             self.tool_ladder(&resolved.model, resolved.access.as_deref(), &resolved.provider_hint)
         });
@@ -1886,7 +1996,7 @@ impl FallbackChain {
                     .stream_one_model(req, model, &mut total_attempts, &mut throttle, &mut clock)
                     .await
                 {
-                    return Ok(rx);
+                    return Ok((rx, route_note));
                 }
                 if throttle.refused() {
                     break;
@@ -2637,6 +2747,84 @@ mod resolution_tests {
             ..RecordingProvider::default()
         });
         FallbackChain::new_with_providers(vec![("anthropic".to_owned(), provider)], 1)
+    }
+
+    #[test]
+    fn route_note_switch_is_on_only_for_the_literal_true() {
+        assert!(route_note_enabled_from(Some("true")));
+        assert!(route_note_enabled_from(Some(" true ")));
+        for raw in [None, Some(""), Some("1"), Some("on"), Some("TRUE")] {
+            assert!(
+                !route_note_enabled_from(raw),
+                "{raw:?} must not turn the route note on"
+            );
+        }
+    }
+
+    #[test]
+    fn constrained_posture_stamps_tier_shifted() {
+        let policy = RoutingPolicy::default();
+        let decision = intent::Decision {
+            model: intent::choose(
+                &policy,
+                intent::VerevonMode::Balance,
+                intent::Complexity::Simple,
+                intent::BudgetPosture::Constrained,
+            )
+            .to_owned(),
+            mode: intent::VerevonMode::Balance,
+            complexity: intent::Complexity::Simple,
+            posture: intent::BudgetPosture::Constrained,
+            effort_cap: None,
+        };
+        let note = budget_route_note(&policy, &decision, None);
+        assert_eq!(note.budget_posture, intent::BudgetPosture::Constrained);
+        assert!(note.tier_shifted, "balance one tier cheaper must be stated");
+        assert!(!note.cheap_fallback_forced);
+        assert_eq!(note.applied_effort, None);
+
+        // Budget is already the floor: a constrained posture changes no model, so nothing is stated.
+        let floor = intent::Decision {
+            model: intent::choose(
+                &policy,
+                intent::VerevonMode::Budget,
+                intent::Complexity::Simple,
+                intent::BudgetPosture::Constrained,
+            )
+            .to_owned(),
+            mode: intent::VerevonMode::Budget,
+            complexity: intent::Complexity::Simple,
+            posture: intent::BudgetPosture::Constrained,
+            effort_cap: None,
+        };
+        assert!(!budget_route_note(&policy, &floor, None).tier_shifted);
+    }
+
+    #[test]
+    fn exhausted_stamps_cheap_fallback() {
+        let policy = RoutingPolicy::default();
+        let decision = intent::Decision {
+            model: policy.cheap_fallback.clone(),
+            mode: intent::VerevonMode::Genius,
+            complexity: intent::Complexity::Complex,
+            posture: intent::BudgetPosture::Exhausted,
+            effort_cap: Some(effort::Level::Low),
+        };
+        let note = budget_route_note(&policy, &decision, Some(effort::Level::Low));
+        assert!(note.cheap_fallback_forced);
+        assert!(!note.tier_shifted, "a forced fallback is not a tier move");
+        assert_eq!(note.applied_effort, Some(effort::Level::Low));
+    }
+
+    #[tokio::test]
+    async fn pinned_model_stamps_nothing() {
+        let chain = FallbackChain::new_with_providers(Vec::new(), 0).with_intent_enabled(true);
+        let pinned = InferRequest {
+            request_id: "pinned".into(),
+            model: "gpt-4o-mini".into(),
+            ..Default::default()
+        };
+        assert!(chain.resolve_intent(&pinned).await.is_none());
     }
 
     #[tokio::test]

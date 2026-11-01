@@ -1,5 +1,6 @@
 /**
- * The run-cost meter of a turn or an agent run (WS27-S4), with the run ceiling its frames carry (WS27-S6).
+ * The run-cost meter of a turn or an agent run (WS27-S4), with the run ceiling its frames carry (WS27-S6)
+ * and the calm line for a turn the budget routed to a cheaper model (WS27-S7).
  *
  * It shows what the `usage_progress` frames and the turn's `usage` frame state, and nothing more. A price
  * the gateway could not state reads as "price unavailable", a subscription call reads as included in the
@@ -43,6 +44,7 @@ export function applyUsageProgress(current: RunMeter | undefined, frame: ChatUsa
     ceilingTokens: frame.ceilingTokens ?? current?.ceilingTokens,
     fraction: frame.fraction,
     warning: frame.warning ?? current?.warning,
+    routing: frame.routing ?? current?.routing,
   }
 }
 
@@ -68,6 +70,7 @@ export function applyUsageTotal(current: RunMeter | undefined, usage: ChatUsageE
     ceilingTokens: current?.ceilingTokens,
     fraction: current?.fraction,
     warning: current?.warning,
+    routing: current?.routing,
   }
 }
 
@@ -88,6 +91,9 @@ function fillToken(fraction: number | undefined): string {
   if (fraction >= 0.8) return 'var(--verevon-accent-strong)'
   return 'var(--verevon-accent)'
 }
+
+/** The budget's routing of a turn (WS27-S7): one tier cheaper, or the cheap fallback an exhausted budget forced. */
+export type RunRouting = NonNullable<ChatUsageProgressEvent['routing']>
 
 /** The allowance's warning line: the same 80 percent the run ceiling warns at (WS27-S6). */
 const ALLOWANCE_WARNING_AT = 0.8
@@ -144,6 +150,7 @@ export function RunCostMeter(props: {
     )
   }
   const hasCap = () => props.meter?.ceilingUsd !== undefined || props.meter?.ceilingTokens !== undefined
+  const hasRouting = () => props.meter?.routing !== undefined
 
   const phaseLabel = (phase: ChatUsagePhase): string => {
     switch (phase) {
@@ -230,6 +237,25 @@ export function RunCostMeter(props: {
     }
   })
 
+  // The calm line for a turn the budget routed cheaper (WS27-S7). It states what the organisation's budget did,
+  // not an error, so it is plain text and never a live region.
+  const routingText = createMemo(() => {
+    switch (props.meter?.routing) {
+      case 'tier_shifted':
+        return i18n.tr(
+          'Budsjettet nærmer seg grensen, så dette svaret er laget med en rimeligere modell.',
+          'The budget is nearing its limit, so this answer used a more economical model.',
+        )
+      case 'cheap_fallback':
+        return i18n.tr(
+          'Budsjettet er brukt opp, så dette svaret er laget med en rimelig modell.',
+          'The budget is used up, so this answer used a low-cost model.',
+        )
+      default:
+        return ''
+    }
+  })
+
   // Warns at 80 percent or once the allowance is exceeded. The text is a memo for the same reason as the run's.
   const allowanceWarning = createMemo((): 'exceeded' | 'near' | undefined => {
     const status = allowanceRead.latest
@@ -256,7 +282,7 @@ export function RunCostMeter(props: {
   })
 
   return (
-    <Show when={hasTotals() || hasCap() || hasAllowance()}>
+    <Show when={hasTotals() || hasCap() || hasAllowance() || hasRouting()}>
       <div
         class="verevon-run-cost-meter"
         role="group"
@@ -294,6 +320,11 @@ export function RunCostMeter(props: {
               </details>
             )}
           </Show>
+        </Show>
+        <Show when={hasRouting()}>
+          <p class="verevon-run-cost-meter__routing" data-routing={props.meter?.routing} style={{ margin: '0' }}>
+            {routingText()}
+          </p>
         </Show>
         <Show when={hasCap()}>
           <span class="verevon-run-cost-meter__cap">

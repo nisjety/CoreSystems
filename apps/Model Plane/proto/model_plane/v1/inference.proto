@@ -401,6 +401,11 @@ message InferResponse {
   // successful response; unset from a server that predates the field. See
   // ProviderTiming.
   ProviderTiming provider_timing = 14;
+
+  // What the budget did to how this call was routed (WS27-S7), when the intent
+  // layer routed it under a budget posture. Absent for a pinned model or while
+  // INFERENCE_ROUTE_NOTE is off.
+  RouteNote route_note = 15;
 }
 
 // InferChunk — a single chunk in a streaming inference response.
@@ -464,6 +469,10 @@ message InferChunk {
   // the final chunk only (same rule as the token counts above). Unset on every
   // non-final chunk. See ProviderTiming.
   ProviderTiming provider_timing = 15;
+
+  // The route note of the call, on the final chunk only, as provider_timing is
+  // (WS27-S7). Absent for a pinned model or while INFERENCE_ROUTE_NOTE is off.
+  RouteNote route_note = 16;
 }
 
 // ProviderTiming — where inference-core's share of one Infer or InferStream
@@ -528,6 +537,27 @@ message ProviderTiming {
   // (for example a subscription broker's process start). Empty when the
   // upstream reports none, which is every provider today.
   map<string, uint64> upstream_ms = 11;
+}
+
+// RouteNote — what the budget did to one Verevon-routed call (WS27-S7). Shared
+// with WS11's applied-effort report. Closed tokens and booleans only: never a
+// price, a count or a model name, so it is safe to log and to forward on
+// zero-data-retention turns.
+message RouteNote {
+  // The org's budget posture when the call was routed: "healthy",
+  // "constrained", "exhausted", or "unknown" when no posture could be read.
+  string budget_posture = 1;
+
+  // True when a constrained budget moved the call one tier cheaper: the same
+  // policy at a healthy budget would have answered with another model.
+  bool tier_shifted = 2;
+
+  // True when an exhausted budget forced the cheap fallback model.
+  bool cheap_fallback_forced = 3;
+
+  // The effort level the budget clamped the call to, when it did. Empty when
+  // the budget left the requested effort alone.
+  string applied_effort = 4;
 }
 
 // CreateEmbeddingRequest — text to embed via a provider-owned model/deployment.

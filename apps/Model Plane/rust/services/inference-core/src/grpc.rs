@@ -333,13 +333,13 @@ impl InferenceCore for InferenceService {
         let internal_req = with_access(to_internal_request(&req, &principal)?, access);
 
         clock.enter_chain();
-        let result = if no_store {
-            self.chain.infer_without_response_cache(&internal_req).await
-        } else {
-            self.chain.infer(&internal_req).await
-        }.map_err(provider_error_to_status)?;
+        let (result, route_note) = self
+            .chain
+            .infer_noted(&internal_req, !no_store)
+            .await
+            .map_err(provider_error_to_status)?;
 
-        let mut response = Response::new(infer_response_to_wire(result, &clock));
+        let mut response = Response::new(infer_response_to_wire(result, &clock, route_note));
         if no_store { response.metadata_mut().insert("cache-control", "no-store".parse().expect("static metadata")); }
         Ok(response)
     }
@@ -367,13 +367,13 @@ impl InferenceCore for InferenceService {
         let internal_req = with_access(to_internal_request(&req, &principal)?, access);
 
         clock.enter_chain();
-        let rx = self
+        let (rx, route_note) = self
             .chain
-            .infer_stream(&internal_req)
+            .infer_stream_noted(&internal_req)
             .await
             .map_err(provider_error_to_status)?;
 
-        let grpc_rx = streaming::bridge_to_grpc(rx, clock);
+        let grpc_rx = streaming::bridge_to_grpc(rx, clock, route_note);
 
         Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
             grpc_rx,
@@ -1112,6 +1112,7 @@ impl InferenceCore for InferenceService {
 fn infer_response_to_wire(
     result: provider::InferResponse,
     clock: &HandlerClock,
+    route_note: Option<provider::fallback::RouteNote>,
 ) -> pb::InferResponse {
     pb::InferResponse {
         request_id: result.request_id,
@@ -1130,6 +1131,7 @@ fn infer_response_to_wire(
             clock.stamp(&mut timing);
             timing.into()
         }),
+        route_note: route_note.map(Into::into),
         tool_calls: result
             .tool_calls
             .into_iter()
@@ -2064,7 +2066,7 @@ mod tests {
             ..provider::InferResponse::default()
         };
 
-        let wire = infer_response_to_wire(result, &clock);
+        let wire = infer_response_to_wire(result, &clock, None);
 
         let timing = wire
             .provider_timing
