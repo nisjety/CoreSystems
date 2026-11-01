@@ -30,8 +30,8 @@ use execution_core::browser_agent::{
     ObservationStatus, PlanConfig, PlanStatus,
 };
 use execution_core::llm_planner::{
-    parse_action_content, planner_infer_request, ActionParse, LlmPlanner, ACTION_SCHEMA,
-    ACTION_SCHEMA_STRICT,
+    parse_action_content, planner_infer_request, ActionParse, ActionPlanner, LlmPlanner,
+    ACTION_SCHEMA, ACTION_SCHEMA_STRICT,
 };
 use execution_core::quarry_agent::QuarryAgentClient;
 use mp_contracts::model_plane::v1::inference_core_client::InferenceCoreClient;
@@ -73,7 +73,14 @@ async fn browser_agent_drives_real_quarry_loop() {
         postcondition: String::new(),
     };
 
-    let result = run_browser_agent_loop(config, Some(&client), planner.as_ref(), None, None).await;
+    let result = run_browser_agent_loop(
+        config,
+        Some(&client),
+        planner.as_ref().map(|planner| planner as &dyn ActionPlanner),
+        None,
+        None,
+    )
+    .await;
 
     eprintln!(
         "E2E result: status={} observations={} summary={}",

@@ -269,7 +269,9 @@ pub(crate) async fn execute_browser_agent(
             let result = browser_agent::run_browser_agent_loop(
                 plan_config,
                 client.as_ref(),
-                planner.as_ref(),
+                planner
+                    .as_ref()
+                    .map(|planner| planner as &dyn crate::llm_planner::ActionPlanner),
                 sink,
                 state,
             )

@@ -16,6 +16,7 @@ use std::time::Instant;
 use tracing::{info, warn};
 
 mod browser_risk;
+pub mod planner_view;
 
 pub(crate) use browser_risk::{approval_poll_interval, approval_timeout_seconds};
 use browser_risk::{classify_action_risk, risk_reason};
@@ -810,7 +811,7 @@ pub fn plan_next_action(
 pub async fn run_browser_agent_loop(
     config: PlanConfig,
     client: Option<&crate::quarry_agent::QuarryAgentClient>,
-    planner: Option<&crate::llm_planner::LlmPlanner>,
+    planner: Option<&dyn crate::llm_planner::ActionPlanner>,
     sink: Option<&dyn BrowserEventSink>,
     state: Option<&crate::state::StateStore>,
 ) -> BrowserAgentLoopResult {
@@ -1020,7 +1021,7 @@ fn pause_poll_interval() -> std::time::Duration {
 async fn decide_next_action(
     plan: &mut AgentPlan,
     last_observation: Option<&BrowserObservation>,
-    planner: Option<&crate::llm_planner::LlmPlanner>,
+    planner: Option<&dyn crate::llm_planner::ActionPlanner>,
     state: Option<&crate::state::StateStore>,
     sink: Option<&dyn BrowserEventSink>,
 ) -> PlanStepResult {
@@ -1038,25 +1039,39 @@ async fn decide_next_action(
     };
     let action = match planner {
         None => candidate,
-        Some(planner) => match planner.next_action(&plan.config, last_observation).await {
-            Ok(Some(action)) => BrowserAction {
-                action_id: candidate.action_id,
-                grant_id: candidate.grant_id,
-                ..action
-            },
-            Ok(None) => {
-                if let Some(reason) = blocked_by_bot_wall(last_observation) {
-                    plan.status = PlanStatus::Failed;
-                    return PlanStepResult::Failed(reason);
+        Some(planner) => {
+            // The planner reads the hygiene view of the page, never the raw
+            // observation; the risk gate and the bot-wall check below keep
+            // reading the observation in full.
+            let view = last_observation.map(planner_view::PlannerView::from_observation);
+            let context = crate::llm_planner::PlannerContext {
+                config: &plan.config,
+                view: view.as_ref(),
+            };
+            match planner.plan_next(&context).await {
+                Ok(reply) => match reply.action.filter(|_| !reply.done) {
+                    Some(action) => BrowserAction {
+                        action_id: candidate.action_id,
+                        grant_id: candidate.grant_id,
+                        ..action
+                    },
+                    None => {
+                        if let Some(reason) = blocked_by_bot_wall(last_observation) {
+                            plan.status = PlanStatus::Failed;
+                            return PlanStepResult::Failed(reason);
+                        }
+                        plan.status = PlanStatus::Completed;
+                        return PlanStepResult::Completed(
+                            "agent reported task complete".to_owned(),
+                        );
+                    }
+                },
+                Err(e) => {
+                    warn!(kind = e.kind.as_str(), error = %e, "llm planner failed; falling back to deterministic observe");
+                    candidate
                 }
-                plan.status = PlanStatus::Completed;
-                return PlanStepResult::Completed("agent reported task complete".to_owned());
             }
-            Err(e) => {
-                warn!(error = %e, "llm planner failed; falling back to deterministic observe");
-                candidate
-            }
-        },
+        }
     };
 
     gate_risky_action(plan, last_observation, action, sink).await

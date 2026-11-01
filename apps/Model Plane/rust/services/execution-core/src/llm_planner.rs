@@ -29,8 +29,9 @@ use mp_contracts::model_plane::v1::{ChatMessage, InferRequest};
 use std::sync::Arc;
 use tonic::transport::Channel;
 
+use crate::browser_agent::planner_view::PlannerView;
 use crate::browser_agent::{
-    ActionType, BrowserAction, BrowserObservation, ChallengeStrength, PlanConfig, RiskCategory,
+    ActionType, BrowserAction, BrowserObservation, PlanConfig, RiskCategory,
 };
 
 /// JSON Schema describing the single next action the model must return.
@@ -126,6 +127,129 @@ fn resolve_planner_model() -> String {
         .unwrap_or_else(|| DEFAULT_MODEL.to_owned())
 }
 
+// ---------------------------------------------------------------------------
+// The planner seam (WS11.S0).
+// ---------------------------------------------------------------------------
+
+/// What the loop hands a planner for one step: the immutable plan and the
+/// hygiene view of the latest page, never the raw observation. `view` is `None`
+/// on the first step, before any page was observed.
+#[derive(Debug, Clone, Copy)]
+pub struct PlannerContext<'a> {
+    pub config: &'a PlanConfig,
+    pub view: Option<&'a PlannerView>,
+}
+
+/// Planner token usage for one reply, counts only.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PlannerUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+}
+
+impl PlannerUsage {
+    #[must_use]
+    pub const fn total(self) -> u64 {
+        self.input_tokens as u64 + self.output_tokens as u64
+    }
+}
+
+/// One planner reply. `done` means the planner reports the goal reached (or
+/// blocked); an `action` that comes with `done` is ignored by the loop.
+#[derive(Debug, Clone)]
+pub struct PlannerReply {
+    pub action: Option<BrowserAction>,
+    pub done: bool,
+    pub usage: PlannerUsage,
+}
+
+impl PlannerReply {
+    #[must_use]
+    pub fn action(action: BrowserAction) -> Self {
+        Self {
+            action: Some(action),
+            done: false,
+            usage: PlannerUsage::default(),
+        }
+    }
+
+    #[must_use]
+    pub fn done() -> Self {
+        Self {
+            action: None,
+            done: true,
+            usage: PlannerUsage::default(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_usage(mut self, usage: PlannerUsage) -> Self {
+        self.usage = usage;
+        self
+    }
+}
+
+/// Why a planner call produced no usable reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlannerErrorKind {
+    /// The inference credential was missing or rejected.
+    Unauthenticated,
+    /// A retryable transport or capacity failure.
+    Transient,
+    /// The model route refused the request (policy, entitlement, bad request).
+    Refused,
+    /// The reply was not a readable action.
+    Parse,
+    Other,
+}
+
+impl PlannerErrorKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unauthenticated => "unauthenticated",
+            Self::Transient => "transient",
+            Self::Refused => "refused",
+            Self::Parse => "parse",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// A failed planner call. `message` carries no page content or model reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannerError {
+    pub kind: PlannerErrorKind,
+    pub message: String,
+}
+
+impl PlannerError {
+    #[must_use]
+    pub fn new(kind: PlannerErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for PlannerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} planner error: {}", self.kind.as_str(), self.message)
+    }
+}
+
+impl std::error::Error for PlannerError {}
+
+/// Chooses the next browser action. The loop takes `Option<&dyn ActionPlanner>`
+/// so a test drives it with a scripted planner and the LLM planner is one
+/// implementation among others. `Err` still falls back to the deterministic
+/// `Observe` in this slice; later slices give the kinds their own arms.
+#[tonic::async_trait]
+pub trait ActionPlanner: Send + Sync {
+    async fn plan_next(&self, ctx: &PlannerContext<'_>) -> Result<PlannerReply, PlannerError>;
+}
+
 /// gRPC planner backed by inference-core.
 #[derive(Clone)]
 pub struct LlmPlanner {
@@ -160,38 +284,83 @@ impl LlmPlanner {
             inference_bearer: Arc::from(inference_bearer),
         })
     }
+}
 
-    /// Ask the model for the next action. `Ok(None)` means the model reported
-    /// the task complete (`action == "done"`).
-    pub async fn next_action(
-        &self,
-        config: &PlanConfig,
-        observation: Option<&BrowserObservation>,
-    ) -> Result<Option<BrowserAction>, String> {
-        let request = planner_infer_request(config, observation, &self.model, ACTION_SCHEMA);
+#[tonic::async_trait]
+impl ActionPlanner for LlmPlanner {
+    /// Ask the model for the next action. A `done` reply is `action == "done"`.
+    async fn plan_next(&self, ctx: &PlannerContext<'_>) -> Result<PlannerReply, PlannerError> {
+        let request = planner_request_from_view(ctx.config, ctx.view, &self.model, ACTION_SCHEMA);
 
         let mut grpc_request = tonic::Request::new(request);
         grpc_request.metadata_mut().insert(
             "authorization",
             format!("Bearer {}", self.inference_bearer)
                 .parse()
-                .map_err(|_| "verified inference credential is not forwardable".to_owned())?,
+                .map_err(|_| {
+                    PlannerError::new(
+                        PlannerErrorKind::Unauthenticated,
+                        "verified inference credential is not forwardable",
+                    )
+                })?,
         );
+        // The run's org rides as metadata too, so inference-core's cost-core
+        // budget guard counts these calls against the right org (F7).
+        if let Ok(org) = ctx.config.org_id.parse() {
+            grpc_request.metadata_mut().insert("x-org-id", org);
+        }
         let response = self
             .client
             .clone()
             .infer(grpc_request)
             .await
-            .map_err(|e| format!("inference infer rpc failed: {e}"))?
+            .map_err(|status| {
+                PlannerError::new(
+                    error_kind_for(status.code()),
+                    format!("inference infer rpc failed: {:?}", status.code()),
+                )
+            })?
             .into_inner();
 
+        let usage = PlannerUsage {
+            input_tokens: u32::try_from(response.input_tokens).unwrap_or(0),
+            output_tokens: u32::try_from(response.output_tokens).unwrap_or(0),
+        };
+        // Neither the error text nor the log carries the reply: it was written
+        // by a model that had just read an attacker-controlled page.
         let parsed: NextAction = serde_json::from_str(response.content.trim()).map_err(|e| {
-            format!(
-                "could not parse action JSON ({e}); content={}",
-                response.content
+            PlannerError::new(
+                PlannerErrorKind::Parse,
+                format!(
+                    "could not parse action JSON ({:?} error at column {})",
+                    e.classify(),
+                    e.column()
+                ),
             )
         })?;
-        Ok(parsed.into_browser_action())
+        Ok(match parsed.into_browser_action() {
+            Some(action) => PlannerReply::action(action),
+            None => PlannerReply::done(),
+        }
+        .with_usage(usage))
+    }
+}
+
+/// Which failure class a gRPC status code from inference-core is.
+fn error_kind_for(code: tonic::Code) -> PlannerErrorKind {
+    use tonic::Code;
+    match code {
+        Code::Unauthenticated => PlannerErrorKind::Unauthenticated,
+        Code::PermissionDenied | Code::FailedPrecondition | Code::InvalidArgument => {
+            PlannerErrorKind::Refused
+        }
+        Code::Unavailable
+        | Code::DeadlineExceeded
+        | Code::Aborted
+        | Code::ResourceExhausted
+        | Code::Cancelled
+        | Code::Internal => PlannerErrorKind::Transient,
+        _ => PlannerErrorKind::Other,
     }
 }
 
@@ -211,37 +380,21 @@ pub fn planner_infer_request(
     model: &str,
     structured_output_schema: &str,
 ) -> InferRequest {
-    let observation_text = observation.map_or_else(
-        || "No observation yet — this is the first step.".to_owned(),
-        |o| {
-            let targets = o
-                .snapshot_targets
-                .iter()
-                .take(40)
-                .map(|target| {
-                    format!(
-                        "  {} role={} name={} text={} frame_id={}",
-                        target.ref_id,
-                        target.role.as_deref().unwrap_or(""),
-                        target.name.as_deref().unwrap_or(""),
-                        target.text.as_deref().unwrap_or(""),
-                        target.frame_id.as_deref().unwrap_or(""),
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            format!(
-                "Current page:\n  url: {}\n  title: {}\n  extracted_text: {}\n  snapshot_id: {}\n  generation: {}\n{}  targets:\n{}",
-                o.page_url,
-                o.page_title,
-                o.extracted_text,
-                o.dom_snapshot_ref,
-                o.snapshot_generation.map_or_else(String::new, |generation| generation.to_string()),
-                challenge_line(o),
-                targets,
-            )
-        },
-    );
+    let view = observation.map(PlannerView::from_observation);
+    planner_request_from_view(config, view.as_ref(), model, structured_output_schema)
+}
+
+/// The request for one step from the page view the loop built. The page text is
+/// the view's framed rendering; nothing of the raw observation reaches it.
+/// `zdr` follows the run, so inference-core neither caches nor logs the page.
+#[must_use]
+pub fn planner_request_from_view(
+    config: &PlanConfig,
+    view: Option<&PlannerView>,
+    model: &str,
+    structured_output_schema: &str,
+) -> InferRequest {
+    let observation_text = PlannerView::render_or_first_step(view);
     let system = format!(
         "You are an autonomous web-browsing agent. Goal: {}\n{BROWSER_CHALLENGE_RULE}\n\
          Choose the SINGLE next browser action and return ONLY JSON matching the schema. \
@@ -271,20 +424,9 @@ pub fn planner_infer_request(
         temperature: 0.2,
         max_tokens: 512,
         structured_output_schema: structured_output_schema.to_owned(),
+        zdr: config.zdr,
         ..Default::default()
     }
-}
-
-/// The observation's challenge as one line of typed fields, or nothing. A
-/// non-signal (a login form, a consent banner, a paywall, a rate limit, a bare
-/// status) gets no line: it is an ordinary page, and showing it would invite the
-/// planner to treat it as a bot wall. Never page text.
-fn challenge_line(observation: &BrowserObservation) -> String {
-    observation
-        .challenge
-        .as_ref()
-        .filter(|challenge| challenge.strength != ChallengeStrength::NonSignal)
-        .map_or_else(String::new, |challenge| format!("  challenge: {challenge}\n"))
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1082,6 +1224,52 @@ mod tests {
         assert!(user.contains("snapshot_id: snap-9"), "{user}");
         assert!(user.contains("generation: 2"), "{user}");
         assert!(user.contains("@e1 role=link name=More information"), "{user}");
+    }
+
+    #[test]
+    fn planner_request_sets_zdr_from_config() {
+        let mut config = test_config();
+        assert!(!planner_infer_request(&config, None, DEFAULT_MODEL, ACTION_SCHEMA).zdr);
+        config.zdr = true;
+        let request = planner_infer_request(
+            &config,
+            Some(&test_observation()),
+            DEFAULT_MODEL,
+            ACTION_SCHEMA,
+        );
+        assert!(request.zdr);
+        assert_eq!(request.org_id, "org_x");
+    }
+
+    #[test]
+    fn planner_request_frames_the_page_and_never_carries_a_planted_secret() {
+        let mut observation = test_observation();
+        observation.extracted_text =
+            "token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdEFGH1234".to_owned();
+        let request = planner_infer_request(
+            &test_config(),
+            Some(&observation),
+            DEFAULT_MODEL,
+            ACTION_SCHEMA,
+        );
+        let user = &request.messages[1].content;
+        assert!(user.starts_with("[source: browser-scraped]\n"), "{user}");
+        assert!(!user.contains("eyJhbGciOiJIUzI1NiJ9"), "{user}");
+    }
+
+    #[test]
+    fn planner_error_kinds_follow_the_grpc_status() {
+        use tonic::Code;
+        assert_eq!(
+            error_kind_for(Code::Unauthenticated),
+            PlannerErrorKind::Unauthenticated
+        );
+        assert_eq!(error_kind_for(Code::Unavailable), PlannerErrorKind::Transient);
+        assert_eq!(
+            error_kind_for(Code::PermissionDenied),
+            PlannerErrorKind::Refused
+        );
+        assert_eq!(error_kind_for(Code::NotFound), PlannerErrorKind::Other);
     }
 
     use crate::browser_agent::{
