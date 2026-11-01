@@ -207,7 +207,7 @@ func TestComposeAuthCoreCredentialScopesAreExactlyTheReviewedSet(t *testing.T) {
 		}
 		got := append([]string(nil), credential.Scopes...)
 		sort.Strings(got)
-		want := []string{"org:projection:delete:any", "org:projection:write:any", "org:retention:read:any"}
+		want := []string{"org:projection:delete:any", "org:projection:write:any", "org:retention:read:any", "org:web-policy:read:any"}
 		if strings.Join(got, ",") != strings.Join(want, ",") {
 			t.Fatalf("auth-core org-core scopes=%v want exactly %v", got, want)
 		}
@@ -272,16 +272,20 @@ func assertBodyEqualsGolden(t *testing.T, response *httptest.ResponseRecorder, w
 	}
 }
 
-// The scope is Auth Core's alone: every other principal in the real compose
-// registry is refused the same request, and Auth Core's own credential does not
-// open the broad organization reads it used to be (unsuccessfully) pointed at.
-func TestOnlyAuthCoreMayReadRetentionPosture(t *testing.T) {
+// The scope has exactly TWO holders: Auth Core (its token issuer) and
+// quarry-edge (the fire-time schedule preflight, R-13 PR 2, which broke the old
+// one-holder invariant on purpose). Every other principal in the real compose
+// registry is refused the same request, and neither holder's credential opens
+// the broad organization reads it must not (WS15.S4a reads two booleans).
+var retentionPostureHolders = map[string]bool{"auth-core": true, "quarry-edge": true}
+
+func TestOnlyAuthCoreAndQuarryEdgeMayReadRetentionPosture(t *testing.T) {
 	server, tokens := contractServer(t)
 	reader := &fakeRetentionPostureReader{posture: &orgcore.RetentionPosture{ZDRIntent: true, Entitled: true}}
 	server.retentionPosture = reader
 
 	for principal, token := range tokens {
-		if principal == "auth-core" {
+		if retentionPostureHolders[principal] {
 			continue
 		}
 		request := httptest.NewRequest(http.MethodGet, "/internal/orgs/org-1/retention-posture", nil)
@@ -294,22 +298,137 @@ func TestOnlyAuthCoreMayReadRetentionPosture(t *testing.T) {
 		}
 	}
 	if _, calls := reader.snapshot(); calls != 0 {
-		t.Fatalf("a non-auth-core principal reached the reader %d times", calls)
+		t.Fatalf("a principal outside the two holders reached the reader %d times", calls)
 	}
 
-	for _, path := range []string{
-		"/api/v1/organizations/org-1",
-		"/api/v1/organizations/org-1/entitlements",
-		"/internal/orgs/org-1",
-		"/internal/orgs",
-	} {
-		request := httptest.NewRequest(http.MethodGet, path, nil)
-		request.Header.Set("X-Service-Id", "auth-core")
-		request.Header.Set("X-Service-Token", tokens["auth-core"])
+	for holder := range retentionPostureHolders {
+		if tokens[holder] == "" {
+			t.Fatalf("holder %s is missing from the compose org-core registry", holder)
+		}
+		request := httptest.NewRequest(http.MethodGet, "/internal/orgs/org-1/retention-posture", nil)
+		request.Header.Set("X-Service-Id", holder)
+		request.Header.Set("X-Service-Token", tokens[holder])
 		response := httptest.NewRecorder()
 		server.router.ServeHTTP(response, request)
-		if response.Code != http.StatusForbidden {
-			t.Fatalf("auth-core read %s: status=%d want=%d (the grant must stay narrow)", path, response.Code, http.StatusForbidden)
+		if response.Code != http.StatusOK {
+			t.Fatalf("holder %s was refused the posture route: status=%d body=%s", holder, response.Code, response.Body.String())
+		}
+
+		for _, path := range []string{
+			"/api/v1/organizations/org-1",
+			"/api/v1/organizations/org-1/entitlements",
+			"/internal/orgs/org-1",
+			"/internal/orgs",
+		} {
+			request := httptest.NewRequest(http.MethodGet, path, nil)
+			request.Header.Set("X-Service-Id", holder)
+			request.Header.Set("X-Service-Token", tokens[holder])
+			response := httptest.NewRecorder()
+			server.router.ServeHTTP(response, request)
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("%s read %s: status=%d want=%d (the grant must stay narrow)", holder, path, response.Code, http.StatusForbidden)
+			}
+		}
+	}
+	if _, calls := reader.snapshot(); calls != len(retentionPostureHolders) {
+		t.Fatalf("reader called %d times, want once per holder (%d)", calls, len(retentionPostureHolders))
+	}
+}
+
+// TestComposeRetentionPostureScopeHasExactlyTwoHolders is the registry-level
+// form of the rule: it reads the scope lists, so a third holder fails even if the
+// route table later changed.
+func TestComposeRetentionPostureScopeHasExactlyTwoHolders(t *testing.T) {
+	_, credentials, _ := composeOrgCoreRegistry(t)
+	var holders []string
+	for _, credential := range credentials {
+		for _, scope := range credential.Scopes {
+			if scope == "org:retention:read:any" {
+				holders = append(holders, credential.Principal)
+			}
+		}
+	}
+	sort.Strings(holders)
+	if strings.Join(holders, ",") != "auth-core,quarry-edge" {
+		t.Fatalf("org:retention:read:any holders=%v want exactly [auth-core quarry-edge]", holders)
+	}
+}
+
+// quarryEdgeComposeToken is the token the compose file gives quarry-edge, derived
+// the way composeOrgCoreRegistry derives every token (one distinct value per
+// variable), so it also pins the variable the token is minted under.
+const quarryEdgeComposeToken = "compose-contract-quarry_org_core_service_token-0123456789abcdef"
+
+// TestQuarryEdgePrincipalHoldsOnlyRetentionRead pins what Quarry may do inside
+// org-core. Of every org-core read it holds the retention-posture read and
+// nothing broader (no org:read:*, no tenant, projection, siem, browser-site or
+// agent/model policy scope). Its only other scopes are the two key-custody scopes
+// (WS17.E2), which route to nothing until ORG_CORE_KEYS_ENABLED=1 and which no
+// other principal holds. Any new scope for quarry-edge must change this list.
+func TestQuarryEdgePrincipalHoldsOnlyRetentionRead(t *testing.T) {
+	_, credentials, tokens := composeOrgCoreRegistry(t)
+	var quarry *serviceCredential
+	for index := range credentials {
+		if credentials[index].Principal == "quarry-edge" {
+			quarry = &credentials[index]
+		}
+	}
+	if quarry == nil {
+		t.Fatal("quarry-edge principal missing from the compose org-core registry (R-13 PR 2)")
+	}
+	got := append([]string(nil), quarry.Scopes...)
+	sort.Strings(got)
+	want := []string{"org:keys:unwrap:any", "org:keys:wrap:any", "org:retention:read:any"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("quarry-edge org-core scopes=%v want exactly %v", got, want)
+	}
+	reads := 0
+	for _, scope := range got {
+		if strings.HasSuffix(scope, ":read:any") || strings.HasSuffix(scope, ":read") {
+			reads++
+			if scope != "org:retention:read:any" {
+				t.Fatalf("quarry-edge holds a read scope beyond the retention posture: %s", scope)
+			}
+		}
+		if strings.HasSuffix(scope, ":self") {
+			t.Fatalf("quarry-edge holds a delegated :self scope: %s", scope)
+		}
+	}
+	if reads != 1 {
+		t.Fatalf("quarry-edge holds %d read scopes, want exactly the retention posture read", reads)
+	}
+	if quarry.Audience != serviceCredentialAudience {
+		t.Fatalf("quarry-edge audience=%q", quarry.Audience)
+	}
+	if tokens["quarry-edge"] != quarryEdgeComposeToken {
+		t.Fatalf("quarry-edge must present QUARRY_ORG_CORE_SERVICE_TOKEN (the secrets-ledger name), got a token from another variable: %q", tokens["quarry-edge"])
+	}
+}
+
+// TestComposeKeyAndWebPolicyScopeHolders: the key-custody scopes are
+// quarry-edge's alone and the web-policy read is Auth Core's alone, so a
+// stray grant of either fails here before it reaches a stack.
+func TestComposeKeyAndWebPolicyScopeHolders(t *testing.T) {
+	_, credentials, _ := composeOrgCoreRegistry(t)
+	holders := map[string][]string{}
+	for _, credential := range credentials {
+		for _, scope := range credential.Scopes {
+			if strings.HasPrefix(scope, "org:keys:") || strings.HasPrefix(scope, "org:web-policy:") {
+				holders[scope] = append(holders[scope], credential.Principal)
+			}
+		}
+	}
+	want := map[string]string{
+		"org:keys:wrap:any":       "quarry-edge",
+		"org:keys:unwrap:any":     "quarry-edge",
+		"org:web-policy:read:any": "auth-core",
+	}
+	if len(holders) != len(want) {
+		t.Fatalf("scopes under org:keys:* and org:web-policy:* held in compose=%v want exactly %v", holders, want)
+	}
+	for scope, principal := range want {
+		if len(holders[scope]) != 1 || holders[scope][0] != principal {
+			t.Fatalf("%s holders=%v want only %s", scope, holders[scope], principal)
 		}
 	}
 }
