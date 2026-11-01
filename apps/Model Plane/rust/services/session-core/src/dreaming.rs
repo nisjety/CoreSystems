@@ -1316,6 +1316,7 @@ async fn load_pending_messages(
          WHERE m.role IN ('user', 'assistant') \
            AND m.on_active_path \
            AND m.copied_from_message_id IS NULL \
+           AND NOT (t.space_id IS NOT NULL OR t.origin IN ('space', 'agent_run')) \
            AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND m.created_at <= c.extract_after) \
            AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND c.memory_state <> 'on' AND $2) \
            AND (NOT $2 OR t.memory_resumed_at IS NULL OR m.created_at > t.memory_resumed_at) \
@@ -3047,6 +3048,57 @@ mod tests {
             .map(|message| message.message_id)
             .collect();
         assert_eq!(pending, vec![original]);
+    }
+
+    /// K3-5: a Space thread is the room's record and an agent run's thread is the run's, so
+    /// neither is mined into the person's own memory; an ordinary chat thread still is.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn space_thread_messages_never_reach_user_memory() {
+        let pool = disposable_pool().await;
+        let org = format!("space-threads-{}", new_ulid());
+        let chat = seed_thread(&pool, &org, "user-a").await;
+        let (space, agent_run) = (new_ulid(), new_ulid());
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id, space_id, space_decision_ref, \
+             recipient_audience_ref, privacy_policy_ref, resource_authorization_ref, authority_revision, \
+             recipient_audience_revision, recipient_audience_hash, origin) \
+             VALUES ($1, $1, $2, 'user-a', 'space-room', 'decision-1', 'audience-1', 'policy-1', \
+             'resource-1', 1, 1, 'audience-hash-1', 'space')",
+        )
+        .bind(&space)
+        .bind(&org)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id, origin) VALUES ($1, $1, $2, 'user-a', 'agent_run')",
+        )
+        .bind(&agent_run)
+        .bind(&org)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut said = Vec::new();
+        for thread in [&chat, &space, &agent_run] {
+            let id = new_ulid();
+            sqlx::query("INSERT INTO messages (id, thread_id, role, content) VALUES ($1, $2, 'user', 'Jeg heter Ima.')")
+                .bind(&id)
+                .bind(thread)
+                .execute(&pool)
+                .await
+                .unwrap();
+            said.push(id);
+        }
+
+        let pending: Vec<String> = load_pending_messages(&pool, 100_000)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|message| [&chat, &space, &agent_run].contains(&&message.thread_id))
+            .map(|message| message.message_id)
+            .collect();
+        assert_eq!(pending, vec![said[0].clone()]);
     }
 
     /// D1-570: Dreaming neither reads nor is shown what a thread said while it was off, once the
