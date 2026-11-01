@@ -35,6 +35,11 @@ const TOOL_TRUST: &[(&str, TrustClass)] = &[
     ("web.search", TrustClass::ExternalWeb),
     ("web.read", TrustClass::ExternalWeb),
     ("browser_agent", TrustClass::BrowserScraped),
+    // The parent-loop browser tools (WS21 / WS9.E) return rendered page text,
+    // console output and DOM-derived labels: attacker-controllable page content.
+    ("browser.observe", TrustClass::BrowserScraped),
+    ("browser.act", TrustClass::BrowserScraped),
+    ("browser.console", TrustClass::BrowserScraped),
     ("read_provider_action", TrustClass::ConnectorContent),
     ("execute_provider_action", TrustClass::ConnectorContent),
 ];
@@ -100,6 +105,19 @@ mod tests {
         }
         assert_eq!(TrustClass::classify("list_provider_actions"), TrustClass::OrgInternal);
         assert_eq!(TrustClass::classify("mcp__srv__create_order"), TrustClass::ThirdPartyMcp);
+    }
+
+    #[test]
+    fn trust_class_browser_mcp_tools_are_browser_scraped() {
+        for name in ["browser.observe", "browser.act", "browser.console"] {
+            let class = TrustClass::classify(name);
+            assert_eq!(class, TrustClass::BrowserScraped, "{name}");
+            assert_eq!(class.label(), "browser-scraped", "{name}");
+            assert!(class.is_external(), "{name}");
+            assert!(class.framing().is_some(), "{name}");
+        }
+        // The neighbours that are not page content stay internal.
+        assert_eq!(TrustClass::classify("browser.open"), TrustClass::OrgInternal);
     }
 
     #[test]
