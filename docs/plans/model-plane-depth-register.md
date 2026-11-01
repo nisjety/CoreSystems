@@ -2320,6 +2320,39 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-983 | WS22-S5 | risk | P1 | Rows are erased before blobs, and a failed blob delete in the sweeper is only logged. The rows are gone, so no later pass finds the thread again and its blobs stay forever (a GDPR completeness gap) until a tombstone or retry queue exists. | open |
 | D2-984 | WS22-S5 | follow-up | P3 | 36 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-37.json | open |
 
+
+### Wave-mode batch W2-38 (2026-11-01)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-985 | WS15-S5 | live-proof | P1 | The live proof for WS15-S5 is not run: no rebuilt model-gateway or execution-core with the switch on, no transient Data Plane outage producing retry_scheduled, and no browser screenshot of the notes and live-region text. The compose default must not flip until this evidence exists. | open |
+| D2-986 | WS15-S5 | test-gap | P1 | tests/e2e/chat-lifecycle-cues.spec.ts has only been listed by Playwright, never executed. It depends on the signed-in stack, the fetch shim's frame timing and the live-region observer, so its first run may need fixes. | open |
+| D2-987 | WS15-S5 | live-proof | P1 | There is no browser or live evidence that the lifecycle-notices node and the live-region sentence render against a rebuilt gateway emitting retry_scheduled, compaction or context_change. This must exist before MODEL_GATEWAY_LIFECYCLE_EVENTS defaults to true. | open |
+| D2-988 | WS15-S5 | live-proof | P1 | pnpm lint exits 2 on 'suppressions left that do not occur anymore' because stream-activity.ts no longer needs its 3 recorded no-restricted-syntax suppressions. The lead must prune that entry in apps/Frontend Plane/verevonv3/eslint-suppressions.json (line 222), which is a shared file. With --pass-on-unpruned-suppressions the owned files show 0 errors. | open |
+| D2-989 | WS15-S5 | live-proof | P1 | pnpm typecheck: src/shared/api/ag-ui-client.ts(127) TS2366 comes from WS22-S6's uncommitted lifecycle.sandbox variant in verevon-ui-events.ts, not from this slice. It needs a case or default in ag-ui-client.ts through a shared edit. The other errors (quarry-client.ts link, schedule-contract.test.ts) were already there. | open |
+| D2-990 | WS15-S5 | live-proof | P1 | global.css styles for .verevon-chat-lifecycle-notices and .verevon-chat-lifecycle-notice are a shared edit and are not added yet. Without them the notes render unstyled. | open |
+| D2-991 | WS15-S5 | live-proof | P1 | UI_STATE_CHECKLIST.md rows (retrying, history trimmed, compacted, parked) are a shared edit and are not added. | open |
+| D2-992 | WS15-S5 | live-proof | P1 | pnpm test:e2e -- chat-lifecycle-cues has never run in a browser. It needs the signed-in stack or a playwright.config.ts chat-project regex entry (shared). | open |
+| D2-993 | WS15-S5 | follow-up | P3 | 23 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-38.json | open |
+| D2-994 | WS25-S3 | test-gap | P1 | The execution-core lib unit tests (hook::tests including malformed_context_fails_closed_when_the_switch_is_on, observe_only_enforces_nothing, allow_never_overrides_a_later_deny; runtime_loop::tests::post_deny_*) have not run. Blocked by WS22-S6's concurrent sandboxes.proto change: FakeSandboxManager in execution-core/src/workspace_sync.rs:635 needs get_lease_status (owned by WS22-S6 or the lead). Re-run: cargo test -q -p execution-core --lib hook:: and --lib runtime_loop::tests::post_deny. | open |
+| D2-995 | WS25-S3 | test-gap | P1 | The root-and-child denied Do-run test named in the row is not written; it needs an agent-loop harness with a scripted model that delegates to a child. | open |
+| D2-996 | WS25-S3 | risk | P1 | The D7 write-versus-read class is a name heuristic (permission::is_risky_call) until WS05 declares tool classes; a write the heuristic misses fails its step and can invite a retry. Needed before HOOKS_DO_RUNS=enforce. | open |
+| D2-997 | WS25-S3 | decision | P1 | Strictest-wins, unknown-token-as-ask and post-tool withhold ship unflagged (DEC-15). Owner to confirm, or gate them, given the switch-off byte-identical promise. | open |
+| D2-998 | WS25-S3 | risk | P1 | The gateway hook registry is in-memory: HOOKS_DO_RUNS=enforce only applies rules registered since the last gateway start until WS25-S8 makes them durable. | open |
+| D2-999 | WS25-S3 | test-gap | P1 | The row's execution-core lib unit tests (hook::tests rewrite, malformed_context_fails_closed_when_the_switch_is_on, allow_never_overrides_a_later_deny, post_deny_on_a_write_withholds_and_never_fails_the_step) have never been executed. The external WS22-S6 E0046 blocks the lib-test target. I read the code and it is correct, but no test has proved it. | open |
+| D2-1000 | WS25-S3 | test-gap | P1 | The row asks for a root-and-delegated-child denied Do-run test, and it was not written. Child inheritance is only the one-line `hook_context: parent.hook_context` in run_delegated_child (agent.rs), and the source-text golden covers the root dispatch argument only. | open |
+| D2-1001 | WS25-S3 | decision | P1 | Strictest-wins, unknown-token-as-ask and post-tool withhold ship without a flag on every hook path, including tools.rs and browser_run.rs, which already forward hook_context. That matches DEC-15 and the row's 'intentional, recorded in ledger', but behaviour with switches off is identical only for contexts where at most one rule matches and every token is known. The ledger entry must record this. | open |
+| D2-1002 | WS25-S3 | follow-up | P3 | 28 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-38.json | open |
+| D2-1003 | WS22-S6 | live-proof | P1 | The sandbox_state frame has no emitter wired, so no client receives it; the row's DoD SSE transcript (kept, conflict, refused over-quota) needs the tool-loop call-in plus a rebuilt model-gateway and BFF, all lead-run. | open |
+| D2-1004 | WS22-S6 | test-gap | P1 | model-gateway sse_event_payload_golden is red until the golden chain runs (regenerate, pin, re-vendor, gen:chat-events, sync script digest); the contract-goldens CI job is red until then. | open |
+| D2-1005 | WS22-S6 | risk | P1 | toAgUiEvent in ag-ui-client.ts is an exhaustive switch over VerevonUiEvent; without the lifecycle.sandbox case, pnpm typecheck fails (shared-edit recorded for the lead). | open |
+| D2-1006 | WS22-S6 | test-gap | P1 | The Postgres round-trip for migration 0007 and RecordActivity (TestLeaseStore_LifecycleColumnsRoundTripInPostgres) is written and compiles under the integration tag, but has not been run: it needs a container, which I may not run. | open |
+| D2-1007 | WS22-S6 | risk | P1 | Adding 'lifecycle.sandbox' to the VerevonUiEvent union breaks the exhaustive toAgUiEvent switch in ag-ui-client.ts (TS2366 at 127,53), so verevonv3 typecheck stays red until the lead's one-line shared edit lands. | open |
+| D2-1008 | WS22-S6 | test-gap | P1 | model-gateway sse_events: 49/50 pass and sandbox_state_frame_contract passes, but sse_event_payload_golden fails (sse_events.rs:3825) until the committed golden chain is regenerated and re-pinned. | open |
+| D2-1009 | WS22-S6 | live-proof | P1 | No emitter builds ChatEvent::sandbox_state from the code_interpreter workspace result, so the frame and the planned chip are unreachable and the row's SSE-transcript DoD cannot be met by this slice alone. | open |
+| D2-1010 | WS22-S6 | follow-up | P1 | The row names the chip 'Workspace: kept / not kept / conflict', but it is not built: onSandboxState and lifecycle.sandbox have no renderer. | open |
+| D2-1011 | WS22-S6 | follow-up | P3 | 30 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-38.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -2521,3 +2554,5 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS21-S5b | authority, policy, cross-branch: the Quarry-side grant issuance endpoint and Quarry-to-broker identity are built on local branch quarryv2, not on model-plane; build against the contract with a stub and leave the live proof to the lead after quarryv2 merges | W2-36 | no |
 | WS15-S3 | zdr, authority | W2-37 | no |
 | WS22-S5 | data-loss, policy, authority | W2-37 | no |
+| WS15-S5 | zdr | W2-38 | no |
+| WS25-S3 | authority, policy | W2-38 | no |
