@@ -94,6 +94,9 @@ const READ_TOOLS = new Set([
   // not a JSON envelope, so no count or outcome is surfaced — but a read is
   // still what it is, and 'generic' would say less than we know.
   'reattach_context',
+  // Reads matches out of the person's other conversations. Its JSON envelope names them `hits` and reports
+  // no count, so the card shows the read without a number.
+  'recall_conversations',
 ])
 
 function intentFor(name: string): ToolIntent {

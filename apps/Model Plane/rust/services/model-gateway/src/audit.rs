@@ -15,9 +15,11 @@ pub fn tool_data_category(tool: &str) -> &'static str {
         // read of them is exactly as reportable as a read of a document —
         // recording any of them as `unclassified` understates what the ledger
         // says was accessed.
-        "knowledge_search" | "knowledge_list_documents" | "recall_memory" | "reattach_context" => {
-            "customer_private"
-        }
+        "knowledge_search"
+        | "knowledge_list_documents"
+        | "recall_memory"
+        | "reattach_context"
+        | "recall_conversations" => "customer_private",
         // A connected account's records are the user's own personal data.
         "list_provider_actions" | "read_provider_action" | "execute_provider_action" => "personal",
         _ => "unclassified",
@@ -56,6 +58,7 @@ mod tests {
         for tool in [
             "recall_memory",
             "reattach_context",
+            "recall_conversations",
             "knowledge_search",
             "knowledge_list_documents",
         ] {

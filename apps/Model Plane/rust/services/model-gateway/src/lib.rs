@@ -62,6 +62,7 @@ mod quarry_auth;
 pub mod queued_input;
 pub mod rate_limit;
 pub mod readiness;
+pub mod recall_conversations;
 pub mod relevance;
 pub mod relevance_calibration;
 pub mod result_validation;

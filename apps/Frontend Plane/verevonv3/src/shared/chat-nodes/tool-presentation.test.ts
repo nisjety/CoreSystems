@@ -25,6 +25,7 @@ describe('toolPresentation', () => {
       'track_shipment',
       'recall_memory',
       'reattach_context',
+      'recall_conversations',
     ]) {
       expect(toolPresentation(call({ name })).intent).toBe('read')
     }

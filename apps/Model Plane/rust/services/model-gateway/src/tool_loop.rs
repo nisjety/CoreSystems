@@ -2199,7 +2199,7 @@ fn resolve_forced_web_search_query(messages: &[ChatMessage], query: &str) -> Str
     normalize_search_query(query)
 }
 
-fn err_outcome(call: &ToolCall, msg: impl Into<String>) -> ToolOutcome {
+pub(crate) fn err_outcome(call: &ToolCall, msg: impl Into<String>) -> ToolOutcome {
     ToolOutcome {
         call_id: call.id.clone(),
         name: call.name.clone(),
@@ -4113,6 +4113,26 @@ async fn dispatch_tool_with_cost(
                 error: None,
             }
         }
+        // The read-only search of the person's own earlier conversations (WS17-S5). Off by default. The gate,
+        // the screening and the framing live in the recall module, and its matches are prior conversation,
+        // never instructions.
+        "recall_conversations" => {
+            let waived_mode = mp_contracts::dataplane_posture::data_plane_zdr_mode(false, true);
+            crate::recall_conversations::outcome(
+                state,
+                call,
+                &crate::recall_conversations::RecallCaller {
+                    org_id,
+                    user_id,
+                    thread_id,
+                    session_bearer,
+                    capability_bearer,
+                    zdr,
+                    waived: data_plane_mode.as_deref() == Some(waived_mode),
+                },
+            )
+            .await
+        }
         // Recover a skill the per-prompt budget cut. `skill_budget` degrades
         // before dropping and marks what it cut — honest, and until now
         // unrecoverable: the model read "truncated" and had no way to obtain the
@@ -5404,6 +5424,7 @@ pub fn builtin_tool_defs() -> Vec<ToolDefinition> {
             description: "Replace the content of an artifact you created earlier with create_artifact, producing a new version the user can step back through. Use this whenever the user asks to change, extend, shorten, translate, or fix an existing artifact — never create a second artifact for a revision of the same thing. Always send the COMPLETE new content, not a diff or a fragment: read the current text with read_artifact first when you no longer have it in front of you.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"id":{"type":"string","description":"The id you used with create_artifact"},"content":{"type":"string","description":"The complete replacement content"},"title":{"type":"string","description":"Optional new title; omit to keep the current one"}},"required":["id","content"]}"#.to_owned(),
         },
+        crate::recall_conversations::tool_definition(),
         // §23.6. Only usable with a `handle_id` the model was given in an
         // earlier tool result, so advertising it unconditionally is safe: a
         // turn that produced no handle (every ZDR turn, and any result small

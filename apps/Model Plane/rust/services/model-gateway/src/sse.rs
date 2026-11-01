@@ -2899,6 +2899,25 @@ pub async fn invoke_stream_sse(
             || client_requested_web_search
             || web_search_signal
             || deep_research_requested);
+    // The recall tool reads the person's other conversations, so it is offered only when the switch is on,
+    // this turn reads its own sources in full, and the person's memory allows recall. The switch is read
+    // first, so a deployment that leaves it off makes no memory read.
+    let recall_offered = features.iter().any(|f| f == "tools")
+        && crate::recall_conversations::enabled()
+        && crate::recall_conversations::turn_permits(
+            conversation_only,
+            retrieval_scope == crate::normalize::RetrievalScope::WebOnly,
+            effective_zdr,
+            turn_posture.is_waived(),
+        )
+        && crate::recall_conversations::memory_refusal(
+            &state,
+            &org_id,
+            &user_id,
+            model_bearer.as_str(),
+        )
+        .await
+        .is_none();
     let mut tool_defs: Vec<ToolDefinition> = if features.iter().any(|f| f == "tools") {
         let mut defs: Vec<ToolDefinition> = req
             .tools
@@ -2926,6 +2945,9 @@ pub async fn invoke_stream_sse(
                 continue;
             }
             if builtin.name == "reattach_context" && !thread_was_compacted {
+                continue;
+            }
+            if builtin.name == crate::recall_conversations::TOOL_NAME && !recall_offered {
                 continue;
             }
             if builtin.name == "skill_file" && !skill_file_offered {
