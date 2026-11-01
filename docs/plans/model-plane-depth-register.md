@@ -2444,6 +2444,54 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-1083 | WS25-S6 | live-proof | P1 | Frontend: model-access.ts needs the `chat.set_agent_mode` exempt row (lead_todo 4). Without it admission-contract.test.ts fails 5 tests (TypeError reading 'access') and the typecheck gives TS2741. After that, regenerate and re-vendor the agent-action-admission golden into the Model Plane, execution-core, model-gateway and capability-core fixtures (lead_todo 8). | closed: model-access row and admission golden applied (lead, W2-41) |
 | D2-1084 | WS25-S6 | follow-up | P3 | 37 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-41.json | open |
 
+
+### Wave-mode batch W2-42 (2026-11-01)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-1085 | WS14-S4 | risk | P1 | answerPendingQuestion and skipPendingQuestion write after their await with no thread check. If the person opens another thread while the request is in flight, the settle clears that thread's restored card, and answerPendingQuestion's sendContent can post the summary into the newly opened thread. Suggested guard: read state.threadId before the request, and after it return when the thread has changed, before setPendingQuestion(null) and sendContent. Not implemented, because it is outside the required fix. | open |
+| D2-1086 | WS14-S4 | risk | P1 | The answer route records the answer before the turn is appended, so if the turn append fails the question stays answered with no turn carrying it. | open |
+| D2-1087 | WS14-S4 | risk | P1 | answered_message_id is never set: the link needs the appended turn's id, which session_flow.rs does not return to the invoke stream and which is not owned here. | open |
+| D2-1088 | WS14-S4 | risk | P1 | Under TOOL_CLASS_GATE=enforce an unseeded ask_user is classed unclassified with an approval floor, so the capability-core seed must land before the switch is enabled anywhere. | open |
+| D2-1089 | WS14-S4 | live-proof | P1 | No live proof yet: rebuilt execution-core, model-gateway and BFF with AGENT_ASK_USER_ENABLED=true have not shown create, list, answer and the follow-up run. | open |
+| D2-1090 | WS14-S4 | risk | P1 | In use-chat-controller.ts, answerPendingQuestion and skipPendingQuestion change state after their await without checking that the thread is the same. If the person switches threads while the request is in flight, the code can clear the new thread's card, and sendContent can post the answer summary into the wrong thread. | open |
+| D2-1091 | WS14-S4 | risk | P1 | The answer is recorded through POST /questions/:id/answer before sendContent. If the send fails, the question stays answered with no turn carrying it, and nothing offers a retry. | open |
+| D2-1092 | WS14-S4 | decision | P1 | The row's InvokeRequest.answers_question_id and answered_message_id link was not built: the answer goes through S3's answer route and answered_message_id stays empty. Record this as a deviation, or schedule the link before the switch is turned on. | open |
+| D2-1093 | WS14-S4 | follow-up | P3 | 36 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-42.json | open |
+| D2-1094 | WS25-S11 | risk | P1 | The composer shows the org mode cap before WS25-S9 enforces it, so with ORG_AGENT_POLICY_API on and S9 unbuilt a member's picker is limited in the UI only, while the server still applies the platform posture. Keep the switch off for members, or hide the picker, until S9 lands. | open |
+| D2-1095 | WS25-S11 | risk | P1 | The composer limits the picker to the org mode_cap before WS25-S9 enforces it on the server, so with ORG_AGENT_POLICY_API on and S9 unbuilt the cap holds in the UI only; keep the policy switch off for real orgs until S9 lands. | open |
+| D2-1096 | WS25-S11 | live-proof | P1 | Apply the four shared edits from the implementer's lead_todo: the App.tsx route /agents/customize (no /agents/:param route ahead of it, so the order is safe), the sidebar-navigation entry (SlidersHorizontal exists in @/shared/icons), ChatPage agentModeCap={agentModeCap()}, and use-chat-controller agentMode forwarding at the connectorScope anchors (lines 3256 and 3627 today). Until then the hub has no route and the picker never shows in the chat page. | open |
+| D2-1097 | WS25-S11 | live-proof | P1 | After those edits, run src/features/core/lib, which pins the nav shape. | open |
+| D2-1098 | WS25-S11 | live-proof | P1 | Run the Playwright tests/e2e/customize-hub.spec.ts on a second dev server (not :5173). It is written but has not been run. | open |
+| D2-1099 | WS25-S11 | live-proof | P1 | Live proof: on a stack with ORG_AGENT_POLICY_API=true, an admin sets a read_only cap and the member's picker shows only lockdown and read_only. Capture admin and member screenshots plus the hub's off state. | open |
+| D2-1100 | WS25-S11 | live-proof | P1 | Commit: the lead stages the slice files only, not the concurrent WS14-S4 files (ComposerTrays, use-chat-controller question test, chat-client, QuestionCard) or the Model Plane files in this worktree. | open |
+| D2-1101 | WS25-S11 | live-proof | P1 | Live proof, not run here: on a second dev server (not :5173), run `pnpm exec playwright test --project=chat tests/e2e/customize-hub.spec.ts` after the shared edits. pnpm exec fails its dependency check in this worktree, so run it from a checkout where the Quarry SDK path exists. | open |
+| D2-1102 | WS25-S11 | follow-up | P3 | 25 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-42.json | open |
+
+
+### Wave-mode batch W2-42 (2026-11-01)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-1103 | WS14-S4 | risk | P1 | answerPendingQuestion and skipPendingQuestion write after their await with no thread check. If the person opens another thread while the request is in flight, the settle clears that thread's restored card, and answerPendingQuestion's sendContent can post the summary into the newly opened thread. Suggested guard: read state.threadId before the request, and after it return when the thread has changed, before setPendingQuestion(null) and sendContent. Not implemented, because it is outside the required fix. | open |
+| D2-1104 | WS14-S4 | risk | P1 | The answer route records the answer before the turn is appended, so if the turn append fails the question stays answered with no turn carrying it. | open |
+| D2-1105 | WS14-S4 | risk | P1 | answered_message_id is never set: the link needs the appended turn's id, which session_flow.rs does not return to the invoke stream and which is not owned here. | open |
+| D2-1106 | WS14-S4 | risk | P1 | Under TOOL_CLASS_GATE=enforce an unseeded ask_user is classed unclassified with an approval floor, so the capability-core seed must land before the switch is enabled anywhere. | open |
+| D2-1107 | WS14-S4 | live-proof | P1 | No live proof yet: rebuilt execution-core, model-gateway and BFF with AGENT_ASK_USER_ENABLED=true have not shown create, list, answer and the follow-up run. | open |
+| D2-1108 | WS14-S4 | risk | P1 | In use-chat-controller.ts, answerPendingQuestion and skipPendingQuestion change state after their await without checking that the thread is the same. If the person switches threads while the request is in flight, the code can clear the new thread's card, and sendContent can post the answer summary into the wrong thread. | open |
+| D2-1109 | WS14-S4 | risk | P1 | The answer is recorded through POST /questions/:id/answer before sendContent. If the send fails, the question stays answered with no turn carrying it, and nothing offers a retry. | open |
+| D2-1110 | WS14-S4 | decision | P1 | The row's InvokeRequest.answers_question_id and answered_message_id link was not built: the answer goes through S3's answer route and answered_message_id stays empty. Record this as a deviation, or schedule the link before the switch is turned on. | open |
+| D2-1111 | WS14-S4 | follow-up | P3 | 36 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-42.json | open |
+| D2-1112 | WS25-S11 | risk | P1 | The composer shows the org mode cap before WS25-S9 enforces it, so with ORG_AGENT_POLICY_API on and S9 unbuilt a member's picker is limited in the UI only, while the server still applies the platform posture. Keep the switch off for members, or hide the picker, until S9 lands. | open |
+| D2-1113 | WS25-S11 | risk | P1 | The composer limits the picker to the org mode_cap before WS25-S9 enforces it on the server, so with ORG_AGENT_POLICY_API on and S9 unbuilt the cap holds in the UI only; keep the policy switch off for real orgs until S9 lands. | open |
+| D2-1114 | WS25-S11 | live-proof | P1 | Apply the four shared edits from the implementer's lead_todo: the App.tsx route /agents/customize (no /agents/:param route ahead of it, so the order is safe), the sidebar-navigation entry (SlidersHorizontal exists in @/shared/icons), ChatPage agentModeCap={agentModeCap()}, and use-chat-controller agentMode forwarding at the connectorScope anchors (lines 3256 and 3627 today). Until then the hub has no route and the picker never shows in the chat page. | open |
+| D2-1115 | WS25-S11 | live-proof | P1 | After those edits, run src/features/core/lib, which pins the nav shape. | open |
+| D2-1116 | WS25-S11 | live-proof | P1 | Run the Playwright tests/e2e/customize-hub.spec.ts on a second dev server (not :5173). It is written but has not been run. | open |
+| D2-1117 | WS25-S11 | live-proof | P1 | Live proof: on a stack with ORG_AGENT_POLICY_API=true, an admin sets a read_only cap and the member's picker shows only lockdown and read_only. Capture admin and member screenshots plus the hub's off state. | open |
+| D2-1118 | WS25-S11 | live-proof | P1 | Commit: the lead stages the slice files only, not the concurrent WS14-S4 files (ComposerTrays, use-chat-controller question test, chat-client, QuestionCard) or the Model Plane files in this worktree. | open |
+| D2-1119 | WS25-S11 | live-proof | P1 | Live proof, not run here: on a second dev server (not :5173), run `pnpm exec playwright test --project=chat tests/e2e/customize-hub.spec.ts` after the shared edits. pnpm exec fails its dependency check in this worktree, so run it from a checkout where the Quarry SDK path exists. | open |
+| D2-1120 | WS25-S11 | follow-up | P3 | 25 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-42.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -2654,3 +2702,5 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS21-S10 | zdr, policy | W2-40 | no |
 | WS18-S4 | authority, policy, zdr, EP-8 slice 1 (Dreaming exclusion of space threads) is owned outside this program: verify it first, else build the exclusion inside this slice | W2-41 | no |
 | WS25-S6 | authority, policy | W2-41 | no |
+| WS14-S4 | authority, policy, zdr | W2-42 | no |
+| WS14-S4 | authority, policy, zdr | W2-42 | no |
