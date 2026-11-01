@@ -39,6 +39,7 @@ export type VerevonUiEvent =
   | { type: 'lifecycle.retry'; at: string; scope?: string; tool?: string; attempt?: number; maxAttempts?: number; waitMs?: number; reason?: string }
   | { type: 'lifecycle.compaction'; at: string; scope?: string; outcome?: string; messagesCompacted?: number; messagesKept?: number; pinnedKept?: number }
   | { type: 'lifecycle.context'; at: string; change?: string; messagesDropped?: number; skillsTruncated?: number; skillsDropped?: number; layer?: string; state?: string }
+  | { type: 'lifecycle.sandbox'; at: string; scope?: string; state?: string; cause?: string }
   | { type: 'unknown'; at: string; name: string; payload: Record<string, unknown> }
 
 const stringValue = (value: unknown): string | undefined => typeof value === 'string' ? value : undefined
@@ -111,6 +112,7 @@ const PROJECTABLE_CUSTOM_NAMES = new Set([
   'retry_scheduled',
   'compaction',
   'context_change',
+  'sandbox_state',
   'artifact',
   'attachment',
   'reasoning_delta',
@@ -372,6 +374,7 @@ export function toVerevonUiEvent(name: string, payload: Record<string, unknown>,
     case 'retry_scheduled': return { type: 'lifecycle.retry', at, scope: stringValue(payload.scope), tool: stringValue(payload.tool), attempt: numberValue(payload.attempt), maxAttempts: numberValue(payload.max_attempts), waitMs: numberValue(payload.wait_ms), reason: stringValue(payload.reason) }
     case 'compaction': return { type: 'lifecycle.compaction', at, scope: stringValue(payload.scope), outcome: stringValue(payload.outcome), messagesCompacted: numberValue(payload.messages_compacted), messagesKept: numberValue(payload.messages_kept), pinnedKept: numberValue(payload.pinned_kept) }
     case 'context_change': return { type: 'lifecycle.context', at, change: stringValue(payload.change), messagesDropped: numberValue(payload.messages_dropped), skillsTruncated: numberValue(payload.skills_truncated), skillsDropped: numberValue(payload.skills_dropped), layer: stringValue(payload.layer), state: stringValue(payload.state) }
+    case 'sandbox_state': return { type: 'lifecycle.sandbox', at, scope: stringValue(payload.scope), state: stringValue(payload.state), cause: stringValue(payload.cause) }
     case 'CUSTOM': {
       const customName = stringValue(payload.name)
       const customValue = recordValue(payload.value)

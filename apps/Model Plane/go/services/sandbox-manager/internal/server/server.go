@@ -496,8 +496,16 @@ func (s *Server) ApplyThreadWorkspaceChanges(ctx context.Context, req *ApplyThre
 	}
 	res, err := s.threads.Apply(ctx, principal.OrganizationID, l.OwnerID, l.ScopeID, changes, deletions, s.threadLimits)
 	if err != nil {
+		if errors.Is(err, threadworkspace.ErrQuotaExceeded) {
+			s.recordActivity(ctx, l, mpv1.SandboxFailureCause_SANDBOX_FAILURE_CAUSE_QUOTA_EXCEEDED)
+		}
 		return nil, threadWorkspaceErr(err)
 	}
+	cause := mpv1.SandboxFailureCause_SANDBOX_FAILURE_CAUSE_UNSPECIFIED
+	if len(res.Conflicts) > 0 {
+		cause = mpv1.SandboxFailureCause_SANDBOX_FAILURE_CAUSE_WORKSPACE_CONFLICT
+	}
+	s.recordActivity(ctx, l, cause)
 	return &ApplyThreadWorkspaceChangesResponse{
 		ConflictingPaths: res.Conflicts,
 		Revision:         res.Revision,
@@ -554,6 +562,58 @@ func (s *Server) DeleteThreadWorkspace(ctx context.Context, req *DeleteThreadWor
 		return nil, status.Errorf(codes.Internal, "thread workspace rows are erased but its blobs were not removed; retry the erase: %v", err)
 	}
 	return &DeleteThreadWorkspaceResponse{FilesDeleted: files, ObjectPrefix: prefix}, nil
+}
+
+// recordActivity stamps the lease's last use and the cause the apply produced. It is best effort: the
+// apply has already landed, and failing the call over a status write would make a client retry a batch
+// whose base hashes no longer match what it wrote.
+func (s *Server) recordActivity(ctx context.Context, l *lease.Lease, cause mpv1.SandboxFailureCause) {
+	_ = s.leases.RecordActivity(ctx, l.ID, l.OrgID, l.OwnerID, cause, time.Now().UTC())
+}
+
+// GetLeaseStatus reports a lease's lifecycle and the counts its thread workspace holds (WS22-S6). Like
+// GetProcess it is descriptive: a released or expired lease still answers, so a client can say why its
+// files are not kept. A thread lease belongs to its user, so a service principal may not read it.
+func (s *Server) GetLeaseStatus(ctx context.Context, req *GetLeaseStatusRequest) (*GetLeaseStatusResponse, error) {
+	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "GetLeaseStatus")))
+	principal, err := s.principal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if req.GetLeaseId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "lease_id is required")
+	}
+	l, err := s.leases.GetAny(ctx, req.GetLeaseId(), principal.OrganizationID, authz.OwnerFilter(principal), req.GetBackendId())
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	if l.ScopeType == "thread" && principal.PrincipalType != "user" {
+		return nil, status.Error(codes.PermissionDenied, "a thread workspace belongs to a user, not a service principal")
+	}
+	resp := &GetLeaseStatusResponse{
+		LeaseId:      l.ID,
+		State:        l.State,
+		FailureCause: l.FailureCause,
+		ExpiresAt:    timestamppb.New(l.ExpiresAt),
+		ScopeType:    l.ScopeType,
+	}
+	if !l.LastActivityAt.IsZero() {
+		resp.LastActivityAt = timestamppb.New(l.LastActivityAt)
+	}
+	if l.HeartbeatAt != nil {
+		resp.HeartbeatAt = timestamppb.New(*l.HeartbeatAt)
+	}
+	if l.ScopeType == "thread" && s.threads != nil {
+		snap, err := s.threads.Get(ctx, principal.OrganizationID, l.OwnerID, l.ScopeID)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "get thread workspace: %v", err)
+		}
+		for _, f := range snap.Files {
+			resp.FileCount++
+			resp.TotalBytes += f.SizeBytes
+		}
+	}
+	return resp, nil
 }
 
 // Health reports serving status.

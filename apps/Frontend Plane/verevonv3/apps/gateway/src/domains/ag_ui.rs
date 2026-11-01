@@ -915,7 +915,9 @@ fn map_upstream_frame(run: &mut AgUiRunState, frame: SseFrame) -> Vec<Event> {
         // WS15 lifecycle notices: counts and closed tokens only, shown as they arrive.
         | "retry_scheduled"
         | "compaction"
-        | "context_change" => {
+        | "context_change"
+        // WS22-S6: a tool call's workspace state, closed tokens only, shown as it arrives.
+        | "sandbox_state" => {
             vec![ag_ui_event(json!({
                 "type": "CUSTOM",
                 "name": event,
@@ -1372,6 +1374,11 @@ mod tests {
                 "context_change",
                 r#"{"change":"history_shed","messages_dropped":4,"request_id":"req_1"}"#,
                 "history_shed",
+            ),
+            (
+                "sandbox_state",
+                r#"{"scope":"thread","state":"conflict","cause":"workspace_conflict","request_id":"req_1"}"#,
+                "workspace_conflict",
             ),
         ] {
             let mut run = AgUiRunState::default();

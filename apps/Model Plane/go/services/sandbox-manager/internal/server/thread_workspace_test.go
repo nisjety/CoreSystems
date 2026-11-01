@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
 	"github.com/triodelab/model-plane/pkg/authctx"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -277,4 +278,84 @@ func TestDeleteThreadWorkspaceRefusesUntilErasureIsWired(t *testing.T) {
 	h := newThreadHarness(true, threadworkspace.Limits{MaxFiles: 8, MaxBytes: 1 << 20})
 	_, err := h.s.DeleteThreadWorkspace(context.Background(), &DeleteThreadWorkspaceRequest{ThreadId: "thread-1", OrgId: "org-1"})
 	wantCode(t, err, codes.FailedPrecondition, "DeleteThreadWorkspace with the switch on and no erasure wired")
+}
+
+// status reads a lease's lifecycle through GetLeaseStatus as the harness's current caller.
+func (h *threadHarness) status(leaseID string) (*GetLeaseStatusResponse, error) {
+	return h.s.GetLeaseStatus(context.Background(), &GetLeaseStatusRequest{LeaseId: leaseID, BackendId: "backend-1"})
+}
+
+func TestGetLeaseStatusReportsTheLatestApplyCauseAndCounts(t *testing.T) {
+	h := newThreadHarness(true, threadworkspace.Limits{MaxFiles: 2, MaxBytes: 1 << 20})
+	lease, err := h.acquireThread("thread-1", time.Minute)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	id := lease.GetLeaseId()
+	wantStatus := func(what string, cause mpv1.SandboxFailureCause, files, bytes int64) {
+		t.Helper()
+		got, err := h.status(id)
+		if err != nil {
+			t.Fatalf("%s: status: %v", what, err)
+		}
+		if got.GetFailureCause() != cause || got.GetFileCount() != files || got.GetTotalBytes() != bytes {
+			t.Fatalf("%s: cause %v, %d files, %d bytes; want %v, %d files, %d bytes",
+				what, got.GetFailureCause(), got.GetFileCount(), got.GetTotalBytes(), cause, files, bytes)
+		}
+		if got.GetScopeType() != "thread" || got.GetLastActivityAt() == nil {
+			t.Fatalf("%s: scope %q, last activity %v; want a thread lease that was used", what, got.GetScopeType(), got.GetLastActivityAt())
+		}
+	}
+
+	if _, err := h.apply(id, []*WorkspaceChangedFile{{Path: "a.txt", ContentHash: "sha256:one", SizeBytes: 3}}, nil); err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	wantStatus("after a clean apply", mpv1.SandboxFailureCause_SANDBOX_FAILURE_CAUSE_UNSPECIFIED, 1, 3)
+
+	if _, err := h.apply(id, []*WorkspaceChangedFile{{Path: "a.txt", ContentHash: "sha256:two", SizeBytes: 3, BaseHash: "sha256:stale"}}, nil); err != nil {
+		t.Fatalf("stale write: %v", err)
+	}
+	wantStatus("after a conflicting apply", mpv1.SandboxFailureCause_SANDBOX_FAILURE_CAUSE_WORKSPACE_CONFLICT, 1, 3)
+
+	if _, err := h.apply(id, []*WorkspaceChangedFile{{Path: "b.txt", ContentHash: "sha256:b", SizeBytes: 1}}, nil); err != nil {
+		t.Fatalf("second file: %v", err)
+	}
+	wantStatus("after a clean apply that follows a conflict", mpv1.SandboxFailureCause_SANDBOX_FAILURE_CAUSE_UNSPECIFIED, 2, 4)
+
+	_, err = h.apply(id, []*WorkspaceChangedFile{{Path: "c.txt", ContentHash: "sha256:c", SizeBytes: 1}}, nil)
+	wantCode(t, err, codes.ResourceExhausted, "a third file over a two-file cap")
+	wantStatus("after a refused over-quota batch", mpv1.SandboxFailureCause_SANDBOX_FAILURE_CAUSE_QUOTA_EXCEEDED, 2, 4)
+}
+
+func TestGetLeaseStatusIsOwnerBoundAndStillAnswersAfterRelease(t *testing.T) {
+	h := newThreadHarness(true, threadworkspace.Limits{MaxFiles: 8, MaxBytes: 1 << 20})
+	lease, err := h.acquireThread("thread-1", time.Minute)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	id := lease.GetLeaseId()
+	owner := *h.who
+
+	h.who = &authctx.Principal{OrganizationID: "org-1", ActorID: "user-2", PrincipalType: "user"}
+	_, err = h.status(id)
+	wantCode(t, err, codes.NotFound, "another user reads the lease")
+
+	h.who = &authctx.Principal{OrganizationID: "org-1", ActorID: "service:execution-core", PrincipalType: "service"}
+	_, err = h.status(id)
+	wantCode(t, err, codes.PermissionDenied, "a service principal reads a thread lease")
+
+	h.who = &owner
+	_, err = h.s.GetLeaseStatus(context.Background(), &GetLeaseStatusRequest{BackendId: "backend-1"})
+	wantCode(t, err, codes.InvalidArgument, "a status call with no lease id")
+
+	if _, err := h.s.ReleaseLease(context.Background(), &ReleaseLeaseRequest{LeaseId: id, BackendId: "backend-1"}); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	got, err := h.status(id)
+	if err != nil {
+		t.Fatalf("status after release: %v", err)
+	}
+	if got.GetState() != mpv1.SandboxLifecycleState_DESTROYED {
+		t.Fatalf("state after release = %v, want DESTROYED", got.GetState())
+	}
 }

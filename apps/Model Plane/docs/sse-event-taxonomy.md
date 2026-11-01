@@ -37,6 +37,7 @@ asserted, not just reported.
 | `retrieval_notice` | — (control) | `ChatEvent::RetrievalNotice` | ✅ |
 | `retry_scheduled` | `steps` | `ChatEvent::RetryScheduled` | ✅ |
 | `run_parked` | — (control) | `ChatEvent::RunParked` | ✅ |
+| `sandbox_state` | `steps` | `ChatEvent::SandboxState` | ✅ |
 | `source_scope_applied` | `citations` | `ChatEvent::SourceScopeApplied` | ✅ |
 | `step_update` | `steps` | `ChatEvent::StepUpdate` | ✅ |
 | `stopped` | — (control) | `ChatEvent::Stopped` | ✅ |

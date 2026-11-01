@@ -302,6 +302,37 @@ describe('chat-client stream-event coverage', () => {
   })
 })
 
+describe('chat-client sandbox state (WS22-S6)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('routes sandbox_state by scope, state and cause, and ignores a frame that names neither scope nor state', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          `event: sandbox_state\ndata: ${JSON.stringify({ scope: 'thread', state: 'conflict', cause: 'workspace_conflict', request_id: 'req-1' })}\n\n`,
+          `event: sandbox_state\ndata: ${JSON.stringify({ scope: 'thread', state: 'kept', request_id: 'req-1' })}\n\n`,
+          // A frame that says nothing about where the files went cannot be shown as a workspace state.
+          `event: sandbox_state\ndata: ${JSON.stringify({ cause: 'quota_exceeded' })}\n\n`,
+        ]),
+      ),
+    )
+    const onSandboxState = vi.fn()
+    await streamChat({ content: 'hi' }, { onSandboxState })
+
+    expect(onSandboxState).toHaveBeenCalledTimes(2)
+    expect(onSandboxState).toHaveBeenNthCalledWith(1, {
+      scope: 'thread',
+      state: 'conflict',
+      cause: 'workspace_conflict',
+      requestId: 'req-1',
+    })
+    expect(onSandboxState).toHaveBeenNthCalledWith(2, { scope: 'thread', state: 'kept', requestId: 'req-1' })
+  })
+})
+
 describe('mid-run queued input', () => {
   afterEach(() => {
     vi.unstubAllGlobals()

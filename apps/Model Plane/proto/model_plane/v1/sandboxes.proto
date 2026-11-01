@@ -106,6 +106,11 @@ service SandboxManager {
   // Erase a thread's rows and its object-store prefix (WS22-S5). Owner-bound: the
   // caller's own sandbox bearer; service principals are refused.
   rpc DeleteThreadWorkspace(DeleteThreadWorkspaceRequest) returns (DeleteThreadWorkspaceResponse);
+
+  // Read a lease's lifecycle: its state, the failure cause the latest thread-workspace apply recorded,
+  // when it was last used, and the counts its thread workspace holds (WS22-S6). Descriptive, like
+  // GetProcess: a released or expired lease still answers, so a client can say why its files are not kept.
+  rpc GetLeaseStatus(GetLeaseStatusRequest) returns (GetLeaseStatusResponse);
 }
 
 // Lifecycle of one sandbox lease. SCRATCH is the only state in which no
@@ -767,4 +772,72 @@ message DeleteThreadWorkspaceResponse {
 
   // Object-store prefix whose blobs were removed.
   string object_prefix = 2;
+}
+
+// --- WS22-S6 lease lifecycle status ---
+
+// Why a lease could not do what was asked. The numeric values are stored in leases.failure_cause
+// (migration 0007), where 0 records that no failure is recorded. Only QUOTA_EXCEEDED and
+// WORKSPACE_CONFLICT are written today; the other causes are reserved for the paths that will record them.
+// The names carry the enum's prefix because proto enum values share the package namespace.
+enum SandboxFailureCause {
+  // No failure is recorded: the latest apply was clean, or none has run.
+  SANDBOX_FAILURE_CAUSE_UNSPECIFIED = 0;
+  // The sandbox backend did not answer.
+  SANDBOX_FAILURE_CAUSE_BACKEND_UNAVAILABLE = 1;
+  // The backend did not start the sandbox in time.
+  SANDBOX_FAILURE_CAUSE_START_TIMEOUT = 2;
+  // The backend stopped heartbeating (reserved for WS22-S8).
+  SANDBOX_FAILURE_CAUSE_HEARTBEAT_LOST = 3;
+  // The workspace could not be restored into the sandbox.
+  SANDBOX_FAILURE_CAUSE_WORKSPACE_HYDRATE_FAILED = 4;
+  // The workspace changes could not be saved.
+  SANDBOX_FAILURE_CAUSE_WORKSPACE_COMMIT_FAILED = 5;
+  // The batch would exceed the thread's file or byte cap, so none of it was applied.
+  SANDBOX_FAILURE_CAUSE_QUOTA_EXCEEDED = 6;
+  // At least one path changed under the caller, so that path was reported and not overwritten.
+  SANDBOX_FAILURE_CAUSE_WORKSPACE_CONFLICT = 7;
+  // The lease ran past its expiry.
+  SANDBOX_FAILURE_CAUSE_EXPIRED = 8;
+  // Policy refused the request.
+  SANDBOX_FAILURE_CAUSE_POLICY_DENIED = 9;
+}
+
+// Read one lease's lifecycle.
+message GetLeaseStatusRequest {
+  // Lease to read.
+  string lease_id = 1;
+
+  // Caller's asserted backend id; must match the lease's pinned backend.
+  string backend_id = 2;
+}
+
+// One lease's lifecycle, and the counts its thread workspace holds.
+message GetLeaseStatusResponse {
+  // Lease identifier (ULID).
+  string lease_id = 1;
+
+  // Lifecycle state. A released lease reports DESTROYED; an expired lease keeps the state it had.
+  SandboxLifecycleState state = 2;
+
+  // The failure cause the latest thread-workspace apply recorded, or UNSPECIFIED when that apply was clean.
+  SandboxFailureCause failure_cause = 3;
+
+  // When an acquire or a thread-workspace apply last used the lease. Unset when never stamped.
+  google.protobuf.Timestamp last_activity_at = 4;
+
+  // The backend's last heartbeat for the lease. Unset until WS22-S8 records one.
+  google.protobuf.Timestamp heartbeat_at = 5;
+
+  // Lease expiry time.
+  google.protobuf.Timestamp expires_at = 6;
+
+  // Scope type: "thread" or "agent".
+  string scope_type = 7;
+
+  // Files the lease's thread holds. Zero for a lease that is not a thread lease.
+  int64 file_count = 8;
+
+  // Bytes the lease's thread holds. Zero for a lease that is not a thread lease.
+  int64 total_bytes = 9;
 }

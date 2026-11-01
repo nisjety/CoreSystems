@@ -92,3 +92,29 @@ describe('lifecycle notices (WS15 S1)', () => {
     ).toMatchObject({ type: 'lifecycle.compaction', scope: 'tool_results', outcome: 'cleared' })
   })
 })
+
+describe('sandbox workspace state (WS22 S6)', () => {
+  it('projects the workspace frame into lifecycle.sandbox with its closed tokens only', () => {
+    expect(toVerevonUiEvent('sandbox_state', { scope: 'thread', state: 'kept', request_id: 'req-1' }, AT)).toEqual({
+      type: 'lifecycle.sandbox',
+      at: AT,
+      scope: 'thread',
+      state: 'kept',
+      cause: undefined,
+    })
+  })
+
+  it('projects a conflict with its cause, from the native frame and from the AG-UI CUSTOM envelope', () => {
+    const conflict = { scope: 'thread', state: 'conflict', cause: 'workspace_conflict' }
+    expect(toVerevonUiEvent('sandbox_state', conflict, AT)).toMatchObject({
+      type: 'lifecycle.sandbox',
+      state: 'conflict',
+      cause: 'workspace_conflict',
+    })
+    expect(toVerevonUiEvent('CUSTOM', { name: 'sandbox_state', value: conflict }, AT)).toMatchObject({
+      type: 'lifecycle.sandbox',
+      state: 'conflict',
+      cause: 'workspace_conflict',
+    })
+  })
+})

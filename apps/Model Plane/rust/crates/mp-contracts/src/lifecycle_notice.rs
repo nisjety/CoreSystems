@@ -75,11 +75,44 @@ pub const CONTEXT_CHANGE_KEYS: [&str; 6] = [
     "state",
 ];
 
+/// Where a sandboxed workspace's files are kept, as the `sandbox_state` frame names it: the thread's own
+/// workspace, a Space's durable one, or no workspace at all (WS22-S6).
+pub const SANDBOX_SCOPES: [&str; 3] = ["thread", "space", "ephemeral"];
+
+/// What the workspace did with a call's files. `kept` is the chip's "kept", `ephemeral` its "not kept",
+/// `conflict` a path another writer changed first, `refused` a batch the caps or the retention posture
+/// turned away, and `unavailable` a backend that did not answer (WS22-S6).
+pub const SANDBOX_STATES: [&str; 6] = ["kept", "ephemeral", "syncing", "conflict", "refused", "unavailable"];
+
+/// Why a workspace is not `kept`, when the lease recorded a cause: the lowercase name of a
+/// `SandboxFailureCause` that is not UNSPECIFIED (WS22-S6).
+pub const SANDBOX_CAUSES: [&str; 9] = [
+    "backend_unavailable",
+    "start_timeout",
+    "heartbeat_lost",
+    "workspace_hydrate_failed",
+    "workspace_commit_failed",
+    "quota_exceeded",
+    "workspace_conflict",
+    "expired",
+    "policy_denied",
+];
+
+/// The keys a `sandbox_state` payload may carry, beside `request_id`.
+pub const SANDBOX_STATE_KEYS: [&str; 3] = ["scope", "state", "cause"];
+
 /// Whether `token` is a member of `closed`. Exact match only: no trimming, no
 /// case folding, so free text is never accepted as a token.
 #[must_use]
 pub fn is_closed_token(closed: &[&str], token: &str) -> bool {
     closed.contains(&token)
+}
+
+/// The member of `closed` that equals `token`, as its `'static` spelling, or `None` for anything else.
+/// A caller that must keep a token beyond its input takes it from here rather than copying the text.
+#[must_use]
+pub fn closed_token(closed: &[&'static str], token: &str) -> Option<&'static str> {
+    closed.iter().copied().find(|member| *member == token)
 }
 
 #[cfg(test)]
@@ -102,6 +135,9 @@ mod tests {
             (&COMPACTION_SCOPES[..], vec!["history", "tool_results"]),
             (&COMPACTION_OUTCOMES[..], vec!["summarized", "reused", "truncated", "cleared"]),
             (&CONTEXT_CHANGES[..], vec!["history_shed", "skills_truncated", "run_context_skipped"]),
+            (&SANDBOX_SCOPES[..], vec!["thread", "space", "ephemeral"]),
+            (&SANDBOX_STATES[..], vec!["kept", "ephemeral", "syncing", "conflict", "refused", "unavailable"]),
+            (&SANDBOX_CAUSES[..], vec!["backend_unavailable", "quota_exceeded", "workspace_conflict", "policy_denied"]),
         ] {
             for token in &tokens {
                 assert!(is_closed_token(closed, token), "{token}");
@@ -114,15 +150,23 @@ mod tests {
 
     #[test]
     fn each_allowlist_names_a_key_once() {
-        for keys in [&RETRY_SCHEDULED_KEYS[..], &COMPACTION_KEYS[..], &CONTEXT_CHANGE_KEYS[..]] {
+        for keys in [&RETRY_SCHEDULED_KEYS[..], &COMPACTION_KEYS[..], &CONTEXT_CHANGE_KEYS[..], &SANDBOX_STATE_KEYS[..]] {
             let unique: std::collections::BTreeSet<_> = keys.iter().collect();
             assert_eq!(unique.len(), keys.len(), "{keys:?}");
         }
     }
 
     #[test]
+    fn closed_token_yields_the_listed_spelling_and_nothing_else() {
+        assert_eq!(closed_token(&SANDBOX_STATES, "kept"), Some("kept"));
+        for bad in ["", " kept", "Kept", "kept ", "kept; rm -rf /", "/home/user/a.txt"] {
+            assert_eq!(closed_token(&SANDBOX_STATES, bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
     fn no_allowlist_admits_a_content_key() {
-        for keys in [&RETRY_SCHEDULED_KEYS[..], &COMPACTION_KEYS[..], &CONTEXT_CHANGE_KEYS[..]] {
+        for keys in [&RETRY_SCHEDULED_KEYS[..], &COMPACTION_KEYS[..], &CONTEXT_CHANGE_KEYS[..], &SANDBOX_STATE_KEYS[..]] {
             for content in ["summary", "args", "output", "error", "message", "content", "text"] {
                 assert!(!keys.contains(&content), "{content} would carry content");
             }

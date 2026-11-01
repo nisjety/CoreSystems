@@ -477,6 +477,15 @@ pub enum ChatEvent {
         /// When the run can be resumed (RFC 3339, UTC), or `None` when that time is unreadable.
         resume_after: Option<String>,
     },
+    /// The workspace of the sandboxed computer a tool call used: where its files are kept, and whether they
+    /// were (WS22-S6). `scope` is the workspace, `state` its outcome, and `cause` the closed reason when the
+    /// lease recorded one. A `steps` family frame, so only a client that asked for step detail sees it.
+    /// Closed tokens only: no path, file name, content or error text.
+    SandboxState {
+        scope: &'static str,
+        state: &'static str,
+        cause: Option<&'static str>,
+    },
     // ---- end lifecycle (WS15) ----
     /// Terminal control: generation stopped/cancelled by the user.
     Stopped { reason: String },
@@ -514,6 +523,23 @@ pub enum ChatEvent {
 }
 
 impl ChatEvent {
+    /// The `sandbox_state` frame for a workspace result a tool call produced (WS22-S6). Each token must be a
+    /// member of its closed list, so a result that carries free text or a path yields `None` rather than a
+    /// frame that could show it.
+    #[must_use]
+    pub fn sandbox_state(scope: &str, state: &str, cause: Option<&str>) -> Option<Self> {
+        use mp_contracts::lifecycle_notice::{closed_token, SANDBOX_CAUSES, SANDBOX_SCOPES, SANDBOX_STATES};
+        let cause = match cause {
+            Some(token) => Some(closed_token(&SANDBOX_CAUSES, token)?),
+            None => None,
+        };
+        Some(Self::SandboxState {
+            scope: closed_token(&SANDBOX_SCOPES, scope)?,
+            state: closed_token(&SANDBOX_STATES, state)?,
+            cause,
+        })
+    }
+
     /// The opt-in feature family this event belongs to, or `None` if it is a
     /// control event that is ALWAYS emitted (never gated).
     #[must_use]
@@ -536,6 +562,8 @@ impl ChatEvent {
             ChatEvent::MemoryRecall { .. } => Some("memory"),
             // ---- lifecycle (WS15) ----
             ChatEvent::RetryScheduled { .. } => Some("steps"),
+            // ---- sandbox state (WS22-S6) ----
+            ChatEvent::SandboxState { .. } => Some("steps"),
             // control events — always allowed (Title/FollowUps only exist when
             // the gateway actually generated them; gating on a feature family
             // would silently drop them for the plain `chat` profile, which is
@@ -595,6 +623,7 @@ impl ChatEvent {
             ChatEvent::MemoryRecall { .. } => "memory_recall",
             // ---- lifecycle (WS15) ----
             ChatEvent::RetryScheduled { .. } => "retry_scheduled",
+            ChatEvent::SandboxState { .. } => "sandbox_state",
             ChatEvent::Compaction { .. } => "compaction",
             ChatEvent::ContextChange { .. } => "context_change",
             ChatEvent::RunParked { .. } => "run_parked",
@@ -905,6 +934,14 @@ impl ChatEvent {
                 "reason": reason,
                 "request_id": request_id,
             }),
+            ChatEvent::SandboxState { scope, state, cause } => {
+                let mut payload = json!({ "scope": scope, "state": state, "request_id": request_id });
+                // Omitted, not null, when the workspace names no cause: a frame that says the files were kept carries none.
+                if let Some(cause) = cause {
+                    payload["cause"] = json!(cause);
+                }
+                payload
+            }
             ChatEvent::Compaction {
                 scope,
                 outcome,
@@ -2008,6 +2045,51 @@ mod tests {
         assert_eq!(payload["message"], "boom");
         assert_eq!(payload["retryable"], true);
         assert_eq!(payload["request_id"], "req-1");
+    }
+
+    /// WS22-S6: the sandbox_state frame is a steps-family frame whose payload is its closed tokens and the
+    /// request id, and nothing else. Its constructor admits only members of the closed lists.
+    #[test]
+    fn sandbox_state_frame_contract() {
+        use mp_contracts::lifecycle_notice::{SANDBOX_CAUSES, SANDBOX_SCOPES, SANDBOX_STATES, SANDBOX_STATE_KEYS};
+        let kept = ChatEvent::sandbox_state("thread", "kept", None).expect("closed scope and state");
+        assert_eq!(kept.name(), "sandbox_state");
+        assert_eq!(kept.family(), Some("steps"));
+        assert!(!kept.should_emit(&[]), "a client that asked for no steps must not see the workspace");
+        assert!(kept.should_emit(&["steps".to_string()]));
+        let payload = kept.payload("req-1");
+        let keys: std::collections::BTreeSet<&str> =
+            payload.as_object().expect("an object").keys().map(String::as_str).collect();
+        assert_eq!(keys, ["request_id", "scope", "state"].into_iter().collect(), "{payload}");
+
+        let conflict = ChatEvent::sandbox_state("thread", "conflict", Some("workspace_conflict"))
+            .expect("closed tokens");
+        let payload = conflict.payload("req-1");
+        assert_eq!(payload["cause"], "workspace_conflict");
+        for (key, value) in payload.as_object().expect("an object") {
+            if key == "request_id" {
+                continue;
+            }
+            assert!(SANDBOX_STATE_KEYS.contains(&key.as_str()), "{key} is not a sandbox_state key");
+            let token = value.as_str().expect("every sandbox_state value is a closed token");
+            let closed: &[&str] = match key.as_str() {
+                "scope" => &SANDBOX_SCOPES,
+                "state" => &SANDBOX_STATES,
+                _ => &SANDBOX_CAUSES,
+            };
+            assert!(closed.contains(&token), "{key}={token} is not a closed token");
+        }
+
+        // A workspace, a state or a cause outside its closed list, or one that carries a path or free
+        // text, is refused rather than shown.
+        for (scope, state, cause) in [
+            ("workspace", "kept", None),
+            ("thread", "kept; rm -rf /", None),
+            ("thread", "conflict", Some("/home/user/a.txt")),
+            ("thread", "conflict", Some("workspace_conflict ")),
+        ] {
+            assert!(ChatEvent::sandbox_state(scope, state, cause).is_none(), "{scope} {state} {cause:?}");
+        }
     }
 
     #[test]
@@ -3130,6 +3212,7 @@ mod payload_contract {
         "Compaction",
         "ContextChange",
         "RunParked",
+        "SandboxState",
     ];
 
     /// The variant's name. No wildcard arm, so a new `ChatEvent` variant is a compile error here.
@@ -3164,6 +3247,7 @@ mod payload_contract {
             ChatEvent::Compaction { .. } => "Compaction",
             ChatEvent::ContextChange { .. } => "ContextChange",
             ChatEvent::RunParked { .. } => "RunParked",
+            ChatEvent::SandboxState { .. } => "SandboxState",
         }
     }
 
@@ -3561,6 +3645,16 @@ mod payload_contract {
                 run_id: s("run-1"),
                 reason: mp_contracts::loop_fold::ParkReason::ProviderExhausted,
                 resume_after: Some(s("2026-10-20T12:00:00Z")),
+            },
+            ChatEvent::SandboxState {
+                scope: "thread",
+                state: "kept",
+                cause: None,
+            },
+            ChatEvent::SandboxState {
+                scope: "thread",
+                state: "conflict",
+                cause: Some("workspace_conflict"),
             },
             ChatEvent::SubscriptionError {
                 code: s("rate_limited"),

@@ -171,6 +171,8 @@ func TestInterceptorFailsClosedAndEnforcesServiceScopes(t *testing.T) {
 		{name: "ListProcesses missing read scope", method: "/model_plane.v1.SandboxManager/ListProcesses", authorization: "Bearer " + token(t, key, Audience, "org-a", "service:execution-core", "service", ScopeWrite), want: codes.PermissionDenied},
 		{name: "ReadProcessOutput valid service with read scope", method: "/model_plane.v1.SandboxManager/ReadProcessOutput", authorization: "Bearer " + token(t, key, Audience, "org-a", "service:execution-core", "service", ScopeRead), want: codes.OK},
 		{name: "ReadProcessOutput missing read scope", method: "/model_plane.v1.SandboxManager/ReadProcessOutput", authorization: "Bearer " + token(t, key, Audience, "org-a", "service:execution-core", "service", ScopeWrite), want: codes.PermissionDenied},
+		{name: "GetLeaseStatus valid service with read scope", method: "/model_plane.v1.SandboxManager/GetLeaseStatus", authorization: "Bearer " + token(t, key, Audience, "org-a", "service:execution-core", "service", ScopeRead), want: codes.OK},
+		{name: "GetLeaseStatus missing read scope", method: "/model_plane.v1.SandboxManager/GetLeaseStatus", authorization: "Bearer " + token(t, key, Audience, "org-a", "service:execution-core", "service", ScopeWrite), want: codes.PermissionDenied},
 		{name: "custom health is protected", method: "/model_plane.v1.SandboxManager/Health", want: codes.Unauthenticated},
 		{name: "standard health is public", method: "/grpc.health.v1.Health/Check", want: codes.OK},
 	}

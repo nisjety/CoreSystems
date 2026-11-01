@@ -343,6 +343,17 @@ export type ChatContextChangeEvent = {
   state?: string
   requestId?: string
 }
+/**
+ * The workspace state of a tool call's sandboxed files (`sandbox_state`, `steps` family, WS22-S6): where
+ * they were kept and whether they were. Closed tokens and an optional cause only; the gateway sends no path,
+ * file name or content. An unknown `state` or `cause` is passed through as-is, as the lifecycle notices are.
+ */
+export type ChatSandboxStateEvent = {
+  scope: string
+  state: string
+  cause?: string
+  requestId?: string
+}
 export type ChatErrorEvent = {
   code: string
   message: string
@@ -875,6 +886,8 @@ export type ChatStreamHandlers = {
   onCompaction?: (event: ChatCompactionEvent) => void
   /** The context the model was given changed (`context_change`). Ungated. See `ChatContextChangeEvent`. */
   onContextChange?: (event: ChatContextChangeEvent) => void
+  /** The workspace state of a tool call's files (`sandbox_state`, `steps` family). See `ChatSandboxStateEvent`. */
+  onSandboxState?: (event: ChatSandboxStateEvent) => void
   /**
    * The run was PARKED (WS03 S8-A): it stopped on a typed, recoverable failure and stays open, so
    * it can be resumed later. Display only: read with `runParkedFrameOf`, and a frame whose reason
@@ -2188,6 +2201,15 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
           state: str(payload.state),
           requestId: str(payload.request_id),
         })
+      }
+      break
+    }
+    case 'sandbox_state': {
+      // A frame that names neither the workspace nor its state cannot say where the files went, so it is not reported.
+      const scope = str(payload.scope)
+      const state = str(payload.state)
+      if (scope && state) {
+        handlers.onSandboxState?.({ scope, state, cause: str(payload.cause), requestId: str(payload.request_id) })
       }
       break
     }
