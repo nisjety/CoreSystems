@@ -474,6 +474,90 @@ async fn control_request(
     Ok(accepted_view(job, verb))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The production half of this file: everything before the test module.
+    fn production_source() -> &'static str {
+        let source = include_str!("job_lifecycle_routes.rs");
+        let cut = source.find("#[cfg(test)]").expect("test module marker");
+        &source[..cut]
+    }
+
+    /// Every string literal that starts with `/v1/` in the production half.
+    fn control_paths() -> Vec<String> {
+        let mut found = Vec::new();
+        for part in production_source().split('"') {
+            if part.starts_with("/v1/") {
+                found.push(part.to_string());
+            }
+        }
+        found
+    }
+
+    /// D2-050: the edge signs its calls to control with the edge secret, and control
+    /// verifies `/v1/internal/jobs/*` and `/v1/internal/schedules/*` with a different one,
+    /// held by the orchestrator only. So no lifecycle call may target those prefixes:
+    /// the edge has no business there, and a call that did would be refused with a 401
+    /// that the edge maps to 403.
+    #[test]
+    fn lifecycle_calls_stay_out_of_the_orchestrator_only_group() {
+        let paths = control_paths();
+        assert!(
+            paths.len() >= 4,
+            "the scan found only {} control paths: {paths:?}",
+            paths.len()
+        );
+        for path in &paths {
+            assert!(
+                !path.starts_with("/v1/internal/jobs/") && !path.starts_with("/v1/internal/schedules/"),
+                "lifecycle call to an orchestrator-only control route: {path}"
+            );
+        }
+    }
+
+    /// The paths the lifecycle routes do call: org-scoped job resources, which control
+    /// verifies with the edge secret.
+    #[test]
+    fn lifecycle_calls_use_the_org_scoped_job_resources() {
+        let paths = control_paths();
+        for expected in [
+            "/v1/jobs/{id}/summary",
+            "/v1/jobs/{id}/errors",
+            "/v1/jobs/ongoing",
+            "/v1/jobs/{id}/control",
+        ] {
+            assert!(
+                paths.iter().any(|path| path == expected),
+                "expected a call to {expected}; found {paths:?}"
+            );
+        }
+    }
+
+    /// A control refusal (the wrong secret answers 401, a role problem 403) reaches the
+    /// caller as 403 Forbidden, never as the caller's own 401 and never with control's body.
+    #[test]
+    fn a_control_auth_refusal_is_a_forbidden_not_a_401() {
+        for status in [reqwest::StatusCode::UNAUTHORIZED, reqwest::StatusCode::FORBIDDEN] {
+            let err = control_client::map_status(status);
+            assert_eq!(err.code, ErrorCode::Forbidden, "status {status}");
+            assert_eq!(err.message, "control refused the request");
+        }
+    }
+
+    /// The terminal statuses control can report, and only those, mark a status document terminal.
+    #[test]
+    fn terminal_statuses_are_the_five_the_wire_names() {
+        for status in ["completed", "failed", "cancelled", "timed_out", "skipped"] {
+            assert!(is_terminal(status), "{status}");
+        }
+        for status in ["accepted", "running", "paused"] {
+            assert!(!is_terminal(status), "{status}");
+        }
+    }
+}
+
 /// Renders a control request: 202 while the orchestrator has yet to apply it, 200
 /// once the job's state already reflects it.
 async fn control_verb(
