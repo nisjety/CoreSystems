@@ -57,6 +57,8 @@ Rust tests: `cargo test -p mp-events` 54 passed (28 lib incl. the 4 new envelope
 
 Commits (local only):
 - WS10.S5: `d1d63a324`. NOTE: that commit swept in lane B's three uncommitted `MODEL_GATEWAY_AI_CHAT_METERING` / `MODEL_GATEWAY_SERVICE_RPM` / `MODEL_GATEWAY_BROWSER_PLANNER_QUOTAS` compose lines in `apps/Model Plane/deploy/docker-compose.yml` (I added the whole file; the file had foreign hunks). Content is lane B's own, unchanged; their later commit will see it already present.
-- WS10.S2: see the sha in the final report.
+- WS10.S2: `65aae102b` (includes lane B's two `contract-goldens.yml` path-filter lines, per the lead; MP-ASKS.md and http_routes.rs were committed hunk-wise so lane B's other hunks stayed out).
+
+Session-core test: `cargo test -p session-core --bin session-core event_type_to_i32_knows_the_trace_types` 1 passed.
 
 Left (not started): WS10.S6 (migration number >= 0074 after checking `model-plane` and `space` branches, `trace_nats.rs`, `eventlog_grpc.rs`, GDPR purge, sweeper, `SESSION_CORE_TRACE_CONSUMER`, the provisioner registry row + `session-core-trace` needle test), WS10.S9 MP half. Contract for the model-gateway route (lane B's crate) when S6 lands: `GET /v1/runs/:run_id/trace?cursor=&limit=&types=` through `authenticated_session_request`; `limit` clamped 1..500; calls `EventLog.QueryEvents` with `filter{org_id, run_id, event_types}`, `cursor.value`, `limit`, `reverse=false`; response `{ data: { events: [Event JSON...] }, meta: { next_cursor, has_more } }`; gRPC NOT_FOUND / PERMISSION_DENIED -> 404 (owner only, others see 404), UNIMPLEMENTED -> 501 `trace_unavailable`; `types` is a comma list of EventType names without the `EVENT_TYPE_` prefix.
