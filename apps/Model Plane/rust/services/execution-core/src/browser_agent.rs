@@ -1293,6 +1293,26 @@ impl PlanStore {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_canonicaliser_meets_the_browser_domain_golden() {
+        let golden: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/browser-domain-canonical.json"
+        ))
+        .expect("the golden is JSON");
+        for vector in golden["vectors"].as_array().expect("vectors") {
+            let input: Vec<String> =
+                serde_json::from_value(vector["input"].clone()).expect("input");
+            let expected: Option<Vec<String>> = (vector["expect"] == "accept")
+                .then(|| serde_json::from_value(vector["output"].clone()).expect("output"));
+            assert_eq!(
+                super::canonicalize_allowed_domains(&input).ok(),
+                expected,
+                "{}",
+                vector["id"]
+            );
+        }
+    }
+
     use super::*;
 
     fn test_config() -> PlanConfig {

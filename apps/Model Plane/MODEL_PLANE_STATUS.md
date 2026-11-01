@@ -255,6 +255,10 @@ The attention state, the rail and badge, the typed RUN_ATTENTION events, the not
 
 WS14-S2 binds the thread grant to the execute run behind MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE (off); its behaviour tests and ZDR goldens are still missing. WS19-S5 shows a PDF preview of generated Office files only when CODE_INTERPRETER_OFFICE_VERIFY=render. WS21-S5b offers browser.act behind EXECUTION_DO_BROWSER_ACT_ENABLED (off) and must stay off until Quarry's K3-6 read_only test passes; site consent is not built.
 
+## Browser ZDR contract, WS21-S10 (2026-11-01): source-verified, switches off
+
+execution-core/tests/browser_do_contract.rs (11 tests) passes on 2026-11-01 in the epic-shaw worktree. It pins the Do browser tools' names, offer and dispatch, their capability ids and seeded class rows, the fields the model is shown, the zero-retention refusal, and a golden over every enforcement row of the vendored ZDR matrix. The matrix's Do browser row is e_browser_do_tools_refused_under_zdr; no bearer or login row exists. execution-core's domain canonicaliser now runs against browser-domain-canonical.json. Not live-verified: no rebuilt stack, no browser flow and no switch flip. The ZDR sync gate fails the same four checks it failed before this slice.
+
 ## Do browser and generated-file checks (2026-10-31): source-verified, switches off
 
 WS21-S5a's Do-loop browser.open, browser.observe and browser.close are built behind EXECUTION_DO_BROWSER_ENABLED (off). No live proof: the broker refuses read-only grants outside ZDR, so a non-ZDR open fails closed until that policy is decided, and Quarry's grant issuance is on quarryv2. WS19-S3's check chip shows only when CODE_INTERPRETER_OFFICE_VERIFY runs; CODE_INTERPRETER_VERIFY_ENFORCE stays off until the false-failure corpus run.

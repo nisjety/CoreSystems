@@ -151,6 +151,7 @@ export type ChatEventPayloads = {
   /** Rust variants: SourceScopeApplied. */
   source_scope_applied: {
     excluded_tools: unknown[]
+    knowledge?: Record<string, unknown>
     scope: string
   }
   /** Rust variants: StepUpdate. */

@@ -707,6 +707,12 @@
           ],
           "presence": "always"
         },
+        "knowledge": {
+          "types": [
+            "object"
+          ],
+          "presence": "optional"
+        },
         "scope": {
           "types": [
             "string"

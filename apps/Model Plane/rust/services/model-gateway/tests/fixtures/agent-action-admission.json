@@ -1699,6 +1699,32 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "org.create_hook",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:23370bf01586247899f053c87715d6404620790485559a75a2016a4684c671bc",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "org.delete_hook",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:c95b451ce446a613a1bb13e277c87d60fbe51d2cf082acadf73f17a837ec3cf0",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "org.mark_exported",
       "registry": true,
       "access": "none",
@@ -1712,6 +1738,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "org.preview_effective_policy",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "ui_state_only",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:ac479b7ad9ac94f9eb8210b9f0c8d0cf80b8571afc37665f133ef18355f72bc4",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "org.restore",
       "registry": true,
       "access": "none",
@@ -1722,6 +1761,19 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:29518bfb38df38086fca65ccc94c9734ab0ec7c1e6b2c8158d73f745e30002fd",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "org.set_agent_policy",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:1de7ed5ef3e29194290e829702a04723a0033e6e13e4f53a907262ac27240115",
       "zdr_allowed": false
     },
     {
@@ -1774,6 +1826,19 @@
       "executor": {},
       "hashBasis": "catalog_entry",
       "schemaHash": "sha256:e988ab20df349f9d3f2160f8ff6c703b5baaa0cfa7af3b370c1177bd5acef858",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "org.update_hook",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "human_identity_or_security",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:8ccb7a04ca8bd450120bffdc270f55c9a4970deb95d6a10093c8d7f6391ad38d",
       "zdr_allowed": false
     },
     {

@@ -382,6 +382,10 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     no: 'Denne handlingen for planlagte kjøringer er ikke slått på her ennå.',
     en: 'This action for scheduled runs is not turned on here yet.',
   },
+  zdr_durable_mutation_forbidden: {
+    no: 'Legitimasjon med Zero Data Retention kan ikke opprette, endre eller slette varig data.',
+    en: 'Zero Data Retention credentials cannot create, change, or delete durable state.',
+  },
   zdr_persistent_profile_forbidden: {
     no: 'Denne organisasjonen lagrer ikke data, så nettleseren kan ikke bruke en varig profil. Bruk en midlertidig profil.',
     en: 'This organization does not retain data, so the browser cannot use a persistent profile. Use a temporary profile.',

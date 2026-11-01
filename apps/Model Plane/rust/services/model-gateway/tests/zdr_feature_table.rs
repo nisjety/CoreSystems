@@ -488,3 +488,20 @@ fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
         .map_or(source.len(), |offset| start + offset);
     &source[start..end]
 }
+
+/// The knowledge receipt (WS18-S3) is built on the ordinary path only: the persistence-free ZDR branch
+/// returns before any Space knowledge is read, so a ZDR turn cannot carry a receipt.
+#[test]
+fn the_knowledge_receipt_is_built_after_the_zdr_branch_returns() {
+    let sse = include_str!("../src/sse.rs");
+    let zdr_return = sse
+        .find("return zdr_direct_stream(")
+        .expect("the ZDR branch returns its direct stream");
+    let receipt = sse
+        .find("knowledge_receipt::knowledge_receipt(")
+        .expect("the ordinary path builds the receipt");
+    assert!(
+        zdr_return < receipt,
+        "the knowledge receipt must not be built before the ZDR branch returns"
+    );
+}
