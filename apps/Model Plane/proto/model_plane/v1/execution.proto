@@ -319,6 +319,13 @@ message AgentResume {
   // consume itself (the retained approval descriptor is the only source of the
   // approved call), so nothing the client supplies names what the segment runs.
   reserved 9;
+  // The `resume` question a continuation answers (build plan WS14 S5): its `q_` id. Set only
+  // together with `answer_json`, and only by the `/continue` of a run paused for that question;
+  // an approval continuation leaves both empty.
+  string question_id = 10;
+  // The owner's answer to `question_id`, as the `user_question` answer JSON. It is data, never an
+  // instruction and never a grant, and the shared contract bounds it.
+  string answer_json = 11;
 }
 
 // RunContext - what the gateway hands an agent run beyond its goal.
