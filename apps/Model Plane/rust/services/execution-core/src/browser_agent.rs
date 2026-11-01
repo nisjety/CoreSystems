@@ -861,13 +861,16 @@ pub async fn run_browser_agent_loop(
     // through so an AI run launched from a tab with a persistent profile
     // inherits its cookie state (Phase 2); `None` behaves exactly as before.
     let run = match client
-        .start_run(
-            &plan.config.org_id,
-            &constraints,
-            zdr,
-            plan.config.profile_id.clone(),
-            &plan.config.grant_id,
-        )
+        .start_run({
+            let mut params = crate::quarry_agent::StartRunParams::new(
+                &plan.config.org_id,
+                &constraints,
+                zdr,
+                &plan.config.grant_id,
+            );
+            params.profile_id = plan.config.profile_id.clone();
+            params
+        })
         .await
     {
         Ok(r) => r,
@@ -913,7 +916,7 @@ pub async fn run_browser_agent_loop(
                 }
                 let wire_action = crate::quarry_agent::action_to_wire(&action);
                 match client
-                    .step(
+                    .step(crate::quarry_agent::StepParams::new(
                         &run.run_id,
                         &run.lease_id,
                         &plan.config.org_id,
@@ -921,7 +924,7 @@ pub async fn run_browser_agent_loop(
                         &constraints,
                         zdr,
                         &plan.config.grant_id,
-                    )
+                    ))
                     .await
                 {
                     Ok(wire_obs) => {

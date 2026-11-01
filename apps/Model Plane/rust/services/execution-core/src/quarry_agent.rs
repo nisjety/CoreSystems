@@ -190,6 +190,57 @@ pub struct StartRunRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile_id: Option<String>,
     pub zdr: bool,
+    /// Tighten-only request ask (Quarry `RequestAsk`). Absent unless set, so an
+    /// older Quarry never sees the key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy: Option<WireRequestAsk>,
+    /// Run trace context (Quarry run trace body). Absent unless set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace: Option<WireRunTrace>,
+}
+
+/// The subset of Quarry's `RequestAsk` a model-driven run may send. Only these
+/// three keys exist here on purpose: `robots_max` and `proxy_max` must never be
+/// set by a model-driven run, and Quarry's schema is `deny_unknown_fields`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireRequestAsk {
+    /// Capabilities to disable for this run (e.g. `browser.act.upload`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disable: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny_domains: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_domains: Option<Vec<String>>,
+}
+
+impl WireRequestAsk {
+    /// True when the ask says nothing, so the caller can send no `policy` key.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.disable.is_empty() && self.deny_domains.is_empty() && self.allow_domains.is_none()
+    }
+}
+
+/// Run trace context sent on `POST /v1/agent/runs` (`{run_id?, agent?, origin?}`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireRunTrace {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<WireRunAgent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+}
+
+/// The agent identity inside [`WireRunTrace`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireRunAgent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
 }
 
 /// `POST /v1/agent/runs` response payload (inside the envelope `data`).
@@ -213,6 +264,10 @@ pub struct StepRequest {
     pub instruction: Option<String>,
     pub constraints: AgentConstraints,
     pub zdr: bool,
+    /// Who initiated the action (`"agent"` for a delegated attach step).
+    /// Absent unless set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initiated_by: Option<String>,
 }
 
 /// Observation returned by a step. Mirrors quarry-core `BrowserObservation`.
@@ -626,6 +681,251 @@ pub enum AgentClientError {
     Decode(String),
     #[error("quarry agent authentication failed: {0}")]
     Authentication(String),
+    /// A non-2xx answer whose body is a Quarry error envelope. Callers read
+    /// `code` / `reason` / `details`; [`classify_quarry_error`] says what the
+    /// loop should do with it. A body that is not an envelope stays `Status`.
+    #[error("quarry agent returned {}: {} ({})", .0.status, .0.code, .0.message)]
+    Typed(TypedError),
+}
+
+/// A parsed Quarry error envelope (`{ error: { code, message, details } }`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedError {
+    pub status: u16,
+    /// `error.code`, e.g. `BUDGET_EXHAUSTED`, `FORBIDDEN`, `USER_TOOK_OVER`.
+    pub code: String,
+    /// `error.message`. Operator text; never shown to the planner.
+    pub message: String,
+    /// `error.details.reason`, or (attach refusals, which carry the reason in
+    /// `message`) the message when it is a bare lowercase token.
+    pub reason: Option<String>,
+    /// `error.details`, `Null` when absent.
+    pub details: serde_json::Value,
+    /// `error.details.retry_after_seconds` on a 429.
+    pub retry_after_seconds: Option<u64>,
+}
+
+/// A reason token: lowercase letters, digits, `_` and `.`, 1 to 48 chars.
+fn is_reason_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 48
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'.')
+}
+
+/// Read a non-2xx Quarry body as a typed error. `None` when the body is not an
+/// envelope with a string `error.code` (plain text, an array, a bare string).
+#[must_use]
+pub fn parse_typed_error(status: u16, body: &str) -> Option<TypedError> {
+    let envelope: serde_json::Value = serde_json::from_str(body).ok()?;
+    let error = envelope.get("error")?;
+    let code = error.get("code")?.as_str()?.to_owned();
+    let message = error
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let details = error
+        .get("details")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let reason = details
+        .get("reason")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| is_reason_token(&message).then(|| message.clone()));
+    let retry_after_seconds = details
+        .get("retry_after_seconds")
+        .and_then(serde_json::Value::as_u64);
+    Some(TypedError {
+        status,
+        code,
+        message,
+        reason,
+        details,
+        retry_after_seconds,
+    })
+}
+
+/// The Quarry code for an exhausted agent-run budget (402).
+pub const BUDGET_EXHAUSTED_CODE: &str = "BUDGET_EXHAUSTED";
+
+/// Which Quarry run budget ran out (`error.details.dimension` of a 402).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetDimension {
+    Steps,
+    Attempts,
+    Runtime,
+    Cost,
+    OrgAllowance,
+    /// A dimension this build does not know.
+    Other,
+}
+
+impl BudgetDimension {
+    #[must_use]
+    pub fn from_wire(value: &str) -> Self {
+        match value {
+            "steps" => Self::Steps,
+            "attempts" => Self::Attempts,
+            "runtime" => Self::Runtime,
+            "cost" => Self::Cost,
+            "org_allowance" => Self::OrgAllowance,
+            _ => Self::Other,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Steps => "steps",
+            Self::Attempts => "attempts",
+            Self::Runtime => "runtime",
+            Self::Cost => "cost",
+            Self::OrgAllowance => "org_allowance",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// What the loop should do with a failed Quarry call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepFailureClass {
+    /// The planner can try something else (stale target, one slow action).
+    Recoverable,
+    /// The run cannot continue; it ends `Failed`.
+    Terminal,
+    /// A budget or backpressure stopped the run; it ends `resource_exhausted`,
+    /// never `Failed`, and is never retried.
+    ResourceLimit,
+}
+
+/// The budget dimension of a 402 `BUDGET_EXHAUSTED` answer, `None` for every
+/// other error. A 402 whose dimension is missing or unknown reads as `Other`.
+#[must_use]
+pub fn quarry_budget_dimension(error: &AgentClientError) -> Option<BudgetDimension> {
+    let AgentClientError::Typed(typed) = error else {
+        return None;
+    };
+    if typed.status != 402 || typed.code != BUDGET_EXHAUSTED_CODE {
+        return None;
+    }
+    Some(
+        typed
+            .details
+            .get("dimension")
+            .and_then(serde_json::Value::as_str)
+            .map_or(BudgetDimension::Other, BudgetDimension::from_wire),
+    )
+}
+
+/// True for a 429 (Quarry or an upstream is shedding load).
+#[must_use]
+pub fn is_quarry_backpressure(error: &AgentClientError) -> bool {
+    match error {
+        AgentClientError::Typed(typed) => typed.status == 429,
+        AgentClientError::Status { status, .. } => *status == 429,
+        _ => false,
+    }
+}
+
+/// Classify a failed Quarry call. A 402 `BUDGET_EXHAUSTED` and any 429 are
+/// resource limits; everything else is terminal until a slice adds a
+/// recoverable arm (WS11.S3).
+#[must_use]
+pub fn classify_quarry_error(error: &AgentClientError) -> StepFailureClass {
+    if quarry_budget_dimension(error).is_some() || is_quarry_backpressure(error) {
+        StepFailureClass::ResourceLimit
+    } else {
+        StepFailureClass::Terminal
+    }
+}
+
+/// Header carrying the caller's correlation id on start/step/close.
+const REQUEST_ID_HEADER: &str = "x-request-id";
+
+fn with_request_id(
+    builder: reqwest::RequestBuilder,
+    request_id: Option<&str>,
+) -> reqwest::RequestBuilder {
+    match request_id.map(str::trim).filter(|id| !id.is_empty()) {
+        Some(id) => builder.header(REQUEST_ID_HEADER, id),
+        None => builder,
+    }
+}
+
+/// Parameters of [`QuarryAgentClient::start_run`].
+#[derive(Debug, Clone)]
+pub struct StartRunParams<'a> {
+    pub org_id: &'a str,
+    pub constraints: &'a AgentConstraints,
+    pub zdr: bool,
+    pub profile_id: Option<String>,
+    pub grant_id: &'a str,
+    pub policy: Option<WireRequestAsk>,
+    pub trace: Option<WireRunTrace>,
+    pub request_id: Option<&'a str>,
+}
+
+impl<'a> StartRunParams<'a> {
+    #[must_use]
+    pub fn new(
+        org_id: &'a str,
+        constraints: &'a AgentConstraints,
+        zdr: bool,
+        grant_id: &'a str,
+    ) -> Self {
+        Self {
+            org_id,
+            constraints,
+            zdr,
+            profile_id: None,
+            grant_id,
+            policy: None,
+            trace: None,
+            request_id: None,
+        }
+    }
+}
+
+/// Parameters of [`QuarryAgentClient::step`].
+#[derive(Debug, Clone)]
+pub struct StepParams<'a> {
+    pub run_id: &'a str,
+    pub lease_id: &'a str,
+    pub org_id: &'a str,
+    pub action: AgentAction,
+    pub constraints: &'a AgentConstraints,
+    pub zdr: bool,
+    pub grant_id: &'a str,
+    pub initiated_by: Option<String>,
+    pub request_id: Option<&'a str>,
+}
+
+impl<'a> StepParams<'a> {
+    #[must_use]
+    pub fn new(
+        run_id: &'a str,
+        lease_id: &'a str,
+        org_id: &'a str,
+        action: AgentAction,
+        constraints: &'a AgentConstraints,
+        zdr: bool,
+        grant_id: &'a str,
+    ) -> Self {
+        Self {
+            run_id,
+            lease_id,
+            org_id,
+            action,
+            constraints,
+            zdr,
+            grant_id,
+            initiated_by: None,
+            request_id: None,
+        }
+    }
 }
 
 /// HTTP client for Quarry's agent-browser endpoint. Mirrors the auth scheme of
@@ -712,31 +1012,32 @@ impl QuarryAgentClient {
     /// the `run_id` + `lease_id` used by subsequent steps.
     pub async fn start_run(
         &self,
-        org_id: &str,
-        constraints: &AgentConstraints,
-        zdr: bool,
-        profile_id: Option<String>,
-        grant_id: &str,
+        params: StartRunParams<'_>,
     ) -> Result<StartRunResponse, AgentClientError> {
+        let org_id = params.org_id;
         let body = StartRunRequest {
             org_id: org_id.to_owned(),
-            grant_id: grant_id.to_owned(),
-            constraints: constraints.clone(),
-            profile_id,
-            zdr,
+            grant_id: params.grant_id.to_owned(),
+            constraints: params.constraints.clone(),
+            profile_id: params.profile_id,
+            zdr: params.zdr,
+            policy: params.policy,
+            trace: params.trace,
         };
         let mut retried_unauthorized = false;
         let resp = loop {
             let token = self.token(org_id).await?;
-            let resp = self
-                .http
-                .post(self.url("/v1/agent/runs"))
-                .bearer_auth(&token)
-                .header("x-quarry-org", org_id)
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| AgentClientError::Transport(e.to_string()))?;
+            let resp = with_request_id(
+                self.http
+                    .post(self.url("/v1/agent/runs"))
+                    .bearer_auth(&token)
+                    .header("x-quarry-org", org_id),
+                params.request_id,
+            )
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| AgentClientError::Transport(e.to_string()))?;
             if resp.status() == reqwest::StatusCode::UNAUTHORIZED && !retried_unauthorized {
                 self.invalidate_if_matches(org_id, &token).await?;
                 retried_unauthorized = true;
@@ -748,38 +1049,34 @@ impl QuarryAgentClient {
     }
 
     /// Execute one action against an existing run; returns the observation.
-    pub async fn step(
-        &self,
-        run_id: &str,
-        lease_id: &str,
-        org_id: &str,
-        action: AgentAction,
-        constraints: &AgentConstraints,
-        zdr: bool,
-        grant_id: &str,
-    ) -> Result<WireObservation, AgentClientError> {
+    pub async fn step(&self, params: StepParams<'_>) -> Result<WireObservation, AgentClientError> {
+        let org_id = params.org_id;
+        let run_id = params.run_id;
         let body = StepRequest {
             run_id: run_id.to_owned(),
-            lease_id: lease_id.to_owned(),
-            grant_id: grant_id.to_owned(),
-            action,
+            lease_id: params.lease_id.to_owned(),
+            grant_id: params.grant_id.to_owned(),
+            action: params.action,
             instruction: None,
-            constraints: constraints.clone(),
-            zdr,
+            constraints: params.constraints.clone(),
+            zdr: params.zdr,
+            initiated_by: params.initiated_by,
         };
         let endpoint = self.url(&format!("/v1/agent/runs/{run_id}/step"));
         let mut retried_unauthorized = false;
         let resp = loop {
             let token = self.token(org_id).await?;
-            let resp = self
-                .http
-                .post(&endpoint)
-                .bearer_auth(&token)
-                .header("x-quarry-org", org_id)
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| AgentClientError::Transport(e.to_string()))?;
+            let resp = with_request_id(
+                self.http
+                    .post(&endpoint)
+                    .bearer_auth(&token)
+                    .header("x-quarry-org", org_id),
+                params.request_id,
+            )
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| AgentClientError::Transport(e.to_string()))?;
             if resp.status() == reqwest::StatusCode::UNAUTHORIZED && !retried_unauthorized {
                 self.invalidate_if_matches(org_id, &token).await?;
                 retried_unauthorized = true;
@@ -800,18 +1097,30 @@ impl QuarryAgentClient {
 
     /// Release a run and its browser lease. Best-effort; non-2xx is surfaced.
     pub async fn close_run(&self, run_id: &str, org_id: &str) -> Result<(), AgentClientError> {
+        self.close_run_with(run_id, org_id, None).await
+    }
+
+    /// [`Self::close_run`] carrying an `x-request-id` correlation header.
+    pub async fn close_run_with(
+        &self,
+        run_id: &str,
+        org_id: &str,
+        request_id: Option<&str>,
+    ) -> Result<(), AgentClientError> {
         let endpoint = self.url(&format!("/v1/agent/runs/{run_id}"));
         let mut retried_unauthorized = false;
         let resp = loop {
             let token = self.token(org_id).await?;
-            let resp = self
-                .http
-                .delete(&endpoint)
-                .bearer_auth(&token)
-                .header("x-quarry-org", org_id)
-                .send()
-                .await
-                .map_err(|e| AgentClientError::Transport(e.to_string()))?;
+            let resp = with_request_id(
+                self.http
+                    .delete(&endpoint)
+                    .bearer_auth(&token)
+                    .header("x-quarry-org", org_id),
+                request_id,
+            )
+            .send()
+            .await
+            .map_err(|e| AgentClientError::Transport(e.to_string()))?;
             if resp.status() == reqwest::StatusCode::UNAUTHORIZED && !retried_unauthorized {
                 self.invalidate_if_matches(org_id, &token).await?;
                 retried_unauthorized = true;
@@ -824,10 +1133,16 @@ impl QuarryAgentClient {
             Ok(())
         } else {
             let body = resp.text().await.unwrap_or_default();
-            Err(AgentClientError::Status {
-                status: status.as_u16(),
-                body,
-            })
+            Err(Self::refusal(status.as_u16(), body))
+        }
+    }
+
+    /// A non-2xx answer: typed when the body is a Quarry error envelope,
+    /// otherwise the raw status and body.
+    fn refusal(status: u16, body: String) -> AgentClientError {
+        match parse_typed_error(status, &body) {
+            Some(typed) => AgentClientError::Typed(typed),
+            None => AgentClientError::Status { status, body },
         }
     }
 
@@ -848,10 +1163,7 @@ impl QuarryAgentClient {
         text: &str,
     ) -> Result<T, AgentClientError> {
         if !status.is_success() {
-            return Err(AgentClientError::Status {
-                status: status.as_u16(),
-                body: text.to_owned(),
-            });
+            return Err(Self::refusal(status.as_u16(), text.to_owned()));
         }
         let env: WireEnvelope<T> =
             serde_json::from_str(text).map_err(|e| AgentClientError::Decode(e.to_string()))?;
@@ -1109,7 +1421,7 @@ mod tests {
             .await;
         let client = QuarryAgentClient::new(server.uri(), "tok").unwrap();
         client
-            .step(
+            .step(StepParams::new(
                 "run_abc",
                 "lease_xyz",
                 "org_1",
@@ -1117,7 +1429,7 @@ mod tests {
                 &AgentConstraints::default(),
                 false,
                 "grant_broker_validated",
-            )
+            ))
             .await
             .expect_err("a refusal is an error from step")
     }
@@ -1180,7 +1492,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn other_403s_and_other_statuses_stay_status_errors() {
+    async fn other_403s_and_other_statuses_are_typed_errors_not_challenges() {
         for (status, code) in [
             (403, "FORBIDDEN"),
             (403, "SECURITY_BLOCKED"),
@@ -1192,7 +1504,7 @@ mod tests {
             body["error"]["code"] = serde_json::json!(code);
             let err = step_against(status, body).await;
             assert!(
-                matches!(&err, AgentClientError::Status { status: s, .. } if *s == status),
+                matches!(&err, AgentClientError::Typed(t) if t.status == status && t.code == code),
                 "{status} {code}: {err:?}"
             );
         }
@@ -1218,7 +1530,7 @@ mod tests {
             .await;
         let client = QuarryAgentClient::new(server.uri(), "tok").unwrap();
         let wire = client
-            .step(
+            .step(StepParams::new(
                 "run_abc",
                 "lease_xyz",
                 "org_1",
@@ -1226,7 +1538,7 @@ mod tests {
                 &AgentConstraints::default(),
                 false,
                 "grant_broker_validated",
-            )
+            ))
             .await
             .unwrap();
         let obs = observation_from_wire(&wire, "a", "g");
@@ -1280,13 +1592,12 @@ mod tests {
 
         let client = QuarryAgentClient::new(server.uri(), "tok").unwrap();
         let resp = client
-            .start_run(
+            .start_run(StartRunParams::new(
                 "org_1",
                 &AgentConstraints::default(),
                 false,
-                None,
                 "grant_broker_validated",
-            )
+            ))
             .await
             .unwrap();
         assert_eq!(resp.run_id, "run_abc");
@@ -1323,7 +1634,7 @@ mod tests {
 
         let client = QuarryAgentClient::new(server.uri(), "tok").unwrap();
         let obs = client
-            .step(
+            .step(StepParams::new(
                 "run_abc",
                 "lease_xyz",
                 "org_1",
@@ -1331,13 +1642,226 @@ mod tests {
                 &AgentConstraints::default(),
                 false,
                 "grant_broker_validated",
-            )
+            ))
             .await
             .unwrap();
         assert_eq!(obs.url, "https://example.com");
         assert_eq!(obs.title.as_deref(), Some("Example"));
         let mapped = observation_from_wire(&obs, "act_1", "grant_1");
         assert_eq!(mapped.extracted_text, "hi");
+    }
+
+    fn envelope_body(code: &str, message: &str, details: serde_json::Value) -> String {
+        serde_json::json!({
+            "data": null,
+            "meta": {"request_id": "req_1"},
+            "error": {"code": code, "message": message, "retryable": false, "details": details}
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn typed_error_reads_code_message_and_details_reason() {
+        let body = envelope_body(
+            "FORBIDDEN",
+            "navigation denied",
+            serde_json::json!({"reason": "policy_denied", "capability": "browser.act.upload"}),
+        );
+        let typed = parse_typed_error(403, &body).expect("an envelope");
+        assert_eq!(typed.status, 403);
+        assert_eq!(typed.code, "FORBIDDEN");
+        assert_eq!(typed.message, "navigation denied");
+        assert_eq!(typed.reason.as_deref(), Some("policy_denied"));
+        assert_eq!(typed.details["capability"], "browser.act.upload");
+    }
+
+    #[test]
+    fn typed_error_attach_exists_reason_comes_from_message() {
+        // Attach refusals carry the reason in `message`, with no details.reason.
+        let body = envelope_body("CONFLICT", "attach_exists", serde_json::Value::Null);
+        let typed = parse_typed_error(409, &body).expect("an envelope");
+        assert_eq!(typed.reason.as_deref(), Some("attach_exists"));
+        // Prose is not a reason.
+        let body = envelope_body("CONFLICT", "An attach already exists for this tab", serde_json::Value::Null);
+        assert_eq!(parse_typed_error(409, &body).unwrap().reason, None);
+        // details.reason wins over the message.
+        let body = envelope_body("CONFLICT", "attach_exists", serde_json::json!({"reason": "other_reason"}));
+        assert_eq!(
+            parse_typed_error(409, &body).unwrap().reason.as_deref(),
+            Some("other_reason")
+        );
+    }
+
+    #[test]
+    fn parse_typed_error_reads_code_reason_and_retry_after() {
+        let body = envelope_body(
+            "RATE_LIMITED",
+            "slow down",
+            serde_json::json!({"reason": "attach_steps", "retry_after_seconds": 7}),
+        );
+        let typed = parse_typed_error(429, &body).unwrap();
+        assert_eq!(typed.reason.as_deref(), Some("attach_steps"));
+        assert_eq!(typed.retry_after_seconds, Some(7));
+    }
+
+    #[test]
+    fn parse_typed_error_tolerates_a_non_envelope_body() {
+        for body in ["", "domain violation", "\"nope\"", "[1,2]", "{}", "{\"error\":null}", "{\"error\":{\"code\":5}}"] {
+            assert!(parse_typed_error(500, body).is_none(), "{body:?}");
+        }
+        // A code with no message or details still parses.
+        let typed = parse_typed_error(500, "{\"error\":{\"code\":\"INTERNAL\"}}").unwrap();
+        assert_eq!(typed.message, "");
+        assert_eq!(typed.reason, None);
+        assert!(typed.details.is_null());
+    }
+
+    #[test]
+    fn start_run_omits_policy_and_trace_when_none() {
+        let constraints = AgentConstraints::default();
+        let mut params = StartRunParams::new("org_1", &constraints, false, "g");
+        let body = StartRunRequest {
+            org_id: "org_1".into(),
+            grant_id: "g".into(),
+            constraints: constraints.clone(),
+            profile_id: None,
+            zdr: false,
+            policy: params.policy.take(),
+            trace: params.trace.take(),
+        };
+        let json = serde_json::to_value(&body).unwrap();
+        assert!(json.get("policy").is_none() && json.get("trace").is_none(), "{json}");
+
+        let body = StartRunRequest {
+            policy: Some(WireRequestAsk {
+                disable: vec!["browser.act.upload".into()],
+                deny_domains: vec![],
+                allow_domains: None,
+            }),
+            trace: Some(WireRunTrace {
+                run_id: Some("run_1".into()),
+                agent: Some(WireRunAgent {
+                    id: Some("a1".into()),
+                    role: None,
+                    parent_id: None,
+                }),
+                origin: None,
+            }),
+            ..body
+        };
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["policy"], serde_json::json!({"disable": ["browser.act.upload"]}));
+        assert_eq!(
+            json["trace"],
+            serde_json::json!({"run_id": "run_1", "agent": {"id": "a1"}})
+        );
+    }
+
+    #[test]
+    fn step_request_serialises_initiated_by_only_when_set() {
+        let mut body = StepRequest {
+            run_id: "r".into(),
+            lease_id: "l".into(),
+            grant_id: "g".into(),
+            action: AgentAction::GetContent,
+            instruction: None,
+            constraints: AgentConstraints::default(),
+            zdr: false,
+            initiated_by: None,
+        };
+        assert!(serde_json::to_value(&body).unwrap().get("initiated_by").is_none());
+        body.initiated_by = Some("agent".into());
+        assert_eq!(serde_json::to_value(&body).unwrap()["initiated_by"], "agent");
+    }
+
+    #[tokio::test]
+    async fn request_id_header_is_sent_when_present() {
+        let server = MockServer::start().await;
+        let ok = |data: serde_json::Value| {
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": data, "meta": {}, "error": null
+            }))
+        };
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/runs"))
+            .and(header("x-request-id", "req-abc"))
+            .respond_with(ok(serde_json::json!({"run_id": "run_abc", "lease_id": "lease_xyz"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/runs/run_abc/step"))
+            .and(header("x-request-id", "req-abc"))
+            .respond_with(ok(serde_json::json!({"run_id": "run_abc", "url": "https://example.com"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/agent/runs/run_abc"))
+            .and(header("x-request-id", "req-abc"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = QuarryAgentClient::new(server.uri(), "tok").unwrap();
+        let constraints = AgentConstraints::default();
+        let mut start = StartRunParams::new("org_1", &constraints, false, "g");
+        start.request_id = Some("req-abc");
+        client.start_run(start).await.unwrap();
+        let mut step = StepParams::new("run_abc", "lease_xyz", "org_1", AgentAction::GetContent, &constraints, false, "g");
+        step.request_id = Some("req-abc");
+        client.step(step).await.unwrap();
+        client.close_run_with("run_abc", "org_1", Some("req-abc")).await.unwrap();
+
+        // Absent id: no header is sent (a header matcher on the other side
+        // would not match, so assert on the received request instead).
+        let quiet = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/runs"))
+            .respond_with(ok(serde_json::json!({"run_id": "r", "lease_id": "l"})))
+            .mount(&quiet)
+            .await;
+        let client = QuarryAgentClient::new(quiet.uri(), "tok").unwrap();
+        client
+            .start_run(StartRunParams::new("org_1", &constraints, false, "g"))
+            .await
+            .unwrap();
+        let received = quiet.received_requests().await.unwrap();
+        assert!(received[0].headers.get("x-request-id").is_none());
+    }
+
+    fn typed(status: u16, code: &str, details: serde_json::Value) -> AgentClientError {
+        AgentClientError::Typed(parse_typed_error(status, &envelope_body(code, "m", details)).unwrap())
+    }
+
+    #[test]
+    fn classify_maps_402_budget_and_429_to_resource_limit() {
+        let budget = typed(402, "BUDGET_EXHAUSTED", serde_json::json!({"dimension": "cost", "limit": 5}));
+        assert_eq!(quarry_budget_dimension(&budget), Some(BudgetDimension::Cost));
+        assert_eq!(classify_quarry_error(&budget), StepFailureClass::ResourceLimit);
+
+        let unknown = typed(402, "BUDGET_EXHAUSTED", serde_json::json!({"dimension": "moon"}));
+        assert_eq!(quarry_budget_dimension(&unknown), Some(BudgetDimension::Other));
+        let bare = typed(402, "BUDGET_EXHAUSTED", serde_json::Value::Null);
+        assert_eq!(quarry_budget_dimension(&bare), Some(BudgetDimension::Other));
+
+        // 429 with and without an envelope is backpressure.
+        let rate = typed(429, "RATE_LIMITED", serde_json::json!({"retry_after_seconds": 3}));
+        assert_eq!(classify_quarry_error(&rate), StepFailureClass::ResourceLimit);
+        let raw = AgentClientError::Status { status: 429, body: "slow".into() };
+        assert_eq!(classify_quarry_error(&raw), StepFailureClass::ResourceLimit);
+
+        // Everything else is terminal here.
+        for err in [
+            typed(402, "PAYMENT_REQUIRED", serde_json::Value::Null),
+            typed(403, "FORBIDDEN", serde_json::Value::Null),
+            typed(500, "INTERNAL", serde_json::Value::Null),
+            AgentClientError::Status { status: 401, body: String::new() },
+            AgentClientError::Transport("boom".into()),
+        ] {
+            assert_eq!(classify_quarry_error(&err), StepFailureClass::Terminal, "{err:?}");
+            assert_eq!(quarry_budget_dimension(&err), None);
+        }
     }
 
     #[tokio::test]
@@ -1351,7 +1875,7 @@ mod tests {
 
         let client = QuarryAgentClient::new(server.uri(), "tok").unwrap();
         let err = client
-            .step(
+            .step(StepParams::new(
                 "run_abc",
                 "lease_xyz",
                 "org_1",
@@ -1361,7 +1885,7 @@ mod tests {
                 &AgentConstraints::default(),
                 false,
                 "grant_broker_validated",
-            )
+            ))
             .await
             .unwrap_err();
         match err {
@@ -1382,7 +1906,7 @@ mod tests {
 
         let client = QuarryAgentClient::new(server.uri(), "expired").unwrap();
         let error = client
-            .step(
+            .step(StepParams::new(
                 "run_abc",
                 "lease_xyz",
                 "org_1",
@@ -1390,7 +1914,7 @@ mod tests {
                 &AgentConstraints::default(),
                 false,
                 "grant_broker_validated",
-            )
+            ))
             .await
             .expect_err("second 401 must be surfaced");
         assert!(matches!(

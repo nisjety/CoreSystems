@@ -330,7 +330,7 @@ pub(crate) async fn execute_quarry_browser_mcp(
         max_cost_usd: None,
     };
     match client
-        .step(
+        .step(crate::quarry_agent::StepParams::new(
             &request.quarry_run_id,
             &request.lease_id,
             verified_org_id,
@@ -338,7 +338,7 @@ pub(crate) async fn execute_quarry_browser_mcp(
             &constraints,
             verified_zdr,
             validated_grant.grant_id(),
-        )
+        ))
         .await
     {
         Ok(observation) => match serde_json::to_string(&observation) {
