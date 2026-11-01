@@ -1,0 +1,100 @@
+# Alert rules for the Quarry edge (Ingestion Plane), scraped by the `quarry-edge` job
+# in ../prometheus.yml (WS6.I / U48, R-13 PR 2). Evaluated here and shown in the
+# Prometheus UI; no Alertmanager or pager is wired yet (build plan WS01 decision D1),
+# so an alert is visible only to someone looking.
+#
+# The edge serves /metrics only when QUARRY_EDGE__METRICS_ENABLED=1 (compose
+# variable QUARRY_EDGE_METRICS_ENABLED, default 0 = the owner flip). With it off
+# the scrape target reads as down and none of the series below exist, so every
+# rule here is quiet: they are all built on series that are absent, not on
+# `up == 0` alone. The one rule that looks at `up` (QuarryEdgeMetricsDown) fires
+# only for a target that was UP at some point in the last 7 days, so a stack that
+# never turned metrics on does not alert forever.
+#
+# All series are content-free: every label is a closed set (matched route template,
+# status class, pool name, cache name, drain flag), never a URL, host, organization,
+# user or run id (crates/quarry-edge/src/metrics.rs, "Closed label sets").
+#
+# File name: `quarry.rules.yml` so the `rule_files` glob in prometheus.yml and the
+# promtool CI job (observability/rules/*.rules.yml) both pick it up.
+# Runbook: apps/Ingestion Plane/Quarry-v2/docs/RUNBOOKS.md, "Metrics" and "WS6.I series".
+groups:
+  - name: quarry-edge
+    rules:
+      - alert: QuarryEdgeMetricsDown
+        # The scrape target was up within the last 7 days and is down now. A token
+        # mismatch (401) also reads as down: re-mirror QUARRY_EDGE_METRICS_TOKEN.
+        expr: |
+          up{job="quarry-edge"} == 0
+          and
+          max_over_time(up{job="quarry-edge"}[7d]) == 1
+        for: 5m
+        labels: { severity: warning, plane: ingestion }
+        annotations:
+          summary: "the Quarry edge was reporting metrics and has stopped (down, or the scrape token no longer matches)"
+          runbook: "apps/Ingestion Plane/Quarry-v2/docs/RUNBOOKS.md#metrics"
+
+      - alert: QuarryEdgeServerErrorRatioHigh
+        # More than 5 percent of requests over 5 minutes are 5xx, for at least 10
+        # minutes, with enough traffic (over 0.1 request per second) for the ratio
+        # to mean something.
+        expr: |
+          sum(rate(quarry_http_requests_total{status_class="5xx"}[5m]))
+            / sum(rate(quarry_http_requests_total[5m])) > 0.05
+          and
+          sum(rate(quarry_http_requests_total[5m])) > 0.1
+        for: 10m
+        labels: { severity: warning, plane: ingestion }
+        annotations:
+          summary: "more than 5 percent of Quarry edge responses are 5xx"
+          runbook: "apps/Ingestion Plane/Quarry-v2/docs/RUNBOOKS.md#metrics"
+
+      - alert: QuarryEdgeLeasePoolRefusing
+        # The browser/search lease pool refused more than 10 acquisitions in 10
+        # minutes because it was full or a wait timed out. org_render_cap is excluded:
+        # it is a per-organization limit working as designed, not a capacity problem.
+        expr: |
+          sum by (pool) (increase(quarry_lease_pool_refused_total{reason!="org_render_cap"}[10m])) > 10
+        for: 5m
+        labels: { severity: warning, plane: ingestion }
+        annotations:
+          summary: "a Quarry lease pool is refusing work (full or wait timeouts)"
+          runbook: "apps/Ingestion Plane/Quarry-v2/docs/RUNBOOKS.md#ws6i-series-agent-runs-steps-budgets-caches-pool-refusals"
+
+      - alert: QuarryEdgeLeasePoolSaturated
+        # Every permit of a pool has been in flight for 15 minutes. A pool with no
+        # capacity gauge, or capacity 0, is not judged.
+        expr: |
+          max by (pool) (quarry_lease_pool_in_flight) / max by (pool) (quarry_lease_pool_capacity) >= 1
+          and
+          max by (pool) (quarry_lease_pool_capacity) > 0
+        for: 15m
+        labels: { severity: warning, plane: ingestion }
+        annotations:
+          summary: "a Quarry lease pool has been fully in use for 15 minutes"
+          runbook: "apps/Ingestion Plane/Quarry-v2/docs/RUNBOOKS.md#ws6i-series-agent-runs-steps-budgets-caches-pool-refusals"
+
+      - alert: QuarryEdgeStuckDraining
+        # SIGTERM starts the drain and it should end with the process. A drain flag
+        # still set after 15 minutes means a shutdown that did not finish.
+        expr: max(quarry_edge_draining) == 1
+        for: 15m
+        labels: { severity: warning, plane: ingestion }
+        annotations:
+          summary: "the Quarry edge has been draining for 15 minutes and has not exited"
+          runbook: "apps/Ingestion Plane/Quarry-v2/docs/RUNBOOKS.md#ws6i-series-agent-runs-steps-budgets-caches-pool-refusals"
+
+      - alert: QuarryEdgeCacheBackendErrors
+        # More than a fifth of a Redis cache's lookups failed (backend or decode
+        # error, served as a miss) over 10 minutes, for 15 minutes, with traffic
+        # over 0.05 lookups per second. Division by zero is NaN and does not fire.
+        expr: |
+          sum by (cache) (rate(quarry_cache_requests_total{outcome="error"}[10m]))
+            / sum by (cache) (rate(quarry_cache_requests_total[10m])) > 0.2
+          and
+          sum by (cache) (rate(quarry_cache_requests_total[10m])) > 0.05
+        for: 15m
+        labels: { severity: warning, plane: ingestion }
+        annotations:
+          summary: "a Quarry cache backend is failing more than 20 percent of lookups"
+          runbook: "apps/Ingestion Plane/Quarry-v2/docs/RUNBOOKS.md#ws6i-series-agent-runs-steps-budgets-caches-pool-refusals"
