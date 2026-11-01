@@ -2517,6 +2517,30 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-1138 | WS27-S7 | live-proof | P1 | Golden contract (after shared edit 1 compiles): give usage_progress_with_ceiling a sixth parameter `routing: Option<&'static str>` (pass None at line 3423 and at the ceiling sample near line 3600), add one routed sample `usage_progress_with_ceiling(2, Some(0.001), Some(crate::pricing::CostBasis::Metered), 0, None, Some("tier_shifted"))` to the sample list, then in apps/Model Plane/rust run `MP_UPDATE_GOLDEN=1 CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib payload_contract`. Confirm the golden diff adds only routing (optional string) to usage_progress. Then refresh apps/Model Plane/api/contracts/sse-event-payloads.json.sha256 and the pinned digest in the repo-level scripts/tests/zdr-contract-sync.test.sh, copy the golden to apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json, and run `node scripts/gen-chat-event-types.mjs` in apps/Frontend Plane/verevonv3. | closed: 9e48b2d8c (the routed golden sample) |
 | D2-1139 | WS27-S7 | follow-up | P3 | 18 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-44.json | open |
 
+
+### Wave-mode batch W2-45 (2026-11-01)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-1140 | WS14-S5 | risk | P1 | The execution-core grpc.rs park and segment validators do not refuse AgentResume.question_id or answer_json. Nothing reads the fields yet, but the validators must refuse them before any reader ships. | open |
+| D2-1141 | WS14-S5 | risk | P1 | consumed_at has no writer until ConsumeRunQuestion exists. The single-use guard needs a compare-and-set on run_id, org_id, user_id, delivery resume, state answered and consumed_at null, plus claim-hash replay as in ConsumeApproval. An answer CAS alone does not guard a launch retry. | open |
+| D2-1142 | WS14-S5 | test-gap | P1 | The two resume_question DB tests are written and registered as ignored, but not run. The lead runs them through the harness. | open |
+| D2-1143 | WS14-S5 | decision | P1 | Migration number: 0071 (batch) against 0063 (plan 4.4 and the inflight lock). 0063 is free in this tree. The lead must choose before merge. | open |
+| D2-1144 | WS14-S5 | follow-up | P1 | Plan 4.3 lists no ConsumeRunQuestion RPC, but the S5 row names a handler for one. Add it to the plan and the ledger when the proto lands. | open |
+| D2-1145 | WS14-S5 | decision | P1 | Migration number: plan section 4.4 reserves 0063 for WS14.S5 run_question_consume and 0063 is free in the tree, but the batch named 0071 and the file is 0071. The lead must decide before merge, and any rename must also cover the include_str! path in the terminalization test. | open |
+| D2-1146 | WS14-S5 | risk | P1 | execution-core grpc.rs park and segment validators accept AgentResume.question_id/answer_json without reading or refusing them, so a peer-set answer is silently dropped. Refuse them until the reader ships. | open |
+| D2-1147 | WS14-S5 | risk | P1 | has_pending_resume_question holds only state='requested'. After the owner answers but before the continuation consumes, a resume question no longer holds the run, so recovery can end an answered-but-unconsumed run as outcome_unknown. Consider holding while state='answered' AND consumed_at IS NULL inside a bounded window. | open |
+| D2-1148 | WS14-S5 | follow-up | P3 | 34 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-45.json | open |
+| D2-1149 | WS13-S8 | risk | P0 | A waived run's approval writes are not refused: create_approval stores metadata.cause through new_approval_metadata, which keys on caller.zdr() (session-core orchestration_grpc.rs: helper near lines 1443-1455, call near line 3411), and decide_approval merges metadata.decision for any caller that refuse_zdr_continuation admits, while a waiver's credential has zdr() false (auth.rs:155-157), against DEC-32 (a waived run counts as ZDR for every new durable store). The data is content-free, but the write is durable and unconditional. | open |
+| D2-1150 | WS13-S8 | risk | P1 | A waived decision still writes its approval_decided outbox row once APPROVAL_AUDIT_EVENTS_ENABLED is on, because decide_approval_recorded (orchestration_store.rs near line 1169) has no retention check, so this must be fixed before that switch is enabled. | open |
+| D2-1151 | WS13-S8 | follow-up | P1 | The WS13-S6 HTTP and UI surface is absent: the gateway and the BFF have no approval-grant list or revoke route and the frontend has no grant client (listApprovalGrants, revokeApprovalGrant), although the store and gRPC handlers exist, so the card's Revoke control cannot be built and scope grants must stay off until it lands. | open |
+| D2-1152 | WS13-S8 | live-proof | P1 | apps/Model Plane/scripts/verify-approvals-v2.sh is syntax-checked and dry-run against a closed port, but not run on a stack, and its S6 list and revoke steps will FAIL until the grant routes exist. | open |
+| D2-1153 | WS13-S8 | risk | P1 | Waived runs are not treated as ZDR for approval stores (DEC-32): session-core create_approval calls new_approval_metadata(&req, caller.zdr()) and refuse_zdr_continuation checks only caller.zdr(), while a waiver credential has zdr() false, so a waived run's metadata.cause and decision provenance are written; fix belongs to the S1/S3 owners in orchestration_grpc.rs. | open |
+| D2-1154 | WS13-S8 | follow-up | P1 | WS13-S6 HTTP/UI surface (gateway GET /v1/orchestration/threads/:id/approval-grants and DELETE /v1/orchestration/approval-grants/:id, BFF routes, frontend grant client) is absent, so the verify walk's S6 list/revoke checks cannot pass and scope grants must stay off. | open |
+| D2-1155 | WS13-S8 | live-proof | P1 | One captured end-to-end run of apps/Model Plane/scripts/verify-approvals-v2.sh on a running stack in a dated evidence folder under docs/compliance/evidence (needs docker, lead only); its S6 grant-list and revoke steps will FAIL until the WS13-S6 gateway/BFF routes exist | open |
+| D2-1156 | WS13-S8 | live-proof | P1 | cargo test --workspace --no-fail-fast and full pnpm test not run (CI) | open |
+| D2-1157 | WS13-S8 | follow-up | P3 | 23 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-45.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -2732,3 +2756,5 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS13-S7 | policy, authority, audit | W2-43 | no |
 | WS25-S9 | authority, policy | W2-43 | no |
 | WS13-S7 | policy, authority, audit | W2-44 | no |
+| WS14-S5 | authority, audit | W2-45 | no |
+| WS13-S8 | zdr | W2-45 | no |
