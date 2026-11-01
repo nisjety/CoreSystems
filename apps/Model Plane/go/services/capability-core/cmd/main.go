@@ -170,7 +170,11 @@ func main() {
 	toolPolicies := api.NewToolPoliciesHandler(pool)
 	toolPolicyEnforced := policy.ToolPolicyEnforcedFromLookup(os.Getenv)
 	slog.Info("tool policies", "enforced", toolPolicyEnforced)
-	pol := policy.New(reg).WithScopeResolver(scopeStore).WithToolPolicies(toolPolicies, toolPolicyEnforced)
+	// WS25-S9: the org's extension allow-list, read from the same agent policy the policy API serves. Inert unless
+	// ORG_EXTENSION_ALLOWLIST is the literal true.
+	orgExtensionsEnforced := policy.OrgExtensionAllowListFromLookup(os.Getenv)
+	pol := policy.New(reg).WithScopeResolver(scopeStore).WithToolPolicies(toolPolicies, toolPolicyEnforced).
+		WithOrgExtensionPolicy(api.NewOrgExtensionReader(pool), orgExtensionsEnforced)
 
 	// Letta's /v1/tools/search searches tool definitions, not memories. When
 	// explicitly configured it is only a discovery ranker; the server
@@ -293,7 +297,8 @@ func main() {
 	// WS05-S5: writes need a person and capability:write; reads are the org's
 	// and the caller's own. Enforcement is the engine's, behind TOOL_POLICY_ENFORCED.
 	toolPolicies.Register(protectedMux)
-	mcpHandler := api.NewMCPHandler(pool).WithPublisher(recPub).WithVault(mcpVault).WithMCPServiceToken(mcpServiceToken)
+	mcpHandler := api.NewMCPHandler(pool).WithPublisher(recPub).WithVault(mcpVault).WithMCPServiceToken(mcpServiceToken).
+		WithOrgExtensionPolicy(api.NewOrgExtensionReader(pool), orgExtensionsEnforced)
 	mcpHandler.Register(protectedMux)
 	// Deliberately on publicMux, not protectedMux: see RegisterInternal's doc
 	// comment — these routes authenticate themselves (X-Mcp-Service-Token) and

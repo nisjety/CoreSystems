@@ -9545,10 +9545,21 @@ async fn plan_approval(
         durable_grant && durably_recorded && !body.plan_id.is_empty(),
         state.plan_mode.execute_enabled() && state.plan_mode.approval_resume_enabled(),
     );
+    // WS25-S9: the rung the run will actually hold. An enforced org rung cap clamps the grant at dispatch (and the
+    // in-memory copy at record), so the answer states the clamped rung rather than the one asked for.
+    let effective_rung = crate::org_agent_policy::clamp_rung(
+        Some(escalation.to()),
+        crate::org_agent_policy::held_rung_cap(
+            crate::org_agent_policy::policy_mode(),
+            crate::org_agent_policy::shared_cache(),
+            &claims.org_id,
+        ),
+    )
+    .unwrap_or(escalation.to());
     Ok(Json(json!({
         "run_id": run_id,
         "was_in_plan_mode": exited.was_active,
-        "granted_rung": label(escalation.to()),
+        "granted_rung": label(effective_rung),
         "justification": escalation.justification(),
         "persisted": durably_recorded,
         "plan": approved_plan.map(|plan| plan_value(&plan)),

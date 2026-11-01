@@ -383,6 +383,10 @@ services:
       # WS14-S4: offer ask_user to a Do run (max_questions on the run request). Off by default; ZDR, waived, scheduled
       # and Space-scoped runs never get it. Needs capability-core migration 0029 before TOOL_CLASS_GATE=enforce.
       AGENT_ASK_USER_ENABLED: ${AGENT_ASK_USER_ENABLED:-false}
+      # WS25-S9: the org agent policy binds Do runs (mode cap, lockdown, rung cap). off, shadow (logs only) or enforce;
+      # an unknown value reads as enforce. Off by default: resumed runs and the browser and code-interpreter entry points
+      # do not read the policy yet, and every Do caller must carry a capability bearer before enforce.
+      ORG_AGENT_POLICY_MODE: ${ORG_AGENT_POLICY_MODE:-off}
       # WS11-S5: derive the reasoning level once in the gateway and send it to inference-core. Off by default; only the
       # literal `true` turns it on. Roll out in this order: inference-core adapter flags on first, then this switch. With
       # this on and the adapter flags off, a deep request sends budget 0 and a level nothing renders (no thinking).
@@ -1777,6 +1781,9 @@ services:
       CAPABILITY_CORE_DECISION_SIGNING_KID: ${CAPABILITY_CORE_DECISION_SIGNING_KID:-capability-decision-v1}
       # WS25-S7: org agent policy API (routes answer 404 while off). Only the literal `true` enables it.
       ORG_AGENT_POLICY_API: ${ORG_AGENT_POLICY_API:-false}
+      # WS25-S9: hide and deny MCP servers and tools outside the org's allow-list (org_extension_not_allowed). Only the
+      # literal `true` enables it.
+      ORG_EXTENSION_ALLOWLIST: ${ORG_EXTENSION_ALLOWLIST:-false}
       # WS20-S4: stored-consent schedule contracts. Only the literal `true` enables it; user-core takes the same name.
       SCHEDULE_CONTRACT_ENABLED: ${SCHEDULE_CONTRACT_ENABLED:-false}
       # WS20-S8: approval guards (auto-pause on expiry and failures, renewal refusal). Only the literal `true` enables them.

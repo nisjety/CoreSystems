@@ -693,7 +693,8 @@ type toolBindingDatabase interface {
 // built-in name can never resolve to an MCP row and the other way round.
 const toolBindingSQL = `
 SELECT ct.capability_id, ct.tool_name, COALESCE(ct.qualified_name, ''), ct.side_effect_class,
-       ct.approval_floor, COALESCE(ct.pinned_digest, ''), COALESCE(ct.review_state, ''), c.version
+       ct.approval_floor, COALESCE(ct.pinned_digest, ''), COALESCE(ct.review_state, ''), c.version,
+       COALESCE(ct.server_id, '')
 FROM capability_tools ct
 JOIN capabilities c
   ON c.id = ct.capability_id
@@ -740,8 +741,8 @@ func (s *Server) lookupToolBindings(ctx context.Context, orgID string, names []s
 	defer rows.Close()
 	found := toolBindings{}
 	for rows.Next() {
-		var capabilityID, toolName, qualifiedName, class, floor, digest, reviewState, version string
-		if err := rows.Scan(&capabilityID, &toolName, &qualifiedName, &class, &floor, &digest, &reviewState, &version); err != nil {
+		var capabilityID, toolName, qualifiedName, class, floor, digest, reviewState, version, serverID string
+		if err := rows.Scan(&capabilityID, &toolName, &qualifiedName, &class, &floor, &digest, &reviewState, &version, &serverID); err != nil {
 			return nil, fmt.Errorf("scan tool binding: %w", err)
 		}
 		name := toolName
@@ -764,6 +765,8 @@ func (s *Server) lookupToolBindings(ctx context.Context, orgID string, names []s
 			ApprovalFloor:     models.NormalizeApprovalFloor(floor),
 			ToolDigest:        digest,
 			ReviewState:       reviewState,
+			// WS25-S9: the org extension allow-list matches MCP tools by server; empty for a built-in tool.
+			ServerID: serverID,
 		}
 	}
 	if err := rows.Err(); err != nil {
