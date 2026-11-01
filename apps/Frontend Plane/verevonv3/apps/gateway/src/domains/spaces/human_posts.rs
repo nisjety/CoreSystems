@@ -21,19 +21,33 @@
 //! stored message id are all `space-post-{client_send_id}`, so a retry lands on the same thread
 //! and the same row, and the same id with other text is a 409 `idempotency_key_conflict`.
 //!
-//! Order (each step is a refusal before the next one runs): flag, org, Zero Data Retention (typed
-//! 412 before any Control or model call; an org-core failure is a typed 503, never "your org is
-//! ZDR"), body shape, Space lifecycle, bearers, Control decision, model-gateway.
+//! Order (each step is a refusal before the next one runs): flag, org, per-user post ceiling
+//! (typed 429 `rate_limited` with `details.retry_after_seconds`, before anything else is called),
+//! Zero Data Retention (typed 412 before any Control or model call; an org-core failure is a
+//! typed 503, never "your org is ZDR"), body shape, Space lifecycle, bearers, Control decision,
+//! model-gateway.
 //!
 //! Errors are `{error:{code,message,details}}` and ZDR refusals the catalogue shape
 //! (`zdr::zdr_refusal_body`): 400 `invalid_post` / `invalid_client_send_id` / `invalid_space`,
 //! 403 `active_membership_required` / `space_post_not_authorized`, 404 `space_not_found` /
 //! `thread_not_found` / `space_human_posts_disabled`, 409 `idempotency_key_conflict` /
 //! `space_authority_stale` (a reply re-mints once) / `room_archived` / `thread_state_conflict`, 412
-//! `zdr_durable_mutation_forbidden`, 502 `post_not_stored` (the thread exists, the post did not
-//! land: retry with the same send id), 503 `zdr_decision_unavailable` /
+//! `zdr_durable_mutation_forbidden`, 429 `rate_limited`, 502 `post_not_stored` (the thread exists,
+//! the post did not land: retry with the same send id), 503 `zdr_decision_unavailable` /
 //! `space_lifecycle_unavailable` / `space_decision_unavailable` / `delegated_auth_unavailable` /
 //! `session_unavailable`.
+//!
+//! A model-gateway error is not relayed as it came: it keeps its status and its code and is
+//! rebuilt with a message of at most 300 characters and only the scalar entries of `details`
+//! (at most 16). The codes model-gateway answers are `invalid_post`, `invalid_client_message_id`,
+//! `space_post_not_authorized`, `thread_not_found`, `idempotency_key_conflict`,
+//! `space_authority_stale`, `thread_state_conflict`, `post_not_stored`, `session_unavailable` and
+//! the ZDR pair (rebuilt from the catalogue); a body without a well-formed code becomes the
+//! generic `session_unavailable` 503, and so does its 401 `unauthorized` (the gateway already
+//! verified the browser session, and the SPA reads a 401 `unauthorized` as a signed-out user).
+//! `room_archived` comes from Control, not from here.
+
+use std::sync::OnceLock;
 
 use axum::{
     body::Bytes,
@@ -48,6 +62,7 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
 use super::denial::{typed_response, OP_POST};
+use super::room_admin::{is_error_code, MAX_RELAYED_DETAILS, MAX_RELAYED_MESSAGE_CHARS};
 use crate::{
     config::AppState,
     contracts::ActionActor,
@@ -57,6 +72,7 @@ use crate::{
     },
     envelope::{error, error_with_details, unwrap_data},
     middleware::AuthenticatedUser,
+    rate_limit::RateLimiter,
     upstream::{authorized_org_id, proxy_json},
     zdr,
 };
@@ -65,6 +81,15 @@ use crate::{
 pub(crate) const POST_MAX_CHARS: usize = 8000;
 const MAX_THREAD_ID_BYTES: usize = 128;
 const SEND_KEY_PREFIX: &str = "space-post-";
+/// Human posts per user per organization per minute, creates and replies together. A test run
+/// shares one process-wide limiter and one user, so the ceiling is lifted there; the limiter
+/// itself is tested directly with its own small bucket.
+const POSTS_PER_MINUTE: f64 = if cfg!(test) { 100_000.0 } else { 60.0 };
+
+/// Process-wide limiter, built on first use from the gateway's Dragonfly connection (in-process
+/// fallback when the cache is off). Not an `AppState` field, like `room_admin`'s member limiter,
+/// so no test state literal changes.
+static POST_LIMITER: OnceLock<RateLimiter> = OnceLock::new();
 
 type Reply = (StatusCode, Json<Value>);
 
@@ -100,6 +125,25 @@ async fn reply_in_thread(
 ) -> Reply {
     let body = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
     submit_post(&state, &user, &headers, &space_ref, Some(&thread_id), &body).await
+}
+
+/// One post token for the caller, or the typed 429. The Retry-After seconds travel in
+/// `details.retry_after_seconds` because the flow answers a bare `(status, json)`.
+async fn check_post_ceiling(limiter: &RateLimiter, org_id: &str, user_id: &str) -> Result<(), Reply> {
+    match limiter
+        .try_acquire(&format!("space-post:{}:{user_id}", org_id.trim()))
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(retry_after) => Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(error_with_details(
+                "rate_limited",
+                "Too many posts. Retry shortly.",
+                json!({ "retry_after_seconds": retry_after.max(1) }),
+            )),
+        )),
+    }
 }
 
 fn refuse(status: StatusCode, code: &'static str, message: &'static str) -> Reply {
@@ -190,6 +234,21 @@ pub(crate) async fn submit_post(
     thread_id: Option<&str>,
     body: &Value,
 ) -> Reply {
+    let limiter = POST_LIMITER
+        .get_or_init(|| RateLimiter::from_cache_with_rpm(&state.cache, POSTS_PER_MINUTE));
+    submit_post_limited(state, limiter, user, headers, space_ref, thread_id, body).await
+}
+
+/// `submit_post` with the post ceiling passed in, so a test can use a small bucket of its own.
+async fn submit_post_limited(
+    state: &AppState,
+    limiter: &RateLimiter,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    space_ref: &str,
+    thread_id: Option<&str>,
+    body: &Value,
+) -> Reply {
     if !state.space_features.human_posts_api {
         return refuse(
             StatusCode::NOT_FOUND,
@@ -217,6 +276,9 @@ pub(crate) async fn submit_post(
         Some(id) if id.is_empty() || id.len() > MAX_THREAD_ID_BYTES => return thread_not_found(),
         other => other,
     };
+    if let Err(reply) = check_post_ceiling(limiter, &org_id, &user.user_id).await {
+        return reply;
+    }
     if let Some(refusal) = zdr_refusal(state, user, headers, body).await {
         return refusal;
     }
@@ -322,17 +384,52 @@ pub(crate) async fn submit_post(
     )
 }
 
-/// model-gateway's answer as the browser envelope. Its own errors are already
-/// `{error:{code,message,details}}` (or the typed ZDR catalogue shape) with fixed words, so they
-/// pass through with their status; anything else is `session_unavailable`.
+/// A model-gateway failure body as the browser envelope. A typed body
+/// (`{error:{code,message,details}}`) keeps its code and is rebuilt from a bounded `message` and
+/// the scalar entries of `details` only, so nothing else an upstream puts in a body (extra keys,
+/// nested values, text of another service) reaches the browser. A ZDR catalogue code is rebuilt
+/// from the catalogue itself. `None` when the body has no well-formed code.
+fn filter_model_error(response: &Value) -> Option<Value> {
+    let error = response.get("error").and_then(Value::as_object)?;
+    let code = error
+        .get("code")
+        .and_then(Value::as_str)
+        .filter(|code| is_error_code(code))?;
+    if code == zdr::ZDR_DURABLE_MUTATION_FORBIDDEN || code == zdr::ZDR_DECISION_UNAVAILABLE {
+        return Some(zdr::zdr_refusal_body(code));
+    }
+    let message: String = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .chars()
+        .take(MAX_RELAYED_MESSAGE_CHARS)
+        .collect();
+    let details: Map<String, Value> = error
+        .get("details")
+        .and_then(Value::as_object)
+        .map(|details| {
+            details
+                .iter()
+                .filter(|(_, value)| !value.is_array() && !value.is_object())
+                .take(MAX_RELAYED_DETAILS)
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(json!({ "error": { "code": code, "message": message, "details": details } }))
+}
+
+/// model-gateway's answer as the browser envelope. Its own errors keep their status and code and
+/// are bounded by `filter_model_error`; anything else is `session_unavailable`.
 fn map_model_response(status: StatusCode, response: Value, space_ref: Option<&str>) -> Reply {
     if !status.is_success() {
-        if response
-            .pointer("/error/code")
-            .and_then(Value::as_str)
-            .is_some()
-        {
-            return (status, Json(response));
+        // A 401 here is the delegated bearer being refused, not the browser session; relayed, the
+        // SPA would sign the user out. It is an outage, like room_admin's typed 401.
+        if status != StatusCode::UNAUTHORIZED {
+            if let Some(body) = filter_model_error(&response) {
+                return (status, Json(body));
+            }
         }
         return refuse(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1305,6 +1402,172 @@ mod tests {
         let (status, body, _) = send(&fx.state, create_uri(), None, post("hello")).await;
         assert_eq!(status, 503);
         assert_eq!(body["error"]["code"], "session_unavailable");
+    }
+
+    /// The caller as the router builds it, for the tests that drive `submit_post_limited` with a
+    /// limiter of their own.
+    fn caller(user_id: &str) -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: user_id.to_owned(),
+            user_email: "user@example.com".to_owned(),
+            user_name: "User One".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    fn session_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "cookie",
+            "better-auth.session_token=session-1".parse().unwrap(),
+        );
+        headers
+    }
+
+    #[tokio::test]
+    async fn the_post_ceiling_is_per_user_and_per_org_and_answers_a_typed_429() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let state = AppState::for_tests();
+        let limiter = RateLimiter::from_cache_with_rpm(&state.cache, 2.0);
+        assert!(check_post_ceiling(&limiter, "org-1", "user-1").await.is_ok());
+        assert!(check_post_ceiling(&limiter, "org-1", "user-1").await.is_ok());
+        let (status, Json(body)) = check_post_ceiling(&limiter, "org-1", "user-1")
+            .await
+            .expect_err("the third post in the minute is refused");
+        assert_eq!(status.as_u16(), 429);
+        assert_eq!(body["error"]["code"], "rate_limited");
+        assert!(body["error"]["details"]["retry_after_seconds"].as_u64().unwrap() >= 1);
+        // Another user, and the same user in another organization, have their own bucket.
+        assert!(check_post_ceiling(&limiter, "org-1", "user-2").await.is_ok());
+        assert!(check_post_ceiling(&limiter, "org-2", "user-1").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_refused_post_calls_neither_control_nor_model_gateway() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = default_fixture().await;
+        mount_decision(&fx, "thread-decision").await;
+        mount_decision(&fx, "thread-append-decision").await;
+        mount_model(&fx, "/v1/threads", stored(false)).await;
+        mount_model(&fx, "/v1/threads/thread-1/messages", stored(false)).await;
+        let user = caller("user-ceiling");
+        let headers = session_headers();
+        // One post an hour is the whole bucket: the first lands, creates and replies share it.
+        let limiter = RateLimiter::from_cache_with_rpm(&fx.state.cache, 1.0);
+        let (status, Json(body)) = submit_post_limited(
+            &fx.state, &limiter, &user, &headers, "space-room", None, &post("hello"),
+        )
+        .await;
+        assert_eq!(status.as_u16(), 201, "{body}");
+        let control_before = control_calls(&fx).await.len();
+        let model_before = model_calls(&fx).await.len();
+        assert!(control_before >= 1 && model_before == 1);
+        for thread in [None, Some("thread-1")] {
+            let (status, Json(body)) = submit_post_limited(
+                &fx.state, &limiter, &user, &headers, "space-room", thread, &post("again"),
+            )
+            .await;
+            assert_eq!(status.as_u16(), 429, "{body}");
+            assert_eq!(body["error"]["code"], "rate_limited");
+            assert!(body["error"]["details"]["retry_after_seconds"].as_u64().unwrap() >= 1);
+        }
+        assert_eq!(control_calls(&fx).await.len(), control_before, "no Control call");
+        assert_eq!(model_calls(&fx).await.len(), model_before, "no model-gateway call");
+    }
+
+    #[test]
+    fn a_model_gateway_error_is_bounded_before_it_reaches_the_browser() {
+        let long = "m".repeat(1000);
+        let mut details: Map<String, Value> =
+            (0..40).map(|i| (format!("k{i:02}"), json!(i))).collect();
+        details.insert("nested".to_owned(), json!({"internal": "http://session-core:8080"}));
+        details.insert("list".to_owned(), json!(["a", "b"]));
+        let (status, Json(body)) = map_model_response(
+            StatusCode::CONFLICT,
+            json!({"error": {"code": "thread_state_conflict", "message": long, "details": details,
+                "stack": "at session-core/src/append.rs:10"}, "trace": "x"}),
+            None,
+        );
+        assert_eq!(status.as_u16(), 409);
+        assert_eq!(body["error"]["code"], "thread_state_conflict");
+        assert_eq!(body["error"]["message"].as_str().unwrap().chars().count(), 300);
+        let kept = body["error"]["details"].as_object().unwrap();
+        assert_eq!(kept.len(), 16);
+        assert!(!kept.contains_key("nested") && !kept.contains_key("list"));
+        assert!(body.get("trace").is_none() && body["error"].get("stack").is_none());
+
+        // Nested values are dropped even when few details are sent.
+        let (_, Json(body)) = map_model_response(
+            StatusCode::BAD_GATEWAY,
+            json!({"error": {"code": "post_not_stored", "message": "m",
+                "details": {"thread_id": "thread-9", "cause": {"url": "http://x"}}}}),
+            None,
+        );
+        assert_eq!(body["error"]["details"], json!({"thread_id": "thread-9"}));
+
+        // No details in, an empty details object out: the envelope keeps its shape.
+        let (_, Json(body)) = map_model_response(
+            StatusCode::NOT_FOUND,
+            json!({"error": {"code": "thread_not_found"}}),
+            None,
+        );
+        assert_eq!(body["error"]["details"], json!({}));
+        assert_eq!(body["error"]["message"], "");
+    }
+
+    #[test]
+    fn an_untyped_model_gateway_error_maps_to_the_generic_session_unavailable() {
+        for response in [
+            json!({"error": "boom"}),
+            json!({"error": {"message": "no code"}}),
+            json!({"error": {"code": "Not A Code!", "message": "m"}}),
+            json!({"error": {"code": 500, "message": "m"}}),
+            json!({"detail": "something"}),
+            Value::Null,
+        ] {
+            let (status, Json(body)) =
+                map_model_response(StatusCode::INTERNAL_SERVER_ERROR, response, None);
+            assert_eq!(status.as_u16(), 503);
+            assert_eq!(body["error"]["code"], "session_unavailable");
+            assert_eq!(
+                body["error"]["message"],
+                "The conversation service is unavailable."
+            );
+        }
+    }
+
+    #[test]
+    fn a_model_gateway_401_never_reaches_the_browser_as_a_signed_out_user() {
+        let (status, Json(body)) = map_model_response(
+            StatusCode::UNAUTHORIZED,
+            json!({"error": {"code": "unauthorized", "message": "authentication required",
+                "details": {}}}),
+            None,
+        );
+        assert_eq!(status.as_u16(), 503);
+        assert_eq!(body["error"]["code"], "session_unavailable");
+    }
+
+    #[test]
+    fn a_zdr_code_from_model_gateway_is_rebuilt_from_the_catalogue() {
+        let (status, Json(body)) = map_model_response(
+            StatusCode::PRECONDITION_FAILED,
+            json!({"error": {"code": "zdr_durable_mutation_forbidden", "message": "x".repeat(900),
+                "details": {"internal": {"k": "v"}}}}),
+            None,
+        );
+        assert_eq!(status.as_u16(), 412);
+        assert_eq!(
+            body,
+            zdr::zdr_refusal_body(zdr::ZDR_DURABLE_MUTATION_FORBIDDEN)
+        );
     }
 
     #[tokio::test]

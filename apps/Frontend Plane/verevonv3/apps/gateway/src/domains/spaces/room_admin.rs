@@ -55,8 +55,8 @@ const MAX_IDEMPOTENCY_KEY_LEN: usize = 128;
 /// one process-wide limiter and one user, so the ceiling is lifted there; the limiter itself is
 /// tested directly with its own small bucket.
 const MEMBER_OPS_PER_MINUTE: f64 = if cfg!(test) { 100_000.0 } else { 30.0 };
-const MAX_RELAYED_MESSAGE_CHARS: usize = 300;
-const MAX_RELAYED_DETAILS: usize = 16;
+pub(crate) const MAX_RELAYED_MESSAGE_CHARS: usize = 300;
+pub(crate) const MAX_RELAYED_DETAILS: usize = 16;
 const MAX_ARCHIVE_BODY_BYTES: usize = 4096;
 
 /// Process-wide limiter, built on first use from the gateway's Dragonfly connection (in-process
@@ -94,7 +94,7 @@ async fn check_member_ops(limiter: &RateLimiter, org_id: &str, user_id: &str) ->
 }
 
 /// True for a short lowercase token, the shape of every Control error code.
-fn is_error_code(code: &str) -> bool {
+pub(crate) fn is_error_code(code: &str) -> bool {
     !code.is_empty()
         && code.len() <= 64
         && code
