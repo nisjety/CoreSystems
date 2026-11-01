@@ -8,7 +8,9 @@
 //!   `failed` / `policy_denied` (typed, no host, no rule); the allowed host is fetched as before;
 //! - the default policy changes nothing: both results are fetched;
 //! - a ZDR request is still refused before search, fetch and model, and leaves no answer-cache
-//!   entry (the cache half needs Redis; it is skipped without one unless `REQUIRE_CONTRACT`).
+//!   entry (the cache half needs Redis; it is skipped without one unless `REQUIRE_CONTRACT`);
+//! - security review: `include_answer` on `POST /v1/search` passes the same gate, and a run whose
+//!   policy is not the default neither replays nor writes an answer cached by org and query.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -159,6 +161,7 @@ impl Edge {
         let state = AppState {
             answer_pipeline: Some(Arc::new(pipeline)),
             answer_status: AnswerPipelineStatus::Ready,
+            search: Some(search.clone()),
             policy,
             redis,
             #[cfg(feature = "browser-agent")]
@@ -362,7 +365,7 @@ async fn try_redis() -> Option<redis::aio::ConnectionManager> {
 }
 
 #[tokio::test]
-async fn a_zdr_stream_writes_no_answer_cache_entry_and_a_standard_one_does() {
+async fn a_zdr_stream_writes_no_answer_cache_entry_and_a_default_policy_one_does() {
     let Some(conn) = try_redis().await else {
         assert!(
             std::env::var_os("REQUIRE_CONTRACT").is_none(),
@@ -372,7 +375,9 @@ async fn a_zdr_stream_writes_no_answer_cache_entry_and_a_standard_one_does() {
         return;
     };
     let cache = quarry_edge::cache::SearchCache::new(conn.clone());
-    let edge = Edge::start(Some(DENY_NET), Some(conn)).await;
+    // The default policy: a run under host rules uses no answer cache at all (see below), so the
+    // control half needs a default run to prove the key is the real one.
+    let edge = Edge::start(None, Some(conn)).await;
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -402,6 +407,126 @@ async fn a_zdr_stream_writes_no_answer_cache_entry_and_a_standard_one_does() {
         cache.get::<String>(&key(&std_query)).await.is_some(),
         "the control run wrote its answer-cache entry"
     );
-    // The gate held on the control run as well.
-    assert_eq!(edge.fetcher.urls(), vec![ALLOWED_URL.to_owned()]);
+    assert_eq!(edge.fetcher.urls().len(), 2, "the default policy fetched both results");
+}
+
+// ---- security review: answer caches and include_answer ---------------------
+
+/// An answer cached by org and query (another principal's run, or one from before the policy
+/// tightened) is not replayed to a run under host rules, and that run writes no entry either.
+#[tokio::test]
+async fn a_restricted_policy_stream_neither_replays_nor_writes_the_answer_cache() {
+    let Some(conn) = try_redis().await else {
+        assert!(
+            std::env::var_os("REQUIRE_CONTRACT").is_none(),
+            "REQUIRE_CONTRACT is set but REDIS_URL is unreachable: the answer cache guard cannot be skipped"
+        );
+        eprintln!("skip: REDIS_URL unreachable");
+        return;
+    };
+    let cache = quarry_edge::cache::SearchCache::new(conn.clone());
+    let edge = Edge::start(Some(DENY_NET), Some(conn)).await;
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let seeded_query = format!("capital of norway seeded {unique}");
+    let fresh_query = format!("capital of norway fresh {unique}");
+    let key = |query: &str| {
+        quarry_edge::cache::SearchCache::key("org_placeholder", query, "answer:stream:v1")
+    };
+    const SEEDED: &str = "SEEDEDANSWER synthesized from the denied page";
+    cache
+        .put_with_ttl(&key(&seeded_query), &SEEDED.to_owned(), 300)
+        .await
+        .expect("seed the answer cache");
+
+    let (status, text) = edge
+        .post("/v1/answer/stream", json!({ "query": seeded_query }))
+        .await;
+    assert_eq!(status, 200, "{text}");
+    assert!(!text.contains("SEEDEDANSWER"), "a cached answer was replayed: {text}");
+    let done = sse_event(&text, "done").expect("a done frame");
+    assert_eq!(done["cached"], false, "{done}");
+    assert_eq!(edge.fetcher.urls(), vec![ALLOWED_URL.to_owned()], "the run went through the gate");
+
+    let (status, _) = edge
+        .post("/v1/answer/stream", json!({ "query": fresh_query }))
+        .await;
+    assert_eq!(status, 200);
+    assert!(
+        cache.get::<String>(&key(&fresh_query)).await.is_none(),
+        "a run under host rules leaves no answer-cache entry"
+    );
+}
+
+#[tokio::test]
+async fn search_include_answer_never_fetches_a_denied_host() {
+    let edge = Edge::start(Some(DENY_NET), None).await;
+    let (status, text) = edge
+        .post(
+            "/v1/search",
+            json!({ "query": "capital of norway", "include_answer": true }),
+        )
+        .await;
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(
+        edge.fetcher.urls(),
+        vec![ALLOWED_URL.to_owned()],
+        "only the allowed URL is fetched"
+    );
+    let body: Value = serde_json::from_str(&text).unwrap();
+    let citations = body
+        .pointer("/data/citations")
+        .or_else(|| body.get("citations"))
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("no citations: {body}"));
+    assert_denied_citation(citation_for(citations, DENIED_URL));
+    let sent = edge.model_bodies().await.join("\n");
+    assert!(!sent.contains(DENIED_SNIPPET), "denied snippet reached the model");
+    assert!(!sent.contains("secret-page"), "denied URL reached the model");
+}
+
+#[tokio::test]
+async fn search_include_answer_under_the_default_policy_fetches_every_result() {
+    let edge = Edge::start(None, None).await;
+    let (status, text) = edge
+        .post(
+            "/v1/search",
+            json!({ "query": "capital of norway", "include_answer": true }),
+        )
+        .await;
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(edge.fetcher.urls().len(), 2);
+}
+
+/// A search that asks for an answer under host rules neither reads nor writes the search cache:
+/// the same request twice fetches the allowed page twice.
+#[tokio::test]
+async fn a_restricted_policy_include_answer_uses_no_search_cache() {
+    let Some(conn) = try_redis().await else {
+        assert!(
+            std::env::var_os("REQUIRE_CONTRACT").is_none(),
+            "REQUIRE_CONTRACT is set but REDIS_URL is unreachable: the search cache guard cannot be skipped"
+        );
+        eprintln!("skip: REDIS_URL unreachable");
+        return;
+    };
+    let edge = Edge::start(Some(DENY_NET), Some(conn)).await;
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let query = format!("capital of norway search {unique}");
+    for _ in 0..2 {
+        let (status, text) = edge
+            .post("/v1/search", json!({ "query": query, "include_answer": true }))
+            .await;
+        assert_eq!(status, 200, "{text}");
+    }
+    assert_eq!(
+        edge.fetcher.urls(),
+        vec![ALLOWED_URL.to_owned(), ALLOWED_URL.to_owned()],
+        "the second request was not served from the cache"
+    );
 }

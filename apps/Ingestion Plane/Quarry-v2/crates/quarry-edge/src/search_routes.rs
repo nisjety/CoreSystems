@@ -841,7 +841,17 @@ async fn search_run(
     let rerank_epoch = provider.rerank_epoch();
     let params_sig = params_signature(&opts, req.include_answer, &rerank_epoch);
     let cache_key = crate::cache::SearchCache::key(&claims.org_id, &effective_query, &params_sig);
-    let scache = state.redis.clone().map(crate::cache::SearchCache::new);
+    // Security review (D2-055): an entry holding an answer is keyed without the web policy, so
+    // it may hold an answer synthesized from pages this run's policy refuses. A run under host
+    // rules that asks for an answer neither reads nor writes the cache (the scrape family's
+    // `is_default` rule); a results-only search is unaffected, its results are not page fetches.
+    let answer_cache_ok =
+        !req.include_answer || crate::web_policy_edge::is_default(&decision);
+    let scache = state
+        .redis
+        .clone()
+        .filter(|_| answer_cache_ok)
+        .map(crate::cache::SearchCache::new);
     let from_cache: Option<CachedSearch> = if zdr {
         None
     } else {
@@ -899,7 +909,10 @@ async fn search_run(
                                 zdr: Some(zdr),
                                 org_id: Some(claims.org_id.clone()),
                             };
-                            match p.answer(areq).await {
+                            // D2-055: the answer's page fetches pass the same web-policy gate
+                            // as `/v1/answer`; a denied result URL is never fetched.
+                            let gate = crate::answer_routes::gate_for(decision.clone());
+                            match p.answer_gated(areq, Some(&gate)).await {
                                 Ok(ar) => {
                                     let outcome = AnswerOutcome::from_result(&ar);
                                     (Some(ar.answer), Some(ar.citations), outcome)

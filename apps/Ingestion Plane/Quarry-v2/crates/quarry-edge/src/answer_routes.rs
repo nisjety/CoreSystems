@@ -112,15 +112,30 @@ fn policy_refused(error: quarry_core::error::QuarryError) -> axum::response::Res
 /// `policy_denied`), counted like any other enforced denial, and never fetched. The decision is
 /// taken once, with the effective ZDR posture, so the ZDR floor applies the same as on the
 /// scrape family. The policy fingerprint is untouched: this reads the decision, it adds no layer.
+///
+/// The second value says whether the decision is the catalogue default (see
+/// [`crate::web_policy_edge::is_default`]). Only a default run may read or write an answer
+/// cache: the cached answer is keyed by org and query alone, so a run under host rules (an
+/// autonomous principal's allow list, an org deny list) must not replay an answer another
+/// principal synthesized from pages this run's policy refuses (security review, D2-055).
 fn url_gate(
     state: &AppState,
     claims: &crate::auth::Claims,
     zdr: bool,
-) -> Result<quarry_runtime::answer::UrlGate, quarry_core::error::QuarryError> {
+) -> Result<(quarry_runtime::answer::UrlGate, bool), quarry_core::error::QuarryError> {
     let decision = crate::web_policy_edge::decide(&state.policy, claims, zdr, None)?;
-    Ok(std::sync::Arc::new(move |url: &str| {
+    let default = crate::web_policy_edge::is_default(&decision);
+    Ok((gate_for(decision), default))
+}
+
+/// The URL gate of an already-taken web-policy decision. Shared with `include_answer` on
+/// `POST /v1/search`, whose page fetches run the same answer pipeline.
+pub(crate) fn gate_for(
+    decision: crate::policy_baseline::Decision,
+) -> quarry_runtime::answer::UrlGate {
+    std::sync::Arc::new(move |url: &str| {
         crate::web_policy_edge::gate_url(&decision, url).is_ok()
-    }))
+    })
 }
 
 /// The response for a failed `AnswerPipeline::answer`. A refused service token is a 503 with a
@@ -215,7 +230,7 @@ async fn answer_run(
         Err(reason) => return not_configured(reason),
     };
 
-    let gate = match url_gate(&state, &claims, claims.effective_zdr(req.zdr.unwrap_or(false))) {
+    let (gate, _) = match url_gate(&state, &claims, claims.effective_zdr(req.zdr.unwrap_or(false))) {
         Ok(gate) => gate,
         Err(error) => return policy_refused(error),
     };
@@ -314,13 +329,14 @@ pub async fn answer_stream(
         }
     };
 
-    let gate = match url_gate(&state, &claims, claims.effective_zdr(req.zdr.unwrap_or(false))) {
-        Ok(gate) => gate,
-        Err(error) => {
-            tombstone.status(StatusCode::FORBIDDEN.as_u16());
-            return policy_refused(error);
-        }
-    };
+    let (gate, default_policy) =
+        match url_gate(&state, &claims, claims.effective_zdr(req.zdr.unwrap_or(false))) {
+            Ok(gate) => gate,
+            Err(error) => {
+                tombstone.status(StatusCode::FORBIDDEN.as_u16());
+                return policy_refused(error);
+            }
+        };
 
     let query = req.query.clone();
     let org_id = claims.org_id.clone();
@@ -341,7 +357,10 @@ pub async fn answer_stream(
     // A ZDR answer neither reads nor writes the answer cache: the cached value
     // is the synthesized answer text itself, keyed only by org and query, so a
     // ZDR request must not be served from (or leave behind) a durable copy.
-    let scache = if zdr.is_active() {
+    // Security review (D2-055): nor does a run whose web policy is not the default. The entry
+    // is keyed by org and query only, so it may hold an answer synthesized from pages this
+    // run's policy refuses (another principal's run, or one from before the policy changed).
+    let scache = if zdr.is_active() || !default_policy {
         None
     } else {
         state.redis.clone().map(crate::cache::SearchCache::new)
