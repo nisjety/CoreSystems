@@ -39,6 +39,9 @@ on:
       # durable_loop_contract reads these across the plane boundary (no attestation field, the
       # continue vocabulary lists), so a change there must run it.
       - "apps/Model Plane/go/gen/**"
+      # WS10.S5: the NATS provisioner contract tests read the broker config and the topology.
+      - "apps/Model Plane/go/services/nats-provisioner/**"
+      - "apps/Model Plane/deploy/nats.conf"
       - "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs"
       - "apps/Frontend Plane/verevonv3/apps/gateway/src/upstream.rs"
       - "apps/Frontend Plane/verevonv3/apps/gateway/tests/continue_error_vocabulary.rs"
@@ -60,6 +63,9 @@ on:
       # durable_loop_contract reads these across the plane boundary (no attestation field, the
       # continue vocabulary lists), so a change there must run it.
       - "apps/Model Plane/go/gen/**"
+      # WS10.S5: the NATS provisioner contract tests read the broker config and the topology.
+      - "apps/Model Plane/go/services/nats-provisioner/**"
+      - "apps/Model Plane/deploy/nats.conf"
       - "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs"
       - "apps/Frontend Plane/verevonv3/apps/gateway/src/upstream.rs"
       - "apps/Frontend Plane/verevonv3/apps/gateway/tests/continue_error_vocabulary.rs"
@@ -217,6 +223,27 @@ jobs:
             echo "expected at least 18 loop checkpoint tests to run, got ${passed:-0}"
             exit 1
           fi
+
+  # WS10.S5: the NATS provisioner has no other CI. Its contract tests start an
+  # in-process broker from the real deploy/nats.conf, provision the real manifest
+  # and apply every principal's grants, so a stream without a publisher grant (or
+  # the reverse) fails here and not in production.
+  nats-provisioner:
+    name: NATS provisioner contract tests (Go)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: "apps/Model Plane/go/services/nats-provisioner"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: "apps/Model Plane/go/services/nats-provisioner/go.mod"
+          cache-dependency-path: "apps/Model Plane/go/services/nats-provisioner/go.sum"
+      - name: go vet
+        run: GOWORK=off go vet ./...
+      - name: go test
+        run: GOWORK=off go test ./...
 
   # WS12 S11 (D11): an optional clippy warning-count ratchet. It never denies a
   # warning. It is off unless the repo variable MODEL_PLANE_CLIPPY_RATCHET is the
