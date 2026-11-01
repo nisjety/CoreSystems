@@ -2469,6 +2469,30 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-1102 | WS25-S11 | follow-up | P3 | 25 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-42.json | open |
 | D2-1103 | WS14-S4 | gate | P2 | CI's buf lint ratchet reports 85 findings not in `buf-lint-baseline.json` (browser 9, capabilities 19, execution 6, gateway 1, memory 8, orchestration 7, and more), all missing comments on fields and messages from earlier batches; none is W2-42's `max_questions`. `buf breaking` against baseline.binpb passes. Either comment them or refresh the baseline before the next CI run. | open |
 
+
+### Wave-mode batch W2-43 (2026-11-01)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-1104 | WS13-S7 | risk | P1 | Always is unreachable end to end. mp-contracts approval_cause.rs is_standing_excluded (163-169) removes every mcp__ tool from thread scope, and checked_decision_scope refuses thread for an MCP cause (scope_not_offered) before the rule check runs. | open |
+| D2-1105 | WS13-S7 | risk | P1 | No wire carrier for rule_proposed. With APPROVAL_RULE_PROPOSALS_ENABLED on, a valid Always records a thread grant and only a warn log says no rule was proposed. The switch must stay off until the carrier lands. | open |
+| D2-1106 | WS13-S7 | risk | P1 | BFF orchestration.rs refuses promote (deny_unknown_fields, lines 528-536) and every scope except once (decide_upstream_body, 541-564). The SPA cannot send thread or promote. | open |
+| D2-1107 | WS13-S7 | follow-up | P1 | K3-10 expiry and the tool_policy_rule_* audit rows are unbuilt. capability-core tool_policies has no expires_at, PUT refuses it through DisallowUnknownFields (line 250), and capability-core writes only tool_policy_set and tool_policy_revoked. execution-core writes no rule-use row. | open |
+| D2-1108 | WS13-S7 | decision | P1 | ADR-0011 is not written (ledger line 95). S6 and S7 wait for it, so the lead decides whether S7 proceeds beyond gateway validation. | open |
+| D2-1109 | WS13-S7 | risk | P1 | With APPROVAL_RULE_PROPOSALS_ENABLED=true, a valid promote records a thread grant and produces only a warn log. The user would believe a rule was proposed. The switch must stay off until the proto carrier and the session-core write land. | open |
+| D2-1110 | WS13-S7 | live-proof | P1 | ADR-0011 is unwritten (decisions ledger line 95 says S6 and S7 wait for it). Only the lead can decide whether S7 proceeds past gateway validation. | open |
+| D2-1111 | WS13-S7 | live-proof | P1 | No live proof of Always -> settings confirm -> digest-pinned allow -> rule use -> expiry/drift demotion. This needs the full stack and the lead. | open |
+| D2-1112 | WS13-S7 | follow-up | P3 | 25 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-43.json | open |
+| D2-1113 | WS25-S9 | live-proof | P1 | The row's DoD evidence (rebuilt gateway, capability-core and execution-core; admin cap; member Do write refused; capability-core down gives 503) has not been produced and needs the lead's stack run. | open |
+| D2-1114 | WS25-S9 | risk | P1 | Resumed runs (continue_run and the park resume) bypass admission, so an org mode cap or lockdown does not bind a continuation and its rung is not capped; the resume path needs the same admission before ORG_AGENT_POLICY_MODE=enforce. | open |
+| D2-1115 | WS25-S9 | risk | P1 | Enforce refuses every Do run whose invoke carries no VerifiedCapabilityBearer, because admission has no bearer to fetch with; confirm every Do-run caller carries one before enforce is switched on. | open |
+| D2-1116 | WS25-S9 | risk | P1 | With ORG_EXTENSION_ALLOWLIST=true and ToolBinding.ServerID unpopulated, approved_only denies every MCP tool and none denies all; this is fail-closed but removes MCP for the org until lead_todo 2 lands. | open |
+| D2-1117 | WS25-S9 | risk | P1 | Resumed runs (continue_run and the park resume) skip admit_turn, so an org mode cap or lockdown set after a run started does not bind its continuation. This must be closed before ORG_AGENT_POLICY_MODE=enforce. | open |
+| D2-1118 | WS25-S9 | risk | P1 | Under enforce, an agentic invoke with no VerifiedCapabilityBearer fails hydrate ('capability bearer is unavailable') and is refused with org_policy_unavailable, so every Do caller must carry a capability bearer before enforce is switched on. | open |
+| D2-1119 | WS25-S9 | risk | P1 | Only invoke_stream_sse and spawn_run_dispatch apply the policy. Other Do entry points (browser_run, the tools.rs code_interpreter path) bypass the mode cap and lockdown, so the DoD 'cannot start a write Do run from any client' is not yet met for those paths. | open |
+| D2-1120 | WS25-S9 | risk | P1 | Under enforce, a cold cache means only the first admission fetches. spawn_run_dispatch then falls back to ReadOnly whenever the entry is missing (for example after ensure removed it). This is fail-closed but can silently narrow runs; the live proof should confirm runs keep their grant during normal operation. | open |
+| D2-1121 | WS25-S9 | follow-up | P3 | 32 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-43.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -2681,3 +2705,5 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS25-S6 | authority, policy | W2-41 | no |
 | WS14-S4 | authority, policy, zdr | W2-42 | no |
 | WS14-S4 | authority, policy, zdr | W2-42 | no |
+| WS13-S7 | policy, authority, audit | W2-43 | no |
+| WS25-S9 | authority, policy | W2-43 | no |
