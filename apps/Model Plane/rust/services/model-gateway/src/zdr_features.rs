@@ -120,6 +120,9 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
     // `chat` is honored. A deployed-agent profile is an unattended agent, which
     // ZDR refuses.
     ("profile", refused_feature("deployed_agent")),
+    // The mode a person chose is resolved before a turn is admitted (WS25-S6): it only tightens the
+    // posture, and a plan gate it sets is refused through `plan_mode` like any plan flag.
+    ("agent_mode", Treatment::Honored),
     ("verbosity", Treatment::Honored),
     ("effort", Treatment::Honored),
     ("features", Treatment::PerMember),
@@ -235,6 +238,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         max_cost_usd: _,
         max_tokens: _,
         profile: _,
+        agent_mode: _,
         verbosity: _,
         effort: _,
         features: _,
@@ -278,6 +282,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         "max_cost_usd",
         "max_tokens",
         "profile",
+        "agent_mode",
         "verbosity",
         "effort",
         "features",

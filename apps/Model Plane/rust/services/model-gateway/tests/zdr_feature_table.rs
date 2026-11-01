@@ -187,6 +187,7 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
             refused("deployed_agent"),
         ),
         ("profile", with("profile", json!("chat")), None),
+        ("agent_mode", with("agent_mode", json!("auto")), None),
         ("verbosity", with("verbosity", json!("concise")), None),
         ("effort", with("effort", json!("deep")), None),
         (

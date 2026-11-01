@@ -377,6 +377,9 @@ services:
       HOOKS_DURABLE: ${HOOKS_DURABLE:-false}
       # WS17-S5: the read-only recall_conversations tool. Off by default; needs WS07 memory controls live.
       MODEL_GATEWAY_RECALL_CONVERSATIONS_ENABLED: ${MODEL_GATEWAY_RECALL_CONVERSATIONS_ENABLED:-false}
+      # WS25-S6: the optional agent_mode on invoke (lockdown, read_only, ask_first, auto), strictest-wins over the
+      # platform floor and the org cap. Off by default; with it off the field is ignored and requests are unchanged.
+      AGENT_MODES: ${AGENT_MODES:-false}
       # WS11-S5: derive the reasoning level once in the gateway and send it to inference-core. Off by default; only the
       # literal `true` turns it on. Roll out in this order: inference-core adapter flags on first, then this switch. With
       # this on and the adapter flags off, a deep request sends budget 0 and a level nothing renders (no thinking).

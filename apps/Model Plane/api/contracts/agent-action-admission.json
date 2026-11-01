@@ -514,6 +514,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "chat.set_agent_mode",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "context_write",
+      "exemptReason": "agent_cannot_self_govern",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:b6bc5a79a011293ad721afa748d5fb915035c38971a69c4855832ee540a81739",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "chat.set_connector_scope",
       "registry": true,
       "access": "none",

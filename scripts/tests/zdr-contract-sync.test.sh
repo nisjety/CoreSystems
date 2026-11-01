@@ -116,6 +116,7 @@ GOLDENS=(
   # WS25-S7: the org agent policy schema. AUTHORED (not generated), read by mp-contracts and by
   # capability-core's org agent policy API.
   "apps/Model Plane/api/contracts/org-agent-policy-schema.json|03002781992a7dd607bc54530648cc33973f8bf1b8e72dc7949bad14e25909c2"
+  "apps/Model Plane/api/contracts/agent-modes.json|baee130b47b668bab8cffdb547cdee592269eef89969214da53165b54b113027"
 
   # QB-T02: every Auth Core service-token request quarry-edge makes. AUTHORED data owned
   # by Quarry, not generated: the Rust loader, the source scan and the wire tests in
@@ -201,7 +202,7 @@ GOLDENS=(
   # (VEREVON_UPDATE_GOLDEN=1 pnpm vitest run src/shared/actions/admission-contract.test.ts) from the typed
   # side map (model-access.ts) and the registry, never written by hand. Each plane that admits an agent
   # action vendors it, with the pin beside it, in the VENDORED rows below.
-  "apps/Model Plane/api/contracts/agent-action-admission.json|c195b0ca213740a4318a4ba4fa5924f001f0119f9530eb27a0032411eab6ed5a"
+  "apps/Model Plane/api/contracts/agent-action-admission.json|f4e57479723ccd261aa35ea02caa9f926be46089375d602ae21e6cbbf78882e9"
   # WS21-S0 and WS21-S3: the browser policy goldens, authored (not generated). org-core's validate and resolve tests
   # and execution-core's canonicaliser test read vendored copies (VENDORED); the other consumers are pending (CONSUMERS).
   "apps/Model Plane/api/contracts/browser-domain-canonical.json|ef6bfb8e63f3a1c34b90a0d26d0f27fb5ef224f138a652bf851dc179573ac45d"
