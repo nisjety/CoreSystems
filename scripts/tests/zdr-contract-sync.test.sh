@@ -29,6 +29,10 @@
 # schema, the .sha256 pin, every rule exercised). This script pins its bytes and lists the
 # Model Plane consumer (mp-scrub, WS12.S4) as pending until that crate vendors its copy.
 #
+# The approval ZDR golden cases (APPROVAL_ZDR_CASES, build plan WS13 S8) are not golden files:
+# they are guard functions in one Rust file, one per case. This script only proves that each case
+# still has its guard there; cargo test runs them.
+#
 # CONSUMERS says who must vendor which golden. A consumer that has not vendored its
 # copy yet is reported as "pending"; under REQUIRE_CONTRACT (set it in any job that
 # runs from a full checkout and expects the build to be complete) a pending consumer
@@ -428,6 +432,19 @@ CONSUMERS=(
   "apps/Model Plane/api/contracts/browser-site-policy-matrix.json|browser-broker|apps/Model Plane/go/services/browser-broker/|WS21-S4 (site-policy client)"
 )
 
+# The approval ZDR golden cases (build plan WS13 S8). Each is a guard function of the Rust file
+# named by APPROVAL_ZDR_GUARDS: the refusal, or the omission, that comes before the durable write
+# it protects, read from the file that owns it. Renaming or deleting a guard must fail this
+# check, or the case would be dropped without anyone noticing.
+APPROVAL_ZDR_GUARDS="apps/Model Plane/rust/services/execution-core/tests/approval_gate_contract.rs"
+APPROVAL_ZDR_CASES=(
+  approval_cause_not_persisted_under_zdr
+  approval_audit_not_emitted_under_zdr
+  approval_denial_memory_not_consulted_under_zdr
+  approval_scope_grant_under_zdr_refused
+  approval_grant_use_under_zdr_refused
+)
+
 passes=0
 failures=0
 pass() { printf 'ok - %s\n' "$1"; passes=$((passes + 1)); }
@@ -559,6 +576,23 @@ check_consumers() {
   fi
 }
 
+# Every approval ZDR golden case has its guard function in APPROVAL_ZDR_GUARDS. The guards run
+# under cargo test; this proves only that no case has lost the function that states it.
+check_approval_zdr_cases() {
+  local case
+  if [[ ! -f "$ROOT/$APPROVAL_ZDR_GUARDS" ]]; then
+    fail "approval ZDR guards are missing: $APPROVAL_ZDR_GUARDS"
+    return 0
+  fi
+  for case in "${APPROVAL_ZDR_CASES[@]}"; do
+    if grep -Eq "^fn ${case}\(\) \{" "$ROOT/$APPROVAL_ZDR_GUARDS"; then
+      pass "approval ZDR golden case has its guard: $case"
+    else
+      fail "approval ZDR golden case has no guard function in $APPROVAL_ZDR_GUARDS: $case"
+    fi
+  done
+}
+
 # The check is only worth having if it can fail. Copy the goldens into a scratch
 # tree, flip one byte, and require the same checks to reject it; then require
 # them to accept the untouched copy.
@@ -583,6 +617,9 @@ self_test() {
       cp "$ROOT/$path" "$SCRATCH/$path"
     done
   done
+  # The approval ZDR guards are read by check_approval_zdr_cases, so the scratch tree carries them.
+  mkdir -p "$SCRATCH/$(dirname "$APPROVAL_ZDR_GUARDS")"
+  cp "$ROOT/$APPROVAL_ZDR_GUARDS" "$SCRATCH/$APPROVAL_ZDR_GUARDS"
   # REQUIRE_CONTRACT is emptied here: this run asks only whether an untouched copy passes.
   if ! REQUIRE_CONTRACT= CONTRACT_SYNC_ROOT="$SCRATCH" bash "$SELF" >/dev/null 2>&1; then
     echo "self-test: the checks reject an untouched copy of the goldens" >&2
@@ -610,6 +647,14 @@ self_test() {
     echo "self-test: the scratch copy does not pass again after the tamper checks, so the checks below would prove nothing" >&2
     return 1
   fi
+
+  # A case whose guard is renamed away is a case nothing runs: the check must notice it.
+  sed -i 's/^fn approval_grant_use_under_zdr_refused() {/fn approval_grant_use_under_zdr_refused_renamed() {/' "$SCRATCH/$APPROVAL_ZDR_GUARDS"
+  if CONTRACT_SYNC_ROOT="$SCRATCH" bash "$SELF" >/dev/null 2>&1; then
+    echo "self-test: the checks accept an approval ZDR case whose guard was renamed away" >&2
+    return 1
+  fi
+  cp "$ROOT/$APPROVAL_ZDR_GUARDS" "$SCRATCH/$APPROVAL_ZDR_GUARDS"
 
   # The strict loader must reject a malformed ZDR golden on its own. A digest pin only
   # proves the file did not change; it says nothing about whether the file is well formed,
@@ -707,6 +752,7 @@ fi
 check_goldens
 check_vendored
 check_schema
+check_approval_zdr_cases
 check_consumers || true
 printf '%s passed, %s failed\n' "$passes" "$failures"
 [[ "$failures" -eq 0 ]]
