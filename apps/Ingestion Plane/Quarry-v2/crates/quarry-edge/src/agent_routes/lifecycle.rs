@@ -91,6 +91,12 @@ pub(super) fn resumed_run_class(
         .map_or(derived, |stored| stored.stricter(derived))
 }
 
+/// D2-061: the seq a resumed run's trace starts at: the checkpoint's `trace_seq`, and never
+/// below 1 (0 is a checkpoint written before the field existed).
+pub(super) fn trace_start_seq(stored: u64) -> u64 {
+    stored.max(1)
+}
+
 /// D2: the first step key a resumed run hands out. A step key is reserved for every
 /// admitted step, completed or failed, while the checkpoint's `step` counts completed steps
 /// only, so seeding the keys from `step` gave a key that a failed step had already used
@@ -447,11 +453,19 @@ pub async fn start_run(
     }
     // WS7.D: the run's web policy, resolved once from the caller's principal, the ZDR posture,
     // the operator baseline and the request's `policy` ask. A refusal here consumes nothing.
+    // D2-051: a resume re-applies the ask the run was started with, merged with the resume
+    // request's own (which can only tighten it), so a resume never drops a restriction.
+    let policy_ask = crate::agent_policy_gate::merge_asks(
+        resume_checkpoint
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.policy_ask.as_ref()),
+        body.policy.as_ref(),
+    );
     let web_decision = crate::agent_policy_gate::resolve_for_start(
         &state.policy,
         &claims,
         zdr.is_active(),
-        body.policy.as_ref(),
+        policy_ask.as_ref(),
         persist_profile,
         body.driver_requirements.uploads_from_artifacts,
         body.driver_requirements.downloads_to_artifacts,
@@ -772,10 +786,23 @@ pub async fn start_run(
     // are authoritative (see above), so the resume request cannot lengthen it.
     .with_run(run_class, entry.constraints.max_runtime_s.map(u64::from))
     .with_policy(web_decision)
+    .with_policy_ask(policy_ask)
+    .with_trace(state.event_sink.clone(), run_id.clone())
     .with_resume_step(resume_checkpoint.as_ref().map_or(0, |cp| cp.next_step));
 
+    // D2-061: the run's event trace continues past every seq an earlier segment minted. A
+    // first start numbers from 1; a resume from the checkpoint's `trace_seq` (0 on a
+    // checkpoint written before it existed, which starts at 1 as it did).
+    let trace_start = resume_checkpoint
+        .as_ref()
+        .map_or(1, |cp| trace_start_seq(cp.trace_seq));
+
     if !zdr.is_active() {
-        let checkpoint = checkpoint_for_entry(&entry, &live);
+        let mut checkpoint = checkpoint_for_entry(&entry, &live);
+        // The trace opens only after this save, and AgentStarted takes `trace_start`, so the
+        // seq the trace mints next is the one past it (the open trace would read 0 here and
+        // overwrite what a resume carried in).
+        checkpoint.trace_seq = trace_start.saturating_add(1);
         if let Err(error) = state.receipts.save_run_checkpoint(checkpoint).await {
             let _ = state.agent_driver.release(entry.session).await;
             return Err(driver_err(&request_id, error));
@@ -804,9 +831,9 @@ pub async fn start_run(
         if resume_checkpoint.is_some() { "resumed" } else { "started" },
     );
 
-    // WS10.S3: the run's event trace starts here, numbered from seq 1, so the
-    // AgentStarted below is the first event of the run's replay ring.
-    state.event_sink.open_run(&run_id, 1);
+    // WS10.S3: the run's event trace starts here, so the AgentStarted below is the first
+    // event of this segment's replay ring (seq 1 on a start, past the checkpoint on a resume).
+    state.event_sink.open_run(&run_id, trace_start);
 
     state
         .event_sink

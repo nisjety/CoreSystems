@@ -237,6 +237,11 @@ pub struct RunLive {
     /// WS7.D: the run's web-policy decision, resolved at start (see `agent_policy_gate`).
     /// `None` only for a run built outside `start_run`.
     policy: Option<crate::policy_baseline::Decision>,
+    /// D2-051: the `policy` ask the run was started with (merged with the ask of every
+    /// earlier segment), kept so each checkpoint stores it and a resume re-applies it.
+    policy_ask: Option<quarry_core::web_policy::RequestAsk>,
+    /// D2-061: the run's event trace, read for the next seq each checkpoint stores.
+    trace: Option<(quarry_runtime::EventSink, RunKind)>,
     /// WS8.F: who holds each tab, and the run's attach. Locked for one read or change only.
     pub(super) tabs: StdMutex<TabLedger>,
     pub(super) attaches: StdMutex<AttachRegistry>,
@@ -264,6 +269,8 @@ impl RunLive {
             in_flight: AtomicU32::new(0),
             explicit_runtime_s: None,
             policy: None,
+            policy_ask: None,
+            trace: None,
             tabs: StdMutex::new(TabLedger::new()),
             attaches: StdMutex::new(AttachRegistry::default()),
             steps_reserved: AtomicU32::new(0),
@@ -302,6 +309,33 @@ impl RunLive {
     pub fn with_policy(mut self, decision: crate::policy_baseline::Decision) -> Self {
         self.policy = Some(decision);
         self
+    }
+
+    /// D2-051: keep the ask the run's policy was resolved with, for its checkpoints.
+    pub fn with_policy_ask(mut self, ask: Option<quarry_core::web_policy::RequestAsk>) -> Self {
+        self.policy_ask = ask;
+        self
+    }
+
+    /// D2-051: the ask a checkpoint stores, or `None` when the run has none.
+    pub fn policy_ask(&self) -> Option<&quarry_core::web_policy::RequestAsk> {
+        self.policy_ask.as_ref()
+    }
+
+    /// D2-061: attach the run's event trace, so a checkpoint can store its next seq.
+    pub fn with_trace(mut self, sink: quarry_runtime::EventSink, run_id: RunKind) -> Self {
+        self.trace = Some((sink, run_id));
+        self
+    }
+
+    /// D2-061: the seq the run's trace mints next, or 0 when it has no open trace (a run
+    /// built outside `start_run`, or one whose trace is closed): a checkpoint then stores
+    /// nothing, and a resume starts at 1 as before.
+    pub fn trace_seq(&self) -> u64 {
+        self.trace
+            .as_ref()
+            .and_then(|(sink, run_id)| sink.next_seq(run_id))
+            .unwrap_or(0)
     }
 
     /// WS7.D: the run's web-policy decision, or `None` for a run built outside `start_run`.

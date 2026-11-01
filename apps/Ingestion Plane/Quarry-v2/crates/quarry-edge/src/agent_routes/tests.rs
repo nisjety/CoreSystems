@@ -2147,6 +2147,8 @@ fn gone_checkpoint(run_id: &RunKind, actor: &str, zdr: ZdrMode, status: AgentRun
         budget: None,
         policy_mode: None,
         next_step: 2,
+        trace_seq: 0,
+        policy_ask: None,
     }
 }
 
