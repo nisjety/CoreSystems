@@ -27,6 +27,11 @@ func logGrantIssued(ctx context.Context, g *grant.Grant) {
 	}
 	if !g.Zdr {
 		attrs = append(attrs, "grant_id", g.ID)
+		// INNH-10: the API key id (an id, never the key). Left out under ZDR
+		// with the grant id, so nothing names a ZDR session.
+		if g.KeyID != "" {
+			attrs = append(attrs, "key_id", g.KeyID)
+		}
 	}
 	slog.InfoContext(ctx, "browser grant issued", attrs...)
 }

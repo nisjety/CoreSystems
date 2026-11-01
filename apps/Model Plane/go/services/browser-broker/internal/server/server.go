@@ -29,6 +29,8 @@ type Server struct {
 	baseURL   string
 	principal func(context.Context) (authctx.Principal, error)
 	options   Options
+	// revokedKeys remembers recently revoked API keys (INNH-10).
+	revokedKeys *revokedKeys
 }
 
 // Options is the optional wiring a broker main sets after NewServerWithConfig.
@@ -68,7 +70,10 @@ func NewServerWithConfig(grants grant.Repository, cfg Config) *Server {
 			DeniedSuffixes:     cfg.DenySuffixes,
 		}
 	}
-	return &Server{grants: grants, cfg: cfg, baseURL: baseURL, principal: authz.Principal}
+	return &Server{
+		grants: grants, cfg: cfg, baseURL: baseURL, principal: authz.Principal,
+		revokedKeys: newRevokedKeys(nil),
+	}
 }
 
 // AcquireGrant mints a new browser grant using the proto-defined session/mode contract.

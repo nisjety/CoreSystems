@@ -44,6 +44,14 @@ Tests added: `internal/grant/key_grant_test.go` (6-case `keyContract`, memory), 
 Tests run: `GOWORK=off go test -count=1 -v ./...`: PASS=345 FAIL=0. `TEST_DATABASE_URL=<scratch mpw2w3-pg> GOWORK=off go test -count=1 -tags integration -v ./...`: PASS=439 FAIL=0. `go vet` (with and without the integration tag): clean.
 Flags: none needed here (no grant gets a KeyID until the acquire path, which is behind the switch).
 
+### Slice MP-2b: key-grant issue path, revoked-key list, RevokeKey (commit: see git log, `feat(browser-broker): issue api key grants ... (INNH-10 MP-2b)`)
+
+Built: `internal/server/key_grants.go` (`acquireKeyGrant` body: switch, shape, scope, valid key id, revoked list, hosts normalized + non-empty + each exactly in the normalized `KeyHostCeiling` (a malformed or empty ceiling admits nothing; no subdomains), StaticPolicy, budget mandatory (all three > 0, source required by NormalizeBudget) and each within `KeyBudgetCeiling` (a zero ceiling dimension admits nothing), TTL `keyGrantTTL` (0 = KeyGrantTTL clamped 30-900, request only shortens, < 30 s InvalidArgument), ZDR floor, read-only only under ZDR, site policy, `CreateSession` with KeyID + MaxActivePerKey + MaxActivePerOwner, post-insert revoked-list re-check that revokes the new grant; ErrorInfo reasons `API_KEY_GRANTS_DISABLED` / `API_KEY_REVOKED` / `API_KEY_HOST_CEILING` / `API_KEY_BUDGET_CEILING`; `Server.RevokeKey` (mark, then `KeyRevoker.RevokeByKey`, runs with the switch off too); `keyGrantLive` also refuses a key on the revoked list), `internal/server/revoked_keys.go` (20 min memory, 65536 entries, overflow fails closed for 20 min), `server.go` (field + init), `grantlog.go` (`key_id` on the issue line, omitted under ZDR with the grant id).
+Tests: `internal/server/key_issue_test.go` (11 tests, 33 PASS lines incl. subtests).
+Tests run: `GOWORK=off go test -count=1 -v ./...`: PASS=378 FAIL=0; `go vet ./...` clean.
+Flags: `BROWSER_BROKER_KEY_GRANTS_ENABLED` (default off, pinned by `TestKeyGrants_DefaultConfigIsOff`).
+Assumed: key_id is logged only for non-ZDR grants; the revoked list is per instance (see DEPTH).
+
 ## MP-3 contract (model-gateway, lane B builds it; what the broker will expect)
 
 - Routes: `POST /v1/browser/key-grants`, `DELETE /v1/browser/key-grants/:grant_id`. Accept ONLY an api_key principal (`PrincipalKind::ApiKey`), refuse user and service (403); api_key refused on every other route. Ingress needs CP-1 audience `model-gateway` (ask below); the delegated bearer to the broker is the `aud=browser-broker` key token with the same `sub`, `org_id`, `key_id`, `zdr`.
