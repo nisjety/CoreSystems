@@ -1,7 +1,7 @@
 # Lane C progress (Go browser-broker, INNH-10 MP-1 / MP-2, security-sensitive)
 
 Branch `mp-w2w3`, worktree `mp-w2w3-350537`. Everything dark behind `BROWSER_BROKER_KEY_GRANTS_ENABLED` (default off).
-STOPPED 2026-11-01 on the lead's usage-limit order after MP-1. MP-2 is NOT committed (partial edits left in the tree, see "Left").
+Batch 1 stopped after MP-1. Batch 2 (2026-11-01): MP-2 built and committed in five slices (MP-2a..e), flag off; security review below. MP-3 (model-gateway) not built here.
 
 ## Slice C0: OwnerFilter fail-open fix (commit 4501c9a85)
 
@@ -29,13 +29,12 @@ Tests run (all `-count=1`):
 
 Assumed decisions (defaults taken): OD-1 new type; OD-5 scope `browser:agent`; the opt-in `AcceptAPIKey` (instead of every service learning the type); the budget ceiling travels as a token claim `key_budget` (the design's token table lists only `key_hosts`; added to the CP-1 ask); an api_key revoke of a dead own grant reads NotFound.
 
-## Left (NOT done; for the next batch)
-
-Uncommitted, UNTESTED partial MP-2 edits left in the tree (lane C files only; do not commit as is, finish or discard them):
-- `internal/grant/postgres.go` (`key_id` in `grantColumns`/`fetch`/`insertGrant`/`insertArgs`, per-key count under a new `lockNsKeyGrants` advisory lock taken after the owner lock, `RevokeByKey` with a recursive revoke, key grant refused as approval parent), `internal/grant/router.go` (`Routed.RevokeByKey` sweeps memory AND Postgres), `internal/grant/humanbrowse.go` + `postgres_humanbrowse.go` (`renewable(g)` refuses a key grant; a key grant is not derivable), `migrations/0005_browser_grants_key.{up,down}.sql` (column, CHECK fence with COALESCE on the budget columns, index `(key_id, org_id, expires_at)`; down deletes key grants first so they never become the owner's grants).
-- Still to build for MP-2: `acquireKeyGrant` body (hosts normalized, non-empty, each in the normalized `KeyHostCeiling` exactly, StaticPolicy + site policy; budget: all three bounds > 0 and each within `KeyBudgetCeiling`, a ceiling with a zero dimension refuses; TTL = KeyGrantTTL, a request may only shorten it, < 30 s refused; ZDR floor, `z_` id in memory; `MaxActivePerOwner` and `MaxActivePerKey`; read-only only under ZDR as today); a revoked-key list in the server (about 20 min, longer than the 900 s grant plus the 120 s token) checked at acquire AND in `keyGrantLive`, so a token minted before the revoke event cannot get or keep a grant; `Server.RevokeKey` (mark list, then `KeyRevoker.RevokeByKey`); proto `string key_id = 60;` on `AcquireGrantResponse` and `ValidateGrantResponse` (60 is free in the upstream proto and in the Quarry vendored copy; 54-59 stay reserved), Go regen with buf, Rust `cargo check -p model-gateway --lib` / `-p execution-core --lib` in `C:/dev/mp-w2w3-target-C`; `logGrantIssued` with key_id; CP-3 consumer package (`verevon.audit.v2.control.auth-core.api_key_revoked`, decode top-level or `details.key_id`, bound and validate the key id, ack malformed, nak on store error; bind a pre-provisioned durable like cost-core's GDPR consumer, on its own connection `BROWSER_BROKER_KEY_REVOKE_NATS_URL/_USER/_PASSWORD`, stream default `VEREVON_CONTROL_OBSERVABILITY`, wired in `cmd/main.go` only when the switch is on and the URL is set); compose env lines (switch 0); `scripts/tests/browser-grant-contract.test.mjs` (test 1 pins `AcquireGrantResponse`/`ValidateGrantResponse` numbers; it already fails on the base because 11-14 were added without updating it, and tests 6 and 15 fail on the base too); Postgres contract tests via `TEST_DATABASE_URL` (scratch `mpw2w3-pg`) including the 0005 rerun and down/up; consumer tests; ValidateGrant returns key_id.
+## Left after batch 1 (all done in batch 2, see MP-2a..e; kept as history)
+- The batch-1 partial edits were reviewed, tested and committed as MP-2a; every "still to build" item is in MP-2b..e.
 
 ## Batch 2 (2026-11-01)
+
+Final run at the end of batch 2 (browser-broker): `GOWORK=off go test -count=1 -v ./...` PASS=385 FAIL=0; with `-tags integration` and `TEST_DATABASE_URL` on scratch `mpw2w3-pg`: PASS=479 FAIL=0; `go vet` clean (both tag sets); contract mjs 30/33 (the 3 base failures); Rust `cargo check --tests -p model-gateway -p execution-core -p session-core` exit 0.
 
 ### Slice MP-2a: grant store key_id, per-key cap, RevokeByKey (commit: see git log, `feat(browser-broker): key_id grant column ... (INNH-10 MP-2a)`)
 
@@ -80,6 +79,17 @@ Not done: `deploy/.env.example` (rule 7, asked in MP-ASKS).
 - Broker codes -> HTTP (typed `{error:{code,message,details:{reason}}}`): PermissionDenied with switch off -> 403 `api_key_grants_disabled`; PermissionDenied host outside ceiling -> 403 `api_key_host_ceiling`; PermissionDenied budget over ceiling -> 403 `api_key_budget_ceiling`; InvalidArgument (budget missing, hosts invalid) -> 400 `invalid_request`; ResourceExhausted -> 429 `per_key_grant_cap` (or owner cap); PermissionDenied site policy (`BROWSER_SITE_DENIED`) -> 403 as `/v1/browser/grants` does; Unavailable -> 503.
 - DELETE: broker RevokeGrant as the key; OK and NotFound both -> 204 (idempotent, never says whether the id exists for another key); PermissionDenied (switch off) -> 403.
 - Flag interplay: `MODEL_GATEWAY_BROWSER_KEY_GRANTS` default off -> both routes 404; on but broker switch off -> 403 `api_key_grants_disabled`. Hosts never logged under ZDR.
+
+## Security self-review (batch 2: the full MP-1 + MP-2 diff, 4501c9a85..HEAD in lane C)
+
+One pass over authz, authctx, key_grants.go, revoked_keys.go, the grant stores, 0005, keyrevoke and cmd wiring.
+- Who can create a key grant: only `acquireKeyGrant`, reached only for `principal_type=api_key` (verifier opt-in, `sub == apikey:<key_id>`, scope `browser:agent`), and `CreateSessionParams.KeyID` is set nowhere else (grepped). A user or service request has no key field. The memory store, the Pg store (ValidKeyID) and the 0005 CHECK each refuse a malformed key id or a key row that is not an allow-list session grant with hosts and a full budget.
+- Widening: hosts are exact members of the signed ceiling (no subdomain, an empty/malformed ceiling admits nothing), then StaticPolicy and the owner's site policy can only narrow. Budget: all three bounds required and within the signed ceiling; a zero ceiling dimension admits nothing. TTL: request only shortens, clamped 30-900 s. No renew (grant layer `renewable(g)` and handler), no derive child (`planDerive`), no sensitive approval parent (both stores), for the key AND its owner. Key grants count against the per-key cap (exact: store lock / advisory lock) and the owner cap.
+- Cross-key / cross-org: org pinned at Authorize and the handler; an api_key sees and revokes only grants carrying its own key id (`KeyMatches`), NotFound otherwise; the owner may validate and revoke its key's grants (intended: the person can always kill them).
+- Revocation: `RevokeKey` marks then sweeps both stores; acquire re-checks after insert (race test); `keyGrantLive` refuses a listed key's grants even if the sweep missed; the switch off or `DisableKeyGrants` (consumer cannot bind) makes every key grant validate as revoked; revoke runs with the switch off; the list fails closed on overflow. Switch on without a revoke URL refuses to start.
+- ZDR: floor unchanged (token or request raises, nothing lowers); ZDR key grants stay in memory (`z_`), swept by Routed; the issue log omits grant id AND key id under ZDR; no host in any log or ErrorInfo; the NATS URL is never logged; the revoke bus password is a release secret.
+- Shared authctx: opt-in, the six other services unchanged (batch 1); HTTP middleware refuses api_key.
+- Findings left open (DEPTH, not fixed in this wave): the revoked list is per process and lost on restart; a key's budget source label is caller-chosen (`request`/`org_default`/`entitlement`, a label only); a ZDR key grant's AcquireGrantResponse still lists its hosts (the MP-3 door must omit them); a consumer whose durable disappears after bind is not detected.
 
 ## Security self-review (of what is committed: C0 + MP-1)
 
