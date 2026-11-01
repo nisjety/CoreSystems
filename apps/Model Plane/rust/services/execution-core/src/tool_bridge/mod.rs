@@ -43,6 +43,10 @@ pub(crate) struct ValidatedBrowserGrant {
     parent_grant_id: String,
     owner_id: String,
     zdr: bool,
+    // The grant's budget claim (WS6.E); zero means no bound on that dimension.
+    // It can only tighten the run (see `PlanCeilings`).
+    budget_max_steps: i32,
+    budget_max_runtime_s: i32,
 }
 
 impl ValidatedBrowserGrant {
@@ -73,6 +77,8 @@ impl ValidatedBrowserGrant {
             parent_grant_id: response.parent_grant_id.clone(),
             owner_id: response.owner_id.clone(),
             zdr: response.zdr,
+            budget_max_steps: response.budget_max_steps,
+            budget_max_runtime_s: response.budget_max_runtime_s,
         })
     }
 
@@ -94,6 +100,8 @@ impl ValidatedBrowserGrant {
             parent_grant_id: parent_grant_id.to_owned(),
             owner_id: owner_id.to_owned(),
             zdr,
+            budget_max_steps: 0,
+            budget_max_runtime_s: 0,
         }
     }
 
@@ -846,21 +854,33 @@ fn browser_execution_from_loop_result(
 
     if let Some(resource_limit) = result.resource_limit {
         return match resource_limit {
-            BrowserResourceLimit::MaxSteps => BrowserAgentExecution::ResourceExhausted {
-                reason: result.summary,
-            },
-            BrowserResourceLimit::Runtime => BrowserAgentExecution::TimedOut {
-                reason: result.summary,
-            },
+            // Time-shaped limits are a timeout; every budget and backpressure
+            // limit is resource exhaustion. None of them is `Failed`.
+            BrowserResourceLimit::Runtime
+            | BrowserResourceLimit::Credential
+            | BrowserResourceLimit::QuarryBudget(crate::quarry_agent::BudgetDimension::Runtime) => {
+                BrowserAgentExecution::TimedOut {
+                    reason: result.summary,
+                }
+            }
+            BrowserResourceLimit::MaxSteps
+            | BrowserResourceLimit::Tokens
+            | BrowserResourceLimit::QuarryBudget(_)
+            | BrowserResourceLimit::QuarryBackpressure => {
+                BrowserAgentExecution::ResourceExhausted {
+                    reason: result.summary,
+                }
+            }
         };
     }
 
     match result.status {
         PlanStatus::Completed => BrowserAgentExecution::Completed {
             output: format!(
-                "status=completed summary={} verification={}",
+                "status=completed summary={} verification={}{}",
                 result.summary,
-                browser_verification_note(&result.observations, verification)
+                browser_verification_note(&result.observations, verification),
+                usage_suffix(result.usage)
             ),
         },
         PlanStatus::Failed => BrowserAgentExecution::Failed {
@@ -893,6 +913,151 @@ fn browser_execution_from_loop_result(
     }
 }
 
+/// ` usage=<counts>` when a planner ran, empty otherwise (a deterministic run
+/// keeps the output it always had). Counts only, no content.
+fn usage_suffix(usage: browser_agent::BrowserLoopUsage) -> String {
+    if usage.planner_calls == 0 {
+        String::new()
+    } else {
+        format!(" usage={}", usage.line())
+    }
+}
+
+/// Default and ceiling for the per-run bounds, read from the environment on
+/// every call (`QUARRY_BROWSER_AGENT_{DEFAULT,CEILING}_MAX_{STEPS,RUNTIME_S}`,
+/// `QUARRY_BROWSER_AGENT_MAX_PLANNER_TOKENS` and `_CEILING`). An unset or
+/// unparsable value takes the built-in number, so with no env set a run gets
+/// the 20 steps and 120 s it always had.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PlanCeilings {
+    default_steps: i32,
+    ceiling_steps: i32,
+    default_runtime_s: i32,
+    ceiling_runtime_s: i32,
+    default_planner_tokens: u64,
+    ceiling_planner_tokens: u64,
+}
+
+impl Default for PlanCeilings {
+    fn default() -> Self {
+        Self {
+            default_steps: 20,
+            ceiling_steps: 100,
+            default_runtime_s: 120,
+            ceiling_runtime_s: 900,
+            default_planner_tokens: 200_000,
+            ceiling_planner_tokens: 1_000_000,
+        }
+    }
+}
+
+impl PlanCeilings {
+    pub(crate) fn from_env() -> Self {
+        Self::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    pub(crate) fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
+        fn positive<T: std::str::FromStr + PartialOrd + Default>(
+            lookup: &impl Fn(&str) -> Option<String>,
+            name: &str,
+            fallback: T,
+        ) -> T {
+            lookup(name)
+                .and_then(|value| value.trim().parse::<T>().ok())
+                .filter(|value| *value > T::default())
+                .unwrap_or(fallback)
+        }
+        let built_in = Self::default();
+        let ceiling_steps = positive(
+            &lookup,
+            "QUARRY_BROWSER_AGENT_CEILING_MAX_STEPS",
+            built_in.ceiling_steps,
+        );
+        let ceiling_runtime_s = positive(
+            &lookup,
+            "QUARRY_BROWSER_AGENT_CEILING_MAX_RUNTIME_S",
+            built_in.ceiling_runtime_s,
+        );
+        let ceiling_planner_tokens = positive(
+            &lookup,
+            "QUARRY_BROWSER_AGENT_MAX_PLANNER_TOKENS_CEILING",
+            built_in.ceiling_planner_tokens,
+        );
+        // A default above its ceiling would hand out more than the ceiling.
+        Self {
+            default_steps: positive(
+                &lookup,
+                "QUARRY_BROWSER_AGENT_DEFAULT_MAX_STEPS",
+                built_in.default_steps,
+            )
+            .min(ceiling_steps),
+            ceiling_steps,
+            default_runtime_s: positive(
+                &lookup,
+                "QUARRY_BROWSER_AGENT_DEFAULT_MAX_RUNTIME_S",
+                built_in.default_runtime_s,
+            )
+            .min(ceiling_runtime_s),
+            ceiling_runtime_s,
+            default_planner_tokens: positive(
+                &lookup,
+                "QUARRY_BROWSER_AGENT_MAX_PLANNER_TOKENS",
+                built_in.default_planner_tokens,
+            )
+            .min(ceiling_planner_tokens),
+            ceiling_planner_tokens,
+        }
+    }
+
+    /// The step bound: the caller's value (zero, negative or absent take the
+    /// default), clamped to the ceiling, then tightened by the grant's claim.
+    pub(crate) fn steps(&self, requested: Option<i32>, claim: i32) -> i32 {
+        tighten(
+            requested
+                .filter(|value| *value > 0)
+                .unwrap_or(self.default_steps)
+                .min(self.ceiling_steps),
+            claim,
+        )
+    }
+
+    /// The runtime bound in seconds; same rules as [`Self::steps`].
+    pub(crate) fn runtime_s(&self, requested: Option<i32>, claim: i32) -> i32 {
+        tighten(
+            requested
+                .filter(|value| *value > 0)
+                .unwrap_or(self.default_runtime_s)
+                .min(self.ceiling_runtime_s),
+            claim,
+        )
+    }
+
+    /// The planner token budget: the caller's value (absent or non-positive
+    /// takes the default), never above the ceiling.
+    pub(crate) fn planner_tokens(&self, requested: Option<i64>) -> u64 {
+        requested
+            .and_then(|value| u64::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(self.default_planner_tokens)
+            .min(self.ceiling_planner_tokens)
+    }
+}
+
+/// `min(value, claim)` where a non-positive claim means no bound.
+fn tighten(value: i32, claim: i32) -> i32 {
+    if claim > 0 {
+        value.min(claim)
+    } else {
+        value
+    }
+}
+
+/// The org planner switch values the gateway writes; anything else is unset.
+fn known_planner_flag(value: Option<&str>) -> Option<String> {
+    let value = value?.trim().to_ascii_lowercase();
+    matches!(value.as_str(), "on" | "off" | "unavailable").then_some(value)
+}
+
 #[derive(serde::Deserialize)]
 struct BrowserAgentInput {
     grant_id: String,
@@ -916,6 +1081,13 @@ struct BrowserAgentInput {
     /// worth anything; omitting it means the procedure can be refuted but
     /// never confirmed.
     postcondition: Option<String>,
+    /// Planner token budget the gateway computed (the tighter of the request
+    /// and the org ceiling). Tighten-only: it is clamped to the env ceiling
+    /// here and can never raise it.
+    max_planner_tokens: Option<i64>,
+    /// The org planner switch the gateway wrote from the org quota row
+    /// (`on`, `off`, `unavailable`); read by the planner policy (WS11.S2).
+    planner_flag: Option<String>,
 }
 
 fn browser_plan_config(
@@ -923,6 +1095,22 @@ fn browser_plan_config(
     verified_org_id: &str,
     verified_zdr: bool,
     validated_grant: &ValidatedBrowserGrant,
+) -> Result<browser_agent::PlanConfig, String> {
+    browser_plan_config_with(
+        input,
+        verified_org_id,
+        verified_zdr,
+        validated_grant,
+        &PlanCeilings::from_env(),
+    )
+}
+
+fn browser_plan_config_with(
+    input: BrowserAgentInput,
+    verified_org_id: &str,
+    verified_zdr: bool,
+    validated_grant: &ValidatedBrowserGrant,
+    ceilings: &PlanCeilings,
 ) -> Result<browser_agent::PlanConfig, String> {
     if input.grant_id.trim() != validated_grant.grant_id() {
         return Err(
@@ -935,8 +1123,11 @@ fn browser_plan_config(
         run_id: input.run_id.unwrap_or_default(),
         org_id: verified_org_id.to_owned(),
         system_prompt: input.system_prompt.unwrap_or_default(),
-        max_steps: input.max_steps.unwrap_or(20),
-        max_runtime_s: input.max_runtime_s.unwrap_or(120),
+        max_steps: ceilings.steps(input.max_steps, validated_grant.budget_max_steps),
+        max_runtime_s: ceilings.runtime_s(
+            input.max_runtime_s,
+            validated_grant.budget_max_runtime_s,
+        ),
         // Caller-supplied `allowed_domains` is deliberately ignored. The
         // only policy that reaches Quarry is the broker-owned validation.
         allowed_domains: validated_grant.allowed_domains().to_vec(),
@@ -947,6 +1138,10 @@ fn browser_plan_config(
         profile_id: input.profile_id,
         start_url: input.start_url,
         postcondition: input.postcondition.unwrap_or_default(),
+        max_planner_tokens: Some(ceilings.planner_tokens(input.max_planner_tokens)),
+        // No source for the credential expiry yet (see DEPTH.md).
+        deadline_at: None,
+        planner_flag: known_planner_flag(input.planner_flag.as_deref()),
     };
     browser_agent::validate_plan_config(&plan)?;
     Ok(plan)
@@ -1122,6 +1317,7 @@ mod tests {
                 summary: "cancelled by user".to_owned(),
                 abort_reason: Some(abort_reason),
                 resource_limit: None,
+                usage: browser_agent::BrowserLoopUsage::default(),
             };
 
             assert_eq!(
@@ -1157,9 +1353,11 @@ mod tests {
                 summary: match resource_limit {
                     BrowserResourceLimit::MaxSteps => "max_steps exceeded".to_owned(),
                     BrowserResourceLimit::Runtime => "max_runtime_s exceeded".to_owned(),
+                    _ => unreachable!("only the two original limits are listed here"),
                 },
                 abort_reason: None,
                 resource_limit: Some(resource_limit),
+                usage: browser_agent::BrowserLoopUsage::default(),
             };
 
             assert_eq!(
@@ -1167,6 +1365,194 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn resource_limit_outcomes_map_to_step_outcomes() {
+        use crate::quarry_agent::BudgetDimension as D;
+        use browser_agent::BrowserResourceLimit as L;
+
+        let resource_exhausted = [
+            L::MaxSteps,
+            L::Tokens,
+            L::QuarryBackpressure,
+            L::QuarryBudget(D::Steps),
+            L::QuarryBudget(D::Attempts),
+            L::QuarryBudget(D::Cost),
+            L::QuarryBudget(D::OrgAllowance),
+            L::QuarryBudget(D::Other),
+        ];
+        let timed_out = [L::Runtime, L::Credential, L::QuarryBudget(D::Runtime)];
+        let run = |limit: L| {
+            browser_execution_from_loop_result(
+                browser_agent::BrowserAgentLoopResult {
+                    status: browser_agent::PlanStatus::Failed,
+                    observations: Vec::new(),
+                    summary: limit.reason().to_owned(),
+                    abort_reason: None,
+                    resource_limit: Some(limit),
+                    usage: browser_agent::BrowserLoopUsage::default(),
+                },
+                &BrowserVerificationInputs::default(),
+            )
+        };
+        for limit in resource_exhausted {
+            assert_eq!(
+                run(limit),
+                BrowserAgentExecution::ResourceExhausted {
+                    reason: limit.reason().to_owned()
+                },
+                "{limit:?}"
+            );
+        }
+        for limit in timed_out {
+            assert_eq!(
+                run(limit),
+                BrowserAgentExecution::TimedOut {
+                    reason: limit.reason().to_owned()
+                },
+                "{limit:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn usage_line_is_counts_only() {
+        let usage = browser_agent::BrowserLoopUsage {
+            planner_calls: 3,
+            planner_input_tokens: 1200,
+            planner_output_tokens: 80,
+        };
+        assert_eq!(
+            usage.line(),
+            "planner_calls=3 planner_input_tokens=1200 planner_output_tokens=80"
+        );
+        assert_eq!(usage_suffix(browser_agent::BrowserLoopUsage::default()), "");
+        let completed = browser_execution_from_loop_result(
+            browser_agent::BrowserAgentLoopResult {
+                status: browser_agent::PlanStatus::Completed,
+                observations: Vec::new(),
+                summary: "agent reported task complete".to_owned(),
+                abort_reason: None,
+                resource_limit: None,
+                usage,
+            },
+            &BrowserVerificationInputs::default(),
+        );
+        let BrowserAgentExecution::Completed { output } = completed else {
+            panic!("expected Completed");
+        };
+        assert!(
+            output.ends_with(
+                " usage=planner_calls=3 planner_input_tokens=1200 planner_output_tokens=80"
+            ),
+            "{output}"
+        );
+    }
+
+    fn ceilings_with(vars: &[(&str, &str)]) -> PlanCeilings {
+        let vars: Vec<(String, String)> = vars
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        PlanCeilings::from_lookup(|name| {
+            vars.iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        })
+    }
+
+    #[test]
+    fn caller_steps_above_ceiling_are_clamped() {
+        let ceilings = ceilings_with(&[]);
+        assert_eq!(ceilings.steps(Some(500), 0), 100);
+        assert_eq!(ceilings.steps(Some(7), 0), 7);
+        let tight = ceilings_with(&[("QUARRY_BROWSER_AGENT_CEILING_MAX_STEPS", "30")]);
+        assert_eq!(tight.steps(Some(50), 0), 30);
+        // The grant's claim tightens further, never loosens.
+        assert_eq!(ceilings.steps(Some(50), 12), 12);
+        assert_eq!(ceilings.steps(Some(5), 12), 5);
+        // Runtime and planner tokens clamp the same way.
+        assert_eq!(ceilings.runtime_s(Some(5000), 0), 900);
+        assert_eq!(ceilings.planner_tokens(Some(5_000_000)), 1_000_000);
+        assert_eq!(ceilings.planner_tokens(Some(40_000)), 40_000);
+    }
+
+    #[test]
+    fn zero_or_absent_steps_take_the_default() {
+        let ceilings = ceilings_with(&[]);
+        for requested in [None, Some(0), Some(-4)] {
+            assert_eq!(ceilings.steps(requested, 0), 20, "{requested:?}");
+            assert_eq!(ceilings.runtime_s(requested, 0), 120, "{requested:?}");
+        }
+        assert_eq!(ceilings.planner_tokens(None), 200_000);
+        assert_eq!(ceilings.planner_tokens(Some(0)), 200_000);
+        // Garbage in the environment is the built-in number, and a default
+        // above its ceiling is cut to the ceiling.
+        let odd = ceilings_with(&[
+            ("QUARRY_BROWSER_AGENT_DEFAULT_MAX_STEPS", "lots"),
+            ("QUARRY_BROWSER_AGENT_DEFAULT_MAX_RUNTIME_S", "2000"),
+        ]);
+        assert_eq!(odd.steps(None, 0), 20);
+        assert_eq!(odd.runtime_s(None, 0), 900);
+    }
+
+    #[test]
+    fn runtime_default_is_120() {
+        assert_eq!(ceilings_with(&[]).runtime_s(None, 0), 120);
+        assert_eq!(PlanCeilings::default().runtime_s(None, 0), 120);
+        let set = ceilings_with(&[("QUARRY_BROWSER_AGENT_DEFAULT_MAX_RUNTIME_S", "300")]);
+        assert_eq!(set.runtime_s(None, 0), 300);
+    }
+
+    #[test]
+    fn plan_config_reads_planner_tokens_and_flag_from_tool_input() {
+        let grant = ValidatedBrowserGrant::for_test("grant-1", "run", "", "u", false);
+        let build = |json: &str| {
+            let input: BrowserAgentInput = serde_json::from_str(json).unwrap();
+            browser_plan_config_with(input, "org", false, &grant, &PlanCeilings::default())
+                .unwrap()
+        };
+        let plain = build(r#"{"grant_id":"grant-1"}"#);
+        assert_eq!(plain.max_steps, 20);
+        assert_eq!(plain.max_runtime_s, 120);
+        assert_eq!(plain.max_planner_tokens, Some(200_000));
+        assert_eq!(plain.planner_flag, None);
+        assert!(plain.deadline_at.is_none());
+
+        let tight = build(
+            r#"{"grant_id":"grant-1","max_planner_tokens":40000,"planner_flag":"Off","max_steps":999}"#,
+        );
+        assert_eq!(tight.max_planner_tokens, Some(40_000));
+        assert_eq!(tight.planner_flag.as_deref(), Some("off"));
+        assert_eq!(tight.max_steps, 100);
+        // The request can never raise the ceiling; an unknown flag is unset.
+        let raised = build(r#"{"grant_id":"grant-1","max_planner_tokens":9000000,"planner_flag":"yes"}"#);
+        assert_eq!(raised.max_planner_tokens, Some(1_000_000));
+        assert_eq!(raised.planner_flag, None);
+    }
+
+    #[test]
+    fn grant_budget_claim_tightens_the_plan_bounds() {
+        let grant = ValidatedBrowserGrant::from_broker_response(
+            "grant-1",
+            &ValidateGrantResponse {
+                grant_id: "grant-1".to_owned(),
+                active: true,
+                allowed_domains: vec!["example.com".to_owned()],
+                budget_max_steps: 6,
+                budget_max_runtime_s: 45,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let input: BrowserAgentInput =
+            serde_json::from_str(r#"{"grant_id":"grant-1","max_steps":50}"#).unwrap();
+        let plan =
+            browser_plan_config_with(input, "org", false, &grant, &PlanCeilings::default())
+                .unwrap();
+        assert_eq!(plan.max_steps, 6);
+        assert_eq!(plan.max_runtime_s, 45);
     }
 
     // --- Browser postcondition threading (roadmap P1 item 3) ----------------

@@ -71,6 +71,7 @@ async fn browser_agent_drives_real_quarry_loop() {
         // page loaded, so the first action needs an explicit destination.
         start_url: Some("https://example.com".to_owned()),
         postcondition: String::new(),
+        ..Default::default()
     };
 
     let result = run_browser_agent_loop(
@@ -159,6 +160,7 @@ fn probe_config(org_id: &str, goal: &str) -> PlanConfig {
         profile_id: None,
         start_url: None,
         postcondition: String::new(),
+        ..Default::default()
     }
 }
 

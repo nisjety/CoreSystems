@@ -60,14 +60,73 @@ pub enum BrowserAbortReason {
 pub enum BrowserResourceLimit {
     MaxSteps,
     Runtime,
+    /// The planner's token budget (`PlanConfig::max_planner_tokens`).
+    Tokens,
+    /// The run's credential (delegated bearer) is about to expire
+    /// (`PlanConfig::deadline_at`); no new planner call is started.
+    Credential,
+    /// Quarry answered 402 `BUDGET_EXHAUSTED` for this dimension.
+    QuarryBudget(crate::quarry_agent::BudgetDimension),
+    /// Quarry (or an upstream) answered 429. Backpressure, never retried here.
+    QuarryBackpressure,
 }
 
 impl BrowserResourceLimit {
-    const fn reason(self) -> &'static str {
+    pub(crate) const fn reason(self) -> &'static str {
+        use crate::quarry_agent::BudgetDimension as D;
         match self {
             Self::MaxSteps => "max_steps exceeded",
             Self::Runtime => "max_runtime_s exceeded",
+            Self::Tokens => "max_planner_tokens exceeded",
+            Self::Credential => "run credential deadline reached",
+            Self::QuarryBudget(D::Steps) => "quarry budget exhausted: steps",
+            Self::QuarryBudget(D::Attempts) => "quarry budget exhausted: attempts",
+            Self::QuarryBudget(D::Runtime) => "quarry budget exhausted: runtime",
+            Self::QuarryBudget(D::Cost) => "quarry budget exhausted: cost",
+            Self::QuarryBudget(D::OrgAllowance) => "quarry budget exhausted: org_allowance",
+            Self::QuarryBudget(D::Other) => "quarry budget exhausted",
+            Self::QuarryBackpressure => "quarry is shedding load (429); not retried",
         }
+    }
+}
+
+/// The resource limit a failed Quarry call stands for, when the classifier
+/// says it is one (402 `BUDGET_EXHAUSTED`, 429). `None` for every other error.
+#[must_use]
+pub fn resource_limit_for_quarry_error(
+    error: &crate::quarry_agent::AgentClientError,
+) -> Option<BrowserResourceLimit> {
+    use crate::quarry_agent::{classify_quarry_error, quarry_budget_dimension, StepFailureClass};
+    if classify_quarry_error(error) != StepFailureClass::ResourceLimit {
+        return None;
+    }
+    Some(match quarry_budget_dimension(error) {
+        Some(dimension) => BrowserResourceLimit::QuarryBudget(dimension),
+        None => BrowserResourceLimit::QuarryBackpressure,
+    })
+}
+
+/// What the planner spent in one loop, counts only (no content).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BrowserLoopUsage {
+    pub planner_calls: u32,
+    pub planner_input_tokens: u64,
+    pub planner_output_tokens: u64,
+}
+
+impl BrowserLoopUsage {
+    #[must_use]
+    pub const fn planner_tokens(self) -> u64 {
+        self.planner_input_tokens + self.planner_output_tokens
+    }
+
+    /// `planner_calls=N planner_input_tokens=N planner_output_tokens=N`.
+    #[must_use]
+    pub fn line(self) -> String {
+        format!(
+            "planner_calls={} planner_input_tokens={} planner_output_tokens={}",
+            self.planner_calls, self.planner_input_tokens, self.planner_output_tokens
+        )
     }
 }
 
@@ -429,7 +488,7 @@ pub trait BrowserEventSink: Send + Sync {
     async fn run_start_authorized(&self, _run_id: &str, _plan_id: &str, _decided_by: &str) {}
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PlanConfig {
     pub plan_id: String,
     pub grant_id: String,
@@ -479,6 +538,15 @@ pub struct PlanConfig {
     /// the page and that the agent was not steering toward: an order number
     /// pattern, a confirmation-page heading, a receipt id.
     pub postcondition: String,
+    /// Token budget for the LLM planner (input + output, all calls). `None`
+    /// means no budget; it binds only when a planner is selected.
+    pub max_planner_tokens: Option<u64>,
+    /// The run's credential deadline. Once it passes, `check_limits` stops the
+    /// run before any new planner call. `None` means no deadline.
+    pub deadline_at: Option<Instant>,
+    /// The org planner switch the gateway wrote (`on`, `off`, `unavailable`);
+    /// read by the planner policy (WS11.S2). Any other value is dropped.
+    pub planner_flag: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -488,6 +556,9 @@ pub struct AgentPlan {
     pub status: PlanStatus,
     pub observations: Vec<BrowserObservation>,
     started_at: Instant,
+    usage: BrowserLoopUsage,
+    /// Tokens the most recent planner call used, the estimate for the next one.
+    last_planner_tokens: u64,
     /// Whether the Phase 5 run-level `PersistentCookieUse` gate has already
     /// run for this plan. Checked once, at the first `decide_next_action`
     /// call (after `start_run` has already succeeded) — never re-asked on
@@ -503,11 +574,46 @@ impl AgentPlan {
             status: PlanStatus::Planning,
             observations: Vec::new(),
             started_at: Instant::now(),
+            usage: BrowserLoopUsage::default(),
+            last_planner_tokens: 0,
             cookie_use_gate_done: false,
         }
     }
 
+    /// What the planner has spent so far.
+    #[must_use]
+    pub const fn usage(&self) -> BrowserLoopUsage {
+        self.usage
+    }
+
+    /// Add one planner reply's actual usage to the meter.
+    pub fn meter_planner_usage(&mut self, usage: crate::llm_planner::PlannerUsage) {
+        self.usage.planner_calls = self.usage.planner_calls.saturating_add(1);
+        self.usage.planner_input_tokens += u64::from(usage.input_tokens);
+        self.usage.planner_output_tokens += u64::from(usage.output_tokens);
+        self.last_planner_tokens = usage.total();
+    }
+
+    /// The pre-call token check: `Tokens` when the budget is spent, or when the
+    /// next call (estimated as the size of the last one) would overshoot it.
+    #[must_use]
+    pub fn check_planner_budget(&self) -> Option<BrowserResourceLimit> {
+        let max = self.config.max_planner_tokens?;
+        let spent = self.usage.planner_tokens();
+        if spent >= max || spent.saturating_add(self.last_planner_tokens) > max {
+            return Some(BrowserResourceLimit::Tokens);
+        }
+        None
+    }
+
     pub fn check_limits(&self) -> Option<BrowserResourceLimit> {
+        if self
+            .config
+            .deadline_at
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Some(BrowserResourceLimit::Credential);
+        }
         if self.config.max_steps > 0 && self.current_step >= self.config.max_steps {
             return Some(BrowserResourceLimit::MaxSteps);
         }
@@ -647,6 +753,8 @@ pub struct BrowserAgentLoopResult {
     pub summary: String,
     pub abort_reason: Option<BrowserAbortReason>,
     pub resource_limit: Option<BrowserResourceLimit>,
+    /// Planner spend for this loop (counts only).
+    pub usage: BrowserLoopUsage,
 }
 
 /// Extract the host portion of a URL without bringing in a full URL parser.
@@ -827,6 +935,7 @@ pub async fn run_browser_agent_loop(
             summary: error,
             abort_reason: None,
             resource_limit: None,
+            usage: BrowserLoopUsage::default(),
         };
     }
 
@@ -842,6 +951,7 @@ pub async fn run_browser_agent_loop(
             summary,
             abort_reason: None,
             resource_limit: None,
+            usage: BrowserLoopUsage::default(),
         };
     };
 
@@ -877,12 +987,19 @@ pub async fn run_browser_agent_loop(
         Err(e) => {
             plan.status = PlanStatus::Failed;
             warn!(plan_id = %plan.config.plan_id, error = %e, "browser-agent start_run failed");
+            // A 402 budget or a 429 at launch is a resource outcome, not a
+            // failure of the run.
+            let resource_limit = resource_limit_for_quarry_error(&e);
             return BrowserAgentLoopResult {
                 status: plan.status,
                 observations: plan.observations,
-                summary: format!("browser-agent start_run failed: {e}"),
+                summary: match resource_limit {
+                    Some(limit) => limit.reason().to_owned(),
+                    None => format!("browser-agent start_run failed: {e}"),
+                },
                 abort_reason: None,
-                resource_limit: None,
+                resource_limit,
+                usage: BrowserLoopUsage::default(),
             };
         }
     };
@@ -963,6 +1080,13 @@ pub async fn run_browser_agent_loop(
                     }
                     Err(e) => {
                         plan.status = PlanStatus::Failed;
+                        // The classifier decides: a 402 budget or a 429 ends the
+                        // run `resource_exhausted`, never `Failed`, never retried.
+                        if let Some(limit) = resource_limit_for_quarry_error(&e) {
+                            warn!(plan_id = %plan.config.plan_id, error = %e, "quarry resource limit");
+                            resource_limit = Some(limit);
+                            break limit.reason().to_owned();
+                        }
                         break format!("browser-agent step failed: {e}");
                     }
                 }
@@ -991,12 +1115,14 @@ pub async fn run_browser_agent_loop(
 
     info!(plan_id = %plan.config.plan_id, status = plan.status.as_str(), "browser-agent loop finished");
     let observations = plan.observations.clone();
+    let usage = plan.usage();
     BrowserAgentLoopResult {
         status: plan.status,
         observations,
         summary,
         abort_reason,
         resource_limit,
+        usage,
     }
 }
 
@@ -1046,12 +1172,25 @@ async fn decide_next_action(
             // The planner reads the hygiene view of the page, never the raw
             // observation; the risk gate and the bot-wall check below keep
             // reading the observation in full.
+            // Pre-call token check: no planner call is started that the
+            // budget cannot cover.
+            if let Some(limit) = plan.check_planner_budget() {
+                plan.status = PlanStatus::Failed;
+                return PlanStepResult::ResourceExhausted {
+                    reason: limit.reason().to_owned(),
+                    limit,
+                };
+            }
             let view = last_observation.map(planner_view::PlannerView::from_observation);
             let context = crate::llm_planner::PlannerContext {
                 config: &plan.config,
                 view: view.as_ref(),
             };
-            match planner.plan_next(&context).await {
+            let reply = planner.plan_next(&context).await;
+            if let Ok(reply) = &reply {
+                plan.meter_planner_usage(reply.usage);
+            }
+            match reply {
                 Ok(reply) => match reply.action.filter(|_| !reply.done) {
                     Some(action) => BrowserAction {
                         action_id: candidate.action_id,
@@ -1330,6 +1469,7 @@ mod tests {
             profile_id: None,
             start_url: None,
             postcondition: String::new(),
+            ..Default::default()
         }
     }
 
@@ -2075,5 +2215,215 @@ mod tests {
             last.challenge.as_ref().map(|c| (c.is_strong(), c.block_reason)),
             Some((true, Some(BlockReason::ChallengeLoop)))
         );
+    }
+
+    // ── WS11.S1: planner meter, credential deadline, typed Quarry limits ──
+
+    /// A planner that always answers `observe` and reports a fixed usage.
+    struct FixedUsagePlanner {
+        tokens: u32,
+        calls: std::sync::atomic::AtomicU32,
+    }
+
+    impl FixedUsagePlanner {
+        fn new(tokens: u32) -> Self {
+            Self {
+                tokens,
+                calls: std::sync::atomic::AtomicU32::new(0),
+            }
+        }
+
+        fn calls(&self) -> u32 {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[tonic::async_trait]
+    impl crate::llm_planner::ActionPlanner for FixedUsagePlanner {
+        async fn plan_next(
+            &self,
+            _ctx: &crate::llm_planner::PlannerContext<'_>,
+        ) -> Result<crate::llm_planner::PlannerReply, crate::llm_planner::PlannerError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let action = BrowserAction {
+                action_id: String::new(),
+                grant_id: String::new(),
+                action_type: ActionType::Observe,
+                selector: String::new(),
+                value: String::new(),
+                url: String::new(),
+                max_wait_ms: 5000,
+                target: None,
+                reason: String::new(),
+                risk_category: None,
+            };
+            Ok(crate::llm_planner::PlannerReply::action(action).with_usage(
+                crate::llm_planner::PlannerUsage {
+                    input_tokens: self.tokens,
+                    output_tokens: 0,
+                },
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn meter_adds_actual_response_usage() {
+        let mut config = test_config();
+        config.max_planner_tokens = Some(10_000);
+        let mut plan = AgentPlan::new(config);
+        let planner = FixedUsagePlanner::new(300);
+        let _ = decide_next_action(&mut plan, None, Some(&planner), None, None).await;
+        let _ = decide_next_action(&mut plan, None, Some(&planner), None, None).await;
+        let usage = plan.usage();
+        assert_eq!(usage.planner_calls, 2);
+        assert_eq!(usage.planner_input_tokens, 600);
+        assert_eq!(usage.planner_output_tokens, 0);
+        assert_eq!(usage.planner_tokens(), 600);
+    }
+
+    #[tokio::test]
+    async fn meter_stops_before_overshoot() {
+        let mut config = test_config();
+        config.max_planner_tokens = Some(1000);
+        let mut plan = AgentPlan::new(config);
+        let planner = FixedUsagePlanner::new(400);
+        for _ in 0..2 {
+            assert!(matches!(
+                decide_next_action(&mut plan, None, Some(&planner), None, None).await,
+                PlanStepResult::Action(_)
+            ));
+        }
+        // 800 spent, the last call cost 400: a third call could reach 1200.
+        match decide_next_action(&mut plan, None, Some(&planner), None, None).await {
+            PlanStepResult::ResourceExhausted { limit, .. } => {
+                assert_eq!(limit, BrowserResourceLimit::Tokens);
+            }
+            _ => panic!("expected the token budget to stop the run"),
+        }
+        assert_eq!(planner.calls(), 2, "the stopped call was never made");
+        assert_eq!(plan.status, PlanStatus::Failed);
+
+        // No budget: never stops.
+        let mut open = AgentPlan::new(test_config());
+        for _ in 0..4 {
+            assert!(matches!(
+                decide_next_action(&mut open, None, Some(&planner), None, None).await,
+                PlanStepResult::Action(_)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn credential_deadline_stops_new_planner_calls() {
+        let mut config = test_config();
+        config.deadline_at = Instant::now().checked_sub(std::time::Duration::from_secs(1));
+        let mut plan = AgentPlan::new(config);
+        let planner = FixedUsagePlanner::new(10);
+        match decide_next_action(&mut plan, None, Some(&planner), None, None).await {
+            PlanStepResult::ResourceExhausted { limit, .. } => {
+                assert_eq!(limit, BrowserResourceLimit::Credential);
+            }
+            _ => panic!("expected the credential deadline to stop the run"),
+        }
+        assert_eq!(planner.calls(), 0);
+
+        // A deadline still ahead does not stop anything.
+        let mut config = test_config();
+        config.deadline_at = Some(Instant::now() + std::time::Duration::from_secs(60));
+        let mut plan = AgentPlan::new(config);
+        assert!(matches!(
+            decide_next_action(&mut plan, None, Some(&planner), None, None).await,
+            PlanStepResult::Action(_)
+        ));
+    }
+
+    /// One step against a Quarry whose step answers `status` with `body`.
+    async fn loop_against_step_error(
+        status: u16,
+        body: serde_json::Value,
+    ) -> (BrowserAgentLoopResult, usize) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/runs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {"run_id": "run_abc", "lease_id": "lease_xyz"},
+                "meta": {}, "error": null
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/runs/run_abc/step"))
+            .respond_with(ResponseTemplate::new(status).set_body_json(body))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/agent/runs/run_abc"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let mut config = test_config();
+        config.start_url = Some("https://example.com/".to_owned());
+        let client = crate::quarry_agent::QuarryAgentClient::new(server.uri(), "tok").unwrap();
+        let result = run_browser_agent_loop(config, Some(&client), None, None, None).await;
+        let step_calls = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.path().ends_with("/step"))
+            .count();
+        (result, step_calls)
+    }
+
+    #[tokio::test]
+    async fn quarry_402_maps_to_resource_limit_not_failed() {
+        let (result, step_calls) = loop_against_step_error(
+            402,
+            serde_json::json!({
+                "data": null, "meta": {},
+                "error": {
+                    "code": "BUDGET_EXHAUSTED", "message": "run budget exhausted",
+                    "retryable": false,
+                    "details": {"dimension": "cost", "limit": 1.0, "spent": 1.2,
+                                "unit": "usd", "limit_source": "run_budget", "resumable": false}
+                }
+            }),
+        )
+        .await;
+        assert_eq!(
+            result.resource_limit,
+            Some(BrowserResourceLimit::QuarryBudget(
+                crate::quarry_agent::BudgetDimension::Cost
+            ))
+        );
+        assert_eq!(result.summary, "quarry budget exhausted: cost");
+        assert_eq!(step_calls, 1, "a 402 is never retried");
+    }
+
+    #[tokio::test]
+    async fn quarry_429_is_backpressure_not_failed() {
+        let (result, step_calls) = loop_against_step_error(
+            429,
+            serde_json::json!({
+                "data": null, "meta": {},
+                "error": {"code": "RATE_LIMITED", "message": "slow down", "retryable": true,
+                          "details": {"reason": "capacity", "retry_after_seconds": 5}}
+            }),
+        )
+        .await;
+        assert_eq!(result.resource_limit, Some(BrowserResourceLimit::QuarryBackpressure));
+        assert_eq!(step_calls, 1, "a 429 is not retried by the loop");
+
+        // A 500 is still a plain failure.
+        let (failed, _) = loop_against_step_error(
+            500,
+            serde_json::json!({"error": {"code": "INTERNAL", "message": "boom"}}),
+        )
+        .await;
+        assert_eq!(failed.resource_limit, None);
+        assert!(failed.summary.starts_with("browser-agent step failed"), "{}", failed.summary);
     }
 }

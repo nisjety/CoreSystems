@@ -4,7 +4,10 @@
 
 mod support;
 
-use execution_core::browser_agent::{run_browser_agent_loop, ActionType, PlanStatus};
+use execution_core::browser_agent::{
+    run_browser_agent_loop, ActionType, BrowserResourceLimit, PlanStatus,
+};
+use execution_core::quarry_agent::BudgetDimension;
 use execution_core::llm_planner::ActionPlanner;
 use support::fake_quarry::FakeQuarry;
 use support::scripted_planner::ScriptedPlanner;
@@ -113,4 +116,83 @@ async fn planner_sees_scrubbed_observation_only() {
     assert!(rendered.contains("SCREENING: a prompt-injection marker was detected"));
     assert!(rendered.starts_with("[source: browser-scraped]"));
     assert!(rendered.contains("<<<BEGIN UNTRUSTED PAGE CONTENT>>>"));
+}
+
+#[tokio::test]
+async fn token_budget_exhaustion_ends_resource_exhausted_with_usage() {
+    let quarry = FakeQuarry::start().await;
+    quarry
+        .push_page("https://example.com/", "Example", "Welcome", &[])
+        .push_page("https://example.com/", "Example", "Welcome", &[])
+        .push_page("https://example.com/", "Example", "Welcome", &[]);
+    // Each call costs 450 tokens; a budget of 1,000 covers two and would be
+    // overshot by a third.
+    let planner = ScriptedPlanner::new()
+        .then_action_with_usage(goto("https://example.com/"), 300, 150)
+        .then_action_with_usage(action(ActionType::Observe), 300, 150)
+        .then_action_with_usage(action(ActionType::Observe), 300, 150);
+    let client = quarry.client();
+    let mut config = plan_config();
+    config.max_planner_tokens = Some(1_000);
+
+    let result = run_browser_agent_loop(
+        config,
+        Some(&client),
+        Some(&planner as &dyn ActionPlanner),
+        None,
+        None,
+    )
+    .await;
+
+    assert_eq!(result.resource_limit, Some(BrowserResourceLimit::Tokens));
+    assert_eq!(result.status, PlanStatus::Failed);
+    assert_eq!(planner.calls(), 2, "the third call is never made");
+    assert_eq!(result.usage.planner_calls, 2);
+    assert_eq!(result.usage.planner_input_tokens, 600);
+    assert_eq!(result.usage.planner_output_tokens, 300);
+    assert_eq!(quarry.step_requests().len(), 2);
+    assert_eq!(quarry.closed_runs(), 1, "the lease is released");
+}
+
+#[tokio::test]
+async fn fake_quarry_402_budget_exhausted_ends_resource_exhausted() {
+    let quarry = FakeQuarry::start().await;
+    quarry.push_page("https://example.com/", "Example", "Welcome", &[]);
+    quarry.push_error(
+        402,
+        serde_json::json!({
+            "data": null, "meta": {},
+            "error": {
+                "code": "BUDGET_EXHAUSTED",
+                "message": "run budget exhausted",
+                "retryable": false,
+                "details": {"dimension": "steps", "limit": 2, "spent": 2, "unit": "steps",
+                            "limit_source": "run_budget", "resumable": false}
+            }
+        }),
+    );
+    // A third scripted page proves the loop does not retry past the 402.
+    quarry.push_page("https://example.com/", "Example", "Never read", &[]);
+    let planner = ScriptedPlanner::new()
+        .then_action(goto("https://example.com/"))
+        .then_action(action(ActionType::Observe))
+        .then_action(action(ActionType::Observe));
+    let client = quarry.client();
+
+    let result = run_browser_agent_loop(
+        plan_config(),
+        Some(&client),
+        Some(&planner as &dyn ActionPlanner),
+        None,
+        None,
+    )
+    .await;
+
+    assert_eq!(
+        result.resource_limit,
+        Some(BrowserResourceLimit::QuarryBudget(BudgetDimension::Steps))
+    );
+    assert_ne!(result.summary, "", "the reason is carried");
+    assert_eq!(quarry.step_requests().len(), 2, "no retry after the 402");
+    assert_eq!(quarry.closed_runs(), 1);
 }

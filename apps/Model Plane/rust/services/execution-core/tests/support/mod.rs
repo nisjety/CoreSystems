@@ -30,6 +30,7 @@ pub fn plan_config() -> PlanConfig {
         profile_id: None,
         start_url: None,
         postcondition: String::new(),
+        ..Default::default()
     }
 }
 

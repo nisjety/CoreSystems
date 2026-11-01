@@ -1162,6 +1162,7 @@ mod tests {
             profile_id: None,
             start_url: None,
             postcondition: String::new(),
+            ..Default::default()
         }
     }
 
