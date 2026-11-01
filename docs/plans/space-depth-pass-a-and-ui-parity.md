@@ -120,3 +120,28 @@ Still open:
 - `zdr_refusal_inventory` flags `browser_run.rs:802` (pre-existing, from the quarryv2-next merge).
 - The post limiter's Dragonfly path is untested here; only the in-process fallback ran.
 - Owner decisions SD-12 and F12 are unchanged.
+
+## 6. Section 5 leftovers (2026-11-01)
+
+One workflow (6 builders, a reviewer each, one final verify). Not pushed, nothing live-proven.
+
+| Item | Result |
+|---|---|
+| Service resolvers send typed refusals as 503 | Control's six service resolvers answer the denial's status with the typed body. orchestrator-core and execution-core callers stop retrying a 4xx (401, 408, 425 and 429 still retry). capability-core's watch authorizers were already right and gained tests |
+| Decline note missing on later turns, reopen, ZDR | Appends carry the reason (and a declined append now reads with no retrieval authority). The answer stores `retrievalDeclined` (closed codes only, streaming and fallback completions) and the SPA shows it on reopen. The ZDR direct stream emits the notice |
+| `zdr_refusal_inventory` on `browser_run.rs` | The ZDR browser-run refusal is now the catalogue's `feature_not_supported`, status 412 unchanged. The test passes |
+| Dragonfly limiter path | 3 ignored live tests (`SPACE_LIMITER_REDIS_URL`) plus a default test against an erroring loopback server. The live ones have not run, because Docker was down |
+| Rust key decoders strict on trailing bits | session-core and execution-core accept trailing bits and skip embedded CR/LF, as Go does |
+| Other stale generated types | 8 TS and Python modules regenerated with the pinned tools. A new mp-events-py test checks the top-level types against the protos |
+
+Final verify: gateway 972 (all targets); session-core 759; model-gateway 2413 plus the inventory test; execution-core 1450; Go modules green; SPA full suite 5351 of 5352. The failures are 3 pre-existing files: 2 from unlinked workspace packages, plus 1 more. tsc is at 34.
+
+Still open:
+- The live-DB test for the Control resolvers and the Dragonfly tests have not run.
+- Control must be rebuilt before the callers' new classification has anything to act on.
+- The capability-core cron sweeper and `taskexec` end a schedule on any authorization error, a Control outage included. This needs its own decision.
+- imports-core (Python) cannot tell a 403 from a 503 on import-execution.
+- Each append now makes one extra advisory Control retrieval-decision call. The clean fix is for `thread-append-decision` to return the verdict.
+- A granted append still reads unscoped.
+- The session-core key loader in `grpc.rs` still refuses whitespace inside a key.
+- SD-12 and F12 are unchanged.
