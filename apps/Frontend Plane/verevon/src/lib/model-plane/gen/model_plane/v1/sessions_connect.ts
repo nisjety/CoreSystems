@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { AppendMessageRequest, AppendMessageResponse, ArchiveThreadRequest, ArchiveThreadResponse, ArchiveThreadsRequest, ArchiveThreadsResponse, ClaimScheduledStepRequest, ClaimScheduledStepResponse, CompactNowRequest, CompactNowResponse, CompleteStepRequest, CompleteStepResponse, CreateThreadRequest, CreateThreadResponse, DeleteSpaceThreadsRequest, DeleteSpaceThreadsResponse, DeleteThreadRequest, DeleteThreadResponse, DeleteThreadsRequest, DeleteThreadsResponse, FinalizeToolActionRequest, FinalizeToolActionResponse, GetContextAssemblyRequest, GetContextAssemblyResponse, HeartbeatManagedRunRequest, HeartbeatManagedRunResponse, ListAgentSkillsRequest, ListAgentSkillsResponse, ListConversationRequest, ListConversationResponse, ListThreadsRequest, ListThreadsResponse, PrepareScheduledRunThreadRequest, PrepareScheduledRunThreadResponse, RecordRunOutputRequest, RecordRunOutputResponse, RecordScheduledStepReceiptRequest, RecordScheduledStepReceiptResponse, RecordTerminalOutcomeRequest, RecordTerminalOutcomeResponse, ReplayThreadRequest, ReserveToolActionRequest, ReserveToolActionResponse, SaveCheckpointRequest, SaveCheckpointResponse, SetAgentSkillEnabledRequest, SetAgentSkillEnabledResponse, SetRunModeRequest, SetRunModeResponse, StartManagedRunRequest, StartManagedRunResponse, StartRunRequest, StartRunResponse, StartScheduledRunRequest, UpdateThreadPresentationRequest, UpdateThreadPresentationResponse, UpsertAgentSkillRequest, UpsertAgentSkillResponse } from "./sessions_pbjs";
+import { AppendMessageRequest, AppendMessageResponse, ArchiveThreadRequest, ArchiveThreadResponse, ArchiveThreadsRequest, ArchiveThreadsResponse, ClaimLoopCheckpointRequest, ClaimLoopCheckpointResponse, ClaimScheduledStepRequest, ClaimScheduledStepResponse, CloseLoopCheckpointRequest, CloseLoopCheckpointResponse, CompactNowRequest, CompactNowResponse, CompleteDirectRunWithMessageRequest, CompleteDirectRunWithMessageResponse, CompleteStepRequest, CompleteStepResponse, CountWaivedRunsRequest, CountWaivedRunsResponse, CreateThreadRequest, CreateThreadResponse, DecideSkillProposalRequest, DecideSkillProposalResponse, DeleteSpaceThreadsRequest, DeleteSpaceThreadsResponse, DeleteThreadRequest, DeleteThreadResponse, DeleteThreadsRequest, DeleteThreadsResponse, FinalizeToolActionRequest, FinalizeToolActionResponse, GetContextAssemblyRequest, GetContextAssemblyResponse, GetThreadGrantRequest, GetThreadGrantResponse, HeartbeatManagedRunRequest, HeartbeatManagedRunResponse, ListAgentSkillsRequest, ListAgentSkillsResponse, ListConversationRequest, ListConversationResponse, ListLearningLedgerRequest, ListLearningLedgerResponse, ListThreadsRequest, ListThreadsResponse, ListToolActionsRequest, ListToolActionsResponse, PrepareScheduledRunThreadRequest, PrepareScheduledRunThreadResponse, PrepareUserOwnedThreadRequest, PrepareUserOwnedThreadResponse, RecordRunContextRequest, RecordRunContextResponse, RecordRunOutputRequest, RecordRunOutputResponse, RecordScheduledRunResultRequest, RecordScheduledRunResultResponse, RecordScheduledStepReceiptRequest, RecordScheduledStepReceiptResponse, RecordTerminalOutcomeRequest, RecordTerminalOutcomeResponse, ReplayThreadRequest, ReserveToolActionRequest, ReserveToolActionResponse, SaveCheckpointRequest, SaveCheckpointResponse, SaveLoopCheckpointRequest, SaveLoopCheckpointResponse, SearchMessagesRequest, SearchMessagesResponse, SetAgentSkillEnabledRequest, SetAgentSkillEnabledResponse, SetRunModeRequest, SetRunModeResponse, StartManagedRunRequest, StartManagedRunResponse, StartRunRequest, StartRunResponse, StartScheduledRunRequest, UndoLearningEntryRequest, UndoLearningEntryResponse, UpdateThreadPresentationRequest, UpdateThreadPresentationResponse, UpsertAgentSkillRequest, UpsertAgentSkillResponse } from "./sessions_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 import { Event } from "./events_pbjs";
 
@@ -77,6 +77,28 @@ export const SessionCore = {
       kind: MethodKind.Unary,
     },
     /**
+     * Create-or-reuse a durable thread owned by a REAL user (never a service
+     * principal), with a caller-named origin, keyed by session_key for
+     * idempotency (chat-wave2 "schedule"/"mail-task" specs, 2026-09-28 —
+     * the reusable "service creates or reuses a thread owned by user U,
+     * readable by U, with a named origin" seam). Unlike
+     * PrepareScheduledRunThread, which always mints a service-owned,
+     * Space-authority-bound thread, this RPC's thread IS owned by the given
+     * user_id, so it is trivially readable through the existing owner-bound
+     * path (ListThreads' default user_id filter) -- no Control decision, no
+     * Space authority, is required to read it back. Restricted to an allow-
+     * listed set of trusted service callers; never reachable by a live user's
+     * own bearer.
+     *
+     * @generated from rpc model_plane.v1.SessionCore.PrepareUserOwnedThread
+     */
+    prepareUserOwnedThread: {
+      name: "PrepareUserOwnedThread",
+      I: PrepareUserOwnedThreadRequest,
+      O: PrepareUserOwnedThreadResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
      * Record completion of a single step within a run.
      *
      * @generated from rpc model_plane.v1.SessionCore.CompleteStep
@@ -120,6 +142,67 @@ export const SessionCore = {
       name: "SaveCheckpoint",
       I: SaveCheckpointRequest,
       O: SaveCheckpointResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Save the durable loop's fold for a run (build plan WS03 S4). Latest wins,
+     * compare-and-set on expected_seq. Refused for a zero-retention or waived run.
+     *
+     * @generated from rpc model_plane.v1.SessionCore.SaveLoopCheckpoint
+     */
+    saveLoopCheckpoint: {
+      name: "SaveLoopCheckpoint",
+      I: SaveLoopCheckpointRequest,
+      O: SaveLoopCheckpointResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Claim a paused or parked run's fold for one continuation. Exactly one claim wins.
+     *
+     * @generated from rpc model_plane.v1.SessionCore.ClaimLoopCheckpoint
+     */
+    claimLoopCheckpoint: {
+      name: "ClaimLoopCheckpoint",
+      I: ClaimLoopCheckpointRequest,
+      O: ClaimLoopCheckpointResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Close a run's fold once its loop has finished. Idempotent for a closed row.
+     *
+     * @generated from rpc model_plane.v1.SessionCore.CloseLoopCheckpoint
+     */
+    closeLoopCheckpoint: {
+      name: "CloseLoopCheckpoint",
+      I: CloseLoopCheckpointRequest,
+      O: CloseLoopCheckpointResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Read the effect ledger's rows for named tool calls of one run (build plan WS03
+     * S7a). Digest-only: the status, class and argument digest of each action, never
+     * its arguments or output. The loop that resumes a run reads it to close a call
+     * honestly instead of running it again.
+     *
+     * Answers only while the loop checkpoint store is switched on (otherwise the same
+     * closed "loop_checkpoint_disabled" refusal the checkpoint RPCs give), and only for a
+     * run that persists: a zero-retention or waived run never keeps a fold, so it gets the
+     * durable-mutation refusal. The caller must be allowed to read the run under the same
+     * rule as GetRun, which includes refusing a run whose owner was removed from its
+     * Space. Rows written under zero retention are never returned.
+     *
+     * ABSENCE IS NOT PROOF. An action id missing from the answer is UNKNOWN. It may never
+     * have been reserved, may be reserved by a concurrent writer that has not committed
+     * yet, or may be a row this read hides. Never read absence as "the call did not run".
+     * For an effectful call, only a row with status "not_run" (or a "completed" row with
+     * its output) licenses a re-dispatch decision.
+     *
+     * @generated from rpc model_plane.v1.SessionCore.ListToolActions
+     */
+    listToolActions: {
+      name: "ListToolActions",
+      I: ListToolActionsRequest,
+      O: ListToolActionsResponse,
       kind: MethodKind.Unary,
     },
     /**
@@ -348,6 +431,34 @@ export const SessionCore = {
       O: RecordScheduledStepReceiptResponse,
       kind: MethodKind.Unary,
     },
+    /**
+     * Stamp how a run's context was assembled onto the run record
+     * (`runs.metadata.run_context`). Counts and closed tokens only; refused for
+     * zero-retention and waived credentials like every durable run mutation.
+     *
+     * @generated from rpc model_plane.v1.SessionCore.RecordRunContext
+     */
+    recordRunContext: {
+      name: "RecordRunContext",
+      I: RecordRunContextRequest,
+      O: RecordRunContextResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Persist the answer of a claimed scheduled step into the scheduled thread
+     * and complete its receipt in one transaction. Idempotent on (run_id,
+     * step_id). Refused for zero-retention and waived runs. Off unless
+     * SESSION_CORE_SCHEDULED_RESULT_PERSIST is `true`; off keeps the receipt-only
+     * path. `output` is content and is accepted only on this direct hop.
+     *
+     * @generated from rpc model_plane.v1.SessionCore.RecordScheduledRunResult
+     */
+    recordScheduledRunResult: {
+      name: "RecordScheduledRunResult",
+      I: RecordScheduledRunResultRequest,
+      O: RecordScheduledRunResultResponse,
+      kind: MethodKind.Unary,
+    },
   }
 } as const;
 
@@ -413,6 +524,164 @@ export const ManagedRunLifecycle = {
       name: "RecordRunOutput",
       I: RecordRunOutputRequest,
       O: RecordRunOutputResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Save a gateway-direct run's final assistant message and record its
+     * Completed terminal receipt in ONE transaction.
+     *
+     * Replaces AppendMessage followed by RecordTerminalOutcome for a completed
+     * direct turn. Two calls let a durable cancel land between them, leaving a
+     * saved answer on a cancelled run, and the append rode a short-lived
+     * delegated user bearer that a long turn could outlive. This call uses the
+     * Gateway's own scoped terminalization credential: Session Core derives the
+     * tenant and owner from the durable run and appends to that run's own
+     * thread only. A run that is no longer active answers already_terminal and
+     * writes nothing. It is refused for a zero-retention run, whose turns have
+     * no durable transcript.
+     *
+     * @generated from rpc model_plane.v1.ManagedRunLifecycle.CompleteDirectRunWithMessage
+     */
+    completeDirectRunWithMessage: {
+      name: "CompleteDirectRunWithMessage",
+      I: CompleteDirectRunWithMessageRequest,
+      O: CompleteDirectRunWithMessageResponse,
+      kind: MethodKind.Unary,
+    },
+  }
+} as const;
+
+/**
+ * SessionRetentionService: read-only retention receipt counts for the org
+ * admin view. It is a separate service, as ManagedRunLifecycle is, so that
+ * SessionCore and every mock of it stay source-compatible. The answer carries
+ * counts and dates only, never run, message or goal content.
+ *
+ * @generated from service model_plane.v1.SessionRetentionService
+ */
+export const SessionRetentionService = {
+  typeName: "model_plane.v1.SessionRetentionService",
+  methods: {
+    /**
+     * Count an org's waived runs per (connection, user), with the start time of
+     * the most recent one. Refused to user credentials and to any service that
+     * lacks session:retention:read, and never answers for another org.
+     *
+     * @generated from rpc model_plane.v1.SessionRetentionService.CountWaivedRuns
+     */
+    countWaivedRuns: {
+      name: "CountWaivedRuns",
+      I: CountWaivedRunsRequest,
+      O: CountWaivedRunsResponse,
+      kind: MethodKind.Unary,
+    },
+  }
+} as const;
+
+/**
+ * ThreadAutonomy: the autonomy grant a plan approval made, read back by the
+ * run that is about to start. A separate service, as SessionRetentionService
+ * is, so that SessionCore and every mock of it stay source-compatible. The
+ * grant is WRITTEN by SessionCore.SetRunMode (with `approved_plan_id` set), in
+ * the same transaction as the run update.
+ *
+ * @generated from service model_plane.v1.ThreadAutonomy
+ */
+export const ThreadAutonomy = {
+  typeName: "model_plane.v1.ThreadAutonomy",
+  methods: {
+    /**
+     * The live grant of one thread: the rung, the reason it was granted, the plan
+     * it was approved with and when it lapses. A thread with no grant, or one
+     * that has lapsed, answers a response whose `granted_rung` is UNSPECIFIED:
+     * "no grant" is an answer, not an error. Read-only; it spends nothing. Refused
+     * for a caller that does not own the thread, and never answers for another org.
+     *
+     * @generated from rpc model_plane.v1.ThreadAutonomy.GetThreadGrant
+     */
+    getThreadGrant: {
+      name: "GetThreadGrant",
+      I: GetThreadGrantRequest,
+      O: GetThreadGrantResponse,
+      kind: MethodKind.Unary,
+    },
+  }
+} as const;
+
+/**
+ * MessageSearch: full-text search over the durable conversation record. A
+ * separate service, as ThreadAutonomy and SessionRetentionService are, so that
+ * SessionCore and every mock of it stay source-compatible. Read-only.
+ *
+ * @generated from service model_plane.v1.MessageSearch
+ */
+export const MessageSearch = {
+  typeName: "model_plane.v1.MessageSearch",
+  methods: {
+    /**
+     * Search the messages of threads the caller may list, with the same owner and
+     * Space-audience rules as ListThreads. Refused with unavailable
+     * `message_search_disabled` while SESSION_CORE_MESSAGE_SEARCH_ENABLED is not
+     * `true`. A query that holds no searchable word answers an empty page.
+     *
+     * @generated from rpc model_plane.v1.MessageSearch.SearchMessages
+     */
+    searchMessages: {
+      name: "SearchMessages",
+      I: SearchMessagesRequest,
+      O: SearchMessagesResponse,
+      kind: MethodKind.Unary,
+    },
+  }
+} as const;
+
+/**
+ * LearningGovernanceService: the owner's decisions on what Verevon learned from their
+ * conversations (WS07 S8). A separate service, as MessageSearch is, so that
+ * SessionCore and every mock of it stay source-compatible. Every RPC is the
+ * owner's own: a service credential is refused, and a person never reaches
+ * another person's skill proposals or ledger.
+ *
+ * @generated from service model_plane.v1.LearningGovernanceService
+ */
+export const LearningGovernanceService = {
+  typeName: "model_plane.v1.LearningGovernanceService",
+  methods: {
+    /**
+     * Accept or reject one learned-skill proposal. Only the person the proposal
+     * belongs to may decide, and only while it is still proposed.
+     *
+     * @generated from rpc model_plane.v1.LearningGovernanceService.DecideSkillProposal
+     */
+    decideSkillProposal: {
+      name: "DecideSkillProposal",
+      I: DecideSkillProposalRequest,
+      O: DecideSkillProposalResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Undo one ledger entry of a skill by restoring the snapshot taken before it.
+     * Only the latest entry of a skill can be undone, and only by its owner. A
+     * learned memory is not undone here: it is erased by DeleteMemory.
+     *
+     * @generated from rpc model_plane.v1.LearningGovernanceService.UndoLearningEntry
+     */
+    undoLearningEntry: {
+      name: "UndoLearningEntry",
+      I: UndoLearningEntryRequest,
+      O: UndoLearningEntryResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * The owner's ledger of what was learned and changed: skill revisions and the
+     * memories the extractor wrote, newest first.
+     *
+     * @generated from rpc model_plane.v1.LearningGovernanceService.ListLearningLedger
+     */
+    listLearningLedger: {
+      name: "ListLearningLedger",
+      I: ListLearningLedgerRequest,
+      O: ListLearningLedgerResponse,
       kind: MethodKind.Unary,
     },
   }
