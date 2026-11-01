@@ -33,6 +33,23 @@ import { isAbsolute, normalize } from 'node:path';
 export type PrincipalRetentionPolicy = 'zdr' | 'persistent' | 'tenant';
 
 /**
+ * Whether a principal's token for one audience carries the ORG's own web
+ * policy (the `web_policy` claim, WS7.I), resolved from org-core when the token
+ * is minted. The only value is `tenant`; an audience the row does not name has
+ * none (`none`). Independent of `retentionByAudience`: a `zdr` row for the
+ * `quarry` audience stays `zdr` and may still carry the org's web policy.
+ */
+export type PrincipalWebPolicy = 'tenant' | 'none';
+
+/**
+ * The only audiences that carry a `web_policy` claim, and the only ones an API
+ * key may be exchanged into (INNH-10 CP-1). A name outside this list is a typo
+ * or an attempt to widen the feature, and invalidates the registry rather than
+ * being ignored.
+ */
+const webPolicyAudiences: readonly string[] = ['quarry', 'browser-broker'];
+
+/**
  * How a principal's token organization was bound, for one mint:
  *
  *   `fixed`      the organization is one of the row's own `orgIds` (including a
@@ -81,6 +98,23 @@ type ServicePrincipalConfig = {
    * that further per-principal, never widen it.
    */
   tokenExchange?: Readonly<Record<string, readonly string[]>>;
+  /**
+   * Audiences whose token carries the org's web policy, resolved at mint time
+   * (WS7.I). Keyed by audience (a member of `audiences`, and `quarry` or
+   * `browser-broker` only); the only value is `tenant`. Absent by default: no
+   * principal's token carries the claim until a row opts in. It does not change
+   * what any `retentionByAudience` entry means.
+   */
+  webPolicyByAudience?: Readonly<Record<string, 'tenant'>>;
+  /**
+   * Audiences this principal may present an API key for, to exchange it for a
+   * short-lived agent token (INNH-10 CP-1, `POST /api/:audience/api-key-exchange`).
+   * Each is `quarry` or `browser-broker`. It is not an audience the principal
+   * may mint a service token for: it needs no entry in `audiences`, so the Verevon
+   * gateway gains no service-token capability for these audiences by holding it.
+   * Absent by default.
+   */
+  apiKeyExchange?: readonly string[];
 };
 
 type ServicePrincipalRegistry = Record<string, ServicePrincipalConfig>;
@@ -366,7 +400,9 @@ function orgBindingFor(
   return undefined;
 }
 
-function validTokenExchangeMap(config: Partial<ServicePrincipalConfig>): boolean {
+function validTokenExchangeMap(
+  config: Partial<ServicePrincipalConfig>,
+): boolean {
   if (config.tokenExchange === undefined) {
     // Absent by default — no principal gains token-exchange capability
     // until a deployment explicitly opts it in.
@@ -386,6 +422,40 @@ function validTokenExchangeMap(config: Partial<ServicePrincipalConfig>): boolean
   return entries.every(
     ([targetAudience, subjectAudiences]) =>
       audiences.has(targetAudience) && nonEmptyStrings(subjectAudiences),
+  );
+}
+
+function validWebPolicyMap(config: Partial<ServicePrincipalConfig>): boolean {
+  if (config.webPolicyByAudience === undefined) {
+    return true;
+  }
+  if (
+    !config.webPolicyByAudience ||
+    typeof config.webPolicyByAudience !== 'object' ||
+    Array.isArray(config.webPolicyByAudience) ||
+    !nonEmptyStrings(config.audiences)
+  ) {
+    return false;
+  }
+  const audiences = new Set(config.audiences);
+  return Object.entries(config.webPolicyByAudience).every(
+    ([audience, posture]) =>
+      audiences.has(audience) &&
+      webPolicyAudiences.includes(audience) &&
+      posture === 'tenant',
+  );
+}
+
+function validApiKeyExchange(config: Partial<ServicePrincipalConfig>): boolean {
+  if (config.apiKeyExchange === undefined) {
+    return true;
+  }
+  return (
+    nonEmptyStrings(config.apiKeyExchange) &&
+    new Set(config.apiKeyExchange).size === config.apiKeyExchange.length &&
+    config.apiKeyExchange.every((audience) =>
+      webPolicyAudiences.includes(audience),
+    )
   );
 }
 
@@ -435,7 +505,9 @@ function parseRegistry(raw: string): ServicePrincipalRegistry {
       !nonEmptyStrings(config.scopes) ||
       !validAudienceScopeMap(config) ||
       !validAudienceRetentionMap(config) ||
-      !validTokenExchangeMap(config)
+      !validTokenExchangeMap(config) ||
+      !validWebPolicyMap(config) ||
+      !validApiKeyExchange(config)
     ) {
       throw new ServicePrincipalConfigurationError(
         'PLANE_SERVICE_PRINCIPALS_JSON contains an invalid principal policy',
@@ -599,5 +671,68 @@ export function authorizePlaneServiceTokenExchange(
     orgId,
     scopes: requestedScopes,
     reason,
+  };
+}
+
+/**
+ * Whether the token this principal gets for `audience` carries the org's web
+ * policy (WS7.I reads this when it signs). `none` for an unknown principal, an
+ * audience the row does not name, or a row without the field: the claim is
+ * opt-in per row. Performs no authorization; the caller has already run
+ * `authorizePlaneServicePrincipal` for the same request.
+ */
+export function webPolicyPostureFor(
+  rawRegistry: string,
+  serviceId: string,
+  audience: string,
+): PrincipalWebPolicy {
+  const principal = parseRegistry(rawRegistry)[serviceId.trim()];
+  return principal?.webPolicyByAudience?.[audience] ?? 'none';
+}
+
+export type PlaneApiKeyExchangeRequest = {
+  serviceId: string;
+  credential: string;
+  /** TARGET audience of the exchange: `quarry` or `browser-broker`. */
+  audience: string;
+};
+
+export type AuthorizedPlaneApiKeyExchange = {
+  serviceId: string;
+  subject: string;
+  audience: string;
+};
+
+/**
+ * Authorizes the CALLER of an API-key exchange (INNH-10 CP-1): a registry
+ * principal whose `apiKeyExchange` lists the audience, presenting its own
+ * credential. It says nothing about the key being exchanged (Better Auth
+ * verifies that) and mints nothing. A principal's `audiences`, `scopes` and
+ * `orgIds` play no part: holding `apiKeyExchange` neither grants nor requires a
+ * service-token lane for the audience.
+ */
+export function authorizePlaneApiKeyExchange(
+  rawRegistry: string,
+  request: PlaneApiKeyExchangeRequest,
+): AuthorizedPlaneApiKeyExchange {
+  const registry = parseRegistry(rawRegistry);
+  const serviceId = request.serviceId.trim();
+  const principal = registry[serviceId];
+
+  if (
+    !principal ||
+    !request.credential ||
+    !secureEqual(principal.credential, request.credential) ||
+    !principal.apiKeyExchange?.includes(request.audience)
+  ) {
+    throw new ServicePrincipalAuthorizationError(
+      'Service principal API key exchange is not authorized',
+    );
+  }
+
+  return {
+    serviceId,
+    subject: `service:${serviceId}`,
+    audience: request.audience,
   };
 }

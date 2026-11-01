@@ -128,9 +128,10 @@ Rules for editing the rows:
 - The `quarry` audience stays `zdr` for every principal. Quarry reads the run's
   zero-retention mode from the request body, not from a token an org setting could
   change. The policy contract spec fails if a `quarry` row is anything else.
-- Exactly the `embedding-engine` and `graph-index` rows on `inference-core` are
-  `tenant` (switched by the principal bundle below); the policy contract spec names
-  them and fails for any other lane, and fails if either goes back.
+- Exactly four lanes are `tenant`: the `embedding-engine` and `graph-index` rows on
+  `inference-core` (switched by the principal bundle below) and the `quarry-edge`
+  rows on `inference-core` and `model-gateway` (R-13 PR 1, below); the policy
+  contract spec names them and fails for any other lane, and fails if one goes back.
 
 ### Web tools: `execution-core` on the Quarry audience
 
@@ -301,6 +302,53 @@ principal's top-level `scopes` is the union of its lanes, so it now lists
 `browser:read` first. The vendored Quarry manifest row that names this lane
 (`browser-grant-validate`) lands with Quarry's `browser-broker` audience; deploy
 Auth Core with this registry before a quarry-edge that mints for it.
+
+### Registry change R-13 PR 1: the model lane, the code read, `parse:write` and two schema fields
+
+One registry change, inert until a caller exists (no flag; nothing presents any of
+it yet). Each scope is held by exactly one principal on the audiences named, and
+the policy contract spec ("principal bundle R-13 PR 1") asks the real authorizer for
+each from every principal on every audience.
+
+| principal | audience | scope | retention | why |
+| --- | --- | --- | --- | --- |
+| `quarry-edge` | `model-gateway` | `models:invoke` | `tenant` | the user-ingress bearer of an org-bound model call (WS16.S2); manifest row `model-extract` |
+| `quarry-edge` | `inference-core` | `inference:invoke`, `models:invoke` | `tenant` | the second bearer, `x-inference-authorization` (WS16.S2); manifest row `model-extract-inference` |
+| `quarry-edge` | `ingestion` | `integration:otp:read` | `zdr` | the executor-only one-time-code read of integration-corev2 (ADR-2a, E3.1-g) |
+| `execution-core` | `quarry` | `parse:write`, beside its scrape scopes | `zdr` | `POST /v1/parse` for a service principal (INNH-11); a user token needs no scope |
+
+`quarry-edge`'s `consumerEnv` (`QUARRY_SERVICE_API_KEY`) is unchanged, so there is no
+new credential and `validate-release-credentials.sh` needs no change. The two
+`tenant` lanes follow the org's own ZDR setting (the token's `zdr` is read from
+org-core when it is minted, at most 60 seconds of life) and answer 503
+`retention_posture_unavailable` with no token when org-core cannot be read, exactly
+as the Data Plane worker lanes do. The Quarry manifest appends `model-extract` and
+`model-extract-inference` as `granted: true` (both pending their call site,
+WS16.S3); `model-invoke`, `model-stream` and `model-audio` stay `granted: false`.
+Auth Core cannot tell those three from `model-extract` (same service, audience and
+scope), so for them `granted: false` is Quarry's own closed gate, no longer an
+Auth Core refusal, and the gateway still refuses a service principal on
+`/v1/invoke`. The `ingestion` audience is integration-corev2's own verifier
+audience; `integration:otp:read` is a scope of its own and neither implies nor is
+implied by `integration:read` or `integration:write`.
+
+Two optional per-row fields join the schema. Both default to absent, and an invalid
+value invalidates the whole registry, so the launcher's assembler
+(`plane-principal-registry.jq`) and the Auth Core loader check the same rules:
+
+- `webPolicyByAudience` (`{"quarry": "tenant"}`): the token a principal gets for that
+  audience carries the org's web policy claim, resolved at mint time (WS7.I). Only
+  `quarry` and `browser-broker` may be named, the audience must be one of the row's
+  `audiences`, and the only value is `tenant`. It is set on `execution-core` and
+  `model-gateway` for `quarry`, and is independent of `retentionByAudience`: both
+  rows keep `quarry` at `zdr`. `webPolicyPostureFor` in `plane-service-principal.ts`
+  is the accessor WS7.I reads; nothing reads it before then.
+- `apiKeyExchange` (`["browser-broker", "quarry"]`): the audiences this principal may
+  present an API key for, to exchange it for a short-lived agent token (INNH-10 CP-1,
+  `POST /api/:audience/api-key-exchange`). Only the Verevon gateway
+  (`verevon-gateway`) holds it. It is not a service-token lane: it needs no entry in
+  `audiences`, grants no scope, and `authorizePlaneApiKeyExchange` is the only code
+  that reads it.
 
 ### Mail-to-task principals (dark)
 

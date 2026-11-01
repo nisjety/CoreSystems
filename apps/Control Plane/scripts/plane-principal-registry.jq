@@ -97,7 +97,13 @@ def org_ids($name; $row):
 # while /health stays green). The commonest hand edit that breaks them is adding an
 # audience to a row and forgetting its entry in scopesByAudience or retentionByAudience.
 # Checked here so the launcher and the bootstrap stop instead (the same rules as
-# validAudienceScopeMap, validAudienceRetentionMap and validTokenExchangeMap).
+# validAudienceScopeMap, validAudienceRetentionMap, validTokenExchangeMap,
+# validWebPolicyMap and validApiKeyExchange).
+#
+# The audiences that carry a web_policy claim and the only ones an API key may be
+# exchanged into (webPolicyAudiences in plane-service-principal.ts).
+def web_policy_audiences: ["quarry", "browser-broker"];
+
 def check_maps($name; $row; $audiences; $scopes):
   (if ($row | has("scopesByAudience")) then
        $row.scopesByAudience as $m
@@ -120,6 +126,21 @@ def check_maps($name; $row; $audiences; $scopes):
          elif ([$m | keys[] | IN($audiences[])] | all | not) then fail($name; "every \"tokenExchange\" target must be one of the row's audiences")
          elif ([$m[] | non_empty_strings] | all | not) then fail($name; "every \"tokenExchange\" entry must be a non-empty array of non-empty strings")
          else . end
+     else . end)
+  | (if ($row | has("webPolicyByAudience")) then
+       $row.webPolicyByAudience as $m
+       | if ($m | type) != "object" then fail($name; "\"webPolicyByAudience\" must be an object")
+         elif ([$m | keys[] | IN($audiences[])] | all | not) then fail($name; "every \"webPolicyByAudience\" audience must be one of the row's audiences")
+         elif ([$m | keys[] | IN(web_policy_audiences[])] | all | not) then fail($name; "\"webPolicyByAudience\" may name only quarry or browser-broker")
+         elif ([$m[] | . == "tenant"] | all | not) then fail($name; "\"webPolicyByAudience\" values must be tenant")
+         else . end
+     else . end)
+  | (if ($row | has("apiKeyExchange")) then
+       $row.apiKeyExchange as $m
+       | if ($m | non_empty_strings | not) then fail($name; "\"apiKeyExchange\" must be a non-empty array of non-empty strings")
+         elif ($m | length) != ($m | unique | length) then fail($name; "\"apiKeyExchange\" lists an audience twice")
+         elif ([$m[] | IN(web_policy_audiences[])] | all | not) then fail($name; "\"apiKeyExchange\" may name only quarry or browser-broker")
+         else . end
      else . end);
 
 # The only keys a policy row may carry. Anything else is refused rather than dropped: a
@@ -127,8 +148,9 @@ def check_maps($name; $row; $audiences; $scopes):
 # emitted without one, and Auth Core then grants EVERY scope the row lists on EVERY
 # audience it lists, silently widening the principal to the union of its scopes.
 def known_row_keys:
-  ["allowAnyOrg", "audiences", "consumerEnv", "orgIds", "retentionByAudience",
-   "scopes", "scopesByAudience", "tenancy", "tokenExchange"];
+  ["allowAnyOrg", "apiKeyExchange", "audiences", "consumerEnv", "orgIds",
+   "retentionByAudience", "scopes", "scopesByAudience", "tenancy", "tokenExchange",
+   "webPolicyByAudience"];
 
 def check_keys($name; $row):
   ([$row | keys[] | select(IN(known_row_keys[]) | not)]) as $unknown
@@ -161,5 +183,7 @@ reduce ($pol[0] | keys[]) as $name ({};
       + optional($row; "scopesByAudience")
       + optional($row; "retentionByAudience")
       + optional($row; "tokenExchange")
+      + optional($row; "webPolicyByAudience")
+      + optional($row; "apiKeyExchange")
     )
 )
