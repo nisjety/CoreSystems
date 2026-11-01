@@ -251,6 +251,13 @@ message RunAgentRequest {
   // this message in the build plan's proto reservation table (section 4.3).
   ReasoningEffort reasoning_effort = 21;
 
+  // The most questions the run's `ask_user` tool may put to its owner (build plan WS14 S4). Zero
+  // means the tool is not offered: the gateway sends zero for a zero-retention, waived, plan-mode,
+  // Space-scoped or continuation run, and while AGENT_ASK_USER_ENABLED is off. Execution-core
+  // offers the tool only when this is above zero and caps it at the shared question limit. Field 22
+  // is reserved for this message in the build plan's proto reservation table (section 4.3).
+  uint32 max_questions = 22;
+
   // The connected accounts the person selected for this turn (build plan WS23 S4). Absent or empty
   // selects none: no connector read is offered, and one that is attempted is refused. The gateway
   // refuses a selection under zero retention, in a Space, under a knowledge-only or web-only source

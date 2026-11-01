@@ -1335,7 +1335,7 @@ fn question_state_token(state: i32) -> &'static str {
 }
 
 /// The question as the browser reads it. The owner's own org and user ids stay off the wire.
-fn run_question_value(question: &RunQuestion) -> Value {
+pub(crate) fn run_question_value(question: &RunQuestion) -> Value {
     json!({
         "id": question.id,
         "run_id": question.run_id,

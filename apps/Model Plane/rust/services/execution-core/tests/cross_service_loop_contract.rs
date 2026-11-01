@@ -620,3 +620,23 @@ fn the_loop_stop_code_is_spelled_the_same_by_execution_core_and_the_gateway() {
         "model-gateway must read the loop stop under the spelling execution-core writes"
     );
 }
+
+/// The question cap is one number in both services: each reads it from `mp_contracts::user_question`,
+/// so the gateway's `max_questions` and execution-core's admission cannot disagree (WS14 S4).
+#[test]
+fn the_question_cap_is_read_from_the_shared_contract_by_both_services() {
+    let ask = read("src/ask.rs");
+    let sse = read(GATEWAY_SSE);
+    assert!(
+        code_lines(&ask)
+            .iter()
+            .any(|line| line.contains("MAX_QUESTIONS_PER_RUN")),
+        "execution-core must cap the question tool at the shared limit"
+    );
+    assert!(
+        code_lines(&sse)
+            .iter()
+            .any(|line| line.contains("MAX_QUESTIONS_PER_RUN")),
+        "model-gateway must send the shared limit as the run's max_questions"
+    );
+}

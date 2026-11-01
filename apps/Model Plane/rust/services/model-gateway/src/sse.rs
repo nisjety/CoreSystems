@@ -10965,6 +10965,93 @@ fn latest_proposed_plan(
         .find(|p| p.state == PlanState::Proposed as i32)
 }
 
+/// Whether the deployment offers the `ask_user` tool (build plan WS14 S4), read once per process so a run
+/// cannot see it change. Only the literal `true` enables it, and the default is off.
+fn ask_user_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| ask_user_switch(std::env::var("AGENT_ASK_USER_ENABLED").ok().as_deref()))
+}
+
+/// The strict reading of `AGENT_ASK_USER_ENABLED`: only the literal `true` enables it.
+fn ask_user_switch(raw: Option<&str>) -> bool {
+    raw == Some("true")
+}
+
+/// The most questions a run may put to its owner, sent as `RunAgentRequest.max_questions` (build plan WS14
+/// S4). Zero, which offers the tool to nothing, unless the switch is on and the run may ask: not zero
+/// retention, not waived, not a plan run, not Space-scoped, and not a continuation (which runs the tool set
+/// its pause retained). Execution-core applies the same rule and caps the number at the shared limit.
+fn ask_user_max_questions(
+    on: bool,
+    zdr: bool,
+    waived: bool,
+    plan_mode: bool,
+    space_scoped: bool,
+    continuation: bool,
+) -> u32 {
+    let may_ask = on && !zdr && !waived && !plan_mode && !space_scoped && !continuation;
+    if may_ask {
+        u32::try_from(mp_contracts::user_question::MAX_QUESTIONS_PER_RUN).unwrap_or(0)
+    } else {
+        0
+    }
+}
+
+/// The question a run is waiting on, if its `ask_user` call put one to the owner (build plan WS14 S4): the
+/// newest `REQUESTED` question of the run in session-core's run-scoped list. Best-effort: a failed lookup
+/// sends no card, and the prose the turn ends with still carries the question.
+async fn requested_question_for_run(
+    state: &AppState,
+    run_id: &str,
+    org_id: &str,
+    bearer: &VerifiedModelBearer,
+) -> Option<mp_contracts::model_plane::v1::RunQuestion> {
+    let request = authenticated_session_request(
+        mp_contracts::model_plane::v1::ListRunQuestionsRequest {
+            run_id: run_id.to_owned(),
+            org_id: org_id.to_owned(),
+        },
+        bearer,
+    )
+    .ok()?;
+    let questions = state
+        .orchestration_client
+        .clone()
+        .list_run_questions(request)
+        .await
+        .ok()?
+        .into_inner()
+        .questions;
+    questions.into_iter().rev().find(|question| {
+        question.state == mp_contracts::model_plane::v1::QuestionState::Requested as i32
+    })
+}
+
+#[cfg(test)]
+mod ask_user_tests {
+    use super::*;
+
+    #[test]
+    fn the_switch_reads_only_the_literal_true() {
+        assert!(ask_user_switch(Some("true")));
+        for raw in [None, Some(""), Some("TRUE"), Some("1"), Some("yes"), Some("true ")] {
+            assert!(!ask_user_switch(raw), "{raw:?} must not enable the tool");
+        }
+    }
+
+    #[test]
+    fn a_run_is_offered_the_shared_cap_only_when_it_may_ask() {
+        let cap = u32::try_from(mp_contracts::user_question::MAX_QUESTIONS_PER_RUN).unwrap();
+        assert_eq!(ask_user_max_questions(true, false, false, false, false, false), cap);
+        assert_eq!(ask_user_max_questions(false, false, false, false, false, false), 0, "switch off");
+        assert_eq!(ask_user_max_questions(true, true, false, false, false, false), 0, "zero retention");
+        assert_eq!(ask_user_max_questions(true, false, true, false, false, false), 0, "waived");
+        assert_eq!(ask_user_max_questions(true, false, false, true, false, false), 0, "plan run");
+        assert_eq!(ask_user_max_questions(true, false, false, false, true, false), 0, "Space run");
+        assert_eq!(ask_user_max_questions(true, false, false, false, false, true), 0, "continuation");
+    }
+}
+
 /// The typed code of an execute turn (`execute_granted`) that has no live plan grant to run
 /// under: the run is refused and terminalized (`dispatch_rejected`), and execution-core is
 /// never called (WS14 S2a). It travels as the message of the `failed_precondition` status
@@ -11334,6 +11421,9 @@ fn spawn_run_dispatch(
     // The run's effort level (WS11-S8), from `thinking::run_level` on the turn's clamped
     // profile; 0 with the ladder off, and for every continuation.
     run_effort: i32,
+    // The most questions the run's `ask_user` tool may put to its owner (build plan WS14 S4); zero offers
+    // none. Decided by the caller, which knows the turn's posture and whether it is a continuation.
+    max_questions: u32,
 ) -> Result<tokio::task::JoinHandle<Result<RunAgentResponse, tonic::Status>>, tonic::Status> {
     let mut execution_client = state.execution_client.clone();
     // The graded authority execution-core enforces PER CALL.
@@ -11433,6 +11523,8 @@ fn spawn_run_dispatch(
     // switch off, or with no rules, the request carries no org policy, as it did before the field.
     run_agent_req.org_policy =
         crate::runtime_registries::do_run_org_policy(&state.hooks, org_id, hooks_do_runs_mode());
+    // The question tool's cap for this run (build plan WS14 S4), set by the caller as the org policy is.
+    run_agent_req.max_questions = max_questions;
     let run_agent_req = authenticated_run_agent_request(
         run_agent_req,
         execution_bearer,
@@ -11688,6 +11780,8 @@ fn build_run_agent_request(
         // The org's hook rules are set by the caller from the registry (`spawn_run_dispatch`),
         // which this pure builder cannot read; none here.
         org_policy: None,
+        // The question tool's cap is decided by the caller (`spawn_run_dispatch`), as the org policy is; none here.
+        max_questions: 0,
     }
 }
 
@@ -12326,6 +12420,20 @@ fn agentic_run_stream(
             None => durable_grant,
         };
 
+        // The question tool's cap for this run (build plan WS14 S4): a Do run that may ask is offered the
+        // tool, a continuation or any other run is not. The completion below asks for the question only
+        // when this is above zero.
+        let max_questions = ask_user_max_questions(
+            ask_user_enabled(),
+            zdr,
+            matches!(
+                retention_class,
+                Some(crate::sse_events::RetentionClass::ZdrWaived { .. })
+            ),
+            plan_mode,
+            !space_id.is_empty(),
+            resume.is_some(),
+        );
         // Construct the authenticated request before reporting the run as
         // started. A deterministic local credential/metadata failure is a
         // confirmed pre-dispatch rejection, not an ambiguous remote outage.
@@ -12373,6 +12481,7 @@ fn agentic_run_stream(
             },
             durable_grant.as_ref(),
             run_effort,
+            max_questions,
         ) {
             Ok(dispatch) => dispatch,
             Err(error) => {
@@ -13018,6 +13127,24 @@ fn agentic_run_stream(
                             "operation": s.operation,
                         }))
                         .collect::<Vec<_>>()),
+                };
+                let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+            }
+        }
+
+        // The question the run's `ask_user` call put to the owner (build plan WS14 S4): the card's event,
+        // sent once the run completed with it still waiting. A lookup failure sends no card; the prose the
+        // turn ends with carries the question either way.
+        if max_questions > 0 {
+            if let Some(question) =
+                requested_question_for_run(&state, &run.run_id, &org_id, &model_bearer).await
+            {
+                let fields = crate::http_routes::run_question_value(&question);
+                let event = crate::sse_events::ChatEvent::UserQuestion {
+                    question_id: question.id,
+                    delivery: question.delivery,
+                    expires_at: fields["expires_at"].as_str().map(str::to_owned),
+                    items: fields["items"].clone(),
                 };
                 let _ = tx.send(Ok(event.to_sse(&request_id))).await;
             }

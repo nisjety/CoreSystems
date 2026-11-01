@@ -1589,6 +1589,11 @@ pub fn trusted_capability_id(tool_name: &str) -> Option<String> {
         // for delegated subagents — which is orthogonal to capability risk.
         "save_memory" => "cap.memory.index",
         "recall_memory" => "cap.memory.search",
+        // The question tool (WS14 S4) writes one owner-scoped row through session-core, the same
+        // dependency and low-risk shape as `plan.propose`, so it binds to that seeded, attested id.
+        // Its class is seeded beside `plan.propose`'s row in capability-core; the parity test
+        // (tests/tool_class_registry_parity.rs) refuses a bound name that has no seed.
+        "ask_user" => "cap.memory.index",
         // Reading this run's own delegation records. `cap.agent.lineage.read`
         // covers both: the content-free listing and the approval-gated answer
         // read are the same authority over the same records, and the difference
@@ -1904,6 +1909,12 @@ mod tests {
             Some("cap.memory.index")
         );
         assert!(trusted_capability_id("plan.propose").is_some());
+        // The question tool (WS14 S4) is bound, to a seeded id, so the gate evaluates it rather
+        // than refusing it as unbound.
+        assert_eq!(
+            trusted_capability_id("ask_user").as_deref(),
+            Some("cap.memory.index")
+        );
         // The bare prefix is not itself a callable tool (mirrors
         // `is_plan_tool`'s own "prefix alone is not a tool" rule).
         assert!(trusted_capability_id("plan.").is_none());

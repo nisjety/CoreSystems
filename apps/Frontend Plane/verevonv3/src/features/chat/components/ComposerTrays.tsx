@@ -1,6 +1,7 @@
 import { For, Match, Show, Switch } from 'solid-js'
-import type { AutonomyRung } from '@/shared/api/chat-client'
+import type { AutonomyRung, ChatQuestionAnswer, ChatUserQuestionEvent } from '@/shared/api/chat-client'
 import type { ApprovalDecision, PlanStepEdit } from '@/shared/api/orchestration-client'
+import { QuestionCard } from '@/shared/chat-nodes/QuestionCard'
 import { useI18n } from '@/shared/i18n'
 import type { DockedTray, DockedTrayKind } from '../lib/composer-trays'
 import { ApprovalRequests, PlanApprovalControl, QueuedInputStrip } from './ChatMessages'
@@ -29,6 +30,12 @@ export function ComposerTrays(props: {
   onApprovalDecision: (turnId: string, approvalId: string, decision: ApprovalDecision) => void
   onApprovePlan: (turnId: string, rung: AutonomyRung, justification: string, steps?: PlanStepEdit[]) => void
   onRejectPlan: (turnId: string, reason: string) => void
+  /** The question a run put to its owner (WS14 S4). It waits behind an approval and ahead of a plan or the queue. */
+  question?: ChatUserQuestionEvent
+  questionPending?: boolean
+  questionError?: string | null
+  onAnswerQuestion?: (answer: ChatQuestionAnswer) => void
+  onSkipQuestion?: () => void
 }) {
   const i18n = useI18n()
   const active = () => props.trays[0]
@@ -36,6 +43,8 @@ export function ComposerTrays(props: {
     const tray = active()
     return tray?.kind === 'approval' ? tray : undefined
   }
+  // The question takes the tray unless an approval is waiting first: the order the dock is read in.
+  const questionShown = () => props.question !== undefined && approval() === undefined
   const plan = () => {
     const tray = active()
     return tray?.kind === 'plan' ? tray : undefined
@@ -44,12 +53,12 @@ export function ComposerTrays(props: {
     const tray = active()
     return tray?.kind === 'queue' ? tray : undefined
   }
-  const others = () => props.trays.slice(1)
+  const others = () => (questionShown() ? props.trays : props.trays.slice(1))
 
   return (
     <div
       class="verevon-chat-composer-trays"
-      data-empty={props.trays.length === 0 ? '' : undefined}
+      data-empty={props.trays.length === 0 && !props.question ? '' : undefined}
       role="region"
       aria-live="polite"
       aria-label={i18n.tr('Venter på deg', 'Waiting for you')}
@@ -63,6 +72,17 @@ export function ComposerTrays(props: {
                 const entry = tray().approvals.find((candidate) => candidate.approval.id === approvalId)
                 if (entry) props.onApprovalDecision(entry.turnId, approvalId, decision)
               }}
+            />
+          )}
+        </Match>
+        <Match when={questionShown() && props.question}>
+          {(question) => (
+            <QuestionCard
+              question={question()}
+              pending={props.questionPending}
+              error={props.questionError ?? undefined}
+              onAnswer={(answer) => props.onAnswerQuestion?.(answer)}
+              onSkip={() => props.onSkipQuestion?.()}
             />
           )}
         </Match>

@@ -69,8 +69,11 @@ import {
 import {
   cancelRun,
   decideApproval,
+  answerQuestion as answerRunQuestion,
   listApprovals,
   listPlans,
+  listRunQuestions,
+  runQuestionErrorCodeOf,
   resumeRun,
   type ApprovalDecision,
   type PlanStepEdit,
@@ -110,6 +113,7 @@ import { OPENAI_CODEX_SUBSCRIPTION_PROVIDER } from '@/shared/api/chatgpt-subscri
 import { resolveReplaySubscriptionConnectionId } from '@/shared/ai/model-selection'
 import { getSession } from '@/shared/session/session-store'
 import { blobToDataUrl } from '@/shared/lib/blob-data'
+import type { ChatQuestionAnswer, ChatUserQuestionEvent } from '@/shared/api/chat-client'
 import { useI18n } from '@/shared/i18n'
 import type { VerevonUiEvent } from '@/shared/chat/verevon-ui-events'
 import {
@@ -277,6 +281,24 @@ export function frameSequence(id: string | undefined): number | undefined {
 
 /** The server id of the turn a regenerate or an edit replaces, sent only on a versioned thread (WS17 S9). */
 type ServerVersionTarget = Pick<ChatInvokeRequest, 'regenerateOfMessageId' | 'editOfMessageId'>
+
+/**
+ * What the person's answer reads as in the transcript: the chosen labels and their own words, one line per
+ * item. The gateway receives the structured answer; this is the words the turn is shown under.
+ */
+export function questionAnswerSummary(question: ChatUserQuestionEvent, answer: ChatQuestionAnswer): string {
+  return question.items
+    .map((item) => {
+      const given = answer.answers.find((entry) => entry.itemId === item.id)
+      const labels = (given?.optionIds ?? []).map(
+        (id) => item.options.find((option) => option.id === id)?.label ?? id,
+      )
+      const words = given?.text.trim() ?? ''
+      return [...labels, ...(words ? [words] : [])].join(', ')
+    })
+    .filter((line) => line.length > 0)
+    .join('\n')
+}
 
 export function useChatController() {
   // Resolved once, like any hook: the controller runs inside the chat page,
@@ -926,6 +948,33 @@ export function useChatController() {
    * cannot pause for a plan approval and should not trigger an unnecessary
    * approval read.
    */
+  /**
+   * A reload restores the question the thread's last run is still waiting on (WS14 S4): the newest `requested`
+   * question not yet past its expiry, read from the run's own list.
+   */
+  const hydrateRunQuestions = (threadId: string, turns: ChatTurn[], sequence: number) => {
+    if (isTemporaryThread(threadId)) return
+    const runId = [...turns].reverse().find((turn) => turn.role === 'assistant' && turn.runId)?.runId
+    if (!runId) return
+    void listRunQuestions(runId)
+      .then((questions) => {
+        if (sequence !== threadLoadSequence || state.threadId !== threadId) return
+        const waiting = [...questions].reverse().find((question) => (
+          question.state === 'requested'
+          && (!question.expiresAt || Date.parse(question.expiresAt) > Date.now())
+        ))
+        if (waiting) {
+          setPendingQuestion({
+            questionId: waiting.id,
+            delivery: waiting.delivery,
+            expiresAt: waiting.expiresAt,
+            items: waiting.items,
+          })
+        }
+      })
+      .catch(() => undefined)
+  }
+
   const hydrateRunApprovals = (threadId: string, turns: ChatTurn[], sequence: number) => {
     if (isTemporaryThread(threadId)) return
     const runTurn = [...turns].reverse().find((turn) => (
@@ -1274,6 +1323,10 @@ export function useChatController() {
     // In particular, do this before aborting `abortController`: session-core
     // may still be indexing the new thread's messages for a few milliseconds.
     if (isStartingThread(threadId)) return
+    // A waiting question belongs to the thread whose run asked it, so opening another thread must not carry its
+    // card over. This thread's own question, if it still waits, comes back with its run (`hydrateRunQuestions`).
+    setPendingQuestion(null)
+    setQuestionError(null)
     // A project thread's scope is recorded before `threadId` moves into state, so the
     // project chip reads it from the first render of the thread. With the switch off the
     // branch is never taken: `scopedThreadRefs` can already hold the Space of an origin=space
@@ -1449,6 +1502,7 @@ export function useChatController() {
       if (seq !== threadLoadSequence || state.threadId !== threadId) return
       restoreSurfaceTab(threadId)
       hydrateRunApprovals(threadId, turns, seq)
+      hydrateRunQuestions(threadId, turns, seq)
       hydrateProposedPlan(threadId, turns, seq)
       maybeResumeStream(threadId, turns)
       if (activeRunTail) void followUnresumableRun(threadId, activeRunTail.id, activeRunTail.runId)
@@ -1500,6 +1554,7 @@ export function useChatController() {
       if (seq !== threadLoadSequence || state.threadId !== threadId) return
       restoreSurfaceTab(threadId)
       hydrateRunApprovals(threadId, fallbackTurns, seq)
+      hydrateRunQuestions(threadId, fallbackTurns, seq)
       hydrateProposedPlan(threadId, fallbackTurns, seq)
       maybeResumeStream(threadId, fallbackTurns)
     }
@@ -2182,6 +2237,9 @@ export function useChatController() {
     // A fresh chat has no title yet; leaving the previous thread's would show
     // the old conversation's name over the new one until the next title lands.
     setGeneratedTitle(null)
+    // A waiting question, and a refusal left on its card, belong to the thread that asked: a fresh chat has neither.
+    setPendingQuestion(null)
+    setQuestionError(null)
     // Each fresh chat starts with Temporary Chat off — a user re-enables it
     // deliberately per conversation rather than it silently staying on.
     setTemporaryChat(false)
@@ -2447,6 +2505,56 @@ export function useChatController() {
    * Session-only: the durable record of a grant is on the run itself, and this
    * is only the status of the click.
    */
+  // The question a run put to its owner (WS14 S4), waiting for the person's answer in the composer tray.
+  // Session-only: a reload restores it from the run's questions (`hydrateRunQuestions`).
+  const [pendingQuestion, setPendingQuestion] = createSignal<ChatUserQuestionEvent | null>(null)
+  const [questionPending, setQuestionPending] = createSignal(false)
+  const [questionError, setQuestionError] = createSignal<string | null>(null)
+
+  /**
+   * Answers the waiting question. The answer is recorded first and then sent as the person's next message, so
+   * the run that follows works from an answered question. A refused answer sends nothing: a question that can
+   * no longer be answered leaves the tray with the refusal, and any other refusal keeps the card for another try.
+   */
+  const answerPendingQuestion = async (answer: ChatQuestionAnswer) => {
+    const question = pendingQuestion()
+    if (!question || questionPending()) return
+    setQuestionPending(true)
+    setQuestionError(null)
+    try {
+      await answerRunQuestion(question.questionId, { answers: answer.answers })
+    } catch (error) {
+      const code = runQuestionErrorCodeOf(error)
+      if (code === 'question_expired' || code === 'question_already_answered' || code === 'question_not_found') {
+        setPendingQuestion(null)
+      }
+      setQuestionError(i18n.tr('Svaret ble ikke lagret. Prøv igjen.', 'The answer was not saved. Try again.'))
+      return
+    } finally {
+      setQuestionPending(false)
+    }
+    setPendingQuestion(null)
+    await sendContent(questionAnswerSummary(question, answer))
+  }
+
+  /** Skips the waiting question. Nothing is sent to the run: the skip is recorded and the card goes. */
+  const skipPendingQuestion = async () => {
+    const question = pendingQuestion()
+    if (!question || questionPending()) return
+    setQuestionPending(true)
+    setQuestionError(null)
+    try {
+      await answerRunQuestion(question.questionId, { skip: true })
+      setPendingQuestion(null)
+    } catch {
+      setQuestionError(
+        i18n.tr('Spørsmålet kunne ikke hoppes over. Prøv igjen.', 'The question could not be skipped. Try again.'),
+      )
+    } finally {
+      setQuestionPending(false)
+    }
+  }
+
   const [planApprovalPending, setPlanApprovalPending] = createSignal<string | null>(null)
   const [planApprovalError, setPlanApprovalError] = createSignal<Record<string, string>>({})
 
@@ -3303,6 +3411,11 @@ export function useChatController() {
               const turn = s.turns.find((t) => t.id === assistantId)
               if (turn) turn.proposedPlan = { planId, summary, steps }
             })
+          },
+          onUserQuestion: (question) => {
+            // WS14 S4. A temporary chat keeps no question, as it keeps no follow-up chips.
+            if (isTemporaryThread(state.threadId ?? activeThreadId)) return
+            setPendingQuestion(question)
           },
           onDone: ({ requestId, modelUsed, outputTokens, stopReason }) => {
             settled = true
@@ -4665,6 +4778,11 @@ export function useChatController() {
     setImageMode,
     planMode,
     approveTurnPlan,
+    pendingQuestion,
+    questionPending,
+    questionError,
+    answerPendingQuestion,
+    skipPendingQuestion,
     rejectTurnPlan,
     planApprovalPending,
     planApprovalError,

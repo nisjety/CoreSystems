@@ -980,7 +980,7 @@ async fn offered_tools(
     // A waived route keeps nothing and runs no MCP call, exactly like a ZDR run: the same
     // flag, so no listing, no token and no lookup is made for either.
     let retention_bound = req.zdr || waived;
-    let (defs, derivable) = merged_tool_defs_governed(
+    let (mut defs, mut derivable) = merged_tool_defs_governed(
         &req.run_id,
         &req.org_id,
         &req.user_id,
@@ -993,6 +993,14 @@ async fn offered_tools(
         governance,
     )
     .await;
+    // `ask_user` (WS14 S4) is named by the deployment and never by a caller: a caller's or an MCP
+    // tool of that name is dropped, and the built-in is offered only where `ask::budget` allows it.
+    // Appended after the base set, so the run is not derivable, as the browser tools are.
+    defs.retain(|tool| tool.name != runtime_loop::ask::ASK_TOOL);
+    if runtime_loop::ask::budget(req, waived) > 0 {
+        defs.push(runtime_loop::ask::tool_def());
+        derivable = false;
+    }
     if req.resume.is_some() {
         return OfferedTools {
             defs,
@@ -2895,6 +2903,8 @@ async fn run_rounds(
 
     // A delegated loop's rounds are charged against the SAME budget, so a parent
     // that delegates on every round cannot drive max_rounds² inference calls.
+    // The question calls this loop has admitted (WS14 S4), counted across its rounds.
+    let asks = std::sync::atomic::AtomicU32::new(0);
     while rounds_executed + delegated_rounds < max_rounds {
         // A run pinned to the ChatGPT subscription stops the moment ANY of its
         // loops had a round served by another route. This loop may be the
@@ -3663,6 +3673,24 @@ async fn run_rounds(
                     error: Some(crate::plan::main_agent_only_refusal(&call.name)),
                 }));
                 continue;
+            }
+
+            // `ask_user` (WS14 S4) puts a question to the person who started the run. It is admitted
+            // here, in call order, so the run's question cap counts every call before any of them runs
+            // concurrently. A subagent, a run the tool is not offered to and a call past the cap are
+            // refused with the words the model reads.
+            if runtime_loop::ask::is_ask_tool(&call.name) {
+                let budget = runtime_loop::ask::budget(req, ctx.route.is_waived());
+                if let Err(refusal) =
+                    runtime_loop::ask::admit(ctx.depth, budget, &asks)
+                {
+                    slots.push(CallSlot::Rejected(ToolStepResult {
+                        name: call.name.clone(),
+                        output: String::new(),
+                        error: Some(refusal),
+                    }));
+                    continue;
+                }
             }
 
             // Server-side plan-mode enforcement (harness-adoption pass,
@@ -4599,6 +4627,31 @@ async fn run_rounds(
             return Ok(RoundsResult {
                 compaction_triggered,
                 outcome: RoundsOutcome::Paused(paused),
+                rounds_executed,
+                delegated_rounds,
+                grounded,
+            });
+        }
+
+        // `ask_user` (WS14 S4): a question a call put to the owner ends the turn, and the turn answers
+        // with the questions as prose. That prose is what an older client shows; the card comes from
+        // the `user_question` event the gateway sends once the run completes. A call that failed asked
+        // nothing, so the loop goes on and the model can fix its question.
+        if let Some(prose) = runtime_loop::ask::asked_prose(
+            response
+                .tool_calls
+                .iter()
+                .zip(outcomes.iter())
+                .filter(|(call, outcome)| {
+                    call.name == runtime_loop::ask::ASK_TOOL
+                        && outcome.name == call.name
+                        && outcome.error.is_none()
+                })
+                .map(|(call, _)| call.arguments_json.as_str()),
+        ) {
+            return Ok(RoundsResult {
+                compaction_triggered,
+                outcome: RoundsOutcome::Answered(prose),
                 rounds_executed,
                 delegated_rounds,
                 grounded,
@@ -9988,6 +10041,8 @@ mod tests {
         /// `(thread_id, summary, step_count)` — every `ProposePlan` call
         /// `MockOrchestration` observed, for `plan.propose` dispatch tests.
         propose_plan_calls: Vec<(String, String, usize)>,
+        /// Every `CreateRunQuestion` `MockOrchestration` stored, whole, for `ask_user` dispatch tests.
+        run_questions: Vec<pb::CreateRunQuestionRequest>,
         decisions: Vec<(String, i32)>,     // (approval_id, decision) — DecideApproval
         /// Every `DecideApproval` the mock accepted, whole: who decided, and why.
         decision_requests: Vec<pb::DecideApprovalRequest>,
@@ -11621,11 +11676,21 @@ mod tests {
 
         async fn create_run_question(
             &self,
-            _: Request<pb::CreateRunQuestionRequest>,
+            request: Request<pb::CreateRunQuestionRequest>,
         ) -> Result<Response<pb::CreateRunQuestionResponse>, Status> {
-            Err(Status::unimplemented(
-                "create_run_question not needed in test",
-            ))
+            let req = request.into_inner();
+            let question = pb::RunQuestion {
+                id: format!("q_{}", req.step_id),
+                run_id: req.run_id.clone(),
+                state: pb::QuestionState::Requested as i32,
+                delivery: req.delivery.clone(),
+                items: req.items.clone(),
+                ..Default::default()
+            };
+            self.rec.lock().unwrap().run_questions.push(req);
+            Ok(Response::new(pb::CreateRunQuestionResponse {
+                question: Some(question),
+            }))
         }
 
         async fn list_run_questions(
@@ -11954,6 +12019,9 @@ mod tests {
             // tests set it explicitly.
             reasoning_effort: pb::ReasoningEffort::Unspecified as i32,
             org_policy: None,
+            // No question tool, which is what every run that predates the field sends; the
+            // `ask_user` tests set it explicitly.
+            max_questions: 0,
         }
     }
 
@@ -20108,6 +20176,130 @@ mod tests {
             )],
             "plan.propose must reach session-core's ProposePlan with the model's summary and step count"
         );
+    }
+
+    /// One `ask_user` call with a single question of two choices, as the model writes it.
+    fn ask_user_call(id: &str, question_id: &str) -> pb::ToolCall {
+        pb::ToolCall {
+            id: id.to_owned(),
+            name: "ask_user".to_owned(),
+            arguments_json: serde_json::json!({
+                "questions": [{
+                    "id": question_id,
+                    "kind": "single",
+                    "prompt": "Which carrier should I book?",
+                    "options": [
+                        {"id": "bring", "label": "Bring"},
+                        {"id": "postnord", "label": "PostNord"},
+                    ],
+                    "allow_other": false,
+                }],
+            })
+            .to_string(),
+        }
+    }
+
+    /// A Do run whose first round makes `calls`, with `max_questions` on its request and the tool
+    /// injected as the purpose-lock allowlist, as the plan test injects `plan.propose`.
+    async fn ask_user_run(
+        calls: Vec<pb::ToolCall>,
+        max_questions: u32,
+    ) -> (Result<pb::RunAgentResponse, tonic::Status>, SharedRecorder) {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel = spawn_inference_channel(vec![
+            Scripted::ToolCalls {
+                content: String::new(),
+                calls,
+            },
+            Scripted::Answer("I will continue once you answer.".to_owned()),
+        ])
+        .await;
+        let state = crate::state::StateStore::new();
+        let mut req = sample_request();
+        req.mode = "auto".to_owned();
+        req.max_questions = max_questions;
+        let tools = vec![pb::ToolDefinition {
+            name: "ask_user".to_owned(),
+            description: String::new(),
+            parameters_json: "{}".to_owned(),
+        }];
+        let resp = run_agent_with_tools(
+            &state,
+            session_channel,
+            inference_channel,
+            &plain_caller(),
+            req,
+            tools,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+        )
+        .await;
+        (resp, rec)
+    }
+
+    #[tokio::test]
+    async fn ask_user_ends_the_turn_with_the_question_and_stores_it_once() {
+        let _switch = crate::runtime_loop::ask::test_switch::force(true);
+        let (resp, rec) = ask_user_run(vec![ask_user_call("ask-1", "carrier")], 3).await;
+        let resp = resp.expect("ask_user must dispatch and the run must complete");
+
+        assert_eq!(resp.status, "completed");
+        assert!(
+            resp.final_output.contains("Which carrier should I book?")
+                && resp.final_output.contains("- Bring"),
+            "the turn answers with the question as prose: {}",
+            resp.final_output
+        );
+        let r = rec.lock().unwrap();
+        assert_eq!(r.run_questions.len(), 1, "one question is stored");
+        let stored = &r.run_questions[0];
+        assert_eq!(stored.delivery, "next_turn");
+        assert_eq!(stored.items[0].id, "carrier");
+        assert!(!stored.run_id.is_empty() && !stored.step_id.is_empty());
+        assert_eq!(
+            stored.idempotency_key,
+            format!("{}:{}", stored.run_id, stored.step_id),
+            "a retry of the same step returns the question it stored"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_fourth_question_of_a_run_is_refused_and_stores_nothing() {
+        let _switch = crate::runtime_loop::ask::test_switch::force(true);
+        let calls = (1..=4)
+            .map(|n| ask_user_call(&format!("ask-{n}"), &format!("q{n}")))
+            .collect();
+        let (resp, rec) = ask_user_run(calls, 3).await;
+        let resp = resp.expect("the run completes");
+
+        assert_eq!(resp.status, "completed");
+        assert_eq!(
+            rec.lock().unwrap().run_questions.len(),
+            3,
+            "the run's cap of three holds: the fourth call stores nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn with_the_switch_off_a_question_call_is_refused_and_the_run_goes_on() {
+        let _switch = crate::runtime_loop::ask::test_switch::force(false);
+        let (resp, rec) = ask_user_run(vec![ask_user_call("ask-1", "carrier")], 3).await;
+        let resp = resp.expect("the run completes");
+
+        assert_eq!(resp.status, "completed");
+        assert_eq!(resp.final_output, "I will continue once you answer.");
+        assert!(rec.lock().unwrap().run_questions.is_empty());
     }
 
     #[tokio::test]

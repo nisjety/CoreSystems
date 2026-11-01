@@ -19,6 +19,9 @@ pub mod subagent_results;
 // WS24-S8. The file lives at the crate root; lib.rs should declare it there (shared edit).
 #[path = "../owner_reads.rs"]
 pub mod owner_reads;
+// WS14 S4. The file lives at the crate root; lib.rs should declare it there (shared edit).
+#[path = "../ask.rs"]
+pub(crate) mod ask;
 
 #[cfg(test)]
 pub(crate) mod session_core_rules_double;
@@ -1377,6 +1380,18 @@ async fn execute_step_inner(
             thread_id,
             run_id,
             zdr,
+            session_channel.as_ref(),
+            session_bearer,
+        )
+        .await
+    } else if tool_name == ask::ASK_TOOL {
+        execute_ask_user(
+            tool_input,
+            org_id,
+            run_id,
+            step_id,
+            thread_id,
+            zdr || waived,
             session_channel.as_ref(),
             session_bearer,
         )
@@ -3732,6 +3747,82 @@ async fn execute_propose_plan(
             }
         }
         Err(status) => tool_error(format!("plan.propose failed: {}", status.message())),
+    }
+}
+
+/// `ask_user` — input JSON `{"questions": [...]}` (WS14 S4). The contract is in `crate::ask`.
+///
+/// Puts the questions to the run's owner as one `next_turn` question in session-core's
+/// `run_questions`. An answer is information, never a grant, so nothing here reads as one. A call
+/// under zero retention is refused before anything is written. A call that succeeds ends the turn
+/// in `run_rounds`, which answers with the questions as prose.
+async fn execute_ask_user(
+    tool_input: &str,
+    org_id: &str,
+    run_id: &str,
+    step_id: &str,
+    thread_id: &str,
+    zdr: bool,
+    session_channel: Option<&Channel>,
+    session_bearer: Option<&str>,
+) -> tool_bridge::ToolExecution {
+    if zdr {
+        return tool_error(format!(
+            "{} unavailable: this run is Zero-Data-Retention, so a question cannot be kept. Answer \
+             from the conversation itself.",
+            ask::ASK_TOOL
+        ));
+    }
+    let items = match ask::parse(tool_input) {
+        Ok(items) => items,
+        Err(problem) => return tool_error(problem),
+    };
+    let (channel, bearer) = match memory_tool_preflight(
+        ask::ASK_TOOL,
+        org_id,
+        thread_id,
+        zdr,
+        session_channel,
+        session_bearer,
+    ) {
+        Ok(ok) => ok,
+        Err(refusal) => return refusal,
+    };
+    // A retry of the same call (same run and step) returns the question it stored.
+    let request = pb::CreateRunQuestionRequest {
+        run_id: run_id.to_owned(),
+        step_id: step_id.to_owned(),
+        org_id: org_id.to_owned(),
+        delivery: mp_contracts::user_question::DELIVERY_NEXT_TURN.to_owned(),
+        items: items.iter().map(ask::to_wire_item).collect(),
+        expires_in_seconds: 0,
+        idempotency_key: format!("{run_id}:{step_id}"),
+    };
+    let request = match authenticated_session_request(request, &bearer) {
+        Ok(request) => request,
+        Err(error) => return tool_error(format!("{} unavailable: {error}", ask::ASK_TOOL)),
+    };
+    match OrchestrationCoreServiceClient::new(channel.clone())
+        .create_run_question(request)
+        .await
+    {
+        Ok(response) => {
+            let question_id = response
+                .into_inner()
+                .question
+                .map(|question| question.id)
+                .unwrap_or_default();
+            tool_bridge::ToolExecution {
+                output: serde_json::json!({
+                    "question_id": question_id,
+                    "state": "requested",
+                    "delivery": mp_contracts::user_question::DELIVERY_NEXT_TURN,
+                })
+                .to_string(),
+                error: None,
+            }
+        }
+        Err(status) => tool_error(format!("{} failed: {}", ask::ASK_TOOL, status.message())),
     }
 }
 

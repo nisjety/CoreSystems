@@ -820,6 +820,41 @@ export type ChatPlanProposedEvent = {
   requestId?: string
 }
 
+/** One choice of a question's single- or multi-choice item (WS14 S4). */
+export type ChatQuestionOption = { id: string; label: string; description?: string }
+
+/**
+ * One thing a run's `ask_user` call asks its owner (WS14 S4). `options` is empty for a free-text item;
+ * `allowOther` says a single- or multi-choice item also takes the person's own words.
+ */
+export type ChatQuestionItem = {
+  id: string
+  kind: 'single' | 'multi' | 'text'
+  prompt: string
+  options: ChatQuestionOption[]
+  allowOther: boolean
+}
+
+/**
+ * The question a run put to its owner, sent once that run completed with the question still waiting
+ * (WS14 S4). The card records its answer through the question's answer route, and the answer is then the
+ * person's next turn.
+ */
+export type ChatUserQuestionEvent = {
+  questionId: string
+  delivery: string
+  /** RFC 3339. Past it the question reads as expired and cannot be answered. */
+  expiresAt?: string
+  items: ChatQuestionItem[]
+  requestId?: string
+}
+
+/** The owner's answer to a question, one entry per item, or a skip (WS14 S4). */
+export type ChatQuestionAnswer = {
+  answers: { itemId: string; optionIds: string[]; text: string }[]
+  skip?: boolean
+}
+
 /**
  * Read the recalled-memory list off the wire.
  *
@@ -880,6 +915,8 @@ export type ChatStreamHandlers = {
   onFollowUps?: (event: ChatFollowUpsEvent) => void
   /** See `ChatPlanProposedEvent`. */
   onPlanProposed?: (event: ChatPlanProposedEvent) => void
+  /** See `ChatUserQuestionEvent`. Ungated: the card is the only way to answer the question. */
+  onUserQuestion?: (event: ChatUserQuestionEvent) => void
   onStopped?: (event: ChatStoppedEvent) => void
   onMemoryRecall?: (event: ChatMemoryRecallEvent) => void
   onVerification?: (event: ChatVerificationEvent) => void
@@ -1219,6 +1256,36 @@ const DEFAULT_FEATURES = [
 ]
 function str(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined
+}
+
+/**
+ * The items of a `user_question` frame, read defensively: an item this build cannot read is dropped, and a
+ * choice item with fewer than two readable options is dropped with it (it is not a choice).
+ */
+function normalizeQuestionItems(value: unknown): ChatQuestionItem[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((item): ChatQuestionItem | null => {
+      const raw = objectValue(item)
+      if (!raw) return null
+      const id = str(raw.id)
+      const prompt = str(raw.prompt)
+      const kind = raw.kind === 'single' || raw.kind === 'multi' || raw.kind === 'text' ? raw.kind : undefined
+      if (!id || !prompt || !kind) return null
+      const options = (Array.isArray(raw.options) ? raw.options : [])
+        .map((option): ChatQuestionOption | null => {
+          const entry = objectValue(option)
+          const optionId = str(entry?.id)
+          const label = str(entry?.label)
+          if (!optionId || !label) return null
+          const description = str(entry?.description)
+          return description ? { id: optionId, label, description } : { id: optionId, label }
+        })
+        .filter((option): option is ChatQuestionOption => option !== null)
+      if (kind !== 'text' && options.length < 2) return null
+      return { id, kind, prompt, options, allowOther: raw.allow_other === true }
+    })
+    .filter((item): item is ChatQuestionItem => item !== null)
 }
 
 function strOrJson(value: unknown): string | undefined {
@@ -2125,6 +2192,22 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
       // calls for, rather than rendering a broken edit surface.
       if (planId && summary) {
         handlers.onPlanProposed?.({ planId, summary, steps, requestId: str(payload.request_id) })
+      }
+      break
+    }
+    case 'user_question': {
+      // A question with no id or no answerable item is a malformed frame. The prose the turn ends with
+      // still carries the question, so dropping the card loses nothing the person needs to read.
+      const questionId = str(payload.question_id)
+      const items = normalizeQuestionItems(payload.items)
+      if (questionId && items.length > 0) {
+        handlers.onUserQuestion?.({
+          questionId,
+          delivery: str(payload.delivery) || 'next_turn',
+          expiresAt: str(payload.expires_at) || undefined,
+          items,
+          requestId: str(payload.request_id),
+        })
       }
       break
     }

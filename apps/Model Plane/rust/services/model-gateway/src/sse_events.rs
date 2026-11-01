@@ -366,6 +366,17 @@ pub enum ChatEvent {
         summary: String,
         steps: Value,
     },
+    /// The question a Do run's `ask_user` call put to the run's owner, sent once the run completed with
+    /// it still waiting (WS14 S4). Control event, ungated: a client that never opted in still has to see
+    /// that its turn waits on an answer. `items` is the question as the card reads it, the shape of
+    /// `ListRunQuestions`' items. An older client ignores the unknown event name and reads the prose
+    /// the turn ends with, which is the degrade path.
+    UserQuestion {
+        question_id: String,
+        delivery: String,
+        expires_at: Option<String>,
+        items: Value,
+    },
     /// Deterministic "memory was used" indicator (harness-adoption §7.9,
     /// hermes-agent's `RecallStatus`, MIT): emitted once per turn, before the
     /// answer streams, when long-term memory was actually injected into the
@@ -593,7 +604,9 @@ impl ChatEvent {
             // ---- lifecycle (WS15) ----
             | ChatEvent::Compaction { .. }
             | ChatEvent::ContextChange { .. }
-            | ChatEvent::RunParked { .. } => None,
+            | ChatEvent::RunParked { .. }
+            // The question a run waits on (WS14 S4): the card needs it whatever the client opted into.
+            | ChatEvent::UserQuestion { .. } => None,
         }
     }
 
@@ -636,6 +649,7 @@ impl ChatEvent {
             ChatEvent::Title { .. } => "title",
             ChatEvent::FollowUps { .. } => "follow_ups",
             ChatEvent::PlanProposed { .. } => "plan_proposed",
+            ChatEvent::UserQuestion { .. } => "user_question",
             ChatEvent::QueuedInput { .. } | ChatEvent::QueuedInputReceipted { .. } => "queued_input",
             ChatEvent::RetrievalNotice { .. } => "retrieval_notice",
             // ---- usage progress (WS27) ----
@@ -870,6 +884,18 @@ impl ChatEvent {
                 "plan_id": plan_id,
                 "summary": summary,
                 "steps": steps,
+                "request_id": request_id,
+            }),
+            ChatEvent::UserQuestion {
+                question_id,
+                delivery,
+                expires_at,
+                items,
+            } => json!({
+                "question_id": question_id,
+                "delivery": delivery,
+                "expires_at": expires_at,
+                "items": items,
                 "request_id": request_id,
             }),
             ChatEvent::QueuedInput { messages } => {
@@ -3210,6 +3236,7 @@ mod payload_contract {
         "Title",
         "FollowUps",
         "PlanProposed",
+        "UserQuestion",
         "Verification",
         "MemoryRecall",
         "QueuedInput",
@@ -3245,6 +3272,7 @@ mod payload_contract {
             ChatEvent::Title { .. } => "Title",
             ChatEvent::FollowUps { .. } => "FollowUps",
             ChatEvent::PlanProposed { .. } => "PlanProposed",
+            ChatEvent::UserQuestion { .. } => "UserQuestion",
             ChatEvent::Verification { .. } => "Verification",
             ChatEvent::MemoryRecall { .. } => "MemoryRecall",
             ChatEvent::QueuedInput { .. } => "QueuedInput",
@@ -3593,6 +3621,24 @@ mod payload_contract {
                 summary: s("Summary"),
                 steps: json!([{ "id": "s1", "title": "T", "operation": "write" }]),
             },
+            ChatEvent::UserQuestion {
+                question_id: s("q_1"),
+                delivery: s("next_turn"),
+                expires_at: None,
+                items: json!([]),
+            },
+            ChatEvent::UserQuestion {
+                question_id: s("q_2"),
+                delivery: s("next_turn"),
+                expires_at: Some(s("2026-11-02T10:00:00Z")),
+                items: json!([{
+                    "id": "carrier",
+                    "kind": "single",
+                    "prompt": "Which carrier?",
+                    "options": [{ "id": "bring", "label": "Bring", "description": null }],
+                    "allow_other": true,
+                }]),
+            },
             ChatEvent::Verification { verdict: "unrelated", kb_citations: 0, web_citations: 0, web_allowed: false },
             ChatEvent::Verification { verdict: "supports", kb_citations: 2, web_citations: 1, web_allowed: true },
             memory_recall(false),
@@ -3785,6 +3831,30 @@ mod payload_contract {
         let mut text = serde_json::to_string_pretty(&contract).expect("the contract serializes");
         text.push('\n');
         text
+    }
+
+    /// `user_question` is a control event that carries the card's keys and the question itself, and
+    /// nothing else (WS14 S4).
+    #[test]
+    fn user_question_is_a_control_event_with_the_card_keys() {
+        let event = ChatEvent::UserQuestion {
+            question_id: "q_abc".into(),
+            delivery: "next_turn".into(),
+            expires_at: Some("2026-11-02T10:00:00Z".into()),
+            items: json!([{ "id": "carrier", "kind": "single" }]),
+        };
+        assert_eq!(event.name(), "user_question");
+        assert!(
+            event.family().is_none(),
+            "a question is a control event, never feature-gated"
+        );
+        assert!(event.should_emit(&[]));
+        let payload = event.payload("req-4");
+        assert_eq!(payload["question_id"], "q_abc");
+        assert_eq!(payload["delivery"], "next_turn");
+        assert_eq!(payload["expires_at"], "2026-11-02T10:00:00Z");
+        assert_eq!(payload["items"][0]["id"], "carrier");
+        assert_eq!(payload["request_id"], "req-4");
     }
 
     #[test]

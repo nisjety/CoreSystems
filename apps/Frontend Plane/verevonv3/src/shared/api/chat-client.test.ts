@@ -1078,6 +1078,58 @@ describe('chat-client tool wiring', () => {
     expect(onFollowUps).not.toHaveBeenCalled()
   })
 
+  /** WS14 S4: a question a run put to its owner reads into the card's shape; a malformed one is dropped. */
+  it('maps a user_question event into onUserQuestion and drops what the card cannot answer', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      sseResponse([
+        `event: user_question\ndata: ${JSON.stringify({
+          question_id: 'q_1',
+          delivery: 'next_turn',
+          expires_at: '2026-11-02T10:00:00Z',
+          items: [
+            {
+              id: 'carrier',
+              kind: 'single',
+              prompt: 'Which carrier?',
+              options: [
+                { id: 'bring', label: 'Bring' },
+                { id: 'postnord', label: 'PostNord', description: 'Next day' },
+              ],
+              allow_other: true,
+            },
+            { id: 'pin', kind: 'password', prompt: 'Your PIN?' },
+          ],
+          request_id: 'req_2',
+        })}\n\n`,
+        `event: user_question\ndata: ${JSON.stringify({ items: [] })}\n\n`,
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const onUserQuestion = vi.fn()
+    await streamChat({ content: 'hi' }, { onUserQuestion })
+
+    expect(onUserQuestion).toHaveBeenCalledTimes(1)
+    expect(onUserQuestion).toHaveBeenCalledWith({
+      questionId: 'q_1',
+      delivery: 'next_turn',
+      expiresAt: '2026-11-02T10:00:00Z',
+      items: [
+        {
+          id: 'carrier',
+          kind: 'single',
+          prompt: 'Which carrier?',
+          options: [
+            { id: 'bring', label: 'Bring' },
+            { id: 'postnord', label: 'PostNord', description: 'Next day' },
+          ],
+          allowOther: true,
+        },
+      ],
+      requestId: 'req_2',
+    })
+  })
+
   /** plan-gate §2.1: the model's structured plan-mode plan. */
   it('maps a plan_proposed event into onPlanProposed with its steps', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
