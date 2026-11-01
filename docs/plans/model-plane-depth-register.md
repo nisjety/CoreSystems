@@ -2296,6 +2296,30 @@ Built so far: WS13-S0, WS13-S1, WS13-S2; WS14-S1, WS14-S2 (partial), WS14-S3; WS
 | D2-965 | WS21-S5b | live-proof | P1 | Ledger entry (apps/Model Plane/docs/decisions/ledger.md) for the act-pauses-always decision, strict 'true' switch, and the wire-parity url skip: shared file, lead applies. | closed: ledger entry in 6f1d27e68 |
 | D2-966 | WS21-S5b | follow-up | P3 | 22 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-36.json | open |
 
+
+### Wave-mode batch W2-37 (2026-11-01)
+
+| ID | Slice | Kind | P | Finding | Status |
+|---|---|---|---|---|---|
+| D2-967 | WS15-S3 | test-gap | P1 | session-core is not compile-verified: event_run_id_extracts_tool_retry and the RecordOrchestrationEvent path cannot build until the proto_shim.rs arm is added (E0004 at line 515 confirmed by cargo check). | open |
+| D2-968 | WS15-S3 | live-proof | P1 | The row's live DoD is not run: needs rebuilt model-gateway, execution-core and session-core images, the compose env, and a Data Plane outage that makes knowledge_search fail transiently, with the chat and run-stream frames checked on a live stack. | open |
+| D2-969 | WS15-S3 | risk | P1 | With this slice's proto change alone the Rust workspace does not compile (mp-orchestration E0004, so session-core does not build either); the one-line proto_shim.rs arm must land in the same commit as orchestration.proto. | open |
+| D2-970 | WS15-S3 | live-proof | P1 | Neither loop's retry announcement has been seen on a live stack, and the Do-loop half stays unreachable until compose passes MODEL_GATEWAY_LIFECYCLE_EVENTS to execution-core. | open |
+| D2-971 | WS15-S3 | live-proof | P1 | Lead shared edit, needed before the proto can be committed: crates/mp-orchestration/src/proto_shim.rs, in the exhaustive ProtoEvent match (around lines 638-641), change `/ ProtoEvent::RunUsageProgress(_) => {` to `/ ProtoEvent::RunUsageProgress(_)\n / ProtoEvent::ToolRetryScheduled(_) => {`. Without it mp-orchestration fails with E0004 at proto_shim.rs:515, which I reproduced, so session-core cannot build. I applied this exact line in a throwaway scratch copy: mp-orchestration --lib then passed 62/62, session-core --bin event_run_id passed 2/2 (including event_run_id_extracts_tool_retry), and session-core --bin orchestration_grpc passed 93 with 17 ignored. The scratch copy is deleted. | open |
+| D2-972 | WS15-S3 | live-proof | P1 | Regenerate apps/Model Plane/docs/sse-event-taxonomy.md with `PYTHONUTF8=1 python "apps/Model Plane/scripts/gen-sse-event-taxonomy.py"`. The new named arm tool_retry_scheduled (26) makes `--check` fail on doc freshness until the doc is regenerated. | open |
+| D2-973 | WS15-S3 | live-proof | P1 | apps/Model Plane/deploy/docker-compose.yml does not set MODEL_GATEWAY_LIFECYCLE_EVENTS (default false) for execution-core or model-gateway. execution-core reads the switch from its own environment, so the Do-loop announcement cannot be switched on until compose wires it. | open |
+| D2-974 | WS15-S3 | live-proof | P1 | Live DoD not run. Rebuild model-gateway, execution-core and session-core. With the switch on, a Data Plane outage that makes knowledge_search fail transiently should produce two retry_scheduled frames (steps family) and then a tool_result error. One Do run with a transient tool should produce the orchestration-derived retry_scheduled frame and a tool_retry_scheduled console event. A plain-profile stream should show neither. | open |
+| D2-975 | WS15-S3 | follow-up | P3 | 26 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-37.json | open |
+| D2-976 | WS22-S5 | risk | P1 | AcquireLease for a thread scope accepts any scope_id from any user with a sandbox bearer and never checks it against session-core's thread ownership, so a user can create workspace rows and blobs under another user's thread id in the same org. S5 refuses to erase a shared id, which also blocks the victim's own erase. The ownership check belongs in acquireThread before default-on. | open |
+| D2-977 | WS22-S5 | risk | P1 | The blob prefix cas/thread/<org>/<thread>/ carries no owner, and blobs are uploaded before their rows exist, so a non-owner erase could remove a first write whose header is not yet there. An owner-scoped prefix or an erasing tombstone is needed. | open |
+| D2-978 | WS22-S5 | risk | P1 | Rows are erased before blobs, so a blob-delete failure leaves unreachable blobs with no record to retry from. A durable erasure tombstone or retry queue is needed before default-on for GDPR completeness. | open |
+| D2-979 | WS22-S5 | follow-up | P1 | With SANDBOX_MANAGER_THREAD_WORKSPACE off, neither the sweeper nor DELETE runs, so rows and blobs written while it was on are neither expired nor erasable after a rollback. A retention-only path is needed before default-on. | open |
+| D2-980 | WS22-S5 | follow-up | P1 | The WS17 thread-delete hook is not wired: session-core's delete_thread must call DELETE /v1/threads/{id}/workspace with the user's own bearer, because sandbox-manager refuses service principals for this RPC. This gates default-on. | open |
+| D2-981 | WS22-S5 | risk | P1 | Blobs live under cas/thread/<org>/<thread>/ with no owner, and the shared-id check only sees rows. Any org member whose sandbox bearer passes DELETE for a thread id with no rows yet removes another user's blobs that were uploaded before their rows were written (uploads precede ApplyThreadWorkspaceChanges), and nothing checks thread ownership against session-core. | open |
+| D2-982 | WS22-S5 | risk | P1 | AcquireLease and DeleteThreadWorkspace accept any thread id without a session-core ownership check, so a user can plant rows under another user's thread id. ErrThreadShared then blocks the victim's own erase and keeps the thread from retention forever, logging only a warning. | open |
+| D2-983 | WS22-S5 | risk | P1 | Rows are erased before blobs, and a failed blob delete in the sweeper is only logged. The rows are gone, so no later pass finds the thread again and its blobs stay forever (a GDPR completeness gap) until a tombstone or retry queue exists. | open |
+| D2-984 | WS22-S5 | follow-up | P3 | 36 more lower-priority notes from the implementer and the verifier are in .plan-work/execution/results/W2-37.json | open |
+
 ## Cross-wave
 
 | ID | Kind | P | Finding | Status |
@@ -2495,3 +2519,5 @@ Slices that touch authority, audit, ZDR, money or data-loss and were built in wa
 | WS14-S2 | authority, zdr, audit | W2-36 | no |
 | WS19-S5 | zdr, data-loss | W2-36 | no |
 | WS21-S5b | authority, policy, cross-branch: the Quarry-side grant issuance endpoint and Quarry-to-broker identity are built on local branch quarryv2, not on model-plane; build against the contract with a stub and leave the live proof to the lead after quarryv2 merges | W2-36 | no |
+| WS15-S3 | zdr, authority | W2-37 | no |
+| WS22-S5 | data-loss, policy, authority | W2-37 | no |
