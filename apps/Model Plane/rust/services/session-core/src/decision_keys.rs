@@ -24,8 +24,11 @@ use std::{
 };
 
 use base64::{
-    engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD},
-    Engine as _,
+    alphabet,
+    engine::{
+        general_purpose::{GeneralPurpose, NO_PAD, PAD},
+        Engine as _,
+    },
 };
 use ed25519_dalek::VerifyingKey;
 use sha2::{Digest, Sha256};
@@ -53,19 +56,50 @@ const KEY_ENV_VARS: [&str; 3] = [
     "CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64",
 ];
 
+/// Go's `encoding/base64` decodes non-strictly: the unused low bits of a final character may be
+/// set and are ignored, where Rust's engines refuse them unless told otherwise. These four
+/// engines allow them and keep the padding mode of the predefined engine each one mirrors
+/// (`PAD` requires canonical padding, `NO_PAD` requires none), so the accepted padding is
+/// unchanged.
+const GO_URL_SAFE_NO_PAD: GeneralPurpose = GeneralPurpose::new(
+    &alphabet::URL_SAFE,
+    NO_PAD.with_decode_allow_trailing_bits(true),
+);
+const GO_URL_SAFE: GeneralPurpose = GeneralPurpose::new(
+    &alphabet::URL_SAFE,
+    PAD.with_decode_allow_trailing_bits(true),
+);
+const GO_STANDARD: GeneralPurpose = GeneralPurpose::new(
+    &alphabet::STANDARD,
+    PAD.with_decode_allow_trailing_bits(true),
+);
+const GO_STANDARD_NO_PAD: GeneralPurpose = GeneralPurpose::new(
+    &alphabet::STANDARD,
+    NO_PAD.with_decode_allow_trailing_bits(true),
+);
+
 /// Decodes a base64 Ed25519 public key the way every Model Plane consumer of the Control
 /// decision keys does: unpadded base64url (the form Control emits) first, then padded base64url
-/// and standard base64, which decode to the same bytes. The flag says whether the value was in
-/// the canonical (unpadded base64url) form. Never narrow this: a decoder that understood only
-/// one form once silently disabled the whole decision lane while other services started fine.
+/// and standard base64, which decode to the same bytes. Surrounding whitespace is trimmed and the
+/// decoding is non-strict, as Go's `decisionkey.DecodePublicKey` is. The flag says whether the
+/// value was in the canonical (unpadded base64url) form. Never narrow this: a decoder that
+/// understood only one form once silently disabled the whole decision lane while other services
+/// started fine.
 fn decode_public_key_bytes(encoded: &str) -> Option<(Vec<u8>, bool)> {
-    if let Ok(bytes) = URL_SAFE_NO_PAD.decode(encoded) {
+    // Go's decoder skips every CR and LF inside the value.
+    let encoded: String = encoded
+        .trim()
+        .chars()
+        .filter(|c| !matches!(c, '\r' | '\n'))
+        .collect();
+    let encoded = encoded.as_str();
+    if let Ok(bytes) = GO_URL_SAFE_NO_PAD.decode(encoded) {
         return Some((bytes, true));
     }
-    URL_SAFE
+    GO_URL_SAFE
         .decode(encoded)
-        .or_else(|_| STANDARD.decode(encoded))
-        .or_else(|_| STANDARD_NO_PAD.decode(encoded))
+        .or_else(|_| GO_STANDARD.decode(encoded))
+        .or_else(|_| GO_STANDARD_NO_PAD.decode(encoded))
         .ok()
         .map(|bytes| (bytes, false))
 }
@@ -273,6 +307,7 @@ pub(crate) fn boot_check() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
     use ed25519_dalek::SigningKey;
 
     fn key(seed: u8) -> VerifyingKey {
@@ -509,6 +544,93 @@ mod tests {
         assert_eq!(
             refusal.message(),
             "Control Space decision key ID is not configured"
+        );
+    }
+
+    /// The four encodings `decode_public_key_bytes` tries for `key(2)`, each with the unused low
+    /// bits of its final character set (`Q` became `R`). Go's `DecodePublicKey` accepts all four
+    /// and yields the key's 32 bytes. These vectors were checked against Go, not produced by this
+    /// decoder.
+    const NON_ZERO_TRAILING_BITS: [(&str, &str, bool); 4] = [
+        (
+            "unpadded base64url",
+            "gTl3Dqh9F19Wo1Rmw0x-zMuNipG07jeiXfYPW4_Js5R",
+            true,
+        ),
+        (
+            "padded base64url",
+            "gTl3Dqh9F19Wo1Rmw0x-zMuNipG07jeiXfYPW4_Js5R=",
+            false,
+        ),
+        (
+            "padded standard base64",
+            "gTl3Dqh9F19Wo1Rmw0x+zMuNipG07jeiXfYPW4/Js5R=",
+            false,
+        ),
+        (
+            "unpadded standard base64",
+            "gTl3Dqh9F19Wo1Rmw0x+zMuNipG07jeiXfYPW4/Js5R",
+            false,
+        ),
+    ];
+
+    #[test]
+    fn public_key_accepts_non_zero_trailing_bits_as_go_does() {
+        let k = key(2);
+        assert_eq!(
+            URL_SAFE_NO_PAD.encode(k.to_bytes()),
+            "gTl3Dqh9F19Wo1Rmw0x-zMuNipG07jeiXfYPW4_Js5Q",
+            "the fixture is key(2) in Go's canonical form"
+        );
+        for (name, encoded, canonical) in NON_ZERO_TRAILING_BITS {
+            let (bytes, decoded_canonical) =
+                decode_public_key_bytes(encoded).unwrap_or_else(|| panic!("{name} is refused"));
+            assert_eq!(decoded_canonical, canonical, "{name}");
+            assert_eq!(bytes, k.to_bytes(), "{name}");
+            assert_eq!(parse_public_key(encoded).expect(name), k, "{name}");
+        }
+    }
+
+    #[test]
+    fn public_key_trims_surrounding_whitespace_as_go_does() {
+        let encoded = " \tgTl3Dqh9F19Wo1Rmw0x-zMuNipG07jeiXfYPW4_Js5Q\r\n";
+        assert_eq!(parse_public_key(encoded).expect("whitespace"), key(2));
+    }
+
+    #[test]
+    fn public_key_skips_embedded_line_breaks_as_go_does() {
+        let canonical = "gTl3Dqh9F19Wo1Rmw0x-zMuNipG07jeiXfYPW4_Js5Q";
+        for encoded in [
+            format!("{}\n{}", &canonical[..20], &canonical[20..]),
+            format!("{}\r\n{}", &canonical[..20], &canonical[20..]),
+        ] {
+            let (bytes, is_canonical) =
+                decode_public_key_bytes(&encoded).expect("line break is skipped");
+            assert!(is_canonical);
+            assert_eq!(bytes, key(2).to_bytes());
+        }
+    }
+
+    #[test]
+    fn public_key_refuses_over_padding_and_a_short_key_as_go_does() {
+        let canonical = "gTl3Dqh9F19Wo1Rmw0x-zMuNipG07jeiXfYPW4_Js5Q";
+        for encoded in [
+            format!("{canonical}=="),
+            format!("{canonical}==="),
+            format!("{} {}", &canonical[..20], &canonical[20..]),
+        ] {
+            let refusal = parse_public_key(&encoded).expect_err(&encoded);
+            assert_eq!(refusal.code(), tonic::Code::FailedPrecondition, "{encoded}");
+            assert_eq!(
+                refusal.message(),
+                "Control Space decision public key is invalid",
+                "{encoded}"
+            );
+        }
+        let short = parse_public_key(&canonical[..42]).expect_err("42 characters");
+        assert_eq!(
+            short.message(),
+            "Control Space decision public key length is invalid"
         );
     }
 }
