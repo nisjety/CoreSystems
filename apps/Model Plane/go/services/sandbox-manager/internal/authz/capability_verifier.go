@@ -8,9 +8,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/triodelab/model-plane/services/sandbox-manager/internal/decisionkey"
 )
 
 const (
@@ -43,9 +46,16 @@ func LoadSpaceCapabilityVerifierFromEnv(getenv func(string) string) (*SpaceCapab
 		return nil, fmt.Errorf("Space capability verifier environment reader is required")
 	}
 	keyID := strings.TrimSpace(getenv("CONTROL_SPACE_DECISION_KEY_ID"))
-	publicRaw, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(getenv("CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64")))
-	if keyID == "" || err != nil || len(publicRaw) != ed25519.PublicKeySize {
+	// Control emits unpadded base64url; padded base64url and standard base64 decode to the
+	// same 32 bytes and are accepted with a boot warning, matching capability-core and
+	// orchestrator-core (internal/decisionkey).
+	publicRaw, canonical, err := decisionkey.DecodePublicKey(getenv("CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64"))
+	if keyID == "" || err != nil {
 		return nil, fmt.Errorf("Space capability decision public key is invalid")
+	}
+	if !canonical {
+		slog.Warn("CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64 is not unpadded base64url; it was accepted, but Control emits unpadded base64url and other planes may refuse this form",
+			"component", "sandbox-manager")
 	}
 	return &SpaceCapabilityVerifier{keyID: keyID, public: ed25519.PublicKey(publicRaw)}, nil
 }

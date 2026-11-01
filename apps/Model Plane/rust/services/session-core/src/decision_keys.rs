@@ -16,10 +16,17 @@
 use std::{
     collections::{BTreeMap, HashMap},
     env,
-    sync::{Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex, OnceLock,
+    },
     time::{Duration, Instant},
 };
 
+use base64::{
+    engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD},
+    Engine as _,
+};
 use ed25519_dalek::VerifyingKey;
 use sha2::{Digest, Sha256};
 use tonic::Status;
@@ -45,6 +52,45 @@ const KEY_ENV_VARS: [&str; 3] = [
     "CONTROL_SPACE_DECISION_KEY_ID",
     "CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64",
 ];
+
+/// Decodes a base64 Ed25519 public key the way every Model Plane consumer of the Control
+/// decision keys does: unpadded base64url (the form Control emits) first, then padded base64url
+/// and standard base64, which decode to the same bytes. The flag says whether the value was in
+/// the canonical (unpadded base64url) form. Never narrow this: a decoder that understood only
+/// one form once silently disabled the whole decision lane while other services started fine.
+fn decode_public_key_bytes(encoded: &str) -> Option<(Vec<u8>, bool)> {
+    if let Ok(bytes) = URL_SAFE_NO_PAD.decode(encoded) {
+        return Some((bytes, true));
+    }
+    URL_SAFE
+        .decode(encoded)
+        .or_else(|_| STANDARD.decode(encoded))
+        .or_else(|_| STANDARD_NO_PAD.decode(encoded))
+        .ok()
+        .map(|bytes| (bytes, false))
+}
+
+/// Parses one configured Control decision public key. The refusals are the loader's original
+/// messages. A key accepted in a non-canonical encoding logs one warning per process (the keys
+/// are loaded on every request, so the warning must not repeat; boot loads them first).
+pub(crate) fn parse_public_key(encoded: &str) -> Result<VerifyingKey, Status> {
+    static NON_CANONICAL_WARNED: AtomicBool = AtomicBool::new(false);
+    let (bytes, canonical) = decode_public_key_bytes(encoded).ok_or_else(|| {
+        Status::failed_precondition("Control Space decision public key is invalid")
+    })?;
+    let bytes: [u8; 32] = bytes.try_into().map_err(|_| {
+        Status::failed_precondition("Control Space decision public key length is invalid")
+    })?;
+    let key = VerifyingKey::from_bytes(&bytes)
+        .map_err(|_| Status::failed_precondition("Control Space decision public key is invalid"))?;
+    if !canonical && !NON_CANONICAL_WARNED.swap(true, Ordering::Relaxed) {
+        warn!(
+            "a Control Space decision public key is not unpadded base64url; it was accepted, but \
+             Control emits unpadded base64url and other planes may refuse this form"
+        );
+    }
+    Ok(key)
+}
 
 /// A short, stable, non-reversible tag for a public key: the first 8 bytes of
 /// `sha256(raw public key)` as lowercase hex. Enough to compare two deployments' keys by eye.
@@ -339,6 +385,130 @@ mod tests {
         assert_eq!(
             evaluate_boot(false, Err(Status::failed_precondition("x"))),
             Ok(BootOutcome::NotConfigured)
+        );
+    }
+
+    /// A key whose standard-base64 form differs from its URL-safe form, so the encodings cannot
+    /// be confused with each other.
+    fn key_with_url_specific_chars() -> VerifyingKey {
+        (0..=255u8)
+            .map(key)
+            .find(|k| STANDARD_NO_PAD.encode(k.to_bytes()).contains(['+', '/']))
+            .expect("a key with + or / in standard base64")
+    }
+
+    #[test]
+    fn public_key_decodes_unpadded_base64url_as_canonical() {
+        let k = key_with_url_specific_chars();
+        let (bytes, canonical) =
+            decode_public_key_bytes(&URL_SAFE_NO_PAD.encode(k.to_bytes())).expect("decodes");
+        assert!(canonical);
+        assert_eq!(bytes, k.to_bytes());
+        assert_eq!(
+            parse_public_key(&URL_SAFE_NO_PAD.encode(k.to_bytes())).expect("parses"),
+            k
+        );
+    }
+
+    #[test]
+    fn public_key_accepts_padded_base64url_and_standard_base64_as_non_canonical() {
+        let k = key_with_url_specific_chars();
+        for (name, encoded) in [
+            ("padded base64url", URL_SAFE.encode(k.to_bytes())),
+            ("standard base64", STANDARD.encode(k.to_bytes())),
+            ("unpadded standard base64", STANDARD_NO_PAD.encode(k.to_bytes())),
+        ] {
+            let (bytes, canonical) =
+                decode_public_key_bytes(&encoded).unwrap_or_else(|| panic!("{name} decodes"));
+            assert!(!canonical, "{name} must not report canonical");
+            assert_eq!(bytes, k.to_bytes(), "{name}");
+            assert_eq!(parse_public_key(&encoded).expect(name), k, "{name}");
+        }
+    }
+
+    #[test]
+    fn public_key_refuses_garbage_empty_and_wrong_length_with_the_original_messages() {
+        for garbage in ["not base64 at all!!", "a b", "@@@@"] {
+            let refusal = parse_public_key(garbage).expect_err(garbage);
+            assert_eq!(refusal.code(), tonic::Code::FailedPrecondition, "{garbage}");
+            assert_eq!(
+                refusal.message(),
+                "Control Space decision public key is invalid",
+                "{garbage}"
+            );
+        }
+        let short = URL_SAFE_NO_PAD.encode(b"too short");
+        let refusal = parse_public_key(&short).expect_err("wrong length");
+        assert_eq!(refusal.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            refusal.message(),
+            "Control Space decision public key length is invalid"
+        );
+    }
+
+    #[test]
+    fn key_set_loader_accepts_every_encoding_in_the_json_set_and_the_singular_form() {
+        let k = key_with_url_specific_chars();
+        let json = serde_json::json!({
+            "a-canonical": URL_SAFE_NO_PAD.encode(k.to_bytes()),
+            "b-padded": URL_SAFE.encode(k.to_bytes()),
+            "c-standard": STANDARD.encode(k.to_bytes()),
+        })
+        .to_string();
+        let keys =
+            crate::grpc::control_space_decision_keys_from(Some(&json), None, None).expect("json set");
+        assert_eq!(keys.len(), 3);
+        assert!(keys.values().all(|loaded| *loaded == k));
+
+        for encoded in [
+            URL_SAFE_NO_PAD.encode(k.to_bytes()),
+            URL_SAFE.encode(k.to_bytes()),
+            STANDARD.encode(k.to_bytes()),
+        ] {
+            let keys = crate::grpc::control_space_decision_keys_from(
+                None,
+                Some(" control-1 "),
+                Some(&format!(" {encoded} ")),
+            )
+            .expect("singular form");
+            assert_eq!(keys.get("control-1"), Some(&k));
+        }
+    }
+
+    #[test]
+    fn key_set_loader_refuses_garbage_in_either_form_without_changing_the_messages() {
+        let json = r#"{"control-1":"notbase64!"}"#;
+        let refusal = crate::grpc::control_space_decision_keys_from(Some(json), None, None)
+            .expect_err("garbage in the json set");
+        assert_eq!(
+            refusal.message(),
+            "Control Space decision public key is invalid"
+        );
+        let refusal = crate::grpc::control_space_decision_keys_from(
+            None,
+            Some("control-1"),
+            Some("not base64 at all!!"),
+        )
+        .expect_err("garbage in the singular form");
+        assert_eq!(
+            refusal.message(),
+            "Control Space decision key configuration is invalid"
+        );
+        let refusal = crate::grpc::control_space_decision_keys_from(
+            None,
+            Some("control-1"),
+            Some("notbase64!"),
+        )
+        .expect_err("undecodable singular key");
+        assert_eq!(
+            refusal.message(),
+            "Control Space decision public key is invalid"
+        );
+        let refusal = crate::grpc::control_space_decision_keys_from(None, None, None)
+            .expect_err("nothing configured");
+        assert_eq!(
+            refusal.message(),
+            "Control Space decision key ID is not configured"
         );
     }
 }

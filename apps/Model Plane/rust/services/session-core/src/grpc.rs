@@ -2381,12 +2381,27 @@ fn validate_append_space_context_shape(req: &pb::AppendMessageRequest) -> Result
 
 /// Loads the current Control verification key set. During rotation the
 /// deployment supplies `CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON` as a JSON map
-/// of `{ key_id: url_safe_base64_ed25519_public_key }`; any token bearing an
+/// of `{ key_id: base64_ed25519_public_key }` (unpadded base64url preferred; padded
+/// base64url and standard base64 are accepted, see `decision_keys::parse_public_key`); any token bearing an
 /// unlisted key id fails closed. The singular variables remain a deliberately
 /// compatible bootstrap form for deployments that have not started rotation.
 pub(crate) fn configured_control_space_decision_keys() -> Result<BTreeMap<String, VerifyingKey>, Status> {
-    if let Ok(raw) = env::var("CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON") {
-        let encoded_keys: BTreeMap<String, String> = serde_json::from_str(&raw).map_err(|_| {
+    control_space_decision_keys_from(
+        env::var("CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON").ok().as_deref(),
+        env::var("CONTROL_SPACE_DECISION_KEY_ID").ok().as_deref(),
+        env::var("CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64").ok().as_deref(),
+    )
+}
+
+/// The env-free half of [`configured_control_space_decision_keys`]: the three values are the
+/// raw `CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON`, `..._KEY_ID` and `..._PUBLIC_KEY_BASE64`.
+pub(crate) fn control_space_decision_keys_from(
+    keys_json: Option<&str>,
+    key_id: Option<&str>,
+    encoded_key: Option<&str>,
+) -> Result<BTreeMap<String, VerifyingKey>, Status> {
+    if let Some(raw) = keys_json {
+        let encoded_keys: BTreeMap<String, String> = serde_json::from_str(raw).map_err(|_| {
             Status::failed_precondition("Control Space decision public key set is invalid")
         })?;
         if encoded_keys.is_empty() {
@@ -2403,15 +2418,7 @@ pub(crate) fn configured_control_space_decision_keys() -> Result<BTreeMap<String
                     "Control Space decision key configuration is invalid",
                 ));
             }
-            let bytes = URL_SAFE_NO_PAD.decode(encoded).map_err(|_| {
-                Status::failed_precondition("Control Space decision public key is invalid")
-            })?;
-            let bytes: [u8; 32] = bytes.try_into().map_err(|_| {
-                Status::failed_precondition("Control Space decision public key length is invalid")
-            })?;
-            let key = VerifyingKey::from_bytes(&bytes).map_err(|_| {
-                Status::failed_precondition("Control Space decision public key is invalid")
-            })?;
+            let key = crate::decision_keys::parse_public_key(encoded)?;
             if keys.insert(key_id.to_owned(), key).is_some() {
                 return Err(Status::failed_precondition(
                     "Control Space decision public key IDs are not unique",
@@ -2421,10 +2428,10 @@ pub(crate) fn configured_control_space_decision_keys() -> Result<BTreeMap<String
         return Ok(keys);
     }
 
-    let key_id = env::var("CONTROL_SPACE_DECISION_KEY_ID").map_err(|_| {
+    let key_id = key_id.ok_or_else(|| {
         Status::failed_precondition("Control Space decision key ID is not configured")
     })?;
-    let encoded = env::var("CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64").map_err(|_| {
+    let encoded = encoded_key.ok_or_else(|| {
         Status::failed_precondition("Control Space decision public key is not configured")
     })?;
     let key_id = key_id.trim();
@@ -2434,14 +2441,7 @@ pub(crate) fn configured_control_space_decision_keys() -> Result<BTreeMap<String
             "Control Space decision key configuration is invalid",
         ));
     }
-    let bytes = URL_SAFE_NO_PAD
-        .decode(encoded)
-        .map_err(|_| Status::failed_precondition("Control Space decision public key is invalid"))?;
-    let bytes: [u8; 32] = bytes.try_into().map_err(|_| {
-        Status::failed_precondition("Control Space decision public key length is invalid")
-    })?;
-    let key = VerifyingKey::from_bytes(&bytes)
-        .map_err(|_| Status::failed_precondition("Control Space decision public key is invalid"))?;
+    let key = crate::decision_keys::parse_public_key(encoded)?;
     Ok(BTreeMap::from([(key_id.to_owned(), key)]))
 }
 

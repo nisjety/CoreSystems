@@ -9,7 +9,10 @@
 
 use std::time::Duration;
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{
+    engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD},
+    Engine as _,
+};
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use mp_contracts::model_plane::v1::ExecuteScheduledStepRequest;
@@ -83,14 +86,37 @@ impl ScheduledStepDecisionVerifier {
             "CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64",
         ])
         .ok_or_else(|| anyhow::anyhow!("scheduled-step Control decision public key is required"))?;
-        let bytes = URL_SAFE_NO_PAD
-            .decode(encoded_key)
-            .map_err(|_| anyhow::anyhow!("scheduled-step Control public key is not base64url"))?;
+        Self::from_parts(key_id, &encoded_key)
+    }
+
+    /// The env-free half of [`Self::from_env`]. The key is Control's, so it follows the rule
+    /// every Model Plane consumer of the Control decision keys shares: unpadded base64url is
+    /// preferred; padded base64url and standard base64 are accepted with a boot warning;
+    /// anything else is refused. Never narrow this: a decoder that understood only one form
+    /// once silently disabled the whole decision lane while other services started fine.
+    fn from_parts(key_id: String, encoded_key: &str) -> anyhow::Result<Self> {
+        let encoded_key = encoded_key.trim();
+        let (bytes, canonical) = if let Ok(bytes) = URL_SAFE_NO_PAD.decode(encoded_key) {
+            (bytes, true)
+        } else {
+            let bytes = URL_SAFE
+                .decode(encoded_key)
+                .or_else(|_| STANDARD.decode(encoded_key))
+                .or_else(|_| STANDARD_NO_PAD.decode(encoded_key))
+                .map_err(|_| anyhow::anyhow!("scheduled-step Control public key is not base64url"))?;
+            (bytes, false)
+        };
         let bytes: [u8; 32] = bytes.try_into().map_err(|_| {
             anyhow::anyhow!("scheduled-step Control public key must contain 32 bytes")
         })?;
         let key = VerifyingKey::from_bytes(&bytes)
             .map_err(|_| anyhow::anyhow!("scheduled-step Control public key is invalid"))?;
+        if !canonical {
+            tracing::warn!(
+                "the scheduled-step Control decision public key is not unpadded base64url; it was \
+                 accepted, but Control emits unpadded base64url and other planes may refuse this form"
+            );
+        }
         Ok(Self { key_id, key })
     }
 
@@ -489,5 +515,61 @@ mod tests {
         req.control_decision_token = token(&signing, "control-key", &req, now);
         req.step_id = "run_1:step:1".to_owned();
         assert!(verifier.verify(&req, now).is_err());
+    }
+
+    /// A key whose standard-base64 form differs from its URL-safe form, so the encodings cannot
+    /// be confused with each other.
+    fn key_with_url_specific_chars() -> SigningKey {
+        (0..=255u8)
+            .map(|seed| SigningKey::from_bytes(&[seed; 32]))
+            .find(|signing| {
+                STANDARD_NO_PAD
+                    .encode(signing.verifying_key().to_bytes())
+                    .contains(['+', '/'])
+            })
+            .expect("a key with + or / in standard base64")
+    }
+
+    #[test]
+    fn control_public_key_is_accepted_in_every_encoding_and_verifies_the_same_decision() {
+        let now = Utc::now();
+        let signing = key_with_url_specific_chars();
+        let public = signing.verifying_key().to_bytes();
+        let mut req = request();
+        req.control_decision_token = token(&signing, "control-key", &req, now);
+        for (name, encoded) in [
+            ("unpadded base64url", URL_SAFE_NO_PAD.encode(public)),
+            ("padded base64url", URL_SAFE.encode(public)),
+            ("standard base64", STANDARD.encode(public)),
+            ("unpadded standard base64", STANDARD_NO_PAD.encode(public)),
+            ("whitespace padded", format!("  {}\n", URL_SAFE_NO_PAD.encode(public))),
+        ] {
+            let verifier = ScheduledStepDecisionVerifier::from_parts("control-key".to_owned(), &encoded)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            verifier
+                .verify(&req, now)
+                .unwrap_or_else(|status| panic!("{name}: {}", status.message()));
+        }
+    }
+
+    #[test]
+    fn control_public_key_refuses_garbage_and_wrong_length_with_the_original_messages() {
+        let garbage = ScheduledStepDecisionVerifier::from_parts("k".to_owned(), "not base64 at all!!")
+            .err()
+            .expect("garbage is refused");
+        assert_eq!(
+            garbage.to_string(),
+            "scheduled-step Control public key is not base64url"
+        );
+        let short = ScheduledStepDecisionVerifier::from_parts(
+            "k".to_owned(),
+            &URL_SAFE_NO_PAD.encode(b"too short"),
+        )
+        .err()
+        .expect("a short key is refused");
+        assert_eq!(
+            short.to_string(),
+            "scheduled-step Control public key must contain 32 bytes"
+        );
     }
 }
