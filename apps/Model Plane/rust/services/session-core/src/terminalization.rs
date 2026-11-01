@@ -2226,8 +2226,10 @@ async fn recover_claimed_terminalization(
         ));
     }
     // A `resume` question that lapsed unanswered ends its run for a known cause (build plan WS14 S5),
-    // so the run says so rather than reporting an unknown outcome.
-    let failure_code = if expired_resume_question(&mut transaction, &claim.row.run_id).await? {
+    // so the run is applied as failed with that cause; only an unknown outcome needs reconciliation
+    // (the outbox CHECK admits `reconciliation_required` with `outcome_unknown` alone).
+    let question_expired = expired_resume_question(&mut transaction, &claim.row.run_id).await?;
+    let failure_code = if question_expired {
         QUESTION_EXPIRED_FAILURE_CODE
     } else {
         RECOVERY_FAILURE_CODE
@@ -2238,7 +2240,7 @@ async fn recover_claimed_terminalization(
         source,
         step_id,
         ManagedOutcome::Failed(failure_code),
-        true,
+        !question_expired,
         now,
     )
     .await?;
@@ -3263,7 +3265,7 @@ mod resume_question_db_tests {
         );
         assert_eq!(run_status(&pool, &run_id).await, "failed");
         let (state, failure) = obligation(&pool, &run_id).await;
-        assert_eq!(state, "reconciliation_required");
+        assert_eq!(state, "applied", "a known cause is applied, not left for reconciliation");
         assert_eq!(failure.as_deref(), Some(QUESTION_EXPIRED_FAILURE_CODE));
     }
 }

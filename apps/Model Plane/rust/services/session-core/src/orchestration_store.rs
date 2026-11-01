@@ -2967,7 +2967,7 @@ pub async fn consume_run_question(
     for _ in 0..2 {
         let won = sqlx::query_as::<_, RunQuestionRow>(&format!(
             "UPDATE run_questions \
-                SET consumed_at = now(), consumed_claim_hash = $6 \
+                SET consumed_at = now(), consumed_claim_hash = $5 \
               WHERE id = $1 AND org_id = $2 AND user_id = $3 AND run_id = $4 \
                 AND delivery = 'resume' AND state = 'answered' AND consumed_at IS NULL \
           RETURNING {RUN_QUESTION_COLUMNS}"
@@ -3089,7 +3089,7 @@ mod run_question_tests {
         let body = &body[..body.find("\n}\n").expect("end of the function")];
         assert!(body.contains("WHERE id = $1 AND org_id = $2 AND user_id = $3 AND run_id = $4"));
         assert!(body.contains("AND delivery = 'resume' AND state = 'answered' AND consumed_at IS NULL"));
-        assert!(body.contains("SET consumed_at = now(), consumed_claim_hash = $6"));
+        assert!(body.contains("SET consumed_at = now(), consumed_claim_hash = $5"));
         assert!(!body.contains("claim_token"), "the raw claim token is never bound");
     }
 }
@@ -5290,9 +5290,10 @@ mod run_question_db_tests {
         let skipped = resume_question(&pool, &seed, "refuse-3", chrono::Duration::hours(1)).await;
         answer(&pool, &seed, &skipped.id, "a", true).await;
         assert!(matches!(spend(&pool, &seed, &skipped.id, "x").await, ConsumedRunQuestion::NotAnswered));
-        let turn = created(&pool, &seed, "refuse-4").await;
-        answer(&pool, &seed, &turn.id, "a", false).await;
-        assert!(matches!(spend(&pool, &seed, &turn.id, "x").await, ConsumedRunQuestion::NotResumable));
+        // A run asks at most three questions, so the next-turn question lives on its own run.
+        let turn = created(&pool, &other_run, "refuse-4").await;
+        answer(&pool, &other_run, &turn.id, "a", false).await;
+        assert!(matches!(spend(&pool, &other_run, &turn.id, "x").await, ConsumedRunQuestion::NotResumable));
     }
 
     #[tokio::test]

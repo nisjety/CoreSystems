@@ -1563,6 +1563,9 @@ services:
       EXECUTION_DO_BROWSER_ACT_ENABLED: ${EXECUTION_DO_BROWSER_ACT_ENABLED:-false}
       # WS14-S4: the Do loop's ask_user tool. Off by default; the gateway's max_questions bounds it as well.
       AGENT_ASK_USER_ENABLED: ${AGENT_ASK_USER_ENABLED:-false}
+      # WS14-S5: an answer continues the same run. Off by default; also needs AGENT_CONTINUE_AFTER_APPROVAL_ENABLED and
+      # EXECUTION_LOOP_RESUME_ENABLED, and the executor's input pause is not built yet, so it must stay off.
+      AGENT_ASK_USER_RESUME_ENABLED: ${AGENT_ASK_USER_RESUME_ENABLED:-false}
       # WS15-S3: the Do loop announces tool retries (ToolRetryScheduled) on the run stream. Off by default.
       MODEL_GATEWAY_LIFECYCLE_EVENTS: ${MODEL_GATEWAY_LIFECYCLE_EVENTS:-false}
       # Feature-gates QuarryAgentClient::from_env() (browser_agent loop) — the

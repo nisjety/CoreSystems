@@ -23,6 +23,7 @@ use mp_contracts::model_plane::v1::{
     message_search_server::MessageSearchServer,
     message_tree_service_server::MessageTreeServiceServer,
     orchestration_core_service_server::OrchestrationCoreServiceServer,
+    run_question_consume_service_server::RunQuestionConsumeServiceServer,
     routing_policy_server::RoutingPolicyServer,
     run_service_server::RunServiceServer,
     session_core_server::{SessionCore, SessionCoreServer},
@@ -9863,6 +9864,9 @@ pub async fn serve(
     // gets its own instance.
     let approval_scope_grants =
         crate::orchestration_grpc::OrchestrationGrpc::new(pool.clone(), events_tx.clone());
+    // The resume-answer spend (build plan WS14 S5) likewise shares the store and not the replay.
+    let run_question_consume =
+        crate::orchestration_grpc::OrchestrationGrpc::new(pool.clone(), events_tx.clone());
     let orchestration =
         crate::orchestration_grpc::OrchestrationGrpc::new_from_env(pool.clone(), events_tx).await;
 
@@ -9937,6 +9941,11 @@ pub async fn serve(
         ))
         .add_service(OrchestrationCoreServiceServer::with_interceptor(
             orchestration,
+            auth.clone(),
+        ))
+        // WS14-S5: the single-use spend of a resume question's answer.
+        .add_service(RunQuestionConsumeServiceServer::with_interceptor(
+            run_question_consume,
             auth.clone(),
         ))
         .add_service(ApprovalScopeGrantServiceServer::with_interceptor(
