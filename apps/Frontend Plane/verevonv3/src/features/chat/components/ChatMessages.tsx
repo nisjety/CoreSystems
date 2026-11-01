@@ -63,7 +63,7 @@ import {
 import type { DockedNodes } from '@/shared/chat-nodes/types'
 // The barrel does not re-export it yet; one more line there when it next changes.
 import { nodeKey } from '@/shared/chat-nodes/derive'
-import type { AutonomyRung, ChatPlanStep, MemoryOrigin, RecalledMemory } from '@/shared/api/chat-client'
+import type { AutonomyRung, ChatKnowledgeReceipt, ChatPlanStep, MemoryOrigin, RecalledMemory } from '@/shared/api/chat-client'
 import { isSafeLinkHref } from '../lib/safe-href'
 import { readChatThreadHistory } from '../lib/chat-thread-history'
 import { buildPromptSuggestions, type PromptSuggestion } from '../lib/prompt-suggestions'
@@ -276,7 +276,7 @@ const CHAT_NODE_REGISTRY = createConversationNodeRegistry({
   'source-scope': {
     kind: 'source-scope',
     render: (node) => (
-      <SourceScopeNotice scope={node.scope} excludedTools={node.excludedTools} />
+      <SourceScopeNotice scope={node.scope} excludedTools={node.excludedTools} knowledge={node.knowledge} />
     ),
   },
   'lifecycle-notices': {
@@ -4041,19 +4041,48 @@ function retrievalSentence(notice: Extract<LifecycleNotice, { kind: 'retrieval' 
  * change of behavior. `excludedTools` is deliberately not rendered inline
  * here: it is the assembled-context inspector's job (`ChatPanels.tsx`), the
  * existing surface for that kind of transparency, to keep this chip short.
+ *
+ * `knowledge` is a Space's knowledge receipt (WS18-S3): what the Space's
+ * knowledge did for this answer. It gets a chip of its own, so a turn with no
+ * source filter shows only that one.
  */
 export function SourceScopeNotice(props: {
-  scope: 'knowledge_only' | 'web_only'
+  scope: 'knowledge_only' | 'web_only' | 'auto'
   excludedTools: string[]
+  knowledge?: ChatKnowledgeReceipt
 }) {
   const i18n = useI18n()
+  const knowledgeText = (knowledge: ChatKnowledgeReceipt) => {
+    if (knowledge.mode === 'not_entitled') {
+      return i18n.tr('Prosjektkunnskap ikke tilgjengelig for dette svaret', 'Project knowledge not available for this answer')
+    }
+    if (knowledge.mode === 'not_searched') {
+      return i18n.tr('Prosjektkunnskap ikke brukt i dette svaret', 'Project knowledge not used for this answer')
+    }
+    if (knowledge.sources === undefined) return i18n.tr('Prosjektkunnskap: søkt', 'Project knowledge: searched')
+    return knowledge.sources === 1
+      ? i18n.tr('Prosjektkunnskap: 1 kilde', 'Project knowledge: 1 source')
+      : i18n.tr(`Prosjektkunnskap: ${knowledge.sources} kilder`, `Project knowledge: ${knowledge.sources} sources`)
+  }
   return (
-    <p class="verevon-chat-source-scope-notice" role="note">
-      <Info size={12} />
-      {props.scope === 'knowledge_only'
-        ? i18n.tr('Kilder: kun organisasjonskunnskap', 'Sources: organization knowledge only')
-        : i18n.tr('Kilder: kun nett', 'Sources: web only')}
-    </p>
+    <>
+      <Show when={props.scope !== 'auto'}>
+        <p class="verevon-chat-source-scope-notice" role="note">
+          <Info size={12} />
+          {props.scope === 'knowledge_only'
+            ? i18n.tr('Kilder: kun organisasjonskunnskap', 'Sources: organization knowledge only')
+            : i18n.tr('Kilder: kun nett', 'Sources: web only')}
+        </p>
+      </Show>
+      <Show when={props.knowledge}>
+        {(knowledge) => (
+          <p class="verevon-chat-source-scope-notice" role="note">
+            <Info size={12} />
+            {knowledgeText(knowledge())}
+          </p>
+        )}
+      </Show>
+    </>
   )
 }
 

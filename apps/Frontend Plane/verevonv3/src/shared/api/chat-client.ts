@@ -761,15 +761,26 @@ export type ChatResultReceiptEvent = {
   requestId?: string
 }
 /**
+ * What a Space's knowledge did for one turn (`knowledge` on `source_scope_applied`, WS18-S3): a mode and,
+ * when a search ran this turn, its source count. A mode and a count, never content.
+ */
+export type ChatKnowledgeReceipt = {
+  mode: 'retrieval' | 'not_entitled' | 'not_searched'
+  sources?: number
+}
+/**
  * Per-turn retrieval-source filter transparency frame (chat-wave2 scope
  * spec §2.2/§2.3's "shown in the receipt" requirement, `source_scope_applied`
- * family `citations`). Emitted at most once per turn, only when the turn's
- * effective `RetrievalScope` was not `auto`. Consumed by `ChatMessages.tsx`'s
- * scope badge and `ChatPanels.tsx`'s assembled-context inspector line.
+ * family `citations`). Emitted at most once per turn, when the turn's
+ * effective `RetrievalScope` was not `auto`, or when a Space scoped the turn
+ * and so carries a `knowledge` receipt. An `auto` scope arrives only with that
+ * receipt. Consumed by `ChatMessages.tsx`'s scope badge and `ChatPanels.tsx`'s
+ * assembled-context inspector line.
  */
 export type ChatSourceScopeAppliedEvent = {
-  scope: 'knowledge_only' | 'web_only'
+  scope: 'knowledge_only' | 'web_only' | 'auto'
   excludedTools: string[]
+  knowledge?: ChatKnowledgeReceipt
 }
 /**
  * AI-generated thread title, emitted once by model-gateway after a thread's
@@ -1217,6 +1228,31 @@ function num(value: unknown): number | undefined {
 
 function objectValue(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
+}
+
+/**
+ * A `source_scope_applied` frame as the SPA reads it. An `auto` scope arrives only with a knowledge receipt
+ * (WS18-S3), so an `auto` frame without one is not a filter and is dropped. A receipt whose mode the SPA does
+ * not name is dropped on its own, and the frame's scope still applies.
+ */
+function sourceScopeAppliedEvent(payload: Record<string, unknown>): ChatSourceScopeAppliedEvent | undefined {
+  const scope = str(payload.scope)
+  const excludedTools = Array.isArray(payload.excluded_tools)
+    ? payload.excluded_tools.filter((name): name is string => typeof name === 'string')
+    : []
+  const knowledge = knowledgeReceiptValue(payload.knowledge)
+  if (scope === 'knowledge_only' || scope === 'web_only') {
+    return knowledge ? { scope, excludedTools, knowledge } : { scope, excludedTools }
+  }
+  return scope === 'auto' && knowledge ? { scope, excludedTools, knowledge } : undefined
+}
+
+function knowledgeReceiptValue(value: unknown): ChatKnowledgeReceipt | undefined {
+  const receipt = objectValue(value)
+  const mode = str(receipt?.mode)
+  if (mode !== 'retrieval' && mode !== 'not_entitled' && mode !== 'not_searched') return undefined
+  const sources = num(receipt?.sources)
+  return sources === undefined ? { mode } : { mode, sources }
 }
 
 /**
@@ -1722,15 +1758,8 @@ function dispatchAgUiEvent(
           })
           break
         case 'source_scope_applied': {
-          const scope = str(value.scope)
-          if (scope === 'knowledge_only' || scope === 'web_only') {
-            handlers.onSourceScopeApplied?.({
-              scope,
-              excludedTools: Array.isArray(value.excluded_tools)
-                ? value.excluded_tools.filter((name): name is string => typeof name === 'string')
-                : [],
-            })
-          }
+          const applied = sourceScopeAppliedEvent(value)
+          if (applied) handlers.onSourceScopeApplied?.(applied)
           break
         }
         case 'grounding':
@@ -1969,15 +1998,8 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
       emitCitation(payload, handlers)
       break
     case 'source_scope_applied': {
-      const scope = str(payload.scope)
-      if (scope === 'knowledge_only' || scope === 'web_only') {
-        handlers.onSourceScopeApplied?.({
-          scope,
-          excludedTools: Array.isArray(payload.excluded_tools)
-            ? payload.excluded_tools.filter((name): name is string => typeof name === 'string')
-            : [],
-        })
-      }
+      const applied = sourceScopeAppliedEvent(payload)
+      if (applied) handlers.onSourceScopeApplied?.(applied)
       break
     }
     case 'citations':

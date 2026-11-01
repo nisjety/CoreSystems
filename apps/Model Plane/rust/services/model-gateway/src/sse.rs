@@ -3104,6 +3104,22 @@ pub async fn invoke_stream_sse(
         space_append_retrieval_enabled(),
     )
     .map(str::to_owned);
+    // The turn's knowledge receipt (WS18-S3), read from the Space decision that scoped its retrieval and the
+    // search it returned, before `grounding` moves into the task. A turn no Space scopes has none.
+    let knowledge = {
+        let decision = space_retrieval_decision(
+            req.space_context.as_ref(),
+            req.space_append_context.as_ref(),
+            space_append_retrieval_enabled(),
+        );
+        crate::knowledge_receipt::knowledge_receipt(
+            decision.is_some(),
+            decision.is_some_and(|token| token.trim().is_empty()),
+            retrieval_scope,
+            conversation_only,
+            grounding.as_ref(),
+        )
+    };
     let verify_web_allowed =
         crate::verification::may_escalate_to_web(tool_defs.iter().map(|tool| &tool.name));
     let structured_output_schema = req.structured_output_schema.clone().unwrap_or_default();
@@ -3313,17 +3329,20 @@ pub async fn invoke_stream_sse(
         // Per-turn retrieval-source filter receipt (chat-wave2 scope spec
         // §2.2/§2.3): the concrete "shown in the receipt" surface, emitted
         // once per turn right alongside the citations it's most relevant
-        // next to. Never fires under `conversation_only`, which already has
-        // its own long-standing disclosure via `CONVERSATION_SCOPE_NOTICE`
-        // and offers no separate receipt frame.
-        if retrieval_scope != crate::normalize::RetrievalScope::Auto {
+        // next to. A turn with no source filter and no Space knowledge
+        // receipt has no frame. `conversation_only` forces the filter to
+        // `Auto`, so a Space-scoped conversation-only turn reaches this frame
+        // only through its knowledge receipt (WS18-S3).
+        if retrieval_scope != crate::normalize::RetrievalScope::Auto || knowledge.is_some() {
             sink.emit(crate::sse_events::ChatEvent::SourceScopeApplied {
                 scope: match retrieval_scope {
                     crate::normalize::RetrievalScope::KnowledgeOnly => "knowledge_only".to_owned(),
                     crate::normalize::RetrievalScope::WebOnly => "web_only".to_owned(),
-                    crate::normalize::RetrievalScope::Auto => unreachable!("Auto excluded by the guard above"),
+                    // Reached only with a knowledge receipt, since the guard above admits Auto for nothing else.
+                    crate::normalize::RetrievalScope::Auto => "auto".to_owned(),
                 },
                 excluded_tools: excluded_by_retrieval_scope.clone(),
+                knowledge,
             })
             .await;
         }

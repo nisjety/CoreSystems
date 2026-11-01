@@ -17,6 +17,8 @@ use axum::response::sse::Event;
 use serde_json::{json, Value};
 use tokio::sync::mpsc::Sender;
 
+use crate::knowledge_receipt::KnowledgeReceipt;
+
 // Declared here, not in lib.rs, so this slice stays inside its owned files (WS27-S6).
 #[path = "run_ceiling.rs"]
 pub mod run_ceiling;
@@ -253,18 +255,22 @@ pub enum ChatEvent {
     /// Per-turn retrieval-source filter transparency frame (chat-wave2 scope
     /// spec §2.2/§2.3's "shown in the receipt" requirement). Emitted at most
     /// once per turn, only when the turn's effective `RetrievalScope`
-    /// (`crate::normalize::RetrievalScope`) is not `Auto`. Consumed by
+    /// (`crate::normalize::RetrievalScope`) is not `Auto`, or when a Space scopes the turn and it
+    /// carries a `knowledge` receipt (WS18-S3). Consumed by
     /// `ChatPanels.tsx`'s assembled-context inspector and `ChatMessages.tsx`'s
     /// scope badge — the concrete UI surface the spec's "shown in the
     /// receipt" requirement asks for.
     SourceScopeApplied {
-        /// `"knowledge_only"` or `"web_only"` — never `"auto"`, which never
-        /// emits this frame at all.
+        /// `"knowledge_only"` or `"web_only"`, or `"auto"` for a turn whose only receipt is
+        /// `knowledge`. An ordinary turn emits no frame at all.
         scope: String,
         /// Builtin tool names this turn's offered set excluded because of
         /// `scope`, for a concrete "Nett-kilder ekskludert" / "Organisasjons-
         /// kilder ekskludert" style disclosure rather than a vague claim.
         excluded_tools: Vec<String>,
+        /// What the Space's knowledge did for this turn (WS18-S3). Absent for a turn no Space
+        /// scopes, so those frames stay byte-identical to before.
+        knowledge: Option<KnowledgeReceipt>,
     },
     /// Structured internal grounding payload rendered by the chat UI.
     Grounding {
@@ -710,8 +716,12 @@ impl ChatEvent {
                 }
                 payload
             }
-            ChatEvent::SourceScopeApplied { scope, excluded_tools } => {
-                json!({ "scope": scope, "excluded_tools": excluded_tools })
+            ChatEvent::SourceScopeApplied { scope, excluded_tools, knowledge } => {
+                let mut payload = json!({ "scope": scope, "excluded_tools": excluded_tools });
+                if let Some(receipt) = knowledge {
+                    payload["knowledge"] = serde_json::to_value(receipt).unwrap_or_else(|_| json!({}));
+                }
+                payload
             }
             ChatEvent::Grounding { grounding } => {
                 serde_json::to_value(grounding).unwrap_or_else(|_| json!({}))
@@ -3168,6 +3178,7 @@ mod payload_contract {
     use serde_json::{json, Value};
 
     use super::{AttachmentPreview, ChatEvent, RetentionClass, ServedBy};
+    use crate::knowledge_receipt::{KnowledgeMode, KnowledgeReceipt};
 
     const REQUEST_ID: &str = "req-sample";
 
@@ -3507,8 +3518,22 @@ mod payload_contract {
             ChatEvent::ToolResult { id: s("1"), status: s("error"), output: s("out"), error: Some(s("boom")) },
             citation(false),
             citation(true),
-            ChatEvent::SourceScopeApplied { scope: s("web_only"), excluded_tools: Vec::new() },
-            ChatEvent::SourceScopeApplied { scope: s("knowledge_only"), excluded_tools: vec![s("web_search")] },
+            ChatEvent::SourceScopeApplied { scope: s("web_only"), excluded_tools: Vec::new(), knowledge: None },
+            ChatEvent::SourceScopeApplied {
+                scope: s("knowledge_only"),
+                excluded_tools: vec![s("web_search")],
+                knowledge: None,
+            },
+            ChatEvent::SourceScopeApplied {
+                scope: s("auto"),
+                excluded_tools: Vec::new(),
+                knowledge: Some(KnowledgeReceipt { mode: KnowledgeMode::NotEntitled, sources: None }),
+            },
+            ChatEvent::SourceScopeApplied {
+                scope: s("knowledge_only"),
+                excluded_tools: vec![s("web_search")],
+                knowledge: Some(KnowledgeReceipt { mode: KnowledgeMode::Retrieval, sources: Some(3) }),
+            },
             grounding(false),
             grounding(true),
             ChatEvent::Artifact { id: s("a1"), kind: s("document"), title: s(""), content: s(""), version: 1 },

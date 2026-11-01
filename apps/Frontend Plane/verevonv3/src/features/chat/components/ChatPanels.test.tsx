@@ -242,6 +242,20 @@ describe('ContextWindowPanel', () => {
       expect(container.textContent).not.toContain('ekskludert')
       unmount()
     })
+
+    it("shows no filter note for a Space's auto receipt, which excludes no source", () => {
+      const { container, unmount } = render(() => (
+        <ContextWindowPanel
+          context={context()}
+          loading={false}
+          failed={false}
+          scopeApplied={{ scope: 'auto', excludedTools: [], knowledge: { mode: 'retrieval', sources: 2 } }}
+        />
+      ))
+      open(container)
+      expect(container.textContent).not.toContain('ekskludert')
+      unmount()
+    })
   })
 })
 

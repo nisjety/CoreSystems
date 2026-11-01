@@ -161,4 +161,18 @@ describe('retrievalScope is per-turn, unlike sourceScope', () => {
       expect(assistantTurn?.scopeApplied).toEqual({ scope: 'web_only', excludedTools: ['knowledge_search', 'inbox_search'] })
     })
   })
+
+  it("lands a Space's knowledge receipt on its turn, auto scope included", async () => {
+    await withController(async (controller) => {
+      await tick()
+      await send(controller, 'Hva står i prosjektdokumentene?')
+      await tick()
+      const assistantId = controller.state.turns.find((turn) => turn.role === 'assistant')?.id
+      const knowledge = { mode: 'retrieval' as const, sources: 2 }
+      streams[0]!.handlers.onSourceScopeApplied?.({ scope: 'auto', excludedTools: [], knowledge })
+      await tick()
+      const assistantTurn = controller.state.turns.find((turn) => turn.id === assistantId)
+      expect(assistantTurn?.scopeApplied).toEqual({ scope: 'auto', excludedTools: [], knowledge })
+    })
+  })
 })

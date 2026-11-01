@@ -300,6 +300,85 @@ describe('chat-client stream-event coverage', () => {
       payload: { hello: 'world' },
     })
   })
+
+  it('carries a Space knowledge receipt on the source-scope frame, auto scope included', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          `event: source_scope_applied\ndata: ${JSON.stringify({
+            scope: 'auto',
+            excluded_tools: [],
+            knowledge: { mode: 'retrieval', sources: 2 },
+          })}\n\n`,
+          `event: source_scope_applied\ndata: ${JSON.stringify({
+            scope: 'knowledge_only',
+            excluded_tools: ['web_search'],
+            knowledge: { mode: 'not_entitled' },
+          })}\n\n`,
+        ]),
+      ),
+    )
+    const onSourceScopeApplied = vi.fn()
+    await streamChat({ content: 'hi' }, { onSourceScopeApplied })
+
+    expect(onSourceScopeApplied).toHaveBeenNthCalledWith(1, {
+      scope: 'auto',
+      excludedTools: [],
+      knowledge: { mode: 'retrieval', sources: 2 },
+    })
+    expect(onSourceScopeApplied).toHaveBeenNthCalledWith(2, {
+      scope: 'knowledge_only',
+      excludedTools: ['web_search'],
+      knowledge: { mode: 'not_entitled' },
+    })
+  })
+
+  it('reads the knowledge receipt on the AG-UI custom form of the frame too', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          `event: CUSTOM\ndata: ${JSON.stringify({
+            type: 'CUSTOM',
+            name: 'source_scope_applied',
+            value: { scope: 'auto', excluded_tools: [], knowledge: { mode: 'not_searched' } },
+          })}\n\n`,
+        ]),
+      ),
+    )
+    const onSourceScopeApplied = vi.fn()
+    await streamChat({ content: 'hi' }, { onSourceScopeApplied })
+
+    expect(onSourceScopeApplied).toHaveBeenCalledWith({
+      scope: 'auto',
+      excludedTools: [],
+      knowledge: { mode: 'not_searched' },
+    })
+  })
+
+  it('drops an auto frame with no receipt, and a receipt mode the SPA does not name, keeping the filter', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          // An ordinary turn sends no frame; an auto frame with nothing to say is not a filter.
+          `event: source_scope_applied\ndata: ${JSON.stringify({ scope: 'auto', excluded_tools: [] })}\n\n`,
+          `event: source_scope_applied\ndata: ${JSON.stringify({
+            scope: 'web_only',
+            excluded_tools: ['knowledge_search'],
+            knowledge: { mode: 'in_context' },
+          })}\n\n`,
+        ]),
+      ),
+    )
+    const onSourceScopeApplied = vi.fn()
+    await streamChat({ content: 'hi' }, { onSourceScopeApplied })
+
+    expect(onSourceScopeApplied).toHaveBeenCalledTimes(1)
+    expect(onSourceScopeApplied).toHaveBeenCalledWith({ scope: 'web_only', excludedTools: ['knowledge_search'] })
+    expect(onSourceScopeApplied.mock.calls[0]?.[0]).not.toHaveProperty('knowledge')
+  })
 })
 
 describe('chat-client sandbox state (WS22-S6)', () => {

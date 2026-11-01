@@ -685,9 +685,10 @@ export function ContextWindowPanel(props: {
    * Per-turn retrieval-source filter receipt (chat-wave2 scope spec §2.2's
    * "shown in the receipt" requirement) — the concrete transparency surface
    * for the excluded tool classes, sourced from the turn's own
-   * `source_scope_applied` SSE frame. Absent for an `auto` turn.
+   * `source_scope_applied` SSE frame. Absent for an `auto` turn; a Space's
+   * `auto` receipt names no excluded source, so it shows nothing here.
    */
-  scopeApplied?: { scope: 'knowledge_only' | 'web_only'; excludedTools: string[] }
+  scopeApplied?: import('@/shared/api/chat-client').ChatSourceScopeAppliedEvent
 }) {
   const i18n = useI18n()
   const [open, setOpen] = createSignal(false)
@@ -722,7 +723,7 @@ export function ContextWindowPanel(props: {
         <ChevronRight size={14} class={{ 'verevon-chat-rotate': open() }} />
       </button>
       <Show when={open()}>
-        <Show when={props.scopeApplied}>
+        <Show when={props.scopeApplied?.scope === 'auto' ? undefined : props.scopeApplied}>
           {(scopeApplied) => (
             <p class="verevon-chat-context-window__note">
               {scopeApplied().scope === 'knowledge_only'

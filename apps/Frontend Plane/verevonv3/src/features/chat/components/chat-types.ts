@@ -559,11 +559,12 @@ export type ChatTurn = {
   /**
    * The server's own confirmation of `retrievalScope` (`source_scope_applied`
    * SSE event) — the concrete "shown in the receipt" surface. Absent until
-   * the event arrives, and never emitted at all for a turn whose effective
-   * scope was `auto`/omitted. `excludedTools` names the builtin tool classes
-   * this turn's offered set did NOT include because of the filter.
+   * the event arrives. A turn whose scope was `auto`/omitted gets one only
+   * when a Space scoped it, and then its scope is `auto` with a `knowledge`
+   * receipt (WS18-S3). `excludedTools` names the builtin tool classes this
+   * turn's offered set did NOT include because of the filter.
    */
-  scopeApplied?: { scope: 'knowledge_only' | 'web_only'; excludedTools: string[] }
+  scopeApplied?: import('@/shared/api/chat-client').ChatSourceScopeAppliedEvent
 }
 
 export type AgentTaskStep = {

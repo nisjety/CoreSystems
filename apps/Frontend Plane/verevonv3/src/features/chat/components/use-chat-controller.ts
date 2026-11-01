@@ -3652,7 +3652,7 @@ export function useChatController() {
       onSourceScopeApplied: (event: Parameters<NonNullable<ChatStreamHandlers['onSourceScopeApplied']>>[0]) => {
         setState((s) => {
           const turn = s.turns.find((t) => t.id === assistantId)
-          if (turn) turn.scopeApplied = { scope: event.scope, excludedTools: event.excludedTools }
+          if (turn) turn.scopeApplied = event
         })
       },
       onGrounding: ({ value }: Parameters<NonNullable<ChatStreamHandlers['onGrounding']>>[0]) => {

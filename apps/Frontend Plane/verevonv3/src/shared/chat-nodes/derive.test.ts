@@ -343,6 +343,18 @@ describe('source-scope node', () => {
     })
     expect(kinds(streaming)).not.toContain('source-scope')
   })
+
+  it("shows a Space's knowledge receipt on an auto turn, the one auto badge there is", () => {
+    const node = deriveConversationNodes(assistantTurn({
+      scopeApplied: { scope: 'auto', excludedTools: [], knowledge: { mode: 'retrieval', sources: 2 } },
+    })).find((entry) => entry.kind === 'source-scope')
+    expect(node).toEqual({
+      kind: 'source-scope',
+      scope: 'auto',
+      excludedTools: [],
+      knowledge: { mode: 'retrieval', sources: 2 },
+    })
+  })
 })
 
 /**

@@ -37,6 +37,7 @@ pub mod grpc_auth;
 pub mod http_routes;
 pub mod idempotency_registry;
 pub mod implicit_feedback;
+pub mod knowledge_receipt;
 pub mod langcache;
 pub mod latency_levers;
 pub mod lsp;
