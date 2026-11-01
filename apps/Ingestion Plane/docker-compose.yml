@@ -381,6 +381,11 @@ services:
       # deployed and WS6.A is live. Turning it off pauses the Temporal schedules on the
       # next reconcile pass (30 s); it does not delete them.
       QUARRY_SCHEDULED_JOBS_ENABLED: ${QUARRY_SCHEDULED_JOBS_ENABLED:-0}
+      # D2-042: GET /v1/schedules without org_id is always refused now (the all-orgs
+      # branch is deleted). Control ignores this variable; it stays at 1 so an older
+      # control image rolled back onto this stack is fenced too. The orchestrator
+      # reads GET /v1/internal/schedules/desired.
+      QUARRY_CONTROL_SCHEDULES_REQUIRE_ORG: ${QUARRY_CONTROL_SCHEDULES_REQUIRE_ORG:-1}
       QUARRY_JOB_CAP_DEFAULT: ${QUARRY_JOB_CAP_DEFAULT:-3}
       QUARRY_JOB_BACKLOG_DEFAULT: ${QUARRY_JOB_BACKLOG_DEFAULT:-200}
       QUARRY_JOB_BACKLOG_TTL: ${QUARRY_JOB_BACKLOG_TTL:-24h}
