@@ -11216,7 +11216,7 @@ fn spawn_run_dispatch(
         max_subagents = budget.max_subagents,
         "RunAgent budget resolved"
     );
-    let run_agent_req = resolved_run_agent_request(
+    let mut run_agent_req = resolved_run_agent_request(
         run,
         org_id,
         user_id,
@@ -11238,6 +11238,10 @@ fn spawn_run_dispatch(
         connector_scope,
         run_effort,
     );
+    // The org's hook rules for this Do run (WS25-S3), from the registry the gateway owns. With the
+    // switch off, or with no rules, the request carries no org policy, as it did before the field.
+    run_agent_req.org_policy =
+        crate::runtime_registries::do_run_org_policy(&state.hooks, org_id, hooks_do_runs_mode());
     let run_agent_req = authenticated_run_agent_request(
         run_agent_req,
         execution_bearer,
@@ -11490,7 +11494,21 @@ fn build_run_agent_request(
         // it for a fresh run, so this builder's bytes stay as they were. execution-core uses it
         // only with EXECUTION_CORE_RUN_EFFORT on.
         reasoning_effort: mp_contracts::model_plane::v1::ReasoningEffort::Unspecified as i32,
+        // The org's hook rules are set by the caller from the registry (`spawn_run_dispatch`),
+        // which this pure builder cannot read; none here.
+        org_policy: None,
     }
+}
+
+/// `HOOKS_DO_RUNS` (WS25-S3), read once per process so the mode cannot change under a run.
+fn hooks_do_runs_mode() -> crate::runtime_registries::HooksDoRunsMode {
+    static MODE: std::sync::OnceLock<crate::runtime_registries::HooksDoRunsMode> =
+        std::sync::OnceLock::new();
+    *MODE.get_or_init(|| {
+        crate::runtime_registries::HooksDoRunsMode::from_env_value(
+            std::env::var("HOOKS_DO_RUNS").ok().as_deref(),
+        )
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -3134,12 +3134,28 @@ impl HookRegistry {
 /// the wire to today's behaviour, so orgs without hooks are unaffected.
 #[must_use]
 pub fn hook_context_json(reg: &HookRegistry, org_id: &str) -> String {
-    let rules: Vec<Value> = reg
+    hook_context_json_observing(reg, org_id, false)
+}
+
+/// [`hook_context_json`] for a run whose verdicts are only observed (`HOOKS_DO_RUNS=shadow`): the
+/// context carries `observe_only`, so execution-core logs what the rules would decide and enforces none.
+fn hook_context_json_observing(reg: &HookRegistry, org_id: &str, observe_only: bool) -> String {
+    // The registry is a DashMap, whose iteration order is arbitrary. Sorting by priority, highest
+    // first, then by id, makes one registry always serialise to the same bytes.
+    let mut hooks: Vec<Hook> = reg
         .inner
         .iter()
         .filter(|entry| entry.key().0 == org_id && entry.value().enabled)
-        .filter_map(|entry| {
-            let hook = entry.value();
+        .map(|entry| entry.value().clone())
+        .collect();
+    hooks.sort_by(|a, b| {
+        b.priority
+            .cmp(&a.priority)
+            .then_with(|| a.hook_id.cmp(&b.hook_id))
+    });
+    let rules: Vec<Value> = hooks
+        .iter()
+        .filter_map(|hook| {
             // Gateway spells the event `pre_tool`; execution-core expects
             // `pre_tool_use`. Translate rather than relying on its normalizer,
             // which folds case and separators but would not add the suffix.
@@ -3160,15 +3176,60 @@ pub fn hook_context_json(reg: &HookRegistry, org_id: &str) -> String {
     if rules.is_empty() {
         return String::new();
     }
+    if observe_only {
+        return json!({ "rules": rules, "observe_only": true }).to_string();
+    }
     json!({ "rules": rules }).to_string()
+}
+
+/// `HOOKS_DO_RUNS` (WS25-S3): whether a Do run is sent its org's hook rules. An authority switch, so
+/// an unknown value enforces (K3-26). Unset, empty or `off` sends none; `shadow` sends them
+/// observe-only; anything else enforces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HooksDoRunsMode {
+    Off,
+    Shadow,
+    Enforce,
+}
+
+impl HooksDoRunsMode {
+    #[must_use]
+    pub fn from_env_value(value: Option<&str>) -> Self {
+        match value.map(str::trim) {
+            None | Some("" | "off") => Self::Off,
+            Some("shadow") => Self::Shadow,
+            Some(_) => Self::Enforce,
+        }
+    }
+}
+
+/// The org policy a Do run is sent under `mode`. `None` when the switch is off or the org has no
+/// rules, so such a run's request is the same as before the field existed.
+#[must_use]
+pub fn do_run_org_policy(
+    reg: &HookRegistry,
+    org_id: &str,
+    mode: HooksDoRunsMode,
+) -> Option<mp_contracts::model_plane::v1::OrgPolicyContext> {
+    let observe_only = match mode {
+        HooksDoRunsMode::Off => return None,
+        HooksDoRunsMode::Shadow => true,
+        HooksDoRunsMode::Enforce => false,
+    };
+    let hook_context = hook_context_json_observing(reg, org_id, observe_only);
+    (!hook_context.is_empty()).then(|| mp_contracts::model_plane::v1::OrgPolicyContext {
+        hook_context,
+        policy_revision: 0,
+        policy_digest: String::new(),
+    })
 }
 
 /// Registers (or upserts) a lifecycle hook in the gateway-scoped registry.
 ///
 /// # Errors
 ///
-/// Returns `Status::invalid_argument` if `req.hook` is absent or its `event`
-/// is not one of `pre_tool`, `post_tool`, `on_error`, `on_complete`.
+/// Returns `Status::invalid_argument` if `req.hook` is absent, its `event` is not one of
+/// `pre_tool`, `post_tool`, `on_error`, `on_complete`, or its `decision` is not `deny` or `ask`.
 pub fn handle_register_hook(
     reg: &HookRegistry,
     req: RegisterHookRequest,
@@ -3185,6 +3246,16 @@ pub fn handle_register_hook(
             h.event
         )));
     }
+    // Only what execution-core enforces is storable (DEC-15): an allow rule would add nothing, since
+    // allow never overrides a deny, and an unknown token is read as ask, so neither is kept.
+    let decision = h.decision.trim().to_ascii_lowercase();
+    if !matches!(decision.as_str(), "deny" | "ask") {
+        return Err(Status::invalid_argument(format!(
+            "decision must be deny or ask, not '{}'",
+            h.decision
+        )));
+    }
+    h.decision = decision;
     if h.hook_id.is_empty() {
         h.hook_id = new_ulid();
     }
@@ -3533,6 +3604,7 @@ mod tests {
             enabled,
             decision: decision.to_owned(),
             reason: "policy".to_owned(),
+            priority: 0,
         }
     }
 
@@ -3611,6 +3683,105 @@ mod tests {
                 "reason": "policy",
             }]})
         );
+    }
+
+    #[test]
+    fn hook_rules_serialise_highest_priority_first_then_by_id() {
+        let reg = HookRegistry::new();
+        for (id, priority) in [("rule_b", 0), ("rule_a", 0), ("rule_c", 5)] {
+            let mut h = hook("pre_tool", id, "deny", true);
+            h.hook_id = id.to_owned();
+            h.priority = priority;
+            register(&reg, "org", h);
+        }
+        let ctx: Value = serde_json::from_str(&hook_context_json(&reg, "org")).expect("json");
+        let order: Vec<&str> = ctx["rules"]
+            .as_array()
+            .expect("rules")
+            .iter()
+            .filter_map(|rule| rule["tools"].as_str())
+            .collect();
+        assert_eq!(order, ["rule_c", "rule_a", "rule_b"]);
+    }
+
+    #[test]
+    fn hook_rules_only_deny_and_ask_are_storable() {
+        let reg = HookRegistry::new();
+        for decision in ["allow", "", "quarantine"] {
+            let refused = handle_register_hook(
+                &reg,
+                RegisterHookRequest {
+                    request_id: "t".into(),
+                    org_id: "org".into(),
+                    hook: Some(hook("pre_tool", "shell", decision, true)),
+                },
+            );
+            assert_eq!(
+                refused.expect_err("refused").code(),
+                tonic::Code::InvalidArgument,
+                "{decision}"
+            );
+        }
+        register(&reg, "org", hook("pre_tool", "shell", " DENY ", true));
+        let stored = handle_list_hooks(
+            &reg,
+            ListHooksRequest {
+                request_id: "t".into(),
+                org_id: "org".into(),
+                event_filter: String::new(),
+            },
+        )
+        .expect("lists")
+        .hooks;
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].decision, "deny");
+    }
+
+    #[test]
+    fn hook_rules_shadow_context_is_marked_observe_only() {
+        let reg = HookRegistry::new();
+        register(&reg, "org", hook("pre_tool", "shell", "deny", true));
+        let shadow: Value =
+            serde_json::from_str(&hook_context_json_observing(&reg, "org", true)).expect("json");
+        assert_eq!(shadow["observe_only"], true);
+        let enforced: Value = serde_json::from_str(&hook_context_json(&reg, "org")).expect("json");
+        assert!(enforced.get("observe_only").is_none());
+    }
+
+    #[test]
+    fn hook_rules_do_runs_switch_parses_strictly() {
+        assert_eq!(HooksDoRunsMode::from_env_value(None), HooksDoRunsMode::Off);
+        assert_eq!(
+            HooksDoRunsMode::from_env_value(Some("")),
+            HooksDoRunsMode::Off
+        );
+        assert_eq!(
+            HooksDoRunsMode::from_env_value(Some("off")),
+            HooksDoRunsMode::Off
+        );
+        assert_eq!(
+            HooksDoRunsMode::from_env_value(Some(" shadow ")),
+            HooksDoRunsMode::Shadow
+        );
+        assert_eq!(
+            HooksDoRunsMode::from_env_value(Some("enforce")),
+            HooksDoRunsMode::Enforce
+        );
+        // An authority switch: a value it cannot read enforces (K3-26).
+        assert_eq!(
+            HooksDoRunsMode::from_env_value(Some("enfroce")),
+            HooksDoRunsMode::Enforce
+        );
+    }
+
+    #[test]
+    fn hook_rules_reach_a_do_run_only_when_the_switch_is_on_and_the_org_has_some() {
+        let reg = HookRegistry::new();
+        register(&reg, "org", hook("pre_tool", "shell", "deny", true));
+        assert!(do_run_org_policy(&reg, "org", HooksDoRunsMode::Off).is_none());
+        let enforced = do_run_org_policy(&reg, "org", HooksDoRunsMode::Enforce).expect("rules");
+        assert_eq!(enforced.hook_context, hook_context_json(&reg, "org"));
+        assert!(do_run_org_policy(&reg, "org_b", HooksDoRunsMode::Enforce).is_none());
     }
 
     #[test]

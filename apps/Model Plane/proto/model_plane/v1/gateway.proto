@@ -1311,13 +1311,17 @@ message Hook {
   // to this. Retained so existing callers keep parsing. Use `decision`.
   string callback_url = 4 [deprecated = true];
   bool enabled = 5;
-  // What this rule does when it matches: "deny" blocks the call outright,
-  // "ask" escalates it to human approval, "allow" (or anything unrecognised)
-  // permits it. Empty means allow — a rule with no decision must not silently
-  // become a block.
+  // What this rule does when it matches: "deny" blocks the call outright and
+  // "ask" escalates it to human approval. The registry stores only those two: an
+  // "allow" rule would add nothing, since allow never overrides a deny, and anything
+  // unrecognised is read as "ask", never as allow.
   string decision = 6;
   // Human-readable reason surfaced to the user on deny/ask.
   string reason = 7;
+  // Evaluation order of the rules the gateway forwards: higher first, then by hook_id.
+  // Strictest-wins makes the order irrelevant to the verdict; this fixes the serialised
+  // context, so one registry always sends the same bytes.
+  int32 priority = 8;
 }
 
 message RegisterHookRequest {

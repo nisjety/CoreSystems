@@ -451,6 +451,9 @@ struct LoopContext<'a> {
     /// The run this loop belongs to. A subagent runs INSIDE its parent's run, so
     /// org/user/run/thread/ZDR are shared; only the goal and budget differ.
     req: &'a pb::RunAgentRequest,
+    /// The org hook rules for this run, from `RunAgentRequest.org_policy` (WS25-S3). A delegated
+    /// child inherits its parent's: it runs inside the same org policy.
+    hook_context: &'a str,
     tools: Vec<pb::ToolDefinition>,
     /// Purpose-lock scope, derived from `tools`.
     allowlist: BTreeSet<String>,
@@ -1811,6 +1814,10 @@ async fn run_agent_with_route_parkable(
         session_channel: &session_channel,
         inference_channel: &inference_channel,
         req: &req,
+        hook_context: req
+            .org_policy
+            .as_ref()
+            .map_or("", |policy| policy.hook_context.as_str()),
         tools,
         allowlist,
         data_plane_bearer: data_plane_bearer.as_deref(),
@@ -4215,7 +4222,7 @@ async fn run_rounds(
                                     &call.name,
                                     &call.arguments_json,
                                     ctx.permission_wire,
-                                    "",
+                                    ctx.hook_context,
                                     &req.org_id,
                                     &req.user_id,
                                     &req.run_id,
@@ -5746,6 +5753,7 @@ async fn run_delegated_child(
         session_channel: parent.session_channel,
         inference_channel: parent.inference_channel,
         req: parent.req,
+        hook_context: parent.hook_context,
         tools: parent.tools.clone(),
         allowlist: parent.allowlist.clone(),
         data_plane_bearer: parent.data_plane_bearer,
@@ -11945,6 +11953,7 @@ mod tests {
             // Unspecified, which is what every run before the field sent; the run-level
             // tests set it explicitly.
             reasoning_effort: pb::ReasoningEffort::Unspecified as i32,
+            org_policy: None,
         }
     }
 

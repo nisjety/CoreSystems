@@ -258,6 +258,22 @@ message RunAgentRequest {
   // accounts. Field 23 is reserved for this message in the build plan's proto reservation table
   // (section 4.3).
   ConnectorScope connector_scope = 23;
+  // The org policy this run was resolved under (build plan WS25 S3): the org's hook rules,
+  // which the run's hook engine enforces on every tool call. Absent when HOOKS_DO_RUNS is off
+  // or the org has no rules, so the run is exactly as it was before the field existed.
+  OrgPolicyContext org_policy = 24;
+}
+
+// OrgPolicyContext is the org's policy for one Do run (build plan WS25 S3). Its rules can only
+// narrow what the run may do: execution-core enforces them, and no rule lets a call past the
+// signed gate.
+message OrgPolicyContext {
+  // The hook rules as execution-core's hook context JSON ({"rules":[...]}); empty means none.
+  string hook_context = 1;
+  // The revision of the org policy the rules were read at. Zero until the policy registry (WS25 S7).
+  int64 policy_revision = 2;
+  // Digest of the policy document the rules came from. Empty until WS25 S7.
+  string policy_digest = 3;
 }
 
 // ConnectorScope names the Integration Core connections one run may read (build plan WS23 S4).

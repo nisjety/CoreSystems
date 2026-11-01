@@ -824,6 +824,21 @@ fn policy_reason_code(reason: &str) -> &str {
     }
 }
 
+/// The notice a write's result is replaced with when a post-tool rule denies it (WS25-S3).
+const WITHHELD_RESULT_NOTICE: &str =
+    "The action DID execute; its result is withheld by org policy.";
+
+/// What a post-tool deny does (WS25-S3, DEC-15 D7). A write has already run, so its step stays
+/// successful with the result withheld: a failed step would invite the model to repeat the write.
+/// A read-class call keeps the failure it has always had. Until WS05 declares tool classes, the
+/// class is `permission::is_risky_call`.
+fn post_tool_denied(tool_name: &str, tool_input: &str, reason: &str) -> StepOutcome {
+    if permission::is_risky_call(tool_name, tool_input) {
+        return StepOutcome::completed(WITHHELD_RESULT_NOTICE.to_owned());
+    }
+    StepOutcome::failed(&format!("blocked by post-tool hook: {reason}"))
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn execute_step_inner(
     tool_name: &str,
@@ -1494,7 +1509,7 @@ async fn execute_step_inner(
     if let hook::HookDecision::Deny { reason } =
         hook::evaluate(hook_context, hook::HookEvent::PostToolUse, tool_name)
     {
-        return StepOutcome::failed(&format!("blocked by post-tool hook: {reason}"));
+        return post_tool_denied(tool_name, tool_input, &reason);
     }
 
     let output = exec.output;
@@ -3828,6 +3843,21 @@ fn recall_memory_output(entries: Vec<serde_json::Value>, skip_reason: &str) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn post_deny_on_a_write_withholds_and_never_fails_the_step() {
+        let out = post_tool_denied("shell", r#"{"command":"make clean"}"#, "output policy");
+        assert_eq!(out.status, "completed");
+        assert_eq!(out.output, WITHHELD_RESULT_NOTICE);
+        assert!(out.error.is_empty());
+    }
+
+    #[test]
+    fn post_deny_on_a_read_keeps_the_failure_it_has_always_had() {
+        let out = post_tool_denied("web_search", r#"{"query":"x"}"#, "output policy");
+        assert_eq!(out.status, "failed");
+        assert_eq!(out.error, "blocked by post-tool hook: output policy");
+    }
 
     /// A paused user's `save_memory` comes back as a plain refusal naming the
     /// reason, and any other failure keeps its old text.
