@@ -167,6 +167,46 @@ func TestOrgRetentionReadScopeIsMachineOnly(t *testing.T) {
 	}
 }
 
+// The Quarry key-custody scopes (WS17.E2) and the web-policy read (WS7.H) are
+// :any machine scopes like the retention read: refused for the gateway principal,
+// accepted for a machine principal, and nothing beside the reviewed names is
+// accepted (a near-miss spelling is an unknown scope, which fails startup).
+func TestOrgKeysAndWebPolicyScopesAreMachineOnly(t *testing.T) {
+	for _, scope := range []string{"org:keys:wrap:any", "org:keys:unwrap:any", "org:web-policy:read:any"} {
+		if _, err := parseServiceCredentials(orgServiceTestRegistry(scope)); err == nil {
+			t.Fatalf("expected %s to be refused for the gateway principal", scope)
+		}
+		credentials, err := parseServiceCredentials(`[{"principal":"quarry-edge","audience":"org-core","token":"fedcba9876543210fedcba9876543210","scopes":["` + scope + `"]}]`)
+		if err != nil || len(credentials) != 1 {
+			t.Fatalf("machine principal with %s rejected: credentials=%d err=%v", scope, len(credentials), err)
+		}
+	}
+	for _, scope := range []string{"org:keys:destroy:any", "org:keys:rotate:any", "org:keys:read:any", "org:web-policy:write:any", "org:web-policy:read:self"} {
+		if _, err := parseServiceCredentials(`[{"principal":"quarry-edge","audience":"org-core","token":"fedcba9876543210fedcba9876543210","scopes":["` + scope + `"]}]`); err == nil {
+			t.Fatalf("expected unreviewed scope %s to fail startup validation", scope)
+		}
+	}
+}
+
+// A registry that carries the whole R-13 PR 2 shape (auth-core with the
+// web-policy read, quarry-edge with retention plus the two key scopes) must still
+// pass the required-registry check, and the optional scopes must not become
+// requirements: a registry without them stays valid.
+func TestValidateRequiredRegistryAcceptsTheQuarryEdgePrincipalAndDoesNotRequireIt(t *testing.T) {
+	gateway := []string{"org:read:self", "org:provision:self", "org:settings:write:self", "org:onboarding:write:self"}
+	base := orgRequiredServiceTestRegistry(gateway,
+		[]string{"org:projection:write:any", "org:projection:delete:any", "org:retention:read:any"})
+	if err := ValidateRequiredServiceCredentialRegistry(base); err != nil {
+		t.Fatalf("registry without the quarry-edge principal rejected: %v", err)
+	}
+	full := orgRequiredServiceTestRegistry(gateway,
+		[]string{"org:projection:write:any", "org:projection:delete:any", "org:retention:read:any", "org:web-policy:read:any"})
+	full = full[:len(full)-1] + `,{"principal":"quarry-edge","audience":"org-core","token":"abcdef0123456789abcdef0123456789","scopes":["org:retention:read:any","org:keys:wrap:any","org:keys:unwrap:any"]}]`
+	if err := ValidateRequiredServiceCredentialRegistry(full); err != nil {
+		t.Fatalf("registry with the quarry-edge principal rejected: %v", err)
+	}
+}
+
 func TestOrgAgentPolicyReadScopeIsMachineOnly(t *testing.T) {
 	// Same shape as the retention scope: :any keeps it off the gateway principal
 	// and it needs no acting user.

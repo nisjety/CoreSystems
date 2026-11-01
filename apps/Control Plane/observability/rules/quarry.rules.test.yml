@@ -1,0 +1,208 @@
+# promtool unit tests for quarry.rules.yml:
+#   promtool test rules quarry.rules.test.yml
+#
+# Every test pairs a case that must fire with a case that must stay quiet, so a
+# threshold that drifts or a rule that fires on a stack with metrics off fails here.
+rule_files:
+  - quarry.rules.yml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    name: metrics down fires for a target that was up and is now down
+    input_series:
+      - series: 'up{job="quarry-edge",service="quarry-edge"}'
+        values: '1x60 0x60'
+    alert_rule_test:
+      - eval_time: 100m
+        alertname: QuarryEdgeMetricsDown
+        exp_alerts:
+          - exp_labels: { severity: warning, plane: ingestion, job: quarry-edge, service: quarry-edge }
+            exp_annotations:
+              summary: "the Quarry edge was reporting metrics and has stopped (down, or the scrape token no longer matches)"
+              runbook: "apps/Ingestion Plane/Quarry-v2/docs/RUNBOOKS.md#metrics"
+
+  - interval: 1m
+    name: metrics down is quiet for a target that never came up (the flag is off)
+    input_series:
+      - series: 'up{job="quarry-edge",service="quarry-edge"}'
+        values: '0x120'
+    alert_rule_test:
+      - eval_time: 100m
+        alertname: QuarryEdgeMetricsDown
+        exp_alerts: []
+
+  - interval: 1m
+    name: metrics down is quiet for another job that is down
+    input_series:
+      - series: 'up{job="org-core",service="org-core"}'
+        values: '1x60 0x60'
+    alert_rule_test:
+      - eval_time: 100m
+        alertname: QuarryEdgeMetricsDown
+        exp_alerts: []
+
+  - interval: 1m
+    name: server errors above five percent with traffic fire
+    input_series:
+      - series: 'quarry_http_requests_total{route="/v1/scrape",method="POST",status_class="2xx"}'
+        values: '0+60x60'
+      - series: 'quarry_http_requests_total{route="/v1/scrape",method="POST",status_class="5xx"}'
+        values: '0+10x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: QuarryEdgeServerErrorRatioHigh
+        exp_alerts:
+          - exp_labels: { severity: warning, plane: ingestion }
+            exp_annotations:
+              summary: "more than 5 percent of Quarry edge responses are 5xx"
+              runbook: "apps/Ingestion Plane/Quarry-v2/docs/RUNBOOKS.md#metrics"
+
+  - interval: 1m
+    name: server errors below five percent stay quiet
+    input_series:
+      - series: 'quarry_http_requests_total{route="/v1/scrape",method="POST",status_class="2xx"}'
+        values: '0+60x60'
+      - series: 'quarry_http_requests_total{route="/v1/scrape",method="POST",status_class="5xx"}'
+        values: '0+1x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: QuarryEdgeServerErrorRatioHigh
+        exp_alerts: []
+
+  - interval: 1m
+    name: a high error ratio on almost no traffic stays quiet
+    input_series:
+      - series: 'quarry_http_requests_total{route="/v1/scrape",method="POST",status_class="2xx"}'
+        values: '0+1x60'
+      - series: 'quarry_http_requests_total{route="/v1/scrape",method="POST",status_class="5xx"}'
+        values: '0+1x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: QuarryEdgeServerErrorRatioHigh
+        exp_alerts: []
+
+  - interval: 1m
+    name: pool refusals from a full pool fire
+    input_series:
+      - series: 'quarry_lease_pool_refused_total{pool="browser",reason="pool_full"}'
+        values: '0+5x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: QuarryEdgeLeasePoolRefusing
+        exp_alerts:
+          - exp_labels: { severity: warning, plane: ingestion, pool: browser }
+            exp_annotations:
+              summary: "a Quarry lease pool is refusing work (full or wait timeouts)"
+              runbook: "apps/Ingestion Plane/Quarry-v2/docs/RUNBOOKS.md#ws6i-series-agent-runs-steps-budgets-caches-pool-refusals"
+
+  - interval: 1m
+    name: per-organization render cap refusals are not a capacity alert
+    input_series:
+      - series: 'quarry_lease_pool_refused_total{pool="browser",reason="org_render_cap"}'
+        values: '0+50x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: QuarryEdgeLeasePoolRefusing
+        exp_alerts: []
+
+  - interval: 1m
+    name: a handful of refusals stays quiet
+    input_series:
+      - series: 'quarry_lease_pool_refused_total{pool="browser",reason="wait_timeout"}'
+        values: '0+0x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: QuarryEdgeLeasePoolRefusing
+        exp_alerts: []
+
+  - interval: 1m
+    name: a pool fully in use for fifteen minutes fires
+    input_series:
+      - series: 'quarry_lease_pool_in_flight{pool="browser"}'
+        values: '2x60'
+      - series: 'quarry_lease_pool_capacity{pool="browser"}'
+        values: '2x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: QuarryEdgeLeasePoolSaturated
+        exp_alerts:
+          - exp_labels: { severity: warning, plane: ingestion, pool: browser }
+            exp_annotations:
+              summary: "a Quarry lease pool has been fully in use for 15 minutes"
+              runbook: "apps/Ingestion Plane/Quarry-v2/docs/RUNBOOKS.md#ws6i-series-agent-runs-steps-budgets-caches-pool-refusals"
+
+  - interval: 1m
+    name: a half-used pool stays quiet
+    input_series:
+      - series: 'quarry_lease_pool_in_flight{pool="browser"}'
+        values: '1x60'
+      - series: 'quarry_lease_pool_capacity{pool="browser"}'
+        values: '2x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: QuarryEdgeLeasePoolSaturated
+        exp_alerts: []
+
+  - interval: 1m
+    name: a pool with capacity zero is not judged
+    input_series:
+      - series: 'quarry_lease_pool_in_flight{pool="search"}'
+        values: '3x60'
+      - series: 'quarry_lease_pool_capacity{pool="search"}'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: QuarryEdgeLeasePoolSaturated
+        exp_alerts: []
+
+  - interval: 1m
+    name: draining for more than fifteen minutes fires
+    input_series:
+      - series: 'quarry_edge_draining'
+        values: '0x10 1x50'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: QuarryEdgeStuckDraining
+        exp_alerts:
+          - exp_labels: { severity: warning, plane: ingestion }
+            exp_annotations:
+              summary: "the Quarry edge has been draining for 15 minutes and has not exited"
+              runbook: "apps/Ingestion Plane/Quarry-v2/docs/RUNBOOKS.md#ws6i-series-agent-runs-steps-budgets-caches-pool-refusals"
+
+  - interval: 1m
+    name: a short drain stays quiet
+    input_series:
+      - series: 'quarry_edge_draining'
+        values: '0x10 1x5 0x45'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: QuarryEdgeStuckDraining
+        exp_alerts: []
+
+  - interval: 1m
+    name: a failing cache backend fires
+    input_series:
+      - series: 'quarry_cache_requests_total{cache="page",outcome="error"}'
+        values: '0+3x60'
+      - series: 'quarry_cache_requests_total{cache="page",outcome="hit"}'
+        values: '0+7x60'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: QuarryEdgeCacheBackendErrors
+        exp_alerts:
+          - exp_labels: { severity: warning, plane: ingestion, cache: page }
+            exp_annotations:
+              summary: "a Quarry cache backend is failing more than 20 percent of lookups"
+              runbook: "apps/Ingestion Plane/Quarry-v2/docs/RUNBOOKS.md#ws6i-series-agent-runs-steps-budgets-caches-pool-refusals"
+
+  - interval: 1m
+    name: an occasional cache error stays quiet
+    input_series:
+      - series: 'quarry_cache_requests_total{cache="page",outcome="error"}'
+        values: '0+1x60'
+      - series: 'quarry_cache_requests_total{cache="page",outcome="hit"}'
+        values: '0+9x60'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: QuarryEdgeCacheBackendErrors
+        exp_alerts: []

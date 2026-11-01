@@ -71,6 +71,19 @@ var orgServiceScopeAllowlist = map[string]struct{}{
 	// Held by the browser broker alone (validateServiceCredential); the decision
 	// is the broker's input at grant mint, never a member's list.
 	"org:browser-site:read:any": {},
+	// Quarry's per-org browser-profile key custody (WS17.E2): generate a data key
+	// under the org's KEK (wrap) and unwrap/rewrap it, through
+	// /internal/orgs/:orgId/keys/... and nothing else. Held by quarry-edge alone in
+	// the compose registry. The routes exist only when ORG_CORE_KEYS_ENABLED=1, so
+	// until then these scopes reach nothing; they are allowlisted now so the
+	// static credential (R-13 PR 2) and the org-core image can ship together.
+	"org:keys:wrap:any":   {},
+	"org:keys:unwrap:any": {},
+	// Read-only access to one org's web policy, through
+	// GET /internal/orgs/:orgId/web-policy and nothing else (WS7.H). Held by
+	// auth-core alone, which folds it into the web_policy token claim (WS7.I,
+	// WEB_POLICY_CLAIM_ENABLED). Unread until WS7.H registers the route.
+	"org:web-policy:read:any": {},
 }
 
 type serviceCredential struct {
