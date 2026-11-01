@@ -27,11 +27,11 @@ control as the `org_id` query parameter and never reads it from a body.
 - A row belongs to one org. A request for another org's row answers `404`, the
   same answer as a missing row. This covers read, delete, pause, unpause,
   enable, disable, trigger, backfill and the run history.
-- Control's `GET /v1/schedules` requires `org_id`. Without it, the legacy
-  unscoped list still answers (with every org's rows, in the orchestrator's
-  wire shape) and logs a deprecation. Set `QUARRY_CONTROL_SCHEDULES_REQUIRE_ORG=1`
-  to make it a `400`. Remove the legacy path once the orchestrator reads
-  `GET /v1/internal/schedules/desired` (all orgs, internal path only).
+- Control's `GET /v1/schedules` requires `org_id`. Without it the answer is a `400`,
+  always; the legacy all-orgs list is gone (D2-042) and
+  `QUARRY_CONTROL_SCHEDULES_REQUIRE_ORG` no longer changes anything. The all-orgs
+  set the orchestrator reconciles from is `GET /v1/internal/schedules/desired`
+  (internal path only).
 - A body `org_id` is ignored by control.
 
 ## Create
