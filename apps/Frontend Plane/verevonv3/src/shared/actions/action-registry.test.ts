@@ -5,6 +5,7 @@ import {
   integrationsBrowseConnectionInput,
   integrationsFetchConnectionContentInput,
 } from '@/shared/actions/action-registry'
+import { chatProjectSchema } from '@/shared/actions/chat-project'
 import { isModelExecutableAction } from '@/shared/actions/model-eligibility'
 import { buildModelContextPack } from '@/shared/context-packs/context-pack'
 
@@ -501,6 +502,24 @@ describe('action registry', () => {
     expect(schema?.safeParse({ connectionIds: [], userId: 'user_x' }).success).toBe(false)
   })
 
+  it('registers the agent-mode choice as a model-plane action the model cannot execute, and accepts only the four mode ids', () => {
+    const mode = getActionDescriptor('chat.set_agent_mode')
+
+    expect(mode).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+    expect(isModelExecutableAction('chat.set_agent_mode')).toBe(false)
+    expect(mode?.description ?? '').toContain('Never model-executable')
+
+    const schema = mode?.inputSchema
+    for (const id of ['lockdown', 'read_only', 'ask_first', 'auto']) {
+      expect(schema?.safeParse({ mode: id }).success).toBe(true)
+    }
+    for (const id of ['full_access', 'Auto', 'read-only', '', 'danger_full_access']) {
+      expect(schema?.safeParse({ mode: id }).success).toBe(false)
+    }
+    // A mode is the person's choice for one turn, never a field a caller can widen with a second key.
+    expect(schema?.safeParse({ mode: 'auto', rung: 'danger_full_access' }).success).toBe(false)
+  })
+
   function registered(id: string) {
     return actionRegistry.find((action) => action.id === id)
   }
@@ -576,5 +595,30 @@ describe('action registry', () => {
     const retire = registered('org.delete_hook')?.inputSchema
     expect(retire?.safeParse({ hookId: 'ohr_1' }).success).toBe(true)
     expect(retire?.safeParse({ hookId: 'ohr_1', orgId: 'org-1' }).success).toBe(false)
+  })
+
+  it('lets a chat project reuse the registered Space actions, and its contract grants nothing', () => {
+    // A project is a Space, so creating one and editing its instructions are the Space
+    // actions the room and Space pages already use: no second route and no new authority.
+    const createRoomAction = getActionDescriptor('spaces.create_room')
+    const instructionsAction = getActionDescriptor('spaces.update_space_instructions')
+
+    expect(createRoomAction?.ownerPlane).toBe('application')
+    expect(createRoomAction?.requiresApproval).toBe(false)
+    expect(createRoomAction?.inputSchema.safeParse({ kind: 'room', name: 'Launch' }).success).toBe(true)
+    // A project is a named room: a personal Space is not created from the project list.
+    expect(createRoomAction?.inputSchema.safeParse({ kind: 'personal', name: 'Mine' }).success).toBe(false)
+    expect(createRoomAction?.inputSchema.safeParse({ kind: 'room', name: '   ' }).success).toBe(false)
+
+    expect(instructionsAction?.ownerPlane).toBe('application')
+    expect(instructionsAction?.inputSchema.safeParse({ spaceRef: 'space_1', instructions: 'Answer in numbered steps.' }).success).toBe(true)
+    expect(instructionsAction?.inputSchema.safeParse({ spaceRef: '', instructions: 'Answer in numbered steps.' }).success).toBe(false)
+    // Writing the instructions is the gateway's editor, manager or owner floor; the descriptor says so.
+    expect(instructionsAction?.description).toContain('editor, manager, or owner')
+
+    // The project shape describes where a chat goes. A viewer is not a role a project chat can start from.
+    expect(chatProjectSchema.safeParse({ spaceRef: 'space_1', name: 'Launch', kind: 'room', role: 'editor' }).success).toBe(true)
+    expect(chatProjectSchema.safeParse({ spaceRef: 'space_1', name: 'Launch', kind: 'room', role: 'viewer' }).success).toBe(false)
+    expect(chatProjectSchema.safeParse({ spaceRef: 'space_1', name: 'Launch', kind: 'organization', role: 'owner' }).success).toBe(false)
   })
 })

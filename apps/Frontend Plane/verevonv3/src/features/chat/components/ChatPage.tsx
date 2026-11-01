@@ -18,7 +18,9 @@ import {
   CalendarClock,
   EyeOff,
   Square,
+  X,
 } from '@/shared/icons'
+import { spaceDisplayName } from '@/features/spaces/lib/space-name'
 import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
 import {
   DashboardComposer,
@@ -74,6 +76,8 @@ import { speechPlayer } from '@/features/voice/speech-playback'
 import { latestVoiceReply } from '@/features/voice/voice-reply'
 import { pinnedMessagesFull } from '../lib/chat-pinned-messages'
 import { selectChatThread } from '../lib/chat-thread-history'
+import { audienceConfirmed, chatProjectsEnabled, readProjectAudience, readProjectContext, rememberAudienceConfirmed } from '../lib/chat-projects'
+import { audienceConfirmRequired, chatProjectRefusal, sandboxToolsRefusedNotice, type ChatProjectRefusal } from './use-chat-project'
 import { planTranscriptWindow, resolveTurnHeights, virtualizeTranscript } from '../lib/transcript-window'
 
 export default function ChatPage() {
@@ -135,6 +139,8 @@ export default function ChatPage() {
     setSourceScope,
     retrievalScope,
     spaceScoped,
+    activeProjectRef,
+    setProjectSpaceRef,
     setRetrievalScope,
     setBrowseWeb,
     temporaryChat,
@@ -155,10 +161,78 @@ export default function ChatPage() {
   // files locally after it opens.
   const [selectedAttachmentId, setSelectedAttachmentId] = createSignal<string | null>(null)
   const [workPeriod, setWorkPeriod] = createSignal<ChatWorkPeriod>({ kind: 'none' })
-  const submitWithWorkPeriod = (payload: DashboardComposerSubmitPayload) => handleComposerSubmit({
-    ...payload,
-    text: withChatWorkPeriod(payload.text, workPeriod(), i18n.locale() === 'no' ? 'no' : 'en'),
+
+  // WS18-S4. The project this page writes to, from the controller. With the switch
+  // off it is always null and none of the project state below is ever read.
+  const projectRef = () => (chatProjectsEnabled() ? activeProjectRef() : null)
+  const [projectContext] = createResource(projectRef, (spaceRef) => readProjectContext(spaceRef))
+  const projectName = () => {
+    if (projectContext.loading) return i18n.tr('laster ...', 'loading ...')
+    const context = projectContext()
+    return context ? spaceDisplayName(context.space, i18n.tr) : i18n.tr('ikke tilgjengelig', 'unavailable')
+  }
+  const sandboxNoticeVisible = () => Boolean(projectRef()) && sandboxToolsRefusedNotice({
+    kind: projectContext()?.space.kind,
+    doMode: planMode(),
   })
+  const [projectNotice, setProjectNotice] = createSignal('')
+  // The first-send ask for a shared room. The send waits on the answer, and a cancel
+  // is a refused send: the composer clears its draft only after a send it saw succeed.
+  const [audienceAsk, setAudienceAsk] = createSignal<{
+    name: string
+    members: number | null
+    settle: (confirmed: boolean) => void
+  } | null>(null)
+  const projectRefusalMessage = (refusal: ChatProjectRefusal) => {
+    if (refusal === 'temporary') {
+      return i18n.tr('Midlertidig samtale kan ikke brukes i et prosjekt.', 'Temporary chat cannot be used in a project.')
+    }
+    if (refusal === 'role_not_allowed') {
+      return i18n.tr('Du kan lese dette rommet, men ikke starte samtaler i det.', 'You can read this room but cannot start conversations in it.')
+    }
+    return i18n.tr('Prosjektet er ikke tilgjengelig for nye samtaler.', 'This project is not available for new conversations.')
+  }
+  // Re-reads the Space and the caller's role before every project send: the same
+  // question Control answers on the turn itself, asked here so a refusal reads as a
+  // refusal rather than a failed stream. Resolves true when the send may go ahead.
+  const confirmProjectAudience = async (spaceRef: string, temporary: boolean): Promise<boolean> => {
+    const context = await readProjectContext(spaceRef)
+    const refusal = chatProjectRefusal({ temporary, role: context?.role, space: context?.space })
+    if (!context || refusal) throw new Error(projectRefusalMessage(refusal ?? 'not_eligible'))
+    if (!audienceConfirmRequired({ kind: context.space.kind, confirmed: audienceConfirmed(spaceRef) })) return true
+    const members = await readProjectAudience(spaceRef)
+    return new Promise<boolean>((resolve) => {
+      setAudienceAsk({
+        name: spaceDisplayName(context.space, i18n.tr),
+        members,
+        settle: (confirmed) => {
+          setAudienceAsk(null)
+          if (confirmed) rememberAudienceConfirmed(spaceRef)
+          resolve(confirmed)
+        },
+      })
+    })
+  }
+  const submitWithWorkPeriod = async (payload: DashboardComposerSubmitPayload) => {
+    const submission = {
+      ...payload,
+      text: withChatWorkPeriod(payload.text, workPeriod(), i18n.locale() === 'no' ? 'no' : 'en'),
+    }
+    const spaceRef = projectRef()
+    if (!spaceRef) return handleComposerSubmit(submission)
+    setProjectNotice('')
+    const confirmed = await confirmProjectAudience(spaceRef, temporaryChat())
+    if (!confirmed) throw new Error(i18n.tr('Meldingen ble ikke sendt. Utkastet er beholdt.', 'The message was not sent. Your draft is kept.'))
+    return handleComposerSubmit(submission)
+  }
+  // Temporary chat writes no thread, so it cannot be turned on for a project.
+  const setTemporaryFromComposer = (value: boolean) => {
+    if (value && projectRef()) {
+      setProjectNotice(projectRefusalMessage('temporary'))
+      return
+    }
+    setTemporaryChat(value)
+  }
 
   // "Planlegg dette" (chat-wave2 "schedule" spec §2.1) — the message-action
   // entry point. `resolveScheduleSeedForTurn` reuses `rerunAsNewTurn`'s own
@@ -240,48 +314,95 @@ export default function ChatPage() {
   })
 
   const composer = () => (
-    <DashboardComposer
-      appearance="chat"
-      browseWeb={browseWeb()}
-      sourceScope={sourceScope()}
-      onSourceScopeChange={setSourceScope}
-      sourceScopeLocked={state.turns.length > 0}
-      retrievalScope={retrievalScope()}
-      spaceScoped={spaceScoped()}
-      onRetrievalScopeChange={setRetrievalScope}
-      workPeriod={workPeriod()}
-      onWorkPeriodChange={setWorkPeriod}
-      imageMode={imageMode()}
-      message={input()}
-      onBrowseWebChange={setBrowseWeb}
-      onImageModeChange={setImageMode}
-      onMessageChange={setInput}
-      onPlanModeChange={setPlanMode}
-      onStop={handleStop}
-      onSubmit={submitWithWorkPeriod}
-      onTemporaryChatChange={setTemporaryChat}
-      planMode={planMode()}
-      // WS14 S2a: the third pill, shown only while an approved plan is waiting to
-      // run on this thread. The controller owns whether it is selected.
-      approvedPlan={
-        approvedPlanView()
-          ? { rungLabel: rungLabel(approvedPlanView()!.rung, i18n.tr), selected: approvedPlanView()!.selected }
-          : undefined
-      }
-      onApprovedPlanSelect={selectExecute}
-      showTurnReceipt={false}
-      submitting={isStreaming()}
-      allowMidRunSubmit
-      // ^ chat opts in: a submit during the stream is a MID-RUN message, which
-      // sendContent persists to the thread and queues into the live run
-      // (deliverMidRun). Without it the composer swallowed Enter for the whole
-      // stream and the queued-input arc had no reachable client.
-      temporaryChat={temporaryChat()}
-      temporaryChatLocked={temporaryChatLocked()}
-      disabled={isForeignOriginThread()}
-      onKnowledgeImport={importAttachmentsToKnowledge}
-      voiceReply={voiceReply()}
-    />
+    <>
+      <Show when={projectRef() || projectNotice() || audienceAsk()}>
+        <div class="verevon-chat-project-strip">
+          <Show when={projectRef()}>
+            <p class="verevon-chat-project-chip" role="status">
+              <span>{i18n.tr('Prosjekt', 'Project')}: {projectName()}</span>
+              <Show when={!state.threadId}>
+                <button
+                  type="button"
+                  class="verevon-chat-project-chip__clear"
+                  aria-label={i18n.tr('Fjern prosjektvalget', 'Remove the project choice')}
+                  onClick={() => setProjectSpaceRef(null)}
+                >
+                  <X class="size-3" aria-hidden="true" />
+                </button>
+              </Show>
+            </p>
+          </Show>
+          <Show when={sandboxNoticeVisible()}>
+            <p class="verevon-chat-project-notice" role="note">
+              {i18n.tr(
+                'Sandkasse-verktøy er av i delte prosjektrom, så Utfør-kjøringer her kan ikke bruke dem.',
+                'Sandbox tools are off in shared project rooms, so Do runs here cannot use them.',
+              )}
+            </p>
+          </Show>
+          <Show when={projectNotice()}>
+            <p class="verevon-chat-project-notice" role="status">{projectNotice()}</p>
+          </Show>
+          <Show when={audienceAsk()}>
+            {(ask) => (
+              <div class="verevon-chat-project-ask" role="alertdialog" aria-live="assertive">
+                <p>
+                  {ask().members === null
+                    ? i18n.tr(`Alle som kan lese ${ask().name}, ser denne meldingen.`, `Everyone who can read ${ask().name} will see this message.`)
+                    : i18n.tr(`${ask().members} medlemmer i ${ask().name} ser denne meldingen.`, `${ask().members} members of ${ask().name} will see this message.`)}
+                </p>
+                <div>
+                  <button type="button" onClick={() => ask().settle(true)}>{i18n.tr('Send', 'Send')}</button>
+                  <button type="button" onClick={() => ask().settle(false)}>{i18n.tr('Avbryt', 'Cancel')}</button>
+                </div>
+              </div>
+            )}
+          </Show>
+        </div>
+      </Show>
+      <DashboardComposer
+        appearance="chat"
+        browseWeb={browseWeb()}
+        sourceScope={sourceScope()}
+        onSourceScopeChange={setSourceScope}
+        sourceScopeLocked={state.turns.length > 0}
+        retrievalScope={retrievalScope()}
+        spaceScoped={spaceScoped()}
+        onRetrievalScopeChange={setRetrievalScope}
+        workPeriod={workPeriod()}
+        onWorkPeriodChange={setWorkPeriod}
+        imageMode={imageMode()}
+        message={input()}
+        onBrowseWebChange={setBrowseWeb}
+        onImageModeChange={setImageMode}
+        onMessageChange={setInput}
+        onPlanModeChange={setPlanMode}
+        onStop={handleStop}
+        onSubmit={submitWithWorkPeriod}
+        onTemporaryChatChange={setTemporaryFromComposer}
+        planMode={planMode()}
+        // WS14 S2a: the third pill, shown only while an approved plan is waiting to
+        // run on this thread. The controller owns whether it is selected.
+        approvedPlan={
+          approvedPlanView()
+            ? { rungLabel: rungLabel(approvedPlanView()!.rung, i18n.tr), selected: approvedPlanView()!.selected }
+            : undefined
+        }
+        onApprovedPlanSelect={selectExecute}
+        showTurnReceipt={false}
+        submitting={isStreaming()}
+        allowMidRunSubmit
+        // ^ chat opts in: a submit during the stream is a MID-RUN message, which
+        // sendContent persists to the thread and queues into the live run
+        // (deliverMidRun). Without it the composer swallowed Enter for the whole
+        // stream and the queued-input arc had no reachable client.
+        temporaryChat={temporaryChat()}
+        temporaryChatLocked={temporaryChatLocked()}
+        disabled={isForeignOriginThread()}
+        onKnowledgeImport={importAttachmentsToKnowledge}
+        voiceReply={voiceReply()}
+      />
+    </>
   )
   // ONE composer for the page, created once and moved between the empty
   // state and the thread dock below. With one per layout, the first message

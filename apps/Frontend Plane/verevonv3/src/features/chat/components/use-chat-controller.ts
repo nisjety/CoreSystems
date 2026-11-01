@@ -34,6 +34,15 @@ import {
   type ChatThreadTranscriptStep,
   type ChatThreadTranscriptTurn,
 } from '@/features/chat/lib/chat-thread-history'
+import {
+  CHAT_PROJECT_START_EVENT,
+  chatProjectsEnabled,
+  projectThreadRef,
+  rememberProjectThread,
+  takeChatProjectStart,
+} from '@/features/chat/lib/chat-projects'
+import { projectTurnsFromTranscript, requestedProjectRef } from './use-chat-project'
+import { getSpaceThreadTranscript, type SpaceThreadTranscript } from '@/shared/api/spaces-client'
 import { hydratablePlan } from '@/features/chat/lib/chat-plan-hydration'
 import { registerReloadGuard } from '@/app/chunk-recovery'
 import { isLocalRetentionAllowed } from '@/features/chat/lib/chat-retention'
@@ -391,6 +400,10 @@ export function useChatController() {
   // top of `writeThreadSnapshot`.
   const [temporaryChat, setTemporaryChat] = createSignal(false)
   const [temporaryThreadIds, setTemporaryThreadIds] = createSignal<ReadonlySet<string>>(new Set())
+  // WS18-S4: the project a new chat will be started in, picked from the sidebar. It
+  // applies only while there is no thread yet; an open thread's own project is in
+  // `scopedThreadRefs`.
+  const [projectSpaceRef, setProjectSpaceRef] = createSignal<string | null>(null)
   // This is a non-authoritative UI routing hint only. The BFF strips it and
   // re-resolves current Control evidence on every scoped append; keeping it in
   // memory makes a newly-created scoped thread continue to send the selected
@@ -753,6 +766,9 @@ export function useChatController() {
     // After unmount, this is a late write from a stream or wait that was
     // still unwinding; see `disposed`.
     if (disposed) return
+    // A project thread is a room's record. Chat's history, its local transcript and the
+    // server snapshot hold none of it: the room is read back on every open (WS18-S4).
+    if (chatProjectsEnabled() && scopedThreadRefs.has(threadId)) return
     const stableTurns = untrack(() => snapshot(turns))
     const stableTaskSteps = untrack(() => snapshot(taskSteps ?? state.taskSteps))
     // Temporary (ZDR) chat: never persisted, full stop. This is the single
@@ -1223,12 +1239,49 @@ export function useChatController() {
       : getThreadMessages(threadId).then((messages) => ({ messages, hasMore: false }))
   )
 
+  /**
+   * WS18-S4. A project thread is a room's record, not one of Chat's own threads: the
+   * chat transcript and message reads only find threads in Chat's own listing. Its
+   * turns come from the room's transcript route, which asks Control whether the caller
+   * may read the room. Live-run following, approvals and plan hydration stay with
+   * Chat's own threads.
+   */
+  const loadProjectThread = async (threadId: string, spaceRef: string, seq: number) => {
+    let transcript: SpaceThreadTranscript | null = null
+    try {
+      transcript = await getSpaceThreadTranscript(spaceRef, threadId)
+    } catch {
+      transcript = null
+    }
+    if (seq !== threadLoadSequence || state.threadId !== threadId) return
+    hydratingThreadId = null
+    const turns = fillMissingTurnTimestamps(projectTurnsFromTranscript(threadId, transcript?.turns ?? []), threadId)
+    setState((s) => {
+      s.turns = turns
+      s.taskSteps = []
+      s.error = transcript ? null : i18n.tr(
+        'Prosjektsamtalen kunne ikke åpnes. Du har kanskje ikke lenger tilgang til rommet.',
+        'The project conversation could not be opened. You may no longer have access to the room.',
+      )
+    })
+    resetUiEvents()
+    setTraceReplayTruncated(false)
+  }
+
   const loadThread = async (threadId: string) => {
     // The active-thread event for a newly-created conversation is a
     // confirmation, not a request to replace the optimistic live transcript.
     // In particular, do this before aborting `abortController`: session-core
     // may still be indexing the new thread's messages for a few milliseconds.
     if (isStartingThread(threadId)) return
+    // A project thread's scope is recorded before `threadId` moves into state, so the
+    // project chip reads it from the first render of the thread. With the switch off the
+    // branch is never taken: `scopedThreadRefs` can already hold the Space of an origin=space
+    // thread (read from its session below), and that thread must keep Chat's transcript route.
+    const knownProjectRef = chatProjectsEnabled()
+      ? (scopedThreadRefs.get(threadId) ?? projectThreadRef(threadId))
+      : undefined
+    if (knownProjectRef) scopedThreadRefs.set(threadId, knownProjectRef)
     // Switching threads must tear down the previously-selected thread's
     // in-flight stream/resume and reset the shared view machine. Left running,
     // that stream's terminal handlers keep mutating the store after
@@ -1273,6 +1326,10 @@ export function useChatController() {
         ? storedTitle.title.trim()
         : null,
     )
+    if (knownProjectRef) {
+      await loadProjectThread(threadId, knownProjectRef, seq)
+      return
+    }
     // WS09 S6. With VITE_CHAT_PARALLEL_THREAD_LOAD=true the reads go out together.
     // The messages read is awaited further down; `void ...catch` keeps it from
     // rejecting unhandled when a thread switch leaves it unawaited. The transcript
@@ -2139,6 +2196,8 @@ export function useChatController() {
         // invalidates a mount-time restore that captured an older pointer.
         threadSelectionRevision += 1
         if (!threadId) {
+          // A fresh chat forgets the project picked for the previous one.
+          setProjectSpaceRef(null)
           resetChatState()
           return
         }
@@ -2150,6 +2209,17 @@ export function useChatController() {
       }
       window.addEventListener(CHAT_ACTIVE_THREAD_CHANGED_EVENT, handleActiveThreadChange)
 
+      // WS18-S4: the sidebar asks for a new chat in a project. The page may not be
+      // mounted when it asks, so the tab's pending start is taken here as well.
+      const handleProjectStart = (event?: Event) => {
+        const stored = takeChatProjectStart()
+        const requested = event ? (event as CustomEvent<{ spaceRef?: string }>).detail?.spaceRef : undefined
+        const spaceRef = requested || stored
+        if (spaceRef && chatProjectsEnabled()) setProjectSpaceRef(spaceRef)
+      }
+      window.addEventListener(CHAT_PROJECT_START_EVENT, handleProjectStart)
+      handleProjectStart()
+
       const initializeChat = async () => {
         // A Space Activity link is URL-addressable across a browser restart. It
         // may choose the requested view but never grants it: `loadThread` still
@@ -2160,6 +2230,11 @@ export function useChatController() {
         const bootstrapSelectionRevision = threadSelectionRevision
         if (storedThread && bootstrapSelectionRevision === threadSelectionRevision) {
           if (untrack(() => isTemporaryThread(storedThread))) {
+            await loadThread(storedThread)
+          } else if (projectThreadRef(storedThread)) {
+            // A project thread is not in Chat's own listing, so that listing cannot
+            // prove it. Its routing hint lets it resume, and the room's transcript
+            // route decides what the caller may read.
             await loadThread(storedThread)
           } else {
             // A stored or deep-linked pointer is only trusted as far as Chat's
@@ -2261,7 +2336,10 @@ export function useChatController() {
 
       void initializeChat()
 
-      return () => window.removeEventListener(CHAT_ACTIVE_THREAD_CHANGED_EVENT, handleActiveThreadChange)
+      return () => {
+        window.removeEventListener(CHAT_ACTIVE_THREAD_CHANGED_EVENT, handleActiveThreadChange)
+        window.removeEventListener(CHAT_PROJECT_START_EVENT, handleProjectStart)
+      }
     },
   )
 
@@ -2782,23 +2860,29 @@ export function useChatController() {
     // whatever the composer toggle does afterward.
     const isNewThread = !state.threadId
     // `?space_ref=` used to be read from the URL here to scope a NEW chat to a
-    // Space. Removed rather than kept: nothing in the app has ever produced
-    // such a link (every `/chat?` href is `thread_id`), so the only way to
-    // reach it was to hand-craft the URL — and the design explicitly wants
-    // FEWER `/chat` entry points from other surfaces, with Space-scoped
-    // conversations living in the Space's own timeline (which is what the
-    // `origin == "chat"` history filter enforces). The BFF still honours a
-    // `space_ref` in the body and still authorizes it via `resolve_space_role`,
-    // so a future Space-scoped composer has its plumbing intact; what is gone
-    // is the unreachable URL entry point.
+    // Space. It stays removed: nothing in the app produced such a link, and a URL
+    // is not a grant. A project chat (WS18-S4) starts from the Projects section
+    // instead, behind GATEWAY_CHAT_PROJECTS_ENABLED. Chat's own history still lists
+    // only `origin == "chat"` threads, so a project thread is never in it: it is
+    // reached from its project and reopened by its routing hint. The BFF honours a
+    // `space_ref` in the body only through `resolve_space_role`.
     //
     // `scopedThreadRefs` is a different mechanism and stays: it carries the ref
-    // of a thread the server already reports as scoped, recovered in
-    // `loadThread`, so resuming such a thread remains appendable.
-    const requestedSpaceRef = scopedThreadRefs.get(activeThreadId)
+    // of a thread that belongs to a project, recovered in `loadThread` from its
+    // routing hint, so resuming such a thread remains appendable. WS18-S4 adds one
+    // source for a NEW chat's project: the project picked in the sidebar. Never a
+    // link, never the composer. The BFF still authorizes the ref on every turn.
+    const requestedSpaceRef = requestedProjectRef({
+      isNewThread,
+      threadRef: scopedThreadRefs.get(activeThreadId),
+      pickedRef: projectSpaceRef(),
+    })
     if (isNewThread) {
       // A pending snapshot belongs to the thread being left.
       snapshotWriter.flush()
+      // The provisional thread belongs to its project from the first send, so the
+      // project stays on screen until the durable id replaces this one.
+      if (requestedSpaceRef) scopedThreadRefs.set(activeThreadId, requestedSpaceRef)
       setState((s) => { s.threadId = activeThreadId })
       startingThreadIds.add(activeThreadId)
       if (options.zdr) markThreadTemporary(activeThreadId)
@@ -2975,6 +3059,8 @@ export function useChatController() {
       if (requestedSpaceRef) {
         scopedThreadRefs.delete(priorThreadId)
         scopedThreadRefs.set(serverThreadId, requestedSpaceRef)
+        // A project thread reopens from its project after a reload (WS18-S4).
+        if (chatProjectsEnabled()) rememberProjectThread(serverThreadId, requestedSpaceRef)
       }
       setState((s) => { s.threadId = serverThreadId })
       if (!isTemporaryThread(serverThreadId)) setActiveChatThreadId(serverThreadId)
@@ -4491,6 +4577,7 @@ export function useChatController() {
   }
 
   const startNewChat = () => {
+    setProjectSpaceRef(null)
     clearActiveChatThreadId()
     resetChatState()
   }
@@ -4591,6 +4678,11 @@ export function useChatController() {
     setSourceScope,
     retrievalScope,
     spaceScoped: () => Boolean(scopedThreadRefs.get(state.threadId ?? '')),
+    // WS18-S4: the project this page is writing to: the open thread's own project, or the
+    // pick for a chat that has no thread yet. Null for every ordinary chat.
+    activeProjectRef: () => (state.threadId ? scopedThreadRefs.get(state.threadId) ?? null : projectSpaceRef()),
+    projectSpaceRef,
+    setProjectSpaceRef,
     setRetrievalScope,
     setBrowseWeb,
     temporaryChat,

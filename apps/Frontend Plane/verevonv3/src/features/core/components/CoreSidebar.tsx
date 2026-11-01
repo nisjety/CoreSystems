@@ -92,6 +92,8 @@ import { chatAppearanceActive } from '@/features/chat/lib/chat-appearance-previe
 import { applyAttentionBadge, waitingThreadCount } from '@/features/core/lib/attention-badge'
 import { FilledRailIcon } from './FilledRailIcon'
 import { ChatSidebarOrganizer } from './sidebar/ChatSidebarOrganizer'
+import { ChatProjectsSection } from './sidebar/ChatProjectsSection'
+import { chatProjectsEnabled } from '@/features/chat/lib/chat-projects'
 import { ChatAttentionSections, attentionSectionRows } from './sidebar/ChatAttentionSections'
 import { ChatWorkLinks } from './sidebar/ChatWorkLinks'
 
@@ -869,6 +871,10 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
           which the fallback branch never renders at all. */}
       <Show when={error() && (sessionCount() > 0 || chatAppearanceActive('organizer'))}>
         <p class="core-sidebar-empty verevon-sidebar-row-normal" role="alert">{error()}</p>
+      </Show>
+      {/* WS18-S4: projects sit above the organizer and the archive toggle. Off unless the build carries the project switch. */}
+      <Show when={chatProjectsEnabled()}>
+        <ChatProjectsSection />
       </Show>
       <button
         type="button"
