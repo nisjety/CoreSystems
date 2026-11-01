@@ -2,6 +2,7 @@ import {
   type DashboardComposerSubmitPayload,
 } from '@/features/dashboard/home/DashboardComposer'
 import {
+  type AgentModeId,
   type AutonomyRung,
   type ChatAction,
   type ChatCostBasis,
@@ -503,6 +504,11 @@ export type ChatTurn = {
    */
   planMode?: boolean
   /**
+   * The agent mode this turn was sent under, when the person chose one (WS25-S11). Captured at send time, as
+   * `planMode` is, so a later picker change does not relabel a turn that already ran.
+   */
+  agentMode?: AgentModeId
+  /**
    * This turn ran the plan the person had approved (WS14 S2a): an EXECUTING run
    * under the grant the Model Plane holds for the thread, not a planning one.
    *
@@ -691,6 +697,8 @@ export type SendOptions = {
   retrievalScope?: import('@/shared/actions/chat-source-scope').RetrievalScope
   /** See `ChatInvokeRequest.connectorScope`. Per-turn, like `retrievalScope`. */
   connectorScope?: string[]
+  /** See `ChatInvokeRequest.agentMode`. Per-turn, like `connectorScope`. */
+  agentMode?: AgentModeId
   actions?: ChatAction[]
   /** Explicit provider route for a connected user-owned model subscription. */
   provider?: string

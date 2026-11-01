@@ -128,12 +128,14 @@ import {
 	verevonModeById,
 	VEREVON_BALANCE_MODE_ID,
 	VEREVON_MODES,
+	type AgentModeId,
 	type ChatThreadSession,
 	type EffortLevel,
 	type EffortProfile,
 	type ModelGroup,
 	type ModelInfo,
 } from "@/shared/api/chat-client";
+import { agentModeLabel, agentModesWithinCap } from "@/features/customize/AgentModesSection";
 import {
 	browseConnection,
 	fetchConnectionContent,
@@ -370,6 +372,11 @@ export type DashboardComposerSubmitPayload = {
      * without connected apps is unchanged on the wire.
      */
     connectorScope?: string[];
+    /**
+     * The agent mode the person picked for this send (WS25-S11). Omitted unless they picked one, so an
+     * unchanged send is byte-identical. The server resolves it strictest-wins against the org cap.
+     */
+    agentMode?: AgentModeId;
 	actions: ComposerActiveAction[];
 	attachments: DashboardComposerAttachment[];
 	model?: string;
@@ -921,6 +928,14 @@ export function DashboardComposer(props: {
 	onPlanModeChange?: (value: boolean) => void;
 	planMode?: boolean;
 	/**
+	 * The strictest agent mode the organisation allows (WS25-S11), read from the org agent policy. Present only
+	 * where that policy is on: the picker then offers this mode and every stricter one, and no other.
+	 */
+	agentModeCap?: AgentModeId;
+	/** The agent mode the parent holds for the next send. The composer keeps its own choice when unset. */
+	agentMode?: AgentModeId;
+	onAgentModeChange?: (value: AgentModeId | undefined) => void;
+	/**
 	 * A plan the person approved is waiting to run (WS14 S2a). Present only
 	 * then: the chat appearance shows a third "Kjør plan" pill beside Ask and Do.
 	 * `rungLabel` says what the agent may now do; `selected` is whether the next
@@ -1011,6 +1026,20 @@ export function DashboardComposer(props: {
 	// switch to "Kun samtalen" — mirrors the `temporaryChat()` reset pattern
 	// used elsewhere in this file.
 	createEffect(() => conversationOnly(), (restricted) => { if (restricted) setInternalRetrievalScope('auto'); });
+	// The agent mode the person picked, kept here unless the parent holds it. A choice the org cap no longer
+	// admits is dropped, so a stale mode is never offered or sent.
+	const [internalAgentMode, setInternalAgentMode] = createSignal<AgentModeId | undefined>(undefined);
+	const agentMode = () => props.agentMode ?? internalAgentMode();
+	const setAgentMode = (value: AgentModeId | undefined) => {
+		setInternalAgentMode(value);
+		props.onAgentModeChange?.(value);
+	};
+	const agentModeNotAdmitted = () => {
+		const mode = agentMode();
+		const cap = props.agentModeCap;
+		return mode !== undefined && cap !== undefined && !agentModesWithinCap(cap).includes(mode);
+	};
+	createEffect(() => agentModeNotAdmitted(), (notAdmitted) => { if (notAdmitted) setAgentMode(undefined); });
 	const browseWeb = () =>
 		!subscriptionBacked() && !zeroRetentionTurn() && (props.browseWeb ?? internalBrowseWeb());
 	const setBrowseWeb = (next: boolean | ((current: boolean) => boolean)) => {
@@ -2734,6 +2763,10 @@ export function DashboardComposer(props: {
 			? normalizeConnectorScope(connectorScope())
 			: [];
 
+		// The mode chosen for this send, read before the tier lookup may wait. Not sent in a conversation-only
+		// turn, which runs no agent.
+		const submittedAgentMode = conversationOnly() ? undefined : agentMode();
+
 		// Pending from here, so the composer is inert (and a second Enter is
 		// refused) while the tier lookup waits.
 		setHandoffPending(true);
@@ -2753,6 +2786,8 @@ export function DashboardComposer(props: {
 			}
 			// Omitted when nothing was picked, like `retrievalScope` above.
 			if (submittedConnectorScope.length > 0) payload.connectorScope = submittedConnectorScope;
+			// Omitted when nothing was picked, like `connectorScope` above.
+			if (submittedAgentMode !== undefined) payload.agentMode = submittedAgentMode;
 			if (submittedConversationOnly) {
 				payload.tools = [];
 				payload.actions = [];
@@ -3414,6 +3449,26 @@ export function DashboardComposer(props: {
 								</Show>
 							</div>
 						</Show>
+					</Show>
+					<Show when={props.agentModeCap}>
+						{(cap) => (
+							<label
+								class="dashboard-composer-agent-mode"
+								style={{ display: "inline-flex", "align-items": "center", gap: "6px", "font-size": "12px" }}
+							>
+								<span>{i18n.tr("Agentmodus", "Agent mode")}</span>
+								<select
+									aria-label={i18n.tr("Agentmodus", "Agent mode")}
+									value={agentMode() ?? cap()}
+									disabled={conversationOnly()}
+									onChange={(event) => setAgentMode(event.currentTarget.value as AgentModeId)}
+								>
+									<For each={agentModesWithinCap(cap())}>
+										{(mode) => <option value={mode}>{agentModeLabel(mode, i18n)}</option>}
+									</For>
+								</select>
+							</label>
+						)}
 					</Show>
 					<Show when={props.onTemporaryChatChange}>
 						<ComposerIconButton
