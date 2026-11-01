@@ -585,6 +585,18 @@ impl Claims {
         }
     }
 
+    /// The service id of a SERVICE principal, `None` for a user. Reads the claim only; whether the
+    /// claim set is well formed is [`Self::principal_kind`]'s question, asked by the route policy.
+    /// The rate limiter keys a service's bucket on this.
+    #[must_use]
+    pub fn service_principal_id(&self) -> Option<&str> {
+        if self.principal_type.as_deref() == Some("service") {
+            self.service_id.as_deref().filter(|id| !id.is_empty())
+        } else {
+            None
+        }
+    }
+
     /// Returns `true` if the token carries the given scope.
     pub fn has_scope(&self, scope: &str) -> bool {
         self.scopes.iter().any(|s| s == scope)
@@ -1394,12 +1406,100 @@ const CONTROL_SPACE_DELETION_SERVICE: &str = "service:control-space-deletion";
 const MAIL_TASK_BRIDGE_CALLER_SERVICE: &str = "service:verevon-gateway";
 const SERVICE_SCOPE_MAIL_TASK_PREPARE_THREAD: &str = "mail-task:prepare-thread";
 
-/// Restrict service principals to the two non-persisting unary machine routes.
+/// One row of the service route table: a service principal may call `method path` when it holds
+/// `scope` and, if `service` is set, is exactly that service. `service: None` means any service
+/// holding the scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServiceRouteGrant {
+    pub service: Option<&'static str>,
+    pub method: &'static str,
+    pub path: &'static str,
+    pub scope: &'static str,
+}
+
+/// Every route a SERVICE principal may reach (WS16.S1). Users keep the existing route policy.
+/// This table is the single source of the machine-route policy and is pinned by the golden
+/// `api/contracts/model-gateway-service-routes.json`: a route added here changes the golden in
+/// the same change, which is what lets another plane's fake gateway read the real rules.
+pub const SERVICE_ROUTE_GRANTS: &[ServiceRouteGrant] = &[
+    ServiceRouteGrant {
+        service: None,
+        method: "POST",
+        path: "/v1/ai/chat",
+        scope: SERVICE_SCOPE_MODELS_INVOKE,
+    },
+    ServiceRouteGrant {
+        service: None,
+        method: "POST",
+        path: "/v1/ai/embeddings",
+        scope: SERVICE_SCOPE_MODELS_INVOKE,
+    },
+    ServiceRouteGrant {
+        service: Some(CONTROL_SPACE_DELETION_SERVICE),
+        method: "POST",
+        path: "/v1/internal/space-deletion/threads",
+        scope: SERVICE_SCOPE_MODEL_SPACE_DELETE,
+    },
+    ServiceRouteGrant {
+        service: Some(MAIL_TASK_BRIDGE_CALLER_SERVICE),
+        method: "POST",
+        path: "/v1/internal/mail-task/prepare-thread",
+        scope: SERVICE_SCOPE_MAIL_TASK_PREPARE_THREAD,
+    },
+];
+
+/// The second bearer a service call to `/v1/ai/chat` needs, as the golden records it.
+pub const SERVICE_INFERENCE_BEARER_HEADER: &str = "x-inference-authorization";
+const SERVICE_INFERENCE_BEARER_AUDIENCE: &str = "inference-core";
+
+/// Whether `claims`, a service principal, may call `method path`.
+fn service_route_allowed(claims: &Claims, method: &str, path: &str) -> bool {
+    SERVICE_ROUTE_GRANTS.iter().any(|grant| {
+        grant.method == method
+            && grant.path == path
+            && grant.service.is_none_or(|service| claims.sub == service)
+            && claims.has_scope(grant.scope)
+    })
+}
+
+/// The route table and the second-bearer requirement as the JSON golden pins them.
+#[must_use]
+pub fn service_route_table_json() -> serde_json::Value {
+    serde_json::json!({
+        "contract": "model-gateway.service-routes",
+        "version": 1,
+        "generated_by": "model-gateway auth tests (MP_UPDATE_GOLDEN=1)",
+        "routes": SERVICE_ROUTE_GRANTS
+            .iter()
+            .map(|grant| serde_json::json!({
+                "service": grant.service,
+                "method": grant.method,
+                "path": grant.path,
+                "scope": grant.scope,
+            }))
+            .collect::<Vec<_>>(),
+        "service_inference_bearer": {
+            "header": SERVICE_INFERENCE_BEARER_HEADER,
+            "audience": SERVICE_INFERENCE_BEARER_AUDIENCE,
+            "requires_scopes": [SERVICE_SCOPE_MODELS_INVOKE],
+            "downstream_requires_scope": SERVICE_SCOPE_INFERENCE_INVOKE,
+        },
+    })
+}
+
+/// Restrict service principals to the rows of [`SERVICE_ROUTE_GRANTS`].
 /// Users retain the existing route policy. This must run after [`require_auth`].
+///
+/// A service call to `POST /v1/ai/chat` needs TWO bearers: the gateway token
+/// (`Authorization`, `aud=model-gateway`, scope `models:invoke`) and a second
+/// `x-inference-authorization` (`aud=inference-core`, scope `inference:invoke`), verified by
+/// `verify_delegated_service_inference_bearer`, which also requires its `sub` and `service_id`
+/// to equal the ingress token's. The ingress claims must pass [`Claims::principal_kind`] as a
+/// service: `service_id == sub == "service:<id>"` and a `reason` of 3 to 500 characters.
 ///
 /// # Errors
 /// Returns `401` when verified claims are absent/ambiguous and `403` when a
-/// service principal lacks the exact route or `models:invoke` scope.
+/// service principal lacks the exact route or the row's scope.
 pub async fn authorize_principal_route(req: Request, next: Next) -> Result<Response, StatusCode> {
     let claims = req
         .extensions()
@@ -1408,20 +1508,7 @@ pub async fn authorize_principal_route(req: Request, next: Next) -> Result<Respo
     match claims.principal_kind()? {
         PrincipalKind::User => Ok(next.run(req).await),
         PrincipalKind::Service => {
-            let allowed = match (req.method(), req.uri().path()) {
-                (&axum::http::Method::POST, "/v1/ai/chat" | "/v1/ai/embeddings") => {
-                    claims.has_scope(SERVICE_SCOPE_MODELS_INVOKE)
-                }
-                (&axum::http::Method::POST, "/v1/internal/space-deletion/threads") => {
-                    claims.sub == CONTROL_SPACE_DELETION_SERVICE
-                        && claims.has_scope(SERVICE_SCOPE_MODEL_SPACE_DELETE)
-                }
-                (&axum::http::Method::POST, "/v1/internal/mail-task/prepare-thread") => {
-                    claims.sub == MAIL_TASK_BRIDGE_CALLER_SERVICE
-                        && claims.has_scope(SERVICE_SCOPE_MAIL_TASK_PREPARE_THREAD)
-                }
-                _ => false,
-            };
+            let allowed = service_route_allowed(claims, req.method().as_str(), req.uri().path());
             if !allowed {
                 warn!(
                     service = %claims.sub,
@@ -3468,5 +3555,140 @@ mod tests {
         let (status, body) = send_with_headers(&headers(false)).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         clear_env();
+    }
+}
+
+/// WS16.S1: the service route table as a golden-pinned artefact. The table and the second-bearer
+/// rule are what a caller's fake gateway reads, so a route or scope added to
+/// [`SERVICE_ROUTE_GRANTS`] must change the golden in the same change.
+#[cfg(test)]
+mod service_route_table_tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    const GOLDEN_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../api/contracts/model-gateway-service-routes.json"
+    );
+
+    fn render() -> String {
+        let mut text = serde_json::to_string_pretty(&service_route_table_json())
+            .expect("the route table serializes");
+        text.push('\n');
+        text
+    }
+
+    fn pin_line(text: &str) -> String {
+        format!(
+            "{:x} *model-gateway-service-routes.json\n",
+            Sha256::digest(text.as_bytes())
+        )
+    }
+
+    /// Regenerate with `MP_UPDATE_GOLDEN=1 cargo test -p model-gateway --lib
+    /// service_route_table_matches_the_golden`; then update the digest in
+    /// `scripts/tests/zdr-contract-sync.test.sh` and re-vendor Quarry's copy.
+    #[test]
+    fn service_route_table_matches_the_golden() {
+        let generated = render();
+        let pin_path = format!("{GOLDEN_PATH}.sha256");
+        if std::env::var("MP_UPDATE_GOLDEN").is_ok_and(|value| value == "1") {
+            std::fs::create_dir_all(std::path::Path::new(GOLDEN_PATH).parent().unwrap())
+                .expect("the contracts directory");
+            std::fs::write(GOLDEN_PATH, &generated).expect("write the route table golden");
+            std::fs::write(&pin_path, pin_line(&generated)).expect("write the route table pin");
+            return;
+        }
+        let committed = std::fs::read_to_string(GOLDEN_PATH).unwrap_or_else(|error| {
+            panic!(
+                "cannot read {GOLDEN_PATH} ({error}). Generate it with MP_UPDATE_GOLDEN=1 cargo test \
+                 -p model-gateway --lib service_route_table_matches_the_golden"
+            )
+        });
+        assert!(
+            !committed.contains('\r'),
+            "the route table golden must keep LF line endings (it is hashed byte for byte)"
+        );
+        assert_eq!(
+            committed, generated,
+            "SERVICE_ROUTE_GRANTS differs from the committed golden. If the change is intended, \
+             regenerate with MP_UPDATE_GOLDEN=1, refresh the pin and Quarry's vendored copy, and \
+             update the digest in scripts/tests/zdr-contract-sync.test.sh."
+        );
+        let pin = std::fs::read_to_string(&pin_path).expect("the golden's .sha256 pin");
+        assert_eq!(pin, pin_line(&committed), "the .sha256 pin differs from the golden");
+    }
+
+    fn service(sub: &str, scopes: &[&str]) -> Claims {
+        Claims {
+            sub: sub.to_owned(),
+            iss: "test".to_owned(),
+            exp: i64::MAX,
+            org_id: "org".to_owned(),
+            user_id: String::new(),
+            nbf: None,
+            aud: None,
+            scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
+            zdr: false,
+            org_zdr: None,
+            zdr_waiver: None,
+            sovereign: None,
+            principal_type: Some("service".to_owned()),
+            service_id: Some(sub.to_owned()),
+            reason: Some("a reason".to_owned()),
+        }
+    }
+
+    /// The table keeps the semantics of the `match` it replaced: any service holding
+    /// `models:invoke` reaches the two AI routes; the two internal routes are one named service
+    /// each; nothing else (notably `/v1/invoke`) is open to a service.
+    #[test]
+    fn the_table_keeps_the_semantics_of_the_match_it_replaced() {
+        let any = service("service:anything", &["models:invoke"]);
+        assert!(service_route_allowed(&any, "POST", "/v1/ai/chat"));
+        assert!(service_route_allowed(&any, "POST", "/v1/ai/embeddings"));
+        assert!(!service_route_allowed(&any, "GET", "/v1/ai/chat"));
+        assert!(!service_route_allowed(&any, "POST", "/v1/invoke"));
+        assert!(!service_route_allowed(&any, "POST", "/v1/invoke/stream"));
+        let no_scope = service("service:anything", &[]);
+        assert!(!service_route_allowed(&no_scope, "POST", "/v1/ai/chat"));
+
+        let deletion = service("service:control-space-deletion", &["model:space-delete"]);
+        assert!(service_route_allowed(&deletion, "POST", "/v1/internal/space-deletion/threads"));
+        let imposter = service("service:control-space-deletion-copy", &["model:space-delete"]);
+        assert!(!service_route_allowed(&imposter, "POST", "/v1/internal/space-deletion/threads"));
+        assert!(!service_route_allowed(&deletion, "POST", "/v1/ai/chat"));
+
+        let mail = service("service:verevon-gateway", &["mail-task:prepare-thread"]);
+        assert!(service_route_allowed(&mail, "POST", "/v1/internal/mail-task/prepare-thread"));
+        let wrong = service("service:someone-else", &["mail-task:prepare-thread"]);
+        assert!(!service_route_allowed(&wrong, "POST", "/v1/internal/mail-task/prepare-thread"));
+    }
+
+    #[test]
+    fn the_golden_records_the_second_bearer_and_never_opens_invoke() {
+        let table = service_route_table_json();
+        assert_eq!(table["service_inference_bearer"]["header"], "x-inference-authorization");
+        assert_eq!(table["service_inference_bearer"]["audience"], "inference-core");
+        assert_eq!(
+            table["service_inference_bearer"]["downstream_requires_scope"],
+            "inference:invoke"
+        );
+        let paths: Vec<&str> = table["routes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["path"].as_str().unwrap())
+            .collect();
+        assert!(!paths.iter().any(|path| path.starts_with("/v1/invoke")), "{paths:?}");
+    }
+
+    #[test]
+    fn service_principal_id_reads_only_a_service_claim() {
+        let svc = service("service:quarry-edge", &["models:invoke"]);
+        assert_eq!(svc.service_principal_id(), Some("service:quarry-edge"));
+        let mut user = svc.clone();
+        user.principal_type = Some("user".to_owned());
+        assert_eq!(user.service_principal_id(), None);
     }
 }

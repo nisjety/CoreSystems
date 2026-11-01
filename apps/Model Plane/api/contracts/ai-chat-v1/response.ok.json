@@ -1,0 +1,15 @@
+{
+  "status": 200,
+  "body": {
+    "id": "01J0000000000000000000AICH",
+    "content": "{\"name\":\"Acme Widget\",\"price\":19.99}",
+    "model_used": "gpt-5-mini",
+    "provider_used": "azure",
+    "usage": {
+      "input_tokens": 412,
+      "output_tokens": 23,
+      "cost_usd": 0.000163,
+      "latency_ms": 840
+    }
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "contract": "model-gateway.service-routes",
+  "generated_by": "model-gateway auth tests (MP_UPDATE_GOLDEN=1)",
+  "routes": [
+    {
+      "method": "POST",
+      "path": "/v1/ai/chat",
+      "scope": "models:invoke",
+      "service": null
+    },
+    {
+      "method": "POST",
+      "path": "/v1/ai/embeddings",
+      "scope": "models:invoke",
+      "service": null
+    },
+    {
+      "method": "POST",
+      "path": "/v1/internal/space-deletion/threads",
+      "scope": "model:space-delete",
+      "service": "service:control-space-deletion"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/internal/mail-task/prepare-thread",
+      "scope": "mail-task:prepare-thread",
+      "service": "service:verevon-gateway"
+    }
+  ],
+  "service_inference_bearer": {
+    "audience": "inference-core",
+    "downstream_requires_scope": "inference:invoke",
+    "header": "x-inference-authorization",
+    "requires_scopes": [
+      "models:invoke"
+    ]
+  },
+  "version": 1
+}

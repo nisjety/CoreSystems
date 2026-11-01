@@ -845,6 +845,46 @@ mod tests {
         assert_eq!(service.budget_user_id(), "");
     }
 
+    /// WS16.S1: the second bearer a machine caller of the gateway's `/v1/ai/chat` presents.
+    /// `service:quarry-edge` holds `inference:invoke` and `models:invoke`; the first authorises
+    /// provider execution here, the second is what the gateway's route table checks upstream.
+    #[tokio::test]
+    async fn a_service_token_with_both_scopes_is_admitted() {
+        let verifier = verifier("key-both").await;
+        let mut claims = service_claims();
+        claims["sub"] = json!("service:quarry-edge");
+        claims["service_id"] = json!("service:quarry-edge");
+        claims["reason"] = json!("extract structured data from page text");
+        claims["scopes"] = json!(["inference:invoke", "models:invoke"]);
+        claims["zdr"] = json!(false);
+        let token = sign(&claims, "key-both");
+        let principal = verifier
+            .authenticate(&request(&token))
+            .await
+            .expect("a service token with both scopes authenticates");
+        assert_eq!(principal.subject, "service:quarry-edge");
+        assert_eq!(principal.user_id, None);
+        assert!(principal.authorize_org("org-1").is_ok());
+        assert!(principal.authorize_invoke().is_ok());
+        assert!(principal.authorize_catalog().is_ok());
+        assert!(!principal.effective_zdr(false), "a non-ZDR org stays non-ZDR");
+        assert!(principal.effective_zdr(true), "the request can still make it stricter");
+        // The same token minted for another org cannot be used for org-1's request.
+        assert!(principal.authorize_org("org-2").is_err());
+
+        // Holding only the gateway scope is not provider-execution authority.
+        claims["scopes"] = json!(["models:invoke"]);
+        let token = sign(&claims, "key-both");
+        let principal = verifier
+            .authenticate(&request(&token))
+            .await
+            .expect("it still authenticates");
+        assert_eq!(
+            principal.authorize_invoke().unwrap_err().code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
     #[tokio::test]
     async fn rejects_missing_forged_wrong_standard_and_ambiguous_claims() {
         let verifier = verifier("key-2").await;

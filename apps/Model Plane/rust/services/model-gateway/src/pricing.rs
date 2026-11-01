@@ -284,6 +284,24 @@ impl PricingCache {
         }
     }
 
+    /// A cache that already holds one rate row, so a test can price a call without cost-core.
+    #[cfg(test)]
+    pub(crate) fn with_rate_for_test(model: &str, input_per_million: f64, output_per_million: f64) -> Self {
+        let cache = Self::new(None, reqwest::Client::new());
+        let mut inner = cache
+            .inner
+            .try_write()
+            .expect("a fresh cache is not locked");
+        inner.rates = vec![Rate {
+            model: model.trim().to_lowercase(),
+            input_per_million,
+            output_per_million,
+        }];
+        inner.fetched_at = Some(Instant::now());
+        drop(inner);
+        cache
+    }
+
     /// Price one call. A subscription call is never priced from API list
     /// prices. A metered call is priced against the catalogue row that matches
     /// its model; when only the `default` row matches, or there is no catalogue

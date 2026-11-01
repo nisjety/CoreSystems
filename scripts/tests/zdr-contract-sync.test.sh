@@ -202,6 +202,21 @@ GOLDENS=(
   # side map (model-access.ts) and the registry, never written by hand. Each plane that admits an agent
   # action vendors it, with the pin beside it, in the VENDORED rows below.
   "apps/Model Plane/api/contracts/agent-action-admission.json|13f3b72a93c68868b6a4108e1584aec2adf4d0bf40becee878d6bf548d38eb3e"
+
+  # WS16.S1: the route table a SERVICE principal may reach on model-gateway (SERVICE_ROUTE_GRANTS) plus the
+  # second-bearer rule for POST /v1/ai/chat. GENERATED from the real table by model-gateway's auth tests,
+  # never written by hand:
+  #   MP_UPDATE_GOLDEN=1 cargo test -p model-gateway --lib service_route_table_matches_the_golden
+  # in "apps/Model Plane/rust" (it also rewrites the .sha256 pin beside it). Then update the digest here and
+  # re-vendor Quarry's copy.
+  "apps/Model Plane/api/contracts/model-gateway-service-routes.json|f4965cb3b7ecb0390aa5520fd9af4ef25663216b42570a4efce9f6d981de2f10"
+  # WS16.S1: the ai-chat-v1 request and response fixtures (the string-typed structured_output_schema request,
+  # the 200 with usage and provider, the ZDR 412 catalogue body, the 403). AUTHORED data owned by the Model
+  # Plane; model-gateway's ai_chat_lane_tests check them against the handler and against SHA256SUMS.
+  "apps/Model Plane/api/contracts/ai-chat-v1/request.ok.json|dd75c67d10c1d4ce6d55213f2219fad961b8eebaa1c548b0195bf27d0ea5cfae"
+  "apps/Model Plane/api/contracts/ai-chat-v1/response.ok.json|d2db611e05833a3671c5663420698e3b32776a2df5a40d4afe2a3a281734163f"
+  "apps/Model Plane/api/contracts/ai-chat-v1/response.zdr-unavailable.json|58e197283b50674f7131ae9159e5a8945a18725d5113f171e401350166dd65d9"
+  "apps/Model Plane/api/contracts/ai-chat-v1/response.route-denied.json|a9df6d6e58274b351ef0c4adcbc44bc0f54615159bc34ce3bcd10c4dc505f44c"
 )
 
 # "<repo-relative copy>|<repo-relative golden>"
@@ -408,6 +423,11 @@ CONSUMERS=(
   "apps/Model Plane/api/contracts/agent-action-admission.json|execution-core|apps/Model Plane/rust/services/execution-core/|WS24-S5 (every admitted id has an owner path in the Do catalogue)"
   "apps/Model Plane/api/contracts/agent-action-admission.json|model-gateway|apps/Model Plane/rust/services/model-gateway/|WS24-S5 (every Ask-loop read arm is a contract row, and the reverse)"
   "apps/Model Plane/api/contracts/agent-action-admission.json|capability-core|apps/Model Plane/go/services/capability-core/|WS24-S5 (vendored; the admission table reads it in WS24-S6)"
+  # WS16.S1: Quarry's model client fake reads the route table and the ai-chat-v1 fixtures at
+  # crates/quarry-runtime/tests/fixtures/model-gateway-contract/ (WS16.S3, an ask in MP-ASKS.md), pending until then.
+  "apps/Model Plane/api/contracts/model-gateway-service-routes.json|quarry-runtime|apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/|WS16.S3 (the fake gateway applies the real service route table)"
+  "apps/Model Plane/api/contracts/ai-chat-v1/request.ok.json|quarry-runtime|apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/|WS16.S3 (the chat client request, string-typed schema)"
+  "apps/Model Plane/api/contracts/ai-chat-v1/response.ok.json|quarry-runtime|apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/|WS16.S3 (the chat client reads usage and provider)"
 )
 
 passes=0

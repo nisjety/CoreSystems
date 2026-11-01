@@ -1277,6 +1277,27 @@ components:
           default: false
         structured_output_schema:
           type: string
+          description: JSON Schema as a JSON-encoded STRING (an object here fails with 400).
+        zdr:
+          type: boolean
+          default: false
+        temperature:
+          type: number
+          minimum: 0.0
+          maximum: 1.0
+          description: Sampling temperature. Absent keeps 0.7. Out of range is 400.
+        max_tokens:
+          type: integer
+          minimum: 1
+          maximum: 8192
+          description: Output token ceiling. Absent keeps 4096. Out of range is 400.
+        purpose:
+          type: string
+          enum: [quarry.extract]
+          description: >-
+            Why a machine caller makes the call. Service callers only, and only
+            service:quarry-edge; any other caller sending it is 403, an unknown value 400.
+            Rides on the usage envelope so spend can be attributed.
 
     ChatMessage:
       type: object
@@ -1297,12 +1318,20 @@ components:
           type: string
         model_used:
           type: string
+        provider_used:
+          type: string
         usage:
           type: object
           properties:
             input_tokens:
               type: integer
             output_tokens:
+              type: integer
+            cost_usd:
+              type: number
+              nullable: true
+              description: Null under zero data retention, or when the model is not priced.
+            latency_ms:
               type: integer
 
     AiEmbeddingRequest:

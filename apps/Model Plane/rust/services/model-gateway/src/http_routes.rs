@@ -2236,6 +2236,7 @@ async fn cancel_run(
             // The guard above answered every ZDR posture with a refusal, so a
             // run-control event that reaches this line is persistent.
             zdr: false,
+            ..Default::default()
         };
         if let Err(error) = state
             .publisher
@@ -2310,6 +2311,7 @@ async fn resume_run(
         // The guard above answered every ZDR posture with a refusal, so a
         // run-control event that reaches this line is persistent.
         zdr: false,
+        ..Default::default()
     };
     state
         .publisher
@@ -2379,6 +2381,19 @@ struct AiChatRequest {
     structured_output_schema: Option<String>,
     #[serde(default)]
     zdr: bool,
+    /// Sampling temperature, 0.0 to 1.0 (WS16.S1). Absent keeps the 0.7 every caller had before
+    /// this field existed. Read as a plain number and range-checked by hand so a value out of
+    /// range answers 400 with a reason, not a deserialiser 422.
+    #[serde(default)]
+    temperature: Option<f64>,
+    /// Output token ceiling, 1 to 8192. Absent keeps the 4096 every caller had before.
+    #[serde(default)]
+    max_tokens: Option<i64>,
+    /// Why a machine caller makes this call. A closed set (`quarry.extract`), and only the
+    /// `service:quarry-edge` principal may name it; it rides on the usage envelope so cost-core
+    /// can attribute the spend.
+    #[serde(default)]
+    purpose: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2892,13 +2907,181 @@ fn truncate_for_prompt(value: &str, max_chars: usize) -> String {
     out
 }
 
+/// `AiChatRequest::temperature` when the caller sends none.
+const AI_CHAT_DEFAULT_TEMPERATURE: f32 = 0.7;
+/// `AiChatRequest::max_tokens` when the caller sends none.
+const AI_CHAT_DEFAULT_MAX_TOKENS: i32 = 4096;
+/// The ceiling a caller may ask for.
+const AI_CHAT_MAX_TOKENS_CEILING: i64 = 8192;
+/// The one `purpose` value, and the one principal allowed to name it.
+const AI_CHAT_PURPOSE_QUARRY_EXTRACT: &str = "quarry.extract";
+const AI_CHAT_PURPOSE_CALLER: &str = "service:quarry-edge";
+
+/// `MODEL_GATEWAY_AI_CHAT_METERING`: whose `/v1/ai/chat` calls publish a `USAGE_ENVELOPE`.
+///
+/// The build plan's default is `service`; the owner rule is that new behaviour starts off, so the
+/// default here is `off` (assumed decision, recorded in the progress file). Rolling it out is
+/// `MODEL_GATEWAY_AI_CHAT_METERING=service`. `all` also meters user callers, which changes user
+/// accounting and is therefore not a default of anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum AiChatMetering {
+    #[default]
+    Off,
+    Service,
+    All,
+}
+
+impl AiChatMetering {
+    /// Anything other than the literal `service` or `all` is `off`.
+    fn parse(raw: Option<&str>) -> Self {
+        match raw.map(|value| value.trim().to_ascii_lowercase()).as_deref() {
+            Some("service") => Self::Service,
+            Some("all") => Self::All,
+            _ => Self::Off,
+        }
+    }
+
+    const fn meters(self, service_caller: bool) -> bool {
+        match self {
+            Self::Off => false,
+            Self::Service => service_caller,
+            Self::All => true,
+        }
+    }
+}
+
+/// The switch, read once per process.
+fn ai_chat_metering() -> AiChatMetering {
+    static MODE: std::sync::OnceLock<AiChatMetering> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| {
+        AiChatMetering::parse(env::var("MODEL_GATEWAY_AI_CHAT_METERING").ok().as_deref())
+    })
+}
+
+/// The validated sampling parameters of one `/v1/ai/chat` call.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct AiChatParams {
+    temperature: f32,
+    max_tokens: i32,
+    purpose: Option<&'static str>,
+}
+
+fn ai_chat_bad_request(error: &str) -> HttpJsonError {
+    (StatusCode::BAD_REQUEST, Json(json!({ "error": error })))
+}
+
+/// Validate the additive fields. Absent fields keep today's values exactly.
+fn ai_chat_params(req: &AiChatRequest, claims: &Claims) -> Result<AiChatParams, HttpJsonError> {
+    let temperature = match req.temperature {
+        None => AI_CHAT_DEFAULT_TEMPERATURE,
+        Some(value) if value.is_finite() && (0.0..=1.0).contains(&value) => {
+            // The range check above makes the narrowing safe for a sampling knob.
+            #[allow(clippy::cast_possible_truncation)]
+            let narrowed = value as f32;
+            narrowed
+        }
+        Some(_) => return Err(ai_chat_bad_request("temperature must be between 0.0 and 1.0")),
+    };
+    let max_tokens = match req.max_tokens {
+        None => AI_CHAT_DEFAULT_MAX_TOKENS,
+        Some(value) if (1..=AI_CHAT_MAX_TOKENS_CEILING).contains(&value) => {
+            i32::try_from(value).unwrap_or(AI_CHAT_DEFAULT_MAX_TOKENS)
+        }
+        Some(_) => return Err(ai_chat_bad_request("max_tokens must be between 1 and 8192")),
+    };
+    let purpose = match req.purpose.as_deref() {
+        None => None,
+        Some(purpose) => {
+            // Service callers only, and only the one named service. A user token that sends a
+            // purpose is refused rather than ignored, so the field can never read as accepted.
+            if claims.service_principal_id().is_none() || claims.sub != AI_CHAT_PURPOSE_CALLER {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(json!({ "error": "purpose is not permitted for this caller" })),
+                ));
+            }
+            if purpose != AI_CHAT_PURPOSE_QUARRY_EXTRACT {
+                return Err(ai_chat_bad_request("unknown purpose"));
+            }
+            Some(AI_CHAT_PURPOSE_QUARRY_EXTRACT)
+        }
+    };
+    Ok(AiChatParams {
+        temperature,
+        max_tokens,
+        purpose,
+    })
+}
+
+/// The `USAGE_ENVELOPE` of one metered `/v1/ai/chat` call: the shape `grpc.rs` and `invoke`
+/// publish, plus `route` and `purpose` so cost-core can tell this lane from chat.
+fn ai_chat_usage_envelope(
+    request_id: &str,
+    claims: &Claims,
+    infer: &mp_contracts::model_plane::v1::InferResponse,
+    latency_ms: u64,
+    purpose: Option<&str>,
+    cost_basis: crate::pricing::CostBasis,
+) -> Envelope {
+    // A service is attributed by its subject, a user by their id.
+    let user_id = if claims.service_principal_id().is_some() {
+        claims.sub.clone()
+    } else {
+        claims.user_id.clone()
+    };
+    Envelope {
+        event_id: new_ulid(),
+        event_type: "USAGE_ENVELOPE".to_owned(),
+        schema_version: 1,
+        ts: Utc::now(),
+        producer: "model-gateway".to_owned(),
+        correlation_id: request_id.to_owned(),
+        causation_id: String::new(),
+        idempotency_key: format!("{request_id}-USAGE_ENVELOPE"),
+        org_id: claims.org_id.clone(),
+        user_id: user_id.clone(),
+        resource_ref: format!("request/{request_id}"),
+        payload: json!({
+            "request_id": request_id,
+            "org_id": claims.org_id,
+            "user_id": user_id,
+            "model": infer.model_used,
+            "input_tokens": infer.input_tokens,
+            "output_tokens": infer.output_tokens,
+            "latency_ms": latency_ms,
+            "transport": "http",
+            "route": "ai_chat",
+            "purpose": purpose,
+            "provider_used": infer.provider_used,
+            "residency": infer.residency,
+            "cache_read_input_tokens": infer.cache_read_input_tokens,
+            "cache_creation_input_tokens": infer.cache_creation_input_tokens,
+            "cost_basis": cost_basis.as_str(),
+        }),
+        zdr: false,
+        ..Default::default()
+    }
+}
+
 async fn ai_chat(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<AiChatRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    ai_chat_with(state, claims, inference_bearer, req, ai_chat_metering()).await
+}
+
+async fn ai_chat_with(
+    state: AppState,
+    claims: Claims,
+    inference_bearer: VerifiedInferenceBearer,
+    req: AiChatRequest,
+    metering: AiChatMetering,
+) -> Result<Json<Value>, HttpJsonError> {
     use mp_contracts::model_plane::v1::{ChatMessage, InferRequest};
+    // Bad sampling fields and a purpose the caller may not name are refused before anything else.
+    let params = ai_chat_params(&req, &claims)?;
     // The posture of this turn, through the resolver: a ZDR turn that names the caller's own
     // connection is refused here, typed, before any model call, and a waiver is honoured only on
     // the connection it names (see `zdr_posture`). Without this, a connection id with no provider
@@ -2921,6 +3104,9 @@ async fn ai_chat(
         })
         .collect();
     let request_id = new_ulid();
+    let (provider_hint, connection_id) =
+        (req.provider.clone(), req.subscription_connection_id.clone());
+    let started = std::time::Instant::now();
     let resp = state
         .inference_client
         .clone()
@@ -2932,8 +3118,8 @@ async fn ai_chat(
                 provider_hint: req.provider,
                 subscription_connection_id: req.subscription_connection_id,
                 messages,
-                temperature: 0.7,
-                max_tokens: 4096,
+                temperature: params.temperature,
+                max_tokens: params.max_tokens,
                 structured_output_schema: req.structured_output_schema.unwrap_or_default(),
                 zdr,
                 ..Default::default()
@@ -2943,11 +3129,54 @@ async fn ai_chat(
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
+    let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    // A subscription call is never priced from API list prices.
+    let cost_basis = crate::pricing::CostBasis::of_route(&provider_hint, &connection_id)
+        .served_by(&resp.provider_used);
+    // Under ZDR nothing about the call is priced, metered or ledgered: the cost is null.
+    let cost_usd = if zdr {
+        None
+    } else {
+        state
+            .pricing
+            .cost_usd_for(
+                cost_basis,
+                &resp.model_used,
+                i64::from(resp.input_tokens.max(0)),
+                i64::from(resp.output_tokens.max(0)),
+                i64::from(resp.cache_read_input_tokens.max(0)),
+                i64::from(resp.cache_creation_input_tokens.max(0)),
+            )
+            .await
+    };
+    if !zdr && metering.meters(claims.service_principal_id().is_some()) {
+        let envelope = ai_chat_usage_envelope(
+            &request_id,
+            &claims,
+            &resp,
+            latency_ms,
+            params.purpose,
+            cost_basis,
+        );
+        if let Err(error) = state
+            .publisher
+            .publish(&subjects::usage_subject(&claims.org_id), &envelope)
+            .await
+        {
+            warn!(%error, "failed to publish ai_chat USAGE_ENVELOPE");
+        }
+    }
     Ok(Json(json!({
         "id": request_id,
         "content": resp.content,
         "model_used": resp.model_used,
-        "usage": { "input_tokens": resp.input_tokens, "output_tokens": resp.output_tokens },
+        "provider_used": resp.provider_used,
+        "usage": {
+            "input_tokens": resp.input_tokens,
+            "output_tokens": resp.output_tokens,
+            "cost_usd": cost_usd,
+            "latency_ms": latency_ms,
+        },
     })))
 }
 
@@ -7902,6 +8131,7 @@ async fn ingest_feedback(
         // The guard at the top of this handler answered every ZDR posture with a refusal,
         // so the feedback event that reaches this line is persistent.
         zdr: false,
+        ..Default::default()
     };
     state
         .publisher
@@ -11728,6 +11958,7 @@ async fn invoke(
             "model": normalized.model,
         }),
         zdr: effective_zdr,
+        ..Default::default()
     };
 
     if let Err(error) = state
@@ -11936,6 +12167,7 @@ async fn invoke(
             "cost_basis": cost_basis.as_str(),
         }),
         zdr: effective_zdr,
+        ..Default::default()
     };
 
     if let Err(e) = state
@@ -14460,8 +14692,10 @@ mod speech_route_tests {
     /// refuses speech that asks for zero retention. `attested` stands for a
     /// future attested deployment that serves ZDR speech.
     #[derive(Clone, Default)]
-    struct SpeechInference {
+    pub(super) struct SpeechInference {
         attested: bool,
+        /// When set, `infer` answers with this instead of the clean-up stand-in (the ai_chat tests).
+        reply: Arc<Mutex<Option<pb::InferResponse>>>,
         transcribe: Arc<Mutex<Vec<pb::TranscribeSpeechRequest>>>,
         synthesize: Arc<Mutex<Vec<pb::SynthesizeSpeechRequest>>>,
         infer: Arc<Mutex<Vec<pb::InferRequest>>>,
@@ -14488,7 +14722,11 @@ mod speech_route_tests {
             self.synthesize.lock().expect("synthesis capture").clone()
         }
 
-        fn cleanups(&self) -> Vec<pb::InferRequest> {
+        pub(super) fn answering(&self, reply: pb::InferResponse) {
+            *self.reply.lock().expect("reply setting") = Some(reply);
+        }
+
+        pub(super) fn cleanups(&self) -> Vec<pb::InferRequest> {
             self.infer.lock().expect("clean-up capture").clone()
         }
     }
@@ -14512,6 +14750,9 @@ mod speech_route_tests {
                 .lock()
                 .expect("clean-up capture")
                 .push(request.into_inner());
+            if let Some(reply) = self.reply.lock().expect("reply setting").clone() {
+                return Ok(tonic::Response::new(reply));
+            }
             Ok(tonic::Response::new(pb::InferResponse {
                 content: "Hei der.".to_owned(),
                 model_used: "cleanup-model".to_owned(),
@@ -14686,7 +14927,7 @@ mod speech_route_tests {
     }
 
     /// An `AppState` whose inference client talks to `inference`.
-    async fn state_with(inference: SpeechInference) -> AppState {
+    pub(super) async fn state_with(inference: SpeechInference) -> AppState {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind inference stand-in");
@@ -14730,7 +14971,7 @@ mod speech_route_tests {
         }
     }
 
-    fn bearer() -> VerifiedInferenceBearer {
+    pub(super) fn bearer() -> VerifiedInferenceBearer {
         VerifiedInferenceBearer::for_test("inference-test-bearer")
     }
 
@@ -16217,5 +16458,332 @@ mod run_replay_projection_tests {
             r#"{"run_id":"run-1"}"#,
         );
         assert!(project_run_replay_event("run-1", unrelated).is_none());
+    }
+}
+
+#[cfg(test)]
+mod ai_chat_lane_tests {
+    //! WS16.S1: `POST /v1/ai/chat` as a machine route. The handler runs against a real inference
+    //! stand-in (the speech tests' gRPC server, which records every `InferRequest`), so what these
+    //! tests assert is what inference-core would have received and what the bus would have carried.
+    use super::speech_route_tests::{bearer, state_with, SpeechInference};
+    use super::*;
+    use mp_contracts::model_plane::v1 as pb;
+
+    fn user(zdr: bool) -> Claims {
+        Claims {
+            sub: "user-a".to_owned(),
+            iss: "test-issuer".to_owned(),
+            exp: i64::MAX,
+            org_id: "org-a".to_owned(),
+            user_id: "user-a".to_owned(),
+            nbf: None,
+            aud: Some("model-gateway".to_owned()),
+            scopes: Vec::new(),
+            zdr,
+            sovereign: None,
+            org_zdr: None,
+            zdr_waiver: None,
+            principal_type: Some("user".to_owned()),
+            service_id: None,
+            reason: None,
+        }
+    }
+
+    fn service(sub: &str, zdr: bool) -> Claims {
+        Claims {
+            sub: sub.to_owned(),
+            iss: "test-issuer".to_owned(),
+            exp: i64::MAX,
+            org_id: "org-a".to_owned(),
+            user_id: String::new(),
+            nbf: None,
+            aud: Some("model-gateway".to_owned()),
+            scopes: vec!["models:invoke".to_owned()],
+            zdr,
+            sovereign: None,
+            org_zdr: None,
+            zdr_waiver: None,
+            principal_type: Some("service".to_owned()),
+            service_id: Some(sub.to_owned()),
+            reason: Some("extract structured data from page text".to_owned()),
+        }
+    }
+
+    fn quarry(zdr: bool) -> Claims {
+        service("service:quarry-edge", zdr)
+    }
+
+    fn request(extra: Value) -> AiChatRequest {
+        let mut body = json!({
+            "messages": [{ "role": "user", "content": "extract the title" }],
+            "model": "test-model",
+        });
+        for (key, value) in extra.as_object().expect("extra fields are an object") {
+            body[key] = value.clone();
+        }
+        serde_json::from_value(body).expect("an ai_chat body parses")
+    }
+
+    fn reply() -> pb::InferResponse {
+        pb::InferResponse {
+            content: "{\"title\":\"Hello\"}".to_owned(),
+            model_used: "test-model".to_owned(),
+            provider_used: "azure".to_owned(),
+            input_tokens: 1000,
+            output_tokens: 500,
+            ..Default::default()
+        }
+    }
+
+    async fn call(
+        inference: &SpeechInference,
+        claims: Claims,
+        extra: Value,
+        metering: AiChatMetering,
+    ) -> (AppState, Result<Json<Value>, HttpJsonError>) {
+        let mut state = state_with(inference.clone()).await;
+        state.pricing = crate::pricing::PricingCache::with_rate_for_test("test-model", 1.0, 2.0);
+        let outcome = ai_chat_with(state.clone(), claims, bearer(), request(extra), metering).await;
+        (state, outcome)
+    }
+
+    #[tokio::test]
+    async fn ai_chat_defaults_are_unchanged_without_new_fields() {
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (_, outcome) = call(&inference, user(false), json!({}), AiChatMetering::Off).await;
+        let Json(body) = outcome.expect("a plain chat call succeeds");
+
+        let sent = inference.cleanups();
+        assert_eq!(sent.len(), 1);
+        assert!((sent[0].temperature - 0.7).abs() < f32::EPSILON, "{}", sent[0].temperature);
+        assert_eq!(sent[0].max_tokens, 4096);
+        // The keys every caller already read are all still there.
+        assert_eq!(body["content"], "{\"title\":\"Hello\"}");
+        assert_eq!(body["model_used"], "test-model");
+        assert_eq!(body["usage"]["input_tokens"], 1000);
+        assert_eq!(body["usage"]["output_tokens"], 500);
+        assert!(body["id"].as_str().is_some_and(|id| !id.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn ai_chat_accepts_the_bounds_and_passes_them_through() {
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (_, outcome) = call(
+            &inference,
+            user(false),
+            json!({ "temperature": 0.0, "max_tokens": 8192 }),
+            AiChatMetering::Off,
+        )
+        .await;
+        let _ = outcome.expect("the inclusive bounds are accepted");
+        let sent = inference.cleanups();
+        assert!(sent[0].temperature.abs() < f32::EPSILON);
+        assert_eq!(sent[0].max_tokens, 8192);
+    }
+
+    #[tokio::test]
+    async fn ai_chat_rejects_temperature_above_one_and_max_tokens_above_8192() {
+        for extra in [
+            json!({ "temperature": 1.01 }),
+            json!({ "temperature": -0.1 }),
+            json!({ "max_tokens": 8193 }),
+            json!({ "max_tokens": 0 }),
+            json!({ "max_tokens": -5 }),
+        ] {
+            let inference = SpeechInference::default();
+            let (_, outcome) = call(&inference, user(false), extra.clone(), AiChatMetering::Off).await;
+            let (status, _) = outcome.expect_err("an out-of-range field is refused");
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{extra}");
+            assert!(inference.cleanups().is_empty(), "{extra}: no model call");
+        }
+    }
+
+    #[tokio::test]
+    async fn ai_chat_returns_cost_and_provider() {
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (_, outcome) = call(&inference, quarry(false), json!({}), AiChatMetering::Off).await;
+        let Json(body) = outcome.expect("a service call succeeds");
+        assert_eq!(body["provider_used"], "azure");
+        // 1000 input tokens at 1.0 per million plus 500 output tokens at 2.0 per million.
+        let cost = body["usage"]["cost_usd"].as_f64().expect("a metered call is priced");
+        assert!((cost - 0.002).abs() < 1e-9, "{cost}");
+        assert!(body["usage"]["latency_ms"].is_u64(), "{body}");
+
+        // Under ZDR the cost is null, never a number.
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (_, outcome) = call(&inference, quarry(true), json!({}), AiChatMetering::Service).await;
+        let Json(body) = outcome.expect("a ZDR service call succeeds");
+        assert!(body["usage"]["cost_usd"].is_null(), "{body}");
+        assert_eq!(body["provider_used"], "azure");
+        assert!(inference.cleanups()[0].zdr, "the ZDR flag reaches inference-core");
+    }
+
+    #[tokio::test]
+    async fn a_service_call_publishes_one_usage_envelope_and_a_zdr_call_none() {
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (state, outcome) = call(
+            &inference,
+            quarry(false),
+            json!({ "purpose": "quarry.extract" }),
+            AiChatMetering::Service,
+        )
+        .await;
+        let Json(body) = outcome.expect("the call succeeds");
+        let published = state.publisher.drain();
+        assert_eq!(published.len(), 1, "{published:?}");
+        let (subject, envelope) = &published[0];
+        assert_eq!(subject, &subjects::usage_subject("org-a"));
+        assert_eq!(envelope.event_type, "USAGE_ENVELOPE");
+        assert_eq!(envelope.producer, "model-gateway");
+        assert_eq!(envelope.org_id, "org-a");
+        assert_eq!(envelope.user_id, "service:quarry-edge");
+        let id = body["id"].as_str().expect("the response id");
+        assert_eq!(envelope.idempotency_key, format!("{id}-USAGE_ENVELOPE"));
+        assert!(!envelope.zdr);
+        assert_eq!(envelope.payload["route"], "ai_chat");
+        assert_eq!(envelope.payload["purpose"], "quarry.extract");
+        assert_eq!(envelope.payload["input_tokens"], 1000);
+        assert_eq!(envelope.payload["output_tokens"], 500);
+        assert_eq!(envelope.payload["provider_used"], "azure");
+        assert_eq!(envelope.payload["user_id"], "service:quarry-edge");
+
+        // A ZDR call publishes nothing at all.
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (state, outcome) = call(
+            &inference,
+            quarry(true),
+            json!({ "purpose": "quarry.extract" }),
+            AiChatMetering::Service,
+        )
+        .await;
+        let _ = outcome.expect("the ZDR call succeeds");
+        assert!(state.publisher.drain().is_empty(), "a ZDR call is never ledgered");
+    }
+
+    #[tokio::test]
+    async fn a_user_call_publishes_nothing_in_service_mode() {
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (state, outcome) = call(&inference, user(false), json!({}), AiChatMetering::Service).await;
+        let _ = outcome.expect("the user call succeeds");
+        assert!(state.publisher.drain().is_empty());
+
+        // `all` is the only mode that meters a user, and it attributes the user.
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (state, outcome) = call(&inference, user(false), json!({}), AiChatMetering::All).await;
+        let _ = outcome.expect("the user call succeeds");
+        let published = state.publisher.drain();
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].1.user_id, "user-a");
+        assert!(published[0].1.payload["purpose"].is_null());
+    }
+
+    /// New behaviour is off until switched on: no switch, an unknown value and `off` all meter nothing.
+    #[tokio::test]
+    async fn metering_defaults_to_off_and_only_the_literal_modes_enable_it() {
+        assert_eq!(AiChatMetering::parse(None), AiChatMetering::Off);
+        assert_eq!(AiChatMetering::parse(Some("")), AiChatMetering::Off);
+        assert_eq!(AiChatMetering::parse(Some("1")), AiChatMetering::Off);
+        assert_eq!(AiChatMetering::parse(Some("off")), AiChatMetering::Off);
+        assert_eq!(AiChatMetering::parse(Some("service")), AiChatMetering::Service);
+        assert_eq!(AiChatMetering::parse(Some(" ALL ")), AiChatMetering::All);
+
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (state, outcome) = call(&inference, quarry(false), json!({}), AiChatMetering::default()).await;
+        let _ = outcome.expect("the call succeeds");
+        assert!(state.publisher.drain().is_empty(), "a service call is unmetered by default");
+    }
+
+    const CONTRACT_DIR: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../api/contracts/ai-chat-v1"
+    );
+
+    fn contract(name: &str) -> String {
+        std::fs::read_to_string(format!("{CONTRACT_DIR}/{name}"))
+            .unwrap_or_else(|error| panic!("cannot read ai-chat-v1/{name}: {error}"))
+    }
+
+    /// The `ai-chat-v1` fixtures are what a caller's fake gateway replays (Quarry vendors them), so
+    /// they must be what this handler speaks: the request parses, with its schema as a STRING; the
+    /// ok response has exactly the keys the handler writes; the 412 is the catalogue's own body; and
+    /// the pin file matches the bytes.
+    #[tokio::test]
+    async fn the_ai_chat_v1_fixtures_are_what_the_handler_speaks() {
+        let request_text = contract("request.ok.json");
+        let request: AiChatRequest = serde_json::from_str(&request_text).expect("request.ok.json parses");
+        let schema = request.structured_output_schema.as_deref().expect("the schema is a string");
+        assert!(serde_json::from_str::<Value>(schema).is_ok_and(|v| v.is_object()));
+        assert!(
+            ai_chat_params(&request, &quarry(false)).is_ok(),
+            "the fixture request is admitted for service:quarry-edge"
+        );
+
+        // The ok response and the handler's own body have the same keys.
+        let fixture: Value = serde_json::from_str(&contract("response.ok.json")).expect("response.ok.json");
+        assert_eq!(fixture["status"], 200);
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (_, outcome) = call(&inference, quarry(false), json!({}), AiChatMetering::Off).await;
+        let Json(body) = outcome.expect("the call succeeds");
+        let keys = |value: &Value| -> Vec<String> {
+            let mut keys: Vec<String> = value.as_object().expect("an object").keys().cloned().collect();
+            keys.sort();
+            keys
+        };
+        assert_eq!(keys(&body), keys(&fixture["body"]));
+        assert_eq!(keys(&body["usage"]), keys(&fixture["body"]["usage"]));
+
+        let denied: Value = serde_json::from_str(&contract("response.route-denied.json")).expect("route-denied");
+        assert_eq!(denied["status"], 403);
+        let unavailable: Value =
+            serde_json::from_str(&contract("response.zdr-unavailable.json")).expect("zdr-unavailable");
+        assert_eq!(unavailable["status"], 412);
+        assert_eq!(
+            unavailable["body"],
+            mp_contracts::zdr_refusal::Refusal::UNAVAILABLE.json_body()
+        );
+
+        // SHA256SUMS pins every other file in the directory, byte for byte.
+        use sha2::{Digest, Sha256};
+        let sums = contract("SHA256SUMS");
+        let mut pinned = 0;
+        for line in sums.lines() {
+            let (digest, name) = line.split_once(" *").expect("`<digest> *<file>` lines");
+            let bytes = std::fs::read(format!("{CONTRACT_DIR}/{name}")).expect("a pinned file");
+            assert_eq!(digest, format!("{:x}", Sha256::digest(&bytes)), "{name}");
+            pinned += 1;
+        }
+        assert_eq!(pinned, 4);
+    }
+
+    #[tokio::test]
+    async fn purpose_is_for_service_quarry_edge_only() {
+        for (claims, purpose, expected) in [
+            (user(false), "quarry.extract", StatusCode::FORBIDDEN),
+            (service("service:someone-else", false), "quarry.extract", StatusCode::FORBIDDEN),
+            (quarry(false), "something.else", StatusCode::BAD_REQUEST),
+        ] {
+            let inference = SpeechInference::default();
+            let (_, outcome) = call(
+                &inference,
+                claims.clone(),
+                json!({ "purpose": purpose }),
+                AiChatMetering::Service,
+            )
+            .await;
+            let (status, _) = outcome.expect_err("the purpose is refused");
+            assert_eq!(status, expected, "{} / {purpose}", claims.sub);
+            assert!(inference.cleanups().is_empty(), "no model call for a refused purpose");
+        }
     }
 }

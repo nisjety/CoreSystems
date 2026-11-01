@@ -1,0 +1,14 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Extract the product name and price from the page text below. Page text: Acme Widget, 19.99 USD."
+    }
+  ],
+  "model": "",
+  "zdr": false,
+  "structured_output_schema": "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},\"price\":{\"type\":\"number\"}},\"required\":[\"name\",\"price\"]}",
+  "temperature": 0.0,
+  "max_tokens": 2048,
+  "purpose": "quarry.extract"
+}

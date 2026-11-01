@@ -251,3 +251,71 @@ func TestUsageEnvelopeDecodesCacheMissReason(t *testing.T) {
 		}
 	}
 }
+
+// WS16.S1: the gateway meters a machine caller of POST /v1/ai/chat under the org, with the
+// service subject as the user. This is the envelope model-gateway's ai_chat lane publishes for
+// service:quarry-edge (route and purpose ride beside the usual counters). It must decode, pass the
+// subject-scope checks, and land on the org's ledger with its real tokens and a price.
+func TestUsageEnvelopeDecodesAiChatServiceEnvelope(t *testing.T) {
+	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	envelope := []byte(`{
+		"event_type":"USAGE_ENVELOPE",
+		"schema_version":1,
+		"producer":"model-gateway",
+		"correlation_id":"01J0000000000000000000AICH",
+		"idempotency_key":"01J0000000000000000000AICH-USAGE_ENVELOPE",
+		"org_id":"org-a",
+		"user_id":"service:quarry-edge",
+		"resource_ref":"request/01J0000000000000000000AICH",
+		"payload":{
+			"request_id":"01J0000000000000000000AICH","org_id":"org-a","user_id":"service:quarry-edge",
+			"model":"claude-sonnet-4-6","input_tokens":412,"output_tokens":23,"latency_ms":840,
+			"transport":"http","route":"ai_chat","purpose":"quarry.extract",
+			"provider_used":"azure","residency":"",
+			"cache_read_input_tokens":0,"cache_creation_input_tokens":0,
+			"cost_basis":"metered"
+		}
+	}`)
+	entry, err := decodeUsageMessage("mp.v1.usage.org-a", envelope, now)
+	if err != nil {
+		t.Fatalf("the ai_chat service envelope was rejected: %v", err)
+	}
+	if entry.OrgID != "org-a" || entry.UserID != "service:quarry-edge" || entry.ProducerID != "model-gateway" {
+		t.Fatalf("attribution not decoded: %+v", entry)
+	}
+	if entry.InputTokens != 412 || entry.OutputTokens != 23 || entry.ProviderUsed != "azure" {
+		t.Fatalf("counters or provider not decoded: %+v", entry)
+	}
+	if entry.CostBasis != ledger.CostBasisMetered {
+		t.Fatalf("cost basis = %q, want %q", entry.CostBasis, ledger.CostBasisMetered)
+	}
+
+	store := ledger.NewStore()
+	srv := server.NewServer(store)
+	if err := srv.RecordUsage(context.Background(), entry); err != nil {
+		t.Fatalf("RecordUsage: %v", err)
+	}
+	entries, err := store.ListEntries(context.Background(), ledger.AggregateFilter{OrgID: "org-a"}, 10)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("entries = %d (err=%v), want exactly 1 on the org's ledger", len(entries), err)
+	}
+	if entries[0].UserID != "service:quarry-edge" || entries[0].InputTokens != 412 {
+		t.Fatalf("ledger row: %+v", entries[0])
+	}
+	if entries[0].CostUSD <= 0 {
+		t.Fatalf("a metered service call must be priced, got %.8f", entries[0].CostUSD)
+	}
+
+	// The subject-scope rules hold for a service subject too: another org's subject, or a payload
+	// that names a different user than the envelope, is refused.
+	if _, err := decodeUsageMessage("mp.v1.usage.org-b", envelope, now); err == nil {
+		t.Fatal("an envelope for org-a on org-b's subject must be rejected")
+	}
+	mismatched := strings.Replace(string(envelope), `"org_id":"org-a","user_id":"service:quarry-edge",`, `"org_id":"org-a","user_id":"service:other",`, 1)
+	if mismatched == string(envelope) {
+		t.Fatal("test setup: the payload user was not rewritten")
+	}
+	if _, err := decodeUsageMessage("mp.v1.usage.org-a", []byte(mismatched), now); err == nil {
+		t.Fatal("a payload user that differs from the envelope user must be rejected")
+	}
+}
