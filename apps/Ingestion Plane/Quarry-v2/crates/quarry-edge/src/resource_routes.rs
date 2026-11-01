@@ -1206,6 +1206,11 @@ async fn job_events(
         .as_deref()
         .is_some_and(|v| matches!(v.trim(), "1" | "true"));
     if follow_requested && job_stream::follow_enabled() {
+        // A ZDR caller never gets the live tail: its events name page URLs (D2-057).
+        // Decided before control is asked and before a stream permit is taken.
+        if claims.effective_zdr(false) {
+            return err_response(&request_id, job_stream::zdr_follow_refusal()).into_response();
+        }
         return follow_job(state, claims, request_id, job_id, q, last_event_id, kind).await;
     }
 
@@ -1228,6 +1233,12 @@ async fn job_events(
     {
         Ok(events) => events,
         Err(e) => return err_response(&request_id, e).into_response(),
+    };
+    // The drain never returns page URLs, titles or excerpts to a ZDR caller (D2-057).
+    let events: Vec<serde_json::Value> = if claims.effective_zdr(false) {
+        events.into_iter().map(job_stream::redact_event_for_zdr).collect()
+    } else {
+        events
     };
 
     let stream = async_stream::stream! {

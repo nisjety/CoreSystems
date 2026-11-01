@@ -28,7 +28,7 @@ use axum::response::sse::Event;
 use futures::Stream;
 use serde_json::{json, Value};
 
-use quarry_core::error::QuarryError;
+use quarry_core::error::{ErrorCode, QuarryError};
 
 use crate::control_client;
 use crate::state::AppState;
@@ -85,6 +85,86 @@ pub fn max_age() -> Duration {
 /// Whether a job status is one the job does not leave.
 pub fn is_terminal_status(status: &str) -> bool {
     matches!(status, "completed" | "failed" | "cancelled" | "timed_out" | "skipped")
+}
+
+// ---------------------------------------------------------------------------
+// Zero Data Retention floor (D2-057)
+// ---------------------------------------------------------------------------
+
+/// `details.reason` of the 403 a caller under the token's ZDR floor gets for
+/// `follow=true`: the events of a job carry page URLs, titles and excerpts.
+pub const ZDR_FOLLOW_REASON: &str = "job_event_urls";
+
+/// The refusal of a live tail for a ZDR caller. It is decided before control is
+/// asked anything and before a stream permit is taken. No URL, host or title.
+pub fn zdr_follow_refusal() -> QuarryError {
+    QuarryError::new(
+        ErrorCode::Forbidden,
+        "the live job event stream is not available under zero data retention",
+    )
+    .with_details(json!({ "reason": ZDR_FOLLOW_REASON }))
+}
+
+/// Payload keys whose string value is a closed word or a short code, never page
+/// content. Every other string in a ZDR caller's payload is dropped.
+const ZDR_KEPT_STRING_KEYS: &[&str] = &[
+    "status",
+    "reason",
+    "action",
+    "actor_type",
+    "timeout_type",
+    "disposition",
+    "content_type",
+    "driver",
+    "kind",
+    "phase",
+    "code",
+    "dimension",
+    "unit",
+    "limit_source",
+    "lang",
+    "title_source",
+];
+
+/// The envelope fields of an event that are not caller content.
+const ZDR_KEPT_ENVELOPE_KEYS: &[&str] = &["event_id", "run_id", "job_id", "type", "ts", "seq"];
+
+/// One event as a ZDR caller may read it from the legacy drain: the envelope
+/// without its idempotency key (a change event's key embeds the final URL), and a
+/// payload cut down to numbers, booleans and the closed string fields of
+/// [`ZDR_KEPT_STRING_KEYS`]. A kept string that still holds a URL is dropped too.
+/// A URL, title, excerpt, summary, host, query or branding value never survives,
+/// whatever event type or key carries it.
+pub fn redact_event_for_zdr(event: Value) -> Value {
+    let Value::Object(map) = event else {
+        return Value::Null;
+    };
+    let mut out = serde_json::Map::new();
+    for (key, value) in map {
+        if ZDR_KEPT_ENVELOPE_KEYS.contains(&key.as_str()) {
+            out.insert(key, value);
+        } else if key == "payload" {
+            out.insert(key, redact_payload_for_zdr(value));
+        }
+    }
+    Value::Object(out)
+}
+
+fn redact_payload_for_zdr(payload: Value) -> Value {
+    let Value::Object(map) = payload else {
+        return json!({});
+    };
+    let kept = map
+        .into_iter()
+        .filter(|(key, value)| match value {
+            Value::Number(_) | Value::Bool(_) => true,
+            Value::String(text) => {
+                ZDR_KEPT_STRING_KEYS.contains(&key.as_str()) && !text.contains("://")
+            }
+            _ => false,
+        })
+        .collect::<serde_json::Map<String, Value>>();
+    Value::Object(kept)
 }
 
 // ---------------------------------------------------------------------------
@@ -418,5 +498,53 @@ mod tests {
         assert_eq!(open_for_org(org), DEFAULT_MAX_PER_ORG);
         held.pop();
         assert!(acquire(org).is_some(), "a dropped permit frees its slot");
+    }
+
+    #[test]
+    fn zdr_redaction_keeps_the_envelope_and_counts_and_drops_every_page_string() {
+        let event = json!({
+            "event_id": "evt_1",
+            "type": "page_extracted",
+            "seq": 7,
+            "ts": "2026-10-23T10:00:00Z",
+            "idempotency_key": "run_x:https://secret.test/a:changed",
+            "payload": {
+                "url": "https://secret.test/a",
+                "title": "Secret title",
+                "excerpt": "Secret words",
+                "summary": "Secret summary",
+                "host": "secret.test",
+                "seed_url": "https://secret.test/",
+                "query": "secret query",
+                "branding": { "logo": "https://secret.test/logo.png" },
+                "urls": ["https://secret.test/b"],
+                "status": 200,
+                "word_count": 120,
+                "pages_visited": 4,
+                "ok": true,
+                "driver": "static",
+                "reason": "https://secret.test/leaked-in-a-kept-key"
+            }
+        });
+        let out = redact_event_for_zdr(event);
+        let text = out.to_string();
+        assert!(!text.contains("secret"), "{text}");
+        assert!(out.get("idempotency_key").is_none());
+        assert_eq!(out["event_id"], "evt_1");
+        assert_eq!(out["type"], "page_extracted");
+        assert_eq!(out["seq"], 7);
+        assert_eq!(out["payload"]["status"], 200);
+        assert_eq!(out["payload"]["word_count"], 120);
+        assert_eq!(out["payload"]["pages_visited"], 4);
+        assert_eq!(out["payload"]["ok"], true);
+        assert_eq!(out["payload"]["driver"], "static");
+    }
+
+    #[test]
+    fn zdr_follow_refusal_is_a_typed_403_without_caller_data() {
+        let err = zdr_follow_refusal();
+        assert_eq!(err.code, ErrorCode::Forbidden);
+        assert_eq!(err.details.as_ref().unwrap()["reason"], ZDR_FOLLOW_REASON);
+        assert_eq!(ZDR_FOLLOW_REASON, "job_event_urls");
     }
 }
