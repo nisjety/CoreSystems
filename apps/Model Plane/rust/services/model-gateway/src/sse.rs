@@ -12546,6 +12546,7 @@ fn build_stream_envelope(
         resource_ref: format!("request/{request_id}"),
         payload: serde_json::json!({ "model": model }),
         zdr: false,
+        ..Default::default()
     }
 }
 
@@ -12604,6 +12605,7 @@ fn build_usage_envelope(
             "cost_basis": cost_basis.as_str(),
         }),
         zdr: false,
+        ..Default::default()
     }
 }
 

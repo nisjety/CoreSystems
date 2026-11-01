@@ -203,6 +203,15 @@ GOLDENS=(
   # action vendors it, with the pin beside it, in the VENDORED rows below.
   "apps/Model Plane/api/contracts/agent-action-admission.json|13f3b72a93c68868b6a4108e1584aec2adf4d0bf40becee878d6bf548d38eb3e"
 
+  # WS10.S2: the run-trace envelope, one BROWSER_STEP_RECEIPT_RECORDED event with all 18 envelope fields
+  # (model_plane.v1.Event 1-13 plus the trace fields producer_seq, agent, origin, run_id, request_id) and
+  # an explicit "zdr": false. AUTHORED data owned by the Model Plane (not generated): the Rust twin
+  # (mp-events), the Go twin (pkg/envelope), session-core's trace validator (WS10.S6) and Quarry's
+  # trace mapper (WS10.S4, crates/quarry-runtime/tests/fixtures/model-trace/) are all tested against
+  # the same bytes. To change it: edit it, refresh the .sha256 pin beside it, update the digest here,
+  # then re-vendor every copy listed in VENDORED and refresh its pin.
+  "apps/Model Plane/api/contracts/run-trace-envelope.golden.json|265861c85ded72622e279385f53addcdeb7be34469f72f30396108fdd7854d46"
+
   # WS16.S1: the route table a SERVICE principal may reach on model-gateway (SERVICE_ROUTE_GRANTS) plus the
   # second-bearer rule for POST /v1/ai/chat. GENERATED from the real table by model-gateway's auth tests,
   # never written by hand:
@@ -363,6 +372,18 @@ VENDORED=(
 
   # WS24-S5: model-gateway's copy, read by the Ask-loop arms test in src/tool_loop.rs.
   "apps/Model Plane/rust/services/model-gateway/tests/fixtures/agent-action-admission.json|apps/Model Plane/api/contracts/agent-action-admission.json"
+
+  # WS10.S2: mp-events (tests/run_trace_golden.rs) copy of the run-trace envelope golden and its pin.
+  "apps/Model Plane/rust/crates/mp-events/tests/fixtures/run-trace-envelope.golden.json|apps/Model Plane/api/contracts/run-trace-envelope.golden.json"
+  "apps/Model Plane/rust/crates/mp-events/tests/fixtures/run-trace-envelope.golden.json.sha256|apps/Model Plane/api/contracts/run-trace-envelope.golden.json.sha256"
+
+  # WS10.S2: session-core (the trace validator test, WS10.S6) copy of the run-trace envelope golden and its pin.
+  "apps/Model Plane/rust/services/session-core/tests/fixtures/run-trace-envelope.golden.json|apps/Model Plane/api/contracts/run-trace-envelope.golden.json"
+  "apps/Model Plane/rust/services/session-core/tests/fixtures/run-trace-envelope.golden.json.sha256|apps/Model Plane/api/contracts/run-trace-envelope.golden.json.sha256"
+
+  # WS10.S2: the Go envelope twin (trace_test.go, TestRunTraceGoldenDecodes) copy of the run-trace envelope golden and its pin.
+  "apps/Model Plane/go/pkg/envelope/testdata/run-trace-envelope.golden.json|apps/Model Plane/api/contracts/run-trace-envelope.golden.json"
+  "apps/Model Plane/go/pkg/envelope/testdata/run-trace-envelope.golden.json.sha256|apps/Model Plane/api/contracts/run-trace-envelope.golden.json.sha256"
 )
 
 # "<repo-relative golden>|<consumer>|<tree its copy must live in>|<owning task>"
@@ -423,6 +444,12 @@ CONSUMERS=(
   "apps/Model Plane/api/contracts/agent-action-admission.json|execution-core|apps/Model Plane/rust/services/execution-core/|WS24-S5 (every admitted id has an owner path in the Do catalogue)"
   "apps/Model Plane/api/contracts/agent-action-admission.json|model-gateway|apps/Model Plane/rust/services/model-gateway/|WS24-S5 (every Ask-loop read arm is a contract row, and the reverse)"
   "apps/Model Plane/api/contracts/agent-action-admission.json|capability-core|apps/Model Plane/go/services/capability-core/|WS24-S5 (vendored; the admission table reads it in WS24-S6)"
+  # WS10.S2: the run-trace envelope. The three Model Plane twins vendor it now; Quarry's mapper vendors it
+  # at crates/quarry-runtime/tests/fixtures/model-trace/ (WS10.S4, an ask in MP-ASKS.md), pending until then.
+  "apps/Model Plane/api/contracts/run-trace-envelope.golden.json|mp-events|apps/Model Plane/rust/crates/mp-events/|WS10.S2 (Rust envelope twin decodes the golden losslessly)"
+  "apps/Model Plane/api/contracts/run-trace-envelope.golden.json|session-core|apps/Model Plane/rust/services/session-core/|WS10.S6 (trace validator accepts the golden)"
+  "apps/Model Plane/api/contracts/run-trace-envelope.golden.json|envelope-go|apps/Model Plane/go/pkg/envelope/|WS10.S2 (Go envelope twin decodes the golden)"
+  "apps/Model Plane/api/contracts/run-trace-envelope.golden.json|quarry-runtime|apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/|WS10.S4 (the trace mapper output equals the golden)"
   # WS16.S1: Quarry's model client fake reads the route table and the ai-chat-v1 fixtures at
   # crates/quarry-runtime/tests/fixtures/model-gateway-contract/ (WS16.S3, an ask in MP-ASKS.md), pending until then.
   "apps/Model Plane/api/contracts/model-gateway-service-routes.json|quarry-runtime|apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/|WS16.S3 (the fake gateway applies the real service route table)"

@@ -247,6 +247,7 @@ pub(crate) async fn publish_finetune_event(
         resource_ref: format!("finetune:{job_id}"),
         payload,
         zdr,
+        ..Default::default()
     };
     if let Err(e) = publisher.publish(&subject, &envelope).await {
         warn!(error = %e, subject = %subject, "finetune event publish failed");

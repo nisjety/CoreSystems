@@ -2237,6 +2237,7 @@ async fn cancel_run(
             // run-control event that reaches this line is persistent.
             zdr: false,
             ..Default::default()
+            ..Default::default()
         };
         if let Err(error) = state
             .publisher
@@ -2310,6 +2311,7 @@ async fn resume_run(
         payload: serde_json::json!({ "run_id": run_id }),
         // The guard above answered every ZDR posture with a refusal, so a
         // run-control event that reaches this line is persistent.
+        ..Default::default()
         zdr: false,
         ..Default::default()
     };
@@ -8129,6 +8131,7 @@ async fn ingest_feedback(
             "note": note,
         }),
         // The guard at the top of this handler answered every ZDR posture with a refusal,
+        ..Default::default()
         // so the feedback event that reaches this line is persistent.
         zdr: false,
         ..Default::default()
@@ -11955,6 +11958,7 @@ async fn invoke(
         resource_ref: format!("request/{request_id}"),
         payload: serde_json::json!({
             "content_length": normalized.content.len(),
+        ..Default::default()
             "model": normalized.model,
         }),
         zdr: effective_zdr,
@@ -12163,6 +12167,7 @@ async fn invoke(
             // broken out so cache-hit rate and savings are queryable off the
             // durable ledger. 0 (never absent) when this turn used no cache.
             "cache_read_input_tokens": infer_resp.cache_read_input_tokens,
+        ..Default::default()
             "cache_creation_input_tokens": infer_resp.cache_creation_input_tokens,
             "cost_basis": cost_basis.as_str(),
         }),

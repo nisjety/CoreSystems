@@ -89,6 +89,7 @@ mod zdr_publisher_tests {
             resource_ref: "request/test".into(),
             payload: serde_json::json!({"content": "must-not-persist"}),
             zdr: true,
+            ..Default::default()
         };
         publisher.publish("subject", &envelope).await.unwrap();
         assert!(publisher.drain().is_empty());

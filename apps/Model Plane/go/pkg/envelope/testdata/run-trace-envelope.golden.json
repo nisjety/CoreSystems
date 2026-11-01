@@ -1,0 +1,37 @@
+{
+  "event_id": "01JC7K3M9Q4R8T2V5W6X7Y8Z9A",
+  "event_type": "BROWSER_STEP_RECEIPT_RECORDED",
+  "schema_version": 1,
+  "ts": "2026-11-01T09:30:15.250Z",
+  "producer": "quarry-edge",
+  "correlation_id": "01JC7K3M9Q4R8T2V5W6X7Y8Z9B",
+  "causation_id": "01JC7K3M9Q4R8T2V5W6X7Y8Z98",
+  "idempotency_key": "01JC7K3M9Q4R8T2V5W6X7Y8Z9A",
+  "org_id": "01JC7K0000ORG0000000000001",
+  "user_id": "01JC7K0000USR0000000000001",
+  "resource_ref": "run/01JC7K3M9Q4R8T2V5W6X7Y8Z9C",
+  "payload": {
+    "action": "click",
+    "browser_run_id": "agent_run_7f3a",
+    "control_epoch": 2,
+    "cost_micro_usd": 1200,
+    "error_code": "",
+    "initiated_by": "agent",
+    "latency_ms": 412,
+    "outcome": "ok",
+    "receipt_id": "01JC7K3M9Q4R8T2V5W6X7Y8Z99",
+    "step": 7,
+    "url_origin": "https://example.com",
+    "verified": true
+  },
+  "zdr": false,
+  "producer_seq": 7,
+  "agent": {
+    "id": "general-v1",
+    "role": "subagent",
+    "parent_id": "primary-v1"
+  },
+  "origin": "AGENT",
+  "run_id": "01JC7K3M9Q4R8T2V5W6X7Y8Z9C",
+  "request_id": "req_01JC7K3M9Q4R8T2V5W6X7Y8Z9D"
+}

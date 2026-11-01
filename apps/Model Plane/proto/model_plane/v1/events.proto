@@ -51,8 +51,59 @@ message Event {
   // Zero Data Retention mode. When true, this event must not be persisted durably.
   bool zdr = 13;
 
+  // Run-trace envelope fields (WS10.S2). Additive: fields 1-13 are unchanged,
+  // so pre-trace wire bytes still decode. Producers that do not number their
+  // events leave these at their zero values. Numbered 21-25 because shrinking
+  // the published `reserved 14 to 20` range is a buf breaking change
+  // (RESERVED_MESSAGE_NO_DELETE); the reservation is kept as it was.
+
+  // Per-(run_id, producer) sequence, dense from 1. 0 = not numbered.
+  uint64 producer_seq = 21;
+
+  // Agent that produced the event (browser agent, subagent, ...).
+  AgentRef agent = 22;
+
+  // What started the run this event belongs to. Never an authorization input.
+  RunOrigin origin = 23;
+
+  // Model Plane run id this event belongs to (bare ULID, no dots).
+  string run_id = 24;
+
+  // Request id of the HTTP call that caused the event, for support lookups.
+  // Not an authorization, tenancy or idempotency key.
+  string request_id = 25;
+
   // Reserved for future envelope fields.
   reserved 14 to 20;
+}
+
+// Identifies the agent that produced a trace event.
+message AgentRef {
+  // Agent identifier (for example "general-v1"). At most 64 chars [A-Za-z0-9_-].
+  string id = 1;
+
+  // Role of the agent within the run (for example "primary", "subagent").
+  string role = 2;
+
+  // Identifier of the parent agent, empty for the primary agent.
+  string parent_id = 3;
+}
+
+// What started a run. A label for display and filtering only; admission and
+// budget code must never read it as authority.
+enum RunOrigin {
+  // Origin not recorded.
+  RUN_ORIGIN_UNSPECIFIED = 0;
+  // A human in a UI (chat, space, support, agent-run console).
+  RUN_ORIGIN_USER = 1;
+  // Another agent or background review.
+  RUN_ORIGIN_AGENT = 2;
+  // A schedule, cron or routine.
+  RUN_ORIGIN_SCHEDULE = 3;
+  // An inbound webhook or mail task.
+  RUN_ORIGIN_WEBHOOK = 4;
+  // A direct service caller.
+  RUN_ORIGIN_API = 5;
 }
 
 // Lifecycle event types from the plan Phase A taxonomy.
@@ -179,6 +230,28 @@ enum EventType {
   EVENT_TYPE_BROWSER_ACTION_APPROVAL_REQUIRED = 144;
   EVENT_TYPE_BROWSER_ACTION_DECIDED = 145;
   EVENT_TYPE_APPROVAL_CONTINUATION_VERIFIED = 146;
+
+  // Run-trace events (WS10.S2). Produced by Quarry, carried on
+  // mp.v1.trace.run.<run_id> and persisted by session-core. 150-159 belong
+  // to the trace; 150-156 are used.
+  // A browser session was opened for the run.
+  EVENT_TYPE_BROWSER_SESSION_OPENED = 150;
+  // A browser session closed (reason in the payload).
+  EVENT_TYPE_BROWSER_SESSION_CLOSED = 151;
+  // Control of the session moved between agent, user and delegate.
+  EVENT_TYPE_BROWSER_CONTROL_CHANGED = 152;
+  // A tab was opened, closed or activated.
+  EVENT_TYPE_BROWSER_TAB_CHANGED = 153;
+  // A step receipt was recorded (reference-based, no page content).
+  EVENT_TYPE_BROWSER_STEP_RECEIPT_RECORDED = 154;
+  // An egress decision (block or summary) was recorded.
+  EVENT_TYPE_BROWSER_EGRESS_DECIDED = 155;
+  // An artifact (screenshot, download) was recorded by reference.
+  EVENT_TYPE_BROWSER_ARTIFACT_RECORDED = 156;
+
+  // A delegate attached with the owner's shared cookie jar (WS8.G).
+  // Allocated here so the enum is touched once.
+  EVENT_TYPE_BROWSER_ATTACH_SHARED_JAR = 160;
 
   // Reserved for future event types.
   reserved 200 to 255;

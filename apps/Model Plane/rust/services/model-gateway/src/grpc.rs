@@ -670,6 +670,7 @@ async fn publish_ingress_accepted(
             "transport": "grpc",
         }),
         zdr,
+        ..Default::default()
     };
 
     if let Err(error) = state
@@ -734,6 +735,7 @@ async fn publish_usage_envelope(
             "cost_basis": cost_basis.as_str(),
         }),
         zdr,
+        ..Default::default()
     };
 
     if let Err(error) = state

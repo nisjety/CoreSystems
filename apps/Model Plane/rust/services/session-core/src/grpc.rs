@@ -5988,6 +5988,7 @@ fn replay_event_row_to_proto(row: ReplayEventRow) -> pb::Event {
             value: serde_json::to_vec(&payload).unwrap_or_default(),
         }),
         zdr: false,
+        ..Default::default()
     }
 }
 
@@ -9743,6 +9744,15 @@ fn event_type_to_i32(s: &str) -> i32 {
         "BROWSER_ACTION_APPROVAL_REQUIRED" => 144,
         "BROWSER_ACTION_DECIDED" => 145,
         "APPROVAL_CONTINUATION_VERIFIED" => 146,
+        // Run-trace events (WS10.S2); names are the proto enum without EVENT_TYPE_.
+        "BROWSER_SESSION_OPENED" => 150,
+        "BROWSER_SESSION_CLOSED" => 151,
+        "BROWSER_CONTROL_CHANGED" => 152,
+        "BROWSER_TAB_CHANGED" => 153,
+        "BROWSER_STEP_RECEIPT_RECORDED" => 154,
+        "BROWSER_EGRESS_DECIDED" => 155,
+        "BROWSER_ARTIFACT_RECORDED" => 156,
+        "BROWSER_ATTACH_SHARED_JAR" => 160,
         _ => 0,
     }
 }
@@ -10876,6 +10886,29 @@ mod tests {
             assert_eq!(kind, pb::EventType::Unspecified, "{stored}");
             assert_eq!(kind.as_str_name(), "EVENT_TYPE_UNSPECIFIED", "{stored}");
         }
+    }
+
+    #[test]
+    fn event_type_to_i32_knows_the_trace_types() {
+        let names = [
+            "BROWSER_SESSION_OPENED",
+            "BROWSER_SESSION_CLOSED",
+            "BROWSER_CONTROL_CHANGED",
+            "BROWSER_TAB_CHANGED",
+            "BROWSER_STEP_RECEIPT_RECORDED",
+            "BROWSER_EGRESS_DECIDED",
+            "BROWSER_ARTIFACT_RECORDED",
+            "BROWSER_ATTACH_SHARED_JAR",
+        ];
+        for name in names {
+            let n = super::event_type_to_i32(name);
+            assert_ne!(n, 0, "{name} must map to a real EventType");
+            let kind = pb::EventType::try_from(n).expect("a valid EventType");
+            assert_eq!(kind.as_str_name(), format!("EVENT_TYPE_{name}"));
+        }
+        assert_eq!(super::event_type_to_i32("BROWSER_STEP_RECEIPT_RECORDED"), 154);
+        // A name the Model Plane has not allocated still reads as unspecified.
+        assert_eq!(super::event_type_to_i32("BROWSER_NOT_A_TYPE"), 0);
     }
 
     #[test]

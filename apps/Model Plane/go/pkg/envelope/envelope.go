@@ -26,7 +26,24 @@ func DeriveIdempotencyHash(producer, eventType, resourceRef, idempotencyKey stri
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// AgentRef identifies the agent that produced a trace event
+// (model_plane.v1.AgentRef). Empty fields are omitted from the JSON.
+type AgentRef struct {
+	ID       string `json:"id,omitempty"`
+	Role     string `json:"role,omitempty"`
+	ParentID string `json:"parent_id,omitempty"`
+}
+
+// RunOrigins are the JSON names of model_plane.v1.RunOrigin: the enum name
+// without the RUN_ORIGIN_ prefix. An origin is a label for display and
+// filtering, never an authorization input.
+var RunOrigins = [...]string{"USER", "AGENT", "SCHEDULE", "WEBHOOK", "API"}
+
 // Envelope is the canonical event envelope matching the proto Event message.
+//
+// ProducerSeq, Agent, Origin, RunID and RequestID are the run-trace fields
+// (proto fields 21-25). They are omitted from the JSON when empty, so a
+// pre-trace envelope still round-trips byte for byte.
 type Envelope struct {
 	EventID        string          `json:"event_id"`
 	EventType      string          `json:"event_type"`
@@ -64,6 +81,23 @@ type Envelope struct {
 	// emitted as `"zdr": false` — which is what a fail-closed consumer needs in
 	// order to permit anything at all.
 	Zdr *bool `json:"zdr,omitempty"`
+
+	// ProducerSeq numbers the events of one (run_id, producer) pair, dense from
+	// 1. Zero means "not numbered" and is omitted.
+	ProducerSeq uint64 `json:"producer_seq,omitempty"`
+
+	// Agent is the agent that produced the event.
+	Agent *AgentRef `json:"agent,omitempty"`
+
+	// Origin is what started the run: one of [RunOrigins]. Never authority.
+	Origin string `json:"origin,omitempty"`
+
+	// RunID is the Model Plane run id (bare ULID, no dots).
+	RunID string `json:"run_id,omitempty"`
+
+	// RequestID is the id of the call that caused the event. It is not an
+	// authorization, tenancy or idempotency key.
+	RequestID string `json:"request_id,omitempty"`
 }
 
 // ZDRFlag returns a pointer to zdr, for setting [Envelope.Zdr] inline. Go has

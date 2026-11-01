@@ -2443,6 +2443,7 @@ dependencies = [
  "async-nats",
  "blake3",
  "chrono",
+ "mp-contracts",
  "mp-ids",
  "serde",
  "serde_json",
