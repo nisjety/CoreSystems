@@ -77,6 +77,7 @@ import { latestVoiceReply } from '@/features/voice/voice-reply'
 import { pinnedMessagesFull } from '../lib/chat-pinned-messages'
 import { selectChatThread } from '../lib/chat-thread-history'
 import { audienceConfirmed, chatProjectsEnabled, readProjectAudience, readProjectContext, rememberAudienceConfirmed } from '../lib/chat-projects'
+import { loadEffectiveAgentModeCap } from '@/features/customize/AgentModesSection'
 import { audienceConfirmRequired, chatProjectRefusal, sandboxToolsRefusedNotice, type ChatProjectRefusal } from './use-chat-project'
 import { planTranscriptWindow, resolveTurnHeights, virtualizeTranscript } from '../lib/transcript-window'
 
@@ -154,6 +155,11 @@ export default function ChatPage() {
     hasEarlierTurns,
     loadingEarlierTurns,
     loadEarlier,
+    pendingQuestion,
+    questionPending,
+    questionError,
+    answerPendingQuestion,
+    skipPendingQuestion,
   } = useChatController()
 
   // The attachment chip that summoned the canvas stays selected when several
@@ -166,6 +172,8 @@ export default function ChatPage() {
   // off it is always null and none of the project state below is ever read.
   const projectRef = () => (chatProjectsEnabled() ? activeProjectRef() : null)
   const [projectContext] = createResource(projectRef, (spaceRef) => readProjectContext(spaceRef))
+  // WS25-S11. The org's effective mode cap; the composer lists only the modes at or below it.
+  const [agentModeCap] = createResource(() => loadEffectiveAgentModeCap())
   const projectName = () => {
     if (projectContext.loading) return i18n.tr('laster ...', 'loading ...')
     const context = projectContext()
@@ -381,6 +389,7 @@ export default function ChatPage() {
         onSubmit={submitWithWorkPeriod}
         onTemporaryChatChange={setTemporaryFromComposer}
         planMode={planMode()}
+        agentModeCap={agentModeCap()}
         // WS14 S2a: the third pill, shown only while an approved plan is waiting to
         // run on this thread. The controller owns whether it is selected.
         approvedPlan={
@@ -1326,6 +1335,11 @@ export default function ChatPage() {
                   void approveTurnPlan(turnId, rung, justification, steps)
                 }
                 onRejectPlan={(turnId, reason) => void rejectTurnPlan(turnId, reason)}
+                question={pendingQuestion() ?? undefined}
+                questionPending={questionPending()}
+                questionError={questionError()}
+                onAnswerQuestion={(answer) => void answerPendingQuestion(answer)}
+                onSkipQuestion={() => void skipPendingQuestion()}
               />
               <Show when={isStreaming()}>
                 <div class="verevon-chat-stop-wrap">

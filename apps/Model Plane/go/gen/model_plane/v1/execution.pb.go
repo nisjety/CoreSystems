@@ -499,6 +499,12 @@ type RunAgentRequest struct {
 	// park-resume segment carries only what its own request sends. Field 21 is reserved for
 	// this message in the build plan's proto reservation table (section 4.3).
 	ReasoningEffort ReasoningEffort `protobuf:"varint,21,opt,name=reasoning_effort,json=reasoningEffort,proto3,enum=model_plane.v1.ReasoningEffort" json:"reasoning_effort,omitempty"`
+	// The most questions the run's `ask_user` tool may put to its owner (build plan WS14 S4). Zero
+	// means the tool is not offered: the gateway sends zero for a zero-retention, waived, plan-mode,
+	// Space-scoped or continuation run, and while AGENT_ASK_USER_ENABLED is off. Execution-core
+	// offers the tool only when this is above zero and caps it at the shared question limit. Field 22
+	// is reserved for this message in the build plan's proto reservation table (section 4.3).
+	MaxQuestions uint32 `protobuf:"varint,22,opt,name=max_questions,json=maxQuestions,proto3" json:"max_questions,omitempty"`
 	// The connected accounts the person selected for this turn (build plan WS23 S4). Absent or empty
 	// selects none: no connector read is offered, and one that is attempted is refused. The gateway
 	// refuses a selection under zero retention, in a Space, under a knowledge-only or web-only source
@@ -689,6 +695,13 @@ func (x *RunAgentRequest) GetReasoningEffort() ReasoningEffort {
 		return x.ReasoningEffort
 	}
 	return ReasoningEffort_REASONING_EFFORT_UNSPECIFIED
+}
+
+func (x *RunAgentRequest) GetMaxQuestions() uint32 {
+	if x != nil {
+		return x.MaxQuestions
+	}
+	return 0
 }
 
 func (x *RunAgentRequest) GetConnectorScope() *ConnectorScope {
@@ -2122,7 +2135,7 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"tool_calls\x18\t \x01(\rR\ttoolCalls\x12!\n" +
 	"\finput_tokens\x18\n" +
 	" \x01(\rR\vinputTokens\x12#\n" +
-	"\routput_tokens\x18\v \x01(\rR\foutputTokens\"\xed\a\n" +
+	"\routput_tokens\x18\v \x01(\rR\foutputTokens\"\x92\b\n" +
 	"\x0fRunAgentRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x12\n" +
@@ -2147,7 +2160,8 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"runContext\x123\n" +
 	"\x06resume\x18\x13 \x01(\v2\x1b.model_plane.v1.AgentResumeR\x06resume\x12?\n" +
 	"\vattachments\x18\x14 \x03(\v2\x1d.model_plane.v1.RunAttachmentR\vattachments\x12J\n" +
-	"\x10reasoning_effort\x18\x15 \x01(\x0e2\x1f.model_plane.v1.ReasoningEffortR\x0freasoningEffort\x12G\n" +
+	"\x10reasoning_effort\x18\x15 \x01(\x0e2\x1f.model_plane.v1.ReasoningEffortR\x0freasoningEffort\x12#\n" +
+	"\rmax_questions\x18\x16 \x01(\rR\fmaxQuestions\x12G\n" +
 	"\x0fconnector_scope\x18\x17 \x01(\v2\x1e.model_plane.v1.ConnectorScopeR\x0econnectorScope\x12?\n" +
 	"\n" +
 	"org_policy\x18\x18 \x01(\v2 .model_plane.v1.OrgPolicyContextR\torgPolicy\"\x83\x01\n" +

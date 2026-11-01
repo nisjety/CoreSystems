@@ -1119,6 +1119,45 @@
         }
       }
     },
+    "user_question": {
+      "family": null,
+      "variants": [
+        "UserQuestion"
+      ],
+      "keys": {
+        "delivery": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "expires_at": {
+          "types": [
+            "null",
+            "string"
+          ],
+          "presence": "always"
+        },
+        "items": {
+          "types": [
+            "array"
+          ],
+          "presence": "always"
+        },
+        "question_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "request_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        }
+      }
+    },
     "verification": {
       "family": "citations",
       "variants": [

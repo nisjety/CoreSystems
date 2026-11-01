@@ -25,6 +25,7 @@ const FleetRunConsole = FLEET_CONSOLE_ENABLED
   : undefined
 const AgentInstallationsPage = lazy(() => import('@/features/agents/components/AgentInstallationsPage'))
 const ChiefCoreRoutingPage = lazy(() => import('@/features/agents/components/ChiefCoreRoutingPage'))
+const CustomizeHubPage = lazy(() => import('@/features/customize/CustomizeHub'))
 const CostDashboardPage = lazy(() => import('@/features/cost/components/CostDashboardPage'))
 const OpsQualityPage = lazy(() => import('@/features/quality/components/OpsQualityPage'))
 const SocialCalendarPage = lazy(() => import('@/features/social/components/SocialCalendarPage'))
@@ -243,6 +244,7 @@ export const Router = createRouter({
           : []),
         { path: '/agents/cost', component: CostDashboardPage },
         { path: '/agents/quality', component: OpsQualityPage },
+        { path: '/agents/customize', component: CustomizeHubPage },
         { path: '/ingestions', component: VerevonIngestionsPage },
         { path: '/knowledge', component: KnowledgePage },
         { path: '/knowledge/shared', component: SharedWithMePage },

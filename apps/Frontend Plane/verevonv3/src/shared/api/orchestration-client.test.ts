@@ -821,13 +821,13 @@ describe('run questions', () => {
     expect(runQuestionErrorCodeOf(refused)).toBeNull()
   })
 
-  it('has no caller yet: nothing under src but the client and its tests names the question calls', () => {
+  it('has one caller: only the client and the chat controller (WS14-S4) name the question calls', () => {
     const here = dirname(fileURLToPath(import.meta.url))
     const src = join(here, '..', '..')
     const naming = sourceFiles(src)
       .filter(([, text]) => /\b(listRunQuestions|answerQuestion)\b/.test(text))
       .map(([path]) => path.slice(src.length + 1).replaceAll('\\', '/'))
       .filter((path) => !path.endsWith('.test.ts'))
-    expect(naming).toEqual(['shared/api/orchestration-client.ts'])
+    expect(naming.sort()).toEqual(['features/chat/components/use-chat-controller.ts', 'shared/api/orchestration-client.ts'])
   })
 })

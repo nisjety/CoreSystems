@@ -233,6 +233,14 @@ export type ChatEventPayloads = {
     unpriced_calls?: number
     warning?: string
   }
+  /** Rust variants: UserQuestion. */
+  user_question: {
+    delivery: string
+    expires_at: string | null
+    items: unknown[]
+    question_id: string
+    request_id: string
+  }
   /** Rust variants: Verification. */
   verification: {
     kb_citations: number

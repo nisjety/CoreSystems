@@ -380,6 +380,9 @@ services:
       # WS25-S6: the optional agent_mode on invoke (lockdown, read_only, ask_first, auto), strictest-wins over the
       # platform floor and the org cap. Off by default; with it off the field is ignored and requests are unchanged.
       AGENT_MODES: ${AGENT_MODES:-false}
+      # WS14-S4: offer ask_user to a Do run (max_questions on the run request). Off by default; ZDR, waived, scheduled
+      # and Space-scoped runs never get it. Needs capability-core migration 0029 before TOOL_CLASS_GATE=enforce.
+      AGENT_ASK_USER_ENABLED: ${AGENT_ASK_USER_ENABLED:-false}
       # WS11-S5: derive the reasoning level once in the gateway and send it to inference-core. Off by default; only the
       # literal `true` turns it on. Roll out in this order: inference-core adapter flags on first, then this switch. With
       # this on and the adapter flags off, a deep request sends budget 0 and a level nothing renders (no thinking).
@@ -1553,6 +1556,8 @@ services:
       EXECUTION_DO_BROWSER_ENABLED: ${EXECUTION_DO_BROWSER_ENABLED:-0}
       # WS21-S5b: browser.act. Never on until Quarry's read_only contract test (K3-6) passes.
       EXECUTION_DO_BROWSER_ACT_ENABLED: ${EXECUTION_DO_BROWSER_ACT_ENABLED:-false}
+      # WS14-S4: the Do loop's ask_user tool. Off by default; the gateway's max_questions bounds it as well.
+      AGENT_ASK_USER_ENABLED: ${AGENT_ASK_USER_ENABLED:-false}
       # WS15-S3: the Do loop announces tool retries (ToolRetryScheduled) on the run stream. Off by default.
       MODEL_GATEWAY_LIFECYCLE_EVENTS: ${MODEL_GATEWAY_LIFECYCLE_EVENTS:-false}
       # Feature-gates QuarryAgentClient::from_env() (browser_agent loop) — the
