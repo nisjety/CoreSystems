@@ -185,6 +185,42 @@ func TestWriteSpaceDenialMapsTypedAndUntypedFailures(t *testing.T) {
 	}
 }
 
+// D1-214: on a route whose own unavailable status is 503, a typed refusal
+// answers the status the denial vocabulary assigns it (403) and only
+// space_authority_unavailable stays a 503. The body code never changes.
+func TestWriteSpaceDenialAnswersTypedRefusalsWithTheVocabularyStatusOn503Paths(t *testing.T) {
+	s := &Server{spaceRepo: &spaces.Repository{}}
+	denials := []*spaces.Denial{
+		{Code: spaces.DenialMembershipRequired},
+		{Code: spaces.DenialNotActive, State: "archived"},
+		{Code: spaces.DenialKindUnsupported, Kind: "room"},
+		{Code: spaces.DenialPolicyNotProvisioned},
+		{Code: spaces.DenialEntitlementOff, Entitlement: "retrieval_read"},
+		{Code: spaces.DenialRoleBelowFloor, RequiredRoles: []string{"owner"}},
+		{Code: spaces.DenialZDRForbidsEffect, Effect: "import"},
+		{Code: spaces.DenialAudienceNotCurrent},
+		{Code: spaces.DenialAuthorityIncomplete},
+		spaces.AuthorityUnavailableDenial("x"),
+	}
+	for _, denial := range denials {
+		t.Run(string(denial.Code), func(t *testing.T) {
+			w, c := denialTestContext(http.MethodPost, "")
+			s.writeSpaceDenial(c, fmt.Errorf("evidence: %w", denial), "s", spaces.ExpectPersonal,
+				"m", http.StatusServiceUnavailable, "route unavailable")
+			body := decodeDenialBody(t, w)
+			if w.Code != denial.Status() {
+				t.Fatalf("status = %d, want the vocabulary's %d (%v)", w.Code, denial.Status(), body)
+			}
+			if (w.Code == http.StatusServiceUnavailable) != (denial.Code == spaces.DenialAuthorityUnavailable) {
+				t.Fatalf("503 must mean real unavailability only: %d %v", w.Code, body)
+			}
+			if body["code"] != string(denial.Code) || body["error"] != "route unavailable" {
+				t.Fatalf("body drifted: %v", body)
+			}
+		})
+	}
+}
+
 func TestWriteSpaceIssuerDenialAddsTheCodeOnlyForTypedRefusals(t *testing.T) {
 	w, c := denialTestContext(http.MethodPost, "")
 	writeSpaceIssuerDenial(c, fmt.Errorf("issue: %w", spaces.AuthorityUnavailableDenial("x")), "Space thread append is not authorized")

@@ -1613,7 +1613,10 @@ func writeSpaceIssuerDenial(c *gin.Context, err error, message string) {
 //   - ErrNoCurrentMembership is labelled by DiagnoseDenial (non-member, unknown
 //     Space and non-active org member are one code on purpose). If the diagnosis
 //     itself fails the plain 403 stays, which is still a refusal.
-//   - a typed *Denial found in the chain (evidence validators) keeps otherStatus.
+//   - a typed *Denial found in the chain (evidence validators) keeps otherStatus,
+//     except on a 503 path: there a refusal answers the status the denial
+//     vocabulary assigns it (403, like the Space room routes' typed refusals) and
+//     only space_authority_unavailable stays a 503. The body code never changes.
 //   - any other failure on a 503 path is space_authority_unavailable.
 func (s *Server) writeSpaceDenial(c *gin.Context, err error, spaceRef string, expect spaces.ExpectKind, membershipMsg string, otherStatus int, otherMsg string) bool {
 	if err == nil {
@@ -1629,7 +1632,11 @@ func (s *Server) writeSpaceDenial(c *gin.Context, err error, spaceRef string, ex
 		return true
 	}
 	if denial, ok := spaces.AsDenial(err); ok {
-		c.JSON(otherStatus, spaceDenialBody(otherMsg, denial))
+		status := otherStatus
+		if status == http.StatusServiceUnavailable {
+			status = denial.Status()
+		}
+		c.JSON(status, spaceDenialBody(otherMsg, denial))
 		return true
 	}
 	if otherStatus == http.StatusServiceUnavailable {
