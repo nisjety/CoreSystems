@@ -61,3 +61,4 @@ Dockerfile text eol=lf
 # the general rule is ever narrowed.
 apps/**/contracts/*.json text eol=lf
 apps/**/contracts/*.sha256 text eol=lf
+apps/**/src/auth/fixtures/*.sha256 text eol=lf

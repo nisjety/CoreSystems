@@ -134,7 +134,7 @@ GOLDENS=(
   # the_golden_and_markdown_are_what_the_table_generates (crates/quarry-core/src/zdr_matrix.rs),
   # which quarry-v2-ci.yml runs through cargo test --workspace. A regenerated golden needs
   # its digest here updated in the same change.
-  "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/zdr-feature-matrix.json|8b5c4fd472c680a356523a3c4a64375f9daf6c777dcb6787d203386b2a178292"
+  "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/zdr-feature-matrix.json|fbcb6d3c8d81ce5a3ba6de43983a49c6ba6b19fde6f7a7f31c1b9cb14533e8bf"
 
   # WS4.J: the allowlist of the ZDR run tombstone, the ONLY fields that egress path may carry.
   # AUTHORED data owned by Quarry. quarry-edge's serializer (src/zdr_tombstone.rs, tests/
