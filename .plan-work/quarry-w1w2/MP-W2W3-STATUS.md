@@ -11,7 +11,7 @@ Status key: built / tested / commits / flags / assumed decisions / not verified.
 | Row | Built | Tested | Commits | Flags (default) | Assumed decisions | Not verified |
 |---|---|---|---|---|---|---|
 | U03 WS8.A ledger row | yes | n/a (docs) | see git log | none | ADR-3 + X-13 taken as ratified (owner order 2026-11-01) | spike measurements (live lane) |
-| U61 broker browser_grants + migration 0004 | yes (test fix) | broker `go test ./...` and `-tags integration` on scratch Postgres 16: all green after fixing stale `TestPg_MigrationIsRerunnable`; model-gateway `browser_` lib tests: see below | see git log | n/a | none | none |
+| U61 broker browser_grants + migration 0004 | yes (test fix) | broker `go test ./...` and `-tags integration` on scratch Postgres 16: all green after fixing stale `TestPg_MigrationIsRerunnable`; `cargo test -p model-gateway --lib browser_`: 101 passed, 0 failed (17 of them `browser_grants`), at 7471662b1 before batch 1 | 7471662b1 | n/a | none | none |
 
 U61 live check (read only, 2026-11-01): the live broker image ships `0001`, `0003` and `0004` in `/app/migrations`. The broker's database `browser_broker` on `ingestion-postgres` has the 0004 columns (`policy_mode`, `denied_domains`, `resource_id`), the widened kind, domain, parent, policy and resource checks, and the indexes `browser_grants_attach_idempotency_idx` and `browser_grants_owner_human_active_idx`. D2-140 is closed. Side finding: `session_core` on `model-plane-postgres-1` also holds an old pre-0004 `browser_grants` table, which looks like a leftover from before the broker got its own database. It is recorded in the depth file and not touched.
 
