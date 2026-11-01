@@ -1760,6 +1760,42 @@ message AnswerRunQuestionResponse {
   RunQuestion question = 1;
 }
 
+// Spend a `resume` question's answer once, for the continuation of the run that asked it (build
+// plan WS14 S5). Its own service rather than a method of OrchestrationCoreService, as
+// ApprovalScopeGrantService is, so the implementations and test doubles of that service need no
+// change.
+service RunQuestionConsumeService {
+  // Claim an answered `resume` question for its run's continuation. The first claim spends the
+  // answer. The same claim token again is a safe replay that returns the answer; another claim is
+  // reported as already consumed, not as an error. Owner-only and org-scoped.
+  rpc ConsumeRunQuestion(ConsumeRunQuestionRequest) returns (ConsumeRunQuestionResponse);
+}
+
+// Claim a `resume` question's answer for the run's continuation. See `ConsumeRunQuestion`.
+message ConsumeRunQuestionRequest {
+  // The answered question (`RunQuestion.id`).
+  string question_id = 1;
+  // Must equal the caller's verified org.
+  string org_id = 2;
+  // The run the question belongs to; must match the question.
+  string run_id = 3;
+  // An opaque token the continuing segment generates. Only its hash is stored.
+  string claim_token = 4;
+}
+
+// The outcome of a ConsumeRunQuestion.
+message ConsumeRunQuestionResponse {
+  // The question with its answers. Present when the claim is the caller's: consumed now, or the
+  // same claim replaying. Absent for another claim.
+  RunQuestion question = 1;
+  // True when this call spent the answer.
+  bool consumed = 2;
+  // True when the answer had already been spent.
+  bool already_consumed = 3;
+  // With already_consumed: whether the earlier claim used the same token.
+  bool same_claim = 4;
+}
+
 // --- Approval scope grants (build plan WS13 S6) ---
 
 // A standing release for one eligible call, given by a "this thread" or "this run" decision.

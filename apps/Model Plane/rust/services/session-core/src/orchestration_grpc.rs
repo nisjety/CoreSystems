@@ -20,6 +20,7 @@ use mp_contracts::approval_cause::{self, CauseCode};
 use mp_contracts::model_plane::v1::{
     self as proto,
     approval_scope_grant_service_server::ApprovalScopeGrantService,
+    run_question_consume_service_server::RunQuestionConsumeService,
     orchestration_core_service_server::{OrchestrationCoreService, OrchestrationCoreServiceServer},
     orchestration_event,
 };
@@ -2589,6 +2590,89 @@ fn question_answered_event(row: &store::RunQuestionRow) -> proto::OrchestrationE
 // ---------------------------------------------------------------------------
 // Service implementation
 // ---------------------------------------------------------------------------
+
+/// The response to a claim on a question's answer (build plan WS14 S5). Only the claim that spent the
+/// answer, or replays its spend, is handed the answers; another claim learns that it was spent and nothing
+/// more. The refusals are closed codes, read before any answer leaves the service.
+#[allow(clippy::result_large_err)]
+fn consume_question_response(
+    outcome: store::ConsumedRunQuestion,
+) -> Result<proto::ConsumeRunQuestionResponse, Status> {
+    let (question, consumed, already_consumed, same_claim) = match outcome {
+        store::ConsumedRunQuestion::Consumed(row) => {
+            (Some(run_question_from_row(&row)?), true, false, false)
+        }
+        store::ConsumedRunQuestion::Replay(row) => {
+            (Some(run_question_from_row(&row)?), false, true, true)
+        }
+        store::ConsumedRunQuestion::AlreadyConsumed => (None, false, true, false),
+        store::ConsumedRunQuestion::NotAnswered => {
+            return Err(Status::failed_precondition("question_not_answered"));
+        }
+        store::ConsumedRunQuestion::NotResumable => {
+            return Err(Status::failed_precondition("question_not_resumable"));
+        }
+        store::ConsumedRunQuestion::Expired => {
+            return Err(Status::failed_precondition("question_expired"));
+        }
+        store::ConsumedRunQuestion::NotFound => {
+            return Err(Status::not_found("question_not_found"));
+        }
+    };
+    Ok(proto::ConsumeRunQuestionResponse {
+        question,
+        consumed,
+        already_consumed,
+        same_claim,
+    })
+}
+
+// Build plan WS14 S5: the continuation of a `resume` question claims its answer exactly once. Owner-only
+// and org-scoped; a ZDR or waived caller is refused before any lookup.
+#[tonic::async_trait]
+impl RunQuestionConsumeService for OrchestrationGrpc {
+    async fn consume_run_question(
+        &self,
+        request: Request<proto::ConsumeRunQuestionRequest>,
+    ) -> Result<Response<proto::ConsumeRunQuestionResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::ConsumeRunQuestionResponse>, Status> = async {
+            let caller = identity(&request)?;
+            refuse_zdr_or_waived_question_caller(&caller)?;
+            authorize_operation(&caller, "orchestration:write")?;
+            let req = request.into_inner();
+            if req.question_id.is_empty()
+                || req.run_id.is_empty()
+                || req.org_id.is_empty()
+                || req.claim_token.is_empty()
+            {
+                return Err(Status::invalid_argument(
+                    "question_id, run_id, org_id and claim_token are required",
+                ));
+            }
+            caller.authorize_org(&req.org_id)?;
+            let user_id = caller
+                .user_id()
+                .ok_or_else(|| Status::permission_denied("user-bound credential required"))?;
+            // Only a hash of the claim token is stored.
+            let claim_hash = blake3::hash(req.claim_token.as_bytes()).to_hex().to_string();
+            let outcome = store::consume_run_question(
+                &self.pool,
+                &req.question_id,
+                &req.org_id,
+                user_id,
+                &req.run_id,
+                &claim_hash,
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+            Ok(Response::new(consume_question_response(outcome)?))
+        }
+        .await;
+        record_metrics("consume_run_question", started, result.is_ok());
+        result
+    }
+}
 
 /// The standing approval grants (build plan WS13 S6). A release is a service call for the run's
 /// owner, and listing or revoking is the owner's own. Every query is bound to the owner and the
@@ -6446,6 +6530,62 @@ mod tests {
     // The handlers need a database to run, so the order of their gates is read from the source:
     // the ZDR gate first, the scope gate, then the org, and only then any lookup. The event is
     // broadcast only for the call that won the write.
+    #[test]
+    fn consume_question_response_hands_answers_only_to_the_claim_that_spent_or_replays_them() {
+        let mut row = stored_question(serde_json::json!([{
+            "id": "scope", "kind": "single", "prompt": "Which one?",
+            "options": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}]
+        }]));
+        row.state = "answered".to_owned();
+        row.delivery = "resume".to_owned();
+        row.answers = Some(serde_json::json!([]));
+        let spent = consume_question_response(store::ConsumedRunQuestion::Consumed(row.clone()))
+            .expect("the claim that spent the answer");
+        assert!(spent.consumed && !spent.already_consumed && !spent.same_claim);
+        assert!(spent.question.is_some());
+        let replay = consume_question_response(store::ConsumedRunQuestion::Replay(row))
+            .expect("the same claim replays");
+        assert!(!replay.consumed && replay.already_consumed && replay.same_claim);
+        assert!(replay.question.is_some());
+        let other = consume_question_response(store::ConsumedRunQuestion::AlreadyConsumed)
+            .expect("another claim is told it was spent");
+        assert!(!other.consumed && other.already_consumed && !other.same_claim);
+        assert!(other.question.is_none(), "another claim is handed no answer");
+        for (outcome, code) in [
+            (store::ConsumedRunQuestion::NotAnswered, "question_not_answered"),
+            (store::ConsumedRunQuestion::NotResumable, "question_not_resumable"),
+            (store::ConsumedRunQuestion::Expired, "question_expired"),
+        ] {
+            let refused = consume_question_response(outcome).expect_err("refused");
+            assert_eq!(refused.message(), code);
+            assert_eq!(refused.code(), tonic::Code::FailedPrecondition, "{code}");
+        }
+        let missing = consume_question_response(store::ConsumedRunQuestion::NotFound)
+            .expect_err("refused");
+        assert_eq!(missing.code(), tonic::Code::NotFound);
+    }
+
+    #[test]
+    fn consume_run_question_gates_before_the_store() {
+        let source = include_str!("orchestration_grpc.rs");
+        let start = source
+            .find("    async fn consume_run_question(")
+            .expect("the spend handler is present");
+        let rest = &source[start..];
+        let body = &rest[..rest
+            .find("record_metrics(\"consume_run_question\"")
+            .expect("the end of the handler")];
+        let gate = body
+            .find("refuse_zdr_or_waived_question_caller(&caller)?;")
+            .expect("the ZDR gate");
+        let operation = body
+            .find("authorize_operation(&caller, \"orchestration:write\")?;")
+            .expect("the scope gate");
+        let org = body.find("caller.authorize_org(&req.org_id)?;").expect("the org gate");
+        let lookup = body.find("store::consume_run_question(").expect("the store call");
+        assert!(gate < operation && operation < org && org < lookup, "the spend gate order");
+    }
+
     #[test]
     fn run_question_handlers_gate_before_they_look_anything_up() {
         let source = include_str!("orchestration_grpc.rs").replace("\r\n", "\n");

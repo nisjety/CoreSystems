@@ -1014,6 +1014,9 @@ fn enforce_resume(req: &pb::RunAgentRequest, enabled: bool) -> Result<(), Status
     if !enabled {
         return Err(Status::failed_precondition("continue_disabled"));
     }
+    if resume_names_question(resume) {
+        return enforce_question_resume(resume, runtime_loop::resume::ask_resume_enabled());
+    }
     if !matches!(resume.mode.as_str(), "segment" | "loop" | "park") {
         return Err(Status::invalid_argument("resume_incomplete"));
     }
@@ -1029,6 +1032,35 @@ fn enforce_resume(req: &pb::RunAgentRequest, enabled: bool) -> Result<(), Status
         return Ok(());
     }
     if resume.approval_id.is_empty() || resume.claim_token.is_empty() {
+        return Err(Status::invalid_argument("resume_incomplete"));
+    }
+    Ok(())
+}
+
+/// Whether a continuation names a run question rather than an approval (build plan WS14 S5). Such a
+/// continuation carries a question id or an answer, and nothing an approval stage reads.
+fn resume_names_question(resume: &pb::AgentResume) -> bool {
+    !resume.question_id.is_empty() || !resume.answer_json.is_empty()
+}
+
+/// A question continuation (build plan WS14 S5), judged after the continue switch: refused while
+/// `AGENT_ASK_USER_RESUME_ENABLED` and its prerequisites are not all on, and refused unless it names
+/// one question with its answer and a claim. It never names an approval, a step, a tool or a brief.
+fn enforce_question_resume(resume: &pb::AgentResume, question_resume_on: bool) -> Result<(), Status> {
+    if !question_resume_on {
+        return Err(Status::failed_precondition("continue_disabled"));
+    }
+    let names_an_approval = !resume.approval_id.is_empty()
+        || !resume.step_id.is_empty()
+        || !resume.tool_name.is_empty()
+        || !resume.action_fingerprint.is_empty()
+        || !resume.brief.is_empty();
+    if names_an_approval
+        || !matches!(resume.mode.as_str(), "segment" | "loop")
+        || resume.question_id.is_empty()
+        || resume.answer_json.is_empty()
+        || resume.claim_token.is_empty()
+    {
         return Err(Status::invalid_argument("resume_incomplete"));
     }
     Ok(())
@@ -1869,6 +1901,12 @@ impl ExecutionCore for ExecutionService {
         // on a zero-retention run, is refused with the closed token only.
         enforce_run_context(&req)?;
         enforce_resume(&req, mp_contracts::loop_fold::continue_after_approval_enabled())?;
+        // A question continuation is judged above, but its apply on resume is not built yet (the
+        // executor's input pause and its answer step). It is refused here, before anything is
+        // consumed, rather than read as an approval.
+        if req.resume.as_ref().is_some_and(resume_names_question) {
+            return Err(Status::failed_precondition("question_resume_unavailable"));
+        }
         // The inference route the request names (`provider_hint` and
         // `subscription_connection_id`) is judged here, at the boundary and
         // before any of the run's work: a route this process may not honour is
@@ -2947,6 +2985,61 @@ mod run_context_boundary_tests {
             assert_eq!(e.code(), tonic::Code::InvalidArgument);
             assert_eq!(e.message(), "resume_incomplete");
         }
+    }
+
+    fn question_resume(mode: &str) -> pb::AgentResume {
+        pb::AgentResume {
+            mode: mode.to_owned(),
+            question_id: "q_1".to_owned(),
+            answer_json: "{}".to_owned(),
+            claim_token: "claim".to_owned(),
+            ..Default::default()
+        }
+    }
+
+    /// A question continuation is refused while its switch is off, and it names exactly one question,
+    /// its answer and its claim. It never names an approval, a step, a tool or a brief.
+    #[test]
+    fn enforce_question_resume_needs_the_switch_and_exactly_the_question_shape() {
+        for mode in ["segment", "loop"] {
+            assert!(enforce_question_resume(&question_resume(mode), true).is_ok(), "{mode}");
+            let off = enforce_question_resume(&question_resume(mode), false).expect_err("switch off");
+            assert_eq!(off.message(), "continue_disabled");
+        }
+        let incomplete = [
+            pb::AgentResume { mode: "park".to_owned(), ..question_resume("segment") },
+            pb::AgentResume { approval_id: "appr_1".to_owned(), ..question_resume("segment") },
+            pb::AgentResume { tool_name: "delete_records".to_owned(), ..question_resume("segment") },
+            pb::AgentResume { brief: "recorded results".to_owned(), ..question_resume("segment") },
+            pb::AgentResume { question_id: String::new(), ..question_resume("segment") },
+            pb::AgentResume { answer_json: String::new(), ..question_resume("segment") },
+            pb::AgentResume { claim_token: String::new(), ..question_resume("segment") },
+            pb::AgentResume { mode: "PARK".to_owned(), ..question_resume("segment") },
+        ];
+        for shape in incomplete {
+            let e = enforce_question_resume(&shape, true).expect_err("an incomplete question shape");
+            assert_eq!(e.message(), "resume_incomplete");
+        }
+    }
+
+    /// Only a continuation that carries a question or an answer takes the question check, so an
+    /// approval continuation keeps its own.
+    #[test]
+    fn resume_names_a_question_only_when_it_carries_one() {
+        assert!(resume_names_question(&question_resume("segment")));
+        let answer_only = pb::AgentResume { answer_json: "{}".to_owned(), ..Default::default() };
+        assert!(resume_names_question(&answer_only));
+        assert!(!resume_names_question(&resume("segment")));
+        let park = pb::AgentResume { mode: "park".to_owned(), claim_token: "c".to_owned(), ..Default::default() };
+        assert!(!resume_names_question(&park));
+    }
+
+    /// With the continue switch off a question continuation is refused for that reason first.
+    #[test]
+    fn enforce_resume_refuses_a_question_continuation_while_the_continue_switch_is_off() {
+        let refused = enforce_resume(&with_resume(Some(question_resume("segment"))), false)
+            .expect_err("switch off");
+        assert_eq!(refused.message(), "continue_disabled");
     }
 
     /// A park resume (WS03 S8-6): the `park` mode with a claim token and nothing an approval

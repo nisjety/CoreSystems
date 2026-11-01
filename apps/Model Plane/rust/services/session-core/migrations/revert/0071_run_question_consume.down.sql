@@ -1,5 +1,6 @@
--- Reverses 0071_run_question_consume.sql: drops run_questions.consumed_at and restores the failure_code
--- CHECK that 0069 left (every code 0069 accepts, and not 'question_expired').
+-- Reverses 0071_run_question_consume.sql: drops run_questions.consumed_claim_hash and
+-- run_questions.consumed_at, and restores the failure_code CHECK that 0069 left (every code 0069
+-- accepts, and not 'question_expired').
 --
 -- Not applied by sqlx: this file lives in a subdirectory, and sqlx's migrate! reads only the top
 -- level of migrations/. Run it by hand, against the database only, inside one transaction.
@@ -21,6 +22,9 @@ BEGIN;
 
 ALTER TABLE run_questions
     DROP CONSTRAINT IF EXISTS run_questions_consumed_shape;
+
+ALTER TABLE run_questions
+    DROP COLUMN IF EXISTS consumed_claim_hash;
 
 ALTER TABLE run_questions
     DROP COLUMN IF EXISTS consumed_at;

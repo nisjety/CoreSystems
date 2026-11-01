@@ -2923,6 +2923,111 @@ pub async fn get_run_question(
     Ok(row)
 }
 
+/// What [`consume_run_question`] did.
+#[derive(Debug)]
+pub enum ConsumedRunQuestion {
+    /// This claim spent the answer. The row carries the answers for the continuation.
+    Consumed(RunQuestionRow),
+    /// The same claim spent it earlier: the stored row again, for a retried continuation.
+    Replay(RunQuestionRow),
+    /// Another claim spent it earlier. Nothing is handed back to this one.
+    AlreadyConsumed,
+    /// There is no answer to spend: the question is still waiting, or the owner skipped or withdrew it.
+    NotAnswered,
+    /// The question is not a `resume` question of this run.
+    NotResumable,
+    /// The question lapsed before it was answered.
+    Expired,
+    /// No such question for this owner and run.
+    NotFound,
+}
+
+/// Spend the answer of a `resume` question once, for the continuation of the run that asked it
+/// (build plan WS14 S5).
+///
+/// The spend is one compare-and-set on `consumed_at IS NULL`, with the owner, org, run and delivery as
+/// predicates, so two continuations race and exactly one wins. The winner stores the hash of its claim
+/// token: a retry with that token replays the answer, and any other claim is refused. The spend does
+/// not read `expires_at`, because the answer was accepted while the question was still open.
+///
+/// # Errors
+///
+/// Returns an error if a statement fails, or if the question is still answered and unspent after two
+/// attempts (a state these statements cannot reach).
+pub async fn consume_run_question(
+    pool: &Pool,
+    question_id: &str,
+    org_id: &str,
+    user_id: &str,
+    run_id: &str,
+    claim_hash: &str,
+) -> Result<ConsumedRunQuestion> {
+    // An answer recorded between a missed spend and its read is spent by the second attempt. An
+    // answered question is never answered again, so one retry is enough.
+    for _ in 0..2 {
+        let won = sqlx::query_as::<_, RunQuestionRow>(&format!(
+            "UPDATE run_questions \
+                SET consumed_at = now(), consumed_claim_hash = $6 \
+              WHERE id = $1 AND org_id = $2 AND user_id = $3 AND run_id = $4 \
+                AND delivery = 'resume' AND state = 'answered' AND consumed_at IS NULL \
+          RETURNING {RUN_QUESTION_COLUMNS}"
+        ))
+        .bind(question_id)
+        .bind(org_id)
+        .bind(user_id)
+        .bind(run_id)
+        .bind(claim_hash)
+        .fetch_optional(pool)
+        .await?;
+        if let Some(row) = won {
+            info!(question_id = %row.id, run_id = %row.run_id, "run question answer consumed");
+            return Ok(ConsumedRunQuestion::Consumed(row));
+        }
+
+        // The spend missed: lapse the question if its time is up, then read why.
+        sqlx::query(
+            "UPDATE run_questions SET state = 'expired' \
+             WHERE id = $1 AND org_id = $2 AND user_id = $3 \
+               AND state = 'requested' AND expires_at <= now()",
+        )
+        .bind(question_id)
+        .bind(org_id)
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+        let Some(row) = get_run_question(pool, question_id, org_id, user_id).await? else {
+            return Ok(ConsumedRunQuestion::NotFound);
+        };
+        if row.run_id != run_id {
+            return Ok(ConsumedRunQuestion::NotFound);
+        }
+        if row.delivery != "resume" {
+            return Ok(ConsumedRunQuestion::NotResumable);
+        }
+        match row.state.as_str() {
+            "expired" => return Ok(ConsumedRunQuestion::Expired),
+            "requested" | "skipped" | "cancelled" => return Ok(ConsumedRunQuestion::NotAnswered),
+            "answered" => {
+                let stored: Option<String> =
+                    sqlx::query_scalar("SELECT consumed_claim_hash FROM run_questions WHERE id = $1")
+                        .bind(question_id)
+                        .fetch_one(pool)
+                        .await?;
+                match stored {
+                    Some(stored) if stored == claim_hash => {
+                        return Ok(ConsumedRunQuestion::Replay(row));
+                    }
+                    Some(_) => return Ok(ConsumedRunQuestion::AlreadyConsumed),
+                    // Answered after the spend missed and still unspent: the next attempt spends it.
+                    None => {}
+                }
+            }
+            other => bail!("run question {question_id} has an unknown state {other}"),
+        }
+    }
+    bail!("run question {question_id} could not be spent after two attempts")
+}
+
 #[cfg(test)]
 mod run_question_tests {
     use super::*;
@@ -2971,6 +3076,21 @@ mod run_question_tests {
         let body = &body[..body.find("\n}\n").expect("end of the function")];
         assert!(body.contains("AND state = 'requested' AND expires_at > now()"));
         assert!(body.contains("AND org_id = $2 AND user_id = $3"));
+    }
+
+    /// The spend is one compare-and-set on the owner, org, run, delivery and an unspent answer, and it
+    /// stores a claim token only as its hash.
+    #[test]
+    fn run_question_the_spend_keeps_its_predicate_and_stores_only_the_claim_hash() {
+        let source = include_str!("orchestration_store.rs").replace("\r\n", "\n");
+        let body = &source[source
+            .find("pub async fn consume_run_question(")
+            .expect("the spend function is present")..];
+        let body = &body[..body.find("\n}\n").expect("end of the function")];
+        assert!(body.contains("WHERE id = $1 AND org_id = $2 AND user_id = $3 AND run_id = $4"));
+        assert!(body.contains("AND delivery = 'resume' AND state = 'answered' AND consumed_at IS NULL"));
+        assert!(body.contains("SET consumed_at = now(), consumed_claim_hash = $6"));
+        assert!(!body.contains("claim_token"), "the raw claim token is never bound");
     }
 }
 
@@ -5053,6 +5173,135 @@ mod run_question_db_tests {
             .await
             .expect("count");
         assert_eq!(left, 0, "the question and its answer are erased with the run");
+    }
+
+    /// A `resume` question put to the owner. The store holds any delivery the schema allows; the handler
+    /// is what refuses `resume` until the executor asks for one.
+    async fn resume_question(pool: &Pool, seed: &Seed, key: &str, expires_in: chrono::Duration) -> RunQuestionRow {
+        let id = format!("q_{}", mp_ids::new_ulid());
+        let spec = spec();
+        let created = create_run_question(
+            pool,
+            &NewRunQuestion {
+                id: &id,
+                run_id: &seed.run_id,
+                thread_id: &seed.thread_id,
+                step_id: "step-1",
+                org_id: &seed.org,
+                user_id: &seed.user,
+                delivery: "resume",
+                spec: &spec,
+                idempotency_key: key,
+                expires_at: Utc::now() + expires_in,
+            },
+            3,
+        )
+        .await
+        .expect("create");
+        match created {
+            CreatedRunQuestion::Created(row) => row,
+            other => panic!("expected a new question, got {other:?}"),
+        }
+    }
+
+    fn claim_hash(token: &str) -> String {
+        blake3::hash(token.as_bytes()).to_hex().to_string()
+    }
+
+    async fn spend(pool: &Pool, seed: &Seed, question: &str, token: &str) -> ConsumedRunQuestion {
+        consume_run_question(pool, question, &seed.org, &seed.user, &seed.run_id, &claim_hash(token))
+            .await
+            .expect("consume")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn run_question_one_answer_is_spent_once_and_the_same_claim_replays_it() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "spend").await;
+        let question = resume_question(&pool, &seed, "spend-1", chrono::Duration::hours(1)).await;
+        answer(&pool, &seed, &question.id, "a", false).await;
+        match spend(&pool, &seed, &question.id, "claim-a").await {
+            ConsumedRunQuestion::Consumed(row) => assert_eq!(row.state, "answered"),
+            other => panic!("the first claim spends the answer, got {other:?}"),
+        }
+        assert!(
+            matches!(spend(&pool, &seed, &question.id, "claim-a").await, ConsumedRunQuestion::Replay(_)),
+            "the same claim replays the answer"
+        );
+        assert!(
+            matches!(spend(&pool, &seed, &question.id, "claim-b").await, ConsumedRunQuestion::AlreadyConsumed),
+            "another claim is refused"
+        );
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT consumed_claim_hash FROM run_questions WHERE id = $1")
+                .bind(&question.id)
+                .fetch_one(&pool)
+                .await
+                .expect("hash");
+        assert_eq!(stored, Some(claim_hash("claim-a")), "only the first claim's hash is kept");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn run_question_two_claims_racing_for_one_answer_see_exactly_one_winner() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "race").await;
+        let question = resume_question(&pool, &seed, "race-1", chrono::Duration::hours(1)).await;
+        answer(&pool, &seed, &question.id, "b", false).await;
+        let (first, second) = tokio::join!(
+            spend(&pool, &seed, &question.id, "race-a"),
+            spend(&pool, &seed, &question.id, "race-b"),
+        );
+        let outcomes = [first, second];
+        let consumed = outcomes.iter().filter(|o| matches!(o, ConsumedRunQuestion::Consumed(_))).count();
+        let refused = outcomes.iter().filter(|o| matches!(o, ConsumedRunQuestion::AlreadyConsumed)).count();
+        assert_eq!((consumed, refused), (1, 1), "exactly one claim spends the answer");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn run_question_a_spend_is_refused_for_another_owner_run_delivery_or_state() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "refuse").await;
+        let other_run = seed_run(&pool, "refuse-other").await;
+        let question = resume_question(&pool, &seed, "refuse-1", chrono::Duration::hours(1)).await;
+        answer(&pool, &seed, &question.id, "a", false).await;
+
+        let stranger = consume_run_question(
+            &pool, &question.id, &seed.org, "someone-else", &seed.run_id, &claim_hash("x"),
+        )
+        .await
+        .expect("consume");
+        assert!(matches!(stranger, ConsumedRunQuestion::NotFound), "another owner reads nothing");
+        let elsewhere = consume_run_question(
+            &pool, &question.id, &seed.org, &seed.user, &other_run.run_id, &claim_hash("x"),
+        )
+        .await
+        .expect("consume");
+        assert!(matches!(elsewhere, ConsumedRunQuestion::NotFound), "another run's id reads nothing");
+        assert!(matches!(
+            spend(&pool, &seed, &question.id, "winner").await,
+            ConsumedRunQuestion::Consumed(_)
+        ));
+
+        let waiting = resume_question(&pool, &seed, "refuse-2", chrono::Duration::hours(1)).await;
+        assert!(matches!(spend(&pool, &seed, &waiting.id, "x").await, ConsumedRunQuestion::NotAnswered));
+        let skipped = resume_question(&pool, &seed, "refuse-3", chrono::Duration::hours(1)).await;
+        answer(&pool, &seed, &skipped.id, "a", true).await;
+        assert!(matches!(spend(&pool, &seed, &skipped.id, "x").await, ConsumedRunQuestion::NotAnswered));
+        let turn = created(&pool, &seed, "refuse-4").await;
+        answer(&pool, &seed, &turn.id, "a", false).await;
+        assert!(matches!(spend(&pool, &seed, &turn.id, "x").await, ConsumedRunQuestion::NotResumable));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn run_question_a_lapsed_resume_question_is_expired_not_spent() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "lapsed").await;
+        let question = resume_question(&pool, &seed, "lapsed-1", -chrono::Duration::hours(1)).await;
+        assert!(matches!(spend(&pool, &seed, &question.id, "x").await, ConsumedRunQuestion::Expired));
     }
 }
 

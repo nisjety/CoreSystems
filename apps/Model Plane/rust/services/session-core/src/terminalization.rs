@@ -1992,8 +1992,10 @@ async fn has_pending_approval(
     .map_err(database_error)
 }
 
-/// Whether a `resume` question the owner may still answer holds the run (build plan WS14 S5). Like a
-/// live approval, it keeps recovery off the run until its window closes.
+/// Whether a `resume` question holds the run (build plan WS14 S5): one the owner may still answer, or one
+/// answered whose answer is not yet spent. Like a live approval, it keeps recovery off the run until its
+/// window closes. An unspent answer holds for the resume window of one hour from the answer (DEC-05),
+/// because the spend does not read `expires_at`.
 async fn has_pending_resume_question(
     transaction: &mut Transaction<'_, Postgres>,
     run_id: &str,
@@ -2002,7 +2004,9 @@ async fn has_pending_resume_question(
         "SELECT EXISTS(
              SELECT 1 FROM run_questions AS q
              WHERE q.run_id = $1 AND q.delivery = 'resume'
-               AND q.state = 'requested' AND q.expires_at > now()
+               AND ((q.state = 'requested' AND q.expires_at > now())
+                    OR (q.state = 'answered' AND q.consumed_at IS NULL
+                        AND q.answered_at > now() - interval '1 hour'))
          )",
     )
     .bind(run_id)
@@ -3213,6 +3217,33 @@ mod resume_question_db_tests {
         assert!(
             !matches!(status.as_str(), "completed" | "failed" | "cancelled"),
             "the run stays open while its question can be answered, got {status}"
+        );
+        assert_eq!(obligation(&pool, &run_id).await.0, "open");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn an_answered_resume_question_holds_its_run_until_its_window_closes() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let run_id = run_with_resume_question(&pool, "answered", chrono::Duration::hours(1)).await;
+        sqlx::query(
+            "UPDATE run_questions
+                SET state = 'answered', answers = $2, answers_digest = $3, answered_at = now()
+              WHERE run_id = $1",
+        )
+        .bind(&run_id)
+        .bind(serde_json::json!([]))
+        .bind(format!("{:0>64}", "answer"))
+        .execute(&pool)
+        .await
+        .expect("answered");
+        isolate(&pool, &run_id).await;
+        assert_eq!(
+            recover_due_terminalizations(&pool).await.expect("pass"),
+            0,
+            "an answer not yet spent holds its run, so nothing is recovered"
         );
         assert_eq!(obligation(&pool, &run_id).await.0, "open");
     }
