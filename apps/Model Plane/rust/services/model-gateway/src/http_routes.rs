@@ -515,6 +515,25 @@ fn proxy_routes() -> Router<AppState> {
             "/v1/tool-policies/:capability_id",
             put(set_tool_policy_proxy).delete(revoke_tool_policy_proxy),
         )
+        // The org agent policy and its durable hook rules (WS25-S10). capability-core owns both and
+        // decides who may write them from the signed principal; the org comes from the verified token,
+        // never from a body.
+        .route(
+            "/v1/org/agent-policy",
+            get(get_org_agent_policy_proxy).put(set_org_agent_policy_proxy),
+        )
+        .route(
+            "/v1/org/agent-policy/effective",
+            get(get_org_agent_policy_effective_proxy),
+        )
+        .route(
+            "/v1/org/hooks",
+            get(list_org_hooks_proxy).post(create_org_hook_proxy),
+        )
+        .route(
+            "/v1/org/hooks/:hook_id",
+            put(update_org_hook_proxy).delete(delete_org_hook_proxy),
+        )
         // Tasks
         .route("/v1/tasks", get(list_tasks_proxy).post(create_task_proxy))
         .route("/v1/tasks/:id", get(get_task_proxy).patch(patch_task_proxy))
@@ -5962,6 +5981,25 @@ async fn proxy_to_capability_core(
     method: &str,
     body: Option<&Value>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    // Refuse before delegating: the durable-mutation inventory checks this entry point on its own.
+    if method != "GET" {
+        require_non_zdr_durable_mutation(claims)?;
+    }
+    proxy_to_capability_core_with_precondition(state, claims, bearer, path, method, body, None)
+        .await
+}
+
+/// [`proxy_to_capability_core`] with an optional `If-Match` revision on the forwarded request: a write
+/// capability-core applies only at the revision its author read.
+async fn proxy_to_capability_core_with_precondition(
+    state: &AppState,
+    claims: &Claims,
+    bearer: &VerifiedCapabilityBearer,
+    path: &str,
+    method: &str,
+    body: Option<&Value>,
+    if_match: Option<&str>,
+) -> Result<Json<Value>, HttpJsonError> {
     // Capability Core remains authoritative, but stop an obvious issuer-ZDR
     // mutation at the public boundary before forwarding any body or credential.
     if method != "GET" {
@@ -5993,6 +6031,10 @@ async fn proxy_to_capability_core(
         }
     }
     .bearer_auth(bearer.as_str());
+    let builder = match if_match {
+        Some(revision) => builder.header(reqwest::header::IF_MATCH, revision),
+        None => builder,
+    };
     let resp = builder.send().await.map_err(|e| {
         (
             StatusCode::BAD_GATEWAY,
@@ -6211,6 +6253,116 @@ async fn revoke_tool_policy_proxy(
         &format!("tool-policies/{capability_id}"),
         &[("scope", scope)],
     );
+    proxy_to_capability_core(&s, &c, &bearer, &path, "DELETE", None).await
+}
+
+/// Takes the revision a policy write was made against out of its body. capability-core reads it from
+/// `If-Match`, and this proxy forwards only the session's headers, so the SPA names it in the body. A body
+/// without one forwards with no precondition, which capability-core refuses with 428.
+fn take_policy_revision(body: &mut Value) -> Result<Option<String>, HttpJsonError> {
+    let Some(raw) = body
+        .as_object_mut()
+        .and_then(|object| object.remove("revision"))
+    else {
+        return Ok(None);
+    };
+    match raw.as_u64() {
+        Some(revision) if i64::try_from(revision).is_ok() => Ok(Some(revision.to_string())),
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "revision must be a non-negative integer"})),
+        )),
+    }
+}
+
+/// `GET /v1/org/agent-policy` — the org's agent policy in force. Any member of the org reads it.
+async fn get_org_agent_policy_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(&s, &c, &bearer, "org-agent-policy", "GET", None).await
+}
+
+/// `PUT /v1/org/agent-policy` — an org admin replaces the policy at the revision the body names. The rest
+/// of the body is forwarded as sent: capability-core decodes it strictly and decides the admin claim, the
+/// write scope and the ZDR posture from the signed principal.
+async fn set_org_agent_policy_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Json(mut body): Json<Value>,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_non_zdr_durable_mutation(&c)?;
+    let revision = take_policy_revision(&mut body)?;
+    proxy_to_capability_core_with_precondition(
+        &s,
+        &c,
+        &bearer,
+        "org-agent-policy",
+        "PUT",
+        Some(&body),
+        revision.as_deref(),
+    )
+    .await
+}
+
+/// `GET /v1/org/agent-policy/effective` — each setting with the value in force for the caller's org. Only
+/// the org layer exists yet, and capability-core accepts only `user=me`, so the read always asks for that.
+async fn get_org_agent_policy_effective_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+) -> Result<Json<Value>, HttpJsonError> {
+    let path = capability_query_path("org-agent-policy/effective", &[("user", "me")]);
+    proxy_to_capability_core(&s, &c, &bearer, &path, "GET", None).await
+}
+
+/// `GET /v1/org/hooks` — the org's active hook rules and the policy revision they are at.
+async fn list_org_hooks_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(&s, &c, &bearer, "org-hooks", "GET", None).await
+}
+
+/// `POST /v1/org/hooks` — an org admin adds a rule. The body is forwarded as sent, so a field that
+/// capability-core does not know, the org id included, is refused rather than dropped.
+async fn create_org_hook_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_non_zdr_durable_mutation(&c)?;
+    proxy_to_capability_core(&s, &c, &bearer, "org-hooks", "POST", Some(&body)).await
+}
+
+/// `PUT /v1/org/hooks/:hook_id` — an org admin replaces the content of an active rule.
+async fn update_org_hook_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(hook_id): Path<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_non_zdr_durable_mutation(&c)?;
+    require_registry_identifier(&hook_id, "hook_id")?;
+    let path = format!("org-hooks/{hook_id}");
+    proxy_to_capability_core(&s, &c, &bearer, &path, "PUT", Some(&body)).await
+}
+
+/// `DELETE /v1/org/hooks/:hook_id` — an org admin retires an active rule; the row stays as history.
+async fn delete_org_hook_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(hook_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_non_zdr_durable_mutation(&c)?;
+    require_registry_identifier(&hook_id, "hook_id")?;
+    let path = format!("org-hooks/{hook_id}");
     proxy_to_capability_core(&s, &c, &bearer, &path, "DELETE", None).await
 }
 
@@ -16124,6 +16276,304 @@ mod tool_policy_proxy_tests {
         .expect_err("an injected query must be refused");
         assert_eq!(refused.0, StatusCode::BAD_REQUEST);
         assert!(seen.lock().expect("lock").is_empty());
+        task.abort();
+    }
+}
+
+#[cfg(test)]
+mod org_agent_policy_proxy_tests {
+    use super::*;
+    use crate::auth::VerifiedCapabilityBearer;
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+
+    fn claims(zdr: bool) -> Claims {
+        Claims {
+            sub: "user-a".to_owned(),
+            iss: "test-issuer".to_owned(),
+            exp: i64::MAX,
+            org_id: "org-a".to_owned(),
+            user_id: "user-a".to_owned(),
+            nbf: None,
+            aud: Some("model-gateway".to_owned()),
+            scopes: Vec::new(),
+            zdr,
+            sovereign: None,
+            org_zdr: None,
+            zdr_waiver: None,
+            principal_type: Some("user".to_owned()),
+            service_id: None,
+            reason: None,
+        }
+    }
+
+    /// What a stand-in capability-core received, in order: `METHOD path?query`, the `If-Match` header and the body.
+    type Received = Arc<Mutex<Vec<(String, Option<String>, Value)>>>;
+
+    async fn recorder() -> (String, Received, tokio::task::JoinHandle<()>) {
+        let received: Received = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new().fallback(axum::routing::any({
+            let received = Arc::clone(&received);
+            move |method: axum::http::Method,
+                  uri: axum::http::Uri,
+                  headers: axum::http::HeaderMap,
+                  body: String| {
+                let received = Arc::clone(&received);
+                async move {
+                    let if_match = headers
+                        .get("if-match")
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned);
+                    let body = serde_json::from_str(&body).unwrap_or(Value::Null);
+                    received.lock().expect("recorder lock").push((
+                        format!("{method} {uri}"),
+                        if_match,
+                        body,
+                    ));
+                    Json(json!({"ok": true}))
+                }
+            }
+        }));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind recorder");
+        let address = listener.local_addr().expect("recorder address");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve recorder");
+        });
+        (format!("http://{address}"), received, task)
+    }
+
+    #[tokio::test]
+    async fn a_policy_write_names_its_revision_in_if_match_and_forwards_the_rest() {
+        let (base_url, received, task) = recorder().await;
+        let mut state = AppState::new();
+        state.capability_core_base_url = base_url;
+        let bearer = VerifiedCapabilityBearer::for_test("capability-test-bearer");
+        let settings = json!({"mode_cap": "read_only", "lockdown": false});
+
+        let _ = set_org_agent_policy_proxy(
+            State(state.clone()),
+            Extension(claims(false)),
+            bearer.clone(),
+            Json(json!({"settings": settings.clone(), "revision": 4})),
+        )
+        .await
+        .expect("a write at a revision");
+        let _ = set_org_agent_policy_proxy(
+            State(state.clone()),
+            Extension(claims(false)),
+            bearer.clone(),
+            Json(json!({"settings": settings.clone()})),
+        )
+        .await
+        .expect("a write with no revision is forwarded, for capability-core to refuse");
+
+        let received = received.lock().expect("lock").clone();
+        assert_eq!(received[0].0, "PUT /api/v1/org-agent-policy");
+        assert_eq!(received[0].1.as_deref(), Some("4"));
+        // The revision leaves the body: capability-core refuses unknown fields.
+        assert_eq!(received[0].2, json!({"settings": settings}));
+        assert_eq!(received[1].1, None);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_revision_that_is_not_a_non_negative_integer_is_refused_before_forwarding() {
+        let (base_url, received, task) = recorder().await;
+        let mut state = AppState::new();
+        state.capability_core_base_url = base_url;
+        let bearer = VerifiedCapabilityBearer::for_test("capability-test-bearer");
+        for revision in [json!("4"), json!(-1), json!(1.5), json!(null)] {
+            let refused = set_org_agent_policy_proxy(
+                State(state.clone()),
+                Extension(claims(false)),
+                bearer.clone(),
+                Json(json!({"settings": {}, "revision": revision.clone()})),
+            )
+            .await
+            .expect_err("a malformed revision must be refused");
+            assert_eq!(refused.0, StatusCode::BAD_REQUEST, "{revision}");
+        }
+        assert!(
+            received.lock().expect("lock").is_empty(),
+            "a malformed revision was forwarded"
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_zdr_caller_is_refused_every_org_policy_and_hook_write_before_anything_is_forwarded()
+    {
+        let (base_url, received, task) = recorder().await;
+        let mut state = AppState::new();
+        state.capability_core_base_url = base_url;
+        let bearer = VerifiedCapabilityBearer::for_test("capability-test-bearer");
+        let zdr = claims(true);
+        let rule = json!({
+            "event": "pre_tool",
+            "tool_matcher": "shell",
+            "decision": "deny",
+            "reason": "no shell"
+        });
+
+        let set = set_org_agent_policy_proxy(
+            State(state.clone()),
+            Extension(zdr.clone()),
+            bearer.clone(),
+            Json(json!({"settings": {}, "revision": 0})),
+        )
+        .await
+        .expect_err("a ZDR policy write must be refused");
+        assert_eq!(set.0, StatusCode::PRECONDITION_FAILED);
+        let create = create_org_hook_proxy(
+            State(state.clone()),
+            Extension(zdr.clone()),
+            bearer.clone(),
+            Json(rule.clone()),
+        )
+        .await
+        .expect_err("a ZDR hook create must be refused");
+        assert_eq!(create.0, StatusCode::PRECONDITION_FAILED);
+        let update = update_org_hook_proxy(
+            State(state.clone()),
+            Extension(zdr.clone()),
+            bearer.clone(),
+            Path("ohr_1".to_owned()),
+            Json(rule.clone()),
+        )
+        .await
+        .expect_err("a ZDR hook update must be refused");
+        assert_eq!(update.0, StatusCode::PRECONDITION_FAILED);
+        let delete = delete_org_hook_proxy(
+            State(state.clone()),
+            Extension(zdr.clone()),
+            bearer.clone(),
+            Path("ohr_1".to_owned()),
+        )
+        .await
+        .expect_err("a ZDR hook retirement must be refused");
+        assert_eq!(delete.0, StatusCode::PRECONDITION_FAILED);
+        assert!(
+            received.lock().expect("lock").is_empty(),
+            "a ZDR write was forwarded"
+        );
+
+        // Reading the policy and the rules is not a durable mutation and stays open under ZDR.
+        let _ = get_org_agent_policy_proxy(
+            State(state.clone()),
+            Extension(zdr.clone()),
+            bearer.clone(),
+        )
+        .await
+        .expect("a ZDR caller may read the policy in force");
+        let _ = list_org_hooks_proxy(State(state), Extension(zdr), bearer)
+            .await
+            .expect("a ZDR caller may read the hook rules");
+        assert_eq!(received.lock().expect("lock").len(), 2);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn the_gateway_names_the_capability_core_paths_and_pins_the_effective_read() {
+        let (base_url, received, task) = recorder().await;
+        let mut state = AppState::new();
+        state.capability_core_base_url = base_url;
+        let bearer = VerifiedCapabilityBearer::for_test("capability-test-bearer");
+        let rule = json!({
+            "event": "pre_tool",
+            "tool_matcher": "*",
+            "decision": "ask",
+            "reason": "check first",
+            "priority": 5
+        });
+
+        let _ = get_org_agent_policy_effective_proxy(
+            State(state.clone()),
+            Extension(claims(false)),
+            bearer.clone(),
+        )
+        .await
+        .expect("effective");
+        let _ = list_org_hooks_proxy(
+            State(state.clone()),
+            Extension(claims(false)),
+            bearer.clone(),
+        )
+        .await
+        .expect("list");
+        let _ = create_org_hook_proxy(
+            State(state.clone()),
+            Extension(claims(false)),
+            bearer.clone(),
+            Json(rule.clone()),
+        )
+        .await
+        .expect("create");
+        let _ = update_org_hook_proxy(
+            State(state.clone()),
+            Extension(claims(false)),
+            bearer.clone(),
+            Path("ohr_1".to_owned()),
+            Json(rule.clone()),
+        )
+        .await
+        .expect("update");
+        let _ = delete_org_hook_proxy(
+            State(state),
+            Extension(claims(false)),
+            bearer,
+            Path("ohr_1".to_owned()),
+        )
+        .await
+        .expect("delete");
+
+        let received = received.lock().expect("lock").clone();
+        let lines: Vec<&str> = received.iter().map(|(line, _, _)| line.as_str()).collect();
+        assert_eq!(
+            lines,
+            [
+                "GET /api/v1/org-agent-policy/effective?user=me",
+                "GET /api/v1/org-hooks",
+                "POST /api/v1/org-hooks",
+                "PUT /api/v1/org-hooks/ohr_1",
+                "DELETE /api/v1/org-hooks/ohr_1",
+            ]
+        );
+        // A rule is forwarded as sent: the gateway adds no org id and drops nothing from it.
+        assert_eq!(received[2].2, rule);
+        assert_eq!(received[3].2, rule);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_hook_id_that_is_not_an_identifier_is_refused_before_forwarding() {
+        let (base_url, received, task) = recorder().await;
+        let mut state = AppState::new();
+        state.capability_core_base_url = base_url;
+        let bearer = VerifiedCapabilityBearer::for_test("capability-test-bearer");
+        let rule = json!({"event": "pre_tool", "decision": "deny", "reason": "no"});
+
+        let refused = update_org_hook_proxy(
+            State(state.clone()),
+            Extension(claims(false)),
+            bearer.clone(),
+            Path("../org-agent-policy".to_owned()),
+            Json(rule),
+        )
+        .await
+        .expect_err("a path-walking hook id must be refused");
+        assert_eq!(refused.0, StatusCode::BAD_REQUEST);
+        let refused = delete_org_hook_proxy(
+            State(state),
+            Extension(claims(false)),
+            bearer,
+            Path("ohr_1/../../x".to_owned()),
+        )
+        .await
+        .expect_err("a hook id with a slash must be refused");
+        assert_eq!(refused.0, StatusCode::BAD_REQUEST);
+        assert!(received.lock().expect("lock").is_empty());
         task.abort();
     }
 }

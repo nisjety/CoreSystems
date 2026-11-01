@@ -500,4 +500,81 @@ describe('action registry', () => {
     // The user, the org and the turn are the server's, never a client input.
     expect(schema?.safeParse({ connectionIds: [], userId: 'user_x' }).success).toBe(false)
   })
+
+  function registered(id: string) {
+    return actionRegistry.find((action) => action.id === id)
+  }
+
+  it('registers the org agent policy and its hook rules as model-plane actions the model cannot execute, the writes high-risk', () => {
+    for (const id of [
+      'org.set_agent_policy',
+      'org.preview_effective_policy',
+      'org.create_hook',
+      'org.update_hook',
+      'org.delete_hook',
+    ]) {
+      expect(registered(id), id).toMatchObject({ ownerPlane: 'model', requiresApproval: false, reversible: true })
+      expect(isModelExecutableAction(id), id).toBe(false)
+      expect(registered(id)?.description ?? '', id).toContain('model-executable')
+    }
+    for (const id of ['org.set_agent_policy', 'org.create_hook', 'org.update_hook', 'org.delete_hook']) {
+      expect(registered(id), id).toMatchObject({ risk: 'high' })
+    }
+    expect(registered('org.preview_effective_policy')).toMatchObject({ risk: 'low' })
+  })
+
+  it('takes the closed policy settings and no organization from the client, and never a reserved key', () => {
+    const setPolicy = registered('org.set_agent_policy')?.inputSchema
+
+    expect(setPolicy?.safeParse({ revision: 3, settings: {} }).success).toBe(true)
+    expect(
+      setPolicy?.safeParse({
+        revision: 3,
+        settings: { mode_cap: 'read_only', rung_cap: 'workspace_write', lockdown: false, mcp_tool_approval: 'approved_only' },
+      }).success,
+    ).toBe(true)
+    expect(
+      setPolicy?.safeParse({ revision: 3, settings: { 'ext.mcp_servers': { mode: 'approved_only', ids: ['srv-a', 'srv-b'] } } })
+        .success,
+    ).toBe(true)
+    // The revision is required and a whole number; the organization is the session's, never the body's.
+    expect(setPolicy?.safeParse({ settings: {} }).success).toBe(false)
+    expect(setPolicy?.safeParse({ revision: -1, settings: {} }).success).toBe(false)
+    expect(setPolicy?.safeParse({ revision: 3, orgId: 'org-1', settings: {} }).success).toBe(false)
+    expect(setPolicy?.safeParse({ revision: 3, settings: { orgId: 'org-1' } }).success).toBe(false)
+    // Only the enforced closed values are offered: a value outside the schema, a reserved key and ids on
+    // a mode that takes none are all refused.
+    expect(setPolicy?.safeParse({ revision: 3, settings: { mode_cap: 'full_access' } }).success).toBe(false)
+    expect(setPolicy?.safeParse({ revision: 3, settings: { 'ext.skills': { mode: 'any', ids: [] } } }).success).toBe(false)
+    expect(setPolicy?.safeParse({ revision: 3, settings: { 'ext.mcp_servers': { mode: 'any', ids: ['srv-a'] } } }).success).toBe(
+      false,
+    )
+  })
+
+  it('keeps a post-tool rule to a denial, takes no organization, and bounds the matcher like the engine', () => {
+    const create = registered('org.create_hook')?.inputSchema
+
+    expect(create?.safeParse({ event: 'pre_tool', toolMatcher: 'shell', decision: 'deny', reason: 'no shell' }).success).toBe(true)
+    expect(
+      create?.safeParse({ event: 'pre_tool', toolMatcher: 'mcp__crm_*', decision: 'ask', reason: 'check first', priority: 5 })
+        .success,
+    ).toBe(true)
+    expect(create?.safeParse({ event: 'post_tool', decision: 'deny', reason: 'withhold the result' }).success).toBe(true)
+    expect(create?.safeParse({ event: 'post_tool', decision: 'ask', reason: 'check first' }).success).toBe(false)
+    expect(create?.safeParse({ event: 'pre_tool', decision: 'allow', reason: 'open' }).success).toBe(false)
+    expect(create?.safeParse({ event: 'pre_tool', decision: 'deny', reason: '   ' }).success).toBe(false)
+    expect(create?.safeParse({ event: 'pre_tool', toolMatcher: '../shell', decision: 'deny', reason: 'no' }).success).toBe(false)
+    expect(create?.safeParse({ event: 'pre_tool', toolMatcher: 'shell*x', decision: 'deny', reason: 'no' }).success).toBe(false)
+    expect(create?.safeParse({ event: 'pre_tool', decision: 'deny', reason: 'no', priority: 1.5 }).success).toBe(false)
+    expect(create?.safeParse({ event: 'pre_tool', decision: 'deny', reason: 'no', orgId: 'org-1' }).success).toBe(false)
+
+    const update = registered('org.update_hook')?.inputSchema
+    expect(update?.safeParse({ hookId: 'ohr_1', event: 'pre_tool', decision: 'deny', reason: 'no shell' }).success).toBe(true)
+    expect(update?.safeParse({ event: 'pre_tool', decision: 'deny', reason: 'no shell' }).success).toBe(false)
+    expect(update?.safeParse({ hookId: 'ohr_1', event: 'post_tool', decision: 'ask', reason: 'no' }).success).toBe(false)
+
+    const retire = registered('org.delete_hook')?.inputSchema
+    expect(retire?.safeParse({ hookId: 'ohr_1' }).success).toBe(true)
+    expect(retire?.safeParse({ hookId: 'ohr_1', orgId: 'org-1' }).success).toBe(false)
+  })
 })

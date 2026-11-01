@@ -1,6 +1,7 @@
 pub mod actions;
 pub mod ag_ui;
 pub mod agent_actions;
+pub mod agent_policy;
 pub mod agents;
 pub mod agents_runs;
 pub mod ai;

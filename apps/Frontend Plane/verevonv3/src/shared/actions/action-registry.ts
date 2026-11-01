@@ -1148,6 +1148,118 @@ const orgUpdateAgentLearningPolicyInput = z.object({
   learningReview: z.enum(['disabled', 'proposals']).optional(),
 })
 
+// The organization agent policy and its hook rules (WS25-S10). Inputs name no organization: the session
+// supplies it. The settings keys are the closed set of api/contracts/org-agent-policy-schema.json; reserved
+// keys are not writable from here. Inputs are camelCase like the rest of the registry; the REST bodies and
+// the outputs are capability-core's wire form.
+const orgAgentPolicyAllowListInput = z
+  .object({
+    mode: z.enum(['none', 'approved_only', 'any']),
+    ids: z.array(z.string().min(1).max(200)).max(64),
+  })
+  .strict()
+  .refine((input) => input.ids.length === 0 || input.mode === 'approved_only', {
+    message: 'ids are only allowed with mode approved_only',
+    path: ['ids'],
+  })
+
+const orgSetAgentPolicyInput = z
+  .object({
+    revision: z.number().int().min(0),
+    settings: z
+      .object({
+        mode_cap: z.enum(['lockdown', 'read_only', 'ask_first', 'auto']).optional(),
+        rung_cap: z.enum(['read_only', 'workspace_write', 'danger_full_access']).optional(),
+        lockdown: z.boolean().optional(),
+        'ext.mcp_servers': orgAgentPolicyAllowListInput.optional(),
+        mcp_tool_approval: z.enum(['approved_only', 'trust_annotations']).optional(),
+      })
+      .strict(),
+  })
+  .strict()
+
+const orgPreviewEffectivePolicyInput = z.object({}).strict()
+
+// A tool matcher is empty or "*" for any tool, a tool name, or a name ending in one "*" (hook/mod.rs).
+const orgHookRuleFields = z.object({
+  event: z.enum(['pre_tool', 'post_tool']),
+  toolMatcher: z
+    .string()
+    .max(200)
+    .regex(/^(\*|[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}\*?)?$/)
+    .optional(),
+  decision: z.enum(['deny', 'ask']),
+  reason: z.string().trim().min(1).max(500),
+  priority: z.number().int().min(-2147483648).max(2147483647).optional(),
+  enabled: z.boolean().optional(),
+})
+
+// A post_tool rule may only deny: the tool has already acted by the time its result is seen (WS25-D7).
+const postToolRuleMustDeny = (input: { event: string; decision: string }) =>
+  input.event !== 'post_tool' || input.decision === 'deny'
+const postToolRuleMustDenyIssue = { message: 'a post_tool rule may only deny', path: ['decision'] }
+
+const orgCreateHookInput = orgHookRuleFields
+  .strict()
+  .refine(postToolRuleMustDeny, postToolRuleMustDenyIssue)
+
+const orgUpdateHookInput = orgHookRuleFields
+  .extend({ hookId: z.string().min(1).max(200) })
+  .strict()
+  .refine(postToolRuleMustDeny, postToolRuleMustDenyIssue)
+
+const orgDeleteHookInput = z.object({ hookId: z.string().min(1).max(200) }).strict()
+
+const orgAgentPolicyOutput = z
+  .object({
+    org_id: z.string(),
+    revision: z.number().int().min(0),
+    digest: z.string(),
+    settings: z.record(z.string(), z.unknown()),
+  })
+  .passthrough()
+
+const orgEffectivePolicyOutput = z
+  .object({
+    org_id: z.string(),
+    revision: z.number().int().min(0),
+    digest: z.string(),
+    settings: z.array(
+      z
+        .object({
+          key: z.string(),
+          kind: z.enum(['enum', 'bool', 'allow_list']),
+          status: z.enum(['enforced', 'reserved']),
+          value: z.unknown(),
+          source: z.enum(['platform_default', 'org_policy']),
+          fail_closed_value: z.unknown(),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough()
+
+const orgHookRuleOutput = z
+  .object({
+    id: z.string(),
+    event: z.enum(['pre_tool', 'post_tool']),
+    tool_matcher: z.string(),
+    decision: z.enum(['deny', 'ask']),
+    reason: z.string(),
+    priority: z.number().int(),
+    enabled: z.boolean(),
+    revision: z.number().int().min(0),
+  })
+  .passthrough()
+
+const orgHookRevokeOutput = z
+  .object({
+    id: z.string(),
+    revoked: z.literal(true),
+    revision: z.number().int().min(0),
+  })
+  .passthrough()
+
 const membershipInviteMemberInput = z.object({
   orgId: z.string().min(1),
   email: z.string().trim().email().max(320),
@@ -2867,6 +2979,61 @@ export const actionRegistry = [
     reversible: true,
     inputSchema: toolsSetPolicyInput,
     outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'org.set_agent_policy',
+    label: 'Set organization agent policy',
+    description: 'Replace the organization-wide agent policy: the highest mode agents may run in, the highest rung they may be granted, lockdown, the MCP servers they may use and how their tools are approved. Takes the revision it was read at and is refused if the policy has changed since. Takes effect only where the deployment has switched policy enforcement on. An org admin only. Refused typed under zero data retention. Never model-executable: a model does not set the rules it runs under.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: orgSetAgentPolicyInput,
+    outputSchema: orgAgentPolicyOutput,
+  },
+  {
+    id: 'org.preview_effective_policy',
+    label: 'Preview effective agent policy',
+    description: 'Read the organization agent policy in force, setting by setting: the value each takes, whether it is enforced or reserved, and whether it comes from the organization or the platform default. Any member of the organization may read it. Never model-executable.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: orgPreviewEffectivePolicyInput,
+    outputSchema: orgEffectivePolicyOutput,
+  },
+  {
+    id: 'org.create_hook',
+    label: 'Add organization hook rule',
+    description: 'Add a rule that denies, or asks first about, a tool call in the agent runs of the organization. A rule only narrows a run, and a post-tool rule may only deny, because the tool has already acted by then. Takes effect only where the deployment has switched durable hook rules on. An org admin only. Refused typed under zero data retention. Never model-executable: a model does not set the rules it runs under.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: orgCreateHookInput,
+    outputSchema: orgHookRuleOutput,
+  },
+  {
+    id: 'org.update_hook',
+    label: 'Update organization hook rule',
+    description: 'Replace the content of an active organization hook rule, under the same rules as adding one. An org admin only. Refused typed under zero data retention. Never model-executable.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: orgUpdateHookInput,
+    outputSchema: orgHookRuleOutput,
+  },
+  {
+    id: 'org.delete_hook',
+    label: 'Retire organization hook rule',
+    description: 'Retire an active organization hook rule. The rule stays in the history and can be added again. An org admin only. Refused typed under zero data retention. Never model-executable.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: orgDeleteHookInput,
+    outputSchema: orgHookRevokeOutput,
   },
   {
     id: 'monitoring.check_now',
