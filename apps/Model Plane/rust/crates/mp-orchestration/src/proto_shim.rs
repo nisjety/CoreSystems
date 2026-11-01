@@ -637,7 +637,8 @@ impl TryFrom<ProtoOrchestrationEvent> for OrchestrationEvent {
             },
             ProtoEvent::QuestionAsked(_)
             | ProtoEvent::QuestionAnswered(_)
-            | ProtoEvent::RunUsageProgress(_) => {
+            | ProtoEvent::RunUsageProgress(_)
+            | ProtoEvent::ToolRetryScheduled(_) => {
                 return Err(ShimError::UnsupportedEvent);
             }
         })

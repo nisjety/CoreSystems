@@ -142,6 +142,19 @@ export type RunResumedFromParkEvent = {
   at?: string
 }
 
+/** WS15-S3: the Do loop retries a tool after a transient failure. `attempt` is the
+ * attempt about to run (2 or more); `reason` is a closed token, never error text. */
+export type ToolRetryScheduledEvent = {
+  runId?: string
+  stepId?: string
+  tool?: string
+  attempt?: number
+  maxAttempts?: number
+  waitMs?: number
+  reason?: string
+  at?: string
+}
+
 /** Phase 5 HITL gate: a specific browser action (or a run-level condition
  * like persistent-cookie reuse) requires a human decision before it
  * proceeds. `approvalId` lets the UI decide it via the existing generic
@@ -211,6 +224,7 @@ export type RunEventHandlers = {
   onRunResumed?: (event: RunResumedAfterApprovalEvent) => void
   onRunParked?: (event: RunParkedEvent) => void
   onRunResumedFromPark?: (event: RunResumedFromParkEvent) => void
+  onToolRetryScheduled?: (event: ToolRetryScheduledEvent) => void
   onSubagentAttached?: (event: SubagentAttachedEvent) => void
   onSubagentStopped?: (event: SubagentStoppedEvent) => void
   onBrowserAction?: (event: BrowserActionDispatchedEvent) => void
@@ -319,6 +333,18 @@ function dispatch(event: SseEvent, handlers: RunEventHandlers): void {
       handlers.onRunResumedFromPark?.({
         runId: str(payload.run_id) ?? str(payload.runId),
         resumedSegment: nonNegativeInt(payload.resumed_segment),
+        at: str(payload.at),
+      })
+      break
+    case 'tool_retry_scheduled':
+      handlers.onToolRetryScheduled?.({
+        runId: str(payload.run_id) ?? str(payload.runId),
+        stepId: str(payload.step_id) ?? str(payload.stepId),
+        tool: str(payload.tool),
+        attempt: nonNegativeInt(payload.attempt),
+        maxAttempts: nonNegativeInt(payload.max_attempts),
+        waitMs: nonNegativeInt(payload.wait_ms),
+        reason: str(payload.reason),
         at: str(payload.at),
       })
       break

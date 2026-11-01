@@ -298,6 +298,8 @@ services:
       MODEL_GATEWAY_PLAN_EXECUTE_ENABLED: ${MODEL_GATEWAY_PLAN_EXECUTE_ENABLED:-false}
       # WS14-S2: an approved plan starts a Do run on the same thread. Off until the open P1s in the depth register close.
       MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE: ${MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE:-false}
+      # WS15-S1/S3: lifecycle frames (retry_scheduled and friends) on the chat stream. Off by default.
+      MODEL_GATEWAY_LIFECYCLE_EVENTS: ${MODEL_GATEWAY_LIFECYCLE_EVENTS:-false}
       # WS04-S1: cancel, queue and probe routed to the replica that owns a stream, over NATS request/reply.
       # On by default since the WS04-S9 two-replica live proof (2026-10-27, docs/compliance/evidence/
       # live-proof-ws04-replica-run-control-2026-10-27.txt); only the literal `true` turns it on. Deploy order: the
@@ -1539,6 +1541,8 @@ services:
       EXECUTION_DO_BROWSER_ENABLED: ${EXECUTION_DO_BROWSER_ENABLED:-0}
       # WS21-S5b: browser.act. Never on until Quarry's read_only contract test (K3-6) passes.
       EXECUTION_DO_BROWSER_ACT_ENABLED: ${EXECUTION_DO_BROWSER_ACT_ENABLED:-false}
+      # WS15-S3: the Do loop announces tool retries (ToolRetryScheduled) on the run stream. Off by default.
+      MODEL_GATEWAY_LIFECYCLE_EVENTS: ${MODEL_GATEWAY_LIFECYCLE_EVENTS:-false}
       # Feature-gates QuarryAgentClient::from_env() (browser_agent loop) — the
       # env var this block's QUARRY_EDGE_URL comment already promises but that
       # was never actually wired here (Phase 2, found live: run_browser_agent_loop

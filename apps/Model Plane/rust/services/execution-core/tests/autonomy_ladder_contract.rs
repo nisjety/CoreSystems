@@ -172,10 +172,10 @@ fn the_ledger_classifies_through_the_runs_gate_and_fences_a_retry() {
         "the ledger class must come from the run's gate: {for_run}"
     );
     let retry_site = agent
-        .split("let retryable = attempt")
+        .split("runtime_loop::retry::run_attempts(")
         .nth(1)
         .expect("the retry decision is gone")
-        .split("if !retryable")
+        .split("|failed, retry|")
         .next()
         .unwrap_or_default()
         .to_owned();

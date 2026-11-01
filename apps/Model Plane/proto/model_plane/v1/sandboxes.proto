@@ -103,8 +103,8 @@ service SandboxManager {
   // base_hash. A conflicting path is reported and never overwritten.
   rpc ApplyThreadWorkspaceChanges(ApplyThreadWorkspaceChangesRequest) returns (ApplyThreadWorkspaceChangesResponse);
 
-  // Erase a thread's rows and its object-store prefix. Declared here, implemented
-  // with the retention sweeper (WS22-S5); until then it refuses every caller.
+  // Erase a thread's rows and its object-store prefix (WS22-S5). Owner-bound: the
+  // caller's own sandbox bearer; service principals are refused.
   rpc DeleteThreadWorkspace(DeleteThreadWorkspaceRequest) returns (DeleteThreadWorkspaceResponse);
 }
 

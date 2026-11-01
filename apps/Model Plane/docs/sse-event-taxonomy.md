@@ -98,6 +98,7 @@ the wire but not written yet.
 | `approval_continuation_verified` | 23 | ✅ |
 | `run_parked` | 24 | ✅ |
 | `run_resumed` | 25 | ✅ |
+| `tool_retry_scheduled` | 26 | ✅ |
 | `question_asked` | 27 | not yet |
 | `question_answered` | 28 | not yet |
 | `run_usage_progress` | 29 | not yet |

@@ -102,8 +102,8 @@ type SandboxManagerClient interface {
 	// Apply per-path changes and deletes, each compare-and-swapped on its
 	// base_hash. A conflicting path is reported and never overwritten.
 	ApplyThreadWorkspaceChanges(ctx context.Context, in *ApplyThreadWorkspaceChangesRequest, opts ...grpc.CallOption) (*ApplyThreadWorkspaceChangesResponse, error)
-	// Erase a thread's rows and its object-store prefix. Declared here, implemented
-	// with the retention sweeper (WS22-S5); until then it refuses every caller.
+	// Erase a thread's rows and its object-store prefix (WS22-S5). Owner-bound: the
+	// caller's own sandbox bearer; service principals are refused.
 	DeleteThreadWorkspace(ctx context.Context, in *DeleteThreadWorkspaceRequest, opts ...grpc.CallOption) (*DeleteThreadWorkspaceResponse, error)
 }
 
@@ -349,8 +349,8 @@ type SandboxManagerServer interface {
 	// Apply per-path changes and deletes, each compare-and-swapped on its
 	// base_hash. A conflicting path is reported and never overwritten.
 	ApplyThreadWorkspaceChanges(context.Context, *ApplyThreadWorkspaceChangesRequest) (*ApplyThreadWorkspaceChangesResponse, error)
-	// Erase a thread's rows and its object-store prefix. Declared here, implemented
-	// with the retention sweeper (WS22-S5); until then it refuses every caller.
+	// Erase a thread's rows and its object-store prefix (WS22-S5). Owner-bound: the
+	// caller's own sandbox bearer; service principals are refused.
 	DeleteThreadWorkspace(context.Context, *DeleteThreadWorkspaceRequest) (*DeleteThreadWorkspaceResponse, error)
 	mustEmbedUnimplementedSandboxManagerServer()
 }
