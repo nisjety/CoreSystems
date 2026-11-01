@@ -58,6 +58,80 @@ pub fn resolve_for_start(
     Ok(decision)
 }
 
+/// D2-051: the ask a resumed run is held to: the one it was started with (stored in its
+/// checkpoint) and the one the resume request carries, as one. An ask can only tighten, so
+/// the merge is the tightest of the two: capabilities disabled by either stay disabled, the
+/// ceilings take the lower, the deny lists join, and a host must pass both allow lists. A
+/// resume that carries no ask keeps the stored one whole; it never drops a restriction.
+/// `None` only when neither side asked for anything.
+pub fn merge_asks(stored: Option<&RequestAsk>, requested: Option<&RequestAsk>) -> Option<RequestAsk> {
+    match (stored, requested) {
+        (None, None) => None,
+        (Some(only), None) | (None, Some(only)) => Some(only.clone()),
+        (Some(a), Some(b)) => {
+            let mut disable = a.disable.clone();
+            for key in &b.disable {
+                if !disable.contains(key) {
+                    disable.push(key.clone());
+                }
+            }
+            let mut deny_domains = a.deny_domains.clone();
+            for host in &b.deny_domains {
+                if !deny_domains.contains(host) {
+                    deny_domains.push(host.clone());
+                }
+            }
+            Some(RequestAsk {
+                disable,
+                robots_max: min_option(a.robots_max, b.robots_max),
+                proxy_max: min_option(a.proxy_max, b.proxy_max),
+                deny_domains,
+                allow_domains: match (&a.allow_domains, &b.allow_domains) {
+                    (None, None) => None,
+                    (Some(only), None) | (None, Some(only)) => Some(only.clone()),
+                    (Some(left), Some(right)) => Some(allow_both(left, right)),
+                },
+            })
+        }
+    }
+}
+
+/// The lower of two optional ceilings (the enums order least permissive first).
+fn min_option<T: Ord + Copy>(a: Option<T>, b: Option<T>) -> Option<T> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (one, other) => one.or(other),
+    }
+}
+
+/// Host `host` is `entry` or sits under it, on a dot boundary (the policy's own rule).
+fn host_under(host: &str, entry: &str) -> bool {
+    host == entry || host.strip_suffix(entry).is_some_and(|rest| rest.ends_with('.'))
+}
+
+/// One allow list for hosts that must pass both: each entry of one list that the other list
+/// covers, so a parent domain narrowed by a subdomain keeps the subdomain. Empty when no host
+/// passes both, which denies everything (never "allow all").
+fn allow_both(left: &[String], right: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut keep = |host: &String| {
+        if !out.contains(host) {
+            out.push(host.clone());
+        }
+    };
+    for host in left {
+        if right.iter().any(|entry| host_under(host, entry)) {
+            keep(host);
+        }
+    }
+    for host in right {
+        if left.iter().any(|entry| host_under(host, entry)) {
+            keep(host);
+        }
+    }
+    out
+}
+
 /// The egress boundary the run's browser is configured with: the run's own allow list,
 /// narrowed by the policy. `constraints.allowed_domains` is never changed here, so the
 /// broker grant equality checked by `validate_run_grant` still holds. An intersection that
@@ -202,7 +276,9 @@ fn gate_decision(
 mod tests {
     use super::*;
 
-    use quarry_core::web_policy::{resolve, OrgInput, PolicyInputs, PolicyLayer};
+    use quarry_core::web_policy::{
+        resolve, OrgInput, PolicyInputs, PolicyLayer, ProxyMax, RobotsMax,
+    };
 
     fn resolved(principal: Principal, zdr: bool, ask: RequestAsk) -> ResolvedPolicy {
         resolve(&PolicyInputs {
@@ -327,6 +403,122 @@ mod tests {
         let parent = egress_policy(&decision, &["example.com".to_string()]);
         assert!(parent.allows_url("https://www.example.com/"));
         assert!(!parent.allows_url("https://ads.example.com/"));
+    }
+
+    fn strs(list: &[&str]) -> Vec<String> {
+        list.iter().map(|item| (*item).to_string()).collect()
+    }
+
+    #[test]
+    fn merging_asks_keeps_every_restriction_of_both_and_nothing_when_neither_asked() {
+        assert_eq!(merge_asks(None, None), None);
+        let stored = RequestAsk {
+            disable: strs(&["browser.act.upload"]),
+            robots_max: Some(RobotsMax::Respect),
+            proxy_max: Some(ProxyMax::Pool),
+            deny_domains: strs(&["ads.example"]),
+            allow_domains: None,
+        };
+        // A resume with no ask of its own keeps the stored one whole.
+        assert_eq!(merge_asks(Some(&stored), None), Some(stored.clone()));
+        assert_eq!(merge_asks(None, Some(&stored)), Some(stored.clone()));
+
+        let requested = RequestAsk {
+            disable: strs(&["browser.act.input", "browser.act.upload"]),
+            robots_max: Some(RobotsMax::Strict),
+            proxy_max: None,
+            deny_domains: strs(&["tracker.example", "ads.example"]),
+            allow_domains: None,
+        };
+        let merged = merge_asks(Some(&stored), Some(&requested)).expect("an ask");
+        assert_eq!(merged.disable, strs(&["browser.act.upload", "browser.act.input"]));
+        assert_eq!(merged.robots_max, Some(RobotsMax::Strict), "the lower ceiling");
+        assert_eq!(merged.proxy_max, Some(ProxyMax::Pool), "a ceiling only one side set");
+        assert_eq!(merged.deny_domains, strs(&["ads.example", "tracker.example"]));
+        assert_eq!(merged.allow_domains, None);
+        // The merged ask is still a valid layer.
+        merged.into_layer().expect("a valid merged ask");
+    }
+
+    #[test]
+    fn a_resume_cannot_loosen_a_ceiling_the_start_set() {
+        let stored = RequestAsk {
+            robots_max: Some(RobotsMax::Strict),
+            proxy_max: Some(ProxyMax::None),
+            ..Default::default()
+        };
+        let looser = RequestAsk {
+            robots_max: Some(RobotsMax::Ignore),
+            proxy_max: Some(ProxyMax::Pool),
+            ..Default::default()
+        };
+        let merged = merge_asks(Some(&stored), Some(&looser)).expect("an ask");
+        assert_eq!(merged.robots_max, Some(RobotsMax::Strict));
+        assert_eq!(merged.proxy_max, Some(ProxyMax::None));
+    }
+
+    #[test]
+    fn allow_lists_merge_to_the_hosts_that_pass_both() {
+        let ask = |hosts: &[&str]| RequestAsk {
+            allow_domains: Some(strs(hosts)),
+            ..Default::default()
+        };
+        let merged = |a: &[&str], b: &[&str]| {
+            merge_asks(Some(&ask(a)), Some(&ask(b)))
+                .and_then(|merged| merged.allow_domains)
+                .expect("an allow list")
+        };
+        // A subdomain narrows its parent, whichever side names it.
+        assert_eq!(merged(&["example.com"], &["docs.example.com"]), strs(&["docs.example.com"]));
+        assert_eq!(merged(&["docs.example.com"], &["example.com"]), strs(&["docs.example.com"]));
+        // Hosts only one side allows drop out.
+        assert_eq!(
+            merged(&["example.com", "other.test"], &["example.com"]),
+            strs(&["example.com"])
+        );
+        // A suffix that is not on a dot boundary is not under the entry.
+        assert_eq!(merged(&["notexample.com"], &["example.com"]), Vec::<String>::new());
+        // Disjoint lists pass nothing, which is deny-all rather than allow-all.
+        let empty = merged(&["a.test"], &["b.test"]);
+        assert!(empty.is_empty());
+        let decision = PolicyBaseline::default()
+            .decide(
+                Principal::Autonomous,
+                false,
+                Some(
+                    RequestAsk {
+                        allow_domains: Some(empty),
+                        ..Default::default()
+                    }
+                    .into_layer()
+                    .expect("a valid ask"),
+                ),
+            )
+            .expect("the policy resolves");
+        assert!(!egress_policy(&decision, &["a.test".to_string()]).allows_url("https://a.test/"));
+        assert!(decision.policy().check_url("https://a.test/").is_err());
+    }
+
+    #[test]
+    fn a_merged_deny_list_reaches_the_browser_egress_of_an_unconstrained_run() {
+        // D2-052 after a resume: the start asked to deny ads, the resume asked to deny a
+        // tracker; the browser boundary refuses a sub-resource on either, with no allow list.
+        let stored = RequestAsk {
+            deny_domains: strs(&["ads.example"]),
+            ..Default::default()
+        };
+        let resume = RequestAsk {
+            deny_domains: strs(&["tracker.example"]),
+            ..Default::default()
+        };
+        let merged = merge_asks(Some(&stored), Some(&resume)).expect("an ask");
+        let decision = PolicyBaseline::default()
+            .decide(Principal::Autonomous, false, Some(merged.into_layer().expect("a valid ask")))
+            .expect("the policy resolves");
+        let egress = egress_policy(&decision, &[]);
+        assert!(egress.allows_url("https://news.example.org/"));
+        assert!(!egress.allows_url("https://ads.example/pixel.png"));
+        assert!(!egress.allows_url("https://cdn.tracker.example/t.js"));
     }
 
     #[test]

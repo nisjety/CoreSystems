@@ -98,6 +98,23 @@ pub struct AgentRunCheckpoint {
     /// key repeats in a run. 0 on a checkpoint written before it existed (D2).
     #[serde(default)]
     pub next_step: u32,
+    /// The `seq` the run's event trace mints next (WS10.S4, D2-061). A resume opens its
+    /// trace here instead of at 1, so a client holding an old `Last-Event-ID` never sees a
+    /// seq reused for a different event after an expiry or an edge restart. 0 on a
+    /// checkpoint written before it existed (the resume then starts at 1, as it did).
+    #[serde(default, skip_serializing_if = "is_zero_seq")]
+    pub trace_seq: u64,
+    /// The `policy` ask the run was started with (WS7.D, D2-051). A resume re-applies it
+    /// (merged with the resume request's own ask, which can only tighten it), so a
+    /// restriction the caller asked for is never dropped by a resume. Absent when the
+    /// start carried no ask, and on a checkpoint written before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_ask: Option<quarry_core::web_policy::RequestAsk>,
+}
+
+/// serde skip rule: a trace that has minted nothing is the default and is not written.
+fn is_zero_seq(seq: &u64) -> bool {
+    *seq == 0
 }
 
 /// The budget ledger of a run, stored with its checkpoint so a resume restores
@@ -1159,6 +1176,8 @@ mod tests {
             budget: None,
             policy_mode: None,
             next_step: 3,
+            trace_seq: 0,
+            policy_ask: None,
         };
         store.save_run_checkpoint(checkpoint).await.unwrap();
         assert!(store
@@ -1573,6 +1592,8 @@ mod tests {
             control_mode: BrowserControlMode::AgentControl,
             control_epoch: 0,
             next_step: 2,
+            trace_seq: 0,
+            policy_ask: None,
             budget: Some(BudgetCheckpoint {
                 class: "agent".into(),
                 steps: 2,

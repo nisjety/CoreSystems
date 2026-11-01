@@ -34,6 +34,8 @@ pub(super) fn checkpoint_for_entry(entry: &RunEntry, live: &RunLive) -> AgentRun
             .as_ref()
             .map(|budget| budget.snapshot(std::time::Instant::now())),
         next_step: live.next_step(),
+        trace_seq: live.trace_seq(),
+        policy_ask: live.policy_ask().cloned(),
     }
 }
 
