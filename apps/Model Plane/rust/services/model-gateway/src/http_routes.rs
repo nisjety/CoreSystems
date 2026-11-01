@@ -1959,6 +1959,11 @@ struct DecideApprovalBody {
     /// scopes need the grant store (S6), so any other value is refused until it exists.
     #[serde(default)]
     scope: String,
+    /// "Always" (build plan WS13 S7): only the literal `true` asks for a standing rule proposed
+    /// from this grant. Any other value is ignored, as an unknown key always was, so a body that
+    /// carries one reads exactly as it did before the switch existed.
+    #[serde(default)]
+    promote: Value,
 }
 
 /// The scope a decision may carry (build plan WS13 S6). `once` is always available. A standing
@@ -2033,6 +2038,74 @@ fn approval_scope_code(scope: &str) -> i32 {
         SCOPE_RUN => ApprovalScope::Run as i32,
         _ => ApprovalScope::Once as i32,
     }
+}
+
+/// The environment switch for "Always" as a reviewed rule (build plan WS13 S7). Default off; only
+/// the literal `true` enables it, read through the one strict parser the other switches share.
+const RULE_PROPOSALS_ENV: &str = "APPROVAL_RULE_PROPOSALS_ENABLED";
+
+fn rule_proposals_from(value: Option<&str>) -> bool {
+    mp_contracts::loop_fold::switch_from(value)
+}
+
+fn rule_proposals_enabled() -> bool {
+    rule_proposals_from(env::var(RULE_PROPOSALS_ENV).ok().as_deref())
+}
+
+/// The prefix every MCP tool name carries. Only an MCP tool's approval may become a rule: a person
+/// never relaxes a built-in tool, and capability-core refuses an allow for one (DEC-08, WS05 D6).
+const MCP_TOOL_PREFIX: &str = "mcp__";
+
+/// Whether an approval's cause may become a standing rule. The causes are the ones that widen to a
+/// standing grant (`approval_cause::eligible_scopes`), on an MCP tool whose declared class a person
+/// may relax: the ceiling is `external_write`, the same one capability-core's `CanRelax` uses.
+fn rule_offered_for(cause: &ApprovalCause) -> bool {
+    use mp_contracts::tool_class::SideEffectClass;
+    matches!(
+        CauseCode::from_wire(&cause.code),
+        CauseCode::RiskyEffectUnderAsk
+            | CauseCode::ConsentToDisclose
+            | CauseCode::CapabilityHighRisk
+    ) && cause.tool.trim().starts_with(MCP_TOOL_PREFIX)
+        && SideEffectClass::from_wire(&cause.effect_class) <= SideEffectClass::ExternalWrite
+}
+
+/// Whether a decision is "Always" (build plan WS13 S7): a standing rule proposed from this grant,
+/// for the person to confirm in settings. Returns `true` only for a valid ask under the switch; with
+/// the switch off `promote` is ignored. A rule is proposed from a grant of this thread on an MCP
+/// tool's approval and from nothing else, so every other ask is refused with its typed reason.
+fn checked_rule_proposal(
+    promote: bool,
+    scope: &str,
+    target: ApprovalState,
+    cause: Option<&ApprovalCause>,
+    enabled: bool,
+) -> Result<bool, HttpJsonError> {
+    if !enabled || !promote {
+        return Ok(false);
+    }
+    if !matches!(target, ApprovalState::Granted) {
+        return Err(scope_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "rule_not_applicable",
+            "A rule is proposed from a grant only.",
+        ));
+    }
+    if scope != SCOPE_THREAD {
+        return Err(scope_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "rule_requires_thread_scope",
+            "Always applies to a decision for this thread.",
+        ));
+    }
+    if !cause.is_some_and(rule_offered_for) {
+        return Err(scope_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "rule_not_offered",
+            "Always is offered only for an MCP tool that you may relax.",
+        ));
+    }
+    Ok(true)
 }
 
 /// The approval step-up switch (build plan WS13 S5). `off` changes nothing; `shadow` counts a grant
@@ -2178,6 +2251,15 @@ async fn decide_approval(
         .map(|cause| cause.scope_options.clone())
         .unwrap_or_default();
     let scope = checked_decision_scope(&body.scope, target_state, &offered)?;
+    let asks_rule = checked_rule_proposal(
+        body.promote == Value::Bool(true),
+        scope,
+        target_state,
+        prior_approval
+            .as_ref()
+            .and_then(|approval| approval.cause.as_ref()),
+        rule_proposals_enabled(),
+    )?;
     let step_up_claim = step_up.and_then(|Extension(VerifiedStepUp(claim))| claim);
     if step_up_missing(
         target_state,
@@ -2221,6 +2303,14 @@ async fn decide_approval(
     let approval = resp
         .approval
         .ok_or_else(|| not_found("approval not found"))?;
+    if asks_rule {
+        // The decision carries no rule field yet, so the thread grant is recorded and no rule is
+        // proposed. Ids only: the reason text never reaches a log line.
+        warn!(
+            approval_id = %approval.id,
+            "Always recorded as a thread grant; no rule was proposed"
+        );
+    }
 
     // A grant is durable authority, but not a restartable continuation: this
     // path never invokes a generic `ResumeRun`, since the outbox is
@@ -7701,6 +7791,150 @@ mod approval_step_up_tests {
                     callers.insert(relative.to_string_lossy().replace('\\', "/"));
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod approval_rule_tests {
+    use super::*;
+
+    /// An MCP tool's approval as the grant eligibility offers it once the tool is pinned: a risky
+    /// call under ask, with its declared class and both scopes.
+    fn mcp_cause(code: &str, effect_class: &str) -> ApprovalCause {
+        ApprovalCause {
+            code: code.to_owned(),
+            tool: "mcp__fixture__create_note".to_owned(),
+            effect_class: effect_class.to_owned(),
+            scope_options: vec![SCOPE_ONCE.to_owned(), SCOPE_THREAD.to_owned()],
+            action_key: "mcp__fixture__create_note".to_owned(),
+            call_digest: "digest-of-the-exact-call".to_owned(),
+            ..ApprovalCause::default()
+        }
+    }
+
+    fn ask(
+        cause: Option<&ApprovalCause>,
+        scope: &str,
+        target: ApprovalState,
+    ) -> Result<bool, HttpJsonError> {
+        checked_rule_proposal(true, scope, target, cause, true)
+    }
+
+    fn refusal_code(result: Result<bool, HttpJsonError>) -> String {
+        let (status, Json(body)) = result.expect_err("the ask is refused");
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        body["error"]["code"]
+            .as_str()
+            .expect("a typed refusal code")
+            .to_owned()
+    }
+
+    #[test]
+    fn an_always_choice_before_confirmation_is_a_thread_grant() {
+        let cause = mcp_cause("risky_effect_under_ask", "external_write");
+        let scope = checked_decision_scope_with(
+            "thread",
+            ApprovalState::Granted,
+            &cause.scope_options,
+            true,
+        )
+        .expect("the thread scope is offered");
+        assert_eq!(scope, SCOPE_THREAD);
+        assert!(ask(Some(&cause), scope, ApprovalState::Granted).expect("an MCP grant may ask"));
+        // The grant is the decision's own: it does not wait for the rule to be confirmed.
+        let request = user_decision_request(
+            "appr-1".to_owned(),
+            ApprovalState::Granted,
+            "user-1",
+            "org-1",
+            String::new(),
+            scope,
+        );
+        assert_eq!(request.scope, ApprovalScope::Thread as i32);
+        assert_eq!(request.decision_source, ApprovalDecisionSource::User as i32);
+    }
+
+    #[test]
+    fn a_rule_is_proposed_only_from_an_mcp_grant_the_person_may_relax() {
+        let grant = mcp_cause("risky_effect_under_ask", "external_write");
+        let mut built_in = grant.clone();
+        built_in.tool = "write_file".to_owned();
+        assert_eq!(
+            refusal_code(ask(Some(&built_in), SCOPE_THREAD, ApprovalState::Granted)),
+            "rule_not_offered"
+        );
+        for (code, class) in [
+            ("risky_effect_under_ask", "destructive"),
+            ("risky_effect_under_ask", "owner_effect"),
+            ("risky_effect_under_ask", ""),
+            ("hook_ask", "external_write"),
+            ("capability_policy_ask", "external_write"),
+        ] {
+            let cause = mcp_cause(code, class);
+            assert_eq!(
+                refusal_code(ask(Some(&cause), SCOPE_THREAD, ApprovalState::Granted)),
+                "rule_not_offered",
+                "{code} with class {class:?}"
+            );
+        }
+        assert_eq!(
+            refusal_code(ask(None, SCOPE_THREAD, ApprovalState::Granted)),
+            "rule_not_offered"
+        );
+        assert_eq!(
+            refusal_code(ask(Some(&grant), SCOPE_ONCE, ApprovalState::Granted)),
+            "rule_requires_thread_scope"
+        );
+        assert_eq!(
+            refusal_code(ask(Some(&grant), SCOPE_THREAD, ApprovalState::Denied)),
+            "rule_not_applicable"
+        );
+        for class in ["read", "sandbox_compute", "context_write", "external_write"] {
+            let cause = mcp_cause("consent_to_disclose", class);
+            assert!(
+                ask(Some(&cause), SCOPE_THREAD, ApprovalState::Granted).expect(class),
+                "{class} may be relaxed"
+            );
+        }
+        // With the switch off nothing is asked, however invalid the ask, and nothing is refused.
+        assert!(!checked_rule_proposal(
+            true,
+            SCOPE_ONCE,
+            ApprovalState::Denied,
+            Some(&built_in),
+            false,
+        )
+        .expect("ignored while the switch is off"));
+        assert!(!checked_rule_proposal(
+            false,
+            SCOPE_THREAD,
+            ApprovalState::Granted,
+            Some(&grant),
+            true,
+        )
+        .expect("an absent ask is not an ask"));
+    }
+
+    #[test]
+    fn promote_is_ignored_while_the_switch_is_off_and_only_the_literal_true_asks() {
+        assert!(!rule_proposals_from(None));
+        assert!(!rule_proposals_from(Some("1")));
+        assert!(!rule_proposals_from(Some("yes")));
+        assert!(rule_proposals_from(Some(" TRUE ")));
+        let literal: DecideApprovalBody = serde_json::from_value(json!({
+            "decision": "approve",
+            "promote": true,
+        }))
+        .expect("a boolean promote parses");
+        assert_eq!(literal.promote, Value::Bool(true));
+        for other in [json!("yes"), json!(1), json!(null)] {
+            let body: DecideApprovalBody = serde_json::from_value(json!({
+                "decision": "approve",
+                "promote": other,
+            }))
+            .expect("any promote value parses, as an unknown key always did");
+            assert_ne!(body.promote, Value::Bool(true));
         }
     }
 }
