@@ -1071,6 +1071,7 @@ pub async fn list_run_events(
             .list_events(&claims.org_id, &parsed_run_id, limit)
             .await
             .map_err(|e| err_response(&request_id, e))?;
+        let events = scope_run_events(&claims, events).map_err(|e| err_response(&request_id, e))?;
         return Ok(Json(Envelope::ok(
             request_id,
             Page {
@@ -1090,7 +1091,7 @@ pub async fn list_run_events(
         limit: q.limit,
         ..Default::default()
     };
-    let page = forward_list::<quarry_core::job_history::JobHistoryEvent>(
+    let mut page = forward_list::<quarry_core::job_history::JobHistoryEvent>(
         &state,
         &request_id,
         &claims.org_id,
@@ -1099,7 +1100,35 @@ pub async fn list_run_events(
     )
     .await
     .map_err(|e| err_response(&request_id, e))?;
+    page.items = scope_run_events(&claims, page.items).map_err(|e| err_response(&request_id, e))?;
     Ok(Json(Envelope::ok(request_id, page)))
+}
+
+/// What a caller may read of a run's events.
+///
+/// - Another org's run is a 404. Control's `GET /v1/runs/{id}/events` resolves
+///   the run by id alone and ignores `org_id`, so the edge checks the `org_id`
+///   every event carries and refuses the whole page on any mismatch.
+/// - Under the token's ZDR floor the payload keeps only numbers, booleans and
+///   the closed string fields (D2-057, W2-U31): these are the same job events
+///   the job drain redacts, and the drain hands out the `run_id`.
+fn scope_run_events(
+    claims: &crate::auth::Claims,
+    mut events: Vec<quarry_core::job_history::JobHistoryEvent>,
+) -> Result<Vec<quarry_core::job_history::JobHistoryEvent>, QuarryError> {
+    if events.iter().any(|event| event.org_id != claims.org_id) {
+        tracing::warn!(
+            org_id = %claims.org_id,
+            "run events of another org refused at the edge"
+        );
+        return Err(QuarryError::new(ErrorCode::NotFound, "not found"));
+    }
+    if claims.effective_zdr(false) {
+        for event in &mut events {
+            event.payload = job_stream::redact_payload_for_zdr(std::mem::take(&mut event.payload));
+        }
+    }
+    Ok(events)
 }
 
 // =============================================================================

@@ -150,7 +150,13 @@ pub fn redact_event_for_zdr(event: Value) -> Value {
     Value::Object(out)
 }
 
-fn redact_payload_for_zdr(payload: Value) -> Value {
+/// The payload half of [`redact_event_for_zdr`], for the run event route too
+/// (`GET /v1/runs/:id/events` serves the same events with their payload). A null
+/// payload stays null; any other non-object becomes `{}`.
+pub fn redact_payload_for_zdr(payload: Value) -> Value {
+    if payload.is_null() {
+        return Value::Null;
+    }
     let Value::Object(map) = payload else {
         return json!({});
     };
