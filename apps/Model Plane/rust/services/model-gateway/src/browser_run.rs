@@ -227,6 +227,11 @@ struct BrowserRunStartRequest {
     require_approval: Option<bool>,
     #[serde(default)]
     max_cost_usd: Option<f64>,
+    /// Token budget for the LLM planner of this run (WS11.S1). Tighten-only: the run gets
+    /// `min(this, the org's browser_agent_max_tokens_per_run)`; it can never raise a ceiling.
+    /// Absent or non-positive asks for nothing.
+    #[serde(default)]
+    max_planner_tokens: Option<i64>,
     /// Accepted so a well-formed caller body never 4xxs, but never trusted:
     /// this endpoint is called by the Verevon gateway, which derives `zdr`
     /// server-side from the browser session's own persisted metadata and
@@ -387,6 +392,10 @@ fn run_request_fingerprint(req: &BrowserRunStartRequest) -> String {
     part("v", "model-gateway/browser-run-fp/v1");
     part("goal", &req.goal);
     part("max_steps", &format!("{:?}", req.max_steps));
+    if req.max_planner_tokens.is_some() {
+        // Only when named, so a request that never names it keeps the fingerprint it had.
+        part("max_planner_tokens", &format!("{:?}", req.max_planner_tokens));
+    }
     part("stop_criteria", req.stop_criteria.as_deref().unwrap_or(""));
     part("start_url", req.start_url.as_deref().unwrap_or(""));
     part("require_approval", &format!("{:?}", req.require_approval));
@@ -594,6 +603,94 @@ fn bounded_run_params(
         tighten_i32(req.max_runtime_s, claim.max_runtime_s),
         cost,
     )
+}
+
+/// `bounded_run_params` plus the LLM planner's token budget (WS11.S1): the three values it
+/// returns, unchanged, and `min(request.max_planner_tokens, org ceiling)` as a fourth. The
+/// first three come from `bounded_run_params` itself, so the two never disagree about a bound.
+fn bounded_run_params_with_planner_tokens(
+    req: &BrowserRunStartRequest,
+    claim: Option<&BudgetClaim>,
+    org_planner_token_ceiling: Option<i64>,
+) -> (Option<i32>, Option<i32>, Option<f64>, Option<i64>) {
+    let (max_steps, max_runtime_s, max_cost_usd) = bounded_run_params(req, claim);
+    (
+        max_steps,
+        max_runtime_s,
+        max_cost_usd,
+        crate::org_quota::planner_token_ceiling_for(
+            req.max_planner_tokens,
+            org_planner_token_ceiling,
+        ),
+    )
+}
+
+/// `MODEL_GATEWAY_BROWSER_PLANNER_QUOTAS`: only `on` makes a browser run start read the org's
+/// planner quota keys (the token ceiling and the planner switch). Off: nothing is read, the
+/// ceiling is the request's own and no `planner_flag` is written. Off by default.
+fn planner_quotas_flag(value: Option<&str>) -> bool {
+    budget_claim_flag(value)
+}
+
+/// What the org's quota rows say about the LLM planner, resolved once per run start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PlannerQuota {
+    /// `browser_agent_max_tokens_per_run`, when set and readable (fail open).
+    token_ceiling: Option<i64>,
+    /// `browser_agent_llm_planner` (fail closed: an unreadable read is `Unavailable`).
+    flag: crate::org_quota::PlannerFlag,
+}
+
+impl PlannerQuota {
+    /// The quota read was not asked for: no ceiling, no flag.
+    const OFF: Self = Self {
+        token_ceiling: None,
+        flag: crate::org_quota::PlannerFlag::Unset,
+    };
+
+    fn from_keys(keys: &crate::org_quota::OrgQuotaKeys) -> Self {
+        Self {
+            token_ceiling: keys.planner_token_ceiling(),
+            flag: keys.planner_flag(),
+        }
+    }
+}
+
+async fn planner_quota(state: &AppState, org_id: &str) -> PlannerQuota {
+    let flag = std::env::var("MODEL_GATEWAY_BROWSER_PLANNER_QUOTAS").ok();
+    if !planner_quotas_flag(flag.as_deref()) {
+        return PlannerQuota::OFF;
+    }
+    PlannerQuota::from_keys(
+        &crate::org_quota::fetch_org_quota_keys(
+            &state.http_client,
+            &state.org_core_base_url,
+            org_id,
+            &state.org_core_service_id,
+            &state.org_core_service_token,
+        )
+        .await,
+    )
+}
+
+/// Write the planner's inputs into the browser `tool_input`. Both keys are written only when
+/// they have a value, so a run with no planner policy carries the `tool_input` it always did.
+/// `planner_flag` comes from the org's quota row ONLY: the request type has no such field, and a
+/// key of that name in a client body is dropped at deserialisation.
+fn insert_planner_fields(
+    tool_input: &mut serde_json::Value,
+    max_planner_tokens: Option<i64>,
+    planner_flag: crate::org_quota::PlannerFlag,
+) {
+    let Some(fields) = tool_input.as_object_mut() else {
+        return;
+    };
+    if let Some(tokens) = max_planner_tokens {
+        fields.insert("max_planner_tokens".to_owned(), json!(tokens));
+    }
+    if let Some(flag) = planner_flag.wire() {
+        fields.insert("planner_flag".to_owned(), json!(flag));
+    }
 }
 
 /// The bound a run executes under when its run grant was issued before this
@@ -1460,9 +1557,14 @@ async fn browser_run_start_inner(
     // it the loop runs "blind": no events, no pause/resume/stop.
     // The grant's budget claim tightens what execution-core is told, so the
     // planner and Quarry bound the run by the same numbers.
-    let (max_steps, max_runtime_s, max_cost_usd) =
-        bounded_run_params(&req, browser_grant.budget.as_ref());
-    let tool_input = json!({
+    let planner = planner_quota(&state, &org_id).await;
+    let (max_steps, max_runtime_s, max_cost_usd, max_planner_tokens) =
+        bounded_run_params_with_planner_tokens(
+            &req,
+            browser_grant.budget.as_ref(),
+            planner.token_ceiling,
+        );
+    let mut tool_input = json!({
         "grant_id": browser_grant.grant_id,
         "plan_id": plan_id,
         "run_id": run_id,
@@ -1477,8 +1579,9 @@ async fn browser_run_start_inner(
         "zdr": req.zdr,
         "profile_id": req.profile_id,
         "start_url": req.start_url,
-    })
-    .to_string();
+    });
+    insert_planner_fields(&mut tool_input, max_planner_tokens, planner.flag);
+    let tool_input = tool_input.to_string();
 
     let mut execution_client = state.execution_client.clone();
     let terminal_state = state.clone();
@@ -2157,6 +2260,7 @@ mod tests {
             stop_criteria: None,
             require_approval: None,
             max_cost_usd: None,
+            max_planner_tokens: None,
             zdr: false,
         }
     }
@@ -2868,6 +2972,104 @@ mod tests {
         for off in [None, Some(""), Some("off"), Some("true"), Some("1"), Some("onn")] {
             assert!(!budget_claim_flag(off), "{off:?}");
         }
+    }
+
+    #[test]
+    fn the_planner_token_budget_rides_bounded_run_params_and_changes_nothing_else() {
+        let mut request = browser_request("session-1");
+        request.max_steps = Some(40);
+        request.max_cost_usd = Some(3.0);
+        let claim = BudgetClaim {
+            micro_usd: 1_000_000,
+            max_steps: 10,
+            max_runtime_s: 120,
+        };
+        // The first three values are exactly `bounded_run_params`'s, claim or none.
+        for claim in [Some(&claim), None] {
+            let (steps, runtime, cost) = bounded_run_params(&request, claim);
+            assert_eq!(
+                bounded_run_params_with_planner_tokens(&request, claim, None),
+                (steps, runtime, cost, None)
+            );
+        }
+        // The tokens are min(request, org) and the org key alone binds a silent request.
+        request.max_planner_tokens = Some(80_000);
+        assert_eq!(
+            bounded_run_params_with_planner_tokens(&request, None, Some(50_000)).3,
+            Some(50_000)
+        );
+        request.max_planner_tokens = Some(20_000);
+        assert_eq!(
+            bounded_run_params_with_planner_tokens(&request, None, Some(50_000)).3,
+            Some(20_000)
+        );
+        request.max_planner_tokens = None;
+        assert_eq!(
+            bounded_run_params_with_planner_tokens(&request, None, Some(50_000)).3,
+            Some(50_000)
+        );
+        assert_eq!(bounded_run_params_with_planner_tokens(&request, None, None).3, None);
+    }
+
+    #[test]
+    fn only_on_turns_the_planner_quota_read_on() {
+        assert!(planner_quotas_flag(Some("on")));
+        for off in [None, Some(""), Some("off"), Some("1"), Some("true")] {
+            assert!(!planner_quotas_flag(off), "{off:?}");
+        }
+        // Off: no ceiling, no flag, so nothing is written for an org that never opted in.
+        assert_eq!(
+            PlannerQuota::OFF,
+            PlannerQuota {
+                token_ceiling: None,
+                flag: crate::org_quota::PlannerFlag::Unset
+            }
+        );
+    }
+
+    #[test]
+    fn the_planner_keys_are_written_only_when_they_have_a_value() {
+        let base = json!({ "grant_id": "g", "max_steps": 5 });
+        let mut untouched = base.clone();
+        insert_planner_fields(&mut untouched, None, crate::org_quota::PlannerFlag::Unset);
+        assert_eq!(untouched, base, "no planner policy: the tool_input is exactly what it was");
+
+        let mut written = base.clone();
+        insert_planner_fields(&mut written, Some(40_000), crate::org_quota::PlannerFlag::Off);
+        assert_eq!(written["max_planner_tokens"], 40_000);
+        assert_eq!(written["planner_flag"], "off");
+        assert_eq!(written["grant_id"], "g");
+
+        let mut unavailable = base;
+        insert_planner_fields(&mut unavailable, None, crate::org_quota::PlannerFlag::Unavailable);
+        assert_eq!(unavailable["planner_flag"], "unavailable");
+        assert!(unavailable.get("max_planner_tokens").is_none());
+    }
+
+    #[test]
+    fn client_supplied_planner_flag_is_ignored() {
+        // A caller that names `planner_flag` (or the token key under a different spelling) gets
+        // nothing from it: the request type has no such field, and the only writer of
+        // `tool_input.planner_flag` is the org's quota row.
+        let request: BrowserRunStartRequest = serde_json::from_value(json!({
+            "goal": "g",
+            "grant_id": "grant-1",
+            "planner_flag": "on",
+            "max_planner_tokens": 30_000,
+        }))
+        .expect("a body naming planner_flag still parses");
+        assert_eq!(request.max_planner_tokens, Some(30_000));
+        let planner = PlannerQuota::OFF;
+        let mut tool_input = json!({ "grant_id": "grant-1" });
+        let (.., tokens) = bounded_run_params_with_planner_tokens(&request, None, planner.token_ceiling);
+        insert_planner_fields(&mut tool_input, tokens, planner.flag);
+        assert!(
+            tool_input.get("planner_flag").is_none(),
+            "a client-supplied planner_flag must not reach tool_input: {tool_input}"
+        );
+        // And when the org says off, that is what is written whatever the client sent.
+        insert_planner_fields(&mut tool_input, tokens, crate::org_quota::PlannerFlag::Off);
+        assert_eq!(tool_input["planner_flag"], "off");
     }
 
     #[test]
