@@ -90,14 +90,33 @@ Checks (final verify over the whole tree): gateway 940 unit tests (was 926) plus
 
 Pre-existing failures, not from this work: `zdr_refusal_inventory` flags `browser_run.rs:802` (from the quarryv2-next merge); `CoreShell.test.tsx` expects a room href without `?thread_id=...#chat` (stale since b4556868e); `quarry-client.test.ts` cannot resolve `@quarry/client`.
 
-Still open from this pass:
-- D1-109 (no per-user ceiling on the two human-post routes) and D1-110 (`map_model_response` relays model-gateway error bodies unfiltered).
-- D1-214 root cause: `writeSpaceDenial` in user-core still sends 503 for typed refusals on the personal-Space routes; the gateway corrects the status.
-- D1-242 needs a `ThreadSpaceContext` field for the retrieval-decline reason.
-- `SpaceThreadPanel` still shows the generic restricted notice for a typed 403.
-- Go cores accept padded and standard base64 keys (with a warning); session-core accepts only unpadded base64url.
-- The TS and Python generated session types are stale (they already lacked `post_kind`).
-- The rooms sidebar has no archived marker; the phone drawer stays open after picking a room from the rooms index.
-- Visual round 2 leftovers: 11px tabs, the empty Rompuls column, two identical buttons in the details dialog, a selected card that grows 20px.
-- Owner decisions SD-12 and F12 are unchanged.
+Open items from this pass, fixed on 2026-11-01 (section 5) except where noted.
 
+## 5. Open list closed (2026-11-01, commits 9ba5e7b64..bd51143a1)
+
+One workflow (7 builders, a reviewer per lane, one final verify), committed by area. Nothing pushed, nothing live-proven.
+
+| Item | Commit | Result |
+|---|---|---|
+| D1-109 human posts have no per-user ceiling | 9ba5e7b64 | 60/min per user per org shared by create and reply, typed 429 `rate_limited`, no upstream call when refused |
+| D1-110 model-gateway errors relayed unfiltered | 9ba5e7b64 | Same filter as the Control relays; ZDR codes rebuilt from the catalogue; a model-gateway 401 becomes 503 so the SPA does not sign the user out (found by the reviewer) |
+| D1-214 Control sends typed refusals as 503 | 029bc2c93 | `writeSpaceDenial` answers the denial's own status (403); only real outages stay 503. Gateway correction kept as a fallback, comments updated (bd51143a1) |
+| Decision-key decoders disagree | 11f8a3475 | session-core, execution-core and sandbox-manager follow the Go rule; nothing is narrower than before |
+| D1-242 no retrieval-decline reason | 616813441 | Closed-set `retrieval_decline_reason` BFF to model-gateway to a `retrieval_notice` and a one-line composer note. Thread create only, live stream only, not on the ZDR direct path |
+| SpaceThreadPanel typed 403 | 3b4801dee | Presenter copy, generic notice when no reason |
+| Phone drawer stays open after a room pick | 3b4801dee | Closes on navigation to a room at the 767px overlay breakpoint (the reviewer fixed a 759/767 mismatch) |
+| Stale `CoreShell.test.tsx` | 3b4801dee | Expectation matches the committed deep link |
+| Visual round 2 leftovers | 5d1f786a2 | 13.5px tabs, pulse hides zero tiles and lists recent activity, archive set apart as a danger action. The 20px jump did not reproduce; the reviewer's likely cause is text re-wrapping when the pane narrows the timeline at about 1280px |
+| Stale generated types | 16813116b | sessions/runs/events TS and Python regenerated with the pinned plugins |
+| Rooms sidebar has no archived marker | bd51143a1 | `/api/v1/spaces` entries gain `archived` from Control's index `state`; the sidebar sorts them last with an Arkivert tag |
+
+Final checks: gateway 950 unit tests plus integration; session-core 755 bin tests; model-gateway all targets except the pre-existing `zdr_refusal_inventory`; user-core, capability-core, orchestrator-core and sandbox-manager green; SPA 2270 of 2270 tests (plus the new sidebar test); typecheck at the 34-error baseline; contract sync at its baseline.
+
+Still open:
+- The service-to-service Control resolvers (import-execution, schedule-fire, scheduled-run, scheduled-step, sandbox, watch-observe) still send typed refusals as 503, so capability-core's watch authorizer retries them as outages.
+- The decline note is not shown on later turns (`space_append_context`), on a reopened thread, or on the ZDR direct path.
+- Rust key decoders keep the strict trailing-bits check that Go does not have (only matters for a hand-edited key).
+- Other generated TS and Python types are still stale (browser, capabilities, execution, gateway, inference, memory, orchestration, sandboxes, retrieval_v2; space_events and space_room have none).
+- `zdr_refusal_inventory` flags `browser_run.rs:802` (pre-existing, from the quarryv2-next merge).
+- The post limiter's Dragonfly path is untested here; only the in-process fallback ran.
+- Owner decisions SD-12 and F12 are unchanged.
