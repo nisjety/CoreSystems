@@ -733,6 +733,11 @@ mod tests {
             budget: None,
             policy_mode: None,
             next_step: 6,
+            trace_seq: 41,
+            policy_ask: Some(quarry_core::web_policy::RequestAsk {
+                disable: vec!["browser.act.upload".into()],
+                ..Default::default()
+            }),
         };
         store.save_run_checkpoint(checkpoint).await.unwrap();
 
@@ -747,6 +752,13 @@ mod tests {
             "the state JSON keeps the step key high-water mark"
         );
         assert_eq!(loaded.control_mode, BrowserControlMode::HumanTakeover);
+        // D2-061 / D2-051: the trace's next seq and the start-time policy ask ride in the
+        // state JSON, so no column or migration is needed.
+        assert_eq!(loaded.trace_seq, 41);
+        assert_eq!(
+            loaded.policy_ask.as_ref().map(|ask| ask.disable.clone()),
+            Some(vec!["browser.act.upload".to_string()])
+        );
         assert!(store
             .load_run_checkpoint("org_b", &run_id)
             .await
