@@ -3105,13 +3105,30 @@ pub fn handle_execute_command(
 
 #[derive(Clone, Default, Debug)]
 pub struct HookRegistry {
-    inner: Arc<DashMap<(String, String), Hook>>, // (org, hook_id)
+    inner: Arc<DashMap<(String, String), Hook>>, // (org, hook_id): the in-memory registry, HOOKS_DURABLE off
+    // Each org's rules as capability-core last answered for them. Written only in durable mode; once an
+    // org has a snapshot its rules are read from it rather than from `inner` (WS25-S8).
+    durable: Arc<DashMap<String, Arc<OrgHookSnapshot>>>,
 }
 impl HookRegistry {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
+}
+
+/// One org's hook rules as capability-core last answered for them (WS25-S8). A refresh replaces the
+/// snapshot rather than editing it, so a reader sees one answer whole and never a mix of two.
+#[derive(Debug)]
+struct OrgHookSnapshot {
+    /// The org policy revision the answer was read at.
+    revision: i64,
+    /// When the answer was read; the TTL and the stale bound count from here.
+    fetched: Instant,
+    /// Whether the answer held an enabled rule. A restrictive answer may be served longer once the
+    /// registry cannot answer (WS25-D8).
+    restrictive: bool,
+    hooks: Vec<Hook>,
 }
 
 /// Serialize an org's enabled hooks into the `hook_context` JSON that
@@ -3142,12 +3159,20 @@ pub fn hook_context_json(reg: &HookRegistry, org_id: &str) -> String {
 fn hook_context_json_observing(reg: &HookRegistry, org_id: &str, observe_only: bool) -> String {
     // The registry is a DashMap, whose iteration order is arbitrary. Sorting by priority, highest
     // first, then by id, makes one registry always serialise to the same bytes.
-    let mut hooks: Vec<Hook> = reg
-        .inner
-        .iter()
-        .filter(|entry| entry.key().0 == org_id && entry.value().enabled)
-        .map(|entry| entry.value().clone())
-        .collect();
+    let mut hooks: Vec<Hook> = match reg.durable.get(org_id) {
+        Some(snapshot) => snapshot
+            .hooks
+            .iter()
+            .filter(|hook| hook.enabled)
+            .cloned()
+            .collect(),
+        None => reg
+            .inner
+            .iter()
+            .filter(|entry| entry.key().0 == org_id && entry.value().enabled)
+            .map(|entry| entry.value().clone())
+            .collect(),
+    };
     hooks.sort_by(|a, b| {
         b.priority
             .cmp(&a.priority)
@@ -3219,9 +3244,17 @@ pub fn do_run_org_policy(
     let hook_context = hook_context_json_observing(reg, org_id, observe_only);
     (!hook_context.is_empty()).then(|| mp_contracts::model_plane::v1::OrgPolicyContext {
         hook_context,
-        policy_revision: 0,
+        policy_revision: org_hook_revision(reg, org_id),
         policy_digest: String::new(),
     })
+}
+
+/// The policy revision the org's durable rules were read at, or zero when the replica holds no snapshot
+/// for it (the in-memory registry, HOOKS_DURABLE off).
+fn org_hook_revision(reg: &HookRegistry, org_id: &str) -> i64 {
+    reg.durable
+        .get(org_id)
+        .map_or(0, |snapshot| snapshot.revision)
 }
 
 /// Registers (or upserts) a lifecycle hook in the gateway-scoped registry.
@@ -3285,6 +3318,398 @@ pub fn handle_list_hooks(
     Ok(ListHooksResponse {
         request_id: req.request_id,
         hooks,
+    })
+}
+
+/// How long an org's durable hook rules are served without asking capability-core again (WS25-D8: a 30 s TTL).
+const ORG_HOOKS_TTL: Duration = Duration::from_secs(30);
+/// How long the last answer may still be served once a refresh has failed: 900 s when it held an enabled rule,
+/// 120 s when it held none (WS25-D8). Past that bound the org's rules are unknown, and the Do run is refused.
+const ORG_HOOKS_STALE_RESTRICTIVE: Duration = Duration::from_secs(900);
+const ORG_HOOKS_STALE_PERMISSIVE: Duration = Duration::from_secs(120);
+/// capability-core's org hook route, relative to its base address.
+const ORG_HOOKS_PATH: &str = "/api/v1/org-hooks";
+
+/// Whether an org's rules must be read again before a Do run or a listing may use them.
+fn org_hooks_refresh_due(snapshot: Option<&OrgHookSnapshot>, now: Instant) -> bool {
+    match snapshot {
+        None => true,
+        Some(snapshot) => now.saturating_duration_since(snapshot.fetched) > ORG_HOOKS_TTL,
+    }
+}
+
+/// Whether a snapshot may still be served while the refresh that failed is retried.
+fn org_hooks_servable_when_stale(snapshot: &OrgHookSnapshot, now: Instant) -> bool {
+    let bound = if snapshot.restrictive {
+        ORG_HOOKS_STALE_RESTRICTIVE
+    } else {
+        ORG_HOOKS_STALE_PERMISSIVE
+    };
+    now.saturating_duration_since(snapshot.fetched) <= bound
+}
+
+/// One rule as capability-core stores and returns it (`org_hooks.go`, `orgHookRuleView`).
+#[derive(Debug, Deserialize)]
+struct OrgHookRuleRecord {
+    id: String,
+    event: String,
+    tool_matcher: String,
+    decision: String,
+    #[serde(default)]
+    reason: String,
+    #[serde(default)]
+    priority: i32,
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    created_by: String,
+}
+
+impl OrgHookRuleRecord {
+    /// The rule in the form the replica serialises. capability-core's event names are the gateway's, and its
+    /// matcher is the tool scope. The deprecated `callback_url` stays empty: hooks are policy rules, not webhooks.
+    fn into_hook(self, revision: i64) -> Hook {
+        Hook {
+            hook_id: self.id,
+            event: self.event,
+            tool_scope: self.tool_matcher,
+            enabled: self.enabled,
+            decision: self.decision,
+            reason: self.reason,
+            priority: self.priority,
+            revision,
+            created_by: self.created_by,
+            ..Hook::default()
+        }
+    }
+}
+
+/// capability-core's answer to `GET /api/v1/org-hooks`.
+#[derive(Debug, Deserialize)]
+struct OrgHookAnswer {
+    #[serde(default)]
+    org_id: String,
+    revision: i64,
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
+    rules: Vec<OrgHookRuleRecord>,
+}
+
+/// capability-core's answer to a rule write: the rule as stored and the org revision the write produced.
+#[derive(Debug, Deserialize)]
+struct OrgHookWrite {
+    #[serde(flatten)]
+    rule: OrgHookRuleRecord,
+    revision: i64,
+}
+
+/// Read one org's hook rules from capability-core and replace the replica's snapshot with the answer (WS25-S8).
+///
+/// * A successful answer for the requested tenant replaces the snapshot as a whole.
+/// * A refused bearer (401, 403) says the CALLER's credential is bad, not that the registry is down. It changes
+///   nothing, so one bad caller cannot blank an org's rules for everyone on the replica.
+/// * Any other failure (an unreachable registry, a 5xx, or an answer that is not the list or not for this tenant)
+///   also leaves the snapshot where it is. [`ensure_org_hooks`] decides whether the last answer may still be served.
+///
+/// # Errors
+///
+/// Returns the reason the snapshot was not replaced.
+pub async fn hydrate_org_hooks(
+    reg: &HookRegistry,
+    http_client: &reqwest::Client,
+    capability_core_base_url: &str,
+    org_id: &str,
+    capability_bearer: &str,
+) -> Result<usize, String> {
+    let bearer = capability_bearer.trim();
+    if bearer.is_empty() {
+        return Err("capability bearer is unavailable".to_owned());
+    }
+    let base = capability_core_base_url.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return Err("capability registry is unavailable".to_owned());
+    }
+    let response = http_client
+        .get(format!("{base}{ORG_HOOKS_PATH}"))
+        .bearer_auth(bearer)
+        .send()
+        .await
+        .map_err(|error| format!("capability registry request failed: {error}"))?;
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err(format!(
+            "capability registry refused the bearer: HTTP {status}"
+        ));
+    }
+    if !status.is_success() {
+        return Err(format!("capability registry returned HTTP {status}"));
+    }
+    let answer: OrgHookAnswer = response
+        .json()
+        .await
+        .map_err(|error| format!("capability registry answer is not an org hook list: {error}"))?;
+    // capability-core scopes the list by the verified caller and ignores any org the request names, so an answer
+    // for another tenant is a registry defect. Refuse it rather than cache one tenant's rules under another's id.
+    if !answer.org_id.is_empty() && answer.org_id != org_id {
+        return Err(format!(
+            "capability registry answered for org '{}', not '{org_id}'",
+            answer.org_id
+        ));
+    }
+    let revision = answer.revision;
+    let restrictive = answer.rules.iter().any(|rule| rule.enabled);
+    let hooks: Vec<Hook> = answer
+        .rules
+        .into_iter()
+        .map(|rule| rule.into_hook(revision))
+        .collect();
+    let count = hooks.len();
+    reg.durable.insert(
+        org_id.to_owned(),
+        Arc::new(OrgHookSnapshot {
+            revision,
+            fetched: Instant::now(),
+            restrictive,
+            hooks,
+        }),
+    );
+    Ok(count)
+}
+
+/// Make one org's hook rules ready for a Do run, a tool call or a listing (WS25-S8): read them again when the
+/// snapshot is older than the TTL, and when that read fails serve the last answer only inside its D8 bound. Past
+/// the bound the snapshot is dropped and the call fails, so the caller refuses the run rather than running it
+/// without rules it can no longer see.
+///
+/// # Errors
+///
+/// Returns why the org's rules cannot be known: the refresh failed and no answer is inside its bound.
+pub async fn ensure_org_hooks(
+    reg: &HookRegistry,
+    http_client: &reqwest::Client,
+    capability_core_base_url: &str,
+    org_id: &str,
+    capability_bearer: &str,
+) -> Result<(), String> {
+    ensure_org_hooks_at(
+        reg,
+        http_client,
+        capability_core_base_url,
+        org_id,
+        capability_bearer,
+        Instant::now(),
+    )
+    .await
+}
+
+async fn ensure_org_hooks_at(
+    reg: &HookRegistry,
+    http_client: &reqwest::Client,
+    capability_core_base_url: &str,
+    org_id: &str,
+    capability_bearer: &str,
+    now: Instant,
+) -> Result<(), String> {
+    let current = reg
+        .durable
+        .get(org_id)
+        .map(|entry| Arc::clone(entry.value()));
+    if !org_hooks_refresh_due(current.as_deref(), now) {
+        return Ok(());
+    }
+    let Err(error) = hydrate_org_hooks(
+        reg,
+        http_client,
+        capability_core_base_url,
+        org_id,
+        capability_bearer,
+    )
+    .await
+    else {
+        return Ok(());
+    };
+    if current
+        .as_deref()
+        .is_some_and(|snapshot| org_hooks_servable_when_stale(snapshot, now))
+    {
+        tracing::warn!(%org_id, %error, "org hook rules refresh failed; serving the last answer inside its bound");
+        return Ok(());
+    }
+    reg.durable.remove(org_id);
+    Err(error)
+}
+
+/// Who is writing a hook rule, as the gRPC layer reads it from the verified identity. The proxy refuses before it
+/// sends anything, and capability-core checks the same two facts again.
+#[derive(Clone, Copy, Debug)]
+pub struct HookWriteCaller {
+    /// The caller's posture is ZDR. A rule is durable state, so a ZDR principal never writes one.
+    pub zdr: bool,
+    /// The caller holds the org admin scope.
+    pub admin: bool,
+}
+
+/// The status a refused rule write answers with. A refusal names what was wrong with the rule or the caller;
+/// anything else means the registry could not answer, which the caller may retry.
+fn rule_write_refusal(status: reqwest::StatusCode, detail: &str) -> Status {
+    let message = if detail.is_empty() {
+        format!("capability registry refused the hook rule: HTTP {status}")
+    } else {
+        format!("capability registry refused the hook rule: {detail}")
+    };
+    match status {
+        reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::UNPROCESSABLE_ENTITY => {
+            Status::invalid_argument(message)
+        }
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
+            Status::permission_denied(message)
+        }
+        reqwest::StatusCode::NOT_FOUND => Status::not_found(message),
+        reqwest::StatusCode::CONFLICT => Status::already_exists(message),
+        _ => Status::unavailable(format!(
+            "capability registry failed the hook rule write: HTTP {status}"
+        )),
+    }
+}
+
+/// Read capability-core's answer to a rule write.
+async fn read_rule_write(response: reqwest::Response) -> Result<OrgHookWrite, Status> {
+    let status = response.status();
+    if !status.is_success() {
+        let detail = response
+            .json::<Value>()
+            .await
+            .ok()
+            .and_then(|body| body["error"].as_str().map(str::to_owned))
+            .unwrap_or_default();
+        return Err(rule_write_refusal(status, &detail));
+    }
+    response.json::<OrgHookWrite>().await.map_err(|error| {
+        Status::internal(format!(
+            "capability registry answer is not a stored rule: {error}"
+        ))
+    })
+}
+
+/// `RegisterHook` with `HOOKS_DURABLE` on (WS25-S8). capability-core stores the rule and bumps the org's revision,
+/// then the replica reads the org's rules back, so the next Do run already enforces the rule.
+///
+/// The gateway decides nothing about the rule itself: it refuses a ZDR or non-admin caller, then forwards the
+/// caller's own bearer, so capability-core applies its own tenant and admin checks.
+///
+/// # Errors
+///
+/// Returns the refusal the caller should see, or `unavailable` when capability-core cannot be reached.
+pub async fn proxy_register_hook(
+    reg: &HookRegistry,
+    http_client: &reqwest::Client,
+    capability_core_base_url: &str,
+    capability_bearer: &str,
+    caller: HookWriteCaller,
+    req: RegisterHookRequest,
+) -> Result<RegisterHookResponse, Status> {
+    if caller.zdr {
+        return Err(
+            mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+                .grpc_status(tonic::Code::FailedPrecondition),
+        );
+    }
+    if !caller.admin {
+        return Err(Status::permission_denied(
+            "only an org admin may write hook rules",
+        ));
+    }
+    let hook = req
+        .hook
+        .ok_or_else(|| Status::invalid_argument("hook is required"))?;
+    let base = capability_core_base_url.trim().trim_end_matches('/');
+    let bearer = capability_bearer.trim();
+    if base.is_empty() || bearer.is_empty() {
+        return Err(Status::unavailable(
+            "capability registry is unavailable; the hook rule cannot be stored",
+        ));
+    }
+    let response = http_client
+        .post(format!("{base}{ORG_HOOKS_PATH}"))
+        .bearer_auth(bearer)
+        .json(&json!({
+            "event": hook.event,
+            "tool_matcher": hook.tool_scope,
+            "decision": hook.decision,
+            "reason": hook.reason,
+            "priority": hook.priority,
+            "enabled": hook.enabled,
+        }))
+        .send()
+        .await
+        .map_err(|error| {
+            Status::unavailable(format!("capability registry unreachable: {error}"))
+        })?;
+    let written = read_rule_write(response).await?;
+    // Read the org's rules back so the snapshot holds this write. If the read-back fails the snapshot is dropped:
+    // the next Do run must refresh it, and refuses until capability-core answers.
+    if let Err(error) = hydrate_org_hooks(reg, http_client, base, &req.org_id, bearer).await {
+        tracing::warn!(org_id = %req.org_id, %error, "hook rule stored; the snapshot refresh failed");
+        reg.durable.remove(&req.org_id);
+    }
+    Ok(RegisterHookResponse {
+        request_id: req.request_id,
+        hook: Some(written.rule.into_hook(written.revision)),
+    })
+}
+
+/// `ListHooks` with `HOOKS_DURABLE` on (WS25-S8): the org's rules as capability-core holds them, refreshed first
+/// under the D8 bounds. Any member of the org reads them, a ZDR principal included.
+///
+/// # Errors
+///
+/// Returns `unavailable` when the org's rules cannot be known.
+pub async fn proxy_list_hooks(
+    reg: &HookRegistry,
+    http_client: &reqwest::Client,
+    capability_core_base_url: &str,
+    capability_bearer: &str,
+    req: ListHooksRequest,
+) -> Result<ListHooksResponse, Status> {
+    ensure_org_hooks(
+        reg,
+        http_client,
+        capability_core_base_url,
+        &req.org_id,
+        capability_bearer,
+    )
+    .await
+    .map_err(|error| Status::unavailable(format!("org hook rules are unavailable: {error}")))?;
+    let hooks: Vec<Hook> = reg
+        .durable
+        .get(req.org_id.as_str())
+        .map(|snapshot| {
+            snapshot
+                .hooks
+                .iter()
+                .filter(|hook| req.event_filter.is_empty() || hook.event == req.event_filter)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(ListHooksResponse {
+        request_id: req.request_id,
+        hooks,
+    })
+}
+
+/// `HOOKS_DURABLE` (WS25-S8): whether the org's hook rules are read from and written to capability-core. Only the
+/// literal `true` turns it on, so a typo or a stray `1` leaves the in-memory registry in place.
+#[must_use]
+pub fn hooks_durable_from_env_value(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+/// The process's `HOOKS_DURABLE`, read once so the mode cannot change under a request.
+#[must_use]
+pub fn hooks_durable() -> bool {
+    static DURABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DURABLE.get_or_init(|| {
+        hooks_durable_from_env_value(std::env::var("HOOKS_DURABLE").ok().as_deref())
     })
 }
 
@@ -3605,6 +4030,8 @@ mod tests {
             decision: decision.to_owned(),
             reason: "policy".to_owned(),
             priority: 0,
+            revision: 0,
+            created_by: String::new(),
         }
     }
 
@@ -3782,6 +4209,321 @@ mod tests {
         let enforced = do_run_org_policy(&reg, "org", HooksDoRunsMode::Enforce).expect("rules");
         assert_eq!(enforced.hook_context, hook_context_json(&reg, "org"));
         assert!(do_run_org_policy(&reg, "org_b", HooksDoRunsMode::Enforce).is_none());
+    }
+
+    fn durable_rule(id: &str, event: &str, scope: &str, decision: &str, priority: i32) -> Hook {
+        Hook {
+            hook_id: id.to_owned(),
+            event: event.to_owned(),
+            tool_scope: scope.to_owned(),
+            enabled: true,
+            decision: decision.to_owned(),
+            reason: "policy".to_owned(),
+            priority,
+            created_by: "user-admin".to_owned(),
+            ..Hook::default()
+        }
+    }
+
+    fn snapshot_at(
+        fetched: Instant,
+        revision: i64,
+        restrictive: bool,
+        hooks: Vec<Hook>,
+    ) -> Arc<OrgHookSnapshot> {
+        Arc::new(OrgHookSnapshot {
+            revision,
+            fetched,
+            restrictive,
+            hooks,
+        })
+    }
+
+    #[test]
+    fn hook_snapshot_is_refreshed_only_after_the_d8_ttl() {
+        let fetched = Instant::now();
+        let fresh = OrgHookSnapshot {
+            revision: 1,
+            fetched,
+            restrictive: true,
+            hooks: Vec::new(),
+        };
+        assert!(org_hooks_refresh_due(None, fetched));
+        assert!(!org_hooks_refresh_due(
+            Some(&fresh),
+            fetched + Duration::from_secs(30)
+        ));
+        assert!(org_hooks_refresh_due(
+            Some(&fresh),
+            fetched + Duration::from_secs(31)
+        ));
+    }
+
+    #[test]
+    fn hook_snapshot_serves_a_failed_refresh_only_inside_the_d8_bound() {
+        let fetched = Instant::now();
+        let restrictive = OrgHookSnapshot {
+            revision: 1,
+            fetched,
+            restrictive: true,
+            hooks: Vec::new(),
+        };
+        let permissive = OrgHookSnapshot {
+            revision: 1,
+            fetched,
+            restrictive: false,
+            hooks: Vec::new(),
+        };
+        assert!(org_hooks_servable_when_stale(
+            &restrictive,
+            fetched + Duration::from_secs(900)
+        ));
+        assert!(!org_hooks_servable_when_stale(
+            &restrictive,
+            fetched + Duration::from_secs(901)
+        ));
+        assert!(org_hooks_servable_when_stale(
+            &permissive,
+            fetched + Duration::from_secs(120)
+        ));
+        assert!(!org_hooks_servable_when_stale(
+            &permissive,
+            fetched + Duration::from_secs(121)
+        ));
+    }
+
+    #[test]
+    fn hook_rules_serialise_the_same_bytes_from_any_hydrate_order() {
+        let a = durable_rule("a", "pre_tool", "shell", "deny", 5);
+        let b = durable_rule("b", "pre_tool", "read", "ask", 5);
+        let c = durable_rule("c", "post_tool", "*", "deny", 9);
+        let fetched = Instant::now();
+        let one = HookRegistry::new();
+        one.durable.insert(
+            "org".to_owned(),
+            snapshot_at(fetched, 3, true, vec![a.clone(), b.clone(), c.clone()]),
+        );
+        let two = HookRegistry::new();
+        two.durable.insert(
+            "org".to_owned(),
+            snapshot_at(fetched, 3, true, vec![c, b, a]),
+        );
+        assert_eq!(
+            hook_context_json(&one, "org"),
+            hook_context_json(&two, "org")
+        );
+        assert!(hook_context_json(&one, "org").contains("pre_tool_use"));
+    }
+
+    #[test]
+    fn hook_durable_rules_reach_the_do_run_with_their_revision() {
+        let reg = HookRegistry::new();
+        reg.durable.insert(
+            "org".to_owned(),
+            snapshot_at(
+                Instant::now(),
+                7,
+                true,
+                vec![durable_rule("a", "pre_tool", "shell", "deny", 0)],
+            ),
+        );
+        let policy =
+            do_run_org_policy(&reg, "org", HooksDoRunsMode::Enforce).expect("the org has rules");
+        assert_eq!(policy.policy_revision, 7);
+        assert_eq!(policy.hook_context, hook_context_json(&reg, "org"));
+
+        let in_memory = HookRegistry::new();
+        register(&in_memory, "org", hook("pre_tool", "shell", "deny", true));
+        let memory = do_run_org_policy(&in_memory, "org", HooksDoRunsMode::Enforce)
+            .expect("the org has rules");
+        assert_eq!(
+            memory.policy_revision, 0,
+            "the in-memory registry carries no revision"
+        );
+    }
+
+    #[test]
+    fn hook_durable_switch_is_on_only_for_the_literal_true() {
+        for value in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("TRUE"),
+            Some(" true"),
+            Some("on"),
+            Some("yes"),
+        ] {
+            assert!(
+                !hooks_durable_from_env_value(value),
+                "{value:?} must leave the in-memory registry in place"
+            );
+        }
+        assert!(hooks_durable_from_env_value(Some("true")));
+    }
+
+    #[tokio::test]
+    async fn hook_snapshot_hydrates_from_capability_core_with_the_callers_bearer() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/org-hooks"))
+            .and(wiremock::matchers::header("authorization", "Bearer caller-token"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({
+                "org_id": "org-a",
+                "revision": 4,
+                "rules": [{
+                    "id": "ohr_1", "event": "pre_tool", "tool_matcher": "shell", "decision": "deny",
+                    "reason": "no shell", "priority": 10, "enabled": true, "created_by": "user-admin"
+                }]
+            })))
+            .mount(&server)
+            .await;
+        let reg = HookRegistry::new();
+        let client = reqwest::Client::new();
+        assert_eq!(
+            hydrate_org_hooks(&reg, &client, &server.uri(), "org-a", "caller-token").await,
+            Ok(1)
+        );
+        assert_eq!(org_hook_revision(&reg, "org-a"), 4);
+        let context: Value = serde_json::from_str(&hook_context_json(&reg, "org-a")).expect("json");
+        assert_eq!(context["rules"][0]["tools"], "shell");
+        assert_eq!(context["rules"][0]["event"], "pre_tool_use");
+    }
+
+    #[tokio::test]
+    async fn hook_snapshot_keeps_its_answer_when_capability_core_refuses_the_bearer() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        let reg = HookRegistry::new();
+        reg.durable.insert(
+            "org-a".to_owned(),
+            snapshot_at(
+                Instant::now(),
+                2,
+                true,
+                vec![durable_rule("a", "pre_tool", "shell", "deny", 0)],
+            ),
+        );
+        let client = reqwest::Client::new();
+        assert!(
+            hydrate_org_hooks(&reg, &client, &server.uri(), "org-a", "bad-token")
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            org_hook_revision(&reg, "org-a"),
+            2,
+            "a refused caller must not blank the org's rules"
+        );
+    }
+
+    #[tokio::test]
+    async fn hook_snapshot_refuses_another_tenants_answer() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({
+                "org_id": "org-b",
+                "revision": 9,
+                "rules": [{
+                    "id": "ohr_9", "event": "pre_tool", "tool_matcher": "shell", "decision": "deny",
+                    "reason": "org b only", "priority": 0, "enabled": true, "created_by": "user-b"
+                }]
+            })))
+            .mount(&server)
+            .await;
+        let reg = HookRegistry::new();
+        let client = reqwest::Client::new();
+        let error = hydrate_org_hooks(&reg, &client, &server.uri(), "org-a", "token")
+            .await
+            .expect_err("a foreign tenant's answer must not be cached");
+        assert!(error.contains("org-b"), "{error}");
+        assert!(reg.durable.get("org-a").is_none());
+    }
+
+    #[tokio::test]
+    async fn hook_ensure_answers_from_a_fresh_snapshot_without_asking_capability_core() {
+        let server = wiremock::MockServer::start().await;
+        let reg = HookRegistry::new();
+        reg.durable.insert(
+            "org-a".to_owned(),
+            snapshot_at(
+                Instant::now(),
+                1,
+                true,
+                vec![durable_rule("a", "pre_tool", "shell", "deny", 0)],
+            ),
+        );
+        let client = reqwest::Client::new();
+        ensure_org_hooks(&reg, &client, &server.uri(), "org-a", "token")
+            .await
+            .expect("a fresh snapshot needs no refresh");
+        assert!(server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn hook_ensure_fails_closed_when_capability_core_is_down_and_nothing_is_cached() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let reg = HookRegistry::new();
+        let client = reqwest::Client::new();
+        assert!(
+            ensure_org_hooks(&reg, &client, &server.uri(), "org-a", "token")
+                .await
+                .is_err()
+        );
+        assert!(reg.durable.get("org-a").is_none());
+    }
+
+    #[tokio::test]
+    async fn hook_ensure_serves_a_restrictive_snapshot_past_the_ttl_only_inside_its_bound() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let reg = HookRegistry::new();
+        let client = reqwest::Client::new();
+        let fetched = Instant::now();
+        reg.durable.insert(
+            "org-a".to_owned(),
+            snapshot_at(
+                fetched,
+                5,
+                true,
+                vec![durable_rule("a", "pre_tool", "shell", "deny", 0)],
+            ),
+        );
+        ensure_org_hooks_at(
+            &reg,
+            &client,
+            &server.uri(),
+            "org-a",
+            "token",
+            fetched + Duration::from_secs(60),
+        )
+        .await
+        .expect("60 s after the answer, inside the 900 s bound, the last answer is served");
+        assert_eq!(org_hook_revision(&reg, "org-a"), 5);
+        ensure_org_hooks_at(
+            &reg,
+            &client,
+            &server.uri(),
+            "org-a",
+            "token",
+            fetched + Duration::from_secs(1000),
+        )
+        .await
+        .expect_err("past the bound the rules are unknown");
+        assert!(reg.durable.get("org-a").is_none());
     }
 
     #[test]

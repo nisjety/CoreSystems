@@ -289,6 +289,7 @@ func main() {
 	api.NewPluginsHandler(pool).WithPublisher(recPub).Register(protectedMux)
 	// Behind ORG_AGENT_POLICY_API (off by default): the handler answers 404 while it is off.
 	api.NewOrgAgentPolicyHandler(pool, api.OrgAgentPolicyAPIFromLookup(os.Getenv)).Register(protectedMux)
+	api.NewOrgHooksHandler(pool).Register(protectedMux)
 	// WS05-S5: writes need a person and capability:write; reads are the org's
 	// and the caller's own. Enforcement is the engine's, behind TOOL_POLICY_ENFORCED.
 	toolPolicies.Register(protectedMux)

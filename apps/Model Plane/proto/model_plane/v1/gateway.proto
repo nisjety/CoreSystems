@@ -1322,6 +1322,11 @@ message Hook {
   // Strictest-wins makes the order irrelevant to the verdict; this fixes the serialised
   // context, so one registry always sends the same bytes.
   int32 priority = 8;
+  // The org policy revision the rule was read at from capability-core's durable store (WS25-S8).
+  // Zero for a rule that lives only in the gateway's in-memory registry.
+  int64 revision = 9;
+  // The person who created the durable rule, as capability-core recorded it (WS25-S8).
+  string created_by = 10;
 }
 
 message RegisterHookRequest {
