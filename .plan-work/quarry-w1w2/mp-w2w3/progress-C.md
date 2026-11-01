@@ -59,6 +59,13 @@ Rust: `CARGO_TARGET_DIR=C:/dev/mp-w2w3-target-C CARGO_BUILD_JOBS=2 cargo check -
 Tests: `GOWORK=off go test -count=1 -v ./...` PASS=385 FAIL=0 (with MP-2d's tests).
 Quarry: the vendored `proto/browser.proto` can take `key_id = 60` on `ValidateGrantResponse` (MP-ASKS entry).
 
+### Slice MP-2d: api_key_revoked consumer (commit: see git log, `feat(browser-broker): api_key_revoked consumer ... (INNH-10 MP-2d)`)
+
+Built: `internal/keyrevoke/consumer.go` (subject `verevon.audit.v2.control.auth-core.api_key_revoked`, default stream `VEREVON_CONTROL_OBSERVABILITY`, durable `browser-broker-api-key-revoked` bound with `nats.Bind` (never created), manual ack; `Process`: body <= 16 KiB, key id top level or `details.key_id` (two different ids = malformed), `grant.ValidKeyID`; malformed -> ack + warn without content; `Server.RevokeKey` error -> `NakWithDelay(5s)`), `cmd/keyrevoke.go` (`keyRevokeGate`: switch on with no `BROWSER_BROKER_KEY_REVOKE_NATS_URL` refuses to start; `startKeyRevokeConsumer`: own connection with `_USER/_PASSWORD`, stream `BROWSER_BROKER_KEY_REVOKE_STREAM`; connect, JetStream or bind failure -> `DisableKeyGrants` for the process, the rest of the broker serves; the URL is never logged), `cmd/main.go` (gate after config; consumer started before Serve; key settings on the limits line), `go.mod`/`go.sum` (nats.go v1.52.0, matches the existing klauspost 1.18.5; genproto rpc moved to direct, it was already imported), `go/go.work.sum` (+2 go.mod hashes from nats.go's deps).
+Tests: `internal/keyrevoke/consumer_test.go` (4: top-level/details/both, 10 malformed bodies, store error retries, stream default), `cmd/keyrevoke_test.go` (gate; unreachable bus disables key grants; switch off starts nothing), `TestKeyIssue_DisableKeyGrantsActsLikeTheSwitchOff`.
+Tests run: `GOWORK=off go test -count=1 -v ./...` PASS=385 FAIL=0, `go vet ./...` clean.
+Not verified: against a real NATS/JetStream (no bus may be started here); workspace-mode `go build` offline fails on a pre-existing go.work.sum gap (grpc -> x/sys v0.40.0), the Docker build has network.
+
 ## MP-3 contract (model-gateway, lane B builds it; what the broker will expect)
 
 - Routes: `POST /v1/browser/key-grants`, `DELETE /v1/browser/key-grants/:grant_id`. Accept ONLY an api_key principal (`PrincipalKind::ApiKey`), refuse user and service (403); api_key refused on every other route. Ingress needs CP-1 audience `model-gateway` (ask below); the delegated bearer to the broker is the `aud=browser-broker` key token with the same `sub`, `org_id`, `key_id`, `zdr`.
