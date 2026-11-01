@@ -370,6 +370,16 @@ services:
       QUARRY_CONTROL_API_KEY: ${QUARRY_CONTROL_API_KEY:?QUARRY_CONTROL_API_KEY is required}
       QUARRY_INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:?QUARRY_INTERNAL_SECRET must be set (no insecure default)}
       QUARRY_INTERNAL_HMAC_REQUIRED: ${QUARRY_INTERNAL_HMAC_REQUIRED:-0}
+      # D2-050: the routes only the orchestrator calls (/v1/internal/jobs/*,
+      # /v1/internal/schedules/*) verify with their own secret, so the edge's
+      # QUARRY_INTERNAL_SECRET no longer opens them. Unset falls back to the old
+      # secret (no outage; control logs one warning that the two are equal). Set a
+      # distinct value on control AND the orchestrator together, then remove the
+      # fallback after the soak. Never put it on the edge.
+      QUARRY_CONTROL_INTERNAL_SECRET: ${QUARRY_CONTROL_INTERNAL_SECRET:-${QUARRY_INTERNAL_SECRET}}
+      # Off by default: when 1, a finalize with no org_id is refused (400). Turn on
+      # once the orchestrator sends org_id on every finalize (it does since D2-050).
+      QUARRY_CONTROL__FINALIZE_ORG_REQUIRED: ${QUARRY_CONTROL__FINALIZE_ORG_REQUIRED:-0}
       # Job admission (off by default): per-organization caps on running jobs, a
       # bounded backlog of waiting ones, and the claim endpoint the orchestrator
       # uses instead of reading the newest 50 jobs. See docs/RUNBOOKS.md, "Job
@@ -469,6 +479,9 @@ services:
       # /v1/internal/run_page call so a leaked runtime bearer can't forge
       # another tenant's org.
       QUARRY_INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:?QUARRY_INTERNAL_SECRET must be set (no insecure default)}
+      # D2-050: signs the calls to control's orchestrator-only routes. Must equal
+      # control's QUARRY_CONTROL_INTERNAL_SECRET; unset falls back to the old secret.
+      QUARRY_CONTROL_INTERNAL_SECRET: ${QUARRY_CONTROL_INTERNAL_SECRET:-${QUARRY_INTERNAL_SECRET}}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       ENVIRONMENT: ${ENVIRONMENT:-dev}
     depends_on:
