@@ -18,7 +18,7 @@ pub enum TrustClass {
     ThirdPartyMcp,
     /// Content read from, or acted on in, a connected account.
     ConnectorContent,
-    /// Text from an earlier conversation. No tool maps to it yet.
+    /// Text from an earlier conversation, read back by `recall_conversations`.
     PriorConversation,
     /// Text written by another member of a shared room. No tool maps to it yet.
     RoomMember,
@@ -39,6 +39,7 @@ const TOOL_TRUST: &[(&str, TrustClass)] = &[
     ("browser.observe", TrustClass::BrowserScraped),
     ("read_provider_action", TrustClass::ConnectorContent),
     ("execute_provider_action", TrustClass::ConnectorContent),
+    ("recall_conversations", TrustClass::PriorConversation),
 ];
 
 impl TrustClass {
@@ -109,6 +110,10 @@ mod tests {
     #[test]
     fn unknown_and_org_tools_default_to_internal() {
         assert_eq!(TrustClass::classify("knowledge_search"), TrustClass::OrgInternal);
+        assert_eq!(
+            TrustClass::classify("recall_conversations"),
+            TrustClass::PriorConversation
+        );
         assert_eq!(TrustClass::classify("some_future_tool"), TrustClass::OrgInternal);
     }
 

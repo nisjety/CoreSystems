@@ -6837,7 +6837,12 @@ type Hook struct {
 	// Evaluation order of the rules the gateway forwards: higher first, then by hook_id.
 	// Strictest-wins makes the order irrelevant to the verdict; this fixes the serialised
 	// context, so one registry always sends the same bytes.
-	Priority      int32 `protobuf:"varint,8,opt,name=priority,proto3" json:"priority,omitempty"`
+	Priority int32 `protobuf:"varint,8,opt,name=priority,proto3" json:"priority,omitempty"`
+	// The org policy revision the rule was read at from capability-core's durable store (WS25-S8).
+	// Zero for a rule that lives only in the gateway's in-memory registry.
+	Revision int64 `protobuf:"varint,9,opt,name=revision,proto3" json:"revision,omitempty"`
+	// The person who created the durable rule, as capability-core recorded it (WS25-S8).
+	CreatedBy     string `protobuf:"bytes,10,opt,name=created_by,json=createdBy,proto3" json:"created_by,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -6927,6 +6932,20 @@ func (x *Hook) GetPriority() int32 {
 		return x.Priority
 	}
 	return 0
+}
+
+func (x *Hook) GetRevision() int64 {
+	if x != nil {
+		return x.Revision
+	}
+	return 0
+}
+
+func (x *Hook) GetCreatedBy() string {
+	if x != nil {
+		return x.CreatedBy
+	}
+	return ""
 }
 
 type RegisterHookRequest struct {
@@ -9694,7 +9713,7 @@ const file_model_plane_v1_gateway_proto_rawDesc = "" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x1f\n" +
 	"\voutput_json\x18\x02 \x01(\tR\n" +
 	"outputJson\x12#\n" +
-	"\rerror_message\x18\x03 \x01(\tR\ferrorMessage\"\xe5\x01\n" +
+	"\rerror_message\x18\x03 \x01(\tR\ferrorMessage\"\xa0\x02\n" +
 	"\x04Hook\x12\x17\n" +
 	"\ahook_id\x18\x01 \x01(\tR\x06hookId\x12\x14\n" +
 	"\x05event\x18\x02 \x01(\tR\x05event\x12\x1d\n" +
@@ -9704,7 +9723,11 @@ const file_model_plane_v1_gateway_proto_rawDesc = "" +
 	"\aenabled\x18\x05 \x01(\bR\aenabled\x12\x1a\n" +
 	"\bdecision\x18\x06 \x01(\tR\bdecision\x12\x16\n" +
 	"\x06reason\x18\a \x01(\tR\x06reason\x12\x1a\n" +
-	"\bpriority\x18\b \x01(\x05R\bpriority\"u\n" +
+	"\bpriority\x18\b \x01(\x05R\bpriority\x12\x1a\n" +
+	"\brevision\x18\t \x01(\x03R\brevision\x12\x1d\n" +
+	"\n" +
+	"created_by\x18\n" +
+	" \x01(\tR\tcreatedBy\"u\n" +
 	"\x13RegisterHookRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +

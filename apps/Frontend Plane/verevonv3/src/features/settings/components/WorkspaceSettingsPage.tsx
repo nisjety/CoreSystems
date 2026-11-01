@@ -11,6 +11,8 @@ import { PersonaSection } from '@/features/settings/components/PersonaSection'
 import { PluginsSection } from '@/features/settings/components/PluginsSection'
 import { CronSchedulesSection } from '@/features/settings/components/CronSchedulesSection'
 import { OrgModelAccessSection } from '@/features/settings/components/OrgModelAccessSection'
+import { BrowserSitesSection } from '@/features/settings/components/BrowserSitesSection'
+import { OrgBrowserPolicySection } from '@/features/settings/components/OrgBrowserPolicySection'
 import { OrgQuotasSection } from '@/features/settings/components/OrgQuotasSection'
 import { MemorySection } from '@/features/settings/components/MemorySection'
 import { LearningSection } from '@/features/settings/components/LearningSection'
@@ -241,6 +243,9 @@ const sectionStatusCards: Record<WorkspaceSettingsSectionId, StatusCard[]> = {
   quotas: [],
   // Model access renders its own live policy editor, so no shared status grid.
   'model-access': [],
+  // Browser sites and the org browser policy render their own live lists (WS21-S6).
+  'browser-sites': [],
+  'org-browser-policy': [],
   // Memory renders its own live list, so it carries no shared status grid.
   memory: [],
   // Learning renders its own proposals and ledger, so it carries no shared status grid.
@@ -505,6 +510,12 @@ function WorkspaceSettingsSection(props: {
       </Match>
       <Match when={props.section === 'model-access'}>
         <OrgModelAccessSection />
+      </Match>
+      <Match when={props.section === 'browser-sites'}>
+        <BrowserSitesSection />
+      </Match>
+      <Match when={props.section === 'org-browser-policy'}>
+        <OrgBrowserPolicySection />
       </Match>
       <Match when={props.section === 'memory'}>
         <MemorySection />

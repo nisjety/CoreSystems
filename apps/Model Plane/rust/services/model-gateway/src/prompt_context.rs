@@ -411,8 +411,14 @@ impl PromptContext {
 
 /// Tools offered on some turns only, in the order they close the tool list:
 /// `reattach_context` once a thread has been compacted (and from then on),
-/// `web_search` per query, and `skill_file` once a matched skill has a bundle.
-const CONDITIONAL_TOOLS: [&str; 3] = ["reattach_context", "web_search", "skill_file"];
+/// `web_search` per query, `skill_file` once a matched skill has a bundle, and
+/// `recall_conversations` when its switch and the person's memory controls allow it (WS17-S5).
+const CONDITIONAL_TOOLS: [&str; 4] = [
+    "reattach_context",
+    "web_search",
+    "skill_file",
+    "recall_conversations",
+];
 
 /// `tools` with the conditional tools moved to the end.
 ///
