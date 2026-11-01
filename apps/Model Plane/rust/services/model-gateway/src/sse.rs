@@ -876,6 +876,109 @@ fn with_loop_stop(
 }
 
 #[cfg(test)]
+mod agent_mode_turn_tests {
+    use super::*;
+    use crate::profile::{chosen_agent_mode, resolve_turn_mode, ApprovalPosture};
+    use mp_contracts::agent_mode::AgentMode;
+    use mp_contracts::model_plane::v1::AutonomyRung;
+
+    fn run() -> crate::session_flow::SessionRun {
+        crate::session_flow::SessionRun {
+            thread_id: "thread-1".to_owned(),
+            run_id: "run-1".to_owned(),
+            org_id: "org-1".to_owned(),
+            already_started: false,
+            terminal_source: mp_contracts::model_plane::v1::ManagedRunSource::ExecutionAgent,
+        }
+    }
+
+    /// The request a fresh Do run sends, built by the one function a dispatch uses, from the posture and
+    /// plan flag the caller resolved and the thread's grant it names.
+    fn fresh_request(
+        permission_mode: &str,
+        plan_mode: bool,
+        granted: Option<AutonomyRung>,
+    ) -> RunAgentRequest {
+        resolved_run_agent_request(
+            &run(),
+            "org-1",
+            "user-1",
+            "gpt-5.6-terra",
+            "research the Q3 numbers",
+            &[],
+            false,
+            0,
+            permission_mode,
+            plan_mode,
+            granted,
+            "",
+            None,
+            &AgentRoute::default(),
+            crate::run_budget::RunBudget::default(),
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            0,
+        )
+    }
+
+    fn choice(id: &str) -> Option<AgentMode> {
+        chosen_agent_mode(true, Some(id)).expect("a known mode")
+    }
+
+    /// With no choice the request is what the posture alone decides: that posture, no plan gate and no
+    /// rung of its own, so a thread's grant decides exactly as it did before modes existed (WS25-S6).
+    #[test]
+    fn a_turn_with_no_choice_sends_the_posture_the_platform_set() {
+        for requested in [ApprovalPosture::Auto, ApprovalPosture::Ask] {
+            assert!(resolve_turn_mode(None, requested).is_none());
+            let request = fresh_request(requested.as_permission_mode(), false, None);
+            assert_eq!(request.mode, requested.as_permission_mode());
+            assert!(!request.plan_mode);
+            assert_eq!(request.autonomy_rung, AutonomyRung::Unspecified as i32);
+        }
+    }
+
+    /// A read-only choice is a plan gate: the run is a plan run whose rung is READ_ONLY, and a grant the
+    /// thread holds does not widen it, because plan mode wins wherever the run is dispatched.
+    #[test]
+    fn a_read_only_choice_sends_a_plan_run_that_no_grant_widens() {
+        let turn = resolve_turn_mode(choice("read_only"), ApprovalPosture::Auto)
+            .expect("a choice resolves");
+        assert!(turn.preset.plan_gate);
+        let request = fresh_request(
+            turn.preset.permission_mode,
+            turn.preset.plan_gate,
+            Some(AutonomyRung::WorkspaceWrite),
+        );
+        assert!(request.plan_mode);
+        assert_eq!(request.autonomy_rung, AutonomyRung::ReadOnly as i32);
+        assert_eq!(request.mode, "ask");
+    }
+
+    /// An ask-first choice has no plan gate and states no rung of its own: it asks before a risky call and
+    /// leaves the thread's grant to decide the rung, as it does for every run without a mode.
+    #[test]
+    fn an_ask_first_choice_asks_and_leaves_the_grant_to_decide_the_rung() {
+        let turn = resolve_turn_mode(choice("ask_first"), ApprovalPosture::Auto)
+            .expect("a choice resolves");
+        assert!(!turn.preset.plan_gate);
+        assert_eq!(turn.preset.rung, AutonomyRung::Unspecified);
+        let no_grant = fresh_request(turn.preset.permission_mode, false, None);
+        assert_eq!(no_grant.mode, "ask");
+        assert!(!no_grant.plan_mode);
+        assert_eq!(no_grant.autonomy_rung, AutonomyRung::Unspecified as i32);
+        let granted = fresh_request(
+            turn.preset.permission_mode,
+            false,
+            Some(AutonomyRung::WorkspaceWrite),
+        );
+        assert_eq!(granted.autonomy_rung, AutonomyRung::WorkspaceWrite as i32);
+    }
+}
+
+#[cfg(test)]
 mod loop_stop_tests {
     use super::*;
     use mp_contracts::loop_guard::{LoopStop, StopReason};
@@ -1594,6 +1697,38 @@ pub async fn invoke_stream_sse(
             return error_stream(&request_id, refusal.code.as_str(), &refusal.message, false);
         }
     }
+    // The posture and the agent mode the person chose (WS25-S6), resolved before normalisation so the
+    // admission rules below judge the plan gate a chosen mode sets exactly as they judge a plan_mode
+    // the client sent. The posture is decided by the server (approval-enforcement audit): the platform
+    // floor from the verified scopes, and the client's `profile` only as a request that can ratchet it
+    // stricter, never to disable gating. Switch off, or no choice, and the request is not changed here.
+    let profile = crate::profile::AgentProfile::from_wire(req.profile.as_deref());
+    let requested_posture = crate::profile::resolve_posture(posture_floor(&claims), profile);
+    let chosen_mode = match crate::profile::chosen_agent_mode(
+        crate::profile::agent_modes_enabled(),
+        req.agent_mode.as_deref(),
+    ) {
+        Ok(chosen_mode) => chosen_mode,
+        Err(_) => {
+            return error_stream(
+                &request_id,
+                mp_contracts::agent_mode::UNKNOWN_MODE_CODE,
+                "The agent mode is not one this server knows.",
+                false,
+            );
+        }
+    };
+    let turn_mode = crate::profile::resolve_turn_mode(chosen_mode, requested_posture);
+    if let Some(turn) = turn_mode {
+        req.plan_mode |= turn.preset.plan_gate;
+        tracing::info!(
+            agent_mode = turn.mode.as_str(),
+            source = turn.source.label(),
+            permission_mode = turn.preset.permission_mode,
+            plan_mode = req.plan_mode,
+            "agent mode resolved for the turn"
+        );
+    }
     // Normalize and validate BEFORE branching: an unknown tier numeric must
     // fail closed on both the durable and the persistence-free path, and the
     // ZDR branch threads the same floor onto its inference call.
@@ -1858,17 +1993,13 @@ pub async fn invoke_stream_sse(
         run_ceiling_enforce_switch(),
     );
 
-    // Resolve the harness profile → approval posture. Recorded on the opened
-    // envelope so the run loop and operator surfaces agree (HARNESS_PHASE1 §1).
-    //
-    // SECURITY (approval-enforcement audit): the client-supplied `profile` is
-    // NOT trusted for the approval-relevant decision. It keeps its benign role
-    // (SSE stream shape — see `sse_events`), but the approval POSTURE is
-    // resolved server-side from the authenticated principal and the client can
-    // only ratchet it STRICTER — never send `profile:"chat"` to disable gating.
-    let profile = crate::profile::AgentProfile::from_wire(req.profile.as_deref());
-    let posture =
-        crate::profile::resolve_posture(posture_floor(&claims), profile).as_permission_mode();
+    // The approval posture of the turn, recorded on the opened envelope so the run loop and operator
+    // surfaces agree (HARNESS_PHASE1 §1). A chosen agent mode sets the posture its preset states
+    // (WS25-S6); with no choice it is the posture resolved above, byte for byte.
+    let posture = turn_mode.map_or_else(
+        || requested_posture.as_permission_mode(),
+        |turn| turn.preset.permission_mode,
+    );
 
     let start = std::time::Instant::now();
 
@@ -2018,6 +2149,16 @@ pub async fn invoke_stream_sse(
         state.plan_mode.approval_resume_enabled(),
     ) {
         return error_stream(&request_id, code, message, false);
+    }
+    // A chosen mode that allows no Do run refuses an agentic turn, typed, before any run exists
+    // (WS25-S6). A plain answer is not agentic, so lockdown still gives one.
+    if agentic_requested && turn_mode.is_some_and(|turn| !turn.preset.do_runs) {
+        return error_stream(
+            &request_id,
+            mp_contracts::agent_mode::LOCKDOWN_CODE,
+            "This chat is locked to plain answers, so it cannot start an agent run.",
+            false,
+        );
     }
     // WS14 S2, approve then execute: the plan an execute turn names. With its switch off the field
     // is ignored, so the request runs exactly as it did before the field existed. With it on, the
@@ -11278,6 +11419,15 @@ fn spawn_run_dispatch(
         attachments,
         connector_scope,
         run_effort,
+    );
+    // What the request states about its own authority, content-free: the posture, the plan flag and the
+    // rung it is sent with, so a live run shows the agent mode it ran under (WS25-S6).
+    tracing::info!(
+        run_id = %run.run_id,
+        mode = %run_agent_req.mode,
+        plan_mode = run_agent_req.plan_mode,
+        autonomy_rung = run_agent_req.autonomy_rung,
+        "RunAgent authority resolved"
     );
     // The org's hook rules for this Do run (WS25-S3), from the registry the gateway owns. With the
     // switch off, or with no rules, the request carries no org policy, as it did before the field.

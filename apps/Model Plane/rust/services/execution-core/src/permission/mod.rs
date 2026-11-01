@@ -16,13 +16,27 @@ pub enum PermissionMode {
 }
 
 impl PermissionMode {
+    /// The wire form of a permission mode, read strictly: `ask`, `deny` or `auto` and nothing
+    /// else. New code reads the mode through this, so an unknown value is never a mode.
+    #[must_use]
+    pub fn parse_strict(mode: &str) -> Option<Self> {
+        match mode {
+            "ask" => Some(Self::Ask),
+            "deny" => Some(Self::Deny),
+            "auto" => Some(Self::Auto),
+            _ => None,
+        }
+    }
+
+    /// The mode a caller stated on the wire. An unset value is the posture that predates the
+    /// field, `auto`. A value this build does not know is `ask`, never `auto`, so a typo cannot
+    /// switch a gate off (WS25-S6, DEC-15).
     #[must_use]
     pub fn from_wire(mode: &str) -> Self {
-        match mode {
-            "ask" => Self::Ask,
-            "deny" => Self::Deny,
-            _ => Self::Auto,
+        if mode.is_empty() {
+            return Self::Auto;
         }
+        Self::parse_strict(mode).unwrap_or(Self::Ask)
     }
 }
 
@@ -805,6 +819,25 @@ pub fn run_view(org_id: &str, run_id: &str, tool_name: &str) -> Option<ToolClass
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The fail-open reading of an unknown wire value is gone: `ask` gates and `deny` denies, an
+    /// unset value is the posture that predates the field, and anything else asks.
+    #[test]
+    fn an_unknown_wire_mode_asks_and_only_an_unset_one_is_auto() {
+        assert_eq!(PermissionMode::from_wire(""), PermissionMode::Auto);
+        assert_eq!(PermissionMode::from_wire("auto"), PermissionMode::Auto);
+        assert_eq!(PermissionMode::from_wire("ask"), PermissionMode::Ask);
+        assert_eq!(PermissionMode::from_wire("deny"), PermissionMode::Deny);
+        for unknown in ["ASK", "execute", "malformed", " auto"] {
+            assert_eq!(
+                PermissionMode::from_wire(unknown),
+                PermissionMode::Ask,
+                "{unknown:?}"
+            );
+            assert_eq!(PermissionMode::parse_strict(unknown), None, "{unknown:?}");
+        }
+        assert_eq!(PermissionMode::parse_strict(""), None);
+    }
 
     #[test]
     fn deny_mode_always_denies() {

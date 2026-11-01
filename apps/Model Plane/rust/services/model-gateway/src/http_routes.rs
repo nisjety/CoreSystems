@@ -8526,6 +8526,12 @@ pub struct InvokeRequest {
     /// posture (`HARNESS_PHASE1` §1). Absent → "chat" (auto, non-gating).
     #[serde(default)]
     pub profile: Option<String>,
+    /// The agent mode the person chose for this turn (WS25-S6): `lockdown`, `read_only`, `ask_first`
+    /// or `auto`. Read only while `AGENT_MODES` is on, and then it can only tighten the posture the
+    /// platform already sets; an id this build does not know is refused typed (`agent_mode_unknown`).
+    /// Absent or blank is no choice, and the turn is the one it was before the field existed.
+    #[serde(default, alias = "agentMode")]
+    pub agent_mode: Option<String>,
     /// Response-style / verbosity profile (token-efficiency layer):
     /// `concise` | `detailed` | `minimal` | `normal`. `normal`/unset/unknown
     /// injects no directive. See `crate::verbosity`.
@@ -12255,6 +12261,18 @@ async fn invoke(
     if req.features.iter().any(|f| f == "conversation_only") {
         return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": {
             "code": "source_scope_requires_stream", "message": "Conversation-only tasks require the streaming chat endpoint."
+        }}))).into());
+    }
+    // An agent mode this build does not know is refused before anything runs (WS25-S6). The unary
+    // endpoint runs no agent loop, so a known mode changes nothing here and is not applied.
+    if crate::profile::chosen_agent_mode(
+        crate::profile::agent_modes_enabled(),
+        req.agent_mode.as_deref(),
+    )
+    .is_err()
+    {
+        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": {
+            "code": mp_contracts::agent_mode::UNKNOWN_MODE_CODE, "message": "The agent mode is not one this server knows."
         }}))).into());
     }
     let start = std::time::Instant::now();

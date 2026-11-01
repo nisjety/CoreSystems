@@ -3,7 +3,7 @@
 //!
 //! Every assertion here pins a behaviour that a later WS25 slice reverses on
 //! purpose: the Do loop sending an empty hook context (S3), `from_wire` mapping
-//! an unknown mode to `auto` (S3), `hook::evaluate` taking the first matching
+//! an unknown mode to `auto` (S6), `hook::evaluate` taking the first matching
 //! rule with no strictest-wins (S3), and a malformed hook context failing open
 //! (S3). The slice that changes one of these changes its golden in the same
 //! change and records the decision in the ledger. A golden that starts failing
@@ -44,16 +44,18 @@ fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
     &rest[..end]
 }
 
+/// WS25-S6 reversed this golden: a non-empty value this build does not know asks, and only an
+/// unset (empty) value is `auto`.
 #[test]
-fn from_wire_maps_only_the_literal_ask_and_deny_and_everything_else_to_auto() {
+fn from_wire_maps_an_unknown_non_empty_mode_to_ask_and_only_an_unset_one_to_auto() {
     let table = [
         ("ask", PermissionMode::Ask),
         ("deny", PermissionMode::Deny),
         ("auto", PermissionMode::Auto),
         ("", PermissionMode::Auto),
-        ("execute", PermissionMode::Auto),
-        ("ASK", PermissionMode::Auto),
-        ("malformed", PermissionMode::Auto),
+        ("execute", PermissionMode::Ask),
+        ("ASK", PermissionMode::Ask),
+        ("malformed", PermissionMode::Ask),
     ];
     for (wire, expected) in table {
         assert_eq!(
@@ -73,8 +75,8 @@ fn the_do_loop_resolve_mode_is_fail_closed_to_ask_and_is_applied_to_the_request_
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with("//"))
         .collect();
-    // Table: "auto" -> Auto, "deny" -> Deny, every other wire value -> Ask. Note
-    // that this differs from `from_wire` above for "" and every unknown value.
+    // Table: "auto" -> Auto, "deny" -> Deny, every other wire value -> Ask. Since
+    // WS25-S6 this differs from `from_wire` above only for the empty value.
     assert_eq!(
         arms,
         [

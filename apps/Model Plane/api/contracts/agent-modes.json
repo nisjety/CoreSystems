@@ -1,0 +1,40 @@
+{
+  "modes": [
+    {
+      "id": "lockdown",
+      "strictness": 3,
+      "permission_mode": "ask",
+      "plan_gate": false,
+      "rung": "unspecified",
+      "do_runs": false
+    },
+    {
+      "id": "read_only",
+      "strictness": 2,
+      "permission_mode": "ask",
+      "plan_gate": true,
+      "rung": "read_only",
+      "do_runs": true
+    },
+    {
+      "id": "ask_first",
+      "strictness": 1,
+      "permission_mode": "ask",
+      "plan_gate": false,
+      "rung": "unspecified",
+      "do_runs": true
+    },
+    {
+      "id": "auto",
+      "strictness": 0,
+      "permission_mode": "auto",
+      "plan_gate": false,
+      "rung": "unspecified",
+      "do_runs": true
+    }
+  ],
+  "refusals": [
+    "agent_mode_unknown",
+    "mode_lockdown"
+  ]
+}

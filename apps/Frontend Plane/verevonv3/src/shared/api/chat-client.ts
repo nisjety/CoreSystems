@@ -64,6 +64,9 @@ export type ChatAttachment = {
   url?: string
 }
 
+/** The four agent modes a person can choose for a turn (WS25-S6). The ids match `api/contracts/agent-modes.json`. */
+export type AgentModeId = 'lockdown' | 'read_only' | 'ask_first' | 'auto'
+
 export type ChatInvokeRequest = {
   sourceScope?: import('@/shared/actions/chat-source-scope').ChatSourceScope
   /**
@@ -153,6 +156,12 @@ export type ChatInvokeRequest = {
    * for Approve/Reject in chat). Adds the `agentic` feature family.
    */
   planMode?: boolean
+  /**
+   * The agent mode this turn runs under, when the person chose one (WS25-S6). Sent as `agent_mode` only
+   * when set, so an unchanged turn is byte-identical; the server refuses an id it does not know and can
+   * only tighten the posture the platform already sets.
+   */
+  agentMode?: AgentModeId
   /**
    * This turn runs the plan the person just approved (WS14 S2a "Run the
    * approved plan"). Only the chat controller sets it, and only after it has
@@ -1511,6 +1520,9 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
             : {}),
         }
       : {}),
+    // Present only when the person chose a mode (WS25-S6), so every other body is byte-identical to what it
+    // was before the field existed. The gateway resolves it onto the posture and refuses an id it does not know.
+    ...(request.agentMode ? { agent_mode: request.agentMode } : {}),
     // Deep research is its OWN field, not just `browse_web`. "Dyp research"
     // used to set only browseWeb, so it was indistinguishable from a plain
     // Search turn — the same failure planMode had. The gateway keys the

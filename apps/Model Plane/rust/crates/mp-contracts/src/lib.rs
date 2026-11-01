@@ -1,3 +1,4 @@
+pub mod agent_mode;
 pub mod agentic_subscription;
 pub mod approval_cause;
 pub mod attachments;

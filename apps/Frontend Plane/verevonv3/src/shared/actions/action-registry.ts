@@ -1075,6 +1075,14 @@ const chatSetConnectorScopeInput = z
   })
   .strict()
 
+// The agent mode one chat turn runs under (WS25-S6): the four ids of `api/contracts/agent-modes.json`,
+// read by the gateway as `agent_mode`. A closed list, so an id outside it is refused.
+const chatSetAgentModeInput = z
+  .object({
+    mode: z.enum(['lockdown', 'read_only', 'ask_first', 'auto']),
+  })
+  .strict()
+
 // The org-admin schemas below all describe operations whose owner requires
 // require_org_admin (or, for the two self-service deletion checkpoints,
 // require_active_org) — enforced server-side, not by this schema. Getting the
@@ -3617,6 +3625,17 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: chatSetConnectorScopeInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.set_agent_mode',
+    label: 'Choose the agent mode for a chat turn',
+    description: 'Name the agent mode one chat turn runs under: lockdown (no agent runs), read_only (a plan run that refuses writes), ask_first (asks before a risky call) or auto (no gate beyond the platform floor). The server resolves it strictest-wins against the posture the platform already sets, so a choice can only tighten. It is sent as agent_mode on that turn only and is never remembered between turns. Never model-executable: a model does not choose the mode it runs under.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatSetAgentModeInput,
     outputSchema: envelopeStatusOutput,
   },
   {
