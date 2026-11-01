@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { AcquireGrantRequest, AcquireGrantResponse, BrowserHealthRequest, BrowserHealthResponse, RevokeGrantRequest, RevokeGrantResponse, ValidateGrantRequest, ValidateGrantResponse } from "./browser_pbjs";
+import { AcquireGrantRequest, AcquireGrantResponse, BrowserHealthRequest, BrowserHealthResponse, DeriveRunGrantRequest, DeriveRunGrantResponse, RevokeGrantRequest, RevokeGrantResponse, ValidateGrantRequest, ValidateGrantResponse } from "./browser_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 
 /**
@@ -46,6 +46,20 @@ export const BrowserBroker = {
       name: "ValidateGrant",
       I: ValidateGrantRequest,
       O: ValidateGrantResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Derive a run grant for one agent run from an active session grant. The
+     * run grant is never wider than its parent: same owner and tenant, hosts
+     * equal to or below the parent's, ZDR inherited, expiry capped by the
+     * parent's, revoked with it. Idempotent on (parent_grant_id, session_key).
+     *
+     * @generated from rpc model_plane.v1.BrowserBroker.DeriveRunGrant
+     */
+    deriveRunGrant: {
+      name: "DeriveRunGrant",
+      I: DeriveRunGrantRequest,
+      O: DeriveRunGrantResponse,
       kind: MethodKind.Unary,
     },
     /**

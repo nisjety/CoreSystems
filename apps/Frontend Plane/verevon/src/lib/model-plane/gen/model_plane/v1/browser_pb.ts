@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file model_plane/v1/browser.proto.
  */
 export const file_model_plane_v1_browser: GenFile = /*@__PURE__*/
-  fileDesc("Chxtb2RlbF9wbGFuZS92MS9icm93c2VyLnByb3RvEg5tb2RlbF9wbGFuZS52MSLoAQoTQWNxdWlyZUdyYW50UmVxdWVzdBITCgtzZXNzaW9uX2tleRgBIAEoCRIMCgRtb2RlGAIgASgJEg4KBm9yZ19pZBgDIAEoCRIXCg9hbGxvd2VkX2RvbWFpbnMYBCADKAkSFwoPYWxsb3dlZF9hY3Rpb25zGAUgAygJEhkKEWFsbG93ZWRfZnJhbWVfaWRzGAYgAygJEhoKEmFsbG93ZWRfZGlhbG9nX2lkcxgHIAMoCRIcChRhbGxvd2VkX2FydGlmYWN0X2lkcxgIIAMoCRIXCg9wYXJlbnRfZ3JhbnRfaWQYCSABKAkiigIKFEFjcXVpcmVHcmFudFJlc3BvbnNlEhAKCGdyYW50X2lkGAEgASgJEhAKCGVuZHBvaW50GAIgASgJEi4KCmV4cGlyZXNfYXQYAyABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEhcKD2FsbG93ZWRfZG9tYWlucxgEIAMoCRIXCg9hbGxvd2VkX2FjdGlvbnMYBSADKAkSGQoRYWxsb3dlZF9mcmFtZV9pZHMYBiADKAkSGgoSYWxsb3dlZF9kaWFsb2dfaWRzGAcgAygJEhwKFGFsbG93ZWRfYXJ0aWZhY3RfaWRzGAggAygJEhcKD3BhcmVudF9ncmFudF9pZBgJIAEoCSI2ChJSZXZva2VHcmFudFJlcXVlc3QSEAoIZ3JhbnRfaWQYASABKAkSDgoGcmVhc29uGAIgASgJIiYKE1Jldm9rZUdyYW50UmVzcG9uc2USDwoHcmV2b2tlZBgBIAEoCCIWChRCcm93c2VySGVhbHRoUmVxdWVzdCInChVCcm93c2VySGVhbHRoUmVzcG9uc2USDgoGc3RhdHVzGAEgASgJIigKFFZhbGlkYXRlR3JhbnRSZXF1ZXN0EhAKCGdyYW50X2lkGAEgASgJIokCChVWYWxpZGF0ZUdyYW50UmVzcG9uc2USEAoIZ3JhbnRfaWQYASABKAkSDgoGYWN0aXZlGAIgASgIEi4KCmV4cGlyZXNfYXQYAyABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEhcKD2FsbG93ZWRfZG9tYWlucxgEIAMoCRIXCg9hbGxvd2VkX2FjdGlvbnMYBSADKAkSGQoRYWxsb3dlZF9mcmFtZV9pZHMYBiADKAkSGgoSYWxsb3dlZF9kaWFsb2dfaWRzGAcgAygJEhwKFGFsbG93ZWRfYXJ0aWZhY3RfaWRzGAggAygJEhcKD3BhcmVudF9ncmFudF9pZBgJIAEoCTL3AgoNQnJvd3NlckJyb2tlchJZCgxBY3F1aXJlR3JhbnQSIy5tb2RlbF9wbGFuZS52MS5BY3F1aXJlR3JhbnRSZXF1ZXN0GiQubW9kZWxfcGxhbmUudjEuQWNxdWlyZUdyYW50UmVzcG9uc2USVgoLUmV2b2tlR3JhbnQSIi5tb2RlbF9wbGFuZS52MS5SZXZva2VHcmFudFJlcXVlc3QaIy5tb2RlbF9wbGFuZS52MS5SZXZva2VHcmFudFJlc3BvbnNlElwKDVZhbGlkYXRlR3JhbnQSJC5tb2RlbF9wbGFuZS52MS5WYWxpZGF0ZUdyYW50UmVxdWVzdBolLm1vZGVsX3BsYW5lLnYxLlZhbGlkYXRlR3JhbnRSZXNwb25zZRJVCgZIZWFsdGgSJC5tb2RlbF9wbGFuZS52MS5Ccm93c2VySGVhbHRoUmVxdWVzdBolLm1vZGVsX3BsYW5lLnYxLkJyb3dzZXJIZWFsdGhSZXNwb25zZUK0AQoSY29tLm1vZGVsX3BsYW5lLnYxQgxCcm93c2VyUHJvdG9QAVo7Z2l0aHViLmNvbS90cmlvZGVsYWIvbW9kZWwtcGxhbmUvZ2VuL2dvL21vZGVsX3BsYW5lL3YxO21wdjGiAgNNWFiqAg1Nb2RlbFBsYW5lLlYxygINTW9kZWxQbGFuZVxWMeICGU1vZGVsUGxhbmVcVjFcR1BCTWV0YWRhdGHqAg5Nb2RlbFBsYW5lOjpWMWIGcHJvdG8z", [file_google_protobuf_timestamp]);
+  fileDesc("Chxtb2RlbF9wbGFuZS92MS9icm93c2VyLnByb3RvEg5tb2RlbF9wbGFuZS52MSK3AwoTQWNxdWlyZUdyYW50UmVxdWVzdBITCgtzZXNzaW9uX2tleRgBIAEoCRIMCgRtb2RlGAIgASgJEg4KBm9yZ19pZBgDIAEoCRIXCg9hbGxvd2VkX2RvbWFpbnMYBCADKAkSFwoPYWxsb3dlZF9hY3Rpb25zGAUgAygJEhkKEWFsbG93ZWRfZnJhbWVfaWRzGAYgAygJEhoKEmFsbG93ZWRfZGlhbG9nX2lkcxgHIAMoCRIcChRhbGxvd2VkX2FydGlmYWN0X2lkcxgIIAMoCRIXCg9wYXJlbnRfZ3JhbnRfaWQYCSABKAkSCwoDemRyGAogASgIEhgKEGJ1ZGdldF9taWNyb191c2QYKCABKAMSGAoQYnVkZ2V0X21heF9zdGVwcxgpIAEoBRIcChRidWRnZXRfbWF4X3J1bnRpbWVfcxgqIAEoBRIVCg1idWRnZXRfc291cmNlGCsgASgJEh0KFWJ1ZGdldF9taW50ZWRfYXRfdW5peBgsIAEoAxIQCghzcGFjZV9pZBgLIAEoCRIRCglyZWFkX29ubHkYDCABKAgSEwoLdHRsX3NlY29uZHMYDSABKAUi2AMKFEFjcXVpcmVHcmFudFJlc3BvbnNlEhAKCGdyYW50X2lkGAEgASgJEhAKCGVuZHBvaW50GAIgASgJEi4KCmV4cGlyZXNfYXQYAyABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEhcKD2FsbG93ZWRfZG9tYWlucxgEIAMoCRIXCg9hbGxvd2VkX2FjdGlvbnMYBSADKAkSGQoRYWxsb3dlZF9mcmFtZV9pZHMYBiADKAkSGgoSYWxsb3dlZF9kaWFsb2dfaWRzGAcgAygJEhwKFGFsbG93ZWRfYXJ0aWZhY3RfaWRzGAggAygJEhcKD3BhcmVudF9ncmFudF9pZBgJIAEoCRIMCgRraW5kGAogASgJEgsKA3pkchgLIAEoCBIYChBidWRnZXRfbWljcm9fdXNkGCggASgDEhgKEGJ1ZGdldF9tYXhfc3RlcHMYKSABKAUSHAoUYnVkZ2V0X21heF9ydW50aW1lX3MYKiABKAUSFQoNYnVkZ2V0X3NvdXJjZRgrIAEoCRIdChVidWRnZXRfbWludGVkX2F0X3VuaXgYLCABKAMSEQoJcmVhZF9vbmx5GAwgASgIEhYKDmRlbmllZF9kb21haW5zGA0gAygJIjYKElJldm9rZUdyYW50UmVxdWVzdBIQCghncmFudF9pZBgBIAEoCRIOCgZyZWFzb24YAiABKAkiJgoTUmV2b2tlR3JhbnRSZXNwb25zZRIPCgdyZXZva2VkGAEgASgIIhYKFEJyb3dzZXJIZWFsdGhSZXF1ZXN0IicKFUJyb3dzZXJIZWFsdGhSZXNwb25zZRIOCgZzdGF0dXMYASABKAkiKAoUVmFsaWRhdGVHcmFudFJlcXVlc3QSEAoIZ3JhbnRfaWQYASABKAki0QMKFVZhbGlkYXRlR3JhbnRSZXNwb25zZRIQCghncmFudF9pZBgBIAEoCRIOCgZhY3RpdmUYAiABKAgSLgoKZXhwaXJlc19hdBgDIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASFwoPYWxsb3dlZF9kb21haW5zGAQgAygJEhcKD2FsbG93ZWRfYWN0aW9ucxgFIAMoCRIZChFhbGxvd2VkX2ZyYW1lX2lkcxgGIAMoCRIaChJhbGxvd2VkX2RpYWxvZ19pZHMYByADKAkSHAoUYWxsb3dlZF9hcnRpZmFjdF9pZHMYCCADKAkSFwoPcGFyZW50X2dyYW50X2lkGAkgASgJEgwKBGtpbmQYCiABKAkSEAoIb3duZXJfaWQYCyABKAkSCwoDemRyGAwgASgIEhgKEGJ1ZGdldF9taWNyb191c2QYKCABKAMSGAoQYnVkZ2V0X21heF9zdGVwcxgpIAEoBRIcChRidWRnZXRfbWF4X3J1bnRpbWVfcxgqIAEoBRIVCg1idWRnZXRfc291cmNlGCsgASgJEh0KFWJ1ZGdldF9taW50ZWRfYXRfdW5peBgsIAEoAxIRCglyZWFkX29ubHkYDSABKAginAIKFURlcml2ZVJ1bkdyYW50UmVxdWVzdBIXCg9wYXJlbnRfZ3JhbnRfaWQYASABKAkSEwoLc2Vzc2lvbl9rZXkYAiABKAkSDgoGb3JnX2lkGAMgASgJEhcKD2FsbG93ZWRfZG9tYWlucxgEIAMoCRIPCgdwdXJwb3NlGAUgASgJEhMKC3R0bF9zZWNvbmRzGAYgASgFEhgKEGJ1ZGdldF9taWNyb191c2QYKCABKAMSGAoQYnVkZ2V0X21heF9zdGVwcxgpIAEoBRIcChRidWRnZXRfbWF4X3J1bnRpbWVfcxgqIAEoBRIVCg1idWRnZXRfc291cmNlGCsgASgJEh0KFWJ1ZGdldF9taW50ZWRfYXRfdW5peBgsIAEoAyLBAgoWRGVyaXZlUnVuR3JhbnRSZXNwb25zZRIQCghncmFudF9pZBgBIAEoCRIQCghlbmRwb2ludBgCIAEoCRIuCgpleHBpcmVzX2F0GAMgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIXCg9hbGxvd2VkX2RvbWFpbnMYBCADKAkSFwoPcGFyZW50X2dyYW50X2lkGAUgASgJEgwKBGtpbmQYBiABKAkSCwoDemRyGAcgASgIEhgKEGJ1ZGdldF9taWNyb191c2QYKCABKAMSGAoQYnVkZ2V0X21heF9zdGVwcxgpIAEoBRIcChRidWRnZXRfbWF4X3J1bnRpbWVfcxgqIAEoBRIVCg1idWRnZXRfc291cmNlGCsgASgJEh0KFWJ1ZGdldF9taW50ZWRfYXRfdW5peBgsIAEoAzLYAwoNQnJvd3NlckJyb2tlchJZCgxBY3F1aXJlR3JhbnQSIy5tb2RlbF9wbGFuZS52MS5BY3F1aXJlR3JhbnRSZXF1ZXN0GiQubW9kZWxfcGxhbmUudjEuQWNxdWlyZUdyYW50UmVzcG9uc2USVgoLUmV2b2tlR3JhbnQSIi5tb2RlbF9wbGFuZS52MS5SZXZva2VHcmFudFJlcXVlc3QaIy5tb2RlbF9wbGFuZS52MS5SZXZva2VHcmFudFJlc3BvbnNlElwKDVZhbGlkYXRlR3JhbnQSJC5tb2RlbF9wbGFuZS52MS5WYWxpZGF0ZUdyYW50UmVxdWVzdBolLm1vZGVsX3BsYW5lLnYxLlZhbGlkYXRlR3JhbnRSZXNwb25zZRJfCg5EZXJpdmVSdW5HcmFudBIlLm1vZGVsX3BsYW5lLnYxLkRlcml2ZVJ1bkdyYW50UmVxdWVzdBomLm1vZGVsX3BsYW5lLnYxLkRlcml2ZVJ1bkdyYW50UmVzcG9uc2USVQoGSGVhbHRoEiQubW9kZWxfcGxhbmUudjEuQnJvd3NlckhlYWx0aFJlcXVlc3QaJS5tb2RlbF9wbGFuZS52MS5Ccm93c2VySGVhbHRoUmVzcG9uc2VCtAEKEmNvbS5tb2RlbF9wbGFuZS52MUIMQnJvd3NlclByb3RvUAFaO2dpdGh1Yi5jb20vdHJpb2RlbGFiL21vZGVsLXBsYW5lL2dlbi9nby9tb2RlbF9wbGFuZS92MTttcHYxogIDTVhYqgINTW9kZWxQbGFuZS5WMcoCDU1vZGVsUGxhbmVcVjHiAhlNb2RlbFBsYW5lXFYxXEdQQk1ldGFkYXRh6gIOTW9kZWxQbGFuZTo6VjFiBnByb3RvMw", [file_google_protobuf_timestamp]);
 
 /**
  * @generated from message model_plane.v1.AcquireGrantRequest
@@ -78,6 +78,83 @@ export type AcquireGrantRequest = Message<"model_plane.v1.AcquireGrantRequest"> 
    * @generated from field: string parent_grant_id = 9;
    */
   parentGrantId: string;
+
+  /**
+   * Request a Zero Data Retention grant. The broker treats this as a floor:
+   * a verified principal whose token carries zdr=true always gets a ZDR grant,
+   * and a request can raise but never lower it. A ZDR grant has a "z_" id
+   * prefix and is never persisted by a durable store.
+   *
+   * @generated from field: bool zdr = 10;
+   */
+  zdr: boolean;
+
+  /**
+   * Budget claim (WS6.E, field numbers 40-44 are the budget ledger entry of R-6;
+   * 45-49 are reserved for follow-ons). An upper bound a run under this grant
+   * may spend, which can only tighten: a consumer takes the smaller of the
+   * claim and what its own request or default gives, never the larger. Zero
+   * means no bound on that dimension; all zero and an empty source means no
+   * claim. budget_source is "request", "org_default" or "entitlement" and is
+   * required exactly when some dimension is set.
+   *
+   * @generated from field: int64 budget_micro_usd = 40;
+   */
+  budgetMicroUsd: bigint;
+
+  /**
+   * Step bound; zero means no bound.
+   *
+   * @generated from field: int32 budget_max_steps = 41;
+   */
+  budgetMaxSteps: number;
+
+  /**
+   * Wall-clock bound in seconds; zero means no bound.
+   *
+   * @generated from field: int32 budget_max_runtime_s = 42;
+   */
+  budgetMaxRuntimeS: number;
+
+  /**
+   * Where the claim came from: "request", "org_default" or "entitlement".
+   *
+   * @generated from field: string budget_source = 43;
+   */
+  budgetSource: string;
+
+  /**
+   * Stamped by the broker when the claim is stored; a request that sets it
+   * is refused.
+   *
+   * @generated from field: int64 budget_minted_at_unix = 44;
+   */
+  budgetMintedAtUnix: bigint;
+
+  /**
+   * The Space the run belongs to (WS21-S8). The site policy reads the Space
+   * floor from it; empty outside a Space. Tag 11 (R-6 allocates 10 to zdr).
+   *
+   * @generated from field: string space_id = 11;
+   */
+  spaceId: string;
+
+  /**
+   * Ask for a read-only grant (WS21-S4): the broker narrows the grant to the
+   * read level and reports read_only. Until the durable store persists the
+   * flag, a read-only request is refused unless the grant is Zero Data Retention.
+   *
+   * @generated from field: bool read_only = 12;
+   */
+  readOnly: boolean;
+
+  /**
+   * Requested lifetime in seconds (WS21-S4). Zero uses the broker default; the
+   * broker's maximum (BROWSER_GRANT_MAX_TTL) caps it.
+   *
+   * @generated from field: int32 ttl_seconds = 13;
+   */
+  ttlSeconds: number;
 };
 
 /**
@@ -143,6 +220,79 @@ export type AcquireGrantResponse = Message<"model_plane.v1.AcquireGrantResponse"
    * @generated from field: string parent_grant_id = 9;
    */
   parentGrantId: string;
+
+  /**
+   * "session" or "sensitive_approval" (a "run" grant is derived from a session
+   * grant, not acquired). Consumers must treat an unknown value as not valid.
+   *
+   * @generated from field: string kind = 10;
+   */
+  kind: string;
+
+  /**
+   * True when the grant is a Zero Data Retention grant (its id starts "z_").
+   *
+   * @generated from field: bool zdr = 11;
+   */
+  zdr: boolean;
+
+  /**
+   * Budget claim (WS6.E, field numbers 40-44 are the budget ledger entry of R-6;
+   * 45-49 are reserved for follow-ons). An upper bound a run under this grant
+   * may spend, which can only tighten: a consumer takes the smaller of the
+   * claim and what its own request or default gives, never the larger. Zero
+   * means no bound on that dimension; all zero and an empty source means no
+   * claim. budget_source is "request", "org_default" or "entitlement" and is
+   * required exactly when some dimension is set.
+   *
+   * @generated from field: int64 budget_micro_usd = 40;
+   */
+  budgetMicroUsd: bigint;
+
+  /**
+   * Step bound; zero means no bound.
+   *
+   * @generated from field: int32 budget_max_steps = 41;
+   */
+  budgetMaxSteps: number;
+
+  /**
+   * Wall-clock bound in seconds; zero means no bound.
+   *
+   * @generated from field: int32 budget_max_runtime_s = 42;
+   */
+  budgetMaxRuntimeS: number;
+
+  /**
+   * Where the claim came from: "request", "org_default" or "entitlement".
+   *
+   * @generated from field: string budget_source = 43;
+   */
+  budgetSource: string;
+
+  /**
+   * Stamped by the broker when the claim is stored; a request that sets it
+   * is refused.
+   *
+   * @generated from field: int64 budget_minted_at_unix = 44;
+   */
+  budgetMintedAtUnix: bigint;
+
+  /**
+   * True when the grant is read-only (WS21-S4). Quarry must refuse a mutating
+   * action on it.
+   *
+   * @generated from field: bool read_only = 12;
+   */
+  readOnly: boolean;
+
+  /**
+   * Hosts the site policy dropped from the request (WS21-S4), at most nine.
+   * Empty when the policy is off or nothing was dropped.
+   *
+   * @generated from field: repeated string denied_domains = 13;
+   */
+  deniedDomains: string[];
 };
 
 /**
@@ -305,6 +455,79 @@ export type ValidateGrantResponse = Message<"model_plane.v1.ValidateGrantRespons
    * @generated from field: string parent_grant_id = 9;
    */
   parentGrantId: string;
+
+  /**
+   * Same values as AcquireGrantResponse.kind.
+   *
+   * @generated from field: string kind = 10;
+   */
+  kind: string;
+
+  /**
+   * The user (or service actor) the grant was issued to. A consumer may bind a
+   * run to it; it is not a credential.
+   *
+   * @generated from field: string owner_id = 11;
+   */
+  ownerId: string;
+
+  /**
+   * True for a Zero Data Retention grant. Consumers must not persist anything
+   * about the run beyond its lifetime when this is set.
+   *
+   * @generated from field: bool zdr = 12;
+   */
+  zdr: boolean;
+
+  /**
+   * Budget claim (WS6.E, field numbers 40-44 are the budget ledger entry of R-6;
+   * 45-49 are reserved for follow-ons). An upper bound a run under this grant
+   * may spend, which can only tighten: a consumer takes the smaller of the
+   * claim and what its own request or default gives, never the larger. Zero
+   * means no bound on that dimension; all zero and an empty source means no
+   * claim. budget_source is "request", "org_default" or "entitlement" and is
+   * required exactly when some dimension is set.
+   *
+   * @generated from field: int64 budget_micro_usd = 40;
+   */
+  budgetMicroUsd: bigint;
+
+  /**
+   * Step bound; zero means no bound.
+   *
+   * @generated from field: int32 budget_max_steps = 41;
+   */
+  budgetMaxSteps: number;
+
+  /**
+   * Wall-clock bound in seconds; zero means no bound.
+   *
+   * @generated from field: int32 budget_max_runtime_s = 42;
+   */
+  budgetMaxRuntimeS: number;
+
+  /**
+   * Where the claim came from: "request", "org_default" or "entitlement".
+   *
+   * @generated from field: string budget_source = 43;
+   */
+  budgetSource: string;
+
+  /**
+   * Stamped by the broker when the claim is stored; a request that sets it
+   * is refused.
+   *
+   * @generated from field: int64 budget_minted_at_unix = 44;
+   */
+  budgetMintedAtUnix: bigint;
+
+  /**
+   * True when the grant is read-only (WS21-S4). Consumers must refuse a
+   * mutating action on it.
+   *
+   * @generated from field: bool read_only = 13;
+   */
+  readOnly: boolean;
 };
 
 /**
@@ -313,6 +536,202 @@ export type ValidateGrantResponse = Message<"model_plane.v1.ValidateGrantRespons
  */
 export const ValidateGrantResponseSchema: GenMessage<ValidateGrantResponse> = /*@__PURE__*/
   messageDesc(file_model_plane_v1_browser, 7);
+
+/**
+ * @generated from message model_plane.v1.DeriveRunGrantRequest
+ */
+export type DeriveRunGrantRequest = Message<"model_plane.v1.DeriveRunGrantRequest"> & {
+  /**
+   * The session grant the run derives from. It must be active, of kind
+   * "session", owned by the caller (users) inside the caller's organization.
+   *
+   * @generated from field: string parent_grant_id = 1;
+   */
+  parentGrantId: string;
+
+  /**
+   * The run's idempotency key. A repeat with the same parent and key returns
+   * the same grant; a repeat with different hosts is ALREADY_EXISTS.
+   *
+   * @generated from field: string session_key = 2;
+   */
+  sessionKey: string;
+
+  /**
+   * Tenant identifier; must equal the verified token's organization.
+   *
+   * @generated from field: string org_id = 3;
+   */
+  orgId: string;
+
+  /**
+   * Optional narrowing. Empty inherits the parent's hosts (refused when the
+   * parent holds more than the broker's run-domain bound); otherwise every
+   * host must equal or be a subdomain of a parent host.
+   *
+   * @generated from field: repeated string allowed_domains = 4;
+   */
+  allowedDomains: string[];
+
+  /**
+   * Why the run grant is derived. Only "ai_run" is accepted today.
+   *
+   * @generated from field: string purpose = 5;
+   */
+  purpose: string;
+
+  /**
+   * Requested lifetime in seconds; 0 uses the broker default. The expiry is
+   * never later than the parent's.
+   *
+   * @generated from field: int32 ttl_seconds = 6;
+   */
+  ttlSeconds: number;
+
+  /**
+   * Budget claim (WS6.E, field numbers 40-44 are the budget ledger entry of R-6;
+   * 45-49 are reserved for follow-ons). An upper bound a run under this grant
+   * may spend. On a derive it can only tighten the parent's claim: a consumer takes the smaller of the
+   * claim and what its own request or default gives, never the larger. Zero
+   * means no bound on that dimension; all zero and an empty source means no
+   * claim. budget_source is "request", "org_default" or "entitlement" and is
+   * required exactly when some dimension is set.
+   *
+   * @generated from field: int64 budget_micro_usd = 40;
+   */
+  budgetMicroUsd: bigint;
+
+  /**
+   * Step bound; zero means no bound.
+   *
+   * @generated from field: int32 budget_max_steps = 41;
+   */
+  budgetMaxSteps: number;
+
+  /**
+   * Wall-clock bound in seconds; zero means no bound.
+   *
+   * @generated from field: int32 budget_max_runtime_s = 42;
+   */
+  budgetMaxRuntimeS: number;
+
+  /**
+   * Where the claim came from: "request", "org_default" or "entitlement".
+   *
+   * @generated from field: string budget_source = 43;
+   */
+  budgetSource: string;
+
+  /**
+   * Stamped by the broker when the claim is stored; a request that sets it
+   * is refused.
+   *
+   * @generated from field: int64 budget_minted_at_unix = 44;
+   */
+  budgetMintedAtUnix: bigint;
+};
+
+/**
+ * Describes the message model_plane.v1.DeriveRunGrantRequest.
+ * Use `create(DeriveRunGrantRequestSchema)` to create a new message.
+ */
+export const DeriveRunGrantRequestSchema: GenMessage<DeriveRunGrantRequest> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_browser, 8);
+
+/**
+ * @generated from message model_plane.v1.DeriveRunGrantResponse
+ */
+export type DeriveRunGrantResponse = Message<"model_plane.v1.DeriveRunGrantResponse"> & {
+  /**
+   * @generated from field: string grant_id = 1;
+   */
+  grantId: string;
+
+  /**
+   * @generated from field: string endpoint = 2;
+   */
+  endpoint: string;
+
+  /**
+   * @generated from field: google.protobuf.Timestamp expires_at = 3;
+   */
+  expiresAt?: Timestamp | undefined;
+
+  /**
+   * Canonical hosts of the run grant.
+   *
+   * @generated from field: repeated string allowed_domains = 4;
+   */
+  allowedDomains: string[];
+
+  /**
+   * @generated from field: string parent_grant_id = 5;
+   */
+  parentGrantId: string;
+
+  /**
+   * Always "run".
+   *
+   * @generated from field: string kind = 6;
+   */
+  kind: string;
+
+  /**
+   * Inherited from the parent; never lower than the parent's.
+   *
+   * @generated from field: bool zdr = 7;
+   */
+  zdr: boolean;
+
+  /**
+   * Budget claim (WS6.E, field numbers 40-44 are the budget ledger entry of R-6;
+   * 45-49 are reserved for follow-ons). An upper bound a run under this grant
+   * may spend, which can only tighten: a consumer takes the smaller of the
+   * claim and what its own request or default gives, never the larger. Zero
+   * means no bound on that dimension; all zero and an empty source means no
+   * claim. budget_source is "request", "org_default" or "entitlement" and is
+   * required exactly when some dimension is set.
+   *
+   * @generated from field: int64 budget_micro_usd = 40;
+   */
+  budgetMicroUsd: bigint;
+
+  /**
+   * Step bound; zero means no bound.
+   *
+   * @generated from field: int32 budget_max_steps = 41;
+   */
+  budgetMaxSteps: number;
+
+  /**
+   * Wall-clock bound in seconds; zero means no bound.
+   *
+   * @generated from field: int32 budget_max_runtime_s = 42;
+   */
+  budgetMaxRuntimeS: number;
+
+  /**
+   * Where the claim came from: "request", "org_default" or "entitlement".
+   *
+   * @generated from field: string budget_source = 43;
+   */
+  budgetSource: string;
+
+  /**
+   * Stamped by the broker when the claim is stored; a request that sets it
+   * is refused.
+   *
+   * @generated from field: int64 budget_minted_at_unix = 44;
+   */
+  budgetMintedAtUnix: bigint;
+};
+
+/**
+ * Describes the message model_plane.v1.DeriveRunGrantResponse.
+ * Use `create(DeriveRunGrantResponseSchema)` to create a new message.
+ */
+export const DeriveRunGrantResponseSchema: GenMessage<DeriveRunGrantResponse> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_browser, 9);
 
 /**
  * BrowserBroker — trusted browser grant lifecycle.
@@ -350,6 +769,19 @@ export const BrowserBroker: GenService<{
     methodKind: "unary";
     input: typeof ValidateGrantRequestSchema;
     output: typeof ValidateGrantResponseSchema;
+  },
+  /**
+   * Derive a run grant for one agent run from an active session grant. The
+   * run grant is never wider than its parent: same owner and tenant, hosts
+   * equal to or below the parent's, ZDR inherited, expiry capped by the
+   * parent's, revoked with it. Idempotent on (parent_grant_id, session_key).
+   *
+   * @generated from rpc model_plane.v1.BrowserBroker.DeriveRunGrant
+   */
+  deriveRunGrant: {
+    methodKind: "unary";
+    input: typeof DeriveRunGrantRequestSchema;
+    output: typeof DeriveRunGrantResponseSchema;
   },
   /**
    * Health check.
