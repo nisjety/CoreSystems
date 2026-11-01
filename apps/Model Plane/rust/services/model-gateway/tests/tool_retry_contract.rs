@@ -93,6 +93,25 @@ fn string_slice_const(source: &str, name: &str) -> Vec<String> {
     out
 }
 
+/// Every string literal in the body of a named `const`, in order. Unlike `string_slice_const`
+/// this reads nested tables such as `&[(&str, &[&str])]`, and two equal lists give equal output.
+fn string_literals_of_const(source: &str, name: &str) -> Vec<String> {
+    let decl = format!("const {name}: ");
+    let start = source
+        .find(&decl)
+        .unwrap_or_else(|| panic!("`{name}` not found — was it renamed?"));
+    let rest = &source[start..];
+    let end = rest
+        .find("];")
+        .unwrap_or_else(|| panic!("`{name}` has no closing `];`"));
+    rest[..end]
+        .split('"')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_owned)
+        .collect()
+}
+
 const GATEWAY_RETRY: &str = "model-gateway/src/tool_retry.rs";
 const EXECUTION_RETRY: &str = "execution-core/src/runtime_loop/retry.rs";
 const GATEWAY_TOOL_LOOP: &str = "model-gateway/src/tool_loop.rs";
@@ -166,6 +185,26 @@ fn both_loops_read_the_providers_token_ceiling_vocabulary_identically() {
              \"MAX_TOKENS \" would otherwise slip past on one loop only"
         );
     }
+}
+
+#[test]
+fn both_loops_name_a_transient_failure_with_the_same_closed_reason() {
+    // The reason is what a client sees for a retry, so the same upstream blip must read as the
+    // same reason on either surface.
+    let gateway = read_source(GATEWAY_RETRY);
+    let execution = read_source(EXECUTION_RETRY);
+
+    let gateway_reasons = string_literals_of_const(&gateway, "REASON_MARKERS");
+    let execution_reasons = string_literals_of_const(&execution, "REASON_MARKERS");
+
+    assert!(
+        !gateway_reasons.is_empty(),
+        "parsed an empty REASON_MARKERS from the gateway — the parser broke, not the invariant"
+    );
+    assert_eq!(
+        gateway_reasons, execution_reasons,
+        "the two tool loops name a transient failure's reason differently. Change          REASON_MARKERS in BOTH {GATEWAY_RETRY} and {EXECUTION_RETRY}."
+    );
 }
 
 #[test]

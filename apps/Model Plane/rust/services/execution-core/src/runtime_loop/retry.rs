@@ -30,6 +30,7 @@
 //! its check-the-exclusions-first shape, for the same reason: when unsure,
 //! answer "not retryable" rather than replaying an action that may have landed.
 
+use std::future::Future;
 use std::time::Duration;
 
 /// Maximum dispatch attempts for one tool call, including the first.
@@ -143,6 +144,101 @@ pub fn is_transient_tool_failure(error: &str) -> bool {
         .any(|marker| haystack.contains(marker))
 }
 
+/// Which closed reason (`mp_contracts::lifecycle_notice::RETRY_REASONS`) a transient failure
+/// reports, by the first class whose marker the error contains. Kept identical to
+/// `model-gateway`'s `tool_retry::REASON_MARKERS` by its `tests/tool_retry_contract.rs`.
+const REASON_MARKERS: &[(&str, &[&str])] = &[
+    ("timeout", &["timed out", "timeout", "deadline exceeded"]),
+    (
+        "connection",
+        &[
+            "connection refused",
+            "connection reset",
+            "connection closed",
+            "connection error",
+            "broken pipe",
+            "transport error",
+            "no route to host",
+            "dns error",
+            "unexpected eof",
+        ],
+    ),
+    (
+        "upstream_unavailable",
+        &[
+            "service unavailable",
+            "temporarily unavailable",
+            "502 bad gateway",
+            "503",
+            "504",
+        ],
+    ),
+    (
+        "rate_limited",
+        &["too many requests", "429", "rate limit", "rate_limit"],
+    ),
+];
+
+/// The closed reason a transient failure reports. Only the token leaves the loop, so no frame or
+/// log built from it can carry the error text.
+#[must_use]
+pub fn transient_reason(error: &str) -> &'static str {
+    let haystack = error.to_ascii_lowercase();
+    REASON_MARKERS
+        .iter()
+        .find(|(_, markers)| markers.iter().any(|marker| haystack.contains(marker)))
+        .map_or("other", |&(reason, _)| reason)
+}
+
+/// A retry the loop is about to make (build plan WS15 S3), as the run's stream announces it.
+#[derive(Debug)]
+pub(crate) struct ScheduledRetry {
+    /// The attempt about to run (2 or more).
+    pub(crate) attempt: u32,
+    /// The backoff before that attempt.
+    pub(crate) wait: Duration,
+    /// Why the failed attempt is retried.
+    pub(crate) reason: &'static str,
+}
+
+/// Runs one tool call's attempts under the retry policy (build plan WS15 S3). `attempt` runs the
+/// call once. `retryable` says whether a failed outcome may run again: the caller's ledger and risk
+/// gates on top of the transient classifier. `announce` hears each retry, with the failed outcome,
+/// before the attempt it schedules. Returns the outcome of the last attempt.
+pub(crate) async fn run_attempts<Attempt, AttemptFuture, Retryable, Announce, AnnounceFuture>(
+    mut attempt: Attempt,
+    retryable: Retryable,
+    mut announce: Announce,
+) -> super::StepOutcome
+where
+    Attempt: FnMut() -> AttemptFuture,
+    AttemptFuture: Future<Output = super::StepOutcome>,
+    Retryable: Fn(&super::StepOutcome) -> bool,
+    Announce: FnMut(&super::StepOutcome, ScheduledRetry) -> AnnounceFuture,
+    AnnounceFuture: Future<Output = ()>,
+{
+    let mut number = 1;
+    loop {
+        if number > 1 {
+            tokio::time::sleep(backoff_before_attempt(number)).await;
+        }
+        let outcome = attempt().await;
+        if number >= MAX_TOOL_ATTEMPTS || !retryable(&outcome) {
+            return outcome;
+        }
+        announce(
+            &outcome,
+            ScheduledRetry {
+                attempt: number + 1,
+                wait: backoff_before_attempt(number + 1),
+                reason: transient_reason(&outcome.error),
+            },
+        )
+        .await;
+        number += 1;
+    }
+}
+
 /// Whether this specific failed call may be dispatched again.
 ///
 /// Both gates must pass — see the module doc. The risk classifier is checked first
@@ -236,6 +332,7 @@ mod tests {
     use super::*;
     use crate::capability_policy::ToolClassGate;
     use crate::permission::{record_run_views, RunGate, ToolClassView};
+    use crate::runtime_loop::StepOutcome;
 
     /// The retry decision with the tool class gate off: the name heuristic.
     fn legacy_retryable(tool_name: &str, tool_input: &str, error: &str) -> bool {
@@ -535,6 +632,86 @@ mod tests {
         // The bare prefix is not a subagent tool, and must not be caught by a
         // sloppy `starts_with` — it would be an ordinary unknown tool name.
         assert!(legacy_retryable("subagent.", "{}", transient));
+    }
+
+    #[test]
+    fn every_transient_marker_names_a_closed_reason() {
+        // An uncovered marker would report a retried failure as "other", hiding its class from
+        // the client. The reason must also be a closed token the wire allows.
+        for marker in TRANSIENT_MARKERS {
+            let reason = transient_reason(marker);
+            assert!(
+                mp_contracts::lifecycle_notice::is_closed_token(
+                    &mp_contracts::lifecycle_notice::RETRY_REASONS,
+                    reason,
+                ),
+                "{marker:?} named {reason:?}, which is not a closed retry reason"
+            );
+            assert_ne!(reason, "other", "{marker:?} is transient but has no class");
+        }
+        assert_eq!(transient_reason("operation timed out"), "timeout");
+        assert_eq!(
+            transient_reason("transport error: connection reset by peer"),
+            "connection"
+        );
+        assert_eq!(
+            transient_reason("upstream returned 503 Service Unavailable"),
+            "upstream_unavailable"
+        );
+        assert_eq!(
+            transient_reason("provider returned 429 Too Many Requests"),
+            "rate_limited"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retried_tool_announces_each_extra_attempt() {
+        let mut runs: u32 = 0;
+        let mut announced = Vec::new();
+        let outcome = run_attempts(
+            || {
+                runs += 1;
+                std::future::ready(StepOutcome::failed(
+                    "transport error: connection reset by peer",
+                ))
+            },
+            |failed| legacy_retryable("knowledge_search", r#"{"query":"q"}"#, &failed.error),
+            |_, retry| {
+                announced.push(retry);
+                std::future::ready(())
+            },
+        )
+        .await;
+        assert_eq!(runs, MAX_TOOL_ATTEMPTS, "every attempt ran");
+        let attempts: Vec<u32> = announced.iter().map(|retry| retry.attempt).collect();
+        assert_eq!(attempts, vec![2, 3], "one announcement per extra attempt");
+        assert!(announced.iter().all(|retry| retry.reason == "connection"));
+        assert_eq!(announced[0].wait, Duration::from_millis(100));
+        assert_eq!(announced[1].wait, Duration::from_millis(200));
+        assert_eq!(outcome.error, "transport error: connection reset by peer");
+    }
+
+    #[tokio::test]
+    async fn a_risky_call_announces_no_retry() {
+        // A side-effecting call is never dispatched twice, whatever its failure says: it runs
+        // once, and the risk gate, not the transient classifier, decides that.
+        let mut runs: u32 = 0;
+        let mut announced: usize = 0;
+        let outcome = run_attempts(
+            || {
+                runs += 1;
+                std::future::ready(StepOutcome::failed("operation timed out"))
+            },
+            |failed| legacy_retryable("book_shipment", "{}", &failed.error),
+            |_, _| {
+                announced += 1;
+                std::future::ready(())
+            },
+        )
+        .await;
+        assert_eq!(runs, 1, "a risky call is attempted once");
+        assert_eq!(announced, 0, "and no retry is announced");
+        assert_eq!(outcome.error, "operation timed out");
     }
 
     #[test]

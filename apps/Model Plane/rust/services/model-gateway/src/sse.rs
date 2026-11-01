@@ -12281,6 +12281,7 @@ fn agentic_run_stream(
                 orchestration_event_to_step_update(event)
                     .filter(|step| step.should_emit(&features))
                     .map(|step| step.to_sse(&request_id))
+                    .or_else(|| lifecycle_frame(event, &features, &request_id))
             },
             |event| match event.event.as_ref()? {
                 orchestration_event::Event::RunUsageProgress(progress) => {
@@ -13499,6 +13500,7 @@ fn orchestration_event_to_sse(event: &OrchestrationEvent) -> Option<Event> {
         }
         orchestration_event::Event::RunParked(_) => "run_parked",
         orchestration_event::Event::RunResumed(_) => "run_resumed",
+        orchestration_event::Event::ToolRetryScheduled(_) => "tool_retry_scheduled",
         // The question events reach the chat stream as the user_question
         // ChatEvent (WS14-S4), not as a raw orchestration event. They get no named
         // arm so the SSE taxonomy generator, which counts named arms, stays in step.
@@ -13506,6 +13508,44 @@ fn orchestration_event_to_sse(event: &OrchestrationEvent) -> Option<Event> {
     };
     let data = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_owned());
     Some(Event::default().event(event_name).data(data))
+}
+
+/// The lifecycle notice a Do run's tool retry stands for (build plan WS15 S3): the same
+/// `retry_scheduled` a chat tool loop streams. The reason must be a closed token, so anything
+/// else is dropped rather than forwarded.
+fn orchestration_event_to_lifecycle(
+    event: &OrchestrationEvent,
+) -> Option<crate::sse_events::ChatEvent> {
+    let orchestration_event::Event::ToolRetryScheduled(retry) = event.event.as_ref()? else {
+        return None;
+    };
+    let reason = mp_contracts::lifecycle_notice::RETRY_REASONS
+        .into_iter()
+        .find(|token| *token == retry.reason)?;
+    Some(crate::sse_events::ChatEvent::RetryScheduled {
+        scope: "tool",
+        tool: retry.tool.clone(),
+        attempt: retry.attempt,
+        max_attempts: retry.max_attempts,
+        wait_ms: retry.wait_ms,
+        reason,
+    })
+}
+
+/// The frame a Do run's tool retry puts on the chat stream, while the lifecycle switch is on and
+/// the client asked for step detail (the family a `retry_scheduled` belongs to).
+fn lifecycle_frame(
+    event: &OrchestrationEvent,
+    features: &[String],
+    request_id: &str,
+) -> Option<Event> {
+    if !mp_contracts::lifecycle_notice::enabled() {
+        return None;
+    }
+    let notice = orchestration_event_to_lifecycle(event)?;
+    notice
+        .should_emit(features)
+        .then(|| notice.to_sse(request_id))
 }
 
 /// Map an orchestration event to the unified chat-parity `step_update`
@@ -13687,7 +13727,9 @@ fn orchestration_event_to_step_update(
         | Event::RunResumed(_)
         | Event::QuestionAsked(_)
         | Event::QuestionAnswered(_)
-        | Event::RunUsageProgress(_) => return None,
+        | Event::RunUsageProgress(_)
+        // A retry is a lifecycle notice on the chat stream, never a step (WS15 S3).
+        | Event::ToolRetryScheduled(_) => return None,
     };
     Some(crate::sse_events::ChatEvent::StepUpdate {
         id,
@@ -13858,6 +13900,16 @@ fn event_payload_value(event: &OrchestrationEvent) -> Option<Value> {
                 json!(payload.resumed_segment),
             );
         }
+        // Ids, counts and a closed reason only: the error text never reaches an orchestration event.
+        orchestration_event::Event::ToolRetryScheduled(payload) => {
+            object.insert("run_id".to_owned(), json!(payload.run_id));
+            object.insert("step_id".to_owned(), json!(payload.step_id));
+            object.insert("tool".to_owned(), json!(payload.tool));
+            object.insert("attempt".to_owned(), json!(payload.attempt));
+            object.insert("max_attempts".to_owned(), json!(payload.max_attempts));
+            object.insert("wait_ms".to_owned(), json!(payload.wait_ms));
+            object.insert("reason".to_owned(), json!(payload.reason));
+        }
         // Never forwarded raw (see the name map), so there is nothing to project.
         orchestration_event::Event::QuestionAsked(_)
         | orchestration_event::Event::QuestionAnswered(_)
@@ -14008,7 +14060,8 @@ mod tests {
         authored_instructions_message, build_stream_envelope, build_usage_envelope,
         classify_agentic_run_outcome, dispatch_never_reached_execution_core,
         format_approved_plan_block, frame_cost_usd, is_confirmed_agent_dispatch_rejection,
-        latest_proposed_plan, orchestration_event_to_step_update, sanitize_follow_up_suggestions,
+        latest_proposed_plan, orchestration_event_to_lifecycle, orchestration_event_to_step_update,
+        sanitize_follow_up_suggestions,
         sanitize_thread_title, stream_ended_with_no_content, turn_call_rows, turn_usage,
         turn_usage_complete_enabled, usage_progress_enabled, AgenticRunOutcome, PlanState,
         LOOP_DETECTED_CODE, LOOP_STOPPED_MESSAGE,
@@ -14814,6 +14867,48 @@ mod tests {
         assert!(sanitize_follow_up_suggestions("").is_empty());
         assert!(sanitize_follow_up_suggestions("   \n\t\n").is_empty());
         assert!(sanitize_follow_up_suggestions("***\n---").is_empty());
+    }
+
+    #[test]
+    fn a_tool_retry_is_a_lifecycle_notice_and_never_a_step() {
+        use mp_contracts::model_plane::v1::{orchestration_event, OrchestrationEvent};
+        let retry = |reason: &str| OrchestrationEvent {
+            event_id: String::new(),
+            at: None,
+            event: Some(orchestration_event::Event::ToolRetryScheduled(
+                orchestration_event::ToolRetryScheduled {
+                    run_id: "run-1".to_owned(),
+                    step_id: "step-1".to_owned(),
+                    tool: "knowledge_search".to_owned(),
+                    attempt: 2,
+                    max_attempts: 3,
+                    wait_ms: 100,
+                    reason: reason.to_owned(),
+                },
+            )),
+        };
+        match orchestration_event_to_lifecycle(&retry("connection")) {
+            Some(crate::sse_events::ChatEvent::RetryScheduled {
+                scope,
+                tool,
+                attempt,
+                max_attempts,
+                wait_ms,
+                reason,
+            }) => assert_eq!(
+                (scope, tool.as_str(), attempt, max_attempts, wait_ms, reason),
+                ("tool", "knowledge_search", 2, 3, 100, "connection")
+            ),
+            other => panic!(
+                "expected a retry_scheduled notice, got {:?}",
+                other.map(|event| event.name())
+            ),
+        }
+        assert!(
+            orchestration_event_to_lifecycle(&retry("connection reset by peer")).is_none(),
+            "free text is never a reason"
+        );
+        assert!(orchestration_event_to_step_update(&retry("connection")).is_none());
     }
 
     #[test]

@@ -1260,9 +1260,14 @@ message OrchestrationEvent {
     // number only.
     RunResumed run_resumed = 25;
 
-    // Human-in-the-loop questions (build plan WS14 S3, tags 27 and 28 — additive;
-    // 26 is WS15's ToolRetryScheduled). Ids only: the question text and the
-    // answer are owner-only and are read through ListRunQuestions.
+    // Tool retry (build plan WS15 S3, tag 26 — additive). A tool call that failed transiently
+    // is about to run again. Ids, the tool name, counts and a closed reason only: the error
+    // text never leaves the loop that saw it. Broadcast and replayed on the run's stream,
+    // never persisted.
+    ToolRetryScheduled tool_retry_scheduled = 26;
+
+    // Human-in-the-loop questions (build plan WS14 S3, tags 27 and 28 — additive). Ids only:
+    // the question text and the answer are owner-only and are read through ListRunQuestions.
     QuestionAsked question_asked = 27;
     // A requested question was answered or skipped.
     QuestionAnswered question_answered = 28;
@@ -1518,6 +1523,26 @@ message OrchestrationEvent {
     string model_used = 7;
     // The provider that served the round that just finished, as the provider reported it.
     string provider_used = 8;
+  }
+
+  // A tool call is being retried after a transient failure (build plan WS15 S3). Ids, the tool
+  // name, counts and a closed reason only; the error text stays in the loop that saw it.
+  message ToolRetryScheduled {
+    // The run whose stream carries the retry.
+    string run_id = 1;
+    // The step the retried call belongs to.
+    string step_id = 2;
+    // The tool being retried.
+    string tool = 3;
+    // The attempt about to run (2 or more): the first attempt is never announced.
+    uint32 attempt = 4;
+    // The most attempts one tool call gets.
+    uint32 max_attempts = 5;
+    // The backoff before the attempt that is about to run, in milliseconds.
+    uint64 wait_ms = 6;
+    // Why the failed attempt is retried: a closed token (timeout, connection,
+    // upstream_unavailable, rate_limited, other).
+    string reason = 7;
   }
 }
 

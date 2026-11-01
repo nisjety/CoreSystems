@@ -4208,83 +4208,86 @@ async fn run_rounds(
                             org_id: &req.org_id,
                             run_id: &req.run_id,
                         });
-                    let mut outcome = None;
-                    for attempt in 1..=runtime_loop::retry::MAX_TOOL_ATTEMPTS {
-                        if attempt > 1 {
-                            tokio::time::sleep(runtime_loop::retry::backoff_before_attempt(
-                                attempt,
-                            ))
-                            .await;
-                        }
-                        let result = runtime_loop::execute_step_with_result_handles(
-                            &call.name,
-                            &call.arguments_json,
-                            ctx.permission_wire,
-                            "",
-                            &req.org_id,
-                            &req.user_id,
-                            &req.run_id,
-                            step_id,
-                            &req.thread_id,
-                            Some(ctx.session_channel.clone()),
-                            None,
-                            None,
-                            zdr,
-                            // Every step of a waived run runs the waived route's
-                            // retrieval mode; children share the same route (Z-18).
-                            ctx.route.is_waived(),
-                            req.min_privacy_tier,
-                            ctx.data_plane_bearer,
-                            ctx.session_bearer,
-                            Some(ctx.inference_bearer),
-                            ctx.capability_policy,
-                            Some(dispatch),
-                            sandbox.as_ref(),
-                            thread.as_ref(),
-                            // Only the resume segment holds a release, and it
-                            // covers exactly one call.
-                            ctx.release.as_ref(),
-                            ctx.result_store.as_deref(),
-                            // Only the root loop reads the run's attached files: a delegated
-                            // child does not inherit them (WS08-S6).
-                            ctx.depth == 0,
-                            // The connections the run's person selected (WS23-S4). A delegated child
-                            // runs the same request, so it reads the same selection.
-                            connector_scope_of(req),
-                            // The run's Space retrieval for `knowledge_search` (WS18-S5).
-                            ctx.space_retrieval,
-                            // The run's browser page dispatch (WS21-S5a); none for a child or ZDR.
-                            browser.as_ref(),
+                    let outcome = Some(
+                        runtime_loop::retry::run_attempts(
+                            || {
+                                runtime_loop::execute_step_with_result_handles(
+                                    &call.name,
+                                    &call.arguments_json,
+                                    ctx.permission_wire,
+                                    "",
+                                    &req.org_id,
+                                    &req.user_id,
+                                    &req.run_id,
+                                    step_id,
+                                    &req.thread_id,
+                                    Some(ctx.session_channel.clone()),
+                                    None,
+                                    None,
+                                    zdr,
+                                    // Every step of a waived run runs the waived route's
+                                    // retrieval mode; children share the same route (Z-18).
+                                    ctx.route.is_waived(),
+                                    req.min_privacy_tier,
+                                    ctx.data_plane_bearer,
+                                    ctx.session_bearer,
+                                    Some(ctx.inference_bearer),
+                                    ctx.capability_policy,
+                                    Some(dispatch),
+                                    sandbox.as_ref(),
+                                    thread.as_ref(),
+                                    // Only the resume segment holds a release, and it
+                                    // covers exactly one call.
+                                    ctx.release.as_ref(),
+                                    ctx.result_store.as_deref(),
+                                    // Only the root loop reads the run's attached files: a delegated
+                                    // child does not inherit them (WS08-S6).
+                                    ctx.depth == 0,
+                                    // The connections the run's person selected (WS23-S4). A delegated child
+                                    // runs the same request, so it reads the same selection.
+                                    connector_scope_of(req),
+                                    // The run's Space retrieval for `knowledge_search` (WS18-S5).
+                                    ctx.space_retrieval,
+                                    // The run's browser page dispatch (WS21-S5a); none for a child or ZDR.
+                                    browser.as_ref(),
+                                )
+                            },
+                            // The ledger's word first: a call that holds an effectful reservation
+                            // (or the release's pre-reserve) is never dispatched again, whatever
+                            // the retry classifier says. The ledger classifies through the same
+                            // gate, so the two agree; this holds if they ever stop.
+                            |result| {
+                                !runtime_loop::effect::ledger_fences_retry(
+                                    ledger_entry.as_ref(),
+                                    is_release,
+                                ) && runtime_loop::retry::tool_call_is_retryable(
+                                    &run_gate,
+                                    &call.name,
+                                    &call.arguments_json,
+                                    &result.error,
+                                )
+                            },
+                            |failed, retry| {
+                                warn!(
+                                    run_id = %req.run_id,
+                                    tool = %call.name,
+                                    attempt = retry.attempt - 1,
+                                    error = %failed.error,
+                                    "run_agent: retrying tool after a transient failure"
+                                );
+                                announce_tool_retry(
+                                    ctx.session_channel,
+                                    ctx.session_bearer,
+                                    &req.run_id,
+                                    step_id,
+                                    &call.name,
+                                    zdr,
+                                    retry,
+                                )
+                            },
                         )
-                        .await;
-                        // The ledger's word first: a call that holds an effectful reservation
-                        // (or the release's pre-reserve) is never dispatched again, whatever
-                        // the retry classifier says. The ledger classifies through the same
-                        // gate, so the two agree; this holds if they ever stop.
-                        let retryable = attempt < runtime_loop::retry::MAX_TOOL_ATTEMPTS
-                            && !runtime_loop::effect::ledger_fences_retry(
-                                ledger_entry.as_ref(),
-                                is_release,
-                            )
-                            && runtime_loop::retry::tool_call_is_retryable(
-                                &run_gate,
-                                &call.name,
-                                &call.arguments_json,
-                                &result.error,
-                            );
-                        if !retryable {
-                            outcome = Some(result);
-                            break;
-                        }
-                        warn!(
-                            run_id = %req.run_id,
-                            tool = %call.name,
-                            attempt,
-                            error = %result.error,
-                            "run_agent: retrying tool after a transient failure"
-                        );
-                        outcome = Some(result);
-                    }
+                        .await,
+                    );
                     if let (Some(entry), Some(result)) = (&ledger_entry, &outcome) {
                         let closing = runtime_loop::effect::final_outcome_for(&result.status);
                         if let Err(reason) = runtime_loop::effect::finalize(
@@ -5541,6 +5544,60 @@ async fn announce_delegated_child_stopped(
             reason = %status_reason(&error),
             "run_agent: delegated child stop not announced on the run stream; its live card \
              will read 'did not finish' once the run ends"
+        );
+    }
+}
+
+/// Announce a tool retry on the run's stream before its next attempt (build plan WS15 S3), so a
+/// Do run's trace shows the wait rather than a stall. Best-effort, like the child stop: a failed
+/// announcement is a warning and the run goes on. Identifiers, a closed reason and counts only: the
+/// error text stays in the loop. A ZDR run announces nothing, because session-core refuses
+/// orchestration writes for a ZDR credential.
+async fn announce_tool_retry(
+    session_channel: &Channel,
+    session_bearer: Option<&str>,
+    run_id: &str,
+    step_id: &str,
+    tool: &str,
+    zdr: bool,
+    retry: runtime_loop::retry::ScheduledRetry,
+) {
+    if zdr || !tool_retry_events_enabled() {
+        return;
+    }
+    let request = pb::RecordOrchestrationEventRequest {
+        event: Some(pb::OrchestrationEvent {
+            // session-core assigns event_id + at.
+            event_id: String::new(),
+            at: None,
+            event: Some(pb::orchestration_event::Event::ToolRetryScheduled(
+                pb::orchestration_event::ToolRetryScheduled {
+                    run_id: run_id.to_owned(),
+                    step_id: step_id.to_owned(),
+                    tool: tool.to_owned(),
+                    attempt: retry.attempt,
+                    max_attempts: runtime_loop::retry::MAX_TOOL_ATTEMPTS,
+                    wait_ms: u64::try_from(retry.wait.as_millis()).unwrap_or(u64::MAX),
+                    reason: retry.reason.to_owned(),
+                },
+            )),
+        }),
+    };
+    let result = match authenticated_session_request(request, session_bearer) {
+        Ok(request) => {
+            OrchestrationCoreServiceClient::new(session_channel.clone())
+                .record_orchestration_event(request)
+                .await
+        }
+        Err(error) => Err(error),
+    };
+    if let Err(error) = result {
+        warn!(
+            run_id,
+            tool,
+            code = ?error.code(),
+            reason = %status_reason(&error),
+            "run_agent: tool retry not announced on the run stream (best-effort)"
         );
     }
 }
@@ -8552,6 +8609,42 @@ fn run_usage_progress_enabled() -> bool {
     mp_contracts::loop_fold::switch_from(std::env::var(RUN_USAGE_PROGRESS_ENV).ok().as_deref())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// A test's override of the lifecycle switch for tool retries (see `RUN_USAGE_PROGRESS_OVERRIDE`).
+    static TOOL_RETRY_EVENTS_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Holds the tool-retry switch at a fixed value for the current test thread, then restores it.
+#[cfg(test)]
+struct ToolRetryEventsSwitch;
+
+#[cfg(test)]
+impl ToolRetryEventsSwitch {
+    fn set(on: bool) -> Self {
+        TOOL_RETRY_EVENTS_OVERRIDE.with(|cell| cell.set(Some(on)));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for ToolRetryEventsSwitch {
+    fn drop(&mut self) {
+        TOOL_RETRY_EVENTS_OVERRIDE.with(|cell| cell.set(None));
+    }
+}
+
+/// Whether a tool retry is announced on the run's stream (build plan WS15 S3). It reads the one
+/// lifecycle switch the chat stream reads, so a single setting turns the whole lifecycle on or off.
+fn tool_retry_events_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(forced) = TOOL_RETRY_EVENTS_OVERRIDE.with(std::cell::Cell::get) {
+        return forced;
+    }
+    mp_contracts::lifecycle_notice::enabled()
+}
+
 /// Publish the run's cumulative usage after a round the tally counted (build plan WS27 S9), so the
 /// run's cost meter can rise while the run is still going. Counts and ids only: the gateway prices
 /// the increment, and session-core broadcasts the event on the run's stream without storing it.
@@ -9857,6 +9950,8 @@ mod tests {
         /// Every `RunUsageProgress` the mock saw on the orchestration broadcast, in order
         /// (WS27 S9).
         run_usage_progress: Vec<pb::orchestration_event::RunUsageProgress>,
+        /// Every `ToolRetryScheduled` the mock saw, in order (build plan WS15 S3).
+        tool_retries: Vec<pb::orchestration_event::ToolRetryScheduled>,
         /// Every `ClaimLoopCheckpoint` the mock observed. Only an in-place resume claims (a
         /// stage 1 continuation touches no fold), so tests of stage 1 pin it empty.
         claim_calls: Vec<pb::ClaimLoopCheckpointRequest>,
@@ -11349,6 +11444,12 @@ mod tests {
                     ..
                 }) => {
                     self.rec.lock().unwrap().run_usage_progress.push(progress);
+                }
+                Some(pb::OrchestrationEvent {
+                    event: Some(pb::orchestration_event::Event::ToolRetryScheduled(retry)),
+                    ..
+                }) => {
+                    self.rec.lock().unwrap().tool_retries.push(retry);
                 }
                 _ => {}
             }
@@ -21835,6 +21936,137 @@ mod tests {
     /// what routes it — and under the same child run id, which is the join key.
     /// Same script as the parent-round test above: of two items sharing a pool,
     /// one has the rounds to finish and one runs out, so both statuses appear.
+    /// A tool retry the Do loop schedules is announced over a real channel to the mock session-core
+    /// (build plan WS15 S3): one announcement per extra attempt, in order, with the closed reason.
+    #[tokio::test]
+    async fn a_retried_tool_announces_each_extra_attempt() {
+        let _switch = ToolRetryEventsSwitch::set(true);
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let gate = crate::permission::RunGate::with_gate(
+            crate::capability_policy::ToolClassGate::Off,
+            "org-retry",
+            "run-retry",
+        );
+        let mut runs: u32 = 0;
+        let outcome = crate::runtime_loop::retry::run_attempts(
+            || {
+                runs += 1;
+                std::future::ready(crate::runtime_loop::StepOutcome::failed(
+                    "transport error: connection reset by peer",
+                ))
+            },
+            |failed| {
+                crate::runtime_loop::retry::tool_call_is_retryable(
+                    &gate,
+                    "knowledge_search",
+                    r#"{"query":"q"}"#,
+                    &failed.error,
+                )
+            },
+            |_, retry| {
+                announce_tool_retry(
+                    &session_channel,
+                    Some("session-token"),
+                    "run-1",
+                    "step-1",
+                    "knowledge_search",
+                    false,
+                    retry,
+                )
+            },
+        )
+        .await;
+        assert_eq!(runs, crate::runtime_loop::retry::MAX_TOOL_ATTEMPTS);
+        assert_eq!(outcome.error, "transport error: connection reset by peer");
+        let announced = rec.lock().unwrap().tool_retries.clone();
+        let attempts: Vec<u32> = announced.iter().map(|retry| retry.attempt).collect();
+        assert_eq!(attempts, vec![2, 3], "one announcement per extra attempt");
+        for retry in &announced {
+            assert_eq!(retry.run_id, "run-1");
+            assert_eq!(retry.step_id, "step-1");
+            assert_eq!(retry.tool, "knowledge_search");
+            assert_eq!(retry.max_attempts, 3);
+            assert_eq!(retry.reason, "connection");
+        }
+        assert_eq!(
+            announced
+                .iter()
+                .map(|retry| retry.wait_ms)
+                .collect::<Vec<_>>(),
+            vec![100, 200]
+        );
+    }
+
+    /// A side-effecting call that fails transiently runs once and announces nothing (build plan WS15
+    /// S3): the risk gate refuses the replay before any announcement could be made.
+    #[tokio::test]
+    async fn a_risky_call_announces_no_retry() {
+        let _switch = ToolRetryEventsSwitch::set(true);
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let gate = crate::permission::RunGate::with_gate(
+            crate::capability_policy::ToolClassGate::Off,
+            "org-retry",
+            "run-retry",
+        );
+        let mut runs: u32 = 0;
+        crate::runtime_loop::retry::run_attempts(
+            || {
+                runs += 1;
+                std::future::ready(crate::runtime_loop::StepOutcome::failed(
+                    "operation timed out",
+                ))
+            },
+            |failed| {
+                crate::runtime_loop::retry::tool_call_is_retryable(
+                    &gate,
+                    "book_shipment",
+                    "{}",
+                    &failed.error,
+                )
+            },
+            |_, retry| {
+                announce_tool_retry(
+                    &session_channel,
+                    Some("session-token"),
+                    "run-1",
+                    "step-1",
+                    "book_shipment",
+                    false,
+                    retry,
+                )
+            },
+        )
+        .await;
+        assert_eq!(runs, 1, "a risky call is attempted once");
+        assert!(rec.lock().unwrap().tool_retries.is_empty());
+    }
+
+    /// With the lifecycle switch off a retry happens exactly as before and is not announced.
+    #[tokio::test]
+    async fn no_tool_retry_is_announced_while_the_switch_is_off() {
+        let _switch = ToolRetryEventsSwitch::set(false);
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let retry = crate::runtime_loop::retry::ScheduledRetry {
+            attempt: 2,
+            wait: std::time::Duration::from_millis(100),
+            reason: "timeout",
+        };
+        announce_tool_retry(
+            &session_channel,
+            Some("session-token"),
+            "run-1",
+            "step-1",
+            "knowledge_search",
+            false,
+            retry,
+        )
+        .await;
+        assert!(rec.lock().unwrap().tool_retries.is_empty());
+    }
+
     #[tokio::test]
     async fn every_delegated_child_announces_its_stop_on_the_parent_runs_stream() {
         let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));

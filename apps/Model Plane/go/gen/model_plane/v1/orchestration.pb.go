@@ -4782,6 +4782,7 @@ type OrchestrationEvent struct {
 	//	*OrchestrationEvent_ApprovalContinuationVerified_
 	//	*OrchestrationEvent_RunParked_
 	//	*OrchestrationEvent_RunResumed_
+	//	*OrchestrationEvent_ToolRetryScheduled_
 	//	*OrchestrationEvent_QuestionAsked_
 	//	*OrchestrationEvent_QuestionAnswered_
 	//	*OrchestrationEvent_RunUsageProgress_
@@ -4985,6 +4986,15 @@ func (x *OrchestrationEvent) GetRunResumed() *OrchestrationEvent_RunResumed {
 	return nil
 }
 
+func (x *OrchestrationEvent) GetToolRetryScheduled() *OrchestrationEvent_ToolRetryScheduled {
+	if x != nil {
+		if x, ok := x.Event.(*OrchestrationEvent_ToolRetryScheduled_); ok {
+			return x.ToolRetryScheduled
+		}
+	}
+	return nil
+}
+
 func (x *OrchestrationEvent) GetQuestionAsked() *OrchestrationEvent_QuestionAsked {
 	if x != nil {
 		if x, ok := x.Event.(*OrchestrationEvent_QuestionAsked_); ok {
@@ -5092,10 +5102,17 @@ type OrchestrationEvent_RunResumed_ struct {
 	RunResumed *OrchestrationEvent_RunResumed `protobuf:"bytes,25,opt,name=run_resumed,json=runResumed,proto3,oneof"`
 }
 
+type OrchestrationEvent_ToolRetryScheduled_ struct {
+	// Tool retry (build plan WS15 S3, tag 26 — additive). A tool call that failed transiently
+	// is about to run again. Ids, the tool name, counts and a closed reason only: the error
+	// text never leaves the loop that saw it. Broadcast and replayed on the run's stream,
+	// never persisted.
+	ToolRetryScheduled *OrchestrationEvent_ToolRetryScheduled `protobuf:"bytes,26,opt,name=tool_retry_scheduled,json=toolRetryScheduled,proto3,oneof"`
+}
+
 type OrchestrationEvent_QuestionAsked_ struct {
-	// Human-in-the-loop questions (build plan WS14 S3, tags 27 and 28 — additive;
-	// 26 is WS15's ToolRetryScheduled). Ids only: the question text and the
-	// answer are owner-only and are read through ListRunQuestions.
+	// Human-in-the-loop questions (build plan WS14 S3, tags 27 and 28 — additive). Ids only:
+	// the question text and the answer are owner-only and are read through ListRunQuestions.
 	QuestionAsked *OrchestrationEvent_QuestionAsked `protobuf:"bytes,27,opt,name=question_asked,json=questionAsked,proto3,oneof"`
 }
 
@@ -5142,6 +5159,8 @@ func (*OrchestrationEvent_ApprovalContinuationVerified_) isOrchestrationEvent_Ev
 func (*OrchestrationEvent_RunParked_) isOrchestrationEvent_Event() {}
 
 func (*OrchestrationEvent_RunResumed_) isOrchestrationEvent_Event() {}
+
+func (*OrchestrationEvent_ToolRetryScheduled_) isOrchestrationEvent_Event() {}
 
 func (*OrchestrationEvent_QuestionAsked_) isOrchestrationEvent_Event() {}
 
@@ -8132,6 +8151,108 @@ func (x *OrchestrationEvent_RunUsageProgress) GetProviderUsed() string {
 	return ""
 }
 
+// A tool call is being retried after a transient failure (build plan WS15 S3). Ids, the tool
+// name, counts and a closed reason only; the error text stays in the loop that saw it.
+type OrchestrationEvent_ToolRetryScheduled struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The run whose stream carries the retry.
+	RunId string `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	// The step the retried call belongs to.
+	StepId string `protobuf:"bytes,2,opt,name=step_id,json=stepId,proto3" json:"step_id,omitempty"`
+	// The tool being retried.
+	Tool string `protobuf:"bytes,3,opt,name=tool,proto3" json:"tool,omitempty"`
+	// The attempt about to run (2 or more): the first attempt is never announced.
+	Attempt uint32 `protobuf:"varint,4,opt,name=attempt,proto3" json:"attempt,omitempty"`
+	// The most attempts one tool call gets.
+	MaxAttempts uint32 `protobuf:"varint,5,opt,name=max_attempts,json=maxAttempts,proto3" json:"max_attempts,omitempty"`
+	// The backoff before the attempt that is about to run, in milliseconds.
+	WaitMs uint64 `protobuf:"varint,6,opt,name=wait_ms,json=waitMs,proto3" json:"wait_ms,omitempty"`
+	// Why the failed attempt is retried: a closed token (timeout, connection,
+	// upstream_unavailable, rate_limited, other).
+	Reason        string `protobuf:"bytes,7,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *OrchestrationEvent_ToolRetryScheduled) Reset() {
+	*x = OrchestrationEvent_ToolRetryScheduled{}
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[94]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *OrchestrationEvent_ToolRetryScheduled) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*OrchestrationEvent_ToolRetryScheduled) ProtoMessage() {}
+
+func (x *OrchestrationEvent_ToolRetryScheduled) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_orchestration_proto_msgTypes[94]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use OrchestrationEvent_ToolRetryScheduled.ProtoReflect.Descriptor instead.
+func (*OrchestrationEvent_ToolRetryScheduled) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_orchestration_proto_rawDescGZIP(), []int{53, 19}
+}
+
+func (x *OrchestrationEvent_ToolRetryScheduled) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *OrchestrationEvent_ToolRetryScheduled) GetStepId() string {
+	if x != nil {
+		return x.StepId
+	}
+	return ""
+}
+
+func (x *OrchestrationEvent_ToolRetryScheduled) GetTool() string {
+	if x != nil {
+		return x.Tool
+	}
+	return ""
+}
+
+func (x *OrchestrationEvent_ToolRetryScheduled) GetAttempt() uint32 {
+	if x != nil {
+		return x.Attempt
+	}
+	return 0
+}
+
+func (x *OrchestrationEvent_ToolRetryScheduled) GetMaxAttempts() uint32 {
+	if x != nil {
+		return x.MaxAttempts
+	}
+	return 0
+}
+
+func (x *OrchestrationEvent_ToolRetryScheduled) GetWaitMs() uint64 {
+	if x != nil {
+		return x.WaitMs
+	}
+	return 0
+}
+
+func (x *OrchestrationEvent_ToolRetryScheduled) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
 var File_model_plane_v1_orchestration_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_orchestration_proto_rawDesc = "" +
@@ -8454,7 +8575,7 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\alineage\x18\x02 \x01(\v2\x1f.model_plane.v1.SubagentLineageR\alineage\"U\n" +
 	"\x16StreamRunEventsRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12$\n" +
-	"\x0eafter_event_id\x18\x02 \x01(\tR\fafterEventId\"\xb8*\n" +
+	"\x0eafter_event_id\x18\x02 \x01(\tR\fafterEventId\"\xec,\n" +
 	"\x12OrchestrationEvent\x12*\n" +
 	"\x02at\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\x02at\x12\x19\n" +
 	"\bevent_id\x18\x02 \x01(\tR\aeventId\x12b\n" +
@@ -8476,7 +8597,8 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\n" +
 	"run_parked\x18\x18 \x01(\v2,.model_plane.v1.OrchestrationEvent.RunParkedH\x00R\trunParked\x12P\n" +
 	"\vrun_resumed\x18\x19 \x01(\v2-.model_plane.v1.OrchestrationEvent.RunResumedH\x00R\n" +
-	"runResumed\x12Y\n" +
+	"runResumed\x12i\n" +
+	"\x14tool_retry_scheduled\x18\x1a \x01(\v25.model_plane.v1.OrchestrationEvent.ToolRetryScheduledH\x00R\x12toolRetryScheduled\x12Y\n" +
 	"\x0equestion_asked\x18\x1b \x01(\v20.model_plane.v1.OrchestrationEvent.QuestionAskedH\x00R\rquestionAsked\x12b\n" +
 	"\x11question_answered\x18\x1c \x01(\v23.model_plane.v1.OrchestrationEvent.QuestionAnsweredH\x00R\x10questionAnswered\x12c\n" +
 	"\x12run_usage_progress\x18\x1d \x01(\v23.model_plane.v1.OrchestrationEvent.RunUsageProgressH\x00R\x10runUsageProgress\x1a\x9c\x01\n" +
@@ -8606,7 +8728,15 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\x1bcache_creation_input_tokens\x18\x06 \x01(\x04R\x18cacheCreationInputTokens\x12\x1d\n" +
 	"\n" +
 	"model_used\x18\a \x01(\tR\tmodelUsed\x12#\n" +
-	"\rprovider_used\x18\b \x01(\tR\fproviderUsedB\a\n" +
+	"\rprovider_used\x18\b \x01(\tR\fproviderUsed\x1a\xc6\x01\n" +
+	"\x12ToolRetryScheduled\x12\x15\n" +
+	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x17\n" +
+	"\astep_id\x18\x02 \x01(\tR\x06stepId\x12\x12\n" +
+	"\x04tool\x18\x03 \x01(\tR\x04tool\x12\x18\n" +
+	"\aattempt\x18\x04 \x01(\rR\aattempt\x12!\n" +
+	"\fmax_attempts\x18\x05 \x01(\rR\vmaxAttempts\x12\x17\n" +
+	"\await_ms\x18\x06 \x01(\x04R\x06waitMs\x12\x16\n" +
+	"\x06reason\x18\a \x01(\tR\x06reasonB\a\n" +
 	"\x05event\"[\n" +
 	"\x1fRecordOrchestrationEventRequest\x128\n" +
 	"\x05event\x18\x01 \x01(\v2\".model_plane.v1.OrchestrationEventR\x05event\"=\n" +
@@ -8854,7 +8984,7 @@ func file_model_plane_v1_orchestration_proto_rawDescGZIP() []byte {
 }
 
 var file_model_plane_v1_orchestration_proto_enumTypes = make([]protoimpl.EnumInfo, 12)
-var file_model_plane_v1_orchestration_proto_msgTypes = make([]protoimpl.MessageInfo, 94)
+var file_model_plane_v1_orchestration_proto_msgTypes = make([]protoimpl.MessageInfo, 95)
 var file_model_plane_v1_orchestration_proto_goTypes = []any{
 	(PlanState)(0),                                           // 0: model_plane.v1.PlanState
 	(PlanStepState)(0),                                       // 1: model_plane.v1.PlanStepState
@@ -8962,39 +9092,40 @@ var file_model_plane_v1_orchestration_proto_goTypes = []any{
 	(*OrchestrationEvent_QuestionAsked)(nil),                 // 103: model_plane.v1.OrchestrationEvent.QuestionAsked
 	(*OrchestrationEvent_QuestionAnswered)(nil),              // 104: model_plane.v1.OrchestrationEvent.QuestionAnswered
 	(*OrchestrationEvent_RunUsageProgress)(nil),              // 105: model_plane.v1.OrchestrationEvent.RunUsageProgress
-	(*timestamppb.Timestamp)(nil),                            // 106: google.protobuf.Timestamp
-	(*structpb.Struct)(nil),                                  // 107: google.protobuf.Struct
-	(*VerificationResult)(nil),                               // 108: model_plane.v1.VerificationResult
-	(*GetRunProofBundleRequest)(nil),                         // 109: model_plane.v1.GetRunProofBundleRequest
-	(*GetVerificationMetricsRequest)(nil),                    // 110: model_plane.v1.GetVerificationMetricsRequest
-	(*GetRunProofBundleResponse)(nil),                        // 111: model_plane.v1.GetRunProofBundleResponse
-	(*GetVerificationMetricsResponse)(nil),                   // 112: model_plane.v1.GetVerificationMetricsResponse
+	(*OrchestrationEvent_ToolRetryScheduled)(nil),            // 106: model_plane.v1.OrchestrationEvent.ToolRetryScheduled
+	(*timestamppb.Timestamp)(nil),                            // 107: google.protobuf.Timestamp
+	(*structpb.Struct)(nil),                                  // 108: google.protobuf.Struct
+	(*VerificationResult)(nil),                               // 109: model_plane.v1.VerificationResult
+	(*GetRunProofBundleRequest)(nil),                         // 110: model_plane.v1.GetRunProofBundleRequest
+	(*GetVerificationMetricsRequest)(nil),                    // 111: model_plane.v1.GetVerificationMetricsRequest
+	(*GetRunProofBundleResponse)(nil),                        // 112: model_plane.v1.GetRunProofBundleResponse
+	(*GetVerificationMetricsResponse)(nil),                   // 113: model_plane.v1.GetVerificationMetricsResponse
 }
 var file_model_plane_v1_orchestration_proto_depIdxs = []int32{
 	1,   // 0: model_plane.v1.PlanStep.state:type_name -> model_plane.v1.PlanStepState
-	106, // 1: model_plane.v1.PlanStep.created_at:type_name -> google.protobuf.Timestamp
-	106, // 2: model_plane.v1.PlanStep.updated_at:type_name -> google.protobuf.Timestamp
+	107, // 1: model_plane.v1.PlanStep.created_at:type_name -> google.protobuf.Timestamp
+	107, // 2: model_plane.v1.PlanStep.updated_at:type_name -> google.protobuf.Timestamp
 	0,   // 3: model_plane.v1.Plan.state:type_name -> model_plane.v1.PlanState
 	12,  // 4: model_plane.v1.Plan.steps:type_name -> model_plane.v1.PlanStep
-	107, // 5: model_plane.v1.Plan.metadata:type_name -> google.protobuf.Struct
-	106, // 6: model_plane.v1.Plan.created_at:type_name -> google.protobuf.Timestamp
-	106, // 7: model_plane.v1.Plan.updated_at:type_name -> google.protobuf.Timestamp
+	108, // 5: model_plane.v1.Plan.metadata:type_name -> google.protobuf.Struct
+	107, // 6: model_plane.v1.Plan.created_at:type_name -> google.protobuf.Timestamp
+	107, // 7: model_plane.v1.Plan.updated_at:type_name -> google.protobuf.Timestamp
 	2,   // 8: model_plane.v1.Approval.kind:type_name -> model_plane.v1.ApprovalKind
 	3,   // 9: model_plane.v1.Approval.state:type_name -> model_plane.v1.ApprovalState
-	107, // 10: model_plane.v1.Approval.context:type_name -> google.protobuf.Struct
-	106, // 11: model_plane.v1.Approval.requested_at:type_name -> google.protobuf.Timestamp
-	106, // 12: model_plane.v1.Approval.decided_at:type_name -> google.protobuf.Timestamp
-	106, // 13: model_plane.v1.Approval.expires_at:type_name -> google.protobuf.Timestamp
-	106, // 14: model_plane.v1.Approval.consumed_at:type_name -> google.protobuf.Timestamp
+	108, // 10: model_plane.v1.Approval.context:type_name -> google.protobuf.Struct
+	107, // 11: model_plane.v1.Approval.requested_at:type_name -> google.protobuf.Timestamp
+	107, // 12: model_plane.v1.Approval.decided_at:type_name -> google.protobuf.Timestamp
+	107, // 13: model_plane.v1.Approval.expires_at:type_name -> google.protobuf.Timestamp
+	107, // 14: model_plane.v1.Approval.consumed_at:type_name -> google.protobuf.Timestamp
 	15,  // 15: model_plane.v1.Approval.cause:type_name -> model_plane.v1.ApprovalCause
 	4,   // 16: model_plane.v1.Todo.state:type_name -> model_plane.v1.TodoState
 	5,   // 17: model_plane.v1.Todo.priority:type_name -> model_plane.v1.TodoPriority
-	107, // 18: model_plane.v1.Todo.metadata:type_name -> google.protobuf.Struct
-	106, // 19: model_plane.v1.Todo.created_at:type_name -> google.protobuf.Timestamp
-	106, // 20: model_plane.v1.Todo.updated_at:type_name -> google.protobuf.Timestamp
-	106, // 21: model_plane.v1.Todo.completed_at:type_name -> google.protobuf.Timestamp
+	108, // 18: model_plane.v1.Todo.metadata:type_name -> google.protobuf.Struct
+	107, // 19: model_plane.v1.Todo.created_at:type_name -> google.protobuf.Timestamp
+	107, // 20: model_plane.v1.Todo.updated_at:type_name -> google.protobuf.Timestamp
+	107, // 21: model_plane.v1.Todo.completed_at:type_name -> google.protobuf.Timestamp
 	6,   // 22: model_plane.v1.LineageEdge.role:type_name -> model_plane.v1.SubagentRole
-	106, // 23: model_plane.v1.LineageEdge.spawned_at:type_name -> google.protobuf.Timestamp
+	107, // 23: model_plane.v1.LineageEdge.spawned_at:type_name -> google.protobuf.Timestamp
 	17,  // 24: model_plane.v1.SubagentLineage.edges:type_name -> model_plane.v1.LineageEdge
 	13,  // 25: model_plane.v1.ListPlansResponse.plans:type_name -> model_plane.v1.Plan
 	13,  // 26: model_plane.v1.GetPlanResponse.plan:type_name -> model_plane.v1.Plan
@@ -9019,17 +9150,17 @@ var file_model_plane_v1_orchestration_proto_depIdxs = []int32{
 	7,   // 45: model_plane.v1.DecideApprovalRequest.decision_source:type_name -> model_plane.v1.ApprovalDecisionSource
 	8,   // 46: model_plane.v1.DecideApprovalRequest.scope:type_name -> model_plane.v1.ApprovalScope
 	14,  // 47: model_plane.v1.DecideApprovalResponse.approval:type_name -> model_plane.v1.Approval
-	106, // 48: model_plane.v1.ApprovalDelivery.lease_expires_at:type_name -> google.protobuf.Timestamp
+	107, // 48: model_plane.v1.ApprovalDelivery.lease_expires_at:type_name -> google.protobuf.Timestamp
 	49,  // 49: model_plane.v1.ClaimApprovalDeliveriesResponse.deliveries:type_name -> model_plane.v1.ApprovalDelivery
 	9,   // 50: model_plane.v1.RecordApprovalContinuationOutcomeRequest.outcome:type_name -> model_plane.v1.ApprovalContinuationOutcome
-	108, // 51: model_plane.v1.RecordApprovalContinuationOutcomeRequest.verification:type_name -> model_plane.v1.VerificationResult
+	109, // 51: model_plane.v1.RecordApprovalContinuationOutcomeRequest.verification:type_name -> model_plane.v1.VerificationResult
 	10,  // 52: model_plane.v1.AcknowledgeApprovalDeliveryRequest.acknowledgement:type_name -> model_plane.v1.ApprovalDeliveryAcknowledgement
-	106, // 53: model_plane.v1.AcknowledgeApprovalDeliveryResponse.next_attempt_at:type_name -> google.protobuf.Timestamp
+	107, // 53: model_plane.v1.AcknowledgeApprovalDeliveryResponse.next_attempt_at:type_name -> google.protobuf.Timestamp
 	18,  // 54: model_plane.v1.GetSubagentLineageResponse.lineage:type_name -> model_plane.v1.SubagentLineage
 	6,   // 55: model_plane.v1.AttachSubagentRequest.role:type_name -> model_plane.v1.SubagentRole
 	17,  // 56: model_plane.v1.AttachSubagentResponse.edge:type_name -> model_plane.v1.LineageEdge
 	18,  // 57: model_plane.v1.AttachSubagentResponse.lineage:type_name -> model_plane.v1.SubagentLineage
-	106, // 58: model_plane.v1.OrchestrationEvent.at:type_name -> google.protobuf.Timestamp
+	107, // 58: model_plane.v1.OrchestrationEvent.at:type_name -> google.protobuf.Timestamp
 	87,  // 59: model_plane.v1.OrchestrationEvent.plan_transitioned:type_name -> model_plane.v1.OrchestrationEvent.PlanTransitioned
 	88,  // 60: model_plane.v1.OrchestrationEvent.todo_transitioned:type_name -> model_plane.v1.OrchestrationEvent.TodoTransitioned
 	89,  // 61: model_plane.v1.OrchestrationEvent.approval_state_changed:type_name -> model_plane.v1.OrchestrationEvent.ApprovalStateChanged
@@ -9046,109 +9177,110 @@ var file_model_plane_v1_orchestration_proto_depIdxs = []int32{
 	100, // 72: model_plane.v1.OrchestrationEvent.approval_continuation_verified:type_name -> model_plane.v1.OrchestrationEvent.ApprovalContinuationVerified
 	101, // 73: model_plane.v1.OrchestrationEvent.run_parked:type_name -> model_plane.v1.OrchestrationEvent.RunParked
 	102, // 74: model_plane.v1.OrchestrationEvent.run_resumed:type_name -> model_plane.v1.OrchestrationEvent.RunResumed
-	103, // 75: model_plane.v1.OrchestrationEvent.question_asked:type_name -> model_plane.v1.OrchestrationEvent.QuestionAsked
-	104, // 76: model_plane.v1.OrchestrationEvent.question_answered:type_name -> model_plane.v1.OrchestrationEvent.QuestionAnswered
-	105, // 77: model_plane.v1.OrchestrationEvent.run_usage_progress:type_name -> model_plane.v1.OrchestrationEvent.RunUsageProgress
-	65,  // 78: model_plane.v1.RecordOrchestrationEventRequest.event:type_name -> model_plane.v1.OrchestrationEvent
-	107, // 79: model_plane.v1.StartWorkflowRequest.input:type_name -> google.protobuf.Struct
-	70,  // 80: model_plane.v1.QuestionItem.options:type_name -> model_plane.v1.QuestionOption
-	11,  // 81: model_plane.v1.RunQuestion.state:type_name -> model_plane.v1.QuestionState
-	71,  // 82: model_plane.v1.RunQuestion.items:type_name -> model_plane.v1.QuestionItem
-	106, // 83: model_plane.v1.RunQuestion.requested_at:type_name -> google.protobuf.Timestamp
-	106, // 84: model_plane.v1.RunQuestion.expires_at:type_name -> google.protobuf.Timestamp
-	106, // 85: model_plane.v1.RunQuestion.answered_at:type_name -> google.protobuf.Timestamp
-	72,  // 86: model_plane.v1.RunQuestion.answers:type_name -> model_plane.v1.QuestionAnswerItem
-	71,  // 87: model_plane.v1.CreateRunQuestionRequest.items:type_name -> model_plane.v1.QuestionItem
-	73,  // 88: model_plane.v1.CreateRunQuestionResponse.question:type_name -> model_plane.v1.RunQuestion
-	73,  // 89: model_plane.v1.ListRunQuestionsResponse.questions:type_name -> model_plane.v1.RunQuestion
-	72,  // 90: model_plane.v1.AnswerRunQuestionRequest.answers:type_name -> model_plane.v1.QuestionAnswerItem
-	73,  // 91: model_plane.v1.AnswerRunQuestionResponse.question:type_name -> model_plane.v1.RunQuestion
-	8,   // 92: model_plane.v1.ApprovalScopeGrant.scope:type_name -> model_plane.v1.ApprovalScope
-	106, // 93: model_plane.v1.ApprovalScopeGrant.created_at:type_name -> google.protobuf.Timestamp
-	106, // 94: model_plane.v1.ApprovalScopeGrant.expires_at:type_name -> google.protobuf.Timestamp
-	106, // 95: model_plane.v1.ApprovalScopeGrant.revoked_at:type_name -> google.protobuf.Timestamp
-	106, // 96: model_plane.v1.ApprovalScopeGrant.last_used_at:type_name -> google.protobuf.Timestamp
-	80,  // 97: model_plane.v1.ListApprovalScopeGrantsResponse.grants:type_name -> model_plane.v1.ApprovalScopeGrant
-	80,  // 98: model_plane.v1.RevokeApprovalScopeGrantResponse.grant:type_name -> model_plane.v1.ApprovalScopeGrant
-	0,   // 99: model_plane.v1.OrchestrationEvent.PlanTransitioned.from:type_name -> model_plane.v1.PlanState
-	0,   // 100: model_plane.v1.OrchestrationEvent.PlanTransitioned.to:type_name -> model_plane.v1.PlanState
-	4,   // 101: model_plane.v1.OrchestrationEvent.TodoTransitioned.from:type_name -> model_plane.v1.TodoState
-	4,   // 102: model_plane.v1.OrchestrationEvent.TodoTransitioned.to:type_name -> model_plane.v1.TodoState
-	2,   // 103: model_plane.v1.OrchestrationEvent.ApprovalStateChanged.approval_kind:type_name -> model_plane.v1.ApprovalKind
-	3,   // 104: model_plane.v1.OrchestrationEvent.ApprovalStateChanged.to:type_name -> model_plane.v1.ApprovalState
-	8,   // 105: model_plane.v1.OrchestrationEvent.ApprovalStateChanged.scope:type_name -> model_plane.v1.ApprovalScope
-	7,   // 106: model_plane.v1.OrchestrationEvent.ApprovalStateChanged.decision_source:type_name -> model_plane.v1.ApprovalDecisionSource
-	6,   // 107: model_plane.v1.OrchestrationEvent.SubagentAttached.role:type_name -> model_plane.v1.SubagentRole
-	108, // 108: model_plane.v1.OrchestrationEvent.ApprovalContinuationVerified.verification:type_name -> model_plane.v1.VerificationResult
-	106, // 109: model_plane.v1.OrchestrationEvent.QuestionAsked.expires_at:type_name -> google.protobuf.Timestamp
-	11,  // 110: model_plane.v1.OrchestrationEvent.QuestionAnswered.state:type_name -> model_plane.v1.QuestionState
-	19,  // 111: model_plane.v1.OrchestrationCoreService.ListPlans:input_type -> model_plane.v1.ListPlansRequest
-	21,  // 112: model_plane.v1.OrchestrationCoreService.GetPlan:input_type -> model_plane.v1.GetPlanRequest
-	23,  // 113: model_plane.v1.OrchestrationCoreService.TransitionPlan:input_type -> model_plane.v1.TransitionPlanRequest
-	27,  // 114: model_plane.v1.OrchestrationCoreService.ProposePlan:input_type -> model_plane.v1.ProposePlanRequest
-	29,  // 115: model_plane.v1.OrchestrationCoreService.ListTodos:input_type -> model_plane.v1.ListTodosRequest
-	31,  // 116: model_plane.v1.OrchestrationCoreService.GetTodo:input_type -> model_plane.v1.GetTodoRequest
-	33,  // 117: model_plane.v1.OrchestrationCoreService.TransitionTodo:input_type -> model_plane.v1.TransitionTodoRequest
-	35,  // 118: model_plane.v1.OrchestrationCoreService.CreateApproval:input_type -> model_plane.v1.CreateApprovalRequest
-	41,  // 119: model_plane.v1.OrchestrationCoreService.ListApprovals:input_type -> model_plane.v1.ListApprovalsRequest
-	43,  // 120: model_plane.v1.OrchestrationCoreService.ListPendingApprovals:input_type -> model_plane.v1.OrgPendingApprovalsRequest
-	45,  // 121: model_plane.v1.OrchestrationCoreService.GetApproval:input_type -> model_plane.v1.GetApprovalRequest
-	47,  // 122: model_plane.v1.OrchestrationCoreService.DecideApproval:input_type -> model_plane.v1.DecideApprovalRequest
-	36,  // 123: model_plane.v1.OrchestrationCoreService.ConsumeApproval:input_type -> model_plane.v1.ConsumeApprovalRequest
-	50,  // 124: model_plane.v1.OrchestrationCoreService.ClaimApprovalDeliveries:input_type -> model_plane.v1.ClaimApprovalDeliveriesRequest
-	52,  // 125: model_plane.v1.OrchestrationCoreService.GetApprovalContinuation:input_type -> model_plane.v1.GetApprovalContinuationRequest
-	54,  // 126: model_plane.v1.OrchestrationCoreService.RecordApprovalContinuationStarted:input_type -> model_plane.v1.RecordApprovalContinuationStartedRequest
-	56,  // 127: model_plane.v1.OrchestrationCoreService.RecordApprovalContinuationOutcome:input_type -> model_plane.v1.RecordApprovalContinuationOutcomeRequest
-	58,  // 128: model_plane.v1.OrchestrationCoreService.AcknowledgeApprovalDelivery:input_type -> model_plane.v1.AcknowledgeApprovalDeliveryRequest
-	74,  // 129: model_plane.v1.OrchestrationCoreService.CreateRunQuestion:input_type -> model_plane.v1.CreateRunQuestionRequest
-	76,  // 130: model_plane.v1.OrchestrationCoreService.ListRunQuestions:input_type -> model_plane.v1.ListRunQuestionsRequest
-	78,  // 131: model_plane.v1.OrchestrationCoreService.AnswerRunQuestion:input_type -> model_plane.v1.AnswerRunQuestionRequest
-	60,  // 132: model_plane.v1.OrchestrationCoreService.GetSubagentLineage:input_type -> model_plane.v1.GetSubagentLineageRequest
-	62,  // 133: model_plane.v1.OrchestrationCoreService.AttachSubagent:input_type -> model_plane.v1.AttachSubagentRequest
-	109, // 134: model_plane.v1.OrchestrationCoreService.GetRunProofBundle:input_type -> model_plane.v1.GetRunProofBundleRequest
-	110, // 135: model_plane.v1.OrchestrationCoreService.GetVerificationMetrics:input_type -> model_plane.v1.GetVerificationMetricsRequest
-	64,  // 136: model_plane.v1.OrchestrationCoreService.StreamRunEvents:input_type -> model_plane.v1.StreamRunEventsRequest
-	66,  // 137: model_plane.v1.OrchestrationCoreService.RecordOrchestrationEvent:input_type -> model_plane.v1.RecordOrchestrationEventRequest
-	68,  // 138: model_plane.v1.OrchestratorWorkflowService.StartWorkflow:input_type -> model_plane.v1.StartWorkflowRequest
-	81,  // 139: model_plane.v1.ApprovalScopeGrantService.UseApprovalScopeGrant:input_type -> model_plane.v1.UseApprovalScopeGrantRequest
-	83,  // 140: model_plane.v1.ApprovalScopeGrantService.ListApprovalScopeGrants:input_type -> model_plane.v1.ListApprovalScopeGrantsRequest
-	85,  // 141: model_plane.v1.ApprovalScopeGrantService.RevokeApprovalScopeGrant:input_type -> model_plane.v1.RevokeApprovalScopeGrantRequest
-	20,  // 142: model_plane.v1.OrchestrationCoreService.ListPlans:output_type -> model_plane.v1.ListPlansResponse
-	22,  // 143: model_plane.v1.OrchestrationCoreService.GetPlan:output_type -> model_plane.v1.GetPlanResponse
-	25,  // 144: model_plane.v1.OrchestrationCoreService.TransitionPlan:output_type -> model_plane.v1.TransitionPlanResponse
-	28,  // 145: model_plane.v1.OrchestrationCoreService.ProposePlan:output_type -> model_plane.v1.ProposePlanResponse
-	30,  // 146: model_plane.v1.OrchestrationCoreService.ListTodos:output_type -> model_plane.v1.ListTodosResponse
-	32,  // 147: model_plane.v1.OrchestrationCoreService.GetTodo:output_type -> model_plane.v1.GetTodoResponse
-	34,  // 148: model_plane.v1.OrchestrationCoreService.TransitionTodo:output_type -> model_plane.v1.TransitionTodoResponse
-	40,  // 149: model_plane.v1.OrchestrationCoreService.CreateApproval:output_type -> model_plane.v1.CreateApprovalResponse
-	42,  // 150: model_plane.v1.OrchestrationCoreService.ListApprovals:output_type -> model_plane.v1.ListApprovalsResponse
-	44,  // 151: model_plane.v1.OrchestrationCoreService.ListPendingApprovals:output_type -> model_plane.v1.OrgPendingApprovalsResponse
-	46,  // 152: model_plane.v1.OrchestrationCoreService.GetApproval:output_type -> model_plane.v1.GetApprovalResponse
-	48,  // 153: model_plane.v1.OrchestrationCoreService.DecideApproval:output_type -> model_plane.v1.DecideApprovalResponse
-	37,  // 154: model_plane.v1.OrchestrationCoreService.ConsumeApproval:output_type -> model_plane.v1.ConsumeApprovalResponse
-	51,  // 155: model_plane.v1.OrchestrationCoreService.ClaimApprovalDeliveries:output_type -> model_plane.v1.ClaimApprovalDeliveriesResponse
-	53,  // 156: model_plane.v1.OrchestrationCoreService.GetApprovalContinuation:output_type -> model_plane.v1.GetApprovalContinuationResponse
-	55,  // 157: model_plane.v1.OrchestrationCoreService.RecordApprovalContinuationStarted:output_type -> model_plane.v1.RecordApprovalContinuationStartedResponse
-	57,  // 158: model_plane.v1.OrchestrationCoreService.RecordApprovalContinuationOutcome:output_type -> model_plane.v1.RecordApprovalContinuationOutcomeResponse
-	59,  // 159: model_plane.v1.OrchestrationCoreService.AcknowledgeApprovalDelivery:output_type -> model_plane.v1.AcknowledgeApprovalDeliveryResponse
-	75,  // 160: model_plane.v1.OrchestrationCoreService.CreateRunQuestion:output_type -> model_plane.v1.CreateRunQuestionResponse
-	77,  // 161: model_plane.v1.OrchestrationCoreService.ListRunQuestions:output_type -> model_plane.v1.ListRunQuestionsResponse
-	79,  // 162: model_plane.v1.OrchestrationCoreService.AnswerRunQuestion:output_type -> model_plane.v1.AnswerRunQuestionResponse
-	61,  // 163: model_plane.v1.OrchestrationCoreService.GetSubagentLineage:output_type -> model_plane.v1.GetSubagentLineageResponse
-	63,  // 164: model_plane.v1.OrchestrationCoreService.AttachSubagent:output_type -> model_plane.v1.AttachSubagentResponse
-	111, // 165: model_plane.v1.OrchestrationCoreService.GetRunProofBundle:output_type -> model_plane.v1.GetRunProofBundleResponse
-	112, // 166: model_plane.v1.OrchestrationCoreService.GetVerificationMetrics:output_type -> model_plane.v1.GetVerificationMetricsResponse
-	65,  // 167: model_plane.v1.OrchestrationCoreService.StreamRunEvents:output_type -> model_plane.v1.OrchestrationEvent
-	67,  // 168: model_plane.v1.OrchestrationCoreService.RecordOrchestrationEvent:output_type -> model_plane.v1.RecordOrchestrationEventResponse
-	69,  // 169: model_plane.v1.OrchestratorWorkflowService.StartWorkflow:output_type -> model_plane.v1.StartWorkflowResponse
-	82,  // 170: model_plane.v1.ApprovalScopeGrantService.UseApprovalScopeGrant:output_type -> model_plane.v1.UseApprovalScopeGrantResponse
-	84,  // 171: model_plane.v1.ApprovalScopeGrantService.ListApprovalScopeGrants:output_type -> model_plane.v1.ListApprovalScopeGrantsResponse
-	86,  // 172: model_plane.v1.ApprovalScopeGrantService.RevokeApprovalScopeGrant:output_type -> model_plane.v1.RevokeApprovalScopeGrantResponse
-	142, // [142:173] is the sub-list for method output_type
-	111, // [111:142] is the sub-list for method input_type
-	111, // [111:111] is the sub-list for extension type_name
-	111, // [111:111] is the sub-list for extension extendee
-	0,   // [0:111] is the sub-list for field type_name
+	106, // 75: model_plane.v1.OrchestrationEvent.tool_retry_scheduled:type_name -> model_plane.v1.OrchestrationEvent.ToolRetryScheduled
+	103, // 76: model_plane.v1.OrchestrationEvent.question_asked:type_name -> model_plane.v1.OrchestrationEvent.QuestionAsked
+	104, // 77: model_plane.v1.OrchestrationEvent.question_answered:type_name -> model_plane.v1.OrchestrationEvent.QuestionAnswered
+	105, // 78: model_plane.v1.OrchestrationEvent.run_usage_progress:type_name -> model_plane.v1.OrchestrationEvent.RunUsageProgress
+	65,  // 79: model_plane.v1.RecordOrchestrationEventRequest.event:type_name -> model_plane.v1.OrchestrationEvent
+	108, // 80: model_plane.v1.StartWorkflowRequest.input:type_name -> google.protobuf.Struct
+	70,  // 81: model_plane.v1.QuestionItem.options:type_name -> model_plane.v1.QuestionOption
+	11,  // 82: model_plane.v1.RunQuestion.state:type_name -> model_plane.v1.QuestionState
+	71,  // 83: model_plane.v1.RunQuestion.items:type_name -> model_plane.v1.QuestionItem
+	107, // 84: model_plane.v1.RunQuestion.requested_at:type_name -> google.protobuf.Timestamp
+	107, // 85: model_plane.v1.RunQuestion.expires_at:type_name -> google.protobuf.Timestamp
+	107, // 86: model_plane.v1.RunQuestion.answered_at:type_name -> google.protobuf.Timestamp
+	72,  // 87: model_plane.v1.RunQuestion.answers:type_name -> model_plane.v1.QuestionAnswerItem
+	71,  // 88: model_plane.v1.CreateRunQuestionRequest.items:type_name -> model_plane.v1.QuestionItem
+	73,  // 89: model_plane.v1.CreateRunQuestionResponse.question:type_name -> model_plane.v1.RunQuestion
+	73,  // 90: model_plane.v1.ListRunQuestionsResponse.questions:type_name -> model_plane.v1.RunQuestion
+	72,  // 91: model_plane.v1.AnswerRunQuestionRequest.answers:type_name -> model_plane.v1.QuestionAnswerItem
+	73,  // 92: model_plane.v1.AnswerRunQuestionResponse.question:type_name -> model_plane.v1.RunQuestion
+	8,   // 93: model_plane.v1.ApprovalScopeGrant.scope:type_name -> model_plane.v1.ApprovalScope
+	107, // 94: model_plane.v1.ApprovalScopeGrant.created_at:type_name -> google.protobuf.Timestamp
+	107, // 95: model_plane.v1.ApprovalScopeGrant.expires_at:type_name -> google.protobuf.Timestamp
+	107, // 96: model_plane.v1.ApprovalScopeGrant.revoked_at:type_name -> google.protobuf.Timestamp
+	107, // 97: model_plane.v1.ApprovalScopeGrant.last_used_at:type_name -> google.protobuf.Timestamp
+	80,  // 98: model_plane.v1.ListApprovalScopeGrantsResponse.grants:type_name -> model_plane.v1.ApprovalScopeGrant
+	80,  // 99: model_plane.v1.RevokeApprovalScopeGrantResponse.grant:type_name -> model_plane.v1.ApprovalScopeGrant
+	0,   // 100: model_plane.v1.OrchestrationEvent.PlanTransitioned.from:type_name -> model_plane.v1.PlanState
+	0,   // 101: model_plane.v1.OrchestrationEvent.PlanTransitioned.to:type_name -> model_plane.v1.PlanState
+	4,   // 102: model_plane.v1.OrchestrationEvent.TodoTransitioned.from:type_name -> model_plane.v1.TodoState
+	4,   // 103: model_plane.v1.OrchestrationEvent.TodoTransitioned.to:type_name -> model_plane.v1.TodoState
+	2,   // 104: model_plane.v1.OrchestrationEvent.ApprovalStateChanged.approval_kind:type_name -> model_plane.v1.ApprovalKind
+	3,   // 105: model_plane.v1.OrchestrationEvent.ApprovalStateChanged.to:type_name -> model_plane.v1.ApprovalState
+	8,   // 106: model_plane.v1.OrchestrationEvent.ApprovalStateChanged.scope:type_name -> model_plane.v1.ApprovalScope
+	7,   // 107: model_plane.v1.OrchestrationEvent.ApprovalStateChanged.decision_source:type_name -> model_plane.v1.ApprovalDecisionSource
+	6,   // 108: model_plane.v1.OrchestrationEvent.SubagentAttached.role:type_name -> model_plane.v1.SubagentRole
+	109, // 109: model_plane.v1.OrchestrationEvent.ApprovalContinuationVerified.verification:type_name -> model_plane.v1.VerificationResult
+	107, // 110: model_plane.v1.OrchestrationEvent.QuestionAsked.expires_at:type_name -> google.protobuf.Timestamp
+	11,  // 111: model_plane.v1.OrchestrationEvent.QuestionAnswered.state:type_name -> model_plane.v1.QuestionState
+	19,  // 112: model_plane.v1.OrchestrationCoreService.ListPlans:input_type -> model_plane.v1.ListPlansRequest
+	21,  // 113: model_plane.v1.OrchestrationCoreService.GetPlan:input_type -> model_plane.v1.GetPlanRequest
+	23,  // 114: model_plane.v1.OrchestrationCoreService.TransitionPlan:input_type -> model_plane.v1.TransitionPlanRequest
+	27,  // 115: model_plane.v1.OrchestrationCoreService.ProposePlan:input_type -> model_plane.v1.ProposePlanRequest
+	29,  // 116: model_plane.v1.OrchestrationCoreService.ListTodos:input_type -> model_plane.v1.ListTodosRequest
+	31,  // 117: model_plane.v1.OrchestrationCoreService.GetTodo:input_type -> model_plane.v1.GetTodoRequest
+	33,  // 118: model_plane.v1.OrchestrationCoreService.TransitionTodo:input_type -> model_plane.v1.TransitionTodoRequest
+	35,  // 119: model_plane.v1.OrchestrationCoreService.CreateApproval:input_type -> model_plane.v1.CreateApprovalRequest
+	41,  // 120: model_plane.v1.OrchestrationCoreService.ListApprovals:input_type -> model_plane.v1.ListApprovalsRequest
+	43,  // 121: model_plane.v1.OrchestrationCoreService.ListPendingApprovals:input_type -> model_plane.v1.OrgPendingApprovalsRequest
+	45,  // 122: model_plane.v1.OrchestrationCoreService.GetApproval:input_type -> model_plane.v1.GetApprovalRequest
+	47,  // 123: model_plane.v1.OrchestrationCoreService.DecideApproval:input_type -> model_plane.v1.DecideApprovalRequest
+	36,  // 124: model_plane.v1.OrchestrationCoreService.ConsumeApproval:input_type -> model_plane.v1.ConsumeApprovalRequest
+	50,  // 125: model_plane.v1.OrchestrationCoreService.ClaimApprovalDeliveries:input_type -> model_plane.v1.ClaimApprovalDeliveriesRequest
+	52,  // 126: model_plane.v1.OrchestrationCoreService.GetApprovalContinuation:input_type -> model_plane.v1.GetApprovalContinuationRequest
+	54,  // 127: model_plane.v1.OrchestrationCoreService.RecordApprovalContinuationStarted:input_type -> model_plane.v1.RecordApprovalContinuationStartedRequest
+	56,  // 128: model_plane.v1.OrchestrationCoreService.RecordApprovalContinuationOutcome:input_type -> model_plane.v1.RecordApprovalContinuationOutcomeRequest
+	58,  // 129: model_plane.v1.OrchestrationCoreService.AcknowledgeApprovalDelivery:input_type -> model_plane.v1.AcknowledgeApprovalDeliveryRequest
+	74,  // 130: model_plane.v1.OrchestrationCoreService.CreateRunQuestion:input_type -> model_plane.v1.CreateRunQuestionRequest
+	76,  // 131: model_plane.v1.OrchestrationCoreService.ListRunQuestions:input_type -> model_plane.v1.ListRunQuestionsRequest
+	78,  // 132: model_plane.v1.OrchestrationCoreService.AnswerRunQuestion:input_type -> model_plane.v1.AnswerRunQuestionRequest
+	60,  // 133: model_plane.v1.OrchestrationCoreService.GetSubagentLineage:input_type -> model_plane.v1.GetSubagentLineageRequest
+	62,  // 134: model_plane.v1.OrchestrationCoreService.AttachSubagent:input_type -> model_plane.v1.AttachSubagentRequest
+	110, // 135: model_plane.v1.OrchestrationCoreService.GetRunProofBundle:input_type -> model_plane.v1.GetRunProofBundleRequest
+	111, // 136: model_plane.v1.OrchestrationCoreService.GetVerificationMetrics:input_type -> model_plane.v1.GetVerificationMetricsRequest
+	64,  // 137: model_plane.v1.OrchestrationCoreService.StreamRunEvents:input_type -> model_plane.v1.StreamRunEventsRequest
+	66,  // 138: model_plane.v1.OrchestrationCoreService.RecordOrchestrationEvent:input_type -> model_plane.v1.RecordOrchestrationEventRequest
+	68,  // 139: model_plane.v1.OrchestratorWorkflowService.StartWorkflow:input_type -> model_plane.v1.StartWorkflowRequest
+	81,  // 140: model_plane.v1.ApprovalScopeGrantService.UseApprovalScopeGrant:input_type -> model_plane.v1.UseApprovalScopeGrantRequest
+	83,  // 141: model_plane.v1.ApprovalScopeGrantService.ListApprovalScopeGrants:input_type -> model_plane.v1.ListApprovalScopeGrantsRequest
+	85,  // 142: model_plane.v1.ApprovalScopeGrantService.RevokeApprovalScopeGrant:input_type -> model_plane.v1.RevokeApprovalScopeGrantRequest
+	20,  // 143: model_plane.v1.OrchestrationCoreService.ListPlans:output_type -> model_plane.v1.ListPlansResponse
+	22,  // 144: model_plane.v1.OrchestrationCoreService.GetPlan:output_type -> model_plane.v1.GetPlanResponse
+	25,  // 145: model_plane.v1.OrchestrationCoreService.TransitionPlan:output_type -> model_plane.v1.TransitionPlanResponse
+	28,  // 146: model_plane.v1.OrchestrationCoreService.ProposePlan:output_type -> model_plane.v1.ProposePlanResponse
+	30,  // 147: model_plane.v1.OrchestrationCoreService.ListTodos:output_type -> model_plane.v1.ListTodosResponse
+	32,  // 148: model_plane.v1.OrchestrationCoreService.GetTodo:output_type -> model_plane.v1.GetTodoResponse
+	34,  // 149: model_plane.v1.OrchestrationCoreService.TransitionTodo:output_type -> model_plane.v1.TransitionTodoResponse
+	40,  // 150: model_plane.v1.OrchestrationCoreService.CreateApproval:output_type -> model_plane.v1.CreateApprovalResponse
+	42,  // 151: model_plane.v1.OrchestrationCoreService.ListApprovals:output_type -> model_plane.v1.ListApprovalsResponse
+	44,  // 152: model_plane.v1.OrchestrationCoreService.ListPendingApprovals:output_type -> model_plane.v1.OrgPendingApprovalsResponse
+	46,  // 153: model_plane.v1.OrchestrationCoreService.GetApproval:output_type -> model_plane.v1.GetApprovalResponse
+	48,  // 154: model_plane.v1.OrchestrationCoreService.DecideApproval:output_type -> model_plane.v1.DecideApprovalResponse
+	37,  // 155: model_plane.v1.OrchestrationCoreService.ConsumeApproval:output_type -> model_plane.v1.ConsumeApprovalResponse
+	51,  // 156: model_plane.v1.OrchestrationCoreService.ClaimApprovalDeliveries:output_type -> model_plane.v1.ClaimApprovalDeliveriesResponse
+	53,  // 157: model_plane.v1.OrchestrationCoreService.GetApprovalContinuation:output_type -> model_plane.v1.GetApprovalContinuationResponse
+	55,  // 158: model_plane.v1.OrchestrationCoreService.RecordApprovalContinuationStarted:output_type -> model_plane.v1.RecordApprovalContinuationStartedResponse
+	57,  // 159: model_plane.v1.OrchestrationCoreService.RecordApprovalContinuationOutcome:output_type -> model_plane.v1.RecordApprovalContinuationOutcomeResponse
+	59,  // 160: model_plane.v1.OrchestrationCoreService.AcknowledgeApprovalDelivery:output_type -> model_plane.v1.AcknowledgeApprovalDeliveryResponse
+	75,  // 161: model_plane.v1.OrchestrationCoreService.CreateRunQuestion:output_type -> model_plane.v1.CreateRunQuestionResponse
+	77,  // 162: model_plane.v1.OrchestrationCoreService.ListRunQuestions:output_type -> model_plane.v1.ListRunQuestionsResponse
+	79,  // 163: model_plane.v1.OrchestrationCoreService.AnswerRunQuestion:output_type -> model_plane.v1.AnswerRunQuestionResponse
+	61,  // 164: model_plane.v1.OrchestrationCoreService.GetSubagentLineage:output_type -> model_plane.v1.GetSubagentLineageResponse
+	63,  // 165: model_plane.v1.OrchestrationCoreService.AttachSubagent:output_type -> model_plane.v1.AttachSubagentResponse
+	112, // 166: model_plane.v1.OrchestrationCoreService.GetRunProofBundle:output_type -> model_plane.v1.GetRunProofBundleResponse
+	113, // 167: model_plane.v1.OrchestrationCoreService.GetVerificationMetrics:output_type -> model_plane.v1.GetVerificationMetricsResponse
+	65,  // 168: model_plane.v1.OrchestrationCoreService.StreamRunEvents:output_type -> model_plane.v1.OrchestrationEvent
+	67,  // 169: model_plane.v1.OrchestrationCoreService.RecordOrchestrationEvent:output_type -> model_plane.v1.RecordOrchestrationEventResponse
+	69,  // 170: model_plane.v1.OrchestratorWorkflowService.StartWorkflow:output_type -> model_plane.v1.StartWorkflowResponse
+	82,  // 171: model_plane.v1.ApprovalScopeGrantService.UseApprovalScopeGrant:output_type -> model_plane.v1.UseApprovalScopeGrantResponse
+	84,  // 172: model_plane.v1.ApprovalScopeGrantService.ListApprovalScopeGrants:output_type -> model_plane.v1.ListApprovalScopeGrantsResponse
+	86,  // 173: model_plane.v1.ApprovalScopeGrantService.RevokeApprovalScopeGrant:output_type -> model_plane.v1.RevokeApprovalScopeGrantResponse
+	143, // [143:174] is the sub-list for method output_type
+	112, // [112:143] is the sub-list for method input_type
+	112, // [112:112] is the sub-list for extension type_name
+	112, // [112:112] is the sub-list for extension extendee
+	0,   // [0:112] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_orchestration_proto_init() }
@@ -9175,6 +9307,7 @@ func file_model_plane_v1_orchestration_proto_init() {
 		(*OrchestrationEvent_ApprovalContinuationVerified_)(nil),
 		(*OrchestrationEvent_RunParked_)(nil),
 		(*OrchestrationEvent_RunResumed_)(nil),
+		(*OrchestrationEvent_ToolRetryScheduled_)(nil),
 		(*OrchestrationEvent_QuestionAsked_)(nil),
 		(*OrchestrationEvent_QuestionAnswered_)(nil),
 		(*OrchestrationEvent_RunUsageProgress_)(nil),
@@ -9185,7 +9318,7 @@ func file_model_plane_v1_orchestration_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_orchestration_proto_rawDesc), len(file_model_plane_v1_orchestration_proto_rawDesc)),
 			NumEnums:      12,
-			NumMessages:   94,
+			NumMessages:   95,
 			NumExtensions: 0,
 			NumServices:   3,
 		},

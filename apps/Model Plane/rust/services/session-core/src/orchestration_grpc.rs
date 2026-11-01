@@ -2298,6 +2298,9 @@ fn event_run_id(ev: &proto::OrchestrationEvent) -> Option<&str> {
         // replayed like the other run events, and never persisted (`persist_browser_event` has no
         // arm for it).
         orchestration_event::Event::RunUsageProgress(p) => Some(&p.run_id),
+        // Tool retry (WS15 S3): run-scoped, ids and counts. Broadcast and replayed like the other run
+        // events, and never persisted (`persist_browser_event` has no arm for it).
+        orchestration_event::Event::ToolRetryScheduled(p) => Some(&p.run_id),
     }
 }
 
@@ -5601,6 +5604,26 @@ mod tests {
             REPLAY_BUFFER_PER_RUN,
             "buffer is bounded to REPLAY_BUFFER_PER_RUN",
         );
+    }
+
+    #[test]
+    fn event_run_id_extracts_tool_retry() {
+        let retry = proto::OrchestrationEvent {
+            event_id: String::new(),
+            at: None,
+            event: Some(orchestration_event::Event::ToolRetryScheduled(
+                orchestration_event::ToolRetryScheduled {
+                    run_id: "run_r".into(),
+                    step_id: "step_1".into(),
+                    tool: "knowledge_search".into(),
+                    attempt: 2,
+                    max_attempts: 3,
+                    wait_ms: 100,
+                    reason: "connection".into(),
+                },
+            )),
+        };
+        assert_eq!(event_run_id(&retry), Some("run_r"));
     }
 
     #[test]

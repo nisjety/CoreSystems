@@ -4929,6 +4929,55 @@ async fn until_read_deadline(
     }
 }
 
+/// The attempts one chat tool call gets (build plan WS15 S3). `attempt` runs the call once. A
+/// failure that looks transient gets another attempt, up to `MAX_TOOL_ATTEMPTS`, and each retry is
+/// announced on `retry_sink` before its attempt runs. The announcement carries the closed reason,
+/// never the error text.
+async fn attempts_with_retries<F, Fut>(
+    request_id: &str,
+    tool: &str,
+    retry_sink: Option<&crate::sse_events::RichEventSink>,
+    mut attempt: F,
+) -> ToolOutcome
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = ToolOutcome>,
+{
+    let mut number = 1;
+    loop {
+        if number > 1 {
+            tokio::time::sleep(crate::tool_retry::backoff_before_attempt(number)).await;
+        }
+        let result = attempt().await;
+        let error = result.error.as_deref().unwrap_or_default();
+        let transient =
+            result.error.is_some() && crate::tool_retry::is_transient_tool_failure(error);
+        if number >= crate::tool_retry::MAX_TOOL_ATTEMPTS || !transient {
+            return result;
+        }
+        tracing::warn!(
+            request_id = %request_id,
+            tool = %tool,
+            attempt = number,
+            error,
+            "chat tool loop: retrying after a transient failure"
+        );
+        if let Some(sink) = retry_sink {
+            let wait = crate::tool_retry::backoff_before_attempt(number + 1);
+            sink.emit(crate::sse_events::ChatEvent::RetryScheduled {
+                scope: "tool",
+                tool: tool.to_owned(),
+                attempt: number + 1,
+                max_attempts: crate::tool_retry::MAX_TOOL_ATTEMPTS,
+                wait_ms: u64::try_from(wait.as_millis()).unwrap_or(u64::MAX),
+                reason: crate::tool_retry::transient_reason(error),
+            })
+            .await;
+        }
+        number += 1;
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_audited_tool(
     state: &AppState,
@@ -4972,6 +5021,9 @@ async fn dispatch_audited_tool(
     classifier_budget: Option<&crate::semantic_screening::ClassifierBudget>,
     // The turn's connected-account selection, when the connected-app read is offered (WS23-S5).
     connector: Option<&connector_reads::ConnectorTurn>,
+    // Where each retry is announced before its attempt (WS15 S3). `None` for a caller that buffers
+    // its events, and for every caller while the lifecycle switch is off.
+    retry_sink: Option<&crate::sse_events::RichEventSink>,
 ) -> Result<ToolOutcome, &'static str> {
     if session_bearer.is_empty() {
         return Err("tool audit credential unavailable");
@@ -5010,60 +5062,35 @@ async fn dispatch_audited_tool(
     // `inline_tool_allowed` already refused every side-effecting tool before
     // this point, so a replay costs latency, never a duplicated effect. See
     // `crate::tool_retry`'s module doc.
-    let attempts = async {
-        let mut outcome = None;
-        for attempt in 1..=crate::tool_retry::MAX_TOOL_ATTEMPTS {
-            if attempt > 1 {
-                tokio::time::sleep(crate::tool_retry::backoff_before_attempt(attempt)).await;
-            }
-            let result = dispatch_tool_with_cost(
-                state,
-                run_id,
-                org_id,
-                user_id,
-                thread_id,
-                space_id,
-                prompt_contents,
-                conversation,
-                data_plane_bearer,
-                execution_bearer,
-                inference_bearer,
-                session_bearer,
-                capability_bearer,
-                zdr,
-                sovereign_required,
-                allow_paid_providers,
-                call,
-                ingestion_bearer,
-                sandbox_bearer,
-                cost_bearer,
-                data_plane_mode.clone(),
-                attachments,
-                skill_mounts,
-                classifier_budget,
-                connector,
-            )
-            .await;
-            let should_retry = attempt < crate::tool_retry::MAX_TOOL_ATTEMPTS
-                && result
-                    .error
-                    .as_deref()
-                    .is_some_and(crate::tool_retry::is_transient_tool_failure);
-            if !should_retry {
-                outcome = Some(result);
-                break;
-            }
-            tracing::warn!(
-                request_id = %request_id,
-                tool = %call.name,
-                attempt,
-                error = result.error.as_deref().unwrap_or_default(),
-                "chat tool loop: retrying after a transient failure"
-            );
-            outcome = Some(result);
-        }
-        outcome.expect("MAX_TOOL_ATTEMPTS >= 1 always yields an outcome")
-    };
+    let attempts = attempts_with_retries(request_id, &call.name, retry_sink, || {
+        dispatch_tool_with_cost(
+            state,
+            run_id,
+            org_id,
+            user_id,
+            thread_id,
+            space_id,
+            prompt_contents,
+            conversation,
+            data_plane_bearer,
+            execution_bearer,
+            inference_bearer,
+            session_bearer,
+            capability_bearer,
+            zdr,
+            sovereign_required,
+            allow_paid_providers,
+            call,
+            ingestion_bearer,
+            sandbox_bearer,
+            cost_bearer,
+            data_plane_mode.clone(),
+            attachments,
+            skill_mounts,
+            classifier_budget,
+            connector,
+        )
+    });
     let outcome = until_read_deadline(call, read_deadline, attempts).await;
     // One line per tool dispatch, unconditionally — this is the server-side
     // trace the audit found missing (F-11, §3.4): a future tool failure must
@@ -5190,6 +5217,8 @@ pub(crate) async fn dispatch_web_tool_audited(
         &[],
         None,
         // Web tools only: the connected-app read is never reached from this path.
+        None,
+        // This path streams no events, so there is no stream to announce a retry on.
         None,
     )
     .await
@@ -6408,6 +6437,8 @@ pub async fn run_forced_web_search_for_model(
         // `assess_external_payload` runs the inline pass only with one.
         None,
         // A forced web search reads no connected account.
+        None,
+        // The forced search announces no retry: WS15 S3 wires the chat tool loop only.
         None,
     )
     .await?;
@@ -8545,6 +8576,9 @@ pub async fn run_tool_rounds_for_model_with_attachments(
         let classifier_budget_ref = &classifier_budget;
         // The same, for the turn's skill mounts: each per-call future copies the reference.
         let skill_mounts_ref = &skill_mounts;
+        // A retry is announced only on a live stream, and only while the lifecycle switch is on
+        // (WS15 S3): a caller that buffers its events hears none.
+        let retry_sink = sink.filter(|_| mp_contracts::lifecycle_notice::enabled());
         let dispatched = futures::future::join_all(prepared.into_iter().map(
             |(call, is_duplicate, is_truncated)| async move {
                 if !offered_tools.iter().any(|tool| tool.name == call.name) {
@@ -8600,6 +8634,7 @@ pub async fn run_tool_rounds_for_model_with_attachments(
                     skill_mounts_ref,
                     Some(classifier_budget_ref),
                     connector_turn,
+                    retry_sink,
                 )
                 .await
             },
@@ -11263,6 +11298,89 @@ mod tests {
             streamed += 1;
         }
         assert_eq!(streamed, 2, "each event reached the client exactly once");
+    }
+
+    /// A tool call the retry tests run through `attempts_with_retries`.
+    fn retry_test_call() -> ToolCall {
+        ToolCall {
+            id: "call-1".to_owned(),
+            name: "knowledge_search".to_owned(),
+            arguments_json: r#"{"query":"q"}"#.to_owned(),
+        }
+    }
+
+    /// Runs `attempts_with_retries` on a call whose every attempt fails with `error`, announcing on
+    /// a live sink when `streamed`. Returns how many attempts ran and the frames the sink streamed.
+    async fn failing_attempts_with_retries(error: &str, streamed: bool) -> (u32, Vec<String>) {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let sink = crate::sse_events::RichEventSink::new(
+            tx,
+            vec!["steps".to_owned()],
+            "req-1".to_owned(),
+        );
+        let call = retry_test_call();
+        let mut attempts: u32 = 0;
+        let outcome = attempts_with_retries("req-1", &call.name, streamed.then_some(&sink), || {
+            attempts += 1;
+            let failed = err_outcome(&call, error);
+            async move { failed }
+        })
+        .await;
+        assert!(outcome.error.is_some(), "the last failed attempt is the outcome");
+        drop(sink);
+        let mut frames = Vec::new();
+        while let Some(Ok(frame)) = rx.recv().await {
+            frames.push(format!("{frame:?}"));
+        }
+        (attempts, frames)
+    }
+
+    #[tokio::test]
+    async fn a_transient_failure_emits_one_retry_scheduled_per_extra_attempt() {
+        let (attempts, frames) =
+            failing_attempts_with_retries("transport error: connection reset by peer", true).await;
+        assert_eq!(attempts, crate::tool_retry::MAX_TOOL_ATTEMPTS);
+        let scheduled: Vec<&String> = frames
+            .iter()
+            .filter(|frame| frame.contains("retry_scheduled"))
+            .collect();
+        assert_eq!(scheduled.len(), 2, "one frame per extra attempt, got {frames:?}");
+        assert!(scheduled[0].contains(r#"\"attempt\":2"#), "{}", scheduled[0]);
+        assert!(scheduled[1].contains(r#"\"attempt\":3"#), "{}", scheduled[1]);
+        assert!(scheduled
+            .iter()
+            .all(|frame| frame.contains(r#"\"reason\":\"connection\""#)));
+    }
+
+    #[tokio::test]
+    async fn buffered_events_mode_emits_none() {
+        let (attempts, frames) =
+            failing_attempts_with_retries("transport error: connection reset by peer", false)
+                .await;
+        assert_eq!(attempts, crate::tool_retry::MAX_TOOL_ATTEMPTS, "the retries still run");
+        assert!(frames.is_empty(), "a buffering caller hears no retry: {frames:?}");
+    }
+
+    #[tokio::test]
+    async fn retry_frame_never_contains_the_error_text() {
+        let upstream = "https://quarry.internal.example/search?token=sk-retry-secret-42 connection reset";
+        let (_, frames) = failing_attempts_with_retries(upstream, true).await;
+        assert_eq!(
+            frames.iter().filter(|frame| frame.contains("retry_scheduled")).count(),
+            2
+        );
+        for frame in &frames {
+            assert!(!frame.contains("sk-retry-secret-42"), "{frame}");
+            assert!(!frame.contains("quarry.internal.example"), "{frame}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_non_transient_failure_is_never_retried_or_announced() {
+        let (attempts, frames) =
+            failing_attempts_with_retries("invalid json: expected value at line 1", true).await;
+        assert_eq!(attempts, 1, "a deterministic failure is not replayed");
+        assert!(frames.is_empty(), "{frames:?}");
     }
 
     #[tokio::test]
