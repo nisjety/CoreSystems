@@ -1704,6 +1704,29 @@ pub async fn invoke_stream_sse(
     // stricter, never to disable gating. Switch off, or no choice, and the request is not changed here.
     let profile = crate::profile::AgentProfile::from_wire(req.profile.as_deref());
     let requested_posture = crate::profile::resolve_posture(posture_floor(&claims), profile);
+    // The org's agent policy (WS25-S9), read before the mode is resolved so the org's cap binds a turn the person
+    // did not choose a mode for. Off, nothing is read; a Do turn whose policy cannot be read is refused.
+    let org_mode_cap = match crate::org_agent_policy::admit_turn(
+        crate::org_agent_policy::policy_mode(),
+        crate::org_agent_policy::shared_cache(),
+        &state.http_client,
+        &state.capability_core_base_url,
+        &org_id,
+        capability_bearer.as_ref().map_or("", VerifiedCapabilityBearer::as_str),
+        features.iter().any(|feature| feature == "agentic"),
+    )
+    .await
+    {
+        Ok(cap) => cap,
+        Err(code) => {
+            return error_stream(
+                &request_id,
+                code,
+                crate::org_agent_policy::POLICY_UNAVAILABLE_MESSAGE,
+                true,
+            );
+        }
+    };
     let chosen_mode = match crate::profile::chosen_agent_mode(
         crate::profile::agent_modes_enabled(),
         req.agent_mode.as_deref(),
@@ -1718,7 +1741,7 @@ pub async fn invoke_stream_sse(
             );
         }
     };
-    let turn_mode = crate::profile::resolve_turn_mode(chosen_mode, requested_posture);
+    let turn_mode = crate::org_agent_policy::resolve_turn(requested_posture, chosen_mode, org_mode_cap);
     if let Some(turn) = turn_mode {
         req.plan_mode |= turn.preset.plan_gate;
         tracing::info!(
@@ -11465,6 +11488,16 @@ fn spawn_run_dispatch(
     let granted = mp_contracts::model_plane::v1::AutonomyRung::try_from(rung)
         .ok()
         .filter(|rung| *rung != mp_contracts::model_plane::v1::AutonomyRung::Unspecified);
+    // The org's rung cap (WS25-S9) holds a fresh run to the narrower of its grant and the cap, and states the cap
+    // when it has no grant. Plan and resumed runs state no rung of their own (`dispatch_autonomy_rung`).
+    let granted = crate::org_agent_policy::clamp_rung(
+        granted,
+        crate::org_agent_policy::dispatch_rung_cap(
+            crate::org_agent_policy::policy_mode(),
+            crate::org_agent_policy::shared_cache(),
+            org_id,
+        ),
+    );
     // The posture ratchet: an execute turn at the widest rung asks for a per-call approval.
     let ratcheted = execute_permission_mode(permission_mode, execute_granted, rung);
     if ratcheted != permission_mode {
@@ -11523,6 +11556,15 @@ fn spawn_run_dispatch(
     // switch off, or with no rules, the request carries no org policy, as it did before the field.
     run_agent_req.org_policy =
         crate::runtime_registries::do_run_org_policy(&state.hooks, org_id, hooks_do_runs_mode());
+    // The run is attributed to the org policy revision it was admitted under (WS25-S9), with or without hook rules.
+    crate::org_agent_policy::stamp_policy_revision(
+        &mut run_agent_req.org_policy,
+        crate::org_agent_policy::held_revision(
+            crate::org_agent_policy::policy_mode(),
+            crate::org_agent_policy::shared_cache(),
+            org_id,
+        ),
+    );
     // The question tool's cap for this run (build plan WS14 S4), set by the caller as the org policy is.
     run_agent_req.max_questions = max_questions;
     let run_agent_req = authenticated_run_agent_request(

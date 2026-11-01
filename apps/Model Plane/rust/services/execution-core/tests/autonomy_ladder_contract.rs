@@ -364,3 +364,27 @@ fn both_the_gateway_and_session_core_validate_the_grant() {
         );
     }
 }
+
+/// The org's rung cap (WS25-S9) is applied where a fresh run's rung is decided, before the request states it. A
+/// resumed run still states no rung of its own, so the cap never widens a continuation.
+#[test]
+fn an_org_rung_cap_is_applied_before_a_fresh_run_states_its_rung() {
+    let services = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("execution-core's parent is rust/services");
+    let text = std::fs::read_to_string(services.join("model-gateway/src/sse.rs"))
+        .expect("model-gateway's sse.rs is readable");
+    let dispatch = function_body(&text, "fn spawn_run_dispatch(");
+    let clamp = dispatch
+        .find("org_agent_policy::clamp_rung(")
+        .expect("the dispatch holds the granted rung to the org cap");
+    let built = dispatch
+        .find("resolved_run_agent_request(")
+        .expect("the dispatch builds the request");
+    assert!(clamp < built, "the cap must bind the grant before the request states it");
+    let request = function_body(&text, "fn resolved_run_agent_request(");
+    assert!(
+        request.contains("dispatch_autonomy_rung("),
+        "a resumed run states no rung of its own: the rung is decided by dispatch_autonomy_rung"
+    );
+}

@@ -1811,6 +1811,15 @@ async fn run_agent_with_route_parkable(
         .await;
     }
 
+    // The org policy revision this run is attributed to (WS25-S9). Content-free: the log says which revision
+    // the run was admitted under, whether or not the org has hook rules.
+    if let Some(policy) = req.org_policy.as_ref().filter(|policy| policy.policy_revision != 0) {
+        tracing::info!(
+            run_id = %req.run_id,
+            policy_revision = policy.policy_revision,
+            "run attributed to an org policy revision"
+        );
+    }
     let context = LoopContext {
         release: resumed.as_ref().and_then(|r| r.release.clone()),
         // An approval continuation runs under the snapshot's tools, which nothing derives
