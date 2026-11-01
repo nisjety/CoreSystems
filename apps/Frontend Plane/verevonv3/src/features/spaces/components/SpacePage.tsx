@@ -32,6 +32,7 @@ import {
   ACTIVE_RUN_STATUSES,
   AWAITING_APPROVAL_RUN_STATUS,
   formatLabel,
+  formatRelativeWhen,
   threadStatus,
   threadTitle,
 } from '../lib/space-thread-presentation'
@@ -706,7 +707,12 @@ export default function SpacePage() {
                 />
               </main>
 
-              <SpacePulse activeRun={activeRun} threads={currentThreads} agents={() => (agents.error ? [] : agents() ?? [])} />
+              <SpacePulse
+                activeRun={activeRun}
+                threads={currentThreads}
+                agents={() => (agents.error ? [] : agents() ?? [])}
+                onOpenThread={threadPaneEnabled() ? openThread : undefined}
+              />
 
               <Show when={selectedThreadId()}>
                 {(threadId) => {
@@ -1702,12 +1708,28 @@ function SpaceMembersPanel(props: {
   )
 }
 
+/** How many conversations the pulse lists under the live card. */
+const PULSE_RECENT_LIMIT = 5
+
 function SpacePulse(props: {
   readonly activeRun: () => SpaceThread | undefined
   readonly threads: () => readonly SpaceThread[]
   readonly agents: () => readonly SpaceAgent[]
+  /** Opens a conversation in the side pane; absent when the room has no thread pane. */
+  readonly onOpenThread?: (threadId: string) => void
 }) {
   const i18n = useI18n()
+  const attention = () => props.threads().filter((thread) => thread.latest_run_status === AWAITING_APPROVAL_RUN_STATUS).length
+  // What the room did last, from the listing the page already holds (no request of its own). The live
+  // card carries the conversation that is working, so it is not listed twice.
+  const recent = () => {
+    const active = props.activeRun()
+    return props.threads()
+      .filter((thread) => thread.thread_id !== active?.thread_id)
+      .map((thread) => ({ thread, at: thread.updated_at ?? thread.latest_run_updated_at }))
+      .sort((a, b) => (Date.parse(b.at ?? '') || 0) - (Date.parse(a.at ?? '') || 0))
+      .slice(0, PULSE_RECENT_LIMIT)
+  }
   // The same agent, in the same avatar, as in the timeline: the room's single active agent by name
   // (else the product name, neutral), never a separate icon tile that looks like a different thing.
   const agentName = () => roomAgentName(props.agents())
@@ -1726,7 +1748,7 @@ function SpacePulse(props: {
       class="verevon-space-pulse"
       aria-labelledby="space-pulse-title"
       // The stylesheet keeps the column only while it has something to say: live work or an approval wait.
-      data-attention={props.threads().some((thread) => thread.latest_run_status === 'awaiting_approval') ? 'true' : undefined}
+      data-attention={attention() > 0 ? 'true' : undefined}
     >
       <div class="verevon-space-pulse__heading">
         <div>
@@ -1772,16 +1794,55 @@ function SpacePulse(props: {
         )}
       </Show>
 
-      <dl class="verevon-space-pulse-stats">
-        <div>
-          <dt>{i18n.tr('Samtaler', 'Conversations')}</dt>
-          <dd>{props.threads().length}</dd>
-        </div>
-        <div>
-          <dt>{i18n.tr('Oppmerksomhet', 'Attention')}</dt>
-          <dd>{props.threads().filter((thread) => thread.latest_run_status === 'awaiting_approval').length}</dd>
-        </div>
-      </dl>
+      {/* The column is only on screen while something is live or waits on a person, so it lists what else
+          the room did last and keeps only the counters that say something (a zero says nothing). */}
+      <Show when={props.activeRun() && recent().length > 0}>
+        <section class="verevon-space-pulse-recent" aria-labelledby="space-pulse-recent-title">
+          <h3 id="space-pulse-recent-title">{i18n.tr('Siste aktivitet', 'Recent activity')}</h3>
+          <ul>
+            <For each={recent()}>
+              {(item) => {
+                const body = () => (
+                  <>
+                    <span class="verevon-space-pulse-recent__title">{threadTitle(item.thread, i18n.tr)}</span>
+                    <span class="verevon-space-pulse-recent__meta">
+                      {[threadStatus(item.thread, i18n.tr), formatRelativeWhen(item.at)].filter(Boolean).join(' · ')}
+                    </span>
+                  </>
+                )
+                return (
+                  <li data-status={item.thread.latest_run_status ?? undefined}>
+                    <Show when={props.onOpenThread} fallback={<div class="verevon-space-pulse-recent__row">{body()}</div>}>
+                      {(open) => (
+                        <button type="button" class="verevon-space-pulse-recent__row" onClick={() => open()(item.thread.thread_id)}>
+                          {body()}
+                        </button>
+                      )}
+                    </Show>
+                  </li>
+                )
+              }}
+            </For>
+          </ul>
+        </section>
+      </Show>
+
+      <Show when={props.threads().length > 0 || attention() > 0}>
+        <dl class="verevon-space-pulse-stats">
+          <Show when={props.threads().length > 0}>
+            <div>
+              <dt>{i18n.tr('Samtaler', 'Conversations')}</dt>
+              <dd>{props.threads().length}</dd>
+            </div>
+          </Show>
+          <Show when={attention() > 0}>
+            <div>
+              <dt>{i18n.tr('Oppmerksomhet', 'Attention')}</dt>
+              <dd>{attention()}</dd>
+            </div>
+          </Show>
+        </dl>
+      </Show>
 
       <p class="verevon-space-pulse__note">
         {i18n.tr(

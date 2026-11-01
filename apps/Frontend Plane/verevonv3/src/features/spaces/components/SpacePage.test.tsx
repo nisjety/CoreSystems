@@ -359,6 +359,28 @@ describe('SpacePage', () => {
     expect(document.querySelector('.verevon-space-pulse')?.hasAttribute('data-attention')).toBe(false)
   })
 
+  // The column only earns its width with something to read: no zero counters, and what else the room did last.
+  it('keeps only the pulse counters that say something and lists the other recent conversations', async () => {
+    spacesClient.getSpaceContext.mockResolvedValue(personalContext)
+    spacesClient.getSpaceThreads.mockResolvedValue({
+      ...personalContext,
+      threads: [
+        { thread_id: 'thread_live', space_id: 'space_personal_1', title: 'Pågår nå', latest_run_status: 'running', updated_at: '2026-09-06T10:00:00Z' },
+        { thread_id: 'thread_old', space_id: 'space_personal_1', title: 'Eldre samtale', latest_run_status: 'completed', updated_at: '2026-09-01T10:00:00Z' },
+        { thread_id: 'thread_new', space_id: 'space_personal_1', title: 'Nyere samtale', latest_run_status: 'completed', updated_at: '2026-09-05T10:00:00Z' },
+      ],
+    })
+    renderSpacePage()
+    await screen.findByRole('heading', { name: 'Rompuls' })
+    const pulse = document.querySelector('.verevon-space-pulse') as HTMLElement
+    // Nothing waits on a person, so "Oppmerksomhet 0" is not drawn; the conversation count is.
+    expect(within(pulse).queryByText('Oppmerksomhet')).toBeNull()
+    expect(within(pulse).getByText('Samtaler')).toBeTruthy()
+    // The live conversation is the card; the others follow newest first, never the live one twice.
+    const titles = [...pulse.querySelectorAll('.verevon-space-pulse-recent__title')].map((node) => node.textContent)
+    expect(titles).toEqual(['Nyere samtale', 'Eldre samtale'])
+  })
+
   it('keeps the Space composer link encoded without rendering a duplicate Space overview rail', async () => {
     spacesClient.getSpaceContext.mockResolvedValue({
       ...personalContext,

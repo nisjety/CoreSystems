@@ -4,6 +4,9 @@
 //   pnpm dev --port 5174 --strictPort
 //   node tests/visual/space-ui-shots.mjs <outDir> [baseUrl]
 //
+// Switches (env): ARCHIVED=1 serves an archived room, IDLE=1 a room where no agent works, ONLY=<shot,shot> takes
+// only those shots, INSPECT=<shot> prints the container tree, EVAL=<js> [EVAL_SHOT=<shot>] prints a probe.
+//
 // Nothing here reaches a real service: every /api request is fulfilled by this file, and any request it
 // does not know is answered 404 and printed, so a missing mock is visible rather than silent.
 import { mkdirSync } from 'node:fs'
@@ -117,7 +120,10 @@ async function inspect(page) {
 }
 
 const browser = await chromium.launch()
+// ONLY=01-room-desktop,02-thread-pane-desktop takes just those shots (a full run is a few minutes).
+const ONLY = process.env.ONLY ? new Set(process.env.ONLY.split(',')) : null
 async function shoot(name, { width, height, path = `/spaces/${SPACE}`, after, dark = false } = {}) {
+  if (ONLY && !ONLY.has(name)) return
   const context = await browser.newContext({ viewport: { width, height }, locale: 'nb-NO', colorScheme: dark ? 'dark' : 'light' })
   const page = await context.newPage()
   page.on('pageerror', (error) => console.log(`[${name}] pageerror:`, String(error).slice(0, 200)))
@@ -160,6 +166,30 @@ await shoot('08-details-dark', { width: 1440, height: 900, dark: true, after: as
 await shoot('10-thread-laptop', { width: 1280, height: 800, path: `/spaces/${SPACE}?thread_id=thr_1` })
 await shoot('11-room-mobile-dark', { width: 390, height: 844, dark: true })
 await shoot('12-thread-mobile', { width: 390, height: 844, path: `/spaces/${SPACE}?thread_id=thr_1` })
+
+// Archive asks before it acts: the first press arms the button (solid danger, with the consequence), the second archives.
+await shoot('14-archive-armed-desktop', { width: 1440, height: 900, after: async (page) => {
+  await page.getByRole('button', { name: 'Romdetaljer' }).click()
+  await page.getByRole('button', { name: 'Arkiver rommet' }).click()
+} })
+await shoot('15-archive-armed-mobile-dark', { width: 390, height: 844, dark: true, after: async (page) => {
+  await page.getByRole('button', { name: 'Romdetaljer' }).click()
+  await page.getByRole('button', { name: 'Arkiver rommet' }).click()
+} })
+
+// Opening a thread from a post must not move the list: the post heights are printed before and after the click.
+const postHeights = (page) => page.evaluate(() => [...document.querySelectorAll('.verevon-room-post')].map((post) => Math.round(post.getBoundingClientRect().height)))
+await shoot('13-thread-opened-desktop', {
+  width: 1440,
+  height: 900,
+  after: async (page) => {
+    const before = await postHeights(page)
+    await page.locator('.verevon-room-post__summary').nth(3).click()
+    await page.waitForTimeout(800)
+    const after = await postHeights(page)
+    console.log(`post heights before ${before.join(',')} after ${after.join(',')}${before.join() === after.join() ? ' (stable)' : ' (MOVED)'}`)
+  },
+})
 
 await browser.close()
 if (missing.size) console.log('UNMOCKED:\n' + [...missing].sort().join('\n'))

@@ -782,3 +782,115 @@ html.dark:has(.space-page.verevon-space),
   background: linear-gradient(135deg, #34363d, #3b2e29);
   color: #f7f4ee;
 }
+
+/* ── Visual pass, round 3 ──────────────────────────────────────────────────────
+   Appended on purpose, like the block above: each rule overrides an earlier one of equal specificity. */
+
+/* Tabs read at 13.5px (they were 12px and looked like captions). The row stays one line; where it can no
+   longer fit it scrolls sideways and fades at the edge. That is every width up to a laptop, and a laptop
+   with a thread open, when the room shares its width with the pane. */
+.verevon-space .verevon-space-tab {
+  padding: 13px 12px 11px;
+  font-size: 13.5px;
+  white-space: nowrap;
+}
+
+@media (min-width: 1101px) and (max-width: 1360px) {
+  .verevon-space .verevon-space-workroom[data-aux-open] .verevon-space-tabs {
+    -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent);
+    mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent);
+  }
+}
+
+/* The pulse column is on screen only while it has something to say, and then it says it at a readable size:
+   labels at 12px and up, a single counter across the column, and the rest of the room's recent activity
+   under the live card. */
+.verevon-space .verevon-space-pulse-stats dt {
+  font-size: 12px;
+}
+
+.verevon-space .verevon-space-pulse-stats {
+  grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
+}
+
+.verevon-space .verevon-space-pulse-card strong {
+  font-size: 13px;
+}
+
+.verevon-space .verevon-space-pulse-card__detail {
+  font-size: 12px;
+}
+
+.verevon-space-pulse-recent {
+  margin: 22px 6px 0;
+}
+
+.verevon-space-pulse-recent h3 {
+  margin: 0 0 6px;
+  padding-inline: 8px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+.verevon-space-pulse-recent ul {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-space-pulse-recent__row {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  gap: 2px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  padding: 7px 8px;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+button.verevon-space-pulse-recent__row {
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+
+button.verevon-space-pulse-recent__row:hover {
+  background: var(--verevon-surface-soft);
+}
+
+button.verevon-space-pulse-recent__row:focus-visible {
+  outline: 2px solid var(--verevon-accent-ink);
+  outline-offset: 1px;
+}
+
+.verevon-space-pulse-recent__title {
+  overflow: hidden;
+  color: var(--verevon-text);
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.verevon-space-pulse-recent__meta {
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-space-pulse-recent li[data-status='failed'] .verevon-space-pulse-recent__meta {
+  color: color-mix(in srgb, var(--danger) 80%, var(--verevon-text));
+}
+
+/* The post whose thread is open: a soft accent wash and a hairline ring, both paint-only (no border,
+   padding or bar), so opening a thread never moves the posts around it. */
+.verevon-space .verevon-room-post[data-open] {
+  background: color-mix(in srgb, var(--verevon-accent-ink) 7%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--verevon-accent-ink) 24%, transparent);
+}

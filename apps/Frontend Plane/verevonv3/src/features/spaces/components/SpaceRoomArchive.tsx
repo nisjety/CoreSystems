@@ -122,7 +122,7 @@ export function SpaceRoomArchiveControl(props: SpaceRoomArchiveControlProps) {
         when={props.archived}
         fallback={
           <SpaceConfirmButton
-            class="verevon-space-secondary-action verevon-space-room-archive__button"
+            class="verevon-space-secondary-action verevon-space-room-archive__button verevon-space-room-archive__button--danger"
             label={i18n.tr('Arkiver rommet', 'Archive room')}
             confirmLabel={i18n.tr('Bekreft arkivering av rommet', 'Confirm archiving the room')}
             consequence={i18n.tr(

@@ -290,6 +290,39 @@
   line-height: 1.45;
 }
 
+/* Archive is the one destructive action in the panel: it sits apart from the edit button, below a rule
+   and a gap, as plain danger text with no outline until it is pointed at. Armed ("Bekreft"), it turns
+   solid so the second press is unmistakable. Un-archiving is harmless and keeps the quiet outlined look. */
+.verevon-space-details__panel .verevon-space-room-archive {
+  margin-top: 8px;
+  padding-top: 14px;
+}
+
+.verevon-space-room-archive .verevon-space-room-archive__button--danger {
+  border-color: transparent;
+  background: transparent;
+  padding-inline: 6px;
+  color: color-mix(in srgb, var(--danger) 82%, var(--verevon-text));
+  font-size: 13px;
+}
+
+.verevon-space-room-archive .verevon-space-room-archive__button--danger:hover {
+  border-color: color-mix(in srgb, var(--danger) 38%, var(--verevon-border));
+  background: color-mix(in srgb, var(--danger) 7%, var(--verevon-surface));
+  color: color-mix(in srgb, var(--danger) 90%, var(--verevon-text));
+}
+
+.verevon-space-room-archive .verevon-space-confirm:has(.verevon-space-confirm__consequence) .verevon-space-room-archive__button--danger {
+  border-color: var(--danger);
+  background: var(--danger);
+  padding-inline: 14px;
+  color: #fff;
+}
+
+.verevon-space-room-archive .verevon-space-room-archive__button--danger:focus-visible {
+  outline-color: var(--danger);
+}
+
 /* ── Archived room ─────────────────────────────────────────────────────────── */
 
 .verevon-space-archived-banner {
