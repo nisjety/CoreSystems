@@ -55,9 +55,24 @@ func TestKeyIssue_IssuesAKeyGrantWithTheKeyTTLAndBudget(t *testing.T) {
 	if resp.GetBudgetMicroUsd() != 500_000 || len(resp.GetAllowedDomains()) != 1 {
 		t.Fatalf("response = %#v", resp)
 	}
-	// The key validates its own grant.
-	if _, err := srv.ValidateGrant(context.Background(), &ValidateGrantRequest{GrantId: resp.GetGrantId()}); err != nil {
-		t.Fatalf("validate as the key: %v", err)
+	if resp.GetKeyId() != "key-1" {
+		t.Fatalf("AcquireGrantResponse.key_id = %q", resp.GetKeyId())
+	}
+	// The key validates its own grant, and the response names the key.
+	v, err := srv.ValidateGrant(context.Background(), &ValidateGrantRequest{GrantId: resp.GetGrantId()})
+	if err != nil || v.GetKeyId() != "key-1" {
+		t.Fatalf("validate as the key: %#v, %v", v, err)
+	}
+	// An ordinary grant carries no key id.
+	srv.principal = func(context.Context) (authctx.Principal, error) {
+		return authctx.Principal{OrganizationID: "org1", ActorID: "user1", PrincipalType: "user"}, nil
+	}
+	plain, err := srv.AcquireGrant(context.Background(), &AcquireGrantRequest{OrgId: "org1", SessionKey: "u", Mode: "cloud", AllowedDomains: []string{"example.com"}})
+	if err != nil || plain.GetKeyId() != "" {
+		t.Fatalf("ordinary grant key_id = %q, %v", plain.GetKeyId(), err)
+	}
+	if v, err := srv.ValidateGrant(context.Background(), &ValidateGrantRequest{GrantId: plain.GetGrantId()}); err != nil || v.GetKeyId() != "" {
+		t.Fatalf("ordinary validate key_id = %q, %v", v.GetKeyId(), err)
 	}
 }
 
@@ -382,5 +397,30 @@ func TestRevokedKeys_ExpireAndFailClosedOnOverflow(t *testing.T) {
 	now = now.Add(RevokedKeyMemory + time.Second)
 	if list.revoked("never-revoked") {
 		t.Fatal("overflow closed past its window")
+	}
+}
+
+func TestKeyIssue_DisableKeyGrantsActsLikeTheSwitchOff(t *testing.T) {
+	srv, _ := onKeyServer(keyCaller("key-1"))
+	ctx := context.Background()
+	resp, err := srv.AcquireGrant(ctx, keyAcquireReq())
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.DisableKeyGrants()
+	if srv.KeyGrantsActive() {
+		t.Fatal("still active")
+	}
+	if _, err := srv.ValidateGrant(ctx, &ValidateGrantRequest{GrantId: resp.GetGrantId()}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("validate after disable: %v", err)
+	}
+	req := keyAcquireReq()
+	req.SessionKey = "after"
+	if _, err := srv.AcquireGrant(ctx, req); status.Code(err) != codes.PermissionDenied || keyReason(err) != reasonKeyGrantsDisabled {
+		t.Fatalf("acquire after disable: %v", err)
+	}
+	// A revoke still runs.
+	if n, err := srv.RevokeKey(ctx, "key-1"); err != nil || n != 1 {
+		t.Fatalf("RevokeKey after disable = %d, %v", n, err)
 	}
 }

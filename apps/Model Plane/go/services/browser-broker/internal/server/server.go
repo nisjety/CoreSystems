@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
@@ -31,6 +32,8 @@ type Server struct {
 	options   Options
 	// revokedKeys remembers recently revoked API keys (INNH-10).
 	revokedKeys *revokedKeys
+	// keyGrantsDisabled is set by DisableKeyGrants (INNH-10).
+	keyGrantsDisabled atomic.Bool
 }
 
 // Options is the optional wiring a broker main sets after NewServerWithConfig.
@@ -286,6 +289,7 @@ func (s *Server) ValidateGrant(ctx context.Context, req *ValidateGrantRequest) (
 		ResourceId:         g.ResourceID,
 		SessionKey:         g.SessionKey,
 		ReadOnly:           g.ReadOnly,
+		KeyId:              g.KeyID,
 	}, nil
 }
 

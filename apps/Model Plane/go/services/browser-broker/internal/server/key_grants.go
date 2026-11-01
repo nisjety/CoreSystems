@@ -55,7 +55,7 @@ func keyOutcome(ctx context.Context, outcome string) {
 // owner's cap. ZDR follows the ordinary floor, so a ZDR key grant lives in
 // memory with a z_ id.
 func (s *Server) acquireKeyGrant(ctx context.Context, req *AcquireGrantRequest, scopeURL string, principal authctx.Principal) (*AcquireGrantResponse, error) {
-	if !s.cfg.KeyGrantsEnabled {
+	if !s.keyGrantsOn() {
 		keyOutcome(ctx, "key_grants_disabled")
 		return nil, keyRefusal(codes.PermissionDenied, reasonKeyGrantsDisabled, errKeyGrantsDisabled.Error())
 	}
@@ -212,6 +212,22 @@ func (s *Server) RevokeKey(ctx context.Context, keyID string) (int64, error) {
 	return n, err
 }
 
+// keyGrantsOn is the switch: configured on and not disabled since
+// (DisableKeyGrants).
+func (s *Server) keyGrantsOn() bool {
+	return s.cfg.KeyGrantsEnabled && !s.keyGrantsDisabled.Load()
+}
+
+// DisableKeyGrants turns key grants off for the life of this process, as if
+// the switch were off: every api_key acquire and revoke is refused and every
+// key grant validates as revoked. The broker main calls it when the
+// api_key_revoked consumer cannot bind, so a key grant never outlives its key
+// unnoticed. There is no way back on short of a restart.
+func (s *Server) DisableKeyGrants() { s.keyGrantsDisabled.Store(true) }
+
+// KeyGrantsActive reports whether this process issues key grants.
+func (s *Server) KeyGrantsActive() bool { return s.keyGrantsOn() }
+
 // keyMayRevoke lets an api_key revoke only a live grant stamped with its own
 // key (inside its org and owner). Any other grant, and a grant that is already
 // revoked or expired, is NotFound: a key learns nothing about grants that are
@@ -222,7 +238,7 @@ func (s *Server) keyMayRevoke(ctx context.Context, principal authctx.Principal, 
 	if principal.PrincipalType != authz.PrincipalAPIKey {
 		return nil
 	}
-	if !s.cfg.KeyGrantsEnabled {
+	if !s.keyGrantsOn() {
 		return errKeyGrantsDisabled
 	}
 	g, err := s.grants.GetScoped(ctx, grantID, principal.OrganizationID, authz.OwnerFilter(principal))
@@ -247,7 +263,7 @@ func (s *Server) keyGrantLive(principal authctx.Principal, g *grant.Grant) error
 	if !authz.KeyMatches(principal, g.KeyID) {
 		return grant.ErrGrantNotFound
 	}
-	if g.KeyID != "" && (!s.cfg.KeyGrantsEnabled || s.revokedKeys.revoked(g.KeyID)) {
+	if g.KeyID != "" && (!s.keyGrantsOn() || s.revokedKeys.revoked(g.KeyID)) {
 		return grant.ErrGrantRevoked
 	}
 	return nil

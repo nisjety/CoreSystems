@@ -52,6 +52,13 @@ Tests run: `GOWORK=off go test -count=1 -v ./...`: PASS=378 FAIL=0; `go vet ./..
 Flags: `BROWSER_BROKER_KEY_GRANTS_ENABLED` (default off, pinned by `TestKeyGrants_DefaultConfigIsOff`).
 Assumed: key_id is logged only for non-ZDR grants; the revoked list is per instance (see DEPTH).
 
+### Slice MP-2c: proto key_id = 60, DisableKeyGrants (commit: see git log, `feat(browser-broker,proto): key_id = 60 ... (INNH-10 MP-2c)`)
+
+Built: `proto/model_plane/v1/browser.proto` `string key_id = 60;` on `AcquireGrantResponse` and `ValidateGrantResponse` (54-59 stay reserved). Go regenerated natively (buf 1.72, local protoc-gen-go v1.36.12, managed mode as in buf.gen.yaml, `--path model_plane/v1/browser.proto`; only `browser.pb.go` changed, kept CRLF). Broker sets it in `acquireResponse` (`human_browse.go`) and `ValidateGrant` (`server.go`). `Server.DisableKeyGrants` / `KeyGrantsActive` (atomic; acts exactly like the switch off, revoke still runs).
+Rust: `CARGO_TARGET_DIR=C:/dev/mp-w2w3-target-C CARGO_BUILD_JOBS=2 cargo check --tests -p model-gateway -p execution-core -p session-core`: exit 0, no errors; every `ValidateGrantResponse`/`AcquireGrantResponse` literal already ends in `..Default::default()`, so NO file outside lane C was touched.
+Tests: `GOWORK=off go test -count=1 -v ./...` PASS=385 FAIL=0 (with MP-2d's tests).
+Quarry: the vendored `proto/browser.proto` can take `key_id = 60` on `ValidateGrantResponse` (MP-ASKS entry).
+
 ## MP-3 contract (model-gateway, lane B builds it; what the broker will expect)
 
 - Routes: `POST /v1/browser/key-grants`, `DELETE /v1/browser/key-grants/:grant_id`. Accept ONLY an api_key principal (`PrincipalKind::ApiKey`), refuse user and service (403); api_key refused on every other route. Ingress needs CP-1 audience `model-gateway` (ask below); the delegated bearer to the broker is the `aud=browser-broker` key token with the same `sub`, `org_id`, `key_id`, `zdr`.

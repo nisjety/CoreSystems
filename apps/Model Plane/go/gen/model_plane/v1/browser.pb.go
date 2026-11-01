@@ -299,7 +299,11 @@ type AcquireGrantResponse struct {
 	AbsoluteExpiresAt *timestamppb.Timestamp `protobuf:"bytes,52,opt,name=absolute_expires_at,json=absoluteExpiresAt,proto3" json:"absolute_expires_at,omitempty"`
 	// True when the grant is read-only (WS21-S4). Quarry must refuse a mutating
 	// action on it.
-	ReadOnly      bool `protobuf:"varint,12,opt,name=read_only,json=readOnly,proto3" json:"read_only,omitempty"`
+	ReadOnly bool `protobuf:"varint,12,opt,name=read_only,json=readOnly,proto3" json:"read_only,omitempty"`
+	// INNH-10: the API key this grant was issued for (the key id, never the
+	// key). Empty for every grant not acquired by an api_key principal. 60:
+	// 54-59 stay reserved for the WS8.C follow-ons.
+	KeyId         string `protobuf:"bytes,60,opt,name=key_id,json=keyId,proto3" json:"key_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -472,6 +476,13 @@ func (x *AcquireGrantResponse) GetReadOnly() bool {
 		return x.ReadOnly
 	}
 	return false
+}
+
+func (x *AcquireGrantResponse) GetKeyId() string {
+	if x != nil {
+		return x.KeyId
+	}
+	return ""
 }
 
 type RevokeGrantRequest struct {
@@ -755,7 +766,12 @@ type ValidateGrantResponse struct {
 	SessionKey string `protobuf:"bytes,13,opt,name=session_key,json=sessionKey,proto3" json:"session_key,omitempty"`
 	// True when the grant is read-only (WS21-S4). Consumers must refuse a
 	// mutating action on it. Field 14: 13 is session_key.
-	ReadOnly      bool `protobuf:"varint,14,opt,name=read_only,json=readOnly,proto3" json:"read_only,omitempty"`
+	ReadOnly bool `protobuf:"varint,14,opt,name=read_only,json=readOnly,proto3" json:"read_only,omitempty"`
+	// INNH-10: the API key the grant was issued for (the key id, never the
+	// key); empty for a grant not acquired by an api_key principal. A consumer
+	// running a key-driven run binds the grant to the key it was started for.
+	// 60: 54-59 stay reserved for the WS8.C follow-ons.
+	KeyId         string `protobuf:"bytes,60,opt,name=key_id,json=keyId,proto3" json:"key_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -949,6 +965,13 @@ func (x *ValidateGrantResponse) GetReadOnly() bool {
 		return x.ReadOnly
 	}
 	return false
+}
+
+func (x *ValidateGrantResponse) GetKeyId() string {
+	if x != nil {
+		return x.KeyId
+	}
+	return ""
 }
 
 type DeriveRunGrantRequest struct {
@@ -1401,7 +1424,7 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\bspace_id\x18\v \x01(\tR\aspaceId\x12\x1b\n" +
 	"\tread_only\x18\f \x01(\bR\breadOnly\x12\x1f\n" +
 	"\vttl_seconds\x18\r \x01(\x05R\n" +
-	"ttlSeconds\"\xc8\x06\n" +
+	"ttlSeconds\"\xdf\x06\n" +
 	"\x14AcquireGrantResponse\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12\x1a\n" +
 	"\bendpoint\x18\x02 \x01(\tR\bendpoint\x129\n" +
@@ -1425,7 +1448,8 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"policyMode\x12%\n" +
 	"\x0edenied_domains\x183 \x03(\tR\rdeniedDomains\x12J\n" +
 	"\x13absolute_expires_at\x184 \x01(\v2\x1a.google.protobuf.TimestampR\x11absoluteExpiresAt\x12\x1b\n" +
-	"\tread_only\x18\f \x01(\bR\breadOnlyJ\x04\b\r\x10\x0e\"G\n" +
+	"\tread_only\x18\f \x01(\bR\breadOnly\x12\x15\n" +
+	"\x06key_id\x18< \x01(\tR\x05keyIdJ\x04\b\r\x10\x0e\"G\n" +
 	"\x12RevokeGrantRequest\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\"/\n" +
@@ -1435,7 +1459,7 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\x15BrowserHealthResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\"1\n" +
 	"\x14ValidateGrantRequest\x12\x19\n" +
-	"\bgrant_id\x18\x01 \x01(\tR\agrantId\"\x9c\a\n" +
+	"\bgrant_id\x18\x01 \x01(\tR\agrantId\"\xb3\a\n" +
 	"\x15ValidateGrantResponse\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12\x16\n" +
 	"\x06active\x18\x02 \x01(\bR\x06active\x129\n" +
@@ -1464,7 +1488,8 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"resourceId\x12\x1f\n" +
 	"\vsession_key\x18\r \x01(\tR\n" +
 	"sessionKey\x12\x1b\n" +
-	"\tread_only\x18\x0e \x01(\bR\breadOnly\"\xd9\x03\n" +
+	"\tread_only\x18\x0e \x01(\bR\breadOnly\x12\x15\n" +
+	"\x06key_id\x18< \x01(\tR\x05keyId\"\xd9\x03\n" +
 	"\x15DeriveRunGrantRequest\x12&\n" +
 	"\x0fparent_grant_id\x18\x01 \x01(\tR\rparentGrantId\x12\x1f\n" +
 	"\vsession_key\x18\x02 \x01(\tR\n" +

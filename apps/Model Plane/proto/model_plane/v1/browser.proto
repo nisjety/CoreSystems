@@ -167,6 +167,11 @@ message AcquireGrantResponse {
   // 13 carried the site policy's dropped hosts on the model-plane branch before
   // the merge with WS8.C; they now ride in denied_domains (51).
   reserved 13;
+
+  // INNH-10: the API key this grant was issued for (the key id, never the
+  // key). Empty for every grant not acquired by an api_key principal. 60:
+  // 54-59 stay reserved for the WS8.C follow-ons.
+  string key_id = 60;
 }
 
 message RevokeGrantRequest {
@@ -260,6 +265,12 @@ message ValidateGrantResponse {
   // True when the grant is read-only (WS21-S4). Consumers must refuse a
   // mutating action on it. Field 14: 13 is session_key.
   bool read_only = 14;
+
+  // INNH-10: the API key the grant was issued for (the key id, never the
+  // key); empty for a grant not acquired by an api_key principal. A consumer
+  // running a key-driven run binds the grant to the key it was started for.
+  // 60: 54-59 stay reserved for the WS8.C follow-ons.
+  string key_id = 60;
 }
 
 message DeriveRunGrantRequest {
