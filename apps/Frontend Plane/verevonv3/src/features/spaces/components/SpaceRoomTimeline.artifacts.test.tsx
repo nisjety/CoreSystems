@@ -67,6 +67,28 @@ afterEach(() => {
   vi.unstubAllEnvs()
 })
 
+describe('SpaceRoomTimeline retrieval decline (D1-242)', () => {
+  it('keeps the one-line note on a reopened thread, under the assistant turn it belongs to', async () => {
+    withTurns([
+      { role: 'user', content: 'Hva sier policyen?', authorSubjectId: 'user-1' },
+      { role: 'assistant', content: 'Det vet jeg ikke.', agentName: 'Lagerhjelpen', retrievalDeclined: 'role_below_floor' },
+      { role: 'assistant', content: 'Et annet svar.', agentName: 'Lagerhjelpen' },
+    ])
+    renderRoom()
+    const note = await screen.findByText(/rollen din i rommet tillater ikke kunnskapssøk/)
+    expect(note.getAttribute('data-retrieval-declined')).toBe('role_below_floor')
+    expect(note.closest('.verevon-room-turn__content')?.textContent).toContain('Det vet jeg ikke.')
+    expect(document.querySelectorAll('[data-retrieval-declined]')).toHaveLength(1)
+  })
+
+  it('says nothing for a turn that recorded no decline', async () => {
+    withTurns([{ role: 'assistant', content: 'Vanlig svar.', agentName: 'Lagerhjelpen' }])
+    renderRoom()
+    await screen.findByText('Vanlig svar.')
+    expect(document.querySelector('[data-retrieval-declined]')).toBeNull()
+  })
+})
+
 describe('SpaceRoomTimeline artifacts (WS07-S11)', () => {
   it('shows a chip under an assistant turn with the title, kind and version', async () => {
     withTurns([

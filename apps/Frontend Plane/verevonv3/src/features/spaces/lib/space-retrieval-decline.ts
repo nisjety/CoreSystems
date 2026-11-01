@@ -55,11 +55,19 @@ const COPY: Record<SpaceRetrievalDeclineReason, { no: string; en: string }> = {
   },
 }
 
-/** The reason a `retrieval_notice` code states, or `undefined` for any other notice or an unknown reason. */
+/**
+ * The reason a `retrieval_notice` code states, or `undefined` for any other notice or an unknown reason.
+ * The same code is what Model Plane stores on the answer (`retrievalDeclined`), so a reopened thread reads it
+ * back through this function too.
+ */
 export function spaceRetrievalDeclineReason(code: string): SpaceRetrievalDeclineReason | undefined {
   if (!code.startsWith(NOTICE_CODE_PREFIX)) return undefined
-  const reason = code.slice(NOTICE_CODE_PREFIX.length)
-  return Object.prototype.hasOwnProperty.call(COPY, reason) ? (reason as SpaceRetrievalDeclineReason) : undefined
+  return asSpaceRetrievalDeclineReason(code.slice(NOTICE_CODE_PREFIX.length))
+}
+
+/** A bare reason (the form the room's own turn types carry), or `undefined` for a string outside the closed set. */
+export function asSpaceRetrievalDeclineReason(value: string): SpaceRetrievalDeclineReason | undefined {
+  return Object.prototype.hasOwnProperty.call(COPY, value) ? (value as SpaceRetrievalDeclineReason) : undefined
 }
 
 /** The one-line note for a reason, in the Space's two languages. */

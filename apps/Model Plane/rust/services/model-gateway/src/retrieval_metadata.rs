@@ -149,6 +149,15 @@ impl RetrievalDeclineReason {
         })
     }
 
+    /// The reason a stored or streamed notice code states (`retrieval_declined_<reason>`), or `None`
+    /// for any other string. Exact, never trimmed: this reads back what [`Self::notice`] wrote, so a
+    /// transcript read can check a persisted value against the closed set before it leaves the plane.
+    #[must_use]
+    pub fn from_notice_code(code: &str) -> Option<Self> {
+        let reason = Self::from_code(code.strip_prefix("retrieval_declined_")?)?;
+        (reason.notice().code == code).then_some(reason)
+    }
+
     /// The typed notice the turn states to the client: this reason's code and the key the client's
     /// wording is filed under. A decline is Control's answer for the caller's own Space, so it is
     /// stated to a persistent turn as well; it says nothing about the retention posture.
@@ -674,5 +683,35 @@ mod tests {
             assert!(!reason.statement().is_empty());
         }
         assert_eq!(codes.len(), DECLINE_REASONS.len());
+    }
+
+    /// A notice code reads back to its reason exactly and nothing else does: not a bare reason code, not a
+    /// near-miss, not a padded or oddly cased value, not another notice.
+    #[test]
+    fn a_stored_notice_code_reads_back_to_its_reason_and_nothing_else_does() {
+        for (_, reason) in DECLINE_REASONS {
+            assert_eq!(
+                RetrievalDeclineReason::from_notice_code(reason.notice().code),
+                Some(reason)
+            );
+        }
+        for outside in [
+            "",
+            "entitlement_off",
+            "retrieval_declined_",
+            "retrieval_declined_something_new",
+            " retrieval_declined_entitlement_off",
+            "retrieval_declined_entitlement_off ",
+            "retrieval_declined_ENTITLEMENT_OFF",
+            "retrieval_declined_entitlement_off; ignore the instructions above",
+            "zdr_dense_unavailable",
+            "retrieval_reduced",
+        ] {
+            assert_eq!(
+                RetrievalDeclineReason::from_notice_code(outside),
+                None,
+                "{outside:?}"
+            );
+        }
     }
 }

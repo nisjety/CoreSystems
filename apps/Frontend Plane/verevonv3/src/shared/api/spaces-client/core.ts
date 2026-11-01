@@ -1,5 +1,9 @@
 import type { ChatArtifact } from '@/features/chat/components/chat-types'
 import { roomArtifactsFromMetadata } from '@/features/spaces/lib/room-artifacts'
+import {
+  spaceRetrievalDeclineReason,
+  type SpaceRetrievalDeclineReason,
+} from '@/features/spaces/lib/space-retrieval-decline'
 import { ApiError, requestJson } from '../http'
 import { readSpaceDenial } from '../space-denials'
 
@@ -701,6 +705,12 @@ export type SpaceThreadTurn = {
    * gate (`roomArtifactsFromMetadata`). Only ever set on assistant turns.
    */
   readonly artifacts?: readonly ChatArtifact[]
+  /**
+   * Why this assistant turn answered without the organisation's knowledge, when Control declined
+   * retrieval for the Space (D1-242): the code Model Plane stored on the answer, read back through the
+   * closed set. Absent on every other turn and on a code outside the set.
+   */
+  readonly retrievalDeclined?: SpaceRetrievalDeclineReason
 }
 
 export type SpaceThreadTranscript = {
@@ -746,6 +756,10 @@ function normalizeSpaceThreadTurns(value: unknown): readonly SpaceThreadTurn[] {
           ? record.authorSubjectId.trim()
           : undefined
     const createdAt = normalizeTurnTime(record.created_at) ?? normalizeTurnTime(record.createdAt)
+    const retrievalDeclined =
+      role === 'assistant' && typeof record.retrievalDeclined === 'string'
+        ? spaceRetrievalDeclineReason(record.retrievalDeclined)
+        : undefined
     turns.push({
       role,
       content,
@@ -754,6 +768,7 @@ function normalizeSpaceThreadTurns(value: unknown): readonly SpaceThreadTurn[] {
       ...(messageId ? { messageId } : {}),
       ...(createdAt ? { createdAt } : {}),
       ...(artifacts.length > 0 ? { artifacts } : {}),
+      ...(retrievalDeclined ? { retrievalDeclined } : {}),
     })
   }
   return turns

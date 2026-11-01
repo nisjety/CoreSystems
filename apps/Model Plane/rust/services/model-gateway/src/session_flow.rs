@@ -2004,6 +2004,27 @@ pub(crate) fn with_result_receipt(
     Some(metadata)
 }
 
+/// The metadata key a declined retrieval's notice code is stored under (D1-242).
+pub(crate) const RETRIEVAL_DECLINED_KEY: &str = "retrievalDeclined";
+
+/// Record on the answer why Control declined retrieval for its turn, so a reopened thread can say what the
+/// live stream said. Only the typed notice code is stored, the same value the `retrieval_notice` event
+/// carried: never a sentence, never Control's text. The answer's metadata is a field of the message that
+/// already exists, so this adds no table and no column. Absent when retrieval was not declined, which leaves
+/// the metadata exactly as it was.
+pub(crate) fn with_retrieval_decline(
+    metadata: Option<prost_types::Struct>,
+    decline: Option<crate::retrieval_metadata::RetrievalDeclineReason>,
+) -> Option<prost_types::Struct> {
+    let Some(reason) = decline else { return metadata; };
+    let mut metadata = metadata.unwrap_or_default();
+    metadata.fields.insert(
+        RETRIEVAL_DECLINED_KEY.to_owned(),
+        json_to_prost_value(&serde_json::json!(reason.notice().code)),
+    );
+    Some(metadata)
+}
+
 fn json_to_prost_value(value: &serde_json::Value) -> prost_types::Value {
     use prost_types::value::Kind;
     let kind = match value {
@@ -2859,5 +2880,43 @@ mod tests {
                 "{outside}"
             );
         }
+    }
+
+    /// A declined retrieval is stored on the answer as its typed notice code and nothing else, beside the
+    /// evidence the turn already recorded; with no decline the metadata is returned untouched.
+    #[test]
+    fn a_declined_retrieval_is_stored_as_its_notice_code_and_an_absent_decline_changes_nothing() {
+        use crate::retrieval_metadata::RetrievalDeclineReason;
+        use prost_types::value::Kind;
+        let stored = |metadata: &Option<prost_types::Struct>| -> Option<String> {
+            match metadata.as_ref()?.fields.get(crate::session_flow::RETRIEVAL_DECLINED_KEY)?.kind.as_ref()? {
+                Kind::StringValue(code) => Some(code.clone()),
+                _ => None,
+            }
+        };
+        assert_eq!(crate::session_flow::with_retrieval_decline(None, None), None);
+        let existing = prost_types::Struct {
+            fields: std::collections::BTreeMap::from([(
+                "confidence".to_owned(),
+                prost_types::Value { kind: Some(Kind::NumberValue(0.5)) },
+            )]),
+        };
+        assert_eq!(
+            crate::session_flow::with_retrieval_decline(Some(existing.clone()), None),
+            Some(existing.clone()),
+            "no decline: the metadata is as it was"
+        );
+        let declined = crate::session_flow::with_retrieval_decline(
+            Some(existing.clone()),
+            Some(RetrievalDeclineReason::RoleBelowFloor),
+        );
+        assert_eq!(stored(&declined).as_deref(), Some("retrieval_declined_role_below_floor"));
+        assert!(
+            declined.as_ref().is_some_and(|metadata| metadata.fields.contains_key("confidence")),
+            "the evidence already recorded stays"
+        );
+        let alone = crate::session_flow::with_retrieval_decline(None, Some(RetrievalDeclineReason::NotAuthorized));
+        assert_eq!(stored(&alone).as_deref(), Some("retrieval_declined_not_authorized"));
+        assert_eq!(alone.expect("metadata").fields.len(), 1, "the code is the only thing stored");
     }
 }

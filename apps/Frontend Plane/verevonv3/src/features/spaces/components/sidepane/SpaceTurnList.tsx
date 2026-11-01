@@ -12,6 +12,11 @@ import { agentAvatarColor, agentForName, memberTint } from '../../lib/agent-avat
 import { agentCardModel, memberCardModel } from '../../lib/agent-activity'
 import type { IdentityCardModel } from '../../lib/agent-activity'
 import { continuesTurnGroup, formatTurnTime } from '../../lib/space-thread-presentation'
+import {
+  asSpaceRetrievalDeclineReason,
+  spaceRetrievalDeclineCopy,
+  type SpaceRetrievalDeclineReason,
+} from '../../lib/space-retrieval-decline'
 
 /**
  * The rows of one thread, read-only. Extracted from the room timeline so the
@@ -41,6 +46,9 @@ export type TranscriptTurn = {
   readonly createdAt?: string
   /** Artifacts this assistant turn persisted (already through the room's gate). */
   readonly artifacts?: readonly ChatArtifact[]
+  /** Why this assistant turn answered without the organisation's knowledge (D1-242), when Control
+   * declined retrieval for the Space. A reason from the closed set; absent otherwise. */
+  readonly retrievalDeclined?: SpaceRetrievalDeclineReason
 }
 
 export const MAX_TURNS_PER_POST = 30
@@ -76,6 +84,11 @@ export function normalizeTranscriptTurns(
     const createdAt = typeof record.createdAt === 'string' && Number.isFinite(Date.parse(record.createdAt))
       ? new Date(record.createdAt).toISOString()
       : undefined
+    // Already a bare reason from the transcript client; re-checked against the closed set here so a turn from
+    // any other source can only carry a reason the room has words for.
+    const retrievalDeclined = role === 'assistant' && typeof record.retrievalDeclined === 'string'
+      ? asSpaceRetrievalDeclineReason(record.retrievalDeclined)
+      : undefined
     normalized.push({
       role,
       content,
@@ -84,6 +97,7 @@ export function normalizeTranscriptTurns(
       ...(messageId ? { messageId } : {}),
       ...(createdAt ? { createdAt } : {}),
       ...(artifacts.length > 0 ? { artifacts } : {}),
+      ...(retrievalDeclined ? { retrievalDeclined } : {}),
     })
     if (normalized.length >= maxTurns) break
   }
@@ -250,6 +264,15 @@ export function SpaceTurnList(props: SpaceTurnListProps) {
                     <ChatMarkdown content={turn.content} />
                   </div>
                 </Show>
+              </Show>
+              {/* The same one-line note the live exchange showed (D1-242): this answer did not use the
+                  organisation's knowledge, and why. Read from the stored answer, so reopening the thread keeps it. */}
+              <Show when={turn.role === 'assistant' ? turn.retrievalDeclined : undefined}>
+                {(reason) => (
+                  <p class="verevon-space-room-exchange__stopped" data-retrieval-declined={reason()}>
+                    {i18n.tr(spaceRetrievalDeclineCopy(reason()).no, spaceRetrievalDeclineCopy(reason()).en)}
+                  </p>
+                )}
               </Show>
               <Show when={props.onOpenArtifact && turn.role === 'assistant' && (turn.artifacts?.length ?? 0) > 0}>
                 <div class="verevon-space-artifact-chips">

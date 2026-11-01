@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
-import { spaceRetrievalDeclineCopy, spaceRetrievalDeclineReason } from './space-retrieval-decline'
+import {
+  asSpaceRetrievalDeclineReason,
+  spaceRetrievalDeclineCopy,
+  spaceRetrievalDeclineReason,
+} from './space-retrieval-decline'
 
 const REASONS = [
   'entitlement_off',
@@ -36,6 +40,13 @@ describe('space retrieval decline (D1-242)', () => {
       '',
     ]) {
       expect(spaceRetrievalDeclineReason(code), code).toBeUndefined()
+    }
+  })
+
+  it('reads a bare reason only from the closed set', () => {
+    for (const reason of REASONS) expect(asSpaceRetrievalDeclineReason(reason)).toBe(reason)
+    for (const value of ['', 'retrieval_declined_not_authorized', 'something_new', 'constructor', '__proto__', 'toString']) {
+      expect(asSpaceRetrievalDeclineReason(value), value).toBeUndefined()
     }
   })
 })
