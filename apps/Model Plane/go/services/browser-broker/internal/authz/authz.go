@@ -19,6 +19,11 @@ const (
 	Audience   = "browser-broker"
 	ScopeRead  = "browser:read"
 	ScopeWrite = "browser:write"
+
+	// PrincipalUser and PrincipalService are the authctx principal types this
+	// broker authorizes.
+	PrincipalUser    = "user"
+	PrincipalService = "service"
 )
 
 // NewVerifierFromEnv loads trust material eagerly. It rejects attempts to
@@ -74,13 +79,20 @@ func Authorize(principal authctx.Principal, method string, request any) error {
 	default:
 		return errors.New("unknown browser-broker method")
 	}
-	if principal.PrincipalType == "user" {
+	switch principal.PrincipalType {
+	case PrincipalUser:
 		return nil
+	case PrincipalService:
+		if !principal.HasScope(required) {
+			return errors.New("required browser scope is missing")
+		}
+		return nil
+	default:
+		// A principal type this broker was not taught is refused outright. It
+		// used to fall through to the scoped-service branch, whose owner filter
+		// is the organization-wide empty one (fail open).
+		return errors.New("unsupported browser principal type")
 	}
-	if !principal.HasScope(required) {
-		return errors.New("required browser scope is missing")
-	}
-	return nil
 }
 
 // Principal returns the cryptographically verified caller or fails closed.
@@ -92,11 +104,23 @@ func Principal(ctx context.Context) (authctx.Principal, error) {
 	return principal, nil
 }
 
+// noOwner is the owner filter of a principal type the broker does not know. It
+// can never equal a stored owner: the durable store answers NotFound for a NUL
+// byte without a query, and no verified identity carries one.
+const noOwner = "\x00unknown-principal"
+
 // OwnerFilter pins users to their own records. A service with an explicit
-// method scope may access any owner inside its verified organization.
+// method scope may access any owner inside its verified organization: the
+// empty filter is a service's alone. Every other principal type gets a filter
+// that matches no grant. It used to get "" for anything that was not a user,
+// i.e. any owner in the org: fail open.
 func OwnerFilter(principal authctx.Principal) string {
-	if principal.PrincipalType == "user" {
+	switch principal.PrincipalType {
+	case PrincipalUser:
 		return principal.ActorID
+	case PrincipalService:
+		return ""
+	default:
+		return noOwner
 	}
-	return ""
 }
