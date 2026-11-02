@@ -256,6 +256,13 @@ struct BrowserRunStartRequest {
     /// default.
     #[serde(default)]
     run_source: Option<String>,
+    /// Attach mode (WS8.G): the id of the caller's own browser session (the run
+    /// the person is driving). The run does not start a Quarry run of its own; it
+    /// steps on that session's agent tab under an `attach` grant derived here with
+    /// the caller's bearer. Needs `MODEL_GATEWAY_BROWSER_ATTACH` on, else the start
+    /// is refused 400 `browser_attach_unavailable`.
+    #[serde(default)]
+    attach_session_id: Option<String>,
 }
 
 /// The three keys a model-driven run may ask Quarry to tighten on. Same shape
@@ -277,6 +284,40 @@ struct RunPolicyAsk {
 /// without the restriction, so an older Quarry can never drop it silently.
 fn policy_ask_flag(value: Option<&str>) -> bool {
     budget_claim_flag(value)
+}
+
+/// `MODEL_GATEWAY_BROWSER_ATTACH` (WS8.G): only `1`, `true` or `on` lets a start
+/// carry `attach_session_id`. Off (the default) refuses such a start 400
+/// `browser_attach_unavailable` before any grant, thread or run write, so a stack
+/// whose broker or Quarry has attach dark never half-runs one.
+fn attach_flag(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        let value = value.trim();
+        value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("on")
+    })
+}
+
+/// Longest attach session id this route forwards (the broker bounds a resource
+/// id at 256 bytes; session ids are far shorter).
+const MAX_ATTACH_SESSION_ID_BYTES: usize = 128;
+
+/// The attach session id of a start, checked. `Ok(None)` when the start does not
+/// attach. With the flag off a start that names one is refused
+/// `browser_attach_unavailable`; a blank, oversized or non-printable id is
+/// refused `attach_session_id_invalid`.
+fn attach_session_for(enabled: bool, req: &BrowserRunStartRequest) -> Result<Option<String>, ApiError> {
+    let Some(raw) = req.attach_session_id.as_deref() else {
+        return Ok(None);
+    };
+    if !enabled {
+        return Err(bad_request("browser_attach_unavailable"));
+    }
+    let id = raw.trim();
+    let printable = id.bytes().all(|b| b.is_ascii_graphic());
+    if id.is_empty() || id.len() > MAX_ATTACH_SESSION_ID_BYTES || !printable {
+        return Err(bad_request("attach_session_id_invalid"));
+    }
+    Ok(Some(id.to_owned()))
 }
 
 /// The four capabilities plan mode switches off (Quarry capability names).
@@ -504,6 +545,19 @@ fn request_id_for(headers: &HeaderMap) -> String {
         .map_or_else(|| format!("req-{}", new_ulid()), str::to_owned)
 }
 
+/// Write the attach session into the browser `tool_input` (WS8.G): the
+/// `attach_session_id` execution-core attaches to (`grant_id` is already the
+/// derived `attach` grant). A saved browser profile is never loaded into someone
+/// else's session, so `profile_id` is cleared. A start that does not attach
+/// carries the `tool_input` it always did.
+fn insert_attach_fields(tool_input: &mut Value, attach_session_id: Option<&str>) {
+    let (Some(session), Some(fields)) = (attach_session_id, tool_input.as_object_mut()) else {
+        return;
+    };
+    fields.insert("attach_session_id".to_owned(), json!(session));
+    fields.insert("profile_id".to_owned(), Value::Null);
+}
+
 /// Write the policy ask, trace context and request id into the browser
 /// `tool_input`. Keys the run has no value for are not written, so a start with
 /// none of them carries the `tool_input` it always did, except the request id
@@ -690,6 +744,10 @@ fn run_request_fingerprint(req: &BrowserRunStartRequest) -> String {
     part("require_approval", &format!("{:?}", req.require_approval));
     part("profile_id", req.profile_id.as_deref().unwrap_or(""));
     part("allowed_domains", &domains.join(","));
+    if let Some(session) = non_empty(req.attach_session_id.as_deref()) {
+        // Only when attaching: a retry that names another session is another request.
+        part("attach_session_id", session);
+    }
     if req.plan_mode == Some(true) {
         // Only when asked, so a request that never names it keeps the fingerprint it had.
         part("plan_mode", "true");
@@ -1003,8 +1061,12 @@ fn presented_run_budget(
     }
 }
 
-/// The only `DeriveRunGrant` purpose this route asks for.
+/// The `DeriveRunGrant` purpose of an ordinary run.
 const DERIVE_PURPOSE_AI_RUN: &str = "ai_run";
+/// The `DeriveRunGrant` purpose of an attach start (WS8.G): an `attach` grant
+/// whose `resource_id` is the session id. The broker takes it from a signed-in
+/// user only.
+const DERIVE_PURPOSE_ATTACH: &str = "attach";
 /// Most hosts a run may be derived with from a `human_browse` parent (WS8.C).
 /// The broker applies its own bound (`BROWSER_BROKER_MAX_RUN_DOMAINS`); this
 /// keeps an oversized list from reaching it.
@@ -1048,6 +1110,26 @@ async fn resolve_browser_grant(
     if !response.active || response.grant_id.trim() != grant_id {
         // Never distinguish forged, expired, revoked, or cross-tenant grants.
         return Err(browser_grant_forbidden());
+    }
+    // Attach mode (WS8.G): the grant that backs the run is an `attach` grant derived
+    // with the caller's bearer, bound to the named session; never a run grant.
+    if non_empty(request.attach_session_id.as_deref()).is_some() {
+        return resolve_attach_grant(
+            state,
+            request,
+            browser_bearer,
+            org_id,
+            run_key,
+            grant_id,
+            (response.kind.as_str(), response.zdr, &response.allowed_domains),
+            mint,
+            BudgetClaim::from_wire(
+                response.budget_micro_usd,
+                response.budget_max_steps,
+                response.budget_max_runtime_s,
+            ),
+        )
+        .await;
     }
     // A `human_browse` grant (WS8.C) is a person's own open web: it has no host
     // list to canonicalize and is never lent to a run as it is. The run must name
@@ -1188,6 +1270,79 @@ async fn resolve_browser_grant(
     })
 }
 
+/// Resolves the grant of an attach start (WS8.G). The parent must be the person's
+/// own `session` or `human_browse` grant, never ZDR (the broker refuses it too),
+/// and the request must name its hosts: an attach never inherits a parent's list,
+/// and a `human_browse` parent has none to inherit. The `attach` grant is derived
+/// with the caller's bearer, bound (`resource_id`) to the named session, before
+/// the caller's thread or run exists.
+///
+/// `parent` is the validated parent's `(kind, zdr, allowed_domains)`.
+// Nine inputs, all distinct facts about one derive; see `derive_run_grant`.
+#[allow(clippy::too_many_arguments)]
+async fn resolve_attach_grant(
+    state: &AppState,
+    request: &BrowserRunStartRequest,
+    browser_bearer: &VerifiedBrowserBearer,
+    org_id: &str,
+    run_key: &str,
+    parent_grant_id: &str,
+    parent: (&str, bool, &[String]),
+    mint: &BudgetMint,
+    parent_budget: Option<BudgetClaim>,
+) -> Result<ResolvedBrowserGrant, ApiError> {
+    let (kind, zdr, parent_domains) = parent;
+    // A ZDR grant must never back a durable run, whatever the request says.
+    if zdr {
+        return Err(browser_run_zdr_refusal());
+    }
+    if !matches!(kind, "session" | "human_browse") {
+        // A run grant, an approval grant or anything else is not the person's own
+        // session: an attach is derived from that and from nothing narrower.
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "browser_grant_not_derivable" })),
+        ));
+    }
+    let hosts = match request.allowed_domains.as_deref() {
+        None | Some([]) => {
+            return Err(bad_request(
+                "allowed_domains required: an attach session names its hosts",
+            ))
+        }
+        Some(requested) => canonical_browser_domains(requested)
+            .map_err(|()| bad_request("allowed_domains must be a bounded hostname policy"))?,
+    };
+    if hosts.len() > MAX_HUMAN_BROWSE_RUN_DOMAINS {
+        return Err(bad_request(
+            "allowed_domains names too many hosts for an attach session",
+        ));
+    }
+    let parent_policy = if kind == "human_browse" {
+        // An open-web parent has no host list; the named hosts stand in for it.
+        hosts.clone()
+    } else {
+        let broker_policy =
+            canonical_browser_domains(parent_domains).map_err(|()| browser_grant_forbidden())?;
+        if broker_policy != parent_domains {
+            return Err(browser_grant_forbidden());
+        }
+        broker_policy
+    };
+    derive_run_grant(
+        state,
+        request,
+        browser_bearer,
+        org_id,
+        run_key,
+        parent_grant_id,
+        &parent_policy,
+        mint,
+        parent_budget,
+    )
+    .await
+}
+
 /// True when a presented run grant was derived (by this gateway) for a run other than
 /// the one starting (D1-001). The broker reports the key a grant was issued under
 /// (`ValidateGrantResponse.session_key`); for a run grant this gateway derived it is
@@ -1229,7 +1384,13 @@ async fn derive_run_grant(
     // broker refuses a derive that widens its parent, and a run should not fail
     // to start because the organization's ceiling is above a session's bound).
     // None asks for none: a parent's claim is inherited by the broker.
-    let asked = if mint.enabled {
+    //
+    // An attach (WS8.G) sends none: the broker's attach derive does take the claim
+    // fields (the same `tightenBudget` as a run grant), but an attach grant is a
+    // lease on the person's own session, so it carries the parent's claim as the
+    // broker inherits it and this run's numbers are tightened here instead.
+    let attach = non_empty(request.attach_session_id.as_deref());
+    let asked = if mint.enabled && attach.is_none() {
         mint.minted.map(|(claim, source)| {
             (
                 parent_budget.map_or(claim, |parent| claim.tighter(parent)),
@@ -1246,14 +1407,20 @@ async fn derive_run_grant(
             session_key: run_key.to_owned(),
             org_id: org_id.to_owned(),
             allowed_domains: requested.clone(),
-            purpose: DERIVE_PURPOSE_AI_RUN.to_owned(),
+            purpose: if attach.is_some() {
+                DERIVE_PURPOSE_ATTACH
+            } else {
+                DERIVE_PURPOSE_AI_RUN
+            }
+            .to_owned(),
             ttl_seconds: 0,
             budget_micro_usd: claim.map_or(0, |claim| claim.micro_usd),
             budget_max_steps: claim.map_or(0, |claim| claim.max_steps),
             budget_max_runtime_s: claim.map_or(0, |claim| claim.max_runtime_s),
             budget_source: source.unwrap_or_default().to_owned(),
             budget_minted_at_unix: 0,
-            resource_id: String::new(),
+            // Only an attach grant takes a resource: the session it is bound to.
+            resource_id: attach.unwrap_or_default().to_owned(),
         }
     };
     let mut broker = state.browser_client.clone();
@@ -1294,7 +1461,9 @@ async fn derive_run_grant(
     let grant_id = derived.grant_id.trim();
     if grant_id.is_empty()
         || grant_id == parent_grant_id
-        || derived.kind != "run"
+        || derived.kind != if attach.is_some() { "attach" } else { "run" }
+        // An attach grant is bound to the session it was asked for and no other.
+        || attach.is_some_and(|session| derived.resource_id != session)
         || derived.parent_grant_id != parent_grant_id
         // The parent was validated as non-ZDR above; a ZDR run grant would
         // mean the broker and this route disagree about retention.
@@ -1402,6 +1571,9 @@ async fn revoke_derived_run_grant(
 /// cannot seed a run (kind, lifetime, ZDR posture, a conflicting replay) is
 /// 409 `browser_grant_not_derivable`; anything unexpected fails closed.
 fn browser_derive_status_to_http(status: &tonic::Status) -> ApiError {
+    if let Some(refusal) = attach_derive_refusal(status) {
+        return refusal;
+    }
     match status.code() {
         tonic::Code::FailedPrecondition | tonic::Code::AlreadyExists => (
             StatusCode::CONFLICT,
@@ -1423,6 +1595,37 @@ fn browser_derive_status_to_http(status: &tonic::Status) -> ApiError {
         ),
         _ => browser_grant_status_to_http(status),
     }
+}
+
+// The broker's attach refusals. Its `errors.go` names them `attach_zdr_refused`,
+// `attach_needs_owner` and `attach_resource_invalid` only as metric outcomes; on
+// the wire they are a gRPC code plus the error text (`grant.ErrAttach*` in
+// `humanbrowse.go` and the user-only check in `server.go`), which is what is
+// matched here, code and text together.
+const BROKER_ATTACH_ZDR_REFUSED: &str = "an attach grant cannot derive from a zero data retention grant";
+const BROKER_ATTACH_NEEDS_OWNER: &str = "an attach grant needs a user owner";
+const BROKER_ATTACH_USER_ONLY: &str = "an attach grant is derived by a signed-in user only";
+
+/// The three attach refusals of `DeriveRunGrant`, by the codes `errors.go` gives
+/// them: 412 `attach_zdr_refused` (the parent is ZDR; same status as this
+/// route's own ZDR refusal), 403 `attach_needs_owner` (the caller is not a
+/// signed-in user), 400 `attach_resource_invalid` (the session id was refused).
+/// `None` for every other status.
+fn attach_derive_refusal(status: &tonic::Status) -> Option<ApiError> {
+    let (http, error) = match (status.code(), status.message()) {
+        (tonic::Code::FailedPrecondition, BROKER_ATTACH_ZDR_REFUSED) => {
+            (StatusCode::PRECONDITION_FAILED, "attach_zdr_refused")
+        }
+        (
+            tonic::Code::PermissionDenied,
+            BROKER_ATTACH_NEEDS_OWNER | BROKER_ATTACH_USER_ONLY,
+        ) => (StatusCode::FORBIDDEN, "attach_needs_owner"),
+        (tonic::Code::InvalidArgument, message) if message.contains("resource_id") => {
+            (StatusCode::BAD_REQUEST, "attach_resource_invalid")
+        }
+        _ => return None,
+    };
+    Some((http, Json(json!({ "error": error }))))
 }
 
 fn browser_run_zdr_refusal() -> ApiError {
@@ -1634,6 +1837,11 @@ async fn browser_run_start_inner(
     // or run write: flag off, or a malformed ask, never "run without it".
     let policy_ask = policy_ask_for(
         policy_ask_flag(std::env::var("MODEL_GATEWAY_BROWSER_POLICY_ASK").ok().as_deref()),
+        &req,
+    )?;
+    // Attach mode needs its flag; refused the same way, before any write.
+    let attach_session = attach_session_for(
+        attach_flag(std::env::var("MODEL_GATEWAY_BROWSER_ATTACH").ok().as_deref()),
         &req,
     )?;
     let run_source = run_source_of(&req);
@@ -1884,6 +2092,7 @@ async fn browser_run_start_inner(
         "profile_id": req.profile_id,
         "start_url": req.start_url,
     });
+    insert_attach_fields(&mut tool_input, attach_session.as_deref());
     insert_planner_fields(&mut tool_input, max_planner_tokens, planner.flag);
     insert_policy_and_trace_fields(&mut tool_input, policy_ask, run_source, &request_id);
     let tool_input = tool_input.to_string();
@@ -2570,6 +2779,7 @@ mod tests {
             plan_mode: None,
             policy: None,
             run_source: None,
+            attach_session_id: None,
         }
     }
 
@@ -3158,6 +3368,330 @@ mod tests {
             assert!(broker.derive_requests.lock().expect("recorder")[0]
                 .allowed_domains
                 .is_empty());
+        }
+    }
+
+    // ── WS8.G: attach mode ──────────────────────────────────────────────────
+
+    const ATTACH_SESSION: &str = "sess-run-01J0USER";
+
+    fn attach_request(grant_id: &str, hosts: &[&str]) -> BrowserRunStartRequest {
+        let mut request = browser_request(grant_id);
+        request.attach_session_id = Some(ATTACH_SESSION.to_owned());
+        request.allowed_domains = Some(hosts.iter().map(|h| (*h).to_owned()).collect());
+        request.start_url = None;
+        request
+    }
+
+    fn attach_derived(grant_id: &str, parent: &str, domains: &[&str]) -> DeriveRunGrantResponse {
+        DeriveRunGrantResponse {
+            kind: "attach".to_owned(),
+            resource_id: ATTACH_SESSION.to_owned(),
+            ..derived_run(grant_id, parent, domains)
+        }
+    }
+
+    fn attach_session_broker(derive: Result<DeriveRunGrantResponse, tonic::Code>) -> TestBrowserBroker {
+        session_broker(&["example.com", "example.org"], derive)
+    }
+
+    #[tokio::test]
+    async fn attach_derives_with_user_bearer_before_any_run_write() {
+        // Session parent, then human_browse parent: both derive an attach grant
+        // with the caller's bearer, bound to the session, with no budget claim.
+        let brokers = [
+            ("session-1", attach_session_broker(Ok(attach_derived("att-1", "session-1", &["example.com"])))),
+            (
+                "human-1",
+                human_browse_broker(Ok(attach_derived("att-1", "human-1", &["example.com"]))),
+            ),
+        ];
+        for (parent, broker) in brokers {
+            let request = attach_request(parent, &["Example.com"]);
+            let mint = minted(5_000_000, 10, 60, "request");
+            let (result, broker) = resolve_with_mint(broker, request, mint).await;
+            let grant = result.expect("derived attach grant");
+            assert_eq!(grant.grant_id, "att-1");
+            assert_eq!(grant.parent_grant_id.as_deref(), Some(parent));
+            assert_eq!(grant.allowed_domains, ["example.com"]);
+
+            let derives = broker.derive_requests.lock().expect("derive recorder");
+            assert_eq!(derives.len(), 1, "{parent}");
+            let sent = &derives[0];
+            assert_eq!(sent.purpose, "attach");
+            assert_eq!(sent.resource_id, ATTACH_SESSION);
+            assert_eq!(sent.parent_grant_id, parent);
+            assert_eq!(sent.session_key, "browser-run-key");
+            assert_eq!(sent.allowed_domains, ["example.com"]);
+            assert_eq!(
+                (sent.budget_micro_usd, sent.budget_max_steps, sent.budget_max_runtime_s),
+                (0, 0, 0),
+                "an attach derive sends no claim; the broker inherits the parent's"
+            );
+            assert!(sent.budget_source.is_empty());
+            assert_eq!(
+                broker.authorizations.lock().expect("authorization recorder").as_slice(),
+                ["Bearer browser-user-token", "Bearer browser-user-token"],
+                "validate and derive both use the caller's browser bearer"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn attach_requires_explicit_domains() {
+        for parent in ["session-1", "human-1"] {
+            for allowed in [None, Some(Vec::new())] {
+                let mut request = attach_request(parent, &[]);
+                request.allowed_domains = allowed;
+                let broker = if parent == "session-1" {
+                    attach_session_broker(Ok(attach_derived("att-1", parent, &["example.com"])))
+                } else {
+                    human_browse_broker(Ok(attach_derived("att-1", parent, &["example.com"])))
+                };
+                let (result, broker) = resolve_with(broker, request).await;
+                let error = result.expect_err("an attach never inherits hosts");
+                assert_eq!(error.0, StatusCode::BAD_REQUEST, "{parent}");
+                assert!(
+                    error.1 .0["error"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("names its hosts")),
+                    "{:?}",
+                    error.1 .0
+                );
+                assert!(broker.derive_requests.lock().expect("recorder").is_empty());
+            }
+        }
+        // More than the cap is refused too, before the broker is asked.
+        let hosts: Vec<String> = (0..=MAX_HUMAN_BROWSE_RUN_DOMAINS)
+            .map(|i| format!("h{i}.example.com"))
+            .collect();
+        let refs: Vec<&str> = hosts.iter().map(String::as_str).collect();
+        let (result, broker) = resolve_with(
+            human_browse_broker(Ok(attach_derived("att-1", "human-1", &["h0.example.com"]))),
+            attach_request("human-1", &refs),
+        )
+        .await;
+        assert_eq!(result.expect_err("nine hosts").0, StatusCode::BAD_REQUEST);
+        assert!(broker.derive_requests.lock().expect("recorder").is_empty());
+    }
+
+    #[tokio::test]
+    async fn attach_rejected_for_zdr() {
+        for kind in ["session", "human_browse"] {
+            let validation = ValidateGrantResponse {
+                kind: kind.to_owned(),
+                zdr: true,
+                ..session_validation("grant-z", &["example.com"])
+            };
+            let broker = TestBrowserBroker {
+                derive: Some(Ok(attach_derived("att-1", "grant-z", &["example.com"]))),
+                ..TestBrowserBroker::validating(Ok(validation))
+            };
+            let (result, broker) =
+                resolve_with(broker, attach_request("grant-z", &["example.com"])).await;
+            assert_eq!(
+                result.expect_err(kind).0,
+                StatusCode::PRECONDITION_FAILED,
+                "{kind}"
+            );
+            assert!(broker.derive_requests.lock().expect("recorder").is_empty());
+        }
+        // The broker's own refusal (a ZDR parent it was asked to attach to) keeps
+        // its name: gRPC FailedPrecondition + the error text of `ErrAttachZdrRefused`.
+        let refusal = browser_derive_status_to_http(&tonic::Status::failed_precondition(
+            BROKER_ATTACH_ZDR_REFUSED,
+        ));
+        assert_eq!(refusal.0, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(refusal.1 .0["error"], "attach_zdr_refused");
+    }
+
+    #[tokio::test]
+    async fn attach_rejected_when_parent_is_run_or_approval_kind() {
+        for kind in ["run", "", "sensitive_approval", "attach", "origin_extension"] {
+            let validation = ValidateGrantResponse {
+                kind: kind.to_owned(),
+                ..session_validation("grant-x", &["example.com"])
+            };
+            let broker = TestBrowserBroker {
+                derive: Some(Ok(attach_derived("att-1", "grant-x", &["example.com"]))),
+                ..TestBrowserBroker::validating(Ok(validation))
+            };
+            let (result, broker) =
+                resolve_with(broker, attach_request("grant-x", &["example.com"])).await;
+            let error = result.expect_err(kind);
+            assert_eq!(error.0, StatusCode::FORBIDDEN, "{kind:?}");
+            assert_eq!(error.1 .0["error"], "browser_grant_not_derivable", "{kind:?}");
+            assert!(
+                broker.derive_requests.lock().expect("recorder").is_empty(),
+                "{kind:?} must not derive"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_attach_answer_for_another_session_or_kind_is_refused() {
+        let wrong_session = DeriveRunGrantResponse {
+            resource_id: "sess-someone-else".to_owned(),
+            ..attach_derived("att-1", "session-1", &["example.com"])
+        };
+        let no_session = DeriveRunGrantResponse {
+            resource_id: String::new(),
+            ..attach_derived("att-1", "session-1", &["example.com"])
+        };
+        let run_kind = derived_run("att-1", "session-1", &["example.com"]);
+        let wider = attach_derived("att-1", "session-1", &["example.com", "example.net"]);
+        for (name, response) in [
+            ("wrong session", wrong_session),
+            ("no session", no_session),
+            ("run kind", run_kind),
+            ("wider", wider),
+        ] {
+            let (result, _) = resolve_with(
+                attach_session_broker(Ok(response)),
+                attach_request("session-1", &["example.com"]),
+            )
+            .await;
+            assert_eq!(result.expect_err(name).0, StatusCode::FORBIDDEN, "{name}");
+        }
+    }
+
+    #[test]
+    fn the_brokers_attach_refusals_keep_their_names() {
+        let cases = [
+            (
+                tonic::Status::failed_precondition(BROKER_ATTACH_ZDR_REFUSED),
+                StatusCode::PRECONDITION_FAILED,
+                "attach_zdr_refused",
+            ),
+            (
+                tonic::Status::permission_denied(BROKER_ATTACH_NEEDS_OWNER),
+                StatusCode::FORBIDDEN,
+                "attach_needs_owner",
+            ),
+            (
+                tonic::Status::permission_denied(BROKER_ATTACH_USER_ONLY),
+                StatusCode::FORBIDDEN,
+                "attach_needs_owner",
+            ),
+            (
+                tonic::Status::invalid_argument(
+                    "attach grant needs a bounded resource_id, and only an attach grant takes one",
+                ),
+                StatusCode::BAD_REQUEST,
+                "attach_resource_invalid",
+            ),
+            (
+                tonic::Status::invalid_argument("resource_id is required for an attach grant"),
+                StatusCode::BAD_REQUEST,
+                "attach_resource_invalid",
+            ),
+        ];
+        for (status, want_status, want_error) in cases {
+            let mapped = browser_derive_status_to_http(&status);
+            assert_eq!(mapped.0, want_status, "{want_error}");
+            assert_eq!(mapped.1 .0["error"], want_error);
+        }
+        // Other refusals keep the mapping they had.
+        for status in [
+            tonic::Status::failed_precondition("something else"),
+            tonic::Status::permission_denied("derive would widen the parent"),
+            tonic::Status::invalid_argument("hosts are not grantable"),
+        ] {
+            assert!(attach_derive_refusal(&status).is_none(), "{status:?}");
+        }
+    }
+
+    #[test]
+    fn the_attach_flag_is_off_unless_one_true_or_on() {
+        for on in [Some("1"), Some("true"), Some("on"), Some("ON"), Some(" True ")] {
+            assert!(attach_flag(on), "{on:?}");
+        }
+        for off in [None, Some(""), Some("0"), Some("off"), Some("yes"), Some("enabled")] {
+            assert!(!attach_flag(off), "{off:?}");
+        }
+    }
+
+    #[test]
+    fn a_start_with_an_attach_session_is_refused_while_the_flag_is_off() {
+        let mut request = browser_request("session-1");
+        assert_eq!(attach_session_for(false, &request).expect("no attach"), None);
+        assert_eq!(attach_session_for(true, &request).expect("no attach"), None);
+
+        request.attach_session_id = Some(ATTACH_SESSION.to_owned());
+        let refused = attach_session_for(false, &request).expect_err("flag off");
+        assert_eq!(refused.0, StatusCode::BAD_REQUEST);
+        assert_eq!(refused.1 .0["error"], "browser_attach_unavailable");
+        assert_eq!(
+            attach_session_for(true, &request).expect("flag on").as_deref(),
+            Some(ATTACH_SESSION)
+        );
+
+        let oversized = "x".repeat(MAX_ATTACH_SESSION_ID_BYTES + 1);
+        for bad in ["", "   ", "has space", oversized.as_str()] {
+            request.attach_session_id = Some(bad.to_owned());
+            let refused = attach_session_for(true, &request).expect_err(bad);
+            assert_eq!(refused.0, StatusCode::BAD_REQUEST);
+            assert_eq!(refused.1 .0["error"], "attach_session_id_invalid", "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn attach_fields_ride_the_tool_input_only_when_attaching() {
+        let mut plain = json!({ "grant_id": "g", "profile_id": "prof-1" });
+        insert_attach_fields(&mut plain, None);
+        assert_eq!(plain, json!({ "grant_id": "g", "profile_id": "prof-1" }));
+
+        let mut attached = json!({ "grant_id": "att-1", "profile_id": "prof-1" });
+        insert_attach_fields(&mut attached, Some(ATTACH_SESSION));
+        assert_eq!(attached["grant_id"], "att-1");
+        assert_eq!(attached["attach_session_id"], ATTACH_SESSION);
+        assert_eq!(attached["profile_id"], Value::Null, "no profile in someone's session");
+    }
+
+    #[test]
+    fn a_retry_that_names_another_attach_session_is_a_different_request() {
+        let base = attach_request("session-1", &["example.com"]);
+        assert_eq!(run_request_fingerprint(&base), run_request_fingerprint(&base.clone()));
+        let mut other = base.clone();
+        other.attach_session_id = Some("sess-other".to_owned());
+        assert_ne!(run_request_fingerprint(&base), run_request_fingerprint(&other));
+        let mut plain = base.clone();
+        plain.attach_session_id = None;
+        assert_ne!(run_request_fingerprint(&base), run_request_fingerprint(&plain));
+    }
+
+    /// The handler reads the flag from the process environment; every test that
+    /// needs it on sets the same value, and none sets it off.
+    fn attach_flag_on() {
+        std::env::set_var("MODEL_GATEWAY_BROWSER_ATTACH", "1");
+    }
+
+    // Plan name: derive_failure_creates_no_thread_or_run (attach variant; the
+    // ordinary-run test of the same name is above). A refused attach derive
+    // stops the start before Session Core is contacted at all.
+    #[tokio::test]
+    async fn attach_derive_failure_creates_no_thread_or_run() {
+        attach_flag_on();
+        for code in [
+            tonic::Code::FailedPrecondition,
+            tonic::Code::PermissionDenied,
+            tonic::Code::InvalidArgument,
+            tonic::Code::Unimplemented,
+        ] {
+            let broker = attach_session_broker(Err(code));
+            let (result, session_connections) =
+                start_with(broker.clone(), attach_request("session-1", &["example.com"])).await;
+            assert!(result.is_err(), "{code:?} must refuse the start");
+            assert_eq!(
+                broker.derive_requests.lock().expect("recorder").len(),
+                1,
+                "{code:?}: the derive was attempted"
+            );
+            assert_eq!(
+                session_connections, 0,
+                "{code:?}: no thread or run write may follow a refused attach derive"
+            );
+            assert!(broker.revoke_requests.lock().expect("recorder").is_empty());
         }
     }
 
@@ -5491,6 +6025,42 @@ mod tests {
                 .await
                 .expect("the retry of the holder");
             assert_eq!(replay["idempotent_replay"], true);
+        }
+
+        /// WS8.G: an attach start derives the attach grant, then runs under it; what
+        /// reaches execution-core is that grant and the session id, with no profile.
+        #[tokio::test]
+        async fn attach_tool_input_carries_attach_grant_and_session_id() {
+            std::env::set_var("MODEL_GATEWAY_BROWSER_ATTACH", "1");
+            let broker = session_broker(
+                &["example.com"],
+                Ok(DeriveRunGrantResponse {
+                    kind: "attach".to_owned(),
+                    resource_id: ATTACH_SESSION.to_owned(),
+                    ..derived_run("att-1", "session-1", &["example.com"])
+                }),
+            );
+            let h = Harness::with_broker(true, broker).await;
+            let mut request = attach_request("session-1", &["example.com"]);
+            request.profile_id = Some("profile-1".to_owned());
+            request.start_url = Some("https://example.com/start".to_owned());
+            let Json(body) = h.start(Some("retry-1"), request).await.expect("attach start");
+            assert_eq!(body["run_id"], "managed-run-1");
+
+            let derives = h.broker.derive_requests.lock().expect("derives").clone();
+            assert_eq!(derives.len(), 1);
+            assert_eq!(derives[0].purpose, "attach");
+            assert_eq!(derives[0].resource_id, ATTACH_SESSION);
+
+            assert!(eventually(|| h.dispatches().len() == 1).await, "one dispatch");
+            let dispatched = h.dispatches();
+            let tool_input: Value = serde_json::from_str(&dispatched[0].tool_input).unwrap();
+            assert_eq!(tool_input["grant_id"], "att-1", "the derived attach grant");
+            assert_eq!(tool_input["attach_session_id"], ATTACH_SESSION);
+            assert_eq!(tool_input["profile_id"], Value::Null);
+            assert_eq!(tool_input["allowed_domains"], json!(["example.com"]));
+            assert_eq!(tool_input["run_id"], "managed-run-1");
+            assert_eq!(dispatched[0].tool_name, "browser_agent");
         }
     }
 
