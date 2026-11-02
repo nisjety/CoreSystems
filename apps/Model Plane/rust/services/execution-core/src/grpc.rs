@@ -1528,6 +1528,7 @@ impl ExecutionCore for ExecutionService {
                         &req.tool_name,
                         &req.tool_input,
                     )),
+                    ..Default::default()
                 },
                 session_bearer.as_str(),
             )
@@ -1643,6 +1644,7 @@ impl ExecutionCore for ExecutionService {
                     pb::GetApprovalRequest {
                         approval_id: req.approval_id.clone(),
                         org_id: req.org_id.clone(),
+                        ..Default::default()
                     },
                     session_bearer.as_str(),
                 )?)

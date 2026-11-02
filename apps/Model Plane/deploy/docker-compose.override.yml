@@ -35,6 +35,7 @@ services:
       SPACE_MESSAGE_SEARCH_CORE: "1"
       SPACE_ATTENTION_SUMMARY: "1"
       SPACE_TIMELINE_CORE: "1"
+      SESSION_CORE_APPROVAL_MEMBER_DECIDE: "1"
 
   inference-core:
     environment:

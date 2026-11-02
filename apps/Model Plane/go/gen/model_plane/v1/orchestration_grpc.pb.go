@@ -31,6 +31,7 @@ const (
 	OrchestrationCoreService_ListPendingApprovals_FullMethodName              = "/model_plane.v1.OrchestrationCoreService/ListPendingApprovals"
 	OrchestrationCoreService_GetApproval_FullMethodName                       = "/model_plane.v1.OrchestrationCoreService/GetApproval"
 	OrchestrationCoreService_DecideApproval_FullMethodName                    = "/model_plane.v1.OrchestrationCoreService/DecideApproval"
+	OrchestrationCoreService_RerouteApproval_FullMethodName                   = "/model_plane.v1.OrchestrationCoreService/RerouteApproval"
 	OrchestrationCoreService_ConsumeApproval_FullMethodName                   = "/model_plane.v1.OrchestrationCoreService/ConsumeApproval"
 	OrchestrationCoreService_ClaimOnceApproval_FullMethodName                 = "/model_plane.v1.OrchestrationCoreService/ClaimOnceApproval"
 	OrchestrationCoreService_ClaimApprovalDeliveries_FullMethodName           = "/model_plane.v1.OrchestrationCoreService/ClaimApprovalDeliveries"
@@ -96,6 +97,11 @@ type OrchestrationCoreServiceClient interface {
 	GetApproval(ctx context.Context, in *GetApprovalRequest, opts ...grpc.CallOption) (*GetApprovalResponse, error)
 	// Record a decision (granted, denied, or timed_out) on an approval.
 	DecideApproval(ctx context.Context, in *DecideApprovalRequest, opts ...grpc.CallOption) (*DecideApprovalResponse, error)
+	// Move a pending approval to another addressee (build plan WS10 S6). Caller is a Space
+	// member holding a Control-signed `model.approval.reroute` decision; Control has already
+	// checked that the caller is the requester or a manager. Refused for a zero-retention caller
+	// and while SESSION_CORE_APPROVAL_MEMBER_DECIDE is off.
+	RerouteApproval(ctx context.Context, in *RerouteApprovalRequest, opts ...grpc.CallOption) (*RerouteApprovalResponse, error)
 	// Consume a granted loop-mode approval exactly once (build plan WS03 S2). The
 	// durable Do loop that paused for the approval calls this when it re-enters, so
 	// a granted approval is executed by the loop once and never also by the cold
@@ -282,6 +288,16 @@ func (c *orchestrationCoreServiceClient) DecideApproval(ctx context.Context, in 
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(DecideApprovalResponse)
 	err := c.cc.Invoke(ctx, OrchestrationCoreService_DecideApproval_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *orchestrationCoreServiceClient) RerouteApproval(ctx context.Context, in *RerouteApprovalRequest, opts ...grpc.CallOption) (*RerouteApprovalResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RerouteApprovalResponse)
+	err := c.cc.Invoke(ctx, OrchestrationCoreService_RerouteApproval_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -504,6 +520,11 @@ type OrchestrationCoreServiceServer interface {
 	GetApproval(context.Context, *GetApprovalRequest) (*GetApprovalResponse, error)
 	// Record a decision (granted, denied, or timed_out) on an approval.
 	DecideApproval(context.Context, *DecideApprovalRequest) (*DecideApprovalResponse, error)
+	// Move a pending approval to another addressee (build plan WS10 S6). Caller is a Space
+	// member holding a Control-signed `model.approval.reroute` decision; Control has already
+	// checked that the caller is the requester or a manager. Refused for a zero-retention caller
+	// and while SESSION_CORE_APPROVAL_MEMBER_DECIDE is off.
+	RerouteApproval(context.Context, *RerouteApprovalRequest) (*RerouteApprovalResponse, error)
 	// Consume a granted loop-mode approval exactly once (build plan WS03 S2). The
 	// durable Do loop that paused for the approval calls this when it re-enters, so
 	// a granted approval is executed by the loop once and never also by the cold
@@ -611,6 +632,9 @@ func (UnimplementedOrchestrationCoreServiceServer) GetApproval(context.Context, 
 }
 func (UnimplementedOrchestrationCoreServiceServer) DecideApproval(context.Context, *DecideApprovalRequest) (*DecideApprovalResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DecideApproval not implemented")
+}
+func (UnimplementedOrchestrationCoreServiceServer) RerouteApproval(context.Context, *RerouteApprovalRequest) (*RerouteApprovalResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RerouteApproval not implemented")
 }
 func (UnimplementedOrchestrationCoreServiceServer) ConsumeApproval(context.Context, *ConsumeApprovalRequest) (*ConsumeApprovalResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ConsumeApproval not implemented")
@@ -894,6 +918,24 @@ func _OrchestrationCoreService_DecideApproval_Handler(srv interface{}, ctx conte
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(OrchestrationCoreServiceServer).DecideApproval(ctx, req.(*DecideApprovalRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _OrchestrationCoreService_RerouteApproval_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RerouteApprovalRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrchestrationCoreServiceServer).RerouteApproval(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrchestrationCoreService_RerouteApproval_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrchestrationCoreServiceServer).RerouteApproval(ctx, req.(*RerouteApprovalRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1233,6 +1275,10 @@ var OrchestrationCoreService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DecideApproval",
 			Handler:    _OrchestrationCoreService_DecideApproval_Handler,
+		},
+		{
+			MethodName: "RerouteApproval",
+			Handler:    _OrchestrationCoreService_RerouteApproval_Handler,
 		},
 		{
 			MethodName: "ConsumeApproval",

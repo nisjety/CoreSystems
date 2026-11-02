@@ -7193,6 +7193,7 @@ async fn declined_earlier_in_run(
             run_id: ctx.req.run_id.clone(),
             step_id: String::new(),
             org_id: ctx.req.org_id.clone(),
+            ..Default::default()
         },
         ctx.session_bearer,
     ) else {
@@ -7348,6 +7349,7 @@ async fn pause_for_approval(
                 tool_name,
                 tool_input,
             )),
+            ..Default::default()
         },
         bearer,
     );

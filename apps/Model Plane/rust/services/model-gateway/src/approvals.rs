@@ -80,6 +80,7 @@ pub fn to_create_approval_request(a: &GatewayApproval) -> CreateApprovalRequest 
         turn_origin: String::new(),
         grant_use_token: String::new(),
         context_json: String::new(),
+        ..Default::default()
     }
 }
 
@@ -924,6 +925,7 @@ pub(crate) async fn read_through_approval_for_owner_authenticated(
             GetApprovalRequest {
                 approval_id: approval_id.to_owned(),
                 org_id: org_id.to_owned(),
+                ..Default::default()
             },
             bearer,
         )?)

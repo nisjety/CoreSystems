@@ -1054,6 +1054,68 @@ pub async fn decide_approval_recorded(
     decision_reason: &str,
     record: &DecisionRecord<'_>,
 ) -> Result<ApprovalDecisionWrite> {
+    decide_approval_inner(
+        pool,
+        id,
+        org_id,
+        user_id,
+        None,
+        status,
+        decided_by,
+        decision_reason,
+        record,
+    )
+    .await
+}
+
+/// Decide an approval as a Space member who is not its owner (build plan WS10 S6). The owner
+/// predicate is replaced by the approval's run belonging to `space_id`; the requested-state
+/// compare-and-set is unchanged, and the delivery outbox row still copies the requester's
+/// `user_id` from the approval, so the approved action runs as the requester.
+///
+/// # Errors
+///
+/// Returns an error if the update or the outbox insert fails.
+#[allow(clippy::too_many_arguments)]
+pub async fn decide_approval_as_member(
+    pool: &Pool,
+    id: &str,
+    org_id: &str,
+    space_id: &str,
+    status: &str,
+    decided_by: &str,
+    decision_reason: &str,
+    record: &DecisionRecord<'_>,
+) -> Result<ApprovalDecisionWrite> {
+    if space_id.trim().is_empty() {
+        bail!("space_id is required");
+    }
+    decide_approval_inner(
+        pool,
+        id,
+        org_id,
+        None,
+        Some(space_id),
+        status,
+        decided_by,
+        decision_reason,
+        record,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn decide_approval_inner(
+    pool: &Pool,
+    id: &str,
+    org_id: &str,
+    user_id: Option<&str>,
+    member_space: Option<&str>,
+    status: &str,
+    decided_by: &str,
+    decision_reason: &str,
+    record: &DecisionRecord<'_>,
+) -> Result<ApprovalDecisionWrite> {
     if org_id.trim().is_empty() {
         bail!("org_id is required");
     }
@@ -1064,22 +1126,39 @@ pub async fn decide_approval_recorded(
         bail!("unsupported approval decision status");
     }
 
-    let decision = serde_json::json!({
+    let mut decision = serde_json::json!({
         "source": record.source,
         "scope": record.scope,
         "step_up_verified": false,
     });
+    if member_space.is_some() {
+        // The decider is not the run owner; the owner stays the actor (invariant 1).
+        decision["via"] = JsonValue::String("space_member".to_owned());
+    }
     let mut transaction = pool.begin().await?;
-    let updated = sqlx::query_as::<_, (String,)>(DECIDE_APPROVAL_SQL)
-        .bind(id)
-        .bind(org_id)
-        .bind(status)
-        .bind(decided_by)
-        .bind(decision_reason)
-        .bind(user_id)
-        .bind(&decision)
-        .fetch_optional(&mut *transaction)
-        .await?;
+    let updated = if let Some(space_id) = member_space {
+        sqlx::query_as::<_, (String,)>(DECIDE_APPROVAL_AS_MEMBER_SQL)
+            .bind(id)
+            .bind(org_id)
+            .bind(status)
+            .bind(decided_by)
+            .bind(decision_reason)
+            .bind(space_id)
+            .bind(&decision)
+            .fetch_optional(&mut *transaction)
+            .await?
+    } else {
+        sqlx::query_as::<_, (String,)>(DECIDE_APPROVAL_SQL)
+            .bind(id)
+            .bind(org_id)
+            .bind(status)
+            .bind(decided_by)
+            .bind(decision_reason)
+            .bind(user_id)
+            .bind(&decision)
+            .fetch_optional(&mut *transaction)
+            .await?
+    };
     let updated = updated.is_some();
 
     if updated && matches!(status, "denied" | "timed_out") {
@@ -1535,6 +1614,18 @@ const DECIDE_APPROVAL_SQL: &str =
      decided_at = now() WHERE id = $1 AND org_id = $2 AND status = 'requested' \
      AND ($3 <> 'granted' OR expires_at IS NULL OR expires_at > now()) \
      AND ($6::text IS NULL OR user_id = $6) \
+     RETURNING id";
+
+/// The member form of [`DECIDE_APPROVAL_SQL`] (build plan WS10 S6): `$6` is the Space the
+/// approval's run must belong to, in place of the owner predicate. Same compare-and-set on
+/// `status = 'requested'` and on expiry.
+const DECIDE_APPROVAL_AS_MEMBER_SQL: &str =
+    "UPDATE approvals SET status = $3, decided_by = $4, decision_reason = $5, \
+     metadata = jsonb_set(CASE WHEN $3 IN ('denied', 'timed_out') \
+       THEN metadata - 'continuation_descriptor' ELSE metadata END, '{decision}', $7::jsonb, true), \
+     decided_at = now() WHERE id = $1 AND org_id = $2 AND status = 'requested' \
+     AND ($3 <> 'granted' OR expires_at IS NULL OR expires_at > now()) \
+     AND run_id IN (SELECT id FROM runs WHERE org_id = $2 AND space_id = $6) \
      RETURNING id";
 
 const INSERT_APPROVAL_DELIVERY_OUTBOX_SQL: &str = "INSERT INTO approval_delivery_outbox \

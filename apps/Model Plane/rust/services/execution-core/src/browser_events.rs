@@ -338,6 +338,7 @@ impl BrowserEventSink for OrchestrationEventSink {
                 risk_category: detail.risk_category.as_str().to_owned(),
                 ..approval_cause::for_code(CauseCode::BrowserActionRisk)
             }),
+            ..Default::default()
         }) {
             Ok(request) => orchestration.create_approval(request).await,
             Err(error) => Err(error),
@@ -412,6 +413,7 @@ impl BrowserEventSink for OrchestrationEventSink {
                 // created with this same org_id above, so asserting it
                 // here is a real ownership check, not a no-op.
                 org_id: config.org_id.clone(),
+                ..Default::default()
             });
             let approval_result = match approval_request {
                 Ok(request) => orchestration.get_approval(request).await,

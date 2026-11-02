@@ -184,8 +184,10 @@ fn working_sql() -> String {
     )
 }
 
-/// Approvals addressed to the viewer in this Space, oldest first (until the addressee
-/// predicate of WS10-S6 replaces the run owner). Parameters: $1 org, $2 Space, $3 ceiling,
+/// Approvals addressed to the viewer in this Space, oldest first. The addressee predicate of
+/// WS10-S6: the requester for a requester-addressed approval, the named member for a named one.
+/// An `any_editor` or `any_manager` approval is not listed: Session Core cannot see the viewer's
+/// role, so those wait for the role-aware read. Parameters: $1 org, $2 Space, $3 ceiling,
 /// $4 viewer, $5 row cap.
 fn pending_sql() -> String {
     format!(
@@ -193,7 +195,9 @@ fn pending_sql() -> String {
            FROM approvals a
            JOIN runs r ON r.id = a.run_id
            JOIN threads t ON t.id = r.thread_id AND t.org_id = r.org_id
-          WHERE a.org_id = $1 AND a.status = 'requested' AND a.user_id = $4
+          WHERE a.org_id = $1 AND a.status = 'requested'
+            AND ((a.addressee_kind = 'requester' AND a.user_id = $4)
+                 OR (a.addressee_kind = 'named' AND a.addressee_subject_id = $4))
             AND r.space_id = $2
             AND (a.expires_at IS NULL OR a.expires_at > now())
             AND {THREAD_SCOPE}

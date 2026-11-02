@@ -2700,6 +2700,7 @@ async fn resolve_write_approval(
                     tool_input,
                     crate::space_gate::RESUME_NONE,
                 ),
+                ..Default::default()
             },
             bearer,
         )?)
@@ -2777,6 +2778,7 @@ fn auto_posture_decision_request(
         org_id: org_id.to_owned(),
         decision_source: pb::ApprovalDecisionSource::PostureAuto as i32,
         scope: pb::ApprovalScope::Once as i32,
+        ..Default::default()
     }
 }
 

@@ -84,6 +84,13 @@ service RunService {
   // it is not a general run-inspection or user-impersonation API.
   rpc ResolveRunActionAuthority(ResolveRunActionAuthorityRequest) returns (ResolveRunActionAuthorityResponse);
 
+  // ResolveApprovalAuthority returns the content-free bindings Control needs before it signs a
+  // `model.approval.decide` decision for a Space member (build plan WS10 S6): who raised the
+  // approval, who it is addressed to, and the run's Space bindings. Same restriction as
+  // ResolveRunActionAuthority (Control's action-authorizer identity); it returns no approval
+  // context, tool input, reason or card text.
+  rpc ResolveApprovalAuthority(ResolveApprovalAuthorityRequest) returns (ResolveApprovalAuthorityResponse);
+
   // ResolveScheduledStepAuthority returns the exact active prepared scheduled
   // run binding for Control's per-step decision. It is narrower than ordinary
   // run inspection: the caller supplies only immutable identifiers/digests,
@@ -272,6 +279,44 @@ message ResolveRunActionAuthorityResponse {
   string thread_resource_authorization_ref = 11;
   uint64 authority_revision = 12;
   string run_status = 13;
+}
+
+// ResolveApprovalAuthorityRequest names the approval and tenant only; everything else is read
+// from the durable rows.
+message ResolveApprovalAuthorityRequest {
+  string approval_id = 1;
+  string org_id = 2;
+}
+
+// ResolveApprovalAuthorityResponse carries identifiers, kinds and revisions only. `resolved=false`
+// has no authority and every other field is empty/default. A zero-retention run never resolves.
+message ResolveApprovalAuthorityResponse {
+  bool resolved = 1;
+  string approval_id = 2;
+  string run_id = 3;
+  string org_id = 4;
+  // The run owner: the subject the approved action runs as.
+  string requester_subject_id = 5;
+  string thread_id = 6;
+  string space_id = 7;
+  // `requested`, `granted`, `denied` or `timed_out`.
+  string approval_status = 8;
+  // `tool_call`, `plan`, ... as stored.
+  string approval_kind = 9;
+  // `requester`, `named`, `any_editor` or `any_manager`.
+  string addressee_kind = 10;
+  // Set when addressee_kind is `named`.
+  string addressee_subject_id = 11;
+  // `direct`, `ambient` or `automation`; empty reads as `direct`.
+  string turn_origin = 12;
+  // Approval expiry; empty when none.
+  string expires_at = 13;
+  string recipient_audience_ref = 14;
+  uint64 recipient_audience_revision = 15;
+  string recipient_audience_hash = 16;
+  string privacy_policy_ref = 17;
+  string thread_resource_authorization_ref = 18;
+  uint64 authority_revision = 19;
 }
 
 message ResolveScheduledStepAuthorityRequest {

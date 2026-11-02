@@ -3854,6 +3854,118 @@ pub(crate) fn verify_run_wake_space_decision(
     verify_run_wake_space_decision_with_key(wake, org_id, user_id, thread_id, &key_id, key, Utc::now())
 }
 
+/// What a Control approval decision must commit to (WS10-S6): `model.approval.decide` for a
+/// member decide, `model.approval.reroute` for a reroute. The permission set must be exactly the
+/// one named permission, which keeps both disjoint from every thread, run and wake token.
+pub(crate) struct ApprovalDecisionExpect<'a> {
+    pub(crate) action_id: &'static str,
+    pub(crate) schema: &'static str,
+    pub(crate) permission: &'static str,
+    pub(crate) payload_digest: String,
+    pub(crate) space_id: &'a str,
+    pub(crate) decision_ref: &'a str,
+    pub(crate) token: &'a str,
+    pub(crate) org_id: &'a str,
+    /// The CALLER: the decision's subject must be this user.
+    pub(crate) user_id: &'a str,
+    pub(crate) metric_action: &'static str,
+}
+
+#[allow(clippy::result_large_err)]
+fn verify_approval_space_decision_with_key(
+    expect: &ApprovalDecisionExpect<'_>,
+    expected_key_id: &str,
+    key: &VerifyingKey,
+    now: DateTime<Utc>,
+) -> Result<(), Status> {
+    if expect.token.len() > MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES {
+        return Err(Status::invalid_argument("Control Space decision is too large"));
+    }
+    let parts: Vec<&str> = expect.token.split('.').collect();
+    if parts.len() != 4 || parts[0] != CONTROL_SPACE_DECISION_VERSION {
+        return Err(Status::permission_denied("invalid Control Space decision envelope"));
+    }
+    let token_key_id = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .ok()
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| id == expected_key_id)
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let payload = URL_SAFE_NO_PAD
+        .decode(parts[2])
+        .map_err(|_| Status::permission_denied("invalid Control Space decision payload"))?;
+    let signature = URL_SAFE_NO_PAD
+        .decode(parts[3])
+        .map_err(|_| Status::permission_denied("invalid Control Space decision signature"))?;
+    let signature = Signature::from_slice(&signature)
+        .map_err(|_| Status::permission_denied("invalid Control Space decision signature"))?;
+    key.verify(
+        format!("{}.{}.{}", parts[0], parts[1], parts[2]).as_bytes(),
+        &signature,
+    )
+    .map_err(|_| Status::permission_denied("invalid Control Space decision signature"))?;
+    let claims: ControlSpaceDecisionClaims = serde_json::from_slice(&payload)
+        .map_err(|_| Status::permission_denied("invalid Control Space decision claims"))?;
+    let matches_request = claims.decision_ref == expect.decision_ref
+        && claims.org_id == expect.org_id
+        && claims.subject_id == expect.user_id
+        && claims.space_ref == expect.space_id
+        && claims.service_audience == CONTROL_SPACE_DECISION_AUDIENCE
+        && claims.action_id == expect.action_id
+        && claims.action_schema_hash == expect.schema
+        && claims.payload_digest == expect.payload_digest
+        && claims.permissions.len() == 1
+        && claims.permissions[0] == expect.permission;
+    if !matches_request || token_key_id.trim().is_empty() {
+        return Err(Status::permission_denied(
+            "Control Space decision does not authorize this approval action",
+        ));
+    }
+    let privacy_complete = [
+        claims.purpose.as_str(),
+        claims.lawful_basis.as_str(),
+        claims.privacy_class.as_str(),
+        claims.retention_class.as_str(),
+        claims.residency.as_str(),
+        claims.deletion_scope.as_str(),
+    ]
+    .iter()
+    .all(|value| !value.trim().is_empty());
+    if !privacy_complete
+        || claims.nonce.trim().is_empty()
+        || claims.issued_at > now + chrono::Duration::minutes(1)
+        || claims.expires_at <= now
+    {
+        return Err(Status::permission_denied(
+            "Control Space approval decision is expired or incomplete",
+        ));
+    }
+    space_decision_retention_gate(
+        claims.zero_data_retention,
+        expect.metric_action,
+        configured_space_zdr_mode(),
+    )
+}
+
+/// Key lookup and verification of a member-decide or reroute decision (see
+/// [`verify_approval_space_decision_with_key`]).
+#[allow(clippy::result_large_err)]
+pub(crate) fn verify_approval_space_decision(
+    expect: &ApprovalDecisionExpect<'_>,
+) -> Result<(), Status> {
+    let keys = configured_control_space_decision_keys()?;
+    let key_id = expect
+        .token
+        .split('.')
+        .nth(1)
+        .and_then(|part| URL_SAFE_NO_PAD.decode(part).ok())
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let key = crate::decision_keys::lookup_key(&keys, &key_id)?;
+    verify_approval_space_decision_with_key(expect, &key_id, key, Utc::now())
+}
+
 // Whether a decision-less assistant append may land in a Space thread. The
 /// reply slot is open only directly after a user message: that user turn was
 /// itself admitted by a verified create or append decision, and the assistant

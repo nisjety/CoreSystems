@@ -10,6 +10,7 @@
 
 use axum::Router;
 
+mod approvals;
 mod artifacts;
 mod attention;
 mod posts;
@@ -23,6 +24,7 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .merge(crate::space_sse::router())
+        .merge(approvals::router())
         .merge(artifacts::router())
         .merge(attention::router())
         .merge(posts::router())

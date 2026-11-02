@@ -1347,7 +1347,7 @@ fn plan_from_row(row: &store::PlanRow, steps: Vec<proto::PlanStep>) -> proto::Pl
     }
 }
 
-fn approval_from_row(row: &store::ApprovalRow) -> proto::Approval {
+pub(crate) fn approval_from_row(row: &store::ApprovalRow) -> proto::Approval {
     proto::Approval {
         id: row.id.clone(),
         run_id: row.run_id.clone(),
@@ -1370,6 +1370,11 @@ fn approval_from_row(row: &store::ApprovalRow) -> proto::Approval {
         action_label: crate::space::approvals::card_text(&row.metadata, "action_label"),
         // Derived from the delivery rows by `attach_continuations`, never from this row.
         continuation: None,
+        // The run owner, always. The rest is read by `approval_member::attach_addressing`.
+        requester_subject_id: row.user_id.clone(),
+        addressee: None,
+        grant_ref: String::new(),
+        turn_origin: String::new(),
     }
 }
 
@@ -2995,6 +3000,52 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             let caller = identity(&request)?;
             authorize_operation(&caller, "orchestration:read")?;
             let req = request.into_inner();
+            // Room read (build plan WS10 S6): a Space member reads the redacted approvals of the
+            // Space under a verified read decision. Tried first, so a member who owns no run
+            // never reaches the owner check below.
+            if !req.space_id.is_empty()
+                || !req.space_read_decision_ref.is_empty()
+                || !req.space_read_decision_token.is_empty()
+            {
+                validate_approval_org(&req.org_id)?;
+                caller.authorize_org(&req.org_id)?;
+                retention_receipt::refuse_zdr_continuation(&caller)?;
+                let ceiling = crate::space::approval_member::verify_room_read(
+                    &self.pool,
+                    &req.org_id,
+                    caller.user_id(),
+                    &req.space_id,
+                    &req.space_read_decision_ref,
+                    &req.space_read_decision_token,
+                )
+                .await?
+                .ok_or_else(|| Status::invalid_argument("a Space read decision is required"))?;
+                let state = if req.state == proto::ApprovalState::Unspecified as i32 {
+                    ""
+                } else {
+                    approval_state_to_str(req.state)
+                        .ok_or_else(|| Status::invalid_argument("invalid approval state"))?
+                };
+                let rows = crate::space::approval_member::list_room_approvals(
+                    &self.pool,
+                    &req.org_id,
+                    &req.space_id,
+                    ceiling,
+                    &req.run_id,
+                    "",
+                    state,
+                )
+                .await?;
+                let mut approvals: Vec<proto::Approval> = rows.iter().map(approval_from_row).collect();
+                crate::space::approvals::attach_continuations(&self.pool, &req.org_id, &mut approvals)
+                    .await;
+                crate::space::approval_member::attach_addressing(&self.pool, &req.org_id, &mut approvals)
+                    .await;
+                approvals
+                    .iter_mut()
+                    .for_each(crate::space::approval_member::redact_for_room);
+                return Ok(Response::new(proto::ListApprovalsResponse { approvals }));
+            }
             if req.run_id.is_empty() {
                 return Err(Status::invalid_argument("run_id is required"));
             }
@@ -3021,6 +3072,8 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 .map(approval_from_row)
                 .collect();
             crate::space::approvals::attach_continuations(&self.pool, &req.org_id, &mut approvals)
+                .await;
+            crate::space::approval_member::attach_addressing(&self.pool, &req.org_id, &mut approvals)
                 .await;
             Ok(Response::new(proto::ListApprovalsResponse { approvals }))
         }
@@ -3164,14 +3217,45 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             }
             validate_approval_org(&req.org_id)?;
             caller.authorize_org(&req.org_id)?;
-            let row = store::get_approval_for_org(
-                &self.pool,
-                &req.approval_id,
-                &req.org_id,
-                caller.user_id(),
-            )
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            // Room read (build plan WS10 S6): the redacted view of one approval of a run in the
+            // decision's Space. Not found for anything outside it.
+            let room = !req.space_id.is_empty()
+                || !req.space_read_decision_ref.is_empty()
+                || !req.space_read_decision_token.is_empty();
+            let row = if room {
+                retention_receipt::refuse_zdr_continuation(&caller)?;
+                let ceiling = crate::space::approval_member::verify_room_read(
+                    &self.pool,
+                    &req.org_id,
+                    caller.user_id(),
+                    &req.space_id,
+                    &req.space_read_decision_ref,
+                    &req.space_read_decision_token,
+                )
+                .await?
+                .ok_or_else(|| Status::invalid_argument("a Space read decision is required"))?;
+                crate::space::approval_member::list_room_approvals(
+                    &self.pool,
+                    &req.org_id,
+                    &req.space_id,
+                    ceiling,
+                    "",
+                    &req.approval_id,
+                    "",
+                )
+                .await?
+                .into_iter()
+                .next()
+            } else {
+                store::get_approval_for_org(
+                    &self.pool,
+                    &req.approval_id,
+                    &req.org_id,
+                    caller.user_id(),
+                )
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?
+            };
             let mut approval = row.as_ref().map(approval_from_row);
             if let Some(approval) = approval.as_mut() {
                 crate::space::approvals::attach_continuations(
@@ -3180,6 +3264,15 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                     std::slice::from_mut(approval),
                 )
                 .await;
+                crate::space::approval_member::attach_addressing(
+                    &self.pool,
+                    &req.org_id,
+                    std::slice::from_mut(approval),
+                )
+                .await;
+                if room {
+                    crate::space::approval_member::redact_for_room(approval);
+                }
             }
             Ok(Response::new(proto::GetApprovalResponse { approval }))
         }
@@ -3256,6 +3349,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 &req.turn_origin,
                 caller.zdr(),
             )?;
+            let addressee = crate::space::approval_member::addressee_from_request(req.addressee.as_ref())?;
             let granted_by_rule = if req.grant_use_token.is_empty() {
                 None
             } else {
@@ -3338,6 +3432,11 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 crate::space::approval_gate::record_gate_context(&self.pool, new_id, &gate_context)
                     .await
                     .map_err(|e| Status::internal(e.to_string()))?;
+                if let Some(addressee) = addressee.as_ref() {
+                    crate::space::approval_member::record_addressee(&self.pool, new_id, addressee)
+                        .await
+                        .map_err(|e| Status::internal(e.to_string()))?;
+                }
             }
 
             // Counted when a row was inserted, so a retried request that collapses onto
@@ -3753,6 +3852,20 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             }
             pin_approval_decision_identity(&caller, &mut req)?;
             validate_approval_decision_context(&req.org_id, &req.decided_by)?;
+            // Member decide (build plan WS10 S6): a Space member other than the run owner decides
+            // with a Control-signed decision. `Some(space)` once it verified; the owner path below
+            // is unchanged when the request carries no Space fields.
+            let member_space = crate::space::approval_member::authorize_member_decide(
+                &self.pool,
+                caller.user_id(),
+                &req,
+            )
+            .await?;
+            let owner_filter = if member_space.is_some() {
+                None
+            } else {
+                caller.user_id()
+            };
             // Owner decision 17: an approval's stored posture is its run's receipt. An approval of another
             // org, another user's approval, or one that does not exist, is left to the decision below to
             // answer, so the posture of someone else's run is never disclosed.
@@ -3760,7 +3873,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 &self.pool,
                 &req.approval_id,
                 &req.org_id,
-                caller.user_id(),
+                owner_filter,
             )
             .await?
             {
@@ -3778,21 +3891,39 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 .ok_or_else(|| Status::invalid_argument("invalid decision source"))?;
             let scope = approval_scope_to_str(req.scope)
                 .ok_or_else(|| Status::invalid_argument("invalid decision scope"))?;
-            let decision_write = store::decide_approval_recorded(
-                &self.pool,
-                &req.approval_id,
-                &req.org_id,
-                caller.user_id(),
-                new_status,
-                &req.decided_by,
-                &req.decision_reason,
-                &store::DecisionRecord {
-                    source,
-                    scope,
-                    audit: approval_audit_events_enabled(),
-                },
-            )
-            .await
+            let record = store::DecisionRecord {
+                source,
+                scope,
+                audit: approval_audit_events_enabled(),
+            };
+            let decision_write = match member_space.as_deref() {
+                Some(space_id) => {
+                    store::decide_approval_as_member(
+                        &self.pool,
+                        &req.approval_id,
+                        &req.org_id,
+                        space_id,
+                        new_status,
+                        &req.decided_by,
+                        &req.decision_reason,
+                        &record,
+                    )
+                    .await
+                }
+                None => {
+                    store::decide_approval_recorded(
+                        &self.pool,
+                        &req.approval_id,
+                        &req.org_id,
+                        caller.user_id(),
+                        new_status,
+                        &req.decided_by,
+                        &req.decision_reason,
+                        &record,
+                    )
+                    .await
+                }
+            }
             .map_err(|e| Status::internal(e.to_string()))?;
             let updated = decision_write.updated;
             if updated {
@@ -3804,7 +3935,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 &self.pool,
                 &req.approval_id,
                 &req.org_id,
-                caller.user_id(),
+                owner_filter,
             )
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
@@ -3842,6 +3973,12 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 std::slice::from_mut(&mut approval),
             )
             .await;
+            crate::space::approval_member::attach_addressing(
+                &self.pool,
+                &req.org_id,
+                std::slice::from_mut(&mut approval),
+            )
+            .await;
 
             broadcast_approval_decision_events(
                 &self.events_tx,
@@ -3857,6 +3994,63 @@ impl OrchestrationCoreService for OrchestrationGrpc {
         }
         .await;
         record_metrics("decide_approval", started, result.is_ok());
+        result
+    }
+
+    async fn reroute_approval(
+        &self,
+        request: Request<proto::RerouteApprovalRequest>,
+    ) -> Result<Response<proto::RerouteApprovalResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::RerouteApprovalResponse>, Status> = async {
+            let caller = identity(&request)?;
+            retention_receipt::refuse_zdr_continuation(&caller)?;
+            authorize_operation(&caller, "approval:decide")?;
+            let req = request.into_inner();
+            validate_approval_org(&req.org_id)?;
+            caller.authorize_org(&req.org_id)?;
+            let addressee = crate::space::approval_member::authorize_reroute(
+                &self.pool,
+                caller.user_id(),
+                &req,
+            )
+            .await?;
+            // An approval outside the decision's Space, or of a run that is not persistent, is
+            // "not found": no oracle.
+            let not_found = || Status::not_found("approval not found");
+            crate::space::approval_member::load_addressing(&self.pool, &req.approval_id, &req.org_id)
+                .await?
+                .filter(|a| a.space_id == req.space_id && a.retention_class == "persistent")
+                .ok_or_else(not_found)?;
+            let moved = crate::space::approval_member::reroute(
+                &self.pool,
+                &req.approval_id,
+                &req.org_id,
+                &req.space_id,
+                &addressee,
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+            if !moved {
+                return Err(Status::failed_precondition("approval is already decided"));
+            }
+            let row = store::get_approval_for_org(&self.pool, &req.approval_id, &req.org_id, None)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?
+                .ok_or_else(not_found)?;
+            let mut approval = approval_from_row(&row);
+            crate::space::approval_member::attach_addressing(
+                &self.pool,
+                &req.org_id,
+                std::slice::from_mut(&mut approval),
+            )
+            .await;
+            Ok(Response::new(proto::RerouteApprovalResponse {
+                approval: Some(approval),
+            }))
+        }
+        .await;
+        record_metrics("reroute_approval", started, result.is_ok());
         result
     }
 

@@ -1112,6 +1112,7 @@ async fn list_approvals(
                 // Cross-org IDOR fix (Phase 6): scope to the caller's verified
                 // JWT org, never a client-suppliable value.
                 org_id: claims.org_id.clone(),
+                ..Default::default()
             },
             &bearer,
         )?)
@@ -1400,6 +1401,7 @@ async fn get_approval(
                 // Cross-org IDOR fix (Phase 6): scope to the caller's verified
                 // JWT org, never a client-suppliable value.
                 org_id: claims.org_id.clone(),
+                ..Default::default()
             },
             &bearer,
         )?)
@@ -2001,6 +2003,7 @@ fn user_decision_request(
         org_id: org_id.to_owned(),
         decision_source: ApprovalDecisionSource::User as i32,
         scope: ApprovalScope::Once as i32,
+        ..Default::default()
     }
 }
 
@@ -2033,6 +2036,7 @@ async fn decide_approval(
                 GetApprovalRequest {
                     approval_id: approval_id.clone(),
                     org_id: claims.org_id.clone(),
+                    ..Default::default()
                 },
                 &session_bearer,
             )?)
@@ -7116,7 +7120,7 @@ fn todo_value(todo: &Todo) -> Value {
     })
 }
 
-fn approval_value(approval: &Approval) -> Value {
+pub(crate) fn approval_value(approval: &Approval) -> Value {
     json!({
         "id": approval.id,
         "run_id": approval.run_id,
@@ -7138,6 +7142,15 @@ fn approval_value(approval: &Approval) -> Value {
         "resume_class": card_resume_class(approval).map_or(Value::Null, Value::String),
         // Where the approved action stands, derived from the delivery rows; null until granted.
         "continuation": continuation_value(approval),
+        // Who is asked to decide it and who raised it (build plan WS10 S6): identifiers and kinds
+        // only. The requester is the subject the approved action runs as.
+        "requester_subject_id": empty_to_null(&approval.requester_subject_id),
+        "addressee": approval.addressee.as_ref().map(|a| json!({
+            "kind": match a.kind {2 => "named", 3 => "any_editor", 4 => "any_manager", _ => "requester"},
+            "subject_id": empty_to_null(&a.subject_id),
+        })),
+        "grant_ref": empty_to_null(&approval.grant_ref),
+        "turn_origin": empty_to_null(&approval.turn_origin),
     })
 }
 

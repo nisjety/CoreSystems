@@ -64,6 +64,12 @@ service OrchestrationCoreService {
   // Record a decision (granted, denied, or timed_out) on an approval.
   rpc DecideApproval(DecideApprovalRequest) returns (DecideApprovalResponse);
 
+  // Move a pending approval to another addressee (build plan WS10 S6). Caller is a Space
+  // member holding a Control-signed `model.approval.reroute` decision; Control has already
+  // checked that the caller is the requester or a manager. Refused for a zero-retention caller
+  // and while SESSION_CORE_APPROVAL_MEMBER_DECIDE is off.
+  rpc RerouteApproval(RerouteApprovalRequest) returns (RerouteApprovalResponse);
+
   // Consume a granted loop-mode approval exactly once (build plan WS03 S2). The
   // durable Do loop that paused for the approval calls this when it re-enters, so
   // a granted approval is executed by the loop once and never also by the cold
@@ -488,6 +494,20 @@ message Approval {
   // Where the approved action stands (build plan WS10 S1). Unset until the
   // approval is granted.
   ApprovalContinuation continuation = 24;
+
+  // Who is asked to decide it (build plan WS10 S6). Unset on an approval raised before the
+  // addressee existed, which reads as REQUESTER.
+  Addressee addressee = 20;
+
+  // The member whose request raised the approval (the run owner). An approver decides on the
+  // requester's behalf: the action still runs as this subject (build plan WS10 S6, SD-21).
+  string requester_subject_id = 21;
+
+  // Control standing-rule id when a rule, not a person, passed the prompt (WS10 S3).
+  string grant_ref = 22;
+
+  // Where the turn came from (`direct`, `ambient`, `automation`); empty reads as `direct`.
+  string turn_origin = 23;
 }
 
 // Who recorded an approval decision (build plan WS13 S3). Stored as
@@ -864,7 +884,11 @@ message CreateApprovalRequest {
   // keys are refused. Never raw tool arguments.
   string context_json = 14;
 
-  // Tag 15 is reserved for the approval addressee (build plan WS10 S6).
+  // Who is asked to decide this approval (build plan WS10 S6). Unset or UNSPECIFIED means the
+  // requester, exactly as before. NAMED needs `subject_id`; any other kind must not carry one.
+  // Stored only while SESSION_CORE_APPROVAL_MEMBER_DECIDE is on; otherwise the approval stays
+  // requester-addressed.
+  Addressee addressee = 15;
 
   // Stable key of the gated tool (build plan WS10 S3). Stored on the approval so a
   // once-approval can be matched to the retried call. Plain identifier only.
@@ -1009,6 +1033,18 @@ message ListApprovalsRequest {
   // callers). Non-empty → only approvals owned by this org are returned,
   // regardless of what org the run itself belongs to.
   string org_id = 3;
+
+  // Room read (build plan WS10 S6). With `space_id` and the Control `model.thread.read`
+  // decision pair, a Space member who does not own the run reads its approvals as a redacted
+  // room view (no context, no decision reason). With no `run_id`, lists the Space's approvals
+  // (newest first, at most 100). A partial triple is refused.
+  string space_id = 4;
+  string space_read_decision_ref = 5;
+  string space_read_decision_token = 6;
+
+  // Space-wide list only: keep one state (REQUESTED, GRANTED, DENIED, TIMED_OUT). Unspecified
+  // keeps all.
+  ApprovalState state = 7;
 }
 
 message ListApprovalsResponse {
@@ -1042,6 +1078,12 @@ message GetApprovalRequest {
   // not-found (never a distinguishable "forbidden") so existence is not
   // leaked across tenants.
   string org_id = 2;
+
+  // Room read (build plan WS10 S6): as on ListApprovalsRequest, the redacted room view of one
+  // approval of a run in this Space.
+  string space_id = 3;
+  string space_read_decision_ref = 4;
+  string space_read_decision_token = 5;
 }
 
 message GetApprovalResponse {
@@ -1077,9 +1119,41 @@ message DecideApprovalRequest {
 
   // How far the decision reaches (build plan WS13 S3).
   ApprovalScope scope = 7;
+
+  // Member decide (build plan WS10 S6): a Space member other than the run owner decides with a
+  // Control-signed `model.approval.decide` decision for this approval, this decision and this
+  // scope. All three or none; a partial set is refused. The decision's subject must be the
+  // caller. Refused while SESSION_CORE_APPROVAL_MEMBER_DECIDE is off.
+  string space_id = 8;
+  string space_decision_ref = 9;
+  string space_decision_token = 10;
+
+  // Reserved for a Control standing-rule proof on a decision (WS10 S4); not read by S6.
+  string grant_use_token = 11;
 }
 
 message DecideApprovalResponse {
+  // Updated approval record.
+  Approval approval = 1;
+}
+
+message RerouteApprovalRequest {
+  // Approval to move.
+  string approval_id = 1;
+
+  // Tenant; must match the caller.
+  string org_id = 2;
+
+  // New addressee. Never UNSPECIFIED; NAMED needs `subject_id`.
+  Addressee addressee = 3;
+
+  // Control `model.approval.reroute` decision for this approval and this addressee.
+  string space_id = 4;
+  string space_decision_ref = 5;
+  string space_decision_token = 6;
+}
+
+message RerouteApprovalResponse {
   // Updated approval record.
   Approval approval = 1;
 }

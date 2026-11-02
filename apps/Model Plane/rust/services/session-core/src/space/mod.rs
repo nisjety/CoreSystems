@@ -33,6 +33,7 @@
 
 pub(crate) mod append;
 pub(crate) mod approval_gate;
+pub(crate) mod approval_member;
 pub(crate) mod approvals;
 pub(crate) mod attention;
 pub(crate) mod attention_outbox;

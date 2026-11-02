@@ -978,6 +978,10 @@ services:
       # set; dev override turns it on. The activity trigger and backfill (0078) always run. Never an
       # authorization input: each Space read decision decides.
       SPACE_TIMELINE_CORE: ${SPACE_TIMELINE_CORE:-0}
+      # Approval addressee and member decide (WS10-S6): a Space member other than the run owner
+      # decides, or reroutes, an approval with a Control `model.approval.decide` / `.reroute`
+      # decision. OFF unless set; dev override turns it on. Never an authorization input.
+      SESSION_CORE_APPROVAL_MEMBER_DECIDE: ${SESSION_CORE_APPROVAL_MEMBER_DECIDE:-0}
       SPACE_WAKE_CORE: ${SPACE_WAKE_CORE:-0}
       SESSION_CORE_LOOP_CHECKPOINT_ENABLED: ${SESSION_CORE_LOOP_CHECKPOINT_ENABLED:-false}
       # Sweep that closes a tool reservation still open long after its run ended or

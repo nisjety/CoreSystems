@@ -1153,6 +1153,32 @@ impl RunService for RunServiceImpl {
         record_metrics("resolve_run_action_authority", started, result.is_ok());
         result
     }
+
+    async fn resolve_approval_authority(
+        &self,
+        request: Request<pb::ResolveApprovalAuthorityRequest>,
+    ) -> Result<Response<pb::ResolveApprovalAuthorityResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::ResolveApprovalAuthorityResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_run_action_authority_service(&caller)?;
+            let req = request.into_inner();
+            if req.approval_id.trim().is_empty() || req.org_id.trim().is_empty() {
+                return Err(Status::invalid_argument("approval_id and org_id are required"));
+            }
+            caller.authorize_org(&req.org_id)?;
+            let response = crate::space::approval_member::resolve_authority(
+                &self.pool,
+                &req.approval_id,
+                &req.org_id,
+            )
+            .await?;
+            Ok(Response::new(response))
+        }
+        .await;
+        record_metrics("resolve_approval_authority", started, result.is_ok());
+        result
+    }
 }
 
 /// Clamp a wire `limit` (0 = caller left it unset) into `[1, MAX_LIST_LIMIT]`.

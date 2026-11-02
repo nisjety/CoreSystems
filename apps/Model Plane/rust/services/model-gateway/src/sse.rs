@@ -18265,6 +18265,7 @@ pub(crate) async fn continue_run(
                     approval_id: req.approval_id.clone(),
                     // Scoped to the verified org, never a client value.
                     org_id: claims.org_id.clone(),
+                    ..Default::default()
                 },
                 &model_bearer,
             )
