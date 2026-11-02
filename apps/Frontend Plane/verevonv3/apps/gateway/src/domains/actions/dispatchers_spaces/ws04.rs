@@ -131,6 +131,9 @@ pub(in crate::domains::actions) async fn dispatch_spaces_update_room_settings(
     if let Some(value) = input.get("joinRole") {
         body.insert("join_role".to_owned(), value.clone());
     }
+    if let Some(value) = input.get("historyMode") {
+        body.insert("history_mode".to_owned(), value.clone());
+    }
     if !idempotency_key.trim().is_empty() {
         body.insert("idempotency_key".to_owned(), json!(idempotency_key.trim()));
     }

@@ -888,6 +888,7 @@ pub(super) async fn update_room_details_route(
 const VISIBILITIES: [&str; 2] = ["private", "org_public"];
 /// A self-join never lands above editor, so the open-room role is one of these two.
 const JOIN_ROLES: [&str; 2] = ["viewer", "editor"];
+const HISTORY_MODES: [&str; 2] = ["full", "since_join"];
 
 fn directory_feature_disabled() -> Reply {
     (
@@ -973,12 +974,13 @@ pub(crate) async fn join_room(
 }
 
 /// `PATCH /api/v1/spaces/{space_ref}/settings`: a room's visibility (`private`, `org_public`) and
-/// the role a self-join receives (`viewer`, `editor`). Control applies the role rule (owner or
-/// manager), refuses `org_public` while the organization's directory policy is off
+/// the role a self-join receives (`viewer`, `editor`) and, from WS04-S11, the history window
+/// (`full`, `since_join`). Control applies the role rule (owner only for `history_mode`; owner or
+/// manager otherwise), refuses `org_public` while the organization's directory policy is off
 /// (403 `directory_disabled`), the organization room (409 `room_roster_derived`) and an archived
 /// room (409 `room_archived`). A visibility change does not alter the recipient set, so no
-/// audience reconcile follows. `history_mode` belongs to WS04-S11 and is refused here as an
-/// unknown field until that slice lands.
+/// audience reconcile follows. `history_mode` is passed through unchanged: the floor claim is
+/// derived and signed by Control, never by the gateway.
 pub(crate) async fn update_room_settings(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -997,9 +999,14 @@ pub(crate) async fn update_room_settings(
     };
     if fields
         .keys()
-        .any(|key| !["visibility", "join_role", "idempotency_key"].contains(&key.as_str()))
+        .any(|key| {
+            !["visibility", "join_role", "history_mode", "idempotency_key"].contains(&key.as_str())
+        })
     {
-        return invalid("body", "Only visibility, join_role and idempotency_key are accepted.");
+        return invalid(
+            "body",
+            "Only visibility, join_role, history_mode and idempotency_key are accepted.",
+        );
     }
     let mut payload = Map::new();
     match fields.get("visibility") {
@@ -1016,8 +1023,15 @@ pub(crate) async fn update_room_settings(
         }
         Some(_) => return invalid("join_role", "The join role must be viewer or editor."),
     }
+    match fields.get("history_mode") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(value)) if HISTORY_MODES.contains(&value.trim()) => {
+            payload.insert("history_mode".to_owned(), json!(value.trim()));
+        }
+        Some(_) => return invalid("history_mode", "The history mode must be full or since_join."),
+    }
     if payload.is_empty() {
-        return invalid("body", "A visibility or a join role is required.");
+        return invalid("body", "A visibility, a join role or a history mode is required.");
     }
     match optional_idempotency_key(body) {
         Ok(Some(key)) => {
@@ -1049,6 +1063,7 @@ pub(crate) async fn update_room_settings(
             "space_ref": data.get("space_ref").and_then(Value::as_str).unwrap_or(&space_ref),
             "visibility": data.get("visibility").cloned().filter(Value::is_string).unwrap_or(Value::Null),
             "join_role": data.get("join_role").cloned().filter(Value::is_string).unwrap_or(Value::Null),
+            "history_mode": data.get("history_mode").cloned().filter(Value::is_string).unwrap_or(Value::Null),
             "changed": data.get("changed").and_then(Value::as_bool).unwrap_or(false),
         }})),
     )
