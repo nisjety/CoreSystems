@@ -818,8 +818,9 @@ enum BrowserMcpAction {
         ref_id: String,
         approval_grant_id: String,
     },
-    /// E3.2-e2: list the run's tabs.
-    TabList,
+    /// E3.2-e2: list the run's tabs. A struct variant, not a unit one: serde's
+    /// `deny_unknown_fields` does not reject extra keys on an internally tagged unit variant.
+    TabList {},
     /// E3.2-e2: open a tab, at a URL the grant's domains cover or blank.
     TabNew { url: Option<String> },
     /// E3.2-e2: make a tab the active one.
@@ -951,7 +952,7 @@ impl BrowserMcpAction {
     /// The request kind for this action: a tab operation, or a governed step.
     fn into_kind(self, allowed_domains: &[String]) -> Result<BrowserMcpKind, String> {
         match self {
-            Self::TabList => Ok(BrowserMcpKind::Tabs(TabOp::List)),
+            Self::TabList {} => Ok(BrowserMcpKind::Tabs(TabOp::List)),
             Self::TabNew { url } => {
                 let url = url.map(|url| url.trim().to_owned()).filter(|url| !url.is_empty());
                 if let Some(url) = &url {
@@ -976,7 +977,7 @@ impl BrowserMcpAction {
         use crate::quarry_agent::AgentAction;
 
         match self {
-            Self::TabList | Self::TabNew { .. } | Self::TabSelect { .. } | Self::TabClose { .. } => {
+            Self::TabList {} | Self::TabNew { .. } | Self::TabSelect { .. } | Self::TabClose { .. } => {
                 Err("tab operations are not step actions".to_owned())
             }
             Self::ClickRef {
@@ -2796,7 +2797,7 @@ mod tests {
             act_kind(r#"{"type":"click_ref","snapshot_id":"s","generation":1,"ref_id":"@e1"}"#),
             Ok(BrowserMcpKind::Act(_))
         ));
-        assert!(BrowserMcpAction::TabList.into_quarry_action().is_err());
+        assert!(BrowserMcpAction::TabList {}.into_quarry_action().is_err());
         assert!(BrowserMcpAction::TabSelect { tab_id: "t".to_owned() }.into_quarry_action().is_err());
     }
 
