@@ -3207,10 +3207,18 @@ async fn space_thread_transcript(
             )),
         );
     }
+    // WS12-S8: reactions merged by message id. Application failing never fails the read.
+    let mut turns = turns;
+    let reactions_unavailable =
+        message_lifecycle::attach_reactions(&state, &user, &org_id, space_ref, thread_id, &mut turns)
+            .await;
     let mut transcript = json!({
         "threadId": thread_id,
         "turns": turns,
     });
+    if reactions_unavailable {
+        transcript["reactions_unavailable"] = Value::Bool(true);
+    }
     if window.is_some() {
         transcript["window"] = timeline::transcript_window_json(&payload);
     }
@@ -5546,6 +5554,7 @@ async fn space_context(
                     "thread_fork": state.space_features.thread_fork_api,
                     "dm": state.space_features.dm_api,
                     "message_revise": state.space_features.message_revise_api,
+                    "reactions": state.space_features.reactions_api,
                     "tool_policy_editor": state.space_features.tool_policy_editor,
                     "attention": state.space_features.attention_api
                         && state.space_features.attention_ui,

@@ -519,6 +519,8 @@ export const purgeSpace = internalMutation({
     more = (await deleteBatch(ctx, await take("spacePresence", "by_space", (q) => q.eq("spaceRef", spaceRef)), org)) || more;
     more = (await deleteBatch(ctx, await take("spaceRoomNotifyPrefs", "by_space", (q) => q.eq("spaceRef", spaceRef)), org)) || more;
     more = (await deleteBatch(ctx, await take("spaceReminders", "by_space", (q) => q.eq("spaceRef", spaceRef)), org)) || more;
+    // WS12-S8: message reactions of the Space.
+    more = (await deleteBatch(ctx, await take("spaceReactions", "by_space_thread", (q) => q.eq("spaceRef", spaceRef)), org)) || more;
     if (more) await ctx.scheduler.runAfter(0, internal.spaceAttentionIngest.purgeSpace, args);
     return { more };
   },

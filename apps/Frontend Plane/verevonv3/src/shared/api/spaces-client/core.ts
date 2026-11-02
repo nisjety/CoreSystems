@@ -7,6 +7,7 @@ import {
 import { ApiError, requestJson } from '../http'
 import { setDmListingEnabled, type SpaceDmParticipant } from './dm'
 import { spacePinsFrom, type SpaceRoomPin } from './pins'
+import { spaceReactionsFrom, type SpaceReactionChip } from './reactions'
 import { spaceRunWorkFrom, type SpaceRunWork } from './run-work'
 import { readSpaceDenial } from '../space-denials'
 
@@ -79,6 +80,8 @@ export type SpaceContext = {
     dm?: boolean
     /** WS12-S7: editing and deleting messages is offered (rollout only; Control decides each change). */
     message_revise?: boolean
+    /** WS12-S8: emoji reactions are offered (rollout only; the live room role and Control decide each one). */
+    reactions?: boolean
     /** WS10-S5b: the Agent tab shows the per-tool policy editor. */
     tool_policy_editor?: boolean
     /** WS14: the room file library's rollout, `{turn_attachments, durable, files_tab}`. */
@@ -834,6 +837,8 @@ export type SpaceThreadTurn = {
   readonly revisedBySubjectId?: string
   /** A deleted message an agent run had already answered (the answer stays). */
   readonly agentFollowedUp?: boolean
+  /** WS12-S8: the message's emoji reactions, merged by the gateway; absent means none (or unavailable). */
+  readonly reactions?: readonly SpaceReactionChip[]
 }
 
 export type SpaceThreadTranscript = {
@@ -909,6 +914,7 @@ function normalizeSpaceThreadTurns(value: unknown): readonly SpaceThreadTurn[] {
         ? spaceRetrievalDeclineReason(record.retrievalDeclined)
         : undefined
     const work = role === 'assistant' ? spaceRunWorkFrom(record.work) : undefined
+    const reactions = spaceReactionsFrom(record.reactions)
     turns.push({
       role,
       content,
@@ -923,6 +929,7 @@ function normalizeSpaceThreadTurns(value: unknown): readonly SpaceThreadTurn[] {
       ...(revisionState && revisedAt ? { revisedAt } : {}),
       ...(revisionState && revisedBySubjectId ? { revisedBySubjectId } : {}),
       ...(revisionState === 'deleted' && record.agent_followed_up === true ? { agentFollowedUp: true } : {}),
+      ...(revisionState !== 'deleted' && reactions.length > 0 ? { reactions } : {}),
     })
   }
   return turns

@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 
 use crate::config::AppState;
 use crate::domains::spaces::dm::{open_dm_core, set_hidden};
-use crate::domains::spaces::message_lifecycle::{revise_message, Revision};
+use crate::domains::spaces::message_lifecycle::{revise_message, set_reaction, Revision};
 use crate::middleware::AuthenticatedUser;
 
 use super::super::dispatchers::{
@@ -128,4 +128,32 @@ pub(in crate::domains::actions) async fn dispatch_spaces_delete_message(
     )
     .await;
     owner_json_response_to_envelope("spaces.delete_message", user, status, resp)
+}
+
+/// WS12-S8: `spaces.toggle_reaction` rides the same flow as `PUT`/`DELETE
+/// /api/v1/spaces/{space_ref}/threads/{thread_id}/messages/{message_id}/reactions/{emoji}`.
+/// `present` defaults to true (add); false removes the caller's reaction.
+pub(in crate::domains::actions) async fn dispatch_spaces_toggle_reaction(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let (space_ref, thread_id, message_id, emoji) = (
+        ticket_string(input, "spaceRef"),
+        ticket_string(input, "threadId"),
+        ticket_string(input, "messageId"),
+        ticket_string(input, "emoji"),
+    );
+    if space_ref.is_empty() || thread_id.is_empty() || message_id.is_empty() || emoji.is_empty() {
+        return ticket_bad_request(
+            "spaces.toggle_reaction requires non-empty 'spaceRef', 'threadId', 'messageId' and 'emoji'",
+        );
+    }
+    let present = input.get("present").and_then(Value::as_bool).unwrap_or(true);
+    let (status, axum::Json(resp)) = set_reaction(
+        state, user, headers, space_ref, thread_id, message_id, emoji, present,
+    )
+    .await;
+    owner_json_response_to_envelope("spaces.toggle_reaction", user, status, resp)
 }

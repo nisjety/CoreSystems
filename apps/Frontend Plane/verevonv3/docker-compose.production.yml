@@ -44,6 +44,7 @@ services:
             SPACE_SIDEBAR_API: "false"
             SPACE_DM_API: "false"
             SPACE_MESSAGE_REVISE_API: "false"
+            SPACE_REACTIONS_API: "false"
             SPACE_RUN_LIVE_VIEW: "false"
             SPACE_RUN_LIVE_TEXT: "false"
             SPACE_RUN_MANAGER_STOP: "false"

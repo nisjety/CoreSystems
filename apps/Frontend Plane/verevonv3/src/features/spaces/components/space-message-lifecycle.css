@@ -118,3 +118,101 @@
 .verevon-message-edit__hint {
   color: var(--verevon-text-muted);
 }
+
+/* WS12-S8: reaction chips and the emoji picker. */
+.verevon-reaction-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.verevon-reaction-chip {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 999px;
+  background: var(--verevon-surface);
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.verevon-reaction-chip[aria-pressed='true'] {
+  border-color: var(--verevon-accent-ink);
+  color: var(--verevon-text);
+}
+
+.verevon-reaction-chip:hover:not(:disabled),
+.verevon-reaction-chip:focus-visible {
+  background: var(--verevon-surface-soft);
+  color: var(--verevon-text);
+}
+
+.verevon-reaction-chip:focus-visible,
+.verevon-reaction-picker__emoji:focus-visible {
+  outline: 2px solid var(--verevon-accent-ink);
+  outline-offset: 1px;
+}
+
+.verevon-reaction-chip:disabled {
+  cursor: default;
+}
+
+.verevon-reaction-chip__count {
+  font-variant-numeric: tabular-nums;
+}
+
+/* The add button is quiet until the row is hovered or focused, but a message with no chips yet keeps it reachable. */
+.verevon-reaction-chip--add {
+  opacity: 0;
+}
+
+.verevon-room-turn:hover .verevon-reaction-chip--add,
+.verevon-room-turn:focus-within .verevon-reaction-chip--add,
+.verevon-reaction-chip--add[aria-expanded='true'] {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .verevon-reaction-chip--add {
+    opacity: 1;
+  }
+}
+
+.verevon-reaction-picker {
+  position: relative;
+}
+
+.verevon-reaction-picker__panel {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 0;
+  z-index: 5;
+  display: grid;
+  grid-template-columns: repeat(6, 32px);
+  gap: 2px;
+  padding: 4px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 8px;
+  background: var(--verevon-surface);
+  box-shadow: 0 6px 18px rgb(0 0 0 / 0.12);
+}
+
+.verevon-reaction-picker__emoji {
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  font-size: 18px;
+  cursor: pointer;
+}
+
+.verevon-reaction-picker__emoji:hover {
+  background: var(--verevon-surface-soft);
+}

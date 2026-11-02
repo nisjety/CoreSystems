@@ -194,6 +194,7 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'spaces.hide_space': exempt('ui_state_only', 'external_write'),
   'spaces.edit_message': exempt('human_identity_or_security', 'external_write'),
   'spaces.delete_message': exempt('irreversible_destructive', 'destructive'),
+  'spaces.toggle_reaction': exempt('human_identity_or_security', 'external_write'),
   'space.files.attach': exempt('human_identity_or_security', 'external_write'),
   'space.files.list': exempt('no_owner_executor', 'read'),
   'space.files.read_text': exempt('no_owner_executor', 'read'),

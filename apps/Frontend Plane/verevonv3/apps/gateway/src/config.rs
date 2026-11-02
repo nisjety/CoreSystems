@@ -222,6 +222,13 @@ pub(crate) struct SpaceFeatureFlags {
     /// `model.thread.revise` decision and Session Core's author/owner/moderator check decide, and a Zero
     /// Data Retention org is refused with the typed 412 whatever this says. Production default off.
     pub(crate) message_revise_api: bool,
+    /// `SPACE_REACTIONS_API` (WS12-S8): `PUT`/`DELETE .../threads/{thread_id}/messages/{message_id}/reactions/{emoji}`,
+    /// the `reactions[]` merged into transcript turns and `features.reactions`. Off answers 404
+    /// `space_reactions_disabled`. A rollout control, never an authorization input: the caller's live
+    /// room role (editor or above), the Control shared-read decision and Session Core's message check
+    /// decide, and a Zero Data Retention org is refused with the typed 412 before any write. Needs
+    /// Convex `SPACE_REACTIONS` on and model-gateway `SPACE_MESSAGE_REVISE_API` (target route). Production default off.
+    pub(crate) reactions_api: bool,
     /// `CLIENT_VERSION_POLICY` / `CLIENT_MIN_CONTRACT` (WS07-S3): the stale-client contract the
     /// public `/api/v1/client-config` route reports. Unlike the booleans its default is `banner`,
     /// never off. Carried here (not as an `AppState` field) so no test literal needs an edit.
@@ -457,6 +464,7 @@ impl SpaceFeatureFlags {
             denials_typed: space_flag("SPACE_DENIALS_TYPED"),
             dm_api: space_flag("SPACE_DM_API"),
             message_revise_api: space_flag("SPACE_MESSAGE_REVISE_API"),
+            reactions_api: space_flag("SPACE_REACTIONS_API"),
             client_policy: crate::client_contract::ClientPolicy::from_env(),
             csp_report_log_hosts: dev_only_flag("CSP_REPORT_LOG_HOSTS"),
             connectivity_banner_ui: space_flag("SPACE_CONNECTIVITY_BANNER_UI"),

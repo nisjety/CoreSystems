@@ -61,6 +61,7 @@ export interface SpaceThreadPanelProps {
   readonly messageId?: () => string | null | undefined
   /** `features.message_revise` (WS12-S7): edit and delete controls are offered. Absent means off. */
   readonly messageReviseEnabled?: () => boolean
+  readonly reactionsEnabled?: () => boolean
   /** `data.message_policy` (WS12-S7): hints for which controls to offer. Never an authorization. */
   readonly messagePolicy?: () => SpaceMessagePolicyHints | null | undefined
   readonly viewerRole?: () => string | undefined
@@ -108,6 +109,7 @@ export function SpaceThreadPanel(props: SpaceThreadPanelProps) {
     spaceRef: () => props.spaceRef,
     threadId: () => props.threadId,
     enabled: () => props.messageReviseEnabled?.() === true,
+    reactionsEnabled: () => props.reactionsEnabled?.() === true,
     viewerSubjectId: () => props.viewerSubjectId?.(),
     viewerRole: () => props.viewerRole?.(),
     threadOwnerSubjectId: () => props.thread()?.owner_subject_id,

@@ -794,6 +794,7 @@ export default function SpacePage() {
                         journal={sendJournal}
                         humanPostsEnabled={() => current().features?.human_posts === true}
                         messageReviseEnabled={() => current().features?.message_revise === true}
+                        reactionsEnabled={() => current().features?.reactions === true}
                         messagePolicy={() => current().message_policy}
                         agentWork={agentWork}
                         onOpenRun={openRun}
@@ -918,6 +919,7 @@ export default function SpacePage() {
                         thread={thread}
                         messageId={selectedMessageId}
                         messageReviseEnabled={() => current().features?.message_revise === true}
+                        reactionsEnabled={() => current().features?.reactions === true}
                         messagePolicy={() => current().message_policy}
                         viewerRole={() => current().membership.role}
                         archived={() => roomIsArchived(current())}
@@ -1007,6 +1009,7 @@ function SpaceConversationPanel(props: {
   readonly humanPostsEnabled?: () => boolean
   /** The room's `features.message_revise` and `data.message_policy` (WS12-S7). */
   readonly messageReviseEnabled?: () => boolean
+  readonly reactionsEnabled?: () => boolean
   readonly messagePolicy?: () => SpaceMessagePolicyHints | null | undefined
   /** The listing's `data.agent_work` (WS09-S2): what the room's runs offer this caller. Absent means off. */
   readonly agentWork?: () => SpaceAgentWork | undefined
@@ -1081,6 +1084,7 @@ function SpaceConversationPanel(props: {
             viewerSubjectId={props.viewerSubjectId}
             viewerRole={props.viewerRole}
             messageReviseEnabled={props.messageReviseEnabled}
+            reactionsEnabled={props.reactionsEnabled}
             messagePolicy={props.messagePolicy}
             postMaxChars={props.postMaxChars}
             archived={props.archived}

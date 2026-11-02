@@ -57,6 +57,7 @@ import type * as spaceMembershipSync from "../spaceMembershipSync.js";
 import type * as spaceParticipants from "../spaceParticipants.js";
 import type * as spacePins from "../spacePins.js";
 import type * as spacePresence from "../spacePresence.js";
+import type * as spaceReactions from "../spaceReactions.js";
 import type * as spaceReadMarkers from "../spaceReadMarkers.js";
 import type * as spaceRegistration from "../spaceRegistration.js";
 import type * as spaceReminders from "../spaceReminders.js";
@@ -123,6 +124,7 @@ declare const fullApi: ApiFromModules<{
   spaceParticipants: typeof spaceParticipants;
   spacePins: typeof spacePins;
   spacePresence: typeof spacePresence;
+  spaceReactions: typeof spaceReactions;
   spaceReadMarkers: typeof spaceReadMarkers;
   spaceRegistration: typeof spaceRegistration;
   spaceReminders: typeof spaceReminders;

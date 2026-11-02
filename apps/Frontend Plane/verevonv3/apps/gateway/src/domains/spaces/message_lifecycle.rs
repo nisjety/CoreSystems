@@ -32,12 +32,28 @@
 //!
 //! The same flow backs the `spaces.edit_message` and `spaces.delete_message` actions, so the flag,
 //! the ZDR refusal and the typed errors exist once.
+//!
+//! # Reactions (WS12-S8)
+//!
+//! `PUT` and `DELETE /api/v1/spaces/{space_ref}/threads/{thread_id}/messages/{message_id}/reactions/{emoji}`
+//! add and remove the caller's one emoji on one message. Application (Convex `spaceReactions`)
+//! stores ids, the emoji and a time only; this module decides nothing about content. Order of
+//! refusals for a `PUT`: flag (404 `space_reactions_disabled`), organization, request shape (400
+//! `invalid_emoji`), Zero Data Retention (typed 412/503 before any Control, model or Convex call),
+//! Space lifecycle, the caller's LIVE Control role (editor or above, else 403
+//! `space_role_cannot_react`), the Control shared-read decision (403 `space_read_not_authorized`),
+//! proof through model-gateway's target route that the message exists in that Space thread, is
+//! under the reader's ceiling and is not deleted (404 `message_not_found`), and only then Convex
+//! (409 `reaction_limit`, 503 `application_unavailable`). A `DELETE` needs only an active
+//! membership and skips the message proof, so a reaction on a since-deleted message stays removable.
+//! A reaction never starts a run and is never read by approval or wake code. The transcript route
+//! calls `attach_reactions`; Convex failing there never fails the read.
 
 use axum::{
     body::Bytes,
     extract::{DefaultBodyLimit, Extension, Path, Query, State},
     http::{HeaderMap, StatusCode},
-    routing::patch,
+    routing::{patch, put},
     Json, Router,
 };
 use reqwest::Method;
@@ -46,6 +62,10 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use super::human_posts::{filter_model_error, space_context_from_decision, POST_MAX_CHARS};
+use super::{
+    convex_gateway_call, denial, room_admin::convex_mutation_message,
+    shared_thread_read_decision_for_typed,
+};
 use crate::{
     config::AppState,
     contracts::ActionActor,
@@ -75,12 +95,17 @@ const MODERATION_REASONS: [&str; 5] = ["policy_violation", "spam", "harassment",
 /// Registered through `module_routes()` behind `require_session`. The method router shares no
 /// path with the post routes (`.../messages` has no id segment).
 pub(super) fn routes() -> Router<AppState> {
-    Router::new().route(
-        "/api/v1/spaces/{space_ref}/threads/{thread_id}/messages/{message_id}",
-        patch(edit_route)
-            .delete(delete_route)
-            .layer(DefaultBodyLimit::max(BODY_LIMIT_BYTES)),
-    )
+    Router::new()
+        .route(
+            "/api/v1/spaces/{space_ref}/threads/{thread_id}/messages/{message_id}",
+            patch(edit_route)
+                .delete(delete_route)
+                .layer(DefaultBodyLimit::max(BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/api/v1/spaces/{space_ref}/threads/{thread_id}/messages/{message_id}/reactions/{emoji}",
+            put(add_reaction_route).delete(remove_reaction_route),
+        )
 }
 
 /// What the caller asks for.
@@ -356,7 +381,24 @@ pub(crate) async fn revise_message(
         if stale && attempt == 0 {
             continue;
         }
-        return map_model_response(status, response);
+        let reply = map_model_response(status, response);
+        // WS12-S8: a deleted message keeps no reactions. Best effort: the delete already landed
+        // and a reaction on a tombstone is hidden from the transcript either way.
+        if action == "delete" && reply.0 == StatusCode::OK && state.space_features.reactions_api {
+            let _ = convex_mutation_message(
+                state,
+                "spaceReactions:clearForMessageForGateway",
+                json!({
+                    "externalAuthId": user.user_id,
+                    "externalOrgId": org_id,
+                    "spaceRef": space_ref,
+                    "threadId": thread_id,
+                    "messageId": message_id,
+                }),
+            )
+            .await;
+        }
+        return reply;
     }
     refuse(
         StatusCode::CONFLICT,
@@ -553,4 +595,339 @@ pub(super) async fn message_policy_hints(
         "moderate_entitled": flag("moderate_entitled"),
         "original_retention": retention,
     }))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Reactions (WS12-S8)
+// ---------------------------------------------------------------------------------------------
+
+/// Room roles that may react. A viewer reads reactions, never adds one.
+const REACT_ROLES: [&str; 3] = ["editor", "manager", "owner"];
+/// The same ceiling as Application's `MAX_EMOJI_BYTES`; Application does the full cluster check.
+const MAX_EMOJI_BYTES: usize = 32;
+
+fn reactions_disabled() -> Reply {
+    refuse(
+        StatusCode::NOT_FOUND,
+        "space_reactions_disabled",
+        "Reactions are not enabled.",
+    )
+}
+
+fn application_unavailable() -> Reply {
+    refuse(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "application_unavailable",
+        "The reaction could not be changed. Nothing was changed.",
+    )
+}
+
+fn invalid_emoji() -> Reply {
+    refuse(
+        StatusCode::BAD_REQUEST,
+        "invalid_emoji",
+        "A single emoji is required.",
+    )
+}
+
+async fn add_reaction_route(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path((space_ref, thread_id, message_id, emoji)): Path<(String, String, String, String)>,
+) -> Reply {
+    set_reaction(&state, &user, &headers, &space_ref, &thread_id, &message_id, &emoji, true).await
+}
+
+async fn remove_reaction_route(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path((space_ref, thread_id, message_id, emoji)): Path<(String, String, String, String)>,
+) -> Reply {
+    set_reaction(&state, &user, &headers, &space_ref, &thread_id, &message_id, &emoji, false).await
+}
+
+/// The whole reaction flow, shared by the two routes and the `spaces.toggle_reaction` action.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn set_reaction(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    space_ref: &str,
+    thread_id: &str,
+    message_id: &str,
+    emoji: &str,
+    present: bool,
+) -> Reply {
+    if !state.space_features.reactions_api {
+        return reactions_disabled();
+    }
+    let org_id = authorized_org_id(state, user).await;
+    if org_id.trim().is_empty() {
+        return refuse(
+            StatusCode::FORBIDDEN,
+            "active_membership_required",
+            "An active organization membership is required to react.",
+        );
+    }
+    let space_ref = space_ref.trim();
+    if space_ref.is_empty() || space_ref.len() > MAX_SPACE_REF_BYTES {
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            "invalid_space",
+            "A Space reference is required.",
+        );
+    }
+    let (thread_id, message_id) = (thread_id.trim(), message_id.trim());
+    if thread_id.is_empty()
+        || thread_id.len() > MAX_ID_BYTES
+        || message_id.is_empty()
+        || message_id.len() > MAX_ID_BYTES
+    {
+        return message_not_found();
+    }
+    if emoji.is_empty()
+        || emoji.len() > MAX_EMOJI_BYTES
+        || emoji.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return invalid_emoji();
+    }
+    // Adding persists a new row about the room: refused for a Zero Data Retention caller, typed,
+    // before any Control, model or Application call. Removing erases a row and is not refused.
+    if present {
+        if let Some(refusal) = zdr::durable_write_refusal(state, user, Some(headers), None).await {
+            return refusal;
+        }
+    }
+    match super::space_lifecycle_by_ref(state, user, &org_id, space_ref).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return refuse(
+                StatusCode::NOT_FOUND,
+                "space_not_found",
+                "Space is not available.",
+            )
+        }
+        Err(()) => {
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "space_lifecycle_unavailable",
+                "Space lifecycle is unavailable.",
+            )
+        }
+    }
+    // The live role decides, from Control, before any Application request.
+    let role = match super::resolve_space_role(state, user, &org_id, space_ref).await {
+        Ok(role) => role,
+        Err(refusal) => return refusal,
+    };
+    if present {
+        if !REACT_ROLES.contains(&role.as_str()) {
+            return refuse(
+                StatusCode::FORBIDDEN,
+                "space_role_cannot_react",
+                "Only a room editor, manager or owner can react.",
+            );
+        }
+        if let Err(reply) =
+            prove_message_reactable(state, user, headers, &org_id, space_ref, thread_id, message_id)
+                .await
+        {
+            return reply;
+        }
+    }
+    match convex_mutation_message(
+        state,
+        "spaceReactions:setForGateway",
+        json!({
+            "externalAuthId": user.user_id,
+            "externalOrgId": org_id,
+            "spaceRef": space_ref,
+            "threadId": thread_id,
+            "messageId": message_id,
+            "emoji": emoji,
+            "present": present,
+        }),
+    )
+    .await
+    {
+        Ok(value) => (
+            StatusCode::OK,
+            Json(json!({ "data": {
+                "message_id": message_id,
+                "reactions": reaction_chips(value.get("reactions")),
+            }})),
+        ),
+        Err(Some(message)) if message.contains("reaction_limit") => refuse(
+            StatusCode::CONFLICT,
+            "reaction_limit",
+            "This message already has the most different reactions it can hold.",
+        ),
+        Err(Some(message)) if message.contains("invalid_emoji") => invalid_emoji(),
+        Err(Some(message)) if message.contains("reaction_invalid") => refuse(
+            StatusCode::BAD_REQUEST,
+            "invalid_reaction",
+            "The reaction request is not valid.",
+        ),
+        Err(Some(message)) if message.contains("reactions_disabled") => reactions_disabled(),
+        Err(_) => application_unavailable(),
+    }
+}
+
+/// Proof that `message_id` is a live message of this Space thread the reactor may read: the
+/// Control shared-read decision under the reactor's own delegation, then model-gateway's target
+/// route (Session Core applies the audience ceiling and the tombstone). A message of another
+/// Space, a missing one, one above the reader's ceiling and a deleted one all answer 404.
+async fn prove_message_reactable(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    org_id: &str,
+    space_ref: &str,
+    thread_id: &str,
+    message_id: &str,
+) -> Result<(), Reply> {
+    let (read, read_denial) =
+        match shared_thread_read_decision_for_typed(state, user, org_id, space_ref, "").await {
+            Ok(decision) => decision.split(),
+            Err(response) => return Err(response),
+        };
+    let Some((decision_ref, token)) = read else {
+        let message = "Reading this Space's posts is not authorized.";
+        return Err(match read_denial {
+            Some(denial) => (
+                StatusCode::FORBIDDEN,
+                Json(error_with_details(
+                    denial::OP_READ,
+                    message,
+                    denial.details_value(),
+                )),
+            ),
+            None => refuse(StatusCode::FORBIDDEN, "space_read_not_authorized", message),
+        });
+    };
+    let session_bearer = match required_session_token(state, user, headers).await {
+        Ok(token) => token,
+        Err(cause) => return Err(delegated_auth_unavailable(cause)),
+    };
+    let model_bearer = model_token(state, user, headers).await;
+    let url = format!(
+        "{}/v1/threads/{}/messages/{}/target?space_id={}&space_read_decision_ref={}&space_read_decision_token={}",
+        state.model_gateway_url,
+        urlencoding::encode(thread_id),
+        urlencoding::encode(message_id),
+        urlencoding::encode(space_ref),
+        urlencoding::encode(&decision_ref),
+        urlencoding::encode(&token),
+    );
+    let (status, Json(response)) = proxy_model_json_with_session(
+        state,
+        Method::GET,
+        &url,
+        None,
+        model_bearer.as_deref(),
+        Some(&session_bearer),
+        user,
+    )
+    .await;
+    match status {
+        status if status.is_success() => {
+            let role = response.get("role").and_then(Value::as_str).unwrap_or_default();
+            let deleted =
+                response.get("revision_state").and_then(Value::as_str) == Some("deleted");
+            if deleted || !matches!(role, "user" | "assistant") {
+                return Err(message_not_found());
+            }
+            Ok(())
+        }
+        StatusCode::NOT_FOUND => Err(message_not_found()),
+        StatusCode::FORBIDDEN => Err(refuse(
+            StatusCode::FORBIDDEN,
+            "space_read_not_authorized",
+            "Reading this Space's posts is not authorized.",
+        )),
+        _ => Err(refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "session_unavailable",
+            "The conversation service is unavailable.",
+        )),
+    }
+}
+
+/// Application's `[{emoji, count, reactedByMe}]` as the browser's `[{emoji, count, reacted}]`.
+fn reaction_chips(raw: Option<&Value>) -> Vec<Value> {
+    raw.and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    Some(json!({
+                        "emoji": row.get("emoji")?.as_str()?,
+                        "count": row.get("count")?.as_u64()?,
+                        "reacted": row.get("reactedByMe").and_then(Value::as_bool).unwrap_or(false),
+                    }))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Merge the thread's reactions into the transcript turns by `message_id` (WS12-S8): one
+/// Application read per transcript, `reactions: [{emoji, count, reacted}]` on a turn that has any
+/// and is not deleted. Returns `true` when Application could not be asked, so the transcript says
+/// `reactions_unavailable` instead of failing; `false` when the flag is off or the merge worked.
+pub(super) async fn attach_reactions(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    space_ref: &str,
+    thread_id: &str,
+    turns: &mut Value,
+) -> bool {
+    if !state.space_features.reactions_api {
+        return false;
+    }
+    let Ok(value) = convex_gateway_call(
+        state,
+        "query",
+        "spaceReactions:reactionsForThreadForGateway",
+        json!({
+            "externalAuthId": user.user_id,
+            "externalOrgId": org_id,
+            "spaceRef": space_ref,
+            "threadId": thread_id,
+        }),
+    )
+    .await
+    else {
+        return true;
+    };
+    let Some(rows) = value.get("reactions").and_then(Value::as_array) else {
+        return true;
+    };
+    let Some(turns) = turns.as_array_mut() else {
+        return false;
+    };
+    for turn in turns.iter_mut() {
+        if turn.get("revision_state").and_then(Value::as_str) == Some("deleted") {
+            continue;
+        }
+        let Some(message_id) = turn
+            .get("message_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let mine: Vec<Value> = rows
+            .iter()
+            .filter(|row| row.get("messageId").and_then(Value::as_str) == Some(message_id.as_str()))
+            .cloned()
+            .collect();
+        let chips = reaction_chips(Some(&Value::Array(mine)));
+        if !chips.is_empty() {
+            turn["reactions"] = Value::Array(chips);
+        }
+    }
+    false
 }

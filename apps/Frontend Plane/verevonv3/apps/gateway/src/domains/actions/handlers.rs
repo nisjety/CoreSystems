@@ -91,7 +91,7 @@ use super::dispatchers_spaces::ws11::{
 };
 use super::dispatchers_spaces::ws12::{
     dispatch_spaces_delete_message, dispatch_spaces_edit_message, dispatch_spaces_hide_space,
-    dispatch_spaces_open_dm,
+    dispatch_spaces_open_dm, dispatch_spaces_toggle_reaction,
 };
 use super::dispatchers_spaces::ws14::{
     dispatch_space_files_attach, dispatch_space_files_delete, dispatch_space_files_list,
@@ -593,6 +593,9 @@ pub(super) async fn execute_action(
         "spaces.delete_message" => {
             dispatch_spaces_delete_message(&state, &user, &headers, &body.input).await
         }
+        "spaces.toggle_reaction" => {
+            dispatch_spaces_toggle_reaction(&state, &user, &headers, &body.input).await
+        }
         "spaces.update_sidebar" => {
             dispatch_spaces_update_sidebar(&state, &user, &headers, &body.input).await
         }
@@ -618,13 +621,13 @@ pub(super) async fn execute_action(
         "spaces.set_thread_follow" => {
             dispatch_spaces_set_thread_follow(&state, &user, &headers, &body.input).await
         }
-        "spaces.update_room_details" => {
-            dispatch_spaces_update_room_details(&state, &user, &body.input).await
-        }
         "spaces.mark_all_read" => dispatch_spaces_mark_all_read(&state, &user, &body.input).await,
         "spaces.mark_unread" => dispatch_spaces_mark_unread(&state, &user, &body.input).await,
         "spaces.set_notify_level" => {
             dispatch_spaces_set_notify_level(&state, &user, &body.input).await
+        }
+        "spaces.update_room_details" => {
+            dispatch_spaces_update_room_details(&state, &user, &body.input).await
         }
         "spaces.join_room" => {
             dispatch_spaces_join_room(&state, &user, &body.input, &body.idempotency_key).await

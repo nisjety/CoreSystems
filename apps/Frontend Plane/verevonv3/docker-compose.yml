@@ -314,6 +314,11 @@ services:
       # space_message_revise_disabled when off). Rollout control only; Control's model.thread.revise decision
       # and Session Core decide, ZDR orgs get the typed 412. Needs model-gateway SPACE_MESSAGE_REVISE_API.
       SPACE_MESSAGE_REVISE_API: ${SPACE_MESSAGE_REVISE_API:-true}
+      # WS12-S8: message reactions (PUT/DELETE .../messages/{message_id}/reactions/{emoji}; 404
+      # space_reactions_disabled when off). Rollout control only; the live room role, Control's read decision
+      # and Session Core's message check decide, ZDR orgs get the typed 412. Needs Convex SPACE_REACTIONS and
+      # model-gateway SPACE_MESSAGE_REVISE_API.
+      SPACE_REACTIONS_API: ${SPACE_REACTIONS_API:-true}
       # WS04-S8: GET /api/v1/directory/rooms, POST .../join, PATCH .../settings and the actions
       # spaces.join_room / spaces.update_room_settings (404 feature_disabled when off). Rollout control
       # only; Control's per-org space_directory_policies row (absent = off) and the room's visibility decide.

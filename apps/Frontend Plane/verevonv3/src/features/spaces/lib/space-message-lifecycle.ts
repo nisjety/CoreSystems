@@ -9,8 +9,9 @@ import {
   deleteSpaceMessage,
   editSpaceMessage,
   newMessageRevisionKey,
+  setSpaceReaction,
 } from '@/shared/api/spaces-client'
-import type { SpaceMessagePolicyHints } from '@/shared/api/spaces-client'
+import type { SpaceMessagePolicyHints, SpaceReactionChip } from '@/shared/api/spaces-client'
 import { roleRank } from './space-roles'
 
 /** The slice of a turn the rules read. */
@@ -28,6 +29,10 @@ export interface SpaceTurnLifecycle {
   /** Saves new text. Rejects with the ApiError, which the editor words with `translateApiError`. */
   readonly edit: (turn: LifecycleTurn, content: string) => Promise<void>
   readonly remove: (turn: LifecycleTurn) => Promise<void>
+  /** WS12-S8: a reaction control is offered on this turn (a hint; the server decides). */
+  readonly canReact: (turn: LifecycleTurn) => boolean
+  /** Adds or removes the viewer's emoji; resolves to the message's chips afterwards. Rejects with the ApiError. */
+  readonly react: (turn: LifecycleTurn, emoji: string, present: boolean) => Promise<readonly SpaceReactionChip[]>
 }
 
 export interface SpaceTurnLifecycleInput {
@@ -41,6 +46,8 @@ export interface SpaceTurnLifecycleInput {
   readonly threadOwnerSubjectId: () => string | undefined
   readonly policy: () => SpaceMessagePolicyHints | null | undefined
   readonly archived?: () => boolean
+  /** The `features.reactions` flag of the Space context (WS12-S8). Absent means off. */
+  readonly reactionsEnabled?: () => boolean
   /** Called after a change landed, so the transcript is read again. */
   readonly onChanged: () => void
 }
@@ -84,9 +91,22 @@ export function createSpaceTurnLifecycle(input: SpaceTurnLifecycleInput): SpaceT
     }
     return roleRank(input.viewerRole() ?? '') >= roleRank('manager') && policy?.moderate_entitled === true
   }
+  // A viewer reads reactions and never adds one; an unknown role offers nothing.
+  const canReact = (turn: LifecycleTurn): boolean =>
+    input.reactionsEnabled?.() === true &&
+    input.archived?.() !== true &&
+    Boolean(turn.messageId) &&
+    turn.revisionState !== 'deleted' &&
+    (turn.role === 'user' || turn.role === 'assistant') &&
+    roleRank(input.viewerRole() ?? '') >= roleRank('editor')
   return {
     canEdit,
     canDelete,
+    canReact,
+    async react(turn, emoji, present) {
+      if (!turn.messageId) throw new Error('message_id_missing')
+      return setSpaceReaction(input.spaceRef(), input.threadId(), turn.messageId, emoji, present)
+    },
     async edit(turn, content) {
       if (!turn.messageId) throw new Error('message_id_missing')
       await editSpaceMessage(input.spaceRef(), input.threadId(), turn.messageId, {

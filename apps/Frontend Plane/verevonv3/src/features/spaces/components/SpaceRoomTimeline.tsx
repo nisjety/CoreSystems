@@ -92,6 +92,7 @@ export interface SpaceRoomTimelineProps {
   readonly viewerRole?: () => string | undefined
   /** `features.message_revise` (WS12-S7): edit and delete controls are offered. Absent means off. */
   readonly messageReviseEnabled?: () => boolean
+  readonly reactionsEnabled?: () => boolean
   /** `data.message_policy` (WS12-S7): hints for which controls to offer. Never an authorization. */
   readonly messagePolicy?: () => SpaceMessagePolicyHints | null | undefined
   /** The room's post length bound, also the edit bound. */
@@ -478,6 +479,7 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
               viewerSubjectId={props.viewerSubjectId}
               viewerRole={props.viewerRole}
               messageReviseEnabled={props.messageReviseEnabled}
+              reactionsEnabled={props.reactionsEnabled}
               messagePolicy={props.messagePolicy}
               postMaxChars={props.postMaxChars}
               archived={props.archived}
@@ -553,6 +555,7 @@ function SpaceRoomPost(props: {
   readonly viewerSubjectId?: () => string | undefined
   readonly viewerRole?: () => string | undefined
   readonly messageReviseEnabled?: () => boolean
+  readonly reactionsEnabled?: () => boolean
   readonly messagePolicy?: () => SpaceMessagePolicyHints | null | undefined
   readonly postMaxChars?: () => number | undefined
   readonly archived?: () => boolean
@@ -672,6 +675,7 @@ function SpaceRoomPost(props: {
     spaceRef: () => props.spaceRef,
     threadId: () => props.thread.thread_id,
     enabled: () => props.messageReviseEnabled?.() === true,
+    reactionsEnabled: () => props.reactionsEnabled?.() === true,
     viewerSubjectId: () => props.viewerSubjectId?.(),
     viewerRole: () => props.viewerRole?.(),
     threadOwnerSubjectId: () => props.thread.owner_subject_id,
