@@ -2008,17 +2008,32 @@ async fn persist_browser_event(
             }),
             "type.googleapis.com/model_plane.v1.BrowserObservationReceived",
         ),
+        // `reason` (WS8.G attach mode) is stored only when set, so a user-initiated
+        // pause keeps the payload it always had.
         Some(orchestration_event::Event::BrowserRunPaused(value)) => (
             "BROWSER_RUN_PAUSED",
             value.run_id.as_str(),
-            serde_json::json!({ "run_id": value.run_id, "plan_id": value.plan_id }),
+            pause_resume_payload(&value.run_id, &value.plan_id, &value.reason),
             "type.googleapis.com/model_plane.v1.BrowserRunPaused",
         ),
         Some(orchestration_event::Event::BrowserRunResumed(value)) => (
             "BROWSER_RUN_RESUMED",
             value.run_id.as_str(),
-            serde_json::json!({ "run_id": value.run_id, "plan_id": value.plan_id }),
+            pause_resume_payload(&value.run_id, &value.plan_id, &value.reason),
             "type.googleapis.com/model_plane.v1.BrowserRunResumed",
+        ),
+        // Attach mode audit event (WS8.G): ids only, never a URL or a title.
+        Some(orchestration_event::Event::BrowserAttachSharedJar(value)) => (
+            "BROWSER_ATTACH_SHARED_JAR",
+            value.run_id.as_str(),
+            serde_json::json!({
+                "run_id": value.run_id,
+                "plan_id": value.plan_id,
+                "attach_id": value.attach_id,
+                "session_run_id": value.session_run_id,
+                "tab_id": value.tab_id,
+            }),
+            "type.googleapis.com/model_plane.v1.BrowserAttachSharedJar",
         ),
         Some(orchestration_event::Event::BrowserActionApprovalRequired(value)) => (
             "BROWSER_ACTION_APPROVAL_REQUIRED",
@@ -2196,6 +2211,15 @@ fn broadcast_approval_decision_events(
     );
 }
 
+/// The stored payload of a browser pause or resume. `reason` is present only when set.
+fn pause_resume_payload(run_id: &str, plan_id: &str, reason: &str) -> serde_json::Value {
+    let mut payload = serde_json::json!({ "run_id": run_id, "plan_id": plan_id });
+    if !reason.is_empty() {
+        payload["reason"] = serde_json::Value::String(reason.to_owned());
+    }
+    payload
+}
+
 fn event_run_id(ev: &proto::OrchestrationEvent) -> Option<&str> {
     match ev.event.as_ref()? {
         orchestration_event::Event::PlanTransitioned(p) => Some(&p.run_id),
@@ -2216,6 +2240,7 @@ fn event_run_id(ev: &proto::OrchestrationEvent) -> Option<&str> {
         orchestration_event::Event::BrowserObservationReceived(p) => Some(&p.run_id),
         orchestration_event::Event::BrowserRunPaused(p) => Some(&p.run_id),
         orchestration_event::Event::BrowserRunResumed(p) => Some(&p.run_id),
+        orchestration_event::Event::BrowserAttachSharedJar(p) => Some(&p.run_id),
         // Phase 5 — browser-specific HITL approval-gate detail events. Reuse
         // the same `RecordOrchestrationEvent` best-effort delivery path as
         // `BrowserActionDispatched`/`BrowserObservationReceived` above; the
@@ -5580,6 +5605,7 @@ mod tests {
                 orchestration_event::BrowserRunPaused {
                     run_id: "run_p".into(),
                     plan_id: "plan_p".into(),
+                    reason: String::new(),
                 },
             )),
         };
@@ -5592,10 +5618,35 @@ mod tests {
                 orchestration_event::BrowserRunResumed {
                     run_id: "run_p".into(),
                     plan_id: "plan_p".into(),
+                    reason: "control_returned".into(),
                 },
             )),
         };
         assert_eq!(event_run_id(&resumed_run), Some("run_p"));
+
+        let shared_jar = proto::OrchestrationEvent {
+            event_id: String::new(),
+            at: None,
+            event: Some(orchestration_event::Event::BrowserAttachSharedJar(
+                orchestration_event::BrowserAttachSharedJar {
+                    run_id: "run_j".into(),
+                    plan_id: "plan_j".into(),
+                    attach_id: "att_j".into(),
+                    session_run_id: "qrun_j".into(),
+                    tab_id: "tab_j".into(),
+                },
+            )),
+        };
+        assert_eq!(event_run_id(&shared_jar), Some("run_j"));
+
+        assert_eq!(
+            pause_resume_payload("r", "p", ""),
+            serde_json::json!({ "run_id": "r", "plan_id": "p" })
+        );
+        assert_eq!(
+            pause_resume_payload("r", "p", "user_took_over"),
+            serde_json::json!({ "run_id": "r", "plan_id": "p", "reason": "user_took_over" })
+        );
 
         // A durable-loop park and its resume are run-scoped, so both reach the
         // per-run stream and the replay buffer (WS03 S8).
@@ -5663,6 +5714,7 @@ mod tests {
                 orchestration_event::BrowserRunPaused {
                     run_id: "run_x".into(),
                     plan_id: "plan_x".into(),
+                    reason: String::new(),
                 },
             )),
         };

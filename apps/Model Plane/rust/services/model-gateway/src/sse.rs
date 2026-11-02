@@ -12911,6 +12911,7 @@ fn orchestration_event_to_sse(event: &OrchestrationEvent) -> Option<Event> {
         orchestration_event::Event::BrowserObservationReceived(_) => "browser_observation_received",
         orchestration_event::Event::BrowserRunPaused(_) => "browser_run_paused",
         orchestration_event::Event::BrowserRunResumed(_) => "browser_run_resumed",
+        orchestration_event::Event::BrowserAttachSharedJar(_) => "browser_attach_shared_jar",
         orchestration_event::Event::BrowserActionApprovalRequired(_) => {
             "browser_action_approval_required"
         }
@@ -13045,13 +13046,21 @@ fn orchestration_event_to_step_update(
         Event::BrowserRunPaused(p) => (
             p.run_id.clone(),
             "Paused".to_owned(),
-            "user paused the browser run".to_owned(),
+            if p.reason == "user_took_over" {
+                "you took control of the browser tab".to_owned()
+            } else {
+                "user paused the browser run".to_owned()
+            },
             "paused".to_owned(),
         ),
         Event::BrowserRunResumed(p) => (
             p.run_id.clone(),
             "Resumed".to_owned(),
-            "user resumed the browser run".to_owned(),
+            if p.reason == "control_returned" {
+                "control of the browser tab was given back".to_owned()
+            } else {
+                "user resumed the browser run".to_owned()
+            },
             "running".to_owned(),
         ),
         Event::BrowserActionApprovalRequired(p) => {
@@ -13103,8 +13112,10 @@ fn orchestration_event_to_step_update(
         // A park and its resume are not steps of the chat timeline: the owner's turn
         // stream carries its own `run_parked` frame (WS03 S8), and the run console reads
         // the raw orchestration events.
+        // The shared-jar attach is an audit event for the run console, not a step.
         Event::RunParked(_)
         | Event::RunResumed(_)
+        | Event::BrowserAttachSharedJar(_)
         | Event::QuestionAsked(_)
         | Event::QuestionAnswered(_) => return None,
     };
@@ -13223,13 +13234,29 @@ fn event_payload_value(event: &OrchestrationEvent) -> Option<Value> {
                 json!(payload.dom_snapshot_ref),
             );
         }
+        // `reason` is only present when the pause/resume has one (attach mode,
+        // WS8.G), so a user-initiated pause keeps its frame byte-identical.
         orchestration_event::Event::BrowserRunPaused(payload) => {
             object.insert("run_id".to_owned(), json!(payload.run_id));
             object.insert("plan_id".to_owned(), json!(payload.plan_id));
+            if !payload.reason.is_empty() {
+                object.insert("reason".to_owned(), json!(payload.reason));
+            }
         }
         orchestration_event::Event::BrowserRunResumed(payload) => {
             object.insert("run_id".to_owned(), json!(payload.run_id));
             object.insert("plan_id".to_owned(), json!(payload.plan_id));
+            if !payload.reason.is_empty() {
+                object.insert("reason".to_owned(), json!(payload.reason));
+            }
+        }
+        // Ids only: never a URL or a page title (WS8.G).
+        orchestration_event::Event::BrowserAttachSharedJar(payload) => {
+            object.insert("run_id".to_owned(), json!(payload.run_id));
+            object.insert("plan_id".to_owned(), json!(payload.plan_id));
+            object.insert("attach_id".to_owned(), json!(payload.attach_id));
+            object.insert("session_run_id".to_owned(), json!(payload.session_run_id));
+            object.insert("tab_id".to_owned(), json!(payload.tab_id));
         }
         orchestration_event::Event::BrowserActionApprovalRequired(payload) => {
             object.insert("run_id".to_owned(), json!(payload.run_id));
@@ -21176,6 +21203,74 @@ mod continue_run_tests {
         assert!(
             frame.get("reason").is_none() && frame.get("park_reason").is_none(),
             "the park reason is never broadcast: {frame}"
+        );
+    }
+
+    #[tokio::test]
+    async fn orchestration_browser_pause_resume_frames_carry_reason_only_when_set() {
+        let paused = |reason: &str| OrchestrationEvent {
+            event: Some(orchestration_event::Event::BrowserRunPaused(
+                orchestration_event::BrowserRunPaused {
+                    run_id: "run-42".to_owned(),
+                    plan_id: "plan-1".to_owned(),
+                    reason: reason.to_owned(),
+                },
+            )),
+            ..Default::default()
+        };
+        let (name, frame) = frame_of(orchestration_event_to_sse(&paused("")).expect("a frame")).await;
+        assert_eq!(name, "browser_run_paused");
+        assert!(frame.get("reason").is_none(), "{frame}");
+        let (_, frame) =
+            frame_of(orchestration_event_to_sse(&paused("user_took_over")).expect("a frame")).await;
+        assert_eq!(frame["reason"], "user_took_over");
+
+        let resumed = OrchestrationEvent {
+            event: Some(orchestration_event::Event::BrowserRunResumed(
+                orchestration_event::BrowserRunResumed {
+                    run_id: "run-42".to_owned(),
+                    plan_id: "plan-1".to_owned(),
+                    reason: "control_returned".to_owned(),
+                },
+            )),
+            ..Default::default()
+        };
+        let (name, frame) = frame_of(orchestration_event_to_sse(&resumed).expect("a frame")).await;
+        assert_eq!(name, "browser_run_resumed");
+        assert_eq!(frame["reason"], "control_returned");
+        let Some(crate::sse_events::ChatEvent::StepUpdate { detail, .. }) =
+            orchestration_event_to_step_update(&resumed)
+        else {
+            panic!("a resume is a step");
+        };
+        assert!(detail.contains("given back"), "{detail}");
+    }
+
+    #[tokio::test]
+    async fn orchestration_browser_attach_shared_jar_frame_is_ids_only() {
+        let event = OrchestrationEvent {
+            event: Some(orchestration_event::Event::BrowserAttachSharedJar(
+                orchestration_event::BrowserAttachSharedJar {
+                    run_id: "run-42".to_owned(),
+                    plan_id: "plan-1".to_owned(),
+                    attach_id: "att-1".to_owned(),
+                    session_run_id: "qrun-9".to_owned(),
+                    tab_id: "tab-3".to_owned(),
+                },
+            )),
+            ..Default::default()
+        };
+        let (name, frame) = frame_of(orchestration_event_to_sse(&event).expect("a frame")).await;
+        assert_eq!(name, "browser_attach_shared_jar");
+        let mut keys: Vec<&str> = frame.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["attach_id", "plan_id", "run_id", "session_run_id", "tab_id"]
+        );
+        assert!(
+            orchestration_event_to_step_update(&event).is_none(),
+            "an audit event is not a chat step"
         );
     }
 
