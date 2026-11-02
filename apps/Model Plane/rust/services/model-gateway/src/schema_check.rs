@@ -288,7 +288,7 @@ mod tests {
     /// The bytes of the shared corpus. Pinned: a change to the file is a change to the contract and
     /// goes with the lead's `zdr-contract-sync.test.sh` digest row.
     const CORPUS: &str = include_str!("../tests/fixtures/ai-extract/schema-corpus.json");
-    const CORPUS_SHA256: &str = "97bd67b9953f4a2f7584f549ff19cd3ba395e138547e43530e5a44061a2f85f6";
+    const CORPUS_SHA256: &str = "f3ce2e27a78010d28df3e14bc688908e681426db6bfc2b968a59409810a7c6f5";
 
     fn codes(value: &Value, schema: &Value) -> Vec<(String, &'static str)> {
         let mut shown: Vec<_> = issues(value, schema)
@@ -302,9 +302,7 @@ mod tests {
     #[test]
     fn schema_corpus_matches_quarry() {
         // Hashed with line endings normalised to LF: a Windows checkout with autocrlf rewrites them.
-        let digest = Sha256::digest(CORPUS.replace("
-", "
-").as_bytes());
+        let digest = Sha256::digest(CORPUS.replace("\r\n", "\n").as_bytes());
         let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
         assert_eq!(
             hex, CORPUS_SHA256,

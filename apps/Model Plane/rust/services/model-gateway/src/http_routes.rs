@@ -2980,12 +2980,23 @@ fn browser_suggestion_prompt(
         },
         1_200,
     );
-    let observation = compact_json_for_prompt(&req.observation, BROWSER_OBSERVATION_PROMPT_CHARS);
-    let visual_observation =
-        compact_json_for_prompt(&req.visual_observation, BROWSER_VISUAL_PROMPT_CHARS);
+    // WS12.S4: the page is untrusted and may hold a credential the user typed or the page
+    // echoed. Credential-shaped strings are masked HERE, on the way into the prompt, before
+    // any cut (`compact_json_for_prompt`, `truncate_for_prompt`) can split one into a
+    // fragment the pattern no longer matches. The request itself is not changed.
+    let observation = compact_json_for_prompt(
+        &scrubbed_live_json(&req.observation),
+        BROWSER_OBSERVATION_PROMPT_CHARS,
+    );
+    let visual_observation = compact_json_for_prompt(
+        &scrubbed_live_json(&req.visual_observation),
+        BROWSER_VISUAL_PROMPT_CHARS,
+    );
     let visual_summary = visual_summary.map_or_else(
         || "not provided".to_owned(),
-        |summary| truncate_for_prompt(summary, BROWSER_VISUAL_PROMPT_CHARS),
+        |summary| {
+            truncate_for_prompt(&mp_scrub::scrub_live(summary), BROWSER_VISUAL_PROMPT_CHARS)
+        },
     );
     let visual_artifact = req
         .visual_observation_artifact_id
@@ -2996,9 +3007,16 @@ fn browser_suggestion_prompt(
 
     format!(
         "Goal:\n{goal}\n\nCurrent URL: {}\nCurrent title: {}\n\nQuarry observation JSON:\n{observation}\n\nOpenCV visual observation artifact id: {visual_artifact}\nOpenCV visual observation JSON:\n{visual_observation}\n\nVLM screenshot summary:\n{visual_summary}\n\nReturn the single next browser action JSON only.",
-        truncate_for_prompt(&req.url, 1_000),
-        truncate_for_prompt(&req.title, 500),
+        truncate_for_prompt(&mp_scrub::scrub_url(&req.url), 1_000),
+        truncate_for_prompt(&mp_scrub::scrub_live(&req.title), 500),
     )
+}
+
+/// A copy of `value` with every credential-shaped string masked (`mp_scrub::scrub_live_json`).
+fn scrubbed_live_json(value: &Value) -> Value {
+    let mut copy = value.clone();
+    mp_scrub::scrub_live_json(&mut copy);
+    copy
 }
 
 fn browser_suggestion_value(parsed: &Value) -> Value {
@@ -12561,6 +12579,66 @@ mod browser_suggestion_tests {
 
         assert!(prompt.contains("...[truncated]"));
         assert!(prompt.contains("Inspect page"));
+    }
+
+    /// WS12.S4: a credential in the page (an accessibility value the user typed, a title,
+    /// a URL query, the vision model's reading of the screenshot) never reaches the
+    /// planner prompt; ordinary prose and ordinary URLs come through untouched. Secrets
+    /// are built from fragments so no secret-shaped literal sits in the source.
+    #[test]
+    fn browser_suggestion_prompt_masks_ax_value_and_visual_summary() {
+        let jwt = [
+            "eyJhbGciOiJI",
+            "UzI1NiIsInR5cCI6IkpXVCJ9",
+            ".eyJzdWIiOiIxMjM0NTY3ODkw",
+            ".SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+        ]
+        .concat();
+        let key = ["sk-proj-", "Ab12Cd34Ef56", "Gh78Ij90Kl12"].concat();
+        let pat = ["ghp_", "aB3dE6gH9jK2mN5pQ8sT1uV4wX7yZ0"].concat();
+        let req = BrowserSuggestActionRequest {
+            goal: "Log in".to_owned(),
+            url: format!("https://app.example.com/cb?page=2&access_token={pat}&limit=5"),
+            title: format!("Welcome back {key}"),
+            observation: json!({
+                "extracted_text": "the bearer of the message arrived",
+                "page_url": format!("https://svc:hunter2-pw@h.example/p?token={pat}"),
+                "ax": [{ "role": "textbox", "value": jwt, "name": "Token" }],
+            }),
+            visual_observation: json!({ "ocr": [format!("key {key}")] }),
+            ..Default::default()
+        };
+
+        let prompt = browser_suggestion_prompt(
+            &req,
+            Some(&format!("The page shows an API key field containing {key}.")),
+        );
+
+        for secret in [&jwt, &key, &pat, &"hunter2-pw".to_owned()] {
+            assert!(!prompt.contains(secret.as_str()), "secret leaked: {prompt}");
+        }
+        assert!(prompt.contains("access_token=[REDACTED]&limit=5"));
+        assert!(prompt.contains("the bearer of the message arrived"));
+        assert!(prompt.contains("Welcome back [REDACTED]"));
+        assert!(prompt.contains("h.example/p?token=[REDACTED]"));
+        // The request is read, never rewritten.
+        assert!(req.observation.to_string().contains("eyJhbGciOiJI"));
+    }
+
+    #[test]
+    fn browser_suggestion_prompt_leaves_an_ordinary_page_alone() {
+        let req = BrowserSuggestActionRequest {
+            goal: "Inspect page".to_owned(),
+            url: "https://example.com/search?q=rust&page=2#top".to_owned(),
+            title: "Search results".to_owned(),
+            observation: json!({ "extracted_text": "max_tokens=4096 status=completed" }),
+            ..Default::default()
+        };
+        let prompt = browser_suggestion_prompt(&req, Some("a login form"));
+        assert!(prompt.contains("https://example.com/search?q=rust&page=2#top"));
+        assert!(prompt.contains("max_tokens=4096 status=completed"));
+        assert!(prompt.contains("a login form"));
+        assert!(!prompt.contains("[REDACTED]"));
     }
 }
 

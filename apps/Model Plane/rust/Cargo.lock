@@ -1183,6 +1183,7 @@ dependencies = [
  "mp-content-safety",
  "mp-contracts",
  "mp-ids",
+ "mp-scrub",
  "mp-slo",
  "mp-telemetry",
  "nix",
@@ -2357,6 +2358,7 @@ dependencies = [
  "mp-contracts",
  "mp-events",
  "mp-ids",
+ "mp-scrub",
  "mp-telemetry",
  "mp-toon",
  "prost",
@@ -2475,6 +2477,16 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "ulid",
+]
+
+[[package]]
+name = "mp-scrub"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]
