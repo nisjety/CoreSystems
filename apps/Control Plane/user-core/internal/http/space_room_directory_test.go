@@ -247,3 +247,23 @@ func TestDirectoryAndRoomWriterScopeMapping(t *testing.T) {
 		t.Errorf("a POST settings must not map to the act scope, got %q", got)
 	}
 }
+
+// WS04-S11: history_mode is a known settings field. It passes the strict
+// decoder on its own (no 'unknown field' 400) and a bad value is rejected by
+// the repository's own validation before any database read.
+func TestSettingsAcceptsHistoryModeAloneAndRejectsBadValues(t *testing.T) {
+	engine := roomDirectoryEngine(t, &spaces.Repository{}, roomActorCtx())
+	rec := roomDirectoryDo(engine, http.MethodPatch, "/api/v1/internal/spaces/room-1/settings", `{"history_mode":"forever"}`)
+	if rec.Code != http.StatusBadRequest || errorCode(t, rec) != spaces.CodeInvalidRequest {
+		t.Fatalf("bad history_mode: %d %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "history_mode") {
+		t.Fatalf("the typed error should name history_mode: %s", rec.Body.String())
+	}
+	// Alone and valid it reaches the repository (no repository -> the fail-closed 503, not a decoder 400).
+	nilRepo := roomDirectoryEngine(t, nil, roomActorCtx())
+	rec = roomDirectoryDo(nilRepo, http.MethodPatch, "/api/v1/internal/spaces/room-1/settings", `{"history_mode":"since_join"}`)
+	if rec.Code != http.StatusServiceUnavailable || errorCode(t, rec) != spaces.CodeSpaceAuthorityUnavailable {
+		t.Fatalf("history_mode alone must decode: %d %s", rec.Code, rec.Body.String())
+	}
+}
