@@ -442,6 +442,10 @@ services:
             # WS04-S10: durable Space membership events (ledger outbox + re-announce).
             # Strict literal true; off by default and in production until enabled.
             SPACE_MEMBERSHIP_EVENTS_SWEEPER: ${SPACE_MEMBERSHIP_EVENTS_SWEEPER:-false}
+            # WS12-S1: Control accepts the dm/group_dm kinds and serves
+            # POST /api/v1/internal/spaces/dm-eligibility. Strict literal true; off by
+            # default and in production. 0 + restart: no new DMs, existing DMs keep resolving.
+            SPACE_DM_REGISTRATION: ${SPACE_DM_REGISTRATION:-false}
             SPACE_AUDIT_DECISION_EVENTS: ${SPACE_AUDIT_DECISION_EVENTS:-false}
             SPACE_AUDIT_DECISION_KINDS: ${SPACE_AUDIT_DECISION_KINDS:-denied}
             # WS14-S2: owner-asserted grant writes (only the registered owner service of a

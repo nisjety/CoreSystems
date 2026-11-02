@@ -384,6 +384,10 @@ func main() {
 	// WS03-S1: effect-policy changes insert their audit outbox row on the
 	// change's own transaction; unwired, policy writes fail closed.
 	spaceRepo.SetPolicyAuditOutbox(users.NewSpaceAuditEnqueuer(userRepo))
+	// WS12-S1: direct-message registration and the dm-eligibility route. Strict
+	// literal true; off by default; a rollout control, never an authorization
+	// input (the dm_create_entitled bit and membership checks still decide).
+	spaceRepo.SetDMRegistrationEnabled(os.Getenv("SPACE_DM_REGISTRATION") == "true")
 	httpServer.SetSpaceRepository(spaceRepo)
 	// WS05-S5: Space decision denied/issued audit events. Strict literal true;
 	// off by default; a rollout control, never an authorization input.

@@ -22,6 +22,7 @@ const (
 	CodeRoomArchived              = "room_archived"
 	CodeRoomRosterDerived         = "room_roster_derived"
 	CodeRoomPersonalSpace         = "room_personal_space"
+	CodeRoomFixedRoster           = "room_fixed_roster"
 	CodeRoomMemberNotFound        = "member_not_found"
 	CodeRoomMemberChanged         = "room_member_changed"
 	CodeIdempotencyKeyReused      = "idempotency_key_reused"

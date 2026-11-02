@@ -128,6 +128,9 @@ func (r *Repository) setArchiveState(ctx context.Context, req ArchiveRequest, ar
 	if space.Kind == KindPersonal {
 		return nil, roomError(409, CodeRoomPersonalSpace, "a personal Space has no room settings", nil)
 	}
+	if space.Kind.IsDM() {
+		return nil, roomError(409, CodeRoomFixedRoster, "a direct message has no room settings", nil)
+	}
 	if denial := CanManageRoom(actorRole); denial != nil {
 		return nil, denialError(denial)
 	}

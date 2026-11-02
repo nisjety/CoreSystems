@@ -3,6 +3,7 @@ package spaces
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/database"
 )
@@ -29,6 +31,8 @@ type RegisteredSpace struct {
 	RegistrationState            string    `json:"registration_state"`
 	RegisteredAt                 time.Time `json:"registered_at"`
 	UpdatedAt                    time.Time `json:"updated_at"`
+	// ParticipantHash is set for the DM kinds only (WS12-S1).
+	ParticipantHash string `json:"participant_hash,omitempty"`
 }
 
 type Repository struct {
@@ -36,6 +40,8 @@ type Repository struct {
 	// policyAudit inserts the user_audit_outbox row of an effect-policy change
 	// on the change's own transaction. Unwired, policy writes fail closed.
 	policyAudit PolicyAuditOutbox
+	// dmRegistration is the SPACE_DM_REGISTRATION rollout switch (WS12-S1).
+	dmRegistration bool
 }
 
 // SetPolicyAuditOutbox wires the in-transaction audit outbox for Space
@@ -88,6 +94,19 @@ func (r *Repository) Register(ctx context.Context, registration Registration) (*
 		if err := requireActiveOwnerMembership(ctx, tx, registration.OwnerPrincipalID, registration.OrgID); err != nil {
 			return nil, err
 		}
+		if registration.Kind.IsDM() {
+			// Direct messages (WS12-S1): switch, entitlements and every
+			// participant are checked inside this transaction.
+			if !r.dmRegistration {
+				return nil, ErrDMDisabled
+			}
+			if err := requireDMEntitlements(ctx, tx, registration.OrgID); err != nil {
+				return nil, err
+			}
+			if err := requireActiveDMParticipants(ctx, tx, registration.OrgID, registration.Participants); err != nil {
+				return nil, err
+			}
+		}
 		current = &RegisteredSpace{
 			SpaceRef:                     registration.SpaceRef,
 			OrgID:                        registration.OrgID,
@@ -95,14 +114,22 @@ func (r *Repository) Register(ctx context.Context, registration Registration) (*
 			OwnerPrincipalID:             registration.OwnerPrincipalID,
 			ApplicationLifecycleRevision: registration.LifecycleRevision,
 			RegistrationState:            "active",
+			ParticipantHash:              registration.ParticipantHash,
+		}
+		var participantHash any
+		if registration.Kind.IsDM() {
+			participantHash = registration.ParticipantHash
 		}
 		if err := tx.QueryRow(ctx, `
 			INSERT INTO registered_spaces
-				(space_ref, org_id, space_kind, owner_principal_id, application_lifecycle_revision, registration_state)
-			VALUES ($1, $2, $3, $4, $5, 'active')
+				(space_ref, org_id, space_kind, owner_principal_id, application_lifecycle_revision, registration_state, participant_hash)
+			VALUES ($1, $2, $3, $4, $5, 'active', $6)
 			RETURNING registered_at, updated_at`,
-			current.SpaceRef, current.OrgID, current.Kind, current.OwnerPrincipalID, current.ApplicationLifecycleRevision,
+			current.SpaceRef, current.OrgID, current.Kind, current.OwnerPrincipalID, current.ApplicationLifecycleRevision, participantHash,
 		).Scan(&current.RegisteredAt, &current.UpdatedAt); err != nil {
+			if registration.Kind.IsDM() && isUniqueViolation(err, "uq_registered_spaces_dm_participants") {
+				return nil, ErrDMExists
+			}
 			return nil, fmt.Errorf("insert registered Space: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO space_authority_revisions (space_ref) VALUES ($1)`, current.SpaceRef); err != nil {
@@ -115,8 +142,28 @@ func (r *Repository) Register(ctx context.Context, registration Registration) (*
 		); err != nil {
 			return nil, fmt.Errorf("seed verified Space owner membership: %w", err)
 		}
+		if registration.Kind.IsDM() {
+			// The roster is fixed here and never written again: every other
+			// participant is an editor seeded by the registration itself.
+			for _, participant := range registration.Participants {
+				participant = strings.TrimSpace(participant)
+				if participant == strings.TrimSpace(registration.OwnerPrincipalID) {
+					continue
+				}
+				if _, err := tx.Exec(ctx, `
+					INSERT INTO space_memberships (space_ref, subject_type, subject_id, role, granted_by, source)
+					VALUES ($1, 'user', $2, 'editor', 'application-space-registration', 'registration')`,
+					current.SpaceRef, participant,
+				); err != nil {
+					return nil, fmt.Errorf("seed direct message participant membership: %w", err)
+				}
+			}
+		}
 	default:
 		if current.OrgID != registration.OrgID || current.Kind != registration.Kind || current.OwnerPrincipalID != registration.OwnerPrincipalID {
+			return nil, fmt.Errorf("space reference is already registered with a different organization, kind, or owner")
+		}
+		if current.ParticipantHash != registration.ParticipantHash {
 			return nil, fmt.Errorf("space reference is already registered with a different organization, kind, or owner")
 		}
 		// Archive is Control-owned (WS04-S7): an Application lifecycle event
@@ -603,9 +650,17 @@ func (r *Repository) SpacesForSubject(ctx context.Context, orgID, subjectID stri
 		return nil, fmt.Errorf("organization and subject are required")
 	}
 	rows, err := r.db.Pool.Query(ctx, `
-		SELECT s.space_ref, s.org_id, s.space_kind, m.role, s.registration_state
+		SELECT s.space_ref, s.org_id, s.space_kind, m.role, s.registration_state, dmp.participants
 		FROM registered_spaces s
 		JOIN space_memberships m ON m.space_ref = s.space_ref
+		LEFT JOIN LATERAL (
+		    SELECT jsonb_agg(jsonb_build_object('subject_id', pm.subject_id, 'display_name', COALESCE(pu.name, ''))
+		                     ORDER BY pm.subject_id) AS participants
+		    FROM space_memberships pm
+		    LEFT JOIN users pu ON pu.id::text = pm.subject_id
+		    WHERE s.space_kind IN ('dm', 'group_dm')
+		      AND pm.space_ref = s.space_ref AND pm.subject_type = 'user' AND pm.active = TRUE
+		) dmp ON TRUE
 		WHERE s.org_id = $1
 		  AND s.registration_state IN ('active', 'archived')
 		  AND m.subject_type = 'user' AND m.subject_id = $2 AND m.active = TRUE
@@ -622,8 +677,15 @@ func (r *Repository) SpacesForSubject(ctx context.Context, orgID, subjectID stri
 	entries := make([]SpaceIndexEntry, 0, 8)
 	for rows.Next() {
 		var entry SpaceIndexEntry
-		if err := rows.Scan(&entry.SpaceRef, &entry.OrgID, &entry.Kind, &entry.Role, &entry.State); err != nil {
+		var participants []byte
+		if err := rows.Scan(&entry.SpaceRef, &entry.OrgID, &entry.Kind, &entry.Role, &entry.State, &participants); err != nil {
 			return nil, fmt.Errorf("scan Space index entry: %w", err)
+		}
+		entry.AgentScope = entry.Kind.AgentScope()
+		if entry.Kind.IsDM() && len(participants) > 0 {
+			if err := json.Unmarshal(participants, &entry.Participants); err != nil {
+				return nil, fmt.Errorf("decode direct message participants: %w", err)
+			}
 		}
 		entries = append(entries, entry)
 	}
@@ -722,6 +784,10 @@ func (r *Repository) replaceMemberships(ctx context.Context, replacement Members
 		// roster sync widen it would quietly turn private storage into shared
 		// storage.
 		return nil, nil, nil, "", fmt.Errorf("a personal Space membership cannot be replaced")
+	}
+	if space.Kind.IsDM() {
+		// A DM roster is fixed at registration (WS12-S1); a sync cannot widen it.
+		return nil, nil, nil, "", ErrFixedRoster
 	}
 	if strings.TrimSpace(replacement.RosterMode) == RosterModeOrgDerived {
 		// Set once, never cleared. It changes who may write the roster, not
@@ -1631,11 +1697,11 @@ func registeredSpaceForUpdate(ctx context.Context, tx pgx.Tx, spaceRef string) (
 	space := &RegisteredSpace{}
 	err := tx.QueryRow(ctx, `
 		SELECT space_ref, org_id, space_kind, owner_principal_id, application_lifecycle_revision,
-		       registration_state, registered_at, updated_at
+		       registration_state, registered_at, updated_at, COALESCE(participant_hash, '')
 		FROM registered_spaces WHERE space_ref=$1 FOR UPDATE`, strings.TrimSpace(spaceRef),
 	).Scan(
 		&space.SpaceRef, &space.OrgID, &space.Kind, &space.OwnerPrincipalID, &space.ApplicationLifecycleRevision,
-		&space.RegistrationState, &space.RegisteredAt, &space.UpdatedAt,
+		&space.RegistrationState, &space.RegisteredAt, &space.UpdatedAt, &space.ParticipantHash,
 	)
 	if err != nil {
 		return nil, err
@@ -1657,4 +1723,11 @@ func requireActiveOwnerMembership(ctx context.Context, tx pgx.Tx, ownerID, orgID
 		return ErrInactiveOwnerMembership
 	}
 	return nil
+}
+
+// isUniqueViolation reports a Postgres unique violation (23505) on the named
+// constraint or index.
+func isUniqueViolation(err error, constraint string) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == constraint
 }

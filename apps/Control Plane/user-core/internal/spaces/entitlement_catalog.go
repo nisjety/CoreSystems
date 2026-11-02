@@ -105,6 +105,15 @@ var entitlementCatalog = []EntitlementSpec{
 		Get: func(p EffectPolicy) bool { return p.ApprovalGrantEntitled },
 		Set: func(p *EffectPolicy, v bool) { p.ApprovalGrantEntitled = v },
 	},
+	{
+		// WS12-S1: opening a direct message. The decisions it gates ship with
+		// the DM routes (registration and dm-eligibility); a DM persists
+		// message content, so it is inert under Space ZDR.
+		Key: "dm_create", Column: "dm_create_entitled",
+		Decisions: []string{"space.dm.create"}, ZDR: ZDRInert,
+		Get: func(p EffectPolicy) bool { return p.DMCreateEntitled },
+		Set: func(p *EffectPolicy, v bool) { p.DMCreateEntitled = v },
+	},
 }
 
 // effectPolicyPrivacyColumns are the nine privacy/attestation columns, in the

@@ -218,6 +218,9 @@ func (r *Repository) roomOpPrelude(ctx context.Context, tx pgx.Tx, req MemberOpR
 	if space.Kind == KindPersonal {
 		return nil, roomError(409, CodeRoomPersonalSpace, "a personal Space has no members to manage", nil)
 	}
+	if space.Kind.IsDM() {
+		return nil, roomError(409, CodeRoomFixedRoster, "a direct message roster is fixed at registration", nil)
+	}
 	if err := tx.QueryRow(ctx, `SELECT roster_mode FROM registered_spaces WHERE space_ref=$1`, space.SpaceRef).Scan(&op.rosterMode); err != nil {
 		return nil, fmt.Errorf("read Space roster mode: %w", err)
 	}

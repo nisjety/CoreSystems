@@ -246,6 +246,14 @@ func (s *Server) registerSpace(c *gin.Context) {
 	}
 	registered, err := s.spaceRepo.Register(c.Request.Context(), registration)
 	if err != nil {
+		// WS12-S1: a refused direct message is a terminal 409 for Application
+		// (the gateway pre-checks through dm-eligibility so a user normally
+		// sees the typed error there). The code names the refusal; nothing
+		// else about the participants is echoed.
+		if code, ok := dmRegistrationRefusalCode(err); ok {
+			c.JSON(http.StatusConflict, gin.H{"error": "Direct message registration refused", "code": code})
+			return
+		}
 		if strings.Contains(err.Error(), "different organization, kind, or owner") || errors.Is(err, spaces.ErrInactiveOwnerMembership) {
 			c.JSON(http.StatusConflict, gin.H{"error": "Space reference conflicts with registered authority"})
 			return
