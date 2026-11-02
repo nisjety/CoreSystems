@@ -14,8 +14,9 @@
 //!    alive (`FLUSH_JS`, delivered through `Runtime.addBinding`), kept in the [`OriginJournal`].
 //!    Web storage only: IndexedDB cannot be read from a `pagehide` handler.
 //! 4b. With `QUARRY_BROWSER_CAPTURE_CLOSED_ORIGINS` on (default off, D2-070): the IndexedDB of
-//!    those same closed origins, read through the frame-less `IndexedDB` CDP domain on a live
-//!    tab of the same browser context (S0 probe P3, `tests/profile_cdp_spike.rs`), bounded by
+//!    those same closed origins, read through the frame-less `IndexedDB` CDP domain on a blank
+//!    carrier page opened in the same browser context for the phase, never on a live tab
+//!    (S0 probe P3, `tests/profile_cdp_spike.rs`; see `ClosedCarrier`), bounded by
 //!    its own time budget, a per-origin cap and an all-origins cap. A read that fails, finds
 //!    nothing or runs out of time never erases what the journal already holds.
 //!
@@ -33,6 +34,7 @@ use ::chromiumoxide::cdp::browser_protocol::browser::BrowserContextId;
 use ::chromiumoxide::cdp::browser_protocol::network as net;
 use ::chromiumoxide::cdp::browser_protocol::page::AddScriptToEvaluateOnNewDocumentParams;
 use ::chromiumoxide::cdp::browser_protocol::storage::GetCookiesParams;
+use ::chromiumoxide::cdp::browser_protocol::target::CreateTargetParams;
 use ::chromiumoxide::cdp::js_protocol::runtime::{
     AddBindingParams, EvaluateParams, EventBindingCalled, EventExecutionContextCreated,
     ExecutionContextId,
@@ -552,7 +554,7 @@ pub(crate) struct RecordPage {
 }
 
 /// Where a closed origin's IndexedDB is read from. The real source is the frame-less
-/// `IndexedDB` CDP domain on a live tab of the same browser context
+/// `IndexedDB` CDP domain on a [`ClosedCarrier`] of the same browser context
 /// ([`CdpClosedIdb`]); the unit tests use a mock.
 pub(crate) trait ClosedIdbSource {
     async fn database_names(&self, origin: &str) -> QuarryResult<Vec<String>>;
@@ -583,7 +585,7 @@ pub(crate) struct ClosedReport {
     pub records: u32,
     pub truncated: bool,
     pub timed_out: bool,
-    /// No live tab to send the CDP calls through.
+    /// No carrier page could be opened to send the CDP calls through.
     pub no_page: bool,
 }
 
@@ -903,14 +905,91 @@ const ENCODE_REMOTE_JS: &str = r#"async function () {
   return JSON.stringify({ v, dropped });
 }"#;
 
-/// The real source: the `IndexedDB` CDP domain, asked through a live tab of the session's
-/// browser context with the closed origin named as `securityOrigin`. The domain needs no
-/// frame for that origin (S0 probe P3a/P3b); it does need a target to send through.
+/// What the closed-origin carrier page loads: nothing.
+pub(crate) const CLOSED_CARRIER_URL: &str = "about:blank";
+
+/// The target the closed-origin phase opens: a fresh `about:blank` page of the session's
+/// own browser context (never another context: the IndexedDB domain reads the carrier's
+/// storage partition).
+pub(crate) fn closed_carrier_params(context: &BrowserContextId) -> CreateTargetParams {
+    let mut params = CreateTargetParams::new(CLOSED_CARRIER_URL);
+    params.browser_context_id = Some(context.clone());
+    params
+}
+
+/// The page the closed-origin phase reads through: opened for the phase, closed after it
+/// (on drop too, so a capture cut by the overall deadline does not leave it open).
+///
+/// Never a live tab (security review of W2-U55). `IndexedDB.requestData` materialises the
+/// closed origin's records as objects in the carrier's main world, and the encoder runs
+/// there through `Runtime.callFunctionOn`. A live tab's page is another origin, possibly
+/// hostile: by patching the intrinsics the encoder calls (`JSON.stringify`,
+/// `WeakSet.prototype.add`, `Blob.prototype.arrayBuffer`, ...) it would read the closed
+/// origin's IndexedDB, or rewrite what is persisted for it and restored into it later. A
+/// blank target that no page script has run in has nothing patched, and no page holds a
+/// reference to it. It also keeps the closed origin's data out of another site's renderer
+/// and releases the encoder's remote objects with the page.
+pub(crate) struct ClosedCarrier {
+    page: Option<Page>,
+}
+
+impl ClosedCarrier {
+    /// Open the carrier in `context`, or `None` when it did not open before `until`.
+    pub(crate) async fn open(
+        browser: &Browser,
+        context: &BrowserContextId,
+        until: Instant,
+    ) -> Option<Self> {
+        match tokio::time::timeout(
+            remaining(until),
+            browser.new_page(closed_carrier_params(context)),
+        )
+        .await
+        {
+            Ok(Ok(page)) => Some(Self { page: Some(page) }),
+            _ => None,
+        }
+    }
+
+    fn page(&self) -> &Page {
+        self.page
+            .as_ref()
+            .expect("the carrier page is held until drop")
+    }
+}
+
+impl Drop for ClosedCarrier {
+    fn drop(&mut self) {
+        let Some(page) = self.page.take() else {
+            return;
+        };
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _ = page.close().await;
+            });
+        }
+    }
+}
+
+/// The real source: the `IndexedDB` CDP domain, asked through the [`ClosedCarrier`] with the
+/// closed origin named as `securityOrigin`. The domain needs no frame for that origin (S0
+/// probe P3a/P3b, read from an `about:blank` page); it does need a target to send through.
+/// It holds a carrier, not a `Page`, so a live tab cannot be passed in.
 pub(crate) struct CdpClosedIdb<'a> {
-    pub page: &'a Page,
+    carrier: &'a ClosedCarrier,
+}
+
+impl<'a> CdpClosedIdb<'a> {
+    pub(crate) fn on(carrier: &'a ClosedCarrier) -> Self {
+        Self { carrier }
+    }
 }
 
 impl CdpClosedIdb<'_> {
+    fn page(&self) -> &Page {
+        self.carrier.page()
+    }
+
     fn cdp_error(what: &str, error: &impl std::fmt::Display) -> QuarryError {
         QuarryError::new(ErrorCode::DriverFailed, format!("chromiumoxide {what} failed"))
             .with_details(json!({ "error": error.to_string() }))
@@ -939,7 +1018,7 @@ impl CdpClosedIdb<'_> {
         params.await_promise = Some(true);
         params.return_by_value = Some(true);
         let response = self
-            .page
+            .page()
             .execute(params)
             .await
             .map_err(|error| Self::cdp_error("closed-origin value encode", &error))?;
@@ -966,7 +1045,7 @@ impl ClosedIdbSource for CdpClosedIdb<'_> {
     async fn database_names(&self, origin: &str) -> QuarryResult<Vec<String>> {
         use ::chromiumoxide::cdp::browser_protocol::indexed_db::RequestDatabaseNamesParams;
         let response = self
-            .page
+            .page()
             .execute(RequestDatabaseNamesParams {
                 security_origin: Some(origin.to_owned()),
                 storage_key: None,
@@ -982,7 +1061,7 @@ impl ClosedIdbSource for CdpClosedIdb<'_> {
         let mut params = RequestDatabaseParams::new(name);
         params.security_origin = Some(origin.to_owned());
         let response = self
-            .page
+            .page()
             .execute(params)
             .await
             .map_err(|error| Self::cdp_error("IndexedDB.requestDatabase", &error))?;
@@ -1024,7 +1103,7 @@ impl ClosedIdbSource for CdpClosedIdb<'_> {
     ) -> QuarryResult<RecordPage> {
         use ::chromiumoxide::cdp::browser_protocol::indexed_db::RequestDataParams;
         let response = self
-            .page
+            .page()
             .execute(RequestDataParams {
                 security_origin: Some(origin.to_owned()),
                 storage_key: None,
@@ -1299,26 +1378,26 @@ pub(crate) async fn capture_profile(
     };
 
     // 4b. The IndexedDB of those closed origins (D2-070), flag-gated and budgeted. It goes
-    // through a live tab (the active one first) because the IndexedDB domain needs a target.
+    // through a blank carrier page of this context opened for the phase, never through a
+    // live tab (see [`ClosedCarrier`]).
     let mut closed_report = ClosedReport::default();
     if want_closed && !closed_candidates.is_empty() {
         let overall_end = capture_started
             + Duration::from_millis(BUDGET_TOTAL_MS.saturating_sub(CLOSED_MARGIN_MS));
         let until = (Instant::now() + Duration::from_millis(BUDGET_CLOSED_MS)).min(overall_end);
-        if let Some(tab) = tabs.first() {
-            if Instant::now() < until {
-                let source = CdpClosedIdb { page: &tab.page };
-                let (reads, phase) =
-                    capture_closed_origins(&source, &closed_candidates, &limits, until).await;
-                closed_report = phase;
-                flushed = merge_closed_idb(flushed, reads);
-            } else {
-                closed_report.enabled = true;
-                closed_report.candidates = closed_candidates.len() as u32;
-                closed_report.timed_out = true;
-                closed_report.truncated = true;
-                closed_report.skipped = closed_candidates.len() as u32;
-            }
+        if Instant::now() >= until {
+            closed_report.enabled = true;
+            closed_report.candidates = closed_candidates.len() as u32;
+            closed_report.timed_out = true;
+            closed_report.truncated = true;
+            closed_report.skipped = closed_candidates.len() as u32;
+        } else if let Some(carrier) = ClosedCarrier::open(browser, context, until).await {
+            let source = CdpClosedIdb::on(&carrier);
+            let (reads, phase) =
+                capture_closed_origins(&source, &closed_candidates, &limits, until).await;
+            drop(carrier);
+            closed_report = phase;
+            flushed = merge_closed_idb(flushed, reads);
         } else {
             closed_report.enabled = true;
             closed_report.candidates = closed_candidates.len() as u32;
@@ -1634,6 +1713,38 @@ mod tests {
             )],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn closed_carrier_is_a_blank_target_of_the_session_context() {
+        let context = BrowserContextId::new("ctx-session-a");
+        let params = closed_carrier_params(&context);
+        assert_eq!(params.url, "about:blank");
+        assert_eq!(params.browser_context_id, Some(context));
+        // A blank page: no navigation, so no egress and no page script in its main world.
+        assert_eq!(CLOSED_CARRIER_URL, "about:blank");
+    }
+
+    #[test]
+    fn closed_phase_never_reads_through_a_live_tab() {
+        // The production path builds its source only from a carrier it opened. The type
+        // enforces it (`CdpClosedIdb` holds a `ClosedCarrier`, not a `Page`); this guards
+        // the call site against a later edit that hands a live tab's page back in.
+        let source = include_str!("profile_capture.rs");
+        let body = source
+            .split("pub(crate) async fn capture_profile(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}").next())
+            .expect("capture_profile body");
+        let phase = body
+            .split("// 4b.")
+            .nth(1)
+            .and_then(|rest| rest.split("profile_capture_closed_origins").next())
+            .expect("the closed-origin phase");
+        assert!(phase.contains("ClosedCarrier::open(browser, context, until)"));
+        assert!(phase.contains("CdpClosedIdb::on(&carrier)"));
+        assert!(!phase.contains("tabs"), "the closed phase must not pick a live tab");
+        assert!(!phase.contains(".page"), "the closed phase must not use a live page");
     }
 
     fn limits() -> ClosedLimits {
@@ -2118,7 +2229,7 @@ mod tests {
             .expect("context");
         let mut params = CreateTargetParams::new("about:blank");
         params.browser_context_id = Some(context.clone());
-        let carrier = browser.new_page(params.clone()).await.expect("carrier tab");
+        let hostile = browser.new_page(params.clone()).await.expect("hostile live tab");
         let victim = browser.new_page(params).await.expect("victim tab");
         let origin = format!("http://127.0.0.1:{port}");
         victim.goto(format!("{origin}/")).await.expect("goto");
@@ -2146,11 +2257,30 @@ mod tests {
         victim.execute(setup).await.expect("seed IndexedDB");
         victim.close().await.expect("close the tab");
 
-        let source = CdpClosedIdb { page: &carrier };
+        // A live tab of the same context patches the intrinsics the encoder calls. It must
+        // see nothing of the closed origin's records, and must not change them.
+        let mut patch = EvaluateParams::new(
+            "window.__leak = []; const s = JSON.stringify; \
+             JSON.stringify = function (v) { window.__leak.push(s(v)); return s({ v: 'forged', dropped: 0 }); }; \
+             const a = WeakSet.prototype.add; \
+             WeakSet.prototype.add = function (v) { window.__leak.push('seen'); return a.call(this, v); }; 'patched'",
+        );
+        patch.return_by_value = Some(true);
+        hostile.execute(patch).await.expect("patch the live tab");
+
         let until = Instant::now() + Duration::from_secs(10);
+        let carrier = ClosedCarrier::open(&browser, &context, until)
+            .await
+            .expect("carrier page");
+        let source = CdpClosedIdb::on(&carrier);
         let (reads, report) =
             capture_closed_origins(&source, std::slice::from_ref(&origin), &limits(), until).await;
+        drop(carrier);
         server.abort();
+        let mut leak = EvaluateParams::new("window.__leak.length");
+        leak.return_by_value = Some(true);
+        let leaked = hostile.execute(leak).await.expect("read the leak counter");
+        assert_eq!(leaked.result.result.value, Some(json!(0)), "the live tab saw records");
         assert_eq!(report.origins_read, 1, "{report:?}");
         let db = &reads[0].idb[0];
         assert_eq!((db.name.as_str(), db.version), ("closed-live", 2));
