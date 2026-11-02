@@ -122,3 +122,16 @@ Execution-core half (a LATER lane; `runtime_loop/agent.rs`, `runtime_loop/mod.rs
 5. Kill switch for that half: `EXECUTION_CORE_EXTERNAL_CONTENT_GUARD` (spec-B proposal; default on), tests pin the default.
 
 Not verified: nothing live; migration 0087 applied to a populated database (only to the empty scratch one); the `ReserveToolAction` path from the real inline chat loop; Dreaming with `DREAMING_LLM_EXTRACTION=1` against a real model (the window test calls `extraction_window` directly).
+
+## Slice WS10.S9 (Model Plane half): contract tests and soak script (batch 3)
+
+Where each contract test lives (the plan's C1-C7):
+- C1 envelope golden: proto/Rust/Go twins are S2 (`run_trace_golden_decodes`, `TestRunTraceGoldenDecodes`, the Go wire-hex test); session-core's validator is `validate_accepts_the_run_trace_golden` (S6), and `scripts/tests/zdr-contract-sync.test.sh` reports `ok - session-core vendors run-trace-envelope.golden.json` plus byte-identical vendored copies (re-run this batch: every run-trace row ok; the Quarry row stays `pending`).
+- C3 principal least privilege: `TestQuarryTracePrincipalCanOnlyPublishTraceSubjects`, `TestSessionCoreCanDrainTheTraceStreamButNotAdministerIt` (S5); `model-trace-nats-smoke.sh` is the live twin (not run).
+- C4 registry completeness: the new `quarry-edge` row in `publishers_registry_test.go` (S5 follow-up commit), which the PubAck, source and call-site tests now cover.
+- C5 ZDR row, Model Plane side: `validate_rejects_zdr_true`, `validate_rejects_an_absent_zdr_key`, `trace_persist_refuses_a_zdr_run` (S6). The two matrix rows `browser_trace_publish` / `browser_trace_replay` were NOT added to `zdr-posture-matrix.json`: that file is the per-turn retention decision matrix that four planes decode strictly and vendor, and the plan's "WS4 matrix" is Quarry's `zdr_matrix::ROWS` (Quarry-owned, forbidden here). Ask written in MP-ASKS.md; DEPTH.md has the consequence.
+- C6 read API shape fixture and C7 request-id E2E: not built (C6 needs lane B's route and the gateway's typed reader; C7 is documentation Playwright, Frontend). Nothing in this lane's files can carry them.
+
+Built: `scripts/tests/run-trace-soak.sh` (NEW, LF, executable bit set in the index): 50 runs x 40 steps, one 5 s NATS outage, the six assertions of the plan (dense seq except logged drops, no duplicates, rows = published - dropped, consumer lag p99 < 2 s, step latency p99 within 5 percent of a publisher-off baseline, CPU and insert rate recorded). It refuses to do anything unless every dangerous input is explicit (container names, a database whose name contains soak/test, `SOAK_ALLOW_PAUSE=1`), always unpauses the broker on exit, and cleans its seeded rows. The Quarry binary it drives does not exist; its CLI and summary contract are written at the top of the script and in MP-ASKS.md. NOT RUN, as ordered.
+Verified without running the soak: `bash -n` clean; `--list` prints the steps; `--dry-run` exits 2 with the missing inputs, exits 2 for a non-soak/test database name, and prints the plan with valid inputs; the script's seed, gap, duplicate, lag-percentile and insert-count SQL ran inside a rolled-back transaction on the scratch database (50 runs seeded, 1,999 rows with one gap -> gaps total 1, p99 0.000, 0 duplicate keys).
+Flags: none. Not verified: everything the soak measures.
