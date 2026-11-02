@@ -387,6 +387,10 @@ func main() {
 	httpServer.SetSpaceRepository(spaceRepo)
 	// WS20-S4: stored-consent schedule contracts. Strict literal true; off by default.
 	httpServer.SetScheduleContractsEnabled(os.Getenv("SCHEDULE_CONTRACT_ENABLED") == "true")
+	// WS14-S2: owner-asserted grant writes and Space-subject grants. Strict
+	// literal true; off by default; rollout controls, never authorization inputs.
+	httpServer.SetOwnerAssertedGrants(os.Getenv("CONTROL_OWNER_ASSERTED_GRANTS") == "true")
+	httpServer.SetSpaceSubjectGrants(os.Getenv("CONTROL_SPACE_SUBJECT_GRANTS") == "true")
 	// WS03-S3: org-admin Space policy writes. Strict literal true; off by default.
 	httpServer.SetSpacePolicyAdminWrites(os.Getenv("SPACE_POLICY_ADMIN_WRITES") == "true")
 	// WS04-S10: durable membership events (ledger as outbox, PubAck publish,

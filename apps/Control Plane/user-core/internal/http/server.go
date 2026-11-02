@@ -42,13 +42,20 @@ type Server struct {
 	// scheduleContractsEnabled is SCHEDULE_CONTRACT_ENABLED. Off by default: a
 	// create request carrying a stored-consent contract is refused.
 	scheduleContractsEnabled bool
-	port                     string
-	httpClient               *http.Client
-	orgService               string
-	internalKey              string
-	authMembershipService    string
-	authMembershipToken      string
-	authInternalCredential   clients.AuthInternalClientCredential
+	// ownerAssertedGrants is CONTROL_OWNER_ASSERTED_GRANTS (WS14-S2). Off: the
+	// authz grant write surface stays fenced. On: only the registered owner
+	// service of a resource type may write its grants, for a verified user.
+	ownerAssertedGrants bool
+	// spaceSubjectGrants is CONTROL_SPACE_SUBJECT_GRANTS (WS14-S2). Off:
+	// file-grant and space-visible answer 404.
+	spaceSubjectGrants     bool
+	port                   string
+	httpClient             *http.Client
+	orgService             string
+	internalKey            string
+	authMembershipService  string
+	authMembershipToken    string
+	authInternalCredential clients.AuthInternalClientCredential
 	// publisher emits controlplane.acl.resource_grants.changed on
 	// grant/revoke so the Data Plane retrieval visibility cache evicts the
 	// affected (subject_id, org_id) immediately (TTL is the backstop). May be nil.
@@ -367,6 +374,9 @@ func (s *Server) setupRoutes() {
 			{
 				authz.GET("/visible", s.authzVisible)
 				authz.GET("/check", s.authzCheck)
+				// WS14-S2: Space-attached resources a user may see through a Space
+				// right now. Behind CONTROL_SPACE_SUBJECT_GRANTS (404 when off).
+				authz.GET("/space-visible", s.authzSpaceVisible)
 				// Grant write surface backing the verevonv3 ShareDialog (PR-6).
 				// Disabled until verified delegation exists; resource_grants remains
 				// the single authority retrieval + documents-api enforce against.

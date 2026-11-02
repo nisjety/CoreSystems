@@ -167,6 +167,12 @@ func purgeControlSpaceProjections(ctx context.Context, tx pgx.Tx, spaceRef strin
 		WHERE space_ref=$1 AND status='reserved'`, spaceRef); err != nil {
 		return fmt.Errorf("cancel pending owner effects for deleted Space: %w", err)
 	}
+	// WS14-S2: a Space's own grants (room files it was attached to) end with
+	// it. The grant is inert without the Space, but a stale row must not
+	// outlive it. The document itself is the owning plane's to delete.
+	if _, err := tx.Exec(ctx, `DELETE FROM resource_grants WHERE subject_type='space' AND subject_id=$1`, spaceRef); err != nil {
+		return fmt.Errorf("revoke Control Space resource grants: %w", err)
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM space_memberships WHERE space_ref=$1`, spaceRef); err != nil {
 		return fmt.Errorf("purge Control Space memberships: %w", err)
 	}

@@ -187,6 +187,23 @@ func (d Decision) matchesExpectation(expected DecisionExpectation) bool {
 }
 
 func VerifyDecision(key VerificationKey, token string, expected DecisionExpectation) (*Decision, error) {
+	decision, err := parseVerifiedDecision(key, token)
+	if err != nil {
+		return nil, err
+	}
+	if !decision.matchesExpectation(expected) {
+		return nil, fmt.Errorf("space decision target does not match expected authority")
+	}
+	if err := checkDecisionWindow(decision, expected.Now); err != nil {
+		return nil, err
+	}
+	return decision, nil
+}
+
+// parseVerifiedDecision checks the envelope, key id, signature and payload
+// validity of a decision token. It binds no caller intent and no time window;
+// VerifyDecision and VerifyIssuedDecision add those.
+func parseVerifiedDecision(key VerificationKey, token string) (*Decision, error) {
 	if strings.TrimSpace(key.ID) == "" || len(key.PublicKey) != ed25519.PublicKeySize {
 		return nil, fmt.Errorf("valid Space decision verification key is required")
 	}
@@ -217,18 +234,19 @@ func VerifyDecision(key VerificationKey, token string, expected DecisionExpectat
 	if err := decision.Validate(); err != nil {
 		return nil, err
 	}
-	if !decision.matchesExpectation(expected) {
-		return nil, fmt.Errorf("space decision target does not match expected authority")
-	}
-	now := expected.Now
+	return &decision, nil
+}
+
+// checkDecisionWindow refuses an expired decision or one issued in the future.
+func checkDecisionWindow(decision *Decision, now time.Time) error {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
 	if !now.Before(decision.ExpiresAt) {
-		return nil, fmt.Errorf("space decision expired")
+		return fmt.Errorf("space decision expired")
 	}
 	if decision.IssuedAt.After(now.Add(time.Minute)) {
-		return nil, fmt.Errorf("space decision issued in the future")
+		return fmt.Errorf("space decision issued in the future")
 	}
-	return &decision, nil
+	return nil
 }
