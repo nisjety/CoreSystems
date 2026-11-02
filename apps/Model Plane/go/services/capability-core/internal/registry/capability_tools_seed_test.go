@@ -21,13 +21,14 @@ var seedRowPattern = regexp.MustCompile(`\('global', '([^']+)', '([^']+)', '([a-
 
 func readSeedRows(t *testing.T) []seedRow {
 	t.Helper()
-	// 0016 seeds the classes; 0018, 0019, 0020, 0024 and 0026 add the rows of the tools registered after it.
+	// 0016 seeds the classes; 0018, 0019, 0020, 0024, 0026 and 0031 add the rows of the tools registered after it.
 	sql := readMigration(t, "0016_capability_tool_classes.up.sql") +
 		readMigration(t, "0018_workspace_read_capability.up.sql") +
 		readMigration(t, "0019_workspace_write_capability.up.sql") +
 		readMigration(t, "0020_result_query_capability.up.sql") +
 		readMigration(t, "0024_provider_read_tool.up.sql") +
-		readMigration(t, "0026_knowledge_list_documents_tool.up.sql")
+		readMigration(t, "0026_knowledge_list_documents_tool.up.sql") +
+		readMigration(t, "0031_web_crawl_tool_capabilities.up.sql")
 	var rows []seedRow
 	for _, m := range seedRowPattern.FindAllStringSubmatch(sql, -1) {
 		refinement := strings.Trim(m[5], "'")
@@ -141,6 +142,9 @@ func TestSeededCeilingsAreTheStrictestOfTheirTools(t *testing.T) {
 		"cap.process.background":    {models.SideEffectSandboxCompute, models.ApprovalFloorNone},
 		"cap.tool.provider.execute": {models.SideEffectExternalWrite, models.ApprovalFloorNone},
 		"cap.tool.ticket.create":    {models.SideEffectOwnerEffect, models.ApprovalFloorDurableOwner},
+		"cap.web.batch":             {models.SideEffectContextWrite, models.ApprovalFloorNone},
+		"cap.web.crawl":             {models.SideEffectContextWrite, models.ApprovalFloorNone},
+		"cap.web.map":               {models.SideEffectRead, models.ApprovalFloorNone},
 		"cap.workspace.write":       {models.SideEffectContextWrite, models.ApprovalFloorNone},
 	} {
 		if class[id] != want[0] || floor[id] != want[1] {
