@@ -98,11 +98,23 @@ export const spaceTables = {
     // fields (knowledge_scope, default_thread_policy, audit_visibility) are
     // deliberately NOT stored yet: nothing enforces them, and a stored-but-
     // unenforced policy is a false promise.
+    // WS08-S5: `group` is retired. It stays in the validator only so rows that already
+    // carry it remain readable; no writer accepts it and nothing acts on it.
     triggerModes: v.optional(v.array(v.union(v.literal("mention"), v.literal("group")))),
     allowedTools: v.optional(v.array(v.string())),
     approvalMode: v.optional(
       v.union(v.literal("auto"), v.literal("require_confirmation"), v.literal("blocked")),
     ),
+    // WS08-S5: who may wake this agent in this room. ABSENT reads as `members`
+    // (any editor, manager or owner: SD-26). A human decision written only by
+    // `spaceAgents:setSpaceAgentWakePolicyForGateway`, enforced at the gateway
+    // on the mention path. `allowlist` names Control subject ids in
+    // `respondToSubjects` (at most 50). Never an authorization input on its own:
+    // Control still decides who may post or wake at all.
+    respondTo: v.optional(
+      v.union(v.literal("members"), v.literal("managers"), v.literal("allowlist")),
+    ),
+    respondToSubjects: v.optional(v.array(v.string())),
     status: v.union(
       v.literal("pending"),
       v.literal("active"),
@@ -147,6 +159,26 @@ export const spaceTables = {
     // Additive and backward-compatible: computed from the `externalOrgId`
     // every row already carries, no data migration required.
     .index("by_external_org", ["externalOrgId"]),
+
+  // WS08-S5: append-only record of every change to a binding's wake policy (who widened or
+  // narrowed `respondTo`, and when). Ids and enum values only, never content, so it is not
+  // ZDR-sensitive. Written in the same mutation as the binding patch, never edited or deleted
+  // by a policy writer.
+  spaceAgentPolicyEvents: defineTable({
+    bindingRef: v.string(),
+    spaceRef: v.string(),
+    externalOrgId: v.string(),
+    subjectId: v.string(),
+    actorExternalAuthId: v.string(),
+    previousRespondTo: v.optional(v.string()),
+    previousRespondToSubjects: v.optional(v.array(v.string())),
+    respondTo: v.string(),
+    respondToSubjects: v.optional(v.array(v.string())),
+    projectionVersion: v.number(),
+    createdAt: v.number(),
+  })
+    .index("by_binding_ref", ["bindingRef", "createdAt"])
+    .index("by_space_ref", ["spaceRef", "createdAt"]),
 
   // Transactional outbox for Space lifecycle notifications. Consumers dedupe
   // by the immutable event ID and never infer authorization from this event.

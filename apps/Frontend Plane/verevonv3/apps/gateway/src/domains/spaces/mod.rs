@@ -29,6 +29,7 @@ use crate::{
 
 mod denial;
 use denial::{typed_response, with_gap_details, Decision, SpaceDenial};
+pub(crate) mod agent_policy;
 pub(crate) mod directory;
 pub(crate) mod human_posts;
 pub(crate) mod room_admin;
@@ -876,6 +877,11 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route(
             "/api/v1/spaces/{space_ref}/agents/{binding_ref}",
             patch(set_space_agent_state).delete(revoke_space_agent),
+        )
+        // WS08-S5: who may wake a bound agent. Behind `agent_wake_policy_api`.
+        .route(
+            "/api/v1/spaces/{space_ref}/agents/{binding_ref}/policy",
+            patch(agent_policy::set_space_agent_wake_policy_route),
         )
         .route("/api/v1/spaces/{space_ref}/threads", get(list_space_threads))
         .route("/api/v1/spaces/{space_ref}/work", get(space_work))
@@ -4280,6 +4286,9 @@ async fn compose_space_agents(
                         // Binding policy — absent on legacy bindings, and the
                         // invocation path treats absence as the legacy default.
                         ("triggerModes", "trigger_modes"),
+                        // WS08-S5: who may wake it. Absent means `members`.
+                        ("respondTo", "respond_to"),
+                        ("respondToSubjects", "respond_to_subjects"),
                         ("allowedTools", "allowed_tools"),
                         ("approvalMode", "approval_mode"),
                         ("avatarColor", "avatar_color"),
@@ -4626,6 +4635,7 @@ pub(crate) async fn inject_mentioned_space_agent_persona(
     // ABSENT field is the legacy default — bindings created before policy
     // fields existed keep behaving exactly as they did — while a PRESENT
     // field is a human decision and binds.
+    enforce_respond_to(state, user, org_id, &space_ref, &agent).await?;
     apply_mention_binding_policy(object, &agent)?;
 
     let name = agent
@@ -4646,6 +4656,60 @@ pub(crate) async fn inject_mentioned_space_agent_persona(
     }
 
     Ok(())
+}
+
+/// WS08-S5: whether `respond_to` lets this caller wake the agent. Pure so the matrix is
+/// testable. Owners and managers can always wake; `members` lets an editor; `managers` lets
+/// nobody else; `allowlist` lets an editor whose Control subject id is listed. A viewer never
+/// wakes an agent, and an unknown value refuses (no permissive default). Not an authorization
+/// grant: Control still decides whether the caller may post or run at all.
+fn respond_to_allows(respond_to: &str, subjects: &[&str], role: &str, caller_subject: &str) -> bool {
+    if CREATE_AGENT_ROLES.contains(&role) {
+        return true;
+    }
+    if role != "editor" {
+        return false;
+    }
+    match respond_to {
+        "members" => true,
+        "allowlist" => subjects.contains(&caller_subject),
+        _ => false,
+    }
+}
+
+/// Applies [`respond_to_allows`] on the mention path. An ABSENT `respond_to` is today's
+/// behaviour (no extra check, no extra Control read); a PRESENT one is a human decision and
+/// binds. Runs on every entry that shares the injector (chat stream and AG-UI).
+async fn enforce_respond_to(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    space_ref: &str,
+    agent: &Value,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let Some(respond_to) = agent
+        .get("respond_to")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+    let role = resolve_space_role(state, user, org_id, space_ref).await?;
+    let subjects: Vec<&str> = agent
+        .get("respond_to_subjects")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    if respond_to_allows(respond_to, &subjects, &role, &user.user_id) {
+        return Ok(());
+    }
+    Err((
+        StatusCode::FORBIDDEN,
+        Json(error(
+            "agent_respond_to_denied",
+            "This agent's wake policy does not let you wake it here.",
+        )),
+    ))
 }
 
 /// Enforces the mentioned binding's policy on the outbound turn.

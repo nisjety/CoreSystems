@@ -98,6 +98,10 @@ export const spaceAgentBindingsForGateway = query({
         triggerModes: binding.triggerModes,
         allowedTools: binding.allowedTools,
         approvalMode: binding.approvalMode,
+        // WS08-S5: who may wake this agent. Absent means `members`; projection only, the
+        // gateway enforces it on the mention path.
+        respondTo: binding.respondTo,
+        respondToSubjects: binding.respondToSubjects,
         projectionVersion: binding.projectionVersion,
         updatedAt: binding.updatedAt,
       });
@@ -341,6 +345,11 @@ export const upsertSpaceAgentBinding = internalMutation({
   handler: async (ctx, args) => {
     const subjectId = args.subjectId.trim();
     if (!subjectId) throw new Error("A Control subject id is required");
+    // WS08-S5: the `group` trigger is retired. Rows that already carry it stay readable,
+    // but no writer accepts it any more and nothing acts on it.
+    if (args.triggerModes?.includes("group")) {
+      throw new Error("The group trigger mode is retired; use mention");
+    }
     if ((args.deliveryTargets?.length ?? 0) > MAX_DELIVERY_TARGETS) {
       throw new Error("Too many delivery targets");
     }
@@ -660,6 +669,133 @@ export const setSpaceAgentBindingStateForGateway = mutation({
       bindingRef,
       subjectId: (binding as any).subjectId as string,
       status: args.status,
+      changed: true,
+    };
+  },
+});
+
+const MAX_RESPOND_TO_SUBJECTS = 50;
+const MAX_SUBJECT_ID_LENGTH = 128;
+
+/**
+ * WS08-S5: set who may wake one bound agent in this room (`respondTo`).
+ *
+ * A human policy decision, written only here. The gateway has already checked that the
+ * caller is the Space's owner or a manager (`require_space_agent_grant_role`); this
+ * mutation re-checks that the binding belongs to that Space and org, compares
+ * `expectedUpdatedAt` so two managers cannot silently overwrite each other, bumps
+ * `projectionVersion` and appends one `spaceAgentPolicyEvents` row in the same
+ * transaction. The policy narrows or widens who the gateway lets mention-wake the agent;
+ * it never grants anything: Control still decides who may post or wake at all.
+ *
+ * Errors are stable strings the gateway maps to typed envelopes:
+ * `invalid_policy`, `agent_binding_not_found`, `policy_conflict`.
+ */
+export const setSpaceAgentWakePolicyForGateway = mutation({
+  args: {
+    serviceKey: v.string(),
+    externalAuthId: v.string(),
+    externalOrgId: v.string(),
+    spaceRef: v.string(),
+    bindingRef: v.string(),
+    respondTo: v.union(v.literal("members"), v.literal("managers"), v.literal("allowlist")),
+    respondToSubjects: v.optional(v.array(v.string())),
+    expectedUpdatedAt: v.number(),
+  },
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{
+    bindingRef: string;
+    subjectId: string;
+    respondTo: string;
+    respondToSubjects: string[];
+    projectionVersion: number;
+    updatedAt: number;
+    changed: boolean;
+  }> => {
+    assertServiceKey(args.serviceKey);
+    await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
+
+    const spaceRef = args.spaceRef.trim();
+    const bindingRef = args.bindingRef.trim();
+    if (!spaceRef || !bindingRef) throw new Error("invalid_policy");
+
+    // Normalize the allowlist: trimmed, non-empty, unique, bounded. It is only meaningful
+    // for `allowlist`; the other two modes store none so a stale list can never linger.
+    const rawSubjects = args.respondToSubjects ?? [];
+    const subjects: string[] = [];
+    for (const raw of rawSubjects) {
+      const id = raw.trim();
+      if (!id || id.length > MAX_SUBJECT_ID_LENGTH) throw new Error("invalid_policy");
+      if (!subjects.includes(id)) subjects.push(id);
+    }
+    if (subjects.length > MAX_RESPOND_TO_SUBJECTS) throw new Error("invalid_policy");
+    if (args.respondTo === "allowlist" && subjects.length === 0) throw new Error("invalid_policy");
+    if (args.respondTo !== "allowlist" && subjects.length > 0) throw new Error("invalid_policy");
+
+    const binding = await ctx.db
+      .query("spaceAgentBindings")
+      .withIndex("by_binding_ref", (q: any) => q.eq("bindingRef", bindingRef))
+      .unique();
+    if (
+      !binding ||
+      (binding as any).spaceRef !== spaceRef ||
+      (binding as any).externalOrgId !== args.externalOrgId ||
+      ((binding as any).status !== "active" && (binding as any).status !== "paused")
+    ) {
+      throw new Error("agent_binding_not_found");
+    }
+    if ((binding as any).updatedAt !== args.expectedUpdatedAt) {
+      throw new Error("policy_conflict");
+    }
+
+    const previousRespondTo = ((binding as any).respondTo as string | undefined) ?? undefined;
+    const previousSubjects = ((binding as any).respondToSubjects as string[] | undefined) ?? undefined;
+    const effectivePrevious = previousRespondTo ?? "members";
+    const sameSubjects =
+      (previousSubjects ?? []).length === subjects.length &&
+      (previousSubjects ?? []).every((id) => subjects.includes(id));
+    if (effectivePrevious === args.respondTo && sameSubjects) {
+      return {
+        bindingRef,
+        subjectId: (binding as any).subjectId as string,
+        respondTo: effectivePrevious,
+        respondToSubjects: previousSubjects ?? [],
+        projectionVersion: (binding as any).projectionVersion as number,
+        updatedAt: (binding as any).updatedAt as number,
+        changed: false,
+      };
+    }
+
+    const now = Date.now();
+    const projectionVersion = ((binding as any).projectionVersion as number) + 1;
+    await ctx.db.patch(binding._id, {
+      respondTo: args.respondTo,
+      respondToSubjects: args.respondTo === "allowlist" ? subjects : undefined,
+      projectionVersion,
+      updatedAt: now,
+    });
+    await ctx.db.insert("spaceAgentPolicyEvents", {
+      bindingRef,
+      spaceRef,
+      externalOrgId: args.externalOrgId,
+      subjectId: (binding as any).subjectId as string,
+      actorExternalAuthId: args.externalAuthId,
+      previousRespondTo,
+      previousRespondToSubjects: previousSubjects,
+      respondTo: args.respondTo,
+      respondToSubjects: args.respondTo === "allowlist" ? subjects : undefined,
+      projectionVersion,
+      createdAt: now,
+    });
+    return {
+      bindingRef,
+      subjectId: (binding as any).subjectId as string,
+      respondTo: args.respondTo,
+      respondToSubjects: args.respondTo === "allowlist" ? subjects : [],
+      projectionVersion,
+      updatedAt: now,
       changed: true,
     };
   },

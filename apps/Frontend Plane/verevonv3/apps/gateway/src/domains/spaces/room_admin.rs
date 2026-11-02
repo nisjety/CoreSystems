@@ -680,7 +680,7 @@ fn details_field(body: &Value, field: &'static str) -> Result<Option<String>, Re
 /// route needs Application's stable messages to answer with a typed code. Convex reports a
 /// thrown error as a non-success status (or `status: "error"`) with an `errorMessage`; `Err(None)`
 /// is every other failure (not configured, unreachable, unreadable).
-async fn convex_mutation_message(
+pub(super) async fn convex_mutation_message(
     state: &AppState,
     path: &str,
     mut args: Value,

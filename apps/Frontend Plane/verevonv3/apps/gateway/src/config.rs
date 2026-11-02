@@ -173,6 +173,11 @@ pub(crate) struct AppState {
 /// no edit. Production default is OFF; development may default ON (see [`space_flag`]).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SpaceFeatureFlags {
+    /// `SPACE_AGENT_WAKE_POLICY_API` (WS08-S5): `PATCH /api/v1/spaces/{space_ref}/agents/{binding_ref}/policy`,
+    /// the owner/manager writer of a binding's `respond_to`. Off answers 404 `feature_disabled`. A
+    /// rollout control, never an authorization input: Control's live role (owner or manager) decides
+    /// who may write it, and it moves no content, so Zero Data Retention organizations are unaffected.
+    pub(crate) agent_wake_policy_api: bool,
     /// `GATEWAY_SPACE_APPEND_RETRIEVAL` (WS18-S2): a follow-up turn of a scoped thread fetches its own
     /// retrieval decision and carries the token (empty on a decline, which suppresses grounding).
     /// Read once in `build_state`, and only the literal `true` turns it on: unlike the other Space flags
@@ -259,6 +264,7 @@ pub(crate) struct SpaceFeatureFlags {
 impl SpaceFeatureFlags {
     pub(crate) fn from_env() -> Self {
         Self {
+            agent_wake_policy_api: space_flag("SPACE_AGENT_WAKE_POLICY_API"),
             append_retrieval: env::var("GATEWAY_SPACE_APPEND_RETRIEVAL").is_ok_and(|value| value == "true"),
             chat_locale_hint: space_flag("CHAT_LOCALE_HINT"),
             denials_typed: space_flag("SPACE_DENIALS_TYPED"),
