@@ -325,6 +325,8 @@ fn authed_routes() -> Router<AppState> {
         // returns after reload. The live SSE route remains the sole tail
         // transport; this route only reads Session Core's canonical log.
         .route("/v1/runs/:run_id/events/replay", get(replay_run_events))
+        // WS10.S6: the run's durable trace (Session Core EventLog), owner only, paged by cursor.
+        .route("/v1/runs/:run_id/trace", get(get_run_trace))
         // Run event SSE
         .route("/v1/runs/:run_id/events", get(sse::run_events_sse))
         // Browser reasoning: Model Plane proposes one safe browser action from
@@ -1669,6 +1671,212 @@ async fn replay_run_events(
         next_event_id,
         truncated: raw_count >= limit as usize,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// WS10.S6: `GET /v1/runs/:run_id/trace` â€” a run's durable trace from Session Core's EventLog.
+// ---------------------------------------------------------------------------
+
+/// Default and bounds of one trace page. Session Core clamps the same way (0 reads 100).
+const RUN_TRACE_DEFAULT_LIMIT: u32 = 100;
+const RUN_TRACE_MAX_LIMIT: u32 = 500;
+const RUN_TRACE_MAX_CURSOR_LEN: usize = 512;
+const RUN_TRACE_MAX_RUN_ID_LEN: usize = 64;
+const RUN_TRACE_MAX_TYPES: usize = 32;
+/// The `type_url` Session Core gives a trace row's payload; its `value` is the JSON object Quarry
+/// sent (`eventlog_grpc.rs` `TRACE_PAYLOAD_TYPE_URL`).
+const RUN_TRACE_PAYLOAD_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.BrowserTraceEvent";
+
+#[derive(Debug, Deserialize)]
+struct RunTraceQuery {
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    limit: Option<u32>,
+    /// Comma list of `EventType` names without the `EVENT_TYPE_` prefix.
+    #[serde(default)]
+    types: Option<String>,
+}
+
+fn run_trace_error(status: StatusCode, code: &str, message: &str) -> HttpJsonError {
+    (
+        status,
+        Json(json!({ "error": { "code": code, "message": message } })),
+    )
+}
+
+/// A run id as Session Core's trace store keeps it: one `[A-Za-z0-9_-]` token of at most 64.
+fn valid_trace_run_id(run_id: &str) -> bool {
+    (1..=RUN_TRACE_MAX_RUN_ID_LEN).contains(&run_id.len())
+        && run_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+/// `types=A,B` to EventType numbers. Blank items are skipped; an unknown name is a 400 (a typo
+/// must not read as "no events"); `UNSPECIFIED` is not a filter.
+fn parse_trace_types(raw: Option<&str>) -> Result<Vec<i32>, HttpJsonError> {
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
+    let mut types = Vec::new();
+    for name in raw.split(',').map(str::trim).filter(|name| !name.is_empty()) {
+        let kind = EventType::from_str_name(&format!("EVENT_TYPE_{name}"))
+            .filter(|kind| *kind != EventType::Unspecified)
+            .ok_or_else(|| {
+                run_trace_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_trace_types",
+                    "types must be EventType names without the EVENT_TYPE_ prefix",
+                )
+            })?;
+        if !types.contains(&(kind as i32)) {
+            types.push(kind as i32);
+        }
+    }
+    if types.len() > RUN_TRACE_MAX_TYPES {
+        return Err(run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_trace_types",
+            "too many event types",
+        ));
+    }
+    Ok(types)
+}
+
+/// One trace event in the shape of the run-trace envelope golden
+/// (`api/contracts/run-trace-envelope.golden.json`): names without their enum prefixes, the
+/// payload as the JSON object Quarry sent. A payload of any other type, or one that is not a JSON
+/// object, is reported by its type only: raw bytes never leave the gateway.
+fn trace_event_json(event: &Event) -> Value {
+    let event_type = EventType::try_from(event.event_type).map_or("UNSPECIFIED", |kind| {
+        kind.as_str_name().trim_start_matches("EVENT_TYPE_")
+    });
+    let origin = mp_contracts::model_plane::v1::RunOrigin::try_from(event.origin)
+        .ok()
+        .filter(|origin| *origin != mp_contracts::model_plane::v1::RunOrigin::Unspecified)
+        .map(|origin| origin.as_str_name().trim_start_matches("RUN_ORIGIN_").to_owned());
+    let ts = event.ts.as_ref().and_then(|ts| {
+        let nanos = u32::try_from(ts.nanos).ok()?;
+        chrono::DateTime::from_timestamp(ts.seconds, nanos)
+            .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+    });
+    let payload = event.payload.as_ref().map(|any| {
+        let object = (any.type_url == RUN_TRACE_PAYLOAD_TYPE_URL)
+            .then(|| serde_json::from_slice::<Value>(&any.value).ok())
+            .flatten()
+            .filter(Value::is_object);
+        object.unwrap_or_else(|| json!({ "type_url": any.type_url }))
+    });
+    let agent = event.agent.as_ref().map(|agent| {
+        json!({ "id": agent.id, "role": agent.role, "parent_id": agent.parent_id })
+    });
+    json!({
+        "event_id": event.event_id,
+        "event_type": event_type,
+        "schema_version": event.schema_version,
+        "ts": ts,
+        "producer": event.producer,
+        "correlation_id": event.correlation_id,
+        "causation_id": event.causation_id,
+        "org_id": event.org_id,
+        "user_id": event.user_id,
+        "resource_ref": event.resource_ref,
+        "payload": payload,
+        "zdr": event.zdr,
+        "producer_seq": event.producer_seq,
+        "agent": agent,
+        "origin": origin,
+        "run_id": event.run_id,
+        "request_id": event.request_id,
+    })
+}
+
+/// Session Core's answer to a trace read. A non-owner and an unknown run look the same (404); a
+/// Session Core that does not serve the trace yet is a 501 the caller can tell from an outage.
+fn run_trace_status_to_http(status: &tonic::Status) -> HttpJsonError {
+    match status.code() {
+        tonic::Code::NotFound | tonic::Code::PermissionDenied => {
+            run_trace_error(StatusCode::NOT_FOUND, "run_not_found", "no such run")
+        }
+        tonic::Code::Unimplemented => run_trace_error(
+            StatusCode::NOT_IMPLEMENTED,
+            "trace_unavailable",
+            "the run trace is not available",
+        ),
+        tonic::Code::InvalidArgument => run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_trace_query",
+            "the trace query was refused",
+        ),
+        _ => grpc_status_to_http(status),
+    }
+}
+
+/// `GET /v1/runs/:run_id/trace?cursor=&limit=&types=` â€” one page of the run's trace, oldest first.
+/// The org is the token's; Session Core checks that the caller owns the run (the user behind the
+/// session bearer), so this route adds no ownership rule of its own.
+async fn get_run_trace(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(run_id): Path<String>,
+    Query(query): Query<RunTraceQuery>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let run_id = run_id.trim();
+    if !valid_trace_run_id(run_id) {
+        return Err(run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_run_id",
+            "run_id must be 1 to 64 characters of [A-Za-z0-9_-]",
+        ));
+    }
+    let limit = query
+        .limit
+        .unwrap_or(RUN_TRACE_DEFAULT_LIMIT)
+        .clamp(1, RUN_TRACE_MAX_LIMIT);
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(str::trim)
+        .filter(|cursor| !cursor.is_empty());
+    if cursor.is_some_and(|cursor| cursor.len() > RUN_TRACE_MAX_CURSOR_LEN) {
+        return Err(run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_cursor",
+            "the cursor is too long",
+        ));
+    }
+    let event_types = parse_trace_types(query.types.as_deref())?;
+    let request = mp_contracts::model_plane::v1::QueryEventsRequest {
+        filter: Some(mp_contracts::model_plane::v1::EventFilter {
+            org_id: claims.org_id.clone(),
+            run_id: run_id.to_owned(),
+            event_types,
+            ..Default::default()
+        }),
+        cursor: cursor.map(|value| mp_contracts::model_plane::v1::Cursor {
+            value: value.to_owned(),
+        }),
+        limit,
+        reverse: false,
+    };
+    let page = state
+        .event_log_client
+        .clone()
+        .query_events(authenticated_session_request(request, &bearer)?)
+        .await
+        .map_err(|status| run_trace_status_to_http(&status))?
+        .into_inner();
+    let events: Vec<Value> = page.events.iter().map(trace_event_json).collect();
+    let next_cursor = page
+        .next_cursor
+        .map(|cursor| cursor.value)
+        .filter(|value| !value.is_empty());
+    Ok(Json(json!({
+        "data": { "events": events },
+        "meta": { "next_cursor": next_cursor, "has_more": page.has_more },
+    })))
 }
 
 /// `type_url` of Session Core's `RUN_CANCELLED` row. Session Core has no enum
@@ -16945,5 +17153,236 @@ mod api_key_route_fence_tests {
             "an api key principal reached a route it may not:\n{}",
             failures.join("\n")
         );
+    }
+}
+
+/// WS10.S6: the run trace route against a stand-in Session Core EventLog.
+#[cfg(test)]
+mod run_trace_route_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    use axum::{body::Body, http::Request as HttpRequest};
+    use mp_contracts::model_plane::v1::{
+        event_log_client::EventLogClient,
+        event_log_server::{EventLog, EventLogServer},
+        AgentRef, AppendEventRequest, AppendEventResponse, Cursor, QueryEventsRequest,
+        QueryEventsResponse, RunOrigin, SubscribeEventsRequest,
+    };
+    use tower::ServiceExt;
+
+    #[derive(Clone, Default)]
+    struct FakeEventLog {
+        seen: Arc<Mutex<Vec<(QueryEventsRequest, Option<String>)>>>,
+        failure: Option<tonic::Code>,
+    }
+
+    #[tonic::async_trait]
+    impl EventLog for FakeEventLog {
+        async fn append_event(
+            &self,
+            _: tonic::Request<AppendEventRequest>,
+        ) -> Result<tonic::Response<AppendEventResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not used"))
+        }
+
+        async fn query_events(
+            &self,
+            request: tonic::Request<QueryEventsRequest>,
+        ) -> Result<tonic::Response<QueryEventsResponse>, tonic::Status> {
+            let authorization = request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            self.seen
+                .lock()
+                .unwrap()
+                .push((request.into_inner(), authorization));
+            if let Some(code) = self.failure {
+                return Err(tonic::Status::new(code, "session-core says no"));
+            }
+            Ok(tonic::Response::new(QueryEventsResponse {
+                events: vec![Event {
+                    event_id: "01JC7K3M9Q4R8T2V5W6X7Y8Z9A".to_owned(),
+                    event_type: EventType::BrowserStepReceiptRecorded as i32,
+                    schema_version: 1,
+                    ts: Some(prost_types::Timestamp {
+                        seconds: 1_793_525_415,
+                        nanos: 250_000_000,
+                    }),
+                    producer: "quarry-edge".to_owned(),
+                    org_id: "org-a".to_owned(),
+                    user_id: "user-a".to_owned(),
+                    payload: Some(prost_types::Any {
+                        type_url: RUN_TRACE_PAYLOAD_TYPE_URL.to_owned(),
+                        value: br#"{"action":"click","step":7}"#.to_vec(),
+                    }),
+                    producer_seq: 7,
+                    agent: Some(AgentRef {
+                        id: "general-v1".to_owned(),
+                        role: "subagent".to_owned(),
+                        parent_id: "primary-v1".to_owned(),
+                    }),
+                    origin: RunOrigin::Agent as i32,
+                    run_id: "run_1".to_owned(),
+                    request_id: "req_1".to_owned(),
+                    ..Default::default()
+                }],
+                next_cursor: Some(Cursor {
+                    value: "42".to_owned(),
+                }),
+                has_more: true,
+            }))
+        }
+
+        type SubscribeEventsStream = futures::stream::Empty<Result<Event, tonic::Status>>;
+
+        async fn subscribe_events(
+            &self,
+            _: tonic::Request<SubscribeEventsRequest>,
+        ) -> Result<tonic::Response<Self::SubscribeEventsStream>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not used"))
+        }
+    }
+
+    fn claims() -> Claims {
+        serde_json::from_value(json!({
+            "sub": "user-a", "iss": "auth-core", "exp": 4_102_444_800_i64, "org_id": "org-a",
+            "user_id": "user-a", "principal_type": "user", "zdr": false
+        }))
+        .expect("claims")
+    }
+
+    async fn app(fake: FakeEventLog, with_session_bearer: bool) -> Router {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(EventLogServer::new(fake))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await;
+        });
+        let mut state = AppState::new();
+        state.event_log_client = EventLogClient::connect(format!("http://{address}"))
+            .await
+            .unwrap();
+        let mut router = Router::new()
+            .route("/v1/runs/:run_id/trace", get(get_run_trace))
+            .with_state(state)
+            .layer(Extension(claims()));
+        if with_session_bearer {
+            router = router.layer(Extension(crate::auth::VerifiedSessionBearer::for_test(
+                "session-core-bearer",
+            )));
+        }
+        router
+    }
+
+    async fn get_json(router: Router, uri: &str) -> (StatusCode, Value) {
+        let response = router
+            .oneshot(HttpRequest::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    #[tokio::test]
+    async fn run_trace_route_requires_the_verified_bearer() {
+        let fake = FakeEventLog::default();
+        let (status, _) = get_json(app(fake.clone(), false).await, "/v1/runs/run_1/trace").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(fake.seen.lock().unwrap().is_empty(), "nothing reaches Session Core");
+
+        let (status, body) = get_json(
+            app(fake.clone(), true).await,
+            "/v1/runs/run_1/trace?cursor=41&limit=9999&types=BROWSER_STEP_RECEIPT_RECORDED,%20RUN_COMPLETED",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let seen = fake.seen.lock().unwrap();
+        let (request, authorization) = &seen[0];
+        assert_eq!(authorization.as_deref(), Some("Bearer session-core-bearer"));
+        let filter = request.filter.as_ref().expect("a filter");
+        assert_eq!(filter.org_id, "org-a", "the org is the token's");
+        assert_eq!(filter.run_id, "run_1");
+        assert_eq!(
+            filter.event_types,
+            [
+                EventType::BrowserStepReceiptRecorded as i32,
+                EventType::RunCompleted as i32
+            ]
+        );
+        assert_eq!(request.cursor.as_ref().map(|c| c.value.as_str()), Some("41"));
+        assert_eq!(request.limit, 500, "the limit is clamped to 1..500");
+        assert!(!request.reverse);
+        assert_eq!(body["meta"], json!({ "next_cursor": "42", "has_more": true }));
+        let event = &body["data"]["events"][0];
+        assert_eq!(event["event_type"], "BROWSER_STEP_RECEIPT_RECORDED");
+        assert_eq!(event["origin"], "AGENT");
+        assert_eq!(event["ts"], "2026-11-01T09:30:15.250Z");
+        assert_eq!(event["payload"], json!({ "action": "click", "step": 7 }));
+        assert_eq!(event["agent"]["parent_id"], "primary-v1");
+        assert_eq!(event["producer_seq"], 7);
+        assert_eq!(event["zdr"], false);
+    }
+
+    #[tokio::test]
+    async fn run_trace_route_maps_unimplemented_and_not_found() {
+        for (code, want, error_code) in [
+            (tonic::Code::NotFound, StatusCode::NOT_FOUND, "run_not_found"),
+            (tonic::Code::PermissionDenied, StatusCode::NOT_FOUND, "run_not_found"),
+            (tonic::Code::Unimplemented, StatusCode::NOT_IMPLEMENTED, "trace_unavailable"),
+            (tonic::Code::InvalidArgument, StatusCode::BAD_REQUEST, "invalid_trace_query"),
+        ] {
+            let fake = FakeEventLog {
+                failure: Some(code),
+                ..Default::default()
+            };
+            let (status, body) = get_json(app(fake, true).await, "/v1/runs/run_1/trace").await;
+            assert_eq!(status, want, "{code:?}");
+            assert_eq!(body["error"]["code"], error_code, "{code:?}");
+            assert!(
+                !body.to_string().contains("session-core says no"),
+                "the upstream message is not echoed: {body}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn run_trace_route_refuses_bad_input_before_session_core() {
+        for uri in [
+            "/v1/runs/run.1/trace",
+            "/v1/runs/run_1/trace?types=NOT_A_TYPE",
+            "/v1/runs/run_1/trace?types=UNSPECIFIED",
+            "/v1/runs/run_1/trace?types=EVENT_TYPE_RUN_COMPLETED",
+        ] {
+            let fake = FakeEventLog::default();
+            let (status, _) = get_json(app(fake.clone(), true).await, uri).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+            assert!(fake.seen.lock().unwrap().is_empty(), "{uri}");
+        }
+        let long_cursor = format!("/v1/runs/run_1/trace?cursor={}", "1".repeat(513));
+        let fake = FakeEventLog::default();
+        let (status, _) = get_json(app(fake.clone(), true).await, &long_cursor).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // A missing limit reads the default page, and an unknown payload type is never raw bytes.
+        let (status, _) = get_json(app(fake.clone(), true).await, "/v1/runs/run_1/trace").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(fake.seen.lock().unwrap()[0].0.limit, 100);
+        let opaque = Event {
+            payload: Some(prost_types::Any {
+                type_url: "type.googleapis.com/other".to_owned(),
+                value: b"secret bytes".to_vec(),
+            }),
+            ..Default::default()
+        };
+        let json = trace_event_json(&opaque);
+        assert_eq!(json["payload"], json!({ "type_url": "type.googleapis.com/other" }));
+        assert_eq!(json["origin"], Value::Null);
     }
 }

@@ -10,6 +10,7 @@ use mp_contracts::dataplane::{
 };
 use mp_contracts::model_plane::v1::{
     browser_broker_client::BrowserBrokerClient, capability_core_client::CapabilityCoreClient,
+    event_log_client::EventLogClient,
     execution_core_client::ExecutionCoreClient, finetune_jobs_client::FinetuneJobsClient,
     inference_core_client::InferenceCoreClient,
     learning_governance_service_client::LearningGovernanceServiceClient,
@@ -105,6 +106,8 @@ pub struct AppState {
     pub session_client: SessionCoreClient<Channel>,
     /// Session Core's MessageSearch service, on the same endpoint as `session_client` (WS17-S3).
     pub message_search_client: MessageSearchClient<Channel>,
+    /// Session Core's EventLog (the run trace read path, WS10.S6) on the `session_client` endpoint.
+    pub event_log_client: EventLogClient<Channel>,
     /// Session Core's MessageTree service on the session_client endpoint (WS17-S8).
     pub message_tree_client: MessageTreeServiceClient<Channel>,
     /// Session Core's LearningGovernance service on the same endpoint as `session_client` (WS07-S9).
@@ -428,6 +431,7 @@ impl AppState {
             rate_limiter: RateLimiter::from_env(),
             inference_client: InferenceCoreClient::new(inference_channel),
             message_search_client: MessageSearchClient::new(session_channel.clone()),
+            event_log_client: EventLogClient::new(session_channel.clone()),
             message_tree_client: MessageTreeServiceClient::new(session_channel.clone()),
             learning_client: LearningGovernanceServiceClient::new(session_channel.clone()),
             session_client: SessionCoreClient::new(session_channel),
@@ -589,6 +593,11 @@ impl AppState {
             "http://localhost:9091",
         )?);
         let message_search_client = MessageSearchClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let event_log_client = EventLogClient::new(Self::lazy_channel(
             "SESSION_CORE_URL",
             "SESSION_CORE_ADDR",
             "http://localhost:9091",
@@ -803,6 +812,7 @@ impl AppState {
             state.inference_client = inference_client;
             state.session_client = session_client;
             state.message_search_client = message_search_client;
+            state.event_log_client = event_log_client;
             state.message_tree_client = message_tree_client;
             state.learning_client = learning_client;
             state.managed_run_client = managed_run_client;
@@ -857,6 +867,7 @@ impl AppState {
             state.inference_client = inference_client;
             state.session_client = session_client;
             state.message_search_client = message_search_client;
+            state.event_log_client = event_log_client;
             state.message_tree_client = message_tree_client;
             state.learning_client = learning_client;
             state.managed_run_client = managed_run_client;

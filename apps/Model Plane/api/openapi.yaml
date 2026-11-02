@@ -502,6 +502,72 @@ paths:
               schema:
                 $ref: "#/components/schemas/OrchestrationEvent"
 
+  /v1/runs/{run_id}/trace:
+    get:
+      operationId: getRunTrace
+      tags: [events]
+      summary: Page through a run's durable trace (WS10.S6)
+      description: >-
+        Reads Session Core's EventLog for one run, ordered by ingest sequence. Owner only:
+        a run of another user or org is a 404, as is an unknown run. A Session Core that
+        does not serve the trace yet answers 501 `trace_unavailable`. Needs the
+        `x-session-authorization` bearer, as every Session Core read does.
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 512
+          description: The `meta.next_cursor` of the previous page.
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+          description: Page size, clamped to 1..500.
+        - name: types
+          in: query
+          required: false
+          schema:
+            type: string
+          description: >-
+            Comma list of EventType names without the `EVENT_TYPE_` prefix, e.g.
+            `BROWSER_STEP_RECEIPT_RECORDED,RUN_COMPLETED`. An unknown name is a 400.
+      responses:
+        "200":
+          description: One page of trace events
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      events:
+                        type: array
+                        items:
+                          type: object
+                  meta:
+                    type: object
+                    properties:
+                      next_cursor:
+                        type: string
+                        nullable: true
+                      has_more:
+                        type: boolean
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          description: No such run for this caller
+        "501":
+          description: "`trace_unavailable`: Session Core does not serve the run trace"
+
   # ===========================================================================
   # Browser key grants (INNH-10 MP-3), dark behind MODEL_GATEWAY_BROWSER_KEY_GRANTS
   # ===========================================================================
