@@ -40,6 +40,7 @@ mod orchestration_store;
 mod org_policy;
 mod retention_receipt;
 mod routing_policy_grpc;
+mod room_run_attach;
 mod run_phase;
 mod run_service_grpc;
 mod service_token;

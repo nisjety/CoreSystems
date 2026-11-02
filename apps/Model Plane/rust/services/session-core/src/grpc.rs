@@ -3159,6 +3159,51 @@ pub(crate) fn verify_space_stream_decision(
     )
 }
 
+/// Verifies the Control `model.thread.read` decision (audience `model-plane`) and keeps its
+/// claims: the audience ceiling, the expiry and the zero-retention claim. Unlike
+/// [`verify_thread_read_space_decision`] a missing decision is an error, not "no decision":
+/// the room run live view (WS09-S4) has no owner-bound fallback.
+#[allow(clippy::result_large_err)]
+pub(crate) fn verify_space_read_claims(
+    token: &str,
+    decision_ref: &str,
+    org_id: &str,
+    user_id: &str,
+    space_id: &str,
+    now: DateTime<Utc>,
+) -> Result<VerifiedReadClaims, Status> {
+    if token.trim().is_empty() || decision_ref.trim().is_empty() || space_id.trim().is_empty() {
+        return Err(Status::invalid_argument(
+            "a Space read decision requires space_id, decision ref, and token together",
+        ));
+    }
+    if user_id.trim().is_empty() {
+        return Err(Status::permission_denied(
+            "a Space read decision requires an authenticated user subject",
+        ));
+    }
+    let keys = configured_control_space_decision_keys()?;
+    let key_id = token
+        .split('.')
+        .nth(1)
+        .and_then(|part| URL_SAFE_NO_PAD.decode(part).ok())
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let key = crate::decision_keys::lookup_key(&keys, &key_id)?;
+    verify_thread_read_claims_with_key(
+        token,
+        decision_ref,
+        org_id,
+        user_id,
+        space_id,
+        CONTROL_SPACE_DECISION_AUDIENCE,
+        &key_id,
+        key,
+        now,
+    )
+}
+
 /// Resolve an optional shared-Space read authority for one request.
 ///
 /// `Ok(None)` means no decision was offered and the caller stays on the

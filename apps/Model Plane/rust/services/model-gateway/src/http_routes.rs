@@ -6972,7 +6972,7 @@ fn parse_skill_decision(word: &str) -> Option<mp_contracts::model_plane::v1::Ski
 /// camelCase. Timestamps are emitted as RFC3339 strings (null when unset) and
 /// the arbitrary `metadata` Struct is flattened to plain JSON.
 fn run_detail_value(run: &RunDetail) -> Value {
-    json!({
+    let mut value = json!({
         "run_id": run.run_id,
         "thread_id": run.thread_id,
         "parent_run_id": empty_to_null(&run.parent_run_id),
@@ -6989,7 +6989,13 @@ fn run_detail_value(run: &RunDetail) -> Value {
         "created_at": run.created_at.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
         "updated_at": run.updated_at.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
         "metadata": run.metadata.as_ref().map_or(Value::Null, prost_struct_to_json),
-    })
+    });
+    // Set by Session Core only when the run was read through a Space read decision (WS09-S4);
+    // absent otherwise, so an owner-path projection is byte-for-byte what it was.
+    if !run.owner_subject_id.is_empty() {
+        value["owner_subject_id"] = json!(run.owner_subject_id);
+    }
+    value
 }
 
 #[cfg(test)]
@@ -13155,6 +13161,13 @@ mod run_owner_publish_tests {
             Err(Status::unimplemented(
                 "scheduled step authority not needed in route test",
             ))
+        }
+
+        async fn authorize_room_run_attach(
+            &self,
+            _: TonicRequest<mp_contracts::model_plane::v1::AuthorizeRoomRunAttachRequest>,
+        ) -> Result<TonicResponse<mp_contracts::model_plane::v1::AuthorizeRoomRunAttachResponse>, Status> {
+            Err(Status::unimplemented("room run attach not needed in this test"))
         }
     }
 

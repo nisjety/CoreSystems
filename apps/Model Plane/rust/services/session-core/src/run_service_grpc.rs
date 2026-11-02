@@ -510,6 +510,7 @@ fn row_to_detail(row: RunRow, store_enabled: bool, viewer: &VerifiedIdentity) ->
         metadata: json_to_struct(&row.metadata),
         resumable,
         park_reason,
+        owner_subject_id: String::new(),
     }
 }
 
@@ -850,16 +851,42 @@ impl RunService for RunServiceImpl {
 
             let has_more = i64::try_from(rows.len()).unwrap_or(i64::MAX) > limit;
             let store_enabled = crate::loop_checkpoint::enabled();
+            let via_space = audience_ceiling.is_some();
             let runs: Vec<pb::RunDetail> = rows
                 .into_iter()
                 .take(usize::try_from(limit).unwrap_or(usize::MAX))
-                .map(|row| row_to_detail(row, store_enabled, &caller))
+                .map(|row| {
+                    let owner = row.owner_user_id.clone();
+                    let mut detail = row_to_detail(row, store_enabled, &caller);
+                    // The owner id rides only on the Space branch (WS09-S4).
+                    if via_space {
+                        detail.owner_subject_id = owner;
+                    }
+                    detail
+                })
                 .collect();
 
             Ok(Response::new(pb::ListRunsResponse { runs, has_more }))
         }
         .await;
         record_metrics("list_runs", started, result.is_ok());
+        result
+    }
+
+    async fn authorize_room_run_attach(
+        &self,
+        request: Request<pb::AuthorizeRoomRunAttachRequest>,
+    ) -> Result<Response<pb::AuthorizeRoomRunAttachResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::AuthorizeRoomRunAttachResponse>, Status> = async {
+            let caller = identity(&request)?;
+            let req = request.into_inner();
+            crate::room_run_attach::authorize_room_run_attach(&self.pool, &caller, &req)
+                .await
+                .map(Response::new)
+        }
+        .await;
+        record_metrics("authorize_room_run_attach", started, result.is_ok());
         result
     }
 

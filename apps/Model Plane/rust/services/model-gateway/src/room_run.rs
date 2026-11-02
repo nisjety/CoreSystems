@@ -41,6 +41,14 @@ pub const WORK_SUMMARY_ENV: &str = "SPACE_RUN_WORK_SUMMARY";
 /// The metadata key the summary is stored under.
 pub const WORK_KEY: &str = "work";
 
+/// Environment variable of the member live view (`space_run_live_view`). Off unless an explicit on
+/// word; a rollout control, never an authorization input.
+pub const LIVE_VIEW_ENV: &str = "SPACE_RUN_LIVE_VIEW";
+
+/// Environment variable that lets the live view carry the answer text (`space_run_live_text`). Off
+/// means step classes and `text_progress` only.
+pub const LIVE_TEXT_ENV: &str = "SPACE_RUN_LIVE_TEXT";
+
 /// Most steps the summary and a snapshot carry.
 pub const MAX_STEPS: usize = 64;
 
@@ -88,6 +96,10 @@ impl Default for RoomLimits {
 pub struct SpaceRunPolicy {
     /// `space_run_work_summary`: save `metadata.work` with a room turn's answer.
     pub work_summary: bool,
+    /// `space_run_live_view`: serve the member live view route.
+    pub live_view: bool,
+    /// `space_run_live_text`: the live view carries answer text (requires `live_view`).
+    pub live_text: bool,
     pub limits: RoomLimits,
 }
 
@@ -95,14 +107,23 @@ impl SpaceRunPolicy {
     /// Everything off: what an unset environment means.
     pub const OFF: Self = Self {
         work_summary: false,
+        live_view: false,
+        live_text: false,
         limits: RoomLimits::DEFAULT,
     };
 
     /// The policy the raw value means.
     #[must_use]
-    pub fn from_values(work_summary: Option<&str>) -> Self {
+    pub fn from_values(
+        work_summary: Option<&str>,
+        live_view: Option<&str>,
+        live_text: Option<&str>,
+    ) -> Self {
+        let on = mp_contracts::agentic_subscription::switch_value_is_on;
         Self {
-            work_summary: mp_contracts::agentic_subscription::switch_value_is_on(work_summary),
+            work_summary: on(work_summary),
+            live_view: on(live_view),
+            live_text: on(live_view) && on(live_text),
             limits: RoomLimits::DEFAULT,
         }
     }
@@ -110,7 +131,11 @@ impl SpaceRunPolicy {
     /// The process environment right now.
     #[must_use]
     pub fn from_env() -> Self {
-        Self::from_values(std::env::var(WORK_SUMMARY_ENV).ok().as_deref())
+        Self::from_values(
+            std::env::var(WORK_SUMMARY_ENV).ok().as_deref(),
+            std::env::var(LIVE_VIEW_ENV).ok().as_deref(),
+            std::env::var(LIVE_TEXT_ENV).ok().as_deref(),
+        )
     }
 }
 

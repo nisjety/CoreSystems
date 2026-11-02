@@ -13,6 +13,8 @@ services:
       # Wave 7 — dev profile enables fine-tuning routes; production keeps off.
       FINETUNE_ENABLED: "1"
       SPACE_RUN_WORK_SUMMARY: "true"
+      SPACE_RUN_LIVE_VIEW: "true"
+      SPACE_RUN_LIVE_TEXT: "true"
       FINETUNE_ORG_BUDGET_USD: "50"
       FINETUNE_PER_JOB_BUDGET_USD: "20"
       SPACE_HUMAN_POSTS_API: "1"

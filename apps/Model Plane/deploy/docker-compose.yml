@@ -594,6 +594,10 @@ services:
       # WS09-S3: save a room turn's work summary (steps and steer count, no text) with its answer.
       # Off in production-style profiles; the dev override turns it on. Never an authorization input.
       SPACE_RUN_WORK_SUMMARY: ${SPACE_RUN_WORK_SUMMARY:-false}
+      # WS09-S4: the member live view of a room run (steps), and its answer text (SD-20: off in
+      # production first). Both off in production-style profiles; never an authorization input.
+      SPACE_RUN_LIVE_VIEW: ${SPACE_RUN_LIVE_VIEW:-false}
+      SPACE_RUN_LIVE_TEXT: ${SPACE_RUN_LIVE_TEXT:-false}
       FINETUNE_ORG_BUDGET_USD: ${FINETUNE_ORG_BUDGET_USD:-50}
       FINETUNE_PER_JOB_BUDGET_USD: ${FINETUNE_PER_JOB_BUDGET_USD:-20}
       # Dedicated finetune-poller session-core credential — NOT

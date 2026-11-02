@@ -1006,6 +1006,13 @@ impl RunService for MockRunOwner {
         ))
     }
 
+    async fn authorize_room_run_attach(
+        &self,
+        _: TonicRequest<mp_contracts::model_plane::v1::AuthorizeRoomRunAttachRequest>,
+    ) -> Result<Response<mp_contracts::model_plane::v1::AuthorizeRoomRunAttachResponse>, Status> {
+        Err(Status::unimplemented("room run attach not needed in this test"))
+    }
+
     async fn get_scheduled_step_context(
         &self,
         _: TonicRequest<GetScheduledStepContextRequest>,

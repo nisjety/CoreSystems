@@ -91,6 +91,40 @@ service RunService {
   // scheduled-run record. No goal, transcript, tool, credential, or decision
   // bearer crosses this boundary.
   rpc ResolveScheduledStepAuthority(ResolveScheduledStepAuthorityRequest) returns (ResolveScheduledStepAuthorityResponse);
+
+  // AuthorizeRoomRunAttach answers whether the calling room member may watch one run live
+  // (build plan WS09-S4). The caller presents the Control `model.thread.read` decision for the
+  // Space; Session Core verifies it, the viewer's membership, that the run is a root run of a
+  // thread inside the decision's audience ceiling, and that nothing about the run or the
+  // decision is zero-retention. NotFound for any run outside the audience (no oracle). Returns
+  // ids, the honest run phase and a validity window; never run content. Called at subscribe and
+  // again every 15 seconds for as long as the stream lives.
+  rpc AuthorizeRoomRunAttach(AuthorizeRoomRunAttachRequest) returns (AuthorizeRoomRunAttachResponse);
+}
+
+message AuthorizeRoomRunAttachRequest {
+  // The run the member wants to watch.
+  string run_id = 1;
+  // The Space the run's thread belongs to.
+  string space_id = 2;
+  // Control `model.thread.read` decision reference and token (audience model-plane).
+  string space_read_decision_ref = 3;
+  string space_read_decision_token = 4;
+}
+
+message AuthorizeRoomRunAttachResponse {
+  string run_id = 1;
+  string thread_id = 2;
+  string org_id = 3;
+  // The run owner (the person whose turn this is). Shown to members as "started by".
+  string owner_subject_id = 4;
+  // The honest run phase (`queued`, `running`, or a terminal status).
+  string run_phase = 5;
+  // When the run was created, Unix seconds.
+  int64 started_at_unix = 6;
+  // The verdict holds until here (Unix seconds): the lesser of the decision's expiry and ten
+  // minutes from now. The caller asks again before this and closes the stream at it.
+  int64 valid_until_unix = 7;
 }
 
 message GetRunRequest {
@@ -331,6 +365,11 @@ message RunDetail {
   // crash_interrupted or reauth_required (mp_contracts::loop_fold::ParkReason).
   // Owner: WS03 durable loop.
   string park_reason = 18;
+
+  // The run owner's subject id. Set ONLY when the run was read through a Space read decision
+  // (ListRuns with a Space branch), so a room member can say who started it; empty everywhere
+  // else. Owner: WS09 room live view.
+  string owner_subject_id = 19;
 }
 
 // --- Run context (build plan WS02 S4) ---
