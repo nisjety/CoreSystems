@@ -174,6 +174,18 @@ export default function SpacePage() {
   // A different thread never inherits the previous thread's message.
   const openThread = (threadId: string) => setSearchParams({ thread_id: threadId, m: undefined })
   const closeThread = () => setSearchParams({ thread_id: undefined, m: undefined }, { replace: true })
+  // Click-through from the composer's activity strip (WS09-S6): the thread pane when it is on, else
+  // the post in the timeline (WS01 AuxPane is the fallback's reason; `post-<thread id>` is the row id).
+  const openRun = (threadId: string) => {
+    if (threadPaneEnabled()) {
+      openThread(threadId)
+      return
+    }
+    const post = document.getElementById(`post-${threadId}`)
+    post?.scrollIntoView({ block: 'center', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })
+    if (post && !post.hasAttribute('tabindex')) post.setAttribute('tabindex', '-1')
+    post?.focus({ preventScroll: true })
+  }
   // A search hit (WS13-S5) opens its thread in the pane, scrolled to the message when entry links are on.
   const openSearchHit = (hit: SpaceSearchHit) =>
     setSearchParams({ thread_id: hit.threadId, m: spaceEntryLinksEnabled() ? hit.messageId : undefined })
@@ -781,6 +793,7 @@ export default function SpacePage() {
                         journal={sendJournal}
                         humanPostsEnabled={() => current().features?.human_posts === true}
                         agentWork={agentWork}
+                        onOpenRun={openRun}
                         archived={() => roomIsArchived(current())}
                         viewerRole={() => current().membership.role}
                         postMaxChars={() => current().limits?.post_max_chars}
@@ -925,6 +938,7 @@ export default function SpacePage() {
                               replyTargetFixed
                               humanPostsEnabled={() => current().features?.human_posts === true}
                               agentWork={agentWork}
+                              onOpenRun={openRun}
                               viewerSubjectId={() => current().membership.subject_id}
                               viewerRole={() => current().membership.role}
                               postMaxChars={() => current().limits?.post_max_chars}
@@ -982,6 +996,8 @@ function SpaceConversationPanel(props: {
   readonly humanPostsEnabled?: () => boolean
   /** The listing's `data.agent_work` (WS09-S2): what the room's runs offer this caller. Absent means off. */
   readonly agentWork?: () => SpaceAgentWork | undefined
+  /** Click-through from the composer's activity strip (WS09-S6). */
+  readonly onOpenRun?: (threadId: string) => void
   /** The room is archived: it stays readable, and the composer gives way to a read-only notice. */
   readonly archived?: () => boolean
   readonly viewerRole?: () => string | undefined
@@ -1098,6 +1114,7 @@ function SpaceConversationPanel(props: {
           onArtifact={artifactsOn() ? noteLiveArtifact : undefined}
           humanPostsEnabled={props.humanPostsEnabled}
           agentWork={props.agentWork}
+          onOpenRun={props.onOpenRun}
           viewerSubjectId={props.viewerSubjectId}
           viewerRole={props.viewerRole}
           postMaxChars={props.postMaxChars}

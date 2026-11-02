@@ -55,6 +55,7 @@ import { createSpaceSendJournal, type SpaceSendJournal } from '../lib/space-send
 import { DM_SPACE_FEATURE } from '../lib/space-kind'
 import { canPostInSpace, postLength } from '../lib/space-posting'
 import { SpaceConnectivityBanner } from './SpaceConnectivityBanner'
+import { SpaceRunStrip } from './SpaceRunStrip'
 import {
   SkillScope,
   SpaceComposerChipSlot,
@@ -208,6 +209,11 @@ export interface SpaceRoomComposerProps {
    * every steer.
    */
   readonly agentWork?: () => SpaceAgentWork | undefined
+  /**
+   * Click-through from the activity strip (WS09-S6): open the working conversation. Absent, the
+   * strip's lines are plain text.
+   */
+  readonly onOpenRun?: (threadId: string) => void
 }
 
 export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
@@ -1132,7 +1138,10 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
           </p>
         )}
       </Show>
-      <Show when={othersWorking().length > 0}>
+      <Show when={props.agentWork?.()?.live === true && othersWorking().length > 0}>
+        <SpaceRunStrip spaceRef={props.spaceRef} threads={othersWorking} onOpenRun={props.onOpenRun} />
+      </Show>
+      <Show when={props.agentWork?.()?.live !== true && othersWorking().length > 0}>
         <p class="verevon-space-room-composer__working" role="status" aria-live="polite">
           <span class="verevon-space-room-composer__working-dot" aria-hidden="true" />
           {othersWorking().length === 1

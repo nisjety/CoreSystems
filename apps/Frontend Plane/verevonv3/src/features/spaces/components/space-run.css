@@ -159,3 +159,66 @@
   outline: 2px solid var(--verevon-accent, currentColor);
   outline-offset: 1px;
 }
+
+/* The composer's activity strip (WS09-S6). Rides on the composer's existing working-line look. */
+.verevon-run-strip {
+  flex-wrap: wrap;
+  gap: 2px 14px;
+  min-width: 0;
+}
+
+.verevon-run-strip__line {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.verevon-run-strip__line:disabled {
+  cursor: default;
+}
+
+.verevon-run-strip__line:focus-visible {
+  outline: 2px solid var(--verevon-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.verevon-run-strip__headline {
+  flex: none;
+  color: var(--verevon-text);
+}
+
+.verevon-run-strip__where {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.verevon-run-strip__more {
+  color: var(--verevon-text-muted);
+}
+
+.dark .verevon-run-strip__headline {
+  color: rgb(255 255 255 / 88%);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .verevon-run-strip__headline {
+    animation: verevon-run-strip-in 160ms ease-out;
+  }
+}
+
+@keyframes verevon-run-strip-in {
+  from { opacity: 0.4; }
+  to { opacity: 1; }
+}
