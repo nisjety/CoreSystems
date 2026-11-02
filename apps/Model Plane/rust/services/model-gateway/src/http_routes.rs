@@ -2503,6 +2503,7 @@ async fn resume_run(
                 checkpoint_id: String::new(),
                 org_id: claims.org_id.clone(),
                 approval_id: String::new(),
+                steer_text: String::new(),
             },
             &execution_bearer,
             &session_bearer,

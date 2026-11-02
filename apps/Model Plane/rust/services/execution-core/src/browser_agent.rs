@@ -631,6 +631,27 @@ pub struct PlanConfig {
     /// default off). Set by the tool bridge from the process environment,
     /// never read in the loop. A rejection without text still aborts.
     pub approval_redirect: bool,
+    /// E3.3-f: read the text a person sends to the live run at each step boundary
+    /// (`QUARRY_BROWSER_AGENT_STEER`, default off). Set by the tool bridge from the
+    /// process environment, never read in the loop. Ignored under ZDR.
+    pub steer: bool,
+}
+
+/// E3.3-f: the switch for steering a live browser run. execution-core's pause and
+/// resume handlers read it per call (they refuse a steer text while it is off), the
+/// tool bridge copies it into [`PlanConfig::steer`]. Literal `1`, `true` or `on`.
+pub const STEER_ENV: &str = "QUARRY_BROWSER_AGENT_STEER";
+
+/// Whether `value` (an env value) turns steering on.
+#[must_use]
+pub fn steer_enabled_from(value: Option<&str>) -> bool {
+    value.is_some_and(|value| matches!(value.trim(), "1" | "true" | "on"))
+}
+
+/// Whether steering is on in this process.
+#[must_use]
+pub fn steer_enabled() -> bool {
+    steer_enabled_from(std::env::var(STEER_ENV).ok().as_deref())
 }
 
 /// E3.2-c: the longest redirect text the planner is shown, in characters.
@@ -645,6 +666,17 @@ pub const MAX_REDIRECTS_PER_RUN: u32 = 5;
 /// is left (a rejection with no text stays a plain denial).
 #[must_use]
 pub fn bound_redirect_text(raw: &str) -> Option<String> {
+    clean_person_text(raw, MAX_REDIRECT_CHARS)
+}
+
+/// E3.3-f: a steer text made safe to show the planner, cut at the queued-input
+/// cap (`mp_contracts::queued_limits::MAX_QUEUED_CHARS`).
+#[must_use]
+pub fn bound_steer_text(raw: &str) -> Option<String> {
+    clean_person_text(raw, mp_contracts::queued_limits::MAX_QUEUED_CHARS)
+}
+
+fn clean_person_text(raw: &str, max_chars: usize) -> Option<String> {
     let cleaned = raw
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
@@ -653,7 +685,7 @@ pub fn bound_redirect_text(raw: &str) -> Option<String> {
     if collapsed.is_empty() {
         return None;
     }
-    Some(collapsed.chars().take(MAX_REDIRECT_CHARS).collect())
+    Some(collapsed.chars().take(max_chars).collect())
 }
 
 /// E3.2-c: one rejected action and what the person said about it. Unlike an
@@ -757,6 +789,9 @@ pub struct AgentPlan {
     /// E3.2-c: set by `decide_next_action` for the step in hand: a redirect
     /// only makes sense when a planner will read it.
     planner_active: bool,
+    /// E3.3-f: texts taken from the run's steer queue, waiting for the next
+    /// planner call (shown once). At most `MAX_QUEUED_MESSAGES`.
+    steer_pending: Vec<String>,
 }
 
 impl AgentPlan {
@@ -780,6 +815,7 @@ impl AgentPlan {
             redirect: None,
             redirects_used: 0,
             planner_active: false,
+            steer_pending: Vec::new(),
         }
     }
 
@@ -1974,10 +2010,10 @@ async fn decide_next_action(
     state: Option<&crate::state::StateStore>,
     sink: Option<&dyn BrowserEventSink>,
 ) -> PlanStepResult {
+    plan.planner_active = planner.is_some();
     if let Some(aborted) = wait_out_pause_or_cancel(plan, state, sink).await {
         return aborted;
     }
-    plan.planner_active = planner.is_some();
 
     if let Some(gated) = gate_persistent_cookie_use(plan, sink).await {
         return gated;
@@ -2012,6 +2048,14 @@ async fn decide_next_action(
             // E3.2-c: a person's redirect is shown for this one planner call
             // (its retries included) and then dropped.
             let redirect_line = plan.redirect.take().map(|redirect| redirect.line());
+            // E3.3-f: what the person sent since the last call, shown once.
+            let steer_lines = (!plan.steer_pending.is_empty()).then(|| {
+                std::mem::take(&mut plan.steer_pending)
+                    .iter()
+                    .map(|text| format!("- \"{text}\""))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            });
             // A transient or unreadable reply is retried once (the unreadable
             // one with a corrective line); the second failure stops the run.
             let mut attempts = 0u32;
@@ -2024,6 +2068,7 @@ async fn decide_next_action(
                     step: plan.current_step,
                     failed_total: plan.failures.total(),
                     redirect: redirect_line.as_deref(),
+                    steer: steer_lines.as_deref(),
                 };
                 match planner.plan_next(&context).await {
                     Ok(reply) => break Ok(reply),
@@ -2380,10 +2425,42 @@ async fn wait_out_pause_or_cancel(
                         sink.run_resumed(&plan.config).await;
                     }
                 }
+                take_steer_texts(plan, state);
                 return None;
             }
         }
     }
+}
+
+/// E3.3-f: at a step boundary the run is neither cancelled nor paused: move what a
+/// person queued for it into the plan, for the next planner call. Only when steering is
+/// on for this plan, a planner will read it and the run is not ZDR; otherwise the queue
+/// is left alone. It is text and nothing else: a pending approval is decided by the
+/// approval gate, never by this, and the allowed domains are the plan's alone. At most
+/// `MAX_QUEUED_MESSAGES` are kept (the newest win).
+fn take_steer_texts(plan: &mut AgentPlan, state: &crate::state::StateStore) {
+    if !plan.config.steer || !plan.planner_active || plan.config.zdr {
+        return;
+    }
+    let taken = state.take_steer(&plan.config.run_id);
+    if taken.is_empty() {
+        return;
+    }
+    for text in taken {
+        if let Some(text) = bound_steer_text(&text) {
+            plan.steer_pending.push(text);
+        }
+    }
+    let keep = mp_contracts::queued_limits::MAX_QUEUED_MESSAGES;
+    if plan.steer_pending.len() > keep {
+        let drop = plan.steer_pending.len() - keep;
+        plan.steer_pending.drain(..drop);
+    }
+    tracing::debug!(
+        plan_id = %plan.config.plan_id,
+        messages = plan.steer_pending.len(),
+        "steer text taken at the step boundary"
+    );
 }
 
 /// In-memory plan store for tracking active browser-agent plans.
@@ -3727,6 +3804,160 @@ mod tests {
         PlanConfig {
             approval_redirect: true,
             ..test_config()
+        }
+    }
+
+    // ---- E3.3-f steer at the step boundary -----------------------------
+
+    fn steer_config() -> PlanConfig {
+        PlanConfig {
+            steer: true,
+            ..test_config()
+        }
+    }
+
+    #[test]
+    fn steer_is_off_by_default_and_only_literal_values_enable() {
+        assert!(!PlanConfig::default().steer);
+        assert!(!test_config().steer);
+        assert!(!steer_enabled_from(None));
+        for on in ["1", "true", "on", " 1 "] {
+            assert!(steer_enabled_from(Some(on)), "{on:?}");
+        }
+        for off in ["0", "false", "yes", "", "TRUE", "enabled"] {
+            assert!(!steer_enabled_from(Some(off)), "{off:?}");
+        }
+    }
+
+    #[test]
+    fn steer_text_is_cleaned_and_cut_at_the_queued_input_cap() {
+        assert_eq!(bound_steer_text("  \n"), None);
+        assert_eq!(
+            bound_steer_text("go to\nthe pricing   page"),
+            Some("go to the pricing page".to_owned())
+        );
+        let long = "z".repeat(mp_contracts::queued_limits::MAX_QUEUED_CHARS + 50);
+        assert_eq!(
+            bound_steer_text(&long).map(|text| text.chars().count()),
+            Some(mp_contracts::queued_limits::MAX_QUEUED_CHARS)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_queued_steer_is_taken_at_the_boundary_and_shown_to_the_planner_once() {
+        let store = crate::state::StateStore::new();
+        let mut plan = AgentPlan::new(steer_config());
+        let _ = store.enqueue_steer(&plan.config.run_id, "use the annual plan");
+        let sink = ScriptedApprovalSink::new(vec![]);
+        let planner = SteerProbePlanner::new(vec![observe_action(), observe_action()]);
+
+        let first = decide_next_action(&mut plan, None, Some(&planner), Some(&store), Some(&sink)).await;
+        assert!(matches!(first, PlanStepResult::Action(_)));
+        let second = decide_next_action(&mut plan, None, Some(&planner), Some(&store), Some(&sink)).await;
+        assert!(matches!(second, PlanStepResult::Action(_)));
+        let seen = planner.seen();
+        assert_eq!(seen[0].as_deref(), Some("- \"use the annual plan\""));
+        assert_eq!(seen[1], None, "shown once");
+        assert_eq!(store.pending_steer(&plan.config.run_id), 0);
+    }
+
+    #[tokio::test]
+    async fn a_steer_waits_while_paused_and_arrives_when_the_run_resumes() {
+        let store = crate::state::StateStore::new();
+        let mut plan = AgentPlan::new(steer_config());
+        let run_id = plan.config.run_id.clone();
+        assert!(store.pause(&run_id));
+        let _ = store.enqueue_steer(&run_id, "also check the footer");
+        let resumer = store.clone();
+        let resume_id = run_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            let _ = resumer.resume_paused(&resume_id);
+        });
+        let planner = SteerProbePlanner::new(vec![observe_action()]);
+        let result = decide_next_action(&mut plan, None, Some(&planner), Some(&store), None).await;
+        assert!(matches!(result, PlanStepResult::Action(_)));
+        assert_eq!(
+            planner.seen()[0].as_deref(),
+            Some("- \"also check the footer\"")
+        );
+    }
+
+    #[tokio::test]
+    async fn steer_is_left_alone_when_off_without_a_planner_or_under_zdr() {
+        // Flag off.
+        let store = crate::state::StateStore::new();
+        let mut plan = AgentPlan::new(test_config());
+        let _ = store.enqueue_steer(&plan.config.run_id, "hello");
+        let planner = SteerProbePlanner::new(vec![observe_action()]);
+        let _ = decide_next_action(&mut plan, None, Some(&planner), Some(&store), None).await;
+        assert_eq!(planner.seen()[0], None);
+        assert_eq!(store.pending_steer(&plan.config.run_id), 1, "left queued");
+
+        // No planner reads it.
+        let mut plan = AgentPlan::new(steer_config());
+        let _ = decide_next_action(&mut plan, None, None, Some(&store), None).await;
+        assert_eq!(store.pending_steer(&plan.config.run_id), 1);
+
+        // ZDR run: never delivered.
+        let mut zdr = steer_config();
+        zdr.zdr = true;
+        let mut plan = AgentPlan::new(zdr);
+        let planner = SteerProbePlanner::new(vec![observe_action()]);
+        let _ = decide_next_action(&mut plan, None, Some(&planner), Some(&store), None).await;
+        assert_eq!(planner.seen()[0], None);
+        assert_eq!(store.pending_steer(&plan.config.run_id), 1);
+    }
+
+    #[tokio::test]
+    async fn a_steer_never_replaces_the_approval_gate() {
+        let store = crate::state::StateStore::new();
+        let mut plan = AgentPlan::new(steer_config());
+        let _ = store.enqueue_steer(&plan.config.run_id, "yes, go ahead and pay");
+        let sink = ScriptedApprovalSink::new(vec![ApprovalOutcome::Denied("no".to_owned())]);
+        let planner = SteerProbePlanner::new(vec![checkout_click()]);
+        let result =
+            decide_next_action(&mut plan, None, Some(&planner), Some(&store), Some(&sink)).await;
+        assert!(
+            matches!(result, PlanStepResult::Aborted { .. }),
+            "text from the person is not an approval; the gate still asks"
+        );
+        assert_eq!(sink.call_count(), 1);
+    }
+
+    /// A planner that records the steer lines it was shown on each call.
+    struct SteerProbePlanner {
+        actions: std::sync::Mutex<std::collections::VecDeque<BrowserAction>>,
+        seen: std::sync::Mutex<Vec<Option<String>>>,
+    }
+
+    impl SteerProbePlanner {
+        fn new(actions: Vec<BrowserAction>) -> Self {
+            Self {
+                actions: std::sync::Mutex::new(actions.into()),
+                seen: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn seen(&self) -> Vec<Option<String>> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    #[tonic::async_trait]
+    impl crate::llm_planner::ActionPlanner for SteerProbePlanner {
+        async fn plan_next(
+            &self,
+            ctx: &crate::llm_planner::PlannerContext<'_>,
+        ) -> Result<crate::llm_planner::PlannerReply, crate::llm_planner::PlannerError> {
+            self.seen.lock().unwrap().push(ctx.steer.map(str::to_owned));
+            let action = self
+                .actions
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("scripted action");
+            Ok(crate::llm_planner::PlannerReply::action(action))
         }
     }
 

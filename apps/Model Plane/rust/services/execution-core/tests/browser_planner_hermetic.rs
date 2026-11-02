@@ -690,6 +690,7 @@ fn rendered_prompt(
             step: if page { 3 } else { 1 },
             failed_total: failures.len() as u32,
             redirect: None,
+            steer: None,
         },
         "verevon-balance",
         schema,

@@ -1277,6 +1277,8 @@ pub(crate) struct PlanCeilings {
     require_quarry_redaction_stamp: bool,
     /// `QUARRY_BROWSER_AGENT_APPROVAL_REDIRECT` (E3.2-c), default off.
     approval_redirect: bool,
+    /// `QUARRY_BROWSER_AGENT_STEER` (E3.3-f), default off.
+    steer: bool,
 }
 
 impl Default for PlanCeilings {
@@ -1294,6 +1296,7 @@ impl Default for PlanCeilings {
             widened_actions: false,
             require_quarry_redaction_stamp: false,
             approval_redirect: false,
+            steer: false,
         }
     }
 }
@@ -1389,6 +1392,9 @@ impl PlanCeilings {
             .is_some_and(|value| matches!(value.trim(), "1" | "true" | "on")),
             approval_redirect: lookup("QUARRY_BROWSER_AGENT_APPROVAL_REDIRECT")
                 .is_some_and(|value| matches!(value.trim(), "1" | "true" | "on")),
+            steer: browser_agent::steer_enabled_from(
+                lookup(browser_agent::STEER_ENV).as_deref(),
+            ),
         }
     }
 
@@ -1635,6 +1641,7 @@ fn browser_plan_config_with(
         require_quarry_redaction_stamp: ceilings.require_quarry_redaction_stamp,
         tab_mark_on_complete: input_tab_mark.unwrap_or_default(),
         approval_redirect: ceilings.approval_redirect,
+        steer: ceilings.steer,
     };
     browser_agent::validate_plan_config(&plan)?;
     Ok(plan)
@@ -2040,6 +2047,18 @@ mod tests {
         for off in ["0", "false", "yes", "", "TRUE"] {
             let set = ceilings_with(&[("QUARRY_BROWSER_AGENT_APPROVAL_REDIRECT", off)]);
             assert!(!set.approval_redirect, "{off:?}");
+        }
+    }
+
+    #[test]
+    fn steer_default_off_and_only_literal_values_enable() {
+        assert!(!ceilings_with(&[]).steer);
+        assert!(!PlanCeilings::default().steer);
+        for on in ["1", "true", "on", " on "] {
+            assert!(ceilings_with(&[("QUARRY_BROWSER_AGENT_STEER", on)]).steer, "{on:?}");
+        }
+        for off in ["0", "false", "yes", "", "TRUE"] {
+            assert!(!ceilings_with(&[("QUARRY_BROWSER_AGENT_STEER", off)]).steer, "{off:?}");
         }
     }
 

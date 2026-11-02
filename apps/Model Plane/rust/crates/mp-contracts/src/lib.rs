@@ -13,6 +13,7 @@ pub mod org_agent_policy;
 pub mod park_reason;
 pub mod prompt_tier;
 pub mod provider_reads;
+pub mod queued_limits;
 pub mod result_query;
 pub mod retention;
 pub mod run_context;

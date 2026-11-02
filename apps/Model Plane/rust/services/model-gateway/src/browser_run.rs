@@ -2385,6 +2385,11 @@ enum BrowserRunControlAction {
 #[derive(Debug, Deserialize)]
 struct BrowserRunControlRequest {
     action: BrowserRunControlAction,
+    /// E3.3-f: text the person typed for the live run, sent with `pause` or
+    /// `resume`. Held to the queued-input caps here and queued by execution-core
+    /// (which refuses it while its steer switch is off). Never with `stop`.
+    #[serde(default)]
+    text: Option<String>,
 }
 
 /// `POST /v1/browser/runs/:run_id/control` — pause / resume / stop a durable
@@ -2414,6 +2419,25 @@ async fn browser_run_control(
     if run_id.trim().is_empty() {
         return Err(bad_request("run_id must not be empty"));
     }
+    let steer_text = match crate::queued_input::validate_steer_text(req.text.as_deref()) {
+        Ok(text) => text,
+        Err(crate::queued_input::SteerRefusal::Empty) => {
+            return Err(bad_request("steer_text_empty"));
+        }
+        Err(crate::queued_input::SteerRefusal::TooLong { chars }) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "steer_text_too_long",
+                    "chars": chars,
+                    "max_chars": crate::queued_input::MAX_QUEUED_CHARS,
+                })),
+            ));
+        }
+    };
+    if steer_text.is_some() && req.action == BrowserRunControlAction::Stop {
+        return Err(bad_request("steer_text_not_allowed_with_stop"));
+    }
 
     let mut execution_client = state.execution_client.clone();
     let status = match req.action {
@@ -2422,6 +2446,7 @@ async fn browser_run_control(
                 PauseRunRequest {
                     run_id: run_id.clone(),
                     org_id: claims.org_id.clone(),
+                    steer_text: steer_text.clone().unwrap_or_default(),
                 },
                 &execution_bearer,
                 &session_bearer,
@@ -2444,6 +2469,7 @@ async fn browser_run_control(
                     checkpoint_id: String::new(),
                     org_id: claims.org_id.clone(),
                     approval_id: String::new(),
+                    steer_text: steer_text.clone().unwrap_or_default(),
                 },
                 &execution_bearer,
                 &session_bearer,
@@ -3165,7 +3191,7 @@ mod tests {
                 VerifiedExecutionBearer::for_test("must-not-forward"),
                 VerifiedSessionBearer::for_test("must-not-forward"),
                 Path("run-retained".to_owned()),
-                Json(BrowserRunControlRequest { action }),
+                Json(BrowserRunControlRequest { action, text: None }),
             )
             .await
             .expect_err("issuer-ZDR browser control must fail before execution forwarding");
