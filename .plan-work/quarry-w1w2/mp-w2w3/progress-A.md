@@ -211,7 +211,7 @@ Note: the Model Plane crates are not clean under default `cargo fmt --check` (ex
 
 ## Batch 7 end: full-suite results
 - `cargo test -p execution-core --lib` 1724 passed, 0 failed (baseline 1700). `--test browser_planner_hermetic` 46 passed (baseline 39). `--test browser_agent_e2e` 11 passed, 3 ignored. `--test tool_catalogue_characterisation` 1, `--test tool_class_registry_parity` 6, `--test autonomy_ladder_contract` 11. `cargo test -p model-gateway --lib browser_run` 94 passed (baseline 93), `--lib moderation` 31 passed.
-- Commits: 02544d09a (WS12.S4b), 4cc45e060 (WS9.E), WS8.J see git log.
+- Commits: 02544d09a (WS12.S4b), 4cc45e060 (WS9.E), 53dddd193 (WS8.J MP half).
 
 ### Lead to land (WS8.J)
 - Nothing in compose for WS8.J.
