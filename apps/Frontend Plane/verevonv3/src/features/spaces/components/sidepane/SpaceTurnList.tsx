@@ -100,7 +100,11 @@ export function normalizeTranscriptTurns(
       ...(artifacts.length > 0 ? { artifacts } : {}),
       ...(retrievalDeclined ? { retrievalDeclined } : {}),
     })
-    if (normalized.length >= maxTurns) break
+  }
+  // Over the cap, keep the first turn (the post's opening message) and the NEWEST turns, never the
+  // oldest thirty: a long thread used to show its start and silently lose its latest answers.
+  if (maxTurns >= 2 && normalized.length > maxTurns) {
+    return [normalized[0] as TranscriptTurn, ...normalized.slice(normalized.length - (maxTurns - 1))]
   }
   return normalized
 }
@@ -172,6 +176,12 @@ export interface SpaceTurnListProps {
   readonly onOpenArtifact?: (artifactId: string) => void
   /** The room timeline's post date and status, drawn in the header of the first row. */
   readonly headMeta?: () => PostHeadMeta | undefined
+  /**
+   * Turns left out between the first row and the rest (WS15-S1). When present, a row "N earlier turns"
+   * is drawn under the first turn and calls `onExpand`; the turn after the gap never groups with the
+   * one above it.
+   */
+  readonly earlierTurns?: () => { readonly count: number; readonly onExpand: () => void } | undefined
 }
 
 export function SpaceTurnList(props: SpaceTurnListProps) {
@@ -217,9 +227,12 @@ export function SpaceTurnList(props: SpaceTurnListProps) {
       {(turn, index) => {
         // Slack-style grouping: a turn by the same author within five minutes of the one above it
         // drops its avatar and name and sits under that turn's text.
-        const grouped = () => continuesTurnGroup(visibleTurns()[index() - 1], turn, props.agentName)
+        const grouped = () =>
+          !(index() === 1 && props.earlierTurns?.() !== undefined)
+          && continuesTurnGroup(visibleTurns()[index() - 1], turn, props.agentName)
         const time = () => formatTurnTime(turn.createdAt)
         return (
+          <>
           <div
             class="verevon-room-turn"
             data-role={turn.role}
@@ -305,6 +318,18 @@ export function SpaceTurnList(props: SpaceTurnListProps) {
               </Show>
             </div>
           </div>
+          <Show when={index() === 0 ? props.earlierTurns?.() : undefined}>
+            {(gap) => (
+              <div class="verevon-room-turns-gap">
+                <button type="button" class="verevon-room-turns-gap__button" onClick={() => gap().onExpand()}>
+                  {gap().count === 1
+                    ? i18n.tr('1 tidligere melding', '1 earlier turn')
+                    : i18n.tr(`${gap().count} tidligere meldinger`, `${gap().count} earlier turns`)}
+                </button>
+              </div>
+            )}
+          </Show>
+          </>
         )
       }}
     </For>

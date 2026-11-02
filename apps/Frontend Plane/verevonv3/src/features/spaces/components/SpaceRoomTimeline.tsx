@@ -1,5 +1,5 @@
 import { Bot, MessageCircle, Pin, PinOff } from '@/shared/icons'
-import { createMemo, createSignal, For, Show } from 'solid-js'
+import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'solid-js'
 
 import {
   AWAITING_APPROVAL_RUN_STATUS,
@@ -15,11 +15,22 @@ import { SpaceApprovalPanel } from './SpaceApprovalPanel'
 import { agentAvatarColor, agentForName } from '../lib/agent-avatar'
 import { agentCardModel, memberCardModel } from '../lib/agent-activity'
 import type { IdentityCardModel } from '../lib/agent-activity'
-import { MemberAvatar, PostTurnHeader, SpaceTurnList, normalizeTranscriptTurns, resolveAuthorName } from './sidepane/SpaceTurnList'
+import {
+  MAX_TURNS_PER_POST,
+  MemberAvatar,
+  PostTurnHeader,
+  SpaceTurnList,
+  normalizeTranscriptTurns,
+  resolveAuthorName,
+} from './sidepane/SpaceTurnList'
 import type { PostHeadMeta, PostStatus, TranscriptTurn } from './sidepane/SpaceTurnList'
 import { SpaceRestrictedNotice } from './SpaceRestrictedNotice'
 import { SpacePendingNewPost, SpacePendingReplies } from './SpacePendingPost'
 import type { SpaceJournalEntry } from '../lib/space-send-journal'
+import { spaceRoomFeatureWithDevOverride } from '../lib/space-room-features'
+import { postPosition } from '../lib/timeline-anchor'
+import { startAnchoring } from '../lib/timeline-anchor-dom'
+import './space-timeline.css'
 import { SpaceArtifactChip } from './SpaceArtifactChip'
 import { SpaceArtifactSheet } from './SpaceArtifactSheet'
 import { roomItems } from '@/features/spaces/lib/room-artifact-items'
@@ -120,6 +131,12 @@ export interface SpaceRoomTimelineProps {
   readonly roomPins?: () => readonly SpaceRoomPin[]
 }
 
+/**
+ * How many of a post's newest turns the server returns in its tail window (WS15-S6 `tail=12`). One
+ * export shared with the thread pane's inline collapse (WS01-S7b), which owns the same surface.
+ */
+export const TAIL_WINDOW_TURNS = 12
+
 /** Distinct reply authors drawn in the summary row's avatar stack; the rest read as "+N". */
 const SUMMARY_AVATARS = 3
 
@@ -165,6 +182,66 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
   const pendingRepliesFor = (threadId: string) =>
     (props.pendingPosts?.() ?? []).filter((entry) => entry.kind === 'post_reply' && entry.threadId === threadId)
 
+  // ── Scroll anchoring (WS15-S1, `features.timeline_anchor`) ───────────────────────────────────────
+  // Off, none of this runs and the list renders exactly as before.
+  const anchored = () => spaceRoomFeatureWithDevOverride('timeline_anchor', import.meta.env.VITE_SPACE_TIMELINE_ANCHOR_UI)
+  const [unseenNew, setUnseenNew] = createSignal(0)
+  const [jumpVisible, setJumpVisible] = createSignal(false)
+  let listEl: HTMLOListElement | undefined
+  let runTick: (() => void) | undefined
+  let ownSendPending = false
+  let ownSendTimer: ReturnType<typeof setTimeout> | undefined
+
+  const reduceMotion = () =>
+    typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
+  function jumpToLatest(): void {
+    if (!listEl) return
+    listEl.scrollTo({ top: listEl.scrollHeight, behavior: reduceMotion() ? 'auto' : 'smooth' })
+    setUnseenNew(0)
+    setJumpVisible(false)
+  }
+
+  // The reader's own send always goes to the bottom: a new journal entry means this browser just posted.
+  let lastPendingCount = props.pendingPosts?.().length ?? 0
+  createEffect(
+    () => props.pendingPosts?.().length ?? 0,
+    (count) => {
+      const grew = count > lastPendingCount
+      lastPendingCount = count
+      if (!grew || !anchored()) return
+      ownSendPending = true
+      clearTimeout(ownSendTimer)
+      ownSendTimer = setTimeout(() => { ownSendPending = false }, 2000)
+      if (runTick) requestAnimationFrame(runTick)
+    },
+  )
+
+  // The controller. Solid v2 has no onMount: this effect runs once the list is in the document, and
+  // again if the flag flips; the function it returns tears the observers down.
+  createEffect(
+    () => ({ on: anchored(), has: orderedThreads().length > 0 }),
+    ({ on, has }) => {
+      const el = listEl
+      if (!on || !has || !el) return undefined
+      return startAnchoring(el, {
+        startAtBottom: !props.openThreadId?.(),
+        takeOwnSend: () => {
+          const own = ownSendPending
+          ownSendPending = false
+          return own
+        },
+        setUnseen: setUnseenNew,
+        setJump: setJumpVisible,
+        unseen: unseenNew,
+        register: (tick) => { runTick = tick },
+      })
+    },
+  )
+  onCleanup(() => {
+    clearTimeout(ownSendTimer)
+    runTick = undefined
+  })
+
   return (
     <Show
       when={orderedThreads().length > 0 || pendingNewPosts().length > 0}
@@ -181,9 +258,14 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
       <Show when={!sharedRead()}>
         <SpaceRestrictedNotice variant="room" />
       </Show>
-      <ol class="verevon-room-timeline" aria-label={i18n.tr('Samtaler i rommet', 'Room conversations')}>
+      <ol
+        class="verevon-room-timeline"
+        ref={(element) => { listEl = element }}
+        data-anchored={anchored() ? '' : undefined}
+        aria-label={i18n.tr('Samtaler i rommet', 'Room conversations')}
+      >
         <For each={orderedThreads()}>
-          {(thread) => (
+          {(thread, index) => (
             <>
             <Show when={firstUnreadId() === thread.thread_id}>
               <li class="verevon-room-new-divider-item" role="presentation">
@@ -195,6 +277,7 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
             <SpaceRoomPost
               spaceRef={props.spaceRef}
               thread={thread}
+              position={anchored() ? postPosition(index(), orderedThreads().length) : undefined}
               threads={props.threads}
               roster={props.roster}
               viewerSubjectId={props.viewerSubjectId}
@@ -217,6 +300,23 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
           )}
         </For>
         <For each={pendingNewPosts()}>{(entry) => <SpacePendingNewPost entry={entry} />}</For>
+        {/* The jump pill: sticks to the bottom edge of the list while the reader is scrolled up. */}
+        <Show when={anchored() && jumpVisible()}>
+          <li class="verevon-room-jump-item" role="presentation">
+            <button
+              type="button"
+              class="verevon-room-jump"
+              data-new={unseenNew() > 0 ? 'true' : undefined}
+              onClick={jumpToLatest}
+            >
+              {unseenNew() > 0
+                ? unseenNew() === 1
+                  ? i18n.tr('1 ny', '1 new')
+                  : i18n.tr(`${unseenNew()} nye`, `${unseenNew()} new`)
+                : i18n.tr('Hopp til siste', 'Jump to latest')}
+            </button>
+          </li>
+        </Show>
       </ol>
     </Show>
   )
@@ -225,6 +325,8 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
 function SpaceRoomPost(props: {
   readonly spaceRef: string
   readonly thread: SpaceThread
+  /** `aria-posinset`/`aria-setsize` for this post (`features.timeline_anchor`); absent leaves them off. */
+  readonly position?: { readonly posinset: number; readonly setsize: number }
   /** Every thread in the room, for the identity hover card's activity line. */
   readonly threads: () => readonly SpaceThread[]
   readonly roster: () => readonly SpaceRosterMember[]
@@ -269,7 +371,12 @@ function SpaceRoomPost(props: {
       // said out loud instead of being swallowed into the preview.
       const load = await loadSpaceTranscript(spaceRef, threadId)
       if (load.state === 'ok') {
-        return { state: 'ok' as const, turns: normalizeTranscriptTurns(load.turns as readonly unknown[] | undefined) }
+        // Every turn is kept: the post draws its first turn plus the newest ones and offers the rest
+        // behind the "earlier turns" row, instead of dropping everything after the first thirty.
+        return {
+          state: 'ok' as const,
+          turns: normalizeTranscriptTurns(load.turns as readonly unknown[] | undefined, Number.MAX_SAFE_INTEGER),
+        }
       }
       // A 403 may carry a typed Space denial (why Control said no, and who can fix it). Kept so the
       // post can say that, not only the generic "not shared with you".
@@ -279,24 +386,35 @@ function SpaceRoomPost(props: {
   )
   // With the artifact surfaces off an artifact-only turn has nothing to show,
   // so it is dropped here and the post reads exactly as it did before.
-  const turns = (): readonly TranscriptTurn[] => {
+  const allTurns = (): readonly TranscriptTurn[] => {
     const all = transcript()?.turns ?? []
     return props.artifactsOn ? all : all.filter((turn) => turn.content.length > 0)
   }
+  // A long transcript is drawn as its first turn plus the newest ones, with a row to show the rest.
+  const [turnsExpanded, setTurnsExpanded] = createSignal(false)
+  const turnWindow = (): { readonly turns: readonly TranscriptTurn[]; readonly omitted: number } => {
+    const all = allTurns()
+    if (turnsExpanded() || all.length <= MAX_TURNS_PER_POST) return { turns: all, omitted: 0 }
+    return {
+      turns: [all[0] as TranscriptTurn, ...all.slice(all.length - (MAX_TURNS_PER_POST - 1))],
+      omitted: all.length - MAX_TURNS_PER_POST,
+    }
+  }
+  const turns = (): readonly TranscriptTurn[] => turnWindow().turns
   const [openArtifactId, setOpenArtifactId] = createSignal<string | undefined>(undefined)
   // Live artifacts from this browser's own stream that the transcript does not
   // carry yet (same id and version). In memory only, never stored.
   const pendingLive = (): readonly ChatArtifact[] => {
     if (!props.artifactsOn) return []
     const persisted = new Set(
-      turns().flatMap((turn) => (turn.artifacts ?? []).map((artifact) => `${artifact.id}\u0000${artifact.version}`)),
+      allTurns().flatMap((turn) => (turn.artifacts ?? []).map((artifact) => `${artifact.id}\u0000${artifact.version}`)),
     )
     return (props.liveArtifacts?.(props.thread.thread_id) ?? []).filter(
       (artifact) => !persisted.has(`${artifact.id}\u0000${artifact.version}`),
     )
   }
   const artifactItems = createMemo(() =>
-    props.artifactsOn ? roomItems([...turns(), { artifacts: pendingLive() }]) : [],
+    props.artifactsOn ? roomItems([...allTurns(), { artifacts: pendingLive() }]) : [],
   )
   const readState = () => transcript()?.state
   // The typed denial a 403 carried, when it carried one this build understands; else undefined and the
@@ -310,13 +428,17 @@ function SpaceRoomPost(props: {
   // transcript has loaded the projection's `reply_count` stands in.
   const replyCount = () => {
     if (props.collapse?.() !== true) return 0
-    if (turns().length > 0) return turns().length - 1
+    if (allTurns().length > 0) return allTurns().length - 1
     const count = props.thread.reply_count
     return typeof count === 'number' && count > 0 ? count : 0
   }
   const summarised = () => replyCount() > 0
   const headTurns = (): readonly TranscriptTurn[] => (summarised() && turns().length > 0 ? turns().slice(0, 1) : turns())
-  const replyTurns = (): readonly TranscriptTurn[] => turns().slice(1)
+  const replyTurns = (): readonly TranscriptTurn[] => allTurns().slice(1)
+  const earlierTurns = () => {
+    const omitted = turnWindow().omitted
+    return omitted > 0 && !summarised() ? { count: omitted, onExpand: () => setTurnsExpanded(true) } : undefined
+  }
   const replyAuthorName = (turn: TranscriptTurn): string =>
     turn.role === 'assistant'
       ? turn.agentName ?? props.agentName
@@ -370,7 +492,7 @@ function SpaceRoomPost(props: {
       threads: props.threads(),
       color: agentAvatarColor(agent),
       roster: props.roster(),
-      turns: turns().map((turn) => ({
+      turns: allTurns().map((turn) => ({
         threadId: props.thread.thread_id,
         role: turn.role,
         agentName: turn.agentName,
@@ -451,6 +573,8 @@ function SpaceRoomPost(props: {
       data-unread={props.unread?.() ? 'true' : undefined}
       data-open={props.open?.() ? 'true' : undefined}
       data-run-status={props.thread.latest_run_status ?? undefined}
+      aria-posinset={props.position?.posinset}
+      aria-setsize={props.position?.setsize}
     >
       {/* Pinned and new are facts about the post, stated before its content so
           a reader scanning the room sees them first. "New" is drawn once for the whole room as the
@@ -537,6 +661,7 @@ function SpaceRoomPost(props: {
           threadId={props.thread.thread_id}
           onOpenArtifact={props.artifactsOn ? setOpenArtifactId : undefined}
           headMeta={headMeta}
+          earlierTurns={earlierTurns}
         />
       </Show>
 
