@@ -9,7 +9,7 @@ export type BrowserNavigationFailure = {
   /** The URL the person asked for. Only navigate actions produce one. */
   url: string
   /** A typed reason for the card. Never a raw message from the server. */
-  reason: 'invalid_url' | 'blocked' | 'unreachable' | 'failed'
+  reason: 'invalid_url' | 'blocked' | 'outside_scope' | 'unreachable' | 'failed'
   /** The user-facing sentence, already chosen by the caller's `tr` (no raw error text). */
   sentence: string
 }
@@ -47,6 +47,8 @@ export function retryUrlOf(failure: BrowserNavigationFailure | null | undefined)
 function navigationReasonOf(error: unknown): BrowserNavigationFailure['reason'] {
   if (!(error instanceof ApiError)) return 'failed'
   if (error.code === 'invalid_url') return 'invalid_url'
+  // The gateway's typed code for a navigation outside the run's allowed domains (D2-046).
+  if (error.code === 'browser_navigation_outside_scope') return 'outside_scope'
   if (error.blockReason !== null) return 'blocked'
   if (error.status === 0 || error.status >= 500) return 'unreachable'
   return 'failed'
