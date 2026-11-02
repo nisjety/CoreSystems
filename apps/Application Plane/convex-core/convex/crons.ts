@@ -65,4 +65,12 @@ crons.interval(
   {},
 );
 
+// WS15-S12: delete room notices older than 90 days. Deletes only.
+crons.interval(
+  "space room notice prune",
+  { hours: 1 },
+  internal.spaceRoomNotices.pruneRoomNotices,
+  {},
+);
+
 export default crons;

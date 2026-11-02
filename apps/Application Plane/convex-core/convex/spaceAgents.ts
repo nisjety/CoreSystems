@@ -3,6 +3,7 @@ import { action, internalMutation, internalQuery, mutation, query } from "./_gen
 import { internal } from "./_generated/api";
 import { assertServiceKey, requireGatewayMember } from "./authz";
 import { isDmKind } from "./spaceParticipants";
+import { noticeKindForBindingStatus, recordRoomNotice } from "./spaceRoomNotices";
 
 /**
  * WS12-S2 legacy-path guard: agents are not bound inside a direct message. A DM
@@ -508,6 +509,14 @@ export const createSpaceAgentForGateway = mutation({
       createdAt: now,
       updatedAt: now,
     });
+    // WS15-S12: the room timeline's "agent added" row, in the same transaction.
+    await recordRoomNotice(ctx, {
+      spaceRef,
+      externalOrgId: args.externalOrgId,
+      kind: "agent_bound",
+      actorExternalAuthId: args.externalAuthId,
+      subjectId,
+    });
 
     return { agentRef: agentId, subjectId, bindingRef };
   },
@@ -602,6 +611,14 @@ export const bindExistingSpaceAgentForGateway = mutation({
         approvalMode: "require_confirmation",
       },
     );
+    // WS15-S12: the room timeline's "agent added" row, in the same transaction.
+    await recordRoomNotice(ctx, {
+      spaceRef,
+      externalOrgId: args.externalOrgId,
+      kind: "agent_bound",
+      actorExternalAuthId: args.externalAuthId,
+      subjectId,
+    });
     return { subjectId, bindingRef: result.bindingRef };
   },
 });
@@ -690,6 +707,17 @@ export const setSpaceAgentBindingStateForGateway = mutation({
       projectionVersion: ((binding as any).projectionVersion as number) + 1,
       updatedAt: Date.now(),
     });
+    // WS15-S12: the room timeline's paused / resumed / revoked row, in the same transaction.
+    const noticeKind = noticeKindForBindingStatus(args.status);
+    if (noticeKind) {
+      await recordRoomNotice(ctx, {
+        spaceRef,
+        externalOrgId: args.externalOrgId,
+        kind: noticeKind,
+        actorExternalAuthId: args.externalAuthId,
+        subjectId: (binding as any).subjectId as string,
+      });
+    }
     return {
       bindingRef,
       subjectId: (binding as any).subjectId as string,

@@ -37,7 +37,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::{
-    control_membership_url, denial, list_space_threads, public_space,
+    control_membership_url, convex_gateway_call, denial, list_space_threads, public_space,
     shared_thread_read_decision_for_typed, space_lifecycle_by_ref, space_read_marker,
     thread_items_match_space, SpaceThreadsQuery,
 };
@@ -429,21 +429,31 @@ async fn space_timeline(
     });
     // 7b. WS15-S11: the room's system rows for the interval this page covers. Control failing is a
     //     named gap, never a failed window.
-    let mut system_gap: Option<Value> = None;
+    //     WS15-S12: Application's room notices (agent and room changes) are merged into the same
+    //     rows; Application failing is its own named gap and keeps Control's rows.
+    let mut system_gaps: Vec<Value> = Vec::new();
     if state.space_features.system_entries_api {
         let interval = system_interval(&window, has_more, oldest_ms, newest_ms);
-        match system_entries(&state, &org_id, &space_ref, &actor, interval).await {
-            Some((entries, truncated)) => {
-                data["system_entries"] = Value::Array(entries);
-                data["system_truncated"] = Value::Bool(truncated);
-            }
-            None => {
-                system_gap = Some(json!({
-                    "section": "system_entries",
-                    "code": "system_entries_unavailable",
-                    "reason": "Control could not return the room's membership changes.",
-                }));
-            }
+        let control = system_entries(&state, &org_id, &space_ref, &actor, interval).await;
+        let notices = room_notices(&state, &user, &org_id, &space_ref, interval).await;
+        if control.is_none() {
+            system_gaps.push(json!({
+                "section": "system_entries",
+                "code": "system_entries_unavailable",
+                "reason": "Control could not return the room's membership changes.",
+            }));
+        }
+        if notices.is_none() {
+            system_gaps.push(json!({
+                "section": "system_entries",
+                "code": "room_notices_unavailable",
+                "reason": "Application Plane could not return the room's agent and room changes.",
+            }));
+        }
+        if control.is_some() || notices.is_some() {
+            let (entries, truncated) = merge_system_rows(control, notices);
+            data["system_entries"] = Value::Array(entries);
+            data["system_truncated"] = Value::Bool(truncated);
         }
     }
     // 8. First page only: the membership fact, the room's own pins, the agent-work offer, where the
@@ -482,13 +492,11 @@ async fn space_timeline(
         data["agent_work"] = super::agent_work_offer(&state, &user).await;
         data["shared_read"] = json!({ "available": true });
         data["read_marker"] = read_marker;
-        if let Some(gap) = system_gap.take() {
-            unavailable.push(gap);
-        }
+        unavailable.append(&mut system_gaps);
         data["unavailable"] = Value::Array(unavailable);
     }
-    if let Some(gap) = system_gap {
-        data["unavailable"] = json!([gap]);
+    if !system_gaps.is_empty() {
+        data["unavailable"] = Value::Array(system_gaps);
     }
     (StatusCode::OK, Json(json!({ "data": data })))
 }
@@ -603,6 +611,104 @@ async fn system_entries(
         }));
     }
     Some((entries, truncated))
+}
+
+/// The closed set of Application notice words the room shows; anything else is dropped.
+const NOTICE_KINDS: [&str; 6] = [
+    "agent_bound",
+    "agent_paused",
+    "agent_resumed",
+    "agent_revoked",
+    "room_renamed",
+    "topic_changed",
+];
+
+/// Application's room notices for the interval, as timeline rows newest first, plus whether
+/// Application cut the list. `None` when Application could not answer. Rows hold ids and closed
+/// words only (no names); the BFF stores nothing and logs nothing from them.
+async fn room_notices(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    space_ref: &str,
+    interval: (Option<i64>, Option<i64>),
+) -> Option<(Vec<Value>, bool)> {
+    let mut args = json!({
+        "externalAuthId": user.user_id,
+        "externalOrgId": org_id,
+        "spaceRef": space_ref,
+        "limit": MAX_SYSTEM_ENTRIES,
+    });
+    if let Some(lo) = interval.0 {
+        args["after"] = json!(lo);
+    }
+    if let Some(hi) = interval.1 {
+        args["before"] = json!(hi);
+    }
+    let result = convex_gateway_call(state, "query", "spaceRoomNotices:roomNoticesForGateway", args)
+        .await
+        .ok()?;
+    let value = result.get("value").unwrap_or(&result);
+    let rows = value.get("notices")?.as_array()?;
+    let truncated = value
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut entries = Vec::with_capacity(rows.len());
+    for row in rows {
+        let text = |name: &str| row.get(name).and_then(Value::as_str).unwrap_or("");
+        let kind = text("kind");
+        let id = text("noticeId");
+        let created_at = row
+            .get("createdAt")
+            .and_then(Value::as_i64)
+            .and_then(rfc3339_from_ms);
+        let (false, true, Some(created_at)) = (id.is_empty(), NOTICE_KINDS.contains(&kind), created_at)
+        else {
+            continue;
+        };
+        entries.push(json!({
+            "id": id,
+            "kind": "notice",
+            "action": kind,
+            "actor_id": text("actorExternalAuthId"),
+            "subject_id": text("subjectId"),
+            "created_at": created_at,
+        }));
+    }
+    Some((entries, truncated))
+}
+
+/// Control rows and Application notices as one list, newest first by `(created_at, id)`, cut to
+/// `MAX_SYSTEM_ENTRIES`. Truncated when either source was cut or the merge itself dropped rows.
+/// The timestamps are RFC 3339 UTC with the same precision from Control and from here, so the
+/// string order is the time order.
+fn merge_system_rows(
+    control: Option<(Vec<Value>, bool)>,
+    notices: Option<(Vec<Value>, bool)>,
+) -> (Vec<Value>, bool) {
+    let mut truncated = false;
+    let mut rows: Vec<Value> = Vec::new();
+    for (mut part, cut) in [control, notices].into_iter().flatten() {
+        truncated |= cut;
+        rows.append(&mut part);
+    }
+    let key = |row: &Value| {
+        (
+            row.get("created_at")
+                .and_then(Value::as_str)
+                .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
+                .map(|at| at.timestamp_millis())
+                .unwrap_or(0),
+            row.get("id").and_then(Value::as_str).unwrap_or("").to_owned(),
+        )
+    };
+    rows.sort_by(|a, b| key(b).cmp(&key(a)));
+    if rows.len() > MAX_SYSTEM_ENTRIES as usize {
+        rows.truncate(MAX_SYSTEM_ENTRIES as usize);
+        truncated = true;
+    }
+    (rows, truncated)
 }
 
 /// The legacy thread listing, shaped as one complete page. It re-runs the legacy handler's own

@@ -24,7 +24,8 @@ export type SpaceTimelinePage = {
 }
 
 /**
- * A room-level system row (WS15-S11): one fact from Control's membership ledger. Ids and closed
+ * A room-level system row (WS15-S11/S12): one fact from Control's membership ledger or an Application
+ * notice (agent bound, paused, resumed, revoked; room renamed; topic changed). Ids and closed
  * words only; the reader resolves names from the roster. Same shape as the `system` timeline entry
  * of the Space feature's entry registry.
  */
@@ -91,7 +92,7 @@ function systemEntriesOf(value: unknown): readonly SpaceSystemEntry[] {
     const atRaw = text('created_at')
     const atMs = atRaw ? Date.parse(atRaw) : Number.NaN
     // A row with no id, no word or no readable time cannot be placed or de-duplicated: drop it.
-    if (!id || !code || !Number.isFinite(atMs) || record.kind !== 'membership') continue
+    if (!id || !code || !Number.isFinite(atMs) || (record.kind !== 'membership' && record.kind !== 'notice')) continue
     out.push({
       kind: 'system',
       id,

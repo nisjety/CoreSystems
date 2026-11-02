@@ -18,6 +18,7 @@ import {
   spaceRecipientAudienceRef,
 } from "./spaceAudience";
 import { normalizeRoomDetails } from "./spaceRoomRules";
+import { recordRoomNotice } from "./spaceRoomNotices";
 import {
   DmParticipantError,
   canonicalParticipants,
@@ -620,6 +621,28 @@ export const updateRoomDetailsForGateway = mutation({
     if (normalized.value.name !== undefined) patch.name = normalized.value.name;
     if (normalized.value.topic !== undefined) patch.topic = normalized.value.topic ?? undefined;
     await ctx.db.patch(space._id, patch);
+
+    // WS15-S12: one timeline row per field that actually changed, in the same transaction.
+    // Ids and kinds only: the new name and topic are never copied into a notice.
+    if (normalized.value.name !== undefined && normalized.value.name !== space.name) {
+      await recordRoomNotice(ctx, {
+        spaceRef: space.spaceRef,
+        externalOrgId: args.externalOrgId,
+        kind: "room_renamed",
+        actorExternalAuthId: args.externalAuthId,
+      });
+    }
+    if (
+      normalized.value.topic !== undefined &&
+      (normalized.value.topic ?? null) !== (space.topic ?? null)
+    ) {
+      await recordRoomNotice(ctx, {
+        spaceRef: space.spaceRef,
+        externalOrgId: args.externalOrgId,
+        kind: "topic_changed",
+        actorExternalAuthId: args.externalAuthId,
+      });
+    }
 
     return {
       spaceRef: space.spaceRef,
