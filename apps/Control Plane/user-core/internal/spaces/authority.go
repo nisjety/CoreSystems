@@ -377,6 +377,11 @@ type CurrentMembership struct {
 	// (WS04-S7). ArchivedAt is set when State is "archived".
 	State      string     `json:"state,omitempty"`
 	ArchivedAt *time.Time `json:"archived_at,omitempty"`
+	// Visibility is "private" or "org_public" and JoinRole the role a self-join
+	// receives (WS04-S8). Both are additive facts for the settings UI; neither
+	// grants access by itself.
+	Visibility string `json:"visibility,omitempty"`
+	JoinRole   string `json:"join_role,omitempty"`
 }
 
 func (m CurrentMembership) Validate() error {

@@ -949,7 +949,7 @@ func (r *Repository) resolveUserMembership(ctx context.Context, spaceRef, orgID,
 		SELECT s.space_ref, s.org_id, m.subject_id, s.space_kind, m.role,
 		       r.authority_revision, r.membership_revision, r.privacy_revision,
 		       r.recipient_audience_revision, r.entitlement_revision,
-		       s.roster_mode, s.registration_state, s.archived_at,
+		       s.roster_mode, s.registration_state, s.archived_at, s.visibility, s.join_role,
 		       (s.space_kind='personal' OR EXISTS (
 			SELECT 1 FROM space_recipient_audience_members a
 			WHERE a.space_ref=s.space_ref
@@ -976,7 +976,8 @@ func (r *Repository) resolveUserMembership(ctx context.Context, spaceRef, orgID,
 		&membership.SpaceRef, &membership.OrgID, &membership.SubjectID, &membership.Kind, &membership.Role,
 		&membership.Revisions.Authority, &membership.Revisions.Membership, &membership.Revisions.Privacy,
 		&membership.Revisions.RecipientAudience, &membership.Revisions.Entitlement,
-		&membership.RosterMode, &membership.State, &membership.ArchivedAt, &membership.RecipientReady,
+		&membership.RosterMode, &membership.State, &membership.ArchivedAt,
+		&membership.Visibility, &membership.JoinRole, &membership.RecipientReady,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNoCurrentMembership
