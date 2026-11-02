@@ -14,6 +14,7 @@ mod artifacts;
 mod attention;
 mod posts;
 mod runs;
+mod timeline;
 
 use crate::state::AppState;
 
@@ -25,4 +26,5 @@ pub fn router() -> Router<AppState> {
         .merge(attention::router())
         .merge(posts::router())
         .merge(runs::router())
+        .merge(timeline::router())
 }

@@ -9684,6 +9684,54 @@ struct ThreadMessage {
     /// only on a versioned thread, so every other transcript keeps its shape.
     #[serde(skip_serializing_if = "Option::is_none")]
     version: Option<ThreadMessageVersion>,
+    /// The typed room entry of a human post (WS15): its own field, never flattened with the free
+    /// metadata. An unknown future kind arrives as `{kind, version}` only. Omitted when none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    entry: Option<ThreadMessageEntry>,
+}
+
+/// A typed room entry as the transcript serialises it (WS15-S6; stored and validated by WS15-S9).
+#[derive(Debug, Serialize)]
+struct ThreadMessageEntry {
+    kind: String,
+    version: u32,
+    /// Present only for the `link_previews` kind.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    link_previews: Vec<ThreadMessageLinkPreview>,
+}
+
+#[derive(Debug, Serialize)]
+struct ThreadMessageLinkPreview {
+    url: String,
+    final_url: String,
+    host: String,
+    title: String,
+    description: String,
+    site_name: String,
+    fetched_at: String,
+}
+
+fn thread_message_entry(
+    entry: Option<mp_contracts::model_plane::v1::MessageEntry>,
+) -> Option<ThreadMessageEntry> {
+    let entry = entry.filter(|entry| !entry.kind.is_empty())?;
+    Some(ThreadMessageEntry {
+        kind: entry.kind,
+        version: entry.version,
+        link_previews: entry
+            .link_previews
+            .into_iter()
+            .map(|preview| ThreadMessageLinkPreview {
+                url: preview.url,
+                final_url: preview.final_url,
+                host: preview.host,
+                title: preview.title,
+                description: preview.description,
+                site_name: preview.site_name,
+                fetched_at: timestamp_to_rfc3339(preview.fetched_at),
+            })
+            .collect(),
+    })
 }
 
 /// A turn's place in the message tree, as the version switcher reads it.
@@ -9713,6 +9761,11 @@ struct ListThreadMessagesResponse {
     /// page. Absent on the unpaged read, which stays byte-identical.
     #[serde(skip_serializing_if = "Option::is_none")]
     has_more: Option<bool>,
+    /// Set only on a read that asked for the first turn (`include_first`, WS15-S6) while
+    /// `SPACE_TIMELINE_API` is on: how many readable turns lie between the first turn and the tail
+    /// window. When positive, `messages[0]` is the first turn and the rest is the contiguous tail.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    omitted_before: Option<u32>,
     /// Set only when this gateway runs with message versions on (WS17 S8), so the
     /// client can offer the version switcher. Absent otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -9788,9 +9841,23 @@ struct ThreadSummaryResponse {
     /// Who wrote the latest human row; omitted when Session Core names none.
     #[serde(skip_serializing_if = "String::is_empty")]
     last_author_subject_id: String,
+    /// Thread activity summary (WS15-S6): present only on a timeline window, omitted from every
+    /// other listing so those keep their shape. `last_message_seq` is the window's keyset position.
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    last_message_seq: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    recent_author_subject_ids: Vec<String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    last_role: String,
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    turn_count: u32,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
 fn is_zero_u32(value: &u32) -> bool {
     *value == 0
 }
@@ -10051,6 +10118,10 @@ async fn list_threads(
             unread: thread.unread,
             reply_count: thread.reply_count,
             last_author_subject_id: thread.last_author_subject_id,
+            last_message_seq: thread.last_message_seq,
+            recent_author_subject_ids: thread.recent_author_subject_ids,
+            last_role: thread.last_role,
+            turn_count: thread.turn_count,
         })
         .collect();
 
@@ -10516,6 +10587,10 @@ struct ThreadMessagesQuery {
     /// before it, so it is read only together with a positive `limit`.
     #[serde(default)]
     before: Option<String>,
+    /// `1` or `true`: also return the thread's first readable turn ahead of the newest page
+    /// (WS15-S6). Honoured only while `SPACE_TIMELINE_API` is on and only without `before`.
+    #[serde(default)]
+    include_first: Option<String>,
 }
 
 /// Caps the tail page `GET /v1/threads/{id}/messages` serves. Operators set
@@ -10580,6 +10655,13 @@ async fn list_thread_messages(
     let limit = query.limit.unwrap_or(0).min(thread_messages_page_ceiling(
         std::env::var(THREAD_MESSAGES_MAX_LIMIT_ENV).ok().as_deref(),
     ));
+    let include_first = limit > 0
+        && before.is_empty()
+        && mp_contracts::space_timeline::api_enabled()
+        && query
+            .include_first
+            .as_deref()
+            .is_some_and(|raw| matches!(raw.trim(), "1" | "true"));
     // A shared-Space read (it carries a Control decision) sees only the
     // allowlisted metadata keys (WS07-S9a); the owner's Chat read is unchanged.
     let space_read_decision_ref = query.space_read_decision_ref.unwrap_or_default();
@@ -10609,6 +10691,7 @@ async fn list_thread_messages(
                 // context or reattach_context.
                 include_human_posts: true,
                 post_context_cap: 0,
+                include_first,
             },
             &bearer,
         )?)
@@ -10652,6 +10735,7 @@ async fn list_thread_messages(
     // Only a paged read says whether more exists, so an unpaged body keeps the
     // exact shape every caller already parses.
     let has_more = (limit > 0).then_some(response.has_more);
+    let omitted_before = include_first.then_some(response.omitted_before);
     let messages =
         response
             .messages
@@ -10664,10 +10748,16 @@ async fn list_thread_messages(
                 author_subject_id: m.author_subject_id,
                 post_kind: if m.post_kind == "post" { m.post_kind } else { String::new() },
                 created_at: message_created_at(m.created_at.as_ref()),
+                entry: thread_message_entry(m.entry),
                 metadata: crate::room_metadata::visible_metadata(
                     m.metadata.as_ref().map(prost_struct_to_json).and_then(
                         |value| match value {
-                            Value::Object(map) if !map.is_empty() => Some(map),
+                            // `entry` is the typed field above; a stored free key of that name
+                            // must never produce a second `entry` in the body.
+                            Value::Object(mut map) => {
+                                map.remove("entry");
+                                (!map.is_empty()).then_some(map)
+                            }
                             _ => None,
                         },
                     ),
@@ -10691,6 +10781,7 @@ async fn list_thread_messages(
         thread_id: trimmed.to_owned(),
         messages,
         has_more,
+        omitted_before,
         versions_enabled: message_versions_enabled().then_some(true),
     }))
 }
@@ -16032,6 +16123,7 @@ mod thread_messages_page_tests {
             thread_id: "thread-1".to_owned(),
             messages: Vec::new(),
             has_more: None,
+            omitted_before: None,
             versions_enabled: None,
         })
         .expect("the response serialises");
@@ -16047,6 +16139,7 @@ mod thread_messages_page_tests {
             thread_id: "thread-1".to_owned(),
             messages: Vec::new(),
             has_more: Some(false),
+            omitted_before: None,
             versions_enabled: None,
         })
         .expect("the response serialises");
@@ -16069,8 +16162,10 @@ mod thread_messages_page_tests {
                 created_at: None,
                 metadata: None,
                 version: None,
+                entry: None,
             }],
             has_more: None,
+            omitted_before: None,
             versions_enabled: None,
         })
         .expect("the response serialises");
@@ -16138,6 +16233,7 @@ mod thread_messages_page_tests {
             thread_id: "thread-1".to_owned(),
             messages: Vec::new(),
             has_more: None,
+            omitted_before: None,
             versions_enabled: Some(true),
         })
         .expect("the response serialises");
@@ -16388,6 +16484,7 @@ mod space_post_wire_tests {
             created_at: None,
             metadata: None,
             version: None,
+            entry: None,
         }
     }
 
@@ -16412,6 +16509,10 @@ mod space_post_wire_tests {
             unread: false,
             reply_count,
             last_author_subject_id: last_author.to_owned(),
+            last_message_seq: 0,
+            recent_author_subject_ids: Vec::new(),
+            last_role: String::new(),
+            turn_count: 0,
         }
     }
 

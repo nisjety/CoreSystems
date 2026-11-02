@@ -121,6 +121,9 @@ pub struct AppState {
     pub space_attention_client: SpaceAttentionClient<Channel>,
     /// `SPACE_ATTENTION_SUMMARY`, read once at startup. A rollout control, never an authorization input.
     pub space_attention_enabled: bool,
+    /// `SPACE_TIMELINE_API`, read once at startup (WS15-S6). A rollout control, never an
+    /// authorization input.
+    pub space_timeline_enabled: bool,
     /// Additive managed-run terminalization service hosted by Session Core on
     /// the same gRPC endpoint. It deliberately remains separate from the
     /// legacy `SessionCore` client so existing callers retain their contracts.
@@ -444,6 +447,7 @@ impl AppState {
             space_room_read_client: SpaceRoomReadServiceClient::new(session_channel.clone()),
             space_attention_client: SpaceAttentionClient::new(session_channel.clone()),
             space_attention_enabled: false,
+            space_timeline_enabled: false,
             session_client: SessionCoreClient::new(session_channel),
             managed_run_client: ManagedRunLifecycleClient::new(managed_run_channel),
             session_terminal_tokens: None,
@@ -838,6 +842,7 @@ impl AppState {
             state.space_room_read_client = space_room_read_client;
             state.space_attention_client = space_attention_client;
             state.space_attention_enabled = mp_contracts::space_attention::summary_enabled();
+            state.space_timeline_enabled = mp_contracts::space_timeline::api_enabled();
             state.managed_run_client = managed_run_client;
             state.session_terminal_tokens = Some(session_terminal_tokens);
             state.mail_task_bridge_tokens = mail_task_bridge_tokens.clone();
@@ -897,6 +902,7 @@ impl AppState {
             state.space_room_read_client = space_room_read_client;
             state.space_attention_client = space_attention_client;
             state.space_attention_enabled = mp_contracts::space_attention::summary_enabled();
+            state.space_timeline_enabled = mp_contracts::space_timeline::api_enabled();
             state.managed_run_client = managed_run_client;
             state.session_terminal_tokens = Some(session_terminal_tokens);
             state.mail_task_bridge_tokens = mail_task_bridge_tokens;

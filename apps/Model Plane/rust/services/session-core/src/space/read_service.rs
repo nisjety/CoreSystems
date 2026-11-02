@@ -37,11 +37,24 @@ const MAX_TITLE_CHARS: i32 = 200;
 #[derive(Clone)]
 pub(crate) struct SpaceRoomReadGrpc {
     pool: PgPool,
+    /// `SPACE_TIMELINE_CORE`, read once at boot (WS15-S6). A rollout control, never an
+    /// authorization input.
+    timeline_enabled: bool,
 }
 
 impl SpaceRoomReadGrpc {
     pub(crate) fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            timeline_enabled: mp_contracts::space_timeline::core_enabled(),
+        }
+    }
+
+    /// Overrides the timeline switch (tests and the boot wiring).
+    #[allow(dead_code)]
+    pub(crate) fn with_timeline_enabled(mut self, enabled: bool) -> Self {
+        self.timeline_enabled = enabled;
+        self
     }
 }
 
@@ -168,6 +181,14 @@ type ArtifactRow = (
 
 #[tonic::async_trait]
 impl SpaceRoomReadService for SpaceRoomReadGrpc {
+    async fn list_space_timeline(
+        &self,
+        request: Request<pb::ListSpaceTimelineRequest>,
+    ) -> Result<Response<pb::ListSpaceTimelineResponse>, Status> {
+        crate::space::timeline::list_space_timeline(&self.pool, self.timeline_enabled, request)
+            .await
+    }
+
     async fn list_space_artifacts(
         &self,
         request: Request<pb::ListSpaceArtifactsRequest>,

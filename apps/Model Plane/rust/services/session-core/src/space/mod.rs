@@ -26,6 +26,8 @@
 //!   wake is verified against (WS08-S2; the rows are `message_mentions`, migration 0075).
 //! - [`revisions`]: `MessageRevisionService` (edit or delete one message), the revision fold every read applies
 //!   (WS12-S4; the log itself is `message_revisions`, migration 0076).
+//! - [`timeline`]: `SpaceRoomReadService.ListSpaceTimeline`, one window of the room's posts read from the thread
+//!   activity summary (WS15-S6; behind SPACE_TIMELINE_CORE).
 //! - [`thread_activity`]: the thread activity summary backfill and pending probe (WS15-S5; the summary itself is
 //!   kept by the trigger in migration 0078).
 
@@ -42,5 +44,6 @@ pub(crate) mod mentions;
 pub(crate) mod read_service;
 pub(crate) mod revisions;
 pub(crate) mod thread_activity;
+pub(crate) mod timeline;
 #[cfg(test)]
 pub(crate) mod test_support;

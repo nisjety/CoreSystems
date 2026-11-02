@@ -1209,6 +1209,13 @@ message ListConversationRequest {
   // With include_human_posts, keep only the newest N human posts in the returned page (0 = no
   // cap). Used by a wake that opts in to fenced room-post context (WS08-S3).
   uint32 post_context_cap = 10;
+
+  // Space timeline tail transcript (WS15-S6). With a positive `limit` and no
+  // `before_message_id`, also return the thread's first readable turn ahead of
+  // the newest page (unless the page already holds it) and report in
+  // `omitted_before` how many readable turns lie between the two. Only read
+  // while SPACE_TIMELINE_CORE is on; otherwise the read is the plain page.
+  bool include_first = 11;
 }
 
 // One conversation turn. Named SessionMessage (not ThreadMessage, which the
@@ -1264,7 +1271,9 @@ message SessionMessage {
   // The mentions recorded on this post (WS08-S2), with the wake state derived from the newest
   // run per (post, agent). Empty on turns and on posts without mentions.
   repeated MentionRef mentions = 13;
-  // 14 (entry) is reserved by another Space slice.
+  // Typed room entry of a human post (WS15-S6 declares it, WS15-S9 validates and fills it). Unset
+  // on every turn and on a post without one; a reader renders an unset or unknown kind neutrally.
+  MessageEntry entry = 14;
 
   // The latest revision applied to this message (WS12-S4): "" (never revised),
   // "edited" or "deleted". A deleted message arrives with empty `content` and no
@@ -1288,6 +1297,29 @@ message ListConversationResponse {
   // True when messages older than this page exist. Always false for an
   // unpaged read.
   bool has_more = 2;
+  // Readable turns between the first turn (ListConversationRequest.include_first) and the
+  // returned page; 0 when the request did not ask for the first turn or nothing is omitted
+  // (WS15-S6).
+  uint32 omitted_before = 3;
+}
+
+// A typed room entry carried by a human post (WS15). `kind` is a closed word; a reader that
+// does not know a kind shows `{kind, version}` neutrally. Today's only kind is "link_previews".
+message MessageEntry {
+  string kind = 1;
+  uint32 version = 2;
+  repeated LinkPreview link_previews = 3;
+}
+
+// One captured link preview, text only (no image), snapshotted when the post was sent.
+message LinkPreview {
+  string url = 1;
+  string final_url = 2;
+  string host = 3;
+  string title = 4;
+  string description = 5;
+  string site_name = 6;
+  google.protobuf.Timestamp fetched_at = 7;
 }
 
 // --- ReviseMessage / ResolveMessageTarget (WS12-S4) ---
@@ -1481,6 +1513,17 @@ message ThreadSummary {
   // Author subject of the latest human row the reader may see; empty when
   // there is none. Presentation only, never a grant.
   string last_author_subject_id = 24;
+
+  // Thread activity summary (WS15-S5 columns, read by ListSpaceTimeline, WS15-S6). Ids, counts and
+  // a role word only; set by ListSpaceTimeline and left at the defaults by ListThreads.
+  // Sequence of the thread's newest message: the timeline's keyset position.
+  uint64 last_message_seq = 25;
+  // Up to five most recent human authors, newest first. Presentation only, never a grant.
+  repeated string recent_author_subject_ids = 26;
+  // Role of the newest message ("user", "assistant", ...).
+  string last_role = 27;
+  // Messages with role user or assistant in the thread.
+  uint32 turn_count = 28;
 }
 
 message ListThreadsResponse {

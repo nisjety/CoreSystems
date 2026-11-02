@@ -92,7 +92,7 @@ const MAX_THREAD_LIST_LIMIT: i64 = 200;
 /// caller asks for. The gateway may serve less, never more.
 const MAX_CONVERSATION_PAGE_LIMIT: i64 = 200;
 pub(crate) const THREAD_TITLE_MAX_CHARS: usize = 96;
-const THREAD_PREVIEW_MAX_CHARS: usize = 180;
+pub(crate) const THREAD_PREVIEW_MAX_CHARS: usize = 180;
 
 /// EU data-residency default for Model-Plane processing (P0.4). Sweden Central
 /// is the explicit EU region; runs are stamped with this unless an operator
@@ -274,6 +274,8 @@ fn session_message_from_row(row: ConversationRow, include_inactive: bool) -> pb:
         agent_followed_up: row.agent_followed_up,
         // Filled for human posts by `finish_conversation_messages` (WS08-S2).
         mentions: Vec::new(),
+        // Typed entries are validated, stored and mapped by WS15-S9; unset until then.
+        entry: None,
     }
 }
 
@@ -336,6 +338,34 @@ async fn conversation_page_rows(
     fetch: i64,
     include_inactive: bool,
 ) -> Result<Vec<ConversationRow>, Status> {
+    conversation_rows_ordered(
+        pool,
+        org_id,
+        thread_id,
+        audience_ceiling,
+        include_human_posts,
+        before_sequence,
+        fetch,
+        include_inactive,
+        false,
+    )
+    .await
+}
+
+/// [`conversation_page_rows`] with the read order chosen: newest first, or (`ascending`) oldest
+/// first, which is how the tail transcript fetches a thread's first readable turn (WS15-S6).
+async fn conversation_rows_ordered(
+    pool: &PgPool,
+    org_id: &str,
+    thread_id: &str,
+    audience_ceiling: Option<i64>,
+    include_human_posts: bool,
+    before_sequence: Option<i64>,
+    fetch: i64,
+    include_inactive: bool,
+    ascending: bool,
+) -> Result<Vec<ConversationRow>, Status> {
+    let direction = if ascending { "ASC" } else { "DESC" };
     let sql = format!(
         "SELECT m.id::text AS id, m.role, {fold_content} AS content, m.agent_name,
                 {fold_metadata} AS metadata, m.author_subject_id,
@@ -356,8 +386,9 @@ async fn conversation_page_rows(
            AND ($4::BIGINT IS NULL OR m.sequence < $4)
            AND ($6 OR m.on_active_path)
            AND ($7 OR m.post_kind <> 'post')
-         ORDER BY m.sequence DESC
+         ORDER BY m.sequence {direction}
          LIMIT $5",
+        direction = direction,
         sibling = SIBLING_COUNT_SQL,
         fold_content = crate::space::revisions::FOLD_CONTENT_SQL,
         fold_metadata = crate::space::revisions::FOLD_METADATA_SQL,
@@ -381,8 +412,57 @@ async fn conversation_page_rows(
         })
 }
 
+/// Whether `ListConversationRequest.include_first` is honoured: `SPACE_TIMELINE_CORE`, read once.
+fn timeline_include_first_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(mp_contracts::space_timeline::core_enabled)
+}
+
+/// How many readable turns lie strictly before `before_sequence`, under the same org join,
+/// audience ceiling, branch and post filters as the page read.
+async fn conversation_count_before(
+    pool: &PgPool,
+    org_id: &str,
+    thread_id: &str,
+    audience_ceiling: Option<i64>,
+    include_human_posts: bool,
+    include_inactive: bool,
+    before_sequence: i64,
+) -> Result<i64, Status> {
+    sqlx::query_scalar(
+        "SELECT count(*)
+         FROM messages m
+         JOIN threads t ON t.id = m.thread_id
+         WHERE m.thread_id = $1 AND t.org_id = $2
+           AND ($3::BIGINT IS NULL
+                OR m.recipient_audience_revision IS NULL
+                OR m.recipient_audience_revision <= $3)
+           AND m.sequence < $4
+           AND ($5 OR m.on_active_path)
+           AND ($6 OR m.post_kind <> 'post')",
+    )
+    .bind(thread_id)
+    .bind(org_id)
+    .bind(audience_ceiling)
+    .bind(before_sequence)
+    .bind(include_inactive)
+    .bind(include_human_posts)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| {
+        warn!(error = %error, "list_conversation first-turn count failed");
+        Status::internal(error.to_string())
+    })
+}
+
 /// The paged transcript read (WS09 S8): the newest `limit` turns before the
 /// cursor, in conversation order, and whether older turns exist.
+///
+/// With `include_first` (WS15-S6, `SPACE_TIMELINE_CORE`), no `before_message_id` and older turns
+/// than the page, the thread's first readable turn is put ahead of the page and `omitted_before`
+/// counts the readable turns between the two. When `omitted_before` is positive, `messages[0]` is
+/// that first turn and the rest is the contiguous tail window; paging further back uses the
+/// oldest tail message id (`messages[1]`). When it is 0 the page is contiguous from the first turn.
 async fn conversation_page_response(
     pool: &PgPool,
     req: &pb::ListConversationRequest,
@@ -416,13 +496,66 @@ async fn conversation_page_response(
     )
     .await?;
     let page_size = usize::try_from(limit).unwrap_or(usize::MAX);
-    let (page, has_more) = conversation_tail_page(rows, page_size);
-    let mut messages: Vec<pb::SessionMessage> = page
+    let (page, mut has_more) = conversation_tail_page(rows, page_size);
+    let mut omitted_before: u32 = 0;
+    let mut first_row: Option<ConversationRow> = None;
+    if req.include_first
+        && timeline_include_first_enabled()
+        && before_sequence.is_none()
+        && has_more
+    {
+        if let Some(oldest) = page.first() {
+            let oldest_sequence = conversation_cursor_sequence(
+                pool,
+                &req.org_id,
+                &req.thread_id,
+                audience_ceiling,
+                req.include_human_posts,
+                &oldest.id,
+            )
+            .await?;
+            first_row = conversation_rows_ordered(
+                pool,
+                &req.org_id,
+                &req.thread_id,
+                audience_ceiling,
+                req.include_human_posts,
+                None,
+                1,
+                req.include_inactive,
+                true,
+            )
+            .await?
+            .into_iter()
+            .next();
+            if first_row.is_some() {
+                let before = conversation_count_before(
+                    pool,
+                    &req.org_id,
+                    &req.thread_id,
+                    audience_ceiling,
+                    req.include_human_posts,
+                    req.include_inactive,
+                    oldest_sequence,
+                )
+                .await?;
+                // The count includes the first turn itself.
+                omitted_before = u32::try_from((before - 1).max(0)).unwrap_or(u32::MAX);
+                has_more = omitted_before > 0;
+            }
+        }
+    }
+    let mut messages: Vec<pb::SessionMessage> = first_row
         .into_iter()
+        .chain(page)
         .map(|row| session_message_from_row(row, req.include_inactive))
         .collect();
     finish_conversation_messages(pool, req, &mut messages).await?;
-    Ok(Response::new(pb::ListConversationResponse { messages, has_more }))
+    Ok(Response::new(pb::ListConversationResponse {
+        messages,
+        has_more,
+        omitted_before,
+    }))
 }
 
 /// WS08-S2: what a read that includes human posts adds after the rows are mapped: the optional
@@ -8759,6 +8892,7 @@ impl SessionCore for SessionService {
             Ok(Response::new(pb::ListConversationResponse {
                 messages,
                 has_more: false,
+                omitted_before: 0,
             }))
         }
         .await;
@@ -9025,6 +9159,8 @@ impl SessionCore for SessionService {
                                 .and_then(|stats| stats["last_author"].as_str())
                                 .unwrap_or_default()
                                 .to_owned(),
+                            // The activity summary is read by ListSpaceTimeline (WS15-S6).
+                            ..Default::default()
                         }
                     },
                 )
