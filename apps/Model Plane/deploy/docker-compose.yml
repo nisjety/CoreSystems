@@ -517,6 +517,17 @@ services:
       # by auth-core, CP-1). Off answers 404; only 1/true/on enables it. The broker's own
       # BROWSER_BROKER_KEY_GRANTS_ENABLED still applies (403 api_key_grants_disabled while off).
       MODEL_GATEWAY_BROWSER_KEY_GRANTS: ${MODEL_GATEWAY_BROWSER_KEY_GRANTS:-0}
+      # WS7.L, OFF by default: a browser run start may carry a tighten-only policy ask (or plan_mode,
+      # expanded to four disables) to Quarry. Off REFUSES a start that carries one (400
+      # browser_policy_ask_unavailable) so a restriction is never dropped silently. Only `on` enables it.
+      MODEL_GATEWAY_BROWSER_POLICY_ASK: ${MODEL_GATEWAY_BROWSER_POLICY_ASK:-off}
+      # WS16.S8, OFF by default: advertise the extract_structured chat tool (schema-validated,
+      # verbatim-grounded extraction over 1-5 pages). The gRPC ExtractStructured fixes are unflagged.
+      MODEL_GATEWAY_EXTRACT_TOOL: ${MODEL_GATEWAY_EXTRACT_TOOL:-0}
+      # E3.6-8, OFF by default: open POST /v1/ai/documents/layout and POST /v1/ai/language/pii to
+      # SERVICE principals holding models:invoke (404 while off). Users are unaffected.
+      MODEL_GATEWAY_AI_LAYOUT_SERVICE: ${MODEL_GATEWAY_AI_LAYOUT_SERVICE:-0}
+      MODEL_GATEWAY_AI_PII_SERVICE: ${MODEL_GATEWAY_AI_PII_SERVICE:-0}
       # Agentic (Do mode) runs on the user's ChatGPT subscription: the
       # kill switch, OFF by default. One variable with three readers, and the
       # same expression in model-gateway, execution-core and inference-core

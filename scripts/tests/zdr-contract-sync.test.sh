@@ -27,7 +27,7 @@
 # A third authored golden, the secret-redaction shapes (WS12.S0, secret-shapes.v1.json), is
 # held to its own Rust loader instead (crates/quarry-core/tests/redaction_golden.rs: strict
 # schema, the .sha256 pin, every rule exercised). This script pins its bytes and lists the
-# Model Plane consumer (mp-scrub, WS12.S4) as pending until that crate vendors its copy.
+# Model Plane consumer (mp-scrub, WS12.S4), which vendors its copy (see VENDORED).
 #
 # CONSUMERS says who must vendor which golden. A consumer that has not vendored its
 # copy yet is reported as "pending"; under REQUIRE_CONTRACT (set it in any job that
@@ -218,7 +218,7 @@ GOLDENS=(
   #   MP_UPDATE_GOLDEN=1 cargo test -p model-gateway --lib service_route_table_matches_the_golden
   # in "apps/Model Plane/rust" (it also rewrites the .sha256 pin beside it). Then update the digest here and
   # re-vendor Quarry's copy.
-  "apps/Model Plane/api/contracts/model-gateway-service-routes.json|f4965cb3b7ecb0390aa5520fd9af4ef25663216b42570a4efce9f6d981de2f10"
+  "apps/Model Plane/api/contracts/model-gateway-service-routes.json|72302d575946f4183897df8e66098ec45b4c0dd2a3d1e45d3af967bbb29c3cc3"
   # WS16.S1: the ai-chat-v1 request and response fixtures (the string-typed structured_output_schema request,
   # the 200 with usage and provider, the ZDR 412 catalogue body, the 403). AUTHORED data owned by the Model
   # Plane; model-gateway's ai_chat_lane_tests check them against the handler and against SHA256SUMS.
@@ -226,6 +226,10 @@ GOLDENS=(
   "apps/Model Plane/api/contracts/ai-chat-v1/response.ok.json|d2db611e05833a3671c5663420698e3b32776a2df5a40d4afe2a3a281734163f"
   "apps/Model Plane/api/contracts/ai-chat-v1/response.zdr-unavailable.json|58e197283b50674f7131ae9159e5a8945a18725d5113f171e401350166dd65d9"
   "apps/Model Plane/api/contracts/ai-chat-v1/response.route-denied.json|a9df6d6e58274b351ef0c4adcbc44bc0f54615159bc34ce3bcd10c4dc505f44c"
+  # WS16.S8: the extract schema-validation corpus (model-gateway schema_check.rs, CORPUS_SHA256). AUTHORED by the
+  # Model Plane until Quarry publishes its byte-stable schema-corpus.json (ask in MP-ASKS); then byte-copy it
+  # over this file and move this row to VENDORED. Stored LF (.gitattributes), so the digest is of the LF bytes.
+  "apps/Model Plane/rust/services/model-gateway/tests/fixtures/ai-extract/schema-corpus.json|f3ce2e27a78010d28df3e14bc688908e681426db6bfc2b968a59409810a7c6f5"
 )
 
 # "<repo-relative copy>|<repo-relative golden>"
@@ -384,6 +388,10 @@ VENDORED=(
   # WS10.S2: the Go envelope twin (trace_test.go, TestRunTraceGoldenDecodes) copy of the run-trace envelope golden and its pin.
   "apps/Model Plane/go/pkg/envelope/testdata/run-trace-envelope.golden.json|apps/Model Plane/api/contracts/run-trace-envelope.golden.json"
   "apps/Model Plane/go/pkg/envelope/testdata/run-trace-envelope.golden.json.sha256|apps/Model Plane/api/contracts/run-trace-envelope.golden.json.sha256"
+
+  # WS12.S4: the Model Plane scrub crate's byte copy of Quarry's secret-shapes golden and its pin.
+  "apps/Model Plane/rust/crates/mp-scrub/tests/fixtures/secret-shapes.v1.json|apps/Ingestion Plane/Quarry-v2/crates/quarry-core/tests/fixtures/redaction/secret-shapes.v1.json"
+  "apps/Model Plane/rust/crates/mp-scrub/tests/fixtures/secret-shapes.v1.json.sha256|apps/Ingestion Plane/Quarry-v2/crates/quarry-core/tests/fixtures/redaction/secret-shapes.v1.json.sha256"
 )
 
 # "<repo-relative golden>|<consumer>|<tree its copy must live in>|<owning task>"
@@ -422,7 +430,7 @@ CONSUMERS=(
   "apps/Model Plane/api/contracts/infer-statuses.json|embedding-engine|apps/Data Plane v2/services/embedding-engine-rs/|CR-T7 (outcome table over every wire status)"
   "apps/Control Plane/auth-core/src/auth/fixtures/inference-service-tokens.golden.json|embedding-engine|apps/Data Plane v2/services/embedding-engine-rs/|CR-T7 (engine tests replay the real mint)"
   # The secret-redaction shapes: the Model Plane scrub crate vendors the golden and runs the
-  # cases that name it (applies_to "mp"). Pending until WS12.S4 creates the crate.
+  # cases that name it (applies_to "mp"). Satisfied by the WS12.S4 VENDORED rows.
   "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/tests/fixtures/redaction/secret-shapes.v1.json|mp-scrub|apps/Model Plane/rust/crates/mp-scrub/|WS12.S4 (Model Plane scrub crate, vendored golden)"
   # WS10.S8: the Go quarryotel package tests its constants against the vendored copy.
   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/telemetry-field-contract.json|quarryotel|apps/Ingestion Plane/Quarry-v2/pkg/quarryotel/|WS10.S8 (span field vocabulary, Go constants)"
