@@ -5,10 +5,10 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{delete, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use execution_core::quarry_agent::QuarryAgentClient;
 use serde_json::{json, Value};
@@ -33,6 +33,16 @@ struct Inner {
     close_headers: Vec<Vec<(String, String)>>,
     closed: u32,
     step_counter: u32,
+    /// WS8.G: the run id in the path of each step request.
+    step_paths: Vec<String>,
+    /// WS8.G: a scripted error for `POST .../attach`.
+    attach_error: Option<(u16, Value)>,
+    /// WS8.G: `(run_id, body, headers)` of each attach request.
+    attach_requests: Vec<(String, Value, Vec<(String, String)>)>,
+    /// WS8.G: `(run_id, attach_id, disposition)` of each release.
+    releases: Vec<(String, String, String)>,
+    /// WS8.G: `(run_id, grant_id)` of each tab listing.
+    tab_queries: Vec<(String, String)>,
 }
 
 type Shared = Arc<Mutex<Inner>>;
@@ -57,6 +67,9 @@ impl FakeQuarry {
             .route("/v1/agent/runs", post(start_run))
             .route("/v1/agent/runs/:run_id/step", post(step))
             .route("/v1/agent/runs/:run_id", delete(close_run))
+            .route("/v1/agent/runs/:run_id/attach", post(attach_run))
+            .route("/v1/agent/runs/:run_id/attach/:attach_id", delete(release_attach))
+            .route("/v1/agent/runs/:run_id/tabs", get(list_tabs))
             .with_state(inner.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -144,6 +157,39 @@ impl FakeQuarry {
     pub fn closed_runs(&self) -> u32 {
         self.inner.lock().expect("lock").closed
     }
+
+    /// WS8.G: the run id each step went to, in order.
+    pub fn step_paths(&self) -> Vec<String> {
+        self.inner.lock().expect("lock").step_paths.clone()
+    }
+
+    /// WS8.G: make `POST .../attach` answer with this error.
+    pub fn fail_attach(&self, status: u16, body: Value) {
+        self.inner.lock().expect("lock").attach_error = Some((status, body));
+    }
+
+    /// WS8.G: every attach request, `(run_id, body, headers)`.
+    pub fn attach_requests(&self) -> Vec<(String, Value, Vec<(String, String)>)> {
+        self.inner.lock().expect("lock").attach_requests.clone()
+    }
+
+    /// WS8.G: every release, `(run_id, attach_id, disposition)`.
+    pub fn releases(&self) -> Vec<(String, String, String)> {
+        self.inner.lock().expect("lock").releases.clone()
+    }
+
+    /// WS8.G: a 409 `USER_TOOK_OVER` exactly as Quarry's delegate lane writes it.
+    pub fn push_took_over(&self) -> &Self {
+        self.push_error(
+            409,
+            json!({"data": null, "meta": {"request_id": "r"}, "error": {
+                "code": "USER_TOOK_OVER",
+                "message": "the person using the browser has taken control of this tab; this action was not run",
+                "retryable": false,
+                "details": {"scope": "tab", "tab_id": "tab_fake", "tab_epoch": 2, "control_epoch": 3}
+            }}),
+        )
+    }
 }
 
 fn envelope(data: Value) -> Value {
@@ -184,11 +230,12 @@ async fn start_run(
 
 async fn step(
     State(inner): State<Shared>,
-    Path(_run_id): Path<String>,
+    Path(run_id): Path<String>,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     let mut guard = inner.lock().expect("lock");
+    guard.step_paths.push(run_id);
     guard.step_requests.push(body);
     guard.step_headers.push(
         headers
@@ -225,4 +272,75 @@ async fn close_run(
     guard.closed += 1;
     guard.close_headers.push(header_pairs(&headers));
     StatusCode::OK
+}
+
+async fn attach_run(
+    State(inner): State<Shared>,
+    Path(run_id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let mut guard = inner.lock().expect("lock");
+    guard
+        .attach_requests
+        .push((run_id, body, header_pairs(&headers)));
+    if let Some((status, body)) = guard.attach_error.clone() {
+        return (StatusCode::from_u16(status).expect("status"), Json(body));
+    }
+    (
+        StatusCode::OK,
+        Json(envelope(json!({
+            "attach_id": "att_fake",
+            "tab_id": "tab_fake",
+            "tab_epoch": 1,
+            "control_epoch": 2,
+            "opened_by": "agent",
+            "holder": "agent",
+            "allowed_domains": ["example.com"],
+        }))),
+    )
+}
+
+#[derive(serde::Deserialize)]
+struct ReleaseQuery {
+    disposition: Option<String>,
+}
+
+async fn release_attach(
+    State(inner): State<Shared>,
+    Path((run_id, attach_id)): Path<(String, String)>,
+    Query(query): Query<ReleaseQuery>,
+) -> impl IntoResponse {
+    let disposition = query.disposition.unwrap_or_else(|| "release".to_owned());
+    let state = if disposition == "abort" { "aborted" } else { "released" };
+    inner
+        .lock()
+        .expect("lock")
+        .releases
+        .push((run_id, attach_id.clone(), disposition));
+    (
+        StatusCode::OK,
+        Json(envelope(json!({"attach_id": attach_id, "state": state}))),
+    )
+}
+
+#[derive(serde::Deserialize)]
+struct TabsQuery {
+    grant_id: Option<String>,
+}
+
+async fn list_tabs(
+    State(inner): State<Shared>,
+    Path(run_id): Path<String>,
+    Query(query): Query<TabsQuery>,
+) -> impl IntoResponse {
+    inner
+        .lock()
+        .expect("lock")
+        .tab_queries
+        .push((run_id, query.grant_id.unwrap_or_default()));
+    (
+        StatusCode::OK,
+        Json(envelope(json!({"tabs": [{"tabId": "tab_fake", "title": null, "url": null, "active": false}]}))),
+    )
 }

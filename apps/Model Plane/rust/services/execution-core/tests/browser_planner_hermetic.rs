@@ -1315,3 +1315,322 @@ async fn trace_context_is_sent_on_start_and_request_id_on_every_call() {
     assert_eq!(request_ids(quarry.step_headers()), [expected.clone(), expected.clone()]);
     assert_eq!(request_ids(quarry.close_headers()), [expected]);
 }
+
+// ---------------------------------------------------------------------------
+// WS8.G attach mode: the loop on the person's run, against the fake's attach
+// routes (shapes from quarry-edge `agent_routes/attach.rs`).
+// ---------------------------------------------------------------------------
+
+/// Records the sink calls an attached run makes (ids only).
+#[derive(Default)]
+struct AttachSink {
+    events: std::sync::Mutex<Vec<String>>,
+}
+
+impl AttachSink {
+    fn events(&self) -> Vec<String> {
+        self.events.lock().unwrap().clone()
+    }
+
+    fn count(&self, prefix: &str) -> usize {
+        self.events().iter().filter(|e| e.starts_with(prefix)).count()
+    }
+
+    fn note(&self, event: String) {
+        self.events.lock().unwrap().push(event);
+    }
+}
+
+#[tonic::async_trait]
+impl execution_core::browser_agent::BrowserEventSink for AttachSink {
+    async fn action_dispatched(
+        &self,
+        _config: &execution_core::browser_agent::PlanConfig,
+        _action: &execution_core::browser_agent::BrowserAction,
+    ) {
+    }
+    async fn observation_received(
+        &self,
+        _config: &execution_core::browser_agent::PlanConfig,
+        _observation: &execution_core::browser_agent::BrowserObservation,
+    ) {
+    }
+    async fn run_paused(&self, _config: &execution_core::browser_agent::PlanConfig) {
+        self.note("run_paused".to_owned());
+    }
+    async fn run_resumed(&self, _config: &execution_core::browser_agent::PlanConfig) {
+        self.note("run_resumed".to_owned());
+    }
+    async fn require_approval(
+        &self,
+        _config: &execution_core::browser_agent::PlanConfig,
+        _detail: &execution_core::browser_agent::RiskyActionDetail,
+    ) -> execution_core::browser_agent::ApprovalOutcome {
+        self.note("require_approval".to_owned());
+        execution_core::browser_agent::ApprovalOutcome::Granted
+    }
+    async fn paused_by_user(&self, _config: &execution_core::browser_agent::PlanConfig, tab_id: &str) {
+        self.note(format!("paused_by_user:{tab_id}"));
+    }
+    async fn resumed_after_takeover(
+        &self,
+        _config: &execution_core::browser_agent::PlanConfig,
+        tab_id: &str,
+    ) {
+        self.note(format!("resumed_after_takeover:{tab_id}"));
+    }
+    async fn attach_shared_jar(
+        &self,
+        _config: &execution_core::browser_agent::PlanConfig,
+        session_run_id: &str,
+        attach_id: &str,
+        tab_id: &str,
+    ) {
+        self.note(format!("attach_shared_jar:{session_run_id}:{attach_id}:{tab_id}"));
+    }
+}
+
+/// An attached plan on the person's run `run_user`: one allowed domain, a
+/// start page, and a 1 ms takeover poll so a pause costs nothing real.
+fn attach_config() -> execution_core::browser_agent::PlanConfig {
+    execution_core::browser_agent::PlanConfig {
+        attach: Some(execution_core::browser_agent::AttachConfig {
+            session_run_id: "run_user".to_owned(),
+        }),
+        start_url: Some("https://example.com/".to_owned()),
+        takeover_poll: Some(std::time::Duration::from_millis(1)),
+        ..plan_config()
+    }
+}
+
+/// Every step went to the person's run as the agent, with the attach grant
+/// and no lease of our own.
+fn assert_delegate_steps(quarry: &FakeQuarry) {
+    let steps = quarry.step_requests();
+    assert!(!steps.is_empty());
+    assert!(quarry.step_paths().iter().all(|run| run == "run_user"), "{:?}", quarry.step_paths());
+    for step in &steps {
+        assert_eq!(step["initiated_by"], "agent", "{step}");
+        assert_eq!(step["grant_id"], "grant_h", "{step}");
+        assert_eq!(step["ai_run_id"], "run_h", "{step}");
+        assert_eq!(step["agent_label"], "browser-agent", "{step}");
+        assert!(step.get("lease_id").is_none(), "no lease on a delegate step: {step}");
+    }
+}
+
+#[tokio::test]
+async fn attach_mode_never_calls_start_run() {
+    let quarry = FakeQuarry::start().await;
+    quarry.push_page("https://example.com/", "Example", "Open 9 to 5", &[]);
+    let client = quarry.client();
+    let config = execution_core::browser_agent::PlanConfig {
+        stop_criteria: "Open 9 to 5".to_owned(),
+        request_id: Some("req-attach-1".to_owned()),
+        ..attach_config()
+    };
+
+    let result = run_browser_agent_loop(config, Some(&client), None, None, None).await;
+
+    assert_eq!(result.status, PlanStatus::Completed, "{}", result.summary);
+    assert!(quarry.start_requests().is_empty(), "attach mode never acquires a lease");
+    assert_eq!(quarry.closed_runs(), 0, "and never closes the person's run");
+    let attaches = quarry.attach_requests();
+    assert_eq!(attaches.len(), 1);
+    let (run, body, headers) = &attaches[0];
+    assert_eq!(run, "run_user");
+    assert_eq!(
+        body,
+        &serde_json::json!({"grant_id": "grant_h", "constraints": {"max_steps": 8, "max_runtime_s": 60}}),
+        "the tab opens blank; the first step navigates"
+    );
+    assert!(headers.iter().any(|(k, v)| k == "authorization" && v == "Bearer test-token"));
+    assert!(headers.iter().any(|(k, v)| k == "x-quarry-org" && v == "org_h"));
+    assert!(headers.iter().any(|(k, v)| k == "x-request-id" && v == "req-attach-1"));
+    assert_delegate_steps(&quarry);
+    assert_eq!(quarry.step_requests()[0]["action"]["type"], "navigate");
+    assert_eq!(
+        quarry.releases(),
+        [("run_user".to_owned(), "att_fake".to_owned(), "release".to_owned())]
+    );
+}
+
+#[tokio::test]
+async fn attach_mode_releases_attach_on_every_exit() {
+    // Success: released.
+    let quarry = FakeQuarry::start().await;
+    quarry.push_page("https://example.com/", "Example", "Open 9 to 5", &[]);
+    let client = quarry.client();
+    let done = run_browser_agent_loop(
+        execution_core::browser_agent::PlanConfig {
+            stop_criteria: "Open 9 to 5".to_owned(),
+            ..attach_config()
+        },
+        Some(&client),
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(done.status, PlanStatus::Completed, "{}", done.summary);
+    assert_eq!(release(&quarry), ["release"]);
+
+    // Failure (a step Quarry refuses): aborted.
+    let quarry = FakeQuarry::start().await;
+    quarry.push_error(
+        502,
+        serde_json::json!({"error": {"code": "UPSTREAM_BLOCKED", "message": "Upstream blocked the request", "retryable": true}}),
+    );
+    let client = quarry.client();
+    let failed = run_browser_agent_loop(attach_config(), Some(&client), None, None, None).await;
+    assert_eq!(failed.status, PlanStatus::Failed);
+    assert_eq!(failed.summary, "browser-agent step failed: 502 UPSTREAM_BLOCKED");
+    assert_eq!(release(&quarry), ["abort"]);
+
+    // Cancel (the run was cancelled before the first step): aborted.
+    let quarry = FakeQuarry::start().await;
+    let client = quarry.client();
+    let state = execution_core::state::StateStore::new();
+    let _ = state.cancel("run_h", None);
+    let cancelled = run_browser_agent_loop(attach_config(), Some(&client), None, None, Some(&state)).await;
+    assert_eq!(cancelled.status, PlanStatus::Aborted);
+    assert_eq!(
+        cancelled.abort_reason,
+        Some(execution_core::browser_agent::BrowserAbortReason::Cancelled)
+    );
+    assert_eq!(release(&quarry), ["abort"]);
+
+    // Plan error (the planner's bearer is refused): aborted.
+    let quarry = FakeQuarry::start().await;
+    quarry.push_page("https://example.com/", "Example", "Welcome", &[]);
+    let planner = ScriptedPlanner::new().then_error(execution_core::llm_planner::PlannerError::new(
+        execution_core::llm_planner::PlannerErrorKind::Unauthenticated,
+        "bearer rejected",
+    ));
+    let client = quarry.client();
+    let plan_error = run_browser_agent_loop(
+        attach_config(),
+        Some(&client),
+        Some(&planner as &dyn ActionPlanner),
+        None,
+        None,
+    )
+    .await;
+    assert_ne!(plan_error.status, PlanStatus::Completed, "{}", plan_error.summary);
+    assert_eq!(release(&quarry), ["abort"]);
+
+    // A refused attach leaves nothing to release; the Quarry reason is the summary.
+    let quarry = FakeQuarry::start().await;
+    quarry.fail_attach(
+        409,
+        serde_json::json!({"data": null, "meta": {}, "error": {"code": "CONFLICT", "message": "attach_exists", "retryable": false}}),
+    );
+    let client = quarry.client();
+    let refused = run_browser_agent_loop(attach_config(), Some(&client), None, None, None).await;
+    assert_eq!(refused.status, PlanStatus::Failed);
+    assert_eq!(refused.summary, "browser-agent attach failed: 409 CONFLICT (attach_exists)");
+    assert!(quarry.releases().is_empty());
+    assert!(quarry.step_requests().is_empty());
+    assert!(quarry.start_requests().is_empty());
+}
+
+#[tokio::test]
+async fn attach_mode_user_took_over_pauses_then_resumes_after_give_back() {
+    let quarry = FakeQuarry::start().await;
+    // The first step is refused (the person holds the tab), the first probe
+    // too; the second probe is answered: the tab came back.
+    quarry.push_took_over();
+    quarry.push_took_over();
+    quarry.push_page("https://example.com/left", "Left", "Open 9 to 5", &[]);
+    let client = quarry.client();
+    let sink = AttachSink::default();
+    let result = run_browser_agent_loop(
+        execution_core::browser_agent::PlanConfig {
+            stop_criteria: "Open 9 to 5".to_owned(),
+            ..attach_config()
+        },
+        Some(&client),
+        None,
+        Some(&sink as &dyn execution_core::browser_agent::BrowserEventSink),
+        None,
+    )
+    .await;
+
+    assert_eq!(result.status, PlanStatus::Completed, "{}", result.summary);
+    assert_delegate_steps(&quarry);
+    let types: Vec<String> = quarry
+        .step_requests()
+        .iter()
+        .map(|s| s["action"]["type"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert_eq!(types, ["navigate", "get_content", "get_content"], "the refused action is not replayed; passive probes");
+    assert_eq!(sink.count("paused_by_user:tab_fake"), 1);
+    assert_eq!(sink.count("resumed_after_takeover:tab_fake"), 1);
+    assert_eq!(sink.count("run_paused"), 0, "a takeover is not a user pause of the run");
+    assert_eq!(release(&quarry), ["release"]);
+}
+
+#[tokio::test]
+async fn attach_mode_tab_closed_while_paused_fails_with_the_quarry_reason() {
+    let quarry = FakeQuarry::start().await;
+    quarry.push_took_over();
+    quarry.push_error(
+        404,
+        serde_json::json!({"data": null, "meta": {}, "error": {"code": "NOT_FOUND", "message": "pinned_tab_closed", "retryable": false}}),
+    );
+    let client = quarry.client();
+    let sink = AttachSink::default();
+    let result = run_browser_agent_loop(
+        attach_config(),
+        Some(&client),
+        None,
+        Some(&sink as &dyn execution_core::browser_agent::BrowserEventSink),
+        None,
+    )
+    .await;
+    assert_eq!(result.status, PlanStatus::Failed);
+    assert_eq!(result.summary, "browser-agent step failed: 404 NOT_FOUND (pinned_tab_closed)");
+    assert_eq!(sink.count("paused_by_user:"), 1);
+    assert_eq!(sink.count("resumed_after_takeover:"), 0);
+    assert_eq!(release(&quarry), ["abort"]);
+}
+
+#[tokio::test]
+async fn attach_shared_jar_event_emitted_once() {
+    let quarry = FakeQuarry::start().await;
+    quarry
+        .push_page("https://example.com/", "Example", "Welcome", &[("@e1", "link", "Hours", "Hours")])
+        .push_page("https://example.com/hours", "Hours", "Mon", &[])
+        .push_page("https://example.com/hours", "Hours", "Tue", &[]);
+    // The first step is the start page (no planner call); then a click and a read.
+    let planner = ScriptedPlanner::new()
+        .then_action(click_ref("snap-1", 1, "@e1"))
+        .then_action(action(ActionType::Observe))
+        .then_done();
+    let client = quarry.client();
+    let sink = AttachSink::default();
+    let result = run_browser_agent_loop(
+        attach_config(),
+        Some(&client),
+        Some(&planner as &dyn ActionPlanner),
+        Some(&sink as &dyn execution_core::browser_agent::BrowserEventSink),
+        None,
+    )
+    .await;
+    assert_eq!(result.status, PlanStatus::Completed, "{}", result.summary);
+    assert_eq!(quarry.step_requests().len(), 3);
+    assert_eq!(
+        sink.events()
+            .iter()
+            .filter(|e| e.starts_with("attach_shared_jar:"))
+            .cloned()
+            .collect::<Vec<_>>(),
+        ["attach_shared_jar:run_user:att_fake:tab_fake"],
+        "once per attachment, ids only"
+    );
+    assert_eq!(sink.count("require_approval"), 0, "no persistent-profile gate on an attached run");
+}
+
+/// The disposition of each release, in order.
+fn release(quarry: &FakeQuarry) -> Vec<String> {
+    quarry.releases().into_iter().map(|r| r.2).collect()
+}

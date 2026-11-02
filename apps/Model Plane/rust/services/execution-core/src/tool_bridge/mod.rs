@@ -377,15 +377,21 @@ pub(crate) async fn execute_quarry_browser_mcp(
         max_cost_usd: None,
     };
     match client
-        .step(crate::quarry_agent::StepParams::new(
-            &request.quarry_run_id,
-            &request.lease_id,
-            verified_org_id,
-            action,
-            &constraints,
-            verified_zdr,
-            validated_grant.grant_id(),
-        ))
+        .step({
+            let mut params = crate::quarry_agent::StepParams::new(
+                &request.quarry_run_id,
+                &request.lease_id,
+                verified_org_id,
+                action,
+                &constraints,
+                verified_zdr,
+                validated_grant.grant_id(),
+            );
+            // The model proposed this action (WS8.G): Quarry records it as an
+            // agent's, which it would for a service principal anyway.
+            params.initiated_by = Some("agent".to_owned());
+            params
+        })
         .await
     {
         Ok(observation) => match serde_json::to_string(&observation) {
@@ -1254,6 +1260,11 @@ struct BrowserAgentInput {
     /// Trace context (WS10.S4): `origin` and `agent` labels. The run id is the
     /// verified Model run id, never read from here.
     trace: Option<crate::quarry_agent::WireRunTrace>,
+    /// WS8.G attach mode: the person's Quarry run the agent attaches to. Set
+    /// by the gateway together with a derived `attach` grant; when present the
+    /// run never acquires a lease of its own.
+    #[serde(default)]
+    attach_session_id: Option<String>,
 }
 
 /// The three keys of [`crate::quarry_agent::WireRequestAsk`], strictly.
@@ -1301,6 +1312,9 @@ fn effective_trace(
     trace.sanitized()
 }
 
+/// The broker's kind for a grant derived with `purpose=attach` (WS8.C).
+const ATTACH_GRANT_KIND: &str = "attach";
+
 fn browser_plan_config(
     input: BrowserAgentInput,
     verified_org_id: &str,
@@ -1329,6 +1343,26 @@ fn browser_plan_config_with(
         );
     }
     let run_id = input.run_id.unwrap_or_default();
+    // Attach mode needs an attach grant, and an attach grant drives nothing
+    // but an attached run (the broker scoped it to the person's run).
+    let attach_session_id = input
+        .attach_session_id
+        .map(|id| id.trim().to_owned())
+        .filter(|id| !id.is_empty());
+    let attach_grant = validated_grant.kind() == ATTACH_GRANT_KIND;
+    let attach = match (attach_session_id, attach_grant) {
+        (Some(session_run_id), true) => Some(browser_agent::AttachConfig { session_run_id }),
+        (None, false) => None,
+        (Some(_), false) => {
+            return Err("browser attach requires a broker-derived attach grant".to_owned());
+        }
+        (None, true) => {
+            return Err("an attach grant can only drive an attached browser run".to_owned());
+        }
+    };
+    // An attached run uses the person's own session and cookie jar, never a
+    // persistent profile of its own.
+    let profile_id = if attach.is_some() { None } else { input.profile_id };
     let plan = browser_agent::PlanConfig {
         plan_id: input.plan_id.unwrap_or_else(mp_ids::new_ulid),
         grant_id: validated_grant.grant_id().to_owned(),
@@ -1352,7 +1386,7 @@ fn browser_plan_config_with(
         require_approval: input.require_approval.unwrap_or(false),
         max_cost_usd: input.max_cost_usd,
         zdr: verified_zdr,
-        profile_id: input.profile_id,
+        profile_id,
         start_url: input.start_url,
         postcondition: input.postcondition.unwrap_or_default(),
         max_planner_tokens: Some(ceilings.planner_tokens(input.max_planner_tokens)),
@@ -1363,6 +1397,11 @@ fn browser_plan_config_with(
         max_total_failures: ceilings.max_total_failures,
         procedure: ceilings.procedure,
         widened_actions: ceilings.widened_actions,
+        attach,
+        // D5 default (600 s, capped by the runtime in the loop); the gateway
+        // sends no override.
+        takeover_wait_s: 0,
+        takeover_poll: None,
     };
     browser_agent::validate_plan_config(&plan)?;
     Ok(plan)
@@ -2113,5 +2152,70 @@ mod tests {
         };
         let note = browser_verification_note(&observations, &inputs);
         assert!(note.contains("Zero Data Retention"), "got: {note}");
+    }
+
+    // WS8.G attach mode at the bridge.
+
+    #[test]
+    fn attach_input_with_an_attach_grant_selects_attach_mode_and_drops_the_profile() {
+        let input: BrowserAgentInput = serde_json::from_str(
+            r#"{"grant_id":"grant-att","attach_session_id":" run_user_1 ","profile_id":"prof-1","max_steps":5}"#,
+        )
+        .unwrap();
+        let grant = ValidatedBrowserGrant::for_test("grant-att", "attach", "grant-run", "u", false);
+        let plan = browser_plan_config(input, "verified-org", false, &grant).unwrap();
+        assert_eq!(
+            plan.attach,
+            Some(browser_agent::AttachConfig {
+                session_run_id: "run_user_1".to_owned()
+            })
+        );
+        assert_eq!(plan.profile_id, None, "an attached run never names a profile");
+        assert_eq!(plan.grant_id, "grant-att");
+        assert_eq!(plan.takeover_wait_s, 0, "the D5 default applies");
+    }
+
+    #[test]
+    fn attach_input_without_an_attach_grant_is_refused() {
+        for kind in ["run", "session", "human_browse", ""] {
+            let input: BrowserAgentInput = serde_json::from_str(
+                r#"{"grant_id":"grant-1","attach_session_id":"run_user_1"}"#,
+            )
+            .unwrap();
+            let grant = ValidatedBrowserGrant::for_test("grant-1", kind, "p", "u", false);
+            let error = browser_plan_config(input, "verified-org", false, &grant).unwrap_err();
+            assert!(error.contains("attach grant"), "{kind}: {error}");
+        }
+    }
+
+    #[test]
+    fn an_attach_grant_cannot_drive_a_leased_run() {
+        for body in [r#"{"grant_id":"grant-att"}"#, r#"{"grant_id":"grant-att","attach_session_id":"  "}"#] {
+            let input: BrowserAgentInput = serde_json::from_str(body).unwrap();
+            let grant = ValidatedBrowserGrant::for_test("grant-att", "attach", "grant-run", "u", false);
+            let error = browser_plan_config(input, "verified-org", false, &grant).unwrap_err();
+            assert!(error.contains("attached browser run"), "{body}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_leased_input_is_unchanged_by_attach_mode() {
+        let input: BrowserAgentInput =
+            serde_json::from_str(r#"{"grant_id":"grant-1","profile_id":"prof-1"}"#).unwrap();
+        let grant = ValidatedBrowserGrant::for_test("grant-1", "run", "grant-s", "u", false);
+        let plan = browser_plan_config(input, "verified-org", false, &grant).unwrap();
+        assert_eq!(plan.attach, None);
+        assert_eq!(plan.profile_id.as_deref(), Some("prof-1"));
+    }
+
+    #[test]
+    fn attach_is_refused_for_a_zdr_run_at_the_bridge() {
+        let input: BrowserAgentInput = serde_json::from_str(
+            r#"{"grant_id":"grant-att","attach_session_id":"run_user_1"}"#,
+        )
+        .unwrap();
+        let grant = ValidatedBrowserGrant::for_test("grant-att", "attach", "grant-run", "u", true);
+        let error = browser_plan_config(input, "verified-org", true, &grant).unwrap_err();
+        assert!(error.contains("zero-data-retention"), "{error}");
     }
 }

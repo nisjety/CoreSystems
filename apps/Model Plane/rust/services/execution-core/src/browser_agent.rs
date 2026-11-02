@@ -502,6 +502,21 @@ pub trait BrowserEventSink: Send + Sync {
     /// gate; never called under ZDR. The default records nothing, so a sink that
     /// keeps no timeline need not implement it.
     async fn run_start_authorized(&self, _run_id: &str, _plan_id: &str, _decided_by: &str) {}
+    /// WS8.G: a person took the agent tab of an attached run (`USER_TOOK_OVER`);
+    /// the loop waits for the give-back. Ids only. The default records nothing.
+    async fn paused_by_user(&self, _config: &PlanConfig, _tab_id: &str) {}
+    /// WS8.G: the person gave the agent tab back; the loop goes on.
+    async fn resumed_after_takeover(&self, _config: &PlanConfig, _tab_id: &str) {}
+    /// WS8.G: an attached run shares the person's cookie jar (the session's
+    /// own), recorded once per attachment. Ids only, never a URL or a title.
+    async fn attach_shared_jar(
+        &self,
+        _config: &PlanConfig,
+        _session_run_id: &str,
+        _attach_id: &str,
+        _tab_id: &str,
+    ) {
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -585,7 +600,30 @@ pub struct PlanConfig {
     pub trace: Option<crate::quarry_agent::WireRunTrace>,
     /// Correlation id sent as `x-request-id` on every Quarry call of the run.
     pub request_id: Option<String>,
+    /// WS8.G attach mode: the agent works on its own tab of the person's
+    /// Quarry run instead of a lease of its own. `None` keeps the leased run.
+    /// Set only by the tool bridge, from a gateway-derived `attach` grant.
+    pub attach: Option<AttachConfig>,
+    /// How long an attached run waits for a person to give control of the
+    /// agent tab back after `USER_TOOK_OVER` (0 = [`DEFAULT_TAKEOVER_WAIT_S`]).
+    /// Never longer than what is left of the plan's runtime.
+    pub takeover_wait_s: u32,
+    /// How often a paused attached run checks for the give-back. `None` is
+    /// [`TAKEOVER_POLL_INTERVAL`]; tests shorten it.
+    pub takeover_poll: Option<std::time::Duration>,
 }
+
+/// WS8.G: what an attached run attaches to.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AttachConfig {
+    /// The person's Quarry run id (the attach grant's `resource_id`).
+    pub session_run_id: String,
+}
+
+/// D5: a person who took the agent tab has ten minutes to give it back.
+pub const DEFAULT_TAKEOVER_WAIT_S: u32 = 600;
+/// How often a paused attached run checks whether the tab came back.
+pub const TAKEOVER_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 #[derive(Debug, Clone)]
 pub struct AgentPlan {
@@ -750,6 +788,23 @@ pub(crate) fn validate_plan_config(config: &PlanConfig) -> Result<(), String> {
     // trimmed or dropped on the way to Quarry.
     if let Some(ask) = &config.policy {
         ask.validate()?;
+    }
+    if let Some(attach) = &config.attach {
+        // An attached run acts on the person's own browser: it names their
+        // run, never a persistent profile of its own, and an explicit domain
+        // list (canonicalisation above already refused a malformed one).
+        if !crate::quarry_agent::is_trace_token(&attach.session_run_id) {
+            return Err("browser attach session id is malformed".to_owned());
+        }
+        if config.allowed_domains.is_empty() {
+            return Err("browser attach requires explicit allowed_domains".to_owned());
+        }
+        if config.profile_id.is_some() {
+            return Err("browser attach cannot use a persistent profile".to_owned());
+        }
+        if config.zdr {
+            return Err("browser attach is refused for zero-data-retention runs".to_owned());
+        }
     }
     Ok(())
 }
@@ -1064,35 +1119,72 @@ pub async fn run_browser_agent_loop(
     };
     let zdr = plan.config.zdr;
 
-    // Acquire a leased browser session for this run. `profile_id` threads
-    // through so an AI run launched from a tab with a persistent profile
-    // inherits its cookie state (Phase 2); `None` behaves exactly as before.
-    let run = match client
-        .start_run({
-            let mut params = crate::quarry_agent::StartRunParams::new(
-                &plan.config.org_id,
-                &constraints,
-                zdr,
-                &plan.config.grant_id,
-            );
-            params.profile_id = plan.config.profile_id.clone();
-            // Tighten-only restrictions and the trace label ride the start
-            // request only when present; an empty ask sends no `policy` key.
-            params.policy = plan
-                .config
-                .policy
-                .clone()
-                .filter(|ask| !ask.is_empty());
-            params.trace = plan.config.trace.clone();
-            params.request_id = plan.config.request_id.as_deref();
-            params
-        })
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
+    // Attach mode (WS8.G): the agent gets its own tab of the person's run and
+    // never acquires a lease (`start_run` is not called). The attach bounds are
+    // the plan's, clamped to Quarry's (`attach.rs`), and always sent, so the
+    // takeover wait can be held under the runtime Quarry will enforce.
+    let launched = if let Some(attach) = plan.config.attach.clone() {
+        let max_steps = match u32::try_from(plan.config.max_steps).unwrap_or(0) {
+            0 => crate::quarry_agent::ATTACH_DEFAULT_STEPS,
+            steps => steps.min(crate::quarry_agent::ATTACH_MAX_STEPS),
+        };
+        let runtime_s = match u64::try_from(plan.config.max_runtime_s).unwrap_or(0) {
+            0 => crate::quarry_agent::ATTACH_DEFAULT_RUNTIME_S,
+            seconds => seconds.min(crate::quarry_agent::ATTACH_MAX_RUNTIME_S),
+        };
+        client
+            .attach_run(crate::quarry_agent::AttachParams {
+                org_id: &plan.config.org_id,
+                run_id: &attach.session_run_id,
+                grant_id: &plan.config.grant_id,
+                // The tab opens blank; the loop's first step navigates to the
+                // start URL as an admitted agent step (one navigation, not two).
+                start_url: None,
+                max_steps: Some(max_steps),
+                max_runtime_s: Some(runtime_s),
+                request_id: plan.config.request_id.as_deref(),
+            })
+            .await
+            .map(|data| QuarryRun::Attached {
+                session_run_id: attach.session_run_id,
+                attach: data,
+                attached_at: Instant::now(),
+                runtime_s,
+            })
+            .map_err(|e| (e, "attach"))
+    } else {
+        // Acquire a leased browser session for this run. `profile_id` threads
+        // through so an AI run launched from a tab with a persistent profile
+        // inherits its cookie state (Phase 2); `None` behaves exactly as before.
+        client
+            .start_run({
+                let mut params = crate::quarry_agent::StartRunParams::new(
+                    &plan.config.org_id,
+                    &constraints,
+                    zdr,
+                    &plan.config.grant_id,
+                );
+                params.profile_id = plan.config.profile_id.clone();
+                // Tighten-only restrictions and the trace label ride the start
+                // request only when present; an empty ask sends no `policy` key.
+                params.policy = plan
+                    .config
+                    .policy
+                    .clone()
+                    .filter(|ask| !ask.is_empty());
+                params.trace = plan.config.trace.clone();
+                params.request_id = plan.config.request_id.as_deref();
+                params
+            })
+            .await
+            .map(QuarryRun::Leased)
+            .map_err(|e| (e, "start_run"))
+    };
+    let run = match launched {
+        Ok(run) => run,
+        Err((e, call)) => {
             plan.status = PlanStatus::Failed;
-            warn!(plan_id = %plan.config.plan_id, error = %e, "browser-agent start_run failed");
+            warn!(plan_id = %plan.config.plan_id, error = %e, call, "browser-agent launch failed");
             // A 402 budget or a 429 at launch is a resource outcome, not a
             // failure of the run.
             let resource_limit = resource_limit_for_quarry_error(&e);
@@ -1102,7 +1194,7 @@ pub async fn run_browser_agent_loop(
                 summary: match resource_limit {
                     Some(limit) => limit.reason().to_owned(),
                     None => format!(
-                        "browser-agent start_run failed: {}",
+                        "browser-agent {call} failed: {}",
                         crate::quarry_agent::fixed_error_text(&e)
                     ),
                 },
@@ -1113,6 +1205,13 @@ pub async fn run_browser_agent_loop(
             };
         }
     };
+    // An attached run uses the person's own session, and so their cookie jar:
+    // recorded once, as an audit event, in place of the persistent-profile
+    // gate (an attached run never names a profile).
+    if let (Some(sink), QuarryRun::Attached { session_run_id, attach, .. }) = (sink, &run) {
+        sink.attach_shared_jar(&plan.config, session_run_id, &attach.attach_id, &attach.tab_id)
+            .await;
+    }
 
     let mut pending: Option<BrowserObservation> = None;
     let mut abort_reason = None;
@@ -1219,6 +1318,85 @@ pub async fn run_browser_agent_loop(
                         }
                         pending = Some(obs);
                     }
+                    // WS8.G: a person took the agent tab. A state, not a fault:
+                    // the run pauses until the tab comes back (checked once a
+                    // second), and fails only when it does not within the wait.
+                    // The refused action did not run and is not replayed; the
+                    // planner goes on from the page as the person left it.
+                    Err(e)
+                        if matches!(run, QuarryRun::Attached { .. })
+                            && crate::quarry_agent::is_user_took_over(&e) =>
+                    {
+                        let tab_id = run.attached_tab_id().unwrap_or_default().to_owned();
+                        info!(plan_id = %plan.config.plan_id, step = plan.current_step, "a person took the agent tab; waiting for it to be given back");
+                        if let Some(sink) = sink {
+                            sink.paused_by_user(&plan.config, &tab_id).await;
+                        }
+                        let wait = takeover_wait(
+                            &plan.config,
+                            plan.started_at.elapsed(),
+                            run.attach_time_left(),
+                        );
+                        let poll = plan.config.takeover_poll.unwrap_or(TAKEOVER_POLL_INTERVAL);
+                        let outcome = {
+                            let config = &plan.config;
+                            let run = &run;
+                            let constraints = &constraints;
+                            await_give_back(
+                                poll,
+                                wait,
+                                || {
+                                    dispatch_step(
+                                        client,
+                                        run,
+                                        config,
+                                        constraints,
+                                        crate::quarry_agent::AgentAction::GetContent,
+                                        false,
+                                    )
+                                },
+                                || run_cancelled(state, &config.run_id),
+                            )
+                            .await
+                        };
+                        match outcome {
+                            GiveBack::Resumed(wire_obs) => {
+                                info!(plan_id = %plan.config.plan_id, "the agent tab was given back; resuming");
+                                if let Some(sink) = sink {
+                                    sink.resumed_after_takeover(&plan.config, &tab_id).await;
+                                }
+                                let obs = crate::quarry_agent::observation_from_wire(
+                                    &wire_obs,
+                                    &action.action_id,
+                                    &plan.config.grant_id,
+                                );
+                                if let Some(sink) = sink {
+                                    sink.observation_received(&plan.config, &obs).await;
+                                }
+                                pending = Some(obs);
+                            }
+                            GiveBack::Cancelled => {
+                                plan.status = PlanStatus::Aborted;
+                                abort_reason = Some(BrowserAbortReason::Cancelled);
+                                break "cancelled by user".to_owned();
+                            }
+                            GiveBack::TimedOut => {
+                                plan.status = PlanStatus::Failed;
+                                break took_over_timeout_reason(wait);
+                            }
+                            GiveBack::Failed(probe_error) => {
+                                plan.status = PlanStatus::Failed;
+                                if let Some(limit) = resource_limit_for_quarry_error(&probe_error) {
+                                    resource_limit = Some(limit);
+                                    break limit.reason().to_owned();
+                                }
+                                break format!(
+                                    "browser-agent step failed: {}",
+                                    crate::quarry_agent::fixed_error_text(&probe_error)
+                                );
+                            }
+                        }
+                    }
                     Err(e) => {
                         plan.status = PlanStatus::Failed;
                         // The classifier decides: a 402 budget or a 429 ends the
@@ -1312,16 +1490,48 @@ pub async fn run_browser_agent_loop(
         }
     };
 
-    // Always release the leased session.
-    if let Err(e) = client
-        .close_run_with(
-            &run.run_id,
-            &plan.config.org_id,
-            plan.config.request_id.as_deref(),
-        )
-        .await
-    {
-        warn!(plan_id = %plan.config.plan_id, error = %e, "browser-agent close_run failed");
+    // Always release the leased session, or end the attachment: every exit
+    // of the loop comes through here.
+    match &run {
+        QuarryRun::Leased(lease) => {
+            if let Err(e) = client
+                .close_run_with(
+                    &lease.run_id,
+                    &plan.config.org_id,
+                    plan.config.request_id.as_deref(),
+                )
+                .await
+            {
+                warn!(plan_id = %plan.config.plan_id, error = %e, "browser-agent close_run failed");
+            }
+        }
+        QuarryRun::Attached {
+            session_run_id,
+            attach,
+            ..
+        } => {
+            // WS8.J hook point: `mark_tab` (`deliverable` on Completed, `none`
+            // otherwise) goes here, before the release; a mark failure must
+            // never block the release.
+            let disposition = attach_disposition(&plan.status);
+            if let Err(e) = client
+                .release_attach(
+                    &plan.config.org_id,
+                    session_run_id,
+                    &attach.attach_id,
+                    disposition,
+                    plan.config.request_id.as_deref(),
+                )
+                .await
+            {
+                warn!(
+                    plan_id = %plan.config.plan_id,
+                    error = %e,
+                    disposition = disposition.as_str(),
+                    "browser-agent release_attach failed"
+                );
+            }
+        }
     }
 
     info!(plan_id = %plan.config.plan_id, status = plan.status.as_str(), "browser-agent loop finished");
@@ -1338,13 +1548,163 @@ pub async fn run_browser_agent_loop(
     }
 }
 
+/// The Quarry side of one loop: a lease of our own, or (WS8.G) an attachment
+/// to the person's run.
+enum QuarryRun {
+    Leased(crate::quarry_agent::StartRunResponse),
+    Attached {
+        /// The person's Quarry run; every step and the release go to it.
+        session_run_id: String,
+        attach: crate::quarry_agent::AttachData,
+        attached_at: Instant,
+        /// The runtime bound sent with the attach; Quarry counts it from the
+        /// attach, pauses included.
+        runtime_s: u64,
+    },
+}
+
+impl QuarryRun {
+    fn attached_tab_id(&self) -> Option<&str> {
+        match self {
+            Self::Attached { attach, .. } => Some(attach.tab_id.as_str()),
+            Self::Leased(_) => None,
+        }
+    }
+
+    /// What is left of the attachment's runtime bound, `None` for a lease.
+    fn attach_time_left(&self) -> Option<std::time::Duration> {
+        match self {
+            Self::Attached {
+                attached_at,
+                runtime_s,
+                ..
+            } => Some(
+                std::time::Duration::from_secs(*runtime_s).saturating_sub(attached_at.elapsed()),
+            ),
+            Self::Leased(_) => None,
+        }
+    }
+}
+
+/// D6b: an attachment is released when the run completed and aborted on every
+/// other exit (failure, cancel, a limit, an approval stop, a plan error).
+#[must_use]
+pub(crate) fn attach_disposition(status: &PlanStatus) -> crate::quarry_agent::AttachDisposition {
+    if *status == PlanStatus::Completed {
+        crate::quarry_agent::AttachDisposition::Release
+    } else {
+        crate::quarry_agent::AttachDisposition::Abort
+    }
+}
+
+/// How long a paused attached run waits for the tab to come back (D5): the
+/// configured wait (default 600 s), never longer than what is left of the
+/// plan's runtime or of the attachment's own runtime bound.
+#[must_use]
+pub(crate) fn takeover_wait(
+    config: &PlanConfig,
+    run_elapsed: std::time::Duration,
+    attach_left: Option<std::time::Duration>,
+) -> std::time::Duration {
+    let configured = match config.takeover_wait_s {
+        0 => DEFAULT_TAKEOVER_WAIT_S,
+        seconds => seconds,
+    };
+    let mut wait = std::time::Duration::from_secs(u64::from(configured));
+    if let Ok(runtime) = u64::try_from(config.max_runtime_s) {
+        if runtime > 0 {
+            wait = wait.min(std::time::Duration::from_secs(runtime).saturating_sub(run_elapsed));
+        }
+    }
+    if let Some(left) = attach_left {
+        wait = wait.min(left);
+    }
+    wait
+}
+
+/// The run summary when the person kept the tab past the wait. Fixed text.
+#[must_use]
+pub(crate) fn took_over_timeout_reason(wait: std::time::Duration) -> String {
+    format!(
+        "the user did not give control back within {} s",
+        wait.as_secs()
+    )
+}
+
+/// How a takeover pause ended.
+pub(crate) enum GiveBack {
+    /// The tab came back; the probe's observation is the page as left.
+    Resumed(crate::quarry_agent::WireObservation),
+    /// The wait ran out with the tab still held.
+    TimedOut,
+    /// The run was cancelled while it waited.
+    Cancelled,
+    /// The probe failed for another reason (the tab or attachment is gone).
+    Failed(crate::quarry_agent::AgentClientError),
+}
+
+/// Wait out a takeover: every `poll`, a passive probe step on the agent tab.
+/// Quarry refuses any agent step on a tab a person holds with 409
+/// `USER_TOOK_OVER` before admission (nothing runs, nothing is charged), so a
+/// refused probe means "still held" and an answered one means "given back".
+/// Quarry's tab list carries no holder, so the probe is the only signal. The
+/// cancel gate is checked before and after each sleep.
+pub(crate) async fn await_give_back<P, Fut, C>(
+    poll: std::time::Duration,
+    wait: std::time::Duration,
+    mut probe: P,
+    mut cancelled: C,
+) -> GiveBack
+where
+    P: FnMut() -> Fut,
+    Fut: std::future::Future<
+        Output = Result<
+            crate::quarry_agent::WireObservation,
+            crate::quarry_agent::AgentClientError,
+        >,
+    >,
+    C: FnMut() -> bool,
+{
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        if cancelled() {
+            return GiveBack::Cancelled;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return GiveBack::TimedOut;
+        }
+        tokio::time::sleep(poll.min(deadline - now)).await;
+        if cancelled() {
+            return GiveBack::Cancelled;
+        }
+        match probe().await {
+            Ok(observation) => return GiveBack::Resumed(observation),
+            Err(error) if crate::quarry_agent::is_user_took_over(&error) => {}
+            Err(error) => return GiveBack::Failed(error),
+        }
+    }
+}
+
+/// Whether the run was cancelled (the same `StateStore` gate the pause check
+/// reads). False without a store or a run id.
+fn run_cancelled(state: Option<&crate::state::StateStore>, run_id: &str) -> bool {
+    state.is_some_and(|state| {
+        !run_id.is_empty()
+            && matches!(
+                state.get_or_create(run_id).status,
+                crate::state::RunStatus::Cancelled
+            )
+    })
+}
+
 /// One Quarry step. With `recover` (an LLM planner is selected) a 502
 /// `DRIVER_FAILED` is replayed once, and a 429 that asks for at most 10 s is
 /// waited out and replayed once; everything else, including a 504, is returned
 /// as it came (a timed-out action is never replayed).
 async fn dispatch_step(
     client: &crate::quarry_agent::QuarryAgentClient,
-    run: &crate::quarry_agent::StartRunResponse,
+    run: &QuarryRun,
     config: &PlanConfig,
     constraints: &crate::quarry_agent::AgentConstraints,
     action: crate::quarry_agent::AgentAction,
@@ -1353,17 +1713,35 @@ async fn dispatch_step(
     let mut driver_retried = false;
     let mut waited = false;
     loop {
-        let mut params = crate::quarry_agent::StepParams::new(
-            &run.run_id,
-            &run.lease_id,
-            &config.org_id,
-            action.clone(),
-            constraints,
-            config.zdr,
-            &config.grant_id,
-        );
-        params.request_id = config.request_id.as_deref();
-        let result = client.step(params).await;
+        let result = match run {
+            QuarryRun::Leased(lease) => {
+                let mut params = crate::quarry_agent::StepParams::new(
+                    &lease.run_id,
+                    &lease.lease_id,
+                    &config.org_id,
+                    action.clone(),
+                    constraints,
+                    config.zdr,
+                    &config.grant_id,
+                );
+                params.request_id = config.request_id.as_deref();
+                client.step(params).await
+            }
+            // A delegate step on the person's run: the attach grant, always
+            // `initiated_by: "agent"`, the Model run id as the advisory label.
+            QuarryRun::Attached { session_run_id, .. } => {
+                client
+                    .step_attached(crate::quarry_agent::AttachedStepParams {
+                        org_id: &config.org_id,
+                        run_id: session_run_id,
+                        grant_id: &config.grant_id,
+                        action: action.clone(),
+                        ai_run_id: Some(config.run_id.as_str()).filter(|id| !id.is_empty()),
+                        request_id: config.request_id.as_deref(),
+                    })
+                    .await
+            }
+        };
         let Err(error) = &result else {
             return result;
         };
@@ -2841,5 +3219,209 @@ mod tests {
         .await;
         assert_eq!(failed.resource_limit, None);
         assert!(failed.summary.starts_with("browser-agent step failed"), "{}", failed.summary);
+    }
+
+    // -----------------------------------------------------------------------
+    // WS8.G attach mode: the takeover wait, the disposition, the plan checks.
+    // Virtual time (`start_paused`): the 1 s poll and the 600 s wait cost
+    // nothing real.
+    // -----------------------------------------------------------------------
+
+    fn took_over() -> crate::quarry_agent::AgentClientError {
+        let body = serde_json::json!({
+            "data": null, "meta": {},
+            "error": {"code": "USER_TOOK_OVER",
+                      "message": "the person using the browser has taken control of this tab; this action was not run",
+                      "retryable": false,
+                      "details": {"scope": "tab", "tab_id": "tab_9", "tab_epoch": 2, "control_epoch": 5}},
+        })
+        .to_string();
+        crate::quarry_agent::AgentClientError::Typed(
+            crate::quarry_agent::parse_typed_error(409, &body).expect("envelope"),
+        )
+    }
+
+    fn page(url: &str) -> crate::quarry_agent::WireObservation {
+        crate::quarry_agent::WireObservation {
+            url: url.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn user_took_over_pauses_then_resumes_after_give_back() {
+        let probes = std::sync::atomic::AtomicU32::new(0);
+        let started = tokio::time::Instant::now();
+        let outcome = await_give_back(
+            TAKEOVER_POLL_INTERVAL,
+            std::time::Duration::from_secs(u64::from(DEFAULT_TAKEOVER_WAIT_S)),
+            || {
+                let n = probes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move {
+                    // Held for three checks, given back on the fourth.
+                    if n < 3 {
+                        Err(took_over())
+                    } else {
+                        Ok(page("https://example.com/after"))
+                    }
+                }
+            },
+            || false,
+        )
+        .await;
+        let GiveBack::Resumed(observation) = outcome else {
+            panic!("the run resumes once the tab is given back");
+        };
+        assert_eq!(observation.url, "https://example.com/after");
+        assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 4);
+        assert_eq!(started.elapsed(), std::time::Duration::from_secs(4), "one check a second");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn user_took_over_beyond_wait_fails_with_reason() {
+        let probes = std::sync::atomic::AtomicU32::new(0);
+        let started = tokio::time::Instant::now();
+        let config = PlanConfig {
+            max_runtime_s: 3600,
+            ..test_config()
+        };
+        let wait = takeover_wait(&config, std::time::Duration::ZERO, None);
+        assert_eq!(wait, std::time::Duration::from_secs(600), "D5 default");
+        let outcome = await_give_back(
+            TAKEOVER_POLL_INTERVAL,
+            wait,
+            || {
+                probes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { Err(took_over()) }
+            },
+            || false,
+        )
+        .await;
+        assert!(matches!(outcome, GiveBack::TimedOut));
+        assert_eq!(started.elapsed(), std::time::Duration::from_secs(600));
+        assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 600);
+        assert_eq!(
+            took_over_timeout_reason(wait),
+            "the user did not give control back within 600 s"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn takeover_wait_ends_on_cancel_and_on_another_refusal() {
+        let checks = std::sync::atomic::AtomicU32::new(0);
+        let outcome = await_give_back(
+            TAKEOVER_POLL_INTERVAL,
+            std::time::Duration::from_secs(600),
+            || async { Err(took_over()) },
+            || checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 5,
+        )
+        .await;
+        assert!(matches!(outcome, GiveBack::Cancelled));
+
+        let closed = crate::quarry_agent::AgentClientError::Typed(
+            crate::quarry_agent::parse_typed_error(
+                404,
+                r#"{"error":{"code":"NOT_FOUND","message":"pinned_tab_closed","retryable":false}}"#,
+            )
+            .unwrap(),
+        );
+        let mut closed = Some(closed);
+        let outcome = await_give_back(
+            TAKEOVER_POLL_INTERVAL,
+            std::time::Duration::from_secs(600),
+            || {
+                let next = closed.take();
+                async move { Err(next.unwrap_or_else(took_over)) }
+            },
+            || false,
+        )
+        .await;
+        let GiveBack::Failed(error) = outcome else {
+            panic!("a closed tab ends the wait");
+        };
+        assert_eq!(
+            crate::quarry_agent::fixed_error_text(&error),
+            "404 NOT_FOUND (pinned_tab_closed)"
+        );
+    }
+
+    #[test]
+    fn takeover_wait_is_capped_by_the_plan_and_the_attachment_runtime() {
+        let secs = std::time::Duration::from_secs;
+        let config = PlanConfig {
+            max_runtime_s: 300,
+            ..test_config()
+        };
+        // Never past the plan's runtime: 300 s total, 100 s spent.
+        assert_eq!(takeover_wait(&config, secs(100), None), secs(200));
+        // Nor past the attachment's own bound.
+        assert_eq!(takeover_wait(&config, secs(0), Some(secs(90))), secs(90));
+        // A configured wait below both wins.
+        let short = PlanConfig {
+            takeover_wait_s: 30,
+            ..config.clone()
+        };
+        assert_eq!(takeover_wait(&short, secs(0), Some(secs(90))), secs(30));
+        // Runtime spent: no wait at all.
+        assert_eq!(takeover_wait(&config, secs(400), None), secs(0));
+        // An unbounded plan keeps the D5 default.
+        let unbounded = PlanConfig {
+            max_runtime_s: 0,
+            ..test_config()
+        };
+        assert_eq!(takeover_wait(&unbounded, secs(10_000), None), secs(600));
+    }
+
+    #[test]
+    fn attach_is_released_only_on_completed_and_aborted_otherwise() {
+        use crate::quarry_agent::AttachDisposition;
+        assert_eq!(attach_disposition(&PlanStatus::Completed), AttachDisposition::Release);
+        for status in [
+            PlanStatus::Failed,
+            PlanStatus::Aborted,
+            PlanStatus::WaitingApproval,
+            PlanStatus::Executing,
+            PlanStatus::Planning,
+        ] {
+            assert_eq!(attach_disposition(&status), AttachDisposition::Abort, "{status:?}");
+        }
+    }
+
+    #[test]
+    fn attach_plans_need_a_session_domains_and_no_profile() {
+        let attach = Some(AttachConfig {
+            session_run_id: "run_user_1".to_owned(),
+        });
+        let ok = PlanConfig {
+            attach: attach.clone(),
+            ..test_config()
+        };
+        assert_eq!(validate_plan_config(&ok), Ok(()));
+
+        let malformed = PlanConfig {
+            attach: Some(AttachConfig {
+                session_run_id: "run/../x".to_owned(),
+            }),
+            ..test_config()
+        };
+        assert!(validate_plan_config(&malformed).is_err());
+        let no_domains = PlanConfig {
+            attach: attach.clone(),
+            allowed_domains: Vec::new(),
+            ..test_config()
+        };
+        assert!(validate_plan_config(&no_domains).is_err());
+        let profile = PlanConfig {
+            attach: attach.clone(),
+            profile_id: Some("prof".to_owned()),
+            ..test_config()
+        };
+        assert!(validate_plan_config(&profile).is_err());
+        let zdr = PlanConfig {
+            attach,
+            zdr: true,
+            ..test_config()
+        };
+        assert!(validate_plan_config(&zdr).is_err());
     }
 }
