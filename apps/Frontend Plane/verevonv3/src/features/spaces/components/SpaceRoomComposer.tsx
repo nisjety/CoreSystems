@@ -40,6 +40,15 @@ import {
   visibleSpaceComposerModes,
 } from '../lib/space-composer-registry'
 import { createSpaceSendPipeline } from '../lib/space-send-pipeline'
+import {
+  currentSearchOpener,
+  matchPlatformCommands,
+  openRoomTabByHash,
+  openShortcutSheetViaHotkeyLayer,
+  parseSlashCommandText,
+  type PlatformCommand,
+  type SlashCommandContext,
+} from '../lib/space-slash-commands'
 import { spaceRetrievalDeclineCopy } from '../lib/space-retrieval-decline'
 import { createSpacePostSender } from '../lib/space-post-sender'
 import { createSpaceSendJournal, type SpaceSendJournal } from '../lib/space-send-journal'
@@ -124,6 +133,7 @@ type MentionCandidate = {
 type PickerItem =
   | { readonly kind: 'mention'; readonly candidate: MentionCandidate }
   | { readonly kind: 'skill'; readonly skill: Skill }
+  | { readonly kind: 'command'; readonly command: PlatformCommand }
 
 export interface SpaceRoomComposerProps {
   readonly spaceRef: string
@@ -224,6 +234,8 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   const [skillsFailed, setSkillsFailed] = createSignal(false)
   const [pickedSkills, setPickedSkills] = createSignal<readonly Skill[]>([])
   const [activeIndex, setActiveIndex] = createSignal(0)
+  // Platform slash commands (WS13-S7): a local, ephemeral result line. Never a timeline entry.
+  const [commandStatus, setCommandStatus] = createSignal<string | undefined>(undefined)
   let skillsLoading = false
   const pickerId = `room-picker-${Math.random().toString(36).slice(2, 8)}`
   // The member's own pick between Send and Ask; `effectiveMode` below is what the box does.
@@ -577,7 +589,12 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
       return visibleCandidates().map((candidate) => ({ kind: 'mention' as const, candidate }))
     }
     if (skillQuery() !== undefined) {
-      return visibleSkills().map((skill) => ({ kind: 'skill' as const, skill }))
+      // Platform commands list above skills; flag off, there are none and this is today's list.
+      const commands = matchPlatformCommands(skillQuery() ?? '', slashContext()).map((command) => ({
+        kind: 'command' as const,
+        command,
+      }))
+      return [...commands, ...visibleSkills().map((skill) => ({ kind: 'skill' as const, skill }))]
     }
     return []
   })
@@ -617,6 +634,7 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
     // opening a picker with `@` or `/`, is not something to announce.
     if (value.trim()) props.onTyping?.()
     setText(value)
+    setCommandStatus(undefined)
     const agentLabel = candidates().find((c) => c.subjectId === mentionedAgentRef())?.label
     if (agentLabel && !value.includes(`@${agentLabel}`)) setMentionedAgentRef(undefined)
     detectTriggers(value, event.currentTarget.selectionStart ?? value.length)
@@ -658,9 +676,48 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
     setPickedSkills((current) => current.filter((skill) => skill.id !== id))
   }
 
+  // What a platform command may touch. Presentation and local navigation only; the owning plane
+  // still decides anything a command asks of it (`/read` runs the shared mark-read action).
+  function slashContext(): SlashCommandContext {
+    return {
+      spaceRef: props.spaceRef,
+      openTab: openRoomTabByHash,
+      openSearch: currentSearchOpener(),
+      openShortcutSheet: openShortcutSheetViaHotkeyLayer,
+      startNewThread: () => {
+        if (!props.replyTargetFixed) props.onClearReplyTarget?.()
+        openRoomTabByHash('chat')
+        textareaRef?.focus()
+      },
+    }
+  }
+
+  // Runs a command locally: the text it came from leaves the box, nothing is sent, the model is
+  // never called, and the outcome is one transient status line.
+  async function runPlatformCommand(command: PlatformCommand, arg: string): Promise<void> {
+    setText('')
+    discardDraft()
+    closePicker()
+    setCommandStatus(undefined)
+    let status: Awaited<ReturnType<PlatformCommand['run']>>
+    try {
+      status = await command.run(slashContext(), arg)
+    } catch {
+      status = {
+        no: 'Kommandoen kunne ikke kjøres akkurat nå.',
+        en: 'The command could not run right now.',
+      }
+    }
+    setCommandStatus(status ? i18n.tr(status.no, status.en) : undefined)
+    textareaRef?.focus()
+  }
+
   function pickItem(item: PickerItem): void {
     if (item.kind === 'mention') selectCandidate(item.candidate)
-    else selectSkill(item.skill)
+    else if (item.kind === 'command') {
+      // A command picked from the list runs now; `/search` opens search with an empty query.
+      void runPlatformCommand(item.command, '')
+    } else selectSkill(item.skill)
   }
 
   // Apply one markdown format to the textarea's selection and put the caret where the transform says.
@@ -724,6 +781,13 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   async function submitMessage(): Promise<void> {
     const content = text().trim()
     if (!content || nothingOffered()) return
+    // A message that is exactly a platform command runs locally instead of being sent. Anything
+    // else that starts with `/` is an ordinary message, as before.
+    const slash = parseSlashCommandText(content, slashContext())
+    if (slash) {
+      await runPlatformCommand(slash.command, slash.arg)
+      return
+    }
     if (effectiveMode() === 'post') {
       if (submitting() || postBusy() || overLimit()) return
       if (files().length > 0) {
@@ -1137,6 +1201,9 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
                     onClick={() => pickItem(item)}
                   >
                     <Show
+                      when={item.kind === 'command' ? item.command : undefined}
+                      fallback={
+                    <Show
                       when={item.kind === 'skill' ? item.skill : undefined}
                       fallback={
                         <>
@@ -1158,6 +1225,20 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
                         </>
                       )}
                     </Show>
+                      }
+                    >
+                      {(command) => (
+                        <>
+                          <span class="verevon-space-room-mentions__label">/{command().names[0]}</span>
+                          <span class="verevon-space-room-skill-scope" data-kind="command">
+                            {i18n.tr('Kommando', 'Command')}
+                          </span>
+                          <span class="verevon-space-room-mentions__hint">
+                            {i18n.tr(command().labelNo, command().labelEn)}
+                          </span>
+                        </>
+                      )}
+                    </Show>
                   </button>
                 </li>
               )}
@@ -1168,6 +1249,13 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
               </li>
             </Show>
           </ul>
+        </Show>
+        <Show when={commandStatus()}>
+          {(line) => (
+            <p class="verevon-space-room-composer__hint" role="status" aria-live="polite">
+              {line()}
+            </p>
+          )}
         </Show>
         <Show when={attachAvailable()}>
           <div class="verevon-space-attachments">
