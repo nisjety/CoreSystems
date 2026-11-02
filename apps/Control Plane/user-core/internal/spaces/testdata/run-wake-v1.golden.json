@@ -1,0 +1,34 @@
+{
+  "comment": "Shared Control/Session Core vector for the model.run.wake payload digest (WS08-S1). The Rust copy goes to apps/Model Plane/rust/services/session-core/tests/fixtures/run-wake-v1.golden.json in WS08-S2. Field order of the digest: org_id, user_id, thread_id, space_id, space_decision_ref, recipient_audience_ref, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, trigger_message_id, content_digest, agent_subject_id, turn_origin, action_schema_hash, idempotency_key (each name NUL u64-BE-length value), then authority_revision and recipient_audience_revision (name NUL u64-BE). Header model.run.wake NUL v1 NUL. Change the digest only on an intended wire change, on both sides.",
+  "input": {
+    "org_id": "org-1",
+    "user_id": "user-2",
+    "thread_id": "thread-1",
+    "space_id": "space-room-1",
+    "space_decision_ref": "decision-1",
+    "recipient_audience_ref": "audience:space-room-1:4",
+    "recipient_audience_hash": "sha256:audience-hash",
+    "privacy_policy_ref": "privacy:org-1:5",
+    "resource_authorization_ref": "control:space-room-1:run-wake:7",
+    "trigger_message_id": "message-9",
+    "content": "hello room @agent-7",
+    "agent_subject_id": "agent-7",
+    "turn_origin": "direct",
+    "idempotency_key": "wake-1",
+    "authority_revision": 7,
+    "recipient_audience_revision": 4
+  },
+  "expected": {
+    "action": "model.run.wake",
+    "schema": "sha256:run-wake-v1",
+    "audience": "model-plane",
+    "permissions": ["run:wake"],
+    "content_digest": "sha256:a8039f58bdf9b3f1ab4226c7d6f8f1190623104fb39f57bf4d65b4dc46bc46bf",
+    "digest": "sha256:a34c42b7e650e2b16aa96260e448c7794e265ae848f3d455d823742a8e790e5f"
+  },
+  "turn_origin_mapping": [
+    {"turn_origin": "direct", "run_origin": "chat", "issued": true},
+    {"turn_origin": "ambient", "run_origin": "trigger", "issued": false},
+    {"turn_origin": "automation", "run_origin": "schedule", "issued": false}
+  ]
+}

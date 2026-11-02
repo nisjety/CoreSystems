@@ -97,6 +97,7 @@ var decisionAuditRoutes = map[string]DecisionAuditRoute{
 	"/personal-thread-decision":         {Name: "thread_create"},
 	"/thread-decision":                  {Name: "thread_create"},
 	"/thread-append-decision":           {Name: "thread_append"},
+	"/run-wake-decision":                {Name: "run_wake"},
 	"/thread-read-decision":             {Name: "thread_read"},
 	"/personal-retrieval-decision":      {Name: "retrieval"},
 	"/retrieval-decision":               {Name: "retrieval"},

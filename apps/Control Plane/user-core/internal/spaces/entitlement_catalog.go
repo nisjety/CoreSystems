@@ -47,7 +47,7 @@ type EntitlementSpec struct {
 var entitlementCatalog = []EntitlementSpec{
 	{
 		Key: "thread_create", Column: "thread_create_entitled",
-		Decisions: []string{"model.thread.create", "model.thread.append"}, ZDR: ZDRCompatible,
+		Decisions: []string{"model.thread.create", "model.thread.append", "model.run.wake"}, ZDR: ZDRCompatible,
 		Get: func(p EffectPolicy) bool { return p.ThreadCreateEntitled },
 		Set: func(p *EffectPolicy, v bool) { p.ThreadCreateEntitled = v },
 	},
