@@ -220,7 +220,13 @@ export function SpaceTurnList(props: SpaceTurnListProps) {
         const grouped = () => continuesTurnGroup(visibleTurns()[index() - 1], turn, props.agentName)
         const time = () => formatTurnTime(turn.createdAt)
         return (
-          <div class="verevon-room-turn" data-role={turn.role} data-grouped={grouped() ? 'true' : undefined}>
+          <div
+            class="verevon-room-turn"
+            data-role={turn.role}
+            data-grouped={grouped() ? 'true' : undefined}
+            data-message-id={turn.messageId}
+            tabindex={turn.messageId ? -1 : undefined}
+          >
             <Show
               when={!grouped()}
               fallback={

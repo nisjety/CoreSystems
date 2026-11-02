@@ -5,6 +5,7 @@
 export * from './core'
 export * from './agent-policy'
 export * from './directory'
+export * from './entries'
 export * from './human-posts'
 export * from './membership-writer'
 export * from './pins'

@@ -444,6 +444,8 @@ function SpaceRoomPost(props: {
   return (
     <li
       class="verevon-room-post"
+      id={`post-${props.thread.thread_id}`}
+      data-thread-id={props.thread.thread_id}
       data-failed={isFailed() || undefined}
       data-pinned={props.thread.pinned === true || props.roomPin?.() ? 'true' : undefined}
       data-unread={props.unread?.() ? 'true' : undefined}

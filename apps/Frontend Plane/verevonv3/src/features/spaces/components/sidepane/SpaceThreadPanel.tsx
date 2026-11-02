@@ -1,6 +1,6 @@
 import { MessageCircle } from '@/shared/icons'
 import type { JSX } from '@solidjs/web'
-import { Match, Show, Switch } from 'solid-js'
+import { Match, Show, Switch, createEffect, createMemo, onCleanup } from 'solid-js'
 
 import { threadStatus, formatWhen } from '@/features/spaces/lib/space-thread-presentation'
 import { ApiError } from '@/shared/api/http'
@@ -10,7 +10,7 @@ import type { SpaceAgent, SpaceRosterMember, SpaceThread } from '@/shared/api/sp
 import { useI18n } from '@/shared/i18n'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import { SpaceRestrictedNotice } from '../SpaceRestrictedNotice'
-import { SpaceTurnList, normalizeTranscriptTurns } from './SpaceTurnList'
+import { SpaceTurnList, normalizeTranscriptTurns, resolveAuthorName } from './SpaceTurnList'
 import type { TranscriptTurn } from './SpaceTurnList'
 
 /**
@@ -52,7 +52,15 @@ export interface SpaceThreadPanelProps {
    * is not available to this member, because there is nothing to reply to.
    */
   readonly footer?: JSX.Element
+  /**
+   * A message to bring into view (`?thread_id=&m=`, WS13-S4a). Only a request: when the transcript the
+   * viewer may read does not hold it, the panel says so neutrally and never echoes the id.
+   */
+  readonly messageId?: () => string | null | undefined
 }
+
+// How long a reached message keeps its outline.
+const HIGHLIGHT_MS = 3000
 
 export function SpaceThreadPanel(props: SpaceThreadPanelProps) {
   const i18n = useI18n()
@@ -92,8 +100,58 @@ export function SpaceThreadPanel(props: SpaceThreadPanelProps) {
   }
   const when = () => props.thread()?.updated_at ?? props.thread()?.latest_run_updated_at
 
+  // `?m=`: which turn of the readable transcript it names. `missing` is decided from the transcript the
+  // viewer was given, so a hidden, tombstoned or invented id all read the same.
+  let root: HTMLDivElement | undefined
+  const wantedId = () => props.messageId?.() ?? null
+  const wantedTurn = createMemo(() => {
+    const id = wantedId()
+    return id ? okTurns(current()).find((turn) => turn.messageId === id) : undefined
+  })
+  const entryMissing = () => wantedId() !== null && current()?.state === 'ok' && wantedTurn() === undefined
+  const entryAnnouncement = () => {
+    const turn = wantedTurn()
+    if (turn) {
+      const author = turn.role === 'assistant'
+        ? turn.agentName ?? props.agentName
+        : resolveAuthorName(turn.authorSubjectId, props.roster(), props.viewerSubjectId?.(), i18n.tr)
+      return i18n.tr(`Viser melding fra ${author}`, `Showing message from ${author}`)
+    }
+    return entryMissing() ? i18n.tr('Denne meldingen er ikke tilgjengelig for deg.', 'This message is not available to you.') : ''
+  }
+  // Scroll to, outline and focus the turn once it is rendered; the outline goes after three seconds
+  // (and never animates: it is a static 2 px outline). Runs once per (thread, message) reached.
+  createEffect(
+    () => ({ id: wantedId(), found: wantedTurn() !== undefined, thread: props.threadId }),
+    ({ id, found }) => {
+      if (!id || !found) return undefined
+      let timer: ReturnType<typeof setTimeout> | undefined
+      let target: Element | null = null
+      const frame = requestAnimationFrame(() => {
+        target = root?.querySelector(`[data-message-id="${id}"]`) ?? null
+        if (!(target instanceof HTMLElement)) return
+        const reduce = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
+        target.scrollIntoView({ block: 'center', behavior: reduce ? 'auto' : 'smooth' })
+        target.setAttribute('data-highlight', 'true')
+        target.focus({ preventScroll: true })
+        timer = setTimeout(() => target?.removeAttribute('data-highlight'), HIGHLIGHT_MS)
+      })
+      return () => {
+        cancelAnimationFrame(frame)
+        if (timer) clearTimeout(timer)
+        target?.removeAttribute('data-highlight')
+      }
+    },
+  )
+  onCleanup(() => { root = undefined })
+
   return (
-    <div class="verevon-space-thread-panel" aria-busy={current() === undefined ? 'true' : 'false'}>
+    <div ref={(element) => { root = element }} class="verevon-space-thread-panel" aria-busy={current() === undefined ? 'true' : 'false'}>
+      <Show when={wantedId()}>
+        <p class={entryMissing() ? 'verevon-space-inline-status' : 'sr-only'} role="status" aria-live="polite" data-entry-status={entryMissing() ? 'missing' : 'found'}>
+          {entryAnnouncement()}
+        </p>
+      </Show>
       <Show when={props.thread()}>
         {(thread) => (
           <p class="verevon-space-thread-panel__meta">

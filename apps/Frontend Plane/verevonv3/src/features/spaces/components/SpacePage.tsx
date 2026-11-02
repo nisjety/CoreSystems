@@ -75,6 +75,7 @@ import {
 import { createRoomLiveArtifacts, type RoomLiveArtifacts } from '../lib/room-live-artifacts'
 import { SpaceArtifactsTab } from './SpaceArtifactsTab'
 import { resolveOpenSpacePane } from '../lib/space-pane-registry'
+import { readSpaceMessageParam, spaceEntryLinksEnabled } from '../lib/space-entity-link'
 import { publishSpaceThreads, publishSpaceUnread, retractSpaceThreads } from '../lib/space-live-work'
 import { unreadThreadIds } from '../lib/space-unread'
 import { createSpaceSendJournal, type SpaceSendJournal } from '../lib/space-send-journal'
@@ -154,8 +155,14 @@ export default function SpacePage() {
   // The sender's own live artifacts, in memory: the timeline's chips and the
   // Artifacts tab read the same store until a read carries them (WS07-S11/S12).
   const liveArtifacts = createRoomLiveArtifacts()
-  const openThread = (threadId: string) => setSearchParams({ thread_id: threadId })
-  const closeThread = () => setSearchParams({ thread_id: undefined }, { replace: true })
+  // `?m=` (WS13-S4a): a message to reach inside the open thread. Read only while a thread is open and the
+  // entry-links flag is on; the panel decides whether the viewer's transcript holds it.
+  const selectedMessageId = createMemo(() =>
+    selectedThreadId() && spaceEntryLinksEnabled() ? readSpaceMessageParam(searchParams.m) : null,
+  )
+  // A different thread never inherits the previous thread's message.
+  const openThread = (threadId: string) => setSearchParams({ thread_id: threadId, m: undefined })
+  const closeThread = () => setSearchParams({ thread_id: undefined, m: undefined }, { replace: true })
   // The context read also carries the room's rollout flags (`features`), which drive the UI switches that
   // used to be build-time.
   const [context, { refetch: refetchContext }] = createResource(spaceRef, getSpaceContext)
@@ -267,6 +274,19 @@ export default function SpacePage() {
     },
   )
 
+  // A `?thread_id=` link brings the post into view in the timeline once the listing has loaded; the pane
+  // opens regardless. Once per thread id, so the 30 s poll never scrolls the page again.
+  let scrolledToThread: string | null = null
+  createEffect(
+    () => ({ id: selectedThreadId(), loaded: !threads.error && threads() !== undefined }),
+    ({ id, loaded }) => {
+      if (!id || !loaded || !spaceEntryLinksEnabled() || scrolledToThread === id) return
+      scrolledToThread = id
+      requestAnimationFrame(() => {
+        document.getElementById(`post-${id}`)?.scrollIntoView({ block: 'nearest' })
+      })
+    },
+  )
   // Having the room open IS reading it. Advance the durable marker on every
   // successful listing while the tab is visible — the listing only runs then —
   // fire-and-forget: a marker write failing must never cost the room anything,
@@ -734,6 +754,7 @@ export default function SpacePage() {
                         spaceRef={current().space.space_ref}
                         threadId={threadId()}
                         thread={thread}
+                        messageId={selectedMessageId}
                         roster={() => (roster.error ? [] : roster() ?? [])}
                         viewerSubjectId={() => current().membership.subject_id}
                         agentName={roomAgentName(agents.error ? [] : agents() ?? [])}

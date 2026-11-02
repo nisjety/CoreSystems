@@ -207,3 +207,14 @@
   from { opacity: 0; transform: translateX(12px); }
   to { opacity: 1; transform: translateX(0); }
 }
+
+/* WS13-S4a: the message an entry link (`?thread_id=&m=`) reached. A static outline, no animation. */
+.verevon-room-turn[data-message-id]:focus {
+  outline: none;
+}
+
+.verevon-room-turn[data-highlight="true"] {
+  outline: 2px solid var(--verevon-accent, currentColor);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
