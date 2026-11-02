@@ -161,3 +161,27 @@ func TestApprovalGateRunBindingFailsClosed(t *testing.T) {
 			http.StatusServiceUnavailable, "approval_authority_unavailable")
 	}
 }
+
+// WS10-S5a: with the policy store unavailable the gate view fails closed (the
+// gate treats it as ask with grants off); it never answers a permissive view.
+func TestToolGateViewFailsClosedWhenTheStoreIsUnavailable(t *testing.T) {
+	authority := spaces.RunActionAuthority{
+		RunID: "run-1", OrgID: "org-1", SubjectID: "user-1", ThreadID: "thread-1", SpaceRef: "room-1",
+		RecipientAudienceRef: "audience:room-1:1", RecipientAudienceRevision: 1, RecipientAudienceHash: "sha256:a",
+		PrivacyPolicyRef: "privacy:org-1:1", RunContextAuthorizationRef: "control:room-1:thread-create:1",
+		AuthorityRevision: 1, RunStatus: "running",
+	}
+	engine := approvalHarness(t, &spaces.Repository{}, fakeRunAuthority{authority: authority}, executionCoreContext(spaceToolGateViewScope))
+	rec := doJSON(engine, http.MethodPost, toolGateViewPath, validApprovalGateBody())
+	wantApprovalError(t, rec, http.StatusServiceUnavailable, "approval_authority_unavailable")
+	if strings.Contains(rec.Body.String(), `"tools"`) || strings.Contains(rec.Body.String(), "policy_digest") {
+		t.Fatalf("an unavailable store must not leak a view: %s", rec.Body.String())
+	}
+	// An oversized agent id is refused before any lookup.
+	body := validApprovalGateBody()
+	body["agent_subject_id"] = strings.Repeat("a", 201)
+	rec = doJSON(engine, http.MethodPost, toolGateViewPath, body)
+	if rec.Code != http.StatusServiceUnavailable && rec.Code != http.StatusBadRequest {
+		t.Fatalf("oversized agent id: %d %s", rec.Code, rec.Body.String())
+	}
+}
