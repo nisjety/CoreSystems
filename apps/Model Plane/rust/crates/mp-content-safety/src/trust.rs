@@ -36,6 +36,10 @@ const TOOL_TRUST: &[(&str, TrustClass)] = &[
     ("extract_structured", TrustClass::ExternalWeb),
     ("web.search", TrustClass::ExternalWeb),
     ("web.read", TrustClass::ExternalWeb),
+    // E3.7.10: the crawl tools return pages fetched from the open web through Quarry.
+    ("knowledge.map", TrustClass::ExternalWeb),
+    ("knowledge.crawl_site", TrustClass::ExternalWeb),
+    ("knowledge.batch", TrustClass::ExternalWeb),
     ("browser_agent", TrustClass::BrowserScraped),
     // The parent-loop browser tools (WS21 / WS9.E) return rendered page text,
     // console output and DOM-derived labels: attacker-controllable page content.
@@ -160,6 +164,9 @@ mod tests {
             "browser.observe",
             "browser.act",
             "browser.console",
+            "knowledge.map",
+            "knowledge.crawl_site",
+            "knowledge.batch",
             "mcp__srv__anything",
         ] {
             assert!(TrustClass::classify(name).is_external_content(), "{name}");

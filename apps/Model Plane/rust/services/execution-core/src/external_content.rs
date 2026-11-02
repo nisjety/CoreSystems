@@ -161,7 +161,7 @@ pub fn transcript_has_external_tag(messages: &[pb::ChatMessage]) -> bool {
 mod tests {
     use super::*;
 
-    /// The ten names the shared classifier treats as external content. The same list pins the
+    /// The names the shared classifier treats as external content. The same list pins the
     /// mp-content-safety test, so a tool added to `TOOL_TRUST` cannot slip into one service only.
     const EXTERNAL: &[&str] = &[
         "web_search",
@@ -173,6 +173,10 @@ mod tests {
         "browser.observe",
         "browser.act",
         "browser.console",
+        "extract_structured",
+        "knowledge.map",
+        "knowledge.crawl_site",
+        "knowledge.batch",
         "mcp__srv__any_tool",
     ];
 

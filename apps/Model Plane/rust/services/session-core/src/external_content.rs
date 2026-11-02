@@ -114,6 +114,10 @@ mod tests {
             "browser.observe",
             "browser.act",
             "browser.console",
+            "extract_structured",
+            "knowledge.map",
+            "knowledge.crawl_site",
+            "knowledge.batch",
             "mcp__srv__create_order",
         ] {
             assert!(is_external_content_tool(name), "{name}");
