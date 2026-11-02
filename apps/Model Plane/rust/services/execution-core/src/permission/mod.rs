@@ -1319,6 +1319,7 @@ mod tests {
 MCP__s__t                  risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
 book_shipment              risky=yes/yes restricted=no rung=danger_full_access/danger_full_access owner=no consent=no ask=AwaitApproval/AwaitApproval auto=Allow/Allow
 browser.act                risky=yes/yes restricted=no rung=danger_full_access/danger_full_access owner=no consent=no ask=AwaitApproval/AwaitApproval auto=Allow/Allow
+browser.console            risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
 browser.observe            risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
 code_interpreter           risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
 company_lookup             risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow

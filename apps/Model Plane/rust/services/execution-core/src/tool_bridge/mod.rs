@@ -367,9 +367,34 @@ pub(crate) async fn execute_quarry_browser_mcp(
         Err(error) => return browser_mcp_error(format!("browser MCP unavailable: {error}")),
     };
 
-    let action = request
-        .action
-        .unwrap_or(crate::quarry_agent::AgentAction::GetContent);
+    let action = match request.kind {
+        BrowserMcpKind::Observe => crate::quarry_agent::AgentAction::GetContent,
+        BrowserMcpKind::Act(action) => action,
+        // WS9.E: a read of the run's console, not a step: no lease, no action,
+        // the same service token and 401 retry.
+        BrowserMcpKind::Console(query) => {
+            return match client
+                .devtools(crate::quarry_agent::DevtoolsParams {
+                    org_id: verified_org_id,
+                    run_id: &request.quarry_run_id,
+                    levels: query.levels.as_deref(),
+                    filter: query.filter.as_deref(),
+                    after_sequence: query.since_sequence,
+                    limit: Some(query.limit),
+                    request_id: None,
+                })
+                .await
+            {
+                Ok(page) => ToolExecution {
+                    output: console_output(page),
+                    error: None,
+                },
+                Err(error) => {
+                    browser_mcp_error(format!("Quarry browser console read failed: {error}"))
+                }
+            };
+        }
+    };
     let constraints = crate::quarry_agent::AgentConstraints {
         max_steps: 1,
         allowed_domains: validated_grant.allowed_domains().to_vec(),
@@ -420,12 +445,163 @@ fn browser_mcp_error(error: impl Into<String>) -> ToolExecution {
 const MAX_BROWSER_MCP_TEXT_BYTES: usize = 64 * 1024;
 const MAX_BROWSER_MCP_WAIT_MS: u32 = 30_000;
 
+/// WS9.E: most console entries one `browser.console` call returns.
+const MAX_CONSOLE_ENTRIES: usize = 100;
+/// Entries asked for when the model names no limit.
+const DEFAULT_CONSOLE_LIMIT: u32 = 50;
+/// Most bytes of entries in one result (the envelope is on top of this).
+const MAX_CONSOLE_OUTPUT_BYTES: usize = 16 * 1024;
+/// Most characters of one entry's text.
+const MAX_CONSOLE_TEXT_CHARS: usize = 500;
+/// Longest substring filter, in characters (Quarry's own limit).
+const MAX_CONSOLE_FILTER_CHARS: usize = 200;
+/// Most levels one call may name (Quarry's own limit).
+const MAX_CONSOLE_LEVELS: usize = 5;
+/// Longest Quarry run id the console path puts in a URL path.
+const MAX_CONSOLE_RUN_ID_CHARS: usize = 128;
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BrowserMcpObserveInput {
     grant_id: String,
     quarry_run_id: String,
     lease_id: String,
+}
+
+/// `browser.console` input (WS9.E). Strict: an unknown key is an error, so a
+/// model cannot ask for `payload`, a category or a tab filter that is not here.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BrowserMcpConsoleInput {
+    grant_id: String,
+    quarry_run_id: String,
+    lease_id: String,
+    /// `debug`, `info`, `log`, `warn`, `warning`, `error`, `verbose`; at most five.
+    #[serde(default)]
+    levels: Option<Vec<String>>,
+    /// Case-insensitive substring over the console text (Quarry matches it).
+    #[serde(default)]
+    filter: Option<String>,
+    /// Clamped to 1..=100.
+    #[serde(default)]
+    limit: Option<i64>,
+    /// Continue after this sequence (the previous result's `next_sequence`).
+    #[serde(default)]
+    since_sequence: Option<u64>,
+}
+
+/// A validated console read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConsoleQuery {
+    levels: Option<String>,
+    filter: Option<String>,
+    limit: u32,
+    since_sequence: Option<u64>,
+}
+
+impl BrowserMcpConsoleInput {
+    fn into_query(self) -> Result<ConsoleQuery, String> {
+        let mut levels: Vec<String> = Vec::new();
+        for raw in self.levels.unwrap_or_default() {
+            let level = raw.trim().to_ascii_lowercase();
+            if level.is_empty() {
+                continue;
+            }
+            if !matches!(
+                level.as_str(),
+                "debug" | "verbose" | "info" | "log" | "warn" | "warning" | "error"
+            ) {
+                return Err(
+                    "invalid browser.console input: levels must be from debug, info, log, warn, warning, error, verbose"
+                        .to_owned(),
+                );
+            }
+            if !levels.contains(&level) {
+                levels.push(level);
+            }
+        }
+        if levels.len() > MAX_CONSOLE_LEVELS {
+            return Err(format!(
+                "invalid browser.console input: at most {MAX_CONSOLE_LEVELS} levels"
+            ));
+        }
+        let filter = match self.filter.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(text) if text.chars().any(char::is_control) => {
+                return Err("invalid browser.console input: filter has a control character".to_owned());
+            }
+            Some(text) if text.chars().count() > MAX_CONSOLE_FILTER_CHARS => {
+                return Err(format!(
+                    "invalid browser.console input: filter is longer than {MAX_CONSOLE_FILTER_CHARS} characters"
+                ));
+            }
+            Some(text) => Some(text.to_owned()),
+        };
+        let limit = self
+            .limit
+            .map_or(DEFAULT_CONSOLE_LIMIT, |limit| {
+                u32::try_from(limit.clamp(1, MAX_CONSOLE_ENTRIES as i64))
+                    .unwrap_or(DEFAULT_CONSOLE_LIMIT)
+            });
+        Ok(ConsoleQuery {
+            levels: (!levels.is_empty()).then(|| levels.join(",")),
+            filter,
+            limit,
+            since_sequence: self.since_sequence.filter(|sequence| *sequence > 0),
+        })
+    }
+}
+
+/// The result of a console read (WS9.E): `{entries:[{sequence, tab_id, level,
+/// text}], next_sequence, truncated}`. At most 100 entries and 16 KB of
+/// entries; each text is scrubbed (the Live set, before the cut so a secret
+/// that straddles it is masked whole) and capped at 500 characters. Nothing
+/// but those four fields is read from Quarry's event, so `payload` cannot be
+/// here. `truncated` is true when an entry was dropped or a text was cut;
+/// `next_sequence` then points after the last entry that was kept, so the
+/// model can ask for the rest.
+fn console_output(page: crate::quarry_agent::WireDevtoolsPage) -> String {
+    // Room for the envelope around the entries.
+    const ENVELOPE_RESERVE_BYTES: usize = 128;
+    let mut entries: Vec<serde_json::Value> = Vec::new();
+    let mut bytes = 0usize;
+    let mut truncated = false;
+    let mut dropped = false;
+    let mut last_kept = None;
+    for event in page.events {
+        let scrubbed = crate::scrub::scrub_live(event.text.as_deref().unwrap_or(""));
+        let (text, cut) = match scrubbed.char_indices().nth(MAX_CONSOLE_TEXT_CHARS) {
+            Some((index, _)) => (&scrubbed[..index], true),
+            None => (scrubbed.as_str(), false),
+        };
+        let entry = serde_json::json!({
+            "sequence": event.sequence,
+            "tab_id": event.tab_id.as_deref().map(|id| id.chars().take(64).collect::<String>()),
+            "level": event.level.as_deref().map(|level| level.chars().take(16).collect::<String>()),
+            "text": text,
+        });
+        let size = entry.to_string().len() + 1;
+        if entries.len() >= MAX_CONSOLE_ENTRIES
+            || bytes + size + ENVELOPE_RESERVE_BYTES > MAX_CONSOLE_OUTPUT_BYTES
+        {
+            dropped = true;
+            break;
+        }
+        bytes += size;
+        truncated |= cut;
+        last_kept = Some(event.sequence);
+        entries.push(entry);
+    }
+    let next_sequence = match (dropped, last_kept) {
+        (true, Some(last)) => last,
+        _ => page.next_sequence,
+    };
+    serde_json::json!({
+        "entries": entries,
+        "next_sequence": next_sequence,
+        "truncated": truncated || dropped,
+    })
+    .to_string()
 }
 
 #[derive(serde::Deserialize)]
@@ -529,10 +705,20 @@ enum BrowserMcpAction {
     },
 }
 
+/// What a browser MCP call asks Quarry to do.
+enum BrowserMcpKind {
+    /// Read the page (`get_content`).
+    Observe,
+    /// One governed action.
+    Act(crate::quarry_agent::AgentAction),
+    /// Read the run's console (WS9.E).
+    Console(ConsoleQuery),
+}
+
 struct BrowserMcpRequest {
     quarry_run_id: String,
     lease_id: String,
-    action: Option<crate::quarry_agent::AgentAction>,
+    kind: BrowserMcpKind,
 }
 
 impl BrowserMcpRequest {
@@ -554,7 +740,33 @@ impl BrowserMcpRequest {
                 Ok(Self {
                     quarry_run_id: input.quarry_run_id,
                     lease_id: input.lease_id,
-                    action: None,
+                    kind: BrowserMcpKind::Observe,
+                })
+            }
+            "browser.console" => {
+                let input: BrowserMcpConsoleInput = serde_json::from_str(tool_input)
+                    .map_err(|error| format!("invalid browser.console input: {error}"))?;
+                validate_browser_mcp_scope(
+                    &input.grant_id,
+                    &input.quarry_run_id,
+                    &input.lease_id,
+                    validated_grant,
+                )?;
+                // The run id is put in a URL path: a Quarry id, nothing else.
+                let run_id = input.quarry_run_id.trim();
+                if run_id.chars().count() > MAX_CONSOLE_RUN_ID_CHARS
+                    || !run_id
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))
+                {
+                    return Err("invalid browser.console input: quarry_run_id is not a Quarry run id".to_owned());
+                }
+                let run_id = run_id.to_owned();
+                let lease_id = input.lease_id.clone();
+                Ok(Self {
+                    quarry_run_id: run_id,
+                    lease_id,
+                    kind: BrowserMcpKind::Console(input.into_query()?),
                 })
             }
             "browser.act" => {
@@ -569,7 +781,7 @@ impl BrowserMcpRequest {
                 Ok(Self {
                     quarry_run_id: input.quarry_run_id,
                     lease_id: input.lease_id,
-                    action: Some(input.action.into_quarry_action()?),
+                    kind: BrowserMcpKind::Act(input.action.into_quarry_action()?),
                 })
             }
             _ => Err("unsupported Quarry browser MCP tool".to_owned()),
@@ -2240,5 +2452,186 @@ mod tests {
         let grant = ValidatedBrowserGrant::for_test("grant-att", "attach", "grant-run", "u", true);
         let error = browser_plan_config(input, "verified-org", true, &grant).unwrap_err();
         assert!(error.contains("zero-data-retention"), "{error}");
+    }
+
+    // ---- WS9.E browser.console ------------------------------------------
+
+    fn console_request(input: &str) -> Result<BrowserMcpRequest, String> {
+        let grant = ValidatedBrowserGrant::for_test("grant-1", "run", "", "u", false);
+        BrowserMcpRequest::parse("browser.console", input, &grant)
+    }
+
+    fn console_query(input: &str) -> ConsoleQuery {
+        match console_request(input).expect("a valid console input").kind {
+            BrowserMcpKind::Console(query) => query,
+            _ => panic!("not a console request"),
+        }
+    }
+
+    const CONSOLE_BASE: &str = r#""grant_id":"grant-1","quarry_run_id":"run_ab-1","lease_id":"lease-1""#;
+
+    #[test]
+    fn browser_console_input_parses_with_defaults_and_every_field() {
+        let bare = console_query(&format!("{{{CONSOLE_BASE}}}"));
+        assert_eq!(
+            bare,
+            ConsoleQuery { levels: None, filter: None, limit: 50, since_sequence: None }
+        );
+        let full = console_query(&format!(
+            r#"{{{CONSOLE_BASE},"levels":["Error","warn","error"],"filter":"  boom  ","limit":20,"since_sequence":7}}"#
+        ));
+        assert_eq!(full.levels.as_deref(), Some("error,warn"), "lower-cased, de-duplicated");
+        assert_eq!(full.filter.as_deref(), Some("boom"));
+        assert_eq!((full.limit, full.since_sequence), (20, Some(7)));
+        assert_eq!(
+            console_query(&format!(r#"{{{CONSOLE_BASE},"levels":[],"filter":" ","since_sequence":0}}"#)),
+            bare,
+            "empty levels, a blank filter and sequence 0 are no constraint"
+        );
+    }
+
+    #[test]
+    fn browser_console_input_rejects_unknown_fields_levels_and_a_foreign_grant() {
+        for extra in [
+            r#""payload":true"#,
+            r#""category":"network""#,
+            r#""tab_id":"tab_1""#,
+            r#""after_sequence":3"#,
+        ] {
+            let error = console_request(&format!("{{{CONSOLE_BASE},{extra}}}")).err().expect(extra);
+            assert!(error.contains("unknown field"), "{extra}: {error}");
+        }
+        assert!(console_request(&format!(r#"{{{CONSOLE_BASE},"levels":["fatal"]}}"#)).is_err());
+        assert!(console_request(&format!(
+            r#"{{{CONSOLE_BASE},"levels":["debug","info","log","warn","error","verbose"]}}"#
+        ))
+        .is_err(), "six names (five distinct canonical levels at most per call)");
+        let long = "x".repeat(201);
+        assert!(console_request(&format!(r#"{{{CONSOLE_BASE},"filter":"{long}"}}"#)).is_err());
+        assert!(console_request(&format!(r#"{{{CONSOLE_BASE},"filter":"a\nb"}}"#)).is_err());
+        // The grant must be the broker-validated one; the run id must be a Quarry id.
+        let foreign = r#"{"grant_id":"someone-else","quarry_run_id":"run_1","lease_id":"l"}"#;
+        let refused = |input: &str| match console_request(input) {
+            Err(error) => error,
+            Ok(_) => panic!("{input} was accepted"),
+        };
+        assert!(refused(foreign).contains("does not match"));
+        let traversal = r#"{"grant_id":"grant-1","quarry_run_id":"../admin","lease_id":"l"}"#;
+        assert!(refused(traversal).contains("not a Quarry run id"));
+        let missing = r#"{"grant_id":"grant-1","quarry_run_id":"run_1"}"#;
+        assert!(console_request(missing).is_err());
+    }
+
+    #[test]
+    fn browser_console_limit_is_clamped_to_one_through_one_hundred() {
+        for (asked, sent) in [(0_i64, 1_u32), (-5, 1), (1, 1), (100, 100), (101, 100), (9_999_999_999, 100)] {
+            let query = console_query(&format!(r#"{{{CONSOLE_BASE},"limit":{asked}}}"#));
+            assert_eq!(query.limit, sent, "limit {asked}");
+        }
+    }
+
+    fn page_from(json: serde_json::Value) -> crate::quarry_agent::WireDevtoolsPage {
+        serde_json::from_value(json).expect("a page")
+    }
+
+    #[test]
+    fn browser_console_output_has_no_payload_and_only_the_four_fields() {
+        let page = page_from(serde_json::json!({
+            "events": [{
+                "sequence": 11, "tabId": "tab_1", "category": "console", "name": "console.error",
+                "level": "error", "text": "Uncaught TypeError", "url": "https://example.com/x?token=zzz",
+                "method": "GET", "status": 500, "timestampMs": 1,
+                "payload": {"stack": "secret stack", "args": ["hunter2"]}
+            }],
+            "nextSequence": 11, "zdr": false
+        }));
+        let out: serde_json::Value = serde_json::from_str(&console_output(page)).unwrap();
+        assert_eq!(out["next_sequence"], 11);
+        assert_eq!(out["truncated"], false);
+        let entries = out["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        let entry = entries[0].as_object().unwrap();
+        let mut keys: Vec<&str> = entry.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["level", "sequence", "tab_id", "text"]);
+        assert_eq!(entry["text"], "Uncaught TypeError");
+        let raw = out.to_string();
+        for forbidden in ["payload", "secret stack", "hunter2", "token=zzz", "timestamp"] {
+            assert!(!raw.contains(forbidden), "{forbidden}: {raw}");
+        }
+    }
+
+    #[test]
+    fn browser_console_output_is_scrubbed_and_capped_per_text() {
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdEFGH1234";
+        let long = format!("{}{jwt}{}", "a".repeat(495), "b".repeat(2_000));
+        let page = page_from(serde_json::json!({
+            "events": [
+                {"sequence": 1, "tabId": null, "level": "log", "text": format!("token {jwt} here")},
+                {"sequence": 2, "tabId": "t", "level": "warning", "text": long},
+                {"sequence": 3, "tabId": "t", "level": "info"}
+            ],
+            "nextSequence": 3
+        }));
+        let out: serde_json::Value = serde_json::from_str(&console_output(page)).unwrap();
+        let entries = out["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 3);
+        assert!(!out.to_string().contains("eyJhbGciOiJIUzI1NiJ9"), "{out}");
+        assert_eq!(entries[0]["text"], "token [REDACTED] here");
+        assert!(entries[0]["tab_id"].is_null());
+        assert_eq!(entries[1]["text"].as_str().unwrap().chars().count(), 500);
+        assert_eq!(entries[2]["text"], "", "an event with no text is an empty text");
+        assert_eq!(out["truncated"], true, "a cut text is reported");
+        assert_eq!(out["next_sequence"], 3, "nothing was dropped, so Quarry's cursor stands");
+    }
+
+    #[test]
+    fn browser_console_output_stops_at_100_entries_and_16_kb_and_points_past_the_last_kept() {
+        let events = |n: u64, text: &str| -> Vec<serde_json::Value> {
+            (1..=n)
+                .map(|i| serde_json::json!({"sequence": i, "tabId": "t", "level": "log", "text": text}))
+                .collect()
+        };
+        // 150 short entries: the 100-entry cap.
+        let page = page_from(serde_json::json!({"events": events(150, "x"), "nextSequence": 150}));
+        let out: serde_json::Value = serde_json::from_str(&console_output(page)).unwrap();
+        assert_eq!(out["entries"].as_array().unwrap().len(), 100);
+        assert_eq!(out["truncated"], true);
+        assert_eq!(out["next_sequence"], 100, "resume after the last entry returned");
+
+        // 100 entries of 500 characters: the 16 KB cap bites first.
+        let page = page_from(
+            serde_json::json!({"events": events(100, &"y".repeat(500)), "nextSequence": 100}),
+        );
+        let raw = console_output(page);
+        assert!(raw.len() <= 16 * 1024, "{} bytes", raw.len());
+        let out: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let kept = out["entries"].as_array().unwrap().len();
+        assert!(kept > 20 && kept < 100, "{kept}");
+        assert_eq!(out["truncated"], true);
+        assert_eq!(out["next_sequence"], kept as u64);
+
+        // An empty page keeps Quarry's cursor and is not truncated.
+        let out: serde_json::Value =
+            serde_json::from_str(&console_output(page_from(serde_json::json!({"nextSequence": 42})))).unwrap();
+        assert_eq!((out["entries"].as_array().unwrap().len(), out["next_sequence"].clone(), out["truncated"].clone()),
+            (0, serde_json::json!(42), serde_json::json!(false)));
+    }
+
+    #[test]
+    fn browser_console_is_not_an_observe_or_act_request() {
+        let observe = {
+            let grant = ValidatedBrowserGrant::for_test("grant-1", "run", "", "u", false);
+            BrowserMcpRequest::parse("browser.observe", &format!("{{{CONSOLE_BASE}}}"), &grant).unwrap()
+        };
+        assert!(matches!(observe.kind, BrowserMcpKind::Observe));
+        // The observe input has no console keys: `levels` is refused there.
+        let grant = ValidatedBrowserGrant::for_test("grant-1", "run", "", "u", false);
+        assert!(BrowserMcpRequest::parse(
+            "browser.observe",
+            &format!(r#"{{{CONSOLE_BASE},"levels":["error"]}}"#),
+            &grant
+        )
+        .is_err());
     }
 }

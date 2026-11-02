@@ -512,6 +512,50 @@ struct WireTabs {
     tabs: Vec<WireTab>,
 }
 
+/// One devtools event of `GET /v1/agent/runs/{run_id}/devtools` (quarry-browser
+/// `BrowserDevtoolsEvent`, camelCase), reduced to what a console read keeps
+/// (WS9.E). `payload`, `url`, `method`, `status`, `name` and `timestampMs` are
+/// not read: serde skips them, so they cannot reach the model.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WireDevtoolsEvent {
+    #[serde(default)]
+    pub sequence: u64,
+    #[serde(default)]
+    pub tab_id: Option<String>,
+    #[serde(default)]
+    pub level: Option<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+}
+
+/// The `data` of a devtools read: the matches and the cursor to continue from
+/// (`nextSequence`, the last event Quarry examined, even when none matched).
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WireDevtoolsPage {
+    #[serde(default)]
+    pub events: Vec<WireDevtoolsEvent>,
+    #[serde(default)]
+    pub next_sequence: u64,
+}
+
+/// What a console read asks Quarry for. The filters are Quarry's own
+/// (`DevtoolsQuery`, WS9.C): the category is fixed to `console`.
+#[derive(Debug, Clone, Default)]
+pub struct DevtoolsParams<'a> {
+    pub org_id: &'a str,
+    pub run_id: &'a str,
+    /// Comma-separated console levels (already validated by the caller).
+    pub levels: Option<&'a str>,
+    /// Case-insensitive substring over text, url and name (Quarry matches it).
+    pub filter: Option<&'a str>,
+    /// Continue after this sequence (`afterSequence`).
+    pub after_sequence: Option<u64>,
+    pub limit: Option<u32>,
+    pub request_id: Option<&'a str>,
+}
+
 /// A delegate step body (Quarry `StepBody` on the attached lane): no lease,
 /// the attach grant, and `initiated_by: "agent"` always. `ai_run_id` and
 /// `agent_label` are advisory labels Quarry records on the receipt.
@@ -1929,6 +1973,36 @@ impl QuarryAgentClient {
         Ok(tabs.tabs)
     }
 
+    /// WS9.E: read a run's console (`GET /v1/agent/runs/{run_id}/devtools`
+    /// with `category=console`, camelCase query keys as Quarry's
+    /// `DevtoolsQuery` names them). Same service token and one 401 retry as
+    /// every other call. Returns events reduced to sequence, tab, level, text.
+    pub async fn devtools(
+        &self,
+        params: DevtoolsParams<'_>,
+    ) -> Result<WireDevtoolsPage, AgentClientError> {
+        let endpoint = self.url(&format!("/v1/agent/runs/{}/devtools", params.run_id));
+        let mut query: Vec<(&str, String)> = vec![("category", "console".to_owned())];
+        if let Some(levels) = params.levels.filter(|levels| !levels.is_empty()) {
+            query.push(("levels", levels.to_owned()));
+        }
+        if let Some(filter) = params.filter.filter(|filter| !filter.is_empty()) {
+            query.push(("filter", filter.to_owned()));
+        }
+        if let Some(after) = params.after_sequence {
+            query.push(("afterSequence", after.to_string()));
+        }
+        if let Some(limit) = params.limit {
+            query.push(("limit", limit.to_string()));
+        }
+        let resp = self
+            .send_with_auth_retry(params.org_id, params.request_id, || {
+                self.http.get(&endpoint).query(&query)
+            })
+            .await?;
+        Self::decode(resp).await
+    }
+
     /// WS8.G: one delegate step on the person's run (`POST .../step`), with
     /// the attach grant and `initiated_by: "agent"` on every call. Quarry acts
     /// on the attachment's tab only. A held tab answers 409 `USER_TOOK_OVER`.
@@ -3285,6 +3359,123 @@ mod tests {
         assert_eq!(tabs.len(), 1);
         assert_eq!(tabs[0].tab_id, "tab_9");
         assert!(!tabs[0].active);
+    }
+
+    fn devtools_page() -> serde_json::Value {
+        serde_json::json!({
+            "data": {
+                "events": [
+                    {"sequence": 5, "tabId": "tab_9", "category": "console", "name": "console.error",
+                     "level": "error", "text": "boom", "timestampMs": 1, "payload": {"k": "v"}},
+                    {"sequence": 6, "tabId": null, "category": "console", "name": "console.log",
+                     "timestampMs": 2, "payload": null}
+                ],
+                "nextSequence": 6, "zdr": false
+            },
+            "meta": {}, "error": null,
+        })
+    }
+
+    #[tokio::test]
+    async fn browser_console_devtools_asks_for_the_console_with_quarrys_camel_case_keys_and_keeps_four_fields() {
+        use wiremock::matchers::query_param;
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/agent/runs/run_1/devtools"))
+            .and(header("authorization", "Bearer svc"))
+            .and(header("x-quarry-org", "org_1"))
+            .and(query_param("category", "console"))
+            .and(query_param("levels", "error,warn"))
+            .and(query_param("filter", "boom"))
+            .and(query_param("afterSequence", "4"))
+            .and(query_param("limit", "20"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(devtools_page()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = QuarryAgentClient::new(server.uri(), "svc").unwrap();
+        let page = client
+            .devtools(DevtoolsParams {
+                org_id: "org_1",
+                run_id: "run_1",
+                levels: Some("error,warn"),
+                filter: Some("boom"),
+                after_sequence: Some(4),
+                limit: Some(20),
+                request_id: None,
+            })
+            .await
+            .expect("a page");
+        assert_eq!(page.next_sequence, 6);
+        assert_eq!(
+            page.events,
+            vec![
+                WireDevtoolsEvent {
+                    sequence: 5,
+                    tab_id: Some("tab_9".to_owned()),
+                    level: Some("error".to_owned()),
+                    text: Some("boom".to_owned()),
+                },
+                WireDevtoolsEvent { sequence: 6, ..Default::default() },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn browser_console_devtools_sends_only_the_category_when_nothing_else_is_asked() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/agent/runs/run_1/devtools"))
+            .and(wiremock::matchers::query_param("category", "console"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(devtools_page()))
+            .mount(&server)
+            .await;
+        let client = QuarryAgentClient::new(server.uri(), "svc").unwrap();
+        client
+            .devtools(DevtoolsParams { org_id: "org_1", run_id: "run_1", ..Default::default() })
+            .await
+            .unwrap();
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].url.query(), Some("category=console"));
+    }
+
+    #[tokio::test]
+    async fn browser_console_devtools_retries_exactly_once_after_unauthorized() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/agent/runs/run_1/devtools"))
+            .respond_with(ResponseTemplate::new(401))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/agent/runs/run_1/devtools"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(devtools_page()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = QuarryAgentClient::new(server.uri(), "svc").unwrap();
+        let page = client
+            .devtools(DevtoolsParams { org_id: "org_1", run_id: "run_1", ..Default::default() })
+            .await
+            .expect("the second attempt is answered");
+        assert_eq!(page.events.len(), 2);
+
+        // A second 401 is not retried again.
+        let always = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/agent/runs/run_1/devtools"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(2)
+            .mount(&always)
+            .await;
+        let client = QuarryAgentClient::new(always.uri(), "svc").unwrap();
+        assert!(client
+            .devtools(DevtoolsParams { org_id: "org_1", run_id: "run_1", ..Default::default() })
+            .await
+            .is_err());
     }
 
     #[tokio::test]

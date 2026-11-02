@@ -1564,7 +1564,9 @@ pub fn trusted_capability_id(tool_name: &str) -> Option<String> {
         // The granular MCP facade never creates raw browser authority. It is
         // governed by the same browser capability as the agent loop, while
         // BrowserBroker separately binds its opaque run grant.
-        "browser_agent" | "browser.observe" | "browser.act" => "cap.browser.open",
+        "browser_agent" | "browser.observe" | "browser.act" | "browser.console" => {
+            "cap.browser.open"
+        }
         "web_search" | "web_fetch" | "web.search" | "web.read" => "cap.tool.http",
         // E3.7.10: the bulk-acquisition tools. A crawl or a batch multiplies pages, spend and
         // egress by a count the model picks, so each family has its own capability instead of

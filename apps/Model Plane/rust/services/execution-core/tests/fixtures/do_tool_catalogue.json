@@ -172,6 +172,12 @@
     },
     {
       "is_risky_tool": false,
+      "name": "browser.console",
+      "rung_required_for": "read_only",
+      "trusted_capability_id": "cap.browser.open"
+    },
+    {
+      "is_risky_tool": false,
       "name": "process_start",
       "rung_required_for": "read_only",
       "trusted_capability_id": "cap.process.background"

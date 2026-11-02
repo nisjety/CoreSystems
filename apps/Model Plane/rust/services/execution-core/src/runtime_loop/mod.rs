@@ -61,6 +61,9 @@ const BROWSER_AGENT_TOOL: &str = "browser_agent";
 /// execute one grant-bound observation or opaque snapshot-ref action.
 const QUARRY_MCP_BROWSER_OBSERVE_TOOL: &str = "browser.observe";
 const QUARRY_MCP_BROWSER_ACT_TOOL: &str = "browser.act";
+/// WS9.E: a bounded, scrubbed read of the run's console. Read-only; no lease,
+/// no action.
+const QUARRY_MCP_BROWSER_CONSOLE_TOOL: &str = "browser.console";
 
 /// Read-only research tools backed by the Quarry edge (`web_tools`). Async.
 /// Not in `permission::is_risky_tool`, so they run under `ask` without a gate.
@@ -1046,7 +1049,9 @@ async fn execute_step_inner(
     // the same approval/deny policy.
     let exec = if matches!(
         tool_name,
-        QUARRY_MCP_BROWSER_OBSERVE_TOOL | QUARRY_MCP_BROWSER_ACT_TOOL
+        QUARRY_MCP_BROWSER_OBSERVE_TOOL
+            | QUARRY_MCP_BROWSER_ACT_TOOL
+            | QUARRY_MCP_BROWSER_CONSOLE_TOOL
     ) {
         tool_bridge::execute_quarry_browser_mcp(tool_name, tool_input, org_id, zdr, browser_grant)
             .await

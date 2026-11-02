@@ -1354,7 +1354,7 @@ impl ExecutionCore for ExecutionService {
         // live leased context and `browser.act` can cause external effects.
         let browser_bearer = if matches!(
             request.get_ref().tool_name.as_str(),
-            "browser_agent" | "browser.observe" | "browser.act"
+            "browser_agent" | "browser.observe" | "browser.act" | "browser.console"
         ) {
             Some(
                 self.auth
