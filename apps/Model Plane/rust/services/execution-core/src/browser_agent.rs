@@ -1153,6 +1153,18 @@ fn extract_host(url: &str) -> Option<String> {
     }
 }
 
+/// Whether `url` (http or https) names a host an allow-list covers. An empty
+/// list allows nothing (a missing policy is never unrestricted).
+#[must_use]
+pub(crate) fn url_allowed_by(url: &str, allowed_domains: &[String]) -> bool {
+    let Some(host) = extract_host(url) else {
+        return false;
+    };
+    allowed_domains
+        .iter()
+        .any(|domain| host_matches(&host, domain))
+}
+
 /// Test whether `host` is allowed by an allowlist entry `pattern`.
 ///
 /// Match rules:

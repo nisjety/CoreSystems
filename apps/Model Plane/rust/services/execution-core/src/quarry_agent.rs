@@ -551,6 +551,98 @@ pub struct ReleaseData {
     pub state: String,
 }
 
+/// The query of a tab select or close: who initiated it and the advisory ids.
+fn tab_call_query(params: &TabCallParams<'_>) -> Vec<(&'static str, String)> {
+    let mut query = vec![("initiatedBy", "agent".to_owned())];
+    if let Some(id) = &params.advisory.ai_run_id {
+        query.push(("aiRunId", id.clone()));
+    }
+    if let Some(label) = &params.advisory.agent_label {
+        query.push(("agentLabel", label.clone()));
+    }
+    query
+}
+
+/// A Quarry run or tab id that goes in a URL path: `[A-Za-z0-9._:-]{1,64}`, so
+/// nothing can add a path segment or a query.
+fn check_quarry_path_id(id: &str) -> Result<(), AgentClientError> {
+    if !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':'))
+    {
+        Ok(())
+    } else {
+        Err(AgentClientError::Decode(
+            "tab call ids are not Quarry ids".into(),
+        ))
+    }
+}
+
+/// E3.2-e2: the advisory labels sent with a tab call: the Model run id and a
+/// short agent label (Quarry's `aiRunId` / `agentLabel`). Advisory only: Quarry
+/// records them on the tab's timeline and never reads them as authority. A value
+/// outside Quarry's identifier shape (`[A-Za-z0-9._:-]`, 1 to 64) is dropped here,
+/// not repaired.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TabAdvisory {
+    pub ai_run_id: Option<String>,
+    pub agent_label: Option<String>,
+}
+
+impl TabAdvisory {
+    #[must_use]
+    pub fn new(ai_run_id: &str, agent_label: &str) -> Self {
+        let keep = |value: &str| {
+            let value = value.trim();
+            (!value.is_empty()
+                && value.len() <= 64
+                && value
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-')))
+            .then(|| value.to_owned())
+        };
+        Self {
+            ai_run_id: keep(ai_run_id),
+            agent_label: keep(agent_label),
+        }
+    }
+}
+
+/// What every tab call needs: the org the service token is minted for, the Quarry
+/// run, the advisory labels and a correlation id.
+#[derive(Debug, Clone, Copy)]
+pub struct TabCallParams<'a> {
+    pub org_id: &'a str,
+    pub run_id: &'a str,
+    pub advisory: &'a TabAdvisory,
+    pub request_id: Option<&'a str>,
+}
+
+/// `POST .../tabs` body (Quarry `NewTabBody`, camelCase). `initiatedBy: agent`
+/// because the model proposed the call; Quarry's hint can only tighten.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NewTabRequest<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<&'a str>,
+    initiated_by: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ai_run_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_label: Option<&'a str>,
+}
+
+/// `POST .../tabs` answer (Quarry `BrowserTabData`): the new tab and the list.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WireTabOpened {
+    pub tab: WireTab,
+    #[serde(default)]
+    pub tabs: Vec<WireTab>,
+}
+
 /// One tab of `GET .../tabs` (quarry-browser `BrowserTab`, camelCase). A
 /// delegate sees only its own tab. Quarry lists no holder here: whether a
 /// person holds the tab is learnt from a refused step (`USER_TOOK_OVER`).
@@ -2141,6 +2233,78 @@ impl QuarryAgentClient {
         Ok(tabs.tabs)
     }
 
+    /// E3.2-e2: open a tab on a run the service principal owns
+    /// (`POST /v1/agent/runs/{run_id}/tabs`). Same service token and one 401 retry
+    /// as every call; `initiatedBy: agent` and the advisory ids ride the body.
+    /// Quarry holds the URL to the run's allowed domains and web policy; the
+    /// caller checks the grant's domains first as well.
+    pub async fn open_tab(
+        &self,
+        params: TabCallParams<'_>,
+        url: Option<&str>,
+    ) -> Result<WireTabOpened, AgentClientError> {
+        check_quarry_path_id(params.run_id)?;
+        let body = NewTabRequest {
+            url,
+            initiated_by: "agent",
+            ai_run_id: params.advisory.ai_run_id.as_deref(),
+            agent_label: params.advisory.agent_label.as_deref(),
+        };
+        let endpoint = self.url(&format!("/v1/agent/runs/{}/tabs", params.run_id));
+        let resp = self
+            .send_with_auth_retry(params.org_id, params.request_id, || {
+                self.http.post(&endpoint).json(&body)
+            })
+            .await?;
+        Self::decode(resp).await
+    }
+
+    /// E3.2-e2: make a tab the active one
+    /// (`POST /v1/agent/runs/{run_id}/tabs/{tab_id}/select`, no body). The call
+    /// context rides the query (Quarry `TabCallQuery`, camelCase). Returns the
+    /// run's tabs afterwards.
+    pub async fn select_tab(
+        &self,
+        params: TabCallParams<'_>,
+        tab_id: &str,
+    ) -> Result<Vec<WireTab>, AgentClientError> {
+        check_quarry_path_id(params.run_id)?;
+        check_quarry_path_id(tab_id)?;
+        let endpoint = self.url(&format!(
+            "/v1/agent/runs/{}/tabs/{tab_id}/select",
+            params.run_id
+        ));
+        let query = tab_call_query(&params);
+        let resp = self
+            .send_with_auth_retry(params.org_id, params.request_id, || {
+                self.http.post(&endpoint).query(&query)
+            })
+            .await?;
+        let tabs: WireTabs = Self::decode(resp).await?;
+        Ok(tabs.tabs)
+    }
+
+    /// E3.2-e2: close a tab (`DELETE /v1/agent/runs/{run_id}/tabs/{tab_id}`). The
+    /// call context rides the query like [`Self::select_tab`]. Returns the run's
+    /// tabs afterwards.
+    pub async fn close_tab(
+        &self,
+        params: TabCallParams<'_>,
+        tab_id: &str,
+    ) -> Result<Vec<WireTab>, AgentClientError> {
+        check_quarry_path_id(params.run_id)?;
+        check_quarry_path_id(tab_id)?;
+        let endpoint = self.url(&format!("/v1/agent/runs/{}/tabs/{tab_id}", params.run_id));
+        let query = tab_call_query(&params);
+        let resp = self
+            .send_with_auth_retry(params.org_id, params.request_id, || {
+                self.http.delete(&endpoint).query(&query)
+            })
+            .await?;
+        let tabs: WireTabs = Self::decode(resp).await?;
+        Ok(tabs.tabs)
+    }
+
     /// WS8.J: mark the agent's tab (`POST /v1/agent/runs/{run_id}/tabs/{tab_id}/mark`)
     /// so the release keeps it open for the person. Same service token and one
     /// 401 retry as every call. `TabMark::None` sends nothing. Any 2xx counts;
@@ -3652,6 +3816,147 @@ mod tests {
         assert_eq!(tabs.len(), 1);
         assert_eq!(tabs[0].tab_id, "tab_9");
         assert!(!tabs[0].active);
+    }
+
+    fn tab_envelope(data: serde_json::Value) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": data, "meta": {}, "error": null,
+        }))
+    }
+
+    #[test]
+    fn tab_advisory_keeps_identifier_shaped_values_and_drops_the_rest() {
+        let ok = TabAdvisory::new("run_01J.abc:x-1", "model-plane");
+        assert_eq!(ok.ai_run_id.as_deref(), Some("run_01J.abc:x-1"));
+        assert_eq!(ok.agent_label.as_deref(), Some("model-plane"));
+        let bad = TabAdvisory::new("https://example.com/x?token=1", &"a".repeat(65));
+        assert_eq!(bad, TabAdvisory::default());
+        assert_eq!(TabAdvisory::new("  ", ""), TabAdvisory::default());
+    }
+
+    #[tokio::test]
+    async fn open_tab_posts_camel_case_with_the_service_token_and_advisory_ids() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/runs/run_1/tabs"))
+            .and(header("authorization", "Bearer svc"))
+            .and(header("x-quarry-org", "org_1"))
+            .and(body_json(serde_json::json!({
+                "url": "https://example.com/a",
+                "initiatedBy": "agent",
+                "aiRunId": "run_model_1",
+                "agentLabel": "model-plane"
+            })))
+            .respond_with(tab_envelope(serde_json::json!({
+                "tab": {"tabId": "tab_2", "title": "A", "url": "https://example.com/a", "active": true},
+                "tabs": [
+                    {"tabId": "tab_1", "title": "Home", "url": "https://example.com/", "active": false},
+                    {"tabId": "tab_2", "title": "A", "url": "https://example.com/a", "active": true}
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = QuarryAgentClient::new(server.uri(), "svc").unwrap();
+        let advisory = TabAdvisory::new("run_model_1", "model-plane");
+        let opened = client
+            .open_tab(
+                TabCallParams { org_id: "org_1", run_id: "run_1", advisory: &advisory, request_id: None },
+                Some("https://example.com/a"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(opened.tab.tab_id, "tab_2");
+        assert_eq!(opened.tabs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn open_tab_without_a_url_or_advisory_sends_only_the_initiator() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/runs/run_1/tabs"))
+            .and(body_json(serde_json::json!({"initiatedBy": "agent"})))
+            .respond_with(tab_envelope(serde_json::json!({
+                "tab": {"tabId": "tab_3"}, "tabs": []
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = QuarryAgentClient::new(server.uri(), "svc").unwrap();
+        let advisory = TabAdvisory::default();
+        client
+            .open_tab(
+                TabCallParams { org_id: "org_1", run_id: "run_1", advisory: &advisory, request_id: None },
+                None,
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn select_and_close_tab_carry_the_call_context_in_the_query() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/runs/run_1/tabs/tab_2/select"))
+            .and(wiremock::matchers::query_param("initiatedBy", "agent"))
+            .and(wiremock::matchers::query_param("aiRunId", "run_model_1"))
+            .and(wiremock::matchers::query_param("agentLabel", "model-plane"))
+            .respond_with(tab_envelope(serde_json::json!({
+                "tabs": [{"tabId": "tab_2", "active": true}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/agent/runs/run_1/tabs/tab_2"))
+            .and(wiremock::matchers::query_param("initiatedBy", "agent"))
+            .respond_with(tab_envelope(serde_json::json!({"tabs": []})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = QuarryAgentClient::new(server.uri(), "svc").unwrap();
+        let advisory = TabAdvisory::new("run_model_1", "model-plane");
+        let params = TabCallParams { org_id: "org_1", run_id: "run_1", advisory: &advisory, request_id: None };
+        let selected = client.select_tab(params, "tab_2").await.unwrap();
+        assert_eq!(selected.len(), 1);
+        assert!(selected[0].active);
+        assert!(client.close_tab(params, "tab_2").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn tab_calls_refuse_ids_that_are_not_quarry_ids_before_any_request() {
+        let server = MockServer::start().await;
+        let client = QuarryAgentClient::new(server.uri(), "svc").unwrap();
+        let advisory = TabAdvisory::default();
+        let params = TabCallParams { org_id: "org_1", run_id: "run_1", advisory: &advisory, request_id: None };
+        for bad in ["", "tab/../x", "tab?x=1", "tab 1", &"t".repeat(65)] {
+            assert!(client.select_tab(params, bad).await.is_err(), "{bad:?}");
+            assert!(client.close_tab(params, bad).await.is_err(), "{bad:?}");
+        }
+        let bad_run = TabCallParams { run_id: "run/../1", ..params };
+        assert!(client.open_tab(bad_run, None).await.is_err());
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_refused_tab_call_surfaces_the_refusal() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/runs/run_1/tabs"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "data": null, "error": {"code": "NOT_FOUND", "message": "agent run not found"}
+            })))
+            .mount(&server)
+            .await;
+        let client = QuarryAgentClient::new(server.uri(), "svc").unwrap();
+        let advisory = TabAdvisory::default();
+        let result = client
+            .open_tab(
+                TabCallParams { org_id: "org_1", run_id: "run_1", advisory: &advisory, request_id: None },
+                None,
+            )
+            .await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]

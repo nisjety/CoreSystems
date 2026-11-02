@@ -345,6 +345,7 @@ pub(crate) async fn execute_quarry_browser_mcp(
     verified_org_id: &str,
     verified_zdr: bool,
     validated_grant: Option<&ValidatedBrowserGrant>,
+    model_run_id: &str,
 ) -> ToolExecution {
     if verified_org_id.trim().is_empty() {
         return browser_mcp_error("browser MCP requires the verified run organization");
@@ -370,6 +371,19 @@ pub(crate) async fn execute_quarry_browser_mcp(
     let action = match request.kind {
         BrowserMcpKind::Observe => crate::quarry_agent::AgentAction::GetContent,
         BrowserMcpKind::Act(action) => action,
+        // E3.2-e2: a tab operation, not a step: no lease, no action; the same
+        // service token and 401 retry, with the advisory run id and label.
+        BrowserMcpKind::Tabs(op) => {
+            return execute_tab_op(
+                &client,
+                op,
+                verified_org_id,
+                request.quarry_run_id.trim(),
+                validated_grant.grant_id(),
+                model_run_id,
+            )
+            .await;
+        }
         // WS9.E: a read of the run's console, not a step: no lease, no action,
         // the same service token and 401 retry.
         BrowserMcpKind::Console(query) => {
@@ -433,6 +447,107 @@ pub(crate) async fn execute_quarry_browser_mcp(
         }
         Err(error) => browser_mcp_error(format!("Quarry browser operation failed: {error}")),
     }
+}
+
+/// E3.2-e2: the agent label sent with a tab call (advisory, never authority).
+const TAB_AGENT_LABEL: &str = "model-plane";
+/// Most tabs one tab result lists.
+const MAX_TAB_LIST: usize = 20;
+/// Most characters of a tab title in a result.
+const MAX_TAB_TITLE_CHARS: usize = 200;
+/// Most characters of a tab URL in a result.
+const MAX_TAB_URL_CHARS: usize = 300;
+/// Longest URL a `tab_new` may name.
+const MAX_TAB_NEW_URL_CHARS: usize = 2048;
+
+/// E3.2-e2: one tab operation on a Quarry run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TabOp {
+    List,
+    New { url: Option<String> },
+    Select(String),
+    Close(String),
+}
+
+async fn execute_tab_op(
+    client: &crate::quarry_agent::QuarryAgentClient,
+    op: TabOp,
+    org_id: &str,
+    quarry_run_id: &str,
+    grant_id: &str,
+    model_run_id: &str,
+) -> ToolExecution {
+    let advisory = crate::quarry_agent::TabAdvisory::new(model_run_id, TAB_AGENT_LABEL);
+    let params = crate::quarry_agent::TabCallParams {
+        org_id,
+        run_id: quarry_run_id,
+        advisory: &advisory,
+        request_id: None,
+    };
+    let result = match op {
+        TabOp::List => client
+            .tab_state(org_id, quarry_run_id, grant_id, None)
+            .await
+            .map(|tabs| tabs_output(None, &tabs)),
+        TabOp::New { url } => client
+            .open_tab(params, url.as_deref())
+            .await
+            .map(|opened| tabs_output(Some(&opened.tab), &opened.tabs)),
+        TabOp::Select(tab_id) => client
+            .select_tab(params, &tab_id)
+            .await
+            .map(|tabs| tabs_output(None, &tabs)),
+        TabOp::Close(tab_id) => client
+            .close_tab(params, &tab_id)
+            .await
+            .map(|tabs| tabs_output(None, &tabs)),
+    };
+    match result {
+        Ok(output) => ToolExecution {
+            output,
+            error: None,
+        },
+        Err(crate::quarry_agent::AgentClientError::PolicyDenied(denial)) => {
+            browser_mcp_error(denial.fixed_text())
+        }
+        Err(error) => browser_mcp_error(format!("Quarry browser tab operation failed: {error}")),
+    }
+}
+
+/// A tab result for the model: `{tab?, tabs:[{tab_id, title, url, active}], truncated}`.
+/// Titles and URLs are page-authored, so they go through the Live scrub, the URL
+/// without its fragment, and a length cut; at most [`MAX_TAB_LIST`] tabs.
+fn tabs_output(opened: Option<&crate::quarry_agent::WireTab>, tabs: &[crate::quarry_agent::WireTab]) -> String {
+    let entry = |tab: &crate::quarry_agent::WireTab| {
+        let title: String = crate::scrub::scrub_live(tab.title.as_deref().unwrap_or_default())
+            .chars()
+            .take(MAX_TAB_TITLE_CHARS)
+            .collect();
+        let url: String = crate::scrub::scrub_url(
+            tab.url
+                .as_deref()
+                .unwrap_or_default()
+                .split_once('#')
+                .map_or(tab.url.as_deref().unwrap_or_default(), |(head, _)| head),
+        )
+        .chars()
+        .take(MAX_TAB_URL_CHARS)
+        .collect();
+        serde_json::json!({
+            "tab_id": tab.tab_id,
+            "title": title,
+            "url": url,
+            "active": tab.active,
+        })
+    };
+    let mut output = serde_json::json!({
+        "tabs": tabs.iter().take(MAX_TAB_LIST).map(&entry).collect::<Vec<_>>(),
+        "truncated": tabs.len() > MAX_TAB_LIST,
+    });
+    if let Some(tab) = opened {
+        output["tab"] = entry(tab);
+    }
+    output.to_string()
 }
 
 fn browser_mcp_error(error: impl Into<String>) -> ToolExecution {
@@ -703,6 +818,14 @@ enum BrowserMcpAction {
         ref_id: String,
         approval_grant_id: String,
     },
+    /// E3.2-e2: list the run's tabs.
+    TabList,
+    /// E3.2-e2: open a tab, at a URL the grant's domains cover or blank.
+    TabNew { url: Option<String> },
+    /// E3.2-e2: make a tab the active one.
+    TabSelect { tab_id: String },
+    /// E3.2-e2: close a tab.
+    TabClose { tab_id: String },
 }
 
 /// What a browser MCP call asks Quarry to do.
@@ -713,6 +836,8 @@ enum BrowserMcpKind {
     Act(crate::quarry_agent::AgentAction),
     /// Read the run's console (WS9.E).
     Console(ConsoleQuery),
+    /// A tab operation (E3.2-e2): list, open, select or close.
+    Tabs(TabOp),
 }
 
 struct BrowserMcpRequest {
@@ -781,7 +906,7 @@ impl BrowserMcpRequest {
                 Ok(Self {
                     quarry_run_id: input.quarry_run_id,
                     lease_id: input.lease_id,
-                    kind: BrowserMcpKind::Act(input.action.into_quarry_action()?),
+                    kind: input.action.into_kind(validated_grant.allowed_domains())?,
                 })
             }
             _ => Err("unsupported Quarry browser MCP tool".to_owned()),
@@ -806,11 +931,54 @@ fn validate_browser_mcp_scope(
     Ok(())
 }
 
+/// A Quarry tab id as the driver reports it (`[A-Za-z0-9_-]{1,64}`); it goes in a
+/// URL path, so nothing else may pass.
+fn valid_tab_id(tab_id: &str) -> Result<String, String> {
+    let tab_id = tab_id.trim();
+    if !tab_id.is_empty()
+        && tab_id.len() <= 64
+        && tab_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        Ok(tab_id.to_owned())
+    } else {
+        Err("invalid browser.act input: tab_id is not a Quarry tab id".to_owned())
+    }
+}
+
 impl BrowserMcpAction {
+    /// The request kind for this action: a tab operation, or a governed step.
+    fn into_kind(self, allowed_domains: &[String]) -> Result<BrowserMcpKind, String> {
+        match self {
+            Self::TabList => Ok(BrowserMcpKind::Tabs(TabOp::List)),
+            Self::TabNew { url } => {
+                let url = url.map(|url| url.trim().to_owned()).filter(|url| !url.is_empty());
+                if let Some(url) = &url {
+                    if url.chars().count() > MAX_TAB_NEW_URL_CHARS
+                        || !crate::browser_agent::url_allowed_by(url, allowed_domains)
+                    {
+                        return Err(
+                            "invalid browser.act input: tab_new url is not an http(s) URL on the grant's allowed domains"
+                                .to_owned(),
+                        );
+                    }
+                }
+                Ok(BrowserMcpKind::Tabs(TabOp::New { url }))
+            }
+            Self::TabSelect { tab_id } => Ok(BrowserMcpKind::Tabs(TabOp::Select(valid_tab_id(&tab_id)?))),
+            Self::TabClose { tab_id } => Ok(BrowserMcpKind::Tabs(TabOp::Close(valid_tab_id(&tab_id)?))),
+            other => Ok(BrowserMcpKind::Act(other.into_quarry_action()?)),
+        }
+    }
+
     fn into_quarry_action(self) -> Result<crate::quarry_agent::AgentAction, String> {
         use crate::quarry_agent::AgentAction;
 
         match self {
+            Self::TabList | Self::TabNew { .. } | Self::TabSelect { .. } | Self::TabClose { .. } => {
+                Err("tab operations are not step actions".to_owned())
+            }
             Self::ClickRef {
                 snapshot_id,
                 generation,
@@ -2569,6 +2737,94 @@ mod tests {
     }
 
     const CONSOLE_BASE: &str = r#""grant_id":"grant-1","quarry_run_id":"run_ab-1","lease_id":"lease-1""#;
+
+    // ---- E3.2-e2 tab operations through browser.act ---------------------
+
+    fn act_kind(action: &str) -> Result<BrowserMcpKind, String> {
+        let grant = ValidatedBrowserGrant::for_test("grant-1", "run", "", "u", false);
+        BrowserMcpRequest::parse(
+            "browser.act",
+            &format!(r#"{{{CONSOLE_BASE},"action":{action}}}"#),
+            &grant,
+        )
+        .map(|request| request.kind)
+    }
+
+    fn tab_op(action: &str) -> TabOp {
+        match act_kind(action).expect("a valid tab action") {
+            BrowserMcpKind::Tabs(op) => op,
+            _ => panic!("not a tab request"),
+        }
+    }
+
+    #[test]
+    fn tab_actions_parse_to_tab_operations() {
+        assert_eq!(tab_op(r#"{"type":"tab_list"}"#), TabOp::List);
+        assert_eq!(tab_op(r#"{"type":"tab_new"}"#), TabOp::New { url: None });
+        assert_eq!(
+            tab_op(r#"{"type":"tab_new","url":"  https://docs.example.com/a "}"#),
+            TabOp::New { url: Some("https://docs.example.com/a".to_owned()) }
+        );
+        assert_eq!(tab_op(r#"{"type":"tab_new","url":"  "}"#), TabOp::New { url: None });
+        assert_eq!(tab_op(r#"{"type":"tab_select","tab_id":"tab_2"}"#), TabOp::Select("tab_2".to_owned()));
+        assert_eq!(tab_op(r#"{"type":"tab_close","tab_id":" tab-9 "}"#), TabOp::Close("tab-9".to_owned()));
+    }
+
+    #[test]
+    fn tab_actions_refuse_foreign_urls_bad_ids_and_extra_fields() {
+        for action in [
+            r#"{"type":"tab_new","url":"https://evil.com/"}"#,
+            r#"{"type":"tab_new","url":"https://example.com.evil.com/"}"#,
+            r#"{"type":"tab_new","url":"file:///etc/passwd"}"#,
+            r#"{"type":"tab_new","url":"javascript:alert(1)"}"#,
+            r#"{"type":"tab_new","url":"example.com/a"}"#,
+            r#"{"type":"tab_select","tab_id":"tab/../x"}"#,
+            r#"{"type":"tab_select","tab_id":""}"#,
+            r#"{"type":"tab_close","tab_id":"a?b=1"}"#,
+            r#"{"type":"tab_list","extra":1}"#,
+            r#"{"type":"tab_select"}"#,
+        ] {
+            assert!(act_kind(action).is_err(), "{action}");
+        }
+        let long = format!(r#"{{"type":"tab_new","url":"https://example.com/{}"}}"#, "a".repeat(2100));
+        assert!(act_kind(&long).is_err());
+    }
+
+    #[test]
+    fn a_governed_action_is_still_an_act_and_tab_variants_are_never_steps() {
+        assert!(matches!(
+            act_kind(r#"{"type":"click_ref","snapshot_id":"s","generation":1,"ref_id":"@e1"}"#),
+            Ok(BrowserMcpKind::Act(_))
+        ));
+        assert!(BrowserMcpAction::TabList.into_quarry_action().is_err());
+        assert!(BrowserMcpAction::TabSelect { tab_id: "t".to_owned() }.into_quarry_action().is_err());
+    }
+
+    #[test]
+    fn tab_output_is_scrubbed_bounded_and_fragmentless() {
+        use crate::quarry_agent::WireTab;
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdEFGH1234";
+        let tabs: Vec<WireTab> = (0..25)
+            .map(|n| WireTab {
+                tab_id: format!("tab_{n}"),
+                title: Some(format!("Title {n} {jwt} {}", "x".repeat(400))),
+                url: Some(format!("https://example.com/p{n}?lang=en#secret-fragment")),
+                active: n == 0,
+            })
+            .collect();
+        let value: serde_json::Value = serde_json::from_str(&tabs_output(Some(&tabs[3]), &tabs)).unwrap();
+        assert_eq!(value["tabs"].as_array().unwrap().len(), MAX_TAB_LIST);
+        assert_eq!(value["truncated"], true);
+        assert_eq!(value["tab"]["tab_id"], "tab_3");
+        let text = value.to_string();
+        assert!(!text.contains("eyJhbGciOiJIUzI1NiJ9"), "{text}");
+        assert!(!text.contains("secret-fragment"), "{text}");
+        assert!(value["tabs"][0]["title"].as_str().unwrap().chars().count() <= MAX_TAB_TITLE_CHARS);
+        assert!(value["tabs"][0]["url"].as_str().unwrap().starts_with("https://example.com/p0?lang=en"));
+        let short: serde_json::Value = serde_json::from_str(&tabs_output(None, &tabs[..2])).unwrap();
+        assert_eq!(short["truncated"], false);
+        assert!(short.get("tab").is_none());
+    }
 
     #[test]
     fn browser_console_input_parses_with_defaults_and_every_field() {

@@ -1053,8 +1053,15 @@ async fn execute_step_inner(
             | QUARRY_MCP_BROWSER_ACT_TOOL
             | QUARRY_MCP_BROWSER_CONSOLE_TOOL
     ) {
-        tool_bridge::execute_quarry_browser_mcp(tool_name, tool_input, org_id, zdr, browser_grant)
-            .await
+        tool_bridge::execute_quarry_browser_mcp(
+            tool_name,
+            tool_input,
+            org_id,
+            zdr,
+            browser_grant,
+            run_id,
+        )
+        .await
     } else if tool_name == SHELL_TOOL {
         execute_shell(tool_input).await
     } else if tool_name == CODE_INTERPRETER_TOOL {
