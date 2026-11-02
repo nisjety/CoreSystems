@@ -12,3 +12,10 @@ Built (`apps/Model Plane/rust/services/execution-core/src/provenance.rs`, CRLF k
 Tests: `cargo check -p execution-core --tests` clean (only the 4 pre-existing lib dead-code warnings). `cargo test -p execution-core --lib tier_b_rule_tests` -> 9 passed.
 Assumed decisions: the MP rule also counts requests outside the grant's `allowed_domains` (stricter than the scorer); `Degraded` does not set `injection_flagged`.
 Not verified: nothing is wired into the product loop (by design); the tier_b_loop test (E3.9.3) is the consumer.
+
+## Slice E3.3-i: browser attachments and `browser.*` results use the shared trust table (W3, compile + cheap test)
+
+Finding (nothing to route): `model-gateway/src/turn_attachments.rs` and `attachment_policy.rs` handle user-uploaded chat files (base64 cap, mime, hash, sandbox staging); they classify NOTHING by trust, so there is no separate attachment classification to point at `TrustClass::BrowserScraped`. Files/screenshots/downloads of a browser run arrive as results of `browser.observe`/`browser.act`/`browser.console`, which `mp_content_safety::TrustClass` already classifies `BrowserScraped` (rows in `TOOL_TRUST`, plus `browser_agent`), and both loops call `classify` (model-gateway `moderation.rs` re-exports it; execution-core `provenance.rs`). `browser.open` is deliberately `OrgInternal` (pinned by an existing test). The offered browser tools today are `browser.observe` and `browser.act`; all covered.
+Built (additive only): `mp-content-safety/src/trust.rs` test `every_browser_row_in_the_table_is_browser_scraped_or_the_pinned_internal_one` (a future `browser*` row cannot be added with another class).
+Tests: `cargo test -p mp-content-safety` -> 23 passed (lib) + others green; `cargo check -p model-gateway --tests` -> clean (3 pre-existing lib-test warnings).
+Not verified: `TrustClass::classify` does not trim the name while the offer's `is_browser_tool_name` does; a padded name could classify OrgInternal (no producer of such names known) -> DEPTH.

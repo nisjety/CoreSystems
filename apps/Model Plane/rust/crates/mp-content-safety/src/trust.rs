@@ -205,4 +205,24 @@ mod tests {
             assert!(external.framing().expect("framed").contains("UNTRUSTED"));
         }
     }
+
+    // E3.3-i: browser attachments and results use the one shared table. The tools that return
+    // page content (and the downloads, uploads and screenshots they carry, which are results of
+    // `browser.act`/`browser.observe`) are BrowserScraped; `browser.open` is the one deliberate
+    // org-internal name and is not in the table. Any `browser*` row added to the table must be BrowserScraped.
+    #[test]
+    fn every_browser_row_in_the_table_is_browser_scraped_or_the_pinned_internal_one() {
+        let rows: Vec<&str> = TOOL_TRUST
+            .iter()
+            .map(|(name, _)| *name)
+            .filter(|name| name.starts_with("browser"))
+            .collect();
+        assert!(rows.len() >= 4, "browser rows vanished: {rows:?}");
+        for (name, class) in TOOL_TRUST.iter().filter(|(n, _)| n.starts_with("browser")) {
+            assert_eq!(*class, TrustClass::BrowserScraped, "{name}");
+        }
+        // Not in the table on purpose: it returns no page text.
+        assert!(!rows.contains(&"browser.open"));
+        assert_eq!(TrustClass::classify("browser.open"), TrustClass::OrgInternal);
+    }
 }
