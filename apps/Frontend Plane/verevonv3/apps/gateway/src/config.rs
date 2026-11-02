@@ -287,6 +287,12 @@ pub(crate) struct SpaceFeatureFlags {
     /// turn. A rollout control, never an authorization input: the queue route re-authorizes each
     /// message, and a Zero Data Retention org is reported false because that route refuses there.
     pub(crate) run_owner_steer: bool,
+    /// `SPACE_SIDEBAR_API` (WS16-S8): `GET` and `PUT /api/v1/spaces/sidebar` and the
+    /// `spaces.update_sidebar` action, the member's personal sidebar layout (refs only, stored in
+    /// Application). Off answers 404 `space_sidebar_disabled`, which the SPA reads as "use the
+    /// legacy panel". A rollout control, never an authorization input: a Zero Data Retention org
+    /// is answered `zdr_local` on `GET` and refused on `PUT` whatever this says.
+    pub(crate) sidebar: bool,
 }
 
 impl SpaceFeatureFlags {
@@ -316,6 +322,7 @@ impl SpaceFeatureFlags {
             run_live_view: space_flag("SPACE_RUN_LIVE_VIEW"),
             run_manager_stop: space_flag("SPACE_RUN_MANAGER_STOP"),
             run_owner_steer: space_flag("SPACE_RUN_OWNER_STEER"),
+            sidebar: space_flag("SPACE_SIDEBAR_API"),
         }
     }
 }

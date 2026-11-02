@@ -80,6 +80,7 @@ use super::dispatchers_spaces::ws04::{
     dispatch_spaces_update_room_details,
 };
 use super::dispatchers_spaces::ws08::dispatch_spaces_set_agent_wake_policy;
+use super::dispatchers_spaces::ws16::dispatch_spaces_update_sidebar;
 use super::dispatchers_spaces::ws03::{
     dispatch_spaces_apply_effect_preset, dispatch_spaces_set_effect_entitlements,
 };
@@ -565,6 +566,9 @@ pub(super) async fn execute_action(
                 .await
         }
         "spaces.leave_room" => dispatch_spaces_leave_room(&state, &user, &body.input).await,
+        "spaces.update_sidebar" => {
+            dispatch_spaces_update_sidebar(&state, &user, &headers, &body.input).await
+        }
         "spaces.set_agent_wake_policy" => {
             dispatch_spaces_set_agent_wake_policy(&state, &user, &body.input).await
         }

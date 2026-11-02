@@ -264,6 +264,9 @@ services:
       # re-authorizes every steer, attach and stop. OWNER_STEER lets the person who started a run type
       # into it; LIVE_VIEW, LIVE_TEXT and MANAGER_STOP are read by later WS09 slices. Production: off.
       SPACE_RUN_OWNER_STEER: ${SPACE_RUN_OWNER_STEER:-true}
+      # WS16-S8: the personal sidebar layout (GET/PUT /api/v1/spaces/sidebar; 404 when off, which the SPA reads
+      # as "use the legacy panel"). A rollout control only; a Zero Data Retention org gets zdr_local / 412 regardless.
+      SPACE_SIDEBAR_API: ${SPACE_SIDEBAR_API:-true}
       SPACE_RUN_LIVE_VIEW: ${SPACE_RUN_LIVE_VIEW:-true}
       SPACE_RUN_LIVE_TEXT: ${SPACE_RUN_LIVE_TEXT:-true}
       SPACE_RUN_MANAGER_STOP: ${SPACE_RUN_MANAGER_STOP:-true}
