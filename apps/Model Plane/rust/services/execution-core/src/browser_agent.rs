@@ -576,6 +576,15 @@ pub struct PlanConfig {
     /// the verbs are absent from the schemas and the procedure text, and one the
     /// model sends anyway is read as an `observe`.
     pub widened_actions: bool,
+    /// Tighten-only restrictions sent on `POST /v1/agent/runs` (WS7.L): plan
+    /// mode, a Space restriction, an organisation ask. `None` or an empty ask
+    /// sends nothing. Quarry can only be made stricter by it, never looser.
+    pub policy: Option<crate::quarry_agent::WireRequestAsk>,
+    /// Run trace context sent on start (WS10.S4): the Model run id, an agent
+    /// label and the run origin. Labels only, never authority.
+    pub trace: Option<crate::quarry_agent::WireRunTrace>,
+    /// Correlation id sent as `x-request-id` on every Quarry call of the run.
+    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -736,6 +745,11 @@ pub(crate) fn validate_plan_config(config: &PlanConfig) -> Result<(), String> {
         if !plan.is_domain_allowed(start_url) {
             return Err("browser start_url is outside the broker domain policy".to_owned());
         }
+    }
+    // A restriction that cannot be sent as given fails the run; it is never
+    // trimmed or dropped on the way to Quarry.
+    if let Some(ask) = &config.policy {
+        ask.validate()?;
     }
     Ok(())
 }
@@ -1062,6 +1076,15 @@ pub async fn run_browser_agent_loop(
                 &plan.config.grant_id,
             );
             params.profile_id = plan.config.profile_id.clone();
+            // Tighten-only restrictions and the trace label ride the start
+            // request only when present; an empty ask sends no `policy` key.
+            params.policy = plan
+                .config
+                .policy
+                .clone()
+                .filter(|ask| !ask.is_empty());
+            params.trace = plan.config.trace.clone();
+            params.request_id = plan.config.request_id.as_deref();
             params
         })
         .await
@@ -1165,6 +1188,37 @@ pub async fn run_browser_agent_loop(
                         }
                         pending = Some(obs);
                     }
+                    // A policy refusal is final the same way: blocked with the
+                    // fixed text, so the next planning step ends the run. The
+                    // action never reaches the risk gate or an approval, and
+                    // nothing is retried or re-read.
+                    Err(crate::quarry_agent::AgentClientError::PolicyDenied(denial)) => {
+                        warn!(
+                            plan_id = %plan.config.plan_id,
+                            reason = denial.reason.as_str(),
+                            capability = denial.capability.as_deref().unwrap_or(""),
+                            decision_source = denial.decision_source.as_deref().unwrap_or(""),
+                            "quarry web policy refused the browser action"
+                        );
+                        let page_url = if matches!(action.action_type, ActionType::Goto) {
+                            action.url.clone()
+                        } else {
+                            plan.observations
+                                .last()
+                                .map(|o| o.page_url.clone())
+                                .unwrap_or_default()
+                        };
+                        let obs = crate::quarry_agent::observation_from_policy_denial(
+                            &denial,
+                            &action.action_id,
+                            &plan.config.grant_id,
+                            &page_url,
+                        );
+                        if let Some(sink) = sink {
+                            sink.observation_received(&plan.config, &obs).await;
+                        }
+                        pending = Some(obs);
+                    }
                     Err(e) => {
                         plan.status = PlanStatus::Failed;
                         // The classifier decides: a 402 budget or a 429 ends the
@@ -1259,7 +1313,14 @@ pub async fn run_browser_agent_loop(
     };
 
     // Always release the leased session.
-    if let Err(e) = client.close_run(&run.run_id, &plan.config.org_id).await {
+    if let Err(e) = client
+        .close_run_with(
+            &run.run_id,
+            &plan.config.org_id,
+            plan.config.request_id.as_deref(),
+        )
+        .await
+    {
         warn!(plan_id = %plan.config.plan_id, error = %e, "browser-agent close_run failed");
     }
 
@@ -1292,17 +1353,17 @@ async fn dispatch_step(
     let mut driver_retried = false;
     let mut waited = false;
     loop {
-        let result = client
-            .step(crate::quarry_agent::StepParams::new(
-                &run.run_id,
-                &run.lease_id,
-                &config.org_id,
-                action.clone(),
-                constraints,
-                config.zdr,
-                &config.grant_id,
-            ))
-            .await;
+        let mut params = crate::quarry_agent::StepParams::new(
+            &run.run_id,
+            &run.lease_id,
+            &config.org_id,
+            action.clone(),
+            constraints,
+            config.zdr,
+            &config.grant_id,
+        );
+        params.request_id = config.request_id.as_deref();
+        let result = client.step(params).await;
         let Err(error) = &result else {
             return result;
         };

@@ -29,6 +29,8 @@ struct Inner {
     start_requests: Vec<Value>,
     step_requests: Vec<Value>,
     step_headers: Vec<Vec<(String, String)>>,
+    start_headers: Vec<Vec<(String, String)>>,
+    close_headers: Vec<Vec<(String, String)>>,
     closed: u32,
     step_counter: u32,
 }
@@ -128,6 +130,16 @@ impl FakeQuarry {
         self.inner.lock().expect("lock").step_headers.clone()
     }
 
+    /// The headers (lower-cased names) of each start request.
+    pub fn start_headers(&self) -> Vec<Vec<(String, String)>> {
+        self.inner.lock().expect("lock").start_headers.clone()
+    }
+
+    /// The headers (lower-cased names) of each release request.
+    pub fn close_headers(&self) -> Vec<Vec<(String, String)>> {
+        self.inner.lock().expect("lock").close_headers.clone()
+    }
+
     /// How many times the run was released.
     pub fn closed_runs(&self) -> u32 {
         self.inner.lock().expect("lock").closed
@@ -138,9 +150,26 @@ fn envelope(data: Value) -> Value {
     json!({"data": data, "meta": {}, "error": null})
 }
 
-async fn start_run(State(inner): State<Shared>, Json(body): Json<Value>) -> impl IntoResponse {
+fn header_pairs(headers: &HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_owned(),
+                value.to_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect()
+}
+
+async fn start_run(
+    State(inner): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
     let mut guard = inner.lock().expect("lock");
     guard.start_requests.push(body);
+    guard.start_headers.push(header_pairs(&headers));
     if let Some((status, body)) = guard.start.clone() {
         return (
             StatusCode::from_u16(status).expect("status"),
@@ -187,7 +216,13 @@ async fn step(
     }
 }
 
-async fn close_run(State(inner): State<Shared>, Path(_run_id): Path<String>) -> StatusCode {
-    inner.lock().expect("lock").closed += 1;
+async fn close_run(
+    State(inner): State<Shared>,
+    Path(_run_id): Path<String>,
+    headers: HeaderMap,
+) -> StatusCode {
+    let mut guard = inner.lock().expect("lock");
+    guard.closed += 1;
+    guard.close_headers.push(header_pairs(&headers));
     StatusCode::OK
 }

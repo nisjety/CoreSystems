@@ -452,7 +452,11 @@ async fn policy_denied_is_terminal_with_fixed_text() {
             error_with(
                 "FORBIDDEN",
                 "capability denied for https://secret.example/path?token=abc123",
-                serde_json::json!({"reason": "policy_denied"}),
+                serde_json::json!({
+                    "reason": "policy_denied",
+                    "capability": "browser.act.upload",
+                    "decision_source": "org"
+                }),
             ),
         )
         // Never reached: a terminal error is not retried or re-read.
@@ -462,8 +466,16 @@ async fn policy_denied_is_terminal_with_fixed_text() {
         .then_done();
     let result = run_with(&quarry, &planner, plan_config()).await;
     assert_eq!(result.status, PlanStatus::Failed);
-    assert_eq!(result.summary, "browser-agent step failed: 403 FORBIDDEN (policy_denied)");
+    // WS7.L: the denial is a Blocked observation with the fixed text, not a
+    // step failure carrying Quarry's wording.
+    assert_eq!(
+        result.summary,
+        "action blocked: denied by organisation policy: browser.act.upload; \
+         do not retry or try another route"
+    );
     assert!(!result.summary.contains("secret.example"));
+    let last = result.observations.last().expect("the denial is recorded");
+    assert_eq!(last.status, ObservationStatus::Blocked);
     assert_eq!(quarry.step_requests().len(), 1, "no retry, no re-read");
     assert_eq!(planner.calls(), 1, "the planner is not asked again");
     assert_eq!(quarry.closed_runs(), 1);
@@ -1160,4 +1172,146 @@ async fn with_the_flag_off_a_proposed_press_is_only_an_observe() {
     assert_eq!(result.status, PlanStatus::Completed, "{}", result.summary);
     let types = request_types(&quarry);
     assert_eq!(types, ["navigate", "get_content"], "no press verb is ever sent: {types:?}");
+}
+
+// ---------------------------------------------------------------------------
+// WS7.L: the request ask and the denial rendering. WS10.S4: trace context.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn blocked_denial_is_not_offered_to_approvals() {
+    use execution_core::browser_agent::ApprovalOutcome;
+    let quarry = FakeQuarry::start().await;
+    quarry
+        .push_page("https://example.com/", "Home", "Home page", &[("@e1", "button", "Open", "")])
+        .push_error(
+            403,
+            error_with(
+                "FORBIDDEN",
+                "operator text",
+                serde_json::json!({"reason": "policy_denied", "capability": "browser.act.interact"}),
+            ),
+        )
+        // Never reached: a granted approval must not re-send the denied action.
+        .push_page("https://example.com/", "Home", "Home page", &[]);
+    let sink = ApprovalSink {
+        outcome: ApprovalOutcome::Granted,
+        asked: std::sync::Mutex::new(Vec::new()),
+    };
+    let planner = ScriptedPlanner::new()
+        .then_action(goto("https://example.com/"))
+        .then_action(click_ref("snap-1", 1, "@e1"))
+        .then_done();
+    let client = quarry.client();
+    let result = run_browser_agent_loop(
+        plan_config(),
+        Some(&client),
+        Some(&planner as &dyn ActionPlanner),
+        Some(&sink),
+        None,
+    )
+    .await;
+    assert_eq!(result.status, PlanStatus::Failed);
+    assert!(
+        result
+            .summary
+            .starts_with("action blocked: denied by organisation policy: browser.act.interact"),
+        "{}",
+        result.summary
+    );
+    assert!(sink.asked.lock().unwrap().is_empty(), "a denial is never an approval request");
+    assert_eq!(quarry.step_requests().len(), 2, "no retry after the denial");
+    assert_eq!(planner.calls(), 2, "the planner is not asked again");
+    assert_eq!(quarry.closed_runs(), 1);
+}
+
+#[tokio::test]
+async fn plan_mode_policy_reaches_the_start_request_and_nothing_else_changes() {
+    use execution_core::quarry_agent::WireRequestAsk;
+    let quarry = FakeQuarry::start().await;
+    quarry.push_page("https://example.com/", "Home", "Home page", &[]);
+    let planner = ScriptedPlanner::new()
+        .then_action(goto("https://example.com/"))
+        .then_done();
+    let mut config = plan_config();
+    config.policy = Some(WireRequestAsk::plan_mode());
+    let result = run_with(&quarry, &planner, config).await;
+    assert_eq!(result.status, PlanStatus::Completed, "{}", result.summary);
+    let starts = quarry.start_requests();
+    assert_eq!(starts.len(), 1);
+    assert_eq!(
+        starts[0]["policy"],
+        serde_json::json!({"disable": [
+            "browser.act.input", "browser.act.interact",
+            "browser.act.upload", "browser.act.download"
+        ]})
+    );
+    // The broker's host policy is untouched by the ask.
+    assert_eq!(starts[0]["constraints"]["allowed_domains"], serde_json::json!(["example.com"]));
+
+    // No ask, or an empty one: no `policy` key at all.
+    for ask in [None, Some(WireRequestAsk::default())] {
+        let quarry = FakeQuarry::start().await;
+        quarry.push_page("https://example.com/", "Home", "Home page", &[]);
+        let planner = ScriptedPlanner::new()
+            .then_action(goto("https://example.com/"))
+            .then_done();
+        let mut config = plan_config();
+        config.policy = ask;
+        run_with(&quarry, &planner, config).await;
+        assert!(quarry.start_requests()[0].get("policy").is_none());
+        assert!(quarry.start_requests()[0].get("trace").is_none());
+    }
+}
+
+#[tokio::test]
+async fn trace_context_is_sent_on_start_and_request_id_on_every_call() {
+    use execution_core::quarry_agent::{WireRunAgent, WireRunTrace};
+    let quarry = FakeQuarry::start().await;
+    quarry
+        .push_page("https://example.com/", "Home", "Home page", &[("@e1", "link", "More", "More")])
+        .push_page("https://example.com/more", "More", "More page", &[]);
+    let planner = ScriptedPlanner::new()
+        .then_action(goto("https://example.com/"))
+        .then_action(click_ref("snap-1", 1, "@e1"))
+        .then_done();
+    let mut config = plan_config();
+    config.request_id = Some("req-abc_123".to_owned());
+    config.trace = Some(WireRunTrace {
+        run_id: Some("run_h".to_owned()),
+        agent: Some(WireRunAgent {
+            id: Some("browser-agent".to_owned()),
+            role: Some("browser".to_owned()),
+            parent_id: None,
+        }),
+        origin: Some("USER".to_owned()),
+    });
+    let result = run_with(&quarry, &planner, config).await;
+    assert_eq!(result.status, PlanStatus::Completed, "{}", result.summary);
+
+    let starts = quarry.start_requests();
+    assert_eq!(
+        starts[0]["trace"],
+        serde_json::json!({
+            "run_id": "run_h",
+            "agent": {"id": "browser-agent", "role": "browser"},
+            "origin": "USER"
+        })
+    );
+    // Start, both steps and the release all carry the same request id.
+    let request_ids = |calls: Vec<Vec<(String, String)>>| -> Vec<Option<String>> {
+        calls
+            .into_iter()
+            .map(|headers| {
+                headers
+                    .into_iter()
+                    .find(|(name, _)| name == "x-request-id")
+                    .map(|(_, value)| value)
+            })
+            .collect()
+    };
+    let expected = Some("req-abc_123".to_owned());
+    assert_eq!(request_ids(quarry.start_headers()), [expected.clone()]);
+    assert_eq!(request_ids(quarry.step_headers()), [expected.clone(), expected.clone()]);
+    assert_eq!(request_ids(quarry.close_headers()), [expected]);
 }

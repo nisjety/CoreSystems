@@ -395,6 +395,11 @@ pub(crate) async fn execute_quarry_browser_mcp(
             },
             Err(error) => browser_mcp_error(format!("serialize Quarry observation: {error}")),
         },
+        // A policy refusal is final: the fixed text tells the chat model not to
+        // retry or look for another route, and carries no host or message.
+        Err(crate::quarry_agent::AgentClientError::PolicyDenied(denial)) => {
+            browser_mcp_error(denial.fixed_text())
+        }
         Err(error) => browser_mcp_error(format!("Quarry browser operation failed: {error}")),
     }
 }
@@ -1236,6 +1241,64 @@ struct BrowserAgentInput {
     /// The org planner switch the gateway wrote from the org quota row
     /// (`on`, `off`, `unavailable`); read by the planner policy (WS11.S2).
     planner_flag: Option<String>,
+    /// Tighten-only request ask (WS7.L): capabilities to disable and hosts to
+    /// deny or allow for this run. The only way a Space or caller restriction
+    /// reaches Quarry. `robots_max`, `proxy_max` and any unknown key fail the
+    /// input (the type is `deny_unknown_fields`), never get dropped.
+    policy: Option<RunPolicyInput>,
+    /// Plan mode: unions the four write-capable capabilities into the ask.
+    plan_mode: Option<bool>,
+    /// Correlation id for every Quarry call of the run (WS10.S4). A value that
+    /// is not a trace token is dropped.
+    request_id: Option<String>,
+    /// Trace context (WS10.S4): `origin` and `agent` labels. The run id is the
+    /// verified Model run id, never read from here.
+    trace: Option<crate::quarry_agent::WireRunTrace>,
+}
+
+/// The three keys of [`crate::quarry_agent::WireRequestAsk`], strictly.
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RunPolicyInput {
+    #[serde(default)]
+    disable: Vec<String>,
+    #[serde(default)]
+    deny_domains: Vec<String>,
+    #[serde(default)]
+    allow_domains: Option<Vec<String>>,
+}
+
+/// The ask the run sends: plan mode's disables unioned with the caller's ask,
+/// tighten-only. `None` when neither asks for anything.
+fn effective_policy(
+    plan_mode: Option<bool>,
+    policy: Option<RunPolicyInput>,
+) -> Option<crate::quarry_agent::WireRequestAsk> {
+    use crate::quarry_agent::WireRequestAsk;
+    let from_caller = policy.map(|policy| WireRequestAsk {
+        disable: policy.disable,
+        deny_domains: policy.deny_domains,
+        allow_domains: policy.allow_domains,
+    });
+    let ask = match (plan_mode.unwrap_or(false), from_caller) {
+        (true, Some(caller)) => WireRequestAsk::plan_mode().tightened_with(&caller),
+        (true, None) => WireRequestAsk::plan_mode(),
+        (false, Some(caller)) => caller.tightened_with(&WireRequestAsk::default()),
+        (false, None) => return None,
+    };
+    (!ask.is_empty()).then_some(ask)
+}
+
+/// The trace the run sends: the caller's labels with the verified Model run id.
+/// `None` when the input named no trace, so a caller that sends none changes
+/// nothing on the wire.
+fn effective_trace(
+    trace: Option<crate::quarry_agent::WireRunTrace>,
+    run_id: &str,
+) -> Option<crate::quarry_agent::WireRunTrace> {
+    let mut trace = trace?;
+    trace.run_id = Some(run_id.trim().to_owned()).filter(|id| !id.is_empty());
+    trace.sanitized()
 }
 
 fn browser_plan_config(
@@ -1265,10 +1328,16 @@ fn browser_plan_config_with(
             "browser tool input grant does not match the broker-validated grant".to_owned(),
         );
     }
+    let run_id = input.run_id.unwrap_or_default();
     let plan = browser_agent::PlanConfig {
         plan_id: input.plan_id.unwrap_or_else(mp_ids::new_ulid),
         grant_id: validated_grant.grant_id().to_owned(),
-        run_id: input.run_id.unwrap_or_default(),
+        policy: effective_policy(input.plan_mode, input.policy),
+        trace: effective_trace(input.trace, &run_id),
+        request_id: input
+            .request_id
+            .filter(|id| crate::quarry_agent::is_trace_token(id)),
+        run_id,
         org_id: verified_org_id.to_owned(),
         system_prompt: input.system_prompt.unwrap_or_default(),
         max_steps: ceilings.steps(input.max_steps, validated_grant.budget_max_steps),
@@ -1829,6 +1898,95 @@ mod tests {
         let raised = build(r#"{"grant_id":"grant-1","max_planner_tokens":9000000,"planner_flag":"yes"}"#);
         assert_eq!(raised.max_planner_tokens, Some(1_000_000));
         assert_eq!(raised.planner_flag, None);
+    }
+
+    fn build_plan(json: &str) -> Result<browser_agent::PlanConfig, String> {
+        let grant = ValidatedBrowserGrant::for_test("grant-1", "run", "", "u", false);
+        let input: BrowserAgentInput = serde_json::from_str(json).map_err(|e| e.to_string())?;
+        browser_plan_config_with(input, "org", false, &grant, &PlanCeilings::default())
+    }
+
+    #[test]
+    fn space_restriction_enters_only_through_the_ask() {
+        // Nothing but `policy` (and `plan_mode`) can restrict a run: a caller's
+        // stray top-level keys are not restrictions and change nothing.
+        let stray = build_plan(
+            r#"{"grant_id":"grant-1","deny_domains":["a.example"],"disable":["browser.act.upload"],
+                "space_restriction":{"disable":["browser.act.input"]}}"#,
+        )
+        .unwrap();
+        assert!(stray.policy.is_none());
+
+        let asked = build_plan(
+            r#"{"grant_id":"grant-1","policy":{"disable":["browser.act.upload"],
+                "deny_domains":["a.example"]}}"#,
+        )
+        .unwrap();
+        let ask = asked.policy.expect("the ask is carried");
+        assert_eq!(ask.disable, ["browser.act.upload"]);
+        assert_eq!(ask.deny_domains, ["a.example"]);
+        // The ask never rewrites the broker's host policy.
+        assert_eq!(asked.allowed_domains, stray.allowed_domains);
+
+        // Quarry's loosening-capable keys are refused, not dropped.
+        for key in ["robots_max", "proxy_max", "mode"] {
+            let json = format!(r#"{{"grant_id":"grant-1","policy":{{"{key}":"off"}}}}"#);
+            assert!(build_plan(&json).is_err(), "{key}");
+        }
+        // An ask the run cannot send as given fails the run.
+        let bad = build_plan(r#"{"grant_id":"grant-1","policy":{"deny_domains":["https://x.example/"]}}"#);
+        assert!(bad.is_err());
+    }
+
+    #[test]
+    fn plan_mode_unions_with_the_callers_ask() {
+        let plan = build_plan(
+            r#"{"grant_id":"grant-1","plan_mode":true,
+                "policy":{"disable":["browser.act.upload","browser.act.scroll"],
+                          "deny_domains":["a.example"]}}"#,
+        )
+        .unwrap();
+        let ask = plan.policy.expect("ask");
+        assert_eq!(
+            ask.disable,
+            [
+                "browser.act.download",
+                "browser.act.input",
+                "browser.act.interact",
+                "browser.act.scroll",
+                "browser.act.upload",
+            ]
+        );
+        assert_eq!(ask.deny_domains, ["a.example"]);
+        assert!(build_plan(r#"{"grant_id":"grant-1","plan_mode":false}"#).unwrap().policy.is_none());
+        assert!(build_plan(r#"{"grant_id":"grant-1","policy":{}}"#).unwrap().policy.is_none());
+    }
+
+    #[test]
+    fn trace_and_request_id_come_from_the_input_and_the_run_id_from_the_run() {
+        let plan = build_plan(
+            r#"{"grant_id":"grant-1","run_id":"run_77","request_id":"req_ab-1",
+                "trace":{"run_id":"forged","origin":"SCHEDULE",
+                         "agent":{"id":"browser-agent","role":"browser"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(plan.request_id.as_deref(), Some("req_ab-1"));
+        let trace = plan.trace.expect("trace");
+        assert_eq!(trace.run_id.as_deref(), Some("run_77"), "the run id is never the caller's");
+        assert_eq!(trace.origin.as_deref(), Some("SCHEDULE"));
+        assert_eq!(trace.agent.and_then(|a| a.id).as_deref(), Some("browser-agent"));
+
+        // Hostile values are dropped; no trace input, no trace.
+        let hostile = build_plan(
+            r#"{"grant_id":"grant-1","run_id":"run_77","request_id":"a b\n",
+                "trace":{"origin":"USER; drop table","agent":{"id":"x y"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(hostile.request_id, None);
+        let kept = hostile.trace.expect("the run id still labels the run");
+        assert_eq!(kept.origin, None);
+        assert_eq!(kept.agent, None);
+        assert!(build_plan(r#"{"grant_id":"grant-1","run_id":"run_77"}"#).unwrap().trace.is_none());
     }
 
     #[test]
