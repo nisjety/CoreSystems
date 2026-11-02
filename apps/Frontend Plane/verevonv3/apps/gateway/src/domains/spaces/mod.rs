@@ -35,6 +35,7 @@ pub(crate) mod human_posts;
 pub(crate) mod room_admin;
 mod pins;
 mod room_artifacts;
+mod run_live;
 mod schedule_template;
 mod stream;
 
@@ -921,6 +922,7 @@ fn module_routes() -> Router<AppState> {
         .merge(human_posts::routes())
         .merge(pins::routes())
         .merge(room_artifacts::routes())
+        .merge(run_live::routes())
         .merge(stream::routes())
 }
 
