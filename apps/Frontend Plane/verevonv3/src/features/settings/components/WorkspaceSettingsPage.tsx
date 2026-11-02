@@ -14,6 +14,7 @@ import { CronSchedulesSection } from '@/features/settings/components/CronSchedul
 import { OrgModelAccessSection } from '@/features/settings/components/OrgModelAccessSection'
 import { DomainsPanel } from '@/features/settings/components/DomainsPanel'
 import { SsoPolicyPanel } from '@/features/settings/components/SsoPolicyPanel'
+import { ScimPanel } from '@/features/settings/components/ScimPanel'
 import { OrgQuotasSection } from '@/features/settings/components/OrgQuotasSection'
 import { OrgSpacePolicySection } from '@/features/settings/components/OrgSpacePolicySection'
 import { MemorySection } from '@/features/settings/components/MemorySection'
@@ -1266,6 +1267,7 @@ function SsoSection() {
         description={i18n.tr('Konfigurer organisasjonens innlogging, domener og provisjonering.', 'Configure organization sign-in, domains, and provisioning.')}
       />
       <SsoPolicyPanel />
+      <ScimPanel />
     </>
   )
 }

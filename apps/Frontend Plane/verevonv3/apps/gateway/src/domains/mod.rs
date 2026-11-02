@@ -43,6 +43,7 @@ pub mod privacy;
 pub mod remote_support;
 pub mod router_policy;
 pub mod run_watchers;
+pub mod scim;
 pub mod search;
 pub mod settings;
 pub mod shares;

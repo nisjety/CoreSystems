@@ -137,6 +137,7 @@ fn build_router(state: config::AppState) -> Router {
         .merge(domains::remote_support::router(state.clone()))
         .merge(domains::router_policy::router(state.clone()))
         .merge(domains::run_watchers::router(state.clone()))
+        .merge(domains::scim::router(state.clone()))
         .merge(domains::search::router(state.clone()))
         .merge(domains::settings::router(state.clone()))
         .merge(domains::shares::router(state.clone()))

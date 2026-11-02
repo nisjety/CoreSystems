@@ -25,6 +25,7 @@ const (
 	siemExporterPrincipal     = "audit-core"
 	browserBrokerPrincipal    = "browser-broker"
 	domainReaderPrincipal     = "auth-core"
+	scimEdgePrincipal         = "verevon-scim-edge"
 	serviceDelegationMaxAge   = 30 * time.Second
 	serviceDelegationSkew     = 5 * time.Second
 	serviceDelegationMaxBody  = 1 << 20
@@ -71,6 +72,9 @@ var orgServiceScopeAllowlist = map[string]struct{}{
 	// gateway on behalf of a signed user, and the by-domain read of which organisation
 	// holds a verified domain, held by auth-core alone (validateServiceCredential).
 	"org:identity:admin:self": {},
+	// The SCIM surface (WS05-S8), held by the gateway's stateless SCIM edge alone
+	// (validateServiceCredential); the IdP's own bearer token still names the org.
+	"org:scim:any": {},
 	"org:domain:read:any":     {},
 	// Read-only access to one org's agent-browser site decision, through
 	// GET /internal/orgs/:orgId/browser-sites/resolve and nothing else (WS21-S3).
@@ -176,6 +180,9 @@ func validateServiceCredential(credential serviceCredential, principals map[stri
 		// The exporter read returns plaintext destination secrets, so unlike the
 		// other :any scopes it is pinned to one principal.
 		if scope == "org:siem:read:any" && credential.Principal != siemExporterPrincipal {
+			return fmt.Errorf("scope %s is not valid for principal %s", scope, credential.Principal)
+		}
+		if scope == "org:scim:any" && credential.Principal != scimEdgePrincipal {
 			return fmt.Errorf("scope %s is not valid for principal %s", scope, credential.Principal)
 		}
 		if scope == "org:domain:read:any" && credential.Principal != domainReaderPrincipal {
@@ -306,6 +313,8 @@ func serviceScopesForRequest(request *http.Request) []string {
 		}
 	case len(segments) >= 1 && segments[0] == "orgs":
 		return organizationProxyScopes(method, segments[1:])
+	case len(segments) >= 3 && segments[0] == "internal" && segments[1] == "scim" && segments[2] == "v2":
+		return []string{"org:scim:any"}
 	case len(segments) >= 2 && segments[0] == "internal" && segments[1] == "orgs":
 		return internalOrganizationScopes(method, segments[2:])
 	}
@@ -405,6 +414,12 @@ func organizationProxyScopes(method string, rest []string) []string {
 	case len(rest) == 4 && rest[1] == "domains" && rest[3] == "verify" && method == http.MethodPost:
 		return []string{"org:identity:admin:self"}
 	// SSO policy and providers (WS05-S7): the same signed owner/admin authority.
+	case len(rest) == 3 && rest[1] == "scim" && rest[2] == "tokens" && (method == http.MethodGet || method == http.MethodPost):
+		return []string{"org:identity:admin:self"}
+	case len(rest) == 4 && rest[1] == "scim" && rest[2] == "tokens" && method == http.MethodDelete:
+		return []string{"org:identity:admin:self"}
+	case len(rest) == 3 && rest[1] == "scim" && rest[2] == "status" && method == http.MethodGet:
+		return []string{"org:identity:admin:self"}
 	case len(rest) == 3 && rest[1] == "sso" && rest[2] == "policy" && (method == http.MethodGet || method == http.MethodPut):
 		return []string{"org:identity:admin:self"}
 	case len(rest) == 3 && rest[1] == "sso" && rest[2] == "providers" && method == http.MethodPost:

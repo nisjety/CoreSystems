@@ -260,6 +260,11 @@ services:
       # WS05-S6: owner/admin domain verification routes (proxied to org-core, which has its own
       # ORG_DOMAIN_VERIFICATION_ENABLED). Rollout control only; the live owner/admin role decides access.
       ORG_IDENTITY_ADMIN_API: ${ORG_IDENTITY_ADMIN_API:-true}
+      # WS05-S8: the public SCIM edge (/api/v1/scim/v2/*). Off by default everywhere; while off it answers the
+      # same 501 SCIM error. The edge secret is the org-core verevon-scim-edge principal credential (equal
+      # to org-core ORG_CORE_SCIM_EDGE_TOKEN); the edge stays off unless it is a secure secret.
+      SCIM_EDGE_ENABLED: ${SCIM_EDGE_ENABLED:-false}
+      ORG_CORE_SCIM_EDGE_TOKEN: ${ORG_CORE_SCIM_EDGE_TOKEN:-}
       # WS09: agent work in the room. Rollout controls only (never authorization): the owner plane
       # re-authorizes every steer, attach and stop. OWNER_STEER lets the person who started a run type
       # into it; LIVE_VIEW, LIVE_TEXT and MANAGER_STOP are read by later WS09 slices. Production: off.

@@ -258,6 +258,8 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'org.update_sso_policy': exempt('human_identity_or_security', 'external_write'),
   'org.add_sso_provider': exempt('human_identity_or_security', 'external_write'),
   'org.remove_sso_provider': exempt('human_identity_or_security', 'external_write'),
+  'org.create_scim_token': exempt('human_identity_or_security', 'external_write'),
+  'org.revoke_scim_token': exempt('human_identity_or_security', 'external_write'),
   'org.update_support_ai_mode': exempt('human_identity_or_security', 'external_write'),
   'org.update_agent_learning_policy': exempt('human_identity_or_security', 'external_write'),
   'membership.invite_member': exempt('human_identity_or_security', 'external_write'),

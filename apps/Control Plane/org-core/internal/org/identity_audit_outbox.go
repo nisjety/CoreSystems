@@ -32,6 +32,11 @@ func identityAuditResourceKind(event string) string {
 		return "sso_policy"
 	case IdentityEventSSOProviderAdded, IdentityEventSSOProviderGone:
 		return "sso_provider"
+	case IdentityEventSCIMTokenCreated, IdentityEventSCIMTokenRevoked:
+		return "scim_token"
+	case IdentityEventSCIMUserProvisioned, IdentityEventSCIMUserDeprovisioned,
+		IdentityEventSCIMUserReactivated, IdentityEventSCIMRefusedLastOwner:
+		return "scim_user"
 	}
 	return "domain"
 }
@@ -44,6 +49,13 @@ var identityAuditEvents = map[string]struct{}{
 	IdentityEventSSOPolicyUpdated: {},
 	IdentityEventSSOProviderAdded: {},
 	IdentityEventSSOProviderGone:  {},
+	// SCIM tokens and users (WS05-S8). Single-token names, see the note above.
+	IdentityEventSCIMTokenCreated:       {},
+	IdentityEventSCIMTokenRevoked:       {},
+	IdentityEventSCIMUserProvisioned:    {},
+	IdentityEventSCIMUserDeprovisioned:  {},
+	IdentityEventSCIMUserReactivated:    {},
+	IdentityEventSCIMRefusedLastOwner:   {},
 }
 
 // identityAuditChange is one identity change to record. Details hold ids,

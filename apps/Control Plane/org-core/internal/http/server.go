@@ -47,6 +47,12 @@ type Server struct {
 	identityEnabled bool
 	identity        identityDomainService
 	sso             identitySSOService // SSO policy and providers (WS05-S7), same gate
+
+	// scimOn mounts the SCIM routes (WS05-S8, ORG_SCIM_ENABLED); scim is the
+	// service behind them and scimLimiter the per-token rate limit.
+	scimOn      bool
+	scim        scimService
+	scimLimiter *scimRateLimiter
 }
 
 func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository, authServiceURL, userServiceURL string) *Server {
@@ -57,6 +63,9 @@ func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository,
 	if credentialErr != nil {
 		log.Printf("org-core service authentication unavailable: %v", credentialErr)
 		serviceCredentials = nil
+	}
+	if scimEnabled(os.Getenv) && len(serviceCredentials) > 0 {
+		serviceCredentials = withSCIMEdgeCredential(serviceCredentials, os.Getenv(scimEdgeTokenEnv))
 	}
 	router.Use(serviceAuthMiddleware(serviceCredentials, time.Now))
 
@@ -103,6 +112,21 @@ func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository,
 				orgService.SetIdentityProviderAdmin(client)
 			} else {
 				log.Printf("org-core sso administration: %s is not set; provider administration and enforce are unavailable", authCoreIdentityTokenEnv)
+			}
+		}
+	}
+	if scimEnabled(os.Getenv) {
+		s.scimOn = true
+		s.scimLimiter = newSCIMRateLimiter(scimRatePerMinute, time.Now)
+		if orgService != nil {
+			// SCIM needs auth-core for every membership change. Without the
+			// credential the routes stay mounted and answer 503: a SCIM request
+			// never half-applies.
+			if client := orgcore.NewAuthCoreIdentityClient(authCoreIdentityURL(os.Getenv), os.Getenv(authCoreIdentityTokenEnv)); client != nil {
+				orgService.SetScimProvisioner(client)
+				s.scim = orgService
+			} else {
+				log.Printf("org-core scim: %s is not set; SCIM is unavailable", authCoreIdentityTokenEnv)
 			}
 		}
 	}
@@ -218,6 +242,14 @@ func (s *Server) setupRoutes() {
 	s.router.POST("/orgs/:id/sso/providers", identityGate, guard, s.addSSOProvider)
 	s.router.DELETE("/orgs/:id/sso/providers/:providerId", identityGate, guard, s.removeSSOProvider)
 
+	// SCIM token management (WS05-S8): owner/admin, same authority as the domain
+	// routes. Every path answers 404 until ORG_SCIM_ENABLED is on.
+	scimGate := s.requireSCIMEnabled()
+	s.router.GET("/orgs/:id/scim/tokens", scimGate, s.listSCIMTokens)
+	s.router.POST("/orgs/:id/scim/tokens", scimGate, guard, s.createSCIMToken)
+	s.router.DELETE("/orgs/:id/scim/tokens/:tokenId", scimGate, guard, s.revokeSCIMToken)
+	s.router.GET("/orgs/:id/scim/status", scimGate, s.getSCIMStatus)
+
 	// Read-only projection/RBAC catalog. Membership, role assignment, and custom
 	// policy mutations are intentionally not mounted for the secure MVP: Auth
 	// Core is the sole membership authority, while fine-grained policy editing is
@@ -287,6 +319,22 @@ func (s *Server) setupRoutes() {
 	// (WS05-S7). Same scope; no-store.
 	internal.GET("/orgs/by-domain/:domain/sso-policy", identityGate, s.getSSOPolicyByDomainInternal)
 	internal.GET("/orgs/:orgId/roles/:roleName/capabilities", s.getEffectiveCapabilities)
+
+	// The SCIM surface (WS05-S8), reached only by the gateway edge under the
+	// verevon-scim-edge principal (scope org:scim:any). The IdP bearer token in
+	// Authorization names the organisation; Groups are not supported.
+	scim := internal.Group("/scim/v2", scimGate, s.scimAuthenticate())
+	scim.GET("/ServiceProviderConfig", scimServiceProviderConfig)
+	scim.GET("/ResourceTypes", scimResourceTypes)
+	scim.GET("/Schemas", scimSchemas)
+	scim.GET("/Users", s.scimListUsers)
+	scim.POST("/Users", s.scimCreateUser)
+	scim.GET("/Users/:id", s.scimGetUser)
+	scim.PUT("/Users/:id", s.scimReplaceUser)
+	scim.PATCH("/Users/:id", s.scimPatchUser)
+	scim.DELETE("/Users/:id", s.scimDeleteUser)
+	scim.Any("/Groups", scimNotImplemented)
+	scim.Any("/Groups/:id", scimNotImplemented)
 	internal.GET("/orgs/by-tenant", s.getOrganizationByTenant)
 	internal.POST("/orgs/ensure-from-tenant", s.ensureOrganizationFromTenant)
 	internal.POST("/orgs/:orgId/onboarding/state", s.updateOnboardingState)

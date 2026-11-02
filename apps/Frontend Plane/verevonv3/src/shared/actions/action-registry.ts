@@ -1072,6 +1072,18 @@ const orgRemoveSsoProviderInput = z.object({
   providerId: z.string().trim().min(3).max(64),
 })
 
+// SCIM tokens (WS05-S8). org-core mints the bearer token and shows it once; revoking is immediate.
+const orgCreateScimTokenInput = z.object({
+  orgId: z.string().min(1),
+  name: z.string().trim().min(1).max(80),
+  expiresInDays: z.number().int().min(1).max(365),
+})
+
+const orgRevokeScimTokenInput = z.object({
+  orgId: z.string().min(1),
+  tokenId: z.string().trim().min(1).max(64),
+})
+
 const orgUpdateInstructionsInput = z.object({
   orgId: z.string().min(1),
   instructions: z.string().trim().optional(),
@@ -3086,6 +3098,28 @@ export const actionRegistry = [
     requiresApproval: true,
     reversible: false,
     inputSchema: orgRemoveSsoProviderInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'org.create_scim_token',
+    label: 'Create SCIM token',
+    description: 'Create a bearer token your identity provider uses to provision and deprovision members through SCIM. The token is shown once. Needs a verified domain. Owner or admin only.',
+    ownerPlane: 'control',
+    risk: 'high',
+    requiresApproval: true,
+    reversible: true,
+    inputSchema: orgCreateScimTokenInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'org.revoke_scim_token',
+    label: 'Revoke SCIM token',
+    description: 'Revoke a SCIM token so the identity provider can no longer provision or deprovision members. Owner or admin only.',
+    ownerPlane: 'control',
+    risk: 'high',
+    requiresApproval: true,
+    reversible: false,
+    inputSchema: orgRevokeScimTokenInput,
     outputSchema: envelopeStatusOutput,
   },
   {

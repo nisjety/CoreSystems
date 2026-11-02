@@ -27,6 +27,7 @@ services:
             SPACE_ROOM_ARTIFACTS_API: "false"
             SPACE_ROOM_PINS_API: "false"
             ORG_IDENTITY_ADMIN_API: "false"
+            SCIM_EDGE_ENABLED: "false"
             SPACE_RUN_OWNER_STEER: "false"
             SPACE_SIDEBAR_API: "false"
             SPACE_DM_API: "false"

@@ -92,7 +92,13 @@ func NewAuthCoreIdentityClient(baseURL, token string) *AuthCoreIdentityClient {
 }
 
 func (c *AuthCoreIdentityClient) do(ctx context.Context, method, path string, query url.Values, body any, out any) error {
-	target := c.baseURL + "/api/v1/internal/sso" + path
+	return c.doAt(ctx, "/api/v1/internal/sso", method, path, query, body, out)
+}
+
+// doAt is do against another internal auth-core surface that shares the
+// credential (the SCIM membership routes, WS05-S8).
+func (c *AuthCoreIdentityClient) doAt(ctx context.Context, prefix, method, path string, query url.Values, body any, out any) error {
+	target := c.baseURL + prefix + path
 	if len(query) > 0 {
 		target += "?" + query.Encode()
 	}
@@ -142,6 +148,10 @@ func (c *AuthCoreIdentityClient) do(ctx context.Context, method, path string, qu
 		return ErrSSOInvalidIssuer
 	case resp.StatusCode == http.StatusNotFound && problem.Code == "provider_not_found":
 		return ErrSSOProviderNotFound
+	case resp.StatusCode == http.StatusConflict && problem.Code == "last_owner":
+		return ErrSCIMLastOwner
+	case resp.StatusCode == http.StatusConflict && problem.Code == "membership_conflict":
+		return ErrSCIMMembershipConflict
 	}
 	return fmt.Errorf("%w: auth-core answered %d", ErrSSOUnavailable, resp.StatusCode)
 }

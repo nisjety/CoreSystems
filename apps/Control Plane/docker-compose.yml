@@ -572,6 +572,11 @@ services:
             # WS05-S7: SSO provider administration and enforcement go through auth-core.
             AUTH_CORE_URL: http://auth-core:3011
             ORG_CORE_IDENTITY_SERVICE_TOKEN: ${ORG_CORE_IDENTITY_SERVICE_TOKEN:-}
+            # WS05-S8: SCIM Users. Off (404) unless 1 or true; never an authorization input.
+            # The edge secret creates the verevon-scim-edge principal (scope org:scim:any)
+            # only while the flag is on; the gateway presents the same value.
+            ORG_SCIM_ENABLED: ${ORG_SCIM_ENABLED:-0}
+            ORG_CORE_SCIM_EDGE_TOKEN: ${ORG_CORE_SCIM_EDGE_TOKEN:-}
             ORG_CORE_SIEM_SEAL_KEY: ${ORG_CORE_SIEM_SEAL_KEY:-}
             ORG_CORE_SIEM_SEAL_KEY_ID: ${ORG_CORE_SIEM_SEAL_KEY_ID:-v1}
             ORG_CORE_SERVICE_CREDENTIALS: >-

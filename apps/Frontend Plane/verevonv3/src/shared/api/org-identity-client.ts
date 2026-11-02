@@ -151,3 +151,63 @@ export async function addSsoProvider(orgId: string, input: SsoProviderInput): Pr
 export async function removeSsoProvider(orgId: string, providerId: string): Promise<void> {
   await requestJson<unknown>(ssoPath(orgId, `providers/${encodeURIComponent(providerId)}`), { method: 'DELETE' })
 }
+
+/**
+ * SCIM tokens (WS05-S8). An owner or admin mints a bearer token for the identity
+ * provider (Entra ID, Okta). The token is returned once, in the create response,
+ * and cannot be read again; only its prefix is listed afterwards. 404
+ * `feature_disabled` while the gateway switch is off; a SCIM-disabled org-core
+ * answers 404 `not_found`.
+ */
+export interface ScimToken {
+  id: string
+  name: string
+  prefix: string
+  created_by: string
+  created_at: string
+  expires_at: string
+  last_used_at?: string
+  revoked_at?: string
+}
+
+export interface ScimTokenIssued {
+  token: ScimToken
+  bearer_token: string
+}
+
+export interface ScimStatus {
+  enabled: boolean
+  verified_domains: number
+  active_tokens: number
+  max_tokens: number
+  managed_users: number
+  active_users: number
+  last_used_at?: string
+}
+
+function scimPath(orgId: string, tail: string): string {
+  return `/api/v1/orgs/${encodeURIComponent(orgId)}/scim/${tail}`
+}
+
+export async function getScimStatus(orgId: string): Promise<ScimStatus> {
+  return requestJson<ScimStatus>(scimPath(orgId, 'status'))
+}
+
+export async function listScimTokens(orgId: string): Promise<ScimToken[]> {
+  const data = await requestJson<{ tokens?: ScimToken[] }>(scimPath(orgId, 'tokens'))
+  return Array.isArray(data?.tokens) ? data.tokens : []
+}
+
+export async function createScimToken(
+  orgId: string,
+  input: { name: string; expiresInDays: number },
+): Promise<ScimTokenIssued> {
+  return requestJson<ScimTokenIssued>(scimPath(orgId, 'tokens'), {
+    method: 'POST',
+    body: JSON.stringify({ name: input.name, expires_in_days: input.expiresInDays }),
+  })
+}
+
+export async function revokeScimToken(orgId: string, tokenId: string): Promise<void> {
+  await requestJson<unknown>(scimPath(orgId, `tokens/${encodeURIComponent(tokenId)}`), { method: 'DELETE' })
+}
