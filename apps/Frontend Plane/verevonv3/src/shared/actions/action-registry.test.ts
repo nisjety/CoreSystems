@@ -690,3 +690,30 @@ describe('action registry', () => {
     expect(spaceIds).toEqual(spaceActions.map((action) => action.id))
   })
 })
+
+describe('settings.update_preferences contract v2 (WS16-S2)', () => {
+  const schema = () => {
+    const action = getActionDescriptor('settings.update_preferences')
+    if (!action) throw new Error('settings.update_preferences is not registered')
+    return action.inputSchema
+  }
+
+  it('accepts dateFormat, timeFormat (including auto) and compactMode', () => {
+    for (const dateFormat of ['MM/DD/YYYY', 'DD/MM/YYYY', 'YYYY-MM-DD', 'auto']) {
+      expect(schema().safeParse({ dateFormat }).success).toBe(true)
+    }
+    for (const timeFormat of ['12h', '24h', 'auto']) {
+      expect(schema().safeParse({ timeFormat }).success).toBe(true)
+    }
+    expect(schema().safeParse({ compactMode: true }).success).toBe(true)
+    expect(schema().safeParse({ compactMode: false, dateFormat: 'auto', timeFormat: '24h', timezone: 'Europe/Oslo' }).success).toBe(true)
+  })
+
+  it('rejects unknown enum values and a non-boolean compactMode', () => {
+    expect(schema().safeParse({ dateFormat: 'YYYY/MM/DD' }).success).toBe(false)
+    expect(schema().safeParse({ dateFormat: '' }).success).toBe(false)
+    expect(schema().safeParse({ timeFormat: '13h' }).success).toBe(false)
+    expect(schema().safeParse({ timeFormat: '24H' }).success).toBe(false)
+    expect(schema().safeParse({ compactMode: 'yes' }).success).toBe(false)
+  })
+})
