@@ -968,7 +968,8 @@ impl RunService for RunServiceImpl {
             // column of their own: a run has no audience snapshot, so the only
             // honest way to decide whether this reader may see it is to ask
             // whether they may see the thread it belongs to.
-            let audience_ceiling = space_read.map(|read| read.recipient_audience_revision);
+            let audience = crate::space::audience_window::audience_window(space_read);
+            let audience_ceiling = audience.ceiling;
             let mut query = String::from(RUN_SELECT);
             if audience_ceiling.is_some() {
                 query.push_str(
@@ -976,6 +977,9 @@ impl RunService for RunServiceImpl {
                      WHERE t.org_id = $5 AND t.space_id = $6
                        AND (t.recipient_audience_revision IS NULL
                             OR t.recipient_audience_revision <= $7)
+                       AND ($8::BIGINT IS NULL
+                            OR r.recipient_audience_revision IS NULL
+                            OR r.recipient_audience_revision >= $8)
                        AND ($1 = '' OR r.thread_id = $1)",
                 );
             } else {
@@ -994,7 +998,8 @@ impl RunService for RunServiceImpl {
                 sql = sql
                     .bind(caller.org_id())
                     .bind(&req.space_id)
-                    .bind(ceiling);
+                    .bind(ceiling)
+                    .bind(audience.floor);
             }
             let rows: Vec<RunRow> = sql
                 .fetch_all(&self.pool)

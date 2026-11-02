@@ -988,6 +988,10 @@ services:
       # decides, or reroutes, an approval with a Control `model.approval.decide` / `.reroute`
       # decision. OFF unless set; dev override turns it on. Never an authorization input.
       SESSION_CORE_APPROVAL_MEMBER_DECIDE: ${SESSION_CORE_APPROVAL_MEMBER_DECIDE:-0}
+      # WS04-S11: honour the signed `history_floor_revision` claim of a `since_join` room on transcript,
+      # thread and run reads. OFF unless set (full history); dev override turns it on. Paired with
+      # user-core SPACE_HISTORY_WINDOW_CLAIM. Never an authorization input: a presentation rule only.
+      SESSION_CORE_SPACE_HISTORY_FLOOR: ${SESSION_CORE_SPACE_HISTORY_FLOOR:-0}
       SPACE_WAKE_CORE: ${SPACE_WAKE_CORE:-0}
       SESSION_CORE_LOOP_CHECKPOINT_ENABLED: ${SESSION_CORE_LOOP_CHECKPOINT_ENABLED:-false}
       # Sweep that closes a tool reservation still open long after its run ended or

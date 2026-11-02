@@ -40,6 +40,7 @@ pub(crate) mod approval_member;
 pub(crate) mod approvals;
 pub(crate) mod attention;
 pub(crate) mod attention_outbox;
+pub(crate) mod audience_window;
 pub(crate) mod authz;
 pub(crate) mod entry;
 pub(crate) mod events;

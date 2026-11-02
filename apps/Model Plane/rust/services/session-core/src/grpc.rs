@@ -55,6 +55,7 @@ use crate::letta_adapter::{LettaMemoryAdapter, LettaSearchOutcome};
 use crate::loop_checkpoint;
 use crate::orchestration_grpc::{json_to_struct, struct_to_json};
 use crate::retention_receipt::refuse_zdr_continuation;
+use crate::space::audience_window::AudienceWindow;
 use crate::terminalization;
 
 /// Standard gRPC health names registered on the unauthenticated health-only
@@ -306,7 +307,7 @@ async fn conversation_cursor_sequence(
     pool: &PgPool,
     org_id: &str,
     thread_id: &str,
-    audience_ceiling: Option<i64>,
+    audience: AudienceWindow,
     include_human_posts: bool,
     message_id: &str,
 ) -> Result<i64, Status> {
@@ -318,13 +319,17 @@ async fn conversation_cursor_sequence(
            AND ($4::BIGINT IS NULL
                 OR m.recipient_audience_revision IS NULL
                 OR m.recipient_audience_revision <= $4)
+           AND ($6::BIGINT IS NULL
+                OR m.recipient_audience_revision IS NULL
+                OR m.recipient_audience_revision >= $6)
            AND ($5 OR m.post_kind <> 'post')",
     )
     .bind(message_id)
     .bind(thread_id)
     .bind(org_id)
-    .bind(audience_ceiling)
+    .bind(audience.ceiling)
     .bind(include_human_posts)
+    .bind(audience.floor)
     .fetch_optional(pool)
     .await
     .map_err(|error| Status::internal(error.to_string()))?;
@@ -342,7 +347,7 @@ async fn conversation_page_rows(
     pool: &PgPool,
     org_id: &str,
     thread_id: &str,
-    audience_ceiling: Option<i64>,
+    audience: AudienceWindow,
     include_human_posts: bool,
     before_sequence: Option<i64>,
     fetch: i64,
@@ -352,7 +357,7 @@ async fn conversation_page_rows(
         pool,
         org_id,
         thread_id,
-        audience_ceiling,
+        audience,
         include_human_posts,
         before_sequence,
         fetch,
@@ -368,7 +373,7 @@ async fn conversation_rows_ordered(
     pool: &PgPool,
     org_id: &str,
     thread_id: &str,
-    audience_ceiling: Option<i64>,
+    audience: AudienceWindow,
     include_human_posts: bool,
     before_sequence: Option<i64>,
     fetch: i64,
@@ -393,6 +398,9 @@ async fn conversation_rows_ordered(
            AND ($3::BIGINT IS NULL
                 OR m.recipient_audience_revision IS NULL
                 OR m.recipient_audience_revision <= $3)
+           AND ($8::BIGINT IS NULL
+                OR m.recipient_audience_revision IS NULL
+                OR m.recipient_audience_revision >= $8)
            AND ($4::BIGINT IS NULL OR m.sequence < $4)
            AND ($6 OR m.on_active_path)
            AND ($7 OR m.post_kind <> 'post')
@@ -409,11 +417,12 @@ async fn conversation_rows_ordered(
     sqlx::query_as::<_, ConversationRow>(&sql)
         .bind(thread_id)
         .bind(org_id)
-        .bind(audience_ceiling)
+        .bind(audience.ceiling)
         .bind(before_sequence)
         .bind(fetch)
         .bind(include_inactive)
         .bind(include_human_posts)
+        .bind(audience.floor)
         .fetch_all(pool)
         .await
         .map_err(|error| {
@@ -434,7 +443,7 @@ async fn conversation_count_before(
     pool: &PgPool,
     org_id: &str,
     thread_id: &str,
-    audience_ceiling: Option<i64>,
+    audience: AudienceWindow,
     include_human_posts: bool,
     include_inactive: bool,
     before_sequence: i64,
@@ -449,14 +458,18 @@ async fn conversation_count_before(
                 OR m.recipient_audience_revision <= $3)
            AND m.sequence < $4
            AND ($5 OR m.on_active_path)
-           AND ($6 OR m.post_kind <> 'post')",
+           AND ($6 OR m.post_kind <> 'post')
+           AND ($7::BIGINT IS NULL
+                OR m.recipient_audience_revision IS NULL
+                OR m.recipient_audience_revision >= $7)",
     )
     .bind(thread_id)
     .bind(org_id)
-    .bind(audience_ceiling)
+    .bind(audience.ceiling)
     .bind(before_sequence)
     .bind(include_inactive)
     .bind(include_human_posts)
+    .bind(audience.floor)
     .fetch_one(pool)
     .await
     .map_err(|error| {
@@ -476,7 +489,7 @@ async fn conversation_count_before(
 async fn conversation_page_response(
     pool: &PgPool,
     req: &pb::ListConversationRequest,
-    audience_ceiling: Option<i64>,
+    audience: AudienceWindow,
 ) -> Result<Response<pb::ListConversationResponse>, Status> {
     let limit = clamp_conversation_page_limit(req.limit);
     let before_sequence = if req.before_message_id.is_empty() {
@@ -487,7 +500,7 @@ async fn conversation_page_response(
                 pool,
                 &req.org_id,
                 &req.thread_id,
-                audience_ceiling,
+                audience,
                 req.include_human_posts,
                 &req.before_message_id,
             )
@@ -498,7 +511,7 @@ async fn conversation_page_response(
         pool,
         &req.org_id,
         &req.thread_id,
-        audience_ceiling,
+        audience,
         req.include_human_posts,
         before_sequence,
         limit + 1,
@@ -519,7 +532,7 @@ async fn conversation_page_response(
                 pool,
                 &req.org_id,
                 &req.thread_id,
-                audience_ceiling,
+                audience,
                 req.include_human_posts,
                 &oldest.id,
             )
@@ -528,7 +541,7 @@ async fn conversation_page_response(
                 pool,
                 &req.org_id,
                 &req.thread_id,
-                audience_ceiling,
+                audience,
                 req.include_human_posts,
                 None,
                 1,
@@ -543,7 +556,7 @@ async fn conversation_page_response(
                     pool,
                     &req.org_id,
                     &req.thread_id,
-                    audience_ceiling,
+                    audience,
                     req.include_human_posts,
                     req.include_inactive,
                     oldest_sequence,
@@ -1172,6 +1185,11 @@ struct ControlSpaceDecisionClaims {
     permissions: Vec<String>,
     issued_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
+    // WS04-S11: the first audience revision a `since_join` member may read from. Absent (0) on
+    // every other decision and on decisions issued before the claim existed. Not part of any
+    // payload digest; honoured only behind SESSION_CORE_SPACE_HISTORY_FLOOR.
+    #[serde(default)]
+    history_floor_revision: u64,
     // Absent on every decision issued without a stored-consent contract.
     #[serde(default)]
     contract_digest: Option<String>,
@@ -3056,6 +3074,9 @@ pub(crate) struct VerifiedSpaceRead {
     /// stamped with a NEWER revision are refused: they belong to an audience
     /// this reader was not part of when the decision was minted.
     pub(crate) recipient_audience_revision: i64,
+    /// WS04-S11: rows stamped with an OLDER revision are hidden from a `since_join` reader.
+    /// `None` when the claim is absent or SESSION_CORE_SPACE_HISTORY_FLOOR is off (full history).
+    pub(crate) history_floor: Option<i64>,
 }
 
 /// Recompute Control's `model.thread.read` payload digest from the claims.
@@ -3215,6 +3236,10 @@ fn verify_thread_read_claims_with_key(
         issued_at: claims.issued_at,
         expires_at: claims.expires_at,
         zero_data_retention: claims.zero_data_retention,
+        history_floor: crate::space::audience_window::history_floor_from_claim(
+            claims.history_floor_revision,
+            crate::space::audience_window::history_floor_enabled(),
+        ),
     })
 }
 
@@ -3227,6 +3252,8 @@ pub(crate) struct VerifiedReadClaims {
     pub(crate) issued_at: DateTime<Utc>,
     pub(crate) expires_at: DateTime<Utc>,
     pub(crate) zero_data_retention: bool,
+    /// WS04-S11: see [`VerifiedSpaceRead::history_floor`]; always `None` on non-read decisions.
+    pub(crate) history_floor: Option<i64>,
 }
 
 /// The existing `model.thread.read` verifier: audience `model-plane`, answering only the
@@ -3256,6 +3283,7 @@ fn verify_thread_read_space_decision_with_key(
     )?;
     Ok(VerifiedSpaceRead {
         recipient_audience_revision: verified.recipient_audience_revision,
+        history_floor: verified.history_floor,
     })
 }
 
@@ -3513,6 +3541,7 @@ fn verify_run_control_space_decision_with_key(
         issued_at: claims.issued_at,
         expires_at: claims.expires_at,
         zero_data_retention: claims.zero_data_retention,
+        history_floor: None,
     })
 }
 
@@ -9217,9 +9246,10 @@ impl SessionCore for SessionService {
             // written for a recipient set this decision was not issued against.
             // A NULL revision predates audience snapshots entirely and is
             // covered by the thread-level Space check above.
-            let audience_ceiling = space_read.map(|read| read.recipient_audience_revision);
+            // WS04-S11: a `since_join` room also carries a history floor on the same decision.
+            let audience = crate::space::audience_window::audience_window(space_read);
             if req.limit > 0 {
-                return conversation_page_response(&self.pool, &req, audience_ceiling).await;
+                return conversation_page_response(&self.pool, &req, audience).await;
             }
             // The unpaged read is the newest page with no bound, put back in conversation order.
             // One query serves both reads, so the active-path filter and the tree columns cannot
@@ -9228,7 +9258,7 @@ impl SessionCore for SessionService {
                 &self.pool,
                 &req.org_id,
                 &req.thread_id,
-                audience_ceiling,
+                audience,
                 req.include_human_posts,
                 None,
                 i64::MAX,
@@ -9277,7 +9307,9 @@ impl SessionCore for SessionService {
                 &req.user_id,
                 &req.space_id,
             )?;
-            let audience_ceiling = space_read.map(|read| read.recipient_audience_revision);
+            let audience = crate::space::audience_window::audience_window(space_read);
+            let audience_ceiling = audience.ceiling;
+            let history_floor = audience.floor;
             let limit = clamp_thread_limit(req.limit);
             let page_size = usize::try_from(limit).unwrap_or(usize::MAX);
             let archive_state = match pb::ArchiveFilter::try_from(req.archived) {
@@ -9342,7 +9374,11 @@ impl SessionCore for SessionService {
                                OR t.recipient_audience_revision <= $6))
                       AND ($6::BIGINT IS NOT NULL OR t.user_id = $2)
                       AND ($6::BIGINT IS NULL
-                           OR EXISTS (SELECT 1 FROM messages em WHERE em.thread_id = t.id))
+                           OR EXISTS (SELECT 1 FROM messages em
+                                      WHERE em.thread_id = t.id
+                                        AND ($13::BIGINT IS NULL
+                                             OR em.recipient_audience_revision IS NULL
+                                             OR em.recipient_audience_revision >= $13)))
                       AND (NULLIF($4, '') IS NULL OR t.space_id = $4)
                       AND (NULLIF($5, '') IS NULL OR t.origin = $5)
                       AND (NULLIF($7, '') IS NULL OR t.id = $7)
@@ -9380,6 +9416,9 @@ impl SessionCore for SessionService {
                     SELECT content
                     FROM messages
                     WHERE thread_id = page.id AND role = 'user' AND on_active_path
+                      AND ($13::BIGINT IS NULL
+                           OR recipient_audience_revision IS NULL
+                           OR recipient_audience_revision >= $13)
                     ORDER BY sequence ASC
                     LIMIT 1
                  ) first_user ON TRUE
@@ -9387,6 +9426,9 @@ impl SessionCore for SessionService {
                     SELECT content
                     FROM messages
                     WHERE thread_id = page.id AND on_active_path
+                      AND ($13::BIGINT IS NULL
+                           OR recipient_audience_revision IS NULL
+                           OR recipient_audience_revision >= $13)
                     ORDER BY sequence DESC
                     LIMIT 1
                  ) last_message ON TRUE
@@ -9407,6 +9449,9 @@ impl SessionCore for SessionService {
                               AND ($6::BIGINT IS NULL
                                    OR lm.recipient_audience_revision IS NULL
                                    OR lm.recipient_audience_revision <= $6)
+                              AND ($13::BIGINT IS NULL
+                                   OR lm.recipient_audience_revision IS NULL
+                                   OR lm.recipient_audience_revision >= $13)
                             ORDER BY lm.sequence DESC
                             LIMIT 1) AS last_author
                     FROM messages m
@@ -9415,6 +9460,9 @@ impl SessionCore for SessionService {
                       AND ($6::BIGINT IS NULL
                            OR m.recipient_audience_revision IS NULL
                            OR m.recipient_audience_revision <= $6)
+                      AND ($13::BIGINT IS NULL
+                           OR m.recipient_audience_revision IS NULL
+                           OR m.recipient_audience_revision >= $13)
                  ) reply_stats ON TRUE
                  ORDER BY (page.pinned_at IS NOT NULL) DESC, page.last_activity_at DESC, page.id DESC"),
             )
@@ -9430,6 +9478,7 @@ impl SessionCore for SessionService {
             .bind(cursor_thread_id)
             .bind(archive_state)
             .bind(req.starred_only)
+            .bind(history_floor)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| {
@@ -23059,23 +23108,23 @@ mod conversation_page_db_tests {
 
         // A reader whose decision was issued at revision 2 never sees revision 3,
         // and a turn with no snapshot is visible as it always was.
-        let page = conversation_page_rows(&pool, &org, &thread, Some(2), true, None, 10, false)
+        let page = conversation_page_rows(&pool, &org, &thread, AudienceWindow::ceiling_only(Some(2)), true, None, 10, false)
             .await
             .expect("ceiling page");
         let seen: Vec<&str> = page.iter().map(|row| row.id.as_str()).collect();
         assert_eq!(seen, [legacy.as_str(), mid.as_str(), early.as_str()]);
 
         // A hidden turn is no cursor for that reader, exactly as an unknown id is not.
-        let hidden = conversation_cursor_sequence(&pool, &org, &thread, Some(2), true, &late)
+        let hidden = conversation_cursor_sequence(&pool, &org, &thread, AudienceWindow::ceiling_only(Some(2)), true, &late)
             .await
             .expect_err("a hidden turn is refused as a cursor");
         assert_eq!(hidden.code(), tonic::Code::InvalidArgument);
-        conversation_cursor_sequence(&pool, &org, &thread, Some(2), true, &mid)
+        conversation_cursor_sequence(&pool, &org, &thread, AudienceWindow::ceiling_only(Some(2)), true, &mid)
             .await
             .expect("a visible turn is a cursor");
 
         // The owner's unfiltered read sees all four turns.
-        let owner = conversation_page_rows(&pool, &org, &thread, None, true, None, 10, false)
+        let owner = conversation_page_rows(&pool, &org, &thread, AudienceWindow::default(), true, None, 10, false)
             .await
             .expect("owner page");
         assert_eq!(owner.len(), 4);
