@@ -252,6 +252,37 @@ pub struct ParsedCrawl {
     pub warnings: Vec<RequestWarning>,
 }
 
+/// W2-U64 (D2-029, D2-073): what a crawl does when the edge's answer does not prove the scope
+/// was applied, or when the job carries no scope at all. The orchestrator
+/// (`workflows/crawl_scope.go`, `verdict`, and `jobs/dispatcher.go`) decides this in production;
+/// the rule lives here too so the edge side of a rolling deploy reads the same table, and the
+/// two are pinned by the same cases.
+///
+/// - The scope is applied (`scope_applied: true`): [`ScopeSkew::Scoped`].
+/// - Not applied, or no scope on the job, in `observe` (also the empty and any unknown mode):
+///   [`ScopeSkew::LegacyUnscoped`]: the crawl goes on as one that never had a scope.
+/// - Not applied, or no scope, in `enforce`: [`ScopeSkew::Refused`]. Enforce promises that
+///   links the scope drops are not followed; an unscoped page cannot keep that promise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeSkew {
+    Scoped,
+    LegacyUnscoped,
+    Refused,
+}
+
+/// Decide a page (or a job) under version skew. `scope_present` is whether the job carries a
+/// scope object; `scope_applied` is the edge's report (`None` when the report is absent).
+pub fn scope_skew(scope_mode: &str, scope_present: bool, scope_applied: Option<bool>) -> ScopeSkew {
+    if scope_present && scope_applied == Some(true) {
+        return ScopeSkew::Scoped;
+    }
+    if scope_mode == "enforce" {
+        ScopeSkew::Refused
+    } else {
+        ScopeSkew::LegacyUnscoped
+    }
+}
+
 /// Look up an option by any of its spellings. A null value counts as absent.
 fn lookup<'a>(object: &'a Map<String, Value>, canonical: &str) -> Option<(&'static str, &'a Value)> {
     let spellings = FIELDS.iter().find(|(name, _)| *name == canonical)?.1;
@@ -1140,5 +1171,34 @@ mod tests {
         assert!(!CrawlRequestSettings::from_lookup(|_| Some("lenient".into())).strict);
         assert!(CrawlRequestSettings::from_lookup(|_| Some(" STRICT ".into())).strict);
         assert!(!CrawlRequestSettings::from_lookup(|_| Some("maybe".into())).strict);
+    }
+
+    #[test]
+    fn scope_skew_tolerates_a_missing_scope_applied_in_observe_only() {
+        // Same table as TestScopeVerdict / TestCrawlInputFromJobAbsentScope in the orchestrator.
+        let cases = [
+            ("observe", true, Some(true), ScopeSkew::Scoped),
+            ("enforce", true, Some(true), ScopeSkew::Scoped),
+            ("observe", true, Some(false), ScopeSkew::LegacyUnscoped),
+            ("observe", true, None, ScopeSkew::LegacyUnscoped),
+            ("", true, None, ScopeSkew::LegacyUnscoped),
+            ("strict-ish", true, Some(false), ScopeSkew::LegacyUnscoped),
+            ("enforce", true, Some(false), ScopeSkew::Refused),
+            ("enforce", true, None, ScopeSkew::Refused),
+            ("Enforce", true, None, ScopeSkew::LegacyUnscoped), // the wire value is lowercase; anything else is observe
+        ];
+        for (mode, present, applied, want) in cases {
+            assert_eq!(scope_skew(mode, present, applied), want, "{mode:?} {present} {applied:?}");
+        }
+    }
+
+    #[test]
+    fn scope_skew_for_an_absent_scope_runs_unscoped_in_observe_and_is_refused_in_enforce() {
+        // D2-073: no scope object. A report cannot prove a scope that was never sent.
+        assert_eq!(scope_skew("observe", false, None), ScopeSkew::LegacyUnscoped);
+        assert_eq!(scope_skew("", false, None), ScopeSkew::LegacyUnscoped);
+        assert_eq!(scope_skew("observe", false, Some(true)), ScopeSkew::LegacyUnscoped);
+        assert_eq!(scope_skew("enforce", false, None), ScopeSkew::Refused);
+        assert_eq!(scope_skew("enforce", false, Some(true)), ScopeSkew::Refused);
     }
 }
