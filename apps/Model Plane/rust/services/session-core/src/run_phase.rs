@@ -90,7 +90,7 @@ pub(crate) fn guard_enabled_from_env() -> bool {
 
 /// The live root run of a Space thread, if any. `FOR UPDATE` is not needed: the
 /// advisory lock serializes every start on the thread.
-const ACTIVE_ROOT_RUN_SQL: &str = "SELECT r.id
+pub(crate) const ACTIVE_ROOT_RUN_SQL: &str = "SELECT r.id
        FROM runs AS r
        JOIN threads AS t ON t.id = r.thread_id AND t.org_id = r.org_id
        JOIN managed_run_terminalization_outbox AS o ON o.run_id = r.id

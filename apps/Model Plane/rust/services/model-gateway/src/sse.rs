@@ -6503,6 +6503,18 @@ async fn load_recent_thread_messages(
             .into_inner()
             .messages
             .into_iter()
+            // WS12-S4: a deleted turn reaches the model as one static system line and an edited
+            // one carries its effective text plus a marker (session-core folds revisions).
+            .filter_map(|mut message| {
+                let (role, content) = mp_contracts::message_revision::render_for_model(
+                    &message.role,
+                    &message.content,
+                    &message.revision_state,
+                )?;
+                message.role = role;
+                message.content = content;
+                Some(message)
+            })
             .filter(|message| {
                 matches!(message.role.as_str(), "system" | "user" | "assistant")
                     && !message.content.trim().is_empty()

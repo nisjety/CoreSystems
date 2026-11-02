@@ -1332,13 +1332,15 @@ async fn load_pending_messages(
     let org_filter = crate::org_policy::pending_filter(3, 4, 5);
     let gate = crate::org_policy::pending_gate();
     let rows = sqlx::query_as::<_, (String, String, String, String, String, String, bool, bool)>(
-        &format!("SELECT m.id, m.thread_id, m.role, m.content, t.org_id, t.user_id, t.source_scope = 'conversation', \
+        &format!("SELECT m.id, m.thread_id, m.role, {fold_content}, t.org_id, t.user_id, t.source_scope = 'conversation', \
                 {contained} AND $6 \
          FROM messages m \
          JOIN threads t ON t.id = m.thread_id \
+         {fold_join} \
          WHERE m.role IN ('user', 'assistant') \
            AND m.on_active_path \
            AND m.post_kind <> 'post' \
+           AND {not_deleted} \
            AND (m.author_subject_id IS NULL OR m.author_subject_id = t.user_id) \
            AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND m.created_at <= c.extract_after) \
            AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND c.memory_state <> 'on' AND $2) \
@@ -1355,7 +1357,10 @@ async fn load_pending_messages(
            ) \
            {org_filter} \
          ORDER BY m.created_at ASC, m.sequence ASC \
-         LIMIT $1", contained = crate::space::memory_scope::CONTAINED_SQL),
+         LIMIT $1", contained = crate::space::memory_scope::CONTAINED_SQL,
+            fold_content = crate::space::revisions::FOLD_CONTENT_SQL,
+            fold_join = crate::space::revisions::fold_join_sql("NULL::BIGINT"),
+            not_deleted = crate::space::revisions::FOLD_NOT_DELETED_SQL),
     )
     .bind(limit)
     // A paused or off user's messages are not read at all, so none reaches the
@@ -1405,11 +1410,13 @@ async fn load_preceding_context(
     let org_filter = crate::org_policy::pending_filter(5, 6, 7);
     let gate = crate::org_policy::pending_gate();
     let mut rows = sqlx::query_as::<_, (String, String)>(
-        &format!("SELECT m.role, m.content \
+        &format!("SELECT m.role, {fold_content} \
          FROM messages m \
          JOIN threads t ON t.id = m.thread_id \
+         {fold_join} \
          WHERE m.thread_id = $1 \
            AND m.on_active_path \
+           AND {not_deleted} \
            AND m.role IN ('user', 'assistant') \
            AND m.post_kind <> 'post' \
            AND (m.author_subject_id IS NULL OR m.author_subject_id = t.user_id) \
@@ -1422,7 +1429,10 @@ async fn load_preceding_context(
              SELECT b.created_at, b.sequence FROM messages b WHERE b.id = $2 \
            ) \
          ORDER BY m.created_at DESC, m.sequence DESC \
-         LIMIT $3", contained = crate::space::memory_scope::CONTAINED_SQL),
+         LIMIT $3", contained = crate::space::memory_scope::CONTAINED_SQL,
+            fold_content = crate::space::revisions::FOLD_CONTENT_SQL,
+            fold_join = crate::space::revisions::fold_join_sql("NULL::BIGINT"),
+            not_deleted = crate::space::revisions::FOLD_NOT_DELETED_SQL),
     )
     .bind(thread_id)
     .bind(before_message_id)

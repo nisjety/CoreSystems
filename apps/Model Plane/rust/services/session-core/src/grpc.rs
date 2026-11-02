@@ -18,6 +18,7 @@ use mp_contracts::model_plane::v1::{
     learning_governance_service_server::{LearningGovernanceService, LearningGovernanceServiceServer},
     managed_run_lifecycle_server::{ManagedRunLifecycle, ManagedRunLifecycleServer},
     memory_service_server::MemoryServiceServer,
+    message_revision_service_server::MessageRevisionServiceServer,
     message_search_server::MessageSearchServer,
     message_tree_service_server::MessageTreeServiceServer,
     orchestration_core_service_server::OrchestrationCoreServiceServer,
@@ -204,6 +205,13 @@ struct ConversationRow {
     on_active_path: bool,
     /// The thread has a message tree, so its turns carry their place in it.
     versioned: bool,
+    /// The latest allowed revision folded in (WS12-S4): "", "edited" or "deleted". `content`
+    /// and `metadata` above are already the effective values.
+    revision_state: String,
+    revised_at: Option<DateTime<Utc>>,
+    revised_by_subject_id: Option<String>,
+    revision_no: i32,
+    agent_followed_up: bool,
 }
 
 /// The sibling count of a turn, read where the tree is read: a thread that has never been
@@ -255,6 +263,11 @@ fn session_message_from_row(row: ConversationRow, include_inactive: bool) -> pb:
             0
         },
         on_active_path: tree && row.on_active_path,
+        revision_state: row.revision_state,
+        revised_at: row.revised_at.map(to_proto_timestamp),
+        revised_by_subject_id: row.revised_by_subject_id.unwrap_or_default(),
+        revision_no: u32::try_from(row.revision_no).unwrap_or(0),
+        agent_followed_up: row.agent_followed_up,
     }
 }
 
@@ -318,12 +331,18 @@ async fn conversation_page_rows(
     include_inactive: bool,
 ) -> Result<Vec<ConversationRow>, Status> {
     let sql = format!(
-        "SELECT m.id::text AS id, m.role, m.content, m.agent_name, m.metadata, m.author_subject_id,
+        "SELECT m.id::text AS id, m.role, {fold_content} AS content, m.agent_name,
+                {fold_metadata} AS metadata, m.author_subject_id,
                 m.post_kind, m.created_at,
-                m.parent_message_id, m.sibling_ordinal, ({}) AS sibling_count,
-                m.on_active_path, (t.active_leaf_message_id IS NOT NULL) AS versioned
+                m.parent_message_id, m.sibling_ordinal, ({sibling}) AS sibling_count,
+                m.on_active_path, (t.active_leaf_message_id IS NOT NULL) AS versioned,
+                {fold_state} AS revision_state, rv.created_at AS revised_at,
+                rv.actor_subject_id AS revised_by_subject_id,
+                COALESCE(rv.revision_no, 0) AS revision_no,
+                {fold_followed_up} AS agent_followed_up
          FROM messages m
          JOIN threads t ON t.id = m.thread_id
+         {fold_join}
          WHERE m.thread_id = $1 AND t.org_id = $2
            AND ($3::BIGINT IS NULL
                 OR m.recipient_audience_revision IS NULL
@@ -333,7 +352,12 @@ async fn conversation_page_rows(
            AND ($7 OR m.post_kind <> 'post')
          ORDER BY m.sequence DESC
          LIMIT $5",
-        SIBLING_COUNT_SQL
+        sibling = SIBLING_COUNT_SQL,
+        fold_content = crate::space::revisions::FOLD_CONTENT_SQL,
+        fold_metadata = crate::space::revisions::FOLD_METADATA_SQL,
+        fold_state = crate::space::revisions::FOLD_STATE_SQL,
+        fold_followed_up = crate::space::revisions::FOLD_FOLLOWED_UP_SQL,
+        fold_join = crate::space::revisions::fold_join_sql("$3::BIGINT"),
     );
     sqlx::query_as::<_, ConversationRow>(&sql)
         .bind(thread_id)
@@ -3299,7 +3323,214 @@ pub(crate) fn verify_append_space_decision(
     verify_append_space_decision_with_key(req, org_id, user_id, &key_id, key, Utc::now())
 }
 
-/// Whether a decision-less assistant append may land in a Space thread. The
+//// What a verified Control `model.thread.revise` decision admits (WS12-S4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VerifiedRevise {
+    /// `thread:moderate` is present: the caller may delete another member's message.
+    pub(crate) moderate: bool,
+    /// The org's retention rule for the original text: `true` purges it, `false` retains it.
+    pub(crate) purge_original: bool,
+}
+
+/// The `sha256:` digest of a revise request's new text; of the empty string for a delete.
+pub(crate) fn thread_revise_content_digest(req: &pb::ReviseMessageRequest) -> String {
+    if req.action == mp_contracts::message_revision::ACTION_DELETE {
+        thread_append_content_digest("")
+    } else {
+        thread_append_content_digest(&req.content)
+    }
+}
+
+/// Canonical digest shared with Control's `model.thread.revise` decision: the thread-append v1
+/// encoding with `message_id` and `revise_action` added after `idempotency_key`. The exact byte
+/// layout is documented in `mp_contracts::message_revision`. Recomputed from the request fields
+/// and the verified CALLER, never taken from the BFF.
+pub(crate) fn thread_revise_payload_digest(
+    req: &pb::ReviseMessageRequest,
+    org_id: &str,
+    user_id: &str,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"model.thread.revise\0v1\0");
+    let content_digest = thread_revise_content_digest(req);
+    let mut write_field = |name: &str, value: &str| {
+        digest.update(name.as_bytes());
+        digest.update([0]);
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    };
+    for (name, value) in [
+        ("org_id", org_id),
+        ("user_id", user_id),
+        ("thread_id", req.thread_id.as_str()),
+        ("space_id", req.space_id.as_str()),
+        ("space_decision_ref", req.space_decision_ref.as_str()),
+        ("recipient_audience_ref", req.recipient_audience_ref.as_str()),
+        ("recipient_audience_hash", req.recipient_audience_hash.as_str()),
+        ("privacy_policy_ref", req.privacy_policy_ref.as_str()),
+        ("resource_authorization_ref", req.resource_authorization_ref.as_str()),
+        ("content_digest", content_digest.as_str()),
+        ("action_schema_hash", req.action_schema_hash.as_str()),
+        ("idempotency_key", req.idempotency_key.as_str()),
+        ("message_id", req.message_id.as_str()),
+        ("revise_action", req.action.as_str()),
+    ] {
+        write_field(name, value);
+    }
+    digest.update(b"authority_revision\0");
+    digest.update(req.authority_revision.to_be_bytes());
+    digest.update(b"recipient_audience_revision\0");
+    digest.update(req.recipient_audience_revision.to_be_bytes());
+    format!("sha256:{:x}", digest.finalize())
+}
+
+/// Whether the revise request carries the complete decision envelope (all or nothing: a revise
+/// has no decision-less form).
+pub(crate) fn revise_space_context_is_complete(req: &pb::ReviseMessageRequest) -> bool {
+    [
+        req.space_id.trim(),
+        req.space_decision_ref.trim(),
+        req.recipient_audience_ref.trim(),
+        req.recipient_audience_hash.trim(),
+        req.privacy_policy_ref.trim(),
+        req.resource_authorization_ref.trim(),
+        req.space_decision_token.trim(),
+        req.action_schema_hash.trim(),
+        req.payload_digest.trim(),
+        req.idempotency_key.trim(),
+    ]
+    .iter()
+    .all(|value| !value.is_empty())
+        && req.authority_revision != 0
+        && req.recipient_audience_revision != 0
+}
+
+#[allow(clippy::result_large_err)]
+fn verify_revise_space_decision_with_key(
+    req: &pb::ReviseMessageRequest,
+    org_id: &str,
+    user_id: &str,
+    expected_key_id: &str,
+    key: &VerifyingKey,
+    now: DateTime<Utc>,
+) -> Result<VerifiedRevise, Status> {
+    use mp_contracts::message_revision as rev;
+    if req.space_decision_token.len() > MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES {
+        return Err(Status::invalid_argument("Control Space decision is too large"));
+    }
+    let parts: Vec<&str> = req.space_decision_token.split('.').collect();
+    if parts.len() != 4 || parts[0] != CONTROL_SPACE_DECISION_VERSION {
+        return Err(Status::permission_denied("invalid Control Space decision envelope"));
+    }
+    let token_key_id = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .ok()
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| id == expected_key_id)
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let payload = URL_SAFE_NO_PAD
+        .decode(parts[2])
+        .map_err(|_| Status::permission_denied("invalid Control Space decision payload"))?;
+    let signature = URL_SAFE_NO_PAD
+        .decode(parts[3])
+        .map_err(|_| Status::permission_denied("invalid Control Space decision signature"))?;
+    let signature = Signature::from_slice(&signature)
+        .map_err(|_| Status::permission_denied("invalid Control Space decision signature"))?;
+    key.verify(
+        format!("{}.{}.{}", parts[0], parts[1], parts[2]).as_bytes(),
+        &signature,
+    )
+    .map_err(|_| Status::permission_denied("invalid Control Space decision signature"))?;
+    let claims: ControlSpaceDecisionClaims = serde_json::from_slice(&payload)
+        .map_err(|_| Status::permission_denied("invalid Control Space decision claims"))?;
+    let has = |permission: &str| claims.permissions.iter().any(|p| p == permission);
+    // Exactly one retention permission: neither or both is a malformed decision, and it fails
+    // closed rather than guessing which rule the org set.
+    let purge = has(rev::PERMISSION_PURGE_ORIGINAL);
+    let retain = has(rev::PERMISSION_RETAIN_ORIGINAL);
+    let expected_digest = thread_revise_payload_digest(req, org_id, user_id);
+    let matches_request = claims.decision_ref == req.space_decision_ref
+        && claims.org_id == org_id
+        && claims.subject_id == user_id
+        && claims.space_ref == req.space_id
+        && claims.service_audience == CONTROL_SPACE_DECISION_AUDIENCE
+        && claims.action_id == rev::DECISION_ACTION_ID
+        && claims.action_schema_hash == rev::DECISION_SCHEMA
+        && claims.action_schema_hash == req.action_schema_hash
+        && claims.payload_digest == req.payload_digest
+        && claims.payload_digest == expected_digest
+        && claims.idempotency_key == req.idempotency_key
+        && claims.recipient_audience_ref == req.recipient_audience_ref
+        && claims.recipient_audience_revision == req.recipient_audience_revision
+        && claims.recipient_audience_hash == req.recipient_audience_hash
+        && claims.privacy_policy_ref == req.privacy_policy_ref
+        && claims.resource_authorization_ref == req.resource_authorization_ref
+        && claims.authority_revision == req.authority_revision
+        && has(rev::PERMISSION_REVISE)
+        && (purge != retain);
+    if !matches_request || token_key_id.trim().is_empty() {
+        return Err(Status::permission_denied(
+            "Control Space decision does not authorize this message revision",
+        ));
+    }
+    let privacy_complete = [
+        claims.purpose.as_str(),
+        claims.lawful_basis.as_str(),
+        claims.privacy_class.as_str(),
+        claims.retention_class.as_str(),
+        claims.residency.as_str(),
+        claims.deletion_scope.as_str(),
+    ]
+    .iter()
+    .all(|value| !value.trim().is_empty());
+    if !privacy_complete
+        || claims.nonce.trim().is_empty()
+        || claims.issued_at > now + chrono::Duration::minutes(1)
+        || claims.expires_at <= now
+    {
+        return Err(Status::permission_denied(
+            "Control Space revise decision is expired or incomplete",
+        ));
+    }
+    space_decision_retention_gate(
+        claims.zero_data_retention,
+        "message_revise",
+        configured_space_zdr_mode(),
+    )?;
+    Ok(VerifiedRevise {
+        moderate: has(rev::PERMISSION_MODERATE),
+        purge_original: purge,
+    })
+}
+
+/// Verifies the Control `model.thread.revise` decision for exactly this org, this CALLER (not the
+/// thread owner), this Space, this message and this action and text. A v1/v2 append decision
+/// differs in action id and schema and is refused.
+#[allow(clippy::result_large_err)]
+pub(crate) fn verify_revise_space_decision(
+    req: &pb::ReviseMessageRequest,
+    org_id: &str,
+    user_id: &str,
+) -> Result<VerifiedRevise, Status> {
+    if !revise_space_context_is_complete(req) {
+        return Err(Status::invalid_argument(
+            "a message revision requires a complete signed decision and operation bindings",
+        ));
+    }
+    let keys = configured_control_space_decision_keys()?;
+    let key_id = req
+        .space_decision_token
+        .split('.')
+        .nth(1)
+        .and_then(|part| URL_SAFE_NO_PAD.decode(part).ok())
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let key = crate::decision_keys::lookup_key(&keys, &key_id)?;
+    verify_revise_space_decision_with_key(req, org_id, user_id, &key_id, key, Utc::now())
+}
+
+// Whether a decision-less assistant append may land in a Space thread. The
 /// reply slot is open only directly after a user message: that user turn was
 /// itself admitted by a verified create or append decision, and the assistant
 /// reply is the second half of that same authorized exchange. An empty thread
@@ -6424,24 +6655,36 @@ async fn load_thread_messages(
     pool: &PgPool,
     thread_id: &str,
 ) -> Result<Vec<(String, String)>, Status> {
-    let mut msgs = sqlx::query_as::<_, (String, String)>(
-        "SELECT role, content
+    // WS12-S4: the revision fold is always on. A deleted turn reaches the model as one static
+    // system line and an edited one as its effective text plus a marker; the stored thread is
+    // never appended to. No audience ceiling here (the owner's own context read).
+    let sql = format!(
+        "SELECT role, content, revision_state
          FROM (
-             SELECT role, content, sequence
-             FROM messages
-             WHERE thread_id = $1 AND on_active_path AND post_kind <> 'post'
-             ORDER BY sequence DESC
+             SELECT m.role, {fold_content} AS content, {fold_state} AS revision_state, m.sequence
+             FROM messages m
+             {fold_join}
+             WHERE m.thread_id = $1 AND m.on_active_path AND m.post_kind <> 'post'
+             ORDER BY m.sequence DESC
              LIMIT $2
          ) recent
          ORDER BY sequence ASC",
-    )
-    .bind(thread_id)
-    .bind(CONTEXT_MESSAGE_LIMIT)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| Status::internal(e.to_string()))?;
-    msgs.retain(|(_, content)| !content.is_empty());
-    Ok(msgs)
+        fold_content = crate::space::revisions::FOLD_CONTENT_SQL,
+        fold_state = crate::space::revisions::FOLD_STATE_SQL,
+        fold_join = crate::space::revisions::fold_join_sql("NULL::BIGINT"),
+    );
+    let rows = sqlx::query_as::<_, (String, String, String)>(&sql)
+        .bind(thread_id)
+        .bind(CONTEXT_MESSAGE_LIMIT)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(role, content, state)| {
+            mp_contracts::message_revision::render_for_model(&role, &content, &state)
+        })
+        .collect())
 }
 
 fn semantic_memory_query(thread_messages: &[(String, String)]) -> String {
@@ -10339,6 +10582,9 @@ pub async fn serve(
 
     // Space room read service (WS07-S9): its own handle on the pool, taken before `pool` moves.
     let session_read_pool = pool.clone();
+    // Message revisions (WS12-S4): its own handle on the pool and the Letta mirror, taken before they move.
+    let message_revision_pool = pool.clone();
+    let letta_for_revisions = letta_memory.clone();
     let session = SessionService {
         pool,
         retrieval_client,
@@ -10397,6 +10643,10 @@ pub async fn serve(
         ))
         .add_service(SpaceEventsServer::with_interceptor(
             space_events,
+            auth.clone(),
+        ))
+        .add_service(MessageRevisionServiceServer::with_interceptor(
+            crate::space::revisions::MessageRevisionGrpc::new(message_revision_pool, letta_for_revisions),
             auth.clone(),
         ))
         .add_service(RunServiceServer::with_interceptor(runs, auth))
@@ -21671,6 +21921,11 @@ mod conversation_page_tests {
             sibling_count: 0,
             on_active_path: true,
             versioned: false,
+            revision_state: String::new(),
+            revised_at: None,
+            revised_by_subject_id: None,
+            revision_no: 0,
+            agent_followed_up: false,
         };
         let message = session_message_from_row(row, false);
         let created_at = message.created_at.expect("created_at is set on every row");

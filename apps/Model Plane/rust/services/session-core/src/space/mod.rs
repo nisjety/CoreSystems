@@ -13,6 +13,8 @@
 //! - [`events`]: the Space event log's flag sync, listener, sweeper, gate and erasure hooks
 //!   (WS02-S1; the log itself is written by triggers in migration 0072).
 //! - [`memory_scope`]: the memory containment resolver for shared-room threads (WS17-S1).
+//! - [`revisions`]: `MessageRevisionService` (edit or delete one message), the revision fold every read applies
+//!   (WS12-S4; the log itself is `message_revisions`, migration 0076).
 //! - [`thread_activity`]: the thread activity summary backfill and pending probe (WS15-S5; the summary itself is
 //!   kept by the trigger in migration 0078).
 
@@ -21,6 +23,7 @@ pub(crate) mod authz;
 pub(crate) mod events;
 pub(crate) mod memory_scope;
 pub(crate) mod read_service;
+pub(crate) mod revisions;
 pub(crate) mod thread_activity;
 #[cfg(test)]
 pub(crate) mod test_support;

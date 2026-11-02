@@ -304,6 +304,22 @@ service LearningGovernanceService {
   rpc ListLearningLedger(ListLearningLedgerRequest) returns (ListLearningLedgerResponse);
 }
 
+// MessageRevisionService: edit or delete ONE message of a Space thread (build plan WS12-S4).
+// A separate service, as MessageSearch and LearningGovernanceService are, so that SessionCore
+// and every mock of it stay source-compatible. Both RPCs are the caller's own: a service
+// credential is refused, and the caller carries a Control decision for the Space.
+service MessageRevisionService {
+  // The caller carries a Control `model.thread.revise` decision; Session Core verifies it,
+  // records an append-only revision and folds it into every read. Refused for a
+  // zero-retention credential and when SPACE_MESSAGE_REVISE_CORE is off.
+  rpc ReviseMessage(ReviseMessageRequest) returns (ReviseMessageResponse);
+
+  // Resolve what a caller may need to know about a message before asking Control
+  // to authorize a revision: its role and revision state, never its content or
+  // author. Read class: authorized like ListConversation (a Space read decision).
+  rpc ResolveMessageTarget(ResolveMessageTargetRequest) returns (ResolveMessageTargetResponse);
+}
+
 // --- CreateThread ---
 
 message CreateThreadRequest {
@@ -1170,6 +1186,22 @@ message SessionMessage {
   // each message and this is the only source for it; absent only when a caller
   // built the message without reading it from the store.
   google.protobuf.Timestamp created_at = 12;
+  // 13 (mentions) and 14 (entry) are reserved by other Space slices.
+
+  // The latest revision applied to this message (WS12-S4): "" (never revised),
+  // "edited" or "deleted". A deleted message arrives with empty `content` and no
+  // `metadata`; an edited one arrives with its effective (edited) content.
+  string revision_state = 15;
+  // When the latest applied revision was made; absent when never revised.
+  google.protobuf.Timestamp revised_at = 16;
+  // Who made the latest applied revision (the author, the thread owner for an
+  // agent answer, or a moderator).
+  string revised_by_subject_id = 17;
+  // 1-based number of the latest applied revision; 0 when never revised.
+  uint32 revision_no = 18;
+  // Set only on a deleted user message: an agent answer to it already exists, and
+  // that answer is not retracted by the deletion.
+  bool agent_followed_up = 19;
 }
 
 message ListConversationResponse {
@@ -1178,6 +1210,77 @@ message ListConversationResponse {
   // True when messages older than this page exist. Always false for an
   // unpaged read.
   bool has_more = 2;
+}
+
+// --- ReviseMessage / ResolveMessageTarget (WS12-S4) ---
+
+message ReviseMessageRequest {
+  // Required. The owning org; must equal the caller's org and the thread's org.
+  string org_id = 1;
+  // Required. The thread holding the message; it must belong to `space_id`.
+  string thread_id = 2;
+  // Required. The message to revise.
+  string message_id = 3;
+  // Required. "edit" or "delete".
+  string action = 4;
+  // The new text of an edit (1 to 32768 bytes). Must be empty for a delete.
+  string content = 5;
+  // Optional closed set, honoured only for a moderator delete: policy_violation,
+  // spam, harassment, privacy or other. Ignored (stored empty) for any other class.
+  string moderation_reason = 6;
+
+  // The complete Control `model.thread.revise` decision envelope, the same fields
+  // as AppendMessageRequest 5 to 16. `action_schema_hash` is
+  // "sha256:thread-revise-v1" and `payload_digest` binds the org, caller, thread,
+  // message, action, new-content digest and idempotency key. A v1/v2 append
+  // decision is refused. The token is verified and never persisted.
+  string space_id = 7;
+  string space_decision_ref = 8;
+  string recipient_audience_ref = 9;
+  uint64 recipient_audience_revision = 10;
+  string recipient_audience_hash = 11;
+  string privacy_policy_ref = 12;
+  uint64 authority_revision = 13;
+  string resource_authorization_ref = 14;
+  string space_decision_token = 15;
+  string action_schema_hash = 16;
+  string payload_digest = 17;
+  string idempotency_key = 18;
+}
+
+message ReviseMessageResponse {
+  // The message that was revised.
+  string message_id = 1;
+  // 1-based number of the revision that was recorded (or replayed).
+  uint32 revision_no = 2;
+  // "edited" or "deleted".
+  string revision_state = 3;
+  google.protobuf.Timestamp revised_at = 4;
+  // True when the idempotency key had already recorded this exact revision.
+  bool deduplicated = 5;
+  // "author", "agent_owner" or "moderator": the class the caller was revised under.
+  string actor_class = 6;
+}
+
+message ResolveMessageTargetRequest {
+  // Required. The owning org.
+  string org_id = 1;
+  // Required. The thread holding the message.
+  string thread_id = 2;
+  // Required. The message to resolve.
+  string message_id = 3;
+  // Required Space read decision (same envelope as ListConversationRequest 3 to 5):
+  // an absent decision is refused, there is no owner-bound fallback.
+  string space_id = 4;
+  string space_read_decision_ref = 5;
+  string space_read_decision_token = 6;
+}
+
+message ResolveMessageTargetResponse {
+  // "user" | "assistant" | "system" | "tool".
+  string role = 1;
+  // "" (never revised), "edited" or "deleted".
+  string revision_state = 2;
 }
 
 // --- ListThreads (durable cross-device chat history) ---

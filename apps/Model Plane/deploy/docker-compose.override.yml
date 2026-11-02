@@ -22,6 +22,7 @@ services:
       COMPACTION_THRESHOLD: "200000"
       SPACE_RUN_THREAD_GUARD: "true"
       SPACE_HUMAN_POSTS_CORE: "1"
+      SPACE_MESSAGE_REVISE_CORE: "1"
 
   inference-core:
     environment:
