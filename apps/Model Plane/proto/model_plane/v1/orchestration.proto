@@ -82,6 +82,19 @@ service OrchestrationCoreService {
   // concurrent claims have one winner. Refused for a zero-retention caller.
   rpc ClaimOnceApproval(ClaimOnceApprovalRequest) returns (ClaimOnceApprovalResponse);
 
+  // Keep flagged tool output, encrypted, against an UNTRUSTED_CONTENT approval so the model
+  // is handed a placeholder instead (build plan WS10 S8). Caller is the run owner's session.
+  // Refused for a zero-retention caller and for a run that is not in a Space.
+  rpc HoldQuarantinedOutput(HoldQuarantinedOutputRequest) returns (HoldQuarantinedOutputResponse);
+
+  // Hand the held content of a granted UNTRUSTED_CONTENT approval to the retry of the exact
+  // call, once (build plan WS10 S8). One atomic update, so two concurrent retries have one winner.
+  rpc ClaimQuarantineRelease(ClaimQuarantineReleaseRequest) returns (ClaimQuarantineReleaseResponse);
+
+  // A plain-text preview (at most 1 KiB) of held content, for the person deciding the
+  // approval and no one else (build plan WS10 S8).
+  rpc GetQuarantinePreview(GetQuarantinePreviewRequest) returns (GetQuarantinePreviewResponse);
+
   // Claim due durable approval deliveries for an authenticated internal
   // worker. Claims are tenant-scoped, leased, and opaque; the caller identity
   // is derived from its verified service credential, never from this request.
@@ -236,6 +249,10 @@ enum ApprovalKind {
   APPROVAL_KIND_DESTRUCTIVE = 4;
   // Approval for a high-cost operation.
   APPROVAL_KIND_COST = 5;
+  // 6 is reserved for HUMAN_ASSIST (build plan 4.6.C, WS20-S7).
+  // Review of tool output held as untrusted content (build plan WS10 S8). Granting it runs
+  // nothing: the agent's retry of the exact call hands the held content over once.
+  APPROVAL_KIND_UNTRUSTED_CONTENT = 7;
 }
 
 // Lifecycle state of an approval request.
@@ -928,6 +945,76 @@ message ClaimOnceApprovalResponse {
   bool claimed = 1;
   // The spent approval; empty when nothing was claimed.
   string approval_id = 2;
+}
+
+// HoldQuarantinedOutput keeps one flagged tool output against its approval.
+message HoldQuarantinedOutputRequest {
+  // Server-authoritative org scope; must match the caller.
+  string org_id = 1;
+  // The run whose tool call produced the output.
+  string run_id = 2;
+  // The UNTRUSTED_CONTENT approval raised for this output.
+  string approval_id = 3;
+  // Stable key of the tool that produced it.
+  string tool_key = 4;
+  // Hex sha256 of the canonical `{tool, input}` of the call, so only its exact retry can release.
+  string action_digest = 5;
+  // Trust class label of the source (`external-web`, `browser-scraped`, `third-party-mcp`).
+  string trust_class = 6;
+  // BLAKE3 hex digest of the content, kept next to the ciphertext.
+  string content_hash = 7;
+  // The content to hold. At most 1 MiB; encrypted before it is stored.
+  string content = 8;
+}
+
+// The outcome of a HoldQuarantinedOutput.
+message HoldQuarantinedOutputResponse {
+  // True when the content is held (also true for an idempotent repeat).
+  bool held = 1;
+}
+
+// ClaimQuarantineRelease asks for the content a person released for one exact call.
+message ClaimQuarantineReleaseRequest {
+  // Server-authoritative org scope; must match the caller.
+  string org_id = 1;
+  // The run retrying the call; its thread bounds the claim.
+  string run_id = 2;
+  // Stable key of the tool being retried.
+  string tool_key = 3;
+  // Hex sha256 of the canonical `{tool, input}` of the retried call.
+  string action_digest = 4;
+}
+
+// The outcome of a ClaimQuarantineRelease.
+message ClaimQuarantineReleaseResponse {
+  // True when a granted, unspent, unexpired hold matched and was spent now.
+  bool released = 1;
+  // The spent approval; empty when nothing was released.
+  string approval_id = 2;
+  // The released content, to be framed as untrusted data. Empty unless released.
+  string content = 3;
+  // BLAKE3 hex digest of the content as it was held.
+  string content_hash = 4;
+}
+
+// GetQuarantinePreview asks for the inert preview of a held output.
+message GetQuarantinePreviewRequest {
+  // Server-authoritative org scope; must match the caller.
+  string org_id = 1;
+  // The UNTRUSTED_CONTENT approval being decided.
+  string approval_id = 2;
+}
+
+// The inert preview of a held output.
+message GetQuarantinePreviewResponse {
+  // Plain text, at most 1 KiB, control characters removed. Never markup; show it as text.
+  string preview = 1;
+  // True when the held content is longer than the preview.
+  bool truncated = 2;
+  // Stable key of the tool that produced the content.
+  string tool_key = 3;
+  // Trust class label of the source.
+  string trust_class = 4;
 }
 
 // ConsumeApproval claims one granted loop-mode approval for the loop that is

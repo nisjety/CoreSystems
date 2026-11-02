@@ -336,6 +336,10 @@ pub(crate) struct GateView {
     standing_rules_enabled: bool,
     #[serde(default)]
     agent_subject_id: Option<String>,
+    /// The Space's quarantine setting (`off`, `shadow`, `enforce`); absent reads as `off`
+    /// (build plan WS10-S8).
+    #[serde(default)]
+    quarantine_mode: Option<String>,
 }
 
 impl GateView {
@@ -752,6 +756,19 @@ async fn try_standing_rule(
         Err(status) => {
             tracing::warn!(code = ?status.code(), run_id = call.run_id, "Space approval gate: standing-rule approval refused; the call pauses");
             false
+        }
+    }
+}
+
+/// The Space's quarantine setting from Control's gate view (build plan WS10-S8). `None` when
+/// Control is unconfigured or unreachable, which quarantine reads as `off`.
+pub(crate) async fn control_quarantine_mode(org_id: &str, run_id: &str) -> Option<String> {
+    let client = ControlGateClient::shared()?;
+    match client.gate_view(org_id, run_id).await {
+        Ok(view) => view.quarantine_mode,
+        Err(error) => {
+            tracing::warn!(?error, run_id, "Space quarantine: Control view unavailable; quarantine is off for this call");
+            None
         }
     }
 }

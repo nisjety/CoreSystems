@@ -313,6 +313,7 @@ pub(crate) async fn claim_once(
              WHERE a.org_id = $1 AND a.user_id = $2 \
                AND a.tool_key = $3 AND a.action_digest = $4 \
                AND a.status = 'granted' AND a.consumed_at IS NULL \
+               AND a.kind <> 'untrusted_content' \
                AND (a.expires_at IS NULL OR a.expires_at > now()) \
                AND a.continuation_mode = '' \
                AND COALESCE(a.metadata->'card'->>'resume_class', '') = 'none' \

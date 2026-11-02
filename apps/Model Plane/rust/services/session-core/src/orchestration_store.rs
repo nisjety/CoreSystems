@@ -1170,6 +1170,12 @@ async fn decide_approval_inner(
         .bind(org_id)
         .execute(&mut *transaction)
         .await?;
+        // A held quarantined output is blanked with it (build plan WS10 S8).
+        sqlx::query(crate::space::quarantine::PURGE_FOR_APPROVAL_SQL)
+            .bind(id)
+            .bind(org_id)
+            .execute(&mut *transaction)
+            .await?;
     }
 
     // A loop-mode approval is resumed by the durable Do loop through

@@ -100,6 +100,8 @@ services:
     environment:
       # Space approval gate (WS10-S3): off in production until the rollout order turns it on.
       EXECUTION_CORE_SPACE_APPROVAL_GATE: "off"
+      # Quarantine-and-release of flagged tool output (WS10-S8): off in production.
+      EXECUTION_CORE_QUARANTINE_MODE: "off"
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
       AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
       EXECUTION_CORE_AUTH_AUDIENCE: ${EXECUTION_CORE_AUTH_AUDIENCE:?EXECUTION_CORE_AUTH_AUDIENCE is required}

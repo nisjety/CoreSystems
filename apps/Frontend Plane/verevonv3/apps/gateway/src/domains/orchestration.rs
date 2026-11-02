@@ -91,6 +91,10 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(get_approval),
         )
         .route(
+            "/api/v1/orchestration/approvals/{approval_id}/quarantine-preview",
+            get(get_quarantine_preview),
+        )
+        .route(
             "/api/v1/orchestration/threads/{thread_id}/lineage",
             get(get_lineage),
         )
@@ -470,6 +474,27 @@ async fn get_approval(
         &user,
         &headers,
         &format!("/v1/orchestration/approvals/{}", enc(&approval_id)),
+    )
+    .await
+}
+
+/// The inert preview of tool output held for review (build plan WS10 S8). A plain pass-through:
+/// model-gateway verifies the caller's org and Session Core answers only the run owner while the
+/// approval is pending or granted and unspent, so the gateway adds no authority of its own.
+async fn get_quarantine_preview(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(approval_id): Path<String>,
+) -> impl IntoResponse {
+    mg_get(
+        &state,
+        &user,
+        &headers,
+        &format!(
+            "/v1/orchestration/approvals/{}/quarantine-preview",
+            enc(&approval_id)
+        ),
     )
     .await
 }

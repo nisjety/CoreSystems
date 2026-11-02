@@ -226,6 +226,40 @@ export async function decideApproval(
   return payload.approval ? normalizeApproval(payload.approval) : null
 }
 
+/** The kind token of an approval that holds tool output back for review (build plan WS10 S8). */
+export const UNTRUSTED_CONTENT_KIND = 'APPROVAL_KIND_UNTRUSTED_CONTENT'
+
+/** The inert preview of held tool output. Plain text only: render it as text, never as markup. */
+export type QuarantinePreview = {
+  text: string
+  truncated: boolean
+  toolKey?: string
+  trustClass?: string
+}
+
+/**
+ * Read the plain-text preview (at most 1 KiB) of output held for review. Answered only to the
+ * person the approval is addressed to while it is pending or granted and unspent; any other case
+ * is a 404, which a caller shows as "no preview available".
+ */
+export async function readQuarantinePreview(
+  approvalId: string,
+  signal?: AbortSignal,
+): Promise<QuarantinePreview | null> {
+  const payload = await requestJson<{ preview?: Record<string, unknown> }>(
+    `/api/v1/orchestration/approvals/${encodeURIComponent(approvalId)}/quarantine-preview`,
+    { signal },
+  )
+  const raw = payload.preview
+  if (!raw || typeof raw.text !== 'string') return null
+  return {
+    text: raw.text,
+    truncated: raw.truncated === true,
+    toolKey: str(raw.tool_key),
+    trustClass: str(raw.trust_class),
+  }
+}
+
 /** Resume a run that paused for approval, after the decision is recorded. */
 export async function resumeRun(runId: string, signal?: AbortSignal): Promise<void> {
   await requestJson<unknown>(`/api/v1/orchestration/runs/${encodeURIComponent(runId)}/resume`, {

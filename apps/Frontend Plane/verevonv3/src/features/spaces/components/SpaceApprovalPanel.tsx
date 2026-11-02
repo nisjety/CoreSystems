@@ -1,7 +1,12 @@
 import { Loader2, ShieldCheck } from '@/shared/icons'
 import { createEffect, createSignal, For, Show } from 'solid-js'
 
-import type { Approval, ApprovalDecision } from '@/shared/api/orchestration-client'
+import {
+  readQuarantinePreview,
+  UNTRUSTED_CONTENT_KIND,
+  type Approval,
+  type ApprovalDecision,
+} from '@/shared/api/orchestration-client'
 import {
   offerableScopes,
   readSpaceApprovalPolicy,
@@ -63,6 +68,12 @@ export interface SpaceApprovalPanelProps {
   readonly viewerRole?: string
 }
 
+/** Where the preview of one held output stands. */
+type PreviewState =
+  | { status: 'loading'; text?: undefined; truncated?: undefined }
+  | { status: 'unavailable'; text?: undefined; truncated?: undefined }
+  | { status: 'ready'; text: string; truncated: boolean }
+
 export function SpaceApprovalPanel(props: SpaceApprovalPanelProps) {
   const i18n = useI18n()
   const [reloadKey, setReloadKey] = createSignal(0)
@@ -95,6 +106,22 @@ export function SpaceApprovalPanel(props: SpaceApprovalPanelProps) {
     return optionsFor(approval).includes(chosen) ? chosen : 'once'
   }
   const [outcome, setOutcome] = createSignal<ApprovalOutcome | undefined>(undefined)
+  // The inert preview of held tool output, read only when the person asks for it (WS10-S8).
+  const [previews, setPreviews] = createSignal<Record<string, PreviewState>>({})
+  async function showPreview(approvalId: string) {
+    setPreviews((current) => ({ ...current, [approvalId]: { status: 'loading' } }))
+    try {
+      const preview = await readQuarantinePreview(approvalId)
+      setPreviews((current) => ({
+        ...current,
+        [approvalId]: preview
+          ? { status: 'ready', text: preview.text, truncated: preview.truncated }
+          : { status: 'unavailable' },
+      }))
+    } catch {
+      setPreviews((current) => ({ ...current, [approvalId]: { status: 'unavailable' } }))
+    }
+  }
 
   const approvals = () => (pending.error ? [] : pending()?.approvals ?? [])
   const refused = () => (pending.error ? false : pending()?.refused === true)
@@ -201,6 +228,50 @@ export function SpaceApprovalPanel(props: SpaceApprovalPanelProps) {
                   </p>
                 )}
               </Show>
+              <Show when={approval.kind === UNTRUSTED_CONTENT_KIND}>
+                <div class="verevon-room-approval__detail">
+                  <Show
+                    when={previews()[approval.id]}
+                    fallback={
+                      <button type="button" onClick={() => void showPreview(approval.id)}>
+                        {i18n.tr('Vis en ren tekstforhåndsvisning', 'Show a plain-text preview')}
+                      </button>
+                    }
+                  >
+                    {(preview) => (
+                      <>
+                        <Show when={preview().status === 'loading'}>
+                          <p role="status">{i18n.tr('Henter forhåndsvisningen …', 'Loading the preview…')}</p>
+                        </Show>
+                        <Show when={preview().status === 'unavailable'}>
+                          <p role="status">
+                            {i18n.tr(
+                              'Ingen forhåndsvisning er tilgjengelig for deg.',
+                              'No preview is available to you.',
+                            )}
+                          </p>
+                        </Show>
+                        <Show when={preview().text !== undefined}>
+                          {/* Text node only: the content is untrusted, so it is never markup or a link. */}
+                          <pre
+                            style={{
+                              'white-space': 'pre-wrap',
+                              'overflow-wrap': 'anywhere',
+                              'max-height': '12rem',
+                              overflow: 'auto',
+                            }}
+                          >
+                            {preview().text}
+                          </pre>
+                          <Show when={preview().truncated}>
+                            <p>{i18n.tr('Vist: de første 1024 byte.', 'Shown: the first 1024 bytes.')}</p>
+                          </Show>
+                        </Show>
+                      </>
+                    )}
+                  </Show>
+                </div>
+              </Show>
               <SpaceApprovalScopePicker
                 approvalId={approval.id}
                 options={optionsFor(approval)}
@@ -286,6 +357,13 @@ function consequenceMessage(
   approval: Approval,
   tr: (no: string, en: string) => string,
 ): string {
+  // Held tool output: nothing runs on approval, and the agent was not shown the content.
+  if (approval.kind === UNTRUSTED_CONTENT_KIND) {
+    return tr(
+      'Agenten har ikke sett dette innholdet. Godkjenning lar agenten gjenta akkurat dette kallet én gang og få innholdet som ikke-klarert data. Avslag sletter det.',
+      'The agent has not seen this content. Approving lets the agent repeat this exact call once and receive the content as untrusted data. Denying deletes it.',
+    )
+  }
   switch (approval.resumeClass) {
     case 'action_continuation':
       return tr(

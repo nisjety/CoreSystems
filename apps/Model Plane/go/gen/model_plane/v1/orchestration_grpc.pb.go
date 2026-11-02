@@ -34,6 +34,9 @@ const (
 	OrchestrationCoreService_RerouteApproval_FullMethodName                   = "/model_plane.v1.OrchestrationCoreService/RerouteApproval"
 	OrchestrationCoreService_ConsumeApproval_FullMethodName                   = "/model_plane.v1.OrchestrationCoreService/ConsumeApproval"
 	OrchestrationCoreService_ClaimOnceApproval_FullMethodName                 = "/model_plane.v1.OrchestrationCoreService/ClaimOnceApproval"
+	OrchestrationCoreService_HoldQuarantinedOutput_FullMethodName             = "/model_plane.v1.OrchestrationCoreService/HoldQuarantinedOutput"
+	OrchestrationCoreService_ClaimQuarantineRelease_FullMethodName            = "/model_plane.v1.OrchestrationCoreService/ClaimQuarantineRelease"
+	OrchestrationCoreService_GetQuarantinePreview_FullMethodName              = "/model_plane.v1.OrchestrationCoreService/GetQuarantinePreview"
 	OrchestrationCoreService_ClaimApprovalDeliveries_FullMethodName           = "/model_plane.v1.OrchestrationCoreService/ClaimApprovalDeliveries"
 	OrchestrationCoreService_GetApprovalContinuation_FullMethodName           = "/model_plane.v1.OrchestrationCoreService/GetApprovalContinuation"
 	OrchestrationCoreService_RecordApprovalContinuationStarted_FullMethodName = "/model_plane.v1.OrchestrationCoreService/RecordApprovalContinuationStarted"
@@ -112,6 +115,16 @@ type OrchestrationCoreServiceClient interface {
 	// caller is the run owner's session; the claim is one atomic update, so two
 	// concurrent claims have one winner. Refused for a zero-retention caller.
 	ClaimOnceApproval(ctx context.Context, in *ClaimOnceApprovalRequest, opts ...grpc.CallOption) (*ClaimOnceApprovalResponse, error)
+	// Keep flagged tool output, encrypted, against an UNTRUSTED_CONTENT approval so the model
+	// is handed a placeholder instead (build plan WS10 S8). Caller is the run owner's session.
+	// Refused for a zero-retention caller and for a run that is not in a Space.
+	HoldQuarantinedOutput(ctx context.Context, in *HoldQuarantinedOutputRequest, opts ...grpc.CallOption) (*HoldQuarantinedOutputResponse, error)
+	// Hand the held content of a granted UNTRUSTED_CONTENT approval to the retry of the exact
+	// call, once (build plan WS10 S8). One atomic update, so two concurrent retries have one winner.
+	ClaimQuarantineRelease(ctx context.Context, in *ClaimQuarantineReleaseRequest, opts ...grpc.CallOption) (*ClaimQuarantineReleaseResponse, error)
+	// A plain-text preview (at most 1 KiB) of held content, for the person deciding the
+	// approval and no one else (build plan WS10 S8).
+	GetQuarantinePreview(ctx context.Context, in *GetQuarantinePreviewRequest, opts ...grpc.CallOption) (*GetQuarantinePreviewResponse, error)
 	// Claim due durable approval deliveries for an authenticated internal
 	// worker. Claims are tenant-scoped, leased, and opaque; the caller identity
 	// is derived from its verified service credential, never from this request.
@@ -318,6 +331,36 @@ func (c *orchestrationCoreServiceClient) ClaimOnceApproval(ctx context.Context, 
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ClaimOnceApprovalResponse)
 	err := c.cc.Invoke(ctx, OrchestrationCoreService_ClaimOnceApproval_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *orchestrationCoreServiceClient) HoldQuarantinedOutput(ctx context.Context, in *HoldQuarantinedOutputRequest, opts ...grpc.CallOption) (*HoldQuarantinedOutputResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(HoldQuarantinedOutputResponse)
+	err := c.cc.Invoke(ctx, OrchestrationCoreService_HoldQuarantinedOutput_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *orchestrationCoreServiceClient) ClaimQuarantineRelease(ctx context.Context, in *ClaimQuarantineReleaseRequest, opts ...grpc.CallOption) (*ClaimQuarantineReleaseResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ClaimQuarantineReleaseResponse)
+	err := c.cc.Invoke(ctx, OrchestrationCoreService_ClaimQuarantineRelease_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *orchestrationCoreServiceClient) GetQuarantinePreview(ctx context.Context, in *GetQuarantinePreviewRequest, opts ...grpc.CallOption) (*GetQuarantinePreviewResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetQuarantinePreviewResponse)
+	err := c.cc.Invoke(ctx, OrchestrationCoreService_GetQuarantinePreview_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -535,6 +578,16 @@ type OrchestrationCoreServiceServer interface {
 	// caller is the run owner's session; the claim is one atomic update, so two
 	// concurrent claims have one winner. Refused for a zero-retention caller.
 	ClaimOnceApproval(context.Context, *ClaimOnceApprovalRequest) (*ClaimOnceApprovalResponse, error)
+	// Keep flagged tool output, encrypted, against an UNTRUSTED_CONTENT approval so the model
+	// is handed a placeholder instead (build plan WS10 S8). Caller is the run owner's session.
+	// Refused for a zero-retention caller and for a run that is not in a Space.
+	HoldQuarantinedOutput(context.Context, *HoldQuarantinedOutputRequest) (*HoldQuarantinedOutputResponse, error)
+	// Hand the held content of a granted UNTRUSTED_CONTENT approval to the retry of the exact
+	// call, once (build plan WS10 S8). One atomic update, so two concurrent retries have one winner.
+	ClaimQuarantineRelease(context.Context, *ClaimQuarantineReleaseRequest) (*ClaimQuarantineReleaseResponse, error)
+	// A plain-text preview (at most 1 KiB) of held content, for the person deciding the
+	// approval and no one else (build plan WS10 S8).
+	GetQuarantinePreview(context.Context, *GetQuarantinePreviewRequest) (*GetQuarantinePreviewResponse, error)
 	// Claim due durable approval deliveries for an authenticated internal
 	// worker. Claims are tenant-scoped, leased, and opaque; the caller identity
 	// is derived from its verified service credential, never from this request.
@@ -641,6 +694,15 @@ func (UnimplementedOrchestrationCoreServiceServer) ConsumeApproval(context.Conte
 }
 func (UnimplementedOrchestrationCoreServiceServer) ClaimOnceApproval(context.Context, *ClaimOnceApprovalRequest) (*ClaimOnceApprovalResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ClaimOnceApproval not implemented")
+}
+func (UnimplementedOrchestrationCoreServiceServer) HoldQuarantinedOutput(context.Context, *HoldQuarantinedOutputRequest) (*HoldQuarantinedOutputResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method HoldQuarantinedOutput not implemented")
+}
+func (UnimplementedOrchestrationCoreServiceServer) ClaimQuarantineRelease(context.Context, *ClaimQuarantineReleaseRequest) (*ClaimQuarantineReleaseResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ClaimQuarantineRelease not implemented")
+}
+func (UnimplementedOrchestrationCoreServiceServer) GetQuarantinePreview(context.Context, *GetQuarantinePreviewRequest) (*GetQuarantinePreviewResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetQuarantinePreview not implemented")
 }
 func (UnimplementedOrchestrationCoreServiceServer) ClaimApprovalDeliveries(context.Context, *ClaimApprovalDeliveriesRequest) (*ClaimApprovalDeliveriesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ClaimApprovalDeliveries not implemented")
@@ -976,6 +1038,60 @@ func _OrchestrationCoreService_ClaimOnceApproval_Handler(srv interface{}, ctx co
 	return interceptor(ctx, in, info, handler)
 }
 
+func _OrchestrationCoreService_HoldQuarantinedOutput_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(HoldQuarantinedOutputRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrchestrationCoreServiceServer).HoldQuarantinedOutput(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrchestrationCoreService_HoldQuarantinedOutput_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrchestrationCoreServiceServer).HoldQuarantinedOutput(ctx, req.(*HoldQuarantinedOutputRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _OrchestrationCoreService_ClaimQuarantineRelease_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ClaimQuarantineReleaseRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrchestrationCoreServiceServer).ClaimQuarantineRelease(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrchestrationCoreService_ClaimQuarantineRelease_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrchestrationCoreServiceServer).ClaimQuarantineRelease(ctx, req.(*ClaimQuarantineReleaseRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _OrchestrationCoreService_GetQuarantinePreview_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetQuarantinePreviewRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrchestrationCoreServiceServer).GetQuarantinePreview(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrchestrationCoreService_GetQuarantinePreview_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrchestrationCoreServiceServer).GetQuarantinePreview(ctx, req.(*GetQuarantinePreviewRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _OrchestrationCoreService_ClaimApprovalDeliveries_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ClaimApprovalDeliveriesRequest)
 	if err := dec(in); err != nil {
@@ -1287,6 +1403,18 @@ var OrchestrationCoreService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ClaimOnceApproval",
 			Handler:    _OrchestrationCoreService_ClaimOnceApproval_Handler,
+		},
+		{
+			MethodName: "HoldQuarantinedOutput",
+			Handler:    _OrchestrationCoreService_HoldQuarantinedOutput_Handler,
+		},
+		{
+			MethodName: "ClaimQuarantineRelease",
+			Handler:    _OrchestrationCoreService_ClaimQuarantineRelease_Handler,
+		},
+		{
+			MethodName: "GetQuarantinePreview",
+			Handler:    _OrchestrationCoreService_GetQuarantinePreview_Handler,
 		},
 		{
 			MethodName: "ClaimApprovalDeliveries",

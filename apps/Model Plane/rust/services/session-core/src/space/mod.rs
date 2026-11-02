@@ -16,6 +16,7 @@
 //! - [`approval_gate`]: the gate context, the standing-rule pass and the once-token (WS10-S3; columns are
 //!   migration 0074).
 //! - [`approvals`]: the approval card context and the derived continuation state (WS10-S1).
+//! - [`quarantine`]: held tool output and its single-use release (WS10-S8; the table is migration 0082).
 //! - [`read_service`]: `SpaceRoomReadService`, the room read aggregates (D3; `ListSpaceArtifacts` WS07-S9).
 //! - [`events`]: the Space event log's flag sync, listener, sweeper, gate and erasure hooks
 //!   (WS02-S1; the log itself is written by triggers in migration 0072).
@@ -42,10 +43,11 @@ pub(crate) mod events;
 pub(crate) mod history;
 pub(crate) mod memory_scope;
 pub(crate) mod mentions;
+pub(crate) mod quarantine;
 pub(crate) mod read_service;
 pub(crate) mod revisions;
+pub(crate) mod run_control;
 pub(crate) mod thread_activity;
 pub(crate) mod timeline;
-pub(crate) mod run_control;
 #[cfg(test)]
 pub(crate) mod test_support;

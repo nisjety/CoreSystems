@@ -763,6 +763,7 @@ pub(crate) fn approval_kind_from_str(s: &str) -> i32 {
         "permission" => proto::ApprovalKind::Permission as i32,
         "destructive" => proto::ApprovalKind::Destructive as i32,
         "cost" => proto::ApprovalKind::Cost as i32,
+        crate::space::quarantine::KIND => proto::ApprovalKind::UntrustedContent as i32,
         _ => proto::ApprovalKind::Unspecified as i32,
     }
 }
@@ -775,6 +776,7 @@ pub(crate) fn approval_kind_to_str(code: i32) -> Option<&'static str> {
         proto::ApprovalKind::Permission => Some("permission"),
         proto::ApprovalKind::Destructive => Some("destructive"),
         proto::ApprovalKind::Cost => Some("cost"),
+        proto::ApprovalKind::UntrustedContent => Some(crate::space::quarantine::KIND),
     }
 }
 
@@ -3737,6 +3739,135 @@ impl OrchestrationCoreService for OrchestrationGrpc {
         }
         .await;
         record_metrics("claim_once_approval", started, result.is_ok());
+        result
+    }
+
+    // Build plan WS10 S8: keep flagged tool output against its UNTRUSTED_CONTENT approval. The
+    // caller is the run owner's session; the content is encrypted before it is stored and a
+    // zero-retention caller is refused first.
+    async fn hold_quarantined_output(
+        &self,
+        request: Request<proto::HoldQuarantinedOutputRequest>,
+    ) -> Result<Response<proto::HoldQuarantinedOutputResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::HoldQuarantinedOutputResponse>, Status> = async {
+            let caller = identity(&request)?;
+            retention_receipt::refuse_zdr_continuation(&caller)?;
+            authorize_operation(&caller, "orchestration:write")?;
+            let req = request.into_inner();
+            if req.run_id.is_empty() || req.org_id.is_empty() || req.approval_id.is_empty() {
+                return Err(Status::invalid_argument(
+                    "run_id, org_id and approval_id are required",
+                ));
+            }
+            caller.authorize_org(&req.org_id)?;
+            let user_id = caller
+                .user_id()
+                .ok_or_else(|| Status::permission_denied("user-bound approval credential required"))?
+                .to_owned();
+            authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
+            crate::space::quarantine::hold(
+                &self.pool,
+                &crate::space::quarantine::HoldInput {
+                    approval_id: &req.approval_id,
+                    run_id: &req.run_id,
+                    org_id: &req.org_id,
+                    user_id: &user_id,
+                    tool_key: &req.tool_key,
+                    action_digest: &req.action_digest.to_ascii_lowercase(),
+                    trust_class: &req.trust_class,
+                    content_hash: &req.content_hash,
+                    content: &req.content,
+                },
+            )
+            .await?;
+            Ok(Response::new(proto::HoldQuarantinedOutputResponse { held: true }))
+        }
+        .await;
+        record_metrics("hold_quarantined_output", started, result.is_ok());
+        result
+    }
+
+    // Build plan WS10 S8: the retry of the exact call is handed the released content, once.
+    async fn claim_quarantine_release(
+        &self,
+        request: Request<proto::ClaimQuarantineReleaseRequest>,
+    ) -> Result<Response<proto::ClaimQuarantineReleaseResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::ClaimQuarantineReleaseResponse>, Status> = async {
+            let caller = identity(&request)?;
+            retention_receipt::refuse_zdr_continuation(&caller)?;
+            authorize_operation(&caller, "orchestration:write")?;
+            let req = request.into_inner();
+            if req.run_id.is_empty() || req.org_id.is_empty() {
+                return Err(Status::invalid_argument("run_id and org_id are required"));
+            }
+            crate::space::quarantine::validate_claim(&req.tool_key, &req.action_digest)?;
+            caller.authorize_org(&req.org_id)?;
+            let user_id = caller
+                .user_id()
+                .ok_or_else(|| Status::permission_denied("user-bound approval credential required"))?
+                .to_owned();
+            authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
+            let released = crate::space::quarantine::claim_release(
+                &self.pool,
+                &req.org_id,
+                &user_id,
+                &req.run_id,
+                &req.tool_key,
+                &req.action_digest,
+            )
+            .await?;
+            Ok(Response::new(match released {
+                Some(released) => proto::ClaimQuarantineReleaseResponse {
+                    released: true,
+                    approval_id: released.approval_id,
+                    content: released.content,
+                    content_hash: released.content_hash,
+                },
+                None => proto::ClaimQuarantineReleaseResponse::default(),
+            }))
+        }
+        .await;
+        record_metrics("claim_quarantine_release", started, result.is_ok());
+        result
+    }
+
+    // Build plan WS10 S8: the inert preview, for the person deciding and no one else.
+    async fn get_quarantine_preview(
+        &self,
+        request: Request<proto::GetQuarantinePreviewRequest>,
+    ) -> Result<Response<proto::GetQuarantinePreviewResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::GetQuarantinePreviewResponse>, Status> = async {
+            let caller = identity(&request)?;
+            retention_receipt::refuse_zdr_continuation(&caller)?;
+            authorize_operation(&caller, "orchestration:read")?;
+            let req = request.into_inner();
+            if req.approval_id.is_empty() || req.org_id.is_empty() {
+                return Err(Status::invalid_argument("approval_id and org_id are required"));
+            }
+            caller.authorize_org(&req.org_id)?;
+            let user_id = caller
+                .user_id()
+                .ok_or_else(|| Status::permission_denied("user-bound approval credential required"))?
+                .to_owned();
+            let preview = crate::space::quarantine::preview(
+                &self.pool,
+                &req.org_id,
+                &user_id,
+                &req.approval_id,
+            )
+            .await?;
+            Ok(Response::new(proto::GetQuarantinePreviewResponse {
+                preview: preview.text,
+                truncated: preview.truncated,
+                tool_key: preview.tool_key,
+                trust_class: preview.trust_class,
+            }))
+        }
+        .await;
+        record_metrics("get_quarantine_preview", started, result.is_ok());
         result
     }
 

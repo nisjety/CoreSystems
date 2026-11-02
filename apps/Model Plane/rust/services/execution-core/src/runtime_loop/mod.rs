@@ -1347,7 +1347,7 @@ async fn execute_step_inner(
     // rendered, parked or measured, so a withheld result never reaches the model (WS26-S7).
     let compaction_triggered = output.len() > 2048;
     let local = crate::provenance::assess(tool_name, &output);
-    let screened = crate::provenance::screening_client::screen_result(
+    let mut screened = crate::provenance::screening_client::screen_result(
         crate::provenance::screening_client::production(),
         tool_name,
         output,
@@ -1359,6 +1359,38 @@ async fn execute_step_inner(
     )
     .await;
     crate::provenance::audit(tool_name, org_id, run_id, zdr, &screened.provenance);
+    // Build plan WS10 S8: a flagged external result of a Space run may be held for a person's
+    // review (the model gets a placeholder with no content) or, when a person released this exact
+    // call, handed over once. `off`, and every non-Space step, renders exactly as before.
+    match crate::quarantine::apply(
+        &crate::quarantine::QuarantineCall {
+            tool_name,
+            tool_input,
+            org_id,
+            user_id,
+            run_id,
+            step_id,
+            space_scoped: sandbox.is_some(),
+            zdr,
+            waived,
+            session_channel: session_channel.as_ref(),
+            session_bearer,
+        },
+        &screened.output,
+        &screened.provenance,
+    )
+    .await
+    {
+        crate::quarantine::Verdict::Unchanged => {}
+        crate::quarantine::Verdict::Withheld(placeholder) => {
+            return StepOutcome::completed(placeholder);
+        }
+        crate::quarantine::Verdict::Released { content } => {
+            // Re-read in full: the released content is framed and flagged on its own evidence.
+            screened.provenance = crate::provenance::assess(tool_name, &content);
+            screened.output = content;
+        }
+    }
     let rendered = crate::provenance::render(&screened.output, &screened.provenance);
     // An oversized read-class result is held by the run and the model gets its handle
     // (WS25-S5). The label is the render prefix alone, so the held body is exactly the

@@ -295,6 +295,46 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /v1/orchestration/approvals/{approval_id}/quarantine-preview:
+    get:
+      operationId: getQuarantinePreview
+      tags: [orchestration]
+      summary: Inert preview of tool output held for review (WS10-S8)
+      description: >
+        Plain text, at most 1 KiB, control and bidirectional characters removed. Answered only to
+        the run owner while the UNTRUSTED_CONTENT approval is pending or granted and unspent;
+        every other case is a 404. Show the text as text, never as markup or links.
+      parameters:
+        - name: approval_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The preview
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  preview:
+                    type: object
+                    properties:
+                      text:
+                        type: string
+                      truncated:
+                        type: boolean
+                      tool_key:
+                        type: string
+                      trust_class:
+                        type: string
+                      format:
+                        type: string
+                        enum: [plain_text]
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /v1/orchestration/threads/{thread_id}/lineage:
     get:
       operationId: getSubagentLineage

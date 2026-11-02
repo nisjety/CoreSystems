@@ -104,6 +104,7 @@ pub fn gateway_approval_from_proto(a: &Approval) -> GatewayApproval {
         ApprovalKind::Plan => "plan",
         ApprovalKind::Permission => "permission",
         ApprovalKind::Destructive => "destructive_action",
+        ApprovalKind::UntrustedContent => "untrusted_content",
         _ => "custom",
     };
     let status = match ApprovalState::try_from(a.state).unwrap_or(ApprovalState::Unspecified) {
