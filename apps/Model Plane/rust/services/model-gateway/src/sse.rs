@@ -1430,6 +1430,25 @@ pub async fn invoke_stream_sse(
         Ok(turn_posture) => turn_posture,
         Err(refusal) => return zdr_refusal_stream(&request_id, refusal),
     };
+    // A wake starts a durable run from a stored post (WS08-S3): refused, typed, for a zero-retention
+    // or waived turn before anything else, then checked against the post it was approved for.
+    if let Some(wake) = req.wake_context.as_ref() {
+        if let Err(refusal) = crate::space_sse::check_wake(
+            wake,
+            &req.content,
+            req.thread_id.as_deref(),
+            turn_posture.zdr() || turn_posture.retention_class().is_some(),
+            mp_contracts::space_mentions::wake_api_enabled(),
+        ) {
+            return match refusal {
+                crate::space_sse::WakeRefusal::Zdr => zdr_refusal_stream(
+                    &request_id,
+                    mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN,
+                ),
+                other => error_stream(&request_id, other.code(), other.message(), false),
+            };
+        }
+    }
     // The connected accounts the person selected (build plan WS23 S4), checked before any run or model
     // call. An empty selection selects nothing and is never refused.
     let connector_ids = match connector_selection(
@@ -2043,7 +2062,11 @@ pub async fn invoke_stream_sse(
     let managed_start_key = state.managed_start_keys.derive(
         &org_id,
         &user_id,
-        req.idempotency_key.as_deref(),
+        // A wake names its durable start by the browser's per-(post, agent) wake id (WS08-S3).
+        req.wake_context
+            .as_ref()
+            .map(|wake| wake.client_wake_id.as_str())
+            .or(req.idempotency_key.as_deref()),
         &request_id,
         if agentic_requested {
             "execution-agent"
@@ -2089,6 +2112,7 @@ pub async fn invoke_stream_sse(
             req.edited_resubmit,
             req.idempotency_key.as_deref(),
         ),
+        req.wake_context.as_ref(),
     )
     .await
     {
@@ -2356,6 +2380,11 @@ pub async fn invoke_stream_sse(
         sovereign_retrieval,
     )
     .await };
+    let wake_history = req.wake_context.as_ref().map(|wake| crate::space_sse::WakeHistory {
+        trigger_message_id: &wake.trigger_message_id,
+        room_context: mp_contracts::space_mentions::wake_room_context_enabled(),
+        participants: &wake.participants,
+    });
     let recent_thread = load_recent_thread_messages(
         &state,
         &org_id,
@@ -2374,6 +2403,7 @@ pub async fn invoke_stream_sse(
             inference_bearer: &inference_bearer,
             token_budget: cache_options.compaction_token_budget,
         },
+        wake_history.as_ref(),
     )
     .await;
     // A summary written this turn, persisted with the answer so later turns
@@ -6478,8 +6508,14 @@ async fn load_recent_thread_messages(
     pinned_message_ids: &[String],
     bearer: &VerifiedModelBearer,
     summarizer: &SummarizerContext<'_>,
+    // Wake mode (WS08-S3): the current turn is a stored post, pushed rather than spliced.
+    wake: Option<&crate::space_sse::WakeHistory<'_>>,
 ) -> RecentThread {
     use mp_contracts::model_plane::v1::ListConversationRequest;
+
+    let wake_post_reads = crate::space_sse::history_read_options(wake);
+    // Room posts newer than the last answer, offered only to a wake that opted in.
+    let mut room_posts: Vec<crate::space_sse::RoomPost> = Vec::new();
 
     // Forward the verified session bearer — session-core's interceptor rejects
     // an unauthenticated ListConversation, which would silently strip all prior
@@ -6498,6 +6534,8 @@ async fn load_recent_thread_messages(
             // Unpaged (WS09-S8): the whole conversation in sequence order.
             limit: 0,
             before_message_id: String::new(),
+            include_human_posts: wake_post_reads.0,
+            post_context_cap: wake_post_reads.1,
             ..Default::default()
         },
         bearer,
@@ -6526,10 +6564,12 @@ async fn load_recent_thread_messages(
         .list_conversation(request)
         .await
     {
-        Ok(response) => response
-            .into_inner()
-            .messages
-            .into_iter()
+        Ok(response) => crate::space_sse::split_room_posts(
+            response.into_inner().messages,
+            wake,
+            &mut room_posts,
+        )
+        .into_iter()
             // WS12-S4: a deleted turn reaches the model as one static system line and an edited
             // one carries its effective text plus a marker (session-core folds revisions).
             .filter_map(|mut message| {
@@ -6581,24 +6621,7 @@ async fn load_recent_thread_messages(
     // so the indices the pin bound is measured against are the ones the hoist
     // will see.
     let mut loaded = loaded;
-    match loaded
-        .iter_mut()
-        .rev()
-        .find(|entry| entry.message.role == "user")
-    {
-        Some(entry) => current_user_content.clone_into(&mut entry.message.content),
-        None => loaded.push(crate::compaction::IdentifiedMessage {
-            // No durable id: session-core has not persisted this turn yet, and an
-            // empty id matches no pin.
-            id: String::new(),
-            message: ChatMessage {
-                compaction_summary: String::new(),
-                role: "user".to_owned(),
-                content: current_user_content.to_owned(),
-                name: String::new(),
-            },
-        }),
-    }
+    crate::space_sse::place_current_turn(&mut loaded, current_user_content, wake, &room_posts);
 
     if let Some(budget) = summarizer.token_budget {
         return budget_compacted_thread(

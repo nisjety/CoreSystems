@@ -23,6 +23,14 @@ use crate::agentic_subscription::switch_value_is_on;
 pub const RECORDS_CORE_ENV: &str = "SPACE_MENTION_RECORDS_CORE";
 /// Session Core: accepts a wake on `StartManagedRun`.
 pub const WAKE_CORE_ENV: &str = "SPACE_WAKE_CORE";
+/// model-gateway: accepts `mentions` on the post routes and a `wake_context` on the invoke stream
+/// (WS08-S3).
+pub const WAKE_API_ENV: &str = "SPACE_WAKE_API";
+/// model-gateway: lets a wake read the newest room posts as fenced, quoted context (WS08-S3,
+/// default off until decision D-6).
+pub const WAKE_ROOM_CONTEXT_ENV: &str = "SPACE_WAKE_ROOM_CONTEXT";
+/// The most room posts a wake may read as fenced context.
+pub const ROOM_CONTEXT_POSTS: u32 = 7;
 
 /// Pure form of the switches: `value` is the raw variable, `None` when unset.
 #[must_use]
@@ -40,6 +48,18 @@ pub fn records_core_enabled() -> bool {
 #[must_use]
 pub fn wake_core_enabled() -> bool {
     enabled_from(std::env::var(WAKE_CORE_ENV).ok().as_deref())
+}
+
+/// Whether this model-gateway process accepts `mentions` on posts and a wake on the stream.
+#[must_use]
+pub fn wake_api_enabled() -> bool {
+    enabled_from(std::env::var(WAKE_API_ENV).ok().as_deref())
+}
+
+/// Whether a wake may read the newest room posts as fenced context.
+#[must_use]
+pub fn wake_room_context_enabled() -> bool {
+    enabled_from(std::env::var(WAKE_ROOM_CONTEXT_ENV).ok().as_deref())
 }
 
 /// Control decision identity (audience `model-plane`).

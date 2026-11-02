@@ -64,6 +64,54 @@ struct FirstMessage {
     content: String,
     post_kind: String,
     client_message_id: String,
+    #[serde(default)]
+    mentions: Vec<MentionBody>,
+}
+
+/// One mentioned subject of a post (WS08-S3): ids and closed words, never text. The BFF plans the
+/// set; Session Core validates it, records it and decides what each agent is finally left with
+/// (a non-owner's agent mention is downgraded there). Typed, so a forged field is a 400.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MentionBody {
+    subject_id: String,
+    kind: String,
+    #[serde(default)]
+    source: String,
+    #[serde(default)]
+    wake_expectation: String,
+    #[serde(default)]
+    refusal_code: String,
+    #[serde(default)]
+    ordinal: u32,
+}
+
+/// The most mention entries one post body may carry (20 people and 3 agents; Session Core holds
+/// the per-kind caps). Bounds the body before any upstream call.
+const MAX_MENTION_ENTRIES: usize = 23;
+
+/// The mentions to forward. With `SPACE_WAKE_API` off they are dropped and the post stands (a
+/// mention never fails a post, and the kill switch must not fail a body that carries them).
+fn session_mentions(
+    mentions: &[MentionBody],
+) -> Result<Vec<mp_contracts::model_plane::v1::MentionInput>, Response> {
+    if !mp_contracts::space_mentions::wake_api_enabled() {
+        return Ok(Vec::new());
+    }
+    if mentions.len() > MAX_MENTION_ENTRIES {
+        return Err(invalid_post("mentions"));
+    }
+    Ok(mentions
+        .iter()
+        .map(|m| mp_contracts::model_plane::v1::MentionInput {
+            subject_id: m.subject_id.clone(),
+            kind: m.kind.clone(),
+            source: m.source.clone(),
+            wake_expectation: m.wake_expectation.clone(),
+            refusal_code: m.refusal_code.clone(),
+            ordinal: m.ordinal,
+        })
+        .collect())
 }
 
 #[derive(Debug, Deserialize)]
@@ -81,6 +129,8 @@ struct AppendSpacePostBody {
     post_kind: String,
     client_message_id: String,
     space_append_context: ThreadSpaceContext,
+    #[serde(default)]
+    mentions: Vec<MentionBody>,
 }
 
 fn error_response(status: StatusCode, code: &str, message: &str, details: Value) -> Response {
@@ -202,12 +252,37 @@ fn require_space(context: &ThreadSpaceContext, field: &str) -> Result<(), Respon
 }
 
 fn receipt_json(thread_id: &str, receipt: &PostReceipt) -> Value {
-    json!({
+    let mut body = json!({
         "thread_id": thread_id,
         "message_id": receipt.message_id,
         "sequence": receipt.sequence,
         "deduplicated": receipt.deduplicated,
-    })
+    });
+    // Only a post that recorded mentions says so, so a plain post keeps the four-key receipt.
+    if !receipt.mentions.is_empty() {
+        body["mentions"] = Value::Array(
+            receipt
+                .mentions
+                .iter()
+                .map(|m| {
+                    let mut entry = json!({
+                        "subject_id": m.subject_id,
+                        "kind": m.kind,
+                        "source": m.source,
+                        "ordinal": m.ordinal,
+                    });
+                    if !m.wake_state.is_empty() {
+                        entry["wake_state"] = Value::String(m.wake_state.clone());
+                    }
+                    if !m.reason.is_empty() {
+                        entry["reason"] = Value::String(m.reason.clone());
+                    }
+                    entry
+                })
+                .collect(),
+        );
+    }
+    body
 }
 
 fn receipt_response(thread_id: &str, receipt: &PostReceipt) -> Response {
@@ -258,6 +333,10 @@ async fn create_space_post(
     {
         return response;
     }
+    let mentions = match session_mentions(&body.first_message.mentions) {
+        Ok(mentions) => mentions,
+        Err(response) => return response,
+    };
     match session_flow::create_space_post_thread(
         &state,
         &bearer,
@@ -267,6 +346,7 @@ async fn create_space_post(
         &body.space_context,
         &message.content,
         &message.client_message_id,
+        mentions,
     )
     .await
     {
@@ -334,6 +414,10 @@ async fn append_space_post(
     if let Err(response) = validate_post(&body.content, &body.post_kind, &body.client_message_id) {
         return response;
     }
+    let mentions = match session_mentions(&body.mentions) {
+        Ok(mentions) => mentions,
+        Err(response) => return response,
+    };
     let mut client = state.session_client.clone();
     match session_flow::append_post_message(
         &mut client,
@@ -342,6 +426,7 @@ async fn append_space_post(
         bearer.as_str(),
         Some(&body.space_append_context),
         &body.client_message_id,
+        mentions,
     )
     .await
     {
@@ -450,7 +535,7 @@ mod tests {
 
     #[tokio::test]
     async fn receipts_are_201_when_stored_and_200_when_deduplicated() {
-        let stored = PostReceipt { message_id: "m-1".to_owned(), sequence: 3, deduplicated: false };
+        let stored = PostReceipt { message_id: "m-1".to_owned(), sequence: 3, deduplicated: false, mentions: Vec::new() };
         let (status, body) = parts(receipt_response("t-1", &stored)).await;
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(

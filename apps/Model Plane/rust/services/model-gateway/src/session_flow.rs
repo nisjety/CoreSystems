@@ -150,6 +150,84 @@ pub struct ThreadSpaceContext {
     pub idempotency_key: String,
 }
 
+/// The BFF-injected authority for starting one agent run from a stored human post (WS08-S3): the
+/// Control `model.run.wake` decision (the twelve Space decision fields) plus the post and agent it
+/// binds. It is not an authority by itself: Session Core verifies the signed token, the caller, the
+/// stored post and its digest before it starts anything. Browser input never reaches this struct;
+/// the BFF strips and re-injects it.
+#[derive(Clone, serde::Deserialize)]
+pub struct WakeContext {
+    pub space_id: String,
+    pub space_decision_ref: String,
+    pub recipient_audience_ref: String,
+    pub recipient_audience_revision: u64,
+    pub recipient_audience_hash: String,
+    pub privacy_policy_ref: String,
+    pub authority_revision: u64,
+    pub resource_authorization_ref: String,
+    pub space_decision_token: String,
+    pub action_schema_hash: String,
+    pub payload_digest: String,
+    pub idempotency_key: String,
+    /// The caller's own stored post this run answers.
+    pub trigger_message_id: String,
+    /// `sha256:<hex>` of that post's stored text; the request `content` must hash to it.
+    pub trigger_content_digest: String,
+    /// The bound agent to run.
+    pub agent_subject_id: String,
+    /// `direct` today.
+    pub turn_origin: String,
+    /// The browser's per-(post, agent) wake id; feeds the durable managed-start key.
+    pub client_wake_id: String,
+    /// Display names for the optional fenced room context (at most 50 are read).
+    #[serde(default)]
+    pub participants: Vec<WakeParticipant>,
+}
+
+/// One room participant's display label, supplied by the BFF (no emails).
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct WakeParticipant {
+    pub subject_id: String,
+    pub label: String,
+}
+
+// Ids only: the decision token is a credential and never appears in a log line.
+impl std::fmt::Debug for WakeContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WakeContext")
+            .field("space_id", &self.space_id)
+            .field("trigger_message_id", &self.trigger_message_id)
+            .field("agent_subject_id", &self.agent_subject_id)
+            .field("turn_origin", &self.turn_origin)
+            .finish_non_exhaustive()
+    }
+}
+
+impl WakeContext {
+    /// The `StartManagedRunRequest.wake` form.
+    #[must_use]
+    pub fn to_proto(&self) -> mp_contracts::model_plane::v1::RunWakeContext {
+        mp_contracts::model_plane::v1::RunWakeContext {
+            space_id: self.space_id.clone(),
+            space_decision_ref: self.space_decision_ref.clone(),
+            recipient_audience_ref: self.recipient_audience_ref.clone(),
+            recipient_audience_revision: self.recipient_audience_revision,
+            recipient_audience_hash: self.recipient_audience_hash.clone(),
+            privacy_policy_ref: self.privacy_policy_ref.clone(),
+            authority_revision: self.authority_revision,
+            resource_authorization_ref: self.resource_authorization_ref.clone(),
+            space_decision_token: self.space_decision_token.clone(),
+            action_schema_hash: self.action_schema_hash.clone(),
+            payload_digest: self.payload_digest.clone(),
+            idempotency_key: self.idempotency_key.clone(),
+            trigger_message_id: self.trigger_message_id.clone(),
+            trigger_content_digest: self.trigger_content_digest.clone(),
+            agent_subject_id: self.agent_subject_id.clone(),
+            turn_origin: self.turn_origin.clone(),
+        }
+    }
+}
+
 /// A wire value for [`ThreadSpaceContext::retrieval_decline_reason`] that is not a known code (a
 /// newer BFF, a number, a sentence) is no reason, never a rejected request: the reason is advisory
 /// wording and must not cost anyone their turn.
@@ -379,6 +457,20 @@ pub(crate) struct PostReceipt {
     pub message_id: String,
     pub sequence: u64,
     pub deduplicated: bool,
+    /// The mentions Session Core recorded, with the wake each agent was left with (WS08). Empty
+    /// when the post carried none, the record switch is off, or the post was a replay.
+    pub mentions: Vec<PostMention>,
+}
+
+/// One recorded mention as the post reports it (ids and closed words, never text).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PostMention {
+    pub subject_id: String,
+    pub kind: String,
+    pub wake_state: String,
+    pub reason: String,
+    pub source: String,
+    pub ordinal: u32,
 }
 
 /// Why a create-and-post did not finish.
@@ -405,6 +497,7 @@ pub(crate) async fn append_post_message(
     bearer: &str,
     space: Option<&ThreadSpaceContext>,
     client_message_id: &str,
+    mentions: Vec<mp_contracts::model_plane::v1::MentionInput>,
 ) -> Result<PostReceipt, tonic::Status> {
     let (space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision) = space
         .map(|space| {
@@ -459,6 +552,7 @@ pub(crate) async fn append_post_message(
             idempotency_key,
             client_message_id: client_message_id.to_owned(),
             post_kind: "post".to_owned(),
+            mentions,
             ..Default::default()
         },
         Some(bearer),
@@ -470,6 +564,18 @@ pub(crate) async fn append_post_message(
             message_id: response.message_id,
             sequence: response.sequence,
             deduplicated: response.deduplicated,
+            mentions: response
+                .mentions
+                .into_iter()
+                .map(|m| PostMention {
+                    subject_id: m.subject_id,
+                    kind: m.kind,
+                    wake_state: m.wake_state,
+                    reason: m.reason,
+                    source: m.source,
+                    ordinal: m.ordinal,
+                })
+                .collect(),
         }
     })
 }
@@ -487,6 +593,7 @@ pub(crate) async fn create_space_post_thread(
     space: &ThreadSpaceContext,
     content: &str,
     client_message_id: &str,
+    mentions: Vec<mp_contracts::model_plane::v1::MentionInput>,
 ) -> Result<(String, PostReceipt), SpacePostError> {
     let mut client = state.session_client.clone();
     let thread_id = create_thread(
@@ -513,6 +620,7 @@ pub(crate) async fn create_space_post_thread(
         bearer.as_str(),
         None,
         client_message_id,
+        mentions,
     )
     .await
     .map_err(|status| SpacePostError::Append {
@@ -624,6 +732,7 @@ pub async fn prepare_managed_run_authenticated(
         conversation_only,
         retrieval_scope,
         None,
+        None,
     )
     .await
 }
@@ -653,6 +762,9 @@ pub async fn prepare_managed_run_authenticated_with_receipt(
     conversation_only: bool,
     retrieval_scope: Option<&str>,
     client_message_id: Option<&str>,
+    // Wake mode (WS08-S3): start the run from the caller's stored post. No user turn is appended
+    // (the post is already the row), and the Control-signed wake travels on the start request.
+    wake: Option<&WakeContext>,
 ) -> Result<SessionRun> {
     prepare_managed_run_with_bearer(
         state,
@@ -672,7 +784,8 @@ pub async fn prepare_managed_run_authenticated_with_receipt(
         conversation_only,
         retrieval_scope,
         client_message_id,
-        true,
+        wake.is_none(),
+        wake,
     )
     .await
 }
@@ -714,6 +827,7 @@ pub(crate) async fn prepare_managed_run_with_token(
         None,
         None,
         true,
+        None,
     )
     .await
 }
@@ -959,6 +1073,7 @@ pub async fn prepare_version_run_authenticated(
         None,
         None,
         matches!(turn, crate::normalize::VersionTurn::Edit { .. }),
+        None,
     )
     .await
 }
@@ -983,7 +1098,14 @@ async fn prepare_managed_run_with_bearer(
     retrieval_scope: Option<&str>,
     client_message_id: Option<&str>,
     append_goal: bool,
+    wake: Option<&WakeContext>,
 ) -> Result<SessionRun> {
+    // A wake is a durable write from a stored post: it is never started for a zero-retention
+    // caller (the invoke stream refuses first, typed; this is the backstop) and never without
+    // the thread its post lives in.
+    if wake.is_some() && (zdr || non_empty(requested_thread_id).is_none() || append_goal) {
+        anyhow::bail!("a wake needs a durable thread and appends no turn");
+    }
     let thread_id = if zdr {
         // Do not persist a caller-provided thread id or prompt before Session
         // Core selects its metadata-only ZDR thread inside the same transaction
@@ -1057,7 +1179,7 @@ async fn prepare_managed_run_with_bearer(
                 user_id: user_id.to_owned(),
                 start_key: start_key.to_owned(),
                 terminal_source: source as i32,
-                wake: None,
+                wake: wake.map(WakeContext::to_proto),
             },
             bearer,
         )?)

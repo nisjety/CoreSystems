@@ -8027,6 +8027,11 @@ pub struct InvokeRequest {
     /// authority and Session Core independently verifies this bearer.
     #[serde(default)]
     pub space_context: Option<crate::session_flow::ThreadSpaceContext>,
+    /// Server-injected Control `model.run.wake` decision and the stored post and agent it binds
+    /// (WS08-S3). With it the stream starts one run from that post and appends no user turn. The
+    /// BFF strips any browser value and injects this after Control signs; Session Core verifies it.
+    #[serde(default)]
+    pub wake_context: Option<crate::session_flow::WakeContext>,
     #[serde(default)]
     pub structured_output_schema: Option<String>,
     #[serde(default)]
@@ -9688,6 +9693,24 @@ struct ThreadMessage {
     /// metadata. An unknown future kind arrives as `{kind, version}` only. Omitted when none.
     #[serde(skip_serializing_if = "Option::is_none")]
     entry: Option<ThreadMessageEntry>,
+    /// The mentions recorded on a post (WS08), with the wake state derived from the newest run per
+    /// (post, agent). Ids and closed words only; omitted when the row has none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    mentions: Vec<ThreadMessageMention>,
+}
+
+/// One recorded mention of a post as the transcript serialises it (WS08).
+#[derive(Debug, Serialize)]
+struct ThreadMessageMention {
+    subject_id: String,
+    kind: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    wake_state: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    reason: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    source: String,
+    ordinal: u32,
 }
 
 /// A typed room entry as the transcript serialises it (WS15-S6; stored and validated by WS15-S9).
@@ -10749,6 +10772,18 @@ async fn list_thread_messages(
                 post_kind: if m.post_kind == "post" { m.post_kind } else { String::new() },
                 created_at: message_created_at(m.created_at.as_ref()),
                 entry: thread_message_entry(m.entry),
+                mentions: m
+                    .mentions
+                    .into_iter()
+                    .map(|r| ThreadMessageMention {
+                        subject_id: r.subject_id,
+                        kind: r.kind,
+                        wake_state: r.wake_state,
+                        reason: r.reason,
+                        source: r.source,
+                        ordinal: r.ordinal,
+                    })
+                    .collect(),
                 metadata: crate::room_metadata::visible_metadata(
                     m.metadata.as_ref().map(prost_struct_to_json).and_then(
                         |value| match value {
@@ -11908,6 +11943,7 @@ async fn invoke(
                     req.edited_resubmit,
                     req.idempotency_key.as_deref(),
                 ),
+                None,
             )
             .await
         }
@@ -16163,6 +16199,7 @@ mod thread_messages_page_tests {
                 metadata: None,
                 version: None,
                 entry: None,
+                mentions: Vec::new(),
             }],
             has_more: None,
             omitted_before: None,
@@ -16485,6 +16522,7 @@ mod space_post_wire_tests {
             metadata: None,
             version: None,
             entry: None,
+            mentions: Vec::new(),
         }
     }
 

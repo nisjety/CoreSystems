@@ -90,6 +90,15 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
         Treatment::Inert("it appends to a durable thread, which a ZDR turn never writes"),
     ),
     ("space_context", Treatment::Honored),
+    // A wake starts a durable run from a stored post. The invoke stream refuses it first with the
+    // same code (`space_sse::check_wake`); this row keeps the table total and the answer the same.
+    (
+        "wake_context",
+        Treatment::Refused {
+            code: code::DURABLE_MUTATION_FORBIDDEN,
+            feature: None,
+        },
+    ),
     // The schema is sent to the model with the turn, on both ZDR paths, as the
     // unary path always did: the provider answers in the schema's shape.
     ("structured_output_schema", Treatment::Honored),
@@ -219,6 +228,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         thread_id: _,
         space_append_context: _,
         space_context: _,
+        wake_context: _,
         structured_output_schema: _,
         zdr: _,
         min_privacy_tier: _,
@@ -262,6 +272,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         "thread_id",
         "space_append_context",
         "space_context",
+        "wake_context",
         "structured_output_schema",
         "zdr",
         "min_privacy_tier",
@@ -307,6 +318,9 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
 /// connection route is not decided here: the turn's posture decision answers it first.
 #[must_use]
 pub fn refusal(request: &InvokeRequest) -> Option<Refusal> {
+    if request.wake_context.is_some() {
+        return Some(Refusal::DURABLE_MUTATION_FORBIDDEN);
+    }
     let conversation_only = request
         .features
         .iter()

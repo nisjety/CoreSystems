@@ -21,6 +21,7 @@ services:
       FINETUNE_ORG_BUDGET_USD: "50"
       FINETUNE_PER_JOB_BUDGET_USD: "20"
       SPACE_HUMAN_POSTS_API: "1"
+      SPACE_WAKE_API: "1"
 
   session-core:
     environment:
