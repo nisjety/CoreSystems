@@ -85,6 +85,9 @@ type spaceCapabilityDecision struct {
 	EntitlementRevision       int64     `json:"entitlement_revision"`
 	Permissions               []string  `json:"permissions"`
 	ExpiresAt                 time.Time `json:"expires_at"`
+	// ZeroDataRetention is the Space privacy policy flag the decision was signed
+	// under (user-core decision.go). Surfaced for WS06-S6b; S6 only decodes it.
+	ZeroDataRetention bool `json:"zero_data_retention"`
 }
 
 // SpaceCapabilityClaims mirrors Control's unsigned claims sidecar
@@ -137,6 +140,9 @@ type VerifiedCapability struct {
 	// row has to keep it, because a later reader arrives with its own decision
 	// and something has to say which audience the recorded work belongs to.
 	RecipientAudienceRevision int64
+	// ZeroDataRetention is the decision's ZDR flag. Nothing refuses on it yet:
+	// scratch-only leases (WS06-S6b, decision WS06-D2) are its first reader.
+	ZeroDataRetention bool
 }
 
 // HasPermission reports whether the decision granted permission.
@@ -193,6 +199,7 @@ func (v *SpaceCapabilityVerifier) Verify(token, claimsJSON string, expect Capabi
 		Claims:                    claims,
 		Permissions:               decision.Permissions,
 		RecipientAudienceRevision: decision.RecipientAudienceRevision,
+		ZeroDataRetention:         decision.ZeroDataRetention,
 	}, nil
 }
 

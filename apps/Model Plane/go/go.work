@@ -12,6 +12,7 @@ use (
 	./pkg/quarry
 	./pkg/servicetoken
 	./pkg/temporalreg
+	./pkg/zdrrefusal
 	./services/bridge-core
 	./services/browser-broker
 	./services/capability-core

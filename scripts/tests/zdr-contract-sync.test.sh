@@ -327,6 +327,11 @@ VENDORED=(
   "apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json|apps/Model Plane/api/contracts/zdr-refusals.json"
   "apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json.sha256|apps/Model Plane/api/contracts/zdr-refusals.json.sha256"
 
+  # WS06-S6: sandbox-manager's Go refusal helper embeds this copy (go:embed) and answers a ZDR caller with the
+  # catalogue's kind trailer; its tests read the copy inside the Model Plane Go tree.
+  "apps/Model Plane/go/pkg/zdrrefusal/zdr-refusals.json|apps/Model Plane/api/contracts/zdr-refusals.json"
+  "apps/Model Plane/go/pkg/zdrrefusal/zdr-refusals.json.sha256|apps/Model Plane/api/contracts/zdr-refusals.json.sha256"
+
   # WS10.S8: the Go quarryotel package copy of the telemetry field contract, checked for
   # byte identity (pkg/quarryotel/quarryotel_test.go, TestFieldConstantsEqualGolden).
   "apps/Ingestion Plane/Quarry-v2/pkg/quarryotel/testdata/telemetry-field-contract.json|apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/telemetry-field-contract.json"
@@ -414,6 +419,7 @@ CONSUMERS=(
   "apps/Model Plane/api/contracts/zdr-refusals.json|quarry-edge|apps/Ingestion Plane/Quarry-v2/|WS4.I (matrix closed lists derived from the catalogue)"
   # Z-05b: the SPA renders every code of the refusal catalogue in Norwegian and English, with its action.
   "apps/Model Plane/api/contracts/zdr-refusals.json|spa|apps/Frontend Plane/verevonv3/|Z-05b (every code: NO and EN text, action, feature labels)"
+  "apps/Model Plane/api/contracts/zdr-refusals.json|sandbox-manager|apps/Model Plane/go/pkg/zdrrefusal/|WS06-S6 (Go refusal helper: kind and feature trailers, catalogue sentences)"
   # The Data Plane inference client: the wire statuses inference-core emits, and the
   # token answers Auth Core's real mint gives its two background callers.
   "apps/Model Plane/api/contracts/infer-statuses.json|inference-client|apps/Data Plane v2/services/inference-client-rs/|CR-T5 (typed status decoder)"
