@@ -22,6 +22,7 @@ import {
   type SpaceAgent,
   type SpacePresence,
   type SpaceReadMarker,
+  type SpaceRoomPin,
   type SpaceDeletionReceipt,
   type SpaceRosterMember,
   type SpaceThread,
@@ -618,6 +619,7 @@ export default function SpacePage() {
                         threads={currentThreads}
                         liveArtifacts={liveArtifacts}
                         sharedReadAvailable={sharedReadAvailable}
+                        roomPins={() => (threads.error ? [] : threads()?.pins ?? [])}
                         loading={() => threads.loading}
                         unavailable={threadsUnavailable}
                         roster={() => (roster.error ? [] : roster() ?? [])}
@@ -780,6 +782,8 @@ function SpaceConversationPanel(props: {
   readonly threads: () => readonly SpaceThread[]
   /** The listing's `shared_read.available`; false shows the room's restricted notice. */
   readonly sharedReadAvailable?: () => boolean
+  /** The listing's room pins (WS13-S8). */
+  readonly roomPins?: () => readonly SpaceRoomPin[]
   readonly loading: () => boolean
   readonly unavailable: () => boolean
   readonly roster: () => readonly SpaceRosterMember[]
@@ -871,6 +875,7 @@ function SpaceConversationPanel(props: {
             viewerSubjectId={props.viewerSubjectId}
             threads={props.threads}
             sharedReadAvailable={props.sharedReadAvailable}
+            roomPins={props.roomPins}
             liveArtifacts={artifactsOn() ? props.liveArtifacts.forThread : undefined}
             roster={props.roster}
             agents={props.agents}

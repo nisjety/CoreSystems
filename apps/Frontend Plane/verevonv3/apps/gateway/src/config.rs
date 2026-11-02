@@ -252,6 +252,11 @@ pub(crate) struct SpaceFeatureFlags {
     /// never an authorization input: Control's shared-read decision and Session Core's audience
     /// ceiling decide what the caller may list.
     pub(crate) room_artifacts: bool,
+    /// `SPACE_ROOM_PINS_API` (WS13-S8): `PUT`/`DELETE /api/v1/spaces/{space_ref}/pins/{thread_id}`,
+    /// the `pins` section of the thread listing and `features.room_pins`. Off answers 404
+    /// `feature_disabled`, the listing omits `pins` and the SPA stops lifting. A rollout control,
+    /// never an authorization input: Control's live role (editor or above) decides who may pin.
+    pub(crate) room_pins: bool,
     /// `SPACE_SEND_IDEMPOTENCY_API` (WS01-S5): reported to the SPA as `features.send_idempotency`
     /// (the SPA attaches a client send id to an agent-path send so a retry cannot double-post).
     /// Session Core's dedupe is inert without a key. A rollout control, never an authorization input.
@@ -284,6 +289,7 @@ impl SpaceFeatureFlags {
             directory_resolver_api: space_flag("SPACE_DIRECTORY_RESOLVER_API"),
             room_archive_api: space_flag("SPACE_ROOM_ARCHIVE_API"),
             room_artifacts: space_flag("SPACE_ROOM_ARTIFACTS_API"),
+            room_pins: space_flag("SPACE_ROOM_PINS_API"),
             send_idempotency_api: space_flag("SPACE_SEND_IDEMPOTENCY_API"),
             thread_pane_ui: space_flag("SPACE_THREAD_PANE_UI"),
             org_identity_admin_api: space_flag("ORG_IDENTITY_ADMIN_API"),

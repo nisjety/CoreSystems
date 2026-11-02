@@ -254,6 +254,9 @@ services:
       # WS07-S9: the room artifact aggregate route; a rollout control only (Control's shared-read
       # decision and Session Core's audience ceiling decide what is listed).
       SPACE_ROOM_ARTIFACTS_API: ${SPACE_ROOM_ARTIFACTS_API:-true}
+      # WS13-S8: room pins (Convex-backed, editor or above). Rollout control only; Control's live role
+      # decides who may pin and the thread must be readable by the pinner.
+      SPACE_ROOM_PINS_API: ${SPACE_ROOM_PINS_API:-true}
       # WS05-S6: owner/admin domain verification routes (proxied to org-core, which has its own
       # ORG_DOMAIN_VERIFICATION_ENABLED). Rollout control only; the live owner/admin role decides access.
       ORG_IDENTITY_ADMIN_API: ${ORG_IDENTITY_ADMIN_API:-true}

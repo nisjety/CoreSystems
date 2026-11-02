@@ -17,6 +17,7 @@ import { ingestTables } from "./schema/ingest";
 import { spaceTables } from "./schema/spaces";
 import { spaceDeletionTables } from "./schema/spaceDeletion";
 import { spaceAudienceTables } from "./schema/spaceAudience";
+import { spacePinTables } from "./schema/spacePins";
 import { conversationProjectionTables } from "./schema/conversationProjection";
 
 export default defineSchema({
@@ -28,5 +29,6 @@ export default defineSchema({
   ...spaceTables,
   ...spaceDeletionTables,
   ...spaceAudienceTables,
+  ...spacePinTables,
   ...conversationProjectionTables,
 });

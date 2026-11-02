@@ -33,6 +33,7 @@ pub(crate) mod agent_policy;
 pub(crate) mod directory;
 pub(crate) mod human_posts;
 pub(crate) mod room_admin;
+mod pins;
 mod room_artifacts;
 mod schedule_template;
 mod stream;
@@ -918,6 +919,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
 fn module_routes() -> Router<AppState> {
     Router::new()
         .merge(human_posts::routes())
+        .merge(pins::routes())
         .merge(room_artifacts::routes())
         .merge(stream::routes())
 }
@@ -1425,6 +1427,22 @@ async fn list_space_threads(
             Value::Null
         }
     };
+    // WS13-S8: the room's pins, same named-gap rule as the read marker. Flag off: an empty list.
+    let pins = if state.space_features.room_pins {
+        match pins::list_pins(&state, &user, &org_id, space_ref).await {
+            Some(pins) => pins,
+            None => {
+                unavailable.push(json!({
+                    "section": "pins",
+                    "code": "pins_unavailable",
+                    "reason": "Application Plane could not return the room's pins.",
+                }));
+                Value::Array(vec![])
+            }
+        }
+    } else {
+        Value::Array(vec![])
+    };
     (
         StatusCode::OK,
         Json(json!({
@@ -1432,6 +1450,7 @@ async fn list_space_threads(
                 "space": public_space(&space),
                 "membership": crate::envelope::unwrap_data(&membership),
                 "threads": thread_items,
+                "pins": pins,
                 // WS07-S4: Control's shared-read answer, so the SPA can say
                 // "not shared with you" once instead of probing every post.
                 "shared_read": { "available": read.is_some() },
@@ -5087,6 +5106,7 @@ async fn space_context(
                     "directory_resolver": state.space_features.directory_resolver_api,
                     "room_archive": state.space_features.room_archive_api,
                     "room_artifacts": state.space_features.room_artifacts,
+                    "room_pins": state.space_features.room_pins,
                 },
                 "limits": { "post_max_chars": human_posts::POST_MAX_CHARS },
             }}),

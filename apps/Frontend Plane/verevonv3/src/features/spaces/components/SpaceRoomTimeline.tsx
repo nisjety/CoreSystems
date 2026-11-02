@@ -27,7 +27,7 @@ import { roomArtifactsEnabled } from '@/features/spaces/lib/room-artifacts'
 import type { ChatArtifact } from '@/features/chat/components/chat-types'
 import { presentSpaceDenialText, isSpaceDenial } from '@/shared/api/space-denials'
 import { loadSpaceTranscript, updateSpaceThreadPresentation } from '@/shared/api/spaces-client'
-import type { SpaceAgent, SpaceRosterMember, SpaceThread } from '@/shared/api/spaces-client'
+import type { SpaceAgent, SpaceRoomPin, SpaceRosterMember, SpaceThread } from '@/shared/api/spaces-client'
 import { useI18n } from '@/shared/i18n'
 import { createResource } from '@/shared/lib/create-resource-compat'
 
@@ -112,6 +112,12 @@ export interface SpaceRoomTimelineProps {
    * (a folded turn must be reachable); absent or off, every turn is drawn as before.
    */
   readonly collapseLongThreads?: () => boolean
+  /**
+   * The room's pins from the thread listing (WS13-S8, `features.room_pins`). Pinned posts are lifted
+   * above the time order, newest pin first, and say who pinned them. Absent or empty: the order and
+   * the posts read as before.
+   */
+  readonly roomPins?: () => readonly SpaceRoomPin[]
 }
 
 /** Distinct reply authors drawn in the summary row's avatar stack; the rest read as "+N". */
@@ -127,11 +133,22 @@ export function roomAgentName(agents: readonly SpaceAgent[]): string {
 export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
   const i18n = useI18n()
 
-  const orderedThreads = createMemo(() =>
+  const chronologicalThreads = createMemo(() =>
     [...props.threads()].sort((a, b) =>
       (a.updated_at ?? a.latest_run_updated_at ?? '').localeCompare(b.updated_at ?? b.latest_run_updated_at ?? ''),
     ),
   )
+  // Room pins by thread id. A pin whose thread is not in the listing (archived, erased) lifts nothing.
+  const pinByThread = createMemo(() => new Map((props.roomPins?.() ?? []).map((pin) => [pin.thread_id, pin])))
+  // Room-pinned posts first (newest pin first), then the rest in time order.
+  const orderedThreads = createMemo(() => {
+    const pins = pinByThread()
+    if (pins.size === 0) return chronologicalThreads()
+    const pinned = chronologicalThreads()
+      .filter((thread) => pins.has(thread.thread_id))
+      .sort((a, b) => (pins.get(b.thread_id)?.pinned_at ?? 0) - (pins.get(a.thread_id)?.pinned_at ?? 0))
+    return [...pinned, ...chronologicalThreads().filter((thread) => !pins.has(thread.thread_id))]
+  })
 
   const agentName = createMemo(() => roomAgentName(props.agents()))
   // The "new messages" divider goes once, above the first post (oldest first) that is new since the
@@ -187,6 +204,7 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
               artifactsOn={artifactsOn}
               liveArtifacts={props.liveArtifacts}
               unread={() => props.unreadThreadIds?.().has(thread.thread_id) === true}
+              roomPin={() => pinByThread().get(thread.thread_id)}
               open={() => props.openThreadId?.() === thread.thread_id}
               onPresentationChanged={props.onPresentationChanged}
               onReply={props.onReply}
@@ -219,6 +237,8 @@ function SpaceRoomPost(props: {
   /** `features.room_artifacts`: chips, sheet and artifact-only turns. Off, the post reads as before. */
   readonly artifactsOn: boolean
   readonly liveArtifacts?: (threadId: string) => readonly ChatArtifact[]
+  /** This post's room pin (WS13-S8), when the room has pinned it. */
+  readonly roomPin?: () => SpaceRoomPin | undefined
   readonly onReply?: (thread: SpaceThread) => void
   readonly onApprovalSettled?: () => void
   /** New since the reader arrived — see `SpaceRoomTimelineProps.unreadThreadIds`. */
@@ -425,7 +445,7 @@ function SpaceRoomPost(props: {
     <li
       class="verevon-room-post"
       data-failed={isFailed() || undefined}
-      data-pinned={props.thread.pinned === true ? 'true' : undefined}
+      data-pinned={props.thread.pinned === true || props.roomPin?.() ? 'true' : undefined}
       data-unread={props.unread?.() ? 'true' : undefined}
       data-open={props.open?.() ? 'true' : undefined}
       data-run-status={props.thread.latest_run_status ?? undefined}
@@ -434,8 +454,19 @@ function SpaceRoomPost(props: {
           a reader scanning the room sees them first. "New" is drawn once for the whole room as the
           divider line above the first new post; each new post keeps this label for assistive tech
           only (the stylesheet hides it visually), so the fact is still stated per post. */}
-      <Show when={props.thread.pinned === true || props.unread?.()}>
+      <Show when={props.thread.pinned === true || props.roomPin?.() !== undefined || props.unread?.()}>
         <div class="verevon-room-post__flags">
+          <Show when={props.roomPin?.()}>
+            {(pin) => (
+              <span class="verevon-room-post__flag verevon-room-post__flag--pinned">
+                <Pin size={12} aria-hidden="true" />
+                {i18n.tr(
+                  `Festet av ${resolveAuthorName(pin().pinned_by, props.roster(), props.viewerSubjectId?.(), i18n.tr)}`,
+                  `Pinned by ${resolveAuthorName(pin().pinned_by, props.roster(), props.viewerSubjectId?.(), i18n.tr)}`,
+                )}
+              </span>
+            )}
+          </Show>
           <Show when={props.thread.pinned === true}>
             <span class="verevon-room-post__flag verevon-room-post__flag--pinned">
               <Pin size={12} aria-hidden="true" />

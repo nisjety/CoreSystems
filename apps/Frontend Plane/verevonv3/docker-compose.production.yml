@@ -25,6 +25,7 @@ services:
             SPACE_PEOPLE_SEARCH_API: "false"
             SPACE_DIRECTORY_RESOLVER_API: "false"
             SPACE_ROOM_ARTIFACTS_API: "false"
+            SPACE_ROOM_PINS_API: "false"
             ORG_IDENTITY_ADMIN_API: "false"
             MODEL_GATEWAY_DEV_BEARER: ""
             VEREVON_PUBLIC_ORIGIN: ${VEREVON_PUBLIC_ORIGIN:?VEREVON_PUBLIC_ORIGIN is required in production}

@@ -5,6 +5,7 @@ import {
   type SpaceRetrievalDeclineReason,
 } from '@/features/spaces/lib/space-retrieval-decline'
 import { ApiError, requestJson } from '../http'
+import { spacePinsFrom, type SpaceRoomPin } from './pins'
 import { readSpaceDenial } from '../space-denials'
 
 export type SpaceMembership = {
@@ -107,6 +108,8 @@ export type SpaceThreads = {
   membership: SpaceMembership
   threads: readonly SpaceThread[]
   read_marker?: SpaceReadMarker
+  /** The room's pins (WS13-S8), newest first. Empty when none, when the flag is off or when the section was unavailable. */
+  pins?: readonly SpaceRoomPin[]
   /**
    * Whether this caller may read the other members' conversations in this room
    * (Control's shared-read decision, relayed by the BFF). `getSpaceThreads`
@@ -235,6 +238,7 @@ export async function getSpaceThreads(spaceRef: string): Promise<SpaceThreads> {
 
 /**
  * Retitle or pin a post in the room.
+    pins?: unknown
  *
  * Owner-bound in Session Core: only the member who started the post may. The
  * room route relays a refusal as `thread_presentation_owner_only`, and the UI
@@ -261,6 +265,7 @@ export async function markSpaceRead(spaceRef: string): Promise<SpaceReadMarker> 
   const at = response.last_read_at
   return { last_read_at: typeof at === 'number' && Number.isFinite(at) ? at : null }
 }
+    pins: spacePinsFrom(response.pins),
 
 /** Someone else in the room right now. Identifiers and a status, never content. */
 export type SpacePresentMember = {
