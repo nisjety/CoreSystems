@@ -13950,8 +13950,8 @@ mod tests {
 
     /// WS14 S2, DB-gated: a run takes the thread's grant only while the thread names the plan the
     /// run executes. The plan the approval recorded binds the rung, the reason and the plan id onto
-    /// the run record; another plan, a run of another thread and another org bind nothing, and the
-    /// refusal leaves the run record as it was.
+    /// the run record; another plan, another org, a member who does not own the run, a zero-retention
+    /// caller and a lapsed grant bind nothing, and each refusal leaves the run record as it was.
     #[tokio::test]
     #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
     async fn bind_grant_to_run_takes_only_the_plan_the_thread_names_against_real_pg() {
@@ -14051,6 +14051,69 @@ mod tests {
         assert!(
             plan_metadata("SELECT metadata->>'grant_bound_at' FROM runs WHERE id = $1").await.is_some(),
             "the bind is timed on the run record"
+        );
+        // Only the run's own owner binds it: another member of the same org is refused.
+        let bind_run = |user: &str, run: &str| {
+            as_user(
+                &org,
+                user,
+                pb::BindGrantToRunRequest {
+                    run_id: run.to_owned(),
+                    thread_id: thread_id.clone(),
+                    org_id: org.clone(),
+                    approved_plan_id: "plan-1".into(),
+                },
+            )
+        };
+        assert!(
+            reader
+                .bind_grant_to_run(bind_run("u2", &run_id))
+                .await
+                .is_err(),
+            "a member who does not own the run binds nothing"
+        );
+        // A zero-retention caller writes no grant, so it binds none either.
+        let mut zdr = bind_run("u1", &run_id);
+        zdr.extensions_mut()
+            .insert(VerifiedIdentity::user_for_test_with_zdr(&org, "u1", true));
+        let zdr_refusal = reader
+            .bind_grant_to_run(zdr)
+            .await
+            .expect_err("a zero-retention caller binds nothing");
+        assert_eq!(zdr_refusal.code(), tonic::Code::FailedPrecondition);
+        // A lapsed grant binds nothing: the thread's grant is backdated and a second run asks for it.
+        let late_run = format!("{run_id}-late");
+        sqlx::query(
+            "INSERT INTO runs (id,thread_id,goal,org_id,user_id) VALUES ($1,$2,'g',$3,'u1')",
+        )
+        .bind(&late_run)
+        .bind(&thread_id)
+        .bind(&org)
+        .execute(&pool)
+        .await
+        .expect("seed the late run");
+        sqlx::query(
+            "UPDATE threads SET granted_expires_at = now() - interval '1 minute' WHERE id = $1",
+        )
+        .bind(&thread_id)
+        .execute(&pool)
+        .await
+        .expect("backdate the grant");
+        let lapsed = reader
+            .bind_grant_to_run(bind_run("u1", &late_run))
+            .await
+            .expect_err("a lapsed grant binds nothing");
+        assert_eq!(lapsed.message(), "plan_grant_unavailable");
+        let late_plan = sqlx::query_as::<_, (Option<String>,)>(
+            "SELECT metadata->>'approved_plan_id' FROM runs WHERE id = $1",
+        )
+        .bind(&late_run)
+        .fetch_one(&pool)
+        .await
+        .expect("read the late run");
+        assert_eq!(
+            late_plan.0, None,
+            "a refused bind writes nothing to the run"
         );
     }
 

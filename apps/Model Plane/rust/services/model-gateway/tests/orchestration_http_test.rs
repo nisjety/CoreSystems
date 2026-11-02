@@ -2854,12 +2854,21 @@ struct DurableGrantHarness {
 }
 
 async fn durable_grant_harness(durable: bool) -> DurableGrantHarness {
+    durable_grant_harness_with(durable, false).await
+}
+
+/// [`durable_grant_harness`] with the approve-then-execute switches of the plan store stated: the
+/// execute switch and the approval-resume switch, which an `execute_now` answer needs (WS14 S2).
+/// With `execute` false the store is the one `durable_grant_harness` has always built.
+async fn durable_grant_harness_with(durable: bool, execute: bool) -> DurableGrantHarness {
     let auth = AuthFixture::start().await;
     let owner = AuthFixture::user_tokens("org-owner", "owner-user");
     let double = SessionCoreDouble::default();
     let (session_client, grant_client) = spawn_session_core_double(&double).await;
     let configured = || {
-        let store = model_gateway::coordinator::PlanModeStore::default();
+        let store = model_gateway::coordinator::PlanModeStore::default()
+            .with_execute_enabled(execute)
+            .with_approval_resume_enabled(execute);
         if durable {
             store
                 .with_durable_grant_enabled(true)
@@ -2917,6 +2926,27 @@ async fn post_durable_approval(
     let status = response.status();
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+}
+
+/// WS14 S2, approve then execute: a plan approval answers `execute_now` only when the approve
+/// switch is on, the grant is recorded durably for the plan, and an execute turn is accepted here
+/// (the execute switch and the approval-resume switch). Turning the execute switch off answers
+/// `next_message`, as it did before the switch existed.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_approval_answers_execute_now_only_when_every_switch_and_the_durable_record_hold() {
+    std::env::set_var("MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE", "true");
+    let on = durable_grant_harness_with(true, true).await;
+    let (status, body) = post_durable_approval(&on, "run-owned", &on.owner).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["persisted"], true, "{body}");
+    assert_eq!(body["continuation"], "execute_now", "{body}");
+
+    let execute_off = durable_grant_harness_with(true, false).await;
+    let (status, body) = post_durable_approval(&execute_off, "run-owned", &execute_off.owner).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["continuation"], "next_message", "{body}");
+    std::env::remove_var("MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE");
 }
 
 /// The slice's point: approve on replica A, and a run started on replica B reads the rung and
