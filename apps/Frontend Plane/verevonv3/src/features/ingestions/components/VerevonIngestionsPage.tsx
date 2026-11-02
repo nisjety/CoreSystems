@@ -42,7 +42,9 @@ import {
   type RunCreateRequest,
   type RunItem,
   type ScheduleCapabilities,
+  type SchedulePauseAction,
   type ScheduleItem,
+  type ScheduleStateAction,
   type SourceCreateInput,
   type SourcePayload,
 } from '@/shared/api/ingestions-client'
@@ -55,6 +57,7 @@ import {
 import { localeDateTime, useI18n } from '@/shared/i18n'
 import { cn } from '@/shared/lib/cn'
 import { Button } from '@/shared/ui/Button'
+import { RunJobControls } from './RunJobControls'
 import { VerevonInput } from '@/shared/ui/verevon/VerevonInput'
 import { VerevonSegmented, VerevonSegmentedButton } from '@/shared/ui/verevon/VerevonSegmented'
 import { VerevonSelect } from '@/shared/ui/verevon/VerevonSelect'
@@ -344,7 +347,7 @@ export default function VerevonIngestionsPage() {
     }
   }
 
-  async function runScheduleAction(action: string, scheduleId: string) {
+  async function runScheduleAction(action: SchedulePauseAction | ScheduleStateAction, scheduleId: string) {
     setError(null)
     try {
       await runIngestionScheduleAction(action, scheduleId)
@@ -569,6 +572,8 @@ export default function VerevonIngestionsPage() {
             />
             <RunsPanel
               runs={runs()}
+              jobControl={scheduleCapabilities().jobControl}
+              onJobChanged={() => loadWorkspace()}
               selectedRunId={selectedRunId()}
               onSelectRun={(runId) => {
                 setSelectedRunId(runId)
@@ -749,6 +754,9 @@ function RunComposer(props: {
 
 function RunsPanel(props: {
   runs: RunItem[]
+  /** WS15.L5: the installation reports job control, so each controllable row gets pause/resume/cancel. */
+  jobControl?: boolean
+  onJobChanged?: () => void | Promise<void>
   selectedRunId: string | null
   onSelectRun: (runId: string) => void
 }) {
@@ -774,6 +782,9 @@ function RunsPanel(props: {
               <th>{i18n.tr('Status', 'Status')}</th>
               <th>{i18n.tr('Opprettet', 'Created')}</th>
               <th>{i18n.tr('Fremdrift', 'Progress')}</th>
+              <Show when={props.jobControl}>
+                <th>{i18n.tr('Handlinger', 'Actions')}</th>
+              </Show>
             </tr>
           </thead>
           <tbody>
@@ -781,7 +792,7 @@ function RunsPanel(props: {
               each={props.runs}
               fallback={
                 <tr>
-                  <td colspan="5" class="ingestions-empty-cell">
+                  <td colspan={props.jobControl ? 6 : 5} class="ingestions-empty-cell">
                     {i18n.tr('Ingen varige kjøringer ennå.', 'No durable runs yet.')}
                   </td>
                 </tr>
@@ -802,6 +813,11 @@ function RunsPanel(props: {
                     {run.progress.completed ?? 0}
                     {run.progress.total ? ` / ${run.progress.total}` : ''}
                   </td>
+                  <Show when={props.jobControl}>
+                    <td>
+                      <RunJobControls run={run} onChanged={() => props.onJobChanged?.()} />
+                    </td>
+                  </Show>
                 </tr>
               )}
             </For>
@@ -901,7 +917,7 @@ function ScheduleComposer(props: {
 function SchedulesPanel(props: {
   schedules: ScheduleItem[]
   canTrigger: boolean
-  onAction: (action: string, scheduleId: string) => Promise<void>
+  onAction: (action: SchedulePauseAction | ScheduleStateAction, scheduleId: string) => Promise<void>
 }) {
   const i18n = useI18n()
   return (
