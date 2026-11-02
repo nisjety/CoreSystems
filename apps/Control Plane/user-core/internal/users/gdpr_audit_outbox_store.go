@@ -51,6 +51,20 @@ func (e *SpaceAuditEnqueuer) EnqueueAuditTx(ctx context.Context, tx pgx.Tx, even
 	return e.repo.EnqueueAuditTx(ctx, tx, AuditOutboxRow{EventID: eventID, Subject: subject, Payload: payload})
 }
 
+// EnqueueAudit implements spaces.DecisionAuditOutbox (WS05-S5): a Space decision
+// refusal or issue has no state change to join, so the row is inserted alone.
+// It validates the row exactly like the other enqueue paths.
+func (e *SpaceAuditEnqueuer) EnqueueAudit(ctx context.Context, eventID, subject string, payload []byte) error {
+	if e == nil || e.repo == nil {
+		return errors.New("audit outbox store is unavailable")
+	}
+	row := AuditOutboxRow{EventID: eventID, Subject: subject, Payload: payload}
+	if err := validateAuditOutboxRow(row); err != nil {
+		return err
+	}
+	return e.repo.EnqueueAudit(ctx, row)
+}
+
 func (r *Repository) ClaimAudit(ctx context.Context) (AuditOutboxRow, bool, error) {
 	row := AuditOutboxRow{}
 	err := r.db.Pool.QueryRow(ctx, `

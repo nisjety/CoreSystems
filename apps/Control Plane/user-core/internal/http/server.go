@@ -32,6 +32,8 @@ type Server struct {
 	removeMembershipProjection func(context.Context, string, string) error
 	aclRepo                    *users.AclRepository
 	spaceRepo                  *spaces.Repository
+	// WS05-S5: Space decision audit events (flag-gated, off by default).
+	spaceDecisionAudit decisionAuditSink
 	spaceOrgPolicy             spaceOrgPolicyConfig // org-admin Space policy (WS03-S3)
 	peopleDirectory            peopleDirectory      // people search (WS04-S3)
 	mailTaskService            *mailtask.Service

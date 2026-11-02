@@ -385,6 +385,9 @@ func main() {
 	// change's own transaction; unwired, policy writes fail closed.
 	spaceRepo.SetPolicyAuditOutbox(users.NewSpaceAuditEnqueuer(userRepo))
 	httpServer.SetSpaceRepository(spaceRepo)
+	// WS05-S5: Space decision denied/issued audit events. Strict literal true;
+	// off by default; a rollout control, never an authorization input.
+	httpServer.SetSpaceDecisionAudit(spaces.LoadDecisionAuditConfig(os.Getenv), users.NewSpaceAuditEnqueuer(userRepo))
 	// WS20-S4: stored-consent schedule contracts. Strict literal true; off by default.
 	httpServer.SetScheduleContractsEnabled(os.Getenv("SCHEDULE_CONTRACT_ENABLED") == "true")
 	// WS14-S2: owner-asserted grant writes and Space-subject grants. Strict

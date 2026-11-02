@@ -41,6 +41,8 @@ func (s *Server) registerFeatureRoutes(v1 *gin.RouterGroup, internal *gin.Router
 // registerSpaceRoutes registers the /api/v1/internal/spaces routes (moved
 // unchanged from server.go setupRoutes), then every feature registrar.
 func (s *Server) registerSpaceRoutes(spacesGroup *gin.RouterGroup) {
+	// WS05-S5: audit the outcome of the issuer routes (a pass-through when off).
+	spacesGroup.Use(s.spaceDecisionAuditMiddleware())
 	spacesGroup.POST("/register", s.requireSpaceLifecycleRegistrar, s.registerSpace)
 	spacesGroup.POST("/deletion-authorizations", s.requireSpaceDeletionAuthorizer, s.authorizeSpaceDeletion)
 	spacesGroup.PUT("/deletion-policy", s.requireSpacePolicyWriter, s.upsertSpaceDeletionPolicy)
