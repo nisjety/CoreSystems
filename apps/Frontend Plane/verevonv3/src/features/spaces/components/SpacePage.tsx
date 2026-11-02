@@ -50,6 +50,14 @@ import { SpaceConfirmButton } from './SpaceConfirmButton'
 import { SpaceAgentPolicyEditor } from './SpaceAgentPolicyEditor'
 import { toolPolicyEditorEnabled } from '../lib/space-tool-policy'
 import {
+  agentWakePolicyEnabled,
+  respondToChipLabel,
+  respondToOf,
+  respondToSubjectsOf,
+  whyNoAnswerHint,
+} from '../lib/wake-policy'
+import { SpaceAgentWakePolicyEditor } from './SpaceAgentWakePolicyEditor'
+import {
   SpaceLeaveRoomButton,
   SpaceMemberControls,
   SpaceMemberRemoveButton,
@@ -1595,6 +1603,25 @@ function SpaceAgentCard(props: {
               )}
             </Show>
           </ul>
+        </Show>
+
+        {/* WS08-S8: who may wake it (`respond_to`) and, when it is not everyone, why it may stay silent.
+            Behind `features.agent_wake_policy`; the gateway checks the caller's live role on a write. */}
+        <Show when={agentWakePolicyEnabled() && governable()}>
+          <ul class="verevon-space-agent__policy" aria-label={i18n.tr('Hvem kan tilkalle agenten', 'Who can wake the agent')}>
+            <li>{respondToChipLabel(respondToOf(agent()), respondToSubjectsOf(agent()).length, i18n.tr)}</li>
+          </ul>
+          <Show when={whyNoAnswerHint(respondToOf(agent()), i18n.tr)}>
+            {(hint) => <p class="verevon-wake-policy__chip-hint">{hint()}</p>}
+          </Show>
+          <Show when={props.canGovern && bindingRef() && agent().subject_id}>
+            <SpaceAgentWakePolicyEditor
+              spaceRef={props.spaceRef}
+              agent={agent()}
+              roster={() => props.roster?.() ?? []}
+              onSaved={props.onChanged}
+            />
+          </Show>
         </Show>
 
         {/* WS10-S5b: the per-tool rules for this agent. Behind `features.tool_policy_editor`; the

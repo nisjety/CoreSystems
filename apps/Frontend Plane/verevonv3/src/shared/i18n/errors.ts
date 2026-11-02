@@ -1023,6 +1023,11 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   wake_requires_single_agent: { no: 'Én agent kan tilkalles om gangen. Prøv igjen.', en: 'One agent can be called at a time. Try again.' },
   wake_requires_thread: { no: 'Agenten kan bare tilkalles fra en melding som er lagret i en samtale.', en: 'An agent can only be called from a message stored in a conversation.' },
   wake_trigger_mismatch: { no: 'Meldingen er endret siden den ble sendt, så agenten ble ikke tilkalt.', en: 'The message changed after it was sent, so the agent was not called.' },
+  // WS08-S8 wake policy editor
+  agent_binding_not_found: { no: 'Agenten er ikke lenger knyttet til dette rommet. Ingenting er endret.', en: 'The agent is no longer bound to this room. Nothing was changed.' },
+  invalid_policy: { no: 'Valget er ikke gyldig. Velg minst én person for en liste, og høyst 50. Ingenting er endret.', en: 'That choice is not valid. A list needs at least one person and at most 50. Nothing was changed.' },
+  policy_conflict: { no: 'Noen andre har endret hvem som kan tilkalle agenten. Den nyeste innstillingen er lastet inn; se over og lagre på nytt.', en: 'Someone else changed who can wake the agent. The latest setting is loaded; review it and save again.' },
+  space_role_cannot_manage_agent: { no: 'Bare en eier eller leder kan endre hvem som kan tilkalle agenten.', en: 'Only an owner or manager can change who can wake the agent.' },
 
   // WS02 realtime stream
   space_stream_capacity: { no: 'Live-oppdateringer er midlertidig full. Rommet oppdateres hvert par sekunder.', en: 'Live updates are temporarily at capacity. The room is refreshing every few seconds.' },

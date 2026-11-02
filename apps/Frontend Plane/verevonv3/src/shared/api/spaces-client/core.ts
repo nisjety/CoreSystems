@@ -1071,6 +1071,10 @@ export type SpaceAgent = {
    * so the UI must not render a policy it cannot prove.
    */
   trigger_modes?: readonly ('mention' | 'group')[]
+  /** WS08-S5: who may wake it. Absent means `members` (any editor, manager or owner). */
+  respond_to?: 'members' | 'managers' | 'allowlist'
+  /** Control subject ids, set only with `respond_to: 'allowlist'`. */
+  respond_to_subjects?: readonly string[]
   allowed_tools?: readonly string[]
   approval_mode?: 'auto' | 'require_confirmation' | 'blocked'
   /** WS10-S5b: Application's projection of Control's tool policy for this agent (display only). */
