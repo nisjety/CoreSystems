@@ -230,6 +230,8 @@ export function knowledgeItems(results: readonly NavbarSearchResult[]): readonly
  */
 const ACTION_INPUTS: Partial<Record<ActionId, (ctx: CommandContext) => unknown | null>> = {
   'spaces.mark_read': (ctx) => (ctx.spaceRef ? { spaceRef: ctx.spaceRef } : null),
+  // WS11-S3: needs no context; moves only the caller's own read positions (gateway: spaces/attention.rs).
+  'spaces.mark_all_read': () => ({}),
 }
 
 export interface PaletteActionLabel {
@@ -239,6 +241,7 @@ export interface PaletteActionLabel {
 
 const ACTION_LABELS: Partial<Record<ActionId, PaletteActionLabel>> = {
   'spaces.mark_read': { no: 'Merk rommet som lest', en: 'Mark this room read' },
+  'spaces.mark_all_read': { no: 'Merk alle rom som lest', en: 'Mark all rooms read' },
 }
 
 export type PaletteActionOutcome = 'done' | 'needs_input' | 'needs_approval' | 'failed'
