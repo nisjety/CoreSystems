@@ -239,6 +239,295 @@ struct BrowserRunStartRequest {
     /// the safe fallback for any other caller.
     #[serde(default)]
     zdr: bool,
+    /// Plan mode (WS7.L): the run may read but not type, interact, upload or
+    /// download. Expanded here into the four `disable` keys of the ask. Needs
+    /// `MODEL_GATEWAY_BROWSER_POLICY_ASK=on`, else the start is refused.
+    #[serde(default)]
+    plan_mode: Option<bool>,
+    /// A tighten-only ask (WS7.L), e.g. a Space restriction the caller
+    /// resolved. Same flag. Unknown keys (`robots_max`, `proxy_max`) refuse the
+    /// whole body.
+    #[serde(default)]
+    policy: Option<RunPolicyAsk>,
+    /// Which product surface started the run (`chat`, `space`, `support`,
+    /// `agent_run_console`, `scheduled_cron`, `routine`, `background_review`,
+    /// `dreaming`, `mail_task`, `direct_service`). Only a label for the run
+    /// trace (WS10.S4), never read for authorization; an unknown value is the
+    /// default.
+    #[serde(default)]
+    run_source: Option<String>,
+}
+
+/// The three keys a model-driven run may ask Quarry to tighten on. Same shape
+/// as execution-core's `WireRequestAsk`; `robots_max` and `proxy_max` are
+/// deliberately absent and, with any other key, fail the parse.
+#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct RunPolicyAsk {
+    #[serde(default)]
+    disable: Vec<String>,
+    #[serde(default)]
+    deny_domains: Vec<String>,
+    #[serde(default)]
+    allow_domains: Option<Vec<String>>,
+}
+
+/// `MODEL_GATEWAY_BROWSER_POLICY_ASK`: only `on` lets a start carry a policy
+/// ask or plan mode. Off (the default) refuses such a start rather than run it
+/// without the restriction, so an older Quarry can never drop it silently.
+fn policy_ask_flag(value: Option<&str>) -> bool {
+    budget_claim_flag(value)
+}
+
+/// The four capabilities plan mode switches off (Quarry capability names).
+const PLAN_MODE_DISABLED: [&str; 4] = [
+    "browser.act.input",
+    "browser.act.interact",
+    "browser.act.upload",
+    "browser.act.download",
+];
+/// Most entries per list of an ask.
+const MAX_POLICY_ASK_ENTRIES: usize = 64;
+
+fn policy_ask_invalid() -> ApiError {
+    bad_request("browser_policy_ask_invalid")
+}
+
+fn is_ask_capability(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 48
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'.')
+}
+
+fn is_ask_host(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 253
+        && value.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        })
+}
+
+/// The ask this start sends to execution-core, as the `tool_input.policy`
+/// object: plan mode's four disables unioned with the caller's ask, denied
+/// hosts unioned, the allow list as given. Sorted and de-duplicated. `None`
+/// when the start asks for nothing (no plan mode, no entries), whatever the
+/// flag. With the flag off, a start that does ask is refused 400
+/// `browser_policy_ask_unavailable` (fail closed); an ask with a bad shape is
+/// refused 400 `browser_policy_ask_invalid`. Tighten-only by construction: the
+/// output can only disable, deny or narrow.
+fn policy_ask_for(enabled: bool, req: &BrowserRunStartRequest) -> Result<Option<Value>, ApiError> {
+    let caller = req.policy.clone().unwrap_or_default();
+    let plan_mode = req.plan_mode == Some(true);
+    let allow = caller
+        .allow_domains
+        .as_ref()
+        .map(|hosts| hosts.iter().map(|h| h.trim().to_ascii_lowercase()).collect::<Vec<_>>());
+    if !plan_mode && caller.disable.is_empty() && caller.deny_domains.is_empty() && allow.is_none() {
+        return Ok(None);
+    }
+    if !enabled {
+        return Err(bad_request("browser_policy_ask_unavailable"));
+    }
+    let lists_fit = caller.disable.len() <= MAX_POLICY_ASK_ENTRIES
+        && caller.deny_domains.len() <= MAX_POLICY_ASK_ENTRIES
+        && allow.as_ref().map_or(true, |hosts| hosts.len() <= MAX_POLICY_ASK_ENTRIES);
+    if !lists_fit {
+        return Err(policy_ask_invalid());
+    }
+    let mut disable: Vec<String> = caller.disable.iter().map(|c| c.trim().to_owned()).collect();
+    if plan_mode {
+        disable.extend(PLAN_MODE_DISABLED.iter().map(|c| (*c).to_owned()));
+    }
+    let mut deny: Vec<String> = caller
+        .deny_domains
+        .iter()
+        .map(|h| h.trim().to_ascii_lowercase())
+        .collect();
+    disable.sort_unstable();
+    disable.dedup();
+    deny.sort_unstable();
+    deny.dedup();
+    let mut allow = allow;
+    if let Some(hosts) = allow.as_mut() {
+        hosts.sort_unstable();
+        hosts.dedup();
+    }
+    let shapes_ok = disable.iter().all(|c| is_ask_capability(c))
+        && deny.iter().all(|h| is_ask_host(h))
+        && allow.as_ref().map_or(true, |hosts| hosts.iter().all(|h| is_ask_host(h)));
+    if !shapes_ok {
+        return Err(policy_ask_invalid());
+    }
+    let mut ask = serde_json::Map::new();
+    if !disable.is_empty() {
+        ask.insert("disable".to_owned(), json!(disable));
+    }
+    if !deny.is_empty() {
+        ask.insert("deny_domains".to_owned(), json!(deny));
+    }
+    if let Some(hosts) = allow {
+        ask.insert("allow_domains".to_owned(), json!(hosts));
+    }
+    Ok(Some(Value::Object(ask)))
+}
+
+/// Where a browser run came from, as a label for the run trace. Never
+/// authority: Quarry's `origin_is_not_authz` gate keeps it out of admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunSource {
+    /// A person typing in chat.
+    Chat,
+    /// A person in a Space.
+    Space,
+    /// A person in a support session.
+    Support,
+    /// A person in the agent-run console.
+    AgentRunConsole,
+    /// capability-core cron (`0028_space_scoped_cron`).
+    ScheduledCron,
+    /// A capability-core routine.
+    Routine,
+    /// Background review.
+    BackgroundReview,
+    /// Dreaming.
+    Dreaming,
+    /// A `mail_task`.
+    MailTask,
+    /// A service calling the route directly.
+    DirectService,
+}
+
+/// The run-origin vocabulary of the run trace envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunOrigin {
+    User,
+    Schedule,
+    Agent,
+    Webhook,
+    Api,
+}
+
+impl RunOrigin {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "USER",
+            Self::Schedule => "SCHEDULE",
+            Self::Agent => "AGENT",
+            Self::Webhook => "WEBHOOK",
+            Self::Api => "API",
+        }
+    }
+}
+
+impl RunSource {
+    /// Every source; the mapping test walks this list.
+    const ALL: [Self; 10] = [
+        Self::Chat,
+        Self::Space,
+        Self::Support,
+        Self::AgentRunConsole,
+        Self::ScheduledCron,
+        Self::Routine,
+        Self::BackgroundReview,
+        Self::Dreaming,
+        Self::MailTask,
+        Self::DirectService,
+    ];
+
+    const fn wire(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Space => "space",
+            Self::Support => "support",
+            Self::AgentRunConsole => "agent_run_console",
+            Self::ScheduledCron => "scheduled_cron",
+            Self::Routine => "routine",
+            Self::BackgroundReview => "background_review",
+            Self::Dreaming => "dreaming",
+            Self::MailTask => "mail_task",
+            Self::DirectService => "direct_service",
+        }
+    }
+
+    fn from_wire(value: &str) -> Option<Self> {
+        let value = value.trim().to_ascii_lowercase();
+        Self::ALL.into_iter().find(|source| source.wire() == value)
+    }
+
+    /// People acting on a surface are `USER`; scheduled work is `SCHEDULE`;
+    /// unattended agent work is `AGENT`; mail-triggered work is `WEBHOOK`; a
+    /// service calling directly is `API`.
+    const fn origin(self) -> RunOrigin {
+        match self {
+            Self::Chat | Self::Space | Self::Support | Self::AgentRunConsole => RunOrigin::User,
+            Self::ScheduledCron | Self::Routine => RunOrigin::Schedule,
+            Self::BackgroundReview | Self::Dreaming => RunOrigin::Agent,
+            Self::MailTask => RunOrigin::Webhook,
+            Self::DirectService => RunOrigin::Api,
+        }
+    }
+}
+
+/// The source of a start: the named one when it is known, else `Chat`. The
+/// route requires a verified user credential, so the unlabelled case is a
+/// person; a hostile or unknown label gets no say.
+fn run_source_of(req: &BrowserRunStartRequest) -> RunSource {
+    req.run_source
+        .as_deref()
+        .and_then(RunSource::from_wire)
+        .unwrap_or(RunSource::Chat)
+}
+
+const REQUEST_ID_HEADER: &str = "x-request-id";
+
+/// The request id for every Quarry call of this run: the inbound `x-request-id`
+/// when it is 1 to 64 chars of `[A-Za-z0-9_-]`, else a fresh one. A hostile
+/// value is replaced, never repaired or forwarded.
+fn request_id_for(headers: &HeaderMap) -> String {
+    headers
+        .get(REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|id| {
+            !id.is_empty()
+                && id.len() <= 64
+                && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        })
+        .map_or_else(|| format!("req-{}", new_ulid()), str::to_owned)
+}
+
+/// Write the policy ask, trace context and request id into the browser
+/// `tool_input`. Keys the run has no value for are not written, so a start with
+/// none of them carries the `tool_input` it always did, except the request id
+/// and trace, which every start has.
+fn insert_policy_and_trace_fields(
+    tool_input: &mut Value,
+    policy: Option<Value>,
+    source: RunSource,
+    request_id: &str,
+) {
+    let Some(fields) = tool_input.as_object_mut() else {
+        return;
+    };
+    if let Some(policy) = policy {
+        fields.insert("policy".to_owned(), policy);
+    }
+    fields.insert("request_id".to_owned(), json!(request_id));
+    fields.insert(
+        "trace".to_owned(),
+        json!({
+            "origin": source.origin().as_str(),
+            "agent": { "id": "browser-agent", "role": "browser" },
+        }),
+    );
 }
 
 /// How long a presented run grant stays claimed by the run it started when the
@@ -401,6 +690,13 @@ fn run_request_fingerprint(req: &BrowserRunStartRequest) -> String {
     part("require_approval", &format!("{:?}", req.require_approval));
     part("profile_id", req.profile_id.as_deref().unwrap_or(""));
     part("allowed_domains", &domains.join(","));
+    if req.plan_mode == Some(true) {
+        // Only when asked, so a request that never names it keeps the fingerprint it had.
+        part("plan_mode", "true");
+    }
+    if let Some(policy) = req.policy.as_ref().filter(|policy| **policy != RunPolicyAsk::default()) {
+        part("policy", &format!("{policy:?}"));
+    }
     let digest = hasher.finalize();
     let mut hex = String::with_capacity(32);
     for byte in &digest[..16] {
@@ -1334,6 +1630,14 @@ async fn browser_run_start_inner(
         return Err(bad_request("goal must not be empty"));
     }
     reject_unsupported_browser_approval(&req)?;
+    // A restriction the run cannot honour is refused before any grant, thread
+    // or run write: flag off, or a malformed ask, never "run without it".
+    let policy_ask = policy_ask_for(
+        policy_ask_flag(std::env::var("MODEL_GATEWAY_BROWSER_POLICY_ASK").ok().as_deref()),
+        &req,
+    )?;
+    let run_source = run_source_of(&req);
+    let request_id = request_id_for(&headers);
     let idempotency_key = parse_idempotency_key(&headers)?;
     if idempotency_key.is_some() && non_empty(req.thread_id.as_deref()).is_some() {
         return Err(bad_request("idempotency_key_requires_a_new_thread"));
@@ -1581,6 +1885,7 @@ async fn browser_run_start_inner(
         "start_url": req.start_url,
     });
     insert_planner_fields(&mut tool_input, max_planner_tokens, planner.flag);
+    insert_policy_and_trace_fields(&mut tool_input, policy_ask, run_source, &request_id);
     let tool_input = tool_input.to_string();
 
     let mut execution_client = state.execution_client.clone();
@@ -2262,6 +2567,9 @@ mod tests {
             max_cost_usd: None,
             max_planner_tokens: None,
             zdr: false,
+            plan_mode: None,
+            policy: None,
+            run_source: None,
         }
     }
 
@@ -3046,6 +3354,199 @@ mod tests {
         insert_planner_fields(&mut unavailable, None, crate::org_quota::PlannerFlag::Unavailable);
         assert_eq!(unavailable["planner_flag"], "unavailable");
         assert!(unavailable.get("max_planner_tokens").is_none());
+    }
+
+    #[test]
+    fn origin_mapping_covers_every_run_source() {
+        let expected = [
+            (RunSource::Chat, "USER"),
+            (RunSource::Space, "USER"),
+            (RunSource::Support, "USER"),
+            (RunSource::AgentRunConsole, "USER"),
+            (RunSource::ScheduledCron, "SCHEDULE"),
+            (RunSource::Routine, "SCHEDULE"),
+            (RunSource::BackgroundReview, "AGENT"),
+            (RunSource::Dreaming, "AGENT"),
+            (RunSource::MailTask, "WEBHOOK"),
+            (RunSource::DirectService, "API"),
+        ];
+        // Every source in ALL is mapped, and nothing maps that ALL lacks.
+        assert_eq!(expected.len(), RunSource::ALL.len());
+        for source in RunSource::ALL {
+            let (_, origin) = expected
+                .iter()
+                .find(|(s, _)| *s == source)
+                .unwrap_or_else(|| panic!("{source:?} has no expected origin"));
+            assert_eq!(source.origin().as_str(), *origin, "{source:?}");
+            // Wire names round trip, case-insensitively.
+            assert_eq!(RunSource::from_wire(source.wire()), Some(source));
+            assert_eq!(RunSource::from_wire(&source.wire().to_uppercase()), Some(source));
+            // Strings the trace accepts: 1 to 64 chars of [A-Za-z0-9_-].
+            let origin = source.origin().as_str();
+            assert!(origin.len() <= 64 && origin.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'));
+        }
+        // Unlabelled, unknown or hostile labels are a person at the keyboard.
+        let mut request = browser_request("session-1");
+        assert_eq!(run_source_of(&request), RunSource::Chat);
+        for label in ["", "root", "API", "scheduled cron; drop", "ünï"] {
+            request.run_source = Some(label.to_owned());
+            assert_eq!(run_source_of(&request), RunSource::Chat, "{label:?}");
+        }
+        request.run_source = Some("mail_task".to_owned());
+        assert_eq!(run_source_of(&request).origin().as_str(), "WEBHOOK");
+    }
+
+    #[test]
+    fn request_id_is_the_inbound_one_when_valid_else_fresh() {
+        let mut headers = HeaderMap::new();
+        headers.insert(REQUEST_ID_HEADER, "req_Abc-123".parse().unwrap());
+        assert_eq!(request_id_for(&headers), "req_Abc-123");
+        for bad in ["a b", "a/b", "x".repeat(65).as_str(), ""] {
+            let mut headers = HeaderMap::new();
+            headers.insert(REQUEST_ID_HEADER, bad.parse().unwrap());
+            let id = request_id_for(&headers);
+            assert_ne!(id, bad);
+            assert!(id.starts_with("req-") && id.len() <= 64, "{id}");
+        }
+        let fresh = request_id_for(&HeaderMap::new());
+        assert!(fresh.starts_with("req-"));
+        assert_ne!(fresh, request_id_for(&HeaderMap::new()));
+    }
+
+    #[test]
+    fn trace_and_policy_fields_ride_the_tool_input() {
+        let mut tool_input = json!({ "grant_id": "g" });
+        insert_policy_and_trace_fields(&mut tool_input, None, RunSource::ScheduledCron, "req-1");
+        assert_eq!(tool_input["grant_id"], "g");
+        assert_eq!(tool_input["request_id"], "req-1");
+        assert_eq!(tool_input["trace"]["origin"], "SCHEDULE");
+        assert_eq!(tool_input["trace"]["agent"]["id"], "browser-agent");
+        assert!(tool_input["trace"].get("run_id").is_none(), "execution-core fills the run id");
+        assert!(tool_input.get("policy").is_none(), "no ask, no policy key");
+
+        let mut with_ask = json!({});
+        insert_policy_and_trace_fields(
+            &mut with_ask,
+            Some(json!({ "disable": ["browser.act.upload"] })),
+            RunSource::Chat,
+            "req-2",
+        );
+        assert_eq!(with_ask["policy"]["disable"][0], "browser.act.upload");
+        assert_eq!(with_ask["trace"]["origin"], "USER");
+    }
+
+    #[test]
+    fn policy_ask_flag_is_off_unless_literally_on() {
+        assert!(policy_ask_flag(Some("on")));
+        for off in [None, Some(""), Some("off"), Some("1"), Some("true")] {
+            assert!(!policy_ask_flag(off), "{off:?}");
+        }
+    }
+
+    #[test]
+    fn policy_ask_is_refused_when_the_flag_is_off_and_absent_asks_pass() {
+        let plain = browser_request("session-1");
+        assert_eq!(policy_ask_for(false, &plain).unwrap(), None);
+        assert_eq!(policy_ask_for(true, &plain).unwrap(), None);
+
+        let mut plan = browser_request("session-1");
+        plan.plan_mode = Some(true);
+        let refused = policy_ask_for(false, &plan).expect_err("fail closed");
+        assert_eq!(refused.0, StatusCode::BAD_REQUEST);
+        assert_eq!(refused.1 .0["error"], "browser_policy_ask_unavailable");
+
+        let mut asked = browser_request("session-1");
+        asked.policy = Some(RunPolicyAsk {
+            deny_domains: vec!["ads.example".to_owned()],
+            ..Default::default()
+        });
+        assert!(policy_ask_for(false, &asked).is_err());
+
+        // plan_mode=false and an empty policy ask for nothing, flag or not.
+        let mut nothing = browser_request("session-1");
+        nothing.plan_mode = Some(false);
+        nothing.policy = Some(RunPolicyAsk::default());
+        assert_eq!(policy_ask_for(false, &nothing).unwrap(), None);
+    }
+
+    #[test]
+    fn plan_mode_expands_to_the_four_disables_and_unions_with_the_callers_ask() {
+        let mut request = browser_request("session-1");
+        request.plan_mode = Some(true);
+        assert_eq!(
+            policy_ask_for(true, &request).unwrap(),
+            Some(json!({"disable": [
+                "browser.act.download", "browser.act.input",
+                "browser.act.interact", "browser.act.upload"
+            ]}))
+        );
+        request.policy = Some(RunPolicyAsk {
+            disable: vec!["browser.act.upload".to_owned(), "browser.act.scroll".to_owned()],
+            deny_domains: vec![" B.example ".to_owned(), "a.example".to_owned(), "a.example".to_owned()],
+            allow_domains: Some(vec!["Docs.Example.com".to_owned()]),
+        });
+        let ask = policy_ask_for(true, &request).unwrap().expect("ask");
+        assert_eq!(
+            ask["disable"],
+            json!([
+                "browser.act.download", "browser.act.input", "browser.act.interact",
+                "browser.act.scroll", "browser.act.upload"
+            ])
+        );
+        assert_eq!(ask["deny_domains"], json!(["a.example", "b.example"]));
+        assert_eq!(ask["allow_domains"], json!(["docs.example.com"]));
+        // Only these keys ever exist in the output.
+        let keys: BTreeSet<&str> = ask.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, BTreeSet::from(["allow_domains", "deny_domains", "disable"]));
+    }
+
+    #[test]
+    fn malformed_asks_are_refused_not_trimmed() {
+        let with = |policy: RunPolicyAsk| {
+            let mut request = browser_request("session-1");
+            request.policy = Some(policy);
+            policy_ask_for(true, &request)
+        };
+        for policy in [
+            RunPolicyAsk { disable: vec!["Browser Act".to_owned()], ..Default::default() },
+            RunPolicyAsk { deny_domains: vec!["https://x.example/".to_owned()], ..Default::default() },
+            RunPolicyAsk { allow_domains: Some(vec!["*.example.com".to_owned()]), ..Default::default() },
+            RunPolicyAsk { disable: (0..65).map(|i| format!("cap.n{i}")).collect(), ..Default::default() },
+        ] {
+            let err = with(policy).expect_err("malformed");
+            assert_eq!(err.1 .0["error"], "browser_policy_ask_invalid");
+        }
+        // An allow list that is present but empty is a real ask (allow nothing).
+        let none_allowed = with(RunPolicyAsk { allow_domains: Some(vec![]), ..Default::default() });
+        assert_eq!(none_allowed.unwrap(), Some(json!({"allow_domains": []})));
+    }
+
+    #[test]
+    fn the_ask_cannot_name_robots_or_proxy_keys() {
+        for key in ["robots_max", "proxy_max", "mode"] {
+            let body = json!({"goal": "g", "grant_id": "grant-1", "policy": { key: "off" }});
+            assert!(serde_json::from_value::<BrowserRunStartRequest>(body).is_err(), "{key}");
+        }
+        let ok: BrowserRunStartRequest = serde_json::from_value(json!({
+            "goal": "g", "grant_id": "grant-1", "plan_mode": true,
+            "policy": {"disable": ["browser.act.upload"]}, "run_source": "space",
+        }))
+        .unwrap();
+        assert_eq!(ok.plan_mode, Some(true));
+        assert_eq!(run_source_of(&ok), RunSource::Space);
+    }
+
+    #[test]
+    fn a_keyed_retry_that_adds_a_restriction_is_a_different_request() {
+        let base = browser_request("session-1");
+        let mut planned = base.clone();
+        planned.plan_mode = Some(true);
+        assert_ne!(run_request_fingerprint(&base), run_request_fingerprint(&planned));
+        // Absent or empty asks keep the fingerprint a request always had.
+        let mut empty = base.clone();
+        empty.plan_mode = Some(false);
+        empty.policy = Some(RunPolicyAsk::default());
+        assert_eq!(run_request_fingerprint(&base), run_request_fingerprint(&empty));
     }
 
     #[test]
