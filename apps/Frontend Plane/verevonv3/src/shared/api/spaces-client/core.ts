@@ -85,6 +85,8 @@ export type SpaceContext = {
     people_search?: boolean
     /** WS04-S8: the room directory, self-join and the visibility setting are offered. */
     room_directory?: boolean
+    /** WS04-S9: the picker lists people and agents together (presence only) and the resolver is offered. */
+    directory_resolver?: boolean
     /** WS12-S3: direct messages are offered. */
     dm?: boolean
     /** WS12-S7: editing and deleting messages is offered (rollout only; Control decides each change). */

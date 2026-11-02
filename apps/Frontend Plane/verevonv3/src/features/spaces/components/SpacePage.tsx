@@ -893,6 +893,7 @@ export default function SpacePage() {
                         actorId={current().membership.subject_id}
                         writerApi={writerApi()}
                         peopleSearch={current().features?.people_search === true}
+                        directoryResolver={current().features?.directory_resolver === true}
                         isOrganizationRoom={current().space.is_organization_room}
                         archived={roomIsArchived(current())}
                         onMembersChanged={() => {
@@ -1750,6 +1751,8 @@ function SpaceMembersPanel(props: {
   readonly writerApi: boolean
   /** The gateway's people-search route is on: the picker searches the directory (WS04-S3). */
   readonly peopleSearch?: boolean
+  /** The gateway's composed people-and-agent directory is on (WS04-S9). */
+  readonly directoryResolver?: boolean
   /** The organization's own channel derives its roster from org-core, so it
    * has no editable member list — see `SpaceMemberControls`.
    *
@@ -1833,6 +1836,7 @@ function SpaceMembersPanel(props: {
           actorRole={props.role}
           writerApi={props.writerApi}
           peopleSearch={props.peopleSearch}
+          directoryResolver={props.directoryResolver}
         />
       </Show>
 

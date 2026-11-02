@@ -1,6 +1,7 @@
 import { Loader2, Users } from '@/shared/icons'
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'solid-js'
 
+import { DirectoryPicker } from './DirectoryPicker'
 import { SpaceConfirmButton } from './SpaceConfirmButton'
 
 import { listOrganizationMembers } from '@/shared/api/organization-client'
@@ -71,6 +72,13 @@ export interface SpaceMemberControlsProps {
    * server did not say, which is NOT the same as "on".
    */
   readonly peopleSearch?: boolean
+  /**
+   * The gateway's composed directory is on (WS04-S9, `features.directory_resolver`). With it the
+   * picker is the shared `DirectoryPicker`: people and published agents together, agent rows
+   * labelled and never offered an add action. `undefined` means the server did not say, which is
+   * NOT the same as "on".
+   */
+  readonly directoryResolver?: boolean
 }
 
 const SEARCH_DEBOUNCE_MS = 250
@@ -91,9 +99,10 @@ export function SpaceMemberControls(props: SpaceMemberControlsProps) {
   const [audience, setAudience] = createSignal<SpaceAudienceState | undefined>(undefined)
   const [addRole, setAddRole] = createSignal<RoomRole>('editor')
   const addRoles = createMemo(() => (props.writerApi ? assignableRolesForAdd(props.actorRole ?? '') : []))
-  const searching = () => props.peopleSearch === true
+  const composed = () => props.directoryResolver === true
+  const searching = () => props.peopleSearch === true && !composed()
   const [candidates] = createResource(
-    () => (open() && !searching() ? props.orgId ?? '' : ''),
+    () => (open() && !searching() && !composed() ? props.orgId ?? '' : ''),
     async (orgId) => (orgId ? listOrganizationMembers(orgId) : []),
   )
 
@@ -175,8 +184,8 @@ export function SpaceMemberControls(props: SpaceMemberControlsProps) {
         )
     ).filter((member) => !alreadyHere().has(member.userId)),
   )
-  const listLoading = () => (searching() ? searchLoading() && found().length === 0 : candidates.loading)
-  const listError = () => (searching() ? searchError() !== '' : Boolean(candidates.error))
+  const listLoading = () => (composed() ? false : searching() ? searchLoading() && found().length === 0 : candidates.loading)
+  const listError = () => (composed() ? false : searching() ? searchError() !== '' : Boolean(candidates.error))
 
   async function run(
     id: string,
@@ -271,7 +280,7 @@ export function SpaceMemberControls(props: SpaceMemberControlsProps) {
             </p>
           </Show>
 
-          <Show when={!listLoading() && !listError() && !(searching() && searchLoading()) && addable().length === 0}>
+          <Show when={!composed() && !listLoading() && !listError() && !(searching() && searchLoading()) && addable().length === 0}>
             <p class="verevon-space-member-picker__empty">
               {searching()
                 ? searchQuery()
@@ -305,8 +314,33 @@ export function SpaceMemberControls(props: SpaceMemberControlsProps) {
             </label>
           </Show>
 
-          <ul class="verevon-space-member-picker__list">
-            <For each={addable()}>
+          <Show when={composed()}>
+            <DirectoryPicker
+              excludeMemberOf={props.spaceRef}
+              isExcluded={(subjectId) => alreadyHere().has(subjectId)}
+              busyId={busyId()}
+              pickLabel={i18n.tr('Legg til', 'Add')}
+              pickingLabel={i18n.tr('Legger til …', 'Adding…')}
+              onPickPerson={(person) =>
+                void run(
+                  person.subjectId,
+                  () =>
+                    addSpaceMember(
+                      props.spaceRef,
+                      person.subjectId,
+                      addRoles().includes(addRole()) ? addRole() : undefined,
+                    ),
+                  {
+                    no: 'Personen kunne ikke legges til. Ingenting er endret.',
+                    en: 'That person could not be added. Nothing was changed.',
+                  },
+                )
+              }
+            />
+          </Show>
+
+          <ul class="verevon-space-member-picker__list" hidden={composed()}>
+            <For each={composed() ? [] : addable()}>
               {(member) => (
                 <li>
                   <span class="verevon-space-member-picker__who">
