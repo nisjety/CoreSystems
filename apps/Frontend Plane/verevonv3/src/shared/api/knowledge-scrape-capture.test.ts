@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  buildCaptureRequest,
   captureFormats,
   readScrapeCaptures,
   scrapeArtifactUrl,
@@ -62,5 +63,24 @@ describe('scrape captures (WS13.7)', () => {
     ).toEqual({ screenshotInline: { contentType: 'image/png', dataBase64: 'iVBORw0K' } })
     expect(readScrapeCaptures({ formats: { screenshot: 'not-an-artifact' }, screenshot: 'raw' })).toBeUndefined()
     expect(readScrapeCaptures(null)).toBeUndefined()
+  })
+})
+
+// W2-U65-51: a capture is requested only when the user chose it.
+describe('capture toggles (W2-U65-51)', () => {
+  it('returns no request unless a toggle is true, and never carries a false', () => {
+    expect(buildCaptureRequest({})).toBeUndefined()
+    expect(buildCaptureRequest({ pdf: false, screenshot: false })).toBeUndefined()
+    expect(buildCaptureRequest({ screenshot: true })).toEqual({ screenshot: true })
+    expect(buildCaptureRequest({ pdf: true, screenshot: false })).toEqual({ pdf: true })
+    expect(buildCaptureRequest({ pdf: true, screenshot: true })).toEqual({ pdf: true, screenshot: true })
+  })
+
+  it('a request built from the toggles becomes formats entries, none when unticked', () => {
+    expect(captureFormats(buildCaptureRequest({ pdf: true, screenshot: true }))).toEqual(['screenshot', 'pdf'])
+    expect(captureFormats(buildCaptureRequest({ screenshot: false }))).toEqual([])
+    expect(scrapeRequestBody({ capture: buildCaptureRequest({}), url: 'https://example.com/' })).toEqual({
+      url: 'https://example.com/',
+    })
   })
 })
