@@ -1966,6 +1966,8 @@ fn project_run_replay_event(run_id: &str, event: Event) -> Option<DurableRunEven
             | "EVENT_TYPE_BROWSER_OBSERVATION_RECEIVED"
             | "EVENT_TYPE_BROWSER_RUN_PAUSED"
             | "EVENT_TYPE_BROWSER_RUN_RESUMED"
+            // WS8.G: ids only (run, plan, attach, session run, tab), never a URL or a title.
+            | "EVENT_TYPE_BROWSER_ATTACH_SHARED_JAR"
             | "EVENT_TYPE_BROWSER_ACTION_APPROVAL_REQUIRED"
             | "EVENT_TYPE_BROWSER_ACTION_DECIDED"
             | "EVENT_TYPE_APPROVAL_CONTINUATION_VERIFIED"
@@ -16697,6 +16699,33 @@ mod run_replay_projection_tests {
             "{}",
         );
         assert!(project_run_replay_event("run-1", prefix).is_none());
+    }
+
+    #[test]
+    fn an_attach_shared_jar_event_is_replayed_for_its_run() {
+        let payload = r#"{"run_id":"run-1","plan_id":"plan-1","attach_id":"att-1","session_run_id":"user-run-9","tab_id":"tab-3"}"#;
+        let projected = project_run_replay_event(
+            "run-1",
+            event(
+                EventType::BrowserAttachSharedJar as i32,
+                "run:run-1",
+                "run-1",
+                "type.googleapis.com/model_plane.v1.BrowserAttachSharedJar",
+                payload,
+            ),
+        )
+        .expect("a reconnecting client replays the attach audit event");
+        assert_eq!(projected.event_type, "EVENT_TYPE_BROWSER_ATTACH_SHARED_JAR");
+        assert_eq!(projected.payload["attach_id"], "att-1");
+        // Another run's attach event is not replayed.
+        let other = event(
+            EventType::BrowserAttachSharedJar as i32,
+            "run:run-2",
+            "run-2",
+            "type.googleapis.com/model_plane.v1.BrowserAttachSharedJar",
+            r#"{"run_id":"run-2"}"#,
+        );
+        assert!(project_run_replay_event("run-1", other).is_none());
     }
 
     #[test]
