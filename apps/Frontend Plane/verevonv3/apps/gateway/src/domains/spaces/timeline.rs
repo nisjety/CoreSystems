@@ -833,3 +833,1086 @@ pub(super) fn transcript_window_json(payload: &Value) -> Value {
         "has_more_before": has_more || omitted_before > 0,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        decode_cursor, encode_cursor, parse_transcript_window, parse_window, space_timeline,
+        TimelineQuery, TranscriptWindowQuery, MAX_REFRESH_IDS, TAIL_WINDOW_TURNS,
+    };
+    use crate::config::AppState;
+    use crate::middleware::{AuthenticatedUser, AuthorizedMembership};
+    use axum::{
+        extract::{Extension, Path, Query, State},
+        http::{HeaderMap, StatusCode},
+        Json,
+    };
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use serde_json::{json, Value};
+    use wiremock::matchers::{body_string_contains, method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const SPACE: &str = "space-1";
+
+    fn member() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "timeline-user".to_owned(),
+            user_email: "timeline@example.com".to_owned(),
+            user_name: "Timeline".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    fn cursor(raw: &str) -> String {
+        URL_SAFE_NO_PAD.encode(raw)
+    }
+
+    fn query(
+        limit: Option<&str>,
+        before: Option<&str>,
+        after: Option<&str>,
+        refresh: Option<&str>,
+    ) -> TimelineQuery {
+        TimelineQuery {
+            limit: limit.map(str::to_owned),
+            before: before.map(str::to_owned),
+            after: after.map(str::to_owned),
+            refresh: refresh.map(str::to_owned),
+        }
+    }
+
+    fn code_of(result: Result<impl Sized, (StatusCode, Json<Value>)>) -> (u16, String) {
+        match result {
+            Ok(_) => panic!("expected a refusal"),
+            Err((status, Json(body))) => (
+                status.as_u16(),
+                body["error"]["code"].as_str().unwrap_or_default().to_owned(),
+            ),
+        }
+    }
+
+    // ----- fixture ---------------------------------------------------------------------------
+
+    struct Fx {
+        server: MockServer,
+        state: AppState,
+    }
+
+    async fn mount(server: &MockServer, method: &str, route: &str, template: ResponseTemplate) {
+        Mock::given(wm_method(method))
+            .and(wm_path(route))
+            .respond_with(template)
+            .mount(server)
+            .await;
+    }
+
+    fn post(thread_id: &str, space_id: &str, updated_at: &str) -> Value {
+        json!({ "thread_id": thread_id, "space_id": space_id, "updated_at": updated_at })
+    }
+
+    /// Session Core returns the newest activity first.
+    fn window_payload() -> Value {
+        json!({
+            "posts": [
+                post("t2", SPACE, "2026-11-01T10:05:00Z"),
+                post("t1", SPACE, "2026-11-01T10:00:00Z"),
+            ],
+            "pinned": [],
+            "refreshed": [],
+            "has_more": true,
+            "oldest_seq": 5,
+            "newest_seq": 9,
+            "total_posts": 42,
+        })
+    }
+
+    /// `marker`: whether Application answers the read marker. Anything else Application is asked
+    /// stays unmatched (404), which is a named gap for pins.
+    async fn fixture(payload: ResponseTemplate, marker: bool) -> Fx {
+        let server = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .and(body_string_contains("spacesForOrgForGateway"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": [{ "spaceRef": SPACE, "lifecycle": "active", "name": "Room", "kind": "room" }]
+            })))
+            .mount(&server)
+            .await;
+        if marker {
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/api/query"))
+                .and(body_string_contains("spaceReadMarkerForGateway"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({ "value": { "lastReadAt": 123 } })),
+                )
+                .mount(&server)
+                .await;
+        }
+        mount(
+            &server,
+            "GET",
+            &format!("/api/v1/internal/spaces/{SPACE}/membership"),
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "data": { "role": "member", "state": "active" } })),
+        )
+        .await;
+        mount(
+            &server,
+            "GET",
+            "/api/session-core/token",
+            ResponseTemplate::new(200).set_body_json(json!({ "token": "session-test-token" })),
+        )
+        .await;
+        mount(
+            &server,
+            "POST",
+            "/api/v1/internal/spaces/thread-read-decision",
+            ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "decision": { "decision_ref": "dec-1" }, "token": "dec-token" }
+            })),
+        )
+        .await;
+        mount(&server, "GET", &format!("/v1/spaces/{SPACE}/timeline"), payload).await;
+        let mut state = crate::tests::test_state(false);
+        let uri = server.uri();
+        state.auth_core_url = uri.clone();
+        state.user_core_url = uri.clone();
+        state.model_gateway_url = uri.clone();
+        state.org_core_url = uri.clone();
+        state.application_convex_url = uri;
+        state.application_convex_service_key = "application-test-key".into();
+        state.space_features.timeline_api = true;
+        Fx { server, state }
+    }
+
+    async fn timeline(fx: &Fx, q: TimelineQuery) -> (u16, Value) {
+        let (status, Json(body)) = space_timeline(
+            State(fx.state.clone()),
+            Extension(member()),
+            HeaderMap::new(),
+            Path(SPACE.to_owned()),
+            Query(q),
+        )
+        .await;
+        (status.as_u16(), body)
+    }
+
+    async fn requests_to(server: &MockServer, needle: &str) -> usize {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path().contains(needle))
+            .count()
+    }
+
+    async fn timeline_url(server: &MockServer) -> String {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .rev()
+            .find(|request| request.url.path().ends_with("/timeline"))
+            .expect("a model-gateway timeline call")
+            .url
+            .to_string()
+    }
+
+    // ----- cursors and request validation (pure) --------------------------------------------
+
+    #[test]
+    fn cursors_roundtrip_and_carry_only_a_position() {
+        assert_eq!(decode_cursor(encode_cursor(7, None).as_str().unwrap()), Some((7, None)));
+        assert_eq!(
+            decode_cursor(encode_cursor(7, Some(1_700_000_000_000)).as_str().unwrap()),
+            Some((7, Some(1_700_000_000_000)))
+        );
+        assert_eq!(encode_cursor(0, Some(5)), Value::Null);
+        let raw = URL_SAFE_NO_PAD.decode(encode_cursor(7, None).as_str().unwrap()).unwrap();
+        assert_eq!(raw, b"v1|7");
+    }
+
+    #[test]
+    fn timeline_invalid_cursor_is_400() {
+        for bad in [
+            "!!!not-base64!!!".to_owned(),
+            cursor("v2|5"),
+            cursor("5"),
+            cursor("v1|0"),
+            cursor("v1|abc"),
+            cursor("v1|5|notanumber"),
+            cursor("v1|-3"),
+        ] {
+            let (status, code) = code_of(parse_window(&query(None, Some(&bad), None, None)).map(|_| ()));
+            assert_eq!((status, code.as_str()), (400, "invalid_cursor"), "before {bad}");
+            let (status, code) = code_of(parse_window(&query(None, None, Some(&bad), None)).map(|_| ()));
+            assert_eq!((status, code.as_str()), (400, "invalid_cursor"), "after {bad}");
+        }
+        let both = cursor("v1|5");
+        let (status, code) =
+            code_of(parse_window(&query(None, Some(&both), Some(&both), None)).map(|_| ()));
+        assert_eq!((status, code.as_str()), (400, "invalid_cursor"));
+        // A valid single cursor and a blank one are accepted.
+        let window = parse_window(&query(None, Some(&both), None, None)).ok().unwrap();
+        assert_eq!(window.before_seq, 5);
+        assert!(!window.is_first_page());
+        assert!(parse_window(&query(None, Some("  "), None, None)).ok().unwrap().is_first_page());
+    }
+
+    #[test]
+    fn timeline_invalid_limit_and_refresh_are_400() {
+        for bad in ["0", "101", "abc", "-1", "1.5"] {
+            let (status, code) = code_of(parse_window(&query(Some(bad), None, None, None)).map(|_| ()));
+            assert_eq!((status, code.as_str()), (400, "invalid_limit"), "{bad}");
+        }
+        assert_eq!(parse_window(&query(None, None, None, None)).ok().unwrap().limit, 50);
+        assert_eq!(parse_window(&query(Some("1"), None, None, None)).ok().unwrap().limit, 1);
+        assert_eq!(parse_window(&query(Some("100"), None, None, None)).ok().unwrap().limit, 100);
+
+        let too_many = (0..=MAX_REFRESH_IDS).map(|i| format!("t{i}")).collect::<Vec<_>>().join(",");
+        let at_most = (0..MAX_REFRESH_IDS).map(|i| format!("t{i}")).collect::<Vec<_>>().join(",");
+        let (status, code) =
+            code_of(parse_window(&query(None, None, None, Some(&too_many))).map(|_| ()));
+        assert_eq!((status, code.as_str()), (400, "invalid_refresh"));
+        assert_eq!(
+            parse_window(&query(None, None, None, Some(&at_most))).ok().unwrap().refresh.len(),
+            MAX_REFRESH_IDS
+        );
+        for bad in ["a b", "t1,,t2", "t1,../x", "t/1", &"a".repeat(129)] {
+            let (status, code) = code_of(parse_window(&query(None, None, None, Some(bad))).map(|_| ()));
+            assert_eq!((status, code.as_str()), (400, "invalid_refresh"), "{bad}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_bad_request_shape_is_refused_before_any_upstream_call() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(ResponseTemplate::new(200).set_body_json(window_payload()), true).await;
+        for q in [
+            query(Some("0"), None, None, None),
+            query(None, Some("garbage"), None, None),
+            query(None, None, None, Some("a b")),
+        ] {
+            let (status, _) = timeline(&fx, q).await;
+            assert_eq!(status, 400);
+        }
+        assert!(fx.server.received_requests().await.unwrap().is_empty());
+    }
+
+    // ----- flag, composition -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn timeline_flag_off_is_404_space_timeline_disabled_with_no_upstream_call() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut fx = fixture(ResponseTemplate::new(200).set_body_json(window_payload()), true).await;
+        fx.state.space_features.timeline_api = false;
+        let (status, body) = timeline(&fx, TimelineQuery::default()).await;
+        assert_eq!(status, 404);
+        assert_eq!(body["error"]["code"], "space_timeline_disabled");
+        assert!(fx.server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn timeline_first_page_composes_space_membership_marker() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(ResponseTemplate::new(200).set_body_json(window_payload()), true).await;
+        let (status, body) = timeline(&fx, TimelineQuery::default()).await;
+        assert_eq!(status, 200);
+        let data = &body["data"];
+        assert_eq!(data["space"]["space_ref"], SPACE);
+        assert_eq!(data["membership"]["role"], "member");
+        assert_eq!(data["pins"], json!([]));
+        assert_eq!(data["read_marker"]["last_read_at"], 123);
+        assert_eq!(data["page"]["total_posts"], 42);
+        assert_eq!(data["page"]["windowed"], true);
+        assert_eq!(data["shared_read"]["available"], true);
+        assert_eq!(data["unavailable"], json!([]));
+        // The room reads oldest first.
+        assert_eq!(data["threads"][0]["thread_id"], "t1");
+        assert_eq!(data["threads"][1]["thread_id"], "t2");
+        let url = timeline_url(&fx.server).await;
+        assert!(url.contains("include_pinned=1"), "{url}");
+        assert!(url.contains("limit=50"), "{url}");
+        assert!(!url.contains("before_seq") && !url.contains("after_seq"), "{url}");
+    }
+
+    #[tokio::test]
+    async fn a_later_page_carries_no_membership_pins_marker_or_total() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(ResponseTemplate::new(200).set_body_json(window_payload()), true).await;
+        let (status, body) =
+            timeline(&fx, query(Some("20"), Some(&cursor("v1|5")), None, Some("t1,t2"))).await;
+        assert_eq!(status, 200);
+        let data = body["data"].as_object().unwrap();
+        for absent in ["membership", "pins", "read_marker", "agent_work", "shared_read", "unavailable"] {
+            assert!(!data.contains_key(absent), "{absent} is first-page only");
+        }
+        assert!(body["data"]["page"]["total_posts"].is_null());
+        let url = timeline_url(&fx.server).await;
+        assert!(url.contains("before_seq=5"), "{url}");
+        assert!(url.contains("limit=20"), "{url}");
+        assert!(url.contains("refresh=t1%2Ct2"), "{url}");
+        assert!(!url.contains("include_pinned"), "{url}");
+        assert_eq!(requests_to(&fx.server, "spaceReadMarker").await, 0);
+    }
+
+    #[tokio::test]
+    async fn timeline_posts_are_ascending_and_cursors_roundtrip() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(ResponseTemplate::new(200).set_body_json(window_payload()), true).await;
+        let (_, body) = timeline(&fx, TimelineQuery::default()).await;
+        let page = &body["data"]["page"];
+        // Older direction: next_before points at the OLDEST post of this window.
+        let (seq, at_ms) = decode_cursor(page["next_before"].as_str().unwrap()).unwrap();
+        assert_eq!(seq, 5);
+        assert_eq!(
+            at_ms,
+            Some(chrono::DateTime::parse_from_rfc3339("2026-11-01T10:00:00Z").unwrap().timestamp_millis())
+        );
+        assert!(page["next_after"].is_null());
+        let (seq, at_ms) = decode_cursor(page["newest"].as_str().unwrap()).unwrap();
+        assert_eq!(seq, 9);
+        assert_eq!(
+            at_ms,
+            Some(chrono::DateTime::parse_from_rfc3339("2026-11-01T10:05:00Z").unwrap().timestamp_millis())
+        );
+        // Newer direction: next_after continues from the NEWEST post and next_before stays null.
+        let (_, body) = timeline(&fx, query(None, None, Some(&cursor("v1|3")), None)).await;
+        let page = &body["data"]["page"];
+        assert!(page["next_before"].is_null());
+        assert_eq!(decode_cursor(page["next_after"].as_str().unwrap()).unwrap().0, 9);
+        // A window that reached the end has no continuation.
+        let mut done = window_payload();
+        done["has_more"] = json!(false);
+        let fx = fixture(ResponseTemplate::new(200).set_body_json(done), true).await;
+        let (_, body) = timeline(&fx, TimelineQuery::default()).await;
+        assert!(body["data"]["page"]["next_before"].is_null());
+        assert!(body["data"]["page"]["next_after"].is_null());
+        assert_eq!(body["data"]["page"]["has_more"], false);
+    }
+
+    // ----- authority per page ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn timeline_cursor_carries_no_authority_each_page_mints_a_decision() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(ResponseTemplate::new(200).set_body_json(window_payload()), true).await;
+        timeline(&fx, TimelineQuery::default()).await;
+        timeline(&fx, query(None, Some(&cursor("v1|5")), None, None)).await;
+        timeline(&fx, query(None, None, Some(&cursor("v1|3")), None)).await;
+        assert_eq!(requests_to(&fx.server, "space-1/membership").await, 3);
+        assert_eq!(requests_to(&fx.server, "thread-read-decision").await, 3);
+        // The decision rides to model-gateway on every page.
+        let urls: Vec<String> = fx
+            .server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|request| request.url.path().ends_with("/timeline"))
+            .map(|request| request.url.to_string())
+            .collect();
+        assert_eq!(urls.len(), 3);
+        for url in urls {
+            assert!(url.contains("space_read_decision_ref=dec-1"), "{url}");
+            assert!(url.contains("space_read_decision_token=dec-token"), "{url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_declined_read_decision_is_403_space_read_not_authorized_and_nothing_is_read() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(ResponseTemplate::new(200).set_body_json(window_payload()), true).await;
+        fx.server.reset().await;
+        // reset drops every mock: remount only what the route needs up to the decision.
+        let fx = {
+            let Fx { server, state } = fx;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/api/query"))
+                .and(body_string_contains("spacesForOrgForGateway"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "value": [{ "spaceRef": SPACE, "lifecycle": "active" }]
+                })))
+                .mount(&server)
+                .await;
+            mount(
+                &server,
+                "GET",
+                &format!("/api/v1/internal/spaces/{SPACE}/membership"),
+                ResponseTemplate::new(200).set_body_json(json!({ "data": { "role": "member" } })),
+            )
+            .await;
+            mount(
+                &server,
+                "GET",
+                "/api/session-core/token",
+                ResponseTemplate::new(200).set_body_json(json!({ "token": "t" })),
+            )
+            .await;
+            mount(
+                &server,
+                "POST",
+                "/api/v1/internal/spaces/thread-read-decision",
+                ResponseTemplate::new(403).set_body_json(json!({
+                    "error": "No.", "code": "space_membership_required", "resolvable_by": "none"
+                })),
+            )
+            .await;
+            Fx { server, state }
+        };
+        let (status, body) = timeline(&fx, TimelineQuery::default()).await;
+        assert_eq!(status, 403);
+        assert_eq!(body["error"]["code"], "space_read_not_authorized");
+        assert!(body["error"].get("details").map_or(true, |d| d.as_object().map_or(true, |o| o.is_empty())));
+        assert_eq!(requests_to(&fx.server, "/timeline").await, 0);
+
+        // With typed denials on, the same decline carries the reason and who can resolve it.
+        let mut typed = fx;
+        typed.state.space_features.denials_typed = true;
+        let (status, body) = timeline(&typed, TimelineQuery::default()).await;
+        assert_eq!(status, 403);
+        assert_eq!(body["error"]["code"], "space_read_not_authorized");
+        assert_eq!(body["error"]["details"]["reason"], "space_membership_required");
+        assert_eq!(body["error"]["details"]["resolvable_by"], "none");
+        assert_eq!(requests_to(&typed.server, "/timeline").await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_non_member_gets_controls_refusal_and_a_missing_space_is_404() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let server = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "value": [] })))
+            .mount(&server)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.user_core_url = server.uri();
+        state.auth_core_url = server.uri();
+        state.model_gateway_url = server.uri();
+        state.application_convex_url = server.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.space_features.timeline_api = true;
+        let fx = Fx { server, state };
+        let (status, body) = timeline(&fx, TimelineQuery::default()).await;
+        assert_eq!((status, body["error"]["code"].clone()), (404, json!("space_not_found")));
+        assert_eq!(requests_to(&fx.server, "space-1/membership").await, 0);
+
+        let fx = fixture(ResponseTemplate::new(200).set_body_json(window_payload()), true).await;
+        fx.server.reset().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": [{ "spaceRef": SPACE, "lifecycle": "active" }]
+            })))
+            .mount(&fx.server)
+            .await;
+        mount(
+            &fx.server,
+            "GET",
+            &format!("/api/v1/internal/spaces/{SPACE}/membership"),
+            ResponseTemplate::new(403).set_body_json(json!({
+                "error": { "code": "not_a_space_member", "message": "no" }
+            })),
+        )
+        .await;
+        let (status, _) = timeline(&fx, TimelineQuery::default()).await;
+        assert_eq!(status, 403);
+        assert_eq!(requests_to(&fx.server, "thread-read-decision").await, 0);
+        assert_eq!(requests_to(&fx.server, "/timeline").await, 0);
+    }
+
+    // ----- legacy fallback and failures ------------------------------------------------------
+
+    async fn legacy_fixture(upstream: ResponseTemplate) -> Fx {
+        let fx = fixture(upstream, true).await;
+        mount(
+            &fx.server,
+            "GET",
+            "/v1/threads",
+            ResponseTemplate::new(200).set_body_json(json!({
+                "threads": [post("legacy-1", SPACE, "2026-11-01T09:00:00Z")]
+            })),
+        )
+        .await;
+        fx
+    }
+
+    #[tokio::test]
+    async fn timeline_falls_back_to_legacy_on_backfill_pending() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for (status, code) in [
+            (503u16, "summary_backfill_pending"),
+            (409, "summary_backfill_pending"),
+            (404, "space_timeline_disabled"),
+        ] {
+            let fx = legacy_fixture(
+                ResponseTemplate::new(status)
+                    .set_body_json(json!({ "error": { "code": code, "message": "m" } })),
+            )
+            .await;
+            let (got, body) = timeline(&fx, TimelineQuery::default()).await;
+            assert_eq!(got, 200, "{code}");
+            assert_eq!(body["data"]["page"], json!({ "windowed": false, "has_more": false }), "{code}");
+            assert_eq!(body["data"]["threads"][0]["thread_id"], "legacy-1");
+            assert_eq!(requests_to(&fx.server, "/v1/threads").await, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn other_upstream_failures_keep_their_typed_status_or_are_the_503() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = legacy_fixture(
+            ResponseTemplate::new(403)
+                .set_body_json(json!({ "error": { "code": "space_read_not_authorized", "message": "m" } })),
+        )
+        .await;
+        let (status, body) = timeline(&fx, TimelineQuery::default()).await;
+        assert_eq!((status, body["error"]["code"].clone()), (403, json!("space_read_not_authorized")));
+        assert_eq!(requests_to(&fx.server, "/v1/threads").await, 0);
+
+        let fx = legacy_fixture(ResponseTemplate::new(500).set_body_string("down")).await;
+        let (status, body) = timeline(&fx, TimelineQuery::default()).await;
+        assert_eq!((status, body["error"]["code"].clone()), (503, json!("space_timeline_unavailable")));
+    }
+
+    #[tokio::test]
+    async fn timeline_source_failure_is_a_named_gap() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        // No read-marker mock (marker=false) and pins on with no pins mock: Application answers 404.
+        let mut fx = fixture(ResponseTemplate::new(200).set_body_json(window_payload()), false).await;
+        fx.state.space_features.room_pins = true;
+        let (status, body) = timeline(&fx, TimelineQuery::default()).await;
+        assert_eq!(status, 200, "the window is still served");
+        assert_eq!(body["data"]["threads"].as_array().unwrap().len(), 2);
+        assert!(body["data"]["read_marker"].is_null());
+        assert_eq!(body["data"]["pins"], json!([]));
+        let gaps: Vec<(&str, &str)> = body["data"]["unavailable"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|gap| (gap["section"].as_str().unwrap(), gap["code"].as_str().unwrap()))
+            .collect();
+        assert!(gaps.contains(&("read_marker", "read_marker_unavailable")), "{gaps:?}");
+        assert!(gaps.contains(&("pins", "pins_unavailable")), "{gaps:?}");
+    }
+
+    #[tokio::test]
+    async fn posts_outside_the_space_or_a_malformed_window_give_502() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for (field, items) in [
+            ("posts", json!([post("t9", "space-other", "2026-11-01T10:00:00Z")])),
+            ("pinned", json!([post("t9", "space-other", "2026-11-01T10:00:00Z")])),
+            ("refreshed", json!([post("t9", "space-other", "2026-11-01T10:00:00Z")])),
+            ("posts", json!("not-an-array")),
+        ] {
+            let mut payload = window_payload();
+            payload[field] = items;
+            let fx = fixture(ResponseTemplate::new(200).set_body_json(payload), true).await;
+            let (status, body) = timeline(&fx, TimelineQuery::default()).await;
+            assert_eq!(status, 502, "{field}");
+            assert_eq!(body["error"]["code"], "invalid_model_gateway_response");
+        }
+    }
+
+    // ----- R2: the tail window of the transcript route ----------------------------------------
+
+    fn window_query(tail: Option<&str>, before: Option<&str>, first: Option<&str>) -> TranscriptWindowQuery {
+        TranscriptWindowQuery {
+            tail: tail.map(str::to_owned),
+            before: before.map(str::to_owned),
+            include_first: first.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn transcript_window_params_validated() {
+        for bad in ["0", "51", "abc", "-1", "1.5"] {
+            let (status, code) =
+                code_of(parse_transcript_window(true, &window_query(Some(bad), None, None)));
+            assert_eq!((status, code.as_str()), (400, "invalid_window"), "tail {bad}");
+        }
+        for (before, first) in [(Some("a b"), None), (Some("../x"), None), (None, Some("junk")), (None, Some("2"))] {
+            let (status, code) =
+                code_of(parse_transcript_window(true, &window_query(Some("12"), before, first)));
+            assert_eq!((status, code.as_str()), (400, "invalid_window"), "{before:?}/{first:?}");
+        }
+        // before or include_first without tail is refused, not ignored.
+        let (status, code) = code_of(parse_transcript_window(true, &window_query(None, Some("m-1"), None)));
+        assert_eq!((status, code.as_str()), (400, "invalid_window"));
+        let (status, _) = code_of(parse_transcript_window(true, &window_query(None, None, Some("1"))));
+        assert_eq!(status, 400);
+        // Bounds are accepted.
+        for ok in ["1", "50"] {
+            assert!(parse_transcript_window(true, &window_query(Some(ok), None, None)).ok().unwrap().is_some());
+        }
+        // No parameters at all: the whole transcript, no window.
+        assert_eq!(parse_transcript_window(true, &window_query(None, None, None)).ok().unwrap(), None);
+        assert_eq!(parse_transcript_window(true, &window_query(Some(" "), Some(""), None)).ok().unwrap(), None);
+        // Flag off: everything is ignored, even junk.
+        assert_eq!(
+            parse_transcript_window(false, &window_query(Some("junk"), Some("a b"), Some("x"))).ok().unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn transcript_window_query_suffix_carries_limit_before_and_include_first() {
+        let suffix = |tail, before, first| {
+            parse_transcript_window(true, &window_query(tail, before, first))
+                .ok()
+                .unwrap()
+                .unwrap()
+                .query_suffix()
+        };
+        assert_eq!(suffix(Some("12"), None, None), "&limit=12");
+        assert_eq!(suffix(Some("12"), Some("msg-1"), None), "&limit=12&before=msg-1");
+        assert_eq!(suffix(Some("12"), None, Some("1")), "&limit=12&include_first=1");
+        assert_eq!(suffix(Some("12"), None, Some("true")), "&limit=12&include_first=1");
+        assert_eq!(suffix(Some("12"), None, Some("0")), "&limit=12");
+        // A before cursor wins: the first turn is only wanted on the opening tail.
+        assert_eq!(suffix(Some("12"), Some("msg-1"), Some("1")), "&limit=12&before=msg-1");
+        assert_eq!(TAIL_WINDOW_TURNS, 12);
+    }
+
+    async fn model_url(fx: &Fx) -> String {
+        fx.server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .rev()
+            .find(|request| request.url.path().ends_with("/messages"))
+            .unwrap()
+            .url
+            .to_string()
+    }
+
+    async fn transcript(fx: &Fx, q: TranscriptWindowQuery) -> (u16, Value) {
+        let (status, Json(body)) = super::super::space_thread_transcript(
+            State(fx.state.clone()),
+            Extension(member()),
+            HeaderMap::new(),
+            Path((SPACE.to_owned(), "thread-1".to_owned())),
+            Query(q),
+        )
+        .await;
+        (status.as_u16(), body)
+    }
+
+    #[tokio::test]
+    async fn the_transcript_route_forwards_the_tail_window_and_reports_it_only_when_asked() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = fixture(ResponseTemplate::new(200).set_body_json(window_payload()), true).await;
+        mount(
+            &fx.server,
+            "GET",
+            "/v1/threads/thread-1/messages",
+            ResponseTemplate::new(200).set_body_json(json!({
+                "messages": [{ "id": "m-1", "role": "user" }],
+                "has_more": true,
+                "omitted_before": 7,
+            })),
+        )
+        .await;
+        let (status, body) = transcript(&fx, window_query(Some("12"), None, Some("1"))).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["transcript"]["window"], json!({ "omitted_before": 7, "has_more_before": true }));
+        let url = model_url(&fx).await;
+        assert!(url.contains("limit=12") && url.contains("include_first=1"), "{url}");
+
+        let (_, _) = transcript(&fx, window_query(Some("12"), Some("m-1"), None)).await;
+        let url = model_url(&fx).await;
+        assert!(url.contains("limit=12") && url.contains("before=m-1"), "{url}");
+
+        // No window parameters: the whole transcript, no `window` object and no limit.
+        let (status, body) = transcript(&fx, window_query(None, None, None)).await;
+        assert_eq!(status, 200);
+        assert!(body["data"]["transcript"].get("window").is_none());
+        let url = model_url(&fx).await;
+        assert!(!url.contains("limit=") && !url.contains("include_first"), "{url}");
+
+        // Flag off: parameters are ignored (junk included) and the transcript is whole.
+        let mut off = fixture(ResponseTemplate::new(200).set_body_json(window_payload()), true).await;
+        off.state.space_features.timeline_api = false;
+        mount(
+            &off.server,
+            "GET",
+            "/v1/threads/thread-1/messages",
+            ResponseTemplate::new(200).set_body_json(json!({ "messages": [] })),
+        )
+        .await;
+        let (status, body) = transcript(&off, window_query(Some("junk"), None, None)).await;
+        assert_eq!(status, 200);
+        assert!(body["data"]["transcript"].get("window").is_none());
+        let url = model_url(&off).await;
+        assert!(!url.contains("limit="), "{url}");
+
+        // A bad window is a 400 before any upstream call.
+        let fresh = fixture(ResponseTemplate::new(200).set_body_json(window_payload()), true).await;
+        let (status, body) = transcript(&fresh, window_query(Some("51"), None, None)).await;
+        assert_eq!((status, body["error"]["code"].clone()), (400, json!("invalid_window")));
+        assert!(fresh.server.received_requests().await.unwrap().is_empty());
+    }
+
+    // ----- R5: the Space context features -----------------------------------------------------
+
+    #[tokio::test]
+    async fn space_context_features_include_timeline_flags() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut fx = fixture(ResponseTemplate::new(200).set_body_json(window_payload()), true).await;
+        let context = |fx: &Fx| {
+            let state = fx.state.clone();
+            async move {
+                let (status, Json(body)) = super::super::space_context(
+                    State(state),
+                    Extension(member()),
+                    Path(SPACE.to_owned()),
+                )
+                .await;
+                (status.as_u16(), body)
+            }
+        };
+        // Everything off: the new blocks exist and report false.
+        fx.state.space_features.timeline_api = false;
+        let (status, body) = context(&fx).await;
+        assert_eq!(status, 200);
+        let features = &body["data"]["features"];
+        for key in ["timeline_windows", "system_entries", "timeline_anchor", "composer_drafts"] {
+            assert_eq!(features[key], false, "{key}");
+        }
+        assert_eq!(body["data"]["limits"]["tail_window_turns"], 12);
+        assert_eq!(features["link_previews"], false);
+
+        // timeline_api alone turns windows on; system_entries needs both flags.
+        fx.state.space_features.timeline_api = true;
+        let (_, body) = context(&fx).await;
+        assert_eq!(body["data"]["features"]["timeline_windows"], true);
+        assert_eq!(body["data"]["features"]["system_entries"], false);
+        fx.state.space_features.system_entries_api = true;
+        let (_, body) = context(&fx).await;
+        assert_eq!(body["data"]["features"]["system_entries"], true);
+        fx.state.space_features.timeline_api = false;
+        let (_, body) = context(&fx).await;
+        assert_eq!(body["data"]["features"]["system_entries"], false);
+    }
+
+    /// WS10-S4 / WS13-S3 / WS14-S7: the context block mirrors the approval, search, link, palette,
+    /// fork and room-file flags, each reported independently.
+    #[tokio::test]
+    async fn space_context_features_mirror_search_links_palette_fork_and_room_files() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut fx = fixture(ResponseTemplate::new(200).set_body_json(window_payload()), true).await;
+        let context = |fx: &Fx| {
+            let state = fx.state.clone();
+            async move {
+                let (_, Json(body)) = super::super::space_context(
+                    State(state),
+                    Extension(member()),
+                    Path(SPACE.to_owned()),
+                )
+                .await;
+                body
+            }
+        };
+        let body = context(&fx).await;
+        let features = &body["data"]["features"];
+        for key in ["message_search", "entry_links", "command_palette", "thread_fork"] {
+            assert_eq!(features[key], false, "{key} defaults off");
+        }
+        assert_eq!(
+            features["room_files"],
+            json!({ "turn_attachments": false, "durable": false, "files_tab": false })
+        );
+        assert_eq!(body["data"]["limits"]["room_files"]["max_files"], 10);
+
+        // message_search needs the API and the UI flag.
+        fx.state.space_features.message_search_api = true;
+        assert_eq!(context(&fx).await["data"]["features"]["message_search"], false);
+        fx.state.space_features.message_search_ui = true;
+        assert_eq!(context(&fx).await["data"]["features"]["message_search"], true);
+        fx.state.space_features.entry_links_ui = true;
+        fx.state.space_features.command_palette_ui = true;
+        fx.state.space_features.thread_fork_api = true;
+        fx.state.space_features.room_files_api = true;
+        fx.state.space_features.room_files_ui = true;
+        fx.state.space_features.turn_attachments_ui = true;
+        let body = context(&fx).await;
+        let features = &body["data"]["features"];
+        for key in ["entry_links", "command_palette", "thread_fork"] {
+            assert_eq!(features[key], true, "{key}");
+        }
+        assert_eq!(
+            features["room_files"],
+            json!({ "turn_attachments": true, "durable": true, "files_tab": true })
+        );
+    }
+
+    // ----- WS15-S12: room notices merged with Control's membership rows -----------------------
+
+    fn control_row(id: &str, at: &str) -> Value {
+        json!({ "id": id, "kind": "membership", "action": "member_added", "created_at": at })
+    }
+
+    fn notice_row(id: &str, at: &str) -> Value {
+        json!({ "id": id, "kind": "notice", "action": "agent_bound", "created_at": at })
+    }
+
+    fn ids(rows: &[Value]) -> Vec<&str> {
+        rows.iter().map(|row| row["id"].as_str().unwrap()).collect()
+    }
+
+    #[test]
+    fn merge_system_rows_orders_by_created_at_then_id_newest_first() {
+        let control = vec![
+            control_row("c-old", "2026-11-01T10:00:00.000Z"),
+            control_row("c-tie", "2026-11-01T10:00:05.000Z"),
+        ];
+        let notices = vec![
+            notice_row("n-new", "2026-11-01T10:00:09.000Z"),
+            notice_row("n-tie", "2026-11-01T10:00:05.000Z"),
+        ];
+        let (rows, truncated) = super::merge_system_rows(Some((control, false)), Some((notices, false)));
+        assert_eq!(ids(&rows), ["n-new", "n-tie", "c-tie", "c-old"]);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn merge_system_rows_caps_at_a_hundred_and_says_it_cut() {
+        let make = |prefix: &str, base: u64, count: u64| -> Vec<Value> {
+            (0..count)
+                .map(|i| {
+                    let second = base + i;
+                    control_row(
+                        &format!("{prefix}{i:03}"),
+                        &format!("2026-11-01T{:02}:{:02}:{:02}.000Z", second / 3600, (second / 60) % 60, second % 60),
+                    )
+                })
+                .collect()
+        };
+        let (rows, truncated) = super::merge_system_rows(
+            Some((make("c", 0, 60), false)),
+            Some((make("n", 100, 60), false)),
+        );
+        assert_eq!(rows.len(), 100);
+        assert!(truncated, "the merge itself dropped rows");
+        // The newest survive: all 60 notices (later times) and the 40 newest Control rows.
+        assert_eq!(rows[0]["id"], "n059");
+        assert_eq!(rows[99]["id"], "c020");
+    }
+
+    #[test]
+    fn merge_system_rows_exactly_a_hundred_is_not_truncated() {
+        let rows: Vec<Value> = (0..100)
+            .map(|i| control_row(&format!("c{i:03}"), &format!("2026-11-01T10:{:02}:{:02}.000Z", i / 60, i % 60)))
+            .collect();
+        let (merged, truncated) = super::merge_system_rows(Some((rows, false)), None);
+        assert_eq!(merged.len(), 100);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn merge_system_rows_truncated_when_either_source_was_cut() {
+        let one = || vec![control_row("c", "2026-11-01T10:00:00.000Z")];
+        let (_, from_control) = super::merge_system_rows(Some((one(), true)), Some((vec![], false)));
+        assert!(from_control);
+        let (_, from_notices) = super::merge_system_rows(Some((one(), false)), Some((vec![], true)));
+        assert!(from_notices);
+    }
+
+    #[test]
+    fn merge_system_rows_keeps_the_other_source_when_one_failed() {
+        let control = vec![control_row("c", "2026-11-01T10:00:00.000Z")];
+        let notices = vec![notice_row("n", "2026-11-01T10:00:00.000Z")];
+        let (only_control, _) = super::merge_system_rows(Some((control, false)), None);
+        assert_eq!(ids(&only_control), ["c"]);
+        let (only_notices, _) = super::merge_system_rows(None, Some((notices, true)));
+        assert_eq!(ids(&only_notices), ["n"]);
+        let (none, truncated) = super::merge_system_rows(None, None);
+        assert!(none.is_empty() && !truncated);
+    }
+
+    async fn notices_fixture(value: ResponseTemplate) -> Fx {
+        let fx = fixture(ResponseTemplate::new(200).set_body_json(window_payload()), true).await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .and(body_string_contains("roomNoticesForGateway"))
+            .respond_with(value)
+            .mount(&fx.server)
+            .await;
+        fx
+    }
+
+    #[tokio::test]
+    async fn room_notices_keeps_known_kinds_and_drops_rows_without_id_or_time() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = notices_fixture(ResponseTemplate::new(200).set_body_json(json!({ "value": {
+            "truncated": true,
+            "notices": [
+                { "noticeId": "rn_1", "kind": "agent_paused", "actorExternalAuthId": "alice", "subjectId": "agent-1", "createdAt": 1_762_000_000_000_i64 },
+                { "noticeId": "rn_2", "kind": "topic_changed", "actorExternalAuthId": null, "subjectId": null, "createdAt": 1_762_000_001_000_i64 },
+                { "noticeId": "rn_3", "kind": "party_started", "createdAt": 1_762_000_002_000_i64 },
+                { "noticeId": "", "kind": "agent_bound", "createdAt": 1_762_000_003_000_i64 },
+                { "kind": "agent_bound", "createdAt": 1_762_000_004_000_i64 },
+                { "noticeId": "rn_4", "kind": "agent_bound" },
+                { "noticeId": "rn_5", "kind": "agent_bound", "createdAt": "soon" },
+            ]
+        }}))).await;
+        let (rows, truncated) = super::room_notices(&fx.state, &member(), "org-1", SPACE, (Some(10), Some(20)))
+            .await
+            .expect("Application answered");
+        assert!(truncated, "Application's own cut is passed on");
+        assert_eq!(ids(&rows), ["rn_1", "rn_2"]);
+        assert_eq!(rows[0]["kind"], "notice");
+        assert_eq!(rows[0]["action"], "agent_paused");
+        assert_eq!(rows[0]["actor_id"], "alice");
+        assert_eq!(rows[0]["subject_id"], "agent-1");
+        assert_eq!(rows[1]["actor_id"], "", "absent ids are empty words, not names");
+        assert!(rows[0]["created_at"].as_str().unwrap().ends_with('Z'));
+
+        // The query carries the caller, the organization, the Space, the bound and the interval.
+        let call = fx
+            .server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|request| String::from_utf8_lossy(&request.body).contains("roomNoticesForGateway"))
+            .expect("a roomNoticesForGateway call");
+        let body: Value = serde_json::from_slice(&call.body).unwrap();
+        assert_eq!(body["path"], "spaceRoomNotices:roomNoticesForGateway");
+        assert_eq!(body["args"]["externalAuthId"], "timeline-user");
+        assert_eq!(body["args"]["externalOrgId"], "org-1");
+        assert_eq!(body["args"]["spaceRef"], SPACE);
+        assert_eq!(body["args"]["limit"], 100);
+        assert_eq!(body["args"]["after"], 10);
+        assert_eq!(body["args"]["before"], 20);
+    }
+
+    #[tokio::test]
+    async fn room_notices_is_none_when_application_fails_or_answers_nonsense() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for template in [
+            ResponseTemplate::new(500),
+            ResponseTemplate::new(200).set_body_json(json!({ "value": { "nope": [] } })),
+            ResponseTemplate::new(200).set_body_json(json!({})),
+        ] {
+            let fx = notices_fixture(template).await;
+            assert!(super::room_notices(&fx.state, &member(), "org-1", SPACE, (None, None)).await.is_none());
+        }
+    }
+
+    async fn mount_control_events(fx: &Fx, template: ResponseTemplate) {
+        mount(
+            &fx.server,
+            "GET",
+            &format!("/api/v1/internal/spaces/{SPACE}/membership-events"),
+            template,
+        )
+        .await;
+    }
+
+    fn control_events() -> Value {
+        json!({ "data": { "events": [
+            { "event_id": "ev-1", "action": "member_added", "space_seq": 1, "actor_id": "owner", "subject_id": "bob", "created_at": "2026-11-01T10:01:00.000Z" }
+        ], "truncated": false }})
+    }
+
+    fn notice_answer() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({ "value": {
+            "truncated": false,
+            "notices": [{ "noticeId": "rn_1", "kind": "agent_bound", "actorExternalAuthId": "owner", "subjectId": "agent-1", "createdAt": 1793530800000_i64 }]
+        }}))
+    }
+
+    fn gap_codes(body: &Value) -> Vec<String> {
+        body["data"]["unavailable"]
+            .as_array()
+            .map(|gaps| gaps.iter().map(|gap| gap["code"].as_str().unwrap().to_owned()).collect())
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn timeline_merges_control_rows_and_application_notices() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut fx = notices_fixture(notice_answer()).await;
+        fx.state.space_features.system_entries_api = true;
+        mount_control_events(&fx, ResponseTemplate::new(200).set_body_json(control_events())).await;
+        let (status, body) = timeline(&fx, TimelineQuery::default()).await;
+        assert_eq!(status, 200);
+        let rows = body["data"]["system_entries"].as_array().unwrap();
+        assert_eq!(ids(rows), ["rn_1", "ev-1"], "newest first across both sources");
+        assert_eq!(rows[0]["kind"], "notice");
+        assert_eq!(rows[1]["kind"], "membership");
+        assert_eq!(body["data"]["system_truncated"], false);
+        assert!(gap_codes(&body).is_empty(), "{:?}", gap_codes(&body));
+    }
+
+    #[tokio::test]
+    async fn application_failing_is_a_room_notices_gap_that_keeps_control_rows() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut fx = notices_fixture(ResponseTemplate::new(503)).await;
+        fx.state.space_features.system_entries_api = true;
+        mount_control_events(&fx, ResponseTemplate::new(200).set_body_json(control_events())).await;
+        let (status, body) = timeline(&fx, TimelineQuery::default()).await;
+        assert_eq!(status, 200, "the window is still served");
+        assert_eq!(ids(body["data"]["system_entries"].as_array().unwrap()), ["ev-1"]);
+        assert_eq!(gap_codes(&body), ["room_notices_unavailable"]);
+        assert_eq!(body["data"]["threads"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn control_failing_keeps_the_notices_and_names_its_own_gap() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut fx = notices_fixture(notice_answer()).await;
+        fx.state.space_features.system_entries_api = true;
+        mount_control_events(&fx, ResponseTemplate::new(500)).await;
+        let (status, body) = timeline(&fx, TimelineQuery::default()).await;
+        assert_eq!(status, 200);
+        assert_eq!(ids(body["data"]["system_entries"].as_array().unwrap()), ["rn_1"]);
+        assert_eq!(gap_codes(&body), ["system_entries_unavailable"]);
+    }
+
+    #[tokio::test]
+    async fn both_sources_failing_leaves_no_system_rows_and_two_gaps() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let mut fx = notices_fixture(ResponseTemplate::new(503)).await;
+        fx.state.space_features.system_entries_api = true;
+        mount_control_events(&fx, ResponseTemplate::new(500)).await;
+        let (status, body) = timeline(&fx, TimelineQuery::default()).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["system_entries"], json!([]));
+        assert!(body["data"].get("system_truncated").is_none());
+        let codes = gap_codes(&body);
+        assert!(codes.contains(&"system_entries_unavailable".to_owned()), "{codes:?}");
+        assert!(codes.contains(&"room_notices_unavailable".to_owned()), "{codes:?}");
+    }
+
+    #[tokio::test]
+    async fn with_the_system_entries_flag_off_neither_source_is_asked() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let fx = notices_fixture(notice_answer()).await;
+        let (status, body) = timeline(&fx, TimelineQuery::default()).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["system_entries"], json!([]));
+        assert_eq!(requests_to(&fx.server, "membership-events").await, 0);
+        let notice_calls = fx
+            .server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| String::from_utf8_lossy(&request.body).contains("roomNoticesForGateway"))
+            .count();
+        assert_eq!(notice_calls, 0);
+    }
+}
