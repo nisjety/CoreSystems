@@ -18,6 +18,8 @@
 //! - [`approvals`]: the approval card context and the derived continuation state (WS10-S1).
 //! - [`quarantine`]: held tool output and its single-use release (WS10-S8; the table is migration 0082).
 //! - [`read_service`]: `SpaceRoomReadService`, the room read aggregates (D3; `ListSpaceArtifacts` WS07-S9).
+//! - [`entry`]: the typed entry of a human post (`MessageEntry`, kind `link_previews`): write validation, the JSON stored
+//!   under `messages.metadata.entry` and the read mapping (WS15-S9; no migration).
 //! - [`events`]: the Space event log's flag sync, listener, sweeper, gate and erasure hooks
 //!   (WS02-S1; the log itself is written by triggers in migration 0072).
 //! - [`history`]: `SpaceHistoryService`, permission-checked message search and message address resolution
@@ -39,6 +41,7 @@ pub(crate) mod approvals;
 pub(crate) mod attention;
 pub(crate) mod attention_outbox;
 pub(crate) mod authz;
+pub(crate) mod entry;
 pub(crate) mod events;
 pub(crate) mod history;
 pub(crate) mod memory_scope;

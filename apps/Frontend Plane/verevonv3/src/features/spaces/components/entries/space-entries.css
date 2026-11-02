@@ -1,0 +1,92 @@
+/*
+ * Typed room entries (WS15-S9): link preview cards, the neutral fallback card and system rows.
+ * Its own sheet on purpose (global.css is a shared monolith). Tokens only, no raw colours.
+ */
+
+.verevon-room-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+  max-width: 560px;
+}
+
+.verevon-room-entry--unknown {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px dashed var(--border-subtle, currentColor);
+  border-radius: 8px;
+  color: var(--text-muted, inherit);
+  font-size: 0.8125rem;
+}
+
+.verevon-room-entry__icon {
+  display: inline-flex;
+  flex: none;
+}
+
+.verevon-room-link-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle, currentColor);
+  border-radius: 8px;
+  color: inherit;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.verevon-room-link-preview:hover,
+.verevon-room-link-preview:focus-visible {
+  background: var(--surface-hover, transparent);
+}
+
+.verevon-room-link-preview__host {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted, inherit);
+  font-size: 0.75rem;
+}
+
+.verevon-room-link-preview__domain {
+  opacity: 0.8;
+}
+
+.verevon-room-link-preview__title {
+  font-weight: 600;
+  font-size: 0.875rem;
+}
+
+.verevon-room-link-preview__description {
+  color: var(--text-muted, inherit);
+  font-size: 0.8125rem;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.verevon-room-link-preview__note {
+  color: var(--text-muted, inherit);
+  font-size: 0.6875rem;
+  opacity: 0.8;
+}
+
+.verevon-room-system-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 8px;
+  padding: 4px 12px;
+  color: var(--text-muted, inherit);
+  font-size: 0.75rem;
+}
+
+.verevon-room-system-row__time {
+  opacity: 0.7;
+}

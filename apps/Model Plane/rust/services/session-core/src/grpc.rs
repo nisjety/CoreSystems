@@ -231,6 +231,18 @@ fn session_message_from_row(row: ConversationRow, include_inactive: bool) -> pb:
     // The tree fields are sent only where they mean something: a versioned thread, or a read that
     // asked for inactive turns. Every other transcript read keeps its exact shape.
     let tree = include_inactive || row.versioned;
+    // WS15-S9: the typed entry of a human post lives under `metadata.entry`. It is surfaced as its
+    // own field only when it passes the write rules again, and the key never travels in the free
+    // metadata map.
+    let mut metadata = row.metadata;
+    let mut entry = None;
+    if row.post_kind == "post" {
+        if let Some(map) = metadata.as_mut().and_then(serde_json::Value::as_object_mut) {
+            if let Some(stored) = map.remove(crate::space::entry::ENTRY_METADATA_KEY) {
+                entry = crate::space::entry::entry_from_stored(&stored);
+            }
+        }
+    }
     pb::SessionMessage {
         message_id: row.id,
         post_kind: row.post_kind,
@@ -245,8 +257,7 @@ fn session_message_from_row(row: ConversationRow, include_inactive: bool) -> pb:
         // metadata was persisted; send None rather than an empty
         // Struct so the caller can tell "no evidence recorded" from
         // "evidence recorded and empty".
-        metadata: row
-            .metadata
+        metadata: metadata
             .filter(|value| !matches!(value, serde_json::Value::Null))
             .filter(|value| value.as_object().is_none_or(|map| !map.is_empty()))
             .as_ref()
@@ -274,8 +285,7 @@ fn session_message_from_row(row: ConversationRow, include_inactive: bool) -> pb:
         agent_followed_up: row.agent_followed_up,
         // Filled for human posts by `finish_conversation_messages` (WS08-S2).
         mentions: Vec::new(),
-        // Typed entries are validated, stored and mapped by WS15-S9; unset until then.
-        entry: None,
+        entry,
     }
 }
 
@@ -4771,10 +4781,20 @@ pub(crate) async fn append_message_in_tx_as(
         .map_or_else(|| serde_json::json!({}), struct_to_json);
     // WS08-S2: keys that name a post's mentions, a wake or a turn origin are Session Core's to
     // write and never a client's: strip them on every path (the owner path stores metadata).
+    // WS15-S9: `entry` is the typed entry's key; only the validated `req.entry` may set it.
     if let Some(map) = metadata_json.as_object_mut() {
-        for reserved in ["mentions", "wake", "turn_origin", "post_kind"] {
+        for reserved in ["mentions", "wake", "turn_origin", "post_kind", crate::space::entry::ENTRY_METADATA_KEY] {
             map.remove(reserved);
         }
+    }
+    // WS15-S9: the typed entry of a human post. Any other append that carries one is refused, and
+    // an invalid entry refuses the whole append (nothing is stored without its entry).
+    if let Some(entry) = req.entry.as_ref() {
+        if post_kind != "post" {
+            return Err(Status::invalid_argument("entry needs post_kind post"));
+        }
+        let stored = crate::space::entry::validate_entry(entry, now).map_err(Status::invalid_argument)?;
+        metadata_json[crate::space::entry::ENTRY_METADATA_KEY] = stored;
     }
 
     // This scope is immutable after the first user message. Enforce it here,

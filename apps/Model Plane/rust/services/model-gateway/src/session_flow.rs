@@ -498,6 +498,7 @@ pub(crate) async fn append_post_message(
     space: Option<&ThreadSpaceContext>,
     client_message_id: &str,
     mentions: Vec<mp_contracts::model_plane::v1::MentionInput>,
+    entry: Option<mp_contracts::model_plane::v1::MessageEntry>,
 ) -> Result<PostReceipt, tonic::Status> {
     let (space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision) = space
         .map(|space| {
@@ -553,6 +554,7 @@ pub(crate) async fn append_post_message(
             client_message_id: client_message_id.to_owned(),
             post_kind: "post".to_owned(),
             mentions,
+            entry,
             ..Default::default()
         },
         Some(bearer),
@@ -594,6 +596,7 @@ pub(crate) async fn create_space_post_thread(
     content: &str,
     client_message_id: &str,
     mentions: Vec<mp_contracts::model_plane::v1::MentionInput>,
+    entry: Option<mp_contracts::model_plane::v1::MessageEntry>,
 ) -> Result<(String, PostReceipt), SpacePostError> {
     let mut client = state.session_client.clone();
     let thread_id = create_thread(
@@ -621,6 +624,7 @@ pub(crate) async fn create_space_post_thread(
         None,
         client_message_id,
         mentions,
+        entry,
     )
     .await
     .map_err(|status| SpacePostError::Append {

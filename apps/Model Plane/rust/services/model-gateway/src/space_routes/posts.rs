@@ -66,6 +66,80 @@ struct FirstMessage {
     client_message_id: String,
     #[serde(default)]
     mentions: Vec<MentionBody>,
+    /// The typed entry the BFF built for this post (WS15-S9). Absent on every ordinary post.
+    #[serde(default)]
+    entry: Option<EntryBody>,
+}
+
+/// The typed entry of a post (WS15-S9), as the BFF sends it: a closed `kind`, a `version` and the
+/// kind's payload. The BFF builds it from its own cache; the client never supplies the text.
+/// Session Core validates it (kind, version, counts, URL rules, lengths) and refuses what fails.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EntryBody {
+    kind: String,
+    version: u32,
+    #[serde(default)]
+    link_previews: Vec<LinkPreviewBody>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LinkPreviewBody {
+    url: String,
+    #[serde(default)]
+    final_url: String,
+    /// Ignored by Session Core, which recomputes the host from `final_url`.
+    #[serde(default)]
+    host: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    site_name: String,
+    /// RFC 3339.
+    fetched_at: String,
+}
+
+/// The most previews one entry body may carry (Session Core holds the same cap). Bounds the body
+/// before any upstream call.
+const MAX_ENTRY_LINK_PREVIEWS: usize = 3;
+
+/// The entry to forward, or `invalid_post` for a body that cannot be one.
+fn session_entry(entry: Option<&EntryBody>) -> Result<Option<mp_contracts::model_plane::v1::MessageEntry>, Response> {
+    let Some(entry) = entry else {
+        return Ok(None);
+    };
+    if entry.link_previews.len() > MAX_ENTRY_LINK_PREVIEWS {
+        return Err(invalid_post("entry"));
+    }
+    let link_previews = entry
+        .link_previews
+        .iter()
+        .map(|preview| {
+            let fetched_at = chrono::DateTime::parse_from_rfc3339(&preview.fetched_at)
+                .map_err(|_| invalid_post("entry"))?
+                .with_timezone(&chrono::Utc);
+            Ok(mp_contracts::model_plane::v1::LinkPreview {
+                url: preview.url.clone(),
+                final_url: preview.final_url.clone(),
+                host: preview.host.clone(),
+                title: preview.title.clone(),
+                description: preview.description.clone(),
+                site_name: preview.site_name.clone(),
+                fetched_at: Some(prost_types::Timestamp {
+                    seconds: fetched_at.timestamp(),
+                    nanos: i32::try_from(fetched_at.timestamp_subsec_nanos()).unwrap_or(0),
+                }),
+            })
+        })
+        .collect::<Result<Vec<_>, Response>>()?;
+    Ok(Some(mp_contracts::model_plane::v1::MessageEntry {
+        kind: entry.kind.clone(),
+        version: entry.version,
+        link_previews,
+    }))
 }
 
 /// One mentioned subject of a post (WS08-S3): ids and closed words, never text. The BFF plans the
@@ -131,6 +205,8 @@ struct AppendSpacePostBody {
     space_append_context: ThreadSpaceContext,
     #[serde(default)]
     mentions: Vec<MentionBody>,
+    #[serde(default)]
+    entry: Option<EntryBody>,
 }
 
 fn error_response(status: StatusCode, code: &str, message: &str, details: Value) -> Response {
@@ -337,6 +413,10 @@ async fn create_space_post(
         Ok(mentions) => mentions,
         Err(response) => return response,
     };
+    let entry = match session_entry(body.first_message.entry.as_ref()) {
+        Ok(entry) => entry,
+        Err(response) => return response,
+    };
     match session_flow::create_space_post_thread(
         &state,
         &bearer,
@@ -347,6 +427,7 @@ async fn create_space_post(
         &message.content,
         &message.client_message_id,
         mentions,
+        entry,
     )
     .await
     {
@@ -418,6 +499,10 @@ async fn append_space_post(
         Ok(mentions) => mentions,
         Err(response) => return response,
     };
+    let entry = match session_entry(body.entry.as_ref()) {
+        Ok(entry) => entry,
+        Err(response) => return response,
+    };
     let mut client = state.session_client.clone();
     match session_flow::append_post_message(
         &mut client,
@@ -427,6 +512,7 @@ async fn append_space_post(
         Some(&body.space_append_context),
         &body.client_message_id,
         mentions,
+        entry,
     )
     .await
     {

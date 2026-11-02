@@ -518,6 +518,12 @@ message AppendMessageRequest {
   // otherwise ignored. Never written for a zero-retention caller. An agent mention on a
   // thread the caller does not own is recorded as refused/owner_only_thread.
   repeated MentionInput mentions = 20;
+
+  // Typed room entry of a human post (WS15-S9): kind "link_previews", version 1, one to three
+  // text-only previews. Honoured only with post_kind "post"; on any other append it is refused
+  // (invalid_argument), and a failed validation refuses the append. Stored under
+  // messages.metadata.entry; never part of model context. Unset = no entry.
+  MessageEntry entry = 21;
 }
 
 message AppendMessageResponse {
