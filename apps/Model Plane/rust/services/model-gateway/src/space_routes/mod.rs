@@ -14,6 +14,7 @@ mod approvals;
 mod artifacts;
 mod attention;
 mod posts;
+mod revisions;
 mod runs;
 mod search;
 mod timeline;
@@ -28,6 +29,7 @@ pub fn router() -> Router<AppState> {
         .merge(artifacts::router())
         .merge(attention::router())
         .merge(posts::router())
+        .merge(revisions::router())
         .merge(runs::router())
         .merge(search::router())
         .merge(timeline::router())

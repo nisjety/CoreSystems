@@ -223,6 +223,9 @@ services:
       # Human post routes (WS01-S4): POST /v1/threads and POST /v1/threads/:id/messages.
       # Off unless an explicit on-word; a rollout control, never an authorization input.
       SPACE_HUMAN_POSTS_API: ${SPACE_HUMAN_POSTS_API:-0}
+      # Edit, delete and target routes for one message (WS12-S6). Off unless an explicit on-word;
+      # a rollout control, never an authorization input. Session Core has its own CORE switch.
+      SPACE_MESSAGE_REVISE_API: ${SPACE_MESSAGE_REVISE_API:-0}
       # Mentions on posts and the addressed-wake invoke mode (WS08-S3). Rollout controls, never
       # authorization inputs. The room context stays off until decision D-6.
       SPACE_WAKE_API: ${SPACE_WAKE_API:-0}

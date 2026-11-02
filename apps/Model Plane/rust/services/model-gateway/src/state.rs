@@ -14,6 +14,7 @@ use mp_contracts::model_plane::v1::{
     inference_core_client::InferenceCoreClient,
     learning_governance_service_client::LearningGovernanceServiceClient,
     managed_run_lifecycle_client::ManagedRunLifecycleClient,
+    message_revision_service_client::MessageRevisionServiceClient,
     message_search_client::MessageSearchClient,
     memory_service_client::MemoryServiceClient,
     message_tree_service_client::MessageTreeServiceClient,
@@ -107,6 +108,9 @@ pub struct AppState {
     pub session_client: SessionCoreClient<Channel>,
     /// Session Core's MessageSearch service, on the same endpoint as `session_client` (WS17-S3).
     pub message_search_client: MessageSearchClient<Channel>,
+    /// Session Core's MessageRevisionService (edit and delete one message), on the same endpoint as
+    /// `session_client` (WS12-S6).
+    pub message_revision_client: MessageRevisionServiceClient<Channel>,
     /// Session Core's MessageTree service on the session_client endpoint (WS17-S8).
     pub message_tree_client: MessageTreeServiceClient<Channel>,
     /// Session Core's LearningGovernance service on the same endpoint as `session_client` (WS07-S9).
@@ -448,6 +452,7 @@ impl AppState {
             rate_limiter: RateLimiter::from_env(),
             inference_client: InferenceCoreClient::new(inference_channel),
             message_search_client: MessageSearchClient::new(session_channel.clone()),
+            message_revision_client: MessageRevisionServiceClient::new(session_channel.clone()),
             message_tree_client: MessageTreeServiceClient::new(session_channel.clone()),
             learning_client: LearningGovernanceServiceClient::new(session_channel.clone()),
             space_events_client: SpaceEventsClient::new(session_channel.clone()),
@@ -616,6 +621,11 @@ impl AppState {
             "http://localhost:9091",
         )?);
         let message_search_client = MessageSearchClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let message_revision_client = MessageRevisionServiceClient::new(Self::lazy_channel(
             "SESSION_CORE_URL",
             "SESSION_CORE_ADDR",
             "http://localhost:9091",
@@ -850,6 +860,7 @@ impl AppState {
             state.inference_client = inference_client;
             state.session_client = session_client;
             state.message_search_client = message_search_client;
+            state.message_revision_client = message_revision_client;
             state.message_tree_client = message_tree_client;
             state.learning_client = learning_client;
             state.space_events_client = space_events_client;
@@ -913,6 +924,7 @@ impl AppState {
             state.inference_client = inference_client;
             state.session_client = session_client;
             state.message_search_client = message_search_client;
+            state.message_revision_client = message_revision_client;
             state.message_tree_client = message_tree_client;
             state.learning_client = learning_client;
             state.space_events_client = space_events_client;

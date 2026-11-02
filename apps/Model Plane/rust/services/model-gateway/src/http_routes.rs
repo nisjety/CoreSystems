@@ -9748,6 +9748,44 @@ struct ThreadMessage {
     /// (post, agent). Ids and closed words only; omitted when the row has none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     mentions: Vec<ThreadMessageMention>,
+    /// The latest applied edit or deletion of this message (WS12-S6), flattened so its keys sit on
+    /// the turn. Omitted for a message that was never revised, so every other transcript keeps its
+    /// shape. `content` is already the effective text (empty for a deleted turn).
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    revision: Option<ThreadMessageRevision>,
+}
+
+/// The revision state of a turn as the transcript serialises it (WS12-S6). Ids, closed words and
+/// a time: never the original text.
+#[derive(Debug, Serialize)]
+struct ThreadMessageRevision {
+    /// `edited` or `deleted`.
+    revision_state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revised_at: Option<String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    revised_by_subject_id: String,
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    revision_no: u32,
+    /// Set only on a deleted turn that an agent run answered before the deletion.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    agent_followed_up: bool,
+}
+
+/// The revision fields of a conversation row, or `None` when it was never revised.
+fn thread_message_revision(
+    m: &mp_contracts::model_plane::v1::SessionMessage,
+) -> Option<ThreadMessageRevision> {
+    if m.revision_state.is_empty() {
+        return None;
+    }
+    Some(ThreadMessageRevision {
+        revision_state: m.revision_state.clone(),
+        revised_at: message_created_at(m.revised_at.as_ref()),
+        revised_by_subject_id: m.revised_by_subject_id.clone(),
+        revision_no: m.revision_no,
+        agent_followed_up: m.agent_followed_up,
+    })
 }
 
 /// One recorded mention of a post as the transcript serialises it (WS08).
@@ -10815,6 +10853,7 @@ async fn list_thread_messages(
             .messages
             .into_iter()
             .map(|m| ThreadMessage {
+                revision: thread_message_revision(&m),
                 message_id: m.message_id,
                 role: m.role,
                 content: m.content,
@@ -16258,6 +16297,7 @@ mod thread_messages_page_tests {
                 version: None,
                 entry: None,
                 mentions: Vec::new(),
+                revision: None,
             }],
             has_more: None,
             omitted_before: None,
@@ -16581,6 +16621,7 @@ mod space_post_wire_tests {
             version: None,
             entry: None,
             mentions: Vec::new(),
+            revision: None,
         }
     }
 
