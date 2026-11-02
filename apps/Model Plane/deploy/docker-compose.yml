@@ -1562,6 +1562,12 @@ services:
       # WS12.S4b, OFF by default: refuse a browser observation that carries no Quarry redaction
       # stamp. Turn on only once Quarry runs QUARRY_EDGE__REDACTION_MODE=enforce; off logs once per run.
       EXECUTION_CORE_REQUIRE_QUARRY_REDACTION_STAMP: ${EXECUTION_CORE_REQUIRE_QUARRY_REDACTION_STAMP:-0}
+      # Quarry W3 browser-loop rows, all OFF by default: E3.2-c a rejection with text redirects the
+      # planner (max 5 per run); E3.3-f steer text on the pause/resume control (off refuses the text);
+      # E3.3-l console/network/warnings signals shown to the planner.
+      QUARRY_BROWSER_AGENT_APPROVAL_REDIRECT: ${QUARRY_BROWSER_AGENT_APPROVAL_REDIRECT:-0}
+      QUARRY_BROWSER_AGENT_STEER: ${QUARRY_BROWSER_AGENT_STEER:-0}
+      QUARRY_BROWSER_AGENT_OBSERVATION_QUALITY: ${QUARRY_BROWSER_AGENT_OBSERVATION_QUALITY:-0}
       # Data Plane v2 retrieval — backs the real knowledge_search agentic tool
       # (RAG over the org's ingested docs). DATAPLANE_INTERNAL_KEY is sent as
       # the x-api-key credential.
