@@ -74,3 +74,23 @@ Open items:
 - Flag-off by default: WEB_POLICY_CLAIM_ENABLED=0 (nothing reads the policy), QUARRY_SCHEDULED_JOBS_ENABLED=0. W2-U42 span is a no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set.
 - 43 depth rows appended to W23-depth.md; notable: W2-U42 trace headers adopted before HMAC auth (low), no audit-flush loop in org-core main.go, plan change does not move policy rev, free-plan paid search turns off once claim and enforcement are live, ZDR classification of stored host lists, likely E2a merge conflict in the service_auth validator hunk.
 - Model Plane asks: none from this batch.
+
+## Batch W2-B1 addendum (W2), integrated 2026-11-02
+
+Units: W2-U16 (lane a), W2-U31 (lane b), W2-U30-33a (lane c), W2-CP-R13-1 (lane d). The code of all four was already on w23/integ from the 2026-11-01 W2-B1 row; this merge brings in the lanes' later commits, which are docs only (security-review depth rows and the W2-U30-33a status commits section).
+
+Merge commits (--no-ff, no conflicts): dd86c52bb (lane a), f839d5a4e (lane b), 36641841f (lane c), ea11ef634 (lane d). Diff against the pre-merge integ tip 35a3d9f2f is 5 files under .plan-work/quarry-w1w2 only (18 insertions, 1 deletion), so no code changed and nothing was regenerated (no ZDR matrix, schema golden or route-count change).
+
+Checks at the merged tree:
+- Quarry Rust via the integ wrapper: cargo check --workspace --tests exit 0 (warnings only). quarry-edge answer_gate 11 passed, job_follow_zdr 5, profile_roundtrip 12, run_events_scope 3; quarry-runtime --lib token_request_contract service_tokens 31. All 0 failed.
+- Go (GOWORK=off): go vet ./... clean and go test -count=1 ./... all ok in quarry-control and quarry-orchestrator.
+- node --test scripts/tests/*.test.mjs: 73 tests, 71 pass, 2 fail, both the known inherited ones (/v1/audit/page undocumented; tracked internal SDK files).
+- scripts/tests/zdr-contract-sync.test.sh: 128 passed, 0 failed.
+- auth-core jest (plane-service-principals-policy.contract, plane-service-principal.spec, plane-principal-registry-assembly): 3 suites, 185 passed, 1 skipped, 0 failed. Run in the innh-lane-d worktree, whose auth-core tree is byte-identical to integ (git diff empty); integ has no node_modules.
+- No TS package was touched by this merge, so no tsc run.
+
+Open items:
+- principal-registry-parity.test.sh did not finish in about 30 minutes on this host (no output) and was stopped; the lane d run recorded 37 passed, 0 failed earlier. Not re-verified here.
+- Open security depth rows (14 new, appended to W23-depth.md): SR-U16-5 (medium: schedules/desired capped at 500 with no cursor, so the reaper can delete real schedules once more than 500 exist; only with QUARRY_SCHEDULED_JOBS_ENABLED=1), W2-CP-R13-1 gRPC models:invoke reach (medium, Model Plane change recommended, not added to MP-ASKS.md), W2-U30-33a trailing-dot host deny bypass in host_matches (quarry-core web_policy), W2-U31 S6 to S8 (low).
+- Four tracked .sha256 files in the integ worktree show as modified (CRLF/LF checkout artifacts, pre-existing) and a stray untracked q.json; none were committed.
+- Model Plane asks: none.
