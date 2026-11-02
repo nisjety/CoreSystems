@@ -2371,6 +2371,168 @@ pub(super) async fn crawl_job_events(
     .await
 }
 
+// ---- Job lifecycle and control proxy (WS15.L5) ---------------------------------
+//
+// The six routes below carry a person's (or a Model proposal's) read and control
+// calls for one crawl to quarry-edge's `/v1/crawl/{id}` family. They use the same
+// session-bound `aud=quarry` token as every other Quarry leg, so the organization
+// comes from the token's signed claims; the only scoping header sent is the
+// `x-user-id` the proxy helper derives from the session. No browser header and no
+// browser query parameter other than the two paging numbers below is forwarded, so
+// a caller cannot name another organization or user. The edge keeps the control
+// verbs behind `QUARRY_EDGE__JOB_CONTROL`; while that is off it answers a typed
+// 501 and this proxy returns it unchanged.
+
+/// A job id is `job_<ulid>`: ASCII letters, digits, `_` and `-` only. Anything else
+/// (a `.`, which could climb a path segment, a `/`, `%`, a space) is refused before
+/// an upstream call is built.
+fn job_id_is_valid(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+}
+
+fn invalid_job_id() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(error("invalid_job_id", "The job id is not valid.")),
+    )
+        .into_response()
+}
+
+/// The query of the errors read: `after_seq` pages by event sequence and `limit`
+/// caps the page. Both must be plain digits; every other parameter is dropped.
+fn errors_query(uri: &Uri) -> String {
+    let mut kept: Vec<String> = Vec::new();
+    for pair in uri.query().unwrap_or_default().split('&') {
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
+        if matches!(key, "after_seq" | "limit")
+            && !value.is_empty()
+            && value.len() <= 12
+            && value.bytes().all(|b| b.is_ascii_digit())
+            && !kept.iter().any(|k| k.starts_with(&format!("{key}=")))
+        {
+            kept.push(format!("{key}={value}"));
+        }
+    }
+    if kept.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", kept.join("&"))
+    }
+}
+
+/// One call to the edge's crawl family, answered as the edge answered it.
+async fn crawl_edge_call(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    method: Method,
+    path: String,
+) -> Response {
+    let cookie = shared::cookie_header(headers);
+    let token = shared::quarry_token(state, user, &cookie).await;
+    let url = format!("{}{}", state.quarry_edge_url, path);
+    let (status, Json(body)) =
+        proxy_bearer_json(state, method, &url, None, token.as_deref(), &user.user_id).await;
+    (status, Json(body)).into_response()
+}
+
+/// `GET /api/v1/knowledge/crawl/{id}`: the status of one crawl.
+pub(crate) async fn crawl_status(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if !job_id_is_valid(&id) {
+        return invalid_job_id();
+    }
+    let path = format!("/v1/crawl/{}", urlencoding::encode(&id));
+    crawl_edge_call(&state, &user, &headers, Method::GET, path).await
+}
+
+/// `GET /api/v1/knowledge/crawl/{id}/errors`: the pages of the crawl that failed.
+pub(crate) async fn crawl_errors(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    uri: Uri,
+) -> Response {
+    if !job_id_is_valid(&id) {
+        return invalid_job_id();
+    }
+    let path = format!(
+        "/v1/crawl/{}/errors{}",
+        urlencoding::encode(&id),
+        errors_query(&uri)
+    );
+    crawl_edge_call(&state, &user, &headers, Method::GET, path).await
+}
+
+/// `GET /api/v1/knowledge/crawl/ongoing`: the organization's crawls still in flight.
+pub(crate) async fn crawl_ongoing(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+) -> Response {
+    crawl_edge_call(
+        &state,
+        &user,
+        &headers,
+        Method::GET,
+        "/v1/crawl/ongoing".to_owned(),
+    )
+    .await
+}
+
+/// `DELETE /api/v1/knowledge/crawl/{id}`: stop a crawl for good.
+pub(crate) async fn crawl_cancel(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if !job_id_is_valid(&id) {
+        return invalid_job_id();
+    }
+    let path = format!("/v1/crawl/{}", urlencoding::encode(&id));
+    crawl_edge_call(&state, &user, &headers, Method::DELETE, path).await
+}
+
+/// `POST /api/v1/knowledge/crawl/{id}/pause`.
+pub(crate) async fn crawl_pause(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if !job_id_is_valid(&id) {
+        return invalid_job_id();
+    }
+    let path = format!("/v1/crawl/{}/pause", urlencoding::encode(&id));
+    crawl_edge_call(&state, &user, &headers, Method::POST, path).await
+}
+
+/// `POST /api/v1/knowledge/crawl/{id}/resume`.
+pub(crate) async fn crawl_resume(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if !job_id_is_valid(&id) {
+        return invalid_job_id();
+    }
+    let path = format!("/v1/crawl/{}/resume", urlencoding::encode(&id));
+    crawl_edge_call(&state, &user, &headers, Method::POST, path).await
+}
+
 /// WS15.L3: the knowledge job-event proxy forwards `follow=true` in the query and
 /// the caller's `Last-Event-ID` header to quarry-edge, and returns the upstream
 /// SSE bytes unchanged.
@@ -2707,5 +2869,273 @@ mod scrape_artifact_tests {
         let mut body = json!({ "url": "https://example.com/", "formats": ["pdf"] });
         strip_preview_only_fields(&mut body);
         assert!(body.get("formats").is_none());
+    }
+}
+
+/// WS15.L5: the crawl status, errors, ongoing and control proxy. Each handler reaches
+/// the edge's `/v1/crawl` family with the session user, forwards nothing the browser
+/// sent, and returns the edge's answer (a 501 included) unchanged.
+#[cfg(test)]
+mod job_control_tests {
+    use super::*;
+    use wiremock::matchers::{header as wm_header, method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const JOB: &str = "job_01J9SSSSSSSSSSSSSSSSSSSSSS";
+
+    fn user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.invalid".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: None,
+        }
+    }
+
+    fn state_for(quarry: &MockServer) -> AppState {
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+        state
+    }
+
+    async fn body_json(response: Response) -> (StatusCode, Value) {
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    #[test]
+    fn a_job_id_is_letters_digits_underscore_and_dash_only() {
+        assert!(job_id_is_valid(JOB));
+        assert!(job_id_is_valid("run-1_A"));
+        for bad in ["", "..", "a.b", "a/b", "a%2Fb", "a b", "a?x=1", "a:b", "ö"] {
+            assert!(!job_id_is_valid(bad), "{bad:?}");
+        }
+        assert!(job_id_is_valid(&"a".repeat(128)));
+        assert!(!job_id_is_valid(&"a".repeat(129)));
+    }
+
+    #[test]
+    fn the_errors_query_keeps_only_two_numeric_paging_parameters() {
+        let q = |s: &str| errors_query(&s.parse::<Uri>().unwrap());
+        assert_eq!(q("/x"), "");
+        assert_eq!(q("/x?after_seq=5&limit=10"), "?after_seq=5&limit=10");
+        assert_eq!(q("/x?limit=10&org_id=org-2&after_seq=5"), "?limit=10&after_seq=5");
+        assert_eq!(q("/x?org_id=org-2&user_id=u"), "");
+        assert_eq!(q("/x?limit=abc"), "");
+        assert_eq!(q("/x?limit=-1"), "");
+        assert_eq!(q("/x?limit="), "");
+        assert_eq!(q("/x?limit=1&limit=2"), "?limit=1");
+        assert_eq!(q("/x?limit=1234567890123"), "");
+    }
+
+    #[tokio::test]
+    async fn status_reads_the_crawl_with_the_session_user_and_returns_the_edge_answer() {
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path(format!("/v1/crawl/{JOB}")))
+            .and(wm_header("x-user-id", "user-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "job_id": JOB, "kind": "crawl", "status": "running", "phase": "fetching" }
+            })))
+            .expect(1)
+            .mount(&quarry)
+            .await;
+
+        let response = crawl_status(
+            State(state_for(&quarry)),
+            Extension(user()),
+            HeaderMap::new(),
+            Path(JOB.to_owned()),
+        )
+        .await;
+        let (status, body) = body_json(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["phase"], "fetching");
+    }
+
+    #[tokio::test]
+    async fn no_browser_header_or_foreign_scope_reaches_the_edge() {
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path(format!("/v1/crawl/{JOB}/errors")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": { "items": [] } })))
+            .mount(&quarry)
+            .await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-user-id", "attacker".parse().unwrap());
+        headers.insert("x-org-id", "org-2".parse().unwrap());
+        headers.insert("x-organization-id", "org-2".parse().unwrap());
+        headers.insert("authorization", "Bearer forged".parse().unwrap());
+        let uri: Uri = format!("/api/v1/knowledge/crawl/{JOB}/errors?after_seq=7&limit=20&org_id=org-2")
+            .parse()
+            .unwrap();
+        let response = crawl_errors(
+            State(state_for(&quarry)),
+            Extension(user()),
+            headers,
+            Path(JOB.to_owned()),
+            uri,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let seen = quarry.received_requests().await.unwrap();
+        assert_eq!(seen.len(), 1);
+        let request = &seen[0];
+        assert_eq!(request.url.query(), Some("after_seq=7&limit=20"));
+        assert_eq!(request.headers.get("x-user-id").unwrap(), "user-1");
+        assert!(request.headers.get("x-org-id").is_none());
+        assert!(request.headers.get("x-organization-id").is_none());
+        // The forged bearer is not the one sent: with no minted token there is none.
+        assert_ne!(
+            request.headers.get("authorization").map(|v| v.to_str().unwrap_or("")),
+            Some("Bearer forged")
+        );
+    }
+
+    #[tokio::test]
+    async fn ongoing_reads_the_static_route_of_the_edge() {
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/crawl/ongoing"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": { "items": [] } })))
+            .expect(1)
+            .mount(&quarry)
+            .await;
+        let response =
+            crawl_ongoing(State(state_for(&quarry)), Extension(user()), HeaderMap::new()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn pause_resume_and_cancel_use_the_edge_verbs() {
+        let quarry = MockServer::start().await;
+        let accepted = ResponseTemplate::new(200).set_body_json(json!({
+            "data": { "job_id": JOB, "phase": "pausing", "control": { "desired": "pause", "pending": true } }
+        }));
+        for (verb, route) in [
+            ("POST", format!("/v1/crawl/{JOB}/pause")),
+            ("POST", format!("/v1/crawl/{JOB}/resume")),
+            ("DELETE", format!("/v1/crawl/{JOB}")),
+        ] {
+            Mock::given(wm_method(verb))
+                .and(wm_path(route))
+                .and(wm_header("x-user-id", "user-1"))
+                .respond_with(accepted.clone())
+                .expect(1)
+                .mount(&quarry)
+                .await;
+        }
+        let state = state_for(&quarry);
+
+        let paused = crawl_pause(
+            State(state.clone()),
+            Extension(user()),
+            HeaderMap::new(),
+            Path(JOB.to_owned()),
+        )
+        .await;
+        let resumed = crawl_resume(
+            State(state.clone()),
+            Extension(user()),
+            HeaderMap::new(),
+            Path(JOB.to_owned()),
+        )
+        .await;
+        let cancelled = crawl_cancel(
+            State(state),
+            Extension(user()),
+            HeaderMap::new(),
+            Path(JOB.to_owned()),
+        )
+        .await;
+        for response in [paused, resumed, cancelled] {
+            let (status, body) = body_json(response).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["data"]["control"]["pending"], true);
+        }
+    }
+
+    #[tokio::test]
+    async fn the_edges_typed_501_while_job_control_is_off_reaches_the_caller() {
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path(format!("/v1/crawl/{JOB}/pause")))
+            .respond_with(ResponseTemplate::new(501).set_body_json(json!({
+                "ok": false,
+                "error": { "code": "UNSUPPORTED", "message": "job control is not enabled" }
+            })))
+            .mount(&quarry)
+            .await;
+        let response = crawl_pause(
+            State(state_for(&quarry)),
+            Extension(user()),
+            HeaderMap::new(),
+            Path(JOB.to_owned()),
+        )
+        .await;
+        let (status, body) = body_json(response).await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(body["error"]["code"], "UNSUPPORTED");
+    }
+
+    #[tokio::test]
+    async fn an_unsafe_id_is_refused_before_any_upstream_call() {
+        let quarry = MockServer::start().await;
+        let state = state_for(&quarry);
+        for bad in ["..", "a.b", "a/b", "", "x y"] {
+            let responses = vec![
+                crawl_status(
+                    State(state.clone()),
+                    Extension(user()),
+                    HeaderMap::new(),
+                    Path(bad.to_owned()),
+                )
+                .await,
+                crawl_errors(
+                    State(state.clone()),
+                    Extension(user()),
+                    HeaderMap::new(),
+                    Path(bad.to_owned()),
+                    "/x".parse().unwrap(),
+                )
+                .await,
+                crawl_cancel(
+                    State(state.clone()),
+                    Extension(user()),
+                    HeaderMap::new(),
+                    Path(bad.to_owned()),
+                )
+                .await,
+                crawl_pause(
+                    State(state.clone()),
+                    Extension(user()),
+                    HeaderMap::new(),
+                    Path(bad.to_owned()),
+                )
+                .await,
+                crawl_resume(
+                    State(state.clone()),
+                    Extension(user()),
+                    HeaderMap::new(),
+                    Path(bad.to_owned()),
+                )
+                .await,
+            ];
+            for response in responses {
+                let (status, body) = body_json(response).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{bad:?}");
+                assert_eq!(body["error"]["code"], "invalid_job_id");
+            }
+        }
+        assert!(quarry.received_requests().await.unwrap().is_empty());
     }
 }

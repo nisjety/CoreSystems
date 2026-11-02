@@ -24,7 +24,10 @@ use super::shared::{
     str_or_null, validation,
 };
 
-const RUN_KINDS: [&str; 5] = ["crawl", "extract", "search", "agent", "batch"];
+// `scrape` is listed since WS15.L5: a single-page fetch is a job of its own in
+// quarry-control's registry (`/v1/scrape/jobs`) and carries the same origin and
+// phase as the other kinds.
+const RUN_KINDS: [&str; 6] = ["crawl", "extract", "search", "agent", "batch", "scrape"];
 
 // ── List ────────────────────────────────────────────────────────────────────
 
@@ -149,7 +152,40 @@ fn to_run_item(job: &Value) -> Value {
         "target": target,
         "progress": Value::Object(progress),
         "stats": stats,
+        // WS15.L5: who started the job, where it is, and what was last asked of it.
+        // Null when quarry does not send them (older rows, a flag that is off).
+        "origin": origin_label(job),
+        "phase": str_or_null(job, "phase"),
+        "desiredState": desired_state(job),
     })
+}
+
+/// The job's origin as the one word the SPA shows. Quarry sends `{ type, actor?, ref? }`;
+/// only `type` crosses to the browser (the actor is an internal identity).
+fn origin_label(job: &Value) -> Value {
+    let label = match job.get("origin") {
+        Some(Value::String(s)) => s.trim(),
+        Some(Value::Object(o)) => o.get("type").and_then(Value::as_str).unwrap_or("").trim(),
+        _ => "",
+    };
+    if label.is_empty() {
+        Value::Null
+    } else {
+        Value::String(label.to_owned())
+    }
+}
+
+/// What was last asked of the job (`pause`, `resume`, `cancel`), from the job row or
+/// from the lifecycle `control` block; null when nothing was asked.
+fn desired_state(job: &Value) -> Value {
+    ["desired_state", "desiredState"]
+        .iter()
+        .filter_map(|key| job.get(*key).and_then(Value::as_str))
+        .chain(job.pointer("/control/desired").and_then(Value::as_str))
+        .map(str::trim)
+        .find(|s| !s.is_empty())
+        .map(|s| Value::String(s.to_owned()))
+        .unwrap_or(Value::Null)
 }
 
 // ── Create ────────────────────────────────────────────────────────────────
@@ -459,5 +495,140 @@ mod tests {
         let item = to_run_item(&job);
         assert_eq!(item["target"], "crawl target");
         assert_eq!(item["progress"]["pages"], 5);
+    }
+}
+
+#[cfg(test)]
+mod job_control_field_tests {
+    use super::*;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn a_run_item_carries_origin_phase_and_desired_state() {
+        let item = to_run_item(&json!({
+            "job_id": "job-1", "kind": "crawl", "status": "running", "created_at": "x",
+            "origin": { "type": "knowledge", "actor": "user-9", "ref": "r1" },
+            "phase": "fetching", "desired_state": "pause"
+        }));
+        assert_eq!(item["origin"], "knowledge");
+        assert_eq!(item["phase"], "fetching");
+        assert_eq!(item["desiredState"], "pause");
+        // The actor behind the origin stays inside the platform.
+        assert!(!item.to_string().contains("user-9"));
+    }
+
+    #[test]
+    fn the_new_fields_are_null_when_quarry_sends_none() {
+        let item = to_run_item(&json!({ "job_id": "j", "kind": "scrape", "status": "completed", "created_at": "x" }));
+        assert_eq!(item["origin"], Value::Null);
+        assert_eq!(item["phase"], Value::Null);
+        assert_eq!(item["desiredState"], Value::Null);
+        let blank = to_run_item(&json!({
+            "job_id": "j", "kind": "crawl", "status": "x", "created_at": "x",
+            "origin": { "type": "  " }, "phase": 7, "desired_state": ""
+        }));
+        assert_eq!(blank["origin"], Value::Null);
+        assert_eq!(blank["phase"], Value::Null);
+        assert_eq!(blank["desiredState"], Value::Null);
+    }
+
+    #[test]
+    fn desired_state_reads_the_control_block_and_prefers_the_row() {
+        assert_eq!(desired_state(&json!({ "control": { "desired": "resume", "pending": true } })), "resume");
+        assert_eq!(
+            desired_state(&json!({ "desired_state": "cancel", "control": { "desired": "resume" } })),
+            "cancel"
+        );
+        assert_eq!(desired_state(&json!({ "desiredState": "pause" })), "pause");
+        assert_eq!(origin_label(&json!({ "origin": "schedule" })), "schedule");
+    }
+
+    #[test]
+    fn scrape_is_a_listed_run_kind() {
+        assert!(RUN_KINDS.contains(&"scrape"));
+        assert_eq!(RUN_KINDS.len(), 6);
+    }
+
+    #[tokio::test]
+    async fn the_list_reads_the_scrape_registry_and_keeps_its_rows() {
+        let quarry = MockServer::start().await;
+        for kind in ["crawl", "extract", "search", "agent", "batch"] {
+            Mock::given(wm_method("GET"))
+                .and(wm_path(format!("/v1/{kind}/jobs")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": { "items": [] } })))
+                .expect(1)
+                .mount(&quarry)
+                .await;
+        }
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/scrape/jobs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "items": [{
+                    "job_id": "job_s1", "kind": "scrape", "status": "completed",
+                    "created_at": "2026-11-01T10:00:00Z", "stats": { "url": "https://example.com/a" },
+                    "origin": { "type": "api" }, "phase": "completed"
+                }] }
+            })))
+            .expect(1)
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+        let user = AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.invalid".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: None,
+        };
+
+        let response = list_runs(
+            State(state),
+            Extension(user),
+            HeaderMap::new(),
+            Query(HashMap::new()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let rows = body["data"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["id"], "job_s1");
+        assert_eq!(rows[0]["kind"], "scrape");
+        assert_eq!(rows[0]["origin"], "api");
+        assert_eq!(rows[0]["phase"], "completed");
+    }
+
+    #[tokio::test]
+    async fn a_kind_filter_of_scrape_reads_only_that_registry() {
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/scrape/jobs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": { "items": [] } })))
+            .expect(1)
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+        let user = AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.invalid".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: None,
+        };
+        let mut params = HashMap::new();
+        params.insert("kind".to_owned(), "scrape".to_owned());
+        let response = list_runs(State(state), Extension(user), HeaderMap::new(), Query(params)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(quarry.received_requests().await.unwrap().len(), 1);
     }
 }

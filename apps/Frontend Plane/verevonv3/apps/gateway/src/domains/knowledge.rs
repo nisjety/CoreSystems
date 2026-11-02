@@ -205,6 +205,8 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/knowledge/jobs/{id}/events",
             get(quarry::crawl_job_events),
         )
+        // WS15.L5: status, errors, ongoing and the pause/resume/cancel verbs of one crawl.
+        .merge(crawl_control_routes())
         .merge(with_rate_class(
             job_submit,
             &state.rate_limiter,
@@ -216,4 +218,152 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             RateClass::SearchScrape,
         ))
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
+}
+
+/// The read and control routes of one crawl (WS15.L5). `ongoing` is a static
+/// segment, so it takes precedence over `{id}` (the same holds for `jobs` and
+/// `discover`, which are registered beside it); the verbs reach quarry-edge's
+/// `/v1/crawl/{id}` family, which keeps them behind its own `JOB_CONTROL` flag.
+fn crawl_control_routes() -> Router<AppState> {
+    Router::new()
+        .route("/api/v1/knowledge/crawl/ongoing", get(quarry::crawl_ongoing))
+        .route(
+            "/api/v1/knowledge/crawl/{id}",
+            get(quarry::crawl_status).delete(quarry::crawl_cancel),
+        )
+        .route(
+            "/api/v1/knowledge/crawl/{id}/errors",
+            get(quarry::crawl_errors),
+        )
+        .route(
+            "/api/v1/knowledge/crawl/{id}/pause",
+            post(quarry::crawl_pause),
+        )
+        .route(
+            "/api/v1/knowledge/crawl/{id}/resume",
+            post(quarry::crawl_resume),
+        )
+}
+
+#[cfg(test)]
+mod crawl_control_route_tests {
+    use super::*;
+    use axum::{
+        body::Body,
+        extract::Extension,
+        http::{Method as HttpMethod, Request, StatusCode},
+    };
+    use tower::ServiceExt;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use crate::middleware::AuthenticatedUser;
+
+    fn user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.invalid".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: None,
+        }
+    }
+
+    /// The control routes plus the static routes that sit beside `{id}`, with the
+    /// session user injected (the real stack adds it through `require_session`).
+    fn app(state: AppState) -> Router {
+        Router::new()
+            .merge(crawl_control_routes())
+            .route("/api/v1/knowledge/crawl/jobs", get(quarry::list_crawl_jobs))
+            .route(
+                "/api/v1/knowledge/crawl/discover",
+                post(quarry::discover_crawl_pages),
+            )
+            .layer(Extension(user()))
+            .with_state(state)
+    }
+
+    async fn call(app: Router, method: HttpMethod, uri: &str) -> StatusCode {
+        app.oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+    }
+
+    async fn mount(quarry: &MockServer, verb: &str, route: &str, status: u16) {
+        Mock::given(wm_method(verb))
+            .and(wm_path(route))
+            .respond_with(
+                ResponseTemplate::new(status).set_body_json(serde_json::json!({ "data": {} })),
+            )
+            .expect(1)
+            .mount(quarry)
+            .await;
+    }
+
+    #[test]
+    fn the_real_router_builds_with_the_control_routes_beside_the_static_ones() {
+        // A conflicting route panics when the router is built.
+        let _ = router(crate::tests::test_state(false));
+    }
+
+    #[tokio::test]
+    async fn each_route_reaches_its_edge_path_and_ongoing_wins_over_the_id() {
+        let quarry = MockServer::start().await;
+        mount(&quarry, "GET", "/v1/crawl/ongoing", 200).await;
+        mount(&quarry, "GET", "/v1/crawl/job_1", 200).await;
+        mount(&quarry, "GET", "/v1/crawl/job_1/errors", 200).await;
+        mount(&quarry, "POST", "/v1/crawl/job_1/pause", 200).await;
+        mount(&quarry, "POST", "/v1/crawl/job_1/resume", 200).await;
+        mount(&quarry, "DELETE", "/v1/crawl/job_1", 200).await;
+        mount(&quarry, "GET", "/v1/crawl/jobs", 200).await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+
+        for (method, uri) in [
+            (HttpMethod::GET, "/api/v1/knowledge/crawl/ongoing"),
+            (HttpMethod::GET, "/api/v1/knowledge/crawl/job_1"),
+            (HttpMethod::GET, "/api/v1/knowledge/crawl/job_1/errors"),
+            (HttpMethod::POST, "/api/v1/knowledge/crawl/job_1/pause"),
+            (HttpMethod::POST, "/api/v1/knowledge/crawl/job_1/resume"),
+            (HttpMethod::DELETE, "/api/v1/knowledge/crawl/job_1"),
+            (HttpMethod::GET, "/api/v1/knowledge/crawl/jobs"),
+        ] {
+            assert_eq!(
+                call(app(state.clone()), method.clone(), uri).await,
+                StatusCode::OK,
+                "{method} {uri}"
+            );
+        }
+        // `.expect(1)` on every mock is checked when the server drops.
+    }
+
+    #[tokio::test]
+    async fn a_verb_on_the_wrong_method_is_refused_without_an_upstream_call() {
+        let quarry = MockServer::start().await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+        for (method, uri) in [
+            (HttpMethod::GET, "/api/v1/knowledge/crawl/job_1/pause"),
+            (HttpMethod::POST, "/api/v1/knowledge/crawl/job_1"),
+            (HttpMethod::DELETE, "/api/v1/knowledge/crawl/ongoing"),
+            (HttpMethod::POST, "/api/v1/knowledge/crawl/job_1/errors"),
+        ] {
+            assert_eq!(
+                call(app(state.clone()), method.clone(), uri).await,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "{method} {uri}"
+            );
+        }
+        assert!(quarry.received_requests().await.unwrap().is_empty());
+    }
 }
