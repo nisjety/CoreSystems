@@ -7,6 +7,9 @@
 //! /api/v1/spaces/{space_ref}/threads/{thread_id}/follow` in `domains/spaces/attention.rs`, so the
 //! flag, the Zero Data Retention refusal and the typed errors exist once. Neither id is
 //! model-executable: an inbox and a follow are a person's own attention.
+//!
+//! WS11-S10 adds `spaces.set_status` (the org-scoped status, `PUT /api/v1/spaces/status`) through
+//! `put_status_core` in `domains/spaces/status.rs`: a text under Zero Data Retention is the typed 412.
 
 use axum::{http::HeaderMap, response::Response};
 use serde_json::{Map, Value};
@@ -15,6 +18,7 @@ use crate::config::AppState;
 use crate::domains::spaces::attention::{
     mark_unread_core, put_follow_core, put_notify_core, read_all_core, set_item_state_core,
 };
+use crate::domains::spaces::status::put_status_core;
 use crate::middleware::AuthenticatedUser;
 
 use super::super::dispatchers::{
@@ -124,4 +128,25 @@ pub(in crate::domains::actions) async fn dispatch_spaces_set_notify_level(
     let (status, axum::Json(resp)) =
         put_notify_core(state, user, space_ref, &Value::Object(body)).await;
     owner_json_response_to_envelope("spaces.set_notify_level", user, status, resp)
+}
+
+pub(in crate::domains::actions) async fn dispatch_spaces_set_status(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let mut body = Map::new();
+    if let Some(value) = input.get("state") {
+        body.insert("state".to_owned(), value.clone());
+    }
+    if let Some(value) = input.get("text") {
+        body.insert("text".to_owned(), value.clone());
+    }
+    if let Some(value) = input.get("expiresAt") {
+        body.insert("expires_at".to_owned(), value.clone());
+    }
+    let (status, axum::Json(resp)) =
+        put_status_core(state, user, Some(headers), &Value::Object(body)).await;
+    owner_json_response_to_envelope("spaces.set_status", user, status, resp)
 }

@@ -36,6 +36,7 @@ services:
             SPACE_THREAD_FORK_API: "false"
             SPACE_ATTENTION_API: "false"
             SPACE_ATTENTION_UI: "false"
+            SPACE_STATUS_API: "false"
             SPACE_MENTION_RECORDS_API: "false"
             SPACE_ADDRESSED_WAKE_API: "false"
             ORG_IDENTITY_ADMIN_API: "false"

@@ -69,6 +69,20 @@ const spaceSetNotifyLevelOutput = z.object({
   hide_preview: z.boolean(),
 })
 
+const spaceSetStatusInput = z.object({
+  state: z.enum(['available', 'away', 'dnd', 'offline']),
+  // At most 80 characters; refused (zdr_durable_mutation_forbidden) for a Zero Data Retention organization.
+  text: z.string().max(200).optional(),
+  // Epoch milliseconds, in the future and at most 7 days ahead. Absent means until changed.
+  expiresAt: z.number().int().positive().optional(),
+})
+
+const spaceSetStatusOutput = z.object({
+  state: z.enum(['available', 'away', 'dnd', 'offline']),
+  text: z.string().nullable(),
+  expires_at: z.number().nullable(),
+})
+
 export const ws11SpaceActions = [
   {
     id: 'spaces.mark_all_read',
@@ -129,5 +143,17 @@ export const ws11SpaceActions = [
     reversible: true,
     inputSchema: spaceSetThreadFollowInput,
     outputSchema: spaceSetThreadFollowOutput,
+  },
+  {
+    id: 'spaces.set_status',
+    label: 'Set your status',
+    description:
+      'Set your own status in this organization: available, away, do not disturb or offline, with an optional short text and expiry (up to 7 days). Only you set it; do-not-disturb pauses out-of-app notifications only.',
+    ownerPlane: 'application',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: spaceSetStatusInput,
+    outputSchema: spaceSetStatusOutput,
   },
 ] as const satisfies readonly ActionDescriptor[]

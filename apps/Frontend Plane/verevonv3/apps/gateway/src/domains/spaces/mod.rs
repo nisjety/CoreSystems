@@ -32,6 +32,7 @@ pub(crate) mod approvals;
 use denial::{typed_response, with_gap_details, Decision, SpaceDenial};
 pub(crate) mod agent_policy;
 pub(crate) mod attention;
+pub(crate) mod status;
 pub(crate) mod tool_policy;
 pub(crate) mod directory;
 pub(crate) mod dm;
@@ -1047,6 +1048,7 @@ fn module_routes() -> Router<AppState> {
     Router::new()
         .merge(approvals::routes())
         .merge(attention::routes())
+        .merge(status::routes())
         .merge(tool_policy::routes())
         .merge(dm::routes())
         .merge(files::routes())
@@ -3557,10 +3559,10 @@ async fn space_roster(
         urlencoding::encode(space_ref)
     );
     let actor = ActionActor {
-        user_id: user.user_id,
-        user_email: user.user_email,
-        user_name: user.user_name,
-        user_role: user.auth_role.unwrap_or_default(),
+        user_id: user.user_id.clone(),
+        user_email: user.user_email.clone(),
+        user_name: user.user_name.clone(),
+        user_role: user.auth_role.clone().unwrap_or_default(),
     };
     let (status, Json(mut body)) = proxy_json(
         &state,
@@ -3573,6 +3575,8 @@ async fn space_roster(
     )
     .await;
     room_admin::annotate_roster(&state, status, &mut body);
+    // WS11-S10: each person's org-scoped status, after Control has answered for the room.
+    status::annotate_roster(&state, &user, &org_id, status, &mut body).await;
     (status, Json(body))
 }
 
@@ -3677,7 +3681,11 @@ async fn space_agents(
         );
     }
     match compose_space_agents(&state, &user, &org_id, &space_ref).await {
-        Ok(agents) => (StatusCode::OK, Json(json!({"data": {"agents": agents}}))),
+        Ok(mut agents) => {
+            // WS11-S10: availability chip per agent (`activity`), after Control has authorized the roster.
+            status::annotate_agents(&state, &user, &org_id, &space_ref, &mut agents).await;
+            (StatusCode::OK, Json(json!({"data": {"agents": agents}})))
+        }
         Err(response) => response,
     }
 }
@@ -5558,6 +5566,7 @@ async fn space_context(
                     "tool_policy_editor": state.space_features.tool_policy_editor,
                     "attention": state.space_features.attention_api
                         && state.space_features.attention_ui,
+                    "status": state.space_features.status_api,
                     // WS08-S4: mentions and addressed wake. The picker follows the record flag;
                     // a wake needs the records it answers, so both flags must be on.
                     "mention_records": state.space_features.mention_records_api,
