@@ -104,6 +104,7 @@ import { SpaceLiveIndicator } from './SpaceLiveIndicator'
 import { SpaceActivityPanel } from './SpaceActivityPanel'
 import { SpaceKnowledgePanel } from './SpaceKnowledgePanel'
 import { SpaceStandingApprovals } from './SpaceStandingApprovals'
+import { SpaceAgentActivityChip, SpaceMemberStatusChip } from './SpaceStatusChip'
 import { SpaceWorkPanel } from './SpaceWorkPanel'
 import './space-room-layout.css'
 import './space-room-header.css'
@@ -1584,6 +1585,11 @@ function SpaceAgentCard(props: {
               </>
             )}
           </Show>
+          {/* WS11-S10: availability chip (working / waiting / idle); absent when the gateway sent none. */}
+          <Show when={agent().activity}>
+            <span aria-hidden="true"> · </span>
+            <SpaceAgentActivityChip activity={agent().activity} />
+          </Show>
         </p>
 
         <Show when={agent().description?.trim()}>
@@ -1873,6 +1879,10 @@ function SpaceMembersPanel(props: {
                   <span class="verevon-space-roster__meta">
                     {member.subject_type === 'service' ? i18n.tr('Agent', 'Agent') : i18n.tr('Person', 'Person')} · {spaceRoleLabel(member.role, i18n.tr)}
                   </span>
+                  {/* WS11-S10: the member's org-scoped status; the gateway sends it on user members only. */}
+                  <Show when={member.subject_type === 'user'}>
+                    <SpaceMemberStatusChip status={member.status} />
+                  </Show>
                   {/* The registered owner stays: Control keeps them as owner
                       regardless, so removing the grant would only make this
                       list disagree with the roster it describes. Agents are

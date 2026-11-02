@@ -10,6 +10,7 @@ import { setRoomDirectoryListed } from './directory'
 import { spacePinsFrom, type SpaceRoomPin } from './pins'
 import { spaceReactionsFrom, type SpaceReactionChip } from './reactions'
 import { spaceRunWorkFrom, type SpaceRunWork } from './run-work'
+import type { SpaceAgentActivity } from './status'
 import { readSpaceDenial } from '../space-denials'
 
 export type SpaceMembership = {
@@ -773,6 +774,12 @@ export type SpaceRosterMember = {
   revision: number
   /** May be empty: a membership can exist before its user projection does. */
   display_name: string
+  /**
+   * WS11-S10: the member's org-scoped status as the wire sent it (`{state, text, expires_at}` or
+   * null). Read it with `spaceStatusFrom`. Absent means the gateway did not check (flag off, a
+   * failed read); null means "checked, none set". Present on user members only.
+   */
+  status?: unknown
 }
 
 /**
@@ -1099,6 +1106,8 @@ export type SpaceAgent = {
   avatar_color?: string
   delivery_targets: readonly SpaceAgentDeliveryTarget[]
   updated_at?: number
+  /** WS11-S10: availability chip. Absent means the gateway did not check; no chip is shown. */
+  activity?: SpaceAgentActivity
 }
 
 /**

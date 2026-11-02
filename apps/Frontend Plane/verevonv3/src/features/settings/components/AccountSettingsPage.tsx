@@ -4,6 +4,7 @@ import { MailTaskAddressSection } from '@/features/settings/components/MailTaskA
 import { PasskeySecuritySection } from '@/features/settings/components/PasskeySecuritySection'
 import { PrivacyDataSection } from '@/features/settings/components/PrivacyDataSection'
 import { SpaceNotificationPreferences } from '@/features/settings/components/SpaceNotificationPreferences'
+import { SpaceStatusMenu } from '@/features/spaces/components/SpaceStatusMenu'
 import { TwoFactorEnrollmentSection } from '@/features/settings/components/TwoFactorEnrollmentSection'
 import {
   SectionHeader,
@@ -278,6 +279,7 @@ export default function AccountSettingsPage() {
       />
       <PreferencesSection form={form} onField={updateField} />
       <AvailabilitySection form={form} onField={updateField} />
+      <SpaceStatusMenu />
       <SpaceNotificationPreferences />
       <ConnectedAccountsSection profile={profile} />
       <ChatGptSubscriptionSection />
