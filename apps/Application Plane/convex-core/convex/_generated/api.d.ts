@@ -52,6 +52,8 @@ import type * as spacePresence from "../spacePresence.js";
 import type * as spaceReadMarkers from "../spaceReadMarkers.js";
 import type * as spaceRegistration from "../spaceRegistration.js";
 import type * as spaceRoomRules from "../spaceRoomRules.js";
+import type * as spaceSidebar from "../spaceSidebar.js";
+import type * as spaceSidebarRules from "../spaceSidebarRules.js";
 import type * as spaces from "../spaces.js";
 import type * as users from "../users.js";
 
@@ -106,6 +108,8 @@ declare const fullApi: ApiFromModules<{
   spaceReadMarkers: typeof spaceReadMarkers;
   spaceRegistration: typeof spaceRegistration;
   spaceRoomRules: typeof spaceRoomRules;
+  spaceSidebar: typeof spaceSidebar;
+  spaceSidebarRules: typeof spaceSidebarRules;
   spaces: typeof spaces;
   users: typeof users;
 }>;

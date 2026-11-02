@@ -8,6 +8,40 @@
 import { defineTable } from "convex/server";
 import { v } from "convex/values";
 
+/**
+ * WS16-S7: the personal sidebar document (see `convex/spaceSidebarRules.ts` for
+ * every cap and rule; the shape here is only the storage type). Refs only: a
+ * `spaceRef` list, section ids and labels the person typed. No room names, no
+ * thread ids, no content, and nothing in authorization ever reads it.
+ */
+export const spaceSidebarDocValidator = v.object({
+  v: v.literal(1),
+  starred: v.array(v.string()),
+  hidden: v.array(v.string()),
+  sections: v.array(
+    v.object({
+      id: v.string(),
+      name: v.string(),
+      collapsed: v.boolean(),
+      sort: v.union(v.literal("manual"), v.literal("name"), v.literal("activity")),
+      refs: v.array(v.string()),
+    }),
+  ),
+  groups: v.array(
+    v.object({
+      id: v.string(),
+      collapsed: v.optional(v.boolean()),
+      sort: v.optional(v.union(v.literal("name"), v.literal("activity"))),
+    }),
+  ),
+  computed: v.object({
+    needsYou: v.boolean(),
+    unread: v.boolean(),
+    working: v.boolean(),
+    muted: v.boolean(),
+  }),
+});
+
 export const spaceTables = {
   // Application is the canonical owner of a Space's immutable identity, kind,
   // display metadata, and lifecycle. Control registers this reference and is
@@ -236,6 +270,21 @@ export const spaceTables = {
     lastReadAt: v.number(),
   })
     .index("by_space_and_subject", ["spaceRef", "externalAuthId"]),
+
+  // WS16-S7: one row per (organization, member) holding that person's sidebar
+  // layout for Spaces (stars, custom sections, hidden rooms, per-group sort).
+  // Own-row, like `spaceReadMarkers`: a per-user per-org workspace projection,
+  // refs only. `revision` is 1 on the first write and +1 per accepted write; it
+  // is the compare-and-set token for `spaceSidebar:putForGateway`.
+  spaceSidebarPreferences: defineTable({
+    externalOrgId: v.string(),
+    externalAuthId: v.string(),
+    revision: v.number(),
+    doc: spaceSidebarDocValidator,
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_subject", ["externalOrgId", "externalAuthId"]),
 
   /**
    * Who is in a room right now (see `convex/spacePresence.ts`). Separate from
