@@ -1416,6 +1416,13 @@ services:
       # Per-user ownership: filter-at-source needs the viewer's granted doc-set
       # from user-core's resource_grants facade. HTTP/facade port is 3012, NOT 8080.
       USER_CORE_URL: ${USER_CORE_URL:-http://user-core:3012}
+      # WS14-S3 room files: off unless explicitly the literal "true" (dev
+      # override turns it on). A rollout switch only, never an authorization
+      # input. The decision key vars let the Space import verifier trust Control.
+      DOCUMENTS_SPACE_FILES: ${DOCUMENTS_SPACE_FILES:-false}
+      SPACE_FILES_MAX_PER_ROOM: ${SPACE_FILES_MAX_PER_ROOM:-500}
+      SPACE_FILES_MAX_TEXT_BYTES_PER_ROOM: ${SPACE_FILES_MAX_TEXT_BYTES_PER_ROOM:-209715200}
+      CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON: ${CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON:-}
       HTTP_PORT: "8010"
       # Auth is enforced by default; tenant and user identity come only from the
       # verified Control Plane token. JWKS unavailability fails closed.

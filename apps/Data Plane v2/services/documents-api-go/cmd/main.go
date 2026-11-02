@@ -26,6 +26,7 @@ import (
 	"github.com/triodelab/dataplane/services/documents-api-go/internal/metrics"
 	apmotel "github.com/triodelab/dataplane/services/documents-api-go/internal/otel"
 	"github.com/triodelab/dataplane/services/documents-api-go/internal/repo"
+	"github.com/triodelab/dataplane/services/documents-api-go/internal/spacegrant"
 	"github.com/triodelab/dataplane/services/documents-api-go/internal/userauthz"
 	"github.com/triodelab/dataplane/services/documents-api-go/pkg/authctx"
 	"github.com/triodelab/dataplane/services/documents-api-go/pkg/usagepub"
@@ -163,6 +164,20 @@ func main() {
 		authzClient = userauthz.New(cfg.UserCoreURL, cfg.UserCoreServiceToken)
 	}
 	docHandler := handler.NewDocumentHandler(docRepo, authzClient)
+	// WS14-S3 room files (DOCUMENTS_SPACE_FILES, off by default). The Control
+	// client carries the same documents-api service credential as authzClient.
+	spaceFilesConfig := handler.SpaceFilesConfig{
+		Enabled:             cfg.SpaceFilesEnabled,
+		MaxPerRoom:          cfg.SpaceFilesMaxPerRoom,
+		MaxTextBytesPerRoom: cfg.SpaceFilesMaxTextBytesPerRoom,
+	}
+	if cfg.SpaceFilesEnabled && cfg.UserCoreServiceToken != "" {
+		spaceFilesConfig.Grants = spacegrant.New(cfg.UserCoreURL, cfg.UserCoreServiceToken)
+	}
+	if cfg.SpaceFilesEnabled && spaceFilesConfig.Grants == nil {
+		log.Warn().Msg("DOCUMENTS_SPACE_FILES is on but no user-core service credential is configured; room files will be refused (fail closed)")
+	}
+	docHandler.WithSpaceFiles(spaceFilesConfig)
 	sourceObjectHandler := handler.NewSourceObjectHandler(sourceObjectRepo)
 
 	// §16.2.6 — start outbox publisher loop. Drains `documents_outbox`
