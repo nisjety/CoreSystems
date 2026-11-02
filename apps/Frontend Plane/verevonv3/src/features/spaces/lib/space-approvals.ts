@@ -7,6 +7,11 @@ import {
   type Approval,
   type ApprovalDecision,
 } from '@/shared/api/orchestration-client'
+import {
+  decideSpaceApproval,
+  type ApprovalScope,
+  type SpaceGrantResult,
+} from '@/shared/api/space-approvals-client'
 
 /**
  * Deciding an approval from inside a room.
@@ -76,6 +81,10 @@ function isRefusal(error: unknown): boolean {
   return error instanceof ApiError && (error.status === 403 || error.status === 404)
 }
 
+function isAlreadyDecided(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 409
+}
+
 /**
  * What a recorded grant leads to, read from the server's derived continuation and never assumed.
  * Nothing here resumes the run: a granted approval cannot resume an approval-gated run (the only
@@ -117,13 +126,31 @@ export async function settleApproval(input: {
   readonly runId: string
   readonly decision: ApprovalDecision
   readonly signal?: AbortSignal
+  /** In a room: the decision goes through the Space route, which is the one that carries a scope. */
+  readonly spaceRef?: string
+  /** How far an approval reaches. Only meaningful with `spaceRef`; absent is `once`. */
+  readonly scope?: ApprovalScope
+  /** Told what became of a standing rule, so the card can say so. */
+  readonly onGrant?: (grant: SpaceGrantResult) => void
 }): Promise<ApprovalOutcome> {
   const expected = input.decision === 'approve' ? 'GRANTED' : 'DENIED'
   let decided: Approval | null = null
   try {
-    decided = await decideApproval(input.approvalId, input.decision, undefined, input.signal)
+    if (input.spaceRef) {
+      const result = await decideSpaceApproval(
+        input.spaceRef,
+        input.approvalId,
+        { decision: input.decision, scope: input.scope },
+        input.signal,
+      )
+      decided = result.approval
+      input.onGrant?.(result.grant)
+    } else {
+      decided = await decideApproval(input.approvalId, input.decision, undefined, input.signal)
+    }
   } catch (error) {
     if (isRefusal(error)) return 'refused'
+    if (isAlreadyDecided(error)) return 'already_decided'
     const fresh = await listApprovals(input.runId, input.signal).catch(() => null)
     if (fresh === null) return 'unconfirmed'
     const match = fresh.find((approval) => approval.id === input.approvalId)

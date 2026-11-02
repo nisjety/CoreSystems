@@ -167,7 +167,7 @@ export function normalizeApprovalContinuation(raw: unknown): ApprovalContinuatio
 }
 
 /** Normalize a model-gateway approval object (snake_case) to our camelCase shape. */
-function normalizeApproval(raw: RawApproval): Approval | null {
+export function normalizeApproval(raw: RawApproval): Approval | null {
   const id = str(raw.id) ?? str(raw.approval_id)
   if (!id) return null
   return {

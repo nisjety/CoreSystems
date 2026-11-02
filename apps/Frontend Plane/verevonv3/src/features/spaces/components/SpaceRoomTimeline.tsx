@@ -78,6 +78,8 @@ export interface SpaceRoomTimelineProps {
   /** The reading member's own Control subject, used only to mark their own
    * turns as theirs. Never used to attribute an unattributed turn. */
   readonly viewerSubjectId?: () => string | undefined
+  /** The reader's room role, for the approval card's scope picker. Presentation only. */
+  readonly viewerRole?: () => string | undefined
   /** Focuses the room composer — the intro block's primary action. */
   readonly onStartConversation?: () => void
   /** When provided, the intro block offers the in-room create-agent flow. */
@@ -317,6 +319,7 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
               threads={props.threads}
               roster={props.roster}
               viewerSubjectId={props.viewerSubjectId}
+              viewerRole={props.viewerRole}
               agentName={agentName()}
               agents={props.agents}
               transcriptEnabled={sharedRead}
@@ -368,6 +371,7 @@ function SpaceRoomPost(props: {
   readonly threads: () => readonly SpaceThread[]
   readonly roster: () => readonly SpaceRosterMember[]
   readonly viewerSubjectId?: () => string | undefined
+  readonly viewerRole?: () => string | undefined
   readonly agentName: string
   /** Roster agents, for the avatar colour of an assistant turn (exactly-one-name match, else neutral). */
   readonly agents: () => readonly SpaceAgent[]
@@ -802,7 +806,12 @@ function SpaceRoomPost(props: {
 
       <Show when={awaitingApproval() ? props.thread.latest_run_id : undefined}>
         {(runId) => (
-          <SpaceApprovalPanel runId={runId()} onSettled={props.onApprovalSettled} />
+          <SpaceApprovalPanel
+            runId={runId()}
+            onSettled={props.onApprovalSettled}
+            spaceRef={props.spaceRef}
+            viewerRole={props.viewerRole?.()}
+          />
         )}
       </Show>
 

@@ -178,6 +178,13 @@ pub(crate) struct SpaceFeatureFlags {
     /// rollout control, never an authorization input: Control's live role (owner or manager) decides
     /// who may write it, and it moves no content, so Zero Data Retention organizations are unaffected.
     pub(crate) agent_wake_policy_api: bool,
+    /// `SPACE_APPROVAL_SCOPES_ENABLED` (WS10-S4): the standing-rule half of a Space approval decision
+    /// (`scope: always` on `POST /api/v1/spaces/{space_ref}/approvals/{approval_id}/decide`) and the
+    /// `approval-grants` and `approval-policy` routes. Off answers 404 `feature_disabled` there and a
+    /// `once` decision still works. A rollout control, never an authorization input: Control's role,
+    /// entitlement (`approval_grant_entitled`) and Zero Data Retention rules decide, and a ZDR org
+    /// never gets a rule whatever this says.
+    pub(crate) approval_scopes: bool,
     /// `GATEWAY_SPACE_APPEND_RETRIEVAL` (WS18-S2): a follow-up turn of a scoped thread fetches its own
     /// retrieval decision and carries the token (empty on a decline, which suppresses grounding).
     /// Read once in `build_state`, and only the literal `true` turns it on: unlike the other Space flags
@@ -344,6 +351,7 @@ impl SpaceFeatureFlags {
     pub(crate) fn from_env() -> Self {
         Self {
             agent_wake_policy_api: space_flag("SPACE_AGENT_WAKE_POLICY_API"),
+            approval_scopes: space_flag("SPACE_APPROVAL_SCOPES_ENABLED"),
             append_retrieval: env::var("GATEWAY_SPACE_APPEND_RETRIEVAL").is_ok_and(|value| value == "true"),
             chat_locale_hint: space_flag("CHAT_LOCALE_HINT"),
             denials_typed: space_flag("SPACE_DENIALS_TYPED"),

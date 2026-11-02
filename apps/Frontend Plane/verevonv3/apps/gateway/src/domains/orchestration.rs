@@ -250,7 +250,7 @@ const DECIDE_RETRY_TIMEOUT: Duration = Duration::from_secs(8);
 /// placeholder: it 502s only on the literal Requested->Granted transition, and
 /// by the second attempt the DB row is already Granted, so that branch is
 /// skipped.
-async fn mg_post_decide_with_retry(
+pub(crate) async fn mg_post_decide_with_retry(
     state: &AppState,
     user: &AuthenticatedUser,
     headers: &HeaderMap,

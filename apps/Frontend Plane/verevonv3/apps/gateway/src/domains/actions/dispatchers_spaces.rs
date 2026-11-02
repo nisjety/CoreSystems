@@ -5,5 +5,6 @@ pub(super) mod ws01;
 pub(super) mod ws03;
 pub(super) mod ws04;
 pub(super) mod ws08;
+pub(super) mod ws10;
 pub(super) mod ws12;
 pub(super) mod ws16;

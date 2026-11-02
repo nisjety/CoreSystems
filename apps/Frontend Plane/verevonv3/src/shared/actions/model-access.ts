@@ -171,6 +171,8 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'spaces.set_agent_state': exempt('agent_cannot_self_govern', 'external_write'),
   'spaces.revoke_agent': exempt('agent_cannot_self_govern', 'external_write'),
   'spaces.set_agent_wake_policy': exempt('agent_cannot_self_govern', 'external_write'),
+  'spaces.decide_approval': exempt('approval_authority', 'destructive'),
+  'spaces.revoke_approval_grant': exempt('agent_cannot_self_govern', 'external_write'),
   'spaces.create_room': exempt('no_owner_executor', 'external_write'),
   'spaces.add_member': exempt('no_owner_executor', 'external_write'),
   'spaces.remove_member': exempt('no_owner_executor', 'external_write'),

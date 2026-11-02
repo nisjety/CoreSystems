@@ -86,6 +86,7 @@ import { createSpaceStreamController, type SpaceStreamController, type SpaceStre
 import { SpaceLiveIndicator } from './SpaceLiveIndicator'
 import { SpaceActivityPanel } from './SpaceActivityPanel'
 import { SpaceKnowledgePanel } from './SpaceKnowledgePanel'
+import { SpaceStandingApprovals } from './SpaceStandingApprovals'
 import { SpaceWorkPanel } from './SpaceWorkPanel'
 import './space-room-layout.css'
 import './space-room-header.css'
@@ -736,6 +737,10 @@ export default function SpacePage() {
                               : undefined
                           }
                         />
+                        <SpaceStandingApprovals
+                          spaceRef={current().space.space_ref}
+                          canGovern={canCreateAgent(current().membership.role)}
+                        />
                       </>
                     ),
                     medlemmer: (
@@ -931,6 +936,7 @@ function SpaceConversationPanel(props: {
             spaceRef={props.spaceRef}
             spaceName={props.spaceName}
             viewerSubjectId={props.viewerSubjectId}
+            viewerRole={props.viewerRole}
             threads={props.threads}
             sharedReadAvailable={props.sharedReadAvailable}
             roomPins={props.roomPins}

@@ -28,6 +28,7 @@ use crate::{
 };
 
 mod denial;
+pub(crate) mod approvals;
 use denial::{typed_response, with_gap_details, Decision, SpaceDenial};
 pub(crate) mod agent_policy;
 pub(crate) mod directory;
@@ -58,6 +59,9 @@ const FORGED_SPACE_AUTHORITY_FIELDS: &[&str] = &[
     "payload_digest",
     "contract_digest",
     "contract_expires_at",
+    // WS10-S4: the Control-signed approval proofs. A browser never supplies either.
+    "grant_use_token",
+    "space_approval_decision_token",
 ];
 
 /// Turns an untrusted personal-Space selection into a Control-issued thread
@@ -921,6 +925,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
 /// Merged before `require_session`, so every module route is session-gated.
 fn module_routes() -> Router<AppState> {
     Router::new()
+        .merge(approvals::routes())
         .merge(dm::routes())
         .merge(human_posts::routes())
         .merge(pins::routes())

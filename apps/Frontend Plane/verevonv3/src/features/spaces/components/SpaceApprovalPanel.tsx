@@ -2,6 +2,12 @@ import { Loader2, ShieldCheck } from '@/shared/icons'
 import { createEffect, createSignal, For, Show } from 'solid-js'
 
 import type { Approval, ApprovalDecision } from '@/shared/api/orchestration-client'
+import {
+  offerableScopes,
+  readSpaceApprovalPolicy,
+  type ApprovalScope,
+  type SpaceGrantResult,
+} from '@/shared/api/space-approvals-client'
 import { announce } from '@/shared/a11y/announcer'
 import { useI18n } from '@/shared/i18n'
 import { createResource } from '@/shared/lib/create-resource-compat'
@@ -11,6 +17,7 @@ import {
   settleApproval,
   type ApprovalOutcome,
 } from '../lib/space-approvals'
+import { SpaceApprovalScopePicker } from './SpaceApprovalScopePicker'
 
 /**
  * The decision a paused run is waiting for, shown where the waiting happened.
@@ -50,6 +57,10 @@ export interface SpaceApprovalPanelProps {
   readonly runId: string
   /** Called once a decision settles, so the room can re-read its projection. */
   readonly onSettled?: () => void
+  /** The room. With it, a decision goes through the Space route (the one that carries a scope). */
+  readonly spaceRef?: string
+  /** The viewer's room role; only managers and owners are offered a standing rule. Control decides. */
+  readonly viewerRole?: string
 }
 
 export function SpaceApprovalPanel(props: SpaceApprovalPanelProps) {
@@ -63,6 +74,26 @@ export function SpaceApprovalPanel(props: SpaceApprovalPanelProps) {
     },
   )
   const [decidingId, setDecidingId] = createSignal<string | undefined>(undefined)
+  // Only a manager or owner can be offered a wider scope, so only they cause the policy read.
+  const mayManageRules = () => props.viewerRole === 'manager' || props.viewerRole === 'owner'
+  const [policy] = createResource(
+    () => (props.spaceRef && mayManageRules() ? props.spaceRef : undefined),
+    (spaceRef) => readSpaceApprovalPolicy(spaceRef),
+  )
+  const [scopes, setScopes] = createSignal<Record<string, ApprovalScope>>({})
+  const [grant, setGrant] = createSignal<SpaceGrantResult | undefined>(undefined)
+  const optionsFor = (approval: Approval): ApprovalScope[] =>
+    props.spaceRef
+      ? offerableScopes({
+          policy: policy.error ? undefined : policy(),
+          viewerRole: props.viewerRole,
+          toolKey: approval.toolKey,
+        })
+      : ['once']
+  const scopeFor = (approval: Approval): ApprovalScope => {
+    const chosen = scopes()[approval.id] ?? 'once'
+    return optionsFor(approval).includes(chosen) ? chosen : 'once'
+  }
   const [outcome, setOutcome] = createSignal<ApprovalOutcome | undefined>(undefined)
 
   const approvals = () => (pending.error ? [] : pending()?.approvals ?? [])
@@ -88,11 +119,15 @@ export function SpaceApprovalPanel(props: SpaceApprovalPanelProps) {
     if (decidingId()) return
     setDecidingId(approval.id)
     setOutcome(undefined)
+    setGrant(undefined)
     try {
       const settled = await settleApproval({
         approvalId: approval.id,
         runId: props.runId,
         decision,
+        spaceRef: props.spaceRef,
+        scope: decision === 'approve' ? scopeFor(approval) : 'once',
+        onGrant: setGrant,
       })
       setOutcome(settled)
       // Re-read rather than assume: the card leaves only when the server says
@@ -166,6 +201,13 @@ export function SpaceApprovalPanel(props: SpaceApprovalPanelProps) {
                   </p>
                 )}
               </Show>
+              <SpaceApprovalScopePicker
+                approvalId={approval.id}
+                options={optionsFor(approval)}
+                value={scopeFor(approval)}
+                disabled={decidingId() !== undefined}
+                onChange={(scope) => setScopes((current) => ({ ...current, [approval.id]: scope }))}
+              />
               <div class="verevon-room-approval__actions">
                 <button
                   type="button"
@@ -200,6 +242,23 @@ export function SpaceApprovalPanel(props: SpaceApprovalPanelProps) {
           )}
         </For>
       </ul>
+
+      <Show when={grant()?.status === 'recorded'}>
+        <p class="verevon-room-approval__note" role="status">
+          {i18n.tr(
+            'Fast regel opprettet for dette verktøyet i rommet. Du finner den under Agent, og kan trekke den tilbake der.',
+            'Standing rule created for this tool in this room. You can find it under Agent and revoke it there.',
+          )}
+        </p>
+      </Show>
+      <Show when={grant()?.status === 'not_recorded'}>
+        <p class="verevon-space-projection-error" role="alert">
+          {i18n.tr(
+            'Godkjent denne gangen, men den faste regelen ble ikke opprettet. Agenten spør igjen neste gang.',
+            'Approved this time, but the standing rule was not created. The agent will ask again next time.',
+          )}
+        </p>
+      </Show>
 
       <Show when={outcome()}>
         {(settled) => (
