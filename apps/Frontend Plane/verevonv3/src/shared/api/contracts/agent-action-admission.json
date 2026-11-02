@@ -869,6 +869,32 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "ingestions.cancel_run",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:608c6c0242318387d78cf707d1e578b51843ba0a8cfbdc03f5dac4283ab715a5",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "ingestions.change_schedule_state",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:b70fc776e4b8c6d58c67bbc32510ad93657f0ec3d1dc00372ea2940ea3cba894",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "ingestions.create_run",
       "registry": true,
       "access": "none",
@@ -891,7 +917,7 @@
       "eligible": false,
       "executor": {},
       "hashBasis": "catalog_entry",
-      "schemaHash": "sha256:48104c3760b9d2378e8a8b433c9ef3ce5929369de50450987f5ccf994109dd89",
+      "schemaHash": "sha256:047412c54c617287090844041ad83763a829b48a26d6a2646861ce1e49a46127",
       "zdr_allowed": false
     },
     {
@@ -921,7 +947,20 @@
       "zdr_allowed": false
     },
     {
-      "actionId": "ingestions.run_schedule_action",
+      "actionId": "ingestions.get_run_status",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:407576ea24c0b3fe0243b915190bbf1df32225b08035df33812cbc7b2bca0d74",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "ingestions.pause_run",
       "registry": true,
       "access": "none",
       "authority": "control_run_decision",
@@ -930,7 +969,33 @@
       "eligible": false,
       "executor": {},
       "hashBasis": "catalog_entry",
-      "schemaHash": "sha256:9de05108ed3c15a8d9e835d5279f8d1842f41d5e3e70fd5d173003e21409c9d2",
+      "schemaHash": "sha256:5da67234918a75657170a1aaef9d749dea70d972c286ebcd7d0ef3f7a40f0ebc",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "ingestions.pause_schedule",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:70d6da0d42539fc85f92dbbe8abbb611fc7cc0b9a66b97352cbfc9d446fd77da",
+      "zdr_allowed": false
+    },
+    {
+      "actionId": "ingestions.resume_run",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "external_write",
+      "exemptReason": "no_owner_executor",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:3e88b79fb6b2a451d3e6cea8ea916f2ae2e5ccca62e741f7442b48f0339d79aa",
       "zdr_allowed": false
     },
     {
