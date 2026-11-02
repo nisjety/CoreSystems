@@ -1484,6 +1484,11 @@ struct BrowserAgentInput {
     /// run never acquires a lease of its own.
     #[serde(default)]
     attach_session_id: Option<String>,
+    /// WS8.J: the mark an attached run puts on its tab when it completes
+    /// (`none`, `deliverable`, `handoff`; absent = `deliverable`). A value
+    /// outside the set fails the input. Meaningless without `attach_session_id`.
+    #[serde(default)]
+    tab_mark_on_complete: Option<crate::quarry_agent::TabMark>,
 }
 
 /// The three keys of [`crate::quarry_agent::WireRequestAsk`], strictly.
@@ -1582,6 +1587,7 @@ fn browser_plan_config_with(
     // An attached run uses the person's own session and cookie jar, never a
     // persistent profile of its own.
     let profile_id = if attach.is_some() { None } else { input.profile_id };
+    let input_tab_mark = input.tab_mark_on_complete;
     let plan = browser_agent::PlanConfig {
         plan_id: input.plan_id.unwrap_or_else(mp_ids::new_ulid),
         grant_id: validated_grant.grant_id().to_owned(),
@@ -1622,6 +1628,7 @@ fn browser_plan_config_with(
         takeover_wait_s: 0,
         takeover_poll: None,
         require_quarry_redaction_stamp: ceilings.require_quarry_redaction_stamp,
+        tab_mark_on_complete: input_tab_mark.unwrap_or_default(),
     };
     browser_agent::validate_plan_config(&plan)?;
     Ok(plan)
@@ -2452,6 +2459,39 @@ mod tests {
         let grant = ValidatedBrowserGrant::for_test("grant-att", "attach", "grant-run", "u", true);
         let error = browser_plan_config(input, "verified-org", true, &grant).unwrap_err();
         assert!(error.contains("zero-data-retention"), "{error}");
+    }
+
+    #[test]
+    fn tab_mark_on_complete_defaults_to_deliverable_and_takes_only_the_closed_set() {
+        use crate::quarry_agent::TabMark;
+        let grant = ValidatedBrowserGrant::for_test("grant-att", "attach", "grant-run", "u", false);
+        let build = |extra: &str| {
+            let input: BrowserAgentInput = serde_json::from_str(&format!(
+                r#"{{"grant_id":"grant-att","attach_session_id":"run_user_1"{extra}}}"#
+            ))
+            .unwrap();
+            browser_plan_config(input, "verified-org", false, &grant).unwrap()
+        };
+        assert_eq!(build("").tab_mark_on_complete, TabMark::Deliverable);
+        for (name, mark) in [
+            ("none", TabMark::None),
+            ("deliverable", TabMark::Deliverable),
+            ("handoff", TabMark::Handoff),
+        ] {
+            let plan = build(&format!(r#","tab_mark_on_complete":"{name}""#));
+            assert_eq!(plan.tab_mark_on_complete, mark, "{name}");
+        }
+        for bad in ["keep", "Deliverable", "", "pinned"] {
+            let parsed: Result<BrowserAgentInput, _> = serde_json::from_str(&format!(
+                r#"{{"grant_id":"g","tab_mark_on_complete":"{bad}"}}"#
+            ));
+            assert!(parsed.is_err(), "{bad:?} is outside the closed set");
+        }
+        // A leased input carries the default too; the loop only marks an attachment.
+        let input: BrowserAgentInput = serde_json::from_str(r#"{"grant_id":"grant-1"}"#).unwrap();
+        let leased = ValidatedBrowserGrant::for_test("grant-1", "run", "", "u", false);
+        let plan = browser_plan_config(input, "verified-org", false, &leased).unwrap();
+        assert_eq!((plan.attach.is_none(), plan.tab_mark_on_complete), (true, TabMark::Deliverable));
     }
 
     // ---- WS9.E browser.console ------------------------------------------

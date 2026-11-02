@@ -482,6 +482,67 @@ impl AttachDisposition {
     }
 }
 
+/// What a finished attached run leaves the person (WS8.J): a mark on the agent
+/// tab, set before the attachment is released. A marked tab stays open and is
+/// handed to the person; an unmarked one is closed with the attachment.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TabMark {
+    /// No mark: the tab closes with the attachment. Nothing is sent.
+    None,
+    /// The tab holds something the person asked for; keep it open for them.
+    #[default]
+    Deliverable,
+    /// The agent hands the tab over for the person to carry on.
+    Handoff,
+}
+
+impl TabMark {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Deliverable => "deliverable",
+            Self::Handoff => "handoff",
+        }
+    }
+
+    /// The closed set, case-insensitive; anything else is `None` (not a mark).
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "none" => Some(Self::None),
+            "deliverable" => Some(Self::Deliverable),
+            "handoff" => Some(Self::Handoff),
+            _ => None,
+        }
+    }
+}
+
+/// Parameters of [`QuarryAgentClient::mark_tab`].
+#[derive(Debug, Clone)]
+pub struct MarkTabParams<'a> {
+    pub org_id: &'a str,
+    /// The person's Quarry run (the attach session).
+    pub run_id: &'a str,
+    /// The agent's tab, from the attach answer.
+    pub tab_id: &'a str,
+    /// The attach grant, as on every delegate call.
+    pub grant_id: &'a str,
+    pub mark: TabMark,
+    pub request_id: Option<&'a str>,
+}
+
+/// `POST .../tabs/{tab_id}/mark` body. Quarry's route is not built yet (ask
+/// recorded in MP-ASKS); this is the shape the Model side proposes.
+#[derive(Debug, Clone, Serialize)]
+struct MarkTabRequest<'a> {
+    mark: &'static str,
+    grant_id: &'a str,
+}
+
 /// `DELETE .../attach/{id}` answer (Quarry `ReleaseData`).
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 pub struct ReleaseData {
@@ -1973,6 +2034,47 @@ impl QuarryAgentClient {
         Ok(tabs.tabs)
     }
 
+    /// WS8.J: mark the agent's tab (`POST /v1/agent/runs/{run_id}/tabs/{tab_id}/mark`)
+    /// so the release keeps it open for the person. Same service token and one
+    /// 401 retry as every call. `TabMark::None` sends nothing. Any 2xx counts;
+    /// the answer body is not read (Quarry's route is not built yet, and the
+    /// caller never lets a failure here block the release).
+    pub async fn mark_tab(&self, params: MarkTabParams<'_>) -> Result<(), AgentClientError> {
+        if params.mark == TabMark::None {
+            return Ok(());
+        }
+        let valid_id = |id: &str| {
+            !id.is_empty()
+                && id.len() <= 64
+                && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':'))
+        };
+        if !valid_id(params.run_id) || !valid_id(params.tab_id) {
+            return Err(AgentClientError::Decode("tab mark ids are not Quarry ids".into()));
+        }
+        let body = MarkTabRequest {
+            mark: params.mark.as_str(),
+            grant_id: params.grant_id,
+        };
+        let endpoint = self.url(&format!(
+            "/v1/agent/runs/{}/tabs/{}/mark",
+            params.run_id, params.tab_id
+        ));
+        let resp = self
+            .send_with_auth_retry(params.org_id, params.request_id, || {
+                self.http.post(&endpoint).json(&body)
+            })
+            .await?;
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| AgentClientError::Transport(e.to_string()))?;
+        Err(Self::refusal(status.as_u16(), text))
+    }
+
     /// WS9.E: read a run's console (`GET /v1/agent/runs/{run_id}/devtools`
     /// with `category=console`, camelCase query keys as Quarry's
     /// `DevtoolsQuery` names them). Same service token and one 401 retry as
@@ -3359,6 +3461,89 @@ mod tests {
         assert_eq!(tabs.len(), 1);
         assert_eq!(tabs[0].tab_id, "tab_9");
         assert!(!tabs[0].active);
+    }
+
+    #[tokio::test]
+    async fn mark_tab_posts_the_mark_and_the_attach_grant_with_the_service_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/runs/run_user/tabs/tab_9/mark"))
+            .and(header("authorization", "Bearer svc"))
+            .and(header("x-quarry-org", "org_1"))
+            .and(header("x-request-id", "req-7"))
+            .and(body_json(serde_json::json!({"mark": "deliverable", "grant_id": "grant_attach"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {"tabId": "tab_9", "mark": "deliverable"}, "meta": {}, "error": null,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = QuarryAgentClient::new(server.uri(), "svc").unwrap();
+        let params = |mark| MarkTabParams {
+            org_id: "org_1",
+            run_id: "run_user",
+            tab_id: "tab_9",
+            grant_id: "grant_attach",
+            mark,
+            request_id: Some("req-7"),
+        };
+        client.mark_tab(params(TabMark::Deliverable)).await.expect("marked");
+        // `none` sends nothing (the mock expects exactly the one call above).
+        client.mark_tab(params(TabMark::None)).await.expect("nothing to do");
+    }
+
+    #[tokio::test]
+    async fn mark_tab_retries_exactly_once_after_unauthorized_and_surfaces_a_refusal() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/runs/run_user/tabs/tab_9/mark"))
+            .respond_with(ResponseTemplate::new(401))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/runs/run_user/tabs/tab_9/mark"))
+            .and(body_json(serde_json::json!({"mark": "handoff", "grant_id": "g"})))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = QuarryAgentClient::new(server.uri(), "svc").unwrap();
+        let params = MarkTabParams {
+            org_id: "org_1",
+            run_id: "run_user",
+            tab_id: "tab_9",
+            grant_id: "g",
+            mark: TabMark::Handoff,
+            request_id: None,
+        };
+        client.mark_tab(params.clone()).await.expect("any 2xx is a mark");
+
+        // A route Quarry has not built answers 404: an error the caller logs.
+        let missing = MockServer::start().await;
+        let client = QuarryAgentClient::new(missing.uri(), "svc").unwrap();
+        assert!(client.mark_tab(params.clone()).await.is_err());
+        // Ids that are not Quarry ids never reach a URL.
+        for (run_id, tab_id) in [("../x", "tab_9"), ("run_user", "a/b"), ("", "tab_9")] {
+            let bad = MarkTabParams { run_id, tab_id, ..params.clone() };
+            assert!(client.mark_tab(bad).await.is_err(), "{run_id}/{tab_id}");
+        }
+        assert_eq!(missing.received_requests().await.unwrap().len(), 1, "only the 404 call");
+    }
+
+    #[test]
+    fn tab_mark_names_are_the_closed_set() {
+        for (text, mark) in [
+            ("none", TabMark::None),
+            (" Deliverable ", TabMark::Deliverable),
+            ("HANDOFF", TabMark::Handoff),
+        ] {
+            assert_eq!(TabMark::parse(text), Some(mark), "{text}");
+            assert_eq!(TabMark::parse(mark.as_str()), Some(mark));
+        }
+        assert_eq!(TabMark::parse("keep"), None);
+        assert_eq!(TabMark::default(), TabMark::Deliverable);
     }
 
     fn devtools_page() -> serde_json::Value {

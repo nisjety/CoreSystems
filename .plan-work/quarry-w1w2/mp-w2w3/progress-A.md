@@ -196,3 +196,23 @@ Note: the Model Plane crates are not clean under default `cargo fmt --check` (ex
 ### Lead to land (WS9.E)
 - `go/services/capability-core/internal/registry/capability_tools_seed_test.go` `readSeedRows` lists the migrations it reads; add `readMigration(t, "0034_browser_console_tool.up.sql")` (Go test not run by me; without it the Go test simply does not see the new row, nothing fails).
 - Ledger text: "WS9.E: browser.console reads a run's console through Quarry's devtools route (category=console, camelCase query), returns at most 100 entries / 16 KB / 500 chars per text of {sequence, tab_id, level, text} only, scrubbed with the Live set; it is a read under cap.browser.open (migration 0034), rides EXECUTION_DO_BROWSER_ENABLED, and its result is browser-scraped (page-authored)."
+
+### WS8.J MP half (W2, TESTED against a fake Quarry; Quarry's route NOT BUILT)
+- Built:
+  - `quarry_agent.rs`: `TabMark {None, Deliverable (default), Handoff}` (serde snake_case, closed set; `as_str`, `parse`), `MarkTabParams`, `QuarryAgentClient::mark_tab` = `POST /v1/agent/runs/{run}/tabs/{tab}/mark` with `{mark, grant_id}` through `send_with_auth_retry` (service token, one 401 retry, `x-request-id`); `TabMark::None` sends nothing; ids must be Quarry-shaped (`[A-Za-z0-9_.:-]{1,64}`) before they reach a URL; any 2xx is success, a refusal is a typed `AgentClientError`.
+  - `browser_agent.rs`: `PlanConfig.tab_mark_on_complete: TabMark` (default Deliverable). In the attached release arm, just before `release_attach`: only when `plan.status == Completed` and the mark is not `None`, `mark_tab`; a failure is a `warn!` and the release goes on. Failure, cancel, limits, plan errors: no mark (abort as before).
+  - `tool_bridge/mod.rs`: `BrowserAgentInput.tab_mark_on_complete: Option<TabMark>` (a value outside the set fails the input), copied into `PlanConfig` (default when absent).
+  - model-gateway `browser_run.rs`: `BrowserRunStartRequest.tab_mark_on_complete`, `tab_mark_for` (closed set case-insensitive; 400 `tab_mark_on_complete_invalid`; named without `attach_session_id` -> 400 `tab_mark_requires_attach`, before any write), `insert_tab_mark` (key only when named, so every other `tool_input` is unchanged), fingerprint part only when named.
+  - Harness: `tests/support/fake_quarry.rs` mark route + `marks()`, `fail_mark`, `call_order()`.
+- Tests: `--test browser_planner_hermetic` 46 passed (new: completion_marks_deliverable_then_releases (default deliverable, handoff, none; body `{mark, grant_id}`, order mark then release), a_failed_mark_never_blocks_the_release (404 and 500), failure_does_not_mark, cancel_releases_without_mark, a_leased_run_never_marks, plus the two stamp tests from slice 1). `--lib mark_tab` 2 (mark_tab_posts_the_mark_and_the_attach_grant_with_the_service_token, mark_tab_retries_exactly_once_after_unauthorized_and_surfaces_a_refusal), `--lib tab_mark` 2 (tab_mark_names_are_the_closed_set, tab_mark_on_complete_defaults_to_deliverable_and_takes_only_the_closed_set). `cargo test -p model-gateway --lib browser_run` 94 passed (new: tab_mark_on_complete_passes_through_for_an_attach_start_only). The three named tests live in the hermetic file (they need a Quarry), not `--lib browser_agent`.
+- Flags: none (rides `MODEL_GATEWAY_BROWSER_ATTACH`, off by default; without an attach nothing marks).
+- Decisions (defaults taken): D7 `browser.mark_tab` model tool DEFERRED (recorded in DEPTH); mark only on Completed; body shape `{mark, grant_id}` proposed in MP-ASKS; gateway refuses a mark without attach rather than dropping it.
+- Not verified: anything against a real Quarry (the route does not exist; today a real stack answers 404 and the loop logs it).
+
+## Batch 7 end: full-suite results
+- `cargo test -p execution-core --lib` 1724 passed, 0 failed (baseline 1700). `--test browser_planner_hermetic` 46 passed (baseline 39). `--test browser_agent_e2e` 11 passed, 3 ignored. `--test tool_catalogue_characterisation` 1, `--test tool_class_registry_parity` 6, `--test autonomy_ladder_contract` 11. `cargo test -p model-gateway --lib browser_run` 94 passed (baseline 93), `--lib moderation` 31 passed.
+- Commits: 02544d09a (WS12.S4b), 4cc45e060 (WS9.E), WS8.J see git log.
+
+### Lead to land (WS8.J)
+- Nothing in compose for WS8.J.
+- Ledger text (docs/decisions/ledger.md): "WS8.J MP half: a COMPLETED attached browser run marks its agent tab (default deliverable; none or handoff via tab_mark_on_complete, gateway-validated and only with attach_session_id) with POST .../tabs/{tab_id}/mark right before releasing the attachment; every other exit marks nothing and aborts. A failed mark never blocks the release. The browser.mark_tab model tool is deferred (D7)."

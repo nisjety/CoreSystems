@@ -263,6 +263,12 @@ struct BrowserRunStartRequest {
     /// is refused 400 `browser_attach_unavailable`.
     #[serde(default)]
     attach_session_id: Option<String>,
+    /// What the agent leaves on its tab when an attached run completes (WS8.J):
+    /// `none`, `deliverable` (the default) or `handoff`. Only meaningful with
+    /// `attach_session_id`; named without one it is refused 400
+    /// `tab_mark_requires_attach`, outside the set 400 `tab_mark_on_complete_invalid`.
+    #[serde(default)]
+    tab_mark_on_complete: Option<String>,
 }
 
 /// The three keys a model-driven run may ask Quarry to tighten on. Same shape
@@ -318,6 +324,38 @@ fn attach_session_for(enabled: bool, req: &BrowserRunStartRequest) -> Result<Opt
         return Err(bad_request("attach_session_id_invalid"));
     }
     Ok(Some(id.to_owned()))
+}
+
+/// The tab mark of a start (WS8.J), checked against the closed set. `Ok(None)`
+/// when the start names none (execution-core then takes its default). Named
+/// without an attach session it is refused: a leased run has no person's tab to
+/// hand over, and a mark that silently did nothing would mislead the caller.
+fn tab_mark_for(
+    req: &BrowserRunStartRequest,
+    attach_session: Option<&str>,
+) -> Result<Option<&'static str>, ApiError> {
+    let Some(raw) = req.tab_mark_on_complete.as_deref() else {
+        return Ok(None);
+    };
+    let mark = match raw.trim().to_ascii_lowercase().as_str() {
+        "none" => "none",
+        "deliverable" => "deliverable",
+        "handoff" => "handoff",
+        _ => return Err(bad_request("tab_mark_on_complete_invalid")),
+    };
+    if attach_session.is_none() {
+        return Err(bad_request("tab_mark_requires_attach"));
+    }
+    Ok(Some(mark))
+}
+
+/// Write the tab mark into the browser `tool_input` (WS8.J) when the start named
+/// one; a start that names none carries the `tool_input` it always did.
+fn insert_tab_mark(tool_input: &mut Value, mark: Option<&str>) {
+    let (Some(mark), Some(fields)) = (mark, tool_input.as_object_mut()) else {
+        return;
+    };
+    fields.insert("tab_mark_on_complete".to_owned(), json!(mark));
 }
 
 /// The four capabilities plan mode switches off (Quarry capability names).
@@ -747,6 +785,10 @@ fn run_request_fingerprint(req: &BrowserRunStartRequest) -> String {
     if let Some(session) = non_empty(req.attach_session_id.as_deref()) {
         // Only when attaching: a retry that names another session is another request.
         part("attach_session_id", session);
+    }
+    if let Some(mark) = non_empty(req.tab_mark_on_complete.as_deref()) {
+        // Only when named: a retry that asks for another mark is another request.
+        part("tab_mark_on_complete", &mark.to_ascii_lowercase());
     }
     if req.plan_mode == Some(true) {
         // Only when asked, so a request that never names it keeps the fingerprint it had.
@@ -1844,6 +1886,9 @@ async fn browser_run_start_inner(
         attach_flag(std::env::var("MODEL_GATEWAY_BROWSER_ATTACH").ok().as_deref()),
         &req,
     )?;
+    // The mark of a completed attached run: closed set, attach only; refused
+    // the same way, before any write.
+    let tab_mark = tab_mark_for(&req, attach_session.as_deref())?;
     let run_source = run_source_of(&req);
     let request_id = request_id_for(&headers);
     let idempotency_key = parse_idempotency_key(&headers)?;
@@ -2093,6 +2138,7 @@ async fn browser_run_start_inner(
         "start_url": req.start_url,
     });
     insert_attach_fields(&mut tool_input, attach_session.as_deref());
+    insert_tab_mark(&mut tool_input, tab_mark);
     insert_planner_fields(&mut tool_input, max_planner_tokens, planner.flag);
     insert_policy_and_trace_fields(&mut tool_input, policy_ask, run_source, &request_id);
     let tool_input = tool_input.to_string();
@@ -2780,6 +2826,7 @@ mod tests {
             policy: None,
             run_source: None,
             attach_session_id: None,
+            tab_mark_on_complete: None,
         }
     }
 
@@ -3633,6 +3680,53 @@ mod tests {
             assert_eq!(refused.0, StatusCode::BAD_REQUEST);
             assert_eq!(refused.1 .0["error"], "attach_session_id_invalid", "{bad:?}");
         }
+    }
+
+    #[test]
+    fn tab_mark_on_complete_passes_through_for_an_attach_start_only() {
+        // Not named: nothing in the tool input, nothing in the fingerprint.
+        let plain = attach_request("session-1", &["example.com"]);
+        assert_eq!(tab_mark_for(&plain, Some(ATTACH_SESSION)).expect("no mark"), None);
+        let mut untouched = json!({ "grant_id": "att-1" });
+        insert_tab_mark(&mut untouched, None);
+        assert_eq!(untouched, json!({ "grant_id": "att-1" }));
+
+        // Named with an attach session: the closed set, case-insensitive, into the tool input.
+        for (asked, sent) in [("none", "none"), ("Deliverable", "deliverable"), (" HANDOFF ", "handoff")] {
+            let mut request = attach_request("session-1", &["example.com"]);
+            request.tab_mark_on_complete = Some(asked.to_owned());
+            let mark = tab_mark_for(&request, Some(ATTACH_SESSION)).expect(asked);
+            assert_eq!(mark, Some(sent), "{asked}");
+            let mut tool_input = json!({ "grant_id": "att-1", "attach_session_id": ATTACH_SESSION });
+            insert_tab_mark(&mut tool_input, mark);
+            assert_eq!(tool_input["tab_mark_on_complete"], sent);
+            assert_eq!(tool_input["attach_session_id"], ATTACH_SESSION, "the rest is untouched");
+        }
+
+        // Outside the set: refused, whatever else is true.
+        for bad in ["keep", "", "pinned", "deliverable,none"] {
+            let mut request = attach_request("session-1", &["example.com"]);
+            request.tab_mark_on_complete = Some(bad.to_owned());
+            let refused = tab_mark_for(&request, Some(ATTACH_SESSION)).expect_err(bad);
+            assert_eq!(refused.0, StatusCode::BAD_REQUEST);
+            assert_eq!(refused.1 .0["error"], "tab_mark_on_complete_invalid", "{bad:?}");
+        }
+
+        // A mark on a start that does not attach is refused, not silently dropped.
+        let mut leased = browser_request("session-1");
+        leased.tab_mark_on_complete = Some("deliverable".to_owned());
+        let refused = tab_mark_for(&leased, None).expect_err("no attach session");
+        assert_eq!(refused.1 .0["error"], "tab_mark_requires_attach");
+
+        // A retry that asks for another mark is a different request; none named keeps the old fingerprint.
+        let base = attach_request("session-1", &["example.com"]);
+        let mut marked = base.clone();
+        marked.tab_mark_on_complete = Some("handoff".to_owned());
+        let mut other = base.clone();
+        other.tab_mark_on_complete = Some("deliverable".to_owned());
+        assert_ne!(run_request_fingerprint(&base), run_request_fingerprint(&marked));
+        assert_ne!(run_request_fingerprint(&marked), run_request_fingerprint(&other));
+        assert_eq!(run_request_fingerprint(&base), run_request_fingerprint(&base.clone()));
     }
 
     #[test]

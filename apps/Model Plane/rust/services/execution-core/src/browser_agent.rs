@@ -621,6 +621,11 @@ pub struct PlanConfig {
     /// the tool bridge from the process environment, never read in the loop.
     /// Off, a missing stamp is logged once per run and the step goes on.
     pub require_quarry_redaction_stamp: bool,
+    /// WS8.J: the mark an attached run puts on its tab when it COMPLETES, just
+    /// before the attachment is released (`deliverable` by default). Any other
+    /// exit (failure, cancel, a limit) never marks. Only meaningful with
+    /// `attach`; a leased run has no person's tab to hand over.
+    pub tab_mark_on_complete: crate::quarry_agent::TabMark,
 }
 
 /// The step failure when a stamp is required and absent.
@@ -1575,9 +1580,32 @@ pub async fn run_browser_agent_loop(
             attach,
             ..
         } => {
-            // WS8.J hook point: `mark_tab` (`deliverable` on Completed, `none`
-            // otherwise) goes here, before the release; a mark failure must
-            // never block the release.
+            // WS8.J: a run that completed marks its tab (`deliverable` by
+            // default) so the release keeps it open for the person. Every other
+            // exit marks nothing. A failed mark is logged and never blocks the
+            // release.
+            if plan.status == PlanStatus::Completed
+                && plan.config.tab_mark_on_complete != crate::quarry_agent::TabMark::None
+            {
+                if let Err(e) = client
+                    .mark_tab(crate::quarry_agent::MarkTabParams {
+                        org_id: &plan.config.org_id,
+                        run_id: session_run_id,
+                        tab_id: &attach.tab_id,
+                        grant_id: &plan.config.grant_id,
+                        mark: plan.config.tab_mark_on_complete,
+                        request_id: plan.config.request_id.as_deref(),
+                    })
+                    .await
+                {
+                    warn!(
+                        plan_id = %plan.config.plan_id,
+                        error = %e,
+                        mark = plan.config.tab_mark_on_complete.as_str(),
+                        "browser-agent mark_tab failed; releasing anyway"
+                    );
+                }
+            }
             let disposition = attach_disposition(&plan.status);
             if let Err(e) = client
                 .release_attach(

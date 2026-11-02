@@ -1637,6 +1637,144 @@ fn release(quarry: &FakeQuarry) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
+// WS8.J: marks on the agent tab
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn completion_marks_deliverable_then_releases() {
+    let quarry = FakeQuarry::start().await;
+    quarry.push_page("https://example.com/", "Example", "Open 9 to 5", &[]);
+    let client = quarry.client();
+    let done = run_browser_agent_loop(
+        execution_core::browser_agent::PlanConfig {
+            stop_criteria: "Open 9 to 5".to_owned(),
+            ..attach_config()
+        },
+        Some(&client),
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(done.status, PlanStatus::Completed, "{}", done.summary);
+    // The default: one mark, on the agent tab of the person's run, with the
+    // attach grant, then the release, in that order.
+    let marks = quarry.marks();
+    assert_eq!(marks.len(), 1, "{marks:?}");
+    let (run, tab, body, headers) = &marks[0];
+    assert_eq!((run.as_str(), tab.as_str()), ("run_user", "tab_fake"));
+    assert_eq!(body, &serde_json::json!({"mark": "deliverable", "grant_id": "grant_h"}));
+    assert!(headers.iter().any(|(k, v)| k == "authorization" && v == "Bearer test-token"));
+    assert_eq!(quarry.call_order(), ["mark", "release"]);
+    assert_eq!(release(&quarry), ["release"]);
+
+    // A named mark is the one sent; `none` sends nothing and still releases.
+    for (mark, expected) in [
+        (execution_core::quarry_agent::TabMark::Handoff, Some("handoff")),
+        (execution_core::quarry_agent::TabMark::None, None),
+    ] {
+        let quarry = FakeQuarry::start().await;
+        quarry.push_page("https://example.com/", "Example", "Open 9 to 5", &[]);
+        let client = quarry.client();
+        let done = run_browser_agent_loop(
+            execution_core::browser_agent::PlanConfig {
+                stop_criteria: "Open 9 to 5".to_owned(),
+                tab_mark_on_complete: mark,
+                ..attach_config()
+            },
+            Some(&client),
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(done.status, PlanStatus::Completed, "{}", done.summary);
+        let sent: Vec<String> = quarry
+            .marks()
+            .iter()
+            .map(|m| m.2["mark"].as_str().unwrap_or_default().to_owned())
+            .collect();
+        assert_eq!(sent, expected.map(str::to_owned).into_iter().collect::<Vec<_>>());
+        assert_eq!(release(&quarry), ["release"]);
+    }
+}
+
+#[tokio::test]
+async fn a_failed_mark_never_blocks_the_release() {
+    for failure in [
+        (404, serde_json::json!({"error": {"code": "NOT_FOUND", "message": "no such route"}})),
+        (500, serde_json::json!({"error": {"code": "INTERNAL", "message": "boom"}})),
+    ] {
+        let quarry = FakeQuarry::start().await;
+        quarry.fail_mark(failure.0, failure.1);
+        quarry.push_page("https://example.com/", "Example", "Open 9 to 5", &[]);
+        let client = quarry.client();
+        let done = run_browser_agent_loop(
+            execution_core::browser_agent::PlanConfig {
+                stop_criteria: "Open 9 to 5".to_owned(),
+                ..attach_config()
+            },
+            Some(&client),
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(done.status, PlanStatus::Completed, "{}", done.summary);
+        assert_eq!(quarry.call_order(), ["mark", "release"]);
+        assert_eq!(release(&quarry), ["release"], "the attachment is still released");
+    }
+}
+
+#[tokio::test]
+async fn failure_does_not_mark() {
+    let quarry = FakeQuarry::start().await;
+    quarry.push_error(
+        502,
+        serde_json::json!({"error": {"code": "UPSTREAM_BLOCKED", "message": "Upstream blocked the request", "retryable": true}}),
+    );
+    let client = quarry.client();
+    let failed = run_browser_agent_loop(attach_config(), Some(&client), None, None, None).await;
+    assert_eq!(failed.status, PlanStatus::Failed);
+    assert!(quarry.marks().is_empty(), "a failed run marks nothing");
+    assert_eq!(release(&quarry), ["abort"]);
+}
+
+#[tokio::test]
+async fn cancel_releases_without_mark() {
+    let quarry = FakeQuarry::start().await;
+    let client = quarry.client();
+    let state = execution_core::state::StateStore::new();
+    let _ = state.cancel("run_h", None);
+    let cancelled = run_browser_agent_loop(attach_config(), Some(&client), None, None, Some(&state)).await;
+    assert_eq!(cancelled.status, PlanStatus::Aborted);
+    assert!(quarry.marks().is_empty(), "a cancelled run marks nothing");
+    assert_eq!(quarry.call_order(), ["release"]);
+    assert_eq!(release(&quarry), ["abort"]);
+}
+
+#[tokio::test]
+async fn a_leased_run_never_marks() {
+    let quarry = FakeQuarry::start().await;
+    quarry.push_page("https://example.com/", "Example", "Open 9 to 5", &[]);
+    let client = quarry.client();
+    let done = run_browser_agent_loop(
+        execution_core::browser_agent::PlanConfig {
+            stop_criteria: "Open 9 to 5".to_owned(),
+            ..plan_config()
+        },
+        Some(&client),
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(done.status, PlanStatus::Completed, "{}", done.summary);
+    assert!(quarry.marks().is_empty(), "there is no person's tab on a leased run");
+    assert_eq!(quarry.closed_runs(), 1);
+}
+
+// ---------------------------------------------------------------------------
 // WS12.S4: Quarry's redaction stamp
 // ---------------------------------------------------------------------------
 

@@ -43,6 +43,12 @@ struct Inner {
     releases: Vec<(String, String, String)>,
     /// WS8.G: `(run_id, grant_id)` of each tab listing.
     tab_queries: Vec<(String, String)>,
+    /// WS8.J: `(run_id, tab_id, body, headers)` of each mark request.
+    mark_requests: Vec<(String, String, Value, Vec<(String, String)>)>,
+    /// WS8.J: make the mark route answer with this error.
+    mark_error: Option<(u16, Value)>,
+    /// WS8.J: `mark` and `release` calls in arrival order.
+    call_order: Vec<String>,
 }
 
 type Shared = Arc<Mutex<Inner>>;
@@ -70,6 +76,7 @@ impl FakeQuarry {
             .route("/v1/agent/runs/:run_id/attach", post(attach_run))
             .route("/v1/agent/runs/:run_id/attach/:attach_id", delete(release_attach))
             .route("/v1/agent/runs/:run_id/tabs", get(list_tabs))
+            .route("/v1/agent/runs/:run_id/tabs/:tab_id/mark", post(mark_tab))
             .with_state(inner.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -198,6 +205,21 @@ impl FakeQuarry {
     /// WS8.G: every release, `(run_id, attach_id, disposition)`.
     pub fn releases(&self) -> Vec<(String, String, String)> {
         self.inner.lock().expect("lock").releases.clone()
+    }
+
+    /// WS8.J: every tab mark, `(run_id, tab_id, body, headers)`.
+    pub fn marks(&self) -> Vec<(String, String, Value, Vec<(String, String)>)> {
+        self.inner.lock().expect("lock").mark_requests.clone()
+    }
+
+    /// WS8.J: make `POST .../tabs/:tab_id/mark` answer with this error.
+    pub fn fail_mark(&self, status: u16, body: Value) {
+        self.inner.lock().expect("lock").mark_error = Some((status, body));
+    }
+
+    /// WS8.J: `mark` and `release` in the order Quarry received them.
+    pub fn call_order(&self) -> Vec<String> {
+        self.inner.lock().expect("lock").call_order.clone()
     }
 
     /// WS8.G: a 409 `USER_TOOK_OVER` exactly as Quarry's delegate lane writes it.
@@ -335,14 +357,35 @@ async fn release_attach(
 ) -> impl IntoResponse {
     let disposition = query.disposition.unwrap_or_else(|| "release".to_owned());
     let state = if disposition == "abort" { "aborted" } else { "released" };
-    inner
-        .lock()
-        .expect("lock")
+    let mut guard = inner.lock().expect("lock");
+    guard.call_order.push("release".to_owned());
+    guard
         .releases
         .push((run_id, attach_id.clone(), disposition));
+    drop(guard);
     (
         StatusCode::OK,
         Json(envelope(json!({"attach_id": attach_id, "state": state}))),
+    )
+}
+
+async fn mark_tab(
+    State(inner): State<Shared>,
+    Path((run_id, tab_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let mut guard = inner.lock().expect("lock");
+    guard.call_order.push("mark".to_owned());
+    guard
+        .mark_requests
+        .push((run_id, tab_id.clone(), body.clone(), header_pairs(&headers)));
+    if let Some((status, body)) = guard.mark_error.clone() {
+        return (StatusCode::from_u16(status).expect("status"), Json(body));
+    }
+    (
+        StatusCode::OK,
+        Json(envelope(json!({"tabId": tab_id, "mark": body["mark"]}))),
     )
 }
 
