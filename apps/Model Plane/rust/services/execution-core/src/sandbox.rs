@@ -54,10 +54,15 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use crate::policy::{MpNetworkPolicy, MpSandboxPolicy};
+use crate::policy::{LimitsConfig, LimitsMode, MpNetworkPolicy, MpSandboxPolicy, ResourceLimits};
 
 /// The bubblewrap binary used for filesystem/namespace isolation on Linux.
 pub const BWRAP_BIN: &str = "bwrap";
+
+/// The util-linux `prlimit` binary that applies per-spawn resource limits
+/// (WS06-S8). It `exec`s its command, so the limits are inherited by `bwrap`
+/// and everything under it.
+pub const PRLIMIT_BIN: &str = "prlimit";
 
 /// A concrete, ready-to-spawn command: program + args, plus whether it was
 /// actually wrapped in a sandbox.
@@ -68,6 +73,9 @@ pub struct SandboxedCommand {
     /// `true` if wrapped in bubblewrap; `false` for a direct passthrough
     /// (`DangerFullAccess`, `External` delegation, or sandbox unavailable).
     pub sandboxed: bool,
+    /// `true` if the command is prefixed with `prlimit` (WS06-S8), so the
+    /// per-spawn limits it was asked for are in force.
+    pub limits_applied: bool,
 }
 
 /// How the sandboxed process's environment is derived from execution-core's.
@@ -110,6 +118,13 @@ pub struct LaunchOptions<'a> {
     /// existing writable-root/read-only-root relationship below). Empty by
     /// default — every existing caller is unaffected.
     pub extra_ro_binds: &'a [(PathBuf, PathBuf)],
+    /// Per-spawn `prlimit` ceilings (WS06-S8). `None` means "do not apply
+    /// limits" (limits switched off, or a caller that has none). When `Some`
+    /// and `prlimit` works here the command is wrapped as
+    /// `prlimit <flags> -- bwrap ...`; when `Some` and `prlimit` is unusable the
+    /// command comes back with `limits_applied == false` and the spawn site
+    /// refuses it (fail closed).
+    pub limits: Option<&'a ResourceLimits>,
 }
 
 /// Build the bubblewrap argument vector for `policy`, wrapping `program args`.
@@ -266,7 +281,39 @@ pub fn log_support() {
              are refused rather than downgraded to host execution"
         );
     }
+    // WS06-S8: the per-spawn limits state is on the record at every start too.
+    if LimitsConfig::current().mode == LimitsMode::Off {
+        tracing::warn!(
+            limits = "off",
+            "EXECUTION_SANDBOX_LIMITS=off: sandboxed tool processes run WITHOUT per-spawn \
+             CPU, memory, file-size and descriptor limits"
+        );
+    } else if is_supported() && !limits_enforceable() {
+        tracing::warn!(
+            limits = "unavailable",
+            "prlimit is unavailable or unusable here: sandboxed tool processes are refused \
+             because per-spawn limits are enforced"
+        );
+    } else {
+        tracing::info!(limits = "enforce", "per-spawn resource limits are enforced");
+    }
 }
+
+/// Whether per-spawn limits can actually be applied on this host, decided
+/// once per process like [`is_supported`]: a real `prlimit -- true` probe, not
+/// a `PATH` lookup. When limits are `enforce` and this is false, restricted
+/// spawns are refused (fail closed, as for a missing bwrap).
+#[must_use]
+pub fn limits_enforceable() -> bool {
+    static ENFORCEABLE: OnceLock<bool> = OnceLock::new();
+    *ENFORCEABLE.get_or_init(probe_prlimit)
+}
+
+/// The state the capability profile advertises: `enforced` only when limits
+/// are on AND the sandbox and `prlimit` both work here.
+pub const LIMITS_ENFORCED: &str = "enforced";
+/// Limits are switched off or cannot be applied on this host.
+pub const LIMITS_UNLIMITED: &str = "unlimited";
 
 /// A small, runtime-measured profile for callers that must decide whether a
 /// Space can use this execution substrate. It deliberately reports what the
@@ -291,6 +338,9 @@ pub struct SandboxCapabilityProfile {
     pub egress: &'static str,
     /// The executor never forwards service credentials to model-authored code.
     pub credential_mode: &'static str,
+    /// `enforced` when sandboxed spawns carry per-spawn `prlimit` ceilings,
+    /// `unlimited` otherwise (WS06-S8). Changes the profile digest by design.
+    pub limits: &'static str,
 }
 
 /// A canonical, order-stable digest of the measured profile, bound into the
@@ -365,6 +415,14 @@ pub fn capability_profile() -> SandboxCapabilityProfile {
         backup: false,
         egress: "disabled_by_default",
         credential_mode: "credential_free",
+        limits: if local_isolation_available
+            && LimitsConfig::current().mode == LimitsMode::Enforce
+            && limits_enforceable()
+        {
+            LIMITS_ENFORCED
+        } else {
+            LIMITS_UNLIMITED
+        },
     }
 }
 
@@ -389,6 +447,42 @@ fn probe_bwrap() -> bool {
 #[cfg(not(target_os = "linux"))]
 fn probe_bwrap() -> bool {
     false
+}
+
+#[cfg(target_os = "linux")]
+fn probe_prlimit() -> bool {
+    // The same shape the real wrapper uses (`prlimit <flags> -- <command>`),
+    // with the cheapest flag and command.
+    match std::process::Command::new(PRLIMIT_BIN)
+        .args(["--core=0", "--", "true"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+    {
+        Ok(status) => status.success(),
+        Err(_) => false,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn probe_prlimit() -> bool {
+    false
+}
+
+/// Prefix `inner_program inner_args` with `prlimit <limits> --`. Pure, so the
+/// argv is testable on any OS.
+#[must_use]
+pub fn prlimit_wrap(
+    limits: &ResourceLimits,
+    inner_program: &str,
+    inner_args: &[String],
+) -> (String, Vec<String>) {
+    let mut args = limits.prlimit_args();
+    args.push("--".into());
+    args.push(inner_program.to_owned());
+    args.extend(inner_args.iter().cloned());
+    (PRLIMIT_BIN.to_owned(), args)
 }
 
 /// Translate a policy into a concrete command to spawn.
@@ -418,10 +512,25 @@ pub fn wrap_command_with(
 ) -> SandboxedCommand {
     if is_supported() {
         if let Some(argv) = build_bwrap_argv_with(policy, program, args, options) {
+            // WS06-S8: limits ride in FRONT of bwrap so every process under it
+            // inherits them. Requested but `prlimit` unusable => the plain bwrap
+            // command with `limits_applied == false`; the spawn site refuses it.
+            if let Some(limits) = options.limits {
+                if limits_enforceable() {
+                    let (program, args) = prlimit_wrap(limits, BWRAP_BIN, &argv);
+                    return SandboxedCommand {
+                        program,
+                        args,
+                        sandboxed: true,
+                        limits_applied: true,
+                    };
+                }
+            }
             return SandboxedCommand {
                 program: BWRAP_BIN.to_owned(),
                 args: argv,
                 sandboxed: true,
+                limits_applied: false,
             };
         }
     }
@@ -429,6 +538,7 @@ pub fn wrap_command_with(
         program: program.to_owned(),
         args: args.to_vec(),
         sandboxed: false,
+        limits_applied: false,
     }
 }
 

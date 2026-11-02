@@ -29,7 +29,7 @@
 //! proxy (`HTTPS_PROXY`/`ALL_PROXY`) configured to actually enforce it — see
 //! `require_requested_isolation`. Neither ever spawns the process.
 
-use crate::policy::MpSandboxPolicy;
+use crate::policy::{MpSandboxPolicy, ResourceLimits};
 use crate::{sandbox, scrub};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -119,29 +119,175 @@ pub(crate) async fn acquire_spawn_permit() -> std::io::Result<tokio::sync::Owned
     let (semaphore, wait) = spawn_gate();
     match tokio::time::timeout(*wait, semaphore.clone().acquire_owned()).await {
         Ok(Ok(permit)) => Ok(permit),
-        _ => Err(std::io::Error::new(
-            std::io::ErrorKind::WouldBlock,
-            "sandbox is busy, retry later",
-        )),
+        _ => {
+            record_limit_hit("busy");
+            Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "sandbox is busy, retry later",
+            ))
+        }
     }
 }
 
 /// Which stream tripped the output ceiling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum OutputStream {
     Stdout,
     Stderr,
 }
 
 /// A resource ceiling a child hit and was killed for (WS06-S7 defines the
-/// output case; WS06-S8 adds the per-spawn rlimit classes).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// output case; WS06-S8 adds the per-spawn rlimit classes). Serialises as
+/// `{"kind": "...", ...}` into the `execution.limit_hit` field of a result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LimitHit {
     /// A stream produced more than `limit_bytes` while the child ran.
     Output {
         stream: OutputStream,
         limit_bytes: usize,
     },
+    /// The child exceeded its CPU-time limit and got SIGXCPU.
+    Cpu { limit_secs: u64 },
+    /// The child tried to write a file past the size limit and got SIGXFSZ.
+    FileSize { limit_bytes: u64 },
+    /// The child died of SIGKILL that execution-core did not send. OOM and an
+    /// external kill are indistinguishable here.
+    Killed,
+}
+
+impl LimitHit {
+    /// The `kind` label of `execution_core_sandbox_limit_hits_total`.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Output { .. } => "output",
+            Self::Cpu { .. } => "cpu",
+            Self::FileSize { .. } => "file_size",
+            Self::Killed => "killed",
+        }
+    }
+
+    /// One line for a tool-failure message. Starts with the retry marker
+    /// "resource limit exceeded" (never transient: the same input hits the
+    /// same limit again).
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Output { limit_bytes, .. } => {
+                format!("resource limit exceeded: output over {limit_bytes} bytes")
+            }
+            Self::Cpu { limit_secs } => {
+                format!("resource limit exceeded: more than {limit_secs}s of CPU time")
+            }
+            Self::FileSize { limit_bytes } => {
+                format!("resource limit exceeded: a file grew past {limit_bytes} bytes")
+            }
+            Self::Killed => {
+                "resource limit exceeded: the process was killed (out of memory or killed externally)"
+                    .to_owned()
+            }
+        }
+    }
+}
+
+/// Hits per kind, in the order of [`LIMIT_KINDS`].
+static LIMIT_HITS: [std::sync::atomic::AtomicU64; 5] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+const LIMIT_KINDS: [&str; 5] = ["cpu", "file_size", "output", "killed", "busy"];
+
+/// Count one limit hit (`execution_core_sandbox_limit_hits_total{kind}`).
+/// An unknown kind is ignored rather than invented as a new label.
+pub(crate) fn record_limit_hit(kind: &str) {
+    if let Some(index) = LIMIT_KINDS.iter().position(|known| *known == kind) {
+        LIMIT_HITS[index].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// The limit-hit counter in Prometheus text format.
+#[must_use]
+pub fn limit_hit_metrics() -> String {
+    let mut out = String::from(
+        "# HELP execution_core_sandbox_limit_hits_total Sandboxed spawns that hit a resource limit.\n\
+         # TYPE execution_core_sandbox_limit_hits_total counter\n",
+    );
+    for (kind, hits) in LIMIT_KINDS.iter().zip(LIMIT_HITS.iter()) {
+        out.push_str(&format!(
+            "execution_core_sandbox_limit_hits_total{{kind=\"{kind}\"}} {}\n",
+            hits.load(std::sync::atomic::Ordering::Relaxed)
+        ));
+    }
+    out
+}
+
+/// Pure exit classification (WS06-S8). `signal` is the terminating signal when
+/// the direct child died of one; `code` its exit code. Under `bwrap` the
+/// direct child is `bwrap`, which reports a signalled inner process as
+/// `128 + signal`, so both spellings are read. SIGXCPU/SIGXFSZ only count when
+/// the limits were applied (otherwise they are the program's own business);
+/// SIGKILL counts for any sandboxed child.
+#[must_use]
+pub(crate) fn classify_exit(
+    signal: Option<i32>,
+    code: Option<i32>,
+    sandboxed: bool,
+    limits: Option<&ResourceLimits>,
+) -> Option<LimitHit> {
+    const SIGKILL: i32 = 9;
+    const SIGXCPU: i32 = 24;
+    const SIGXFSZ: i32 = 25;
+    let sig = signal.or_else(|| code.and_then(|c| (129..=159).contains(&c).then(|| c - 128)));
+    match (sig?, limits) {
+        (SIGXCPU, Some(l)) => Some(LimitHit::Cpu {
+            limit_secs: l.cpu_secs,
+        }),
+        (SIGXFSZ, Some(l)) => Some(LimitHit::FileSize {
+            limit_bytes: l.file_size_bytes,
+        }),
+        (SIGKILL, _) if sandboxed => Some(LimitHit::Killed),
+        _ => None,
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn exit_signal(status: &std::process::ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal()
+}
+
+#[cfg(not(unix))]
+pub(crate) fn exit_signal(_status: &std::process::ExitStatus) -> Option<i32> {
+    None
+}
+
+/// Refuse a sandboxed command that was asked to carry per-spawn limits but does
+/// not (`prlimit` unusable here): fail closed, as for a missing bwrap.
+fn require_limits_applied(
+    requested: bool,
+    sandboxed: bool,
+    applied: bool,
+) -> std::io::Result<()> {
+    if requested && sandboxed && !applied {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "per-spawn resource limits are required but prlimit is unavailable; refusing unlimited execution",
+        ));
+    }
+    Ok(())
+}
+
+/// [`require_limits_applied`] for a wrapped command (used by every spawn site).
+pub(crate) fn require_limits_applied_for(
+    limits: Option<&ResourceLimits>,
+    cmd: &sandbox::SandboxedCommand,
+) -> std::io::Result<()> {
+    require_limits_applied(limits.is_some(), cmd.sandboxed, cmd.limits_applied)
 }
 
 /// Read `reader` into `buf` until EOF or until more than `cap` bytes arrive.
@@ -305,6 +451,9 @@ pub struct ExecOutcome {
     /// Set when the child was killed for exceeding a resource ceiling
     /// (WS06-S7: the per-stream output cap). `None` for a normal exit.
     pub limit_hit: Option<LimitHit>,
+    /// `enforced` when the child ran under per-spawn `prlimit` ceilings,
+    /// `unlimited` otherwise (WS06-S8).
+    pub limits: &'static str,
 }
 
 /// Execute `program args` under `policy`, returning scrubbed output.
@@ -332,9 +481,15 @@ async fn execute_sandboxed_with_timeout(
     args: &[String],
     timeout: Duration,
 ) -> std::io::Result<ExecOutcome> {
-    let cmd = sandbox::wrap_command(policy, program, args);
+    let limits = crate::policy::limits_for(timeout);
+    let options = sandbox::LaunchOptions {
+        limits: limits.as_ref(),
+        ..sandbox::LaunchOptions::default()
+    };
+    let cmd = sandbox::wrap_command_with(policy, program, args, options);
     require_requested_isolation(policy, cmd.sandboxed, egress_proxy_configured())?;
-    spawn_capture(&cmd, None, None, timeout).await
+    require_limits_applied_for(limits.as_ref(), &cmd)?;
+    spawn_capture(&cmd, None, None, timeout, limits.as_ref()).await
 }
 
 /// Execute `program args` under `policy` **inside** `cwd`, with `env` as the
@@ -389,15 +544,19 @@ pub async fn execute_sandboxed_in_dir_with_ro_binds(
     ro_binds: &[(PathBuf, PathBuf)],
     timeout: Duration,
 ) -> std::io::Result<ExecOutcome> {
+    // WS06-S8: per-spawn ceilings sized from this call's wall-clock budget.
+    let limits = crate::policy::limits_for(timeout);
     let options = sandbox::LaunchOptions {
         cwd: Some(cwd),
         env: sandbox::SandboxEnv::Only(env),
         extra_ro_binds: ro_binds,
+        limits: limits.as_ref(),
     };
     let cmd = sandbox::wrap_command_with(policy, program, args, options);
     require_requested_isolation(policy, cmd.sandboxed, egress_proxy_configured())?;
     require_ro_binds_enforced(!ro_binds.is_empty(), cmd.sandboxed)?;
-    spawn_capture(&cmd, Some(cwd), Some(env), timeout).await
+    require_limits_applied_for(limits.as_ref(), &cmd)?;
+    spawn_capture(&cmd, Some(cwd), Some(env), timeout, limits.as_ref()).await
 }
 
 /// Staged inputs are read-only only inside bubblewrap. Refuses a command that
@@ -421,6 +580,7 @@ async fn spawn_capture(
     cwd: Option<&Path>,
     env: Option<&[(String, String)]>,
     timeout: Duration,
+    limits: Option<&ResourceLimits>,
 ) -> std::io::Result<ExecOutcome> {
     let mut command = tokio::process::Command::new(&cmd.program);
     command.args(&cmd.args);
@@ -491,12 +651,25 @@ async fn spawn_capture(
                 ),
             )
         })??;
+    // WS06-S8: a child we did not kill ourselves may have died of a limit.
+    let applied = cmd.limits_applied.then_some(limits).flatten();
+    let limit_hit = limit_hit.or_else(|| {
+        classify_exit(exit_signal(&status), status.code(), cmd.sandboxed, applied)
+    });
+    if let Some(hit) = &limit_hit {
+        record_limit_hit(hit.kind());
+    }
     Ok(ExecOutcome {
         stdout: scrub_and_cap(&stdout),
         stderr: scrub_and_cap(&stderr),
         exit_code: status.code().unwrap_or(-1),
         sandboxed: cmd.sandboxed,
         limit_hit,
+        limits: if cmd.limits_applied {
+            sandbox::LIMITS_ENFORCED
+        } else {
+            sandbox::LIMITS_UNLIMITED
+        },
     })
 }
 

@@ -424,15 +424,19 @@ impl ProcessHost {
             network: MpNetworkPolicy::Disabled,
         };
         let env = crate::code_interpreter::child_env_for(request.workspace);
+        // WS06-S8: a background process's CPU budget is sized from its TTL.
+        let limits = crate::policy::limits_for(request.ttl.unwrap_or(DEFAULT_TTL).min(MAX_TTL));
         let options = crate::sandbox::LaunchOptions {
             cwd: Some(request.workspace),
             env: crate::sandbox::SandboxEnv::Only(&env),
+            limits: limits.as_ref(),
             ..crate::sandbox::LaunchOptions::default()
         };
         let wrapped = crate::sandbox::wrap_command_with(&policy, program, args, options);
         // Identical fail-closed gate to every other sandboxed spawn: a host
         // that cannot isolate does not run model-authored code at all.
         crate::executor::require_requested_isolation_for(&policy, wrapped.sandboxed)?;
+        crate::executor::require_limits_applied_for(limits.as_ref(), &wrapped)?;
 
         let mut command = tokio::process::Command::new(&wrapped.program);
         command
@@ -609,6 +613,22 @@ impl Supervisor {
         self.live.remove(&self.fence.process_id);
         let _ = pump_handle.await;
         let _ = tokio::fs::remove_dir_all(&self.scratch).await;
+
+        // WS06-S8: a process that ended on its own may have died of a limit.
+        // Counted only; the process state below stays as it was.
+        if end_reason == "exited" {
+            if let Ok(exit) = status.as_ref() {
+                let limits = crate::policy::limits_for(self.ttl);
+                if let Some(hit) = crate::executor::classify_exit(
+                    crate::executor::exit_signal(exit),
+                    exit.code(),
+                    true,
+                    limits.as_ref(),
+                ) {
+                    crate::executor::record_limit_hit(hit.kind());
+                }
+            }
+        }
 
         let exit_code = status
             .as_ref()

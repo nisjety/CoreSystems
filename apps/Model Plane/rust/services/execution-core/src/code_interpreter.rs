@@ -198,6 +198,20 @@ struct CodeResult {
     /// Office files the verifier did not check, so the model can say so.
     #[serde(skip_serializing_if = "is_zero")]
     verification_unchecked: usize,
+    /// How the program was confined and whether it was stopped for a limit
+    /// (WS06-S8). Additive: callers that do not know it ignore it.
+    execution: ExecutionInfo,
+}
+
+/// The `execution` object of a code result: `{sandboxed, limits, limit_hit}`.
+#[derive(Debug, serde::Serialize)]
+struct ExecutionInfo {
+    sandboxed: bool,
+    /// `enforced` | `unlimited`.
+    limits: &'static str,
+    /// Present only when the program was stopped for a resource limit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    limit_hit: Option<executor::LimitHit>,
 }
 
 fn is_zero(count: &usize) -> bool {
@@ -728,6 +742,11 @@ async fn run_in_root(
         files,
         verification: office.reports,
         verification_unchecked: office.unchecked,
+        execution: ExecutionInfo {
+            sandboxed: outcome.sandboxed,
+            limits: outcome.limits,
+            limit_hit: outcome.limit_hit,
+        },
     })
     .map_err(|error| format!("code_interpreter could not encode its result: {error}"))
 }
@@ -1017,6 +1036,11 @@ mod tests {
             ],
             verification: Vec::new(),
             verification_unchecked: 0,
+            execution: ExecutionInfo {
+                sandboxed: true,
+                limits: "enforced",
+                limit_hit: None,
+            },
         };
         assert_eq!(
             serde_json::to_string(&result).expect("serializes"),

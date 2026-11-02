@@ -1380,7 +1380,10 @@ async fn execute_shell(tool_input: &str) -> tool_bridge::ToolExecution {
     match crate::executor::execute_sandboxed(&policy, &input.program, &input.args).await {
         Ok(o) => tool_bridge::ToolExecution {
             output: o.stdout,
-            error: if o.exit_code == 0 {
+            error: if let Some(hit) = o.limit_hit {
+                // WS06-S8: a stopped-for-limit command is a typed, non-retryable failure.
+                Some(hit.describe())
+            } else if o.exit_code == 0 {
                 None
             } else if o.stderr.is_empty() {
                 Some(format!("shell exited with code {}", o.exit_code))
