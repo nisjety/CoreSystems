@@ -36,6 +36,7 @@ pub(crate) mod directory;
 pub(crate) mod dm;
 pub(crate) mod human_posts;
 pub(crate) mod room_admin;
+mod message_search;
 mod pins;
 mod room_artifacts;
 mod run_live;
@@ -930,6 +931,7 @@ fn module_routes() -> Router<AppState> {
         .merge(tool_policy::routes())
         .merge(dm::routes())
         .merge(human_posts::routes())
+        .merge(message_search::routes())
         .merge(pins::routes())
         .merge(room_artifacts::routes())
         .merge(run_live::routes())
@@ -5163,6 +5165,11 @@ async fn space_context(
                     "room_archive": state.space_features.room_archive_api,
                     "room_artifacts": state.space_features.room_artifacts,
                     "room_pins": state.space_features.room_pins,
+                    "message_search": state.space_features.message_search_api
+                        && state.space_features.message_search_ui,
+                    "entry_links": state.space_features.entry_links_ui,
+                    "command_palette": state.space_features.command_palette_ui,
+                    "thread_fork": state.space_features.thread_fork_api,
                     "dm": state.space_features.dm_api,
                     "tool_policy_editor": state.space_features.tool_policy_editor,
                 },

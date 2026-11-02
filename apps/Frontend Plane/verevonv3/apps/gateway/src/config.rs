@@ -270,6 +270,26 @@ pub(crate) struct SpaceFeatureFlags {
     /// `feature_disabled`, the listing omits `pins` and the SPA stops lifting. A rollout control,
     /// never an authorization input: Control's live role (editor or above) decides who may pin.
     pub(crate) room_pins: bool,
+    /// `SPACE_MESSAGE_SEARCH_API` (WS13-S3): `POST /api/v1/spaces/{space_ref}/search` and
+    /// `GET /api/v1/spaces/{space_ref}/entries/{message_id}` (permission-checked message search and
+    /// message addresses, relayed to model-gateway). Off answers 404 `space_search_disabled`.
+    /// Reported as `features.message_search` together with `message_search_ui`. A rollout control,
+    /// never an authorization input: Control's per-request read decision and Session Core's
+    /// audience predicates decide what a caller finds.
+    pub(crate) message_search_api: bool,
+    /// `SPACE_MESSAGE_SEARCH_UI` (WS13-S3 reports it, S5 reads it): shows the in-room search control.
+    /// A rollout control, never an authorization input.
+    pub(crate) message_search_ui: bool,
+    /// `SPACE_ENTRY_LINKS_UI` (WS13-S3 reports it, S4a/S4b read it): `features.entry_links`, the
+    /// message permalink grammar and `/spaces/:spaceId/m/:messageId`. A rollout control only.
+    pub(crate) entry_links_ui: bool,
+    /// `SPACE_COMMAND_PALETTE_UI` (WS13-S3 reports it, S6/S7 read it): `features.command_palette`,
+    /// the Cmd/Ctrl+K palette and platform slash commands. Off keeps the old search dialog. A
+    /// rollout control only.
+    pub(crate) command_palette_ui: bool,
+    /// `SPACE_THREAD_FORK_API` (WS13-S3 reports it; the fork slice S10 is conditional and not built):
+    /// `features.thread_fork`. A rollout control only.
+    pub(crate) thread_fork_api: bool,
     /// `SPACE_SEND_IDEMPOTENCY_API` (WS01-S5): reported to the SPA as `features.send_idempotency`
     /// (the SPA attaches a client send id to an agent-path send so a retry cannot double-post).
     /// Session Core's dedupe is inert without a key. A rollout control, never an authorization input.
@@ -376,6 +396,11 @@ impl SpaceFeatureFlags {
             room_archive_api: space_flag("SPACE_ROOM_ARCHIVE_API"),
             room_artifacts: space_flag("SPACE_ROOM_ARTIFACTS_API"),
             room_pins: space_flag("SPACE_ROOM_PINS_API"),
+            message_search_api: space_flag("SPACE_MESSAGE_SEARCH_API"),
+            message_search_ui: space_flag("SPACE_MESSAGE_SEARCH_UI"),
+            entry_links_ui: space_flag("SPACE_ENTRY_LINKS_UI"),
+            command_palette_ui: space_flag("SPACE_COMMAND_PALETTE_UI"),
+            thread_fork_api: space_flag("SPACE_THREAD_FORK_API"),
             send_idempotency_api: space_flag("SPACE_SEND_IDEMPOTENCY_API"),
             thread_pane_ui: space_flag("SPACE_THREAD_PANE_UI"),
             tool_policy_editor: space_flag("SPACE_TOOL_POLICY_EDITOR_ENABLED"),

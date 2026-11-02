@@ -257,6 +257,14 @@ services:
       # WS13-S8: room pins (Convex-backed, editor or above). Rollout control only; Control's live role
       # decides who may pin and the thread must be readable by the pinner.
       SPACE_ROOM_PINS_API: ${SPACE_ROOM_PINS_API:-true}
+      # WS13-S3: permission-checked message search + entry addresses (relayed to model-gateway, which has
+      # its own SPACE_MESSAGE_SEARCH_API) and the feature report for the search, link, palette and fork UIs.
+      # Rollout controls only; Control's per-request read decision and Session Core's audience predicates decide.
+      SPACE_MESSAGE_SEARCH_API: ${SPACE_MESSAGE_SEARCH_API:-true}
+      SPACE_MESSAGE_SEARCH_UI: ${SPACE_MESSAGE_SEARCH_UI:-true}
+      SPACE_ENTRY_LINKS_UI: ${SPACE_ENTRY_LINKS_UI:-true}
+      SPACE_COMMAND_PALETTE_UI: ${SPACE_COMMAND_PALETTE_UI:-true}
+      SPACE_THREAD_FORK_API: ${SPACE_THREAD_FORK_API:-false}
       # WS05-S6: owner/admin domain verification routes (proxied to org-core, which has its own
       # ORG_DOMAIN_VERIFICATION_ENABLED). Rollout control only; the live owner/admin role decides access.
       ORG_IDENTITY_ADMIN_API: ${ORG_IDENTITY_ADMIN_API:-true}
