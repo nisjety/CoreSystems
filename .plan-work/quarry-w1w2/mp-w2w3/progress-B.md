@@ -99,3 +99,6 @@ Tests: `cargo test -p model-gateway --lib run_trace` -> 3 passed (`run_trace_rou
 Flags: none on the gateway (a read; Session Core answers 501 until its server is deployed and empty pages until `SESSION_CORE_TRACE_CONSUMER` is on).
 Assumed: `next_cursor` passed through whenever Session Core gives one (D's decision a); event JSON uses the golden's field names, including `org_id`/`user_id` (owner-only read); `idempotency_key` omitted (the row does not keep it).
 Not verified: against the real session-core server (lane D's eventlog_grpc.rs was not run together with this route); no live stack.
+### Batch 3 full run
+
+`CARGO_TARGET_DIR=C:/dev/mp-w2w3-target-B CARGO_BUILD_JOBS=2 cargo test -p model-gateway --lib` at e6e49a26f: 2590 passed, 1 failed, 4 ignored. The one failure is the pre-existing baseline `auth::tests::service_inference_bearer_may_hold_a_different_posture_by_audience` (baseline 2570 + 1; +20 new tests in this batch). Commits: MP-3 871c94ab3, WS10.S6 route e6e49a26f.
