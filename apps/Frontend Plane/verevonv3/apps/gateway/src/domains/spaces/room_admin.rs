@@ -279,6 +279,38 @@ async fn reconcile_audience(state: &AppState, org_id: &str, space_ref: &str) -> 
     audience_state(status.as_deref().unwrap_or("unavailable"))
 }
 
+/// WS11-S8: tells the Application attention projection that `invitee` was added to the room.
+///
+/// Called only after Control confirmed a real change (`changed: true`), so a replayed or no-op add
+/// raises nothing. Best effort: the Control write is authoritative and an attention failure never
+/// changes the add's response. The mutation refuses when `SPACE_ATTENTION_INGEST` is off, when the
+/// invitee is not a member of the organization (agents included), and for a self-add. Only ids
+/// travel: no title, name or message text, so nothing here needs a Zero Data Retention refusal.
+async fn record_invite(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    space_ref: &str,
+    invitee: &str,
+    idempotency_key: Option<&str>,
+) {
+    let mut args = json!({
+        "externalAuthId": user.user_id,
+        "externalOrgId": org_id,
+        "spaceRef": space_ref,
+        "inviteeAuthId": invitee,
+    });
+    if let Some(key) = idempotency_key {
+        args["idempotencyKey"] = json!(key);
+    }
+    if convex_gateway_call(state, "mutation", "spaceAttention:recordInviteForGateway", args)
+        .await
+        .is_err()
+    {
+        tracing::warn!(target: "spaces", "space invite attention signal was not recorded");
+    }
+}
+
 fn with_audience_warning(mut body: Value, audience: &str) -> Value {
     if audience == "unconfirmed" {
         body["meta"] = json!({ "warnings": ["room_audience_unconfirmed"] });
@@ -326,6 +358,7 @@ pub(crate) async fn add_member(
     if let Some(role) = role {
         payload.insert("role".to_owned(), json!(role));
     }
+    let idempotency_key = key.clone();
     if let Some(key) = key {
         payload.insert("idempotency_key".to_owned(), json!(key));
     }
@@ -347,6 +380,10 @@ pub(crate) async fn add_member(
     }
     let data = unwrap_data(&control);
     let audience = reconcile_audience(state, &org_id, &space_ref).await;
+    if data.get("changed").and_then(Value::as_bool).unwrap_or(false) {
+        record_invite(state, user, &org_id, &space_ref, &member_id, idempotency_key.as_deref())
+            .await;
+    }
     let out = json!({"data": {
         "member_count": data.get("member_count").and_then(Value::as_u64).unwrap_or(0),
         "changed": data.get("changed").and_then(Value::as_bool).unwrap_or(false),
