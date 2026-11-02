@@ -19,10 +19,19 @@
  *
  * `putForGateway` is compare-and-set on `revision` (see `decideSidebarPut`).
  * The handlers are thin shells around the pure rules in `spaceSidebarRules.ts`.
- * The orphan sweep (WS16-S11) is a later slice and is not defined here.
+ *
+ * # Orphan sweep (WS16-S11)
+ *
+ * A row outlives its owner when the person leaves the organization or the
+ * organization is deleted. Such a row is already inert (`requireGatewayMember`
+ * refuses its owner), so the sweep is housekeeping, not an authority control.
+ * `sweepOrphans` is an internal mutation run by `crons.ts`; it walks the table
+ * in bounded pages and deletes rows whose `(externalOrgId, externalAuthId)` has
+ * no non-deleted membership, using the same test as `requireGatewayMember`.
  */
 import { v } from "convex/values";
-import { mutation, query } from "./_generated/server";
+import { internal } from "./_generated/api";
+import { internalMutation, mutation, query } from "./_generated/server";
 import { assertServiceKey, requireGatewayMember } from "./authz";
 import { spaceSidebarDocValidator } from "./schema/spaces";
 import { decideSidebarPut, validateSidebarDoc } from "./spaceSidebarRules";
@@ -116,5 +125,63 @@ export const putForGateway = mutation({
         return { status: "ok", revision: decision.revision };
       }
     }
+  },
+});
+
+/** Rows examined per sweep page; each page is one transaction. */
+const SWEEP_PAGE_SIZE = 100;
+
+/**
+ * Delete sidebar rows whose owner no longer has a non-deleted membership in the
+ * organization (the organization is missing or deleted, or the member's `users`
+ * row is missing or deleted). Safe to run repeatedly; a live member's row is
+ * never touched. Pages through the table and schedules the next page itself, so
+ * one cron tick covers the whole table without a long transaction.
+ */
+export const sweepOrphans = internalMutation({
+  args: {
+    cursor: v.optional(v.union(v.string(), v.null())),
+  },
+  handler: async (ctx, args): Promise<{ scanned: number; deleted: number; done: boolean }> => {
+    const page = await ctx.db
+      .query("spaceSidebarPreferences")
+      .paginate({ numItems: SWEEP_PAGE_SIZE, cursor: args.cursor ?? null });
+
+    // One organization lookup per distinct org on this page.
+    const orgIdByExternal = new Map<string, any | null>();
+    let deleted = 0;
+    for (const row of page.page) {
+      let organizationId = orgIdByExternal.get(row.externalOrgId);
+      if (organizationId === undefined) {
+        const organizations = await ctx.db
+          .query("organizations")
+          .withIndex("by_external_id", (q: any) => q.eq("externalOrgId", row.externalOrgId))
+          .collect();
+        const organization = organizations.find((candidate: any) => candidate.syncStatus !== "deleted");
+        organizationId = organization ? organization._id : null;
+        orgIdByExternal.set(row.externalOrgId, organizationId);
+      }
+      let isMember = false;
+      if (organizationId !== null) {
+        const members = await ctx.db
+          .query("users")
+          .withIndex("by_external_and_org", (q: any) =>
+            q.eq("externalAuthId", row.externalAuthId).eq("orgId", organizationId),
+          )
+          .collect();
+        isMember = members.some((candidate: any) => candidate.syncStatus !== "deleted");
+      }
+      if (!isMember) {
+        await ctx.db.delete(row._id);
+        deleted += 1;
+      }
+    }
+
+    if (!page.isDone) {
+      await ctx.scheduler.runAfter(0, internal.spaceSidebar.sweepOrphans, {
+        cursor: page.continueCursor,
+      });
+    }
+    return { scanned: page.page.length, deleted, done: page.isDone };
   },
 });

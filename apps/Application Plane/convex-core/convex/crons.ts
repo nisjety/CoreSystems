@@ -28,4 +28,14 @@ crons.interval(
   {},
 );
 
+// WS16-S11: delete sidebar-preference rows whose owner left the organization
+// (or whose organization was deleted). Housekeeping only: such rows are already
+// inert because `requireGatewayMember` refuses their owner.
+crons.interval(
+  "space sidebar orphan sweep",
+  { hours: 6 },
+  internal.spaceSidebar.sweepOrphans,
+  {},
+);
+
 export default crons;
