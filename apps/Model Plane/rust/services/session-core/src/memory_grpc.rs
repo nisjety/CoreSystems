@@ -1595,6 +1595,124 @@ mod tests {
         assert_eq!(open_search.skip_reason, "");
     }
 
+    /// EP-8 S2: a Space room's recall is answered empty, with its reason, and the
+    /// owner's and the org's rows stay out of it.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn space_thread_search_memory_returns_skip_reason_space_scope() {
+        let pool = scratch_pool().await;
+        let org = format!("space-search-{}", mp_ids::new_ulid());
+        seed_reset_memory(&pool, &org, None, "user", "user-a", true, None).await;
+        seed_reset_memory(&pool, &org, None, "org", "", true, None).await;
+        let room = seed_space_thread(&pool, &org, "user-a").await;
+        let service = MemoryGrpc::new(pool.clone(), None);
+
+        let searched = service
+            .search_memory(request(
+                SearchMemoryRequest {
+                    thread_id: room,
+                    ..search_request(&org)
+                },
+                VerifiedIdentity::user_for_test(&org, "user-a"),
+            ))
+            .await
+            .expect("a recall in a Space is answered, empty")
+            .into_inner();
+        assert!(searched.entries.is_empty());
+        assert_eq!(searched.skip_reason, "space_scope");
+    }
+
+    /// EP-8 S2: a write in a Space room is refused with its reason and leaves no row.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn index_memory_refuses_in_space_thread_with_space_scope() {
+        let pool = scratch_pool().await;
+        let org = format!("space-index-{}", mp_ids::new_ulid());
+        seed_reset_memory(&pool, &org, None, "user", "user-a", true, None).await;
+        let room = seed_space_thread(&pool, &org, "user-a").await;
+        let service = MemoryGrpc::new(pool.clone(), None);
+
+        let refused = service
+            .index_memory(request(
+                IndexMemoryRequest {
+                    thread_id: room,
+                    ..index_request(&org)
+                },
+                VerifiedIdentity::user_for_test(&org, "user-a"),
+            ))
+            .await
+            .expect_err("a write in a Space is refused");
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(refused.message(), "memory_not_enabled:space_scope");
+        assert_eq!(
+            policy_rows(&pool, &org).await,
+            1,
+            "the refused write left no row"
+        );
+    }
+
+    /// EP-8 D1 and round A C5: an agent run's thread reads its creator's memory and no
+    /// other user's, which is what a scheduled fire on it reads too.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn agent_run_thread_still_recalls_owner_memory() {
+        let pool = scratch_pool().await;
+        let org = format!("agent-run-recall-{}", mp_ids::new_ulid());
+        seed_reset_memory(&pool, &org, None, "user", "user-a", true, None).await;
+        seed_reset_memory(&pool, &org, None, "user", "user-b", true, None).await;
+        let run = seed_agent_run_thread(&pool, &org, "user-a").await;
+        let service = MemoryGrpc::new(pool.clone(), None);
+
+        let searched = service
+            .search_memory(request(
+                SearchMemoryRequest {
+                    org_id: org.clone(),
+                    thread_id: run,
+                    limit: 10,
+                    ..Default::default()
+                },
+                VerifiedIdentity::user_for_test(&org, "user-a"),
+            ))
+            .await
+            .expect("an agent run's recall is answered")
+            .into_inner();
+        assert_eq!(
+            searched.entries.len(),
+            1,
+            "the owner's own row, and no other user's"
+        );
+        assert_eq!(searched.skip_reason, "", "nothing was left out");
+    }
+
+    /// EP-8 D1: an agent run's thread writes nothing through the memory gate.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn agent_run_index_memory_refused_with_agent_run_scope() {
+        let pool = scratch_pool().await;
+        let org = format!("agent-run-index-{}", mp_ids::new_ulid());
+        seed_reset_memory(&pool, &org, None, "user", "user-a", true, None).await;
+        let run = seed_agent_run_thread(&pool, &org, "user-a").await;
+        let service = MemoryGrpc::new(pool.clone(), None);
+
+        let refused = service
+            .index_memory(request(
+                IndexMemoryRequest {
+                    thread_id: run,
+                    ..index_request(&org)
+                },
+                VerifiedIdentity::user_for_test(&org, "user-a"),
+            ))
+            .await
+            .expect_err("an agent run's write is refused");
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(refused.message(), "memory_not_enabled:agent_run_scope");
+        assert_eq!(
+            policy_rows(&pool, &org).await,
+            1,
+            "the refused write left no row"
+        );
+    }
+
     async fn policy_rows(pool: &PgPool, org: &str) -> i64 {
         sqlx::query_scalar("SELECT count(*) FROM agent_memory WHERE org_id = $1")
             .bind(org)
@@ -1821,6 +1939,40 @@ mod tests {
             .execute(pool)
             .await
             .unwrap();
+        thread
+    }
+
+    /// A Space room's thread, with the Space context the create path stores on the row.
+    async fn seed_space_thread(pool: &PgPool, org: &str, user: &str) -> String {
+        let thread = mp_ids::new_ulid();
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id, space_id, space_decision_ref, \
+             recipient_audience_ref, privacy_policy_ref, resource_authorization_ref, authority_revision, \
+             recipient_audience_revision, recipient_audience_hash, origin) \
+             VALUES ($1, $1, $2, $3, 'space-room', 'decision-1', 'audience-1', 'policy-1', \
+             'resource-1', 1, 1, 'audience-hash-1', 'space')",
+        )
+        .bind(&thread)
+        .bind(org)
+        .bind(user)
+        .execute(pool)
+        .await
+        .unwrap();
+        thread
+    }
+
+    /// An agent run's own thread, origin `agent_run`, no Space.
+    async fn seed_agent_run_thread(pool: &PgPool, org: &str, user: &str) -> String {
+        let thread = mp_ids::new_ulid();
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id, origin) VALUES ($1, $1, $2, $3, 'agent_run')",
+        )
+        .bind(&thread)
+        .bind(org)
+        .bind(user)
+        .execute(pool)
+        .await
+        .unwrap();
         thread
     }
 

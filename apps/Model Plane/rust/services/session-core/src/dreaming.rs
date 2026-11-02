@@ -1309,6 +1309,8 @@ async fn load_pending_messages(
     // not mined, nor is the period it had memory off after it is switched back on.
     let org_filter = crate::org_policy::pending_filter(3, 4, 5);
     let gate = crate::org_policy::pending_gate();
+    // The Space and agent-run exclusion below is the set `memory_control::thread_containment`
+    // names for the gate; a source-scan test there pins the two to each other.
     let rows = sqlx::query_as::<_, (String, String, String, String, String, String, bool)>(
         &format!("SELECT m.id, m.thread_id, m.role, m.content, t.org_id, t.user_id, t.source_scope = 'conversation' \
          FROM messages m \

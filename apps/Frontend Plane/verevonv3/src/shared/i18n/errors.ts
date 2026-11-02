@@ -38,6 +38,7 @@ type ApiErrorLike =
       blockReason?: string | null
       resumable?: boolean
       feature?: string | null
+      details?: Record<string, unknown> | null
     }
   | null
   | undefined
@@ -1021,6 +1022,28 @@ export const BLOCK_REASON_COPY: Record<string, ErrorCopy> = {
   },
 }
 
+/**
+ * Why a memory save was refused in a shared Space or an agent run, keyed by the
+ * `details.reason` of a `memory_not_enabled` refusal. The person's own pause or
+ * off keeps the generic copy: those are theirs to switch back on, these are not.
+ */
+const MEMORY_SCOPE_COPY: ReadonlyMap<string, ErrorCopy> = new Map<string, ErrorCopy>([
+  [
+    'space_scope',
+    {
+      no: 'Personlig minne brukes og lagres ikke i delte Spaces, så dette ble ikke lagret.',
+      en: 'Personal memory is not used or saved in shared Spaces, so this was not saved.',
+    },
+  ],
+  [
+    'agent_run_scope',
+    {
+      no: 'Minne lagres ikke fra en agentkjøring, så dette ble ikke lagret.',
+      en: 'Memory is not saved from an agent run, so this was not saved.',
+    },
+  ],
+])
+
 const BLOCKED_CODES = new Set(['site_blocked', 'browser_site_blocked', 'challenge_detected', 'CHALLENGE_DETECTED'])
 const TAKEOVER_CODES = new Set(['USER_TOOK_OVER', 'browser_human_takeover_active'])
 const SESSION_LOST_CODES = new Set(['browser_process_lost', 'browser_session_reaped', 'session_reaped'])
@@ -1123,6 +1146,9 @@ function describe(
   if (err instanceof LocalizedError) copy = err.copy
   // A refusal that names why the wall is up gets the sentence for that reason.
   if (kind === 'blocked' && typeof like?.blockReason === 'string') copy = BLOCK_REASON_COPY[like.blockReason]
+  // A memory refusal that names a shared Space or an agent run says so.
+  const memoryScope = like?.details?.reason
+  if (code === 'memory_not_enabled' && typeof memoryScope === 'string') copy ??= MEMORY_SCOPE_COPY.get(memoryScope)
   copy ??= code ? ERROR_COPY[code] : undefined
   if (!copy) {
     if (kind === 'unauthenticated') copy = ERROR_COPY.unauthenticated

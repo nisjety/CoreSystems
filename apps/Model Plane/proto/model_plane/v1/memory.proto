@@ -89,7 +89,8 @@ message SearchMemoryResponse {
 
   // Why the caller's own memory was not used for this search, one of the
   // closed MemoryControls.reason tokens: "user_paused", "user_off",
-  // "org_disabled", "policy_unavailable". Empty when it was used. A paused or
+  // "org_disabled", "policy_unavailable", or "space_scope" for a Space thread,
+  // which reads no personal or org rows. Empty when it was used. A paused or
   // off user still receives org-owned entries, so an empty `entries` with this
   // set means "memory is switched off", never "nothing to recall".
   string skip_reason = 4;
@@ -309,7 +310,9 @@ message MemoryControls {
   bool learning_allowed = 6;
 
   // Closed token for what decided the above: "on", "user_paused", "user_off",
-  // "org_disabled", "zdr", "policy_unavailable".
+  // "org_disabled", "zdr", "policy_unavailable". The thread-scoped tokens
+  // "space_scope" and "agent_run_scope" come from a thread's own recall or
+  // write (SearchMemory, IndexMemory), not from this message.
   string reason = 7;
 
   // How many of the user's rows the list hides under this decision (a count,

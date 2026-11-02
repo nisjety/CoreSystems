@@ -2160,9 +2160,14 @@ fn learned_skill_withheld(
         return None;
     }
     Some(match decision.reason {
-        MemoryReason::UserPaused | MemoryReason::UserOff | MemoryReason::ThreadOff => {
-            "memory_state"
-        }
+        // Thread containment is decided per thread and never by the owner's gate asked
+        // here; these arms only keep the match exhaustive, and withhold as a thread set
+        // off does.
+        MemoryReason::UserPaused
+        | MemoryReason::UserOff
+        | MemoryReason::ThreadOff
+        | MemoryReason::SpaceScope
+        | MemoryReason::AgentRunScope => "memory_state",
         MemoryReason::Zdr => "zdr",
         // `On` with learning refused is the organization not having opted in.
         MemoryReason::On | MemoryReason::OrgDisabled | MemoryReason::PolicyUnavailable => {
@@ -3701,7 +3706,8 @@ pub(crate) async fn append_message_in_tx(
     // A paused or off user, or a thread set off, learns nothing from this turn:
     // no candidate is persisted and none reaches the Letta mirror. Asked under the
     // user's row lock, which `persist_candidates` takes again, so the pause cannot
-    // land between the two.
+    // land between the two. A Space room and an agent run's thread are contained by
+    // the same gate (`memory_control::thread_containment`), whatever the user chose.
     let candidates = if candidates.is_empty() {
         candidates
     } else if crate::memory_control::resolve_in_tx_for_thread(

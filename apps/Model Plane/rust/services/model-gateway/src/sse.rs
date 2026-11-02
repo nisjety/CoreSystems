@@ -6645,6 +6645,7 @@ pub(crate) const MEMORY_PREFETCH_OUTCOMES: &[&str] = &[
     "skipped_paused",
     "skipped_off",
     "skipped_org_policy",
+    "skipped_space_scope",
 ];
 
 /// The outcome label for a `SearchMemoryResponse.skip_reason` (the closed
@@ -6655,6 +6656,7 @@ pub(crate) fn skipped_prefetch_outcome(skip_reason: &str) -> Option<&'static str
         "user_paused" => Some("skipped_paused"),
         "user_off" => Some("skipped_off"),
         "org_disabled" | "policy_unavailable" => Some("skipped_org_policy"),
+        "space_scope" => Some("skipped_space_scope"),
         _ => None,
     }
 }
@@ -6680,6 +6682,17 @@ mod memory_prefetch_skip_tests {
         for reason in ["", "zdr", "something_new"] {
             assert_eq!(skipped_prefetch_outcome(reason), None, "{reason:?}");
         }
+    }
+
+    /// A room's recall that session-core left out is counted under its own declared
+    /// label, never as an unlisted one. Checked against the declared set rather than
+    /// by calling the recorder: the source-scan over `fetch_chat_memory_context` counts
+    /// recorder calls, and this test must not add one.
+    #[test]
+    fn space_scope_prefetch_outcome_is_listed() {
+        let outcome = skipped_prefetch_outcome("space_scope").expect("a Space skip has a label");
+        assert_eq!(outcome, "skipped_space_scope");
+        assert!(MEMORY_PREFETCH_OUTCOMES.contains(&outcome));
     }
 }
 
