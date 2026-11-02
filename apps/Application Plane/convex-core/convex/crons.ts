@@ -47,4 +47,13 @@ crons.interval(
   {},
 );
 
+// WS11-S10: delete member status rows past their expiry (reads already treat
+// them as cleared). Deletes only.
+crons.interval(
+  "space member status sweep",
+  { hours: 1 },
+  internal.spaceMemberStatus.sweepExpired,
+  {},
+);
+
 export default crons;

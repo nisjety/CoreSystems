@@ -50,6 +50,8 @@ import type * as spaceDeletionReceiptReconciler from "../spaceDeletionReceiptRec
 import type * as spaceDeletionReceipts from "../spaceDeletionReceipts.js";
 import type * as spaceDmHides from "../spaceDmHides.js";
 import type * as spaceLifecycle from "../spaceLifecycle.js";
+import type * as spaceMemberStatus from "../spaceMemberStatus.js";
+import type * as spaceMemberStatusRules from "../spaceMemberStatusRules.js";
 import type * as spaceMembers from "../spaceMembers.js";
 import type * as spaceMembershipSync from "../spaceMembershipSync.js";
 import type * as spaceParticipants from "../spaceParticipants.js";
@@ -112,6 +114,8 @@ declare const fullApi: ApiFromModules<{
   spaceDeletionReceipts: typeof spaceDeletionReceipts;
   spaceDmHides: typeof spaceDmHides;
   spaceLifecycle: typeof spaceLifecycle;
+  spaceMemberStatus: typeof spaceMemberStatus;
+  spaceMemberStatusRules: typeof spaceMemberStatusRules;
   spaceMembers: typeof spaceMembers;
   spaceMembershipSync: typeof spaceMembershipSync;
   spaceParticipants: typeof spaceParticipants;

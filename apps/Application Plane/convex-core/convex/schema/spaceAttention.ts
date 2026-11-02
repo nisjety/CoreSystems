@@ -131,7 +131,9 @@ export const spaceAttentionTables = {
     expiresAt: v.optional(v.number()),
     updatedAt: v.number(),
   })
-    .index("by_org_and_subject", ["externalOrgId", "externalAuthId"]),
+    .index("by_org_and_subject", ["externalOrgId", "externalAuthId"])
+    // WS11-S10: hourly expiry sweep.
+    .index("by_expiry", ["expiresAt"]),
 
   // Agent availability chips (WS11-S10 reads, WS11-S6 writes).
   spaceAgentActivity: defineTable({
