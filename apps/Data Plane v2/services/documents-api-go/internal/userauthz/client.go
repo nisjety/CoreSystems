@@ -41,13 +41,21 @@ func New(baseURL, serviceToken string) *Client {
 }
 
 func (c *Client) signDelegation(req *http.Request, orgID, userID string) error {
+	return c.signOperation(req, orgID, userID, "authz:visible", "document", "", "resolve explicit document grants", nil)
+}
+
+// signOperation signs the v2 delegation Control verifies (service_delegation.go)
+// for one named operation on one resource. body is the exact request body (nil
+// for none): its digest is part of the signed canonical form. WS14-S4 adds the
+// grant write/list operations on top of the original authz:visible read.
+func (c *Client) signOperation(req *http.Request, orgID, userID, operation, resourceType, resourceID, reason string, body []byte) error {
 	timestamp := c.now().UTC().Format(time.RFC3339)
 	nonceBytes := make([]byte, 18)
 	if _, err := rand.Read(nonceBytes); err != nil {
 		return fmt.Errorf("generate delegation nonce: %w", err)
 	}
 	nonce := base64.RawURLEncoding.EncodeToString(nonceBytes)
-	bodyDigest := sha256.Sum256(nil)
+	bodyDigest := sha256.Sum256(body)
 	digest := base64.RawURLEncoding.EncodeToString(bodyDigest[:])
 	canonical := strings.Join([]string{
 		"v2",
@@ -58,10 +66,10 @@ func (c *Client) signDelegation(req *http.Request, orgID, userID string) error {
 		req.URL.RequestURI(),
 		userID,
 		orgID,
-		"authz:visible",
-		"document",
-		"",
-		"resolve explicit document grants",
+		operation,
+		resourceType,
+		resourceID,
+		reason,
 		"true",
 		nonce,
 		digest,
@@ -73,10 +81,10 @@ func (c *Client) signDelegation(req *http.Request, orgID, userID string) error {
 	req.Header.Set("X-Delegation-Version", "v2")
 	req.Header.Set("X-Delegation-Nonce", nonce)
 	req.Header.Set("X-Delegation-Timestamp", timestamp)
-	req.Header.Set("X-Delegation-Operation", "authz:visible")
-	req.Header.Set("X-Delegation-Resource-Type", "document")
-	req.Header.Set("X-Delegation-Resource-Id", "")
-	req.Header.Set("X-Delegation-Reason", "resolve explicit document grants")
+	req.Header.Set("X-Delegation-Operation", operation)
+	req.Header.Set("X-Delegation-Resource-Type", resourceType)
+	req.Header.Set("X-Delegation-Resource-Id", resourceID)
+	req.Header.Set("X-Delegation-Reason", reason)
 	req.Header.Set("X-Delegation-ZDR", "true")
 	req.Header.Set("X-Delegation-Body-SHA256", digest)
 	req.Header.Set("X-Delegation-Signature", base64.RawURLEncoding.EncodeToString(mac.Sum(nil)))

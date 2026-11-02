@@ -48,6 +48,12 @@ type Config struct {
 	// live room files (count and extracted-text bytes).
 	SpaceFilesMaxPerRoom          int
 	SpaceFilesMaxTextBytesPerRoom int64
+	// ShareWritesEnabled is WS14-S4's DOCUMENTS_SHARE_WRITES rollout switch
+	// (strict literal "true", off by default). On, the document owner can list,
+	// add and remove user shares through documents-api, which proves ownership
+	// and asks Control (owner-asserted mode) to write the grant. Off, the share
+	// routes answer 404. It is never an authorization input.
+	ShareWritesEnabled bool
 }
 
 func Load() (*Config, error) {
@@ -70,6 +76,7 @@ func Load() (*Config, error) {
 		EventSigningPrivateKeyPath:         envOr("EVENT_SIGNING_PRIVATE_KEY_PATH", ""),
 		UserCoreURL:                        envOr("USER_CORE_URL", "http://user-core:8080"),
 		SpaceFilesEnabled:                  strings.TrimSpace(os.Getenv("DOCUMENTS_SPACE_FILES")) == "true",
+		ShareWritesEnabled:                 strings.TrimSpace(os.Getenv("DOCUMENTS_SHARE_WRITES")) == "true",
 		SpaceFilesMaxPerRoom:               envIntOr("SPACE_FILES_MAX_PER_ROOM", 500),
 		SpaceFilesMaxTextBytesPerRoom:      int64(envIntOr("SPACE_FILES_MAX_TEXT_BYTES_PER_ROOM", 209715200)),
 	}

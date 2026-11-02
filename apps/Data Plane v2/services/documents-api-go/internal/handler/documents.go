@@ -26,6 +26,8 @@ type DocumentHandler struct {
 	authz *userauthz.Client
 	// spaceFiles carries the WS14-S3 room-file rules (zero value: off).
 	spaceFiles SpaceFilesConfig
+	// shares carries the WS14-S4 share routes (zero value: off).
+	shares SharesConfig
 }
 
 func NewDocumentHandler(r *repo.DocumentRepo, authz *userauthz.Client) *DocumentHandler {

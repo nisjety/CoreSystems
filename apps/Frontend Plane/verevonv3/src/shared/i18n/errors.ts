@@ -1018,6 +1018,13 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
 
   // WS03 policy and denials
 
+  // WS14 document sharing (documents-api share routes)
+  shares_disabled: { no: 'Deling er ikke slått på ennå.', en: 'Sharing is not turned on yet.' },
+  sharing_unavailable: { no: 'Deling er midlertidig utilgjengelig. Ingenting er endret. Prøv igjen om litt.', en: 'Sharing is temporarily unavailable. Nothing was changed. Try again shortly.' },
+  role_not_supported: { no: 'Dokumenter kan bare deles for visning.', en: 'Documents can only be shared for viewing.' },
+  self_share: { no: 'Du eier dokumentet allerede.', en: 'You already own this document.' },
+  share_limit_reached: { no: 'Dokumentet er delt med så mange som er tillatt. Fjern noen først.', en: 'This document is already shared with as many people as allowed. Remove someone first.' },
+
   // WS04 membership and room administration
   directory_unavailable: { no: 'Personsøket er utilgjengelig akkurat nå. Prøv igjen om litt.', en: 'People search is unavailable right now. Try again shortly.' },
   idempotency_key_reused: { no: 'Denne forespørselen er allerede brukt til noe annet. Last inn på nytt og prøv igjen.', en: 'This request was already used for something else. Reload and try again.' },

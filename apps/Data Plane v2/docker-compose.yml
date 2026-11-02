@@ -1420,6 +1420,10 @@ services:
       # override turns it on). A rollout switch only, never an authorization
       # input. The decision key vars let the Space import verifier trust Control.
       DOCUMENTS_SPACE_FILES: ${DOCUMENTS_SPACE_FILES:-false}
+      # WS14-S4: owner share routes (list/add/remove user shares). A rollout
+      # switch only, never an authorization input. Enable only after the
+      # gateway share actions are re-pointed, then CONTROL_OWNER_ASSERTED_GRANTS.
+      DOCUMENTS_SHARE_WRITES: ${DOCUMENTS_SHARE_WRITES:-false}
       SPACE_FILES_MAX_PER_ROOM: ${SPACE_FILES_MAX_PER_ROOM:-500}
       SPACE_FILES_MAX_TEXT_BYTES_PER_ROOM: ${SPACE_FILES_MAX_TEXT_BYTES_PER_ROOM:-209715200}
       CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON: ${CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON:-}

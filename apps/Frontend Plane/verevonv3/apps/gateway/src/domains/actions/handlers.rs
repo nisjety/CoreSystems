@@ -230,10 +230,10 @@ pub(super) async fn execute_action(
             dispatch_navbar_submit_support_request(&state, &user, &body.input).await
         }
         "ownership.share_document" => {
-            dispatch_ownership_share_document(&state, &user, &body.input).await
+            dispatch_ownership_share_document(&state, &user, &headers, &body.input).await
         }
         "ownership.revoke_document_share" => {
-            dispatch_ownership_revoke_document_share(&state, &user, &body.input).await
+            dispatch_ownership_revoke_document_share(&state, &user, &headers, &body.input).await
         }
         "memory.delete" => dispatch_memory_delete(&state, &user, &headers, &body.input).await,
         "memory.set_state" => {

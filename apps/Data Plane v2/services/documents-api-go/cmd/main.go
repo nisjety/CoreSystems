@@ -178,6 +178,16 @@ func main() {
 		log.Warn().Msg("DOCUMENTS_SPACE_FILES is on but no user-core service credential is configured; room files will be refused (fail closed)")
 	}
 	docHandler.WithSpaceFiles(spaceFilesConfig)
+	// WS14-S4 document sharing (DOCUMENTS_SHARE_WRITES, off by default). The
+	// same user-core client signs the owner-asserted grant calls.
+	sharesConfig := handler.SharesConfig{Enabled: cfg.ShareWritesEnabled}
+	if authzClient != nil {
+		sharesConfig.Grants = authzClient
+	}
+	if cfg.ShareWritesEnabled && sharesConfig.Grants == nil {
+		log.Warn().Msg("DOCUMENTS_SHARE_WRITES is on but no user-core service credential is configured; share routes will answer unavailable (fail closed)")
+	}
+	docHandler.WithShares(sharesConfig)
 	sourceObjectHandler := handler.NewSourceObjectHandler(sourceObjectRepo)
 
 	// §16.2.6 — start outbox publisher loop. Drains `documents_outbox`
@@ -277,6 +287,11 @@ func main() {
 		read := r.With(authctx.RequireServiceScope("documents:read"))
 		write := r.With(authctx.RequireServiceScope("documents:write"))
 		read.Get("/", docHandler.List)
+		// WS14-S4 share routes. The static "shared-with-me" wins over {documentID}.
+		read.Get("/shared-with-me", docHandler.SharedWithMe)
+		read.Get("/{documentID}/shares", docHandler.ListShares)
+		write.Post("/{documentID}/shares", docHandler.CreateShare)
+		write.Delete("/{documentID}/shares/{subjectID}", docHandler.DeleteShare)
 		write.Post("/", docHandler.Create)
 		write.Post("/bulk", docHandler.BulkIngest)
 		read.Get("/{documentID}", docHandler.Get)
