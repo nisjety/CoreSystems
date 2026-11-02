@@ -1559,6 +1559,9 @@ services:
       QUARRY_BROWSER_AGENT_LLM_ORGS: ${QUARRY_BROWSER_AGENT_LLM_ORGS:-}
       QUARRY_BROWSER_AGENT_WIDENED_ACTIONS: ${QUARRY_BROWSER_AGENT_WIDENED_ACTIONS:-0}
       QUARRY_BROWSER_AGENT_DEFAULT_ON_ACK: ${QUARRY_BROWSER_AGENT_DEFAULT_ON_ACK:-}
+      # WS12.S4b, OFF by default: refuse a browser observation that carries no Quarry redaction
+      # stamp. Turn on only once Quarry runs QUARRY_EDGE__REDACTION_MODE=enforce; off logs once per run.
+      EXECUTION_CORE_REQUIRE_QUARRY_REDACTION_STAMP: ${EXECUTION_CORE_REQUIRE_QUARRY_REDACTION_STAMP:-0}
       # Data Plane v2 retrieval — backs the real knowledge_search agentic tool
       # (RAG over the org's ingested docs). DATAPLANE_INTERNAL_KEY is sent as
       # the x-api-key credential.

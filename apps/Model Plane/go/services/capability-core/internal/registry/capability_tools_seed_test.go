@@ -28,7 +28,8 @@ func readSeedRows(t *testing.T) []seedRow {
 		readMigration(t, "0020_result_query_capability.up.sql") +
 		readMigration(t, "0024_provider_read_tool.up.sql") +
 		readMigration(t, "0026_knowledge_list_documents_tool.up.sql") +
-		readMigration(t, "0031_web_crawl_tool_capabilities.up.sql")
+		readMigration(t, "0031_web_crawl_tool_capabilities.up.sql") +
+		readMigration(t, "0034_browser_console_tool.up.sql")
 	var rows []seedRow
 	for _, m := range seedRowPattern.FindAllStringSubmatch(sql, -1) {
 		refinement := strings.Trim(m[5], "'")
