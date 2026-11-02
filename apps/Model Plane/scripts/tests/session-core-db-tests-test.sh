@@ -82,7 +82,7 @@ done
 unbounded="$(grep -nE '(^|[^[:alnum:]_-])docker [a-z]' "$HARNESS" | grep -v 'timeout' | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
 [[ -z "$unbounded" ]] || fail "a docker call is not bounded by timeout: $unbounded"
 
-grep -qF '999' "$HARNESS" || fail 'the harness must record the last full run count, 999 passed'
+grep -qF '1031' "$HARNESS" || fail 'the harness must record the last full run count, 1031 passed'
 
 # The env scrub: run the block the harness marks, under an environment that carries
 # every name the block must clear, and check what survives. Nothing here starts Docker.
