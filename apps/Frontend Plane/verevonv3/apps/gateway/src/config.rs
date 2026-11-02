@@ -346,6 +346,24 @@ pub(crate) struct SpaceFeatureFlags {
     /// legacy panel". A rollout control, never an authorization input: a Zero Data Retention org
     /// is answered `zdr_local` on `GET` and refused on `PUT` whatever this says.
     pub(crate) sidebar: bool,
+    /// `SPACE_COMPOSER_DRAFTS_UI` (WS15-S7, reported as `features.composer_drafts`): the room
+    /// composer keeps per-room, per-thread drafts. A rollout control, never an authorization input.
+    pub(crate) composer_drafts_ui: bool,
+    /// `SPACE_COMPOSER_MARKDOWN_UI` (WS15-S7, `features.composer_markdown`): the markdown toolbar,
+    /// preview and counter in the room composer. Never an authorization input.
+    pub(crate) composer_markdown_ui: bool,
+    /// `SPACE_HUMAN_MARKDOWN_UI` (WS15-S7, `features.human_markdown`): people's posts render as
+    /// markdown. Never an authorization input.
+    pub(crate) human_markdown_ui: bool,
+    /// `SPACE_TIMELINE_ANCHOR_UI` (WS15-S7, `features.timeline_anchor`): the anchored single-root
+    /// room timeline. Never an authorization input.
+    pub(crate) timeline_anchor_ui: bool,
+    /// `SPACE_TIMELINE_API` (WS15-S7): `GET /api/v1/spaces/{space_ref}/timeline` and the tail window
+    /// parameters of the thread transcript route, reported as `features.timeline_windows`. Off
+    /// answers 404 `space_timeline_disabled` (the SPA then reads the legacy listing) and leaves the
+    /// transcript whole. A rollout control, never an authorization input: Control's membership and
+    /// per-page read decision and Session Core's audience ceiling decide what a window holds.
+    pub(crate) timeline_api: bool,
     /// `SCIM_EDGE_ENABLED` (WS05-S8): the public, session-less SCIM edge `/api/v1/scim/v2/*`
     /// that forwards an identity provider's bearer token to org-core. Off (the default, in
     /// development too) answers the same 501 SCIM error as before the feature existed. A rollout
@@ -426,6 +444,11 @@ impl SpaceFeatureFlags {
             run_manager_stop: space_flag("SPACE_RUN_MANAGER_STOP"),
             run_owner_steer: space_flag("SPACE_RUN_OWNER_STEER"),
             sidebar: space_flag("SPACE_SIDEBAR_API"),
+            composer_drafts_ui: space_flag("SPACE_COMPOSER_DRAFTS_UI"),
+            composer_markdown_ui: space_flag("SPACE_COMPOSER_MARKDOWN_UI"),
+            human_markdown_ui: space_flag("SPACE_HUMAN_MARKDOWN_UI"),
+            timeline_anchor_ui: space_flag("SPACE_TIMELINE_ANCHOR_UI"),
+            timeline_api: space_flag("SPACE_TIMELINE_API"),
             scim_edge: ScimEdgeConfig::from_env(),
         }
     }

@@ -259,6 +259,16 @@ services:
       SPACE_ROOM_PINS_API: ${SPACE_ROOM_PINS_API:-true}
       # WS14-S7: room files routes and the per-turn attachment / Files tab reports. Rollout controls only;
       # Control's decisions, Ingestion and Data decide. Off until the upstream WS14 flags are on.
+      # WS15-S7: the windowed room timeline (GET .../timeline, tail window on the transcript route; 404
+      # space_timeline_disabled when off, which the SPA reads as "use the legacy listing"). Rollout
+      # control only. Off by default to match model-gateway's SPACE_TIMELINE_API / session-core's
+      # SPACE_TIMELINE_CORE; with this on and those off the route falls back to the legacy listing.
+      # The four UI flags only change what the SPA offers (composer drafts and markdown, anchored timeline).
+      SPACE_TIMELINE_API: ${SPACE_TIMELINE_API:-false}
+      SPACE_TIMELINE_ANCHOR_UI: ${SPACE_TIMELINE_ANCHOR_UI:-true}
+      SPACE_COMPOSER_DRAFTS_UI: ${SPACE_COMPOSER_DRAFTS_UI:-true}
+      SPACE_COMPOSER_MARKDOWN_UI: ${SPACE_COMPOSER_MARKDOWN_UI:-true}
+      SPACE_HUMAN_MARKDOWN_UI: ${SPACE_HUMAN_MARKDOWN_UI:-true}
       SPACE_ROOM_FILES_API: ${SPACE_ROOM_FILES_API:-false}
       SPACE_ROOM_FILES_UI: ${SPACE_ROOM_FILES_UI:-false}
       SPACE_TURN_ATTACHMENTS_UI: ${SPACE_TURN_ATTACHMENTS_UI:-false}

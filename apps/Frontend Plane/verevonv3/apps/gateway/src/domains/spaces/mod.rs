@@ -38,6 +38,7 @@ pub(crate) mod human_posts;
 pub(crate) mod room_admin;
 pub(crate) mod files;
 mod message_search;
+mod timeline;
 mod pins;
 mod room_artifacts;
 mod run_live;
@@ -936,6 +937,7 @@ fn module_routes() -> Router<AppState> {
         .merge(message_search::routes())
         .merge(pins::routes())
         .merge(room_artifacts::routes())
+        .merge(timeline::routes())
         .merge(run_live::routes())
         .merge(sidebar::routes())
         .merge(stream::routes())
@@ -2918,7 +2920,14 @@ async fn space_thread_transcript(
     Extension(user): Extension<AuthenticatedUser>,
     headers: axum::http::HeaderMap,
     Path((space_ref, thread_id)): Path<(String, String)>,
+    Query(window_query): Query<timeline::TranscriptWindowQuery>,
 ) -> (StatusCode, Json<Value>) {
+    // WS15-S7 (R2): the tail window parameters, honoured only with `space_timeline_api` on.
+    let window =
+        match timeline::parse_transcript_window(state.space_features.timeline_api, &window_query) {
+            Ok(window) => window,
+            Err(response) => return response,
+        };
     let org_id = crate::upstream::authorized_org_id(&state, &user).await;
     let space_ref = space_ref.trim();
     let thread_id = thread_id.trim();
@@ -2995,7 +3004,7 @@ async fn space_thread_transcript(
             Ok(token) => token,
             Err(reason) => return crate::domains::chat::shared::delegated_auth_unavailable(reason),
         };
-    let url = format!(
+    let mut url = format!(
         "{}/v1/threads/{}/messages?space_id={}&space_read_decision_ref={}&space_read_decision_token={}",
         state.model_gateway_url,
         urlencoding::encode(thread_id),
@@ -3003,6 +3012,9 @@ async fn space_thread_transcript(
         urlencoding::encode(&decision_ref),
         urlencoding::encode(&token),
     );
+    if let Some(window) = &window {
+        url.push_str(&window.query_suffix());
+    }
     let model_token = crate::domains::chat::shared::model_token(&state, &user, &headers).await;
     let (status, Json(payload)) = crate::domains::chat::shared::proxy_model_json_with_session(
         &state,
@@ -3030,16 +3042,16 @@ async fn space_thread_transcript(
             )),
         );
     }
+    let mut transcript = json!({
+        "threadId": thread_id,
+        "turns": turns,
+    });
+    if window.is_some() {
+        transcript["window"] = timeline::transcript_window_json(&payload);
+    }
     (
         StatusCode::OK,
-        Json(json!({
-            "data": {
-                "transcript": {
-                    "threadId": thread_id,
-                    "turns": turns,
-                }
-            }
-        })),
+        Json(json!({ "data": { "transcript": transcript } })),
     )
 }
 
@@ -5175,10 +5187,20 @@ async fn space_context(
                     "dm": state.space_features.dm_api,
                     "tool_policy_editor": state.space_features.tool_policy_editor,
                     "room_files": files::features_json(&state),
+                    // WS15-S7 (R5): the timeline and composer rollout controls. `system_entries` and
+                    // `link_previews` stay false until WS15-S11 / WS15-S10 add their flags.
+                    "composer_drafts": state.space_features.composer_drafts_ui,
+                    "composer_markdown": state.space_features.composer_markdown_ui,
+                    "human_markdown": state.space_features.human_markdown_ui,
+                    "timeline_anchor": state.space_features.timeline_anchor_ui,
+                    "timeline_windows": state.space_features.timeline_api,
+                    "system_entries": false,
+                    "link_previews": false,
                 },
                 "limits": {
                     "post_max_chars": human_posts::POST_MAX_CHARS,
                     "room_files": files::limits_json(),
+                    "tail_window_turns": timeline::TAIL_WINDOW_TURNS,
                 },
             }}),
         ),
