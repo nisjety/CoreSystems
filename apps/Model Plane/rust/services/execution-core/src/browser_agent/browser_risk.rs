@@ -79,6 +79,60 @@ impl RiskCategory {
     }
 }
 
+/// The longest a private-range octet string can be, for the IPv4 check.
+const IPV4_OCTETS: usize = 4;
+
+/// E3.2-a: the closed word for the kind of host a gated browser action targets,
+/// stamped on the approval as `metadata.host_class` so the authz audit says more
+/// than `none`. One of `none` (no URL), `general`, `sensitive` (a sign-in or
+/// payment step on a public host), `internal` (a local, private or single-label
+/// host) or `unknown` (a URL that names no readable host). The word is a class,
+/// never the host.
+#[must_use]
+pub fn host_class(category: RiskCategory, url: &str) -> &'static str {
+    let url = url.trim();
+    if url.is_empty() {
+        return "none";
+    }
+    let Some(host) = extract_host(url) else {
+        return "unknown";
+    };
+    if is_internal_host(&host) {
+        return "internal";
+    }
+    match category {
+        RiskCategory::Login | RiskCategory::Checkout => "sensitive",
+        _ => "general",
+    }
+}
+
+fn is_internal_host(host: &str) -> bool {
+    // A bracketed IP literal is not a public name.
+    if host.starts_with('[') {
+        return true;
+    }
+    if host == "localhost"
+        || [".localhost", ".local", ".internal", ".lan", ".home.arpa"]
+            .iter()
+            .any(|suffix| host.ends_with(suffix))
+    {
+        return true;
+    }
+    let octets: Vec<&str> = host.split('.').collect();
+    if octets.len() == IPV4_OCTETS && octets.iter().all(|part| part.parse::<u8>().is_ok()) {
+        let n: Vec<u8> = octets.iter().filter_map(|part| part.parse().ok()).collect();
+        return n[0] == 0
+            || n[0] == 10
+            || n[0] == 127
+            || (n[0] == 169 && n[1] == 254)
+            || (n[0] == 172 && (16..=31).contains(&n[1]))
+            || (n[0] == 192 && n[1] == 168)
+            || (n[0] == 100 && (64..=127).contains(&n[1]));
+    }
+    // A single label ("intranet", "wiki") is a name only a private network resolves.
+    !host.contains('.')
+}
+
 /// Detail describing WHICH browser action (or run-level condition) triggered
 /// the Phase 5 HITL approval gate, and WHY — carried onto the
 /// `BrowserActionApprovalRequired`/`BrowserActionDecided` orchestration
@@ -564,6 +618,48 @@ pub(crate) fn approval_timeout_seconds() -> u32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn host_class_is_a_closed_word_and_never_the_host() {
+        use RiskCategory::{CrossDomainNavigation, Login, Checkout, PostingForm};
+        // No URL.
+        assert_eq!(host_class(Login, ""), "none");
+        assert_eq!(host_class(Login, "   "), "none");
+        // A public host: sensitive for a sign-in or payment step, general otherwise.
+        assert_eq!(host_class(Login, "https://bank.example.com/login"), "sensitive");
+        assert_eq!(host_class(Checkout, "https://shop.example.com/pay?x=1"), "sensitive");
+        assert_eq!(host_class(PostingForm, "https://forum.example.com/new"), "general");
+        assert_eq!(host_class(CrossDomainNavigation, "https://other.example.org/"), "general");
+        // A local or private host is internal whatever the step.
+        for url in [
+            "http://localhost:3000/login",
+            "https://app.localhost/x",
+            "http://127.0.0.1/admin",
+            "http://10.0.0.7/x",
+            "http://172.16.4.1/",
+            "http://172.31.255.1/",
+            "http://192.168.1.10/login",
+            "http://169.254.169.254/latest/meta-data",
+            "http://100.64.0.1/",
+            "https://wiki/",
+            "https://printer.local/",
+            "https://git.corp.internal/",
+            "http://[::1]:8080/",
+        ] {
+            assert_eq!(host_class(Login, url), "internal", "{url}");
+        }
+        // Outside the private ranges stays public.
+        assert_eq!(host_class(Login, "http://172.32.0.1/"), "sensitive");
+        assert_eq!(host_class(PostingForm, "http://8.8.8.8/"), "general");
+        // A URL with no readable host.
+        assert_eq!(host_class(Login, "not a url"), "unknown");
+        assert_eq!(host_class(Login, "file:///etc/passwd"), "unknown");
+        // Whatever the input, the answer is one of the five words.
+        for url in ["", "x", "https://a.b/", "http://localhost", "ftp://h/"] {
+            assert!(["none", "general", "sensitive", "internal", "unknown"]
+                .contains(&host_class(Checkout, url)), "{url}");
+        }
+    }
+
     use super::*;
     use crate::browser_agent::{BrowserSnapshotTarget, BrowserTargetRef, ObservationStatus};
 

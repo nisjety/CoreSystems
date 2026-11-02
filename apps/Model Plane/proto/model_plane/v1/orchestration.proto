@@ -476,6 +476,13 @@ message ApprovalCause {
 
   // Run-salted blake3 digest of the exact (tool, arguments) call.
   string call_digest = 9;
+
+  // Closed word for the kind of host a browser gate targets: `none`, `general`,
+  // `sensitive`, `internal` or `unknown` (E3.2-a). Never a host name. Write-only: a
+  // creator states it, session-core stores it as the approval's top-level
+  // `metadata.host_class` (where the authz_decision audit reads it, dropped for a
+  // zero-retention caller), and a read-back cause leaves it empty.
+  string host_class = 10;
 }
 
 // A durable todo record.

@@ -311,6 +311,8 @@ pub fn from_metadata(metadata: &Value) -> Option<ApprovalCause> {
             .unwrap_or(false),
         action_key: text("action_key"),
         call_digest: text("call_digest"),
+        // Write-only (see the proto): a stored cause never carries it.
+        host_class: String::new(),
     };
     Some(normalized(cause).0)
 }

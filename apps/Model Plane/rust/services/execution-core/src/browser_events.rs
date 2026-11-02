@@ -30,6 +30,15 @@ use crate::state::{RunStatus, StateStore};
 /// The tool whose actions the in-loop gate holds, named on the approval's cause.
 const BROWSER_AGENT_TOOL: &str = "browser_agent";
 
+/// E3.2-a: longest decider name published on the decision event.
+const MAX_DECIDED_BY_CHARS: usize = 128;
+/// E3.2-a: the decider label when the gate failed closed before any person could
+/// decide (no durable approval could be made).
+const DECIDED_BY_FAIL_CLOSED: &str = "system:fail-closed";
+/// The labels the cancel and timeout paths already send to `DecideApproval`.
+const DECIDED_BY_USER_CANCELLED: &str = "system:user-cancelled";
+const DECIDED_BY_TIMEOUT: &str = "system:approval-timeout";
+
 /// E3.2-c: the internal decision word for a person's rejection that carries
 /// instructions. Never published: the timeline sees `denied`.
 const DECISION_REDIRECTED: &str = "redirected";
@@ -155,6 +164,7 @@ impl OrchestrationEventSink {
         approval_id: &str,
         decision: &str,
         reason: &str,
+        decided_by: &str,
     ) -> ApprovalOutcome {
         // E3.2-c: a redirect is a rejection on the timeline ("denied"); only the
         // outcome the loop gets differs.
@@ -172,12 +182,15 @@ impl OrchestrationEventSink {
                     action_id: detail.action_id.clone(),
                     approval_id: approval_id.to_owned(),
                     decision: published.to_owned(),
-                    // The decider's identity lives on the durable Approval
-                    // record itself (`decided_by`, set by whoever called
-                    // `DecideApproval`); this sink has no independent
-                    // knowledge of it beyond what `GetApproval` last returned,
-                    // which callers can fetch separately if needed.
-                    decided_by: String::new(),
+                    // E3.2-a: the decider as the durable Approval record names it
+                    // (`GetApproval.decided_by`, set by whoever called
+                    // `DecideApproval`), or the `system:*` label of the path that
+                    // ended the wait here. A ZDR run names nobody on the event.
+                    decided_by: if config.zdr {
+                        String::new()
+                    } else {
+                        decided_by.chars().take(MAX_DECIDED_BY_CHARS).collect()
+                    },
                 },
             ),
         )
@@ -416,6 +429,17 @@ impl BrowserEventSink for OrchestrationEventSink {
                 tool: BROWSER_AGENT_TOOL.to_owned(),
                 action_key: BROWSER_AGENT_TOOL.to_owned(),
                 risk_category: detail.risk_category.as_str().to_owned(),
+                // E3.2-a: a closed class word for the host, never the host. A ZDR
+                // run states none (session-core stores none for it either).
+                host_class: if config.zdr {
+                    String::new()
+                } else {
+                    crate::browser_agent::host_class(
+                        detail.risk_category,
+                        &detail.url,
+                    )
+                    .to_owned()
+                },
                 ..approval_cause::for_code(CauseCode::BrowserActionRisk)
             }),
         }) {
@@ -435,6 +459,7 @@ impl BrowserEventSink for OrchestrationEventSink {
                             "",
                             "denied",
                             "approval creation returned no durable record",
+                            DECIDED_BY_FAIL_CLOSED,
                         )
                         .await;
                 }
@@ -448,6 +473,7 @@ impl BrowserEventSink for OrchestrationEventSink {
                         "",
                         "denied",
                         &format!("approval creation failed: {error}"),
+                        DECIDED_BY_FAIL_CLOSED,
                     )
                     .await;
             }
@@ -482,6 +508,7 @@ impl BrowserEventSink for OrchestrationEventSink {
                         &approval_id,
                         "denied",
                         "run cancelled by user while awaiting approval",
+                        DECIDED_BY_USER_CANCELLED,
                     )
                     .await;
             }
@@ -503,7 +530,14 @@ impl BrowserEventSink for OrchestrationEventSink {
                         match pb::ApprovalState::try_from(approval.state) {
                             Ok(pb::ApprovalState::Granted) => {
                                 return self
-                                    .decided(config, detail, &approval_id, "granted", "")
+                                    .decided(
+                                        config,
+                                        detail,
+                                        &approval_id,
+                                        "granted",
+                                        "",
+                                        &approval.decided_by,
+                                    )
                                     .await;
                             }
                             Ok(pb::ApprovalState::Denied) => {
@@ -519,6 +553,7 @@ impl BrowserEventSink for OrchestrationEventSink {
                                             &approval_id,
                                             DECISION_REDIRECTED,
                                             &text,
+                                            &approval.decided_by,
                                         )
                                         .await;
                                 }
@@ -529,6 +564,7 @@ impl BrowserEventSink for OrchestrationEventSink {
                                         &approval_id,
                                         "denied",
                                         &approval.decision_reason,
+                                        &approval.decided_by,
                                     )
                                     .await;
                             }
@@ -540,6 +576,7 @@ impl BrowserEventSink for OrchestrationEventSink {
                                         &approval_id,
                                         "timed_out",
                                         &approval.decision_reason,
+                                        &approval.decided_by,
                                     )
                                     .await;
                             }
@@ -580,6 +617,7 @@ impl BrowserEventSink for OrchestrationEventSink {
                         &approval_id,
                         "timed_out",
                         "approval wait budget exceeded",
+                        DECIDED_BY_TIMEOUT,
                     )
                     .await;
             }
@@ -1119,6 +1157,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_browser_gate_states_a_closed_host_class_and_none_under_zdr() {
+        let created = Arc::default();
+        let channel = spawn_mock(NeverResolvingOrchestration {
+            created: Arc::clone(&created),
+            ..Default::default()
+        })
+        .await;
+        let sink = OrchestrationEventSink::new(channel, None).with_verified_bearer("test-bearer");
+
+        let _ = sink.require_approval(&test_config(), &test_detail()).await;
+        let mut zdr = test_config();
+        zdr.zdr = true;
+        zdr.run_id = "run_zdr".to_owned();
+        let _ = sink.require_approval(&zdr, &test_detail()).await;
+
+        let sent = created.lock().unwrap();
+        assert_eq!(sent.len(), 2);
+        let class = |index: usize| sent[index].cause.as_ref().unwrap().host_class.clone();
+        // A sign-in step on a public host; the word, never the host.
+        assert_eq!(class(0), "sensitive");
+        assert!(!format!("{:?}", sent[0].cause).contains("example.com"));
+        assert_eq!(class(1), "", "a ZDR run states no class");
+    }
+
+    #[tokio::test]
+    async fn the_decision_event_names_the_decider_the_record_names_and_nobody_under_zdr() {
+        let recorded = Arc::default();
+        let channel = spawn_mock(NeverResolvingOrchestration {
+            recorded: Arc::clone(&recorded),
+            ..Default::default()
+        })
+        .await;
+        let sink = OrchestrationEventSink::new(channel, None).with_verified_bearer("test-bearer");
+        let detail = test_detail();
+        let mut zdr = test_config();
+        zdr.zdr = true;
+
+        let _ = sink
+            .decided(&test_config(), &detail, "appr_1", "granted", "", "user_42")
+            .await;
+        let _ = sink
+            .decided(&test_config(), &detail, "appr_2", "timed_out", "x", "system:approval-timeout")
+            .await;
+        let _ = sink.decided(&zdr, &detail, "appr_3", "granted", "", "user_42").await;
+
+        let sent = recorded.lock().unwrap();
+        let deciders: Vec<String> = sent
+            .iter()
+            .filter_map(|request| request.event.as_ref()?.event.clone())
+            .filter_map(|event| match event {
+                orchestration_event::Event::BrowserActionDecided(decided) => Some(decided.decided_by),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            deciders,
+            vec!["user_42".to_owned(), "system:approval-timeout".to_owned(), String::new()]
+        );
+    }
+
+    #[tokio::test]
     async fn takeover_pause_resume_and_shared_jar_carry_reasons_and_ids_only() {
         let recorded = Arc::default();
         let channel = spawn_mock(NeverResolvingOrchestration {
@@ -1227,7 +1326,7 @@ mod tests {
             reason: "checkout".to_owned(),
         };
         let outcome = sink
-            .decided(&config, &detail, "appr_1", DECISION_REDIRECTED, "use guest")
+            .decided(&config, &detail, "appr_1", DECISION_REDIRECTED, "use guest", "user_1")
             .await;
         assert_eq!(outcome, ApprovalOutcome::Redirect("use guest".to_owned()));
         let sent = recorded.lock().unwrap();
@@ -1242,7 +1341,7 @@ mod tests {
         assert_eq!(decisions, vec!["denied".to_owned()]);
         drop(sent);
         assert_eq!(
-            sink.decided(&config, &detail, "appr_1", "denied", "no").await,
+            sink.decided(&config, &detail, "appr_1", "denied", "no", "user_1").await,
             ApprovalOutcome::Denied("no".to_owned())
         );
     }

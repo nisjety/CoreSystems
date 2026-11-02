@@ -26,7 +26,7 @@ use failure::{ActionFailure, BrowserFailureKind, FailureBudget, FailureVerdict, 
 
 pub(crate) use browser_risk::{approval_poll_interval, approval_timeout_seconds};
 use browser_risk::{classify_action_risk_with_focus, risk_reason};
-pub use browser_risk::{ApprovalOutcome, RiskCategory, RiskyActionDetail};
+pub use browser_risk::{host_class, ApprovalOutcome, RiskCategory, RiskyActionDetail};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanStatus {

@@ -1243,7 +1243,13 @@ type ApprovalCause struct {
 	// Tool plus operation, never argument values: the key a standing grant matches.
 	ActionKey string `protobuf:"bytes,8,opt,name=action_key,json=actionKey,proto3" json:"action_key,omitempty"`
 	// Run-salted blake3 digest of the exact (tool, arguments) call.
-	CallDigest    string `protobuf:"bytes,9,opt,name=call_digest,json=callDigest,proto3" json:"call_digest,omitempty"`
+	CallDigest string `protobuf:"bytes,9,opt,name=call_digest,json=callDigest,proto3" json:"call_digest,omitempty"`
+	// Closed word for the kind of host a browser gate targets: `none`, `general`,
+	// `sensitive`, `internal` or `unknown` (E3.2-a). Never a host name. Write-only: a
+	// creator states it, session-core stores it as the approval's top-level
+	// `metadata.host_class` (where the authz_decision audit reads it, dropped for a
+	// zero-retention caller), and a read-back cause leaves it empty.
+	HostClass     string `protobuf:"bytes,10,opt,name=host_class,json=hostClass,proto3" json:"host_class,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1337,6 +1343,13 @@ func (x *ApprovalCause) GetActionKey() string {
 func (x *ApprovalCause) GetCallDigest() string {
 	if x != nil {
 		return x.CallDigest
+	}
+	return ""
+}
+
+func (x *ApprovalCause) GetHostClass() string {
+	if x != nil {
+		return x.HostClass
 	}
 	return ""
 }
@@ -7669,7 +7682,7 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\vconsumed_at\x18\x0e \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"consumedAt\x12+\n" +
 	"\x11continuation_mode\x18\x0f \x01(\tR\x10continuationMode\x123\n" +
-	"\x05cause\x18\x10 \x01(\v2\x1d.model_plane.v1.ApprovalCauseR\x05cause\"\xa7\x02\n" +
+	"\x05cause\x18\x10 \x01(\v2\x1d.model_plane.v1.ApprovalCauseR\x05cause\"\xc6\x02\n" +
 	"\rApprovalCause\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\tR\x04code\x12\x12\n" +
 	"\x04tool\x18\x02 \x01(\tR\x04tool\x12!\n" +
@@ -7681,7 +7694,10 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\n" +
 	"action_key\x18\b \x01(\tR\tactionKey\x12\x1f\n" +
 	"\vcall_digest\x18\t \x01(\tR\n" +
-	"callDigest\"\x92\x04\n" +
+	"callDigest\x12\x1d\n" +
+	"\n" +
+	"host_class\x18\n" +
+	" \x01(\tR\thostClass\"\x92\x04\n" +
 	"\x04Todo\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x15\n" +

@@ -1400,6 +1400,18 @@ fn new_approval_metadata(
         }
         stored_code = Some(CauseCode::from_wire(&cause.code).as_str());
         metadata_map.insert("cause".to_owned(), approval_cause::to_metadata(&cause));
+        // E3.2-a: the host class a browser gate states, as a closed word (anything
+        // else reads `unknown`; a host name is never stored). Top level, because
+        // that is where the authz_decision audit reads it. A zero-retention caller
+        // stores none (the `filter` above).
+        if !cause.host_class.trim().is_empty() {
+            metadata_map.insert(
+                "host_class".to_owned(),
+                JsonValue::String(
+                    crate::audit_publisher::host_class_word(&cause.host_class).to_owned(),
+                ),
+            );
+        }
     }
     (JsonValue::Object(metadata_map), stored_code)
 }
@@ -5075,6 +5087,30 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_stated_host_class_is_stored_as_a_closed_word_and_never_for_a_zdr_caller() {
+        let with_class = |class: &str| {
+            let mut req = create_with_cause("browser_action_risk");
+            req.cause.as_mut().unwrap().host_class = class.to_owned();
+            req
+        };
+        for class in ["none", "general", "sensitive", "internal", "unknown"] {
+            let (metadata, _) = new_approval_metadata(&with_class(class), false);
+            assert_eq!(metadata["host_class"], class);
+        }
+        // A host name (or anything off the list) reads `unknown`; it is never stored.
+        let (metadata, _) = new_approval_metadata(&with_class("bank.example.com"), false);
+        assert_eq!(metadata["host_class"], "unknown");
+        // Nothing stated, nothing stored; and the cause itself carries no host class.
+        let (metadata, _) = new_approval_metadata(&with_class("  "), false);
+        assert!(metadata.get("host_class").is_none());
+        let (metadata, _) = new_approval_metadata(&with_class("sensitive"), false);
+        assert!(metadata["cause"].get("host_class").is_none());
+        // Zero retention keeps none of the cause, host class included.
+        let (metadata, _) = new_approval_metadata(&with_class("sensitive"), true);
+        assert!(metadata.get("host_class").is_none());
     }
 
     #[test]
