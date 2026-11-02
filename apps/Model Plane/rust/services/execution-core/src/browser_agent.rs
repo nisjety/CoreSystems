@@ -262,6 +262,11 @@ pub struct BrowserObservation {
     /// Quarry's access-state signal for this page. `None` when Quarry sent
     /// none (an older Quarry, or a page that is an ordinary page).
     pub challenge: Option<BrowserChallenge>,
+    /// The redaction rule version Quarry stamped on this observation (WS12.S2),
+    /// copied from the wire. `None` when Quarry sent no readable stamp, and on
+    /// an observation built locally (a refusal). Nothing else of the stamp is
+    /// kept.
+    pub redaction_rule_version: Option<String>,
 }
 
 /// What Quarry says a page's access state is. Every field is a closed
@@ -611,6 +616,44 @@ pub struct PlanConfig {
     /// How often a paused attached run checks for the give-back. `None` is
     /// [`TAKEOVER_POLL_INTERVAL`]; tests shorten it.
     pub takeover_poll: Option<std::time::Duration>,
+    /// WS12.S4: refuse a Quarry observation that carries no redaction stamp
+    /// (`EXECUTION_CORE_REQUIRE_QUARRY_REDACTION_STAMP`, default off). Set by
+    /// the tool bridge from the process environment, never read in the loop.
+    /// Off, a missing stamp is logged once per run and the step goes on.
+    pub require_quarry_redaction_stamp: bool,
+}
+
+/// The step failure when a stamp is required and absent.
+pub const REDACTION_STAMP_MISSING_REASON: &str =
+    "browser-agent step failed: quarry redaction stamp missing";
+
+/// WS12.S4 guard: the failure reason when `observation` came from Quarry
+/// without a redaction stamp and the plan requires one; otherwise `None`.
+/// With the requirement off, the first missing stamp of a run is logged
+/// (`warned` carries that across steps) and the step goes on.
+fn redaction_stamp_failure(
+    config: &PlanConfig,
+    observation: &BrowserObservation,
+    warned: &mut bool,
+) -> Option<&'static str> {
+    if observation.redaction_rule_version.is_some() {
+        return None;
+    }
+    if config.require_quarry_redaction_stamp {
+        warn!(
+            plan_id = %config.plan_id,
+            "quarry observation carries no redaction stamp; refusing it"
+        );
+        return Some(REDACTION_STAMP_MISSING_REASON);
+    }
+    if !*warned {
+        *warned = true;
+        warn!(
+            plan_id = %config.plan_id,
+            "quarry observation carries no redaction stamp (not required; logged once per run)"
+        );
+    }
+    None
 }
 
 /// WS8.G: what an attached run attaches to.
@@ -1217,6 +1260,8 @@ pub async fn run_browser_agent_loop(
     let mut abort_reason = None;
     let mut resource_limit = None;
     let mut failure_kind = None;
+    // WS12.S4: the missing-stamp warning is logged once per run.
+    let mut stamp_warned = false;
     let summary = loop {
         let last = pending.take();
         let result = decide_next_action(&mut plan, last.as_ref(), planner, state, sink).await;
@@ -1259,6 +1304,12 @@ pub async fn run_browser_agent_loop(
                             &action.action_id,
                             &plan.config.grant_id,
                         );
+                        if let Some(reason) =
+                            redaction_stamp_failure(&plan.config, &obs, &mut stamp_warned)
+                        {
+                            plan.status = PlanStatus::Failed;
+                            break reason.to_owned();
+                        }
                         // Best-effort: surface the observation we just received.
                         if let Some(sink) = sink {
                             sink.observation_received(&plan.config, &obs).await;
@@ -1370,6 +1421,12 @@ pub async fn run_browser_agent_loop(
                                     &action.action_id,
                                     &plan.config.grant_id,
                                 );
+                                if let Some(reason) =
+                                    redaction_stamp_failure(&plan.config, &obs, &mut stamp_warned)
+                                {
+                                    plan.status = PlanStatus::Failed;
+                                    break reason.to_owned();
+                                }
                                 if let Some(sink) = sink {
                                     sink.observation_received(&plan.config, &obs).await;
                                 }
@@ -1437,6 +1494,14 @@ pub async fn run_browser_agent_loop(
                                             &action.action_id,
                                             &plan.config.grant_id,
                                         );
+                                        if let Some(reason) = redaction_stamp_failure(
+                                            &plan.config,
+                                            &obs,
+                                            &mut stamp_warned,
+                                        ) {
+                                            plan.status = PlanStatus::Failed;
+                                            break reason.to_owned();
+                                        }
                                         if let Some(sink) = sink {
                                             sink.observation_received(&plan.config, &obs).await;
                                         }
@@ -2371,6 +2436,7 @@ mod tests {
             snapshot_targets: vec![],
             error_message: "element not found".to_owned(),
             challenge: None,
+            redaction_rule_version: None,
         };
         let result = plan_next_action(&mut plan, Some(&obs));
         match result {
@@ -2379,6 +2445,32 @@ mod tests {
             }
             _ => panic!("expected Failed"),
         }
+    }
+
+    #[test]
+    fn redaction_stamp_guard_is_off_by_default_and_warns_once() {
+        let unstamped = page_with_challenge(None);
+        let stamped = BrowserObservation {
+            redaction_rule_version: Some("qr-redact/4".to_owned()),
+            ..page_with_challenge(None)
+        };
+        let off = test_config();
+        assert!(!off.require_quarry_redaction_stamp, "default off");
+        let mut warned = false;
+        assert_eq!(redaction_stamp_failure(&off, &unstamped, &mut warned), None);
+        assert!(warned, "the first missing stamp of a run is the one that is logged");
+        assert_eq!(redaction_stamp_failure(&off, &stamped, &mut warned), None);
+
+        let on = PlanConfig {
+            require_quarry_redaction_stamp: true,
+            ..test_config()
+        };
+        let mut warned = false;
+        assert_eq!(
+            redaction_stamp_failure(&on, &unstamped, &mut warned),
+            Some(REDACTION_STAMP_MISSING_REASON)
+        );
+        assert_eq!(redaction_stamp_failure(&on, &stamped, &mut warned), None);
     }
 
     #[test]
@@ -2400,6 +2492,7 @@ mod tests {
             snapshot_targets: vec![],
             error_message: String::new(),
             challenge: None,
+            redaction_rule_version: None,
         };
         let result = plan_next_action(&mut plan, Some(&obs));
         match result {
@@ -2914,6 +3007,7 @@ mod tests {
             snapshot_targets: vec![],
             error_message: String::new(),
             challenge,
+            redaction_rule_version: None,
         }
     }
 

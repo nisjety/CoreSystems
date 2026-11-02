@@ -665,6 +665,7 @@ fn golden_observation() -> BrowserObservation {
         ],
         error_message: String::new(),
         challenge: None,
+        redaction_rule_version: None,
     }
 }
 
@@ -1633,4 +1634,61 @@ async fn attach_shared_jar_event_emitted_once() {
 /// The disposition of each release, in order.
 fn release(quarry: &FakeQuarry) -> Vec<String> {
     quarry.releases().into_iter().map(|r| r.2).collect()
+}
+
+// ---------------------------------------------------------------------------
+// WS12.S4: Quarry's redaction stamp
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn missing_stamp_is_refused_when_required() {
+    let quarry = FakeQuarry::start().await;
+    quarry.push_page("https://example.com/", "Hours", "Open 9 to 5", &[]);
+    let planner = ScriptedPlanner::new()
+        .then_action(goto("https://example.com/"))
+        .then_done();
+    let config = execution_core::browser_agent::PlanConfig {
+        require_quarry_redaction_stamp: true,
+        ..plan_config()
+    };
+    let result = run_with(&quarry, &planner, config).await;
+    assert_eq!(result.status, PlanStatus::Failed, "{}", result.summary);
+    assert_eq!(
+        result.summary,
+        "browser-agent step failed: quarry redaction stamp missing"
+    );
+    // The page never reached the planner: one call (the first step), no second.
+    assert_eq!(planner.calls(), 1);
+    assert_eq!(quarry.closed_runs(), 1, "the lease is still released");
+}
+
+#[tokio::test]
+async fn a_stamped_observation_passes_when_required_and_a_missing_one_passes_when_off() {
+    // Required, stamped: the run goes on.
+    let quarry = FakeQuarry::start().await;
+    quarry.push_stamped_page("https://example.com/", "Hours", "Open 9 to 5", "qr-redact/4");
+    let planner = ScriptedPlanner::new()
+        .then_action(goto("https://example.com/"))
+        .then_done();
+    let required = execution_core::browser_agent::PlanConfig {
+        require_quarry_redaction_stamp: true,
+        ..plan_config()
+    };
+    let result = run_with(&quarry, &planner, required).await;
+    assert_eq!(result.status, PlanStatus::Completed, "{}", result.summary);
+    assert_eq!(
+        result.observations[0].redaction_rule_version.as_deref(),
+        Some("qr-redact/4")
+    );
+
+    // Not required (the default), no stamp: the run goes on, the same as before.
+    assert!(!plan_config().require_quarry_redaction_stamp);
+    let quarry = FakeQuarry::start().await;
+    quarry.push_page("https://example.com/", "Hours", "Open 9 to 5", &[]);
+    let planner = ScriptedPlanner::new()
+        .then_action(goto("https://example.com/"))
+        .then_done();
+    let result = run_with(&quarry, &planner, plan_config()).await;
+    assert_eq!(result.status, PlanStatus::Completed, "{}", result.summary);
+    assert_eq!(result.observations[0].redaction_rule_version, None);
 }

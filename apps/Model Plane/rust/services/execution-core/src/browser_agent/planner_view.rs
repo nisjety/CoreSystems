@@ -12,7 +12,7 @@
 //!    its label but never the text it holds.
 //! 3. **Scrubbed.** Hidden characters are removed, then page text, URL, title and
 //!    labels go through [`scrub_page_text`] / [`scrub_page_url`], the two seams
-//!    WS12.S4 re-points at the shared `mp-scrub` crate.
+//!    WS12.S4 points at the shared `mp-scrub` crate (the Live set).
 //! 4. **Framed.** The page facts sit between fixed delimiters under the same
 //!    `[source: browser-scraped]` header every other tool result gets
 //!    ([`crate::provenance::render`]), and the injection scanner's verdict is
@@ -49,19 +49,20 @@ const END_DELIMITER: &str = "<<<END UNTRUSTED PAGE CONTENT>>>";
 /// The first-step message: no page was observed yet, so nothing is framed.
 pub const FIRST_STEP_TEXT: &str = "No observation yet \u{2014} this is the first step.";
 
-/// Scrub seam for page text. WS12.S4 points this at `mp-scrub`.
+/// Scrub seam for page text (WS12.S4): the `mp-scrub` Live set, structured
+/// credential shapes only, so ordinary prose about bearers or tokens survives.
 #[must_use]
 pub(crate) fn scrub_page_text(text: &str) -> String {
-    crate::scrub::scrub_string(text)
+    crate::scrub::scrub_live(text)
 }
 
-/// Scrub seam for a page URL: the fragment is dropped (it never reaches a
-/// server and often carries an access token) and secrets are redacted.
-/// WS12.S4 points this at `mp-scrub`.
+/// Scrub seam for a page URL (WS12.S4): the fragment is dropped (it never
+/// reaches a server and often carries an access token), then credential shapes
+/// and the values of secret query keys are masked by `mp-scrub`.
 #[must_use]
 pub(crate) fn scrub_page_url(url: &str) -> String {
     let without_fragment = url.split_once('#').map_or(url, |(head, _)| head);
-    crate::scrub::scrub_string(without_fragment)
+    crate::scrub::scrub_url(without_fragment)
 }
 
 /// One snapshot target as the planner sees it.
@@ -322,6 +323,7 @@ mod tests {
             }],
             error_message: String::new(),
             challenge: None,
+            redaction_rule_version: None,
         }
     }
 

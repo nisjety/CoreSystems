@@ -204,6 +204,7 @@ fn observation(
         snapshot_targets: targets,
         error_message: String::new(),
         challenge: None,
+        redaction_rule_version: None,
     }
 }
 

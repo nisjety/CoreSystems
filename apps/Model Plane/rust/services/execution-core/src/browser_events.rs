@@ -198,8 +198,12 @@ impl BrowserEventSink for OrchestrationEventSink {
                 plan_id: config.plan_id.clone(),
                 action_id: observation.action_id.clone(),
                 status: observation.status.as_str().to_owned(),
-                page_url: observation.page_url.clone(),
-                page_title: observation.page_title.clone(),
+                // WS12.S4: the event leaves the loop (session-core fans it out
+                // to the UI and the log), so the URL loses a query token and
+                // the title a credential shape here, at the boundary. The
+                // observation itself is untouched.
+                page_url: crate::scrub::scrub_url(&observation.page_url),
+                page_title: crate::scrub::scrub_live(&observation.page_title),
                 // Reference ids only — never inlined bytes, and `extracted_text`
                 // is deliberately excluded from the wire event (ZDR intent).
                 screenshot_ref: observation.screenshot_ref.clone(),
@@ -1129,5 +1133,73 @@ mod tests {
                 tab_id: "tab_9".to_owned(),
             }
         );
+    }
+
+    fn observation_at(url: &str, title: &str) -> BrowserObservation {
+        BrowserObservation {
+            observation_id: "obs_1".to_owned(),
+            action_id: "act_1".to_owned(),
+            grant_id: "grant_001".to_owned(),
+            status: crate::browser_agent::ObservationStatus::Success,
+            page_url: url.to_owned(),
+            page_title: title.to_owned(),
+            extracted_text: "never on the wire".to_owned(),
+            screenshot_ref: String::new(),
+            dom_snapshot_ref: "snap-1".to_owned(),
+            snapshot_generation: None,
+            snapshot_targets: Vec::new(),
+            error_message: String::new(),
+            challenge: None,
+            redaction_rule_version: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn observation_received_event_has_no_url_token() {
+        let recorded = Arc::default();
+        let channel = spawn_mock(NeverResolvingOrchestration {
+            recorded: Arc::clone(&recorded),
+            ..Default::default()
+        })
+        .await;
+        let sink = OrchestrationEventSink::new(channel, None).with_verified_bearer("test-bearer");
+        let config = test_config();
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdEFGH1234";
+
+        // Assembled at run time so no credential-shaped literal sits in the source.
+        let secret = ["tok", "abc123def456ghi789"].join("_");
+        sink.observation_received(
+            &config,
+            &observation_at(
+                &format!("https://example.com/cb?lang=en&access_token={secret}"),
+                &format!("Welcome {jwt}"),
+            ),
+        )
+        .await;
+        // A clean page is byte-identical.
+        sink.observation_received(
+            &config,
+            &observation_at("https://example.com/a?b=1", "Example Domain"),
+        )
+        .await;
+
+        let sent = recorded.lock().unwrap();
+        let events: Vec<_> = sent
+            .iter()
+            .filter_map(|request| request.event.as_ref()?.event.clone())
+            .collect();
+        assert_eq!(events.len(), 2);
+        let orchestration_event::Event::BrowserObservationReceived(masked) = &events[0] else {
+            panic!("{:?}", events[0]);
+        };
+        assert!(!masked.page_url.contains(&secret), "{}", masked.page_url);
+        assert!(masked.page_url.starts_with("https://example.com/cb?lang=en"), "{}", masked.page_url);
+        assert!(!masked.page_title.contains("eyJhbGciOiJIUzI1NiJ9"), "{}", masked.page_title);
+        assert!(masked.page_title.starts_with("Welcome "), "{}", masked.page_title);
+        let orchestration_event::Event::BrowserObservationReceived(clean) = &events[1] else {
+            panic!("{:?}", events[1]);
+        };
+        assert_eq!(clean.page_url, "https://example.com/a?b=1");
+        assert_eq!(clean.page_title, "Example Domain");
     }
 }

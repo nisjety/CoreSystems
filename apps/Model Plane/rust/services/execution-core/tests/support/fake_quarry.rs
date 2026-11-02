@@ -125,6 +125,28 @@ impl FakeQuarry {
         self
     }
 
+    /// WS12.S4: like [`Self::push_page`] (no targets) with Quarry's redaction
+    /// stamp as its `RedactionStamp` serialises it.
+    pub fn push_stamped_page(&self, url: &str, title: &str, text: &str, rule_version: &str) -> &Self {
+        let mut guard = self.inner.lock().expect("lock");
+        guard.step_counter += 1;
+        let n = guard.step_counter;
+        guard.steps.push_back(StepScript::Observation(json!({
+            "run_id": "run_fake",
+            "step": n,
+            "url": url,
+            "title": title,
+            "snapshot": {"snapshot_id": format!("snap-{n}"), "generation": n, "targets": []},
+            "dom_summary": {"node_count": 10, "text_snippet": text},
+            "redaction": {
+                "rule_version": rule_version, "profile": "live", "mode": "enforce",
+                "values_masked": 0, "by_rule": {}, "probe": "ok", "probe_ms": 1,
+                "screenshot": "none", "mask_ms": 0, "oopif_frames": 0, "rects": 0
+            },
+        })));
+        self
+    }
+
     pub fn push_error(&self, status: u16, body: Value) -> &Self {
         self.push(StepScript::Error { status, body })
     }

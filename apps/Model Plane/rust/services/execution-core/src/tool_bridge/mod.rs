@@ -1061,6 +1061,8 @@ pub(crate) struct PlanCeilings {
     max_total_failures: u32,
     procedure: browser_agent::procedure::ProcedureId,
     widened_actions: bool,
+    /// `EXECUTION_CORE_REQUIRE_QUARRY_REDACTION_STAMP` (WS12.S4), default off.
+    require_quarry_redaction_stamp: bool,
 }
 
 impl Default for PlanCeilings {
@@ -1076,6 +1078,7 @@ impl Default for PlanCeilings {
             max_total_failures: 8,
             procedure: browser_agent::procedure::ProcedureId::Legacy0,
             widened_actions: false,
+            require_quarry_redaction_stamp: false,
         }
     }
 }
@@ -1165,6 +1168,10 @@ impl PlanCeilings {
             // Literal `1`, `true` or `on` enables; anything else is off.
             widened_actions: lookup("QUARRY_BROWSER_AGENT_WIDENED_ACTIONS")
                 .is_some_and(|value| matches!(value.trim(), "1" | "true" | "on")),
+            require_quarry_redaction_stamp: lookup(
+                "EXECUTION_CORE_REQUIRE_QUARRY_REDACTION_STAMP",
+            )
+            .is_some_and(|value| matches!(value.trim(), "1" | "true" | "on")),
         }
     }
 
@@ -1402,6 +1409,7 @@ fn browser_plan_config_with(
         // sends no override.
         takeover_wait_s: 0,
         takeover_poll: None,
+        require_quarry_redaction_stamp: ceilings.require_quarry_redaction_stamp,
     };
     browser_agent::validate_plan_config(&plan)?;
     Ok(plan)
@@ -1797,6 +1805,20 @@ mod tests {
     }
 
     #[test]
+    fn require_quarry_redaction_stamp_default_off_and_only_literal_values_enable() {
+        assert!(!ceilings_with(&[]).require_quarry_redaction_stamp);
+        assert!(!PlanCeilings::default().require_quarry_redaction_stamp);
+        for on in ["1", "true", "on", " 1 "] {
+            let set = ceilings_with(&[("EXECUTION_CORE_REQUIRE_QUARRY_REDACTION_STAMP", on)]);
+            assert!(set.require_quarry_redaction_stamp, "{on:?}");
+        }
+        for off in ["0", "", "off", "yes", "TRUE", "enforce"] {
+            let set = ceilings_with(&[("EXECUTION_CORE_REQUIRE_QUARRY_REDACTION_STAMP", off)]);
+            assert!(!set.require_quarry_redaction_stamp, "{off:?}");
+        }
+    }
+
+    #[test]
     fn widened_actions_default_off_and_only_literal_values_enable() {
         assert!(!ceilings_with(&[]).widened_actions);
         for on in ["1", "true", "on", " 1 "] {
@@ -2071,6 +2093,7 @@ mod tests {
             snapshot_targets: vec![],
             error_message: String::new(),
             challenge: None,
+            redaction_rule_version: None,
         }
     }
 

@@ -286,6 +286,7 @@ mod tests {
             snapshot_targets: Vec::new(),
             error_message: String::new(),
             challenge: None,
+            redaction_rule_version: None,
         }
     }
 

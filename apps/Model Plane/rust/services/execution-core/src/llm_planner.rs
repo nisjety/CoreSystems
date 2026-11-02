@@ -331,10 +331,14 @@ pub struct DonePayload {
 
 impl DonePayload {
     /// The answer is trimmed, scrubbed like page text (the model wrote it after
-    /// reading a page) and capped at [`MAX_ANSWER_CHARS`].
+    /// reading a page) and capped at [`MAX_ANSWER_CHARS`]. The answer is
+    /// durable (it becomes the run summary), so it keeps the stricter legacy
+    /// scrub as well as the Live one the page text gets.
     #[must_use]
     pub fn new(answer: &str, outcome: DoneOutcome) -> Self {
-        let scrubbed = crate::browser_agent::planner_view::scrub_page_text(answer.trim());
+        let scrubbed = crate::browser_agent::planner_view::scrub_page_text(
+            &crate::scrub::scrub_string(answer.trim()),
+        );
         Self {
             answer: scrubbed.chars().take(MAX_ANSWER_CHARS).collect(),
             outcome,
@@ -1682,6 +1686,7 @@ mod tests {
             }],
             error_message: String::new(),
             challenge: None,
+            redaction_rule_version: None,
         }
     }
 
@@ -1898,5 +1903,75 @@ mod tests {
             .find(|line| line.trim_start().starts_with("challenge:"))
             .expect("a challenge line");
         assert!(!line.contains("ignore") && !line.contains("press"), "{line}");
+    }
+
+    // WS12.S4: the planner reads the `mp-scrub` Live set at the prompt boundary.
+
+    const JWT: &str = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdEFGH1234";
+
+    #[test]
+    fn planner_prompt_masks_jwt_in_extracted_text() {
+        let mut observation = test_observation();
+        observation.extracted_text = format!("Your session token is {JWT} keep it safe");
+        observation.page_title = format!("Account {JWT}");
+        let user = user_text(&observation);
+        assert!(!user.contains("eyJhbGciOiJIUzI1NiJ9"), "{user}");
+        assert!(user.contains("[REDACTED]"), "{user}");
+        assert!(user.contains("keep it safe"), "{user}");
+    }
+
+    #[test]
+    fn planner_prompt_masks_url_query_token() {
+        let mut observation = test_observation();
+        let secret = ["abc123", "def456", "ghi789"].concat();
+        observation.page_url =
+            format!("https://example.com/cb?next=%2Fhome&access_token={secret}&lang=en#frag");
+        let user = user_text(&observation);
+        assert!(!user.contains(&secret), "{user}");
+        assert!(user.contains("https://example.com/cb?next=%2Fhome"), "{user}");
+        assert!(user.contains("lang=en"), "{user}");
+        assert!(!user.contains("frag"), "the fragment is dropped: {user}");
+    }
+
+    #[test]
+    fn planner_prompt_keeps_ordinary_prose_about_bearers() {
+        let mut observation = test_observation();
+        observation.extracted_text =
+            "The bearer of the message must show a basic understanding; max_tokens=4096."
+                .to_owned();
+        let user = user_text(&observation);
+        assert!(
+            user.contains("The bearer of the message must show a basic understanding; max_tokens=4096."),
+            "{user}"
+        );
+        assert!(!user.contains("[REDACTED]"), "{user}");
+    }
+
+    #[test]
+    fn planner_prompt_masks_target_text_secret() {
+        let mut observation = test_observation();
+        observation.snapshot_targets[0].text = Some(format!("API key ghp_{}", "a1B2c3D4e5".repeat(4)));
+        observation.snapshot_targets[0].name = Some(format!("Copy {JWT}"));
+        let user = user_text(&observation);
+        assert!(!user.contains("ghp_a1B2"), "{user}");
+        assert!(!user.contains("eyJhbGciOiJIUzI1NiJ9"), "{user}");
+        assert!(user.contains("@e1"), "the target itself stays: {user}");
+    }
+
+    #[test]
+    fn stop_criteria_still_match_the_raw_observation() {
+        // Scrubbing is at the prompt boundary only: the loop's stop check reads
+        // the raw observation, so a criterion that is itself a masked shape fires.
+        let mut config = test_config();
+        config.stop_criteria = JWT.to_owned();
+        let plan = crate::browser_agent::AgentPlan::new(config);
+        let mut observation = test_observation();
+        observation.extracted_text = format!("done: {JWT}");
+        assert!(plan.evaluate_stop_criteria(&observation));
+        // The planner's own picture of the same page does not carry the token.
+        let user = user_text(&observation);
+        assert!(!user.contains("eyJhbGciOiJIUzI1NiJ9"), "{user}");
+        // And building the picture did not change the observation.
+        assert!(observation.extracted_text.contains(JWT));
     }
 }
