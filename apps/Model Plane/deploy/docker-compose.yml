@@ -604,6 +604,9 @@ services:
       # WS15-S6: GET /v1/spaces/:space_id/timeline and the tail transcript parameters. Off unless set; dev
       # override turns it on. A rollout control, never an authorization input.
       SPACE_TIMELINE_API: ${SPACE_TIMELINE_API:-0}
+      # WS13-S2: POST /v1/spaces/:space_id/messages/search and /resolve. Off unless set; dev override
+      # turns it on. A rollout control, never an authorization input.
+      SPACE_MESSAGE_SEARCH_API: ${SPACE_MESSAGE_SEARCH_API:-0}
       FINETUNE_ORG_BUDGET_USD: ${FINETUNE_ORG_BUDGET_USD:-50}
       FINETUNE_PER_JOB_BUDGET_USD: ${FINETUNE_PER_JOB_BUDGET_USD:-20}
       # Dedicated finetune-poller session-core credential — NOT

@@ -21,6 +21,7 @@ use mp_contracts::model_plane::v1::{
     run_service_client::RunServiceClient, sandbox_manager_client::SandboxManagerClient,
     session_core_client::SessionCoreClient, space_attention_client::SpaceAttentionClient,
     space_events_client::SpaceEventsClient,
+    space_history_service_client::SpaceHistoryServiceClient,
     space_room_read_service_client::SpaceRoomReadServiceClient,
 };
 use mp_events::envelope::Envelope;
@@ -116,6 +117,12 @@ pub struct AppState {
     /// Session Core's SpaceRoomReadService (the room's read aggregates), on the same endpoint as
     /// `session_client` (WS07-S9).
     pub space_room_read_client: SpaceRoomReadServiceClient<Channel>,
+    /// Session Core's SpaceHistoryService (message search and resolve), on the same endpoint as
+    /// `session_client` (WS13-S2).
+    pub space_history_client: SpaceHistoryServiceClient<Channel>,
+    /// `SPACE_MESSAGE_SEARCH_API`, read once at startup (WS13-S2). A rollout control, never an
+    /// authorization input.
+    pub space_message_search_api_enabled: bool,
     /// Session Core's SpaceAttention service (the cross-room attention aggregate), on the same
     /// endpoint as `session_client` (WS11-S2).
     pub space_attention_client: SpaceAttentionClient<Channel>,
@@ -445,6 +452,8 @@ impl AppState {
             learning_client: LearningGovernanceServiceClient::new(session_channel.clone()),
             space_events_client: SpaceEventsClient::new(session_channel.clone()),
             space_room_read_client: SpaceRoomReadServiceClient::new(session_channel.clone()),
+            space_history_client: SpaceHistoryServiceClient::new(session_channel.clone()),
+            space_message_search_api_enabled: false,
             space_attention_client: SpaceAttentionClient::new(session_channel.clone()),
             space_attention_enabled: false,
             space_timeline_enabled: false,
@@ -627,6 +636,11 @@ impl AppState {
             "http://localhost:9091",
         )?);
         let space_room_read_client = SpaceRoomReadServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let space_history_client = SpaceHistoryServiceClient::new(Self::lazy_channel(
             "SESSION_CORE_URL",
             "SESSION_CORE_ADDR",
             "http://localhost:9091",
@@ -840,6 +854,9 @@ impl AppState {
             state.learning_client = learning_client;
             state.space_events_client = space_events_client;
             state.space_room_read_client = space_room_read_client;
+            state.space_history_client = space_history_client;
+            state.space_message_search_api_enabled =
+                mp_contracts::space_history::api_enabled();
             state.space_attention_client = space_attention_client;
             state.space_attention_enabled = mp_contracts::space_attention::summary_enabled();
             state.space_timeline_enabled = mp_contracts::space_timeline::api_enabled();
@@ -900,6 +917,9 @@ impl AppState {
             state.learning_client = learning_client;
             state.space_events_client = space_events_client;
             state.space_room_read_client = space_room_read_client;
+            state.space_history_client = space_history_client;
+            state.space_message_search_api_enabled =
+                mp_contracts::space_history::api_enabled();
             state.space_attention_client = space_attention_client;
             state.space_attention_enabled = mp_contracts::space_attention::summary_enabled();
             state.space_timeline_enabled = mp_contracts::space_timeline::api_enabled();
