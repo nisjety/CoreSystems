@@ -521,6 +521,11 @@ services:
       # expanded to four disables) to Quarry. Off REFUSES a start that carries one (400
       # browser_policy_ask_unavailable) so a restriction is never dropped silently. Only `on` enables it.
       MODEL_GATEWAY_BROWSER_POLICY_ASK: ${MODEL_GATEWAY_BROWSER_POLICY_ASK:-off}
+      # WS8.G, OFF by default: a browser run start with attach_session_id derives an `attach` grant
+      # and steps on the person's own Quarry run (shared browser session). Off answers 400
+      # browser_attach_unavailable. All layers must be on: broker BROWSER_BROKER_HUMAN_BROWSE_ENABLED,
+      # Quarry QUARRY_EDGE__ATTACH and the gateway BROWSER_ATTACH too. Only `on` enables it.
+      MODEL_GATEWAY_BROWSER_ATTACH: ${MODEL_GATEWAY_BROWSER_ATTACH:-off}
       # WS16.S8, OFF by default: advertise the extract_structured chat tool (schema-validated,
       # verbatim-grounded extraction over 1-5 pages). The gRPC ExtractStructured fixes are unflagged.
       MODEL_GATEWAY_EXTRACT_TOOL: ${MODEL_GATEWAY_EXTRACT_TOOL:-0}
