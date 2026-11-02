@@ -195,6 +195,12 @@ type RunPageInput struct {
 	// Scrape is the crawl's per-page scrape options (INNH-6b), the canonical JSON the edge
 	// stamped on the job. Nil for every other page: the body is then byte-identical to before.
 	Scrape json.RawMessage `json:"scrape,omitempty"`
+	// PolicySnapshot is the web policy the handoff resolved for the job (WS7.G 6b), the
+	// JSON the edge stamped on the job's params. It travels in the run_page body and its
+	// sha256 is part of the signed run-binding string, so it cannot be dropped or swapped on
+	// the way. Nil for every job that was admitted without one: the body and the signature
+	// are then byte-identical to before.
+	PolicySnapshot json.RawMessage `json:"policy_snapshot,omitempty"`
 }
 
 // RunPageResult is returned by the runtime after a successful page execution.
@@ -255,6 +261,10 @@ func (a *Activities) RunPage(ctx context.Context, in RunPageInput) (RunPageResul
 	if len(in.Scrape) > 0 {
 		payload["scrape"] = in.Scrape
 	}
+	snapshot := policySnapshotOrNil(in.PolicySnapshot)
+	if snapshot != nil {
+		payload["policy_snapshot"] = snapshot
+	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return RunPageResult{}, errs.New(errs.CategoryValidation, op, err).Temporal()
@@ -273,7 +283,10 @@ func (a *Activities) RunPage(ctx context.Context, in RunPageInput) (RunPageResul
 	// verify_run_binding byte-for-byte). Skipped when no shared secret is
 	// configured — the edge then falls back to runtime-token-only.
 	if a.cfg.EdgeRunSecret != "" {
-		sig := runBindingSig(a.cfg.EdgeRunSecret, in.OrgID, in.URL)
+		sig, sigErr := runBindingSigExtras(a.cfg.EdgeRunSecret, in.OrgID, in.URL, snapshot)
+		if sigErr != nil {
+			return RunPageResult{}, errs.New(errs.CategoryValidation, op, sigErr).Temporal()
+		}
 		req.Header.Set("X-Quarry-Run-Sig", sig)
 	}
 
@@ -581,4 +594,64 @@ func runBindingSig(secret, orgID, url string) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(orgID + "\n" + url))
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// runBindingSigExtras is runBindingSig over the canonical string with the page's extras
+// appended (WS7.G 6b): the policy snapshot adds one line "\npolicy=<sha256 hex of the
+// snapshot's canonical JSON>" after the url. With no snapshot the string is exactly the
+// two-field one, so an edge that predates the extras still verifies. The Rust side is
+// InternalSigner::run_binding_sig / RunBindingExtras; the golden constants in both test
+// suites pin the two together. WS14.S7a adds "\nrobots=<sha256 hex>" after the policy line.
+func runBindingSigExtras(secret, orgID, url string, policySnapshot json.RawMessage) (string, error) {
+	canonical := orgID + "\n" + url
+	if policySnapshot = policySnapshotOrNil(policySnapshot); policySnapshot != nil {
+		sum, err := policySnapshotSHA256(policySnapshot)
+		if err != nil {
+			return "", err
+		}
+		canonical += "\npolicy=" + sum
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(canonical))
+	return hex.EncodeToString(mac.Sum(nil)), nil
+}
+
+// policySnapshotOrNil is the snapshot when there is one: nil for an absent, empty or JSON null
+// value, so none of them reaches the body or the signature.
+func policySnapshotOrNil(raw json.RawMessage) json.RawMessage {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil
+	}
+	return raw
+}
+
+// canonicalPolicySnapshot is the JSON the snapshot is hashed in: object keys sorted at every
+// level, no whitespace, arrays in order. The edge writes the same bytes (internal_auth.rs
+// canonical_json). A snapshot only holds integers, ASCII host names and closed labels, so no
+// number or escape form can differ between the two writers.
+func canonicalPolicySnapshot(raw json.RawMessage) (string, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return "", fmt.Errorf("policy snapshot is not JSON: %w", err)
+	}
+	var out bytes.Buffer
+	encoder := json.NewEncoder(&out)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return "", fmt.Errorf("policy snapshot cannot be re-encoded: %w", err)
+	}
+	return strings.TrimSuffix(out.String(), "\n"), nil
+}
+
+// policySnapshotSHA256 is the lowercase-hex sha256 of canonicalPolicySnapshot.
+func policySnapshotSHA256(raw json.RawMessage) (string, error) {
+	canonical, err := canonicalPolicySnapshot(raw)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte(canonical))
+	return hex.EncodeToString(sum[:]), nil
 }
