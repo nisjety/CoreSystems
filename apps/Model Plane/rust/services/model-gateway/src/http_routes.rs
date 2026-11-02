@@ -17253,6 +17253,8 @@ mod run_trace_route_tests {
     struct FakeEventLog {
         seen: Arc<Mutex<Vec<(QueryEventsRequest, Option<String>)>>>,
         failure: Option<tonic::Code>,
+        /// When set, the answer to every query (C6 builds its page here).
+        page: Option<QueryEventsResponse>,
     }
 
     #[tonic::async_trait]
@@ -17279,6 +17281,9 @@ mod run_trace_route_tests {
                 .push((request.into_inner(), authorization));
             if let Some(code) = self.failure {
                 return Err(tonic::Status::new(code, "session-core says no"));
+            }
+            if let Some(page) = &self.page {
+                return Ok(tonic::Response::new(page.clone()));
             }
             Ok(tonic::Response::new(QueryEventsResponse {
                 events: vec![Event {
@@ -17407,6 +17412,104 @@ mod run_trace_route_tests {
         assert_eq!(event["agent"]["parent_id"], "primary-v1");
         assert_eq!(event["producer_seq"], 7);
         assert_eq!(event["zdr"], false);
+    }
+
+    /// WS10.S9 C6: the read-API shape of `GET /v1/runs/:run_id/trace`, pinned as an authored
+    /// fixture that the Frontend gateway's type test also reads. The body below is built by the
+    /// real handler from a Session Core page; it must equal the fixture, field for field.
+    #[tokio::test]
+    async fn run_trace_read_response_matches_the_c6_fixture() {
+        use sha2::{Digest, Sha256};
+        const FIXTURE: &str = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../api/contracts/run-trace-read-v1.golden.json"
+        );
+        let text = std::fs::read_to_string(FIXTURE).expect("the C6 fixture");
+        assert!(!text.contains('\r'), "the fixture is hashed byte for byte: LF only");
+        let pin = std::fs::read_to_string(format!("{FIXTURE}.sha256")).expect("the C6 pin");
+        assert_eq!(
+            pin.trim(),
+            format!("{:x} *run-trace-read-v1.golden.json", Sha256::digest(text.as_bytes())),
+            "the fixture changed without its pin (and the sync-script digest)"
+        );
+        let expected: Value = serde_json::from_str(&text).expect("the fixture parses");
+
+        let first = Event {
+            event_id: "01JC7K3M9Q4R8T2V5W6X7Y8Z9A".to_owned(),
+            event_type: EventType::BrowserStepReceiptRecorded as i32,
+            schema_version: 1,
+            ts: Some(prost_types::Timestamp {
+                seconds: 1_793_525_415,
+                nanos: 250_000_000,
+            }),
+            producer: "quarry-edge".to_owned(),
+            org_id: "org-a".to_owned(),
+            user_id: "user-a".to_owned(),
+            payload: Some(prost_types::Any {
+                type_url: RUN_TRACE_PAYLOAD_TYPE_URL.to_owned(),
+                value: br#"{"action":"click","step":7}"#.to_vec(),
+            }),
+            producer_seq: 7,
+            agent: Some(AgentRef {
+                id: "general-v1".to_owned(),
+                role: "subagent".to_owned(),
+                parent_id: "primary-v1".to_owned(),
+            }),
+            origin: RunOrigin::Agent as i32,
+            run_id: "run_1".to_owned(),
+            request_id: "req_1".to_owned(),
+            ..Default::default()
+        };
+        let second = Event {
+            event_id: "01JC7K3M9Q4R8T2V5W6X7Y8Z9B".to_owned(),
+            event_type: EventType::BrowserArtifactRecorded as i32,
+            schema_version: 1,
+            ts: Some(prost_types::Timestamp {
+                seconds: 1_793_525_416,
+                nanos: 0,
+            }),
+            producer: "quarry-edge".to_owned(),
+            correlation_id: "corr_1".to_owned(),
+            causation_id: "01JC7K3M9Q4R8T2V5W6X7Y8Z9A".to_owned(),
+            org_id: "org-a".to_owned(),
+            user_id: "user-a".to_owned(),
+            resource_ref: "artifact_1".to_owned(),
+            // Another payload type is reported by its type_url, never as bytes.
+            payload: Some(prost_types::Any {
+                type_url: "type.googleapis.com/other".to_owned(),
+                value: b"raw bytes".to_vec(),
+            }),
+            zdr: true,
+            producer_seq: 8,
+            run_id: "run_1".to_owned(),
+            request_id: "req_1".to_owned(),
+            ..Default::default()
+        };
+        let fake = FakeEventLog {
+            page: Some(QueryEventsResponse {
+                events: vec![first, second],
+                next_cursor: Some(Cursor {
+                    value: "42".to_owned(),
+                }),
+                has_more: true,
+            }),
+            ..Default::default()
+        };
+        let (status, body) = get_json(app(fake, true).await, "/v1/runs/run_1/trace").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, expected, "the handler's body drifted from the C6 fixture");
+
+        // The last page: no events, no cursor. The same envelope with the cursor null.
+        let empty = FakeEventLog {
+            page: Some(QueryEventsResponse::default()),
+            ..Default::default()
+        };
+        let (status, body) = get_json(app(empty, true).await, "/v1/runs/run_1/trace").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!({ "data": { "events": [] }, "meta": { "next_cursor": null, "has_more": false } })
+        );
     }
 
     #[tokio::test]
