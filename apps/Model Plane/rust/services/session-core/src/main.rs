@@ -15,6 +15,7 @@ mod compaction;
 mod continuation_crypto;
 mod dream_extractor;
 mod dreaming;
+mod eventlog_grpc;
 mod finetune_grpc;
 mod gdpr;
 mod gdpr_nats;
@@ -46,6 +47,7 @@ mod space_membership_nats;
 mod store;
 mod terminalization;
 mod tool_ledger;
+mod trace_nats;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -217,6 +219,32 @@ async fn main() -> Result<()> {
         },
     ));
 
+    // WS10.S6: the run-trace consumer (durable `session-core-trace`) is off unless
+    // SESSION_CORE_TRACE_CONSUMER is 1/true/on, so a deployment that has not provisioned the
+    // stream is unaffected. The retention sweeper only deletes rows past their age.
+    let trace_pool = pool.clone();
+    let trace_nats_url = std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".into());
+    let trace_handle = tokio::spawn(async move {
+        if !trace_nats::enabled() {
+            info!("SESSION_CORE_TRACE_CONSUMER is off; session-core trace consumer disabled");
+            std::future::pending::<()>().await;
+        }
+        supervise_background("session-core trace consumer", move || {
+            let pool = trace_pool.clone();
+            let nats_url = trace_nats_url.clone();
+            async move { trace_nats::run(pool, nats_url).await }
+        })
+        .await
+    });
+    let trace_sweeper_pool = pool.clone();
+    let trace_sweeper_handle = tokio::spawn(supervise_background(
+        "session-core trace retention sweeper",
+        move || {
+            let pool = trace_sweeper_pool.clone();
+            async move { trace_nats::run_retention_sweeper(pool).await }
+        },
+    ));
+
     let shutdown = shutdown_signal();
 
     tokio::select! {
@@ -232,6 +260,8 @@ async fn main() -> Result<()> {
         result = semantic_reconciliation_handle => result??,
         result = terminalization_handle => result??,
         result = tool_ledger_handle => result??,
+        result = trace_handle => result??,
+        result = trace_sweeper_handle => result??,
         () = shutdown => {},
     }
 

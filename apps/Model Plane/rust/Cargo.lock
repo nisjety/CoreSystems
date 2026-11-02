@@ -3909,6 +3909,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "mp-content-safety",
  "mp-contracts",
+ "mp-eventlog",
  "mp-events",
  "mp-ids",
  "mp-orchestration",

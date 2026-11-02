@@ -9,6 +9,7 @@ workspace = true
 [dependencies]
 mp-content-safety = { path = "../../crates/mp-content-safety" }
 mp-contracts = { path = "../../crates/mp-contracts" }
+mp-eventlog = { path = "../../crates/mp-eventlog" }
 mp-events = { path = "../../crates/mp-events" }
 mp-ids = { path = "../../crates/mp-ids" }
 mp-orchestration = { path = "../../crates/mp-orchestration" }

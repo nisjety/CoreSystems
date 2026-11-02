@@ -151,6 +151,7 @@ pub struct PurgeSummary {
     pub tasks: u64,
     pub cron_schedules: u64,
     pub events: u64,
+    pub run_trace_events: u64,
     pub runs: u64,
     pub threads: u64,
     pub hook_configs: u64,
@@ -195,6 +196,7 @@ impl PurgeSummary {
             + self.tasks
             + self.cron_schedules
             + self.events
+            + self.run_trace_events
             + self.runs
             + self.threads
             + self.hook_configs
@@ -370,6 +372,14 @@ pub async fn purge_organization_data(
     .execute(&mut *tx)
     .await?
     .rows_affected();
+
+    // The run trace (WS10.S6): scoped by its own `org_id`, and removed explicitly before `runs`
+    // so the count is the purge's own rather than the cascade's.
+    summary.run_trace_events = sqlx::query("DELETE FROM run_trace_events WHERE org_id = $1")
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
 
     // `runs` — cascades `session_tool_audit_intents` and
     // `managed_run_terminalization_outbox` (ON DELETE CASCADE).
@@ -625,6 +635,50 @@ mod tests {
         ));
     }
 
+    // WS10.S6: the run trace goes with its org, and only with its org.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn gdpr_org_purge_removes_trace_events() {
+        use crate::loop_checkpoint::test_support::{scratch_pool, seed_run};
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let (run, org, _) = seed_run(&pool, "persistent").await;
+        let (other_run, other_org, _) = seed_run(&pool, "persistent").await;
+        for (run_id, org_id) in [(&run, &org), (&other_run, &other_org)] {
+            for seq in 1..=3_i64 {
+                sqlx::query(
+                    "INSERT INTO run_trace_events (event_id, run_id, org_id, producer, producer_seq,                      event_type, occurred_at, resource_ref)                      VALUES ($1, $2, $3, 'quarry-edge', $4, 'BROWSER_SESSION_OPENED', now(), $5)",
+                )
+                .bind(format!("gdpr-{run_id}-{seq}"))
+                .bind(run_id)
+                .bind(org_id)
+                .bind(seq)
+                .bind(format!("run/{run_id}"))
+                .execute(&pool)
+                .await
+                .expect("seed trace row");
+            }
+        }
+        let summary = purge_organization_data(&pool, &org, None).await.expect("purge");
+        assert_eq!(summary.run_trace_events, 3);
+        let left = |run_id: String| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM run_trace_events WHERE run_id = $1",
+                )
+                .bind(run_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count")
+            }
+        };
+        assert_eq!(left(run).await, 0, "the erased org's trace is gone");
+        assert_eq!(left(other_run).await, 3, "another org's trace is untouched");
+        purge_organization_data(&pool, &other_org, None).await.expect("cleanup");
+    }
+
     #[test]
     fn purge_summary_total_sums_every_field() {
         let summary = PurgeSummary {
@@ -643,6 +697,7 @@ mod tests {
             tasks: 1,
             cron_schedules: 1,
             events: 1,
+            run_trace_events: 1,
             runs: 1,
             threads: 1,
             hook_configs: 1,
@@ -668,7 +723,7 @@ mod tests {
         };
         assert_eq!(
             summary.total(),
-            28,
+            29,
             "total() must count only Postgres rows; semantic-tier counts belong \
              to erasure_is_complete(), not to this sum"
         );
@@ -716,6 +771,7 @@ mod tests {
         let tasks = pos("DELETE FROM tasks WHERE org_id = $1");
         let cron_schedules = pos("DELETE FROM cron_schedules WHERE org_id = $1");
         let events = pos("DELETE FROM events");
+        let trace_events = pos("DELETE FROM run_trace_events WHERE org_id = $1");
         let runs = pos("DELETE FROM runs WHERE org_id = $1");
         let threads = pos("DELETE FROM threads WHERE org_id = $1");
 
@@ -767,6 +823,10 @@ mod tests {
         assert!(
             events < runs,
             "events' run_id sweep must run while runs still exist"
+        );
+        assert!(
+            trace_events < runs,
+            "the run trace must be purged before runs (its rows reference them)"
         );
         assert!(runs < threads, "runs must be purged before threads");
         assert!(

@@ -53,7 +53,7 @@ use crate::terminalization;
 
 /// Standard gRPC health names registered on the unauthenticated health-only
 /// surface. Business RPCs remain independently intercepted.
-pub const HEALTH_SERVICE_NAMES: [&str; 9] = [
+pub const HEALTH_SERVICE_NAMES: [&str; 10] = [
     "model_plane.v1.SessionCore",
     "model_plane.v1.ManagedRunLifecycle",
     "model_plane.v1.OrchestrationCoreService",
@@ -63,6 +63,7 @@ pub const HEALTH_SERVICE_NAMES: [&str; 9] = [
     "model_plane.v1.RunService",
     "model_plane.v1.SessionRetentionService",
     "model_plane.v1.ThreadAutonomy",
+    "model_plane.v1.EventLog",
 ];
 
 const RUN_STARTED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.RunStarted";
@@ -9726,7 +9727,7 @@ pub(crate) fn assemble_segments(inputs: &AssemblyInputs) -> (Vec<pb::ContextSegm
     (segments, total)
 }
 
-fn event_type_to_i32(s: &str) -> i32 {
+pub(crate) fn event_type_to_i32(s: &str) -> i32 {
     match s {
         "SESSION_START" => 1,
         "SESSION_END" => 2,
@@ -9863,6 +9864,8 @@ pub async fn serve(
     // `events` tables in this same Postgres (read-only here, plus the cancel
     // status flip).
     let runs = crate::run_service_grpc::RunServiceImpl::new(pool.clone());
+    // Run-trace read path (WS10.S6): QueryEvents over `run_trace_events`.
+    let event_log_pool = pool.clone();
 
     // Tool-action intent is committed to Postgres with the step. The outbox
     // reconnects and retries NATS delivery independently.
@@ -9943,6 +9946,10 @@ pub async fn serve(
         ))
         .add_service(LearningGovernanceServiceServer::with_interceptor(
             learning_governance,
+            auth.clone(),
+        ))
+        .add_service(crate::eventlog_grpc::EventLogServer::with_interceptor(
+            crate::eventlog_grpc::EventLogService::new(event_log_pool),
             auth.clone(),
         ))
         .add_service(RunServiceServer::with_interceptor(runs, auth))
@@ -13025,6 +13032,7 @@ mod tests {
                 "model_plane.v1.RunService",
                 "model_plane.v1.SessionRetentionService",
                 "model_plane.v1.ThreadAutonomy",
+                "model_plane.v1.EventLog",
             ]
         );
     }

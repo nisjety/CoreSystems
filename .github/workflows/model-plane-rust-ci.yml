@@ -223,6 +223,18 @@ jobs:
             echo "expected at least 18 loop checkpoint tests to run, got ${passed:-0}"
             exit 1
           fi
+      # WS10.S6: the run trace's Postgres tests (persist, idempotency, the ZDR and org refusals,
+      # the EventLog read path and its owner check, the GDPR purge and the retention sweeper).
+      # `trace_` selects them by name; the count fails the job if the filter stops matching.
+      - name: Run the run trace tests against a migrated database
+        run: |
+          set -euo pipefail
+          cargo test -p session-core --bin session-core trace_ -- --ignored --test-threads=1 2>&1 | tee run-trace-tests.log
+          passed=$(grep -oE "test result: ok\. [0-9]+ passed" run-trace-tests.log | grep -oE "[0-9]+" | head -1)
+          if [ -z "$passed" ] || [ "$passed" -lt 11 ]; then
+            echo "expected at least 11 run trace tests to run, got ${passed:-0}"
+            exit 1
+          fi
 
   # WS10.S5: the NATS provisioner has no other CI. Its contract tests start an
   # in-process broker from the real deploy/nats.conf, provision the real manifest
