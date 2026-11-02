@@ -37,6 +37,8 @@ import { createTurnPrivacyTierResolver } from '@/features/dashboard/home/submit-
 import { readAiModelSelection, type AiModelSelection } from '@/shared/ai/model-selection'
 import { OPENAI_CODEX_SUBSCRIPTION_PROVIDER } from '@/shared/api/chatgpt-subscription-client'
 import { getSession } from '@/shared/session/session-store'
+import { useHomeDraft } from '@/features/dashboard/home/home-draft'
+import { spaceRoomFeatureWithDevOverride } from '../lib/space-room-features'
 import './space-send.css'
 
 /**
@@ -171,7 +173,15 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   // One catalogue request for the picker and for a send that has to wait for
   // it, as in the main composer: a catalogue model's tier rides every turn.
   const privacyTiers = createTurnPrivacyTierResolver({ orgId })
-  const [text, setText] = createSignal('')
+  // Drafts (WS15-S2): one per room and per reply target, kept in this tab only and only while the
+  // room's `features.composer_drafts` is on. Off, the scope is undefined, the hook reads and writes
+  // nothing, and the box is today's. `zeroRetention` is false because a room has no Temporary chat;
+  // the workspace's retention verdict still closes the hook's gate. Presentation only.
+  const draftsOn = () => spaceRoomFeatureWithDevOverride('composer_drafts', import.meta.env.VITE_SPACE_COMPOSER_DRAFTS)
+  const [text, setText, discardDraft] = useHomeDraft({
+    zeroRetention: () => false,
+    scope: () => (draftsOn() ? `space:${props.spaceRef}:${props.replyTarget?.()?.threadId ?? 'new'}` : undefined),
+  })
   const [mentionQuery, setMentionQuery] = createSignal<string | undefined>(undefined)
   const [mentionedAgentRef, setMentionedAgentRef] = createSignal<string | undefined>(undefined)
   // `/` skills (later tier). The catalogue is fetched on the first `/`, never on
@@ -189,11 +199,26 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   const [pickedMode, setPickedMode] = createSignal<SpaceComposerModeId | undefined>(undefined)
   const [zdrRefused, setZdrRefused] = createSignal(false)
   let textareaRef: HTMLTextAreaElement | undefined
+  // What to clear once the in-flight turn is accepted; set only while drafts keep the words in the box.
+  let acceptSend: (() => void) | undefined
   // The send path (in-flight handles, exchange state, Stop) lives in the send
   // pipeline; the composer keeps the box, the pickers and the chosen chips.
   const pipeline = createSpaceSendPipeline({
     host: props,
     resolveTier: privacyTiers.resolve,
+    // With drafts on, the box is emptied when the server has the turn, not when Send is pressed
+    // (WS15-S2): a send that fails or is stopped before `connected` keeps its words.
+    onStage: (stage) => {
+      const accept = acceptSend
+      if (stage === 'accepted') {
+        acceptSend = undefined
+        accept?.()
+      } else if (stage === 'settled') {
+        acceptSend = undefined
+        // The server said it already had this send: accepted, though no `connected` came.
+        if (pipeline.exchange()?.status === 'done') accept?.()
+      }
+    },
     // Known codes get the room's own words, and a typed Space denial (its
     // details name the reason) gets the denial copy and next step; an unknown
     // code keeps the server's message rather than a generic line that hides it.
@@ -217,7 +242,10 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
     baselineUpdatedAt: (threadId) => props.threads?.().find((thread) => thread.thread_id === threadId)?.updated_at,
     onAccepted: (entry) => {
       // Cleared only now, on acceptance: until then the words are still here to retry or edit.
-      if (text().trim() === entry.content) setText('')
+      if (text().trim() === entry.content) {
+        setText('')
+        discardDraft()
+      }
       props.onClearReplyTarget?.()
       props.onExchangeSettled?.()
     },
@@ -501,10 +529,21 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
     }
     // The pipeline raises `submitting` and the exchange block synchronously,
     // before its first await; the box is cleared right after, as before.
+    if (draftsOn()) {
+      acceptSend = () => {
+        if (text().trim() !== content) return
+        setText('')
+        discardDraft()
+        setMentionedAgentRef(undefined)
+        setPickedSkills([])
+      }
+    }
     const sent = pipeline.send(input)
-    setText('')
-    setMentionedAgentRef(undefined)
-    setPickedSkills([])
+    if (!draftsOn()) {
+      setText('')
+      setMentionedAgentRef(undefined)
+      setPickedSkills([])
+    }
     await sent
   }
 

@@ -17,10 +17,23 @@ export const HOME_DRAFT_MAX_CHARS = 20_000
 
 const storedDraftSchema = z.object({ text: z.string() })
 
-export function homeDraftStorageKey(userId: string | undefined, orgId: string | undefined): string | null {
+/**
+ * The key a draft lives under. `scope` (a Space room draft: one per room and thread) appends a
+ * further segment; without one the key is exactly the Home key, so Home's drafts are untouched and
+ * {@link clearHomeDrafts}'s prefix purge still clears every scoped draft on sign-out.
+ */
+export function homeDraftStorageKey(
+  userId: string | undefined,
+  orgId: string | undefined,
+  scope?: string,
+): string | null {
   const user = userId?.trim()
   const org = orgId?.trim()
-  return user && org ? `${KEY_PREFIX}:${encodeURIComponent(org)}:${encodeURIComponent(user)}` : null
+  if (!user || !org) return null
+  const base = `${KEY_PREFIX}:${encodeURIComponent(org)}:${encodeURIComponent(user)}`
+  if (scope === undefined) return base
+  const part = scope.trim()
+  return part ? `${base}:${encodeURIComponent(part)}` : null
 }
 
 /** Cuts to the cap without leaving half of a surrogate pair at the end. */

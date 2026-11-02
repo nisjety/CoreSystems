@@ -46,9 +46,21 @@ export function useHomeDraft(options: {
    * `false` as the composer reports it, `undefined` while it is not known.
    */
   zeroRetention: Accessor<boolean | undefined>
+  /**
+   * A further key segment for a surface with several drafts (a Space room: one per room and
+   * thread). When the accessor is given, `undefined` means "no draft here": nothing is read or
+   * written, so a surface that is switched off never touches Home's key. Left out, the key is
+   * Home's. A change of scope behaves like a change of identity: what was typed is saved for the
+   * scope it came from and the new scope's own draft is shown.
+   */
+  scope?: Accessor<string | undefined>
 }): HomeDraft {
   const session = getSession()
-  const key = createMemo(() => homeDraftStorageKey(session.user?.id, session.activeOrg?.id))
+  const key = createMemo(() => {
+    if (!options.scope) return homeDraftStorageKey(session.user?.id, session.activeOrg?.id)
+    const scope = options.scope()
+    return scope === undefined ? null : homeDraftStorageKey(session.user?.id, session.activeOrg?.id, scope)
+  })
 
   // The identity the draft is bound to and what storage holds under it. The
   // first paint already shows a known identity's draft.
