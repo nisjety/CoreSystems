@@ -267,6 +267,59 @@ pub struct BrowserObservation {
     /// an observation built locally (a refusal). Nothing else of the stamp is
     /// kept.
     pub redaction_rule_version: Option<String>,
+    /// E3.3-l: how the page behaved while it loaded (console errors, failed
+    /// requests, Quarry's warnings, the settle time). Inert data: the planner
+    /// reads it only when `PlanConfig.observation_quality` is on.
+    pub quality: ObservationQuality,
+}
+
+/// E3.3-l: most console notes and failed requests one observation keeps.
+pub const MAX_QUALITY_ENTRIES: usize = 20;
+/// E3.3-l: most Quarry warnings one observation keeps.
+pub const MAX_QUALITY_WARNINGS: usize = 10;
+/// E3.3-l: longest text of one note, in characters.
+pub const MAX_QUALITY_TEXT_CHARS: usize = 200;
+
+/// One console line worth a planner's attention (an error or a warning).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsoleNote {
+    /// `error` or `warn`.
+    pub level: &'static str,
+    /// Page-authored; bounded, not yet scrubbed (the view scrubs it).
+    pub text: String,
+}
+
+/// One request that failed (status 400 or above).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailedRequest {
+    pub method: String,
+    /// Page-authored URL; bounded, not yet scrubbed (the view scrubs it).
+    pub url: String,
+    pub status: u16,
+}
+
+/// E3.3-l: the part of an observation that says how healthy the load was. Every
+/// field is optional on the wire (an older Quarry sends none), so the default is
+/// "nothing to say".
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ObservationQuality {
+    pub console: Vec<ConsoleNote>,
+    pub failed_requests: Vec<FailedRequest>,
+    /// Quarry's own `warnings[]` (a field Quarry will add; empty until then).
+    pub warnings: Vec<String>,
+    /// How long the page took to settle, when Quarry says (also a field to come).
+    pub settle_ms: Option<u32>,
+}
+
+impl ObservationQuality {
+    /// Whether there is nothing to show.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.console.is_empty()
+            && self.failed_requests.is_empty()
+            && self.warnings.is_empty()
+            && self.settle_ms.is_none()
+    }
 }
 
 /// What Quarry says a page's access state is. Every field is a closed
@@ -635,6 +688,11 @@ pub struct PlanConfig {
     /// (`QUARRY_BROWSER_AGENT_STEER`, default off). Set by the tool bridge from the
     /// process environment, never read in the loop. Ignored under ZDR.
     pub steer: bool,
+    /// E3.3-l: show the planner how the page loaded (console errors, failed
+    /// requests, Quarry's warnings, the settle time) inside the page frame
+    /// (`QUARRY_BROWSER_AGENT_OBSERVATION_QUALITY`, default off). Set by the tool
+    /// bridge from the process environment, never read in the loop.
+    pub observation_quality: bool,
 }
 
 /// E3.3-f: the switch for steering a live browser run. execution-core's pause and
@@ -2044,7 +2102,12 @@ async fn decide_next_action(
                     limit,
                 };
             }
-            let view = last_observation.map(planner_view::PlannerView::from_observation);
+            let view = last_observation.map(|observation| {
+                planner_view::PlannerView::from_observation_with(
+                    observation,
+                    plan.config.observation_quality,
+                )
+            });
             // E3.2-c: a person's redirect is shown for this one planner call
             // (its retries included) and then dropped.
             let redirect_line = plan.redirect.take().map(|redirect| redirect.line());
@@ -2646,6 +2709,7 @@ mod tests {
             error_message: "element not found".to_owned(),
             challenge: None,
             redaction_rule_version: None,
+            quality: Default::default(),
         };
         let result = plan_next_action(&mut plan, Some(&obs));
         match result {
@@ -2661,6 +2725,7 @@ mod tests {
         let unstamped = page_with_challenge(None);
         let stamped = BrowserObservation {
             redaction_rule_version: Some("qr-redact/4".to_owned()),
+            quality: Default::default(),
             ..page_with_challenge(None)
         };
         let off = test_config();
@@ -2702,6 +2767,7 @@ mod tests {
             error_message: String::new(),
             challenge: None,
             redaction_rule_version: None,
+            quality: Default::default(),
         };
         let result = plan_next_action(&mut plan, Some(&obs));
         match result {
@@ -3217,6 +3283,7 @@ mod tests {
             error_message: String::new(),
             challenge,
             redaction_rule_version: None,
+            quality: Default::default(),
         }
     }
 

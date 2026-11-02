@@ -1279,6 +1279,8 @@ pub(crate) struct PlanCeilings {
     approval_redirect: bool,
     /// `QUARRY_BROWSER_AGENT_STEER` (E3.3-f), default off.
     steer: bool,
+    /// `QUARRY_BROWSER_AGENT_OBSERVATION_QUALITY` (E3.3-l), default off.
+    observation_quality: bool,
 }
 
 impl Default for PlanCeilings {
@@ -1297,6 +1299,7 @@ impl Default for PlanCeilings {
             require_quarry_redaction_stamp: false,
             approval_redirect: false,
             steer: false,
+            observation_quality: false,
         }
     }
 }
@@ -1395,6 +1398,8 @@ impl PlanCeilings {
             steer: browser_agent::steer_enabled_from(
                 lookup(browser_agent::STEER_ENV).as_deref(),
             ),
+            observation_quality: lookup("QUARRY_BROWSER_AGENT_OBSERVATION_QUALITY")
+                .is_some_and(|value| matches!(value.trim(), "1" | "true" | "on")),
         }
     }
 
@@ -1642,6 +1647,7 @@ fn browser_plan_config_with(
         tab_mark_on_complete: input_tab_mark.unwrap_or_default(),
         approval_redirect: ceilings.approval_redirect,
         steer: ceilings.steer,
+        observation_quality: ceilings.observation_quality,
     };
     browser_agent::validate_plan_config(&plan)?;
     Ok(plan)
@@ -2051,6 +2057,20 @@ mod tests {
     }
 
     #[test]
+    fn observation_quality_default_off_and_only_literal_values_enable() {
+        assert!(!ceilings_with(&[]).observation_quality);
+        assert!(!PlanCeilings::default().observation_quality);
+        for on in ["1", "true", "on"] {
+            let set = ceilings_with(&[("QUARRY_BROWSER_AGENT_OBSERVATION_QUALITY", on)]);
+            assert!(set.observation_quality, "{on:?}");
+        }
+        for off in ["0", "false", "yes", "", "TRUE"] {
+            let set = ceilings_with(&[("QUARRY_BROWSER_AGENT_OBSERVATION_QUALITY", off)]);
+            assert!(!set.observation_quality, "{off:?}");
+        }
+    }
+
+    #[test]
     fn steer_default_off_and_only_literal_values_enable() {
         assert!(!ceilings_with(&[]).steer);
         assert!(!PlanCeilings::default().steer);
@@ -2352,6 +2372,7 @@ mod tests {
             error_message: String::new(),
             challenge: None,
             redaction_rule_version: None,
+            quality: Default::default(),
         }
     }
 

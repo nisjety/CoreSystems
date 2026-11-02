@@ -776,6 +776,110 @@ pub struct WireObservation {
     /// missing). Never serialised back: the chat-facing MCP output is unchanged.
     #[serde(default, deserialize_with = "lenient_redaction", skip_serializing)]
     pub redaction: Option<WireRedactionStamp>,
+    /// E3.3-l: Quarry's own notes on the load (a field Quarry will add). Absent
+    /// from today's Quarry. Strings only; an entry that does not read is dropped
+    /// and a value that is not a list reads as none. Never serialised back.
+    #[serde(default, deserialize_with = "lenient_warnings", skip_serializing)]
+    pub warnings: Vec<String>,
+    /// E3.3-l: how long the page took to settle after the action, in
+    /// milliseconds (a field Quarry will add). A value that is not a
+    /// non-negative number reads as absent. Never serialised back.
+    #[serde(default, deserialize_with = "lenient_settle_ms", skip_serializing)]
+    pub settle_ms: Option<u32>,
+}
+
+/// The most warnings read off the wire (the observation keeps fewer).
+const MAX_WIRE_WARNINGS: usize = 50;
+
+fn lenient_warnings<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let Some(serde_json::Value::Array(items)) = raw else {
+        return Ok(Vec::new());
+    };
+    Ok(items
+        .into_iter()
+        .filter_map(|item| match item {
+            serde_json::Value::String(text) => Some(text),
+            // `{code, message}` objects read as their message, else their code.
+            serde_json::Value::Object(map) => ["message", "code"]
+                .iter()
+                .find_map(|key| map.get(*key).and_then(serde_json::Value::as_str))
+                .map(str::to_owned),
+            _ => None,
+        })
+        .take(MAX_WIRE_WARNINGS)
+        .collect())
+}
+
+fn lenient_settle_ms<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw
+        .and_then(|value| value.as_u64())
+        .map(|ms| u32::try_from(ms).unwrap_or(u32::MAX)))
+}
+
+/// Most snapshot targets Quarry puts on one observation. Quarry caps the list at
+/// 50 (`quarry-runtime` `observation.rs`, both the native and the compatibility
+/// path); the planner's view cap is this number, so the view never promises room
+/// for targets Quarry does not send.
+pub const QUARRY_SNAPSHOT_TARGET_CAP: usize = 50;
+
+/// E3.3-l: the load-quality part of an observation, bounded. Console lines keep
+/// the errors and warnings only; network entries keep the failed ones (status
+/// 400 and above); warnings and the settle time come through as sent.
+#[must_use]
+pub fn observation_quality_from_wire(wire: &WireObservation) -> crate::browser_agent::ObservationQuality {
+    use crate::browser_agent::{
+        ConsoleNote, FailedRequest, ObservationQuality, MAX_QUALITY_ENTRIES,
+        MAX_QUALITY_TEXT_CHARS, MAX_QUALITY_WARNINGS,
+    };
+    let cut = |text: &str| -> String { text.chars().take(MAX_QUALITY_TEXT_CHARS).collect() };
+    let mut console: Vec<ConsoleNote> = wire
+        .console_summary
+        .iter()
+        .filter_map(|line| {
+            let level = match line.level.trim().to_ascii_lowercase().as_str() {
+                "error" | "severe" => "error",
+                "warn" | "warning" => "warn",
+                _ => return None,
+            };
+            let text = cut(line.text.trim());
+            (!text.is_empty()).then_some(ConsoleNote { level, text })
+        })
+        .collect();
+    // Errors first, so the cap drops warnings before errors.
+    console.sort_by_key(|note| note.level != "error");
+    console.truncate(MAX_QUALITY_ENTRIES);
+    let failed_requests = wire
+        .network_summary
+        .iter()
+        .filter(|entry| entry.status >= 400)
+        .take(MAX_QUALITY_ENTRIES)
+        .map(|entry| FailedRequest {
+            method: cut(entry.method.trim()),
+            url: cut(entry.url.trim()),
+            status: entry.status,
+        })
+        .collect();
+    let warnings = wire
+        .warnings
+        .iter()
+        .map(|warning| cut(warning.trim()))
+        .filter(|warning| !warning.is_empty())
+        .take(MAX_QUALITY_WARNINGS)
+        .collect();
+    ObservationQuality {
+        console,
+        failed_requests,
+        warnings,
+        settle_ms: wire.settle_ms,
+    }
 }
 
 /// The part of Quarry's `RedactionStamp` (`quarry-core/src/redaction/stamp.rs`)
@@ -1130,6 +1234,7 @@ pub fn observation_from_wire(
         error_message,
         challenge: wire.challenge.as_ref().map(challenge_from_wire),
         redaction_rule_version: stamp_rule_version(wire.redaction.as_ref()),
+        quality: observation_quality_from_wire(wire),
     }
 }
 
@@ -1214,6 +1319,7 @@ pub fn observation_from_challenge_refusal(
         error_message: format!("the site refuses automation ({challenge})"),
         challenge: Some(challenge),
         redaction_rule_version: None,
+        quality: Default::default(),
     }
 }
 
@@ -1352,6 +1458,7 @@ pub fn observation_from_policy_denial(
         error_message: denial.fixed_text(),
         challenge: None,
         redaction_rule_version: None,
+        quality: Default::default(),
     }
 }
 
@@ -2289,6 +2396,90 @@ mod tests {
         let blocked = observation_from_wire(&wire, "act_9", "grant_9");
         assert_eq!(blocked.status, ObservationStatus::Blocked);
         assert!(blocked.error_message.contains("domain not allowed"));
+    }
+
+    #[test]
+    fn warnings_and_settle_are_read_leniently_and_absent_today() {
+        // Today's Quarry sends neither: the observation has empty quality.
+        let today = wire_from(serde_json::json!({"url": "https://example.com/"}));
+        assert!(today.warnings.is_empty());
+        assert_eq!(today.settle_ms, None);
+        assert!(observation_from_wire(&today, "a", "g").quality.is_empty());
+
+        let wire = wire_from(serde_json::json!({
+            "url": "u",
+            "warnings": ["slow_settle", {"code": "late_xhr", "message": "a request finished late"},
+                         {"code": "only_code"}, 7, null, {"other": 1}],
+            "settle_ms": 1250
+        }));
+        assert_eq!(
+            wire.warnings,
+            vec!["slow_settle", "a request finished late", "only_code"]
+        );
+        assert_eq!(wire.settle_ms, Some(1250));
+        let quality = observation_from_wire(&wire, "a", "g").quality;
+        assert_eq!(quality.warnings.len(), 3);
+        assert_eq!(quality.settle_ms, Some(1250));
+
+        // A wrong shape reads as absent; it never fails the observation.
+        for json in [
+            serde_json::json!({"url": "u", "warnings": "slow", "settle_ms": "fast"}),
+            serde_json::json!({"url": "u", "warnings": {"a": 1}, "settle_ms": -5}),
+            serde_json::json!({"url": "u", "warnings": null, "settle_ms": null}),
+            serde_json::json!({"url": "u", "settle_ms": 1.5}),
+        ] {
+            let wire = wire_from(json.clone());
+            assert!(wire.warnings.is_empty(), "{json}");
+            assert_eq!(wire.settle_ms, None, "{json}");
+        }
+        // A huge number saturates rather than wrapping.
+        let huge = wire_from(serde_json::json!({"url": "u", "settle_ms": 99_999_999_999_u64}));
+        assert_eq!(huge.settle_ms, Some(u32::MAX));
+        // Never serialised back: the chat-facing output is unchanged.
+        let back = serde_json::to_value(&wire).unwrap();
+        assert!(back.get("warnings").is_none() && back.get("settle_ms").is_none(), "{back}");
+    }
+
+    #[test]
+    fn quality_keeps_console_errors_and_failed_requests_only_and_bounded() {
+        let mut console: Vec<serde_json::Value> = vec![
+            serde_json::json!({"level": "log", "text": "hello"}),
+            serde_json::json!({"level": "info", "text": "fyi"}),
+            serde_json::json!({"level": "warning", "text": "deprecated api"}),
+            serde_json::json!({"level": "ERROR", "text": "Uncaught TypeError"}),
+            serde_json::json!({"level": "error", "text": "   "}),
+        ];
+        for n in 0..40 {
+            console.push(serde_json::json!({"level": "error", "text": format!("e{n}")}));
+        }
+        let wire = wire_from(serde_json::json!({
+            "url": "u",
+            "console_summary": console,
+            "network_summary": [
+                {"method": "GET", "url": "https://example.com/a.js", "status": 200},
+                {"method": "GET", "url": "https://example.com/missing", "status": 404},
+                {"method": "POST", "url": "https://example.com/api", "status": 500, "content_type": "text/html"},
+                {"method": "GET", "url": format!("https://example.com/{}", "x".repeat(400)), "status": 403},
+            ]
+        }));
+        let quality = observation_from_wire(&wire, "a", "g").quality;
+        assert_eq!(quality.console.len(), crate::browser_agent::MAX_QUALITY_ENTRIES);
+        assert_eq!(quality.console[0].level, "error", "errors come first");
+        assert_eq!(quality.console[0].text, "Uncaught TypeError");
+        assert!(quality.console.iter().all(|note| matches!(note.level, "error" | "warn")));
+        assert!(!quality.console.iter().any(|note| note.text == "hello" || note.text == "fyi"));
+        assert_eq!(quality.failed_requests.len(), 3, "the 200 is not a failure");
+        assert_eq!(quality.failed_requests[0].status, 404);
+        assert_eq!(
+            quality.failed_requests[2].url.chars().count(),
+            crate::browser_agent::MAX_QUALITY_TEXT_CHARS
+        );
+    }
+
+    #[test]
+    fn the_snapshot_target_cap_is_quarrys_fifty() {
+        assert_eq!(QUARRY_SNAPSHOT_TARGET_CAP, 50);
+        assert_eq!(crate::browser_agent::planner_view::MAX_TARGETS, QUARRY_SNAPSHOT_TARGET_CAP);
     }
 
     #[test]

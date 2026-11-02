@@ -287,6 +287,7 @@ mod tests {
             error_message: String::new(),
             challenge: None,
             redaction_rule_version: None,
+            quality: Default::default(),
         }
     }
 
