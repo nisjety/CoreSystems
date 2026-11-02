@@ -40,6 +40,8 @@ import { presentSpaceDenialText, isSpaceDenial } from '@/shared/api/space-denial
 import { loadSpaceTranscript, updateSpaceThreadPresentation } from '@/shared/api/spaces-client'
 import type { SpaceAgent, SpaceRoomPin, SpaceRosterMember, SpaceThread } from '@/shared/api/spaces-client'
 import { useI18n } from '@/shared/i18n'
+import { announce } from '@/shared/a11y/announcer'
+import { narrateNewPosts, narrateRunChange } from '@/features/spaces/lib/space-narration'
 import { createResource } from '@/shared/lib/create-resource-compat'
 
 /**
@@ -168,6 +170,32 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
   })
 
   const agentName = createMemo(() => roomAgentName(props.agents()))
+
+  // ── Screen-reader narration (WS16-S4) ────────────────────────────────────────────────────────────
+  // The poll replaces the thread listing; the difference between two listings is what changed under a
+  // reader who cannot see it. A listing for another room, or the first one, is a baseline, not news.
+  let narratedRef: string | undefined
+  let narratedThreads: readonly SpaceThread[] | undefined
+  createEffect(
+    () => ({ ref: props.spaceRef, threads: props.threads() }),
+    ({ ref, threads }) => {
+      const prev = narratedRef === ref ? narratedThreads : undefined
+      narratedRef = ref
+      narratedThreads = threads
+      if (!prev) return
+      const roster = props.roster()
+      const context = {
+        roomName: props.spaceName,
+        nameOf: (subjectId: string | undefined) =>
+          resolveAuthorName(subjectId, roster, props.viewerSubjectId?.(), i18n.tr),
+      }
+      const items = [
+        ...narrateNewPosts(prev, threads, props.viewerSubjectId?.(), i18n.tr, context),
+        ...narrateRunChange(prev, threads, i18n.tr),
+      ]
+      for (const item of items) announce(item.message, item.options)
+    },
+  )
   // The "new messages" divider goes once, above the first post (oldest first) that is new since the
   // reader arrived; the posts after it are new too, so one line says it for all of them.
   const firstUnreadId = createMemo(() => {

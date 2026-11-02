@@ -6,6 +6,7 @@ import { AgentsProvider } from '@/features/agents/lib/use-agent-selection'
 import { CoreNavbar } from '@/features/core/components/CoreNavbar'
 import { CoreSidebar, SIDEBAR_EXPANDED_WIDTH, SIDEBAR_MINIMIZED_WIDTH } from '@/features/core/components/CoreSidebar'
 import { FeedbackWidget } from '@/features/core/components/FeedbackWidget'
+import { AnnouncerRegions } from '@/shared/a11y/announcer'
 import { chatAppearanceActive, chatAppearanceTokens } from '@/features/chat/lib/chat-appearance-preview'
 import { OrgDeletionBanner } from '@/features/core/components/OrgDeletionBanner'
 import {
@@ -158,6 +159,7 @@ export function CoreShell(props: { children?: JSX.Element }) {
           </div>
         </main>
         <FeedbackWidget />
+        <AnnouncerRegions />
       </div>
     </AgentsProvider>
   )

@@ -1,7 +1,8 @@
 import { Loader2, ShieldCheck } from '@/shared/icons'
-import { createSignal, For, Show } from 'solid-js'
+import { createEffect, createSignal, For, Show } from 'solid-js'
 
 import type { Approval, ApprovalDecision } from '@/shared/api/orchestration-client'
+import { announce } from '@/shared/a11y/announcer'
 import { useI18n } from '@/shared/i18n'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import {
@@ -66,6 +67,22 @@ export function SpaceApprovalPanel(props: SpaceApprovalPanelProps) {
 
   const approvals = () => (pending.error ? [] : pending()?.approvals ?? [])
   const refused = () => (pending.error ? false : pending()?.refused === true)
+
+  // Tell a screen-reader user that a decision is waiting for them, once per run. The room's own
+  // narration uses the same key, so the two collapse into a single announcement.
+  let announcedFor: string | undefined
+  createEffect(
+    () => ({ runId: props.runId, waiting: !pending.loading && !pending.error && !refused() && approvals().length > 0 }),
+    ({ runId, waiting }) => {
+      if (!waiting || announcedFor === runId) return
+      announcedFor = runId
+      announce(i18n.tr('Venter på din godkjenning', 'Waiting for your approval'), {
+        politeness: 'assertive',
+        key: `approval:${runId}`,
+        coalesceMs: 10_000,
+      })
+    },
+  )
 
   async function decide(approval: Approval, decision: ApprovalDecision) {
     if (decidingId()) return
