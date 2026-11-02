@@ -268,6 +268,25 @@ pub(crate) struct SpaceFeatureFlags {
     /// (`/api/v1/orgs/{id}/domains`), proxied to org-core. Off answers 404 `feature_disabled`.
     /// A rollout control, never an authorization input: the live owner/admin membership decides.
     pub(crate) org_identity_admin_api: bool,
+    /// `SPACE_RUN_LIVE_TEXT` (WS09-S2 reserves the flag, S4 reads it): stream the answer text to the
+    /// room while a run works. Off means step classes and `text_progress` only. A rollout control,
+    /// never an authorization input.
+    #[allow(dead_code, reason = "first reader is WS09-S4, which streams the room live view")]
+    pub(crate) run_live_text: bool,
+    /// `SPACE_RUN_LIVE_VIEW` (WS09-S2 reserves the flag, S4/S5 read it): the room live view of an
+    /// agent run, reported as `data.agent_work.live`. A rollout control, never an authorization input.
+    #[allow(dead_code, reason = "first reader is WS09-S4, which serves the room live view")]
+    pub(crate) run_live_view: bool,
+    /// `SPACE_RUN_MANAGER_STOP` (WS09-S2 reserves the flag, S8 reads it): a manager's Stop of a run,
+    /// reported as `data.agent_work.stop_manager`. A rollout control, never an authorization input:
+    /// Control's run-control decision decides who may stop.
+    #[allow(dead_code, reason = "first reader is WS09-S8, which serves the manager Stop")]
+    pub(crate) run_manager_stop: bool,
+    /// `SPACE_RUN_OWNER_STEER` (WS09-S2): the person who started a run may type into it while it
+    /// works, reported as `data.agent_work.steer_owner`. Off keeps the composer disabled during a
+    /// turn. A rollout control, never an authorization input: the queue route re-authorizes each
+    /// message, and a Zero Data Retention org is reported false because that route refuses there.
+    pub(crate) run_owner_steer: bool,
 }
 
 impl SpaceFeatureFlags {
@@ -293,6 +312,10 @@ impl SpaceFeatureFlags {
             send_idempotency_api: space_flag("SPACE_SEND_IDEMPOTENCY_API"),
             thread_pane_ui: space_flag("SPACE_THREAD_PANE_UI"),
             org_identity_admin_api: space_flag("ORG_IDENTITY_ADMIN_API"),
+            run_live_text: space_flag("SPACE_RUN_LIVE_TEXT"),
+            run_live_view: space_flag("SPACE_RUN_LIVE_VIEW"),
+            run_manager_stop: space_flag("SPACE_RUN_MANAGER_STOP"),
+            run_owner_steer: space_flag("SPACE_RUN_OWNER_STEER"),
         }
     }
 }

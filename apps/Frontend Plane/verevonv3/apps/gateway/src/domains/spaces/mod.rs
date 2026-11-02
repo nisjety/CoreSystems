@@ -1443,6 +1443,7 @@ async fn list_space_threads(
     } else {
         Value::Array(vec![])
     };
+    let agent_work = agent_work_offer(&state, &user).await;
     (
         StatusCode::OK,
         Json(json!({
@@ -1451,6 +1452,7 @@ async fn list_space_threads(
                 "membership": crate::envelope::unwrap_data(&membership),
                 "threads": thread_items,
                 "pins": pins,
+                "agent_work": agent_work,
                 // WS07-S4: Control's shared-read answer, so the SPA can say
                 // "not shared with you" once instead of probing every post.
                 "shared_read": { "available": read.is_some() },
@@ -1459,6 +1461,23 @@ async fn list_space_threads(
             }
         })),
     )
+}
+
+/// WS09-S2: what the room's agent runs offer this caller, as `data.agent_work`. A rollout answer,
+/// never an authorization: the owner plane re-authorizes every steer and stop. `steer_owner` is true
+/// only with `SPACE_RUN_OWNER_STEER` on AND an org that is positively not under Zero Data Retention
+/// (the queue route refuses there, so an unknown posture fails closed to false). The live view, text
+/// and manager Stop fields report their own flags; their routes land with later WS09 slices.
+async fn agent_work_offer(state: &AppState, user: &AuthenticatedUser) -> Value {
+    let flags = &state.space_features;
+    let steer_owner = flags.run_owner_steer
+        && !crate::zdr::org_zdr_lookup(state, user).await.treat_as_zdr();
+    json!({
+        "live": flags.run_live_view,
+        "text": flags.run_live_view && flags.run_live_text,
+        "steer_owner": steer_owner,
+        "stop_manager": flags.run_manager_stop,
+    })
 }
 
 /// Ask Control whether this caller may read this shared Space's record, and

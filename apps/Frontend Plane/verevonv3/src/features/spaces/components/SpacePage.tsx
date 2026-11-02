@@ -25,6 +25,7 @@ import {
   type SpaceRoomPin,
   type SpaceDeletionReceipt,
   type SpaceRosterMember,
+  type SpaceAgentWork,
   type SpaceThread,
 } from '@/shared/api/spaces-client'
 import { translateApiError, useI18n } from '@/shared/i18n'
@@ -203,6 +204,8 @@ export default function SpacePage() {
   const [deletionError, setDeletionError] = createSignal('')
   const [deletionSubmitting, setDeletionSubmitting] = createSignal(false)
   const currentThreads = () => threads()?.threads ?? []
+  // WS09-S2: a failed listing offers nothing, so a steer is never offered on a guess.
+  const agentWork = () => (threads.error ? undefined : threads()?.agent_work)
   // This browser's own sends not yet in the room's record (WS01-S6). The composer writes it, the
   // timeline draws its optimistic rows, and every projection that arrives settles accepted ones.
   const sendJournal = createSpaceSendJournal()
@@ -627,6 +630,7 @@ export default function SpacePage() {
                         unreadThreadIds={unreadIds}
                         journal={sendJournal}
                         humanPostsEnabled={() => current().features?.human_posts === true}
+                        agentWork={agentWork}
                         archived={() => roomIsArchived(current())}
                         viewerRole={() => current().membership.role}
                         postMaxChars={() => current().limits?.post_max_chars}
@@ -753,6 +757,7 @@ export default function SpacePage() {
                               })}
                               replyTargetFixed
                               humanPostsEnabled={() => current().features?.human_posts === true}
+                              agentWork={agentWork}
                               viewerSubjectId={() => current().membership.subject_id}
                               viewerRole={() => current().membership.role}
                               postMaxChars={() => current().limits?.post_max_chars}
@@ -806,6 +811,8 @@ function SpaceConversationPanel(props: {
   readonly journal?: SpaceSendJournal
   /** The room's `features.human_posts`. Off, the composer is the single ask-the-agent box it was. */
   readonly humanPostsEnabled?: () => boolean
+  /** The listing's `data.agent_work` (WS09-S2): what the room's runs offer this caller. Absent means off. */
+  readonly agentWork?: () => SpaceAgentWork | undefined
   /** The room is archived: it stays readable, and the composer gives way to a read-only notice. */
   readonly archived?: () => boolean
   readonly viewerRole?: () => string | undefined
@@ -918,6 +925,7 @@ function SpaceConversationPanel(props: {
           onClearReplyTarget={() => setReplyTarget(undefined)}
           onArtifact={artifactsOn() ? noteLiveArtifact : undefined}
           humanPostsEnabled={props.humanPostsEnabled}
+          agentWork={props.agentWork}
           viewerSubjectId={props.viewerSubjectId}
           viewerRole={props.viewerRole}
           postMaxChars={props.postMaxChars}

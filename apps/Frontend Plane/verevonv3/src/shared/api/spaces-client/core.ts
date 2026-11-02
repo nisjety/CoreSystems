@@ -118,10 +118,41 @@ export type SpaceThreads = {
    * answer, not an error.
    */
   shared_read?: SpaceSharedRead
+  /**
+   * What the room's agent runs offer this caller (WS09). Absent from an older gateway, which
+   * means every field is off. A rollout answer, never an authorization: the owner plane still
+   * decides each steer and stop.
+   */
+  agent_work?: SpaceAgentWork
   unavailable?: readonly SpaceWorkGap[]
 }
 
 export type SpaceSharedRead = { readonly available: boolean }
+
+/**
+ * `data.agent_work` on the thread listing. `steer_owner`: the person who started a run may type
+ * into it while it works (`space_run_owner_steer`; false in a Zero Data Retention org, where the
+ * queue route refuses). `live`, `text` and `stop_manager` are the room live view, its streamed
+ * text and the manager Stop (later WS09 slices); each is true only when that surface exists.
+ */
+export type SpaceAgentWork = {
+  readonly live: boolean
+  readonly text: boolean
+  readonly steer_owner: boolean
+  readonly stop_manager: boolean
+}
+
+/** Only an explicit `true` turns a field on; anything else, or a missing object, is off. */
+export function spaceAgentWorkFrom(raw: unknown): SpaceAgentWork | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const value = raw as Record<string, unknown>
+  return {
+    live: value.live === true,
+    text: value.text === true,
+    steer_owner: value.steer_owner === true,
+    stop_manager: value.stop_manager === true,
+  }
+}
 
 /** Actor-filtered owner contracts available in a Space. This is an availability
  * view only: each owner plane reauthorizes the exact resource at execution. */
@@ -207,8 +238,10 @@ export async function getSpaceThreads(spaceRef: string): Promise<SpaceThreads> {
     membership: SpaceMembership
     threads: readonly SpaceThread[]
     read_marker?: unknown
+    pins?: unknown
     unavailable?: unknown
     shared_read?: unknown
+    agent_work?: unknown
   }>(`/api/v1/spaces/${encodeURIComponent(spaceRef)}/threads`)
   // Only an explicit `available: false` restricts; absent or malformed keeps
   // today's behaviour (the transcript route still decides per read).
@@ -226,19 +259,21 @@ export async function getSpaceThreads(spaceRef: string): Promise<SpaceThreads> {
     marker && typeof marker === 'object'
       ? { last_read_at: typeof lastReadAt === 'number' && Number.isFinite(lastReadAt) ? lastReadAt : null }
       : undefined
+  const agent_work = spaceAgentWorkFrom(response.agent_work)
   return {
     space: response.space,
     membership: response.membership,
     threads: response.threads,
     ...(read_marker ? { read_marker } : {}),
+    pins: spacePinsFrom(response.pins),
     shared_read,
+    ...(agent_work ? { agent_work } : {}),
     unavailable: workGaps(response.unavailable),
   }
 }
 
 /**
  * Retitle or pin a post in the room.
-    pins?: unknown
  *
  * Owner-bound in Session Core: only the member who started the post may. The
  * room route relays a refusal as `thread_presentation_owner_only`, and the UI
@@ -265,7 +300,6 @@ export async function markSpaceRead(spaceRef: string): Promise<SpaceReadMarker> 
   const at = response.last_read_at
   return { last_read_at: typeof at === 'number' && Number.isFinite(at) ? at : null }
 }
-    pins: spacePinsFrom(response.pins),
 
 /** Someone else in the room right now. Identifiers and a status, never content. */
 export type SpacePresentMember = {

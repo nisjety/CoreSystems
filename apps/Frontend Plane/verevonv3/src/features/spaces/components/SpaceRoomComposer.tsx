@@ -1,7 +1,7 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'solid-js'
 
-import { ChatMarkdown } from '@/features/chat/components/ChatMessages'
-import type { ChatArtifact } from '@/features/chat/components/chat-types'
+import { ChatMarkdown, QueuedInputStrip } from '@/features/chat/components/ChatMessages'
+import type { ChatArtifact, QueuedInput } from '@/features/chat/components/chat-types'
 import { listAvailableSkills, MAX_PICKED_SKILLS, type Skill } from '@/shared/api/skills-client'
 import { Paperclip, WandSparkles } from '@/shared/icons'
 import { ATTACHMENT_ACCEPT, ATTACHMENT_MAX_IMAGES, isImageAttachment, type AttachmentPolicyContext, visionAsPartsEnabled } from '@/features/chat/lib/attachment-policy'
@@ -22,12 +22,14 @@ import {
 import {
   SPACE_POST_MAX_CHARS_DEFAULT,
   type SpaceAgent,
+  type SpaceAgentWork,
   type SpaceRosterMember,
   type SpaceThread,
 } from '@/shared/api/spaces-client'
 import { useI18n } from '@/shared/i18n'
 import { translateApiError } from '@/shared/i18n/errors'
-import { liveThreadsIn, ownStream } from '../lib/space-live-work'
+import { isSpaceObserved, liveThreadsIn, ownStream } from '../lib/space-live-work'
+import { createSpaceMidRun, type SpaceMidRunResend } from '../lib/space-mid-run'
 import { agentAvatarColor } from '../lib/agent-avatar'
 import { AgentAvatar } from './AgentAvatar'
 import { threadTitle } from '../lib/space-thread-presentation'
@@ -180,6 +182,13 @@ export interface SpaceRoomComposerProps {
   readonly defaultSendMode?: 'post' | 'ask'
   /** The room's send journal (the page shares it with the timeline for optimistic rows). */
   readonly journal?: SpaceSendJournal
+  /**
+   * `data.agent_work` from the thread listing (WS09-S2). `steer_owner` keeps the box open while the
+   * member's own turn works and offers "Send when ready" on a busy thread. Absent or false, the box
+   * is disabled during a turn exactly as before. A rollout answer only: the owner plane re-authorizes
+   * every steer.
+   */
+  readonly agentWork?: () => SpaceAgentWork | undefined
 }
 
 export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
@@ -261,9 +270,34 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   let acceptSend: (() => void) | undefined
   // The send path (in-flight handles, exchange state, Stop) lives in the send
   // pipeline; the composer keeps the box, the pickers and the chosen chips.
+  // Owner mid-run steer (WS09-S2): the strip, the messages the run never took and the one waiting
+  // for the agent to be free. In memory only.
+  const midRun = createSpaceMidRun({
+    tr: i18n.tr,
+    settled: () => !pipeline.submitting(),
+  })
+  // Messages the run never took, to go out as ordinary turns one at a time.
+  let resendQueue: SpaceMidRunResend[] = []
+  function flushResends(found: readonly SpaceMidRunResend[]): void {
+    resendQueue = [...resendQueue, ...found]
+    if (pipeline.submitting()) return
+    const next = resendQueue.shift()
+    if (!next) return
+    midRun.startTurn(true)
+    void pipeline.send({
+      content: next.content,
+      mode: 'ask',
+      model: selectedModel(),
+      locale: i18n.locale(),
+      skills: [],
+      replyThreadId: pipeline.liveThreadId(),
+      ...(next.clientMessageId ? { sendId: next.clientMessageId } : {}),
+    })
+  }
   const pipeline = createSpaceSendPipeline({
     host: props,
     resolveTier: privacyTiers.resolve,
+    onQueuedInput: (messages, ids) => midRun.markDelivered(messages, ids),
     // With drafts on, the box is emptied when the server has the turn, not when Send is pressed
     // (WS15-S2): a send that fails or is stopped before `connected` keeps its words.
     onStage: (stage) => {
@@ -275,6 +309,10 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
         acceptSend = undefined
         // The server said it already had this send: accepted, though no `connected` came.
         if (pipeline.exchange()?.status === 'done') accept?.()
+        // The run ended on its own: a steer it never took goes out again as an ordinary turn. A
+        // stop or a failure sends nothing the member did not ask for.
+        if (pipeline.exchange()?.status === 'done') flushResends(midRun.settle())
+        else resendQueue = []
       }
     },
     // Known codes get the room's own words, and a typed Space denial (its
@@ -434,7 +472,41 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
       (thread) => !(own && own.spaceRef === props.spaceRef && own.threadId === thread.thread_id),
     )
   }
+  // Owner steer (WS09-S2). `steerAllowed` is the rollout answer from the thread listing; the queue
+  // route still decides every message. Steer is only ever into THIS browser's own turn: the person
+  // who started it owns it, and the registry on the other side binds it to them.
+  const steerAllowed = () => props.agentWork?.()?.steer_owner === true
+  const steerOpen = () =>
+    steerAllowed() && submitting() && !preparing() && exchange()?.status === 'streaming' && effectiveMode() === 'ask'
+  // The thread this ask would reply into already has a live run that is not this browser's: a
+  // second reply would be refused (one run per thread), so the message waits here instead.
+  const busyReplyThread = (): string | undefined => {
+    if (!steerAllowed() || submitting() || effectiveMode() !== 'ask') return undefined
+    const target = props.replyTarget?.()?.threadId
+    if (!target) return undefined
+    return othersWorking().some((thread) => thread.thread_id === target) ? target : undefined
+  }
+  const sendWhenReadyOffered = () => busyReplyThread() !== undefined && files().length === 0
   props.registerFocusHandle?.(() => textareaRef?.focus())
+  // A message waiting for the agent to be free goes out once the room's projection no longer shows
+  // its thread working. Only on an observed room: absence of data is not idleness.
+  createEffect(() => {
+    const waiting = midRun.deferred()
+    if (!waiting || submitting() || !isSpaceObserved(props.spaceRef)) return
+    if (liveThreadsIn(props.spaceRef).some((thread) => thread.thread_id === waiting.threadId)) return
+    const ready = midRun.takeDeferred()
+    if (!ready) return
+    midRun.startTurn(false)
+    void pipeline.send({
+      content: ready.content,
+      mode: 'ask',
+      model: selectedModel(),
+      mentionedAgentRef: ready.mentionedAgentRef,
+      locale: i18n.locale(),
+      skills: ready.skills ?? [],
+      replyThreadId: ready.threadId,
+    })
+  })
 
   const candidates = createMemo<readonly MentionCandidate[]>(() => {
     const people: MentionCandidate[] = props.roster()
@@ -665,7 +737,29 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
       await postSender.send({ content, replyThreadId: props.replyTarget?.()?.threadId })
       return
     }
+    // The member's own turn is still working and the room allows steering it: hand the message to
+    // the running agent instead of starting another turn.
+    if (steerOpen()) {
+      await steerMessage(content)
+      return
+    }
     if (submitting() || preparing() || postBusy() || blockedByApproval() || subscriptionIncompatible()) return
+    // Another run is live in the thread being replied to: keep the message here until it is free.
+    const busyThread = busyReplyThread()
+    if (busyThread && files().length === 0) {
+      midRun.defer({
+        content,
+        threadId: busyThread,
+        mentionedAgentRef: mentionedAgentRef(),
+        skills: pickedSkills(),
+      })
+      setText('')
+      discardDraft()
+      setMentionedAgentRef(undefined)
+      setPickedSkills([])
+      closePicker()
+      return
+    }
 
     // Read every chip before anything is cleared or sent. A file the turn can no longer carry
     // (the route, the model or the retention verdict changed since it was added) or one that cannot
@@ -717,6 +811,7 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
         clearFiles()
       }
     }
+    midRun.startTurn(false)
     const sent = pipeline.send(input)
     if (!draftsOn()) {
       setText('')
@@ -725,6 +820,31 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
       clearFiles()
     }
     await sent
+  }
+
+  // Deliver a message to the running turn. The words leave the box once the gateway accepted them
+  // (or will send them as a new turn); a refusal keeps them, and the strip says why.
+  async function steerMessage(content: string): Promise<void> {
+    if (files().length > 0) {
+      setAttachNotice(i18n.tr(
+        'Vedlegg kan ikke sendes mens agenten jobber. Fjern dem, eller vent til svaret er ferdig.',
+        'Attachments cannot be sent while the agent works. Remove them, or wait until the reply is done.',
+      ))
+      return
+    }
+    closePicker()
+    const outcome = await midRun.steer(content, {
+      requestId: pipeline.liveRequestId(),
+      threadId: pipeline.liveThreadId(),
+      spaceRef: props.spaceRef,
+    })
+    if (outcome === 'refused') return
+    if (text().trim() === content) {
+      setText('')
+      discardDraft()
+    }
+    // The answer came after the run had already ended: nobody is left to flush it at settle time.
+    if (outcome === 'resend' && !pipeline.submitting()) flushResends(midRun.takeLateResends())
   }
 
   // The thread pane's composer is aimed at one thread for as long as the pane is open; the pane title
@@ -856,6 +976,41 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
             </Show>
           </div>
         )}
+      </Show>
+
+      <Show when={midRun.entries().length > 0}>
+        <QueuedInputStrip entries={midRun.entries() as QueuedInput[]} />
+      </Show>
+      <Show when={steerOpen()}>
+        <p class="verevon-space-room-composer__hint" role="status">
+          {i18n.tr(
+            'Agenten jobber. Det du skriver nå leveres til den ved neste verktøyrunde.',
+            'The agent is working. What you write now reaches it at its next tool round.',
+          )}
+        </p>
+      </Show>
+      <Show when={midRun.deferred()}>
+        {(waiting) => (
+          <p class="verevon-space-room-composer__hint" role="status" aria-live="polite">
+            {i18n.tr('Venter på at agenten blir ferdig: «', 'Waiting for the agent to finish: «')}
+            {waiting().content.length > 80 ? `${waiting().content.slice(0, 80)}…` : waiting().content}
+            {i18n.tr(
+              '». Meldingen holdes her i nettleseren din, ikke på serveren, og går tapt hvis du lukker fanen. ',
+              '». The message is kept in this browser, not on the server, and is lost if you close the tab. ',
+            )}
+            <button type="button" onClick={() => midRun.cancelDeferred()}>
+              {i18n.tr('Avbryt', 'Cancel')}
+            </button>
+          </p>
+        )}
+      </Show>
+      <Show when={sendWhenReadyOffered()}>
+        <p class="verevon-space-room-composer__hint" role="status">
+          {i18n.tr(
+            'Agenten jobber allerede i denne samtalen. Meldingen din holdes her til agenten er ferdig.',
+            'The agent is already working in this conversation. Your message is kept here until it is done.',
+          )}
+        </p>
       </Show>
 
       {/* Other members' agent work, from the server's projection. Shown above
@@ -1145,7 +1300,7 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
                     )
           }
           rows={2}
-          disabled={submitting() || preparing() || blockedByApproval() || postBusy() || roleBlocked()}
+          disabled={(submitting() && !steerOpen()) || preparing() || blockedByApproval() || postBusy() || roleBlocked()}
         />
         {/* A human post that did not land (WS01-S6). The text is still in the box; Retry repeats
             the same send under its own key, so a post whose answer was lost lands once. */}
@@ -1198,11 +1353,15 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
         <button
           type="submit"
           disabled={
-            submitting() || preparing() || blockedByApproval() || subscriptionIncompatible() || !text().trim()
-            || postBusy() || roleBlocked() || nothingOffered() || overLimit()
+            (submitting() && !steerOpen()) || preparing() || blockedByApproval() || subscriptionIncompatible() || !text().trim()
+            || postBusy() || roleBlocked() || nothingOffered() || overLimit() || Boolean(midRun.deferred())
           }
         >
-          {humanPostsActive() && effectiveMode() === 'ask' ? i18n.tr('Spør Verevon', 'Ask Verevon') : i18n.tr('Send', 'Send')}
+          {steerOpen()
+            ? i18n.tr('Send til agenten', 'Send to the agent')
+            : sendWhenReadyOffered()
+              ? i18n.tr('Send når klar', 'Send when ready')
+              : humanPostsActive() && effectiveMode() === 'ask' ? i18n.tr('Spør Verevon', 'Ask Verevon') : i18n.tr('Send', 'Send')}
         </button>
       </form>
     </div>

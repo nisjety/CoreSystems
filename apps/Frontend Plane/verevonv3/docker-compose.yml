@@ -260,6 +260,13 @@ services:
       # WS05-S6: owner/admin domain verification routes (proxied to org-core, which has its own
       # ORG_DOMAIN_VERIFICATION_ENABLED). Rollout control only; the live owner/admin role decides access.
       ORG_IDENTITY_ADMIN_API: ${ORG_IDENTITY_ADMIN_API:-true}
+      # WS09: agent work in the room. Rollout controls only (never authorization): the owner plane
+      # re-authorizes every steer, attach and stop. OWNER_STEER lets the person who started a run type
+      # into it; LIVE_VIEW, LIVE_TEXT and MANAGER_STOP are read by later WS09 slices. Production: off.
+      SPACE_RUN_OWNER_STEER: ${SPACE_RUN_OWNER_STEER:-true}
+      SPACE_RUN_LIVE_VIEW: ${SPACE_RUN_LIVE_VIEW:-true}
+      SPACE_RUN_LIVE_TEXT: ${SPACE_RUN_LIVE_TEXT:-true}
+      SPACE_RUN_MANAGER_STOP: ${SPACE_RUN_MANAGER_STOP:-true}
     ports:
       - "${VEREVON_BIND_ADDRESS:-127.0.0.1}:3185:3185"
     networks:

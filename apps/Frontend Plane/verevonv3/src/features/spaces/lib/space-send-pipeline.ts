@@ -276,6 +276,11 @@ export interface SpaceSendPipelineOptions {
   /** The room's own words for a stream error: known codes translated, unknown kept. */
   readonly describeError: (event: ChatErrorEvent) => string
   readonly onStage?: (stage: SpaceSendStage) => void
+  /**
+   * The agent took messages sent into the run mid-turn (a `queued_input` frame; WS09-S2). The ids
+   * are the client message ids the messages were named with, when the delivery carries them.
+   */
+  readonly onQueuedInput?: (messages: readonly string[], ids: readonly string[]) => void
   /** Whether a send carries its key and resumes a dropped stream. Defaults to the build-time switch. */
   readonly sendIdempotency?: () => boolean
 }
@@ -285,6 +290,8 @@ export interface SpaceSendPipeline {
   readonly submitting: () => boolean
   /** The announced request id of the turn in flight (or the last one). */
   readonly liveRequestId: () => string | undefined
+  /** The thread the turn in flight (or the last one) is in, once known. */
+  readonly liveThreadId: () => string | undefined
   readonly send: (input: SpaceSendInput) => Promise<void>
   readonly stop: () => Promise<void>
   /**
@@ -359,6 +366,9 @@ export function createSpaceSendPipeline(options: SpaceSendPipelineOptions): Spac
         if (!announced) options.onStage?.('accepted')
         announced = true
       },
+      // Both a live stream and a resume deliver this frame, so a delivered message never stays
+      // "pending" in the strip because the read was resumed.
+      onQueuedInput: ({ messages, ids }) => options.onQueuedInput?.(messages, ids ?? []),
       onTitle: ({ title }) => {
         // Only for a thread this browser opened: the title event fires on a
         // first exchange, and only the owner may write presentation. Writing
@@ -536,5 +546,5 @@ export function createSpaceSendPipeline(options: SpaceSendPipelineOptions): Spac
     await send(again)
   }
 
-  return { exchange, submitting, liveRequestId: () => liveRequestId, send, stop, retry }
+  return { exchange, submitting, liveRequestId: () => liveRequestId, liveThreadId: () => liveThreadId, send, stop, retry }
 }
