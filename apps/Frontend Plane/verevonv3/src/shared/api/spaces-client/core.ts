@@ -7,6 +7,7 @@ import {
 import { ApiError, requestJson } from '../http'
 import { setDmListingEnabled, type SpaceDmParticipant } from './dm'
 import { spacePinsFrom, type SpaceRoomPin } from './pins'
+import { spaceRunWorkFrom, type SpaceRunWork } from './run-work'
 import { readSpaceDenial } from '../space-denials'
 
 export type SpaceMembership = {
@@ -760,6 +761,12 @@ export type SpaceThreadTurn = {
    * closed set. Absent on every other turn and on a code outside the set.
    */
   readonly retrievalDeclined?: SpaceRetrievalDeclineReason
+  /**
+   * The content-free work summary of an assistant turn (WS09-S3 `metadata.work`): which kinds of step the
+   * agent took and how many messages its owner steered in. Read through the closed shape
+   * (`spaceRunWorkFrom`); absent on every other turn and when the summary was not stored.
+   */
+  readonly work?: SpaceRunWork
 }
 
 export type SpaceThreadTranscript = {
@@ -809,6 +816,7 @@ function normalizeSpaceThreadTurns(value: unknown): readonly SpaceThreadTurn[] {
       role === 'assistant' && typeof record.retrievalDeclined === 'string'
         ? spaceRetrievalDeclineReason(record.retrievalDeclined)
         : undefined
+    const work = role === 'assistant' ? spaceRunWorkFrom(record.work) : undefined
     turns.push({
       role,
       content,
@@ -818,6 +826,7 @@ function normalizeSpaceThreadTurns(value: unknown): readonly SpaceThreadTurn[] {
       ...(createdAt ? { createdAt } : {}),
       ...(artifacts.length > 0 ? { artifacts } : {}),
       ...(retrievalDeclined ? { retrievalDeclined } : {}),
+      ...(work ? { work } : {}),
     })
   }
   return turns

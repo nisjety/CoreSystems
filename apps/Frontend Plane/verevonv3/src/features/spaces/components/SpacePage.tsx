@@ -697,7 +697,7 @@ export default function SpacePage() {
                         }
                       />
                     ),
-                    arbeid: <SpaceWorkPanel spaceRef={current().space.space_ref} />,
+                    arbeid: <SpaceWorkPanel spaceRef={current().space.space_ref} liveRuns={agentWork()?.live === true} />,
                     kunnskap: <SpaceKnowledgePanel spaceRef={current().space.space_ref} />,
                     artefakter: (
                       <SpaceArtifactsTab spaceRef={current().space.space_ref} live={liveArtifacts} />
@@ -707,6 +707,7 @@ export default function SpacePage() {
                         spaceRef={current().space.space_ref}
                         threads={currentThreads}
                         threadsLoading={() => threads.loading}
+                        liveRuns={agentWork()?.live === true}
                       />
                     ),
                     agent: (
@@ -933,6 +934,7 @@ function SpaceConversationPanel(props: {
             threads={props.threads}
             sharedReadAvailable={props.sharedReadAvailable}
             roomPins={props.roomPins}
+            agentWork={props.agentWork}
             liveArtifacts={artifactsOn() ? props.liveArtifacts.forThread : undefined}
             roster={props.roster}
             agents={props.agents}

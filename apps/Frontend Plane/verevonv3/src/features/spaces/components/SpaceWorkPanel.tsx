@@ -1,4 +1,4 @@
-import { For, Show } from 'solid-js'
+import { createMemo, For, Show } from 'solid-js'
 
 import { isSpaceDenial, presentSpaceDenialText } from '@/shared/api/space-denials'
 import { getSpaceWork, type SpaceWork } from '@/shared/api/spaces-client'
@@ -11,6 +11,9 @@ import {
   type ScheduleLikeActivitySource,
 } from '../lib/activity-grammar'
 import { SpaceActivityFeed } from './SpaceActivityFeed'
+import { withLiveRunItems } from '../lib/room-run-grammar'
+import { spaceRunStore, trackLiveRuns } from '../lib/space-run-store'
+import { LIVE_RUN_STATUSES } from '../lib/space-thread-presentation'
 
 /**
  * What this room has running and scheduled.
@@ -37,6 +40,12 @@ import { SpaceActivityFeed } from './SpaceActivityFeed'
  */
 export interface SpaceWorkPanelProps {
   readonly spaceRef: string
+  /**
+   * `agent_work.live` from the thread listing (WS09-S5). On, a run this panel lists as queued or running
+   * is followed through the room's live view and its row shows the current step in place of the polled
+   * line. Absent or false: the polled rows, as before.
+   */
+  readonly liveRuns?: boolean
 }
 
 function sectionLabel(section: string, tr: (no: string, en: string) => string): string {
@@ -114,15 +123,30 @@ export function SpaceWorkPanel(props: SpaceWorkPanelProps) {
   const [work] = createResource(() => props.spaceRef, getSpaceWork)
 
   const resolved = (): SpaceWork | undefined => (work.error ? undefined : work())
+  // The runs the listing says are in flight; each is followed through the shared live view when it is on.
+  const runIds = createMemo(() => {
+    const runs = (resolved()?.runs ?? []) as readonly RunLikeActivitySource[]
+    return runs.map((run) => (run.id ?? run.run_id ?? '').trim()).filter((id) => id.length > 0)
+  })
+  const liveRunIds = createMemo(() =>
+    ((resolved()?.runs ?? []) as readonly RunLikeActivitySource[])
+      .filter((run) => LIVE_RUN_STATUSES.has((run.status ?? '').trim()))
+      .map((run) => (run.id ?? run.run_id ?? '').trim())
+      .filter((id) => id.length > 0),
+  )
+  trackLiveRuns(() => props.spaceRef, liveRunIds, () => props.liveRuns === true)
   const items = () => {
     const current = resolved()
     if (!current) return []
-    return buildSpaceWork(
+    const polled = buildSpaceWork(
       current.runs as readonly RunLikeActivitySource[],
       current.schedules as readonly ScheduleLikeActivitySource[],
       current.processes as readonly ProcessLikeActivitySource[],
       i18n.tr,
     )
+    return props.liveRuns === true
+      ? withLiveRunItems(polled, spaceRunStore.views(), new Set(runIds()), props.spaceRef, i18n.tr)
+      : polled
   }
 
   return (

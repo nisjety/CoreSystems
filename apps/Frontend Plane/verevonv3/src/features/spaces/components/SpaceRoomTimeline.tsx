@@ -12,6 +12,8 @@ import {
 } from '@/features/spaces/lib/space-thread-presentation'
 import { AgentAvatar } from './AgentAvatar'
 import { SpaceApprovalPanel } from './SpaceApprovalPanel'
+import { SpaceRunCard } from './SpaceRunCard'
+import { spaceRunStore, trackLiveRuns } from '../lib/space-run-store'
 import { agentAvatarColor, agentForName } from '../lib/agent-avatar'
 import { agentCardModel, memberCardModel } from '../lib/agent-activity'
 import type { IdentityCardModel } from '../lib/agent-activity'
@@ -38,7 +40,7 @@ import { roomArtifactsEnabled } from '@/features/spaces/lib/room-artifacts'
 import type { ChatArtifact } from '@/features/chat/components/chat-types'
 import { presentSpaceDenialText, isSpaceDenial } from '@/shared/api/space-denials'
 import { loadSpaceTranscript, updateSpaceThreadPresentation } from '@/shared/api/spaces-client'
-import type { SpaceAgent, SpaceRoomPin, SpaceRosterMember, SpaceThread } from '@/shared/api/spaces-client'
+import type { SpaceAgent, SpaceAgentWork, SpaceRoomPin, SpaceRosterMember, SpaceThread } from '@/shared/api/spaces-client'
 import { useI18n } from '@/shared/i18n'
 import { announce } from '@/shared/a11y/announcer'
 import { narrateNewPosts, narrateRunChange } from '@/features/spaces/lib/space-narration'
@@ -131,6 +133,12 @@ export interface SpaceRoomTimelineProps {
    * the posts read as before.
    */
   readonly roomPins?: () => readonly SpaceRoomPin[]
+  /**
+   * The listing's `data.agent_work` (WS09-S2). With `live` true, a post whose agent is working shows the
+   * run card from the room's live view instead of the polled "is working" line. Absent or off: the line,
+   * exactly as before. A rollout answer, never an authorization.
+   */
+  readonly agentWork?: () => SpaceAgentWork | undefined
 }
 
 /**
@@ -316,6 +324,7 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
               liveArtifacts={props.liveArtifacts}
               unread={() => props.unreadThreadIds?.().has(thread.thread_id) === true}
               roomPin={() => pinByThread().get(thread.thread_id)}
+              agentWork={props.agentWork}
               open={() => props.openThreadId?.() === thread.thread_id}
               onPresentationChanged={props.onPresentationChanged}
               onReply={props.onReply}
@@ -369,6 +378,8 @@ function SpaceRoomPost(props: {
   readonly liveArtifacts?: (threadId: string) => readonly ChatArtifact[]
   /** This post's room pin (WS13-S8), when the room has pinned it. */
   readonly roomPin?: () => SpaceRoomPin | undefined
+  /** The listing's `data.agent_work`; `live` turns on the run card for a working post (WS09-S5). */
+  readonly agentWork?: () => SpaceAgentWork | undefined
   readonly onReply?: (thread: SpaceThread) => void
   readonly onApprovalSettled?: () => void
   /** New since the reader arrived — see `SpaceRoomTimelineProps.unreadThreadIds`. */
@@ -537,6 +548,32 @@ function SpaceRoomPost(props: {
   // busiest. Paused-for-approval is deliberately not "working": nobody is
   // producing anything, a person is being waited for.
   const isWorking = () => LIVE_RUN_STATUSES.has(props.thread.latest_run_status ?? '')
+  // The live view of someone else's run (WS09-S5). The attach is made only when the listing says the
+  // live view is on and the post's agent is working; the BFF and Session Core authorize every attach.
+  // The card shows once the first snapshot has arrived and only for a run somebody ELSE started: the
+  // person who started it has the live exchange in their own composer, so they keep the plain row.
+  const liveRunId = () => {
+    if (props.agentWork?.()?.live !== true || !isWorking()) return undefined
+    return props.thread.latest_run_id?.trim() || undefined
+  }
+  trackLiveRuns(
+    () => props.spaceRef,
+    () => {
+      const id = liveRunId()
+      return id ? [id] : []
+    },
+    () => liveRunId() !== undefined,
+  )
+  const runView = () => {
+    const id = liveRunId()
+    return id ? spaceRunStore.view(id) : undefined
+  }
+  const runCardView = () => {
+    const view = runView()
+    if (!view || view.status !== 'live' || view.finished) return undefined
+    const viewer = props.viewerSubjectId?.()
+    return viewer && view.startedBy === viewer ? undefined : view
+  }
   // Only a run that is actually paused gets a decision surface, and only when
   // the projection named the run — an approval card with no run to decide on
   // would be a control that cannot do anything.
@@ -774,7 +811,31 @@ function SpaceRoomPost(props: {
           it disappears on its own when the projection reports a terminal
           status, which is the "mutate in place" rule from the activity grammar
           rather than a new line per transition. */}
-      <Show when={isWorking()}>
+      <Show when={runCardView()}>
+        {(view) => (
+          <div class="verevon-room-turn verevon-room-turn--working" data-run-card="true">
+            <AgentAvatar
+              kind="agent"
+              size={30}
+              name={view().agentName || props.agentName}
+              color={agentAvatarColor(agentForName(props.agents(), view().agentName || props.agentName))}
+            />
+            <div class="verevon-room-turn__content">
+              <PostTurnHeader author={view().agentName || props.agentName} isAgent card={workingCard()} status={statusNow()} />
+              <SpaceRunCard
+                view={view()}
+                startedByName={
+                  view().startedBy
+                    ? resolveAuthorName(view().startedBy, props.roster(), props.viewerSubjectId?.(), i18n.tr)
+                    : ''
+                }
+              />
+            </div>
+          </div>
+        )}
+      </Show>
+
+      <Show when={isWorking() && !runCardView()}>
         <div class="verevon-room-turn verevon-room-turn--working" role="status" aria-live="polite">
           <AgentAvatar
             kind="agent"

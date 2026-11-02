@@ -4,7 +4,9 @@ import { For, Show } from 'solid-js'
 import { ChatMarkdown } from '@/features/chat/components/ChatMessages'
 import type { ChatArtifact } from '@/features/chat/components/chat-types'
 import { SpaceArtifactChip } from '../SpaceArtifactChip'
-import type { SpaceAgent, SpaceRosterMember, SpaceThread } from '@/shared/api/spaces-client'
+import { spaceRunWorkFrom } from '@/shared/api/spaces-client'
+import type { SpaceAgent, SpaceRosterMember, SpaceRunWork, SpaceThread } from '@/shared/api/spaces-client'
+import { SpaceRunWorkSummary } from '../SpaceRunCard'
 import { useI18n } from '@/shared/i18n'
 import { AgentAvatar } from '../AgentAvatar'
 import { SpaceIdentityHoverCard } from '../SpaceIdentityHoverCard'
@@ -51,6 +53,8 @@ export type TranscriptTurn = {
   /** Why this assistant turn answered without the organisation's knowledge (D1-242), when Control
    * declined retrieval for the Space. A reason from the closed set; absent otherwise. */
   readonly retrievalDeclined?: SpaceRetrievalDeclineReason
+  /** The content-free work summary of this assistant turn (WS09-S3 `metadata.work`), re-read through the closed shape. */
+  readonly work?: SpaceRunWork
 }
 
 export const MAX_TURNS_PER_POST = 30
@@ -91,6 +95,7 @@ export function normalizeTranscriptTurns(
     const retrievalDeclined = role === 'assistant' && typeof record.retrievalDeclined === 'string'
       ? asSpaceRetrievalDeclineReason(record.retrievalDeclined)
       : undefined
+    const work = role === 'assistant' ? spaceRunWorkFrom(record.work) : undefined
     normalized.push({
       role,
       content,
@@ -100,6 +105,7 @@ export function normalizeTranscriptTurns(
       ...(createdAt ? { createdAt } : {}),
       ...(artifacts.length > 0 ? { artifacts } : {}),
       ...(retrievalDeclined ? { retrievalDeclined } : {}),
+      ...(work ? { work } : {}),
     })
   }
   // Over the cap, keep the first turn (the post's opening message) and the NEWEST turns, never the
@@ -319,6 +325,10 @@ export function SpaceTurnList(props: SpaceTurnListProps) {
                     {i18n.tr(spaceRetrievalDeclineCopy(reason()).no, spaceRetrievalDeclineCopy(reason()).en)}
                   </p>
                 )}
+              </Show>
+              {/* What the agent did, as kinds of step only (WS09-S5): a collapsed line, never tool input or output. */}
+              <Show when={turn.role === 'assistant' ? turn.work : undefined}>
+                {(work) => <SpaceRunWorkSummary work={work()} />}
               </Show>
               <Show when={props.onOpenArtifact && turn.role === 'assistant' && (turn.artifacts?.length ?? 0) > 0}>
                 <div class="verevon-space-artifact-chips">
