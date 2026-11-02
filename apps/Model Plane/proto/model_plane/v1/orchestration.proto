@@ -1265,6 +1265,12 @@ message OrchestrationEvent {
     QuestionAsked question_asked = 27;
     // A requested question was answered or skipped.
     QuestionAnswered question_answered = 28;
+
+    // Attach mode (build plan WS8.G, tag 30 — additive; 29 is WS27's
+    // RunUsageProgress on branch model-plane). A delegate agent attached to the
+    // user's browser session and reuses the owner's shared cookie jar. Ids only:
+    // no URL, no title.
+    BrowserAttachSharedJar browser_attach_shared_jar = 30;
   }
 
   message PlanTransitioned {
@@ -1386,12 +1392,30 @@ message OrchestrationEvent {
   message BrowserRunPaused {
     string run_id = 1;
     string plan_id = 2;
+    // Why the run paused (WS8.G, additive). Empty for a user-initiated pause;
+    // `user_took_over` when the person took control of an attached tab.
+    string reason = 3;
   }
 
   // User-initiated run resume (Phase 2 B5), mirrors `BrowserRunPaused`.
   message BrowserRunResumed {
     string run_id = 1;
     string plan_id = 2;
+    // Why the run resumed (WS8.G, additive). Empty for a user-initiated resume;
+    // `control_returned` when the person gave control of an attached tab back.
+    string reason = 3;
+  }
+
+  // A delegate agent attached to the owner's browser session with the shared
+  // cookie jar (WS8.G, tag 30). Emitted once per attach as an audit event.
+  // Ids only: no URL and no page title ever ride this event.
+  message BrowserAttachSharedJar {
+    string run_id = 1;
+    string plan_id = 2;
+    string attach_id = 3;
+    // The user's own browser run the delegate attached to.
+    string session_run_id = 4;
+    string tab_id = 5;
   }
 
   // A browser action was classified risky (login, checkout, posting a form,
