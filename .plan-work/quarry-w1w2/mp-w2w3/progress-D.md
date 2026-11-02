@@ -171,3 +171,33 @@ Assumed decisions: `ConnectorContent` is not external content (plan default, sam
 Tests (from `apps/Model Plane/rust`, target `C:/dev/mp-w2w3-target-D`):
 - `cargo test -p execution-core --lib external_content`: 18 passed. Unit (`external_content::tests`): `external_content_tool_list_is_pinned`, `the_guard_is_on_unless_explicitly_switched_off`, `save_memory_refused_after_web_fetch_in_the_same_run`, `save_memory_refused_when_the_same_batch_has_web_search`, `save_memory_refused_after_browser_observe`, `save_memory_refused_after_mcp_tool`, `save_memory_allowed_after_org_internal_tools_only`, `failed_web_fetch_does_not_taint`, `delegated_child_taint_blocks_parent_save_memory`, `latch_is_rebuilt_from_a_resumed_transcript`, `recall_memory_is_unaffected`, `zdr_run_still_refuses_with_the_zdr_message_first`, `with_the_switch_off_nothing_is_refused_and_nothing_is_marked`. Through the real loop (`runtime_loop::agent::tests`): `external_content_guard_refuses_save_memory_beside_web_search_end_to_end`, `external_content_guard_leaves_recall_memory_and_a_lone_save_memory_alone`, `external_content_guard_gives_a_zdr_run_the_zdr_message_first`. (The 2 `provenance::tests` hits are the name filter.)
 Not verified: a SUCCESSFUL external read latching inside the loop (no network in tests; the latch set is covered by the unit sequence and the call site is one line next to `taint.mark()`); a cold resume rebuilding from a real parked fold; a delegated child's read refusing the parent's `save_memory` end to end (the clone is a one-line struct field); nothing live.
+
+## Slice E3.7.10 execution-core half: knowledge.crawl_site | map | batch (batch 4, BUILD + COMPILE ONLY)
+
+Built (under `apps/Model Plane/rust/services/execution-core`):
+- `src/web_tools.rs`: `WebToolsClient::map_site` (POST `/v1/map`, scope `map:read`), `start_crawl` (POST `/v1/crawl`) and `start_batch` (POST `/v1/batch`), both scope `crawl:write`; pure bodies (`map_body`, `crawl_body`, `batch_body`: `max_pages` always sent and clamped to 1..=1000, batch at most 100 URLs, `ingest` default false, no model-controlled `zdr`), formatters for the map answer and the job handoff (envelope `data` or bare object), `crawl_tool_defs(zdr)` (a ZDR run is offered the map alone), the switch `crawl_tools_enabled` (`EXECUTION_CORE_WEB_CRAWL_TOOLS`, default OFF, only `1`/`true`/`on`), the tighten-only page threshold (`EXECUTION_CORE_WEB_CRAWL_APPROVAL_PAGES`: default 50, a smaller number lowers it, anything else leaves 50), `crawl_requested_pages` / `crawl_needs_page_approval`.
+- `src/capability_policy.rs`: `trusted_capability_id` binds `knowledge.crawl_site` -> `cap.web.crawl`, `knowledge.map` -> `cap.web.map`, `knowledge.batch` -> `cap.web.batch` (the 0031 seed rows).
+- `src/runtime_loop/mod.rs`: early refusal when the switch is off; crawl and batch refused under ZDR or on a waived route (Quarry's `durable_jobs` row refuses them too); the page-count approval after the permission gate (`awaiting_approval(RiskyEffectUnderAsk)` unless the call is released), decided from the call's own arguments so a declared class (registry-global) cannot lower it, on every posture; dispatch arm `execute_web_crawl_tool`.
+- `src/runtime_loop/agent.rs`: the three defs are appended (after `base_len`, so a park resume does not derive them) only when the switch is on.
+- `src/permission/mod.rs` (not in the lane list, one hunk, nobody else had edits there): `is_restricted_context_write` now includes `knowledge.crawl_site` and `knowledge.batch`, because 0031 declares them `context_write`; this makes the name heuristics agree with the declared class, so the parity test needs NO new exception (plan mode and delegated leaves also refuse them, which is the intent: a crawl can ingest into the corpus).
+- `tests/tool_class_registry_parity.rs`: `0031_web_crawl_tool_capabilities.up.sql` added to the `later` list (the test concatenates the listed migrations and parses the seed rows; it does not treat numbers specially).
+
+Flags: `EXECUTION_CORE_WEB_CRAWL_TOOLS` default OFF (pinned by `the_crawl_tools_are_off_unless_explicitly_switched_on`); `EXECUTION_CORE_WEB_CRAWL_APPROVAL_PAGES` tighten-only, default 50 (pinned).
+Assumed decisions: Quarry paths `/v1/map` (exists, `map:read`), `/v1/crawl` and `/v1/batch` with scope `crawl:write` (both exist on Quarry's edge but its service-route scope table in `auth.rs` does not list them for a service token: see MP-ASKS); the batch counts its URLs as pages; a crawl with no `max_pages` counts as the threshold itself and sends 50, never Quarry's default; `ingest` defaults false (working set only) so the model must ask for a corpus write; the approval cause is `RiskyEffectUnderAsk` (no new cause code: `mp-contracts` is not mine).
+
+Tests (from `apps/Model Plane/rust`, target `C:/dev/mp-w2w3-target-D`):
+- `cargo check -p execution-core --tests`: clean (only pre-existing warnings).
+- `cargo test -p execution-core --test tool_class_registry_parity`: 6 passed.
+- `cargo test -p execution-core --lib crawl_tool_tests`: 6 passed (switch default, threshold tighten-only, approval above 50 for crawl and batch, definitions valid and ZDR gets the map alone, bounded bodies, answer formatting). Neighbours: `permission::` 39 passed, `capability_policy` 39 passed, `capability_binding_contract` 3 passed.
+Not verified: any call to Quarry (compile only, as ordered); the approval pause and resume of a real over-threshold call; attestation (below); the browser/Quarry service principal holding `map:read` / `crawl:write`.
+
+Follow-ups for others (not done here, the files are not mine):
+- `src/health_attest.rs` must attest `cap.web.crawl|map|batch` only when `EXECUTION_CORE_WEB_CRAWL_TOOLS` is on and Quarry's `/ready` answers with the `map:read` and `crawl:write` mints succeeding (the `probe_ready` pattern); until then the capabilities stay `unavailable` and the tools fail closed at dispatch even with the switch on. The `every_offered_tool_capability_has_an_attestor` test does not cover them because the three defs are conditional and not in `offered_tool_defs`.
+
+Lead to land (trust table, lane B's file `rust/crates/mp-content-safety/src/trust.rs`, `TOOL_TRUST`):
+```
+    ("knowledge.map", TrustClass::ExternalWeb),
+    ("knowledge.crawl_site", TrustClass::ExternalWeb),
+    ("knowledge.batch", TrustClass::ExternalWeb),
+```
+plus the three names in the `external_content_tool_list_is_pinned` test there, and in the `EXTERNAL` list of `execution-core/src/external_content.rs` tests (lane D; add when the rows land). Effect once landed: a successful map, crawl or batch result sets the WS11.S7 latch and refuses `save_memory` for the rest of the run, and the result is framed `[source: external-web]`.

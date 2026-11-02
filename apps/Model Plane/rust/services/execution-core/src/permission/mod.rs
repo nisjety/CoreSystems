@@ -208,7 +208,11 @@ const EXECUTE_PROVIDER_ACTION_TOOL: &str = "execute_provider_action";
 #[must_use]
 pub fn is_restricted_context_write(tool_name: &str) -> bool {
     let name = tool_name.trim();
-    name == "save_memory" || crate::workspace_tools::is_workspace_write(name)
+    // E3.7.10: a crawl or a batch can ingest pages into the org's knowledge base, a durable
+    // write the seed declares `context_write`; plan mode and a delegated leaf must not run it.
+    name == "save_memory"
+        || crate::web_tools::is_durable_crawl_tool(name)
+        || crate::workspace_tools::is_workspace_write(name)
 }
 
 /// Operation-aware risk classification for a specific tool call. Extends

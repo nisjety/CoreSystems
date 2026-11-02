@@ -1332,6 +1332,11 @@ async fn merged_tool_defs_governed(
     if browser_tools_offered(browser_bearer, zdr, browser_do) {
         tools.extend(browser_tool_defs());
     }
+    // E3.7.10: the bulk-acquisition tools, only where the deployment switched them on (a ZDR run
+    // is offered the map alone). Appended after `base_len`, so a park resume does not derive them.
+    if crate::web_tools::crawl_tools_enabled() {
+        tools.extend(crate::web_tools::crawl_tool_defs(zdr));
+    }
     // The connected-app read is offered only where the switch, the ZDR and Space rules and a
     // selected connection admit it (WS23-S3, K3-15). The selection is the request's own list
     // (WS23-S4), so a run that selected nothing is never offered it.

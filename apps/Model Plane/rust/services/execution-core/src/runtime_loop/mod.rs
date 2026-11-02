@@ -799,6 +799,21 @@ async fn execute_step_inner(
             "{tool_name} is not available on this run: workspace tools need a Space-scoped run on a deployment that switches them on, and never run under zero data retention"
         ));
     }
+    // E3.7.10: the bulk-acquisition tools run only where the deployment switched them on, and the
+    // two that start a durable Quarry job never run under zero data retention or on a waived route
+    // (Quarry's own `durable_jobs` row refuses them too). Refused before the capability gate.
+    if crate::web_tools::is_crawl_tool(tool_name) {
+        if !crate::web_tools::crawl_tools_enabled() {
+            return StepOutcome::failed(&format!(
+                "{tool_name} is not available on this deployment: the crawl tools are switched off"
+            ));
+        }
+        if (zdr || waived) && crate::web_tools::is_durable_crawl_tool(tool_name) {
+            return StepOutcome::failed(&format!(
+                "{tool_name} is not available on this run: it starts a stored background job, which zero data retention forbids"
+            ));
+        }
+    }
     // The owner document listing reads on the user's bearer, so it runs only under the admission
     // switch and never under retention (WS24-S8). Refused before the capability gate is asked.
     if tool_name == crate::runtime_loop::owner_reads::TOOL_NAME
@@ -976,6 +991,13 @@ async fn execute_step_inner(
         PermissionDecision::AwaitApproval | PermissionDecision::Allow => {}
     }
 
+    // E3.7.10: a crawl or a batch over the page threshold (default 50, tighten-only) needs a
+    // person, on every posture. Decided here from the call's own arguments rather than from the
+    // declared class, which is registry-global and cannot see the page count.
+    if !released && crate::web_tools::crawl_needs_page_approval(tool_name, tool_input) {
+        return StepOutcome::awaiting_approval(CauseCode::RiskyEffectUnderAsk);
+    }
+
     // Browser-agent returns a structured lifecycle result, not a generic tool
     // string. Do this before the `ToolExecution` branch so aborted, denied,
     // and timed-out loops cannot accidentally become `completed` when their
@@ -1093,6 +1115,8 @@ async fn execute_step_inner(
         execute_web_search(tool_input, org_id, zdr).await
     } else if matches!(tool_name, WEB_FETCH_TOOL | QUARRY_MCP_WEB_READ_TOOL) {
         execute_web_fetch(tool_input, org_id, zdr).await
+    } else if crate::web_tools::is_crawl_tool(tool_name) {
+        execute_web_crawl_tool(tool_name, tool_input, org_id).await
     } else if tool_name == crate::runtime_loop::owner_reads::TOOL_NAME {
         crate::runtime_loop::owner_reads::execute(
             tool_input,
@@ -1602,6 +1626,92 @@ const MAX_WEB_SEARCH_RESULTS: u32 = 8;
 /// Same treatment for the news tool, whose upstream is a third-party feed.
 const DEFAULT_NEWS_RESULTS: u32 = 10;
 const MAX_NEWS_RESULTS: u32 = 25;
+
+/// `knowledge.map`, `knowledge.crawl_site` and `knowledge.batch` (E3.7.10). The gates (switch,
+/// ZDR, the page-count approval) ran before this; here the model's numbers are clamped and the
+/// Quarry call is made on the run's org. A crawl or batch returns a job handoff, not pages.
+async fn execute_web_crawl_tool(
+    tool_name: &str,
+    tool_input: &str,
+    org_id: &str,
+) -> tool_bridge::ToolExecution {
+    use crate::web_tools::{BATCH_TOOL, CRAWL_SITE_TOOL, MAP_TOOL, MAX_BATCH_URLS};
+    #[derive(serde::Deserialize)]
+    struct CrawlInput {
+        #[serde(default)]
+        url: String,
+        #[serde(default)]
+        urls: Vec<String>,
+        #[serde(default)]
+        search: Option<String>,
+        #[serde(default)]
+        limit: Option<u32>,
+        #[serde(default)]
+        include_subdomains: bool,
+        #[serde(default)]
+        max_pages: Option<u32>,
+        #[serde(default)]
+        max_depth: Option<u32>,
+        #[serde(default)]
+        ingest: bool,
+    }
+    let input: CrawlInput = match serde_json::from_str(tool_input) {
+        Ok(input) => input,
+        Err(error) => return tool_error(format!("invalid {tool_name} input: {error}")),
+    };
+    let client = match crate::web_tools::WebToolsClient::from_env() {
+        Ok(Some(client)) => client,
+        Ok(None) => {
+            return tool_error(format!(
+                "{tool_name} unavailable: QUARRY_EDGE_URL not configured"
+            ));
+        }
+        Err(error) => return tool_error(format!("{tool_name} unavailable: {error}")),
+    };
+    let result = match tool_name {
+        MAP_TOOL if input.url.trim().is_empty() => Err("knowledge.map needs a url".to_owned()),
+        MAP_TOOL => {
+            client
+                .map_site(
+                    input.url.trim(),
+                    input.search.as_deref(),
+                    input.limit.unwrap_or(crate::web_tools::DEFAULT_MAP_LIMIT),
+                    input.include_subdomains,
+                    org_id,
+                )
+                .await
+        }
+        CRAWL_SITE_TOOL if input.url.trim().is_empty() => {
+            Err("knowledge.crawl_site needs a url".to_owned())
+        }
+        CRAWL_SITE_TOOL => {
+            client
+                .start_crawl(
+                    input.url.trim(),
+                    input
+                        .max_pages
+                        .unwrap_or(crate::web_tools::DEFAULT_APPROVAL_PAGES),
+                    input.max_depth,
+                    input.ingest,
+                    org_id,
+                )
+                .await
+        }
+        BATCH_TOOL if input.urls.is_empty() => Err("knowledge.batch needs urls".to_owned()),
+        BATCH_TOOL if input.urls.len() > MAX_BATCH_URLS => Err(format!(
+            "knowledge.batch takes at most {MAX_BATCH_URLS} urls per call"
+        )),
+        BATCH_TOOL => client.start_batch(&input.urls, input.ingest, org_id).await,
+        other => Err(format!("{other} is not a crawl tool")),
+    };
+    match result {
+        Ok(output) => tool_bridge::ToolExecution {
+            output,
+            error: None,
+        },
+        Err(error) => tool_error(error),
+    }
+}
 
 async fn execute_web_search(
     tool_input: &str,
