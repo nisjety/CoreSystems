@@ -21,6 +21,12 @@
 //! cargo test -p execution-core --test browser_agent_e2e -- --ignored --nocapture
 //! ```
 //!
+//! This test builds its planner directly with `LlmPlanner::from_env`, which keeps
+//! the legacy `QUARRY_BROWSER_AGENT_LLM` gate (deprecated, all orgs). The deployed
+//! tool bridge never reads it: it asks `execution_core::planner_policy`
+//! (`QUARRY_BROWSER_AGENT_PLANNER_MODE`, `QUARRY_BROWSER_AGENT_LLM_ORGS` and the
+//! org's flag) and calls `LlmPlanner::connect`.
+//!
 //! This file holds two ignored tests. Name one after `--` to run only it
 //! (`browser_agent_drives_real_quarry_loop`, or the E3 Terra spike
 //! `planner_on_terra_returns_valid_action_json`, which has its own run notes).

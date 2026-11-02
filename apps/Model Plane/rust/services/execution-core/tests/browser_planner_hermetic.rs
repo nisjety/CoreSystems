@@ -807,3 +807,51 @@ fn reply_fixtures_read_as_expected() {
     }
     assert!(seen >= 6, "the corpus has {seen} reply fixtures");
 }
+
+// ---------------------------------------------------------------------------
+// WS11.S2: the planner policy in front of the loop.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn default_on_with_unavailable_org_policy_is_deterministic() {
+    use execution_core::planner_policy::{
+        DeterministicReason, OrgPlannerFlag, PlannerDecision, PlannerMode, PlannerPolicy,
+    };
+    let policy = PlannerPolicy {
+        mode: PlannerMode::DefaultOn,
+        ..PlannerPolicy::default()
+    };
+    // The gateway could not read the org's switch: fail closed.
+    let decision = policy.resolve("org_h", false, OrgPlannerFlag::Unavailable);
+    assert_eq!(
+        decision,
+        PlannerDecision::Deterministic(DeterministicReason::OrgPolicyUnavailable)
+    );
+
+    // So the loop runs with no planner at all: it observes, and the scripted
+    // planner (which a wrongly selected run would have called) is never asked.
+    let quarry = FakeQuarry::start().await;
+    for _ in 0..2 {
+        quarry.push_page("https://example.com/", "Home", "Home page", &[]);
+    }
+    let planner = ScriptedPlanner::new().then_done();
+    let mut config = plan_config();
+    config.start_url = Some("https://example.com/".to_owned());
+    config.max_steps = 2;
+    let client = quarry.client();
+    let selected: Option<&dyn ActionPlanner> = match decision {
+        PlannerDecision::Llm => Some(&planner),
+        PlannerDecision::Deterministic(_) => None,
+    };
+    let result = run_browser_agent_loop(config, Some(&client), selected, None, None).await;
+    assert_eq!(planner.calls(), 0, "the planner was never consulted");
+    assert_eq!(result.usage.planner_calls, 0);
+    assert_eq!(result.resource_limit, Some(BrowserResourceLimit::MaxSteps));
+    let kinds: Vec<String> = quarry
+        .step_requests()
+        .iter()
+        .map(|s| s["action"]["type"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(kinds[0], "navigate", "the deterministic first step is the start URL");
+    assert_eq!(quarry.closed_runs(), 1);
+}

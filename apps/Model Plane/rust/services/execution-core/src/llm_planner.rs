@@ -6,12 +6,15 @@
 //! already generated in `mp-contracts`) for the next browser action as JSON
 //! constrained by a JSON Schema, and maps the result onto a `BrowserAction`.
 //!
-//! Real integration: this is a live gRPC call to inference-core (no mock). It
-//! is gated by `QUARRY_BROWSER_AGENT_LLM=1`; when disabled the loop falls back
-//! to the deterministic planner. inference-core requires an independently
-//! verified, user-bound `aud=inference-core` bearer delegated from ingress;
-//! without it the LLM planner is disabled before any downstream RPC. The address comes from
-//! `INFERENCE_CORE_URL` / `INFERENCE_CORE_ADDR` (default `http://localhost:9092`).
+//! Real integration: this is a live gRPC call to inference-core (no mock).
+//! Whether a run gets the planner is decided by `crate::planner_policy`
+//! (`QUARRY_BROWSER_AGENT_PLANNER_MODE` plus the org's flag), not here:
+//! [`LlmPlanner::connect`] only needs a usable credential. When the policy picks
+//! the planner and there is no credential the run FAILS with a reason; it never
+//! falls back to the deterministic loop silently. inference-core requires an
+//! independently verified, user-bound `aud=inference-core` bearer delegated
+//! from ingress. The address comes from `INFERENCE_CORE_URL` /
+//! `INFERENCE_CORE_ADDR` (default `http://localhost:9092`).
 //!
 //! Cost governance (Phase 5): the planner does NOT pin a concrete model. It
 //! defaults to a **Verevon intent mode** (`verevon-balance`) so inference-core's
@@ -355,9 +358,9 @@ pub struct LlmPlanner {
 }
 
 impl LlmPlanner {
-    /// Build from the environment. Gated by `QUARRY_BROWSER_AGENT_LLM`; returns
-    /// `None` when disabled or the endpoint URL is unparseable, so the loop can
-    /// fall back to the deterministic planner.
+    /// The legacy env gate (`QUARRY_BROWSER_AGENT_LLM`) then [`Self::connect`].
+    /// Only the live e2e test uses it; the tool bridge asks
+    /// `crate::planner_policy` and calls `connect`.
     #[must_use]
     pub fn from_env(inference_bearer: Option<&str>) -> Option<Self> {
         let enabled = std::env::var("QUARRY_BROWSER_AGENT_LLM")
@@ -366,6 +369,14 @@ impl LlmPlanner {
         if !enabled {
             return None;
         }
+        Self::connect(inference_bearer)
+    }
+
+    /// Connect to inference-core with the run's delegated bearer. No env gate:
+    /// `None` only when there is no usable bearer (missing, empty, or holding
+    /// whitespace) or the endpoint URL is unparseable.
+    #[must_use]
+    pub fn connect(inference_bearer: Option<&str>) -> Option<Self> {
         let inference_bearer = inference_bearer
             .map(str::trim)
             .filter(|value| !value.is_empty() && !value.chars().any(char::is_whitespace))?;

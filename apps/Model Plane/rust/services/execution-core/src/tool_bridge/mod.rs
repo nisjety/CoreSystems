@@ -265,7 +265,33 @@ pub(crate) async fn execute_browser_agent(
                     };
                 }
             };
-            let planner = crate::llm_planner::LlmPlanner::from_env(inference_bearer);
+            // The planner policy (deployment mode plus the org's flag) decides;
+            // a selected planner that cannot be built fails the run with a
+            // reason, it never degrades to the deterministic loop.
+            let selection = select_planner(
+                &crate::planner_policy::PlannerPolicy::from_env(),
+                &plan_config.org_id,
+                plan_config.zdr,
+                plan_config.planner_flag.as_deref(),
+                inference_bearer,
+            );
+            let (planner, deterministic_reason) = match selection {
+                PlannerSelection::Llm(planner) => (Some(planner), None),
+                PlannerSelection::Deterministic(reason) => {
+                    tracing::info!(reason = reason.as_str(), "browser run uses the deterministic loop");
+                    // The default deployment (`mode_off`) keeps the output it
+                    // always had; every other reason is worth saying.
+                    (
+                        None,
+                        (reason != crate::planner_policy::DeterministicReason::ModeOff)
+                            .then(|| reason.as_str()),
+                    )
+                }
+                PlannerSelection::Unavailable(reason) => {
+                    tracing::warn!("browser planner selected but unavailable");
+                    return BrowserAgentExecution::Failed { reason };
+                }
+            };
             // Captured before the loop consumes the config — the postcondition
             // judgment below needs all three, and the loop result carries
             // none of them.
@@ -273,6 +299,7 @@ pub(crate) async fn execute_browser_agent(
                 postcondition: plan_config.postcondition.clone(),
                 stop_criteria: plan_config.stop_criteria.clone(),
                 zdr: plan_config.zdr,
+                deterministic_reason,
             };
             let result = browser_agent::run_browser_agent_loop(
                 plan_config,
@@ -806,6 +833,51 @@ pub(crate) struct BrowserVerificationInputs {
     pub(crate) postcondition: String,
     pub(crate) stop_criteria: String,
     pub(crate) zdr: bool,
+    /// Why this run used the deterministic loop, when that is worth saying
+    /// (anything but the default `mode_off`). Recorded in the usage line.
+    pub(crate) deterministic_reason: Option<&'static str>,
+}
+
+/// The planner policy's answer for one run, with the planner built.
+pub(crate) enum PlannerSelection {
+    Llm(crate::llm_planner::LlmPlanner),
+    Deterministic(crate::planner_policy::DeterministicReason),
+    /// The policy picked the planner but it cannot be built (no usable
+    /// inference credential or endpoint). The run fails with this reason.
+    Unavailable(String),
+}
+
+/// Resolve the planner policy for one run and build the planner when it picks
+/// one. `flag` is `tool_input.planner_flag` (already limited to the gateway's
+/// three values).
+pub(crate) fn select_planner(
+    policy: &crate::planner_policy::PlannerPolicy,
+    org_id: &str,
+    zdr: bool,
+    flag: Option<&str>,
+    inference_bearer: Option<&str>,
+) -> PlannerSelection {
+    use crate::planner_policy::{OrgPlannerFlag, PlannerDecision};
+    match policy.resolve(org_id, zdr, OrgPlannerFlag::from_wire(flag)) {
+        PlannerDecision::Deterministic(reason) => PlannerSelection::Deterministic(reason),
+        PlannerDecision::Llm => match crate::llm_planner::LlmPlanner::connect(inference_bearer) {
+            Some(planner) => PlannerSelection::Llm(planner),
+            None => PlannerSelection::Unavailable(
+                "browser planner unavailable: no usable inference credential or endpoint"
+                    .to_owned(),
+            ),
+        },
+    }
+}
+
+/// ` usage=planner=deterministic reason=<reason>` for a run the policy kept off
+/// the planner, empty otherwise. A closed reason, no content.
+fn deterministic_suffix(verification: &BrowserVerificationInputs) -> String {
+    verification
+        .deterministic_reason
+        .map_or_else(String::new, |reason| {
+            format!(" usage=planner=deterministic reason={reason}")
+        })
 }
 
 /// Judge a completed browser loop against its own final observation and
@@ -877,10 +949,11 @@ fn browser_execution_from_loop_result(
     match result.status {
         PlanStatus::Completed => BrowserAgentExecution::Completed {
             output: format!(
-                "status=completed summary={} verification={}{}",
+                "status=completed summary={} verification={}{}{}",
                 result.summary,
                 browser_verification_note(&result.observations, verification),
-                usage_suffix(result.usage)
+                usage_suffix(result.usage),
+                deterministic_suffix(verification)
             ),
         },
         PlanStatus::Failed => BrowserAgentExecution::Failed {
@@ -1543,6 +1616,91 @@ mod tests {
         assert_eq!(junk.procedure, ProcedureId::Legacy0);
     }
 
+    fn completed_output(verification: &BrowserVerificationInputs) -> String {
+        let result = browser_agent::BrowserAgentLoopResult {
+            status: browser_agent::PlanStatus::Completed,
+            observations: Vec::new(),
+            summary: "agent reported task complete".to_owned(),
+            abort_reason: None,
+            resource_limit: None,
+            usage: browser_agent::BrowserLoopUsage::default(),
+            failure_kind: None,
+        };
+        let BrowserAgentExecution::Completed { output } =
+            browser_execution_from_loop_result(result, verification)
+        else {
+            panic!("expected Completed");
+        };
+        output
+    }
+
+    #[test]
+    fn deterministic_reason_is_recorded_in_usage_line() {
+        use crate::planner_policy::{DeterministicReason, OrgPlannerFlag, PlannerMode, PlannerPolicy};
+        let policy = PlannerPolicy {
+            mode: PlannerMode::DefaultOn,
+            ..PlannerPolicy::default()
+        };
+        let PlannerSelection::Deterministic(reason) =
+            select_planner(&policy, "org_a", false, Some("off"), Some("tok"))
+        else {
+            panic!("an org that said off gets the deterministic loop");
+        };
+        assert_eq!(reason, DeterministicReason::OrgOff);
+        let with = BrowserVerificationInputs {
+            deterministic_reason: Some(reason.as_str()),
+            ..Default::default()
+        };
+        assert!(
+            completed_output(&with).ends_with(" usage=planner=deterministic reason=org_off"),
+            "{}",
+            completed_output(&with)
+        );
+        // The default deployment (mode off) keeps the output it always had.
+        assert!(!completed_output(&BrowserVerificationInputs::default()).contains("usage="));
+        assert_eq!(OrgPlannerFlag::from_wire(Some("off")), OrgPlannerFlag::Off);
+    }
+
+    #[tokio::test]
+    async fn llm_selected_without_bearer_fails_with_reason_not_silent_fallback() {
+        use crate::planner_policy::{PlannerMode, PlannerPolicy};
+        let policy = PlannerPolicy {
+            mode: PlannerMode::DefaultOn,
+            ..PlannerPolicy::default()
+        };
+        for bearer in [None, Some(""), Some("two words")] {
+            match select_planner(&policy, "org_a", false, None, bearer) {
+                PlannerSelection::Unavailable(reason) => {
+                    assert!(reason.starts_with("browser planner unavailable"), "{reason}");
+                }
+                PlannerSelection::Llm(_) => panic!("{bearer:?} must not build a planner"),
+                PlannerSelection::Deterministic(_) => {
+                    panic!("{bearer:?}: a selected planner never falls back silently")
+                }
+            }
+        }
+        assert!(matches!(
+            select_planner(&policy, "org_a", false, None, Some("verified-bearer")),
+            PlannerSelection::Llm(_)
+        ));
+    }
+
+    #[test]
+    fn tool_input_planner_flag_unknown_value_is_unset() {
+        for value in ["maybe", "1", "true", "", "ON "] {
+            let kept = known_planner_flag(Some(value));
+            // Only the gateway's three values survive; case and spaces are tolerated.
+            assert_eq!(kept.is_some(), value.trim().eq_ignore_ascii_case("on"), "{value:?}");
+        }
+        assert_eq!(known_planner_flag(Some("off")).as_deref(), Some("off"));
+        assert_eq!(known_planner_flag(Some("unavailable")).as_deref(), Some("unavailable"));
+        assert_eq!(known_planner_flag(None), None);
+        assert_eq!(
+            crate::planner_policy::OrgPlannerFlag::from_wire(known_planner_flag(Some("maybe")).as_deref()),
+            crate::planner_policy::OrgPlannerFlag::Unset
+        );
+    }
+
     #[test]
     fn runtime_default_is_120() {
         assert_eq!(ceilings_with(&[]).runtime_s(None, 0), 120);
@@ -1634,6 +1792,7 @@ mod tests {
             postcondition: "order 12345".to_owned(),
             stop_criteria: "confirmed".to_owned(),
             zdr: false,
+            ..Default::default()
         };
         let note = browser_verification_note(&observations, &inputs);
         assert!(
@@ -1666,6 +1825,7 @@ mod tests {
             postcondition: "confirmed".to_owned(),
             stop_criteria: "confirmed".to_owned(),
             zdr: false,
+            ..Default::default()
         };
         let note = browser_verification_note(&observations, &inputs);
         assert!(note.starts_with("none:"), "got: {note}");
@@ -1682,6 +1842,7 @@ mod tests {
             postcondition: "order 12345".to_owned(),
             stop_criteria: "confirmed".to_owned(),
             zdr: false,
+            ..Default::default()
         };
         let note = browser_verification_note(&observations, &inputs);
         assert!(note.starts_with("postcondition:"), "got: {note}");
@@ -1695,6 +1856,7 @@ mod tests {
             postcondition: "order 12345".to_owned(),
             stop_criteria: "confirmed".to_owned(),
             zdr: true,
+            ..Default::default()
         };
         let note = browser_verification_note(&observations, &inputs);
         assert!(note.contains("Zero Data Retention"), "got: {note}");
