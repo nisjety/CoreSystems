@@ -2,6 +2,7 @@ import { createEffect, untrack } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 import { subscribeLocaleChange, useI18n } from '@/shared/i18n'
 import { getSession } from '@/shared/session/session-store'
+import '@/styles/ui-baseline.css'
 import {
   applyDensity,
   clearPreferences,
