@@ -1023,7 +1023,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/spaces/{space_ref}/threads/{thread_id}/presentation",
             axum::routing::patch(space_thread_presentation),
         )
-        .route("/api/v1/spaces/{space_ref}/read", post(mark_space_read))
+        .route("/api/v1/spaces/{space_ref}/read", post(mark_space_read_route))
         .route(
             "/api/v1/spaces/{space_ref}/presence",
             post(record_space_presence),
@@ -2474,7 +2474,49 @@ pub(crate) async fn mark_space_read(
     Extension(user): Extension<AuthenticatedUser>,
     Path(space_ref): Path<String>,
 ) -> (StatusCode, Json<Value>) {
-    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+    mark_space_read_with_reason(&state, &user, &space_ref, None).await
+}
+
+/// The route form of [`mark_space_read`]: the optional body `{"reason":"enter"|"while_open"}`
+/// (WS11-S3). Absent or empty means `while_open`, so a client written before the manual unread
+/// floor existed is unchanged. `enter` is the first call of a visit and clears a floor; the
+/// 6-second polls while the room stays open are `while_open` and leave it alone.
+async fn mark_space_read_route(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(space_ref): Path<String>,
+    body: axum::body::Bytes,
+) -> (StatusCode, Json<Value>) {
+    let reason = if body.iter().all(u8::is_ascii_whitespace) {
+        None
+    } else {
+        let parsed = serde_json::from_slice::<Value>(&body).ok();
+        match parsed.as_ref().and_then(|value| value.get("reason")) {
+            None | Some(Value::Null) => None,
+            Some(Value::String(word)) if word == "enter" || word == "while_open" => {
+                Some(if word == "enter" { "enter" } else { "while_open" })
+            }
+            Some(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(error(
+                        "invalid_reason",
+                        "reason must be enter or while_open.",
+                    )),
+                )
+            }
+        }
+    };
+    mark_space_read_with_reason(&state, &user, &space_ref, reason).await
+}
+
+async fn mark_space_read_with_reason(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    space_ref: &str,
+    reason: Option<&'static str>,
+) -> (StatusCode, Json<Value>) {
+    let org_id = crate::upstream::authorized_org_id(state, user).await;
     let space_ref = space_ref.trim();
     if org_id.is_empty() {
         return (
@@ -2491,7 +2533,7 @@ pub(crate) async fn mark_space_read(
             Json(error("invalid_space", "A Space reference is required.")),
         );
     }
-    match space_lifecycle_by_ref(&state, &user, &org_id, space_ref).await {
+    match space_lifecycle_by_ref(state, user, &org_id, space_ref).await {
         Ok(Some(_)) => {}
         Ok(None) => {
             return (
@@ -2521,7 +2563,7 @@ pub(crate) async fn mark_space_read(
         urlencoding::encode(space_ref)
     );
     let (membership_status, Json(membership)) = proxy_json(
-        &state,
+        state,
         Method::GET,
         &membership_url,
         None,
@@ -2531,17 +2573,21 @@ pub(crate) async fn mark_space_read(
     )
     .await;
     if !membership_status.is_success() {
-        return typed_response(&state, membership_status, membership, denial::OP_READ);
+        return typed_response(state, membership_status, membership, denial::OP_READ);
+    }
+    let mut marker_args = json!({
+        "externalAuthId": user.user_id,
+        "externalOrgId": org_id,
+        "spaceRef": space_ref,
+    });
+    if let (Some(reason), Some(args)) = (reason, marker_args.as_object_mut()) {
+        args.insert("reason".to_owned(), json!(reason));
     }
     let Ok(result) = convex_gateway_call(
-        &state,
+        state,
         "mutation",
         "spaceReadMarkers:markSpaceReadForGateway",
-        json!({
-            "externalAuthId": user.user_id,
-            "externalOrgId": org_id,
-            "spaceRef": space_ref,
-        }),
+        marker_args,
     )
     .await
     else {
@@ -2560,6 +2606,7 @@ pub(crate) async fn mark_space_read(
             "data": {
                 "space_ref": space_ref,
                 "last_read_at": value.get("lastReadAt").cloned().unwrap_or(Value::Null),
+                "manual_unread": value.get("manualUnread").and_then(Value::as_bool) == Some(true),
             }
         })),
     )

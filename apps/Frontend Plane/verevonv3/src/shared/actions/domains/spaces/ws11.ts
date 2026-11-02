@@ -1,11 +1,12 @@
 import { z } from 'zod'
 import type { ActionDescriptor } from '@/shared/actions/types'
 
-// WS11-S7: the attention inbox and the thread follow control. Both write only the caller's own
+// WS11-S3: "Mark all read", "Mark unread" and the per-room notification level; WS11-S7: the
+// attention inbox and the thread follow control. All write only the caller's own
 // Application rows (ids, a closed word and a time; never text). The gateway is
 // apps/gateway/src/domains/spaces/attention.rs, the dispatcher dispatchers_spaces/ws11.rs.
-// Neither id is model-executable (model-access.ts closes both): an inbox and a follow are a
-// person's own attention. `spaces.set_thread_follow` is refused with the typed
+// No id here is model-executable (model-access.ts closes them): an inbox, a read position, a level
+// and a follow are a person's own attention. `spaces.set_thread_follow` is refused with the typed
 // `zdr_durable_mutation_forbidden` for a Zero Data Retention organization when it sets a follow
 // (clearing one is always allowed).
 
@@ -33,7 +34,78 @@ const spaceSetThreadFollowOutput = z.object({
   reason: z.string().nullable(),
 })
 
+const spaceMarkAllReadInput = z.object({
+  // At most 60 rooms; absent means every room the caller belongs to.
+  spaceRefs: z.array(z.string().trim().min(1).max(200)).max(60).optional(),
+  // Only read-driven items are resolved; "needs you" is live and never touched.
+  kinds: z.array(z.enum(['mention', 'reply'])).optional(),
+})
+
+const spaceMarkAllReadOutput = z.object({
+  rooms_marked: z.number(),
+  items_resolved: z.number(),
+  marked_at: z.number(),
+})
+
+const spaceMarkUnreadInput = z.object({
+  spaceRef: z.string().trim().min(1).max(200),
+  // Epoch milliseconds: everything newer reads as unread again. Never moves the position forward.
+  beforeMs: z.number().int().positive(),
+})
+
+const spaceMarkUnreadOutput = z.object({
+  last_read_at: z.number().nullable(),
+  manual_unread: z.boolean(),
+})
+
+const spaceSetNotifyLevelInput = z.object({
+  spaceRef: z.string().trim().min(1).max(200),
+  level: z.enum(['all', 'mentions', 'off']).optional(),
+  hidePreview: z.boolean().optional(),
+})
+
+const spaceSetNotifyLevelOutput = z.object({
+  level: z.enum(['all', 'mentions', 'off']),
+  hide_preview: z.boolean(),
+})
+
 export const ws11SpaceActions = [
+  {
+    id: 'spaces.mark_all_read',
+    label: 'Mark all rooms read',
+    description:
+      'Move your own read position in every room (or the rooms named) up to now and clear your read-driven mention and reply items. Nothing is created and nobody else is affected; approvals waiting on you stay.',
+    ownerPlane: 'application',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: spaceMarkAllReadInput,
+    outputSchema: spaceMarkAllReadOutput,
+  },
+  {
+    id: 'spaces.mark_unread',
+    label: 'Mark a room unread',
+    description:
+      'Move your own read position in one room back to just before a time, so newer posts show as unread again. Only your position changes.',
+    ownerPlane: 'application',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: spaceMarkUnreadInput,
+    outputSchema: spaceMarkUnreadOutput,
+  },
+  {
+    id: 'spaces.set_notify_level',
+    label: 'Set room notifications',
+    description:
+      'Choose how much of one room reaches your attention: everything, only mentions, or nothing, and whether previews are hidden. It only changes what you are notified about.',
+    ownerPlane: 'application',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: spaceSetNotifyLevelInput,
+    outputSchema: spaceSetNotifyLevelOutput,
+  },
   {
     id: 'spaces.set_attention_item_state',
     label: 'Mark an inbox item',

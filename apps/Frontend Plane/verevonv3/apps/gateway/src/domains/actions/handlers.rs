@@ -86,7 +86,8 @@ use super::dispatchers_spaces::ws10::{
 };
 use super::dispatchers_spaces::ws10b::dispatch_spaces_set_tool_policy;
 use super::dispatchers_spaces::ws11::{
-    dispatch_spaces_set_attention_item_state, dispatch_spaces_set_thread_follow,
+    dispatch_spaces_mark_all_read, dispatch_spaces_mark_unread, dispatch_spaces_set_attention_item_state,
+    dispatch_spaces_set_notify_level, dispatch_spaces_set_thread_follow,
 };
 use super::dispatchers_spaces::ws12::{
     dispatch_spaces_delete_message, dispatch_spaces_edit_message, dispatch_spaces_hide_space,
@@ -619,6 +620,11 @@ pub(super) async fn execute_action(
         }
         "spaces.update_room_details" => {
             dispatch_spaces_update_room_details(&state, &user, &body.input).await
+        }
+        "spaces.mark_all_read" => dispatch_spaces_mark_all_read(&state, &user, &body.input).await,
+        "spaces.mark_unread" => dispatch_spaces_mark_unread(&state, &user, &body.input).await,
+        "spaces.set_notify_level" => {
+            dispatch_spaces_set_notify_level(&state, &user, &body.input).await
         }
         "spaces.join_room" => {
             dispatch_spaces_join_room(&state, &user, &body.input, &body.idempotency_key).await
