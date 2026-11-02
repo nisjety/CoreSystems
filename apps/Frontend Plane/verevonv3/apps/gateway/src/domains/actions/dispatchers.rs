@@ -7529,3 +7529,134 @@ mod tests {
         assert!(outbound.get("decision").is_none());
     }
 }
+
+// WS14-S4: ownership.share_document / ownership.revoke_document_share go to
+// documents-api (the owning service) and wrap its answer in the action
+// envelope; they never reach user-core's grant surface.
+#[cfg(test)]
+mod ownership_share_tests {
+    use super::*;
+    use axum::http::StatusCode;
+    use http_body_util::BodyExt;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.com".to_owned(),
+            user_name: "User One".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    async fn read(response: Response) -> (StatusCode, Value) {
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    async fn stack() -> (AppState, MockServer, MockServer) {
+        let auth_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/data-plane/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "token": "dp-token-aaaaaaaaaaaa" })))
+            .mount(&auth_core)
+            .await;
+        let documents = MockServer::start().await;
+        let user_core = MockServer::start().await;
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth_core.uri();
+        state.documents_api_url = documents.uri();
+        state.user_core_url = user_core.uri();
+        (state, documents, user_core)
+    }
+
+    #[tokio::test]
+    async fn share_document_dispatches_through_documents_api_and_wraps_the_envelope() {
+        let (state, documents, user_core) = stack().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/documents/doc-1/shares"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "subject_type": "user", "subject_id": "user-2", "role": "view"
+            })))
+            .mount(&documents)
+            .await;
+
+        let input = json!({ "docId": " doc-1 ", "subjectId": "user-2", "orgId": "forged", "grantedBy": "forged" });
+        let (status, body) = read(dispatch_ownership_share_document(&state, &user(), &HeaderMap::new(), &input).await).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["actionId"], "ownership.share_document");
+        assert_eq!(body["data"]["status"], "completed");
+        assert_eq!(body["data"]["result"]["subject_id"], "user-2");
+
+        let sent = documents.received_requests().await.unwrap();
+        assert_eq!(sent.len(), 1);
+        let payload: Value = serde_json::from_slice(&sent[0].body).unwrap();
+        assert_eq!(payload, json!({ "subject_id": "user-2" }), "only the subject is client-supplied");
+        assert_eq!(
+            sent[0].headers.get("authorization").unwrap().to_str().unwrap(),
+            "Bearer dp-token-aaaaaaaaaaaa"
+        );
+        assert!(user_core.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn revoke_document_share_dispatches_through_documents_api_and_wraps_the_envelope() {
+        let (state, documents, user_core) = stack().await;
+        Mock::given(wm_method("DELETE"))
+            .and(wm_path("/v1/documents/doc-1/shares/user-2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "success": true })))
+            .mount(&documents)
+            .await;
+
+        let input = json!({ "docId": "doc-1", "subjectId": "user-2" });
+        let (status, body) =
+            read(dispatch_ownership_revoke_document_share(&state, &user(), &HeaderMap::new(), &input).await).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["actionId"], "ownership.revoke_document_share");
+        assert_eq!(body["data"]["status"], "completed");
+        assert_eq!(body["data"]["result"]["success"], true);
+        assert!(user_core.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn both_actions_refuse_missing_ids_without_calling_anything() {
+        let (state, documents, user_core) = stack().await;
+        for input in [json!({}), json!({ "docId": "doc-1" }), json!({ "subjectId": "u" }), json!({ "docId": "  ", "subjectId": "u" })] {
+            let (status, body) =
+                read(dispatch_ownership_share_document(&state, &user(), &HeaderMap::new(), &input).await).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{input}");
+            assert_eq!(body["error"]["code"], "invalid_input");
+            let (status, _) =
+                read(dispatch_ownership_revoke_document_share(&state, &user(), &HeaderMap::new(), &input).await).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{input}");
+        }
+        assert!(documents.received_requests().await.unwrap().is_empty());
+        assert!(user_core.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_upstream_refusal_is_returned_as_the_browser_error_not_wrapped_as_success() {
+        let (state, documents, _user_core) = stack().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/documents/doc-1/shares"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(
+                json!({ "error": "role is not supported for documents", "code": "role_not_supported" }),
+            ))
+            .mount(&documents)
+            .await;
+        let input = json!({ "docId": "doc-1", "subjectId": "user-2", "role": "edit" });
+        let (status, body) = read(dispatch_ownership_share_document(&state, &user(), &HeaderMap::new(), &input).await).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "role_not_supported");
+        assert!(body.get("data").is_none());
+    }
+}
