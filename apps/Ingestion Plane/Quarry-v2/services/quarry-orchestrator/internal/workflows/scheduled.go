@@ -96,8 +96,19 @@ func ScheduledJobWF(ctx workflow.Context, in ScheduledJobInput, a *activities.Ac
 		return err
 	}
 
-	childErr := child.Get(ctx, nil)
-	if childErr == nil {
+	// Wait for the child, or for this fire to be cancelled. A plain child.Get
+	// would stay blocked until the child closed, so the cancel signal below
+	// could only ever reach a child that had already stopped.
+	var childErr error
+	childDone := false
+	await := workflow.NewSelector(ctx)
+	await.AddFuture(child, func(f workflow.Future) {
+		childErr = f.Get(ctx, nil)
+		childDone = true
+	})
+	await.AddReceive(ctx.Done(), func(workflow.ReceiveChannel, bool) {})
+	await.Select(ctx)
+	if childDone && childErr == nil {
 		return nil
 	}
 
