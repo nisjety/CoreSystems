@@ -948,7 +948,39 @@ export function BrowserChrome(props: {
   }
   const navigateFromAddress = () =>
     submitOmnibox(resolveOmniboxIntent(addressInput(), { searchEnabled: omniboxSearchEnabled(), fallbackUrl: session().url }))
-  const openSearchResult = (url: string) => submitOmnibox({ kind: 'navigate', url })
+  // A result click keeps the results open until the navigation settles: a refusal outside the
+  // run's domains is explained next to the results (D2-046), any other outcome closes them.
+  const [pendingResult, setPendingResult] = createSignal<{ url: string; fromUrl: string } | null>(null)
+  const openSearchResult = (url: string) => {
+    if (controlsDisabled()) return
+    setPendingResult({ url, fromUrl: session().url })
+    setAddressInput(url)
+    runAction({ type: 'navigate', url })
+  }
+  createEffect(
+    () => ({ pending: pendingResult(), failure: props.browserNavigationError, url: session().url }),
+    ({ pending, failure, url }) => {
+      if (!pending) return
+      if (failure && failure.url === pending.url) {
+        setPendingResult(null)
+        if (failure.reason !== 'outside_scope') setSearchQuery(null)
+        return
+      }
+      if (url !== pending.fromUrl) {
+        setPendingResult(null)
+        setSearchQuery(null)
+      }
+    },
+  )
+  const outsideScopeFailure = () => {
+    const failure = props.browserNavigationError
+    return failure && failure.reason === 'outside_scope' ? failure : null
+  }
+  const limitedToHost = () => (outsideScopeFailure() ? session().host || hostnameOf(session().url) || null : null)
+  const refusedHost = () => {
+    const failure = outsideScopeFailure()
+    return failure ? hostnameOf(failure.url) || null : null
+  }
   const prepareNewTabNavigation = async () => {
     if (controlsDisabled()) return
     setSelectedTimelineStep(null)
@@ -1946,6 +1978,8 @@ export function BrowserChrome(props: {
                 <BrowserSearchResults
                   query={query()}
                   zdr={session().zdr}
+                  limitedToHost={limitedToHost()}
+                  refusedHost={refusedHost()}
                   onOpen={openSearchResult}
                   onClose={() => setSearchQuery(null)}
                 />
