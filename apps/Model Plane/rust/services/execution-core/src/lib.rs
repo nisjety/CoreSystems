@@ -46,6 +46,7 @@ mod session_terminal_auth;
 pub mod shipping_tools;
 pub mod skill_mounts;
 pub mod social_tools;
+pub(crate) mod space_gate;
 pub mod state;
 pub mod subagent;
 pub(crate) mod subscription_refusal;

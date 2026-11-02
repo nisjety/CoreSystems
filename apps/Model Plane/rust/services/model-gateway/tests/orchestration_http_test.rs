@@ -471,6 +471,9 @@ impl OrchestrationCoreService for MockOrchestration {
         Ok(Response::new(ListApprovalsResponse {
             approvals: vec![Approval {
                 consumed_at: None,
+                tool_key: String::new(),
+                action_label: String::new(),
+                continuation: None,
                 continuation_mode: String::new(),
                 cause: None,
                 id: "appr-1".into(),
@@ -498,6 +501,9 @@ impl OrchestrationCoreService for MockOrchestration {
         Ok(Response::new(OrgPendingApprovalsResponse {
             approvals: vec![Approval {
                 consumed_at: None,
+                tool_key: String::new(),
+                action_label: String::new(),
+                continuation: None,
                 continuation_mode: String::new(),
                 cause: None,
                 id: "appr-pending-1".into(),
@@ -530,6 +536,9 @@ impl OrchestrationCoreService for MockOrchestration {
         Ok(Response::new(GetApprovalResponse {
             approval: Some(Approval {
                 consumed_at: None,
+                tool_key: String::new(),
+                action_label: String::new(),
+                continuation: None,
                 continuation_mode: String::new(),
                 cause: None,
                 id: request.approval_id,
@@ -557,6 +566,9 @@ impl OrchestrationCoreService for MockOrchestration {
         Ok(Response::new(CreateApprovalResponse {
             approval: Some(Approval {
                 consumed_at: None,
+                tool_key: String::new(),
+                action_label: String::new(),
+                continuation: None,
                 continuation_mode: String::new(),
                 cause: None,
                 id: "appr-mock".into(),
@@ -603,6 +615,9 @@ impl OrchestrationCoreService for MockOrchestration {
         Ok(Response::new(DecideApprovalResponse {
             approval: Some(Approval {
                 consumed_at: None,
+                tool_key: String::new(),
+                action_label: String::new(),
+                continuation: None,
                 continuation_mode,
                 cause: None,
                 id: request.approval_id,
@@ -1507,6 +1522,9 @@ impl OrchestrationCoreService for OrgScopedMock {
 fn owned_approval(state: ApprovalState) -> Approval {
     Approval {
         consumed_at: None,
+        tool_key: String::new(),
+        action_label: String::new(),
+        continuation: None,
         continuation_mode: String::new(),
         cause: None,
         id: "appr-owned".into(),

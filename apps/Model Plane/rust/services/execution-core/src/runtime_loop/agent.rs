@@ -7311,6 +7311,18 @@ async fn pause_for_approval(
             // collapses onto the existing durable approval instead of creating
             // a duplicate via the (org_id, idempotency_key) ON CONFLICT guard.
             idempotency_key: format!("{}:{step_id}", req.run_id),
+            // The honest card (build plan WS10 S1): an allowlisted tool key and label, and
+            // what this pause expects. Only a call with a descriptor can be run by the
+            // delivery worker; everything else is a retry of the exact action.
+            context_json: crate::space_gate::card_context_json(
+                tool_name,
+                tool_input,
+                if continuation_descriptor_json.is_empty() {
+                    crate::space_gate::RESUME_NONE
+                } else {
+                    crate::space_gate::RESUME_ACTION_CONTINUATION
+                },
+            ),
             continuation_descriptor_json,
             cause: Some(approval_cause::for_call(
                 cause,

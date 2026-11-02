@@ -29,6 +29,14 @@ import {
  * "allow once" while promising more. Approve and Deny are what the mechanism
  * actually supports, so they are what the room offers.
  *
+ * # The card says what approving does
+ *
+ * A grant records authority; it does not resume an approval-gated run. What
+ * follows depends on the approval, and the server states it (`resumeClass`,
+ * then `continuation` once granted): an action the worker can run is run as
+ * the requester, anything else lets the agent retry that exact action once.
+ * The copy below follows those fields and never promises the run continues.
+ *
  * # It does not pretend
  *
  * A run belongs to the member who started it. Another member can see that a
@@ -110,8 +118,8 @@ export function SpaceApprovalPanel(props: SpaceApprovalPanelProps) {
       <Show when={refused()}>
         <p class="verevon-room-approval__note">
           {i18n.tr(
-            'Denne kjøringen tilhører et annet medlem, så det er de som avgjør den. Du ser at den venter, men kan ikke svare for dem.',
-            'This run belongs to another member, so it is theirs to decide. You can see that it is waiting, but you cannot answer for them.',
+            'Venter på medlemmet som startet kjøringen. Du ser at den venter, men kan ikke svare for dem.',
+            'Waiting for the member who started the run. You can see that it is waiting, but you cannot answer for them.',
           )}
         </p>
       </Show>
@@ -129,6 +137,9 @@ export function SpaceApprovalPanel(props: SpaceApprovalPanelProps) {
         <For each={approvals()}>
           {(approval) => (
             <li class="verevon-room-approval__item">
+              <Show when={approval.actionLabel?.trim()}>
+                {(label) => <p class="verevon-room-approval__detail">{label()}</p>}
+              </Show>
               <p class="verevon-room-approval__detail">{describeApproval(approval, i18n.tr)}</p>
               <Show when={approval.requestedBy?.trim()}>
                 {(requestedBy) => (
@@ -163,12 +174,10 @@ export function SpaceApprovalPanel(props: SpaceApprovalPanelProps) {
                 </button>
               </div>
               {/* Said once, next to the buttons, because denying stops the run
-                  rather than nudging the agent to try something else. */}
+                  rather than nudging the agent to try something else. What approving
+                  does is chosen by the server's `resumeClass`, never by static copy. */}
               <p class="verevon-room-approval__consequence">
-                {i18n.tr(
-                  'Godkjenning lar kjøringen fortsette. Avslag stopper den.',
-                  'Approving lets the run continue. Denying stops it.',
-                )}
+                {consequenceMessage(approval, i18n.tr)}
               </p>
             </li>
           )}
@@ -193,13 +202,65 @@ export function SpaceApprovalPanel(props: SpaceApprovalPanelProps) {
   )
 }
 
+/**
+ * What approving this card does, from the server-stated resume class. An approval with no stated
+ * class says only what is certain: the decision is recorded and denying stops the run.
+ */
+function consequenceMessage(
+  approval: Approval,
+  tr: (no: string, en: string) => string,
+): string {
+  switch (approval.resumeClass) {
+    case 'action_continuation':
+      return tr(
+        'Godkjenning kjører denne handlingen som medlemmet som ba om den. Agenten fortsetter ikke av seg selv. Avslag stopper kjøringen.',
+        'Approving runs this action as the member who asked for it. The agent does not continue by itself. Denying stops the run.',
+      )
+    case 'none':
+      return tr(
+        'Godkjenning lar agenten prøve akkurat denne handlingen på nytt én gang. Avslag stopper kjøringen.',
+        'Approving lets the agent retry this exact action once. Denying stops the run.',
+      )
+    case 'live_poll':
+      return tr(
+        'Godkjenning lar det kjørende nettleser-steget gå videre. Avslag stopper det.',
+        'Approving lets the running browser step go ahead. Denying stops it.',
+      )
+    default:
+      return tr(
+        'Godkjenning registrerer avgjørelsen din. Avslag stopper kjøringen.',
+        'Approving records your decision. Denying stops the run.',
+      )
+  }
+}
+
 function outcomeMessage(
   outcome: ApprovalOutcome,
   tr: (no: string, en: string) => string,
 ): string {
   switch (outcome) {
     case 'granted':
-      return tr('Godkjent. Kjøringen fortsetter.', 'Approved. The run continues.')
+      return tr('Godkjent. Avgjørelsen er registrert.', 'Approved. The decision is recorded.')
+    case 'granted_action':
+      return tr(
+        'Godkjent. Handlingen kjøres som medlemmet som ba om den. Agenten fortsetter ikke av seg selv.',
+        'Approved. The action runs as the member who asked for it. The agent does not continue by itself.',
+      )
+    case 'granted_retry':
+      return tr(
+        'Godkjent. Ingenting kjøres nå: agenten kan prøve akkurat denne handlingen på nytt én gang.',
+        'Approved. Nothing runs now: the agent may retry this exact action once.',
+      )
+    case 'granted_live':
+      return tr(
+        'Godkjent. Det kjørende nettleser-steget går videre.',
+        'Approved. The running browser step goes ahead.',
+      )
+    case 'granted_continue':
+      return tr(
+        'Godkjent. Handlingen brukes når kjøringen fortsetter.',
+        'Approved. The action is applied when the run is continued.',
+      )
     case 'denied':
       return tr('Avslått. Kjøringen er stoppet.', 'Denied. The run has been stopped.')
     case 'already_decided':
@@ -209,8 +270,8 @@ function outcomeMessage(
       )
     case 'refused':
       return tr(
-        'Du kan ikke avgjøre denne. Den tilhører medlemmet som startet kjøringen.',
-        'You cannot decide this one. It belongs to the member who started the run.',
+        'Du kan ikke avgjøre denne. Den venter på medlemmet som startet kjøringen.',
+        'You cannot decide this one. It is waiting for the member who started the run.',
       )
     case 'unconfirmed':
     default:

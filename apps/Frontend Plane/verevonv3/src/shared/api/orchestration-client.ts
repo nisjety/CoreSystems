@@ -38,6 +38,27 @@ export type {
 
 export type ApprovalDecision = 'approve' | 'reject'
 
+/** What approving does with the paused work (build plan WS10 S1). Server-stated, never guessed. */
+export type ApprovalResumeClass = 'action_continuation' | 'live_poll' | 'none'
+
+/** Where an approved action stands. Derived server-side from the delivery rows. */
+export type ApprovalContinuationState =
+  | 'queued'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'not_resumable'
+  | 'live'
+  | 'awaiting_continue'
+
+export type ApprovalContinuation = {
+  state: ApprovalContinuationState
+  failureCode?: string
+  /** Independent read-back of the outcome, when one exists. */
+  verification?: string
+  providerReceiptId?: string
+}
+
 /** A pending/decided approval as reported by model-gateway's orchestration API. */
 export type Approval = {
   id: string
@@ -51,6 +72,14 @@ export type Approval = {
   kind?: string
   /** Why the pause was raised, when the creator stated it. Absent on an older approval. */
   cause?: ApprovalCause
+  /** Stable key of the gated tool, when the creator stated it. */
+  toolKey?: string
+  /** Short allowlisted label of the gated action. Never raw arguments. */
+  actionLabel?: string
+  /** What approving does. Absent on an approval created before the card context existed. */
+  resumeClass?: ApprovalResumeClass
+  /** Where the approved action stands. Absent until the approval is granted. */
+  continuation?: ApprovalContinuation
   /** PENDING | GRANTED | DENIED | EXPIRED (uppercased provider enum name). */
   status?: string
   requestedBy?: string
@@ -112,6 +141,31 @@ export function normalizeApprovalCause(raw: unknown): ApprovalCause | undefined 
   }
 }
 
+const RESUME_CLASSES: readonly ApprovalResumeClass[] = ['action_continuation', 'live_poll', 'none']
+const CONTINUATION_STATES: readonly ApprovalContinuationState[] = [
+  'queued',
+  'running',
+  'completed',
+  'failed',
+  'not_resumable',
+  'live',
+  'awaiting_continue',
+]
+
+/** The typed continuation, read through the closed vocabulary; an unknown state is no claim. */
+export function normalizeApprovalContinuation(raw: unknown): ApprovalContinuation | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
+  const value = raw as Record<string, unknown>
+  const state = CONTINUATION_STATES.find((candidate) => candidate === value.state)
+  if (!state) return undefined
+  return {
+    state,
+    failureCode: str(value.failure_code),
+    verification: str(value.verification),
+    providerReceiptId: str(value.provider_receipt_id),
+  }
+}
+
 /** Normalize a model-gateway approval object (snake_case) to our camelCase shape. */
 function normalizeApproval(raw: RawApproval): Approval | null {
   const id = str(raw.id) ?? str(raw.approval_id)
@@ -123,6 +177,10 @@ function normalizeApproval(raw: RawApproval): Approval | null {
     stepId: str(raw.step_id) ?? str(raw.stepId),
     kind: str(raw.kind) ?? str(raw.approval_kind),
     cause: normalizeApprovalCause(raw.cause),
+    toolKey: str(raw.tool_key),
+    actionLabel: str(raw.action_label),
+    resumeClass: RESUME_CLASSES.find((candidate) => candidate === raw.resume_class),
+    continuation: normalizeApprovalContinuation(raw.continuation),
     status: canonicalApprovalStatus(str(raw.status) ?? str(raw.state)),
     requestedBy: str(raw.requested_by) ?? str(raw.requestedBy),
     detail: str(raw.detail) ?? str(raw.summary) ?? str(raw.reason) ?? str(raw.tool),

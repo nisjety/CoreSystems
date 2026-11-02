@@ -74,6 +74,8 @@ pub fn to_create_approval_request(a: &GatewayApproval) -> CreateApprovalRequest 
         // The cache knows a kind and a free-text reason, not which rule held the call, so
         // it states no cause rather than guessing one (build plan WS13 S1).
         cause: None,
+        // Nor does it know the tool, so it states no card context (build plan WS10 S1).
+        context_json: String::new(),
     }
 }
 
@@ -1520,6 +1522,9 @@ mod tests {
     fn durable_pending(id: &str, org: &str, run: &str) -> Approval {
         Approval {
             consumed_at: None,
+            tool_key: String::new(),
+            action_label: String::new(),
+            continuation: None,
             continuation_mode: String::new(),
             id: id.into(),
             run_id: run.into(),

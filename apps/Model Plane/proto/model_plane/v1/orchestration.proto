@@ -356,6 +356,62 @@ message Plan {
   google.protobuf.Timestamp updated_at = 11;
 }
 
+// Where an approved action stands (build plan WS10 S1). Derived by Session Core
+// from the approval's delivery outbox, continuation receipt and outcome rows;
+// never stored on the approval and never claimed by a client. UNSPECIFIED
+// means the approval is not granted yet (or the state cannot be told).
+enum ContinuationState {
+  CONTINUATION_STATE_UNSPECIFIED = 0;
+  // Granted, and the action is not one a worker can run: the approval only lets
+  // the agent retry this exact action once. The run does not continue by itself.
+  CONTINUATION_STATE_NOT_RESUMABLE = 1;
+  // Granted; the delivery worker has not started the action yet.
+  CONTINUATION_STATE_QUEUED = 2;
+  // The worker started the action and has not recorded an outcome.
+  CONTINUATION_STATE_RUNNING = 3;
+  // The action ran and the worker recorded a completed outcome.
+  CONTINUATION_STATE_COMPLETED = 4;
+  // The action did not run to completion; see `failure_code`.
+  CONTINUATION_STATE_FAILED = 5;
+  // A live in-loop approval (a browser action): the running loop polls it, no
+  // worker is involved.
+  CONTINUATION_STATE_LIVE = 6;
+  // A loop-owned approval: the durable Do loop consumes it when the run is
+  // continued.
+  CONTINUATION_STATE_AWAITING_CONTINUE = 7;
+}
+
+// Read projection of an approval's continuation (build plan WS10 S1).
+message ApprovalContinuation {
+  ContinuationState state = 1;
+  // Closed failure code when `state` is FAILED; empty otherwise.
+  string failure_code = 2;
+  // Independent read-back of the outcome; UNSPECIFIED until one exists.
+  VerificationStatus verification = 3;
+  // Provider receipt id of a completed action; empty otherwise.
+  string provider_receipt_id = 4;
+}
+
+// Who is asked to decide an approval (build plan WS10; used from S6).
+enum AddresseeKind {
+  ADDRESSEE_KIND_UNSPECIFIED = 0;
+  // The member whose request raised the approval.
+  ADDRESSEE_KIND_REQUESTER = 1;
+  // One named member.
+  ADDRESSEE_KIND_NAMED = 2;
+  // Any member who may edit the Space.
+  ADDRESSEE_KIND_ANY_EDITOR = 3;
+  // Any member who may manage the Space.
+  ADDRESSEE_KIND_ANY_MANAGER = 4;
+}
+
+// An approval addressee (build plan WS10; used from S6).
+message Addressee {
+  AddresseeKind kind = 1;
+  // Subject id when `kind` is NAMED; empty otherwise.
+  string subject_id = 2;
+}
+
 // A durable approval record.
 message Approval {
   // Approval identifier (ULID, prefix `appr_`).
@@ -412,6 +468,20 @@ message Approval {
   // Read back from `approvals.metadata.cause`; unset on an approval created
   // before the cause existed and on one whose creator states none.
   ApprovalCause cause = 16;
+
+  // Tag 17 is reserved by the Model Plane chat build (decision record).
+
+  // Stable key of the gated tool, from the creator's validated context (build
+  // plan WS10 S1). Empty when the creator stated none.
+  string tool_key = 18;
+
+  // Short human label of the gated action, built by the creator from an
+  // allowlist and never from raw arguments (build plan WS10 S1). Empty when none.
+  string action_label = 19;
+
+  // Where the approved action stands (build plan WS10 S1). Unset until the
+  // approval is granted.
+  ApprovalContinuation continuation = 24;
 }
 
 // Who recorded an approval decision (build plan WS13 S3). Stored as
@@ -781,6 +851,12 @@ message CreateApprovalRequest {
   // `metadata.cause`; an unknown code degrades to `unclassified_gate`. Unset keeps
   // the approval exactly as before.
   ApprovalCause cause = 13;
+
+  // Typed card context (build plan WS10 S1): a JSON object of at most 4 KiB
+  // with the allowlisted keys `tool_key`, `action_label` and `resume_class`,
+  // string values of at most 128 characters. Unknown keys or credential-like
+  // keys are refused. Never raw tool arguments.
+  string context_json = 14;
 }
 
 // ConsumeApproval claims one granted loop-mode approval for the loop that is

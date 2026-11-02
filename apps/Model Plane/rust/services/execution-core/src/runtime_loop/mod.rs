@@ -2632,6 +2632,11 @@ async fn resolve_write_approval(
                 cause: Some(approval_cause::for_call(
                     cause, run_id, tool_name, tool_input,
                 )),
+                context_json: crate::space_gate::card_context_json(
+                    tool_name,
+                    tool_input,
+                    crate::space_gate::RESUME_NONE,
+                ),
             },
             bearer,
         )?)

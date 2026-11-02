@@ -119,9 +119,9 @@ const MAX_TOKEN_TTL_SECONDS: u64 = 3600;
 /// The resumable tool names — see the module doc for why the rest of the gated
 /// set (`browser_agent`, arbitrary MCP tools, …) isn't here. A tool's class says
 /// whether it is gated, never whether it can be resumed: that stays this list.
-const PROVIDER_ACTION_TOOL_NAME: &str = "execute_provider_action";
-const SHIPMENT_BOOKING_TOOL_NAME: &str = "book_shipment";
-const TICKETS_CREATE_TOOL_NAME: &str = "tickets.create";
+const PROVIDER_ACTION_TOOL_NAME: &str = crate::space_gate::PROVIDER_ACTION_TOOL;
+const SHIPMENT_BOOKING_TOOL_NAME: &str = crate::space_gate::SHIPMENT_BOOKING_TOOL;
+const TICKETS_CREATE_TOOL_NAME: &str = crate::space_gate::TICKETS_CREATE_TOOL;
 
 /// The exact allowlist `session-core`'s `validate_failure_code` enforces.
 /// Any other string is rejected server-side, so these are reproduced here

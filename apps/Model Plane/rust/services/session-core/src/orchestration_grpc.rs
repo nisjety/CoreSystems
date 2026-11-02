@@ -1366,6 +1366,10 @@ fn approval_from_row(row: &store::ApprovalRow) -> proto::Approval {
         consumed_at: row.consumed_at.map(ts),
         continuation_mode: row.continuation_mode.clone(),
         cause: approval_cause::from_metadata(&row.metadata),
+        tool_key: crate::space::approvals::card_text(&row.metadata, "tool_key"),
+        action_label: crate::space::approvals::card_text(&row.metadata, "action_label"),
+        // Derived from the delivery rows by `attach_continuations`, never from this row.
+        continuation: None,
     }
 }
 
@@ -3005,7 +3009,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             )
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
-            let approvals: Vec<proto::Approval> = rows
+            let mut approvals: Vec<proto::Approval> = rows
                 .iter()
                 .filter(|r| {
                     if req.step_id.is_empty() {
@@ -3016,6 +3020,8 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 })
                 .map(approval_from_row)
                 .collect();
+            crate::space::approvals::attach_continuations(&self.pool, &req.org_id, &mut approvals)
+                .await;
             Ok(Response::new(proto::ListApprovalsResponse { approvals }))
         }
         .await;
@@ -3166,9 +3172,16 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             )
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
-            Ok(Response::new(proto::GetApprovalResponse {
-                approval: row.as_ref().map(approval_from_row),
-            }))
+            let mut approval = row.as_ref().map(approval_from_row);
+            if let Some(approval) = approval.as_mut() {
+                crate::space::approvals::attach_continuations(
+                    &self.pool,
+                    &req.org_id,
+                    std::slice::from_mut(approval),
+                )
+                .await;
+            }
+            Ok(Response::new(proto::GetApprovalResponse { approval }))
         }
         .await;
         record_metrics("get_approval", started, result.is_ok());
@@ -3222,7 +3235,18 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             } else {
                 None
             };
-            let (metadata, cause_code) = new_approval_metadata(&req, caller.zdr());
+            let (mut metadata, cause_code) = new_approval_metadata(&req, caller.zdr());
+            // The typed card (build plan WS10 S1): checked here, never trusted. The resume class is
+            // the server's own: a descriptor makes it an action continuation, nothing else can.
+            if let Some(card) = crate::space::approvals::card_from_request(
+                &req.context_json,
+                continuation_descriptor.is_some(),
+                caller.zdr(),
+            )? {
+                if let Some(map) = metadata.as_object_mut() {
+                    map.insert("card".to_owned(), card);
+                }
+            }
 
             let created = store::request_approval(
                 &self.pool,
@@ -3686,7 +3710,13 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 ));
             }
             let after = after.ok_or_else(|| Status::internal("approval vanished after update"))?;
-            let approval = approval_from_row(&after);
+            let mut approval = approval_from_row(&after);
+            crate::space::approvals::attach_continuations(
+                &self.pool,
+                &req.org_id,
+                std::slice::from_mut(&mut approval),
+            )
+            .await;
 
             broadcast_approval_decision_events(
                 &self.events_tx,

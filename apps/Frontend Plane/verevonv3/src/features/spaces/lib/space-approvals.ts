@@ -4,7 +4,6 @@ import {
   cancelRun,
   decideApproval,
   listApprovals,
-  resumeRun,
   type Approval,
   type ApprovalDecision,
 } from '@/shared/api/orchestration-client'
@@ -28,8 +27,17 @@ import {
 
 /** What actually happened, after reconciliation. Never a guess. */
 export type ApprovalOutcome =
-  /** Recorded, and the run was told to continue. */
+  /** Recorded. The server stated nothing about what happens next, so neither do we. */
   | 'granted'
+  /** Recorded, and the action is queued or running as the requester; the agent does not
+   *  continue by itself. */
+  | 'granted_action'
+  /** Recorded, but nothing runs: the agent may retry this exact action once. */
+  | 'granted_retry'
+  /** Recorded, and the running browser step picks it up. */
+  | 'granted_live'
+  /** Recorded, and the durable loop applies it when the run is continued. */
+  | 'granted_continue'
   /** Recorded, and the run was cancelled. */
   | 'denied'
   /** Somebody else got there first; the decision stands, but it is not ours. */
@@ -69,13 +77,36 @@ function isRefusal(error: unknown): boolean {
 }
 
 /**
- * Record one decision and carry it through to the run.
+ * What a recorded grant leads to, read from the server's derived continuation and never assumed.
+ * Nothing here resumes the run: a granted approval cannot resume an approval-gated run (the only
+ * continuation is the delivery worker running the one approved action), so the old blind
+ * `resumeRun` call after a grant is gone (build plan WS10 S1).
+ */
+export function grantedOutcome(approval: Approval | null | undefined): ApprovalOutcome {
+  switch (approval?.continuation?.state) {
+    case 'queued':
+    case 'running':
+    case 'completed':
+    case 'failed':
+      return 'granted_action'
+    case 'not_resumable':
+      return 'granted_retry'
+    case 'live':
+      return 'granted_live'
+    case 'awaiting_continue':
+      return 'granted_continue'
+    default:
+      return 'granted'
+  }
+}
+
+/**
+ * Record one decision and, for a denial, stop the run.
  *
- * Approving resumes the run; denying cancels it, because the point of denying
- * a gated step is to stop that path rather than to let the agent try to route
- * around it. Both follow-throughs are best-effort by design — the decision is
- * the durable part, and a resume that fails leaves a decided approval and a
- * paused run, which the next read shows truthfully.
+ * Denying cancels the run, because the point of denying a gated step is to stop that path
+ * rather than to let the agent try to route around it. The follow-through is best-effort by
+ * design — the decision is the durable part. Approving records the decision and reports what
+ * the server says happens next ({@link grantedOutcome}); it never calls resume.
  *
  * When the decide call itself errors we re-read before claiming anything. A
  * lost response is not the same as a rejected request, and this is a gate: the
@@ -88,8 +119,9 @@ export async function settleApproval(input: {
   readonly signal?: AbortSignal
 }): Promise<ApprovalOutcome> {
   const expected = input.decision === 'approve' ? 'GRANTED' : 'DENIED'
+  let decided: Approval | null = null
   try {
-    await decideApproval(input.approvalId, input.decision, undefined, input.signal)
+    decided = await decideApproval(input.approvalId, input.decision, undefined, input.signal)
   } catch (error) {
     if (isRefusal(error)) return 'refused'
     const fresh = await listApprovals(input.runId, input.signal).catch(() => null)
@@ -102,12 +134,10 @@ export async function settleApproval(input: {
     if (status === 'PENDING') return 'unconfirmed'
     if (status !== expected) return 'already_decided'
     // It did land despite the error; fall through to the follow-through.
+    decided = match
   }
 
-  if (input.decision === 'approve') {
-    await resumeRun(input.runId, input.signal).catch(() => undefined)
-    return 'granted'
-  }
+  if (input.decision === 'approve') return grantedOutcome(decided)
   await cancelRun(input.runId, input.signal).catch(() => undefined)
   return 'denied'
 }

@@ -433,6 +433,10 @@ paths:
                 properties:
                   approval:
                     $ref: "#/components/schemas/Approval"
+                  continuation_delivery:
+                    type: string
+                    description: One-word form of approval.continuation, present after a grant.
+                    enum: [queued, running, completed, failed, not_resumable, live, awaiting_continue, unknown]
         "400":
           $ref: "#/components/responses/BadRequest"
         "404":
@@ -1532,6 +1536,44 @@ components:
           description: Why the approval was asked for. Null when the creator stated no cause.
           allOf:
             - $ref: "#/components/schemas/ApprovalCause"
+        tool_key:
+          type: string
+          nullable: true
+          description: Stable key of the gated tool, from the creator's validated card context.
+        action_label:
+          type: string
+          nullable: true
+          description: Short allowlisted label of the gated action. Never raw tool arguments.
+        resume_class:
+          type: string
+          nullable: true
+          enum: [action_continuation, live_poll, none]
+          description: What approving does. none means approving only lets the agent retry this exact action once. Null when the creator stated none.
+        continuation:
+          nullable: true
+          description: Where the approved action stands, derived from the delivery rows. Null until the approval is granted.
+          allOf:
+            - $ref: "#/components/schemas/ApprovalContinuation"
+
+    ApprovalContinuation:
+      type: object
+      description: >-
+        Derived, never stored and never client-stated. not_resumable means approving only lets the
+        agent retry this exact action once; the run does not continue by itself.
+      properties:
+        state:
+          type: string
+          enum: [queued, running, completed, failed, not_resumable, live, awaiting_continue]
+        failure_code:
+          type: string
+          nullable: true
+        verification:
+          type: string
+          nullable: true
+          enum: [verified_success, verified_failure, partially_verified, unknown]
+        provider_receipt_id:
+          type: string
+          nullable: true
 
     ApprovalCause:
       type: object

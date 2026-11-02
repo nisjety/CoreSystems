@@ -1513,6 +1513,11 @@ impl ExecutionCore for ExecutionService {
                     // (org_id, idempotency_key) ON CONFLICT guard.
                     idempotency_key: format!("{run_id}:{step_id}"),
                     continuation_descriptor_json: String::new(),
+                    context_json: crate::space_gate::card_context_json(
+                        &req.tool_name,
+                        &req.tool_input,
+                        crate::space_gate::RESUME_NONE,
+                    ),
                     cause: Some(approval_cause::for_call(
                         outcome.cause.unwrap_or(CauseCode::UnclassifiedGate),
                         &run_id,

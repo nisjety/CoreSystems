@@ -9,6 +9,7 @@
 //! - [`authz`]: who a message is appended as ([`authz::AppendAs`]) and the member-append gate
 //!   (WS01-S3).
 //! - [`append`]: the member rules inside the append transaction (WS01-S3).
+//! - [`approvals`]: the approval card context and the derived continuation state (WS10-S1).
 //! - [`read_service`]: `SpaceRoomReadService`, the room read aggregates (D3; `ListSpaceArtifacts` WS07-S9).
 //! - [`events`]: the Space event log's flag sync, listener, sweeper, gate and erasure hooks
 //!   (WS02-S1; the log itself is written by triggers in migration 0072).
@@ -21,6 +22,7 @@
 //!   kept by the trigger in migration 0078).
 
 pub(crate) mod append;
+pub(crate) mod approvals;
 pub(crate) mod authz;
 pub(crate) mod events;
 pub(crate) mod history;

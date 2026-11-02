@@ -46,7 +46,6 @@ use serde_json::{json, Value};
 use tracing::{debug, info, warn};
 
 use crate::{
-    approvals,
     auth::{
         self, Claims, StepUpClaim, VerifiedCapabilityBearer, VerifiedCostBearer,
         VerifiedDataPlaneBearer as VerifiedBearer, VerifiedExecutionBearer,
@@ -2088,35 +2087,17 @@ async fn decide_approval(
         .ok_or_else(|| not_found("approval not found"))?;
 
     // A grant is durable authority, but not a restartable continuation: this
-    // path never invokes a generic `ResumeRun`, since the outbox is
-    // identifier-only and there is no descriptor-backed, service-only
-    // dispatcher yet to prove the paused work actually restarted.
-    //
-    // `quarantine_granted_approval_continuation` reports exactly that
-    // boundary and — for a granted approval — is DESIGNED to always return
-    // `unavailable`. That is a statement about continuation delivery, not a
-    // failure of the decision itself: `DecideApproval` above already durably
-    // recorded the grant (session-core's CAS write) before this ever runs.
-    // So its result becomes an informational field on the success response
-    // rather than clobbering it into a 502.
+    // path never invokes a generic `ResumeRun`. What happens next is read from
+    // the approval's derived `continuation` (Session Core joins the delivery
+    // outbox, start receipt and outcome), never assumed here: the old
+    // always-failing quarantine call answered "pending" for kinds the worker
+    // would refuse (build plan WS10 S1). The decision itself was already
+    // durably recorded above, so this is informational and never a 502.
     let mut continuation_delivery: Option<&'static str> = None;
     if matches!(target_state, ApprovalState::Granted)
         && should_resume_granted_approval(prior_approval.as_ref(), &approval)?
     {
-        continuation_delivery = Some(if approval.continuation_mode.is_empty() {
-            match approvals::quarantine_granted_approval_continuation(
-                &approvals::gateway_approval_from_proto(&approval),
-            ) {
-                Ok(()) => "not_applicable",
-                Err(_) => "pending",
-            }
-        } else {
-            // A loop-owned approval (build plan WS03 S2) has no delivery row and
-            // is not the cold worker's: the durable Do loop consumes it when the
-            // user continues the run. Say so, rather than reporting a delivery
-            // that will never happen.
-            "awaiting_continue"
-        });
+        continuation_delivery = Some(continuation_delivery_word(&approval));
     }
 
     let mut body = json!({ "approval": approval_value(&approval) });
@@ -2124,6 +2105,81 @@ async fn decide_approval(
         body["continuation_delivery"] = json!(status);
     }
     Ok(Json(body))
+}
+
+/// The one-word `continuation_delivery` of a decided approval, kept for older clients next to the
+/// typed `approval.continuation`: `queued`, `running`, `completed`, `failed`, `not_resumable`
+/// (the approval only lets the agent retry the exact action once), `live` (a browser action
+/// polled by the running loop), `awaiting_continue` (a loop-owned approval) or `unknown` when
+/// Session Core could not derive the state.
+fn continuation_delivery_word(approval: &Approval) -> &'static str {
+    use mp_contracts::model_plane::v1::ContinuationState as State;
+    match continuation_state_name(approval) {
+        Some(State::Queued) => "queued",
+        Some(State::Running) => "running",
+        Some(State::Completed) => "completed",
+        Some(State::Failed) => "failed",
+        Some(State::NotResumable) => "not_resumable",
+        Some(State::Live) => "live",
+        Some(State::AwaitingContinue) => "awaiting_continue",
+        Some(State::Unspecified) | None => "unknown",
+    }
+}
+
+fn continuation_state_name(
+    approval: &Approval,
+) -> Option<mp_contracts::model_plane::v1::ContinuationState> {
+    approval
+        .continuation
+        .as_ref()
+        .and_then(|continuation| {
+            mp_contracts::model_plane::v1::ContinuationState::try_from(continuation.state).ok()
+        })
+}
+
+/// The resume class Session Core stored on the approval's card (`context.card.resume_class`),
+/// restricted to the closed vocabulary.
+fn card_resume_class(approval: &Approval) -> Option<String> {
+    use prost_types::value::Kind;
+    let context = approval.context.as_ref()?;
+    let Some(Kind::StructValue(card)) = context.fields.get("card")?.kind.as_ref() else {
+        return None;
+    };
+    let Some(Kind::StringValue(class)) = card.fields.get("resume_class")?.kind.as_ref() else {
+        return None;
+    };
+    matches!(class.as_str(), "action_continuation" | "live_poll" | "none").then(|| class.clone())
+}
+
+/// The typed continuation a browser may read; `null` until the approval is granted.
+fn continuation_value(approval: &Approval) -> Value {
+    use mp_contracts::model_plane::v1::{ContinuationState as State, VerificationStatus};
+    let Some(continuation) = approval.continuation.as_ref() else {
+        return Value::Null;
+    };
+    let state = match continuation_state_name(approval) {
+        Some(State::Queued) => "queued",
+        Some(State::Running) => "running",
+        Some(State::Completed) => "completed",
+        Some(State::Failed) => "failed",
+        Some(State::NotResumable) => "not_resumable",
+        Some(State::Live) => "live",
+        Some(State::AwaitingContinue) => "awaiting_continue",
+        Some(State::Unspecified) | None => return Value::Null,
+    };
+    let verification = match VerificationStatus::try_from(continuation.verification) {
+        Ok(VerificationStatus::VerifiedSuccess) => json!("verified_success"),
+        Ok(VerificationStatus::VerifiedFailure) => json!("verified_failure"),
+        Ok(VerificationStatus::PartiallyVerified) => json!("partially_verified"),
+        Ok(VerificationStatus::Unknown) => json!("unknown"),
+        _ => Value::Null,
+    };
+    json!({
+        "state": state,
+        "failure_code": empty_to_null(&continuation.failure_code),
+        "verification": verification,
+        "provider_receipt_id": empty_to_null(&continuation.provider_receipt_id),
+    })
 }
 
 /// Cancel a run through Session Core's authoritative `RunService`.
@@ -7066,6 +7122,16 @@ fn approval_value(approval: &Approval) -> Value {
         "decision_reason": empty_to_null(&approval.decision_reason),
         // Why the pause was raised (build plan WS13 S2); null when the creator stated none.
         "cause": approval.cause.as_ref().map_or(Value::Null, approval_cause_value),
+        // What the card says it is for (build plan WS10 S1): allowlisted by the creator and
+        // re-validated by Session Core, never raw arguments.
+        "tool_key": empty_to_null(&approval.tool_key),
+        "action_label": empty_to_null(&approval.action_label),
+        // What approving does with the paused work, stated by Session Core from its own rows:
+        // `action_continuation`, `live_poll` or `none`. Null on an approval created before the
+        // card context existed, so a surface says nothing rather than guessing.
+        "resume_class": card_resume_class(approval).map_or(Value::Null, Value::String),
+        // Where the approved action stands, derived from the delivery rows; null until granted.
+        "continuation": continuation_value(approval),
     })
 }
 
