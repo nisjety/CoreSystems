@@ -10,6 +10,8 @@ export type SpaceMenuItem = {
   readonly onSelect: () => void
   readonly disabled?: boolean
   readonly danger?: boolean
+  /** A two-state entry (Mute, a computed section toggle): drawn as a checkbox item with `aria-checked`. */
+  readonly checked?: boolean
 }
 
 /**
@@ -62,7 +64,8 @@ export function SpaceRoomMenu(props: {
               <li role="none">
                 <button
                   type="button"
-                  role="menuitem"
+                  role={item.checked === undefined ? 'menuitem' : 'menuitemcheckbox'}
+                  aria-checked={item.checked === undefined ? undefined : item.checked ? 'true' : 'false'}
                   disabled={item.disabled}
                   data-danger={item.danger ? 'true' : undefined}
                   onClick={() => {
@@ -70,7 +73,7 @@ export function SpaceRoomMenu(props: {
                     item.onSelect()
                   }}
                 >
-                  {item.label}
+                  {item.checked ? '✓ ' : ''}{item.label}
                 </button>
               </li>
             )}

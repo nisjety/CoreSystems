@@ -219,6 +219,19 @@ export type SidebarGroupSpec = {
   readonly defaultCompare?: (a: SpaceSummary, b: SpaceSummary) => number
 }
 
+/**
+ * What WS11's attention store says about one room (WS16-S10). Passed in as plain numbers so this
+ * module stays pure and never imports the store; the SPA renders the server's `badge` itself and
+ * nothing here recomputes it. `level` is the caller's own notify level (`off` = muted).
+ */
+export type SidebarRoomAttention = {
+  readonly needsYou: number
+  readonly mentions: number
+  readonly unreadThreads: number
+  readonly working: number
+  readonly level: 'all' | 'mentions' | 'off'
+}
+
 export type SidebarModelSection = { readonly section: SidebarSection; readonly rooms: readonly SpaceSummary[] }
 export type SidebarModelGroup = {
   readonly id: string
@@ -228,6 +241,19 @@ export type SidebarModelGroup = {
 }
 
 export type SidebarModel = {
+  /**
+   * Slot 1, an overlay: rooms that need the viewer (`needs_you + mentions > 0`). The room keeps its
+   * home slot too, and hidden rooms are included on purpose, so hide can never swallow an approval.
+   */
+  readonly needsYou: readonly SpaceSummary[]
+  /** Overlay: unread threads at a level that is not `off`, when `computed.unread` is on. */
+  readonly unread: readonly SpaceSummary[]
+  /** Overlay: rooms with agent work running, when `computed.working` is on. */
+  readonly working: readonly SpaceSummary[]
+  /** Slot 5: muted rooms (level `off`), only when `computed.muted` is on; they then leave slots 2 to 4. */
+  readonly muted: readonly SpaceSummary[]
+  /** Every room the store reports as muted, whether or not the Muted section is on (for the row icon). */
+  readonly mutedRefs: ReadonlySet<string>
   /** Slot 2. Always present (maybe empty) so the header can be a drop target. */
   readonly starred: readonly SpaceSummary[]
   /** Slot 3. Every custom section, empty ones included, in document order. */
@@ -249,29 +275,59 @@ export type SidebarModelInput = {
   /** The name on screen; used for name sort. */
   readonly displayName: (space: SpaceSummary) => string
   readonly locale?: string
+  /**
+   * The attention answer for one room, or undefined when nothing is known. Pass the whole function
+   * only while the store holds a live answer: when `attention` is absent slots 1 and 5 (and the
+   * other computed sections) do not render and nothing falls back to the browser store.
+   */
+  readonly attention?: (spaceRef: string) => SidebarRoomAttention | undefined
 }
 
 /**
  * Builds the ordered, deduplicated render model (docs/plans WS16 D8.6 slot table). Slots 1 (Needs
- * you) and 5 (Muted) need WS11's attention store and arrive with WS16-S10; before that nothing here
- * falls back to the browser store. A room appears once: Starred, else its custom section, else its
- * built-in group. Hidden rooms are slot 6 and, while searching, are included when they match.
+ * you) and 5 (Muted) read WS11's attention store through `input.attention`. A room appears once
+ * among slots 2 to 4: Starred, else its custom section, else its built-in group; slot 1 and the
+ * other computed sections are overlays (the room keeps its home slot), and slot 5 takes muted rooms
+ * out of slots 2 to 4 when it is on. Hidden rooms are slot 6 and, while searching, are included when they match.
  */
 export function buildSidebarModel(input: SidebarModelInput): SidebarModel {
-  const { spaces, doc, groups: specs, query, matches, displayName, locale } = input
+  const { spaces, doc, groups: specs, query, matches, displayName, locale, attention } = input
   const byRef = new Map<string, SpaceSummary>()
   for (const space of spaces) byRef.set(space.space_ref, space)
   const visible = (space: SpaceSummary) => !query || matches(space, query)
   const collator = (a: SpaceSummary, b: SpaceSummary) => displayName(a).localeCompare(displayName(b), locale)
 
   const hiddenRefs = new Set(doc.hidden)
+
+  // Computed slots (WS16-S10). Decided once per room from the attention answer; absent answer, absent slot.
+  const mutedRefs = new Set<string>()
+  const needsYou: SpaceSummary[] = []
+  const unread: SpaceSummary[] = []
+  const working: SpaceSummary[] = []
+  if (attention) {
+    for (const space of spaces) {
+      const room = attention(space.space_ref)
+      if (!room) continue
+      const isMuted = room.level === 'off'
+      if (isMuted) mutedRefs.add(space.space_ref)
+      if (!visible(space)) continue
+      // Needs you includes hidden rooms and muted ones: hiding or muting never swallows a blocking item.
+      if (doc.computed.needsYou && room.needsYou + room.mentions > 0) needsYou.push(space)
+      else if (hiddenRefs.has(space.space_ref)) continue
+      else if (doc.computed.unread && room.unreadThreads > 0 && !isMuted) unread.push(space)
+      else if (doc.computed.working && room.working > 0) working.push(space)
+    }
+  }
+  // With the Muted section on, a muted (and not hidden) room leaves Starred, sections and groups.
+  const movesToMuted = (ref: string) => doc.computed.muted && mutedRefs.has(ref) && !hiddenRefs.has(ref)
+  const muted = spaces.filter((space) => movesToMuted(space.space_ref) && visible(space))
   const hiddenAll = doc.hidden.map((ref) => byRef.get(ref)).filter((space): space is SpaceSummary => Boolean(space))
   const placed = new Set<string>()
 
   const starred: SpaceSummary[] = []
   for (const ref of doc.starred) {
     const space = byRef.get(ref)
-    if (!space || hiddenRefs.has(ref) || placed.has(ref)) continue
+    if (!space || hiddenRefs.has(ref) || placed.has(ref) || movesToMuted(ref)) continue
     placed.add(ref)
     if (visible(space)) starred.push(space)
   }
@@ -280,7 +336,7 @@ export function buildSidebarModel(input: SidebarModelInput): SidebarModel {
     const rooms: SpaceSummary[] = []
     for (const ref of section.refs) {
       const space = byRef.get(ref)
-      if (!space || hiddenRefs.has(ref) || placed.has(ref)) continue
+      if (!space || hiddenRefs.has(ref) || placed.has(ref) || movesToMuted(ref)) continue
       placed.add(ref)
       if (visible(space)) rooms.push(space)
     }
@@ -291,7 +347,7 @@ export function buildSidebarModel(input: SidebarModelInput): SidebarModel {
   const buckets = new Map<string, SpaceSummary[]>(specs.map((spec) => [spec.id, []]))
   const fallback = specs.find((spec) => spec.id === 'channels') ?? specs[0]
   for (const space of spaces) {
-    if (placed.has(space.space_ref) || hiddenRefs.has(space.space_ref)) continue
+    if (placed.has(space.space_ref) || hiddenRefs.has(space.space_ref) || movesToMuted(space.space_ref)) continue
     if (!visible(space)) continue
     // A room no registered group claims lands in Channels, the group the old panel put every
     // non-personal room in, so a kind the registry does not know yet is never dropped.
@@ -312,6 +368,11 @@ export function buildSidebarModel(input: SidebarModelInput): SidebarModel {
   }
 
   return {
+    needsYou,
+    unread,
+    working,
+    muted,
+    mutedRefs,
     starred,
     sections,
     groups,

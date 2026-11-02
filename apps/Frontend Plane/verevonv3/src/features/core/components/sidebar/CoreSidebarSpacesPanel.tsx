@@ -1,5 +1,5 @@
 import { useLocation, useNavigate } from '@solidjs/router'
-import { EyeOff, FolderPlus, Hash, MessageCircle, Pin, Plus, Users } from '@/shared/icons'
+import { EyeOff, FolderPlus, Hash, MessageCircle, Pin, Plus, SlidersHorizontal, Users } from '@/shared/icons'
 import { createEffect, createMemo, createSignal, For, onCleanup, Show, untrack } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 
@@ -34,9 +34,10 @@ import {
   unreadThreadIdsIn,
 } from '@/features/spaces/lib/space-live-work'
 import { setSpaceNotifyLevel, type SpaceNotifyLevel } from '@/shared/api/spaces-attention-client'
-import { refreshSpaceAttention, spaceAttentionRoom } from '@/features/spaces/lib/space-attention'
+import { refreshSpaceAttention, spaceAttentionRoom, spaceAttentionTotals } from '@/features/spaces/lib/space-attention'
 import { SidebarPanelTitle, SidebarSearchField } from './CoreSidebarPrimitives'
 import { SpaceAttentionReadAll, SpaceRoomAttentionBadge } from './SpaceAttentionBadge'
+import { SpaceMoreUnreadPill } from './SpaceMoreUnreadPill'
 import { SpaceMoveDialog, SpaceSectionNameDialog } from './SpaceMoveDialog'
 import { SpaceRoomMenu, type SpaceMenuItem } from './SpaceRoomMenu'
 import { SpaceSidebarSection } from './SpaceSidebarSection'
@@ -64,6 +65,8 @@ type RowContext =
   | { kind: 'section'; id: string; refs: readonly string[]; manual: boolean }
   | { kind: 'group'; id: string }
   | { kind: 'hidden' }
+  /** A computed overlay (Needs you, Unread, Agent work): a second copy of a room, never dragged or reordered. */
+  | { kind: 'computed' }
 
 /**
  * The expanded core sidebar is the one room navigator. It reads the same
@@ -178,6 +181,17 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
     },
   )
   const [showHidden, setShowHidden] = createSignal(false)
+  // WS16-S10: computed sections read WS11's attention store. Until the store holds a live answer
+  // (surface off, first poll pending, ZDR-empty) slots 1 and 5 and the Smart sections menu do not
+  // render, and nothing falls back to the browser store.
+  const attentionLive = () => spaceAttentionTotals() !== undefined
+  const attentionOf = (ref: string) => {
+    const room = spaceAttentionRoom(ref)
+    return room
+      ? { needsYou: room.needsYou, mentions: room.mentions, unreadThreads: room.unreadThreads, working: room.working, level: room.level }
+      : undefined
+  }
+  const [navEl, setNavEl] = createSignal<HTMLElement>()
   const [notice, setNotice] = createSignal('')
   // Signal writes are batched, so the message a failed `run` leaves for a dialog is kept here too.
   let lastError = ''
@@ -189,6 +203,7 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
     matches: (space, term) => matchesSpace(space, term, i18n.tr),
     displayName: (space) => spaceDisplayName(space, i18n.tr),
     locale: i18n.localeCode(),
+    attention: attentionLive() ? attentionOf : undefined,
   }))
   const groupDefs = new Map(spaceSidebarGroups().map((def) => [def.id as string, def]))
   const roomLabel = (space: SpaceSummary) => spaceDisplayName(space, i18n.tr)
@@ -395,9 +410,10 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
         label: isHidden ? i18n.tr('Vis igjen', 'Unhide') : i18n.tr('Skjul', 'Hide'),
         onSelect: () => toggleHide(space, isHidden),
       },
+      ...muteItems(space),
       ...notifyLevelItems(space),
     ]
-    if (canReorder(context) && context.kind !== 'group' && context.kind !== 'hidden') {
+    if (canReorder(context) && context.kind !== 'group' && context.kind !== 'hidden' && context.kind !== 'computed') {
       const index = context.refs.indexOf(ref)
       items.push(
         { id: 'up', label: i18n.tr('Flytt opp', 'Move up'), disabled: index <= 0, onSelect: () => reorder(space, context, -1) },
@@ -410,13 +426,63 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
   // WS11-S4: the caller's own notification level for the room (a closed vocabulary, allowed under
   // ZDR). Offered only once the attention aggregate has answered for this room, so a gateway with the
   // surface off shows no dead items; the checkmark is the level the server last reported.
+  // WS16-S10: Mute is WS11's notify level `off`, not a sidebar preference (there is exactly one mute
+  // store and it is not agent pause). Unmute restores the default level, `mentions`. Offered only
+  // once the aggregate has answered for the room, like the level items.
+  function muteItems(space: SpaceSummary): SpaceMenuItem[] {
+    const current = spaceAttentionRoom(space.space_ref)?.level
+    if (!current) return []
+    const muted = current === 'off'
+    const next: SpaceNotifyLevel = muted ? 'mentions' : 'off'
+    const spoken = muted
+      ? i18n.tr(`${roomLabel(space)} er ikke lenger dempet.`, `${roomLabel(space)} unmuted.`)
+      : i18n.tr(`${roomLabel(space)} er dempet.`, `${roomLabel(space)} muted.`)
+    return [{
+      id: 'mute',
+      checked: muted,
+      label: i18n.tr('Demp rom', 'Mute room'),
+      onSelect: () => {
+        void setSpaceNotifyLevel(space.space_ref, next)
+          .then(() => {
+            announce(spoken, { key: 'space-notify-level' })
+            refreshSpaceAttention()
+          })
+          .catch((error: unknown) => {
+            announce(translateApiError(error, i18n.tr), { politeness: 'assertive' })
+          })
+      },
+    }]
+  }
+
+  /** The computed sections the person turns on or off (stored in the sidebar document). */
+  function computedItems(): SpaceMenuItem[] {
+    const computed = sidebar().doc.computed
+    const options: ReadonlyArray<{ key: keyof typeof computed; no: string; en: string }> = [
+      { key: 'needsYou', no: 'Trenger deg', en: 'Needs you' },
+      { key: 'unread', no: 'Uleste', en: 'Unread' },
+      { key: 'working', no: 'Agentarbeid', en: 'Agent work' },
+      { key: 'muted', no: 'Dempede', en: 'Muted' },
+    ]
+    return options.map((option) => ({
+      id: `computed-${option.key}`,
+      checked: computed[option.key],
+      label: i18n.tr(option.no, option.en),
+      onSelect: () => {
+        const on = !computed[option.key]
+        run(
+          [{ type: 'computed.toggle', key: option.key, on }],
+          i18n.tr(`${option.no}: ${on ? 'på' : 'av'}`, `${option.en} section ${on ? 'on' : 'off'}`),
+        )
+      },
+    }))
+  }
+
   function notifyLevelItems(space: SpaceSummary): SpaceMenuItem[] {
     const current = spaceAttentionRoom(space.space_ref)?.level
     if (!current) return []
     const options: ReadonlyArray<{ level: SpaceNotifyLevel; no: string; en: string }> = [
       { level: 'all', no: 'Varsler: alle meldinger', en: 'Notify: all messages' },
       { level: 'mentions', no: 'Varsler: bare omtaler', en: 'Notify: mentions only' },
-      { level: 'off', no: 'Varsler: av', en: 'Notify: off' },
     ]
     return options.map((option) => ({
       id: `notify-${option.level}`,
@@ -482,11 +548,21 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
 
   /** A room row: the link, its drag behaviour and its menu. */
   function renderRow(space: SpaceSummary, context: RowContext): JSX.Element {
-    const draggable = () => sidebar().canEdit
+    const overlay = context.kind === 'computed'
+    const draggable = () => sidebar().canEdit && !overlay
+    // The pill watches rows that carry a server badge; the overlay copy is skipped so a room counts once.
+    const badgeN = () => {
+      if (overlay || isSpaceObserved(space.space_ref)) return undefined
+      const badge = spaceAttentionRoom(space.space_ref)?.badge
+      return badge && badge.kind === 'count' && badge.n > 0 ? badge.n : undefined
+    }
     return (
       <div
         class="space-sidebar-row"
-        data-room-ref={space.space_ref}
+        data-room-ref={overlay ? undefined : space.space_ref}
+        data-overlay-ref={overlay ? space.space_ref : undefined}
+        data-badge-n={badgeN()}
+        data-muted={model().mutedRefs.has(space.space_ref) ? 'true' : undefined}
         draggable={draggable() ? 'true' : 'false'}
         data-dragged={dragRef() === space.space_ref ? 'true' : undefined}
         data-drop-before={dropBefore() === space.space_ref ? 'true' : undefined}
@@ -508,7 +584,7 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
           reorder(space, context, event.key === 'ArrowUp' ? -1 : 1)
         }}
       >
-        <SpaceLink space={space} active={space.space_ref === selectedSpaceRef()} />
+        <SpaceLink space={space} active={space.space_ref === selectedSpaceRef()} muted={model().mutedRefs.has(space.space_ref)} />
         <SpaceRoomMenu
           class="space-sidebar-row__menu"
           label={i18n.tr(`Valg for ${roomLabel(space)}`, `Options for ${roomLabel(space)}`)}
@@ -531,7 +607,22 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
 
       <SpaceAttentionReadAll />
 
-      <nav class="core-sidebar-panel-nav" aria-label={i18n.tr('Romnavigasjon', 'Spaces navigation')}>
+      <Show when={!legacy() && attentionLive() && sidebar().canEdit}>
+        <div class="space-sidebar-computed-bar">
+          <SpaceRoomMenu
+            label={i18n.tr('Smarte seksjoner', 'Smart sections')}
+            items={computedItems()}
+            icon={
+              <>
+                <SlidersHorizontal size={14} aria-hidden="true" />
+                <span>{i18n.tr('Smarte seksjoner', 'Smart sections')}</span>
+              </>
+            }
+          />
+        </div>
+      </Show>
+
+      <nav ref={setNavEl} class="core-sidebar-panel-nav" aria-label={i18n.tr('Romnavigasjon', 'Spaces navigation')}>
         <Show when={spaces.loading}>
           <p class="core-sidebar-empty verevon-sidebar-row-normal" role="status">{i18n.tr('Laster rom …', 'Loading spaces…')}</p>
         </Show>
@@ -542,6 +633,22 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
         </Show>
 
         <Show when={!legacy() && !spaces.loading && !spacesLoadFailed()}>
+          <For
+            each={[
+              { id: 'needs-you', title: i18n.tr('Trenger deg', 'Needs you'), rooms: model().needsYou },
+              { id: 'unread', title: i18n.tr('Uleste', 'Unread'), rooms: model().unread },
+              { id: 'working', title: i18n.tr('Agentarbeid', 'Agent work'), rooms: model().working },
+            ]}
+          >
+            {(slot) => (
+              <Show when={slot.rooms.length > 0}>
+                <SpaceSidebarSection id={`computed-${slot.id}`} title={slot.title} count={slot.rooms.length} collapsed={false}>
+                  <For each={slot.rooms}>{(space) => renderRow(space, { kind: 'computed' })}</For>
+                </SpaceSidebarSection>
+              </Show>
+            )}
+          </For>
+
           <Show when={model().starred.length > 0 || dragRef() !== null}>
             <SpaceSidebarSection
               id="starred"
@@ -625,6 +732,12 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
               )
             }}
           </For>
+
+          <Show when={model().muted.length > 0}>
+            <SpaceSidebarSection id="computed-muted" title={i18n.tr('Dempede', 'Muted')} count={model().muted.length} collapsed={false}>
+              <For each={model().muted}>{(space) => renderRow(space, { kind: 'hidden' })}</For>
+            </SpaceSidebarSection>
+          </Show>
 
           <Show when={model().hiddenCount > 0 && !normalizedQuery()}>
             <button
@@ -801,6 +914,10 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
             {i18n.tr('Samtaler kunne ikke lastes. Romtilgangen er uendret.', 'Conversations could not be loaded. Space access is unchanged.')}
           </p>
         </Show>
+
+        <Show when={!legacy() && attentionLive()}>
+          <SpaceMoreUnreadPill container={navEl} />
+        </Show>
       </nav>
 
       <DmStartDialog
@@ -843,7 +960,7 @@ function SidebarGroup(props: { title: string; children: JSX.Element }) {
   )
 }
 
-function SpaceLink(props: { space: SpaceSummary; active: boolean }) {
+function SpaceLink(props: { space: SpaceSummary; active: boolean; muted?: boolean }) {
   const i18n = useI18n()
   // Slack's channel dot, for agent work. Read from the live-work store, which
   // the Space page publishes on its own poll — the sidebar fetches nothing
@@ -877,6 +994,26 @@ function SpaceLink(props: { space: SpaceSummary; active: boolean }) {
       </span>
       <Show when={props.space.archived === true}>
         <span class="core-sidebar-archived-tag">{i18n.tr('Arkivert', 'Archived')}</span>
+      </Show>
+      <Show when={props.muted}>
+        <svg
+          class="space-sidebar-muted-icon"
+          viewBox="0 0 24 24"
+          width="13"
+          height="13"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          role="img"
+          aria-label={i18n.tr('Dempet', 'Muted')}
+        >
+          <path d="M8.7 3A6 6 0 0 1 18 8a21.3 21.3 0 0 0 .6 5" />
+          <path d="M17 17H3s3-2 3-9a4.67 4.67 0 0 1 .3-1.7" />
+          <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
+          <path d="m2 2 20 20" />
+        </svg>
       </Show>
       <Show when={working()}>
         <span
