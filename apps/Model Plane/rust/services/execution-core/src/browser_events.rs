@@ -30,6 +30,22 @@ use crate::state::{RunStatus, StateStore};
 /// The tool whose actions the in-loop gate holds, named on the approval's cause.
 const BROWSER_AGENT_TOOL: &str = "browser_agent";
 
+/// E3.2-c: the internal decision word for a person's rejection that carries
+/// instructions. Never published: the timeline sees `denied`.
+const DECISION_REDIRECTED: &str = "redirected";
+
+/// E3.2-c: the redirect text of a denied approval record, if the loop should
+/// treat the rejection as a redirect: the flag is on, a person (not a
+/// `system:*` decider such as the cancel path, and not nobody) decided it, and
+/// some text is left after bounding. The text is the decision reason, bounded.
+fn redirect_text(enabled: bool, decided_by: &str, reason: &str) -> Option<String> {
+    let decider = decided_by.trim();
+    if !enabled || decider.is_empty() || decider.starts_with("system:") {
+        return None;
+    }
+    crate::browser_agent::bound_redirect_text(reason)
+}
+
 /// `BrowserRunPaused.reason` when a person took the agent tab (WS8.G).
 pub const PAUSED_REASON_USER_TOOK_OVER: &str = "user_took_over";
 /// `BrowserRunResumed.reason` when the person gave the tab back (WS8.G).
@@ -140,6 +156,13 @@ impl OrchestrationEventSink {
         decision: &str,
         reason: &str,
     ) -> ApprovalOutcome {
+        // E3.2-c: a redirect is a rejection on the timeline ("denied"); only the
+        // outcome the loop gets differs.
+        let published = if decision == DECISION_REDIRECTED {
+            "denied"
+        } else {
+            decision
+        };
         self.publish(
             &config.run_id,
             orchestration_event::Event::BrowserActionDecided(
@@ -148,7 +171,7 @@ impl OrchestrationEventSink {
                     plan_id: config.plan_id.clone(),
                     action_id: detail.action_id.clone(),
                     approval_id: approval_id.to_owned(),
-                    decision: decision.to_owned(),
+                    decision: published.to_owned(),
                     // The decider's identity lives on the durable Approval
                     // record itself (`decided_by`, set by whoever called
                     // `DecideApproval`); this sink has no independent
@@ -162,6 +185,7 @@ impl OrchestrationEventSink {
         match decision {
             "granted" => ApprovalOutcome::Granted,
             "timed_out" => ApprovalOutcome::TimedOut,
+            DECISION_REDIRECTED => ApprovalOutcome::Redirect(reason.to_owned()),
             _ => ApprovalOutcome::Denied(reason.to_owned()),
         }
     }
@@ -483,6 +507,21 @@ impl BrowserEventSink for OrchestrationEventSink {
                                     .await;
                             }
                             Ok(pb::ApprovalState::Denied) => {
+                                if let Some(text) = redirect_text(
+                                    config.approval_redirect,
+                                    &approval.decided_by,
+                                    &approval.decision_reason,
+                                ) {
+                                    return self
+                                        .decided(
+                                            config,
+                                            detail,
+                                            &approval_id,
+                                            DECISION_REDIRECTED,
+                                            &text,
+                                        )
+                                        .await;
+                                }
                                 return self
                                     .decided(
                                         config,
@@ -1152,6 +1191,59 @@ mod tests {
             challenge: None,
             redaction_rule_version: None,
         }
+    }
+
+    #[test]
+    fn redirect_text_needs_the_flag_a_person_and_some_text() {
+        assert_eq!(redirect_text(true, "user_1", "use the guest option").as_deref(), Some("use the guest option"));
+        // Off, a system decider, nobody, or no text: a plain denial.
+        assert_eq!(redirect_text(false, "user_1", "use the guest option"), None);
+        assert_eq!(redirect_text(true, "system:user-cancelled", "run cancelled by user while awaiting approval"), None);
+        assert_eq!(redirect_text(true, "system:timeout", "expired"), None);
+        assert_eq!(redirect_text(true, "", "text"), None);
+        assert_eq!(redirect_text(true, "user_1", "   "), None);
+        // Bounded.
+        let long = "y".repeat(5_000);
+        assert_eq!(redirect_text(true, "user_1", &long).map(|t| t.chars().count()), Some(1000));
+    }
+
+    #[tokio::test]
+    async fn a_redirected_decision_is_denied_on_the_timeline_and_a_redirect_for_the_loop() {
+        let recorded = Arc::default();
+        let channel = spawn_mock(NeverResolvingOrchestration {
+            recorded: Arc::clone(&recorded),
+            ..Default::default()
+        })
+        .await;
+        let sink = OrchestrationEventSink::new(channel, None).with_verified_bearer("test-bearer");
+        let config = test_config();
+        let detail = RiskyActionDetail {
+            action_id: "act_1".to_owned(),
+            action_type: "click".to_owned(),
+            url: "https://example.com/checkout".to_owned(),
+            selector: String::new(),
+            risk_category: crate::browser_agent::RiskCategory::Checkout,
+            reason: "checkout".to_owned(),
+        };
+        let outcome = sink
+            .decided(&config, &detail, "appr_1", DECISION_REDIRECTED, "use guest")
+            .await;
+        assert_eq!(outcome, ApprovalOutcome::Redirect("use guest".to_owned()));
+        let sent = recorded.lock().unwrap();
+        let decisions: Vec<_> = sent
+            .iter()
+            .filter_map(|request| request.event.as_ref()?.event.clone())
+            .filter_map(|event| match event {
+                orchestration_event::Event::BrowserActionDecided(decided) => Some(decided.decision),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(decisions, vec!["denied".to_owned()]);
+        drop(sent);
+        assert_eq!(
+            sink.decided(&config, &detail, "appr_1", "denied", "no").await,
+            ApprovalOutcome::Denied("no".to_owned())
+        );
     }
 
     #[tokio::test]

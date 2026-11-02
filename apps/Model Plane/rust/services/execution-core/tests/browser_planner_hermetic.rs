@@ -689,6 +689,7 @@ fn rendered_prompt(
             retry_note,
             step: if page { 3 } else { 1 },
             failed_total: failures.len() as u32,
+            redirect: None,
         },
         "verevon-balance",
         schema,

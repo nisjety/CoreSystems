@@ -626,6 +626,56 @@ pub struct PlanConfig {
     /// exit (failure, cancel, a limit) never marks. Only meaningful with
     /// `attach`; a leased run has no person's tab to hand over.
     pub tab_mark_on_complete: crate::quarry_agent::TabMark,
+    /// E3.2-c: a rejection that carries text is a redirect for the planner
+    /// instead of the end of the run (`QUARRY_BROWSER_AGENT_APPROVAL_REDIRECT`,
+    /// default off). Set by the tool bridge from the process environment,
+    /// never read in the loop. A rejection without text still aborts.
+    pub approval_redirect: bool,
+}
+
+/// E3.2-c: the longest redirect text the planner is shown, in characters.
+pub const MAX_REDIRECT_CHARS: usize = 1000;
+/// E3.2-c: redirects one run accepts. Past it a rejection aborts as before, so
+/// a person who keeps rejecting cannot hold a run in a loop of replans.
+pub const MAX_REDIRECTS_PER_RUN: u32 = 5;
+
+/// E3.2-c: the person's rejection text, made safe to show the planner:
+/// control characters become spaces, runs of whitespace collapse, the text is
+/// trimmed and cut at [`MAX_REDIRECT_CHARS`] characters. `None` when nothing
+/// is left (a rejection with no text stays a plain denial).
+#[must_use]
+pub fn bound_redirect_text(raw: &str) -> Option<String> {
+    let cleaned = raw
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>();
+    let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+    Some(collapsed.chars().take(MAX_REDIRECT_CHARS).collect())
+}
+
+/// E3.2-c: one rejected action and what the person said about it. Unlike an
+/// [`ActionFailure`] it is not a failure: it is not counted against the failure
+/// budget and its text is the person's, not a fixed per-kind sentence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionRedirect {
+    pub step: i32,
+    pub action_type: &'static str,
+    /// Already bounded by [`bound_redirect_text`].
+    pub text: String,
+}
+
+impl ActionRedirect {
+    /// `step N <action> was not approved. The person said: "<text>"`
+    #[must_use]
+    pub fn line(&self) -> String {
+        format!(
+            "step {} {} was not approved. The person said: \"{}\"",
+            self.step, self.action_type, self.text
+        )
+    }
 }
 
 /// The step failure when a stamp is required and absent.
@@ -700,6 +750,13 @@ pub struct AgentPlan {
     /// call (after `start_run` has already succeeded) — never re-asked on
     /// later steps of the same run.
     cookie_use_gate_done: bool,
+    /// E3.2-c: the person's redirect for the next planner call (shown once).
+    redirect: Option<ActionRedirect>,
+    /// E3.2-c: redirects accepted so far (capped by [`MAX_REDIRECTS_PER_RUN`]).
+    redirects_used: u32,
+    /// E3.2-c: set by `decide_next_action` for the step in hand: a redirect
+    /// only makes sense when a planner will read it.
+    planner_active: bool,
 }
 
 impl AgentPlan {
@@ -720,7 +777,32 @@ impl AgentPlan {
             usage: BrowserLoopUsage::default(),
             last_planner_tokens: 0,
             cookie_use_gate_done: false,
+            redirect: None,
+            redirects_used: 0,
+            planner_active: false,
         }
+    }
+
+    /// E3.2-c: take a person's redirect for `action` when the run may use one
+    /// (flag on, a planner reading it, budget left, text left after bounding).
+    /// `false` means the rejection stays a denial and the run aborts.
+    fn accept_redirect(&mut self, action: &BrowserAction, text: &str) -> bool {
+        if !self.config.approval_redirect
+            || !self.planner_active
+            || self.redirects_used >= MAX_REDIRECTS_PER_RUN
+        {
+            return false;
+        }
+        let Some(text) = bound_redirect_text(text) else {
+            return false;
+        };
+        self.redirects_used += 1;
+        self.redirect = Some(ActionRedirect {
+            step: self.current_step,
+            action_type: action.action_type.as_str(),
+            text,
+        });
+        true
     }
 
     /// What the planner has spent so far.
@@ -1895,6 +1977,7 @@ async fn decide_next_action(
     if let Some(aborted) = wait_out_pause_or_cancel(plan, state, sink).await {
         return aborted;
     }
+    plan.planner_active = planner.is_some();
 
     if let Some(gated) = gate_persistent_cookie_use(plan, sink).await {
         return gated;
@@ -1926,6 +2009,9 @@ async fn decide_next_action(
                 };
             }
             let view = last_observation.map(planner_view::PlannerView::from_observation);
+            // E3.2-c: a person's redirect is shown for this one planner call
+            // (its retries included) and then dropped.
+            let redirect_line = plan.redirect.take().map(|redirect| redirect.line());
             // A transient or unreadable reply is retried once (the unreadable
             // one with a corrective line); the second failure stops the run.
             let mut attempts = 0u32;
@@ -1937,6 +2023,7 @@ async fn decide_next_action(
                     retry_note: (attempts > 0).then_some(PARSE_RETRY_NOTE),
                     step: plan.current_step,
                     failed_total: plan.failures.total(),
+                    redirect: redirect_line.as_deref(),
                 };
                 match planner.plan_next(&context).await {
                     Ok(reply) => break Ok(reply),
@@ -2150,7 +2237,9 @@ async fn gate_persistent_cookie_use(
         // Approved — nothing to report; the caller falls through to normal
         // planning for this step.
         ApprovalOutcome::Granted => None,
-        ApprovalOutcome::Denied(reason) => {
+        // A redirect is for a planned action; the run-level cookie gate has
+        // none to replace, so it reads as the denial it is.
+        ApprovalOutcome::Denied(reason) | ApprovalOutcome::Redirect(reason) => {
             plan.status = PlanStatus::Aborted;
             Some(PlanStepResult::Aborted {
                 reason: format!("persistent cookie use denied: {reason}"),
@@ -2197,7 +2286,22 @@ async fn gate_risky_action(
     };
     match request_approval(&plan.config, &detail, sink).await {
         ApprovalOutcome::Granted => PlanStepResult::Action(action),
-        ApprovalOutcome::Denied(reason) => {
+        // E3.2-c: the person rejected this action and said what to do instead.
+        // The action is dropped (nothing reaches Quarry) and the planner plans
+        // again over the same page; the next action meets every gate afresh,
+        // so a redirect never stands in for an approval. When the flag is off,
+        // no planner reads it, the budget is spent or no text is left, it is
+        // the denial it always was.
+        ApprovalOutcome::Redirect(text) if plan.accept_redirect(&action, &text) => {
+            warn!(
+                plan_id = %plan.config.plan_id,
+                redirects = plan.redirects_used,
+                "browser action rejected with a redirect; planning again"
+            );
+            plan.status = PlanStatus::Executing;
+            PlanStepResult::Rejected
+        }
+        ApprovalOutcome::Denied(reason) | ApprovalOutcome::Redirect(reason) => {
             plan.status = PlanStatus::Aborted;
             PlanStepResult::Aborted {
                 reason: format!("browser action denied: {reason}"),
@@ -3545,5 +3649,204 @@ mod tests {
             ..test_config()
         };
         assert!(validate_plan_config(&zdr).is_err());
+    }
+
+    // ---- E3.2-c approval redirect -------------------------------------
+
+    /// A planner that replays scripted actions and records the redirect line
+    /// it was shown on each call.
+    struct RedirectProbePlanner {
+        actions: std::sync::Mutex<std::collections::VecDeque<BrowserAction>>,
+        seen: std::sync::Mutex<Vec<Option<String>>>,
+    }
+
+    impl RedirectProbePlanner {
+        fn new(actions: Vec<BrowserAction>) -> Self {
+            Self {
+                actions: std::sync::Mutex::new(actions.into()),
+                seen: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn seen(&self) -> Vec<Option<String>> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    #[tonic::async_trait]
+    impl crate::llm_planner::ActionPlanner for RedirectProbePlanner {
+        async fn plan_next(
+            &self,
+            ctx: &crate::llm_planner::PlannerContext<'_>,
+        ) -> Result<crate::llm_planner::PlannerReply, crate::llm_planner::PlannerError> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(ctx.redirect.map(str::to_owned));
+            let action = self
+                .actions
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("scripted action");
+            Ok(crate::llm_planner::PlannerReply::action(action))
+        }
+    }
+
+    fn checkout_click() -> BrowserAction {
+        BrowserAction {
+            action_id: "act_planner".to_owned(),
+            grant_id: "grant_001".to_owned(),
+            action_type: ActionType::Click,
+            selector: "button.pay".to_owned(),
+            value: String::new(),
+            url: "https://example.com/checkout".to_owned(),
+            max_wait_ms: 5_000,
+            target: None,
+            reason: "pay".to_owned(),
+            risk_category: None,
+        }
+    }
+
+    fn observe_action() -> BrowserAction {
+        BrowserAction {
+            action_id: "act_planner".to_owned(),
+            grant_id: "grant_001".to_owned(),
+            action_type: ActionType::Observe,
+            selector: String::new(),
+            value: String::new(),
+            url: String::new(),
+            max_wait_ms: 5_000,
+            target: None,
+            reason: "look".to_owned(),
+            risk_category: None,
+        }
+    }
+
+    fn redirect_config() -> PlanConfig {
+        PlanConfig {
+            approval_redirect: true,
+            ..test_config()
+        }
+    }
+
+    #[test]
+    fn approval_redirect_is_off_by_default() {
+        assert!(!PlanConfig::default().approval_redirect);
+        assert!(!test_config().approval_redirect);
+    }
+
+    #[test]
+    fn redirect_text_is_cleaned_and_bounded() {
+        assert_eq!(bound_redirect_text(""), None);
+        assert_eq!(bound_redirect_text(" \n\t "), None);
+        assert_eq!(
+            bound_redirect_text("  use the\nguest   option\u{7}now "),
+            Some("use the guest option now".to_owned())
+        );
+        let long = "x".repeat(MAX_REDIRECT_CHARS + 500);
+        assert_eq!(
+            bound_redirect_text(&long).map(|text| text.chars().count()),
+            Some(MAX_REDIRECT_CHARS)
+        );
+        // Cut on a character boundary, not a byte one.
+        let wide = "\u{e9}".repeat(MAX_REDIRECT_CHARS + 1);
+        assert_eq!(
+            bound_redirect_text(&wide).map(|text| text.chars().count()),
+            Some(MAX_REDIRECT_CHARS)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_redirect_replans_without_sending_the_action_or_counting_a_failure() {
+        let mut plan = AgentPlan::new(redirect_config());
+        let sink = ScriptedApprovalSink::new(vec![ApprovalOutcome::Redirect(
+            "use the guest option".to_owned(),
+        )]);
+        let planner = RedirectProbePlanner::new(vec![checkout_click(), observe_action()]);
+
+        let first = decide_next_action(&mut plan, None, Some(&planner), None, Some(&sink)).await;
+        assert!(matches!(first, PlanStepResult::Rejected), "replan, not abort");
+        assert_eq!(plan.status, PlanStatus::Executing);
+        assert_eq!(plan.failures.total(), 0, "a redirect is not a failure");
+        assert_eq!(plan.redirects_used, 1);
+        assert_eq!(sink.call_count(), 1);
+
+        // The next planner call is told, once, and the rejected click was
+        // never dispatched (no history of it, only the gate saw it).
+        plan.replan = true;
+        let second = decide_next_action(&mut plan, None, Some(&planner), None, Some(&sink)).await;
+        assert!(matches!(second, PlanStepResult::Action(_)));
+        let seen = planner.seen();
+        assert_eq!(seen[0], None);
+        let line = seen[1].clone().expect("the second call carries the redirect");
+        assert!(line.contains("use the guest option"), "{line}");
+        assert!(line.contains("was not approved"), "{line}");
+        assert!(plan.redirect.is_none(), "shown once");
+    }
+
+    #[tokio::test]
+    async fn a_redirected_action_that_comes_back_meets_the_gate_again() {
+        let mut plan = AgentPlan::new(redirect_config());
+        let sink = ScriptedApprovalSink::new(vec![
+            ApprovalOutcome::Redirect("try the other button".to_owned()),
+            ApprovalOutcome::Denied("no".to_owned()),
+        ]);
+        let planner = RedirectProbePlanner::new(vec![checkout_click(), checkout_click()]);
+
+        let first = decide_next_action(&mut plan, None, Some(&planner), None, Some(&sink)).await;
+        assert!(matches!(first, PlanStepResult::Rejected));
+        plan.replan = true;
+        let second = decide_next_action(&mut plan, None, Some(&planner), None, Some(&sink)).await;
+        assert!(
+            matches!(second, PlanStepResult::Aborted { .. }),
+            "the same risky action is asked about again; a redirect approved nothing"
+        );
+        assert_eq!(sink.call_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_redirect_aborts_when_the_flag_is_off_or_no_planner_reads_it() {
+        // Flag off: the sink should never produce one, and if it does the
+        // loop still treats it as the denial it always was.
+        let mut plan = AgentPlan::new(test_config());
+        let sink = ScriptedApprovalSink::new(vec![ApprovalOutcome::Redirect("x".to_owned())]);
+        let planner = RedirectProbePlanner::new(vec![checkout_click()]);
+        let result = decide_next_action(&mut plan, None, Some(&planner), None, Some(&sink)).await;
+        assert!(matches!(
+            result,
+            PlanStepResult::Aborted {
+                abort_reason: BrowserAbortReason::ApprovalDenied,
+                ..
+            }
+        ));
+
+        // Flag on but no planner (the deterministic path): nobody to tell.
+        let mut config = redirect_config();
+        config.start_url = Some("https://example.com/checkout".to_owned());
+        let mut plan = AgentPlan::new(config);
+        let sink = ScriptedApprovalSink::new(vec![ApprovalOutcome::Redirect("x".to_owned())]);
+        let result = decide_next_action(&mut plan, None, None, None, Some(&sink)).await;
+        assert!(matches!(result, PlanStepResult::Aborted { .. }));
+    }
+
+    #[tokio::test]
+    async fn redirects_are_capped_per_run() {
+        let mut plan = AgentPlan::new(redirect_config());
+        plan.redirects_used = MAX_REDIRECTS_PER_RUN;
+        let sink = ScriptedApprovalSink::new(vec![ApprovalOutcome::Redirect("again".to_owned())]);
+        let planner = RedirectProbePlanner::new(vec![checkout_click()]);
+        let result = decide_next_action(&mut plan, None, Some(&planner), None, Some(&sink)).await;
+        assert!(matches!(result, PlanStepResult::Aborted { .. }));
+    }
+
+    #[tokio::test]
+    async fn the_cookie_use_gate_never_takes_a_redirect() {
+        let mut config = redirect_config();
+        config.profile_id = Some("prof_1".to_owned());
+        let mut plan = AgentPlan::new(config);
+        let sink = ScriptedApprovalSink::new(vec![ApprovalOutcome::Redirect("no".to_owned())]);
+        let result = gate_persistent_cookie_use(&mut plan, Some(&sink)).await;
+        assert!(matches!(result, Some(PlanStepResult::Aborted { .. })));
     }
 }

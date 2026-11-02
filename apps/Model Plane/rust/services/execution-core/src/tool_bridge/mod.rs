@@ -1275,6 +1275,8 @@ pub(crate) struct PlanCeilings {
     widened_actions: bool,
     /// `EXECUTION_CORE_REQUIRE_QUARRY_REDACTION_STAMP` (WS12.S4), default off.
     require_quarry_redaction_stamp: bool,
+    /// `QUARRY_BROWSER_AGENT_APPROVAL_REDIRECT` (E3.2-c), default off.
+    approval_redirect: bool,
 }
 
 impl Default for PlanCeilings {
@@ -1291,6 +1293,7 @@ impl Default for PlanCeilings {
             procedure: browser_agent::procedure::ProcedureId::Legacy0,
             widened_actions: false,
             require_quarry_redaction_stamp: false,
+            approval_redirect: false,
         }
     }
 }
@@ -1384,6 +1387,8 @@ impl PlanCeilings {
                 "EXECUTION_CORE_REQUIRE_QUARRY_REDACTION_STAMP",
             )
             .is_some_and(|value| matches!(value.trim(), "1" | "true" | "on")),
+            approval_redirect: lookup("QUARRY_BROWSER_AGENT_APPROVAL_REDIRECT")
+                .is_some_and(|value| matches!(value.trim(), "1" | "true" | "on")),
         }
     }
 
@@ -1629,6 +1634,7 @@ fn browser_plan_config_with(
         takeover_poll: None,
         require_quarry_redaction_stamp: ceilings.require_quarry_redaction_stamp,
         tab_mark_on_complete: input_tab_mark.unwrap_or_default(),
+        approval_redirect: ceilings.approval_redirect,
     };
     browser_agent::validate_plan_config(&plan)?;
     Ok(plan)
@@ -2021,6 +2027,20 @@ mod tests {
         let facts = PlanCeilings::default().banner_facts();
         assert_eq!((facts.default_steps, facts.ceiling_steps), (20, 100));
         assert_eq!(facts.procedure, "legacy/0");
+    }
+
+    #[test]
+    fn approval_redirect_default_off_and_only_literal_values_enable() {
+        assert!(!ceilings_with(&[]).approval_redirect);
+        assert!(!PlanCeilings::default().approval_redirect);
+        for on in ["1", "true", "on", " 1 "] {
+            let set = ceilings_with(&[("QUARRY_BROWSER_AGENT_APPROVAL_REDIRECT", on)]);
+            assert!(set.approval_redirect, "{on:?}");
+        }
+        for off in ["0", "false", "yes", "", "TRUE"] {
+            let set = ceilings_with(&[("QUARRY_BROWSER_AGENT_APPROVAL_REDIRECT", off)]);
+            assert!(!set.approval_redirect, "{off:?}");
+        }
     }
 
     #[test]

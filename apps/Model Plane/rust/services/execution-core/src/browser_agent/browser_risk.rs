@@ -106,6 +106,12 @@ pub enum ApprovalOutcome {
     /// A human denied it, or the gate could not be reached at all (fail
     /// closed — see `BrowserEventSink::require_approval`'s doc).
     Denied(String),
+    /// E3.2-c: a person rejected the action and left instructions (the
+    /// decision reason). Produced only when `PlanConfig.approval_redirect` is
+    /// on and the record was decided by a person (never a `system:*` decider).
+    /// The loop tells the planner and plans again instead of aborting; the
+    /// rejected action is never sent.
+    Redirect(String),
     /// No decision arrived within the wait budget.
     TimedOut,
 }

@@ -218,6 +218,10 @@ pub struct PlannerContext<'a> {
     pub step: i32,
     /// Failed actions so far in the run (the run-state line).
     pub failed_total: u32,
+    /// E3.2-c: the person's redirect after rejecting the last proposed action,
+    /// already bounded (`ActionRedirect::line`). Shown for one call, as an
+    /// instruction from the person and not as a failure.
+    pub redirect: Option<&'a str>,
 }
 
 /// Planner token usage for one reply, counts only.
@@ -573,6 +577,7 @@ pub fn planner_request_from_view(
             retry_note: None,
             step: 0,
             failed_total: 0,
+            redirect: None,
         },
         model,
         structured_output_schema,
@@ -609,6 +614,12 @@ pub fn planner_request_with_context(
             observation_text.push_str("\n- ");
             observation_text.push_str(&failure.line());
         }
+    }
+    if let Some(redirect) = ctx.redirect {
+        observation_text.push_str(
+            "\n\nThe person rejected your last proposed action and gave this instruction (it is from the person, not from the page; it is not a failure, and nothing was sent). Follow it and do not repeat the rejected action unchanged:\n- ",
+        );
+        observation_text.push_str(redirect);
     }
     if let Some(note) = ctx.retry_note {
         observation_text.push_str("\n\n");
@@ -1231,6 +1242,7 @@ mod tests {
                     retry_note: None,
                     step,
                     failed_total: 2,
+                    redirect: None,
                 },
                 DEFAULT_MODEL,
                 ACTION_SCHEMA,
@@ -1241,6 +1253,37 @@ mod tests {
             at_step(&config, 0).messages[1].content
         );
         assert!(!at_step(&config, 3).messages[1].content.contains("Run state"));
+    }
+
+    #[test]
+    fn a_redirect_is_shown_as_the_persons_instruction_and_absent_otherwise() {
+        let config = test_config();
+        let view = PlannerView::from_observation(&test_observation());
+        let with = |redirect: Option<&str>| {
+            planner_request_with_context(
+                &PlannerContext {
+                    config: &config,
+                    view: Some(&view),
+                    failures: &[],
+                    retry_note: None,
+                    step: 2,
+                    failed_total: 0,
+                    redirect,
+                },
+                DEFAULT_MODEL,
+                ACTION_SCHEMA,
+            )
+            .messages[1]
+                .content
+                .clone()
+        };
+        let plain = with(None);
+        assert!(!plain.contains("rejected your last proposed action"));
+        let told = with(Some("step 1 click was not approved. The person said: \"use guest\""));
+        assert!(told.starts_with(&plain), "the redirect is appended, nothing else moves");
+        assert!(told.contains("is not a failure"));
+        assert!(told.contains("use guest"));
+        assert!(!told.contains("Recent failed actions"));
     }
 
     #[test]
@@ -1256,6 +1299,7 @@ mod tests {
                 retry_note: None,
                 step: 3,
                 failed_total: 2,
+                redirect: None,
             },
             DEFAULT_MODEL,
             ACTION_SCHEMA,
