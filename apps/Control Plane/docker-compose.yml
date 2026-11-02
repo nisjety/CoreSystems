@@ -439,6 +439,9 @@ services:
             # WS03-S3: org-admin Space policy writes (reads and history stay on).
             # Off in production until the privacy-attestation question (SD-18) is answered.
             SPACE_POLICY_ADMIN_WRITES: ${SPACE_POLICY_ADMIN_WRITES:-false}
+            # WS04-S10: durable Space membership events (ledger outbox + re-announce).
+            # Strict literal true; off by default and in production until enabled.
+            SPACE_MEMBERSHIP_EVENTS_SWEEPER: ${SPACE_MEMBERSHIP_EVENTS_SWEEPER:-false}
             CONTROL_SPACE_DECISION_KEY_ID: ${CONTROL_SPACE_DECISION_KEY_ID:?CONTROL_SPACE_DECISION_KEY_ID is required}
             CONTROL_SPACE_DECISION_PRIVATE_KEY_BASE64: ${CONTROL_SPACE_DECISION_PRIVATE_KEY_BASE64:?CONTROL_SPACE_DECISION_PRIVATE_KEY_BASE64 is required}
             AUTH_CORE_JWT_PUBLIC_KEY_FILE: /app/keys/convex-auth.pub

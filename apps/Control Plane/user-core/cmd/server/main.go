@@ -389,6 +389,13 @@ func main() {
 	httpServer.SetScheduleContractsEnabled(os.Getenv("SCHEDULE_CONTRACT_ENABLED") == "true")
 	// WS03-S3: org-admin Space policy writes. Strict literal true; off by default.
 	httpServer.SetSpacePolicyAdminWrites(os.Getenv("SPACE_POLICY_ADMIN_WRITES") == "true")
+	// WS04-S10: durable membership events (ledger as outbox, PubAck publish,
+	// 10-minute re-announce). Strict literal true; off by default. Handlers
+	// keep their inline publish whichever way this is set.
+	if os.Getenv("SPACE_MEMBERSHIP_EVENTS_SWEEPER") == "true" && sharedPublisher != nil {
+		go spaceRepo.RunMembershipEventsOutbox(ctx, sharedPublisher, spaces.MembershipEventsOutboxConfig{})
+		log.Println("Space membership events sweeper enabled")
+	}
 	// WS04-S3: people search for the Space member picker (one SQL join in user-core).
 	httpServer.SetPeopleDirectory(directory.NewStore(db))
 	httpServer.SetAuthInternalCredential(serviceCredential)

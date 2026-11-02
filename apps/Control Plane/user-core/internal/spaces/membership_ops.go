@@ -84,7 +84,7 @@ func denialError(d *RoleDenial) *RoomError {
 }
 
 // MembershipChangeEvent is the current-fact statement published after commit
-// on aqencia.controlplane.space.membership_changed. ids, role and counts only.
+// on controlplane.space.membership_changed. ids, role and counts only.
 type MembershipChangeEvent struct {
 	EventID   string
 	SpaceRef  string
