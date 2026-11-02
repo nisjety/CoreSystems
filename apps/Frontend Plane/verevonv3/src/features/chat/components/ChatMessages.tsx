@@ -56,6 +56,7 @@ import {
   type AnswerState,
   type ConversationNode,
   type ConversationNodeContext,
+  type ConversationNodeEntry,
   type DiffResult,
   type PlanApprovalStatus,
   type ToolIntent,
@@ -65,6 +66,7 @@ import type { DockedNodes } from '@/shared/chat-nodes/types'
 import { nodeKey } from '@/shared/chat-nodes/derive'
 import type { AutonomyRung, ChatKnowledgeReceipt, ChatPlanStep, MemoryOrigin, RecalledMemory } from '@/shared/api/chat-client'
 import { isSafeLinkHref } from '../lib/safe-href'
+import type { SettledFold } from '../lib/settled-fold'
 import { readChatThreadHistory } from '../lib/chat-thread-history'
 import { buildPromptSuggestions, type PromptSuggestion } from '../lib/prompt-suggestions'
 import { listConversations, type LiveTicket } from '@/shared/api/inbox-client'
@@ -97,6 +99,7 @@ import {
 } from './chat-code-highlight'
 import { ChartFenceBlock } from './ChatChart'
 import { ChatTableTools, TableChart, createTableChartState } from './ChatTableTools'
+import { SettledTurnContent } from './SettledTurnFold'
 import {
   domId,
   formatBytes,
@@ -206,6 +209,8 @@ export function MessageBlock(props: {
   temporaryChat?: boolean
   /** Which of this turn's controls the composer dock holds; see `DockedNodes`. */
   docked?: DockedNodes
+  /** This turn's settled-turn fold (EP-14 S1), from the page. Absent when the switch is off or nothing folds. */
+  settledFold?: SettledFold
 }) {
   // `<For>` invokes its mapper untracked in Solid 2. Read the store-backed
   // role through a memo so the conditional branch is established in a tracked
@@ -377,6 +382,22 @@ const CHAT_NODE_REGISTRY = createConversationNodeRegistry({
 })
 
 /**
+ * One run of a turn's node entries through the registry. The keyed form keeps a
+ * row's DOM while the list re-derives; `VITE_CHAT_RENDER_LEGACY=true` keeps the old
+ * unkeyed one. `SettledTurnContent` calls it once for the fold body and once for the rest.
+ */
+const renderNodeEntries = (entries: () => ConversationNodeEntry[]) =>
+  chatRenderLegacy() ? (
+    <For each={entries()}>
+      {(entry) => CHAT_NODE_REGISTRY.render(entry.node, entry.context)}
+    </For>
+  ) : (
+    <For each={entries()} keyed={(entry) => nodeKey(entry.node)}>
+      {(entry) => CHAT_NODE_REGISTRY.renderLive(entry)}
+    </For>
+  )
+
+/**
  * What the transcript keeps of a control the composer dock holds: where to look,
  * not a second copy of the control. Gone, and the full card back, once it is decided.
  */
@@ -501,6 +522,8 @@ export function AssistantMessage(props: {
   temporaryChat?: boolean
   /** See `MessageBlock`'s doc. */
   docked?: DockedNodes
+  /** See `MessageBlock`'s doc. */
+  settledFold?: SettledFold
 }) {
   const i18n = useI18n()
   const [reaction, setReaction] = createSignal<'up' | 'down' | null>(null)
@@ -771,15 +794,7 @@ export function AssistantMessage(props: {
           could leak into a "clean" PDF).
         */}
         <div class="verevon-chat-message__content" ref={(el) => { contentRef = el }}>
-          {chatRenderLegacy() ? (
-            <For each={nodeEntries()}>
-              {(entry) => CHAT_NODE_REGISTRY.render(entry.node, entry.context)}
-            </For>
-          ) : (
-            <For each={nodeEntries()} keyed={(entry) => nodeKey(entry.node)}>
-              {(entry) => CHAT_NODE_REGISTRY.renderLive(entry)}
-            </For>
-          )}
+          <SettledTurnContent fold={props.settledFold} entries={nodeEntries()} renderEntries={renderNodeEntries} />
         </div>
         <Show when={!waiting() && !errored()}>
           <div class="verevon-chat-message-actions">
