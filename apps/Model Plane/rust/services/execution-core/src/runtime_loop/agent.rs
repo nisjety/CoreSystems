@@ -7336,11 +7336,10 @@ async fn pause_for_approval(
             context_json: crate::space_gate::card_context_json(
                 tool_name,
                 tool_input,
-                if continuation_descriptor_json.is_empty() {
-                    crate::space_gate::RESUME_NONE
-                } else {
-                    crate::space_gate::RESUME_ACTION_CONTINUATION
-                },
+                crate::space_gate::resume_class_for(
+                    tool_name,
+                    !continuation_descriptor_json.is_empty(),
+                ),
             ),
             continuation_descriptor_json,
             cause: Some(approval_cause::for_call(

@@ -7,7 +7,7 @@
 //!
 //! The three resumable tool names live here once; the approval delivery worker reads them from
 //! this module so the list the card promises and the list the worker can run cannot drift
-//! (WS10-S9 adds the parity test and the proof checklist).
+//! (WS10-S9: `RESUMABLE_KINDS`, `resume_class_for`, the proof checklist and the parity test).
 
 use serde_json::json;
 
@@ -17,19 +17,85 @@ pub(crate) const PROVIDER_ACTION_TOOL: &str = "execute_provider_action";
 pub(crate) const SHIPMENT_BOOKING_TOOL: &str = "book_shipment";
 /// Ticket creation run by the approval delivery worker from its descriptor.
 pub(crate) const TICKETS_CREATE_TOOL: &str = "tickets.create";
-/// The tools whose granted approval the worker can run (`action_continuation`). Read by the
-/// WS10-S9 parity test; the worker still matches the three names directly.
-#[allow(dead_code)]
-pub(crate) const RESUMABLE_TOOLS: &[&str] = &[
-    PROVIDER_ACTION_TOOL,
-    SHIPMENT_BOOKING_TOOL,
-    TICKETS_CREATE_TOOL,
-];
 
 /// Resume class names, the same words Session Core stores.
 pub(crate) const RESUME_ACTION_CONTINUATION: &str = "action_continuation";
 pub(crate) const RESUME_LIVE_POLL: &str = "live_poll";
 pub(crate) const RESUME_NONE: &str = "none";
+
+// ---------------------------------------------------------------------------------------------
+// WS10-S9: the resumable-kind registry.
+//
+// A "resumable kind" is a tool whose granted approval the approval delivery worker can run cold,
+// as the requester, from the encrypted continuation descriptor (`action_continuation`). This is
+// the single list: the card's `resume_class`, the once-token exclusion and the worker's
+// `parse_resumable_action` all read it, and the parity test (owed to the test phase) fails when
+// the worker's match arms and this list drift. Everything not listed here is `none`: its grant
+// lets the agent retry the exact action once, and the card says so.
+//
+// Space adds no kind to this list (plan SD-21): a Space run is never loop-owned, so there is no
+// in-place resume to promise. Adding a kind is its own later change and must pass
+// `NEW_KIND_CHECKLIST`.
+// ---------------------------------------------------------------------------------------------
+
+/// One tool the delivery worker can run from a descriptor. The proof fields are read by the
+/// parity test and by reviewers.
+#[allow(dead_code)]
+pub(crate) struct ResumableKind {
+    /// The tool name the descriptor carries (`ContinuationDescriptor.tool_name`).
+    pub tool_name: &'static str,
+    /// How a replay of the same approval cannot run the effect twice.
+    pub idempotency: &'static str,
+    /// What the worker checks about the descriptor before it runs (beyond org and user).
+    pub binding: &'static str,
+}
+
+/// Every kind the worker can resume. Order is not significant.
+pub(crate) const RESUMABLE_KINDS: &[ResumableKind] = &[
+    ResumableKind {
+        tool_name: PROVIDER_ACTION_TOOL,
+        idempotency: "integration-corev2 replays the cached outcome for the same idempotency key (run and step)",
+        binding: "input deserializes into the provider action; postcondition read-back settles an unreceipted write",
+    },
+    ResumableKind {
+        tool_name: SHIPMENT_BOOKING_TOOL,
+        idempotency: "the booking idempotency key is the run and step, the same as the live path",
+        binding: "input deserializes into the booking; booked_by is injected from the run user at descriptor time",
+    },
+    ResumableKind {
+        tool_name: TICKETS_CREATE_TOOL,
+        idempotency: "ticket_idempotency_key bound at descriptor time",
+        binding: "schema_sha256, payload_sha256 and ticket_idempotency_key match; owner_user_id equals user_id",
+    },
+];
+
+/// What a new resumable kind must prove before it is added to `RESUMABLE_KINDS`. Each item is a
+/// reviewer question; "no" to any of them means the kind stays `none`.
+#[allow(dead_code)]
+pub(crate) const NEW_KIND_CHECKLIST: &[&str] = &[
+    "The create call carries an idempotency key that survives a worker retry, or the effect has a provider read-back that settles an unreceipted write.",
+    "The descriptor captures every argument the effect needs, and none is a model-supplied identity (the actor is the requester from the descriptor).",
+    "The worker re-checks the requester's authority with Control before it runs (Space runs: the standing-rule and membership check of WS10-S3).",
+    "A zero-retention run is refused before a descriptor is written (continuation_descriptor already fails closed); the kind adds no content-persisting path.",
+    "The kind has an arm in parse_resumable_action, a fixture in the parity test, and an action_label in space_gate::action_label.",
+    "A failed or cancelled effect maps to an allowlisted failure code the card can show, never raw provider text.",
+    "The once-token does not apply to it (the grant is its continuation), and a retry by the agent cannot run it a second time.",
+];
+
+/// True when the delivery worker can run this tool from a descriptor.
+pub(crate) fn is_resumable_tool(tool_name: &str) -> bool {
+    RESUMABLE_KINDS.iter().any(|kind| kind.tool_name == tool_name)
+}
+
+/// The resume class a pause for this tool can honestly state. Only a resumable kind that has a
+/// descriptor is an action continuation; a browser live approval states `live_poll` itself.
+pub(crate) fn resume_class_for(tool_name: &str, descriptor_present: bool) -> &'static str {
+    if descriptor_present && is_resumable_tool(tool_name) {
+        RESUME_ACTION_CONTINUATION
+    } else {
+        RESUME_NONE
+    }
+}
 
 /// Longest value Session Core accepts in the card context.
 const MAX_VALUE_CHARS: usize = 128;
@@ -590,7 +656,7 @@ pub(crate) async fn resolve(call: &GateCall<'_>, prior_ask: Option<CauseCode>) -
 /// Spend the once-approval for this exact action. Only a non-resumable call has one (a resumable
 /// call's grant is its continuation, which the worker runs; a retry would run it twice).
 async fn try_once_token(call: &GateCall<'_>, tool_key: &str) -> bool {
-    if RESUMABLE_TOOLS.contains(&call.tool_name) || tool_key.is_empty() {
+    if is_resumable_tool(call.tool_name) || tool_key.is_empty() {
         return false;
     }
     let (Some(channel), Some(bearer)) = (call.session_channel, call.session_bearer) else {
