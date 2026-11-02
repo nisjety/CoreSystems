@@ -139,3 +139,26 @@ Open items:
 - 21 depth rows appended to W23-depth.md (a 4, b 4, c 7, d 6, plus the section headings).
 - Four tracked .sha256 files in the integ worktree still show as modified (CRLF/LF checkout artifacts); none committed.
 - Disk after hygiene: /wt 104G, C: 143G free of 951G.
+
+## Batch W2-B6 (W2), integrated 2026-11-02
+
+Units: W2-U52 (lane a, built: isolated scan world for screenshot masking and cross-origin iframe withhold, D2-066/067, both flags default to old behaviour; security review found no blocker), W2-U58 (lane b, built: typed profile load-failure report and setCookies acceptance/read-back check, D2-028/D2-117, bug fix; security review no blocker), W2-U55 (lane c, built: IndexedDB capture of closed-tab origins behind QUARRY_BROWSER_CAPTURE_CLOSED_ORIGINS, default off, D2-070; security review found one blocker, fixed in ac01a9551: the phase now reads through a blank carrier page, never a live tab), W2-FE-L5b (lane d, built: gateway crawl job proxy routes, scrape run kind, origin/phase/desiredState on run rows, job-control action dispatchers; QUARRY_EDGE__JOB_CONTROL stays off at the edge).
+
+Merge commits (--no-ff, no conflicts, nothing regenerated): 8ba332cbf (lane a), 29bebf408 (lane b), cfe5b5b27 (lane c), c90fb59e3 (lane d). Only Rust touched: quarry-browser (lanes a, b, c) and the verevonv3 gateway (lane d). No Go module, no TS package, no golden, schema or route-count change, so no regeneration was needed.
+
+Checks at integ:
+- cargo check --workspace --tests (Quarry, qtest-lane integ): clean, exit 0 (warnings only, all pre-existing).
+- cargo test -p quarry-browser --lib: 235 passed, 0 failed.
+- cargo test -p quarry-browser --features chromiumoxide --lib: 363 passed, 0 failed, 41 ignored (live tests, need Chromium).
+- Verevon v3 gateway, host cargo test in apps/gateway: 1065 passed, 0 failed, 1 ignored in the main binary; integration files 1 + 7 + 13 + 3 + 1 passed.
+- node --test scripts/tests/*.test.mjs (Quarry-v2): 73 tests, 71 passed, 2 failed, both known inherited (/v1/audit/page undocumented; tracked internal SDK files).
+- GOWORK=off go vet / go test: not run, no Go module touched. tsc: not run, no TS file touched.
+
+Open items:
+- W2-FE-L5a/L5b: the gateway does not yet report jobControl in the schedule-capabilities answer (config.rs and schedules.rs were outside L5b); SPA job controls stay hidden. The edge run list carries no desired state, so desiredState is null on the list.
+- Every new W2-U52/U55 behaviour ships dark and none of the live Chromium legs were run: U52 isolated world, OOPIF withhold and the mask_ms p95 test (3 ignored live tests); U55 closed-origin IDB (1 live test); U58 cookie read-back host matching. Run them before flipping QUARRY_BROWSER_SCREENSHOT_SCAN_WORLD=isolated (D2-066 is a leak fix, recommend flipping first), QUARRY_BROWSER_SCREENSHOT_OOPIF=withhold or QUARRY_BROWSER_CAPTURE_CLOSED_ORIGINS.
+- W2-U58: ProfileLoadError::restore_report() is not wired into load_first_tab_snapshot (chromiumoxide.rs was outside the unit); W2-U55: ProfileCapture.closed is not read by persist_profile_v2.
+- New env flags are not yet in RUNBOOKS, SECRET_REDACTION, openapi or compose (D-U52-3).
+- The earlier RED stays: the agent-action admission golden waits for Model Plane (MP-ASKS.md, W2-FE-L5a entry).
+- 30 depth rows appended to W23-depth.md (a 12, b 5, c 9, d 4, plus the lane headings and the lane b review note).
+- Four tracked .sha256 files in the integ worktree still show as modified (CRLF/LF checkout artifacts, empty content diff); none committed.
