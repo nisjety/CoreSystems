@@ -1,4 +1,4 @@
-import { useNavigate, useSearchParams } from '@solidjs/router'
+import { useLocation, useNavigate, useSearchParams } from '@solidjs/router'
 import {
   Bell,
   Building2,
@@ -46,6 +46,12 @@ import { ChatAppearancePreview } from '@/features/chat/components/ChatAppearance
 import { chatAppearanceActive } from '@/features/chat/lib/chat-appearance-preview'
 import { CoreNavbarMore } from './CoreNavbarMore'
 import { homeOverviewLabel, parseHomeOverview } from '@/shared/actions/home-overview'
+import { CommandPalette } from '@/features/command/CommandPalette'
+import { ShortcutSheet } from '@/features/command/ShortcutSheet'
+import { commandPaletteEnabled, registerCommands, type CommandContext } from '@/features/command/command-registry'
+import { createDefaultCommands } from '@/features/command/default-commands'
+import { installHotkeys } from '@/features/command/hotkeys'
+import { spaceRefFromPathname } from '@/features/command/palette-providers'
 
 type OpenPanel = 'assistant' | 'messages' | 'notifications' | 'calendar' | 'profile' | 'workspace' | null
 
@@ -77,6 +83,7 @@ export function CoreNavbar(props: {
   let headerRef: HTMLElement | undefined
   const i18n = useI18n()
   const navigate = useNavigate()
+  const location = useLocation()
   const [searchParams] = useSearchParams()
   const session = getSession()
   const [openPanel, setOpenPanel] = createSignal<OpenPanel>(null)
@@ -111,10 +118,39 @@ export function CoreNavbar(props: {
     return panel && panel !== 'workspace' ? panel as CoreNavbarPanelKind : null
   }
 
+  // WS13-S6: with `space_command_palette_ui` on, the palette and shortcut sheet
+  // replace the knowledge-only dialog and the hotkey layer owns Cmd/Ctrl+K and `/`.
+  const [sheetOpen, setSheetOpen] = createSignal(false)
+  const [paletteQuery, setPaletteQuery] = createSignal<string | undefined>(undefined)
+  const commandContext = (): CommandContext => ({
+    spaceRef: spaceRefFromPathname(location.pathname),
+    offline: offline(),
+    navigate: (href) => navigate(href),
+    openPalette: (query) => {
+      setPaletteQuery(query)
+      setSearchOpen(true)
+    },
+    openShortcutSheet: () => setSheetOpen(true),
+  })
+
   const closeShellOverlays = () => {
     setOpenPanel(null)
     setSearchOpen(false)
+    setSheetOpen(false)
   }
+
+  createEffect(
+    () => undefined,
+    () => {
+      if (!commandPaletteEnabled()) return undefined
+      const dispose = registerCommands(createDefaultCommands({ deferSlash: shouldDeferGlobalSlashSearch }))
+      const removeHotkeys = installHotkeys(commandContext)
+      return () => {
+        removeHotkeys()
+        dispose()
+      }
+    },
+  )
 
   createEffect(
     () => props.navbarData?.theme,
@@ -132,12 +168,15 @@ export function CoreNavbar(props: {
         const target = event.target as HTMLElement | null
         const isTyping = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable
 
-        if (!offline() && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        // Flag on: the hotkey layer (features/command/hotkeys) owns these two keys.
+        const legacyKeys = !commandPaletteEnabled()
+
+        if (legacyKeys && !offline() && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
           event.preventDefault()
           setSearchOpen(true)
         }
 
-        if (!offline() && !isTyping && event.key === '/' && !shouldDeferGlobalSlashSearch()) {
+        if (legacyKeys && !offline() && !isTyping && event.key === '/' && !shouldDeferGlobalSlashSearch()) {
           event.preventDefault()
           setSearchOpen(true)
         }
@@ -396,13 +435,27 @@ export function CoreNavbar(props: {
       </header>
 
       <Show when={searchOpen()}>
-        <GlobalSearchDialog
-          onClose={() => setSearchOpen(false)}
-          onNavigate={(href) => {
-            setSearchOpen(false)
-            navigate(href)
-          }}
-        />
+        <Show
+          when={commandPaletteEnabled()}
+          fallback={
+            <GlobalSearchDialog
+              onClose={() => setSearchOpen(false)}
+              onNavigate={(href) => {
+                setSearchOpen(false)
+                navigate(href)
+              }}
+            />
+          }
+        >
+          <CommandPalette
+            context={commandContext()}
+            initialQuery={paletteQuery()}
+            onClose={() => setSearchOpen(false)}
+          />
+        </Show>
+      </Show>
+      <Show when={sheetOpen() && commandPaletteEnabled()}>
+        <ShortcutSheet onClose={() => setSheetOpen(false)} />
       </Show>
     </>
   )
