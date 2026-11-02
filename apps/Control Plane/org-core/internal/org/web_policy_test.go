@@ -244,10 +244,39 @@ func TestValidateRejectsTooManyOrTooLargeRules(t *testing.T) {
 
 func TestWebPolicyMaxBytesLeavesRoomForTheClaimEnvelope(t *testing.T) {
 	// The issuer adds {"v":1,"rev":"<12 hex>", to the document and fails closed above
-	// 2048 bytes in total.
+	// 2048 bytes in total, and Effective can add a disabled paid search afterwards.
 	envelope := len(`{"v":1,"rev":"abcdef012345",`)
-	if WebPolicyMaxBytes+envelope > 2048 {
-		t.Fatalf("a maximal document plus its claim envelope (%d + %d) would exceed the issuer's 2 KiB cap", WebPolicyMaxBytes, envelope)
+	fold := len(`"caps":{"search.paid_provider":"disabled"},`)
+	if WebPolicyMaxBytes+envelope+fold > 2048 {
+		t.Fatalf("a maximal document, its entitlement fold and its claim envelope (%d + %d + %d) would exceed the issuer's 2 KiB cap", WebPolicyMaxBytes, fold, envelope)
+	}
+}
+
+// TestEffectiveOfAMaximalDocumentStaysUnderTheClaimCap builds the largest document
+// Validate accepts on a plan with no entitlements and checks the claim the issuer
+// would mint from its effective form.
+func TestEffectiveOfAMaximalDocumentStaysUnderTheClaimCap(t *testing.T) {
+	deny := make([]string, 0, 30)
+	for i := 0; i < 30; i++ {
+		deny = append(deny, fmt.Sprintf("%s%02d.example.com", strings.Repeat("b", 40), i))
+	}
+	doc := WebPolicyDoc{RobotsMax: "ignore", ProxyMax: "pool", Domains: &WebPolicyDomains{Deny: deny}}
+	for len(doc.Domains.Deny) > 0 {
+		if doc.Validate(nil) == nil {
+			break
+		}
+		doc.Domains.Deny = doc.Domains.Deny[:len(doc.Domains.Deny)-1]
+	}
+	if err := doc.Validate(nil); err != nil || len(doc.Domains.Deny) < 20 {
+		t.Fatalf("could not build a near-maximal valid document: %d rules, err %v", len(doc.Domains.Deny), err)
+	}
+	effective := doc.Effective(WebEntitlements{})
+	body, err := json.Marshal(map[string]any{"v": 1, "rev": "abcdef012345", "caps": effective.Caps, "robots_max": effective.RobotsMax, "proxy_max": effective.ProxyMax, "domains": effective.Domains})
+	if err != nil {
+		t.Fatalf("encode claim: %v", err)
+	}
+	if len(body) > 2048 {
+		t.Fatalf("the claim for a maximal document is %d bytes, over the issuer's 2048 cap", len(body))
 	}
 }
 

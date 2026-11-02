@@ -32,9 +32,10 @@ import (
 var webPolicyCatalogueBytes []byte
 
 // WebPolicyMaxBytes caps the canonical document. The issuer's claim adds `v` and
-// `rev` (about 30 bytes) and fails closed above 2 KiB, so the document stops short
-// of 2048 to leave that room.
-const WebPolicyMaxBytes = 2000
+// `rev` (28 bytes) and fails closed above 2 KiB, and Effective can add the 42 bytes
+// of a disabled paid search after this check, so the document stops short of 2048 by
+// both: 2048 - 28 - 42 = 1978, rounded down.
+const WebPolicyMaxBytes = 1950
 
 // WebPolicyMaxDomainEntries and WebPolicyMaxDomainBytes are the edge's own limits
 // on a layer's host rules (quarry-core web_policy MAX_RULE_ENTRIES, MAX_RULE_BYTES).
