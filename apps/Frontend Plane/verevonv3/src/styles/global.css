@@ -49731,3 +49731,8 @@ so it
   font-size: 12px;
   color: var(--verevon-text-muted);
 }
+
+/* EP-13-S1: model search and list price in the composer picker */
+.dashboard-composer-model-search { display: block; box-sizing: border-box; width: calc(100% - 20px); margin: 6px 10px 4px; padding: 6px 10px; border: 1px solid var(--verevon-border-warm); border-radius: 8px; background: transparent; color: inherit; font: inherit; font-size: 13px; }
+.dashboard-composer-model-price { display: block; margin-top: 1px; font-size: 11px; font-weight: 400; color: var(--verevon-text-muted); }
+.dashboard-composer-model-empty { margin: 6px 12px; font-size: 13px; color: var(--verevon-text-muted); }

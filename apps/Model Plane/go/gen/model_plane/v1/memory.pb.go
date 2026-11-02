@@ -253,7 +253,8 @@ type SearchMemoryResponse struct {
 	DegradationReason string `protobuf:"bytes,3,opt,name=degradation_reason,json=degradationReason,proto3" json:"degradation_reason,omitempty"`
 	// Why the caller's own memory was not used for this search, one of the
 	// closed MemoryControls.reason tokens: "user_paused", "user_off",
-	// "org_disabled", "policy_unavailable". Empty when it was used. A paused or
+	// "org_disabled", "policy_unavailable", or "space_scope" for a Space thread,
+	// which reads no personal or org rows. Empty when it was used. A paused or
 	// off user still receives org-owned entries, so an empty `entries` with this
 	// set means "memory is switched off", never "nothing to recall".
 	SkipReason    string `protobuf:"bytes,4,opt,name=skip_reason,json=skipReason,proto3" json:"skip_reason,omitempty"`
@@ -1108,7 +1109,9 @@ type MemoryControls struct {
 	// Whether this user's completed runs are announced to the learning loop.
 	LearningAllowed bool `protobuf:"varint,6,opt,name=learning_allowed,json=learningAllowed,proto3" json:"learning_allowed,omitempty"`
 	// Closed token for what decided the above: "on", "user_paused", "user_off",
-	// "org_disabled", "zdr", "policy_unavailable".
+	// "org_disabled", "zdr", "policy_unavailable". The thread-scoped tokens
+	// "space_scope" and "agent_run_scope" come from a thread's own recall or
+	// write (SearchMemory, IndexMemory), not from this message.
 	Reason string `protobuf:"bytes,7,opt,name=reason,proto3" json:"reason,omitempty"`
 	// How many of the user's rows the list hides under this decision (a count,
 	// never a row). Zero unless the state is off or the org disabled memory.

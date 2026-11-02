@@ -80,6 +80,7 @@ import { audienceConfirmed, chatProjectsEnabled, readProjectAudience, readProjec
 import { loadEffectiveAgentModeCap } from '@/features/customize/AgentModesSection'
 import { audienceConfirmRequired, chatProjectRefusal, sandboxToolsRefusedNotice, type ChatProjectRefusal } from './use-chat-project'
 import { planTranscriptWindow, resolveTurnHeights, virtualizeTranscript } from '../lib/transcript-window'
+import { foldPlan, settledFoldEnabled } from '../lib/settled-fold'
 
 export default function ChatPage() {
   const i18n = useI18n()
@@ -449,6 +450,7 @@ export default function ChatPage() {
   // `<For>` mappers are untracked in Solid 2. Derive the neighboring turns and
   // all per-row reactive values up front so each mapper receives plain row data
   // instead of reading the live store while it renders.
+  const settledFolds = createMemo(() => (settledFoldEnabled ? foldPlan(state.turns, { activeTurnId: (isStreaming() || liveRunId()) ? state.turns.at(-1)?.id : undefined }) : undefined))
   const messageRows = createMemo(() => state.turns.map((turn, index, turns) => ({
     turn,
     createdAt: turn.createdAt,
@@ -460,6 +462,7 @@ export default function ChatPage() {
       error: planApprovalError()[turn.id],
     },
     docked: dockedNodesFor(dockedTrays(), turn.id),
+    settledFold: settledFolds()?.get(turn.id),
     version: index === turns.length - 1 ? finalExchangeVersion() : null,
     editLocked: turn.role === 'user' && isEffectfulChatTurn(turns[index + 1]?.effectClass),
   })))
@@ -1099,6 +1102,7 @@ export default function ChatPage() {
         onTogglePin={() => togglePin(row().turn.id)}
         planApproval={row().planApproval}
         docked={row().docked}
+        settledFold={row().settledFold}
         onSelectFollowUp={setInput}
         onViewSteps={() => setActiveTab('steps')}
         onViewAttachments={(attachmentId) => {
