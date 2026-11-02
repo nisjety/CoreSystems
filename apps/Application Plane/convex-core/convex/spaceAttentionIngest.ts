@@ -149,7 +149,7 @@ async function memberStateOf(ctx: any, ev: ParsedSpaceEvent, recipient: string, 
 }
 
 /** Fixed window of 30 out-of-app requests per recipient per hour. */
-async function takeBudget(ctx: any, recipient: string, now: number): Promise<boolean> {
+export async function takeBudget(ctx: any, recipient: string, now: number): Promise<boolean> {
   const row = await ctx.db
     .query("spaceAttentionBudget")
     .withIndex("by_recipient", (q: any) => q.eq("recipientAuthId", recipient))

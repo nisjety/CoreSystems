@@ -56,4 +56,13 @@ crons.interval(
   {},
 );
 
+// WS11-S11: re-schedule reminders whose own scheduled job was lost and delete
+// settled reminder rows.
+crons.interval(
+  "space reminder heal",
+  { minutes: 5 },
+  internal.spaceReminders.healReminders,
+  {},
+);
+
 export default crons;
