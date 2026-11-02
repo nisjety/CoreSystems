@@ -962,27 +962,40 @@ const ingestionsCreateRunInput = z
     message: "kind 'batch' requires a non-empty 'urls' array; any other kind requires 'url'",
   })
 
+// WS15.L5: a schedule is created paused-by-default upstream and activated by a
+// separate step, so this input has no 'activate' member and the client never
+// sends one. 'batch' schedules carry 'urls' (the owner rejects a batch with no
+// valid URL); every other kind carries 'targetUrl'.
 const ingestionsCreateScheduleInput = z
   .object({
     name: z.string().trim().min(1),
     kind: z.string().min(1),
-    targetUrl: z.string().url(),
+    targetUrl: z.string().url().optional(),
+    urls: z.array(z.string().url()).min(1).optional(),
+    maxPages: z.number().int().positive().optional(),
+    overlapPolicy: z.enum(['skip', 'cancel', 'allow']).optional(),
     cron: z.string().trim().optional(),
     scheduleAt: z.string().datetime().optional(),
   })
+  .strict()
   .refine((value) => !!value.cron || !!value.scheduleAt, {
     message: "Provide either 'cron' or 'scheduleAt'",
   })
+  .refine((value) => (value.kind === 'batch' ? (value.urls?.length ?? 0) > 0 : !!value.targetUrl), {
+    message: "kind 'batch' requires a non-empty 'urls' array; any other kind requires 'targetUrl'",
+  })
 
-const ingestionsRunScheduleActionInput = z
+// Pausing a schedule is reversible and loses nothing, so it needs no approval.
+const ingestionsPauseScheduleInput = z.object({
+  scheduleId: z.string().min(1),
+})
+
+// Every other schedule state change goes through one approval-gated action.
+// The 'action' values are the wire verbs POST /api/ingestions/actions already
+// takes, so the gateway split is routing only.
+const ingestionsChangeScheduleStateInput = z
   .object({
-    action: z.enum([
-      'pause_schedule',
-      'unpause_schedule',
-      'trigger_schedule',
-      'backfill_schedule',
-      'delete_schedule',
-    ]),
+    action: z.enum(['unpause_schedule', 'trigger_schedule', 'backfill_schedule', 'delete_schedule']),
     scheduleId: z.string().min(1),
     startAt: z.string().datetime().optional(),
     endAt: z.string().datetime().optional(),
@@ -990,6 +1003,15 @@ const ingestionsRunScheduleActionInput = z
   .refine((value) => value.action !== 'backfill_schedule' || (!!value.startAt && !!value.endAt), {
     message: "backfill_schedule requires 'startAt' and 'endAt'",
   })
+
+// Run control (WS15.L5). 'kind' picks the Quarry job family; crawl is the only one the
+// gateway proxies today, so it is also the default when 'kind' is omitted.
+const ingestionsRunControlKind = z.enum(['crawl'])
+
+const ingestionsRunRefInput = z.object({
+  runId: z.string().trim().min(1),
+  kind: ingestionsRunControlKind.optional(),
+})
 
 const ingestionsCreateSourceInput = z.object({
   name: z.string().trim().min(1),
@@ -2988,7 +3010,7 @@ export const actionRegistry = [
   {
     id: 'ingestions.create_schedule',
     label: 'Create ingestion schedule',
-    description: 'Create a recurring or one-time-scheduled ingestion job for a target URL.',
+    description: 'Create a recurring or one-time-scheduled ingestion job (crawl, scrape, extract, search, or a batch of URLs). The schedule is created inactive and is never activated by this action.',
     ownerPlane: 'ingestion',
     risk: 'medium',
     requiresApproval: false,
@@ -2997,14 +3019,69 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
-    id: 'ingestions.run_schedule_action',
-    label: 'Run schedule action',
-    description: 'Pause, unpause, trigger, backfill, or delete an existing ingestion schedule.',
+    id: 'ingestions.get_run_status',
+    label: 'Get ingestion run status',
+    description: 'Read the status, phase, desired state and progress of one crawl job. Read only.',
+    ownerPlane: 'ingestion',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: ingestionsRunRefInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'ingestions.pause_run',
+    label: 'Pause ingestion run',
+    description: 'Ask a running crawl to pause. Work already fetched is kept; resume continues it.',
     ownerPlane: 'ingestion',
     risk: 'medium',
     requiresApproval: false,
     reversible: true,
-    inputSchema: ingestionsRunScheduleActionInput,
+    inputSchema: ingestionsRunRefInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'ingestions.resume_run',
+    label: 'Resume ingestion run',
+    description: 'Ask a paused crawl to continue from where it stopped.',
+    ownerPlane: 'ingestion',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: ingestionsRunRefInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'ingestions.cancel_run',
+    label: 'Cancel ingestion run',
+    description: 'Stop a crawl for good. A cancelled run cannot be resumed; pages already stored are kept.',
+    ownerPlane: 'ingestion',
+    risk: 'medium',
+    requiresApproval: true,
+    reversible: false,
+    inputSchema: ingestionsRunRefInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'ingestions.pause_schedule',
+    label: 'Pause ingestion schedule',
+    description: 'Pause an ingestion schedule so it stops firing. Unpausing is a separate state change.',
+    ownerPlane: 'ingestion',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: ingestionsPauseScheduleInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'ingestions.change_schedule_state',
+    label: 'Change schedule state',
+    description: 'Unpause, trigger, backfill, or delete an existing ingestion schedule. Deleting a schedule cannot be undone.',
+    ownerPlane: 'ingestion',
+    risk: 'medium',
+    requiresApproval: true,
+    reversible: false,
+    inputSchema: ingestionsChangeScheduleStateInput,
     outputSchema: envelopeStatusOutput,
   },
   {
