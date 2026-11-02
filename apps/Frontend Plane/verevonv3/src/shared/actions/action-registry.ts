@@ -720,6 +720,10 @@ const settingsUpdatePreferencesInput = z.object({
   theme: z.string().trim().optional(),
   language: z.string().trim().optional(),
   timezone: z.string().trim().optional(),
+  // Contract v2: 'auto' means follow the locale (stored, but not an explicit choice).
+  dateFormat: z.enum(['MM/DD/YYYY', 'DD/MM/YYYY', 'YYYY-MM-DD', 'auto']).optional(),
+  timeFormat: z.enum(['12h', '24h', 'auto']).optional(),
+  compactMode: z.boolean().optional(),
   notifications: z.record(z.string(), z.boolean()).optional(),
   crawlIngestMode: z.enum(['auto', 'never', 'prompt']).optional(),
 })
@@ -2558,7 +2562,7 @@ export const actionRegistry = [
   {
     id: 'settings.update_preferences',
     label: 'Update preferences',
-    description: 'Update the caller\'s own preferences (theme, language, timezone, notification and crawl-ingest settings).',
+    description: 'Update the caller\'s own preferences (theme, language, timezone, date format, time format, compact mode, notification and crawl-ingest settings).',
     ownerPlane: 'control',
     risk: 'low',
     requiresApproval: false,

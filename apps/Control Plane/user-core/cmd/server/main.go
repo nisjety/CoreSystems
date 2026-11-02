@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	_ "time/tzdata" // embed the IANA zone database so preference timezone validation works in minimal images
 
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/clients"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/config"
