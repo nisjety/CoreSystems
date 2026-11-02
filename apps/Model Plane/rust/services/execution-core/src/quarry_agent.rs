@@ -410,6 +410,223 @@ pub struct StepRequest {
     pub initiated_by: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// WS8.G attach mode: the agent works on its own tab of a person's run.
+// Wire shapes follow quarry-edge `agent_routes/attach.rs` and `tabs.rs`.
+// ---------------------------------------------------------------------------
+
+/// Quarry's attach bounds (`attach.rs` `ATTACH_*`): steps 1 to 200 (default
+/// 20), runtime 1 to 3600 s (default 120). A body outside them is a 400.
+pub const ATTACH_DEFAULT_STEPS: u32 = 20;
+pub const ATTACH_MAX_STEPS: u32 = 200;
+pub const ATTACH_DEFAULT_RUNTIME_S: u64 = 120;
+pub const ATTACH_MAX_RUNTIME_S: u64 = 3600;
+
+/// The advisory label a delegate step carries (`StepBody.agent_label`).
+pub const ATTACH_AGENT_LABEL: &str = "browser-agent";
+
+/// The Quarry code of a refused agent action on a tab a person holds.
+pub const USER_TOOK_OVER_CODE: &str = "USER_TOOK_OVER";
+
+/// `constraints` of `POST .../attach`.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct AttachConstraintsWire {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_steps: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_runtime_s: Option<u64>,
+}
+
+/// `POST /v1/agent/runs/{run_id}/attach` body (Quarry `AttachBody`).
+#[derive(Debug, Clone, Serialize)]
+pub struct AttachRequest {
+    pub grant_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_url: Option<String>,
+    pub constraints: AttachConstraintsWire,
+}
+
+/// `POST .../attach` answer (Quarry `AttachData`).
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub struct AttachData {
+    pub attach_id: String,
+    pub tab_id: String,
+    #[serde(default)]
+    pub tab_epoch: u64,
+    #[serde(default)]
+    pub control_epoch: u64,
+    #[serde(default)]
+    pub opened_by: String,
+    #[serde(default)]
+    pub holder: String,
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+}
+
+/// How an attachment ends (`DELETE .../attach/{id}?disposition=`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachDisposition {
+    /// The agent finished: the run completed.
+    Release,
+    /// Every other exit: failure, cancel, a plan error, a limit.
+    Abort,
+}
+
+impl AttachDisposition {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Release => "release",
+            Self::Abort => "abort",
+        }
+    }
+}
+
+/// `DELETE .../attach/{id}` answer (Quarry `ReleaseData`).
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub struct ReleaseData {
+    pub attach_id: String,
+    #[serde(default)]
+    pub state: String,
+}
+
+/// One tab of `GET .../tabs` (quarry-browser `BrowserTab`, camelCase). A
+/// delegate sees only its own tab. Quarry lists no holder here: whether a
+/// person holds the tab is learnt from a refused step (`USER_TOOK_OVER`).
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WireTab {
+    #[serde(alias = "tab_id")]
+    pub tab_id: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct WireTabs {
+    #[serde(default)]
+    tabs: Vec<WireTab>,
+}
+
+/// A delegate step body (Quarry `StepBody` on the attached lane): no lease,
+/// the attach grant, and `initiated_by: "agent"` always. `ai_run_id` and
+/// `agent_label` are advisory labels Quarry records on the receipt.
+#[derive(Debug, Clone, Serialize)]
+pub struct AttachedStepRequest {
+    pub action: AgentAction,
+    pub grant_id: String,
+    pub initiated_by: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ai_run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_label: Option<String>,
+}
+
+/// Quarry's advisory identifier shape (`run_live.rs advisory_identifier`):
+/// 1 to 64 of `[A-Za-z0-9._:-]`. Anything else is not sent.
+fn is_advisory_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))
+}
+
+/// Parameters of [`QuarryAgentClient::attach_run`].
+#[derive(Debug, Clone)]
+pub struct AttachParams<'a> {
+    pub org_id: &'a str,
+    /// The person's Quarry run (the attach session id).
+    pub run_id: &'a str,
+    /// The broker-derived attach grant.
+    pub grant_id: &'a str,
+    pub start_url: Option<String>,
+    pub max_steps: Option<u32>,
+    pub max_runtime_s: Option<u64>,
+    pub request_id: Option<&'a str>,
+}
+
+/// Parameters of [`QuarryAgentClient::step_attached`].
+#[derive(Debug, Clone)]
+pub struct AttachedStepParams<'a> {
+    pub org_id: &'a str,
+    /// The person's Quarry run, never a lease of our own.
+    pub run_id: &'a str,
+    pub grant_id: &'a str,
+    pub action: AgentAction,
+    /// The Model run the agent acts for (advisory on the receipt).
+    pub ai_run_id: Option<&'a str>,
+    pub request_id: Option<&'a str>,
+}
+
+/// A typed attach-mode refusal, read from Quarry's error code and reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttachRefusal {
+    /// 409 `USER_TOOK_OVER`: a person holds the agent tab. A state, not a
+    /// fault: the loop pauses until control comes back.
+    UserTookOver { tab_id: Option<String>, tab_epoch: Option<u64> },
+    /// 409 `CONFLICT attach_exists`: the run already has a live attachment.
+    AttachExists,
+    /// 403 `attach_grant_invalid` (FORBIDDEN at attach, SECURITY_BLOCKED on a
+    /// step that found the grant no longer usable).
+    GrantInvalid,
+    /// 404 `pinned_tab_closed`: the agent tab is gone.
+    PinnedTabClosed,
+    /// 429 `attach_steps`: the attachment's step bound is spent.
+    StepsSpent,
+    /// 429 `attach_runtime`: the attachment's runtime bound is spent.
+    RuntimeSpent,
+    /// 403 `attach_disabled`, `attach_requires_service_principal`,
+    /// `attach_zdr_refused`, `attach_requires_grant`, 501
+    /// `attach_driver_unsupported`: attach is not available for this run.
+    Unavailable(String),
+}
+
+/// The attach-mode meaning of a failed Quarry call, `None` when it has none.
+#[must_use]
+pub fn attach_refusal(error: &AgentClientError) -> Option<AttachRefusal> {
+    let AgentClientError::Typed(typed) = error else {
+        return None;
+    };
+    if typed.code == USER_TOOK_OVER_CODE {
+        return Some(AttachRefusal::UserTookOver {
+            tab_id: typed
+                .details
+                .get("tab_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| is_advisory_identifier(id))
+                .map(str::to_owned),
+            tab_epoch: typed.details.get("tab_epoch").and_then(serde_json::Value::as_u64),
+        });
+    }
+    match (typed.status, typed.reason.as_deref()?) {
+        (409, "attach_exists") => Some(AttachRefusal::AttachExists),
+        (403, "attach_grant_invalid") => Some(AttachRefusal::GrantInvalid),
+        (404, "pinned_tab_closed") => Some(AttachRefusal::PinnedTabClosed),
+        (429, "attach_steps") => Some(AttachRefusal::StepsSpent),
+        (429, "attach_runtime") => Some(AttachRefusal::RuntimeSpent),
+        (
+            403 | 501,
+            reason @ ("attach_disabled"
+            | "attach_requires_service_principal"
+            | "attach_zdr_refused"
+            | "attach_requires_grant"
+            | "attach_driver_unsupported"),
+        ) => Some(AttachRefusal::Unavailable(reason.to_owned())),
+        _ => None,
+    }
+}
+
+/// True for Quarry's `USER_TOOK_OVER` refusal (409).
+#[must_use]
+pub fn is_user_took_over(error: &AgentClientError) -> bool {
+    matches!(attach_refusal(error), Some(AttachRefusal::UserTookOver { .. }))
+}
+
 /// Observation returned by a step. Mirrors quarry-core `BrowserObservation`.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct WireObservation {
@@ -1160,6 +1377,15 @@ pub fn quarry_budget_dimension(error: &AgentClientError) -> Option<BudgetDimensi
     let AgentClientError::Typed(typed) = error else {
         return None;
     };
+    // An attachment's own bounds (WS8.G) are a 429 with the reason; they do
+    // not refill by waiting either, so they read as the budget they are.
+    if typed.status == 429 {
+        return match typed.reason.as_deref() {
+            Some("attach_steps") => Some(BudgetDimension::Steps),
+            Some("attach_runtime") => Some(BudgetDimension::Runtime),
+            _ => None,
+        };
+    }
     if typed.status != 402 || typed.code != BUDGET_EXHAUSTED_CODE {
         return None;
     }
@@ -1243,7 +1469,7 @@ pub const MAX_BACKPRESSURE_WAIT_S: u64 = 10;
 /// than [`MAX_BACKPRESSURE_WAIT_S`], so the run ends `resource_exhausted`.
 #[must_use]
 pub fn backpressure_wait(error: &AgentClientError) -> Option<Duration> {
-    if !is_quarry_backpressure(error) {
+    if !is_quarry_backpressure(error) || quarry_budget_dimension(error).is_some() {
         return None;
     }
     let seconds = match error {
@@ -1563,6 +1789,135 @@ impl QuarryAgentClient {
             let body = resp.text().await.unwrap_or_default();
             Err(Self::refusal(status.as_u16(), body))
         }
+    }
+
+    /// Send one request built by `build` with the org's service token, and
+    /// once more with a fresh token after a 401 (the same rule as every call).
+    async fn send_with_auth_retry<F>(
+        &self,
+        org_id: &str,
+        request_id: Option<&str>,
+        build: F,
+    ) -> Result<reqwest::Response, AgentClientError>
+    where
+        F: Fn() -> reqwest::RequestBuilder,
+    {
+        let mut retried_unauthorized = false;
+        loop {
+            let token = self.token(org_id).await?;
+            let resp = with_request_id(
+                build().bearer_auth(&token).header("x-quarry-org", org_id),
+                request_id,
+            )
+            .send()
+            .await
+            .map_err(|e| AgentClientError::Transport(e.to_string()))?;
+            if resp.status() == reqwest::StatusCode::UNAUTHORIZED && !retried_unauthorized {
+                self.invalidate_if_matches(org_id, &token).await?;
+                retried_unauthorized = true;
+                continue;
+            }
+            return Ok(resp);
+        }
+    }
+
+    /// WS8.G: attach to a person's run (`POST /v1/agent/runs/{run_id}/attach`)
+    /// as the service principal, with the broker-derived attach grant. Quarry
+    /// opens one agent tab in the background; the person keeps their tabs.
+    pub async fn attach_run(&self, params: AttachParams<'_>) -> Result<AttachData, AgentClientError> {
+        let body = AttachRequest {
+            grant_id: params.grant_id.to_owned(),
+            start_url: params.start_url.clone(),
+            constraints: AttachConstraintsWire {
+                max_steps: params.max_steps,
+                max_runtime_s: params.max_runtime_s,
+            },
+        };
+        let endpoint = self.url(&format!("/v1/agent/runs/{}/attach", params.run_id));
+        let resp = self
+            .send_with_auth_retry(params.org_id, params.request_id, || {
+                self.http.post(&endpoint).json(&body)
+            })
+            .await?;
+        Self::decode(resp).await
+    }
+
+    /// WS8.G: end the attachment (`DELETE .../attach/{attach_id}?disposition=`).
+    /// Quarry closes the agent tab; the grant is not revoked.
+    pub async fn release_attach(
+        &self,
+        org_id: &str,
+        run_id: &str,
+        attach_id: &str,
+        disposition: AttachDisposition,
+        request_id: Option<&str>,
+    ) -> Result<ReleaseData, AgentClientError> {
+        let endpoint = self.url(&format!(
+            "/v1/agent/runs/{run_id}/attach/{attach_id}?disposition={}",
+            disposition.as_str()
+        ));
+        let resp = self
+            .send_with_auth_retry(org_id, request_id, || self.http.delete(&endpoint))
+            .await?;
+        Self::decode(resp).await
+    }
+
+    /// WS8.G: the delegate's view of the run's tabs (`GET .../tabs?grant_id=`):
+    /// only the attachment's own tab, while the attachment is live. A 404 means
+    /// the attachment (or the run) is gone.
+    pub async fn tab_state(
+        &self,
+        org_id: &str,
+        run_id: &str,
+        grant_id: &str,
+        request_id: Option<&str>,
+    ) -> Result<Vec<WireTab>, AgentClientError> {
+        let endpoint = self.url(&format!("/v1/agent/runs/{run_id}/tabs"));
+        let resp = self
+            .send_with_auth_retry(org_id, request_id, || {
+                self.http.get(&endpoint).query(&[("grant_id", grant_id)])
+            })
+            .await?;
+        let tabs: WireTabs = Self::decode(resp).await?;
+        Ok(tabs.tabs)
+    }
+
+    /// WS8.G: one delegate step on the person's run (`POST .../step`), with
+    /// the attach grant and `initiated_by: "agent"` on every call. Quarry acts
+    /// on the attachment's tab only. A held tab answers 409 `USER_TOOK_OVER`.
+    pub async fn step_attached(
+        &self,
+        params: AttachedStepParams<'_>,
+    ) -> Result<WireObservation, AgentClientError> {
+        let body = AttachedStepRequest {
+            action: params.action,
+            grant_id: params.grant_id.to_owned(),
+            initiated_by: "agent",
+            ai_run_id: params
+                .ai_run_id
+                .map(str::trim)
+                .filter(|id| is_advisory_identifier(id))
+                .map(str::to_owned),
+            agent_label: Some(ATTACH_AGENT_LABEL.to_owned()),
+        };
+        let endpoint = self.url(&format!("/v1/agent/runs/{}/step", params.run_id));
+        let resp = self
+            .send_with_auth_retry(params.org_id, params.request_id, || {
+                self.http.post(&endpoint).json(&body)
+            })
+            .await?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| AgentClientError::Transport(e.to_string()))?;
+        if let Some(challenge) = challenge_from_refusal(status.as_u16(), &text) {
+            return Err(AgentClientError::Challenge(challenge));
+        }
+        if let Some(denial) = policy_denied_from_refusal(status.as_u16(), &text) {
+            return Err(AgentClientError::PolicyDenied(denial));
+        }
+        Self::decode_text(status, &text)
     }
 
     /// A non-2xx answer: typed when the body is a Quarry error envelope,
@@ -2704,5 +3059,338 @@ mod tests {
             error,
             AgentClientError::Status { status: 401, .. }
         ));
+    }
+
+    // -----------------------------------------------------------------------
+    // WS8.G attach mode: the client against Quarry's attach routes.
+    // -----------------------------------------------------------------------
+
+    fn attach_ok() -> serde_json::Value {
+        serde_json::json!({
+            "data": {
+                "attach_id": "att_1",
+                "tab_id": "tab_9",
+                "tab_epoch": 1,
+                "control_epoch": 4,
+                "opened_by": "agent",
+                "holder": "agent",
+                "allowed_domains": ["example.com"],
+            },
+            "meta": {"request_id": "req_a"},
+            "error": null,
+        })
+    }
+
+    #[tokio::test]
+    async fn attach_run_posts_grant_and_constraints_with_the_service_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/runs/run_user/attach"))
+            .and(header("authorization", "Bearer svc"))
+            .and(header("x-quarry-org", "org_1"))
+            .and(header("x-request-id", "req-7"))
+            .and(body_json(serde_json::json!({
+                "grant_id": "grant_attach",
+                "constraints": {"max_steps": 12, "max_runtime_s": 300},
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(attach_ok()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = QuarryAgentClient::new(server.uri(), "svc").unwrap();
+        let data = client
+            .attach_run(AttachParams {
+                org_id: "org_1",
+                run_id: "run_user",
+                grant_id: "grant_attach",
+                start_url: None,
+                max_steps: Some(12),
+                max_runtime_s: Some(300),
+                request_id: Some("req-7"),
+            })
+            .await
+            .unwrap();
+        assert_eq!(data.attach_id, "att_1");
+        assert_eq!(data.tab_id, "tab_9");
+        assert_eq!(data.holder, "agent");
+        assert_eq!(data.allowed_domains, vec!["example.com".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn attach_run_retries_exactly_once_after_unauthorized() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/runs/run_user/attach"))
+            .respond_with(ResponseTemplate::new(401))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/runs/run_user/attach"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(attach_ok()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = QuarryAgentClient::new(server.uri(), "svc").unwrap();
+        let data = client
+            .attach_run(AttachParams {
+                org_id: "org_1",
+                run_id: "run_user",
+                grant_id: "grant_attach",
+                start_url: Some("https://example.com/".to_owned()),
+                max_steps: None,
+                max_runtime_s: None,
+                request_id: None,
+            })
+            .await
+            .expect("the second attempt is answered");
+        assert_eq!(data.attach_id, "att_1");
+    }
+
+    #[tokio::test]
+    async fn release_attach_sends_the_disposition() {
+        let server = MockServer::start().await;
+        for (disposition, state) in [("release", "released"), ("abort", "aborted")] {
+            Mock::given(method("DELETE"))
+                .and(path("/v1/agent/runs/run_user/attach/att_1"))
+                .and(wiremock::matchers::query_param("disposition", disposition))
+                .and(header("authorization", "Bearer svc"))
+                .and(header("x-quarry-org", "org_1"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "data": {"attach_id": "att_1", "state": state},
+                    "meta": {}, "error": null,
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let client = QuarryAgentClient::new(server.uri(), "svc").unwrap();
+        let released = client
+            .release_attach("org_1", "run_user", "att_1", AttachDisposition::Release, None)
+            .await
+            .unwrap();
+        assert_eq!(released.state, "released");
+        let aborted = client
+            .release_attach("org_1", "run_user", "att_1", AttachDisposition::Abort, None)
+            .await
+            .unwrap();
+        assert_eq!(aborted.state, "aborted");
+    }
+
+    #[tokio::test]
+    async fn tab_state_names_the_attach_grant_and_reads_camel_case_tabs() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/agent/runs/run_user/tabs"))
+            .and(wiremock::matchers::query_param("grant_id", "grant_attach"))
+            .and(header("authorization", "Bearer svc"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {"tabs": [{"tabId": "tab_9", "title": "T", "url": "https://example.com/", "active": false}]},
+                "meta": {}, "error": null,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = QuarryAgentClient::new(server.uri(), "svc").unwrap();
+        let tabs = client
+            .tab_state("org_1", "run_user", "grant_attach", None)
+            .await
+            .unwrap();
+        assert_eq!(tabs.len(), 1);
+        assert_eq!(tabs[0].tab_id, "tab_9");
+        assert!(!tabs[0].active);
+    }
+
+    #[tokio::test]
+    async fn step_attached_always_sends_initiated_by_agent() {
+        let server = MockServer::start().await;
+        // Exact body: no lease, no constraints, no zdr; the attach grant, the
+        // agent initiator and the advisory labels.
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/runs/run_user/step"))
+            .and(header("authorization", "Bearer svc"))
+            .and(header("x-quarry-org", "org_1"))
+            .and(body_json(serde_json::json!({
+                "action": {"type": "get_content"},
+                "grant_id": "grant_attach",
+                "initiated_by": "agent",
+                "ai_run_id": "01JRUNMODEL",
+                "agent_label": "browser-agent",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {"run_id": "run_user", "step": 3, "url": "https://example.com/", "title": "E"},
+                "meta": {}, "error": null,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = QuarryAgentClient::new(server.uri(), "svc").unwrap();
+        let obs = client
+            .step_attached(AttachedStepParams {
+                org_id: "org_1",
+                run_id: "run_user",
+                grant_id: "grant_attach",
+                action: AgentAction::GetContent,
+                ai_run_id: Some("01JRUNMODEL"),
+                request_id: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(obs.url, "https://example.com/");
+
+        // A run id that is not an advisory identifier is not sent; the
+        // initiator is still `agent`.
+        let body = serde_json::to_value(AttachedStepRequest {
+            action: AgentAction::GetContent,
+            grant_id: "g".to_owned(),
+            initiated_by: "agent",
+            ai_run_id: Some("bad id/with space")
+                .filter(|id| is_advisory_identifier(id))
+                .map(str::to_owned),
+            agent_label: Some(ATTACH_AGENT_LABEL.to_owned()),
+        })
+        .unwrap();
+        assert_eq!(body["initiated_by"], "agent");
+        assert!(body.get("ai_run_id").is_none());
+        assert!(body.get("lease_id").is_none());
+    }
+
+    #[tokio::test]
+    async fn step_attached_retries_exactly_once_after_unauthorized() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/runs/run_user/step"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let client = QuarryAgentClient::new(server.uri(), "expired").unwrap();
+        let error = client
+            .step_attached(AttachedStepParams {
+                org_id: "org_1",
+                run_id: "run_user",
+                grant_id: "grant_attach",
+                action: AgentAction::GetContent,
+                ai_run_id: None,
+                request_id: None,
+            })
+            .await
+            .expect_err("the second 401 is surfaced");
+        assert!(matches!(error, AgentClientError::Status { status: 401, .. }));
+    }
+
+    /// Quarry's error envelope exactly as `driver_err` writes it.
+    fn quarry_refusal(status: u16, code: &str, message: &str, details: Option<serde_json::Value>) -> AgentClientError {
+        let mut error = serde_json::json!({"code": code, "message": message, "retryable": false});
+        if let Some(details) = details {
+            error["details"] = details;
+        }
+        let body = serde_json::json!({"data": null, "meta": {"request_id": "r"}, "error": error}).to_string();
+        parse_typed_error(status, &body)
+            .map(AgentClientError::Typed)
+            .expect("an envelope")
+    }
+
+    #[tokio::test]
+    async fn typed_quarry_errors_are_parsed() {
+        // 409 USER_TOOK_OVER from the delegate lane (`attach.rs delegate_step`):
+        // a sentence message, the tab in `details`.
+        let took_over = quarry_refusal(
+            409,
+            "USER_TOOK_OVER",
+            "the person using the browser has taken control of this tab; this action was not run",
+            Some(serde_json::json!({"scope": "tab", "tab_id": "tab_9", "tab_epoch": 2, "control_epoch": 5})),
+        );
+        assert_eq!(
+            attach_refusal(&took_over),
+            Some(AttachRefusal::UserTookOver {
+                tab_id: Some("tab_9".to_owned()),
+                tab_epoch: Some(2)
+            })
+        );
+        assert!(is_user_took_over(&took_over));
+        assert_eq!(classify_quarry_error(&took_over), StepFailureClass::Terminal);
+
+        // Reasons in `message` (attach refusals).
+        let cases = [
+            (409, "CONFLICT", "attach_exists", AttachRefusal::AttachExists),
+            (403, "FORBIDDEN", "attach_grant_invalid", AttachRefusal::GrantInvalid),
+            (403, "SECURITY_BLOCKED", "attach_grant_invalid", AttachRefusal::GrantInvalid),
+            (404, "NOT_FOUND", "pinned_tab_closed", AttachRefusal::PinnedTabClosed),
+            (403, "FORBIDDEN", "attach_disabled", AttachRefusal::Unavailable("attach_disabled".to_owned())),
+            (403, "FORBIDDEN", "attach_zdr_refused", AttachRefusal::Unavailable("attach_zdr_refused".to_owned())),
+            (
+                403,
+                "FORBIDDEN",
+                "attach_requires_service_principal",
+                AttachRefusal::Unavailable("attach_requires_service_principal".to_owned()),
+            ),
+            (
+                501,
+                "UNSUPPORTED",
+                "attach_driver_unsupported",
+                AttachRefusal::Unavailable("attach_driver_unsupported".to_owned()),
+            ),
+        ];
+        for (status, code, reason, expected) in cases {
+            let error = quarry_refusal(status, code, reason, None);
+            assert_eq!(attach_refusal(&error), Some(expected), "{status} {code} {reason}");
+            assert!(!is_user_took_over(&error));
+            assert_eq!(
+                fixed_error_text(&error),
+                format!("{status} {code} ({reason})"),
+                "the run summary names the Quarry reason"
+            );
+        }
+
+        // 429 bounds carry the reason in both places and are budgets, never
+        // waited out or replayed.
+        for (reason, refusal, dimension) in [
+            ("attach_steps", AttachRefusal::StepsSpent, BudgetDimension::Steps),
+            ("attach_runtime", AttachRefusal::RuntimeSpent, BudgetDimension::Runtime),
+        ] {
+            let error = quarry_refusal(429, "RATE_LIMITED", reason, Some(serde_json::json!({"reason": reason})));
+            assert_eq!(attach_refusal(&error), Some(refusal));
+            assert_eq!(quarry_budget_dimension(&error), Some(dimension));
+            assert_eq!(classify_quarry_error(&error), StepFailureClass::ResourceLimit);
+            assert_eq!(backpressure_wait(&error), None, "{reason} does not refill by waiting");
+        }
+        // A plain 429 is still backpressure, waited out once.
+        let plain = quarry_refusal(429, "RATE_LIMITED", "slow down", None);
+        assert_eq!(attach_refusal(&plain), None);
+        assert_eq!(quarry_budget_dimension(&plain), None);
+        assert!(backpressure_wait(&plain).is_some());
+
+        // A 404 that is not the tab (the delegate's uniform "not found").
+        let gone = quarry_refusal(404, "NOT_FOUND", "agent run not found", None);
+        assert_eq!(attach_refusal(&gone), None);
+
+        // Through the client: a refused delegate step is Typed and recognised.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/runs/run_user/step"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                "data": null, "meta": {},
+                "error": {"code": "USER_TOOK_OVER", "message": "the person using the browser has taken control of this tab; this action was not run",
+                          "retryable": false, "details": {"scope": "tab", "tab_id": "tab_9", "tab_epoch": 2, "control_epoch": 5}},
+            })))
+            .mount(&server)
+            .await;
+        let client = QuarryAgentClient::new(server.uri(), "svc").unwrap();
+        let error = client
+            .step_attached(AttachedStepParams {
+                org_id: "org_1",
+                run_id: "run_user",
+                grant_id: "grant_attach",
+                action: AgentAction::GetContent,
+                ai_run_id: None,
+                request_id: None,
+            })
+            .await
+            .expect_err("refused");
+        assert!(is_user_took_over(&error));
     }
 }
