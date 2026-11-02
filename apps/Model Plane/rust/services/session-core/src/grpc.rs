@@ -16441,6 +16441,7 @@ mod tests {
         let managed = crate::terminalization::start_managed_run_inner(
             &pool,
             pb::StartManagedRunRequest {
+                wake: None,
                 thread_id: thread_id.clone(),
                 parent_run_id: String::new(),
                 agent_id: "managed-space-agent".to_owned(),
@@ -16560,6 +16561,7 @@ mod tests {
         .await
         .expect("seed thread");
         let request = pb::StartManagedRunRequest {
+            wake: None,
             thread_id: thread_id.clone(),
             parent_run_id: String::new(),
             agent_id: "managed-race-agent".to_owned(),
@@ -17946,6 +17948,7 @@ mod tests {
         let managed = crate::terminalization::start_managed_run_inner(
             &pool,
             pb::StartManagedRunRequest {
+                wake: None,
                 thread_id: thread_id.clone(),
                 parent_run_id: String::new(),
                 agent_id: "managed-agent".to_owned(),
@@ -21160,6 +21163,7 @@ mod waived_run_count_db_tests {
         start_managed_run_with_retention_inner(
             pool,
             pb::StartManagedRunRequest {
+                wake: None,
                 thread_id: thread.to_owned(),
                 parent_run_id: String::new(),
                 agent_id: "general-v1".to_owned(),

@@ -2795,6 +2795,7 @@ mod tests {
     #[test]
     fn zdr_managed_start_persists_only_metadata_and_never_the_prompt() {
         let request = pb::StartManagedRunRequest {
+            wake: None,
             thread_id: String::new(),
             parent_run_id: "parent-with-content-is-not-accepted".to_owned(),
             agent_id: "agent-name-must-not-persist".to_owned(),
@@ -3062,6 +3063,7 @@ mod spent_click_db_tests {
         let run_id = start_managed_run_with_retention_inner(
             pool,
             pb::StartManagedRunRequest {
+                wake: None,
                 thread_id: thread,
                 parent_run_id: String::new(),
                 agent_id: "general-v1".to_owned(),
@@ -3306,6 +3308,7 @@ mod park_recovery_db_tests {
         let run_id = start_managed_run_with_retention_inner(
             pool,
             pb::StartManagedRunRequest {
+                wake: None,
                 thread_id: thread,
                 parent_run_id: String::new(),
                 agent_id: "general-v1".to_owned(),
@@ -3683,6 +3686,7 @@ mod park_recovery_db_tests {
         start_managed_run_with_retention_inner(
             pool,
             pb::StartManagedRunRequest {
+                wake: None,
                 thread_id: thread,
                 parent_run_id: String::new(),
                 agent_id: "general-v1".to_owned(),
@@ -4067,6 +4071,7 @@ mod park_recovery_db_tests {
         start_managed_run_with_retention_inner(
             pool,
             pb::StartManagedRunRequest {
+                wake: None,
                 thread_id,
                 parent_run_id: String::new(),
                 agent_id: "general-v1".to_owned(),

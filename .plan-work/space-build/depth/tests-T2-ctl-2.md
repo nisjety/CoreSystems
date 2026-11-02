@@ -1,0 +1,9 @@
+- P3 deferred: WS10-S2 approval_grant_repository_live_test.go, approval_grants_live_test.go: 12 DB-gated legs (create idempotency, supersede, ceiling, use/expiry/revoke, agent_removed, gate 404/403, ZDR 412) written but not run; need TEST_DATABASE_URL.
+- P3 deferred: WS12-S1 dm_live_test.go, space_dm_test.go live leg: 8 DB-gated legs (seed all participants, entitlements, unique index, fixed roster, deletion, index participants, eligibility) not run.
+- P3 deferred: WS14-S1 shared_import_live_test.go and space_import_decision_test.go live legs: resolver matrix, flag dispatch, execution-decision dispatch not run.
+- P3 deferred: WS04-S10 membership_events_outbox_live_test.go: 6 DB-gated legs (claim order, backoff, SKIP LOCKED race, lease, current-fact payload, reannounce window) not run.
+- P3 deferred: WS11-S1 TestThreadReadDecisionsMixedBatchLive and single-route live leg not run; the not_active row word has no end-to-end repro (a suspended room yields ErrNoCurrentMembership, so the bulk row says not_member).
+- P2 pre-existing: session-core bin tests did not compile: 11 StartManagedRunRequest literals lacked the new `wake` field (W2 added it). Fixed test-side with `wake: None` in grpc.rs, terminalization.rs, retention_receipt.rs, run_phase_tests.rs.
+- P3 test-gap: WS11-S1 owed "own-scheduled personal fallback and typed own denial under the membership message" is covered by the existing d12 live tests plus a source check that both routes share resolveThreadReadEvidence; no new fallback-specific test.
+- P3 test-gap: WS10-S2 grant creator revoke and viewer-list refusal exist only as live legs; pure tier cannot reach them (handlers need a concrete *spaces.Repository).
+- P3 test-gap: WS12-S1 registerSpace DM 409 mapping tested through dmRegistrationRefusalCode, not through the full handler (needs DB).
