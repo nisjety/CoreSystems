@@ -12,7 +12,9 @@ use execution_core::quarry_agent::BudgetDimension;
 use execution_core::llm_planner::{ActionPlanner, DoneOutcome};
 use support::fake_quarry::FakeQuarry;
 use support::scripted_planner::ScriptedPlanner;
-use support::{action, click_ref, goto, plan_config};
+use support::{
+    action, back, click_ref, goto, plan_config, press, select_ref, type_ref, wait_for_ref,
+};
 
 #[tokio::test]
 async fn scripted_planner_drives_loop_against_fake_quarry() {
@@ -854,4 +856,308 @@ async fn default_on_with_unavailable_org_policy_is_deterministic() {
         .collect();
     assert_eq!(kinds[0], "navigate", "the deterministic first step is the start URL");
     assert_eq!(quarry.closed_runs(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// WS11.S4: the widened verbs (press, select, back, wait_for) with the flag on.
+// ---------------------------------------------------------------------------
+
+fn widened_config() -> execution_core::browser_agent::PlanConfig {
+    let mut config = plan_config();
+    config.widened_actions = true;
+    config
+}
+
+fn request_types(quarry: &FakeQuarry) -> Vec<String> {
+    quarry
+        .step_requests()
+        .iter()
+        .map(|s| s["action"]["type"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn search_box_type_then_press_enter_reaches_results() {
+    let quarry = FakeQuarry::start().await;
+    quarry
+        .push_page(
+            "https://example.com/",
+            "Home",
+            "Home page",
+            &[("@e1", "searchbox", "Search", "")],
+        )
+        .push_page(
+            "https://example.com/",
+            "Home",
+            "Home page, query typed",
+            &[("@e1", "searchbox", "Search", "opening hours")],
+        )
+        .push_page("https://example.com/search?q=hours", "Results", "3 results", &[]);
+    let planner = ScriptedPlanner::new()
+        .then_action(goto("https://example.com/"))
+        .then_action(type_ref("snap-1", 1, "@e1", "opening hours"))
+        .then_action(press("Enter"))
+        .then_done_with("There are 3 results.", DoneOutcome::Success);
+    let result = run_with(&quarry, &planner, widened_config()).await;
+    assert_eq!(result.status, PlanStatus::Completed, "{}", result.summary);
+    assert_eq!(request_types(&quarry), ["navigate", "type_ref", "press"]);
+    assert_eq!(quarry.step_requests()[2]["action"]["key"], "Enter");
+    assert_eq!(result.summary, "There are 3 results.");
+}
+
+#[tokio::test]
+async fn select_option_then_confirm_by_reobserve() {
+    let quarry = FakeQuarry::start().await;
+    quarry
+        .push_page(
+            "https://example.com/ship",
+            "Shipping",
+            "Choose shipping",
+            &[("@e1", "combobox", "Shipping method", "")],
+        )
+        .push_page(
+            "https://example.com/ship",
+            "Shipping",
+            "Express chosen",
+            &[("@e1", "combobox", "Shipping method", "Express")],
+        )
+        .push_page(
+            "https://example.com/ship",
+            "Shipping",
+            "Express chosen",
+            &[("@e1", "combobox", "Shipping method", "Express")],
+        );
+    let planner = ScriptedPlanner::new()
+        .then_action(goto("https://example.com/ship"))
+        .then_action(select_ref("snap-1", 1, "@e1", "Express"))
+        .then_action(action(ActionType::Observe))
+        .then_done_with("Express is selected.", DoneOutcome::Success);
+    let result = run_with(&quarry, &planner, widened_config()).await;
+    assert_eq!(result.status, PlanStatus::Completed, "{}", result.summary);
+    assert_eq!(request_types(&quarry), ["navigate", "select_ref", "get_content"]);
+    let select = &quarry.step_requests()[1]["action"];
+    assert_eq!(select["value"], "Express");
+    assert_eq!(select["ref_id"], "@e1");
+}
+
+#[tokio::test]
+async fn back_returns_to_previous_page() {
+    let quarry = FakeQuarry::start().await;
+    quarry
+        .push_page("https://example.com/a", "A", "Page A", &[("@e1", "link", "Next", "Next")])
+        .push_page("https://example.com/b", "B", "Page B", &[])
+        .push_page("https://example.com/a", "A", "Page A", &[("@e1", "link", "Next", "Next")]);
+    let planner = ScriptedPlanner::new()
+        .then_action(goto("https://example.com/a"))
+        .then_action(click_ref("snap-1", 1, "@e1"))
+        .then_action(back())
+        .then_done_with("Back on page A.", DoneOutcome::Success);
+    let result = run_with(&quarry, &planner, widened_config()).await;
+    assert_eq!(result.status, PlanStatus::Completed, "{}", result.summary);
+    assert_eq!(request_types(&quarry), ["navigate", "click_ref", "back"]);
+}
+
+#[tokio::test]
+async fn wait_for_async_content_then_extract() {
+    let quarry = FakeQuarry::start().await;
+    quarry
+        .push_page(
+            "https://example.com/feed",
+            "Feed",
+            "Loading",
+            &[("@e1", "status", "Results", "")],
+        )
+        .push_page("https://example.com/feed", "Feed", "Loaded", &[("@e1", "status", "Results", "")])
+        .push_page("https://example.com/feed", "Feed", "Price 4 USD", &[]);
+    let planner = ScriptedPlanner::new()
+        .then_action(goto("https://example.com/feed"))
+        .then_action(wait_for_ref("snap-1", 1, "@e1", 3000))
+        .then_action(action(ActionType::Extract))
+        .then_done_with("The price is 4 USD.", DoneOutcome::Success);
+    let result = run_with(&quarry, &planner, widened_config()).await;
+    assert_eq!(result.status, PlanStatus::Completed, "{}", result.summary);
+    assert_eq!(request_types(&quarry), ["navigate", "wait_for_ref", "get_content"]);
+    assert_eq!(quarry.step_requests()[1]["action"]["timeout_ms"], 3000);
+}
+
+#[tokio::test]
+async fn modifier_chord_is_rejected_locally_without_a_quarry_call() {
+    let quarry = FakeQuarry::start().await;
+    quarry
+        .push_page("https://example.com/", "Home", "Home page", &[])
+        .push_page("https://example.com/", "Home", "Home page", &[]);
+    let planner = ScriptedPlanner::new()
+        .then_action(goto("https://example.com/"))
+        .then_action(press("Control+A"))
+        .then_action(press("Tab"))
+        .then_done();
+    let result = run_with(&quarry, &planner, widened_config()).await;
+    assert_eq!(result.status, PlanStatus::Completed, "{}", result.summary);
+    // The chord never produced a Quarry request; the Tab after it did.
+    assert_eq!(request_types(&quarry), ["navigate", "press"]);
+    assert_eq!(quarry.step_requests()[1]["action"]["key"], "Tab");
+    // The planner after the rejection saw the fixed text and the same page.
+    let seen = planner.seen();
+    assert_eq!(seen.len(), 4);
+    assert_eq!(seen[2].failures.len(), 1);
+    assert!(seen[2].failures[0].contains("key_not_allowed"), "{:?}", seen[2].failures);
+    assert!(!seen[2].failures[0].contains("Control"), "the model's text is not echoed");
+    assert_eq!(seen[1].rendered, seen[2].rendered, "the same observation is planned over");
+    // The loop recorded the page once, not once per rejection.
+    assert_eq!(result.observations.len(), 2);
+}
+
+#[tokio::test]
+async fn forbidden_off_domain_after_back_is_terminal() {
+    let quarry = FakeQuarry::start().await;
+    quarry
+        .push_page("https://example.com/a", "A", "Page A", &[("@e1", "link", "Next", "Next")])
+        .push_page("https://example.com/b", "B", "Page B", &[])
+        .push_error(
+            403,
+            error_with("FORBIDDEN", "navigation left the allowed domains", serde_json::Value::Null),
+        )
+        .push_page("https://example.com/a", "A", "never read", &[]);
+    let planner = ScriptedPlanner::new()
+        .then_action(goto("https://example.com/a"))
+        .then_action(click_ref("snap-1", 1, "@e1"))
+        .then_action(back())
+        .then_done();
+    let result = run_with(&quarry, &planner, widened_config()).await;
+    assert_eq!(result.status, PlanStatus::Failed);
+    assert_eq!(result.summary, "browser-agent step failed: 403 FORBIDDEN");
+    assert_eq!(request_types(&quarry), ["navigate", "click_ref", "back"], "no retry, no re-read");
+}
+
+/// A sink that answers every approval request the same way and records them.
+struct ApprovalSink {
+    outcome: execution_core::browser_agent::ApprovalOutcome,
+    asked: std::sync::Mutex<Vec<(String, String)>>,
+}
+
+#[tonic::async_trait]
+impl execution_core::browser_agent::BrowserEventSink for ApprovalSink {
+    async fn action_dispatched(
+        &self,
+        _config: &execution_core::browser_agent::PlanConfig,
+        _action: &execution_core::browser_agent::BrowserAction,
+    ) {
+    }
+    async fn observation_received(
+        &self,
+        _config: &execution_core::browser_agent::PlanConfig,
+        _observation: &execution_core::browser_agent::BrowserObservation,
+    ) {
+    }
+    async fn run_paused(&self, _config: &execution_core::browser_agent::PlanConfig) {}
+    async fn run_resumed(&self, _config: &execution_core::browser_agent::PlanConfig) {}
+    async fn require_approval(
+        &self,
+        _config: &execution_core::browser_agent::PlanConfig,
+        detail: &execution_core::browser_agent::RiskyActionDetail,
+    ) -> execution_core::browser_agent::ApprovalOutcome {
+        self.asked
+            .lock()
+            .unwrap()
+            .push((detail.action_type.clone(), detail.risk_category.as_str().to_owned()));
+        self.outcome.clone()
+    }
+}
+
+#[tokio::test]
+async fn risky_press_pauses_for_approval() {
+    use execution_core::browser_agent::ApprovalOutcome;
+    let page = |quarry: &FakeQuarry| {
+        quarry
+            .push_page(
+                "https://example.com/login",
+                "Sign in",
+                "Sign in",
+                &[("@e1", "textbox", "Password", "")],
+            )
+            .push_page(
+                "https://example.com/login",
+                "Sign in",
+                "Sign in",
+                &[("@e1", "textbox", "Password", "")],
+            )
+            .push_page("https://example.com/account", "Account", "Welcome", &[]);
+    };
+    let script = || {
+        ScriptedPlanner::new()
+            .then_action(goto("https://example.com/login"))
+            .then_action(type_ref("snap-1", 1, "@e1", "a-secret"))
+            .then_action(press("Enter"))
+            .then_done()
+    };
+
+    // Denied: the press is never sent and the run ends as a denial.
+    let quarry = FakeQuarry::start().await;
+    page(&quarry);
+    let sink = ApprovalSink {
+        outcome: ApprovalOutcome::Denied("no".to_owned()),
+        asked: std::sync::Mutex::new(Vec::new()),
+    };
+    let planner = script();
+    let client = quarry.client();
+    let result = run_browser_agent_loop(
+        widened_config(),
+        Some(&client),
+        Some(&planner as &dyn ActionPlanner),
+        Some(&sink),
+        None,
+    )
+    .await;
+    assert_eq!(result.status, PlanStatus::Aborted);
+    let asked = sink.asked.lock().unwrap().clone();
+    // The /login URL asks first, so the run stops there; the press is never sent.
+    assert!(!asked.is_empty());
+    assert!(asked.iter().all(|(_, category)| category == "login"), "{asked:?}");
+    assert!(!request_types(&quarry).contains(&"press".to_owned()));
+
+    // Granted: the goto and the type go through, and the press asks as well
+    // before it is sent (a password field with focus is a login).
+    let quarry = FakeQuarry::start().await;
+    page(&quarry);
+    let sink = ApprovalSink {
+        outcome: ApprovalOutcome::Granted,
+        asked: std::sync::Mutex::new(Vec::new()),
+    };
+    let planner = script();
+    let client = quarry.client();
+    let result = run_browser_agent_loop(
+        widened_config(),
+        Some(&client),
+        Some(&planner as &dyn ActionPlanner),
+        Some(&sink),
+        None,
+    )
+    .await;
+    assert_eq!(result.status, PlanStatus::Completed, "{}", result.summary);
+    let asked = sink.asked.lock().unwrap().clone();
+    assert_eq!(
+        asked,
+        [
+            ("goto".to_owned(), "login".to_owned()),
+            ("type".to_owned(), "login".to_owned()),
+            ("press".to_owned(), "login".to_owned())
+        ]
+    );
+    assert_eq!(request_types(&quarry), ["navigate", "type_ref", "press"]);
+}
+
+#[tokio::test]
+async fn with_the_flag_off_a_proposed_press_is_only_an_observe() {
+    let quarry = FakeQuarry::start().await;
+    quarry
+        .push_page("https://example.com/", "Home", "Home page", &[])
+        .push_page("https://example.com/", "Home", "Home page", &[]);
+    let planner = ScriptedPlanner::new()
+        .then_action(goto("https://example.com/"))
+        .then_action(press("Control+A"))
+        .then_done();
+    let result = run_with(&quarry, &planner, plan_config()).await;
+    assert_eq!(result.status, PlanStatus::Completed, "{}", result.summary);
+    let types = request_types(&quarry);
+    assert_eq!(types, ["navigate", "get_content"], "no press verb is ever sent: {types:?}");
 }

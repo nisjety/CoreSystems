@@ -503,6 +503,53 @@ pub fn action_to_wire(action: &BrowserAction) -> AgentAction {
             ms: u32::try_from(action.max_wait_ms).unwrap_or(0),
         },
         ActionType::Extract | ActionType::Observe => AgentAction::GetContent,
+        // The widened verbs (WS11.S4) use the native ref actions only, never
+        // the legacy CSS `Select`/`WaitFor`. Admission rejects a select or a
+        // wait_for with no bound ref, so the `GetContent` arms are a safe
+        // read-only fallback that is not reached in a loop.
+        ActionType::Press => AgentAction::Press {
+            key: action.value.clone(),
+        },
+        ActionType::Back => AgentAction::Back,
+        ActionType::Select => match action.target.as_ref() {
+            Some(target) => match target.frame_id.as_deref() {
+                Some(frame_id) => AgentAction::FrameSelectRef {
+                    snapshot_id: target.snapshot_id.clone(),
+                    generation: target.generation,
+                    frame_id: frame_id.to_owned(),
+                    ref_id: target.ref_id.clone(),
+                    value: action.value.clone(),
+                },
+                None => AgentAction::SelectRef {
+                    snapshot_id: target.snapshot_id.clone(),
+                    generation: target.generation,
+                    ref_id: target.ref_id.clone(),
+                    value: action.value.clone(),
+                },
+            },
+            None => AgentAction::GetContent,
+        },
+        ActionType::WaitFor => match action.target.as_ref() {
+            Some(target) => {
+                let timeout_ms = u32::try_from(action.max_wait_ms).unwrap_or(0);
+                match target.frame_id.as_deref() {
+                    Some(frame_id) => AgentAction::FrameWaitForRef {
+                        snapshot_id: target.snapshot_id.clone(),
+                        generation: target.generation,
+                        frame_id: frame_id.to_owned(),
+                        ref_id: target.ref_id.clone(),
+                        timeout_ms,
+                    },
+                    None => AgentAction::WaitForRef {
+                        snapshot_id: target.snapshot_id.clone(),
+                        generation: target.generation,
+                        ref_id: target.ref_id.clone(),
+                        timeout_ms,
+                    },
+                }
+            }
+            None => AgentAction::GetContent,
+        },
     }
 }
 
@@ -1960,6 +2007,64 @@ mod tests {
 
     fn typed(status: u16, code: &str, details: serde_json::Value) -> AgentClientError {
         AgentClientError::Typed(parse_typed_error(status, &envelope_body(code, "m", details)).unwrap())
+    }
+
+    fn wide_action(action_type: ActionType, value: &str, frame: Option<&str>) -> BrowserAction {
+        BrowserAction {
+            action_id: String::new(),
+            grant_id: String::new(),
+            action_type,
+            selector: String::new(),
+            value: value.to_owned(),
+            url: String::new(),
+            max_wait_ms: 4000,
+            target: Some(crate::browser_agent::BrowserTargetRef {
+                snapshot_id: "snap-1".to_owned(),
+                generation: 2,
+                ref_id: "@e5".to_owned(),
+                frame_id: frame.map(str::to_owned),
+            }),
+            reason: String::new(),
+            risk_category: None,
+        }
+    }
+
+    #[test]
+    fn action_to_wire_maps_each_new_verb() {
+        let json = |action: &BrowserAction| serde_json::to_value(action_to_wire(action)).unwrap();
+        let press = json(&wide_action(ActionType::Press, "Enter", None));
+        assert_eq!(press["type"], "press");
+        assert_eq!(press["key"], "Enter");
+        assert_eq!(json(&wide_action(ActionType::Back, "", None))["type"], "back");
+
+        let select = json(&wide_action(ActionType::Select, "express", None));
+        assert_eq!(select["type"], "select_ref");
+        assert_eq!(select["ref_id"], "@e5");
+        assert_eq!(select["value"], "express");
+        assert_eq!(select["generation"], 2);
+
+        let wait = json(&wide_action(ActionType::WaitFor, "", None));
+        assert_eq!(wait["type"], "wait_for_ref");
+        assert_eq!(wait["timeout_ms"], 4000);
+    }
+
+    #[test]
+    fn select_in_child_frame_maps_to_frame_select_ref() {
+        let json = |action: &BrowserAction| serde_json::to_value(action_to_wire(action)).unwrap();
+        let select = json(&wide_action(ActionType::Select, "b", Some("frame-3")));
+        assert_eq!(select["type"], "frame_select_ref");
+        assert_eq!(select["frame_id"], "frame-3");
+        let wait = json(&wide_action(ActionType::WaitFor, "", Some("frame-3")));
+        assert_eq!(wait["type"], "frame_wait_for_ref");
+        assert_eq!(wait["frame_id"], "frame-3");
+        // No bound ref: never the legacy CSS variant, only a read.
+        let mut unbound = wide_action(ActionType::Select, "b", None);
+        unbound.target = None;
+        unbound.selector = "select#x".to_owned();
+        assert_eq!(json(&unbound)["type"], "get_content");
+        let mut unbound_wait = wide_action(ActionType::WaitFor, "", None);
+        unbound_wait.target = None;
+        assert_eq!(json(&unbound_wait)["type"], "get_content");
     }
 
     #[test]

@@ -110,6 +110,67 @@ pub const ACTION_SCHEMA_STRICT: &str = r#"{
   "required": ["action","selector","snapshot_id","generation","ref_id","frame_id","value","url","reason","risk_category","answer","outcome"]
 }"#;
 
+/// The verbs `QUARRY_BROWSER_AGENT_WIDENED_ACTIONS` adds to the `action` enum.
+pub const WIDENED_VERBS: [&str; 4] = ["press", "select", "back", "wait_for"];
+
+/// The planner's JSON Schema. With `widened` off this is exactly
+/// [`ACTION_SCHEMA`] / [`ACTION_SCHEMA_STRICT`] (the four verbs and their
+/// `key` / `timeout_ms` properties are absent). With it on, the verbs join the
+/// `action` enum and `key` (the key `press` sends) and `timeout_ms` (the
+/// `wait_for` wait) are added; the strict twin lists both in `required` with the
+/// `""` and `-1` sentinels. A test fails when the two twins drift.
+#[must_use]
+pub fn action_schema(strict: bool, widened: bool) -> String {
+    let base = if strict {
+        ACTION_SCHEMA_STRICT
+    } else {
+        ACTION_SCHEMA
+    };
+    if !widened {
+        return base.to_owned();
+    }
+    let mut schema: serde_json::Value =
+        serde_json::from_str(base).expect("the action schema constants are valid JSON");
+    if let Some(verbs) = schema["properties"]["action"]["enum"].as_array_mut() {
+        verbs.extend(WIDENED_VERBS.iter().map(|verb| serde_json::json!(verb)));
+    }
+    let properties = schema["properties"]
+        .as_object_mut()
+        .expect("the action schema has properties");
+    properties.insert(
+        "key".to_owned(),
+        serde_json::json!({
+            "type": "string",
+            "description": if strict {
+                "For action=press: one key name (Enter, Tab, Escape, Backspace, Delete, Space, an arrow key, PageUp, PageDown, Home, End). Otherwise an empty string."
+            } else {
+                "For action=press: one key name (Enter, Tab, Escape, Backspace, Delete, Space, an arrow key, PageUp, PageDown, Home, End); no chords."
+            }
+        }),
+    );
+    properties.insert(
+        "timeout_ms".to_owned(),
+        if strict {
+            serde_json::json!({
+                "type": "integer",
+                "description": "For action=wait_for: how long to wait for the element, in milliseconds. Otherwise -1."
+            })
+        } else {
+            serde_json::json!({
+                "type": "integer",
+                "description": "For action=wait_for: how long to wait for the element, in milliseconds (250 to 10000)."
+            })
+        },
+    );
+    if strict {
+        if let Some(required) = schema["required"].as_array_mut() {
+            required.push(serde_json::json!("key"));
+            required.push(serde_json::json!("timeout_ms"));
+        }
+    }
+    schema.to_string()
+}
+
 /// What the planner does with a bot wall (Quarry WS3.J). model-gateway's
 /// browser suggestion prompt carries the same text as its own
 /// `BROWSER_CHALLENGE_RULE`; the two are separate services, so
@@ -397,7 +458,8 @@ impl LlmPlanner {
 impl ActionPlanner for LlmPlanner {
     /// Ask the model for the next action. A `done` reply is `action == "done"`.
     async fn plan_next(&self, ctx: &PlannerContext<'_>) -> Result<PlannerReply, PlannerError> {
-        let request = planner_request_with_context(ctx, &self.model, ACTION_SCHEMA);
+        let schema = action_schema(false, ctx.config.widened_actions);
+        let request = planner_request_with_context(ctx, &self.model, &schema);
 
         let mut grpc_request = tonic::Request::new(request);
         grpc_request.metadata_mut().insert(
@@ -522,7 +584,7 @@ pub fn system_message(config: &PlanConfig) -> String {
 {BROWSER_CHALLENGE_RULE}
 {}",
         config.system_prompt,
-        procedure_text(config.procedure, false)
+        procedure_text(config.procedure, config.widened_actions)
     )
 }
 
@@ -621,6 +683,13 @@ struct NextAction {
     /// both read as success).
     #[serde(default)]
     outcome: String,
+    /// `press` only: the key name (WS11.S4). Lands in `BrowserAction.value`.
+    #[serde(default)]
+    key: String,
+    /// `wait_for` only: the wait in milliseconds; `-1` (the strict sentinel)
+    /// and absent both mean the default. Lands in `BrowserAction.max_wait_ms`.
+    #[serde(default)]
+    timeout_ms: Option<i64>,
 }
 
 impl NextAction {
@@ -646,6 +715,10 @@ impl NextAction {
             "scroll" => ActionType::Scroll,
             "wait" => ActionType::Wait,
             "extract" => ActionType::Extract,
+            "press" => ActionType::Press,
+            "select" => ActionType::Select,
+            "back" => ActionType::Back,
+            "wait_for" => ActionType::WaitFor,
             "done" => return None,
             // Unknown / "observe" → look at the page again.
             _ => ActionType::Observe,
@@ -675,14 +748,25 @@ impl NextAction {
         } else {
             self.selector
         };
+        // `press` carries its key in `value`, `wait_for` its wait in
+        // `max_wait_ms`; a key in `value` is read too, for a model that put it there.
+        let value = if action_type == ActionType::Press && !self.key.trim().is_empty() {
+            self.key
+        } else {
+            self.value
+        };
+        let max_wait_ms = self
+            .timeout_ms
+            .filter(|ms| *ms > 0)
+            .map_or(5000, |ms| i32::try_from(ms).unwrap_or(i32::MAX));
         Some(BrowserAction {
             action_id: String::new(),
             grant_id: String::new(),
             action_type,
             selector,
-            value: self.value,
+            value,
             url: self.url,
-            max_wait_ms: 5000,
+            max_wait_ms,
             target,
             reason: self.reason,
             risk_category: RiskCategory::from_wire(&self.risk_category),
@@ -1180,6 +1264,90 @@ mod tests {
         assert!(request.messages[1]
             .content
             .ends_with("Run state: step 3 of 8; failed actions so far: 2."));
+    }
+
+    #[test]
+    fn strict_and_plain_schemas_agree_after_widening() {
+        let plain = schema_value(&action_schema(false, true));
+        let strict = schema_value(&action_schema(true, true));
+        assert_eq!(
+            property_names(&strict),
+            property_names(&plain),
+            "a field added to one twin must be added to the other"
+        );
+        assert_eq!(enum_values(&strict, "action"), enum_values(&plain, "action"));
+        assert_eq!(
+            enum_values(&strict, "risk_category"),
+            enum_values(&plain, "risk_category")
+        );
+        for (key, spec) in plain["properties"].as_object().expect("properties") {
+            assert_eq!(strict["properties"][key]["type"], spec["type"], "{key}");
+        }
+        // The strict twin still lists every property as required.
+        let required: BTreeSet<String> = strict["required"]
+            .as_array()
+            .expect("required")
+            .iter()
+            .map(|k| k.as_str().expect("key").to_owned())
+            .collect();
+        assert_eq!(required, property_names(&strict));
+        assert_eq!(strict["additionalProperties"], json!(false));
+        // The widened twins are the base twins plus exactly the four verbs.
+        let mut verbs = enum_values(&schema_value(ACTION_SCHEMA), "action");
+        verbs.extend(WIDENED_VERBS.iter().map(|v| (*v).to_owned()));
+        assert_eq!(enum_values(&plain, "action"), verbs);
+        for name in ["key", "timeout_ms"] {
+            assert!(property_names(&plain).contains(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn widened_verbs_are_absent_from_the_default_schemas() {
+        assert_eq!(action_schema(false, false), ACTION_SCHEMA);
+        assert_eq!(action_schema(true, false), ACTION_SCHEMA_STRICT);
+        for schema in [ACTION_SCHEMA, ACTION_SCHEMA_STRICT] {
+            for verb in WIDENED_VERBS {
+                assert!(!schema.contains(&format!("\"{verb}\"")), "{verb}");
+            }
+            assert!(!schema.contains("timeout_ms") && !schema.contains("\"key\""));
+        }
+        // The request the planner sends follows the config's flag.
+        let mut config = test_config();
+        let off = planner_infer_request(&config, None, DEFAULT_MODEL, &action_schema(false, false));
+        assert!(!off.structured_output_schema.contains("wait_for"));
+        assert!(!off.messages[0].content.contains("press:"));
+        config.widened_actions = true;
+        config.procedure = ProcedureId::Browse1;
+        let on = planner_infer_request(&config, None, DEFAULT_MODEL, &action_schema(false, true));
+        assert!(on.structured_output_schema.contains("wait_for"));
+        assert!(on.messages[0].content.contains("press:"));
+    }
+
+    #[test]
+    fn widened_replies_map_to_the_new_verbs() {
+        let press = parse(r#"{"action":"press","key":"Enter"}"#).into_browser_action().expect("action");
+        assert_eq!(press.action_type, ActionType::Press);
+        assert_eq!(press.value, "Enter");
+        // A key put in `value` instead is read too.
+        let press = parse(r#"{"action":"press","value":"Tab"}"#).into_browser_action().expect("action");
+        assert_eq!(press.value, "Tab");
+        // A widened strict reply: every property present, sentinels for the unused.
+        let strict_widened = r#"{"action":"select","selector":"","snapshot_id":"snap-1","generation":2,"ref_id":"@e4","frame_id":"","value":"express","url":"","reason":"","risk_category":"none","answer":"","outcome":"none","key":"","timeout_ms":-1}"#;
+        let select = parse(strict_widened).into_browser_action().expect("action");
+        assert_eq!(select.action_type, ActionType::Select);
+        assert_eq!(select.value, "express");
+        assert!(select.target.is_some());
+        let wait = parse(r#"{"action":"wait_for","snapshot_id":"s","generation":1,"ref_id":"@e1","timeout_ms":3000}"#)
+            .into_browser_action()
+            .expect("action");
+        assert_eq!(wait.action_type, ActionType::WaitFor);
+        assert_eq!(wait.max_wait_ms, 3000);
+        let sentinel = parse(r#"{"action":"wait_for","timeout_ms":-1}"#).into_browser_action().expect("action");
+        assert_eq!(sentinel.max_wait_ms, 5000);
+        assert_eq!(
+            parse(r#"{"action":"back"}"#).into_browser_action().expect("action").action_type,
+            ActionType::Back
+        );
     }
 
     #[test]

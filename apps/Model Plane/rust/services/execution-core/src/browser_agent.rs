@@ -16,6 +16,7 @@ use std::time::Instant;
 use tracing::{info, warn};
 
 mod browser_risk;
+pub mod admission;
 pub mod failure;
 pub mod planner_view;
 pub mod procedure;
@@ -23,7 +24,7 @@ pub mod procedure;
 use failure::{ActionFailure, BrowserFailureKind, FailureBudget, FailureVerdict, NoProgressDetector};
 
 pub(crate) use browser_risk::{approval_poll_interval, approval_timeout_seconds};
-use browser_risk::{classify_action_risk, risk_reason};
+use browser_risk::{classify_action_risk_with_focus, risk_reason};
 pub use browser_risk::{ApprovalOutcome, RiskCategory, RiskyActionDetail};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,6 +161,12 @@ pub enum ActionType {
     Observe,
     Scroll,
     Wait,
+    /// Widened verbs (WS11.S4), proposed only with
+    /// `QUARRY_BROWSER_AGENT_WIDENED_ACTIONS` on.
+    Press,
+    Select,
+    Back,
+    WaitFor,
 }
 
 impl ActionType {
@@ -172,6 +179,10 @@ impl ActionType {
             Self::Observe => "observe",
             Self::Scroll => "scroll",
             Self::Wait => "wait",
+            Self::Press => "press",
+            Self::Select => "select",
+            Self::Back => "back",
+            Self::WaitFor => "wait_for",
         }
     }
 }
@@ -559,6 +570,11 @@ pub struct PlanConfig {
     /// read per call by the tool bridge). The default is `legacy/0`, the
     /// paragraph the planner always sent.
     pub procedure: procedure::ProcedureId,
+    /// Whether the planner may propose `press`, `select`, `back` and
+    /// `wait_for` (`QUARRY_BROWSER_AGENT_WIDENED_ACTIONS`, off by default). Off,
+    /// the verbs are absent from the schemas and the procedure text, and one the
+    /// model sends anyway is read as an `observe`.
+    pub widened_actions: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -574,6 +590,15 @@ pub struct AgentPlan {
     /// Recoverable step failures (only fed when a planner is selected).
     failures: FailureBudget,
     no_progress: NoProgressDetector,
+    /// Page URLs observed so far (bounded); `back` may only return to the
+    /// page before the current one.
+    history: admission::UrlHistory,
+    /// The field the last `type` or `select` acted on, cleared when the page
+    /// URL changes. A `press Enter` is judged as a click on it.
+    focus_hint: Option<BrowserSnapshotTarget>,
+    /// Set after a rejected proposal: the same observation is planned over
+    /// again, so it is not recorded or evaluated twice.
+    replan: bool,
     /// Whether the Phase 5 run-level `PersistentCookieUse` gate has already
     /// run for this plan. Checked once, at the first `decide_next_action`
     /// call (after `start_run` has already succeeded) — never re-asked on
@@ -589,6 +614,9 @@ impl AgentPlan {
             config,
             failures,
             no_progress: NoProgressDetector::default(),
+            history: admission::UrlHistory::default(),
+            focus_hint: None,
+            replan: false,
             current_step: 0,
             status: PlanStatus::Planning,
             observations: Vec::new(),
@@ -623,6 +651,22 @@ impl AgentPlan {
             return Some(BrowserResourceLimit::Tokens);
         }
         None
+    }
+
+    /// Remember the field a `type` or `select` acts on, so a following
+    /// `press Enter` is judged as a click on it. Cleared when the page URL
+    /// changes (see `plan_next_action`).
+    fn note_dispatch(&mut self, action: &BrowserAction, last: Option<&BrowserObservation>) {
+        if !matches!(action.action_type, ActionType::Type | ActionType::Select) {
+            return;
+        }
+        self.focus_hint = action.target.as_ref().and_then(|bound| {
+            last?
+                .snapshot_targets
+                .iter()
+                .find(|target| target.ref_id == bound.ref_id)
+                .cloned()
+        });
     }
 
     pub fn check_limits(&self) -> Option<BrowserResourceLimit> {
@@ -746,6 +790,9 @@ pub enum PlanStepResult {
     Completed(String),
     WaitingApproval,
     Failed(String),
+    /// A proposal was not admitted (WS11.S4). The planner is asked again about
+    /// the same observation; nothing was sent to Quarry.
+    Rejected,
     /// A max-steps or runtime budget stopped the loop. This is distinct from
     /// the planner's successful `Completed` result.
     ResourceExhausted {
@@ -851,8 +898,12 @@ pub fn plan_next_action(
         };
     }
 
-    if let Some(obs) = last_observation {
+    let replanning = std::mem::take(&mut plan.replan);
+    if let Some(obs) = last_observation.filter(|_| !replanning) {
         plan.observations.push(obs.clone());
+        if plan.history.observe(&obs.page_url) {
+            plan.focus_hint = None;
+        }
 
         if obs.status == ObservationStatus::Failed {
             plan.status = PlanStatus::Failed;
@@ -1192,6 +1243,11 @@ pub async fn run_browser_agent_loop(
                 abort_reason = Some(reason_kind);
                 break reason;
             }
+            PlanStepResult::Rejected => {
+                // Plan over the same page again; it is already recorded.
+                plan.replan = true;
+                pending = last;
+            }
             PlanStepResult::Stopped { reason, kind } => {
                 failure_kind = Some(kind);
                 break reason;
@@ -1294,7 +1350,7 @@ fn pause_poll_interval() -> std::time::Duration {
 /// configured, let the model choose the real action from the latest
 /// observation (falling back to the deterministic `Observe` action when the
 /// planner is absent or errors); finally, gate the resulting action if it is
-/// classified risky (Phase 5, see [`classify_action_risk`]) before returning
+/// classified risky (Phase 5, see `classify_action_risk`) before returning
 /// it for dispatch.
 async fn decide_next_action(
     plan: &mut AgentPlan,
@@ -1402,6 +1458,46 @@ async fn decide_next_action(
         }
     };
 
+    // The widened verbs are checked here, after the planner and before the
+    // risk gate. A rejection is a recoverable failure the planner is told about;
+    // it counts as a step and toward the failure budget and never reaches Quarry.
+    let action = if planner.is_some() {
+        let proposed_name = action.action_type.as_str();
+        let allowed = |url: &str| plan.is_domain_allowed(url);
+        match admission::admit(
+            action,
+            plan.config.widened_actions,
+            &plan.history,
+            allowed,
+        ) {
+            Ok(admitted) => admitted,
+            Err(rejection) => {
+                warn!(
+                    plan_id = %plan.config.plan_id,
+                    kind = rejection.code(),
+                    "browser action proposal rejected before Quarry"
+                );
+                let verdict = plan.failures.record(ActionFailure {
+                    step: plan.current_step,
+                    action_type: proposed_name,
+                    kind: rejection.code(),
+                    advice: rejection.advice(),
+                });
+                if let FailureVerdict::Stop(reason) = verdict {
+                    plan.status = PlanStatus::Failed;
+                    return PlanStepResult::Stopped {
+                        reason,
+                        kind: BrowserFailureKind::RepeatedFailure,
+                    };
+                }
+                plan.status = PlanStatus::Executing;
+                return PlanStepResult::Rejected;
+            }
+        }
+    } else {
+        action
+    };
+
     if planner.is_some() && plan.no_progress.observe(&action, last_observation) {
         plan.status = PlanStatus::Failed;
         return PlanStepResult::Stopped {
@@ -1411,7 +1507,11 @@ async fn decide_next_action(
         };
     }
 
-    gate_risky_action(plan, last_observation, action, sink).await
+    let result = gate_risky_action(plan, last_observation, action, sink).await;
+    if let PlanStepResult::Action(dispatched) = &result {
+        plan.note_dispatch(dispatched, last_observation);
+    }
+    result
 }
 
 /// What a planner `done` means for the run (the honest `done`): `success`
@@ -1548,7 +1648,9 @@ async fn gate_risky_action(
     action: BrowserAction,
     sink: Option<&dyn BrowserEventSink>,
 ) -> PlanStepResult {
-    let Some(category) = classify_action_risk(&action, last_observation) else {
+    let focus = plan.focus_hint.clone();
+    let Some(category) = classify_action_risk_with_focus(&action, last_observation, focus.as_ref())
+    else {
         return PlanStepResult::Action(action);
     };
 

@@ -68,3 +68,45 @@ pub fn click_ref(snapshot_id: &str, generation: u32, ref_id: &str) -> BrowserAct
         ..action(ActionType::Click)
     }
 }
+
+pub fn bound(mut action: BrowserAction, snapshot_id: &str, generation: u32, ref_id: &str) -> BrowserAction {
+    action.target = Some(BrowserTargetRef {
+        snapshot_id: snapshot_id.to_owned(),
+        generation,
+        ref_id: ref_id.to_owned(),
+        frame_id: None,
+    });
+    action
+}
+
+pub fn type_ref(snapshot_id: &str, generation: u32, ref_id: &str, text: &str) -> BrowserAction {
+    BrowserAction {
+        value: text.to_owned(),
+        ..bound(action(ActionType::Type), snapshot_id, generation, ref_id)
+    }
+}
+
+pub fn select_ref(snapshot_id: &str, generation: u32, ref_id: &str, value: &str) -> BrowserAction {
+    BrowserAction {
+        value: value.to_owned(),
+        ..bound(action(ActionType::Select), snapshot_id, generation, ref_id)
+    }
+}
+
+pub fn wait_for_ref(snapshot_id: &str, generation: u32, ref_id: &str, timeout_ms: i32) -> BrowserAction {
+    BrowserAction {
+        max_wait_ms: timeout_ms,
+        ..bound(action(ActionType::WaitFor), snapshot_id, generation, ref_id)
+    }
+}
+
+pub fn press(key: &str) -> BrowserAction {
+    BrowserAction {
+        value: key.to_owned(),
+        ..action(ActionType::Press)
+    }
+}
+
+pub fn back() -> BrowserAction {
+    action(ActionType::Back)
+}

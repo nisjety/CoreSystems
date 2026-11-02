@@ -248,17 +248,36 @@ const POSTING_MARKERS: &[Marker] = &[
 ///
 /// Heuristic, and the planner reads untrusted page text, so a page can label a
 /// control to dodge it: the domain fence in `AgentPlan` stays the hard guard.
+#[cfg(test)]
 pub(super) fn classify_action_risk(
     action: &BrowserAction,
     last_observation: Option<&BrowserObservation>,
 ) -> Option<RiskCategory> {
-    let deterministic = classify_deterministic_risk(action, last_observation);
+    classify_action_risk_with_focus(action, last_observation, None)
+}
+
+/// [`classify_action_risk`] with the run's focus hint: the field the last
+/// `type` or `select` acted on. A `press Enter` or `press Space` submits or
+/// activates whatever has focus, so it is judged like a click on that field.
+/// `back` and `wait_for` change nothing on the page and are never gated.
+pub(super) fn classify_action_risk_with_focus(
+    action: &BrowserAction,
+    last_observation: Option<&BrowserObservation>,
+    focus: Option<&BrowserSnapshotTarget>,
+) -> Option<RiskCategory> {
+    let deterministic = classify_deterministic_risk(action, last_observation, focus);
     deterministic.or(action.risk_category)
+}
+
+/// A `press` of a key that activates the focused control.
+fn activates_focus(action: &BrowserAction) -> bool {
+    action.action_type == ActionType::Press && matches!(action.value.trim(), "Enter" | "Space")
 }
 
 fn classify_deterministic_risk(
     action: &BrowserAction,
     last_observation: Option<&BrowserObservation>,
+    focus: Option<&BrowserSnapshotTarget>,
 ) -> Option<RiskCategory> {
     // Cross-domain navigation: compare the target host of a `Goto` against
     // the host of the last page actually observed — NOT the allow-list
@@ -279,7 +298,7 @@ fn classify_deterministic_risk(
         }
     }
 
-    let evidence = Evidence::of(action, last_observation);
+    let evidence = Evidence::of(action, last_observation, focus);
 
     if evidence.holds_any(CHECKOUT_MARKERS) {
         return Some(RiskCategory::Checkout);
@@ -290,7 +309,9 @@ fn classify_deterministic_risk(
     if evidence.holds_any(DESTRUCTIVE_MARKERS) {
         return Some(RiskCategory::Destructive);
     }
-    if matches!(action.action_type, ActionType::Click) && evidence.holds_any(POSTING_MARKERS) {
+    if (action.action_type == ActionType::Click || activates_focus(action))
+        && evidence.holds_any(POSTING_MARKERS)
+    {
         return Some(RiskCategory::PostingForm);
     }
 
@@ -321,12 +342,29 @@ struct Evidence {
 }
 
 impl Evidence {
-    fn of(action: &BrowserAction, last_observation: Option<&BrowserObservation>) -> Self {
+    fn of(
+        action: &BrowserAction,
+        last_observation: Option<&BrowserObservation>,
+        focus: Option<&BrowserSnapshotTarget>,
+    ) -> Self {
         let mut texts = vec![
             EvidenceText::new(&percent_decode(&action.url)),
             EvidenceText::new(&percent_decode(&action.selector)),
         ];
-        if let Some(target) = bound_target(action, last_observation) {
+        let target = if activates_focus(action) {
+            // The focus hint stands in for the control the key activates.
+            focus
+        } else {
+            bound_target(action, last_observation)
+        };
+        if activates_focus(action) && focus.is_none() {
+            // Nothing is known about the focused control: the page the key is
+            // pressed on is the only evidence there is.
+            if let Some(observation) = last_observation {
+                texts.push(EvidenceText::new(&percent_decode(&observation.page_url)));
+            }
+        }
+        if let Some(target) = target {
             texts.extend(target.role.as_deref().map(EvidenceText::new));
             texts.extend(target.name.as_deref().map(EvidenceText::new));
             // A field's `text` is its current content (Quarry falls back to
@@ -346,7 +384,7 @@ impl Evidence {
     }
 }
 
-/// The snapshot target a click or type is bound to. The ref is looked up in
+/// The snapshot target a click, type or select is bound to. The ref is looked up in
 /// the last observation by its id alone: ids are unique within a snapshot, and
 /// Quarry refuses a ref from another generation, but the gate must not lean on
 /// that refusal, so a ref naming `@e3` is judged by the `@e3` the planner was
@@ -355,7 +393,10 @@ fn bound_target<'a>(
     action: &BrowserAction,
     last_observation: Option<&'a BrowserObservation>,
 ) -> Option<&'a BrowserSnapshotTarget> {
-    if !matches!(action.action_type, ActionType::Click | ActionType::Type) {
+    if !matches!(
+        action.action_type,
+        ActionType::Click | ActionType::Type | ActionType::Select
+    ) {
         return None;
     }
     let bound = action.target.as_ref()?;
@@ -1159,6 +1200,96 @@ mod tests {
             target.frame_id = Some("frame_pay".to_owned());
         }
         assert_eq!(classify_action_risk(&typed, Some(&page)), LOGIN);
+    }
+
+    fn press(key: &str) -> BrowserAction {
+        action(ActionType::Press, "", "", key)
+    }
+
+    #[test]
+    fn press_enter_in_password_field_is_login_risk() {
+        let page = page_with(vec![snapshot_target(
+            "@e2",
+            "textbox",
+            Some("Password"),
+            Some("hunter2"),
+        )]);
+        let focus = page.snapshot_targets[0].clone();
+        assert_eq!(
+            classify_action_risk_with_focus(&press("Enter"), Some(&page), Some(&focus)),
+            Some(RiskCategory::Login)
+        );
+        assert_eq!(
+            classify_action_risk_with_focus(&press("Space"), Some(&page), Some(&focus)),
+            Some(RiskCategory::Login)
+        );
+        // A key that does not activate the field is not judged by it.
+        assert_eq!(
+            classify_action_risk_with_focus(&press("Tab"), Some(&page), Some(&focus)),
+            NONE
+        );
+    }
+
+    #[test]
+    fn press_enter_in_field_named_send_is_posting_risk() {
+        let page = page_with(vec![snapshot_target("@e2", "textbox", Some("Send"), None)]);
+        let focus = page.snapshot_targets[0].clone();
+        assert_eq!(
+            classify_action_risk_with_focus(&press("Enter"), Some(&page), Some(&focus)),
+            Some(RiskCategory::PostingForm)
+        );
+    }
+
+    #[test]
+    fn press_enter_with_no_focus_hint_on_checkout_url_is_checkout_risk() {
+        let page = observation_at("https://butikk.example.no/checkout/payment");
+        assert_eq!(
+            classify_action_risk_with_focus(&press("Enter"), Some(&page), None),
+            Some(RiskCategory::Checkout)
+        );
+        // No hint and an ordinary page: nothing to flag.
+        let plain = observation_at("https://butikk.example.no/produkter");
+        assert_eq!(
+            classify_action_risk_with_focus(&press("Enter"), Some(&plain), None),
+            NONE
+        );
+    }
+
+    #[test]
+    fn select_on_destructive_labelled_control_is_destructive_risk() {
+        let page = page_with(vec![snapshot_target(
+            "@e3",
+            "combobox",
+            Some("Delete account"),
+            Some("keep"),
+        )]);
+        let mut select = bound_to(action(ActionType::Select, "", "", "confirm"), "@e3");
+        select.value = "confirm".to_owned();
+        assert_eq!(
+            classify_action_risk_with_focus(&select, Some(&page), None),
+            Some(RiskCategory::Destructive)
+        );
+        // The option value is content, not evidence.
+        let calm = page_with(vec![snapshot_target("@e3", "combobox", Some("Shipping"), None)]);
+        let mut pick = bound_to(action(ActionType::Select, "", "", "delete"), "@e3");
+        pick.value = "delete".to_owned();
+        assert_eq!(classify_action_risk_with_focus(&pick, Some(&calm), None), NONE);
+    }
+
+    #[test]
+    fn press_enter_in_search_box_is_not_risky() {
+        let page = page_with(vec![snapshot_target("@e1", "searchbox", Some("Search"), None)]);
+        let focus = page.snapshot_targets[0].clone();
+        assert_eq!(
+            classify_action_risk_with_focus(&press("Enter"), Some(&page), Some(&focus)),
+            NONE
+        );
+        // back and wait_for are never gated, even on a risky-looking page.
+        let risky = observation_at("https://butikk.example.no/checkout");
+        for verb in [ActionType::Back, ActionType::WaitFor] {
+            let a = bound_to(action(verb, "", "", ""), "@e1");
+            assert_eq!(classify_action_risk_with_focus(&a, Some(&risky), Some(&focus)), NONE);
+        }
     }
 
     #[test]
