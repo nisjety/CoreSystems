@@ -1373,6 +1373,8 @@ mod tests {
 
     fn claims_with_scopes(scopes: &[&str]) -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "u1".into(),
             iss: "test".into(),
             exp: 0,

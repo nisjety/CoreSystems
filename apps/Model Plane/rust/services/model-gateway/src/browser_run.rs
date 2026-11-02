@@ -2267,6 +2267,8 @@ mod tests {
 
     fn browser_claims(zdr: bool) -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "user-a".to_owned(),
             iss: "auth-core".to_owned(),
             exp: i64::MAX,

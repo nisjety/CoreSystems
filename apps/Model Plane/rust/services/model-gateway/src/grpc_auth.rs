@@ -819,6 +819,28 @@ mod tests {
         assert_eq!(identity.user_id(), Some("user-1"));
     }
 
+    /// INNH-10 MP-3: an `api_key` principal is admitted only on two HTTP routes. The gRPC surface
+    /// has no key arm, so a well-formed key token is unauthenticated here.
+    #[tokio::test]
+    async fn an_api_key_principal_is_refused_on_the_grpc_surface() {
+        let verifier = test_verifier().await;
+        let key = json!({
+            "sub": "apikey:key-1", "iss": "auth-core", "aud": "model-gateway",
+            "exp": now() + 3600, "iat": now() - 5, "nbf": now() - 5,
+            "org_id": "org-1", "principal_type": "api_key", "key_id": "key-1",
+            "acting_user_id": "user-1", "scopes": ["browser:agent"], "zdr": false
+        });
+        let mut request = Request::new(());
+        request.metadata_mut().insert(
+            "authorization",
+            format!("Bearer {}", sign(&key, "key-1")).parse().expect("metadata"),
+        );
+        assert_eq!(
+            verifier.intercept(request).unwrap_err().code(),
+            tonic::Code::Unauthenticated
+        );
+    }
+
     #[tokio::test]
     async fn delegated_credentials_require_target_audience_and_matching_identity() {
         let verifier = test_verifier().await;

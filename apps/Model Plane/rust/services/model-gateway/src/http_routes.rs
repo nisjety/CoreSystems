@@ -192,7 +192,25 @@ pub fn build_router_with_readiness(
     };
 
     // Auth-gated routes with rate limiting
-    let authed = Router::new()
+    let authed = authed_routes()
+        .layer(middleware::from_fn(rate_limit::rate_limit_middleware))
+        .layer(middleware::from_fn(auth::authorize_principal_route))
+        .layer(middleware::from_fn(auth::require_auth))
+        .layer(axum::Extension(rate_limiter));
+
+    Router::new()
+        .merge(public)
+        .merge(authed)
+        .layer(Extension(grpc_readiness))
+        .layer(middleware::from_fn(gateway_metrics::metrics_middleware))
+        .with_state(state)
+}
+
+/// Every auth-gated route, without its layers. `build_router_with_readiness` wraps it in
+/// `require_auth`, `authorize_principal_route` and the rate limiter; a test wraps it in the route
+/// policy alone, to prove every route here answers to it (INNH-10 MP-3).
+fn authed_routes() -> Router<AppState> {
+    Router::new()
         .route("/v1/invoke", post(invoke))
         // Attachments ride the body as base64, so the 2 MiB default would refuse two
         // images the attachment policy admits (a 413 with no typed reason).
@@ -348,17 +366,6 @@ pub fn build_router_with_readiness(
             "/v1/finetune/jobs/:job_id/deploy",
             post(crate::finetune_routes::deploy_job),
         )
-        .layer(middleware::from_fn(rate_limit::rate_limit_middleware))
-        .layer(middleware::from_fn(auth::authorize_principal_route))
-        .layer(middleware::from_fn(auth::require_auth))
-        .layer(axum::Extension(rate_limiter));
-
-    Router::new()
-        .merge(public)
-        .merge(authed)
-        .layer(Extension(grpc_readiness))
-        .layer(middleware::from_fn(gateway_metrics::metrics_middleware))
-        .with_state(state)
 }
 
 /// `/v1/orchestration/*` read + mutation routes. Merged into the auth-gated router.
@@ -12367,6 +12374,8 @@ mod invoke_zdr_tests {
     #[test]
     fn issuer_enforced_zdr_cannot_be_downgraded_by_the_request_body() {
         let claims = Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "user-a".to_owned(),
             iss: "issuer".to_owned(),
             exp: i64::MAX,
@@ -12473,6 +12482,8 @@ mod approval_resume_auth_tests {
     #[test]
     fn issuer_zdr_blocks_run_lifecycle_persistence() {
         let claims = Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "user-a".to_owned(),
             iss: "issuer".to_owned(),
             exp: i64::MAX,
@@ -12508,6 +12519,8 @@ mod capability_contract_tests {
 
     fn proxy_claims(zdr: bool) -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "user-a".to_owned(),
             iss: "test-issuer".to_owned(),
             exp: i64::MAX,
@@ -12928,6 +12941,8 @@ mod capability_contract_tests {
 
     fn mail_task_bridge_claims(org_id: &str) -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "service:verevon-gateway".to_owned(),
             iss: "test-issuer".to_owned(),
             exp: i64::MAX,
@@ -13306,6 +13321,8 @@ mod run_owner_publish_tests {
 
     fn claims(org_id: &str, user_id: &str) -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: user_id.to_owned(),
             iss: "test-issuer".to_owned(),
             exp: i64::MAX,
@@ -14953,6 +14970,8 @@ mod speech_route_tests {
 
     fn claims(zdr: bool) -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "user-a".to_owned(),
             iss: "test-issuer".to_owned(),
             exp: i64::MAX,
@@ -15388,6 +15407,8 @@ mod tool_policy_proxy_tests {
 
     fn claims(zdr: bool) -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "user-a".to_owned(),
             iss: "test-issuer".to_owned(),
             exp: i64::MAX,
@@ -15955,6 +15976,8 @@ mod model_access_route_tests {
 
     fn claims(org_id: &str) -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "user-a".to_owned(),
             iss: "test-issuer".to_owned(),
             exp: i64::MAX,
@@ -16472,6 +16495,8 @@ mod ai_chat_lane_tests {
 
     fn user(zdr: bool) -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "user-a".to_owned(),
             iss: "test-issuer".to_owned(),
             exp: i64::MAX,
@@ -16492,6 +16517,8 @@ mod ai_chat_lane_tests {
 
     fn service(sub: &str, zdr: bool) -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: sub.to_owned(),
             iss: "test-issuer".to_owned(),
             exp: i64::MAX,
@@ -16785,5 +16812,138 @@ mod ai_chat_lane_tests {
             assert_eq!(status, expected, "{} / {purpose}", claims.sub);
             assert!(inference.cleanups().is_empty(), "no model call for a refused purpose");
         }
+    }
+}
+
+/// INNH-10 MP-3: an `api_key` principal reaches the two key-grant routes and nothing else. The
+/// route list is read from the source, so a route added anywhere later is covered without a
+/// change here.
+#[cfg(test)]
+mod api_key_route_fence_tests {
+    use super::*;
+    use axum::{body::Body, http::Request as HttpRequest};
+    use tower::ServiceExt;
+
+    /// Routes outside `authed_routes`: the unauthenticated probes of `build_router_with_readiness`.
+    const PUBLIC: &[&str] = &["/healthz", "/readyz", "/version", "/metrics"];
+
+    /// Every production `.route("<path>", ..)` in the crate, as `(file, path)`.
+    fn production_route_paths() -> Vec<(String, String)> {
+        let pattern = regex::Regex::new(r#"\.route\(\s*"([^"]+)""#).expect("a valid pattern");
+        let mut paths = Vec::new();
+        for (file, text) in crate::zdr_posture::tests::read_sources() {
+            let code: String = crate::zdr_posture::tests::strip_test_items(&text)
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            for capture in pattern.captures_iter(&code) {
+                paths.push((file.clone(), capture[1].to_owned()));
+            }
+        }
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
+    fn concrete(path: &str) -> String {
+        path.split('/')
+            .map(|segment| {
+                if segment.starts_with(':') || segment.starts_with('*') {
+                    "x1"
+                } else {
+                    segment
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    fn key_claims() -> Claims {
+        serde_json::from_value(json!({
+            "sub": "apikey:key-1",
+            "iss": "auth-core",
+            "exp": 4_102_444_800_i64,
+            "org_id": "org-a",
+            "zdr": false,
+            "principal_type": "api_key",
+            "key_id": "key-1",
+            "acting_user_id": "user-a",
+            "scopes": ["browser:agent"],
+        }))
+        .expect("an api key token decodes")
+    }
+
+    #[tokio::test]
+    async fn api_key_is_refused_on_every_other_route() {
+        let paths = production_route_paths();
+        let fenced: Vec<&(String, String)> = paths
+            .iter()
+            .filter(|(_, path)| !PUBLIC.contains(&path.as_str()))
+            .collect();
+        assert!(
+            fenced.len() > 100,
+            "the source scan found only {} routes; it is not reading the route table",
+            fenced.len()
+        );
+        for (_, key_route) in auth::API_KEY_ROUTES {
+            assert!(
+                paths.iter().any(|(_, path)| path == key_route),
+                "{key_route} is not registered"
+            );
+        }
+        let mut state = AppState::new();
+        // On, so the two key routes reach their handler: it answers 401 for the missing key bearer.
+        state.browser_key_grants = Some(true);
+        let router = authed_routes()
+            .layer(middleware::from_fn(auth::authorize_principal_route))
+            .layer(Extension(key_claims()))
+            .with_state(state);
+
+        let mut failures = Vec::new();
+        for (file, path) in fenced {
+            let uri = concrete(path);
+            let is_key_path = auth::API_KEY_ROUTES.iter().any(|(_, key)| key == path);
+            let mut refused = false;
+            for method in ["GET", "POST", "PUT", "PATCH", "DELETE"] {
+                let status = router
+                    .clone()
+                    .oneshot(
+                        HttpRequest::builder()
+                            .method(method)
+                            .uri(&uri)
+                            .header("content-type", "application/json")
+                            .body(Body::from("{}"))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+                    .status();
+                if auth::API_KEY_ROUTES
+                    .iter()
+                    .any(|(key_method, key_path)| *key_method == method && key_path == path)
+                {
+                    if status != StatusCode::UNAUTHORIZED {
+                        failures.push(format!("{method} {path}: the key route answered {status}"));
+                    }
+                    continue;
+                }
+                match status {
+                    StatusCode::FORBIDDEN => refused = true,
+                    StatusCode::METHOD_NOT_ALLOWED => {}
+                    other => failures.push(format!("{method} {path} ({file}): {other}")),
+                }
+            }
+            if !refused && !is_key_path {
+                failures.push(format!(
+                    "{path} ({file}): no method was refused; is it outside authed_routes?"
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "an api key principal reached a route it may not:\n{}",
+            failures.join("\n")
+        );
     }
 }

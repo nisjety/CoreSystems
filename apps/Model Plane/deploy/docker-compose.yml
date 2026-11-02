@@ -512,6 +512,11 @@ services:
       # WS11.S1/S2, OFF by default: a browser run start reads the org's browser_agent_* quota rows
       # (the planner token ceiling and the LLM-planner switch) from org-core. Only `on` enables it.
       MODEL_GATEWAY_BROWSER_PLANNER_QUOTAS: ${MODEL_GATEWAY_BROWSER_PLANNER_QUOTAS:-off}
+      # INNH-10 MP-3, OFF by default: POST /v1/browser/key-grants and DELETE
+      # /v1/browser/key-grants/:grant_id, the door for an api_key principal (an API key exchanged
+      # by auth-core, CP-1). Off answers 404; only 1/true/on enables it. The broker's own
+      # BROWSER_BROKER_KEY_GRANTS_ENABLED still applies (403 api_key_grants_disabled while off).
+      MODEL_GATEWAY_BROWSER_KEY_GRANTS: ${MODEL_GATEWAY_BROWSER_KEY_GRANTS:-0}
       # Agentic (Do mode) runs on the user's ChatGPT subscription: the
       # kill switch, OFF by default. One variable with three readers, and the
       # same expression in model-gateway, execution-core and inference-core

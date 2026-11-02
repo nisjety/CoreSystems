@@ -36,6 +36,8 @@ tags:
     description: Skill registry (proxied to capability-core)
   - name: events
     description: Server-Sent Event streams
+  - name: browser
+    description: Browser grants issued by BrowserBroker
 
 paths:
   # ===========================================================================
@@ -499,6 +501,148 @@ paths:
             text/event-stream:
               schema:
                 $ref: "#/components/schemas/OrchestrationEvent"
+
+  # ===========================================================================
+  # Browser key grants (INNH-10 MP-3), dark behind MODEL_GATEWAY_BROWSER_KEY_GRANTS
+  # ===========================================================================
+  /v1/browser/key-grants:
+    post:
+      operationId: issueBrowserKeyGrant
+      tags: [browser]
+      summary: Issue an allow-list browser grant for an API key principal
+      description: >-
+        Accepts ONLY an `api_key` principal (an API key Auth Core exchanged for a
+        short-lived token, `aud=model-gateway`, scope `browser:agent`) together with the
+        same key's `aud=browser-broker` token in `x-browser-authorization` (same `sub`,
+        `org_id`, `key_id`, `acting_user_id`, `zdr`). A user or service is a 403; an
+        api_key principal is a 403 on every other route. Hosts and budget are
+        mandatory and are checked by the broker against the key's signed ceilings; the
+        lifetime only shortens; there is no kind, no mode and no renew. Unknown body
+        fields are a 400. With the gateway flag off the route is a 404; with the
+        broker's switch off it is a 403 `api_key_grants_disabled`. Under ZDR the
+        response omits `allowed_domains`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [allowed_domains, budget]
+              properties:
+                allowed_domains:
+                  type: array
+                  minItems: 1
+                  maxItems: 32
+                  items:
+                    type: string
+                    maxLength: 253
+                budget:
+                  type: object
+                  additionalProperties: false
+                  required: [micro_usd, max_steps, max_runtime_s]
+                  properties:
+                    micro_usd:
+                      type: integer
+                      format: int64
+                      minimum: 1
+                    max_steps:
+                      type: integer
+                      format: int32
+                      minimum: 1
+                    max_runtime_s:
+                      type: integer
+                      format: int32
+                      minimum: 1
+                zdr:
+                  type: boolean
+                  description: Raises the token's posture; never lowers it.
+                ttl_s:
+                  type: integer
+                  minimum: 30
+                  maximum: 900
+                  description: Only shortens the broker's key-grant TTL (default 600 s).
+                session_key:
+                  type: string
+                  maxLength: 96
+                  pattern: "^[A-Za-z0-9_.:-]+$"
+      responses:
+        "201":
+          description: Grant issued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    required: [grant_id, expires_at, budget, key_id]
+                    properties:
+                      grant_id:
+                        type: string
+                      expires_at:
+                        type: string
+                        format: date-time
+                      allowed_domains:
+                        type: array
+                        items:
+                          type: string
+                        description: Omitted under Zero Data Retention.
+                      budget:
+                        type: object
+                        properties:
+                          micro_usd:
+                            type: integer
+                            format: int64
+                          max_steps:
+                            type: integer
+                          max_runtime_s:
+                            type: integer
+                      key_id:
+                        type: string
+        "400":
+          description: "`invalid_request` (reasons invalid_body, invalid_allowed_domains, api_key_grant_budget_required, invalid_ttl, invalid_session_key, browser_host_not_grantable)"
+        "401":
+          description: "`browser_bearer_required`: the key's browser-broker bearer is missing"
+        "403":
+          description: "api_key_principal_required, api_key_grants_disabled, api_key_revoked, api_key_host_ceiling, api_key_budget_ceiling, browser_grant_forbidden"
+        "404":
+          description: The gateway flag is off
+        "429":
+          description: "`per_key_grant_cap`: too many live grants for the key or its owner"
+        "502":
+          description: "`browser_broker_error` (reason key_grant_mismatch when the broker stamped another key)"
+        "503":
+          description: "`browser_broker_unavailable`"
+  /v1/browser/key-grants/{grant_id}:
+    delete:
+      operationId: releaseBrowserKeyGrant
+      tags: [browser]
+      summary: Release one of the calling API key's grants
+      description: >-
+        Same principal and bearer rules as the POST. 204 whether the grant was live,
+        already gone or never this key's; the answer never says whether an id exists.
+      parameters:
+        - name: grant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            maxLength: 128
+            pattern: "^[A-Za-z0-9_-]+$"
+      responses:
+        "204":
+          description: Released (or nothing to release)
+        "400":
+          description: "`invalid_request` (reason invalid_grant_id)"
+        "401":
+          description: "`browser_bearer_required`"
+        "403":
+          description: "api_key_principal_required, api_key_grants_disabled, browser_grant_forbidden"
+        "404":
+          description: The gateway flag is off
+        "503":
+          description: "`browser_broker_unavailable`"
 
   # ===========================================================================
   # AI modalities

@@ -105,6 +105,15 @@ pub struct Claims {
     pub service_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// INNH-10: the API key an `api_key` principal was minted for (the Better Auth key id, never
+    /// the key). Present only on an `api_key` token; on any other principal type it makes the
+    /// token ambiguous and [`Self::principal_kind`] refuses it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<String>,
+    /// INNH-10: the user who owns the API key of an `api_key` principal. Attribution only: the
+    /// principal is the key (`sub = apikey:<key_id>`), never this person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acting_user_id: Option<String>,
 }
 
 /// The `step_up` claim: the holder re-proved their password at `at` (Unix seconds), so a
@@ -135,6 +144,42 @@ pub struct VerifiedStepUp(pub Option<StepUpClaim>);
 enum PrincipalKind {
     User,
     Service,
+    /// INNH-10: an API key exchanged by Auth Core for a short-lived token. Admitted ONLY on the
+    /// key-grant routes ([`API_KEY_ROUTES`]); refused on every other route by
+    /// [`authorize_principal_route`] and on the gRPC surface by `grpc_auth`.
+    ApiKey,
+}
+
+/// The subject prefix of an `api_key` principal: `sub` is exactly `apikey:<key_id>`.
+const API_KEY_SUBJECT_PREFIX: &str = "apikey:";
+/// The scope an `api_key` principal needs on the key-grant routes (INNH-10 OD-5).
+pub(crate) const API_KEY_SCOPE_BROWSER_AGENT: &str = "browser:agent";
+const MAX_API_KEY_ID_LEN: usize = 128;
+const MAX_ACTING_USER_ID_LEN: usize = 256;
+
+/// The only routes an `api_key` principal may reach, as `(method, axum path)`. Everything else
+/// is refused with 403 by [`authorize_principal_route`].
+pub const API_KEY_ROUTES: &[(&str, &str)] = &[
+    ("POST", "/v1/browser/key-grants"),
+    ("DELETE", "/v1/browser/key-grants/:grant_id"),
+];
+
+/// Whether `method path` (a concrete request path) is one of [`API_KEY_ROUTES`]. A grant id is
+/// one non-empty path segment; the handler validates its characters.
+fn api_key_route_allowed(method: &str, path: &str) -> bool {
+    match method {
+        "POST" => path == "/v1/browser/key-grants",
+        "DELETE" => path
+            .strip_prefix("/v1/browser/key-grants/")
+            .is_some_and(|grant_id| !grant_id.is_empty() && !grant_id.contains('/')),
+        _ => false,
+    }
+}
+
+/// A key id as the broker accepts it: 1 to 128 bytes of printable, non-space ASCII.
+fn valid_api_key_id(key_id: &str) -> bool {
+    (1..=MAX_API_KEY_ID_LEN).contains(&key_id.len())
+        && key_id.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
 }
 
 /// A distinct `aud=data-plane` user bearer, independently verified against the
@@ -273,6 +318,51 @@ impl VerifiedBrowserBearer {
     #[cfg(test)]
     pub(crate) fn for_test(token: &str) -> Self {
         Self::new(token)
+    }
+}
+
+/// INNH-10: the independently verified `aud=browser-broker` bearer of an `api_key` principal.
+/// Accepted only from `x-browser-authorization`, only on the key-grant routes, and only when it
+/// is the same key as the ingress token (same `sub`, `org_id`, `key_id`, `acting_user_id` and
+/// retention posture). A distinct type from [`VerifiedBrowserBearer`] on purpose: no user route
+/// can ever extract a key's bearer, and the key-grant routes can never extract a user's.
+#[derive(Clone)]
+pub struct VerifiedApiKeyBrowserBearer(Arc<str>);
+
+impl VerifiedApiKeyBrowserBearer {
+    fn new(token: &str) -> Self {
+        Self(Arc::from(token))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(token: &str) -> Self {
+        Self::new(token)
+    }
+}
+
+impl fmt::Debug for VerifiedApiKeyBrowserBearer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("VerifiedApiKeyBrowserBearer([REDACTED])")
+    }
+}
+
+#[axum::async_trait]
+impl<S> FromRequestParts<S> for VerifiedApiKeyBrowserBearer
+where
+    S: Send + Sync,
+{
+    type Rejection = StatusCode;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<Self>()
+            .cloned()
+            .ok_or(StatusCode::UNAUTHORIZED)
     }
 }
 
@@ -563,12 +653,15 @@ impl Claims {
             "user"
                 if !self.user_id.is_empty()
                     && self.sub == self.user_id
-                    && self.service_id.is_none() =>
+                    && self.service_id.is_none()
+                    && self.key_id.is_none() =>
             {
                 Ok(PrincipalKind::User)
             }
+            "api_key" if self.is_well_formed_api_key() => Ok(PrincipalKind::ApiKey),
             "service"
                 if self.user_id.is_empty()
+                    && self.key_id.is_none()
                     && self.service_id.as_deref().is_some_and(|service_id| {
                         service_id == self.sub
                             && service_id
@@ -582,6 +675,34 @@ impl Claims {
                 Ok(PrincipalKind::Service)
             }
             _ => Err(StatusCode::UNAUTHORIZED),
+        }
+    }
+
+    /// The shape rules of an `api_key` token (INNH-10, the same rules the broker's `authctx`
+    /// applies): `sub == "apikey:" + key_id` exactly, a bounded printable key id, an owning
+    /// `acting_user_id` that is unpadded and not itself a key, and no user or service identity.
+    fn is_well_formed_api_key(&self) -> bool {
+        let (Some(key_id), Some(owner)) = (self.key_id.as_deref(), self.acting_user_id.as_deref())
+        else {
+            return false;
+        };
+        valid_api_key_id(key_id)
+            && self.sub.strip_prefix(API_KEY_SUBJECT_PREFIX) == Some(key_id)
+            && self.user_id.is_empty()
+            && self.service_id.is_none()
+            && !owner.is_empty()
+            && owner.len() <= MAX_ACTING_USER_ID_LEN
+            && owner == owner.trim()
+            && !owner.starts_with(API_KEY_SUBJECT_PREFIX)
+    }
+
+    /// The key id of a well-formed `api_key` principal, `None` for every other principal.
+    #[must_use]
+    pub fn api_key_id(&self) -> Option<&str> {
+        if self.principal_kind() == Ok(PrincipalKind::ApiKey) {
+            self.key_id.as_deref()
+        } else {
+            None
         }
     }
 
@@ -813,6 +934,8 @@ fn dev_bypass_claims(headers: &HeaderMap) -> Claims {
     let user_id = header_string(headers, "x-user-id", "user_placeholder");
     let org_id = header_string(headers, "x-org-id", "org_placeholder");
     Claims {
+        key_id: None,
+        acting_user_id: None,
         sub: user_id.clone(),
         iss: "dev".to_owned(),
         exp: i64::MAX,
@@ -1039,6 +1162,60 @@ async fn verify_delegated_user_bearer(
         return Err(AuthRejection::ZdrPostureMismatch);
     }
     Ok(Some(token))
+}
+
+/// The delegated headers an `api_key` principal may never send: every downstream bearer except
+/// the broker one. A key has no user identity, so none of them can be bound to it.
+const API_KEY_FORBIDDEN_DELEGATIONS: &[&str] = &[
+    "x-data-plane-authorization",
+    "x-capability-authorization",
+    "x-cost-authorization",
+    "x-session-authorization",
+    "x-inference-authorization",
+    "x-execution-authorization",
+    "x-ingestion-authorization",
+    "x-sandbox-authorization",
+];
+
+/// INNH-10: verify the `aud=browser-broker` bearer of an `api_key` principal. It is accepted only
+/// on the key-grant routes and only as the same key as the ingress token: same `sub`, `org_id`,
+/// `key_id` and `acting_user_id`, and the same retention posture (a mixed set is the typed
+/// `zdr_posture_mismatch`, as for a user's bearers). Anything else is a 403.
+async fn verify_delegated_api_key_browser_bearer(
+    headers: &HeaderMap,
+    model_claims: &Claims,
+    method: &str,
+    path: &str,
+) -> Result<Option<VerifiedApiKeyBrowserBearer>, AuthRejection> {
+    if !headers.contains_key("x-browser-authorization") {
+        return Ok(None);
+    }
+    if !api_key_route_allowed(method, path) {
+        return Err(StatusCode::FORBIDDEN.into());
+    }
+    let Some((token, claims)) = decode_delegated_bearer(
+        headers,
+        "x-browser-authorization",
+        "BROWSER_BROKER_AUTH_AUDIENCE",
+        "browser-broker",
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    if claims.principal_kind() != Ok(PrincipalKind::ApiKey)
+        || claims.sub != model_claims.sub
+        || claims.org_id != model_claims.org_id
+        || claims.key_id != model_claims.key_id
+        || claims.acting_user_id != model_claims.acting_user_id
+    {
+        return Err(StatusCode::FORBIDDEN.into());
+    }
+    if claims.zdr != model_claims.zdr || claims.zdr_waiver != model_claims.zdr_waiver {
+        warn!("delegated api key bearer retention posture differs from the ingress token");
+        return Err(AuthRejection::ZdrPostureMismatch);
+    }
+    Ok(Some(VerifiedApiKeyBrowserBearer::new(&token)))
 }
 
 async fn verify_delegated_service_inference_bearer(
@@ -1304,6 +1481,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Auth
     let principal_kind = token_data.claims.principal_kind().inspect_err(|_| {
         warn!("JWT carries missing, mismatched, or ambiguous principal identity");
     })?;
+    let mut api_key_browser_bearer = None;
     let (
         data_plane_bearer,
         capability_bearer,
@@ -1359,7 +1537,29 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Auth
                 None,
             )
         }
+        PrincipalKind::ApiKey => {
+            // A key carries no user identity, so no user-bound downstream bearer can be bound to
+            // it. Only the key's own broker bearer, on the key-grant routes.
+            if API_KEY_FORBIDDEN_DELEGATIONS
+                .iter()
+                .any(|header| req.headers().contains_key(*header))
+            {
+                warn!("api key principal supplied a downstream delegation it may not hold");
+                return Err(StatusCode::FORBIDDEN.into());
+            }
+            api_key_browser_bearer = verify_delegated_api_key_browser_bearer(
+                req.headers(),
+                &token_data.claims,
+                req.method().as_str(),
+                req.uri().path(),
+            )
+            .await?;
+            (None, None, None, None, None, None, None, None, None)
+        }
     };
+    if let Some(bearer) = api_key_browser_bearer {
+        req.extensions_mut().insert(bearer);
+    }
     req.extensions_mut().insert(step_up);
     req.extensions_mut().insert(token_data.claims);
     req.extensions_mut()
@@ -1519,6 +1719,22 @@ pub async fn authorize_principal_route(req: Request, next: Next) -> Result<Respo
                 return Err(StatusCode::FORBIDDEN);
             }
             Ok(next.run(req).await)
+        }
+        // INNH-10: a key reaches exactly the key-grant routes, with `browser:agent`. Every other
+        // route (and every route added later) is a 403: this arm is an allow-list, not a deny-list.
+        PrincipalKind::ApiKey => {
+            if api_key_route_allowed(req.method().as_str(), req.uri().path())
+                && claims.has_scope(API_KEY_SCOPE_BROWSER_AGENT)
+            {
+                Ok(next.run(req).await)
+            } else {
+                warn!(
+                    method = %req.method(),
+                    path = %req.uri().path(),
+                    "api key principal route or scope denied"
+                );
+                Err(StatusCode::FORBIDDEN)
+            }
         }
     }
 }
@@ -1689,6 +1905,8 @@ mod tests {
     #[test]
     fn claims_roundtrip_json_with_defaults() {
         let c = Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "u1".into(),
             iss: "auth-core".into(),
             exp: 1_700_000_000,
@@ -1721,6 +1939,8 @@ mod tests {
     #[test]
     fn claims_roundtrip_with_aud_and_scopes() {
         let c = Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "u1".into(),
             iss: "auth-core".into(),
             exp: 1_700_000_000,
@@ -1763,6 +1983,8 @@ mod tests {
     #[test]
     fn require_org_matches_and_rejects() {
         let c = Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "user-test".into(),
             iss: "auth-core".into(),
             exp: i64::MAX,
@@ -2327,6 +2549,272 @@ mod tests {
         clear_env();
     }
 
+    fn api_key_claims(key_id: &str) -> Claims {
+        Claims {
+            sub: format!("apikey:{key_id}"),
+            user_id: String::new(),
+            principal_type: Some("api_key".to_owned()),
+            key_id: Some(key_id.to_owned()),
+            acting_user_id: Some("user-test".to_owned()),
+            scopes: vec![API_KEY_SCOPE_BROWSER_AGENT.to_owned()],
+            ..base_claims()
+        }
+    }
+
+    #[test]
+    fn api_key_principal_shape_is_exact_and_the_key_id_is_refused_elsewhere() {
+        assert_eq!(api_key_claims("key-1").principal_kind(), Ok(PrincipalKind::ApiKey));
+        assert_eq!(api_key_claims("key-1").api_key_id(), Some("key-1"));
+        let refused: Vec<(&str, Claims)> = vec![
+            ("sub mismatch", Claims { sub: "apikey:key-2".into(), ..api_key_claims("key-1") }),
+            ("sub without prefix", Claims { sub: "key-1".into(), ..api_key_claims("key-1") }),
+            ("missing key_id", Claims { key_id: None, ..api_key_claims("key-1") }),
+            ("empty key_id", Claims { sub: "apikey:".into(), ..api_key_claims("") }),
+            ("key_id over 128", api_key_claims(&"k".repeat(129))),
+            ("key_id with a space", api_key_claims("key 1")),
+            ("missing owner", Claims { acting_user_id: None, ..api_key_claims("key-1") }),
+            ("empty owner", Claims { acting_user_id: Some(String::new()), ..api_key_claims("key-1") }),
+            ("padded owner", Claims { acting_user_id: Some(" user".into()), ..api_key_claims("key-1") }),
+            ("owner is a key", Claims { acting_user_id: Some("apikey:k".into()), ..api_key_claims("key-1") }),
+            ("user_id present", Claims { user_id: "user-test".into(), ..api_key_claims("key-1") }),
+            ("service_id present", Claims { service_id: Some("service:x".into()), ..api_key_claims("key-1") }),
+            ("key_id on a user", Claims { key_id: Some("key-1".into()), ..base_claims() }),
+            (
+                "key_id on a service",
+                Claims {
+                    sub: "service:quarry".into(),
+                    user_id: String::new(),
+                    principal_type: Some("service".into()),
+                    service_id: Some("service:quarry".into()),
+                    reason: Some("test service".into()),
+                    key_id: Some("key-1".into()),
+                    ..base_claims()
+                },
+            ),
+        ];
+        for (case, claims) in refused {
+            assert_eq!(claims.principal_kind(), Err(StatusCode::UNAUTHORIZED), "{case}");
+            assert_eq!(claims.api_key_id(), None, "{case}");
+        }
+        assert_eq!(base_claims().principal_kind(), Ok(PrincipalKind::User), "users unchanged");
+    }
+
+    #[test]
+    fn api_key_routes_are_exactly_the_two_key_grant_shapes() {
+        assert!(api_key_route_allowed("POST", "/v1/browser/key-grants"));
+        assert!(api_key_route_allowed("DELETE", "/v1/browser/key-grants/abc"));
+        for (method, path) in [
+            ("GET", "/v1/browser/key-grants"),
+            ("DELETE", "/v1/browser/key-grants"),
+            ("DELETE", "/v1/browser/key-grants/"),
+            ("DELETE", "/v1/browser/key-grants/a/b"),
+            ("POST", "/v1/browser/key-grants/abc"),
+            ("POST", "/v1/browser/key-grants/abc/renew"),
+            ("POST", "/v1/browser/grants"),
+            ("DELETE", "/v1/browser/grants/abc"),
+            ("POST", "/v1/browser/key-grants-x"),
+            ("POST", "/v1/invoke"),
+        ] {
+            assert!(!api_key_route_allowed(method, path), "{method} {path}");
+        }
+        assert_eq!(API_KEY_ROUTES.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn authorize_principal_route_admits_a_key_only_on_its_routes_with_its_scope() {
+        async fn ok_handler() -> &'static str {
+            "ok"
+        }
+        async fn status_of(claims: Claims, method: &str, path: &str) -> StatusCode {
+            Router::new()
+                .route("/v1/browser/key-grants", axum::routing::post(ok_handler))
+                .route("/v1/browser/key-grants/:id", axum::routing::delete(ok_handler))
+                .route("/v1/invoke", axum::routing::post(ok_handler))
+                .layer(middleware::from_fn(authorize_principal_route))
+                .layer(axum::Extension(claims))
+                .oneshot(
+                    HttpRequest::builder()
+                        .method(method)
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+        }
+        let key = api_key_claims("key-1");
+        assert_eq!(status_of(key.clone(), "POST", "/v1/browser/key-grants").await, StatusCode::OK);
+        assert_eq!(status_of(key.clone(), "DELETE", "/v1/browser/key-grants/g1").await, StatusCode::OK);
+        assert_eq!(status_of(key.clone(), "POST", "/v1/invoke").await, StatusCode::FORBIDDEN);
+        let unscoped = Claims { scopes: Vec::new(), ..key };
+        assert_eq!(
+            status_of(unscoped, "POST", "/v1/browser/key-grants").await,
+            StatusCode::FORBIDDEN,
+            "a key without browser:agent is refused even on its route"
+        );
+        // A user passes the fence on the key routes (the handler refuses it), as before.
+        assert_eq!(status_of(base_claims(), "POST", "/v1/invoke").await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn delegated_api_key_bearer_must_be_the_same_key_and_only_on_the_key_routes() {
+        async fn echo_key_bearer(bearer: VerifiedApiKeyBrowserBearer) -> String {
+            bearer.as_str().to_owned()
+        }
+        async fn echo_user_bearer(bearer: VerifiedBrowserBearer) -> String {
+            bearer.as_str().to_owned()
+        }
+
+        clear_env();
+        reset_jwks_cache_for_test().await;
+        let kid = "test-kid-api-key-delegation";
+        let server = start_jwks_mock(kid).await;
+        std::env::set_var(
+            "AUTH_CORE_JWKS_URL",
+            format!("{}/.well-known/jwks.json", server.uri()),
+        );
+        std::env::set_var("AUTH_CORE_AUDIENCE", "model-gateway");
+        std::env::set_var("AUTH_CORE_ISSUER", "auth-core");
+        std::env::set_var("BROWSER_BROKER_AUTH_AUDIENCE", "browser-broker");
+
+        let broker_aud = |claims: Claims| Claims {
+            aud: Some("browser-broker".into()),
+            ..claims
+        };
+        let model_token = sign_jwt(&api_key_claims("key-1"), kid);
+        let key_bearer = sign_jwt(&broker_aud(api_key_claims("key-1")), kid);
+        let router = || {
+            Router::new()
+                .route("/v1/browser/key-grants", axum::routing::post(echo_key_bearer))
+                .route("/v1/browser/grants", axum::routing::post(echo_user_bearer))
+                .route("/", get(echo_key_bearer))
+                .layer(middleware::from_fn(require_auth))
+        };
+        let call = |path: &'static str, method: &'static str, extra: Vec<(&'static str, String)>| {
+            let mut builder = HttpRequest::builder()
+                .method(method)
+                .uri(path)
+                .header("authorization", format!("Bearer {model_token}"));
+            for (name, value) in extra {
+                builder = builder.header(name, value);
+            }
+            router().oneshot(builder.body(Body::empty()).unwrap())
+        };
+
+        let response = call(
+            "/v1/browser/key-grants",
+            "POST",
+            vec![("x-browser-authorization", format!("Bearer {key_bearer}"))],
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1 << 16).await.unwrap();
+        assert_eq!(body, key_bearer.as_bytes(), "the key's own broker bearer is forwarded");
+
+        // The same pair on any other route: refused before a handler runs.
+        for (path, method) in [("/", "GET"), ("/v1/browser/grants", "POST")] {
+            let response = call(
+                path,
+                method,
+                vec![("x-browser-authorization", format!("Bearer {key_bearer}"))],
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {path}");
+        }
+
+        let another_key = sign_jwt(&broker_aud(api_key_claims("key-2")), kid);
+        let another_owner = sign_jwt(
+            &broker_aud(Claims {
+                acting_user_id: Some("user-other".into()),
+                ..api_key_claims("key-1")
+            }),
+            kid,
+        );
+        let other_org = sign_jwt(
+            &broker_aud(Claims {
+                org_id: "org-other".into(),
+                ..api_key_claims("key-1")
+            }),
+            kid,
+        );
+        let a_user = sign_jwt(&broker_aud(base_claims()), kid);
+        for (case, token) in [
+            ("another key", another_key),
+            ("another owner", another_owner),
+            ("another org", other_org),
+            ("a user bearer", a_user),
+        ] {
+            let response = call(
+                "/v1/browser/key-grants",
+                "POST",
+                vec![("x-browser-authorization", format!("Bearer {token}"))],
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{case}");
+        }
+
+        let zdr_bearer = sign_jwt(
+            &broker_aud(Claims {
+                zdr: true,
+                ..api_key_claims("key-1")
+            }),
+            kid,
+        );
+        let response = call(
+            "/v1/browser/key-grants",
+            "POST",
+            vec![("x-browser-authorization", format!("Bearer {zdr_bearer}"))],
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(response.into_body(), 1 << 16).await.unwrap();
+        assert!(
+            String::from_utf8_lossy(&body).contains("zdr_posture_mismatch"),
+            "a mixed posture is the typed refusal"
+        );
+
+        // No other downstream bearer may ride with a key, on any route.
+        let response = call(
+            "/v1/browser/key-grants",
+            "POST",
+            vec![
+                ("x-browser-authorization", format!("Bearer {key_bearer}")),
+                ("x-session-authorization", format!("Bearer {key_bearer}")),
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        // Without the broker bearer the handler's extractor has nothing: 401.
+        let response = call("/v1/browser/key-grants", "POST", Vec::new()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // A user's browser bearer never becomes a key bearer.
+        let user_model = sign_jwt(&base_claims(), kid);
+        let user_browser = sign_jwt(&broker_aud(base_claims()), kid);
+        let response = router()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/v1/browser/key-grants")
+                    .header("authorization", format!("Bearer {user_model}"))
+                    .header("x-browser-authorization", format!("Bearer {user_browser}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        clear_env();
+    }
+
     #[tokio::test]
     #[serial]
     async fn delegated_sandbox_bearer_requires_exact_audience_and_matching_identity() {
@@ -2850,6 +3338,8 @@ mod tests {
 
     fn base_claims() -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "user-test".into(),
             iss: "auth-core".into(),
             exp: now_secs() + 3600,
@@ -3129,6 +3619,8 @@ mod tests {
 
         fn service(service_id: &str, scopes: &[&str]) -> Claims {
             Claims {
+                key_id: None,
+                acting_user_id: None,
                 sub: service_id.to_owned(),
                 iss: "auth-core".to_owned(),
                 exp: now_secs() + 60,
@@ -3205,6 +3697,8 @@ mod tests {
 
         fn service(service_id: &str, scopes: &[&str]) -> Claims {
             Claims {
+                key_id: None,
+                acting_user_id: None,
                 sub: service_id.to_owned(),
                 iss: "auth-core".to_owned(),
                 exp: now_secs() + 60,
@@ -3621,6 +4115,8 @@ mod service_route_table_tests {
 
     fn service(sub: &str, scopes: &[&str]) -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: sub.to_owned(),
             iss: "test".to_owned(),
             exp: i64::MAX,
