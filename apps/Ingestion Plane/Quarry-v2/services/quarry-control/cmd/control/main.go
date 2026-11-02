@@ -175,6 +175,8 @@ func main() {
 
 	r := chi.NewRouter()
 	r.Use(httpx.RequestID, httpx.Logger, httpx.Recover)
+	// WS10.S8 (D2-021): one request span, so quarryotel.MarkZDR in the handlers has a span to flag.
+	r.Use(httpx.ZdrSpan)
 
 	r.Get("/health", httpx.Health)
 	r.Get("/version", httpx.Version("quarry-control"))
