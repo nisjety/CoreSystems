@@ -86,6 +86,9 @@ async fn main() -> Result<()> {
 
     let pool = store::connect_postgres().await?;
     store::run_migrations(&pool).await?;
+    // Thread activity summary (WS15-S5): the trigger from migration 0078 keeps new messages current;
+    // this bounded task fills the threads that predate it. Readers refuse until it is done.
+    tokio::spawn(space::thread_activity::run_backfill(pool.clone()));
     // Space event log (WS02-S1): the triggers from migration 0072 write rows only while
     // this flag is on. Off by default; a failure to write the flag leaves the stored value
     // as it was and never stops startup (the log is a realtime aid, not authority).
