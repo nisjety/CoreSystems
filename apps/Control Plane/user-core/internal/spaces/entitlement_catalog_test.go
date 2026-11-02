@@ -66,6 +66,8 @@ func TestEntitlementCatalogueIsWellFormedAndOrdered(t *testing.T) {
 	wantOrder := []string{
 		"thread_create", "thread_read", "retrieval_read", "import_write",
 		"agent_action", "schedule_fire", "sandbox_capability", "process_registry",
+		// W2 rows, appended in build order.
+		"run_control", "approval_grant", "dm_create", "message_revise", "message_moderate",
 	}
 	var gotOrder []string
 	seenKeys := map[string]bool{}
@@ -136,7 +138,7 @@ func TestEntitlementValuesDiffAndColumnLists(t *testing.T) {
 	}
 
 	list := entitlementColumnList()
-	if !strings.HasPrefix(list, "thread_create_entitled, ") || !strings.HasSuffix(list, ", process_registry_entitled") {
+	if !strings.HasPrefix(list, "thread_create_entitled, ") || !strings.HasSuffix(list, ", message_moderate_entitled") {
 		t.Fatalf("entitlementColumnList = %q", list)
 	}
 	full := effectPolicyColumnList()
@@ -220,12 +222,67 @@ func zdrProbes() map[string]zdrProbe {
 			decision, err := IssueSpaceCapabilityDecision(evidence, intent, "d", "n", now)
 			return err == nil, err, decision
 		},
+		// WS09-S7: cancelling a run records nothing durable here; the decision
+		// is issued under ZDR and carries the claim.
+		"run_control": func(t *testing.T) (bool, error, Decision) {
+			evidence := validSharedThreadReadEvidence()
+			evidence.Membership.Role = "manager"
+			evidence.ThreadReadEntitled = false
+			evidence.RunControlEntitled = true
+			evidence.ResourceAuthorizationRef = "control:room-1:run-control:7"
+			evidence.Privacy.ZeroDataRetention = true
+			decision, err := IssueSharedRunControlDecision(evidence, RunControlDecisionRequest{
+				DecisionRef: "d", RunID: "run-1", Operation: RunControlOperationCancel, IdempotencyKey: "i", Nonce: "n",
+			}, now)
+			return err == nil, err, decision
+		},
+		// WS10: a durable consent record fails closed under ZDR.
+		"approval_grant": func(t *testing.T) (bool, error, Decision) {
+			evidence := validSharedThreadReadEvidence()
+			evidence.Membership.Role = "manager"
+			evidence.ApprovalGrantEntitled = true
+			evidence.Privacy.ZeroDataRetention = true
+			_, err := IssueApprovalDecideDecision(evidence, ApprovalDecideAuthority{}, ApprovalDecideRequest{}, now)
+			return err == nil, err, Decision{}
+		},
+		// WS12-S5: revising or moderating rewrites stored content.
+		"message_revise": func(t *testing.T) (bool, error, Decision) {
+			evidence := validSharedThreadReadEvidence()
+			evidence.Membership.Role = "editor"
+			evidence.MessageReviseEntitled = true
+			evidence.OriginalRetention = OriginalRetentionRetain
+			evidence.Privacy.ZeroDataRetention = true
+			decision, err := IssueThreadReviseDecision(evidence, ThreadReviseDecisionRequest{}, now)
+			return err == nil, err, decision
+		},
+		"message_moderate": func(t *testing.T) (bool, error, Decision) {
+			evidence := validSharedThreadReadEvidence()
+			evidence.Membership.Role = "manager"
+			evidence.MessageReviseEntitled = true
+			evidence.MessageModerateEntitled = true
+			evidence.OriginalRetention = OriginalRetentionRetain
+			evidence.Privacy.ZeroDataRetention = true
+			decision, err := IssueThreadReviseDecision(evidence, ThreadReviseDecisionRequest{}, now)
+			return err == nil, err, decision
+		},
 	}
 }
+
+// zdrDBOnlyEntitlements are catalogue keys whose ZDR refusal is a database
+// check, not a pure Issue function, so no in-process probe exists. dm_create:
+// requireDMEntitlements reads zero_data_retention from the policy row and
+// reports it as DMNotEntitledError{Missing: [zero_data_retention]}.
+var zdrDBOnlyEntitlements = map[string]string{"dm_create": "requireDMEntitlements (DB)"}
 
 func TestEntitlementZDRClassIsBoundToTheRealIssueFunctions(t *testing.T) {
 	probes := zdrProbes()
 	for _, spec := range EntitlementCatalog() {
+		if _, dbOnly := zdrDBOnlyEntitlements[spec.Key]; dbOnly {
+			if spec.ZDR != ZDRInert {
+				t.Errorf("%s ZDR refusal lives in the DM eligibility query and must be classed zdr_inert", spec.Key)
+			}
+			continue
+		}
 		probe, ok := probes[spec.Key]
 		if !ok {
 			t.Errorf("catalogue key %q has no ZDR probe; add one when adding an entitlement", spec.Key)
