@@ -312,7 +312,7 @@ func replayerFor(t *testing.T, durable bool) worker.WorkflowReplayer {
 	return replayer
 }
 
-func loadReplayHistory(t *testing.T, path string) *historypb.History {
+func loadCrawlReplayHistory(t *testing.T, path string) *historypb.History {
 	t.Helper()
 	f, err := os.Open(path)
 	require.NoError(t, err)
@@ -359,7 +359,7 @@ func TestReplay_RecordedCrawlHistoriesReplayOnCurrentCrawlJobWF(t *testing.T) {
 	for _, path := range replayFixtures(t) {
 		name := strings.TrimSuffix(filepath.Base(path), ".json")
 		t.Run(name, func(t *testing.T) {
-			history := loadReplayHistory(t, path)
+			history := loadCrawlReplayHistory(t, path)
 			err := replayerFor(t, fixtureIsDurable(name)).ReplayWorkflowHistory(nil, history)
 			require.NoError(t, err, "a crawl recorded before this worker does not replay on it; do not deploy")
 		})
@@ -371,7 +371,7 @@ func TestReplay_RecordedCrawlHistoriesReplayOnCurrentCrawlJobWF(t *testing.T) {
 func TestReplay_PreScopeFixturesCarryNoScopeMarker(t *testing.T) {
 	for _, path := range replayFixtures(t) {
 		name := strings.TrimSuffix(filepath.Base(path), ".json")
-		markers := markersOf(loadReplayHistory(t, path))
+		markers := markersOf(loadCrawlReplayHistory(t, path))
 		switch {
 		case strings.HasPrefix(name, "pre_bounded"):
 			require.Empty(t, markers, "%s predates every version marker", name)
@@ -388,7 +388,7 @@ func TestReplay_PreScopeFixturesCarryNoScopeMarker(t *testing.T) {
 func TestReplay_FixturesMatchTheirScenarios(t *testing.T) {
 	for _, sc := range replayScenarios() {
 		t.Run(sc.name, func(t *testing.T) {
-			committed := loadReplayHistory(t, filepath.Join(replayFixtureDir, sc.name+".json"))
+			committed := loadCrawlReplayHistory(t, filepath.Join(replayFixtureDir, sc.name+".json"))
 			fresh := recordHistory(t, sc)
 			require.Equal(t, eventShape(fresh), eventShape(committed),
 				"the command sequence of %s changed since it was recorded; that is exactly what a replay catches", sc.name)
@@ -414,7 +414,7 @@ func eventShape(h *historypb.History) []string {
 // TestReplay_ADriftedCommandSequenceIsCaught proves the gate has teeth: the same history with
 // one activity renamed, which is what an unversioned change to the loop does, fails.
 func TestReplay_ADriftedCommandSequenceIsCaught(t *testing.T) {
-	history := loadReplayHistory(t, filepath.Join(replayFixtureDir, "pre_scope_inmemory.json"))
+	history := loadCrawlReplayHistory(t, filepath.Join(replayFixtureDir, "pre_scope_inmemory.json"))
 	renamed := false
 	for _, e := range history.GetEvents() {
 		if e.GetEventType() == enumspb.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED &&
@@ -439,7 +439,7 @@ func TestReplay_ADriftedCommandSequenceIsCaught(t *testing.T) {
 func TestReplay_AScopedInputOnAPreScopeHistoryRunsTheLegacyLoop(t *testing.T) {
 	for _, name := range []string{"pre_scope_inmemory", "pre_scope_durable", "pre_bounded_inmemory"} {
 		t.Run(name, func(t *testing.T) {
-			history := loadReplayHistory(t, filepath.Join(replayFixtureDir, name+".json"))
+			history := loadCrawlReplayHistory(t, filepath.Join(replayFixtureDir, name+".json"))
 			started := history.Events[0].GetWorkflowExecutionStartedEventAttributes()
 			var in CrawlJobInput
 			require.NoError(t, converter.GetDefaultDataConverter().FromPayloads(started.Input, &in))
