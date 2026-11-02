@@ -659,6 +659,12 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 	var scope *crawlScopeRun
 	if workflow.GetVersion(ctx, "crawl-scope-v1", workflow.DefaultVersion, 1) >= 1 {
 		scope = newCrawlScopeRun(in)
+		// W2-U64: a missing scope_applied (an edge older than this orchestrator) no longer
+		// ends an observe-mode crawl after its first page. Histories recorded before the
+		// marker keep the strict behaviour.
+		if scope != nil && workflow.GetVersion(ctx, crawlScopeTolerantVersion, workflow.DefaultVersion, 1) >= 1 {
+			scope.tolerateUnapplied = true
+		}
 	}
 
 	ctrl, err := installControlHandlers(ctx)
@@ -787,12 +793,18 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 		}
 		if scope != nil {
 			// An edge that did not apply the scope ends the run: nothing of this page is followed.
-			if !appliedBy(res.Crawl) {
+			switch scope.verdict(res.Crawl) {
+			case verdictRefused:
 				stopReason = edgeScopeUnsupported
+			case verdictLegacyUnscoped:
+				workflow.GetLogger(ctx).Warn("edge did not report scope_applied; crawl continues unscoped (observe)")
+			default:
+				scope.absorb(res.Crawl)
+				ctrl.progress.Denied = scope.linksDenied
+			}
+			if stopReason == edgeScopeUnsupported {
 				break
 			}
-			scope.absorb(res.Crawl)
-			ctrl.progress.Denied = scope.linksDenied
 		}
 		// INNH-6b: an edge that did not apply the scrape options ends the run.
 		if !scrapeAppliedBy(in, res) {
@@ -968,12 +980,12 @@ func crawlJobDurableFrontier(
 			if bounded && pagesFailed >= in.MaxPages {
 				stopReason = crawlStopMaxFailures
 			}
-		} else if scope != nil && !appliedBy(res.Crawl) {
+		} else if scope != nil && scope.verdict(res.Crawl) == verdictRefused {
 			stopReason = edgeScopeUnsupported
 		} else if !scrapeAppliedBy(in, res) {
 			stopReason = edgeScrapeUnsupported
 		} else {
-			if scope != nil {
+			if scope != nil && appliedBy(res.Crawl) {
 				scope.absorb(res.Crawl)
 			}
 			pagesVisited++
