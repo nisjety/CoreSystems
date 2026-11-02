@@ -6,6 +6,7 @@ import type { JSX } from '@solidjs/web'
 import { flush } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import AccountSettingsPage from '@/features/settings/components/AccountSettingsPage'
+import SettingsPage from '@/features/settings/components/SettingsPage'
 import { CoreSidebar } from '@/features/core/components/CoreSidebar'
 import { routeFromPath } from '@/features/core/lib/shell-data'
 import { VerevonWorkspaceSettingsPage } from '@/features/settings/components/WorkspaceSettingsPage'
@@ -1001,5 +1002,68 @@ describe('settings sidebars', () => {
     expect(within(settingsNav).getByRole('link', { name: /^sso$/i }).getAttribute('href')).toBe('/settings/sso')
     expect(within(settingsNav).getByRole('link', { name: /^organisasjonssikkerhet$/i }).getAttribute('href')).toBe('/settings/org-security')
     expect(within(settingsNav).getByRole('link', { name: /^integrasjoner$/i }).getAttribute('href')).toBe('/settings/integrations')
+  })
+})
+
+describe('settings search', () => {
+  function renderSettingsRoute(path: string) {
+    const TestRouter = createRouter({
+      routes: [
+        { path: '/settings', component: () => <SettingsPage /> },
+        { path: '/settings/:section', component: () => <SettingsPage /> },
+      ],
+      history: memoryHistory(path),
+      explicitLinks: true,
+    })
+    return render(() => <TestRouter>{(props) => <>{props.children}</>}</TestRouter>)
+  }
+
+  it('opens the section that a Norwegian or English word matches when Enter is pressed', async () => {
+    renderSettingsRoute('/settings/workspace')
+    const search = screen.getByRole('combobox', { name: /søk i innstillinger/i })
+
+    fireEvent.input(search, { target: { value: 'tidssone' } })
+    flush()
+    const results = screen.getByRole('listbox', { name: /treff i innstillinger/i })
+    expect(within(results).getAllByRole('option').map((option) => option.textContent)).toEqual(['Planlagte kjøringer'])
+
+    fireEvent.keyDown(search, { key: 'Enter' })
+    flush()
+    await waitFor(() => expect(screen.getByRole('heading', { level: 1, name: /planlagte kjøringer/i })).toBeTruthy())
+    expect((search as HTMLInputElement).value).toBe('')
+  })
+
+  it('moves the highlight with the arrow keys and clears the search on Escape', () => {
+    renderSettingsRoute('/settings/workspace')
+    const search = screen.getByRole('combobox', { name: /søk i innstillinger/i })
+
+    fireEvent.input(search, { target: { value: 'minne' } })
+    flush()
+    expect(search.getAttribute('aria-activedescendant')).toBe('settings-search-option-memory')
+
+    fireEvent.keyDown(search, { key: 'ArrowDown' })
+    flush()
+    expect(search.getAttribute('aria-activedescendant')).toBe('settings-search-option-org-security')
+
+    fireEvent.keyDown(search, { key: 'Escape' })
+    flush()
+    expect((search as HTMLInputElement).value).toBe('')
+    expect(screen.queryByRole('listbox', { name: /treff i innstillinger/i })).toBeNull()
+  })
+
+  it('does not offer the platform users page to someone who is not a platform admin', () => {
+    renderSettingsRoute('/settings/workspace')
+
+    fireEvent.input(screen.getByRole('combobox', { name: /søk i innstillinger/i }), { target: { value: 'superadmin' } })
+    flush()
+    expect(screen.getByText(/ingen innstillinger samsvarer med søket/i)).toBeTruthy()
+  })
+
+  it('says so when no setting matches', () => {
+    renderSettingsRoute('/settings/workspace')
+
+    fireEvent.input(screen.getByRole('combobox', { name: /søk i innstillinger/i }), { target: { value: 'xyzzy' } })
+    flush()
+    expect(screen.getByText(/ingen innstillinger samsvarer med søket/i)).toBeTruthy()
   })
 })
