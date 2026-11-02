@@ -618,6 +618,13 @@ pub async fn create_source(
             ),
         ));
     }
+    // A source is a URL the platform fetches later, so a denied URL is refused at create
+    // time, under the same org web policy as the scrape family. The fetch itself is gated
+    // again where it happens (the scrape, crawl and batch routes a tracked source feeds).
+    let source_zdr = claims.effective_zdr(req.zdr.unwrap_or(false));
+    crate::web_policy_edge::decide(&state.policy, &claims, source_zdr, None)
+        .and_then(|decision| crate::web_policy_edge::gate_url(&decision, url))
+        .map_err(|error| crate::web_policy_edge::envelope_error(&request_id, error))?;
     // Re-build the control-facing body from validated, trimmed fields. We
     // never forward a client-supplied org_id — it isn't part of the request
     // shape and control reads org from the `?org_id` query param exclusively.
