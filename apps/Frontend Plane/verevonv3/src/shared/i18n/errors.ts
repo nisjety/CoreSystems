@@ -1054,6 +1054,14 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
 
   // WS05 org security
 
+  // WS13 message search
+  invalid_cursor: { no: 'Søkesiden er ikke gyldig lenger. Søk på nytt.', en: 'That page of results is no longer valid. Search again.' },
+  invalid_filter: { no: 'Søkeavgrensningen er ikke gyldig. Velg omfanget på nytt og prøv igjen.', en: 'The search filter is not valid. Choose the scope again and try again.' },
+  search_busy: { no: 'Søket er opptatt akkurat nå. Prøv igjen om litt.', en: 'Search is busy right now. Try again shortly.', retryable: true },
+  search_timeout: { no: 'Søket tok for lang tid. Prøv igjen, eller gjør søket mer presist.', en: 'The search took too long. Try again, or make the search more specific.', retryable: true },
+  search_unavailable: { no: 'Søket er utilgjengelig akkurat nå. Prøv igjen om litt.', en: 'Search is unavailable right now. Try again shortly.', retryable: true },
+  space_search_disabled: { no: 'Meldingssøk er ikke slått på for dette rommet.', en: 'Message search is not turned on for this room.' },
+
   // WS07 resilience and content hardening
 
   // WS10 tool policy editor (S5b)

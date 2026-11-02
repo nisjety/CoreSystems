@@ -1,0 +1,254 @@
+/*
+ * In-room message search (WS13-S5).
+ *
+ * Its own sheet on purpose: global.css is a shared monolith. Rules carry the `.verevon-space` scope so
+ * they win over the shared button and input rules at equal specificity. The bar sits above the
+ * conversation inside the chat panel (a flex column), takes its natural height, and the result list
+ * scrolls inside its own capped box so the timeline below keeps its room.
+ */
+
+.verevon-space .verevon-space-search {
+  flex: none;
+  margin-bottom: 8px;
+}
+
+.verevon-space .verevon-space-search__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 4px 10px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 8px;
+  background: var(--verevon-surface-soft, transparent);
+  color: var(--verevon-text-muted);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.verevon-space .verevon-space-search__trigger:hover {
+  color: var(--verevon-text);
+}
+
+.verevon-space .verevon-space-search__trigger:focus-visible,
+.verevon-space .verevon-space-search__close:focus-visible,
+.verevon-space .verevon-space-search__chip:focus-visible,
+.verevon-space .verevon-space-search__link:focus-visible,
+.verevon-space .verevon-space-search__more:focus-visible,
+.verevon-space .verevon-space-search__person:focus-visible {
+  outline: 2px solid var(--verevon-accent, currentColor);
+  outline-offset: 2px;
+}
+
+.verevon-space .verevon-space-search__kbd {
+  padding: 0 5px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 4px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--verevon-text-muted);
+}
+
+.verevon-space .verevon-space-search__panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 10px;
+  background: var(--verevon-surface);
+}
+
+.verevon-space .verevon-space-search__bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--verevon-text-muted);
+}
+
+.verevon-space .verevon-space-search__input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 6px 4px;
+  border: 0;
+  border-bottom: 1px solid var(--verevon-border);
+  background: transparent;
+  color: var(--verevon-text);
+  font: inherit;
+  font-size: 14px;
+}
+
+.verevon-space .verevon-space-search__input:focus-visible {
+  outline: 2px solid var(--verevon-accent, currentColor);
+  outline-offset: 2px;
+}
+
+.verevon-space .verevon-space-search__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--verevon-text-muted);
+  cursor: pointer;
+}
+
+.verevon-space .verevon-space-search__scopes,
+.verevon-space .verevon-space-search__recents {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.verevon-space .verevon-space-search__chip {
+  padding: 3px 10px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--verevon-text-muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.verevon-space .verevon-space-search__chip[aria-pressed="true"] {
+  border-color: var(--verevon-accent, currentColor);
+  background: var(--verevon-surface-muted, transparent);
+  color: var(--verevon-text);
+}
+
+.verevon-space .verevon-space-search__person {
+  max-width: 200px;
+  padding: 3px 6px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 6px;
+  background: var(--verevon-surface);
+  color: var(--verevon-text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.verevon-space .verevon-space-search__note,
+.verevon-space .verevon-space-search__state,
+.verevon-space .verevon-space-search__idle p {
+  margin: 0;
+  font-size: 13px;
+  color: var(--verevon-text-muted);
+}
+
+.verevon-space .verevon-space-search__note {
+  padding: 6px 10px;
+  border-left: 3px solid var(--verevon-border);
+  border-radius: 4px;
+  background: var(--verevon-surface-soft, transparent);
+}
+
+.verevon-space .verevon-space-search__state[data-state="error"] {
+  color: var(--verevon-text);
+}
+
+.verevon-space .verevon-space-search__recents-label {
+  font-size: 12px;
+  color: var(--verevon-text-muted);
+}
+
+.verevon-space .verevon-space-search__link {
+  padding: 0 4px;
+  margin-left: 6px;
+  border: 0;
+  background: transparent;
+  color: var(--verevon-accent-ink, var(--verevon-text));
+  font: inherit;
+  font-size: 12px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.verevon-space .verevon-space-search__list {
+  max-height: min(46vh, 420px);
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+  overscroll-behavior: contain;
+}
+
+.verevon-space .verevon-space-search__list[hidden] {
+  display: none;
+}
+
+.verevon-space .verevon-space-search__hit {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.verevon-space .verevon-space-search__hit:hover,
+.verevon-space .verevon-space-search__hit[data-active="true"] {
+  background: var(--verevon-surface-muted, rgba(127, 127, 127, 0.12));
+}
+
+.verevon-space .verevon-space-search__hit[data-active="true"] {
+  outline: 2px solid var(--verevon-accent, currentColor);
+  outline-offset: -2px;
+}
+
+.verevon-space .verevon-space-search__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--verevon-text-muted);
+}
+
+.verevon-space .verevon-space-search__author {
+  font-weight: 600;
+  color: var(--verevon-text);
+}
+
+.verevon-space .verevon-space-search__thread {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.verevon-space .verevon-space-search__snippet {
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--verevon-text);
+  overflow-wrap: anywhere;
+}
+
+.verevon-space .verevon-space-search__snippet mark {
+  padding: 0 1px;
+  border-radius: 2px;
+  background: var(--verevon-accent-soft, rgba(250, 204, 21, 0.35));
+  color: inherit;
+}
+
+.verevon-space .verevon-space-search__more {
+  align-self: flex-start;
+  padding: 4px 12px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--verevon-text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.verevon-space .verevon-space-search__more:disabled {
+  opacity: 0.6;
+  cursor: default;
+}

@@ -25,6 +25,7 @@ import {
   type SpaceRoomPin,
   type SpaceDeletionReceipt,
   type SpaceRosterMember,
+  type SpaceSearchHit,
   type SpaceAgentWork,
   type SpaceThread,
 } from '@/shared/api/spaces-client'
@@ -59,6 +60,7 @@ import { SpaceRoomComposer } from './SpaceRoomComposer'
 import { SpaceArchivedBanner, SpaceArchivedNotice, canArchiveRoom } from './SpaceRoomArchive'
 import { SpaceDmHeader } from './SpaceDmHeader'
 import { SpaceRoomHeader } from './SpaceRoomHeader'
+import { SpaceRoomSearch } from './SpaceRoomSearch'
 import { SpaceRoomTimeline, roomAgentName } from './SpaceRoomTimeline'
 import {
   SpaceAuxPane,
@@ -169,6 +171,9 @@ export default function SpacePage() {
   // A different thread never inherits the previous thread's message.
   const openThread = (threadId: string) => setSearchParams({ thread_id: threadId, m: undefined })
   const closeThread = () => setSearchParams({ thread_id: undefined, m: undefined }, { replace: true })
+  // A search hit (WS13-S5) opens its thread in the pane, scrolled to the message when entry links are on.
+  const openSearchHit = (hit: SpaceSearchHit) =>
+    setSearchParams({ thread_id: hit.threadId, m: spaceEntryLinksEnabled() ? hit.messageId : undefined })
   // The context read also carries the room's rollout flags (`features`), which drive the UI switches that
   // used to be build-time.
   const navigate = useNavigate()
@@ -675,6 +680,14 @@ export default function SpacePage() {
                 <SpaceCockpit
                   tabs={{
                     chat: (
+                      <>
+                      <SpaceRoomSearch
+                        spaceRef={current().space.space_ref}
+                        roster={() => (roster.error ? [] : roster() ?? [])}
+                        viewerSubjectId={() => current().membership.subject_id}
+                        openThreadId={selectedThreadId}
+                        onOpenHit={openSearchHit}
+                      />
                       <SpaceConversationPanel
                         spaceRef={current().space.space_ref}
                         spaceName={spaceDisplayName(current().space, i18n.tr)}
@@ -707,6 +720,7 @@ export default function SpacePage() {
                             : undefined
                         }
                       />
+                      </>
                     ),
                     arbeid: <SpaceWorkPanel spaceRef={current().space.space_ref} liveRuns={agentWork()?.live === true} />,
                     kunnskap: <SpaceKnowledgePanel spaceRef={current().space.space_ref} />,
