@@ -35,6 +35,7 @@ pub mod navbar;
 pub mod notifications;
 pub mod onboarding;
 pub mod orchestration;
+pub mod org_identity;
 pub mod orgs;
 pub mod ownership;
 pub mod persona;

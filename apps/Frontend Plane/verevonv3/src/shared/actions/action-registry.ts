@@ -1038,6 +1038,13 @@ const orgSetModelEntitlementInput = z.object({
   roles: z.record(z.string().min(1), modelPolicyLayer).optional(),
 }).strict()
 
+// Domain verification (WS05-S6). The domain is a hostname; org-core normalizes it, refuses IP
+// literals, public suffixes and free-mail providers, and owns every other rule.
+const orgDomainInput = z.object({
+  orgId: z.string().min(1),
+  domain: z.string().trim().min(1).max(253),
+})
+
 const orgUpdateInstructionsInput = z.object({
   orgId: z.string().min(1),
   instructions: z.string().trim().optional(),
@@ -2967,6 +2974,39 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
+    id: 'org.add_domain',
+    label: 'Add organization domain',
+    description: 'Claim a company domain for the organization. Returns a DNS TXT challenge to publish; nothing is trusted until it is verified. Owner or admin only.',
+    ownerPlane: 'control',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: orgDomainInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'org.verify_domain',
+    label: 'Verify organization domain',
+    description: 'Check the published DNS TXT challenge for a claimed domain. DNS is the only proof; limited to six attempts per domain per hour. Owner or admin only.',
+    ownerPlane: 'control',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: orgDomainInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'org.revoke_domain',
+    label: 'Remove organization domain',
+    description: 'Withdraw a claimed or verified company domain. Refused while the domain backs an enforced single sign-on policy. Owner or admin only.',
+    ownerPlane: 'control',
+    risk: 'high',
+    requiresApproval: true,
+    reversible: true,
+    inputSchema: orgDomainInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
     id: 'org.update_instructions',
     label: 'Update organization instructions',
     description: 'Update the organization-wide standing instructions agents follow.',
@@ -3497,7 +3537,7 @@ export const actionRegistry = [
   {
     id: 'audit.list_events',
     label: 'List audit log events',
-    description: 'Page the organization's audit trail newest first with a cursor and filters on event, user, plane, outcome, subject and resource. Read-only metadata, no export. Owner or admin see the organization; other roles only their own rows. Human sessions only.',
+    description: 'Page the organization\'s audit trail newest first with a cursor and filters on event, user, plane, outcome, subject and resource. Read-only metadata, no export. Owner or admin see the organization; other roles only their own rows. Human sessions only.',
     ownerPlane: 'control',
     risk: 'low',
     requiresApproval: false,

@@ -259,6 +259,10 @@ pub(crate) struct SpaceFeatureFlags {
     /// `SPACE_THREAD_PANE_UI` (WS01-S5): reported to the SPA as `features.thread_pane` (the right-hand
     /// thread pane and `?thread_id=` deep link). A rollout control, never an authorization input.
     pub(crate) thread_pane_ui: bool,
+    /// `ORG_IDENTITY_ADMIN_API` (WS05-S6): the owner/admin domain verification routes
+    /// (`/api/v1/orgs/{id}/domains`), proxied to org-core. Off answers 404 `feature_disabled`.
+    /// A rollout control, never an authorization input: the live owner/admin membership decides.
+    pub(crate) org_identity_admin_api: bool,
 }
 
 impl SpaceFeatureFlags {
@@ -282,6 +286,7 @@ impl SpaceFeatureFlags {
             room_artifacts: space_flag("SPACE_ROOM_ARTIFACTS_API"),
             send_idempotency_api: space_flag("SPACE_SEND_IDEMPOTENCY_API"),
             thread_pane_ui: space_flag("SPACE_THREAD_PANE_UI"),
+            org_identity_admin_api: space_flag("ORG_IDENTITY_ADMIN_API"),
         }
     }
 }

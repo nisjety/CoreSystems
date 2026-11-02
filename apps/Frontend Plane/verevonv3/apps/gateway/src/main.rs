@@ -101,6 +101,7 @@ fn build_router(state: config::AppState) -> Router {
         .merge(domains::ai::router(state.clone()))
         .merge(domains::audit::router(state.clone()))
         .merge(domains::audit_compliance::router(state.clone()))
+        .merge(domains::org_identity::router(state.clone()))
         .merge(domains::auth::router(state.clone()))
         .merge(domains::browser::router(state.clone()))
         .merge(domains::browser_evidence::router(state.clone()))

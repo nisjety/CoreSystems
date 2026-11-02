@@ -124,6 +124,7 @@ func main() {
 		orgService.SetAuditPublisher(natsClient)
 		go runGDPRAuditOutbox(ctx, orgService, 5*time.Second)
 		go runSIEMAuditOutbox(ctx, orgService, 5*time.Second)
+		go runIdentityAuditOutbox(ctx, orgService, 5*time.Second)
 	}
 
 	// Wire shared cross-plane publisher (verevon-nats)
@@ -306,6 +307,35 @@ func runSIEMAuditOutbox(ctx context.Context, service *orgcore.Service, interval 
 		if result.Published > 0 || result.DeadLettered > 0 {
 			log.Printf(
 				"org-core SIEM audit outbox published=%d dead_lettered=%d",
+				result.Published, result.DeadLettered,
+			)
+		}
+	}
+	flush()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			flush()
+		}
+	}
+}
+
+// runIdentityAuditOutbox publishes the audit rows of identity changes (domain added, verified,
+// revoked; WS05-S6). It runs whatever ORG_DOMAIN_VERIFICATION_ENABLED says, so rows still
+// pending when the switch is turned off drain.
+func runIdentityAuditOutbox(ctx context.Context, service *orgcore.Service, interval time.Duration) {
+	flush := func() {
+		result, err := service.FlushIdentityAuditOutbox(ctx, 100)
+		if err != nil {
+			log.Printf("org-core identity audit outbox retry failed: %v", err)
+		}
+		if result.Published > 0 || result.DeadLettered > 0 {
+			log.Printf(
+				"org-core identity audit outbox published=%d dead_lettered=%d",
 				result.Published, result.DeadLettered,
 			)
 		}

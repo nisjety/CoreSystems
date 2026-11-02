@@ -12,6 +12,7 @@ import { PersonaSection } from '@/features/settings/components/PersonaSection'
 import { PluginsSection } from '@/features/settings/components/PluginsSection'
 import { CronSchedulesSection } from '@/features/settings/components/CronSchedulesSection'
 import { OrgModelAccessSection } from '@/features/settings/components/OrgModelAccessSection'
+import { DomainsPanel } from '@/features/settings/components/DomainsPanel'
 import { OrgQuotasSection } from '@/features/settings/components/OrgQuotasSection'
 import { OrgSpacePolicySection } from '@/features/settings/components/OrgSpacePolicySection'
 import { MemorySection } from '@/features/settings/components/MemorySection'
@@ -565,16 +566,7 @@ function WorkspaceSection() {
         <SettingsField id="admin-owner" label={i18n.tr('Administratoreier', 'Admin owner')} value="Author Name" />
       </div>
       <div class="verevon-settings-feature-grid">
-        <FeaturePanel
-          title={i18n.tr('Verifiserte domener', 'Verified domains')}
-          description={i18n.tr(
-            'Domeneoppføringer klare for DNS-verifisering og kundevendte lenker.',
-            'Domain records ready for DNS verification and customer-facing links.',
-          )}
-          actionLabel={i18n.tr('Legg til domene', 'Add domain')}
-        >
-          <p class="verevon-settings-panel-note">{i18n.tr('Ingen domener er verifisert for denne organisasjonen.', 'No domains have been verified for this organization.')}</p>
-        </FeaturePanel>
+        <DomainsPanel />
         <FeaturePanel
           title={i18n.tr('Åpningstider', 'Business hours')}
           description={i18n.tr(
