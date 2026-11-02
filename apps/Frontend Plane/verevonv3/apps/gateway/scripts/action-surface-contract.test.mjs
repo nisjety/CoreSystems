@@ -86,7 +86,7 @@ for (const [fragment, ids] of [
   ['ws04.ts', ['spaces.update_room_details', 'spaces.change_member_role', 'spaces.leave_room']],
   ['ws08.ts', ['spaces.set_agent_wake_policy']],
   ['ws10.ts', ['spaces.decide_approval', 'spaces.revoke_approval_grant']],
-  ['ws12.ts', ['spaces.open_dm', 'spaces.hide_space']],
+  ['ws12.ts', ['spaces.open_dm', 'spaces.hide_space', 'spaces.toggle_reaction']],
   [
     'ws14.ts',
     ['space.files.attach', 'space.files.list', 'space.files.read_text', 'space.files.delete'],
@@ -132,7 +132,7 @@ test('the WS04 room admin actions are not model executable', () => {
 });
 
 // WS16-S8 and WS12-S3: the sidebar layout and the direct message actions are human-only as well.
-test('the WS16-S8, WS12-S3 and WS08-S5 actions are not model executable', () => {
+test('the WS16-S8, WS12-S3, WS08-S5 and WS12-S8 actions are not model executable', () => {
   const modelAccessSource = fs.readFileSync(
     path.join(verevonDirectory, 'src/shared/actions/model-access.ts'),
     'utf8',
@@ -143,6 +143,8 @@ test('the WS16-S8, WS12-S3 and WS08-S5 actions are not model executable', () => 
     'spaces.hide_space',
     // WS08-S5: who may wake an agent is a human decision; an agent cannot govern itself.
     'spaces.set_agent_wake_policy',
+    // WS12-S8: a reaction is a person's own mark; an agent cannot react as someone.
+    'spaces.toggle_reaction',
   ]) {
     const row = modelAccessSource.match(new RegExp(`'${actionId.replace('.', '\\.')}':\\s*([^\\n]+)`));
     assert.ok(row, `${actionId} has a model-access row`);

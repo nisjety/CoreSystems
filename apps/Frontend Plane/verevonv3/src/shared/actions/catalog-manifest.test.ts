@@ -140,6 +140,16 @@ describe('provisional Action Catalog manifest', () => {
     }
   })
 
+  it('keeps the reaction action human-only (WS12-S8): a reaction is a personal mark that no model may place', async () => {
+    const manifest = await buildActionCatalogManifest()
+    const entry = manifest.actions.find((action) => action.id === 'spaces.toggle_reaction')
+    expect(entry).toBeDefined()
+    expect(isModelExecutableAction('spaces.toggle_reaction')).toBe(false)
+    expect(entry?.allowedActorTypes).toEqual(['human'])
+    expect(entry?.modelAccess).toBe('none')
+    expect(entry?.exemptReason).not.toBeNull()
+  })
+
   it('does not let the owner plane move the admission schema hash (WS14-S4 re-point)', async () => {
     // Re-pointing the share actions from Control to the Data Plane changed ownerPlane only.
     // The admission contract hashes id + input + output schemas, so the vendored golden

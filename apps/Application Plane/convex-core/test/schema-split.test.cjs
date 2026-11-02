@@ -144,3 +144,67 @@ test('schema.ts only composes the feature groups and defines no table itself', (
     assert.match(source, new RegExp(`from "\\./schema/${file.replace(/\.ts$/, '')}"`), `schema.ts does not import ${file}`);
   }
 });
+
+// --- WS11-S6 / S9 / S10 / S11, WS12-S8, WS15-S12 indexes ---------------------------------------
+
+function indexFields(table, name) {
+  const found = schema.tables[table].indexes.find((index) => index.indexDescriptor === name);
+  return found ? found.fields : undefined;
+}
+
+test('WS11-S6: spaceRoomNotifyPrefs and spaceReminders list by_space (Space erasure)', () => {
+  assert.deepEqual(indexFields('spaceRoomNotifyPrefs', 'by_space'), ['spaceRef']);
+  assert.deepEqual(indexFields('spaceReminders', 'by_space'), ['spaceRef']);
+});
+
+test('WS11-S10: spaceMemberStatus has by_expiry beside by_org_and_subject', () => {
+  assert.deepEqual(indexFields('spaceMemberStatus', 'by_expiry'), ['expiresAt']);
+  assert.deepEqual(indexFields('spaceMemberStatus', 'by_org_and_subject'), ['externalOrgId', 'externalAuthId']);
+});
+
+test('WS11-S11: spaceReminders has the indexes the create, heal and erase paths read', () => {
+  assert.deepEqual(indexFields('spaceReminders', 'by_subject_and_state'), ['externalAuthId', 'state']);
+  assert.deepEqual(indexFields('spaceReminders', 'by_due'), ['state', 'remindAt']);
+});
+
+test('WS12-S8: spaceReactions is composed with the indexes the reactions API reads', () => {
+  assert.ok(Object.keys(schema.tables).includes('spaceReactions'));
+  assert.deepEqual(indexFields('spaceReactions', 'by_space_thread'), ['spaceRef', 'threadId']);
+  assert.deepEqual(indexFields('spaceReactions', 'by_message_subject_emoji')?.[0], 'messageId');
+});
+
+test('WS15-S12: spaceRoomNotices is composed with by_space_and_created and by_created', () => {
+  assert.ok(Object.keys(schema.tables).includes('spaceRoomNotices'));
+  assert.deepEqual(indexFields('spaceRoomNotices', 'by_space_and_created'), ['spaceRef', 'createdAt']);
+  assert.deepEqual(indexFields('spaceRoomNotices', 'by_created'), ['createdAt']);
+});
+
+test('WS11-S6: every index the attention ingest and its erasure paths name exists with the field they filter on', () => {
+  const expected = [
+    ['spaceAttentionItems', 'by_thread', 'threadId'],
+    ['spaceAttentionItems', 'by_space', 'spaceRef'],
+    ['spaceAttentionItems', 'by_expiry', 'expiresAt'],
+    ['spaceAttentionItems', 'by_recipient_state_updated', 'recipientAuthId'],
+    ['spaceAttentionItems', 'by_recipient_coalesce', 'recipientAuthId'],
+    ['spaceThreadFollows', 'by_thread', 'threadId'],
+    ['spaceThreadFollows', 'by_space', 'spaceRef'],
+    ['spaceThreadFollows', 'by_subject_and_thread', 'externalAuthId'],
+    ['spaceAttentionEvents', 'by_event_id', 'eventId'],
+    ['spaceAttentionEvents', 'by_created', 'createdAt'],
+    ['spaceAttentionBudget', 'by_recipient', 'recipientAuthId'],
+    ['spaceAgentActivity', 'by_space_and_agent', 'spaceRef'],
+    ['spaceRoomNotifyPrefs', 'by_subject_and_space', 'externalAuthId'],
+    ['spaceRoomNotifyPrefs', 'by_subject', 'externalOrgId'],
+    ['spaceNotifyUserSettings', 'by_subject', 'externalOrgId'],
+    ['spaceReadMarkers', 'by_space_and_subject', 'spaceRef'],
+    ['spaceReadMarkers', 'by_org_and_subject', 'externalOrgId'],
+    ['spacePresence', 'by_space', 'spaceRef'],
+    ['spacePresence', 'by_space_and_subject', 'spaceRef'],
+  ];
+  const missing = [];
+  for (const [table, name, first] of expected) {
+    const fields = indexFields(table, name);
+    if (!fields || fields[0] !== first) missing.push(`${table}.${name}`);
+  }
+  assert.deepEqual(missing, []);
+});

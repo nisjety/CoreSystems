@@ -35,9 +35,34 @@ function makeCtx(initialTables = {}, options = {}) {
             conditions.push([field, value]);
             return q;
           },
+          // Range bounds on the last index field (`q.lt("expiresAt", now)`).
+          lt(field, value) {
+            conditions.push([field, value, 'lt']);
+            return q;
+          },
+          lte(field, value) {
+            conditions.push([field, value, 'lte']);
+            return q;
+          },
+          gt(field, value) {
+            conditions.push([field, value, 'gt']);
+            return q;
+          },
+          gte(field, value) {
+            conditions.push([field, value, 'gte']);
+            return q;
+          },
         };
         if (build) build(q);
-        rows = rows.filter((row) => conditions.every(([field, value]) => row[field] === value));
+        rows = rows.filter((row) =>
+          conditions.every(([field, value, op]) => {
+            if (op === 'lt') return row[field] < value;
+            if (op === 'lte') return row[field] <= value;
+            if (op === 'gt') return row[field] > value;
+            if (op === 'gte') return row[field] >= value;
+            return row[field] === value;
+          }),
+        );
         return api;
       },
       filter() {
@@ -88,6 +113,10 @@ function makeCtx(initialTables = {}, options = {}) {
           if (hit) return hit;
         }
         return null;
+      },
+      // Convex returns the id when it belongs to the table, else null.
+      normalizeId(table, id) {
+        return rowsOf(table).some((row) => row._id === id) ? id : null;
       },
       async insert(table, value) {
         const _id = `${table}_${++counter}`;

@@ -330,3 +330,159 @@ test('dead-letters a repeatedly failing event without storing email', async () =
   assert.equal(deadLetter.payload.user_email, undefined);
   assert.equal(JSON.stringify(deadLetter).includes('must-not-enter-dlq'), false);
 });
+
+// --- WS11-S6: Space attention durable (MODEL_PLANE_SPACE_EVENTS / convex-space-attention) ------
+
+const { processSpaceEventMessage } = require('../nats-subscriber.js');
+
+function spaceMessage({ redeliveryCount = 1, data } = {}) {
+  const bytes = data ?? new TextEncoder().encode(JSON.stringify({ event_id: 'evt_1', schema_version: 1 }));
+  return {
+    subject: 'mp.v1.space.space_1.event',
+    data: bytes,
+    info: { redeliveryCount },
+    calls: [],
+    ack() { this.calls.push(['ack']); },
+    nak(delay) { this.calls.push(['nak', delay]); },
+    term() { this.calls.push(['term']); },
+  };
+}
+
+function quietConsole(t) {
+  const saved = { log: console.log, warn: console.warn, error: console.error };
+  const lines = [];
+  for (const name of Object.keys(saved)) console[name] = (...args) => lines.push([name, args.join(' ')]);
+  t.after(() => Object.assign(console, saved));
+  return lines;
+}
+
+test('a Space event is acked only after the handler resolved', async () => {
+  const message = spaceMessage();
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const seen = [];
+  const pending = processSpaceEventMessage(message, async (payload) => {
+    seen.push(payload);
+    await gate;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(message.calls, [], 'nothing is acked while the handler is still running');
+  release();
+  assert.equal(await pending, 'applied');
+  assert.deepEqual(message.calls, [['ack']]);
+  assert.deepEqual(seen, [{ event_id: 'evt_1', schema_version: 1 }]);
+});
+
+test('a Space event whose handler throws is nak\'d with a growing delay, capped at 30 s', async () => {
+  const expected = [[1, 1000], [2, 2000], [3, 4000], [4, 8000], [5, 16000], [6, 30000], [7, 30000]];
+  for (const [redeliveryCount, delay] of expected) {
+    const message = spaceMessage({ redeliveryCount });
+    const result = await processSpaceEventMessage(message, async () => { throw new Error('convex down'); });
+    assert.equal(result, 'retrying', `delivery ${redeliveryCount}`);
+    assert.deepEqual(message.calls, [['nak', delay]], `delivery ${redeliveryCount}`);
+  }
+});
+
+test('a Space event is terminated on its last delivery instead of looping', async () => {
+  const message = spaceMessage({ redeliveryCount: 8 });
+  const result = await processSpaceEventMessage(message, async () => { throw new Error('still down'); });
+  assert.equal(result, 'terminated_exhausted');
+  assert.deepEqual(message.calls, [['term']]);
+  // The last delivery still acks when it succeeds.
+  const ok = spaceMessage({ redeliveryCount: 8 });
+  assert.equal(await processSpaceEventMessage(ok, async () => {}), 'applied');
+  assert.deepEqual(ok.calls, [['ack']]);
+});
+
+test('an oversized or unparseable Space event is terminated without calling the handler', async () => {
+  const handler = async () => assert.fail('the handler must not run');
+  const big = spaceMessage({ data: new Uint8Array(16 * 1024 + 1).fill(97) });
+  assert.equal(await processSpaceEventMessage(big, handler), 'terminated_oversized');
+  assert.deepEqual(big.calls, [['term']]);
+  const exactly = spaceMessage({ data: new TextEncoder().encode(JSON.stringify({ pad: 'x'.repeat(16 * 1024 - 20) })) });
+  assert.equal(await processSpaceEventMessage(exactly, async () => {}), 'applied', 'the limit is inclusive');
+
+  for (const text of ['not json', '{"a":', '']) {
+    const message = spaceMessage({ data: new TextEncoder().encode(text) });
+    assert.equal(await processSpaceEventMessage(message, handler), 'terminated_unparseable', JSON.stringify(text));
+    assert.deepEqual(message.calls, [['term']]);
+  }
+});
+
+test('Space event messages without redelivery info count as the first delivery', async () => {
+  const message = spaceMessage();
+  delete message.info;
+  assert.equal(await processSpaceEventMessage(message, async () => { throw new Error('x'); }), 'retrying');
+  assert.deepEqual(message.calls, [['nak', 1000]]);
+});
+
+test('subscribeToDurableOn binds the provisioned durable on the Space stream with manual ack', async (t) => {
+  quietConsole(t);
+  const calls = [];
+  const connection = {
+    jetstream() {
+      return {
+        async subscribe(subject, options) {
+          calls.push({ subject, options });
+          return (async function* empty() {})();
+        },
+      };
+    },
+  };
+  await ConvexNatsSubscriber.prototype.subscribeToDurableOn.call(
+    {},
+    connection,
+    'MODEL_PLANE_SPACE_EVENTS',
+    'convex-space-attention',
+    'mp.v1.space.*.event',
+    async () => {},
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].subject, 'mp.v1.space.*.event');
+  const { options } = calls[0];
+  assert.equal(options.stream, 'MODEL_PLANE_SPACE_EVENTS');
+  assert.equal(options.config.durable_name, 'convex-space-attention');
+  assert.equal(options.mack, true, 'manual ack');
+  assert.equal(options.config.deliver_group, 'convex-space-attention');
+});
+
+test('a missing durable or a null connection is logged and does not stop the subscriber', async (t) => {
+  const lines = quietConsole(t);
+  const failing = { jetstream() { return { async subscribe() { throw new Error('consumer not found'); } }; } };
+  await ConvexNatsSubscriber.prototype.subscribeToDurableOn.call({}, failing, 'S', 'D', 'subject', async () => {});
+  await ConvexNatsSubscriber.prototype.subscribeToDurableOn.call({}, null, 'S', 'D', 'subject', async () => {});
+  assert.equal(lines.filter(([level]) => level === 'warn').length, 2);
+});
+
+test('setupSubscriptions binds convex-space-attention on the Model Plane connection only', async (t) => {
+  quietConsole(t);
+  function fake(ncModelPlane) {
+    const bound = [];
+    const self = {
+      ncModelPlane,
+      subscribeToDurableTopic: async () => {},
+      subscribeToTopicOn: async () => {},
+      subscribeToDurableOn: async (...args) => { bound.push(args.slice(0, 4)); },
+      handleOrganizationChanged() {},
+      handleMemberChanged() {},
+      handleAgentRunEvent() {},
+      handleSpaceEvent() {},
+    };
+    return { self, bound };
+  }
+  const model = {};
+  const withModel = fake(model);
+  await ConvexNatsSubscriber.prototype.setupSubscriptions.call(withModel.self);
+  assert.deepEqual(withModel.bound, [[model, 'MODEL_PLANE_SPACE_EVENTS', 'convex-space-attention', 'mp.v1.space.*.event']]);
+  const without = fake(null);
+  await ConvexNatsSubscriber.prototype.setupSubscriptions.call(without.self);
+  assert.deepEqual(without.bound, [], 'no fallback to the Control principal');
+});
+
+test('handleSpaceEvent hands the whole envelope to nats:onSpaceEvent', async () => {
+  const calls = [];
+  const self = { callConvexMutation: async (name, payload) => { calls.push([name, payload]); } };
+  const payload = { event_id: 'evt_1' };
+  await ConvexNatsSubscriber.prototype.handleSpaceEvent.call(self, payload);
+  assert.deepEqual(calls, [['nats:onSpaceEvent', payload]]);
+});
