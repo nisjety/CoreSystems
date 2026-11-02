@@ -211,6 +211,9 @@ GOLDENS=(
   # the same bytes. To change it: edit it, refresh the .sha256 pin beside it, update the digest here,
   # then re-vendor every copy listed in VENDORED and refresh its pin.
   "apps/Model Plane/api/contracts/run-trace-envelope.golden.json|265861c85ded72622e279385f53addcdeb7be34469f72f30396108fdd7854d46"
+  # WS10.S9 C6: the GET /v1/runs/:run_id/trace response body. AUTHORED by the Model Plane; model-gateway's
+  # run_trace_route_tests drive the real handler and compare its body to it (pin beside it).
+  "apps/Model Plane/api/contracts/run-trace-read-v1.golden.json|c8202393e0bd6022e04d752e586185374f9e158e384fdeb2c8b7265af4815411"
 
   # WS16.S1: the route table a SERVICE principal may reach on model-gateway (SERVICE_ROUTE_GRANTS) plus the
   # second-bearer rule for POST /v1/ai/chat. GENERATED from the real table by model-gateway's auth tests,
@@ -463,6 +466,9 @@ CONSUMERS=(
   "apps/Model Plane/api/contracts/model-gateway-service-routes.json|quarry-runtime|apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/|WS16.S3 (the fake gateway applies the real service route table)"
   "apps/Model Plane/api/contracts/ai-chat-v1/request.ok.json|quarry-runtime|apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/|WS16.S3 (the chat client request, string-typed schema)"
   "apps/Model Plane/api/contracts/ai-chat-v1/response.ok.json|quarry-runtime|apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/|WS16.S3 (the chat client reads usage and provider)"
+  # WS10.S9 C6: the run-trace read body. model-gateway tests against the authored file itself; the
+  # Frontend gateway/SPA type test reads a vendored copy (pending until it vendors one).
+  "apps/Model Plane/api/contracts/run-trace-read-v1.golden.json|verevonv3-gateway|apps/Frontend Plane/verevonv3/apps/gateway/|WS10.S9 C6 (gateway/SPA type test reads the fixture)"
 )
 
 passes=0
