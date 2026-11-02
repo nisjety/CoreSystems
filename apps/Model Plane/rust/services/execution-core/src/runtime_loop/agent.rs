@@ -5030,6 +5030,7 @@ async fn register_delegated_child_run(
             user_id: parent.req.user_id.clone(),
             start_key: start_key.clone(),
             terminal_source: pb::ManagedRunSource::ExecutionAgent as i32,
+            wake: None,
         },
         parent.session_bearer,
     ) {

@@ -25,6 +25,7 @@ pub mod space_history;
 pub mod space_human_posts;
 pub mod space_memory;
 pub mod space_message_lifecycle;
+pub mod space_mentions;
 pub mod telemetry_labels;
 pub mod tool_arguments;
 pub mod tool_class;

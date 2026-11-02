@@ -400,6 +400,65 @@ message CreateThreadResponse {
 
 // --- AppendMessage ---
 
+// One mentioned subject of a human post (WS08-S2). Ids only, never text. Session Core
+// accepts mentions only on a role "user" row with post_kind "post" from a human caller.
+message MentionInput {
+  // The mentioned person's or agent's subject id (^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$).
+  string subject_id = 1;
+  // "user" or "agent".
+  string kind = 2;
+  // "typed" (the author wrote @name) or "locked" (the composer's address lock). Empty = typed.
+  string source = 3;
+  // Agents only: "expected" (a wake may start one run) or "refused". Empty for a person.
+  string wake_expectation = 4;
+  // Set only with wake_expectation "refused": respond_to_denied, mention_not_enabled,
+  // invocation_blocked or owner_only_thread.
+  string refusal_code = 5;
+  // Wake order among the agents of this post (0-based). Persons carry 0.
+  uint32 ordinal = 6;
+}
+
+// One recorded mention as a read or an append reports it. `wake_state` is derived at read:
+// refused, expected, running, awaiting_approval, completed, failed or cancelled; empty for a
+// person.
+message MentionRef {
+  string subject_id = 1;
+  string kind = 2;
+  string wake_state = 3;
+  // The refusal code when wake_state is refused.
+  string reason = 4;
+  string source = 5;
+  uint32 ordinal = 6;
+}
+
+// The Control-signed authority and the stored post a wake starts a run from (WS08-S2). The
+// decision fields are the twelve of AppendMessageRequest 5 to 16, in that order, for the
+// action "model.run.wake" (schema sha256:run-wake-v1, permission run:wake); the four wake
+// fields follow. Session Core recomputes the payload digest from these fields and the verified
+// caller, and never takes turn_origin from anywhere but the verified decision.
+message RunWakeContext {
+  string space_id = 1;
+  string space_decision_ref = 2;
+  string recipient_audience_ref = 3;
+  uint64 recipient_audience_revision = 4;
+  string recipient_audience_hash = 5;
+  string privacy_policy_ref = 6;
+  uint64 authority_revision = 7;
+  string resource_authorization_ref = 8;
+  string space_decision_token = 9;
+  string action_schema_hash = 10;
+  string payload_digest = 11;
+  string idempotency_key = 12;
+  // The caller's own stored post this run answers.
+  string trigger_message_id = 13;
+  // sha256:<hex> of that post's stored text; must equal the digest the decision bound.
+  string trigger_content_digest = 14;
+  // The bound agent to run (must be an `expected` mention on the trigger post).
+  string agent_subject_id = 15;
+  // "direct" today; Control refuses the others until their slices exist.
+  string turn_origin = 16;
+}
+
 message AppendMessageRequest {
   // Thread to append to.
   string thread_id = 1;
@@ -453,6 +512,12 @@ message AppendMessageRequest {
   // kept out of model context, agent memory and Dreaming (see
   // ListConversationRequest.include_human_posts). Any other value is refused.
   string post_kind = 19;
+
+  // Mentions of a human post (WS08-S2): at most 20 people and 3 agents, no duplicates. Honoured
+  // only for role "user", post_kind "post", a human caller and SPACE_MENTION_RECORDS_CORE on;
+  // otherwise ignored. Never written for a zero-retention caller. An agent mention on a
+  // thread the caller does not own is recorded as refused/owner_only_thread.
+  repeated MentionInput mentions = 20;
 }
 
 message AppendMessageResponse {
@@ -466,6 +531,9 @@ message AppendMessageResponse {
   // True when the append found the caller's `client_message_id` already stored
   // and wrote nothing.
   bool deduplicated = 3;
+
+  // The mentions as stored (effective wake states after Session Core's own downgrade).
+  repeated MentionRef mentions = 4;
 }
 
 // --- StartRun ---
@@ -655,6 +723,9 @@ message StartManagedRunRequest {
   string start_key = 8;
   // The server validates this source and stores the matching canonical step.
   ManagedRunSource terminal_source = 9;
+  // Wake mode (WS08-S2): start this run from a stored human post for one addressed agent.
+  // Absent keeps every existing start unchanged. Refused for a zero-retention caller.
+  RunWakeContext wake = 10;
 }
 
 message StartManagedRunResponse {
@@ -1134,6 +1205,10 @@ message ListConversationRequest {
   // reattach_context included, is contained without doing anything; only the
   // UI transcript route opts in.
   bool include_human_posts = 9;
+
+  // With include_human_posts, keep only the newest N human posts in the returned page (0 = no
+  // cap). Used by a wake that opts in to fenced room-post context (WS08-S3).
+  uint32 post_context_cap = 10;
 }
 
 // One conversation turn. Named SessionMessage (not ThreadMessage, which the
@@ -1186,7 +1261,10 @@ message SessionMessage {
   // each message and this is the only source for it; absent only when a caller
   // built the message without reading it from the store.
   google.protobuf.Timestamp created_at = 12;
-  // 13 (mentions) and 14 (entry) are reserved by other Space slices.
+  // The mentions recorded on this post (WS08-S2), with the wake state derived from the newest
+  // run per (post, agent). Empty on turns and on posts without mentions.
+  repeated MentionRef mentions = 13;
+  // 14 (entry) is reserved by another Space slice.
 
   // The latest revision applied to this message (WS12-S4): "" (never revised),
   // "edited" or "deleted". A deleted message arrives with empty `content` and no

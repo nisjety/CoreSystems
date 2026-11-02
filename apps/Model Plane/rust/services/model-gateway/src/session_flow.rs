@@ -774,6 +774,7 @@ pub(crate) async fn prepare_idempotent_browser_run(
                 user_id: user_id.to_owned(),
                 start_key: start_key.to_owned(),
                 terminal_source: ManagedRunSource::GatewayBrowser as i32,
+                wake: None,
             },
             bearer_str,
         )?)
@@ -1056,6 +1057,7 @@ async fn prepare_managed_run_with_bearer(
                 user_id: user_id.to_owned(),
                 start_key: start_key.to_owned(),
                 terminal_source: source as i32,
+                wake: None,
             },
             bearer,
         )?)

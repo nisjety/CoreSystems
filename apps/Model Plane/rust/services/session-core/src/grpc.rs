@@ -270,6 +270,8 @@ fn session_message_from_row(row: ConversationRow, include_inactive: bool) -> pb:
         revised_by_subject_id: row.revised_by_subject_id.unwrap_or_default(),
         revision_no: u32::try_from(row.revision_no).unwrap_or(0),
         agent_followed_up: row.agent_followed_up,
+        // Filled for human posts by `finish_conversation_messages` (WS08-S2).
+        mentions: Vec::new(),
     }
 }
 
@@ -413,13 +415,27 @@ async fn conversation_page_response(
     .await?;
     let page_size = usize::try_from(limit).unwrap_or(usize::MAX);
     let (page, has_more) = conversation_tail_page(rows, page_size);
-    Ok(Response::new(pb::ListConversationResponse {
-        messages: page
-            .into_iter()
-            .map(|row| session_message_from_row(row, req.include_inactive))
-            .collect(),
-        has_more,
-    }))
+    let mut messages: Vec<pb::SessionMessage> = page
+        .into_iter()
+        .map(|row| session_message_from_row(row, req.include_inactive))
+        .collect();
+    finish_conversation_messages(pool, req, &mut messages).await?;
+    Ok(Response::new(pb::ListConversationResponse { messages, has_more }))
+}
+
+/// WS08-S2: what a read that includes human posts adds after the rows are mapped: the optional
+/// cap on how many posts it returns, then the mentions of the posts it kept (with the wake state
+/// derived from each agent's newest run). A read without posts is untouched.
+async fn finish_conversation_messages(
+    pool: &PgPool,
+    req: &pb::ListConversationRequest,
+    messages: &mut Vec<pb::SessionMessage>,
+) -> Result<(), Status> {
+    if req.include_human_posts {
+        crate::space::mentions::apply_post_context_cap(messages, req.post_context_cap);
+        crate::space::mentions::attach_mentions(pool, &req.org_id, &req.thread_id, messages).await?;
+    }
+    Ok(())
 }
 
 /// The sort position a ListThreads page ended on. The list sorts pinned threads
@@ -3533,6 +3549,131 @@ pub(crate) fn verify_revise_space_decision(
     verify_revise_space_decision_with_key(req, org_id, user_id, &key_id, key, Utc::now())
 }
 
+/// WS08-S2: verifies the Control `model.run.wake` decision of a wake for exactly this org, this
+/// CALLER, this Space, this thread, this trigger post (by id and content digest), this agent and
+/// this turn origin. The permission set must be exactly `["run:wake"]`, which keeps it disjoint
+/// from every thread token in both directions. A thread append/read/revise decision differs in
+/// action id and schema and is refused.
+#[allow(clippy::result_large_err)]
+fn verify_run_wake_space_decision_with_key(
+    wake: &pb::RunWakeContext,
+    org_id: &str,
+    user_id: &str,
+    thread_id: &str,
+    expected_key_id: &str,
+    key: &VerifyingKey,
+    now: DateTime<Utc>,
+) -> Result<crate::space::mentions::VerifiedWake, Status> {
+    use mp_contracts::space_mentions as sm;
+    if wake.space_decision_token.len() > MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES {
+        return Err(Status::invalid_argument("Control Space decision is too large"));
+    }
+    let parts: Vec<&str> = wake.space_decision_token.split('.').collect();
+    if parts.len() != 4 || parts[0] != CONTROL_SPACE_DECISION_VERSION {
+        return Err(Status::permission_denied("invalid Control Space decision envelope"));
+    }
+    let token_key_id = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .ok()
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| id == expected_key_id)
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let payload = URL_SAFE_NO_PAD
+        .decode(parts[2])
+        .map_err(|_| Status::permission_denied("invalid Control Space decision payload"))?;
+    let signature = URL_SAFE_NO_PAD
+        .decode(parts[3])
+        .map_err(|_| Status::permission_denied("invalid Control Space decision signature"))?;
+    let signature = Signature::from_slice(&signature)
+        .map_err(|_| Status::permission_denied("invalid Control Space decision signature"))?;
+    key.verify(
+        format!("{}.{}.{}", parts[0], parts[1], parts[2]).as_bytes(),
+        &signature,
+    )
+    .map_err(|_| Status::permission_denied("invalid Control Space decision signature"))?;
+    let claims: ControlSpaceDecisionClaims = serde_json::from_slice(&payload)
+        .map_err(|_| Status::permission_denied("invalid Control Space decision claims"))?;
+    let expected_digest =
+        crate::space::mentions::run_wake_payload_digest(wake, org_id, user_id, thread_id);
+    let matches_request = claims.decision_ref == wake.space_decision_ref
+        && claims.org_id == org_id
+        && claims.subject_id == user_id
+        && claims.space_ref == wake.space_id
+        && claims.service_audience == CONTROL_SPACE_DECISION_AUDIENCE
+        && claims.action_id == sm::DECISION_ACTION_ID
+        && claims.action_schema_hash == sm::DECISION_SCHEMA
+        && claims.action_schema_hash == wake.action_schema_hash
+        && claims.payload_digest == wake.payload_digest
+        && claims.payload_digest == expected_digest
+        && claims.idempotency_key == wake.idempotency_key
+        && claims.recipient_audience_ref == wake.recipient_audience_ref
+        && claims.recipient_audience_revision == wake.recipient_audience_revision
+        && claims.recipient_audience_hash == wake.recipient_audience_hash
+        && claims.privacy_policy_ref == wake.privacy_policy_ref
+        && claims.resource_authorization_ref == wake.resource_authorization_ref
+        && claims.authority_revision == wake.authority_revision
+        && claims.permissions.len() == 1
+        && claims.permissions[0] == sm::PERMISSION_WAKE;
+    if !matches_request || token_key_id.trim().is_empty() {
+        return Err(Status::permission_denied(
+            "Control Space decision does not authorize this wake",
+        ));
+    }
+    let privacy_complete = [
+        claims.purpose.as_str(),
+        claims.lawful_basis.as_str(),
+        claims.privacy_class.as_str(),
+        claims.retention_class.as_str(),
+        claims.residency.as_str(),
+        claims.deletion_scope.as_str(),
+    ]
+    .iter()
+    .all(|value| !value.trim().is_empty());
+    if !privacy_complete
+        || claims.nonce.trim().is_empty()
+        || claims.issued_at > now + chrono::Duration::minutes(1)
+        || claims.expires_at <= now
+    {
+        return Err(Status::permission_denied(
+            "Control Space wake decision is expired or incomplete",
+        ));
+    }
+    space_decision_retention_gate(
+        claims.zero_data_retention,
+        "run_wake",
+        configured_space_zdr_mode(),
+    )?;
+    Ok(crate::space::mentions::VerifiedWake {
+        space_id: wake.space_id.clone(),
+        trigger_message_id: wake.trigger_message_id.clone(),
+        trigger_content_digest: wake.trigger_content_digest.clone(),
+        agent_subject_id: wake.agent_subject_id.clone(),
+        turn_origin: wake.turn_origin.clone(),
+    })
+}
+
+/// Key lookup and verification of a wake decision (see
+/// [`verify_run_wake_space_decision_with_key`]). `thread_id` is the start request's own.
+#[allow(clippy::result_large_err)]
+pub(crate) fn verify_run_wake_space_decision(
+    wake: &pb::RunWakeContext,
+    org_id: &str,
+    user_id: &str,
+    thread_id: &str,
+) -> Result<crate::space::mentions::VerifiedWake, Status> {
+    let keys = configured_control_space_decision_keys()?;
+    let key_id = wake
+        .space_decision_token
+        .split('.')
+        .nth(1)
+        .and_then(|part| URL_SAFE_NO_PAD.decode(part).ok())
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let key = crate::decision_keys::lookup_key(&keys, &key_id)?;
+    verify_run_wake_space_decision_with_key(wake, org_id, user_id, thread_id, &key_id, key, Utc::now())
+}
+
 // Whether a decision-less assistant append may land in a Space thread. The
 /// reply slot is open only directly after a user message: that user turn was
 /// itself admitted by a verified create or append decision, and the assistant
@@ -3865,6 +4006,7 @@ async fn append_message_inner_as(
         sequence: appended.sequence,
         message_id: appended.message_id,
         deduplicated: appended.deduplicated,
+        mentions: appended.mentions,
     }))
 }
 
@@ -3895,6 +4037,8 @@ pub(crate) struct AppendedMessage {
     /// memory extraction).
     pub(crate) deduplicated: bool,
     pub(crate) memory: Option<AppendedMemory>,
+    /// The mentions stored on the post (WS08-S2); empty for a turn and for a post without any.
+    pub(crate) mentions: Vec<pb::MentionRef>,
 }
 
 /// An append made under the thread owner's authority: the call every existing
@@ -4035,7 +4179,17 @@ pub(crate) async fn append_message_in_tx_as(
                 .fetch_optional(&mut **tx)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
-                if !assistant_reply_slot_is_open(last_role.as_ref().map(|(role,)| role.as_str())) {
+                let last_role_str = last_role.as_ref().map(|(role,)| role.as_str());
+                // WS08-S2: after one addressed agent answered, the next expected agent of the same
+                // human post may answer too (off with SPACE_WAKE_CORE).
+                if !assistant_reply_slot_is_open(last_role_str)
+                    && !crate::space::mentions::extended_reply_slot_is_open(
+                        tx,
+                        &req.thread_id,
+                        last_role_str,
+                    )
+                    .await?
+                {
                     return Err(Status::permission_denied(
                         "a Space assistant reply must directly follow a verified user turn",
                     ));
@@ -4103,6 +4257,13 @@ pub(crate) async fn append_message_in_tx_as(
         .as_ref()
         .filter(|_| !member_metadata_ignored)
         .map_or_else(|| serde_json::json!({}), struct_to_json);
+    // WS08-S2: keys that name a post's mentions, a wake or a turn origin are Session Core's to
+    // write and never a client's: strip them on every path (the owner path stores metadata).
+    if let Some(map) = metadata_json.as_object_mut() {
+        for reserved in ["mentions", "wake", "turn_origin", "post_kind"] {
+            map.remove(reserved);
+        }
+    }
 
     // This scope is immutable after the first user message. Enforce it here,
     // under the thread lock, so alternate ingress paths cannot silently widen
@@ -4175,6 +4336,8 @@ pub(crate) async fn append_message_in_tx_as(
             return Ok(AppendedMessage {
                 sequence: u64::try_from(existing_sequence)
                     .map_err(|_| Status::internal("message sequence out of range"))?,
+                mentions: crate::space::mentions::load_recorded_mentions(&mut **tx, &existing_id)
+                    .await?,
                 message_id: existing_id,
                 deduplicated: true,
                 memory: None,
@@ -4243,6 +4406,32 @@ pub(crate) async fn append_message_in_tx_as(
         crate::message_tree::record_append(tx, &req.thread_id, &msg_id, leaf.as_deref()).await?;
     }
 
+    // WS08-S2: the mentions of a human post, in the same transaction as the post. Only a human
+    // post in a Space thread records them, and only with the records switch on; anything else
+    // ignores the field. The caller is the thread owner on the owner path, or a member whose id
+    // equals the owner's (an agent mention by a non-owner is stored as refused/owner_only_thread).
+    let mut recorded_mentions: Vec<pb::MentionRef> = Vec::new();
+    if post_kind == "post"
+        && !req.mentions.is_empty()
+        && !author_subject_id.is_empty()
+        && mp_contracts::space_mentions::records_core_enabled()
+    {
+        if let Some(mention_space_id) = row.1.as_deref() {
+            let caller_is_owner = !member || thread.1 == author_subject_id;
+            let valid = crate::space::mentions::validate_mentions(&req.mentions, caller_is_owner)?;
+            crate::space::mentions::insert_mentions(
+                tx,
+                &thread.0,
+                &req.thread_id,
+                mention_space_id,
+                &msg_id,
+                &valid,
+            )
+            .await?;
+            recorded_mentions = valid.iter().map(crate::space::mentions::ValidMention::to_ref).collect();
+        }
+    }
+
     // The list's paging key, written in the same transaction as the message so
     // the cursor moves exactly when the message does. Non-owner Space appends
     // come through here too. A reply also stamps the assistant clock, which is
@@ -4278,7 +4467,7 @@ pub(crate) async fn append_message_in_tx_as(
     )
     .bind(new_ulid())
     .bind(&req.thread_id)
-    .bind(serde_json::json!({
+    .bind(crate::space::mentions::with_mention_counts(serde_json::json!({
         "thread_id": &req.thread_id,
         "message_id": &msg_id,
         "sequence": sequence,
@@ -4291,7 +4480,7 @@ pub(crate) async fn append_message_in_tx_as(
         "recipient_audience_hash": row.4,
         "authority_revision": row.5,
         "resource_authorization_ref": row.6,
-    }))
+    }), &recorded_mentions))
     .bind(now)
     .bind(&req.thread_id)
     .bind(&msg_idem)
@@ -4381,6 +4570,7 @@ pub(crate) async fn append_message_in_tx_as(
         message_id: msg_id,
         deduplicated: false,
         memory: letta_sync,
+        mentions: recorded_mentions,
     })
 }
 
@@ -8514,10 +8704,11 @@ impl SessionCore for SessionService {
             )
             .await?;
             rows.reverse();
-            let messages = rows
+            let mut messages: Vec<pb::SessionMessage> = rows
                 .into_iter()
                 .map(|row| session_message_from_row(row, req.include_inactive))
                 .collect();
+            finish_conversation_messages(&self.pool, &req, &mut messages).await?;
             Ok(Response::new(pb::ListConversationResponse {
                 messages,
                 has_more: false,
@@ -9527,6 +9718,13 @@ impl ManagedRunLifecycle for ManagedRunLifecycleService {
                 Status::permission_denied("user-bound managed-run credential required")
             })?;
             req.user_id = user_id.to_owned();
+            // WS08-S2: a wake writes durable rows (the run's trigger pair), so a zero-retention
+            // caller is refused with the typed catalogue refusal before anything else.
+            let wake_ctx = req.wake.take();
+            if wake_ctx.is_some() && caller.zdr() {
+                return Err(mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+                    .grpc_status(tonic::Code::PermissionDenied));
+            }
 
             // ZDR users use the intentionally narrow metadata-only start
             // branch. It does not append a message or durable prompt; their
@@ -9540,9 +9738,43 @@ impl ManagedRunLifecycle for ManagedRunLifecycleService {
             // verified claims give: zero retention, a waived persistent run on
             // its one connection, or an ordinary persistent run.
             let retention = crate::retention_receipt::RunRetention::from_caller(&caller);
-            terminalization::start_managed_run_with_retention_inner(&self.pool, req, retention)
-                .await
-                .map(|started| Response::new(started.into_proto()))
+            // WS08-S2: wake mode. The owner gate above has passed; now the switch, the signed
+            // decision (subject = the caller) and the stored facts. Origin and the (post, agent)
+            // pair come from the verified decision, never from a caller field.
+            let verified_wake = if let Some(wake) = wake_ctx.as_ref() {
+                if !mp_contracts::space_mentions::wake_core_enabled() {
+                    return Err(Status::permission_denied("addressed wake is not enabled"));
+                }
+                if req.thread_id.trim().is_empty()
+                    || !crate::space::mentions::wake_context_is_complete(wake)
+                    || !crate::space::mentions::known_turn_origin(&wake.turn_origin)
+                {
+                    return Err(Status::invalid_argument(
+                        "a wake needs a thread and a complete signed decision",
+                    ));
+                }
+                let verified =
+                    verify_run_wake_space_decision(wake, &req.org_id, user_id, &req.thread_id)?;
+                crate::space::mentions::check_wake_facts(
+                    &self.pool,
+                    &req.org_id,
+                    &req.thread_id,
+                    user_id,
+                    &verified,
+                )
+                .await?;
+                Some(verified)
+            } else {
+                None
+            };
+            terminalization::start_managed_run_with_wake_inner(
+                &self.pool,
+                req,
+                retention,
+                verified_wake.as_ref(),
+            )
+            .await
+            .map(|started| Response::new(started.into_proto()))
         }
         .await;
         record_metrics("start_managed_run", started, result.is_ok());

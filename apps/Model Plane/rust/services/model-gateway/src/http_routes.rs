@@ -10602,6 +10602,7 @@ async fn list_thread_messages(
                 // other caller keeps the default (false), so a post never reaches model
                 // context or reattach_context.
                 include_human_posts: true,
+                post_context_cap: 0,
             },
             &bearer,
         )?)
