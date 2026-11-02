@@ -161,6 +161,385 @@ pub(crate) struct AppState {
     /// gap, not an oversight, and what unblocks it.
     pub(crate) mail_task_pipeline:
         Option<std::sync::Arc<dyn crate::domains::mail_task::MailTaskPipeline>>,
+    /// Space feature flags (P-GW1). Read once in `build_state`, never in a handler, and never an
+    /// authorization input: a flag only decides whether a route or UI surface exists.
+    #[allow(dead_code, reason = "first reader is the next Space slice that adds a flag")]
+    pub(crate) space_features: SpaceFeatureFlags,
+}
+
+/// Space feature flags carried on `AppState`. Every Space slice that adds a flag appends ONE
+/// field here (alphabetical), one line in [`SpaceFeatureFlags::from_env`], and nothing else:
+/// `Default` is all-off, so test literals never name the field and `AppState::for_tests()` needs
+/// no edit. Production default is OFF; development may default ON (see [`space_flag`]).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SpaceFeatureFlags {
+    /// `SPACE_AGENT_WAKE_POLICY_API` (WS08-S5): `PATCH /api/v1/spaces/{space_ref}/agents/{binding_ref}/policy`,
+    /// the owner/manager writer of a binding's `respond_to`. Off answers 404 `feature_disabled`. A
+    /// rollout control, never an authorization input: Control's live role (owner or manager) decides
+    /// who may write it, and it moves no content, so Zero Data Retention organizations are unaffected.
+    pub(crate) agent_wake_policy_api: bool,
+    /// `SPACE_ADDRESSED_WAKE_API` (WS08-S4): the wake mode of `POST /api/v1/chat/stream` and
+    /// `/api/v1/ag-ui/stream` (`wake:{message_id, client_wake_id}`: one run started from the caller's
+    /// own stored post for one bound agent) and `features.addressed_wake`. Off answers 404
+    /// `space_addressed_wake_disabled` to a body that carries `wake`; the legacy `mentioned_agent_ref`
+    /// turn is unaffected. A rollout control, never an authorization input: Control's signed
+    /// `model.run.wake` decision and Session Core's verifier decide, and a Zero Data Retention caller
+    /// is refused (typed 412) before Control is called.
+    pub(crate) addressed_wake_api: bool,
+    /// `SPACE_MENTION_RECORDS_API` (WS08-S4): `mentions` on the human post routes (planned by
+    /// `plan_mentions`, recorded by Session Core) and `features.mention_records`. Off ignores a
+    /// `mentions` key (the post stands). A rollout control, never an authorization input.
+    pub(crate) mention_records_api: bool,
+    /// `SPACE_APPROVAL_SCOPES_ENABLED` (WS10-S4): the standing-rule half of a Space approval decision
+    /// (`scope: always` on `POST /api/v1/spaces/{space_ref}/approvals/{approval_id}/decide`) and the
+    /// `approval-grants` and `approval-policy` routes. Off answers 404 `feature_disabled` there and a
+    /// `once` decision still works. A rollout control, never an authorization input: Control's role,
+    /// entitlement (`approval_grant_entitled`) and Zero Data Retention rules decide, and a ZDR org
+    /// never gets a rule whatever this says.
+    pub(crate) approval_scopes: bool,
+    /// `GATEWAY_SPACE_APPEND_RETRIEVAL` (WS18-S2): a follow-up turn of a scoped thread fetches its own
+    /// retrieval decision and carries the token (empty on a decline, which suppresses grounding).
+    /// Read once in `build_state`, and only the literal `true` turns it on: unlike the other Space flags
+    /// it never defaults on in development, so every other value leaves the follow-up as it was.
+    pub(crate) append_retrieval: bool,
+    /// `CHAT_LOCALE_HINT` (WS16-S6): stamp the viewer's interface language (`nb-NO` or `en-US`) on
+    /// the model-bound body as the request-scoped `locale` field. Off removes the field, whatever
+    /// the browser sent. A rollout control, never an authorization input: the field is a framing
+    /// hint, is never stored, and grants nothing.
+    pub(crate) chat_locale_hint: bool,
+    /// `SPACE_DENIALS_TYPED` (WS03-S5): map Control's typed Space denials to the browser envelope.
+    /// Off restores pass-through. A rollout control, never an authorization input.
+    pub(crate) denials_typed: bool,
+    /// `SPACE_DM_API` (WS12-S3): `POST /api/v1/spaces/dm`, `POST`/`DELETE /api/v1/spaces/{space_ref}/hide`,
+    /// the DM fields of `GET /api/v1/spaces` and `features.dm`. Off answers 404 `dm_disabled`, hides DM
+    /// kinds from the listing and the SPA's DM group. A rollout control, never an authorization input:
+    /// Control's `dm-eligibility` and the fixed roster decide, and a Zero Data Retention org is refused
+    /// with the typed 412 whatever this says. Production default off; DMs also need WS04-S5 audience registration.
+    pub(crate) dm_api: bool,
+    /// `SPACE_MESSAGE_REVISE_API` (WS12-S7): `PATCH`/`DELETE /api/v1/spaces/{space_ref}/threads/{thread_id}/messages/{message_id}`,
+    /// `features.message_revise` and `data.message_policy` of the Space context. Off answers 404
+    /// `space_message_revise_disabled`. A rollout control, never an authorization input: Control's
+    /// `model.thread.revise` decision and Session Core's author/owner/moderator check decide, and a Zero
+    /// Data Retention org is refused with the typed 412 whatever this says. Production default off.
+    pub(crate) message_revise_api: bool,
+    /// `SPACE_REACTIONS_API` (WS12-S8): `PUT`/`DELETE .../threads/{thread_id}/messages/{message_id}/reactions/{emoji}`,
+    /// the `reactions[]` merged into transcript turns and `features.reactions`. Off answers 404
+    /// `space_reactions_disabled`. A rollout control, never an authorization input: the caller's live
+    /// room role (editor or above), the Control shared-read decision and Session Core's message check
+    /// decide, and a Zero Data Retention org is refused with the typed 412 before any write. Needs
+    /// Convex `SPACE_REACTIONS` on and model-gateway `SPACE_MESSAGE_REVISE_API` (target route). Production default off.
+    pub(crate) reactions_api: bool,
+    /// `CLIENT_VERSION_POLICY` / `CLIENT_MIN_CONTRACT` (WS07-S3): the stale-client contract the
+    /// public `/api/v1/client-config` route reports. Unlike the booleans its default is `banner`,
+    /// never off. Carried here (not as an `AppState` field) so no test literal needs an edit.
+    pub(crate) client_policy: crate::client_contract::ClientPolicy,
+    /// `CSP_REPORT_LOG_HOSTS` (WS07-S6): log the blocked ORIGIN (scheme and host, never a path
+    /// or query) of each CSP report, for a host inventory. Forced off when `APP_ENV` is
+    /// production (see `dev_only_flag`); the counters never carry a URL either way.
+    pub(crate) csp_report_log_hosts: bool,
+    /// `SPACE_CONNECTIVITY_BANNER_UI` (WS01-S5): reported to the SPA as `features.connectivity_banner`
+    /// (the offline versus service-down banner). A rollout control, never an authorization input.
+    pub(crate) connectivity_banner_ui: bool,
+    /// `SPACE_HUMAN_POSTS_API` (WS01-S5): the two human-post routes (`POST .../threads` and
+    /// `POST .../threads/{thread_id}/messages`) and `features.human_posts`. Off answers 404
+    /// `space_human_posts_disabled`. A rollout control, never an authorization input: Control's
+    /// decision and Session Core's member gate decide who may post, and a Zero Data Retention org
+    /// is refused whatever this says.
+    pub(crate) human_posts_api: bool,
+    /// `SPACE_MEMBERSHIP_WRITER_API` (WS04-S6): room member add, role change and leave go to
+    /// Control's actor-carrying writer, then the audience reconcile. Off keeps the legacy
+    /// Convex-then-declare path (emergency stop only: it cannot remove a member added through
+    /// Control). A rollout control, never an authorization input; Control decides every role.
+    pub(crate) membership_writer_api: bool,
+    /// `SPACE_POLICY_ADMIN_API` (WS03-S4): the three org-admin Space effect-policy routes and
+    /// the console that reads them. Off answers 404 `space_policy_admin_disabled`. A rollout
+    /// control, never an authorization input; Control's role check and write switch decide.
+    pub(crate) policy_admin_api: bool,
+    /// `SPACE_REALTIME_STREAM` (WS02-S4): `GET /api/v1/spaces/{space_ref}/events`, the validating
+    /// relay of the Space event stream. Off answers 404 `space_stream_disabled` and the SPA stays
+    /// on its 6 s poll. A rollout control, never an authorization input; an org under Zero Data
+    /// Retention gets `poll_only` even when on.
+    pub(crate) realtime_stream: bool,
+    /// `SPACE_ROOM_DETAILS_UI` (WS04-S2): `PATCH /api/v1/spaces/{space_ref}` (room name and topic),
+    /// the `spaces.update_room_details` action and `features.room_details`. Off answers 404
+    /// `feature_disabled`. A rollout control, never an authorization input: Control's live role
+    /// (owner or manager) decides who may rename. The topic is a label, so Zero Data Retention
+    /// organizations are unaffected.
+    pub(crate) room_details_ui: bool,
+    /// `SPACE_PEOPLE_SEARCH_API` (WS04-S3): `GET /api/v1/directory/people`, the people search the
+    /// room member picker uses. Off answers 404 `feature_disabled`. A rollout control, never an
+    /// authorization input: Control's directory read (signed delegation, scope
+    /// `directory:read:self`) decides what the caller may see.
+    pub(crate) people_search_api: bool,
+    /// `SPACE_DIRECTORY_RESOLVER_API` (WS04-S9): `POST /api/v1/directory/resolve` and the composed
+    /// `kinds=person,agent` form of `GET /api/v1/directory/people`, plus
+    /// `features.directory_resolver`. Off answers 404 `feature_disabled`. A rollout control, never
+    /// an authorization input: the answer is presence only (`meta.presence_only`), and Control's
+    /// directory read decides which people the caller may see.
+    pub(crate) directory_resolver_api: bool,
+    /// `SPACE_ROOM_ARCHIVE_API` (WS04-S7): `POST /api/v1/spaces/{space_ref}/archive` and
+    /// `/unarchive` (Control's archive state) and `features.room_archive`. Off answers 404
+    /// `feature_disabled`; an archived room still reads and still refuses writes, because that is
+    /// Control's state, not this flag. A rollout control, never an authorization input: Control's
+    /// live role (owner or manager) decides who may archive. No content moves, so Zero Data
+    /// Retention organizations are unaffected.
+    pub(crate) room_archive_api: bool,
+    /// `SPACE_ROOM_DIRECTORY_API` (WS04-S8): `GET /api/v1/directory/rooms`, `POST
+    /// /api/v1/spaces/{space_ref}/join`, `PATCH /api/v1/spaces/{space_ref}/settings`, the actions
+    /// `spaces.join_room` and `spaces.update_room_settings`, and `features.room_directory`. Off
+    /// answers 404 `feature_disabled`. A rollout control, never an authorization input: Control's
+    /// per-organization directory policy (`space_directory_policies`, absent means off), the
+    /// room's visibility and the caller's live role decide who may list, join or change a room.
+    /// No content moves, so Zero Data Retention organizations are unaffected.
+    pub(crate) room_directory_api: bool,
+    /// `SPACE_ROOM_ARTIFACTS_API` (WS07-S9): `GET /api/v1/spaces/{space_ref}/artifacts`, the room
+    /// artifact aggregate, and `features.room_artifacts`. Off answers 404
+    /// `space_room_artifacts_disabled` and the SPA hides the chips and the tab. A rollout control,
+    /// never an authorization input: Control's shared-read decision and Session Core's audience
+    /// ceiling decide what the caller may list.
+    pub(crate) room_artifacts: bool,
+    /// `SPACE_ROOM_PINS_API` (WS13-S8): `PUT`/`DELETE /api/v1/spaces/{space_ref}/pins/{thread_id}`,
+    /// the `pins` section of the thread listing and `features.room_pins`. Off answers 404
+    /// `feature_disabled`, the listing omits `pins` and the SPA stops lifting. A rollout control,
+    /// never an authorization input: Control's live role (editor or above) decides who may pin.
+    pub(crate) room_pins: bool,
+    /// `SPACE_ROOM_FILES_API` (WS14-S7): the durable room-file routes `POST`/`GET
+    /// /api/v1/spaces/{space_ref}/files`, `.../files/uploads/{upload_id}`, `.../files/{document_id}/text`,
+    /// `DELETE .../files/{document_id}`, and `features.room_files.durable`. Off answers 404
+    /// `room_files_disabled`. A rollout control, never an authorization input: Control's import and
+    /// retrieval decisions and the Data and Ingestion planes decide, and a Zero Data Retention
+    /// organization is refused the upload with the typed 412 whatever this says.
+    pub(crate) room_files_api: bool,
+    /// `SPACE_ROOM_FILES_UI` (WS14-S7): reported as `features.room_files.files_tab` (together with
+    /// `room_files_api`) so the SPA shows the Files tab. Never an authorization input.
+    pub(crate) room_files_ui: bool,
+    /// `SPACE_TURN_ATTACHMENTS_UI` (WS14-S7): reported as `features.room_files.turn_attachments` so the
+    /// composer offers per-turn attachments. Never an authorization input.
+    pub(crate) turn_attachments_ui: bool,
+    /// `SPACE_MESSAGE_SEARCH_API` (WS13-S3): `POST /api/v1/spaces/{space_ref}/search` and
+    /// `GET /api/v1/spaces/{space_ref}/entries/{message_id}` (permission-checked message search and
+    /// message addresses, relayed to model-gateway). Off answers 404 `space_search_disabled`.
+    /// Reported as `features.message_search` together with `message_search_ui`. A rollout control,
+    /// never an authorization input: Control's per-request read decision and Session Core's
+    /// audience predicates decide what a caller finds.
+    pub(crate) message_search_api: bool,
+    /// `SPACE_MESSAGE_SEARCH_UI` (WS13-S3 reports it, S5 reads it): shows the in-room search control.
+    /// A rollout control, never an authorization input.
+    pub(crate) message_search_ui: bool,
+    /// `SPACE_ENTRY_LINKS_UI` (WS13-S3 reports it, S4a/S4b read it): `features.entry_links`, the
+    /// message permalink grammar and `/spaces/:spaceId/m/:messageId`. A rollout control only.
+    pub(crate) entry_links_ui: bool,
+    /// `SPACE_COMMAND_PALETTE_UI` (WS13-S3 reports it, S6/S7 read it): `features.command_palette`,
+    /// the Cmd/Ctrl+K palette and platform slash commands. Off keeps the old search dialog. A
+    /// rollout control only.
+    pub(crate) command_palette_ui: bool,
+    /// `SPACE_THREAD_FORK_API` (WS13-S3 reports it; the fork slice S10 is conditional and not built):
+    /// `features.thread_fork`. A rollout control only.
+    pub(crate) thread_fork_api: bool,
+    /// `SPACE_SEND_IDEMPOTENCY_API` (WS01-S5): reported to the SPA as `features.send_idempotency`
+    /// (the SPA attaches a client send id to an agent-path send so a retry cannot double-post).
+    /// Session Core's dedupe is inert without a key. A rollout control, never an authorization input.
+    pub(crate) send_idempotency_api: bool,
+    /// `SPACE_THREAD_PANE_UI` (WS01-S5): reported to the SPA as `features.thread_pane` (the right-hand
+    /// thread pane and `?thread_id=` deep link). A rollout control, never an authorization input.
+    pub(crate) thread_pane_ui: bool,
+    /// `SPACE_TOOL_POLICY_EDITOR_ENABLED` (WS10-S5b): the per-tool policy editor routes
+    /// (`GET|PUT /api/v1/spaces/{space_ref}/tool-policy`, `PUT .../agents/{binding_ref}/tool-policy`)
+    /// and the Agent tab editor, reported to the SPA as `features.tool_policy_editor`. Off answers
+    /// 404 `feature_disabled` and hides the editor; enforcement is governed by Execution Core's own
+    /// gate, not by this flag. A rollout control, never an authorization input: Control's live
+    /// manager or owner role decides who may write, and a policy only tightens.
+    pub(crate) tool_policy_editor: bool,
+    /// `SPACE_ATTENTION_API` (WS11-S7): the attention inbox routes (`GET /api/v1/spaces/attention/items`,
+    /// `POST .../items/{item_id}/state`, `GET|PUT /api/v1/spaces/{space_ref}/threads/{thread_id}/follow`).
+    /// Off answers 404 `space_attention_disabled`. A rollout control, never an authorization input: the
+    /// caller's own Application rows, Control's index and per-Space read decisions decide what is shown.
+    pub(crate) attention_api: bool,
+    /// `SPACE_ATTENTION_UI` (WS11-S7): reported as `features.attention` so the SPA shows the `/attention`
+    /// inbox and the thread follow control. A rollout control only.
+    pub(crate) attention_ui: bool,
+    /// `SPACE_STATUS_API` (WS11-S10, `space_status_api`): the org-scoped status routes (`GET|PUT
+    /// /api/v1/spaces/status`) and the `status` / `activity` annotations on a room's roster and agent
+    /// list. Off answers 404 `space_status_disabled` on the status routes and leaves the roster and
+    /// agent responses unannotated. A rollout control, never an authorization input.
+    pub(crate) status_api: bool,
+    /// `SPACE_REMINDERS_API` (WS11-S11, `space_reminders_api`): the reminder routes (`POST
+    /// /api/v1/spaces/{space_ref}/reminders`, `GET /api/v1/spaces/reminders`, `DELETE
+    /// /api/v1/spaces/reminders/{id}`) and the `spaces.create_reminder` / `spaces.cancel_reminder`
+    /// actions. Off answers 404 `space_reminders_disabled`. A rollout control, never an
+    /// authorization input: membership, the Zero Data Retention posture and the caller's own rows decide.
+    pub(crate) reminders_api: bool,
+    /// `ORG_IDENTITY_ADMIN_API` (WS05-S6): the owner/admin domain verification routes
+    /// (`/api/v1/orgs/{id}/domains`), proxied to org-core. Off answers 404 `feature_disabled`.
+    /// A rollout control, never an authorization input: the live owner/admin membership decides.
+    pub(crate) org_identity_admin_api: bool,
+    /// `SPACE_RUN_LIVE_TEXT` (WS09-S2 reserves the flag, S4 reads it): stream the answer text to the
+    /// room while a run works. Off means step classes and `text_progress` only. A rollout control,
+    /// never an authorization input.
+    #[allow(dead_code, reason = "first reader is WS09-S4, which streams the room live view")]
+    pub(crate) run_live_text: bool,
+    /// `SPACE_RUN_LIVE_VIEW` (WS09-S2 reserves the flag, S4/S5 read it): the room live view of an
+    /// agent run, reported as `data.agent_work.live`. A rollout control, never an authorization input.
+    #[allow(dead_code, reason = "first reader is WS09-S4, which serves the room live view")]
+    pub(crate) run_live_view: bool,
+    /// `SPACE_RUN_MANAGER_STOP` (WS09-S2 reserves the flag, S8 reads it): a manager's Stop of a run,
+    /// reported as `data.agent_work.stop_manager`. A rollout control, never an authorization input:
+    /// Control's run-control decision decides who may stop.
+    #[allow(dead_code, reason = "first reader is WS09-S8, which serves the manager Stop")]
+    pub(crate) run_manager_stop: bool,
+    /// `SPACE_RUN_OWNER_STEER` (WS09-S2): the person who started a run may type into it while it
+    /// works, reported as `data.agent_work.steer_owner`. Off keeps the composer disabled during a
+    /// turn. A rollout control, never an authorization input: the queue route re-authorizes each
+    /// message, and a Zero Data Retention org is reported false because that route refuses there.
+    pub(crate) run_owner_steer: bool,
+    /// `SPACE_SIDEBAR_API` (WS16-S8): `GET` and `PUT /api/v1/spaces/sidebar` and the
+    /// `spaces.update_sidebar` action, the member's personal sidebar layout (refs only, stored in
+    /// Application). Off answers 404 `space_sidebar_disabled`, which the SPA reads as "use the
+    /// legacy panel". A rollout control, never an authorization input: a Zero Data Retention org
+    /// is answered `zdr_local` on `GET` and refused on `PUT` whatever this says.
+    pub(crate) sidebar: bool,
+    /// `SPACE_COMPOSER_DRAFTS_UI` (WS15-S7, reported as `features.composer_drafts`): the room
+    /// composer keeps per-room, per-thread drafts. A rollout control, never an authorization input.
+    pub(crate) composer_drafts_ui: bool,
+    /// `SPACE_COMPOSER_MARKDOWN_UI` (WS15-S7, `features.composer_markdown`): the markdown toolbar,
+    /// preview and counter in the room composer. Never an authorization input.
+    pub(crate) composer_markdown_ui: bool,
+    /// `SPACE_HUMAN_MARKDOWN_UI` (WS15-S7, `features.human_markdown`): people's posts render as
+    /// markdown. Never an authorization input.
+    pub(crate) human_markdown_ui: bool,
+    /// `SPACE_TIMELINE_ANCHOR_UI` (WS15-S7, `features.timeline_anchor`): the anchored single-root
+    /// room timeline. Never an authorization input.
+    pub(crate) timeline_anchor_ui: bool,
+    /// `SPACE_TIMELINE_API` (WS15-S7): `GET /api/v1/spaces/{space_ref}/timeline` and the tail window
+    /// parameters of the thread transcript route, reported as `features.timeline_windows`. Off
+    /// answers 404 `space_timeline_disabled` (the SPA then reads the legacy listing) and leaves the
+    /// transcript whole. A rollout control, never an authorization input: Control's membership and
+    /// per-page read decision and Session Core's audience ceiling decide what a window holds.
+    pub(crate) timeline_api: bool,
+    /// `SPACE_SYSTEM_ENTRIES_API` (WS15-S11): the room's system rows (membership changes read from
+    /// Control's ledger) merged into the timeline answer, reported as `features.system_entries`.
+    /// Needs `SPACE_TIMELINE_API`. Off leaves `system_entries` empty. A rollout control, never an
+    /// authorization input: Control's feed route requires a live membership, and the rows hold ids
+    /// and closed words only.
+    pub(crate) system_entries_api: bool,
+    /// `SCIM_EDGE_ENABLED` (WS05-S8): the public, session-less SCIM edge `/api/v1/scim/v2/*`
+    /// that forwards an identity provider's bearer token to org-core. Off (the default, in
+    /// development too) answers the same 501 SCIM error as before the feature existed. A rollout
+    /// control, never an authorization input: org-core resolves the token and the organization.
+    pub(crate) scim_edge: ScimEdgeConfig,
+}
+
+/// The SCIM edge switch and its org-core credential (principal `verevon-scim-edge`). The edge is
+/// armed only when the flag is on AND the credential is a secure secret, so a half-configured
+/// deployment keeps answering 501 instead of forwarding anonymously.
+#[derive(Clone, Default)]
+pub(crate) struct ScimEdgeConfig {
+    pub(crate) enabled: bool,
+    pub(crate) token: String,
+}
+
+impl std::fmt::Debug for ScimEdgeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScimEdgeConfig")
+            .field("enabled", &self.enabled)
+            .field("token", &"<redacted>")
+            .finish()
+    }
+}
+
+impl ScimEdgeConfig {
+    pub(crate) fn from_env() -> Self {
+        let flag = env_bool("SCIM_EDGE_ENABLED", false);
+        let token = env::var("ORG_CORE_SCIM_EDGE_TOKEN").unwrap_or_default();
+        let token = token.trim();
+        let secure = service_token_is_secure(token);
+        if flag && !secure {
+            tracing::warn!("SCIM_EDGE_ENABLED is on but ORG_CORE_SCIM_EDGE_TOKEN is not a secure secret; the SCIM edge stays off");
+        }
+        Self {
+            enabled: flag && secure,
+            token: if secure { token.to_owned() } else { String::new() },
+        }
+    }
+}
+
+impl SpaceFeatureFlags {
+    pub(crate) fn from_env() -> Self {
+        Self {
+            agent_wake_policy_api: space_flag("SPACE_AGENT_WAKE_POLICY_API"),
+            addressed_wake_api: space_flag("SPACE_ADDRESSED_WAKE_API"),
+            mention_records_api: space_flag("SPACE_MENTION_RECORDS_API"),
+            approval_scopes: space_flag("SPACE_APPROVAL_SCOPES_ENABLED"),
+            append_retrieval: env::var("GATEWAY_SPACE_APPEND_RETRIEVAL").is_ok_and(|value| value == "true"),
+            chat_locale_hint: space_flag("CHAT_LOCALE_HINT"),
+            denials_typed: space_flag("SPACE_DENIALS_TYPED"),
+            dm_api: space_flag("SPACE_DM_API"),
+            message_revise_api: space_flag("SPACE_MESSAGE_REVISE_API"),
+            reactions_api: space_flag("SPACE_REACTIONS_API"),
+            client_policy: crate::client_contract::ClientPolicy::from_env(),
+            csp_report_log_hosts: dev_only_flag("CSP_REPORT_LOG_HOSTS"),
+            connectivity_banner_ui: space_flag("SPACE_CONNECTIVITY_BANNER_UI"),
+            human_posts_api: space_flag("SPACE_HUMAN_POSTS_API"),
+            membership_writer_api: space_flag("SPACE_MEMBERSHIP_WRITER_API"),
+            policy_admin_api: space_flag("SPACE_POLICY_ADMIN_API"),
+            realtime_stream: space_flag("SPACE_REALTIME_STREAM"),
+            room_details_ui: space_flag("SPACE_ROOM_DETAILS_UI"),
+            people_search_api: space_flag("SPACE_PEOPLE_SEARCH_API"),
+            directory_resolver_api: space_flag("SPACE_DIRECTORY_RESOLVER_API"),
+            room_archive_api: space_flag("SPACE_ROOM_ARCHIVE_API"),
+            room_directory_api: space_flag("SPACE_ROOM_DIRECTORY_API"),
+            room_artifacts: space_flag("SPACE_ROOM_ARTIFACTS_API"),
+            room_pins: space_flag("SPACE_ROOM_PINS_API"),
+            room_files_api: space_flag("SPACE_ROOM_FILES_API"),
+            room_files_ui: space_flag("SPACE_ROOM_FILES_UI"),
+            turn_attachments_ui: space_flag("SPACE_TURN_ATTACHMENTS_UI"),
+            message_search_api: space_flag("SPACE_MESSAGE_SEARCH_API"),
+            message_search_ui: space_flag("SPACE_MESSAGE_SEARCH_UI"),
+            entry_links_ui: space_flag("SPACE_ENTRY_LINKS_UI"),
+            command_palette_ui: space_flag("SPACE_COMMAND_PALETTE_UI"),
+            thread_fork_api: space_flag("SPACE_THREAD_FORK_API"),
+            send_idempotency_api: space_flag("SPACE_SEND_IDEMPOTENCY_API"),
+            thread_pane_ui: space_flag("SPACE_THREAD_PANE_UI"),
+            tool_policy_editor: space_flag("SPACE_TOOL_POLICY_EDITOR_ENABLED"),
+            attention_api: space_flag("SPACE_ATTENTION_API"),
+            attention_ui: space_flag("SPACE_ATTENTION_UI"),
+            status_api: space_flag("SPACE_STATUS_API"),
+            reminders_api: space_flag("SPACE_REMINDERS_API"),
+            org_identity_admin_api: space_flag("ORG_IDENTITY_ADMIN_API"),
+            run_live_text: space_flag("SPACE_RUN_LIVE_TEXT"),
+            run_live_view: space_flag("SPACE_RUN_LIVE_VIEW"),
+            run_manager_stop: space_flag("SPACE_RUN_MANAGER_STOP"),
+            run_owner_steer: space_flag("SPACE_RUN_OWNER_STEER"),
+            sidebar: space_flag("SPACE_SIDEBAR_API"),
+            composer_drafts_ui: space_flag("SPACE_COMPOSER_DRAFTS_UI"),
+            composer_markdown_ui: space_flag("SPACE_COMPOSER_MARKDOWN_UI"),
+            human_markdown_ui: space_flag("SPACE_HUMAN_MARKDOWN_UI"),
+            timeline_anchor_ui: space_flag("SPACE_TIMELINE_ANCHOR_UI"),
+            timeline_api: space_flag("SPACE_TIMELINE_API"),
+            system_entries_api: space_flag("SPACE_SYSTEM_ENTRIES_API"),
+            scim_edge: ScimEdgeConfig::from_env(),
+        }
+    }
+}
+
+/// One Space flag: `1|true|yes|on` turns it on; unset falls back to ON in development and OFF
+/// when `APP_ENV` is production. Same rule as every other dev-defaulted gateway flag.
+#[allow(dead_code, reason = "first consumer is the next Space slice that adds a flag")]
+pub(crate) fn space_flag(key: &str) -> bool {
+    env_bool(
+        key,
+        dev_flags_allowed(&env::var("APP_ENV").unwrap_or_default()),
+    )
+}
+
+#[cfg(test)]
+impl AppState {
+    /// A complete, offline `AppState` for tests. Prefer this plus struct-update syntax over a
+    /// fresh literal so a new field never has to be added to every test.
+    #[allow(dead_code, reason = "used by Space slice tests as they land")]
+    pub(crate) fn for_tests() -> Self {
+        crate::tests::test_state(false)
+    }
 }
 
 /// Which optional parts of the Ingestions schedules surface this installation
@@ -359,6 +738,7 @@ pub(crate) async fn build_state() -> Result<AppState> {
         mail_task_nats_password: optional_env("VEREVON_GATEWAY_MAIL_TASK_NATS_PASSWORD"),
         // See the field doc comment: no production wiring yet.
         mail_task_pipeline: None,
+        space_features: SpaceFeatureFlags::from_env(),
     })
 }
 
@@ -883,6 +1263,193 @@ mod tests {
             1,
             "declared exactly once"
         );
+    }
+
+    /// Runs `body` with the given env vars set (and restored), serialised on the shared lock.
+    fn with_env<T>(vars: &[(&str, Option<&str>)], body: impl FnOnce() -> T) -> T {
+        let _guard = super::TEST_ENV_LOCK.blocking_lock();
+        let saved: Vec<(String, Option<String>)> = vars
+            .iter()
+            .map(|(key, _)| ((*key).to_owned(), std::env::var(key).ok()))
+            .collect();
+        for (key, value) in vars {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        let out = body();
+        for (key, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        out
+    }
+
+    /// P-GW1: a default-built flag set has every Space flag off, so a test literal that never names
+    /// the field and `AppState::for_tests()` can never accidentally turn a route on.
+    #[test]
+    fn space_feature_flags_default_has_every_flag_off() {
+        let flags = super::SpaceFeatureFlags::default();
+        assert!(!flags.denials_typed);
+        assert!(!flags.csp_report_log_hosts);
+        assert!(!flags.connectivity_banner_ui);
+        assert!(!flags.human_posts_api);
+        assert!(!flags.membership_writer_api);
+        assert!(!flags.policy_admin_api);
+        assert!(!flags.realtime_stream);
+        assert!(!flags.room_details_ui);
+        assert!(!flags.people_search_api);
+        assert!(!flags.room_archive_api);
+        assert!(!flags.room_artifacts);
+        assert!(!flags.send_idempotency_api);
+        assert!(!flags.thread_pane_ui);
+    }
+
+    /// P-GW1 / WS01-S5 / WS03-S4: an unset Space flag is OFF under `APP_ENV=production`, ON in
+    /// development, and an explicit value wins in both.
+    #[test]
+    fn space_flag_is_off_in_production_when_unset_and_on_in_dev() {
+        let key = "SPACE_TEST_ONLY_FLAG_P_GW1";
+        with_env(&[("APP_ENV", Some("production")), (key, None)], || {
+            assert!(!super::space_flag(key));
+        });
+        with_env(&[("APP_ENV", Some("prod")), (key, None)], || {
+            assert!(!super::space_flag(key));
+        });
+        with_env(&[("APP_ENV", Some("development")), (key, None)], || {
+            assert!(super::space_flag(key));
+        });
+        with_env(&[("APP_ENV", Some("production")), (key, Some("true"))], || {
+            assert!(super::space_flag(key));
+        });
+        with_env(&[("APP_ENV", Some("development")), (key, Some("off"))], || {
+            assert!(!super::space_flag(key));
+        });
+    }
+
+    /// WS07-S6: `CSP_REPORT_LOG_HOSTS` is a dev-only flag: it follows its variable outside
+    /// production and stays off under `APP_ENV=production` or `prod` even when set to true.
+    #[test]
+    fn csp_report_log_hosts_is_a_dev_only_flag() {
+        with_env(&[("APP_ENV", Some("production")), ("CSP_REPORT_LOG_HOSTS", Some("true"))], || {
+            assert!(!super::SpaceFeatureFlags::from_env().csp_report_log_hosts);
+        });
+        with_env(&[("APP_ENV", Some("prod")), ("CSP_REPORT_LOG_HOSTS", Some("true"))], || {
+            assert!(!super::SpaceFeatureFlags::from_env().csp_report_log_hosts);
+        });
+        with_env(&[("APP_ENV", Some("development")), ("CSP_REPORT_LOG_HOSTS", Some("true"))], || {
+            assert!(super::SpaceFeatureFlags::from_env().csp_report_log_hosts);
+        });
+        // Unset is off in every environment: it is not a `space_flag` (no dev default of on).
+        with_env(&[("APP_ENV", Some("development")), ("CSP_REPORT_LOG_HOSTS", None)], || {
+            assert!(!super::SpaceFeatureFlags::from_env().csp_report_log_hosts);
+        });
+    }
+
+    /// WS01-S5 and WS03-S4: the human-post, thread-pane, send-idempotency, connectivity-banner and
+    /// policy-admin flags are off in production when their variable is unset, on in development,
+    /// and honour an explicit value.
+    #[test]
+    fn ws01_and_ws03_flags_follow_the_space_flag_rule() {
+        let keys = [
+            "SPACE_HUMAN_POSTS_API",
+            "SPACE_THREAD_PANE_UI",
+            "SPACE_SEND_IDEMPOTENCY_API",
+            "SPACE_CONNECTIVITY_BANNER_UI",
+            "SPACE_POLICY_ADMIN_API",
+            "SPACE_REALTIME_STREAM",
+        ];
+        let unset = |app_env: &'static str| -> Vec<(&'static str, Option<&'static str>)> {
+            let mut vars = vec![("APP_ENV", Some(app_env))];
+            vars.extend(keys.iter().map(|key| (*key, None)));
+            vars
+        };
+        with_env(&unset("production"), || {
+            let flags = super::SpaceFeatureFlags::from_env();
+            assert!(!flags.human_posts_api);
+            assert!(!flags.thread_pane_ui);
+            assert!(!flags.send_idempotency_api);
+            assert!(!flags.connectivity_banner_ui);
+            assert!(!flags.policy_admin_api);
+            assert!(!flags.realtime_stream);
+        });
+        with_env(&unset("development"), || {
+            let flags = super::SpaceFeatureFlags::from_env();
+            assert!(flags.human_posts_api);
+            assert!(flags.thread_pane_ui);
+            assert!(flags.send_idempotency_api);
+            assert!(flags.connectivity_banner_ui);
+            assert!(flags.policy_admin_api);
+            assert!(flags.realtime_stream);
+        });
+        let mut explicit = unset("production");
+        explicit.retain(|(key, _)| *key != "SPACE_POLICY_ADMIN_API");
+        explicit.push(("SPACE_POLICY_ADMIN_API", Some("true")));
+        with_env(&explicit, || {
+            let flags = super::SpaceFeatureFlags::from_env();
+            assert!(flags.policy_admin_api, "explicit true wins in production");
+            assert!(!flags.human_posts_api, "the others stay off");
+        });
+        let mut explicit_off = unset("development");
+        explicit_off.retain(|(key, _)| *key != "SPACE_POLICY_ADMIN_API");
+        explicit_off.push(("SPACE_POLICY_ADMIN_API", Some("false")));
+        with_env(&explicit_off, || {
+            assert!(!super::SpaceFeatureFlags::from_env().policy_admin_api);
+        });
+    }
+
+    /// WS03-S5, WS04-S2, WS04-S3 and WS04-S6: the typed-denial, room-details, people-search and
+    /// membership-writer flags are off in production when unset, on in development, and honour an
+    /// explicit value in both.
+    #[test]
+    fn ws03_s5_and_ws04_flags_follow_the_space_flag_rule() {
+        let keys = [
+            "SPACE_DENIALS_TYPED",
+            "SPACE_ROOM_DETAILS_UI",
+            "SPACE_PEOPLE_SEARCH_API",
+            "SPACE_MEMBERSHIP_WRITER_API",
+            "SPACE_ROOM_ARCHIVE_API",
+        ];
+        let vars = |app_env: &'static str, value: Option<&'static str>| {
+            let mut vars = vec![("APP_ENV", Some(app_env))];
+            vars.extend(keys.iter().map(|key| (*key, value)));
+            vars
+        };
+        with_env(&vars("production", None), || {
+            let flags = super::SpaceFeatureFlags::from_env();
+            assert!(!flags.denials_typed);
+            assert!(!flags.room_details_ui);
+            assert!(!flags.people_search_api);
+            assert!(!flags.membership_writer_api);
+            assert!(!flags.room_archive_api);
+        });
+        with_env(&vars("development", None), || {
+            let flags = super::SpaceFeatureFlags::from_env();
+            assert!(flags.denials_typed);
+            assert!(flags.room_details_ui);
+            assert!(flags.people_search_api);
+            assert!(flags.membership_writer_api);
+            assert!(flags.room_archive_api);
+        });
+        with_env(&vars("production", Some("true")), || {
+            let flags = super::SpaceFeatureFlags::from_env();
+            assert!(flags.denials_typed);
+            assert!(flags.room_details_ui);
+            assert!(flags.people_search_api);
+            assert!(flags.membership_writer_api);
+            assert!(flags.room_archive_api);
+        });
+        with_env(&vars("development", Some("false")), || {
+            let flags = super::SpaceFeatureFlags::from_env();
+            assert!(!flags.denials_typed);
+            assert!(!flags.room_details_ui);
+            assert!(!flags.people_search_api);
+            assert!(!flags.membership_writer_api);
+            assert!(!flags.room_archive_api);
+        });
     }
 }
 

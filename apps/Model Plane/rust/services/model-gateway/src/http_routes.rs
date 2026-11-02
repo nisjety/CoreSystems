@@ -51,7 +51,6 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, info, warn};
 
 use crate::{
-    approvals,
     auth::{
         self, Claims, StepUpClaim, VerifiedCapabilityBearer, VerifiedCostBearer,
         VerifiedDataPlaneBearer as VerifiedBearer, VerifiedExecutionBearer,
@@ -370,6 +369,8 @@ pub fn build_router_with_readiness(
         .merge(crate::browser_run::router())
         // A signed-in user's browser grant (issue / release); the broker mints it.
         .merge(crate::browser_grants::router())
+        // Space room routes /v1/spaces/* (one file per feature under space_routes/).
+        .merge(crate::space_routes::router())
         // AI modality routes  /v1/ai/*
         .merge(ai_routes())
         // App-Plane proxies (capabilities/tasks/cron/memory/skills)
@@ -443,6 +444,10 @@ fn orchestration_routes() -> Router<AppState> {
         .route(
             "/v1/orchestration/approvals/:approval_id",
             get(get_approval),
+        )
+        .route(
+            "/v1/orchestration/approvals/:approval_id/quarantine-preview",
+            get(get_quarantine_preview),
         )
         .route(
             "/v1/orchestration/threads/:thread_id/lineage",
@@ -1029,7 +1034,7 @@ fn should_resume_granted_approval(
     ))
 }
 
-fn require_non_zdr_durable_mutation(claims: &Claims) -> Result<(), HttpJsonError> {
+pub(crate) fn require_non_zdr_durable_mutation(claims: &Claims) -> Result<(), HttpJsonError> {
     let zdr = crate::zdr_posture::zdr_or_refuse(claims, &crate::zdr_posture::Route::plain(false))?;
     if !zdr {
         return Ok(());
@@ -1182,6 +1187,7 @@ async fn list_approvals(
                 // Cross-org IDOR fix (Phase 6): scope to the caller's verified
                 // JWT org, never a client-suppliable value.
                 org_id: claims.org_id.clone(),
+                ..Default::default()
             },
             &bearer,
         )?)
@@ -1470,6 +1476,7 @@ async fn get_approval(
                 // Cross-org IDOR fix (Phase 6): scope to the caller's verified
                 // JWT org, never a client-suppliable value.
                 org_id: claims.org_id.clone(),
+                ..Default::default()
             },
             &bearer,
         )?)
@@ -1481,6 +1488,40 @@ async fn get_approval(
         .approval
         .ok_or_else(|| not_found("approval not found"))?;
     Ok(Json(json!({ "approval": approval_value(&approval) })))
+}
+
+/// `GET /v1/orchestration/approvals/{id}/quarantine-preview` — the inert preview (plain text, at
+/// most 1 KiB) of output held for review (build plan WS10 S8). Session Core answers only the run's
+/// owner while the approval is pending or granted-and-unspent; every other case is the same 404.
+/// The org is the verified JWT org, never a caller value. The text is never markup: show it as text.
+async fn get_quarantine_preview(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(approval_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let response = state
+        .orchestration_client
+        .clone()
+        .get_quarantine_preview(authenticated_session_request(
+            mp_contracts::model_plane::v1::GetQuarantinePreviewRequest {
+                org_id: claims.org_id.clone(),
+                approval_id,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| grpc_status_to_http(&e))?
+        .into_inner();
+    Ok(Json(json!({
+        "preview": {
+            "text": response.preview,
+            "truncated": response.truncated,
+            "tool_key": response.tool_key,
+            "trust_class": response.trust_class,
+            "format": "plain_text",
+        }
+    })))
 }
 
 async fn get_subagent_lineage(
@@ -2187,6 +2228,7 @@ fn user_decision_request(
         decision_source: ApprovalDecisionSource::User as i32,
         scope: approval_scope_code(scope),
         rule_proposed,
+        ..Default::default()
     }
 }
 
@@ -2218,6 +2260,7 @@ async fn decide_approval(
                 GetApprovalRequest {
                     approval_id: approval_id.clone(),
                     org_id: claims.org_id.clone(),
+                    ..Default::default()
                 },
                 &session_bearer,
             )?)
@@ -2289,35 +2332,17 @@ async fn decide_approval(
         .approval
         .ok_or_else(|| not_found("approval not found"))?;
     // A grant is durable authority, but not a restartable continuation: this
-    // path never invokes a generic `ResumeRun`, since the outbox is
-    // identifier-only and there is no descriptor-backed, service-only
-    // dispatcher yet to prove the paused work actually restarted.
-    //
-    // `quarantine_granted_approval_continuation` reports exactly that
-    // boundary and — for a granted approval — is DESIGNED to always return
-    // `unavailable`. That is a statement about continuation delivery, not a
-    // failure of the decision itself: `DecideApproval` above already durably
-    // recorded the grant (session-core's CAS write) before this ever runs.
-    // So its result becomes an informational field on the success response
-    // rather than clobbering it into a 502.
+    // path never invokes a generic `ResumeRun`. What happens next is read from
+    // the approval's derived `continuation` (Session Core joins the delivery
+    // outbox, start receipt and outcome), never assumed here: the old
+    // always-failing quarantine call answered "pending" for kinds the worker
+    // would refuse (build plan WS10 S1). The decision itself was already
+    // durably recorded above, so this is informational and never a 502.
     let mut continuation_delivery: Option<&'static str> = None;
     if matches!(target_state, ApprovalState::Granted)
         && should_resume_granted_approval(prior_approval.as_ref(), &approval)?
     {
-        continuation_delivery = Some(if approval.continuation_mode.is_empty() {
-            match approvals::quarantine_granted_approval_continuation(
-                &approvals::gateway_approval_from_proto(&approval),
-            ) {
-                Ok(()) => "not_applicable",
-                Err(_) => "pending",
-            }
-        } else {
-            // A loop-owned approval (build plan WS03 S2) has no delivery row and
-            // is not the cold worker's: the durable Do loop consumes it when the
-            // user continues the run. Say so, rather than reporting a delivery
-            // that will never happen.
-            "awaiting_continue"
-        });
+        continuation_delivery = Some(continuation_delivery_word(&approval));
     }
 
     let mut body = json!({ "approval": approval_value(&approval) });
@@ -2325,6 +2350,81 @@ async fn decide_approval(
         body["continuation_delivery"] = json!(status);
     }
     Ok(Json(body))
+}
+
+/// The one-word `continuation_delivery` of a decided approval, kept for older clients next to the
+/// typed `approval.continuation`: `queued`, `running`, `completed`, `failed`, `not_resumable`
+/// (the approval only lets the agent retry the exact action once), `live` (a browser action
+/// polled by the running loop), `awaiting_continue` (a loop-owned approval) or `unknown` when
+/// Session Core could not derive the state.
+fn continuation_delivery_word(approval: &Approval) -> &'static str {
+    use mp_contracts::model_plane::v1::ContinuationState as State;
+    match continuation_state_name(approval) {
+        Some(State::Queued) => "queued",
+        Some(State::Running) => "running",
+        Some(State::Completed) => "completed",
+        Some(State::Failed) => "failed",
+        Some(State::NotResumable) => "not_resumable",
+        Some(State::Live) => "live",
+        Some(State::AwaitingContinue) => "awaiting_continue",
+        Some(State::Unspecified) | None => "unknown",
+    }
+}
+
+fn continuation_state_name(
+    approval: &Approval,
+) -> Option<mp_contracts::model_plane::v1::ContinuationState> {
+    approval
+        .continuation
+        .as_ref()
+        .and_then(|continuation| {
+            mp_contracts::model_plane::v1::ContinuationState::try_from(continuation.state).ok()
+        })
+}
+
+/// The resume class Session Core stored on the approval's card (`context.card.resume_class`),
+/// restricted to the closed vocabulary.
+fn card_resume_class(approval: &Approval) -> Option<String> {
+    use prost_types::value::Kind;
+    let context = approval.context.as_ref()?;
+    let Some(Kind::StructValue(card)) = context.fields.get("card")?.kind.as_ref() else {
+        return None;
+    };
+    let Some(Kind::StringValue(class)) = card.fields.get("resume_class")?.kind.as_ref() else {
+        return None;
+    };
+    matches!(class.as_str(), "action_continuation" | "live_poll" | "none").then(|| class.clone())
+}
+
+/// The typed continuation a browser may read; `null` until the approval is granted.
+fn continuation_value(approval: &Approval) -> Value {
+    use mp_contracts::model_plane::v1::{ContinuationState as State, VerificationStatus};
+    let Some(continuation) = approval.continuation.as_ref() else {
+        return Value::Null;
+    };
+    let state = match continuation_state_name(approval) {
+        Some(State::Queued) => "queued",
+        Some(State::Running) => "running",
+        Some(State::Completed) => "completed",
+        Some(State::Failed) => "failed",
+        Some(State::NotResumable) => "not_resumable",
+        Some(State::Live) => "live",
+        Some(State::AwaitingContinue) => "awaiting_continue",
+        Some(State::Unspecified) | None => return Value::Null,
+    };
+    let verification = match VerificationStatus::try_from(continuation.verification) {
+        Ok(VerificationStatus::VerifiedSuccess) => json!("verified_success"),
+        Ok(VerificationStatus::VerifiedFailure) => json!("verified_failure"),
+        Ok(VerificationStatus::PartiallyVerified) => json!("partially_verified"),
+        Ok(VerificationStatus::Unknown) => json!("unknown"),
+        _ => Value::Null,
+    };
+    json!({
+        "state": state,
+        "failure_code": empty_to_null(&continuation.failure_code),
+        "verification": verification,
+        "provider_receipt_id": empty_to_null(&continuation.provider_receipt_id),
+    })
 }
 
 /// Cancel a run through Session Core's authoritative `RunService`.
@@ -7397,7 +7497,7 @@ fn parse_skill_decision(word: &str) -> Option<mp_contracts::model_plane::v1::Ski
 /// camelCase. Timestamps are emitted as RFC3339 strings (null when unset) and
 /// the arbitrary `metadata` Struct is flattened to plain JSON.
 fn run_detail_value(run: &RunDetail) -> Value {
-    json!({
+    let mut value = json!({
         "run_id": run.run_id,
         "thread_id": run.thread_id,
         "parent_run_id": empty_to_null(&run.parent_run_id),
@@ -7414,7 +7514,13 @@ fn run_detail_value(run: &RunDetail) -> Value {
         "created_at": run.created_at.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
         "updated_at": run.updated_at.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
         "metadata": run.metadata.as_ref().map_or(Value::Null, prost_struct_to_json),
-    })
+    });
+    // Set by Session Core only when the run was read through a Space read decision (WS09-S4);
+    // absent otherwise, so an owner-path projection is byte-for-byte what it was.
+    if !run.owner_subject_id.is_empty() {
+        value["owner_subject_id"] = json!(run.owner_subject_id);
+    }
+    value
 }
 
 #[cfg(test)]
@@ -7457,6 +7563,15 @@ fn prost_ts_to_rfc3339(ts: &prost_types::Timestamp) -> Value {
     match chrono::DateTime::from_timestamp(ts.seconds, nanos) {
         Some(dt) => Value::String(dt.to_rfc3339()),
         None => Value::Null,
+    }
+}
+
+/// The RFC3339 time of a transcript turn, or `None` when session-core sent none (or one that
+/// cannot be represented), so the field is left off rather than invented.
+fn message_created_at(ts: Option<&prost_types::Timestamp>) -> Option<String> {
+    match prost_ts_to_rfc3339(ts?) {
+        Value::String(rfc3339) => Some(rfc3339),
+        _ => None,
     }
 }
 
@@ -7526,7 +7641,7 @@ fn todo_value(todo: &Todo) -> Value {
     })
 }
 
-fn approval_value(approval: &Approval) -> Value {
+pub(crate) fn approval_value(approval: &Approval) -> Value {
     json!({
         "id": approval.id,
         "run_id": approval.run_id,
@@ -7538,6 +7653,25 @@ fn approval_value(approval: &Approval) -> Value {
         "decision_reason": empty_to_null(&approval.decision_reason),
         // Why the pause was raised (build plan WS13 S2); null when the creator stated none.
         "cause": approval.cause.as_ref().map_or(Value::Null, approval_cause_value),
+        // What the card says it is for (build plan WS10 S1): allowlisted by the creator and
+        // re-validated by Session Core, never raw arguments.
+        "tool_key": empty_to_null(&approval.tool_key),
+        "action_label": empty_to_null(&approval.action_label),
+        // What approving does with the paused work, stated by Session Core from its own rows:
+        // `action_continuation`, `live_poll` or `none`. Null on an approval created before the
+        // card context existed, so a surface says nothing rather than guessing.
+        "resume_class": card_resume_class(approval).map_or(Value::Null, Value::String),
+        // Where the approved action stands, derived from the delivery rows; null until granted.
+        "continuation": continuation_value(approval),
+        // Who is asked to decide it and who raised it (build plan WS10 S6): identifiers and kinds
+        // only. The requester is the subject the approved action runs as.
+        "requester_subject_id": empty_to_null(&approval.requester_subject_id),
+        "addressee": approval.addressee.as_ref().map(|a| json!({
+            "kind": match a.kind {2 => "named", 3 => "any_editor", 4 => "any_manager", _ => "requester"},
+            "subject_id": empty_to_null(&a.subject_id),
+        })),
+        "grant_ref": empty_to_null(&approval.grant_ref),
+        "turn_origin": empty_to_null(&approval.turn_origin),
     })
 }
 
@@ -7736,6 +7870,9 @@ mod approval_step_up_tests {
             "model-gateway/src/grpc.rs",
             // The HTTP decide route, where the step-up gate sits.
             "model-gateway/src/http_routes.rs",
+            // Main's Space member decide route (WS10 S6), merged 2026-11-02. It carries a Control
+            // decision, not the step-up gate; whether a member grant needs step-up is a depth item.
+            "model-gateway/src/space_routes/approvals.rs",
         ]
         .into_iter()
         .collect();
@@ -8658,6 +8795,11 @@ pub struct InvokeRequest {
     /// authority and Session Core independently verifies this bearer.
     #[serde(default)]
     pub space_context: Option<crate::session_flow::ThreadSpaceContext>,
+    /// Server-injected Control `model.run.wake` decision and the stored post and agent it binds
+    /// (WS08-S3). With it the stream starts one run from that post and appends no user turn. The
+    /// BFF strips any browser value and injects this after Control signs; Session Core verifies it.
+    #[serde(default)]
+    pub wake_context: Option<crate::session_flow::WakeContext>,
     #[serde(default)]
     pub structured_output_schema: Option<String>,
     #[serde(default)]
@@ -8875,6 +9017,12 @@ pub struct InvokeRequest {
     /// not carried here — this field is the text alone.
     #[serde(default)]
     pub persona_instructions: Option<String>,
+    /// WS16-S6 — the viewer's interface language, stamped by the BFF gateway from a closed set
+    /// (`nb-NO` or `en-US`; flag `CHAT_LOCALE_HINT`). A framing hint for the reply language,
+    /// request-scoped: never stored, grants nothing, and `Honored` under ZDR. See
+    /// [`crate::locale_hint`]. Absent on agent wake-ups.
+    #[serde(default)]
+    pub locale: Option<String>,
 }
 
 /// A tool/function definition supplied by the client (chat-parity §2).
@@ -10339,6 +10487,14 @@ struct ThreadMessage {
     /// string". Presentation identity, never an authority claim.
     #[serde(skip_serializing_if = "String::is_empty")]
     author_subject_id: String,
+    /// `post` for a human message written to the room; omitted for a conversation turn
+    /// (`turn`, or a row from before post kinds), so a turn keeps the shape it always had.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    post_kind: String,
+    /// When session-core stored this turn, as RFC3339. A room shows a time beside each
+    /// message. Omitted when session-core sent none, so a reader never sees a made-up time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_at: Option<String>,
     /// The turn's persisted evidence, flattened so its keys (today
     /// `grounding`) sit directly on the message the way the live SSE path
     /// delivers them. Omitted entirely for turns recorded before metadata was
@@ -10349,6 +10505,110 @@ struct ThreadMessage {
     /// only on a versioned thread, so every other transcript keeps its shape.
     #[serde(skip_serializing_if = "Option::is_none")]
     version: Option<ThreadMessageVersion>,
+    /// The typed room entry of a human post (WS15): its own field, never flattened with the free
+    /// metadata. An unknown future kind arrives as `{kind, version}` only. Omitted when none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    entry: Option<ThreadMessageEntry>,
+    /// The mentions recorded on a post (WS08), with the wake state derived from the newest run per
+    /// (post, agent). Ids and closed words only; omitted when the row has none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    mentions: Vec<ThreadMessageMention>,
+    /// The latest applied edit or deletion of this message (WS12-S6), flattened so its keys sit on
+    /// the turn. Omitted for a message that was never revised, so every other transcript keeps its
+    /// shape. `content` is already the effective text (empty for a deleted turn).
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    revision: Option<ThreadMessageRevision>,
+}
+
+/// The revision state of a turn as the transcript serialises it (WS12-S6). Ids, closed words and
+/// a time: never the original text.
+#[derive(Debug, Serialize)]
+struct ThreadMessageRevision {
+    /// `edited` or `deleted`.
+    revision_state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revised_at: Option<String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    revised_by_subject_id: String,
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    revision_no: u32,
+    /// Set only on a deleted turn that an agent run answered before the deletion.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    agent_followed_up: bool,
+}
+
+/// The revision fields of a conversation row, or `None` when it was never revised.
+fn thread_message_revision(
+    m: &mp_contracts::model_plane::v1::SessionMessage,
+) -> Option<ThreadMessageRevision> {
+    if m.revision_state.is_empty() {
+        return None;
+    }
+    Some(ThreadMessageRevision {
+        revision_state: m.revision_state.clone(),
+        revised_at: message_created_at(m.revised_at.as_ref()),
+        revised_by_subject_id: m.revised_by_subject_id.clone(),
+        revision_no: m.revision_no,
+        agent_followed_up: m.agent_followed_up,
+    })
+}
+
+/// One recorded mention of a post as the transcript serialises it (WS08).
+#[derive(Debug, Serialize)]
+struct ThreadMessageMention {
+    subject_id: String,
+    kind: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    wake_state: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    reason: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    source: String,
+    ordinal: u32,
+}
+
+/// A typed room entry as the transcript serialises it (WS15-S6; stored and validated by WS15-S9).
+#[derive(Debug, Serialize)]
+struct ThreadMessageEntry {
+    kind: String,
+    version: u32,
+    /// Present only for the `link_previews` kind.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    link_previews: Vec<ThreadMessageLinkPreview>,
+}
+
+#[derive(Debug, Serialize)]
+struct ThreadMessageLinkPreview {
+    url: String,
+    final_url: String,
+    host: String,
+    title: String,
+    description: String,
+    site_name: String,
+    fetched_at: String,
+}
+
+fn thread_message_entry(
+    entry: Option<mp_contracts::model_plane::v1::MessageEntry>,
+) -> Option<ThreadMessageEntry> {
+    let entry = entry.filter(|entry| !entry.kind.is_empty())?;
+    Some(ThreadMessageEntry {
+        kind: entry.kind,
+        version: entry.version,
+        link_previews: entry
+            .link_previews
+            .into_iter()
+            .map(|preview| ThreadMessageLinkPreview {
+                url: preview.url,
+                final_url: preview.final_url,
+                host: preview.host,
+                title: preview.title,
+                description: preview.description,
+                site_name: preview.site_name,
+                fetched_at: timestamp_to_rfc3339(preview.fetched_at),
+            })
+            .collect(),
+    })
 }
 
 /// A turn's place in the message tree, as the version switcher reads it.
@@ -10378,6 +10638,11 @@ struct ListThreadMessagesResponse {
     /// page. Absent on the unpaged read, which stays byte-identical.
     #[serde(skip_serializing_if = "Option::is_none")]
     has_more: Option<bool>,
+    /// Set only on a read that asked for the first turn (`include_first`, WS15-S6) while
+    /// `SPACE_TIMELINE_API` is on: how many readable turns lie between the first turn and the tail
+    /// window. When positive, `messages[0]` is the first turn and the rest is the contiguous tail.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    omitted_before: Option<u32>,
     /// Set only when this gateway runs with message versions on (WS17 S8), so the
     /// client can offer the version switcher. Absent otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -10538,6 +10803,32 @@ struct ThreadSummaryResponse {
     /// Whether the thread has an unread reply. Present only with an attention state.
     #[serde(skip_serializing_if = "Option::is_none")]
     attention_unseen: Option<bool>,
+    /// Replies after the first message, under the reader's audience ceiling (Session Core's
+    /// count); omitted when zero so a thread without replies keeps its shape.
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    reply_count: u32,
+    /// Who wrote the latest human row; omitted when Session Core names none.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    last_author_subject_id: String,
+    /// Thread activity summary (WS15-S6): present only on a timeline window, omitted from every
+    /// other listing so those keep their shape. `last_message_seq` is the window's keyset position.
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    last_message_seq: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    recent_author_subject_ids: Vec<String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    last_role: String,
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    turn_count: u32,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Serialize)]
@@ -10801,6 +11092,12 @@ async fn list_threads(
                 .map(|value| timestamp_to_rfc3339(Some(value))),
             attention_unseen: attention_state_name(thread.attention_state)
                 .map(|_| thread.attention_unseen),
+            reply_count: thread.reply_count,
+            last_author_subject_id: thread.last_author_subject_id,
+            last_message_seq: thread.last_message_seq,
+            recent_author_subject_ids: thread.recent_author_subject_ids,
+            last_role: thread.last_role,
+            turn_count: thread.turn_count,
         })
         .collect();
 
@@ -11445,6 +11742,10 @@ struct ThreadMessagesQuery {
     /// before it, so it is read only together with a positive `limit`.
     #[serde(default)]
     before: Option<String>,
+    /// `1` or `true`: also return the thread's first readable turn ahead of the newest page
+    /// (WS15-S6). Honoured only while `SPACE_TIMELINE_API` is on and only without `before`.
+    #[serde(default)]
+    include_first: Option<String>,
 }
 
 /// Caps the tail page `GET /v1/threads/{id}/messages` serves. Operators set
@@ -11509,6 +11810,21 @@ async fn list_thread_messages(
     let limit = query.limit.unwrap_or(0).min(thread_messages_page_ceiling(
         std::env::var(THREAD_MESSAGES_MAX_LIMIT_ENV).ok().as_deref(),
     ));
+    let include_first = limit > 0
+        && before.is_empty()
+        && mp_contracts::space_timeline::api_enabled()
+        && query
+            .include_first
+            .as_deref()
+            .is_some_and(|raw| matches!(raw.trim(), "1" | "true"));
+    // A shared-Space read (it carries a Control decision) sees only the
+    // allowlisted metadata keys (WS07-S9a); the owner's Chat read is unchanged.
+    let space_read_decision_ref = query.space_read_decision_ref.unwrap_or_default();
+    let legacy_metadata_passthrough = crate::room_metadata::legacy_passthrough(
+        std::env::var(crate::room_metadata::LEGACY_PASSTHROUGH_ENV)
+            .ok()
+            .as_deref(),
+    );
 
     let response = state
         .session_client
@@ -11518,13 +11834,19 @@ async fn list_thread_messages(
                 org_id: claims.org_id.clone(),
                 thread_id: trimmed.to_owned(),
                 space_id: query.space_id.unwrap_or_default(),
-                space_read_decision_ref: query.space_read_decision_ref.unwrap_or_default(),
+                space_read_decision_ref: space_read_decision_ref.clone(),
                 space_read_decision_token: query.space_read_decision_token.unwrap_or_default(),
                 // The transcript a client shows is the active path; turns on other
                 // branches are not read through this route.
                 include_inactive: false,
                 limit,
                 before_message_id: before,
+                // The UI transcript route is the only reader that shows human posts. Every
+                // other caller keeps the default (false), so a post never reaches model
+                // context or reattach_context.
+                include_human_posts: true,
+                post_context_cap: 0,
+                include_first,
             },
             &bearer,
         )?)
@@ -11552,6 +11874,8 @@ async fn list_thread_messages(
                     include_inactive: true,
                     limit: 0,
                     before_message_id: String::new(),
+                    // A personal thread holds no human posts; the internal read keeps them out.
+                    ..Default::default()
                 },
                 &bearer,
             )?)
@@ -11566,21 +11890,47 @@ async fn list_thread_messages(
     // Only a paged read says whether more exists, so an unpaged body keeps the
     // exact shape every caller already parses.
     let has_more = (limit > 0).then_some(response.has_more);
+    let omitted_before = include_first.then_some(response.omitted_before);
     let messages =
         response
             .messages
             .into_iter()
             .map(|m| ThreadMessage {
+                revision: thread_message_revision(&m),
                 message_id: m.message_id,
                 role: m.role,
                 content: m.content,
                 agent_name: m.agent_name,
                 author_subject_id: m.author_subject_id,
-                metadata: m.metadata.as_ref().map(prost_struct_to_json).and_then(
-                    |value| match value {
-                        Value::Object(map) if !map.is_empty() => Some(map),
-                        _ => None,
-                    },
+                post_kind: if m.post_kind == "post" { m.post_kind } else { String::new() },
+                created_at: message_created_at(m.created_at.as_ref()),
+                entry: thread_message_entry(m.entry),
+                mentions: m
+                    .mentions
+                    .into_iter()
+                    .map(|r| ThreadMessageMention {
+                        subject_id: r.subject_id,
+                        kind: r.kind,
+                        wake_state: r.wake_state,
+                        reason: r.reason,
+                        source: r.source,
+                        ordinal: r.ordinal,
+                    })
+                    .collect(),
+                metadata: crate::room_metadata::visible_metadata(
+                    m.metadata.as_ref().map(prost_struct_to_json).and_then(
+                        |value| match value {
+                            // `entry` is the typed field above; a stored free key of that name
+                            // must never produce a second `entry` in the body.
+                            Value::Object(mut map) => {
+                                map.remove("entry");
+                                (!map.is_empty()).then_some(map)
+                            }
+                            _ => None,
+                        },
+                    ),
+                    &space_read_decision_ref,
+                    legacy_metadata_passthrough,
                 ),
                 version: (m.sibling_count > 0).then(|| ThreadMessageVersion {
                     siblings: sibling_ids
@@ -11599,6 +11949,7 @@ async fn list_thread_messages(
         thread_id: trimmed.to_owned(),
         messages,
         has_more,
+        omitted_before,
         versions_enabled: message_versions_enabled().then_some(true),
     }))
 }
@@ -11993,6 +12344,14 @@ struct MemorySummaryResponse {
     /// unknown row "stated" would be the one wrong answer: it is the claim a
     /// user would rely on when deciding whether to keep it.
     provenance: &'static str,
+    /// Closed vocabulary; omitted for an ordinary row. "room_origin_unverified" marks a
+    /// row learned in a shared room before containment: listed to its owner, never
+    /// recalled (WS17-S2).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    withheld_reason: String,
+    /// Space the withheld row was learned in (an id, never content); omitted when empty.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    origin_space_ref: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -12040,6 +12399,8 @@ async fn list_memories(
             content: entry.content,
             updated_at: timestamp_to_rfc3339(entry.updated_at),
             provenance: memory_provenance_label(entry.provenance),
+            withheld_reason: entry.withheld_reason,
+            origin_space_ref: entry.origin_space_ref,
         })
         .collect();
 
@@ -12817,6 +13178,7 @@ async fn invoke(
                     req.edited_resubmit,
                     req.idempotency_key.as_deref(),
                 ),
+                None,
             )
             .await
         }
@@ -14048,6 +14410,14 @@ mod run_owner_publish_tests {
 
     #[tonic::async_trait]
     impl RunService for OwnerResolver {
+        // Main's RPCs (merged 2026-11-02); this double does not serve them.
+        async fn resolve_approval_authority(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::ResolveApprovalAuthorityRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ResolveApprovalAuthorityResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("resolve_approval_authority is not served by this double"))
+        }
+
         async fn get_run(
             &self,
             _: TonicRequest<GetRunRequest>,
@@ -14161,6 +14531,20 @@ mod run_owner_publish_tests {
             Err(Status::unimplemented(
                 "scheduled step authority not needed in route test",
             ))
+        }
+
+        async fn authorize_room_run_attach(
+            &self,
+            _: TonicRequest<mp_contracts::model_plane::v1::AuthorizeRoomRunAttachRequest>,
+        ) -> Result<TonicResponse<mp_contracts::model_plane::v1::AuthorizeRoomRunAttachResponse>, Status> {
+            Err(Status::unimplemented("room run attach not needed in this test"))
+        }
+
+        async fn cancel_run_as_room_manager(
+            &self,
+            _: TonicRequest<mp_contracts::model_plane::v1::CancelRunAsRoomManagerRequest>,
+        ) -> Result<TonicResponse<mp_contracts::model_plane::v1::CancelRunAsRoomManagerResponse>, Status> {
+            Err(Status::unimplemented("room run stop not needed in this test"))
         }
     }
 
@@ -17340,6 +17724,7 @@ mod thread_messages_page_tests {
             thread_id: "thread-1".to_owned(),
             messages: Vec::new(),
             has_more: None,
+            omitted_before: None,
             versions_enabled: None,
         })
         .expect("the response serialises");
@@ -17355,6 +17740,7 @@ mod thread_messages_page_tests {
             thread_id: "thread-1".to_owned(),
             messages: Vec::new(),
             has_more: Some(false),
+            omitted_before: None,
             versions_enabled: None,
         })
         .expect("the response serialises");
@@ -17373,10 +17759,16 @@ mod thread_messages_page_tests {
                 content: "hi".to_owned(),
                 agent_name: String::new(),
                 author_subject_id: String::new(),
+                post_kind: String::new(),
+                created_at: None,
                 metadata: None,
                 version: None,
+                entry: None,
+                mentions: Vec::new(),
+                revision: None,
             }],
             has_more: None,
+            omitted_before: None,
             versions_enabled: None,
         })
         .expect("the response serialises");
@@ -17392,11 +17784,14 @@ mod thread_messages_page_tests {
     #[test]
     fn a_versioned_turn_says_where_it_sits_among_its_versions() {
         let body = serde_json::to_value(ThreadMessage {
+            entry: None, mentions: Vec::new(), revision: None,
             message_id: "m2".to_owned(),
             role: "assistant".to_owned(),
             content: "answer".to_owned(),
             agent_name: String::new(),
             author_subject_id: String::new(),
+            post_kind: String::new(),
+            created_at: None,
             metadata: None,
             version: Some(ThreadMessageVersion {
                 siblings: Vec::new(),
@@ -17442,6 +17837,7 @@ mod thread_messages_page_tests {
             thread_id: "thread-1".to_owned(),
             messages: Vec::new(),
             has_more: None,
+            omitted_before: None,
             versions_enabled: Some(true),
         })
         .expect("the response serialises");
@@ -17707,5 +18103,165 @@ mod fork_route_tests {
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body["error"]["code"], "history_fork_refused");
         assert_eq!(body["error"]["message"], "fork_source_not_forkable");
+    }
+}
+
+#[cfg(test)]
+mod space_post_wire_tests {
+    use super::*;
+
+    fn message(post_kind: &str) -> ThreadMessage {
+        ThreadMessage {
+            message_id: "m-1".to_owned(),
+            role: "user".to_owned(),
+            content: "hello".to_owned(),
+            agent_name: String::new(),
+            author_subject_id: "user-2".to_owned(),
+            post_kind: post_kind.to_owned(),
+            created_at: None,
+            metadata: None,
+            version: None,
+            entry: None,
+            mentions: Vec::new(),
+            revision: None,
+        }
+    }
+
+    fn summary(reply_count: u32, last_author: &str) -> ThreadSummaryResponse {
+        ThreadSummaryResponse {
+            attention_state: None, attention_since: None, attention_unseen: None, forked_from_thread_id: String::new(),
+            thread_id: "t-1".to_owned(),
+            session_key: "k".to_owned(),
+            title: "title".to_owned(),
+            preview: "preview".to_owned(),
+            created_at: "2026-10-27T00:00:00Z".to_owned(),
+            updated_at: "2026-10-27T00:00:00Z".to_owned(),
+            pinned: false,
+            space_id: "space-1".to_owned(),
+            owner_subject_id: "user-1".to_owned(),
+            latest_run_id: String::new(),
+            latest_run_status: String::new(),
+            latest_run_updated_at: None,
+            origin: "space".to_owned(),
+            persona_enabled: true,
+            archived_at: String::new(),
+            starred: false,
+            unread: false,
+            reply_count,
+            last_author_subject_id: last_author.to_owned(),
+            last_message_seq: 0,
+            recent_author_subject_ids: Vec::new(),
+            last_role: String::new(),
+            turn_count: 0,
+        }
+    }
+
+    #[test]
+    fn thread_message_json_carries_created_at_as_rfc3339_and_omits_it_when_unset() {
+        // 2026-10-31T09:30:15.250Z
+        let stored = prost_types::Timestamp {
+            seconds: 1_793_439_015,
+            nanos: 250_000_000,
+        };
+        let mut stamped = message("post");
+        stamped.created_at = message_created_at(Some(&stored));
+        let body = serde_json::to_value(stamped).expect("serialises");
+        let created_at = body["created_at"].as_str().expect("created_at is a string");
+        let parsed = chrono::DateTime::parse_from_rfc3339(created_at).expect("RFC3339");
+        assert_eq!(parsed.timestamp(), 1_793_439_015);
+        assert_eq!(parsed.timestamp_subsec_millis(), 250);
+        // A row session-core sent no time for keeps the shape it always had.
+        assert_eq!(message_created_at(None), None);
+        let unset = serde_json::to_value(message("")).expect("serialises");
+        assert!(unset.get("created_at").is_none(), "{unset}");
+    }
+
+    #[test]
+    fn thread_message_json_omits_post_kind_for_turns_and_carries_it_for_posts() {
+        // The handler maps a turn (or a row from before post kinds) to an empty kind, which is
+        // omitted, so a turn keeps the shape it always had.
+        let turn = serde_json::to_value(message("")).expect("serialises");
+        assert!(turn.get("post_kind").is_none(), "{turn}");
+        assert_eq!(turn["author_subject_id"], "user-2");
+        let post = serde_json::to_value(message("post")).expect("serialises");
+        assert_eq!(post["post_kind"], "post");
+        assert_eq!(post["author_subject_id"], "user-2");
+        assert_eq!(post["message_id"], "m-1");
+    }
+
+    #[test]
+    fn thread_summary_omits_reply_count_when_zero_and_last_author_when_empty() {
+        let quiet = serde_json::to_value(summary(0, "")).expect("serialises");
+        assert!(quiet.get("reply_count").is_none(), "{quiet}");
+        assert!(quiet.get("last_author_subject_id").is_none(), "{quiet}");
+        let busy = serde_json::to_value(summary(3, "user-2")).expect("serialises");
+        assert_eq!(busy["reply_count"], 3);
+        assert_eq!(busy["last_author_subject_id"], "user-2");
+        // One of the two alone is carried independently of the other.
+        let only_author = serde_json::to_value(summary(0, "user-9")).expect("serialises");
+        assert!(only_author.get("reply_count").is_none());
+        assert_eq!(only_author["last_author_subject_id"], "user-9");
+        let only_count = serde_json::to_value(summary(1, "")).expect("serialises");
+        assert_eq!(only_count["reply_count"], 1);
+        assert!(only_count.get("last_author_subject_id").is_none());
+    }
+}
+
+#[cfg(test)]
+mod memory_withheld_json_tests {
+    use super::*;
+
+    fn summary(withheld_reason: &str, origin_space_ref: &str) -> MemorySummaryResponse {
+        MemorySummaryResponse {
+            memory_id: "mem-1".to_owned(),
+            topic: "USER".to_owned(),
+            content: "likes tea".to_owned(),
+            updated_at: "2026-10-27T12:00:00Z".to_owned(),
+            provenance: "unknown",
+            withheld_reason: withheld_reason.to_owned(),
+            origin_space_ref: origin_space_ref.to_owned(),
+        }
+    }
+
+    #[test]
+    fn memories_json_omits_withheld_fields_for_an_ordinary_row() {
+        let ordinary = serde_json::to_value(summary("", "")).expect("serialises");
+        assert!(ordinary.get("withheld_reason").is_none(), "{ordinary}");
+        assert!(ordinary.get("origin_space_ref").is_none(), "{ordinary}");
+        // The shape an older SPA reads is unchanged.
+        for key in ["memory_id", "topic", "content", "updated_at", "provenance"] {
+            assert!(ordinary.get(key).is_some(), "{key} must stay: {ordinary}");
+        }
+    }
+
+    #[test]
+    fn memories_json_carries_withheld_reason_and_origin_space_when_set() {
+        let withheld = serde_json::to_value(summary("room_origin_unverified", "space-room-1")).expect("serialises");
+        assert_eq!(withheld["withheld_reason"], "room_origin_unverified");
+        assert_eq!(withheld["origin_space_ref"], "space-room-1");
+    }
+
+    #[test]
+    fn memories_json_carries_each_withheld_field_independently() {
+        let only_reason = serde_json::to_value(summary("room_origin_unverified", "")).expect("serialises");
+        assert_eq!(only_reason["withheld_reason"], "room_origin_unverified");
+        assert!(only_reason.get("origin_space_ref").is_none());
+        let only_space = serde_json::to_value(summary("", "space-room-1")).expect("serialises");
+        assert!(only_space.get("withheld_reason").is_none());
+        assert_eq!(only_space["origin_space_ref"], "space-room-1");
+    }
+
+    #[test]
+    fn the_listing_envelope_still_serialises_with_withheld_rows_inside() {
+        let body = serde_json::to_value(ListMemoriesResponse {
+            memories: vec![summary("room_origin_unverified", "space-room-1"), summary("", "")],
+            degraded: false,
+            degradation_reason: String::new(),
+        })
+        .expect("serialises");
+        let rows = body["memories"].as_array().expect("array");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["withheld_reason"], "room_origin_unverified");
+        assert!(rows[1].get("withheld_reason").is_none());
     }
 }

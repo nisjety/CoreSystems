@@ -153,3 +153,16 @@ func (d spaceImportDecisionClaims) validate(orgID string, now time.Time) error {
 func (d spaceImportDecisionClaims) matchesDocumentInputType(documentType string) bool {
 	return strings.TrimSpace(documentType) == d.ImportSourceType
 }
+
+// isSpaceUpload reports whether the decision was issued for a room file
+// (WS14-S3), which is the only case where documents-api applies the room-file
+// rules: shared visibility, per-Space quota, dedupe and the Space grant.
+func (d spaceImportDecisionClaims) isSpaceUpload() bool {
+	return strings.TrimSpace(d.ImportSourceType) == spaceUploadDocumentType
+}
+
+// signedSubject is the user the Space authority was issued for. It is the
+// verified decision's own claim, never a request field.
+func (d spaceImportDecisionClaims) signedSubject() string {
+	return strings.TrimSpace(d.SubjectID)
+}

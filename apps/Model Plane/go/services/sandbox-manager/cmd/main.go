@@ -237,7 +237,7 @@ func main() {
 		// other is not.
 		server = server.WithSpaceReadVerifier(capabilityVerifier.VerifySpaceRead)
 	}
-	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(authz.UnaryInterceptor(verifier)))
+	grpcServer := grpc.NewServer(grpc.ChainUnaryInterceptor(authz.UnaryInterceptor(verifier), authz.ZDRGate()))
 	sbxserver.Register(grpcServer, server)
 	healthServerGRPC := health.NewServer()
 	grpc_health_v1.RegisterHealthServer(grpcServer, healthServerGRPC)

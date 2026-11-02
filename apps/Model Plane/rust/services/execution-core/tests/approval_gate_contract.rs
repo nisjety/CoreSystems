@@ -31,7 +31,18 @@ const GOLDEN: &str = include_str!("../../../../api/contracts/approval-causes.jso
 
 /// The codes no production site raises yet. Each is in the golden; the test insists that it stays
 /// unraised until the slice that owns it wires it, so the reservation cannot outlive its reason.
-const RESERVED: &[&str] = &["CapabilityPolicyAsk"];
+// `CapabilityPolicyAsk` left this list when main's Space gate (WS10 S3, `space_gate.rs`) began raising it.
+const RESERVED: &[&str] = &[];
+
+/// Main's creators that state no cause, and why: (file under `src`, enclosing function). The
+/// quarantine hold (WS10 S8) is an `UntrustedContent` review of held tool output, not a tool call
+/// waiting for consent; the standing-rule use (WS10 S3) records a call a Control rule already
+/// passed, granted at creation, so no person is asked. Whether either should carry a cause code
+/// is a depth item, not something the merge of main decides.
+const KIND_CARD_CREATORS: &[(&str, &str)] = &[
+    ("quarantine.rs", "enforce"),
+    ("space_gate.rs", "try_standing_rule"),
+];
 
 /// Every production site that creates an approval: (file under `src`, enclosing function).
 const CREATORS: &[(&str, &str)] = &[
@@ -149,6 +160,12 @@ fn every_approval_creator_is_inventoried_and_states_a_cause() {
     for source in production_sources() {
         for (line, block) in literal_blocks(&source.text, "CreateApprovalRequest {") {
             let function = enclosing_fn(&source.text, line);
+            if KIND_CARD_CREATORS
+                .iter()
+                .any(|(file, name)| source.path.ends_with(file) && function == *name)
+            {
+                continue;
+            }
             assert!(
                 block.contains("cause: Some("),
                 "{}:{line} ({function}) creates an approval without stating its cause: build the \

@@ -86,3 +86,53 @@ test('the marker never moves backwards', () => {
   assert.equal(advanceMarker(undefined, 500), 500);
   assert.equal(advanceMarker(Number.NaN, 500), 500);
 });
+
+// WS01-S7b: with `last_author_subject_id` the rule is "the latest message is
+// mine", not "I started the thread". Kept identical to the SPA's
+// space-unread.test.ts.
+test('a thread I started whose latest message is someone else’s is unread', () => {
+  const marker = T('2026-09-07T10:00:00Z');
+  const ids = unreadThreadIds(
+    [thread('t1', '2026-09-07T11:00:00Z', { owner_subject_id: 'viewer', last_author_subject_id: 'someone-else' })],
+    marker,
+    'viewer',
+  );
+  assert.deepEqual(ids, ['t1']);
+});
+
+test('a thread whose latest message is mine is not unread, whoever started it', () => {
+  const marker = T('2026-09-07T10:00:00Z');
+  const ids = unreadThreadIds(
+    [thread('t1', '2026-09-07T11:00:00Z', { owner_subject_id: 'someone-else', last_author_subject_id: 'viewer' })],
+    marker,
+    'viewer',
+  );
+  assert.deepEqual(ids, []);
+});
+
+test('without last_author_subject_id the owner rule still applies', () => {
+  const marker = T('2026-09-07T10:00:00Z');
+  const ids = unreadThreadIds(
+    [
+      thread('mine', '2026-09-07T11:00:00Z', { owner_subject_id: 'viewer' }),
+      thread('theirs', '2026-09-07T11:00:00Z'),
+    ],
+    marker,
+    'viewer',
+  );
+  assert.deepEqual(ids, ['theirs']);
+});
+
+test('an empty last_author_subject_id counts as absent', () => {
+  const marker = T('2026-09-07T10:00:00Z');
+  const ids = unreadThreadIds(
+    [
+      thread('mine', '2026-09-07T11:00:00Z', { owner_subject_id: 'viewer', last_author_subject_id: '' }),
+      thread('blank', '2026-09-07T11:00:00Z', { owner_subject_id: 'viewer', last_author_subject_id: '   ' }),
+      thread('theirs', '2026-09-07T11:00:00Z', { last_author_subject_id: '' }),
+    ],
+    marker,
+    'viewer',
+  );
+  assert.deepEqual(ids, ['theirs']);
+});

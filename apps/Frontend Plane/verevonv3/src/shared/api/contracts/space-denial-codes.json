@@ -1,0 +1,95 @@
+{
+  "version": 1,
+  "codes": [
+    {
+      "code": "space_membership_required",
+      "status": 403,
+      "class": "membership",
+      "resolvable_by": "none",
+      "details_keys": [],
+      "retryable": false
+    },
+    {
+      "code": "space_not_active",
+      "status": 403,
+      "class": "lifecycle",
+      "resolvable_by": "space_manager",
+      "details_keys": [
+        "state"
+      ],
+      "retryable": false
+    },
+    {
+      "code": "space_kind_unsupported",
+      "status": 403,
+      "class": "kind",
+      "resolvable_by": "none",
+      "details_keys": [
+        "kind"
+      ],
+      "retryable": false
+    },
+    {
+      "code": "space_policy_not_provisioned",
+      "status": 403,
+      "class": "policy",
+      "resolvable_by": "org_admin",
+      "details_keys": [],
+      "retryable": false
+    },
+    {
+      "code": "space_entitlement_off",
+      "status": 403,
+      "class": "entitlement",
+      "resolvable_by": "org_admin",
+      "details_keys": [
+        "entitlement"
+      ],
+      "retryable": false
+    },
+    {
+      "code": "space_role_below_floor",
+      "status": 403,
+      "class": "role",
+      "resolvable_by": "space_manager",
+      "details_keys": [
+        "required_roles"
+      ],
+      "retryable": false
+    },
+    {
+      "code": "space_zdr_forbids_effect",
+      "status": 403,
+      "class": "zdr",
+      "resolvable_by": "none",
+      "details_keys": [
+        "effect"
+      ],
+      "retryable": false
+    },
+    {
+      "code": "space_audience_not_current",
+      "status": 403,
+      "class": "audience",
+      "resolvable_by": "retry",
+      "details_keys": [],
+      "retryable": true
+    },
+    {
+      "code": "space_authority_incomplete",
+      "status": 403,
+      "class": "authority",
+      "resolvable_by": "operator",
+      "details_keys": [],
+      "retryable": false
+    },
+    {
+      "code": "space_authority_unavailable",
+      "status": 503,
+      "class": "availability",
+      "resolvable_by": "retry",
+      "details_keys": [],
+      "retryable": true
+    }
+  ]
+}

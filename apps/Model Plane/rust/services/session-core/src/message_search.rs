@@ -5,7 +5,9 @@
 //! the owner already keeps and persists nothing (DEC-32). RECALL serves the read-only
 //! recall tool, which runs on a prompt the model writes. It searches only the owner's
 //! unscoped threads, skips every thread that holds a zero-retention or waived run, and
-//! is refused to a zero-retention credential.
+//! is refused to a zero-retention credential. A recall result becomes model context, and a
+//! member's room post (`post_kind = 'post'`) is never model context (WS01), so recall also
+//! skips every post even where one sits in a thread the owner can reach; UI search shows them.
 //!
 //! Both purposes read the active path only (WS17 S8): a turn on an inactive branch is not
 //! part of the conversation the owner sees, so search never returns one.
@@ -50,7 +52,8 @@ const QUERY_CANCELED: &str = "57014";
 /// The page, every candidate message, the highlight and the caller's scope.
 ///
 /// Parameters: $1 org, $2 owner, $3 prefix tsquery, $4 Space, $5 Space audience ceiling,
-/// $6 origin, $7 thread filter, $8 excluded thread, $9 recall, $10 archive state,
+/// $6 origin, $7 thread filter, $8 excluded thread, $9 recall (no human posts, no zero-retention
+/// threads), $10 archive state,
 /// $11/$12 keyset position, $13 page rows + 1, $14 candidate cap.
 ///
 /// The predicate on `to_tsvector('simple', left(m.content, 65536))` and the role filter
@@ -65,6 +68,7 @@ WITH candidates AS (
     WHERE m.role IN ('user', 'assistant')
       AND m.on_active_path
       AND (m.copied_from_message_id IS NULL OR NULLIF($7, '') IS NOT NULL)
+      AND (NOT $9::BOOLEAN OR m.post_kind = 'turn')
       AND to_tsvector('simple', left(m.content, 65536)) @@ to_tsquery('simple', $3)
       AND t.org_id = $1
       AND (CASE WHEN $5::BIGINT IS NULL
@@ -249,9 +253,8 @@ impl MessageSearchGrpc {
         let recall = purpose == pb::SearchPurpose::Recall;
         if recall {
             if caller.zdr() {
-                return Err(Status::permission_denied(
-                    "recall is not available to zero-retention credentials",
-                ));
+                return Err(mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+                    .grpc_status(tonic::Code::PermissionDenied));
             }
             // Recall reads the owner's own unscoped threads. A Space read is never
             // widened to it, so a decision or a Space id here is a caller error.
@@ -527,6 +530,19 @@ mod tests {
         .unwrap();
     }
 
+    async fn seed_post(pool: &PgPool, thread: &str, id: &str, content: &str) {
+        sqlx::query(
+            "INSERT INTO messages (id, thread_id, role, content, post_kind)
+             VALUES ($1, $2, 'user', $3, 'post')",
+        )
+        .bind(id)
+        .bind(thread)
+        .bind(content)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     fn request(org: &str, user: &str, query: &str) -> Request<pb::SearchMessagesRequest> {
         let mut request = Request::new(pb::SearchMessagesRequest {
             org_id: org.to_owned(),
@@ -656,5 +672,77 @@ mod tests {
             .expect("ui search")
             .into_inner();
         assert_eq!(ui.hits.len(), 2);
+    }
+
+    /// WS01 depth: a recall result is model context and a member's post never is, so recall skips
+    /// `post_kind = 'post'` rows while the person's own UI search still finds them.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn search_recall_excludes_human_posts_but_ui_search_keeps_them() {
+        let pool = connect().await;
+        let suffix = new_ulid();
+        let org = format!("search-posts-{suffix}");
+        let turn = format!("{suffix}-turn");
+        let post = format!("{suffix}-post");
+        seed_thread(&pool, &org, "poster", &turn).await;
+        seed_thread(&pool, &org, "poster", &post).await;
+        seed_message(&pool, &turn, &format!("{suffix}-t"), "kvartal marker as a turn").await;
+        seed_post(&pool, &post, &format!("{suffix}-p"), "kvartal marker as a post").await;
+
+        let mut recall = request(&org, "poster", "kvartal marker");
+        recall.get_mut().purpose = pb::SearchPurpose::Recall as i32;
+        let recalled = service(pool.clone())
+            .search_messages(recall)
+            .await
+            .expect("recall search")
+            .into_inner();
+        let recalled_threads: Vec<&str> =
+            recalled.hits.iter().map(|hit| hit.thread_id.as_str()).collect();
+        assert_eq!(recalled_threads, vec![turn.as_str()], "recall never returns a post");
+
+        let ui = service(pool.clone())
+            .search_messages(request(&org, "poster", "kvartal marker"))
+            .await
+            .expect("ui search")
+            .into_inner();
+        let mut ui_threads: Vec<&str> = ui.hits.iter().map(|hit| hit.thread_id.as_str()).collect();
+        ui_threads.sort_unstable();
+        let mut expected = vec![turn.as_str(), post.as_str()];
+        expected.sort_unstable();
+        assert_eq!(ui_threads, expected, "UI search keeps the post");
+    }
+
+    /// The post predicate rides on the recall flag alone: it must stay in the statement and stay
+    /// off for UI search (no database needed).
+    #[test]
+    fn the_post_predicate_is_gated_on_the_recall_flag() {
+        assert!(SEARCH_SQL.contains("(NOT $9::BOOLEAN OR m.post_kind = 'turn')"));
+    }
+
+    /// WS06-S1: a ZDR credential's recall search is the typed durable-mutation refusal
+    /// (answered before any row is read, so no database is needed).
+    #[tokio::test]
+    async fn zdr_refusal_recall_search_is_durable_mutation_forbidden() {
+        use mp_contracts::zdr_refusal::Refusal;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://unreachable.invalid/session")
+            .expect("lazy pool");
+        let service = MessageSearchGrpc { pool, enabled: true };
+        let mut request = Request::new(pb::SearchMessagesRequest {
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+            purpose: pb::SearchPurpose::Recall as i32,
+            query: "budget".to_owned(),
+            ..Default::default()
+        });
+        request
+            .extensions_mut()
+            .insert(crate::auth::VerifiedIdentity::user_for_test_with_zdr("org-1", "user-1", true));
+        let status = service.search(request).await.expect_err("ZDR recall is refused");
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+        assert_eq!(
+            Refusal::from_status(&status).map(|refusal| refusal.code()),
+            Some(mp_contracts::zdr_refusal::code::DURABLE_MUTATION_FORBIDDEN)
+        );
     }
 }

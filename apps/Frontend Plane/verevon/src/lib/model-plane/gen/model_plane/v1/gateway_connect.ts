@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { AppendThreadMessageRequest, AppendThreadMessageResponse, ApproveApprovalRequest, ApproveApprovalResponse, CheckPermissionRequest, CheckPermissionResponse, CreateTaskRequest, CreateTaskResponse, DenyApprovalRequest, DenyApprovalResponse, EnterPlanModeRequest, EnterPlanModeResponse, ExecuteCommandRequest, ExecuteCommandResponse, ExitPlanModeRequest, ExitPlanModeResponse, ExportTrajectoriesRequest, ExportTrajectoriesResponse, ExtractStructuredRequest, ExtractStructuredResponse, FetchRequest, FetchResponse, GetAnalyticsRequest, GetAnalyticsResponse, GetPolicyRequest, GetPolicyResponse, GetSkillRequest, GetSkillResponse, HealthRequest, HealthResponse, InvokeChunk, InvokeRequest, InvokeResponse, IsPlanModeRequest, IsPlanModeResponse, ListCommandsRequest, ListCommandsResponse, ListHooksRequest, ListHooksResponse, ListMcpServersRequest, ListMcpServersResponse, ListMcpToolsRequest, ListMcpToolsResponse, ListPendingApprovalsRequest, ListPendingApprovalsResponse, ListPluginsRequest, ListPluginsResponse, ListSkillsRequest, ListSkillsResponse, ListTasksRequest, ListTasksResponse, ListThreadMessagesRequest, ListThreadMessagesResponse, ListTrajectoriesRequest, ListTrajectoriesResponse, LspQueryRequest, LspQueryResponse, MatchSkillsRequest, MatchSkillsResponse, ProxyMcpToolRequest, ProxyMcpToolResponse, RecordTrajectoryRequest, RecordTrajectoryResponse, RegisterHookRequest, RegisterHookResponse, RegisterMcpServerRequest, RegisterMcpServerResponse, RegisterPluginRequest, RegisterPluginResponse, RemoteTriggerRequest, RemoteTriggerResponse, RequestApprovalRequest, RequestApprovalResponse, SendMessageRequest, SendMessageResponse, SetPermissionRequest, SetPermissionResponse, SetPluginEnabledRequest, SetPluginEnabledResponse, SetPolicyRequest, SetPolicyResponse, SleepRequest, SleepResponse, SpeechToTextRequest, SpeechToTextResponse, SyntheticOutputRequest, SyntheticOutputResponse, TeamCreateRequest, TeamCreateResponse, TeamDeleteRequest, TeamDeleteResponse, TeamListRequest, TeamListResponse, TextToSpeechRequest, TextToSpeechResponse, WebSearchRequest, WebSearchResponse } from "./gateway_pbjs";
+import { AppendThreadMessageRequest, AppendThreadMessageResponse, ApproveApprovalRequest, ApproveApprovalResponse, CheckPermissionRequest, CheckPermissionResponse, CreateTaskRequest, CreateTaskResponse, DenyApprovalRequest, DenyApprovalResponse, EnterPlanModeRequest, EnterPlanModeResponse, ExecuteCommandRequest, ExecuteCommandResponse, ExitPlanModeRequest, ExitPlanModeResponse, ExportTrajectoriesRequest, ExportTrajectoriesResponse, ExtractStructuredRequest, ExtractStructuredResponse, FetchRequest, FetchResponse, GetAnalyticsRequest, GetAnalyticsResponse, GetPolicyRequest, GetPolicyResponse, GetSkillRequest, GetSkillResponse, HealthRequest, HealthResponse, InvokeChunk, InvokeRequest, InvokeResponse, IsPlanModeRequest, IsPlanModeResponse, ListCommandsRequest, ListCommandsResponse, ListHooksRequest, ListHooksResponse, ListMcpServersRequest, ListMcpServersResponse, ListMcpToolsRequest, ListMcpToolsResponse, ListPendingApprovalsRequest, ListPendingApprovalsResponse, ListPluginsRequest, ListPluginsResponse, ListSkillsRequest, ListSkillsResponse, ListTasksRequest, ListTasksResponse, ListThreadMessagesRequest, ListThreadMessagesResponse, ListTrajectoriesRequest, ListTrajectoriesResponse, LspQueryRequest, LspQueryResponse, MatchSkillsRequest, MatchSkillsResponse, ProxyMcpToolRequest, ProxyMcpToolResponse, RecordTrajectoryRequest, RecordTrajectoryResponse, RegisterHookRequest, RegisterHookResponse, RegisterMcpServerRequest, RegisterMcpServerResponse, RegisterPluginRequest, RegisterPluginResponse, RemoteTriggerRequest, RemoteTriggerResponse, RequestApprovalRequest, RequestApprovalResponse, ScreenContentRequest, ScreenContentResponse, SendMessageRequest, SendMessageResponse, SetPermissionRequest, SetPermissionResponse, SetPluginEnabledRequest, SetPluginEnabledResponse, SetPolicyRequest, SetPolicyResponse, SleepRequest, SleepResponse, SpeechToTextRequest, SpeechToTextResponse, SyntheticOutputRequest, SyntheticOutputResponse, TeamCreateRequest, TeamCreateResponse, TeamDeleteRequest, TeamDeleteResponse, TeamListRequest, TeamListResponse, TextToSpeechRequest, TextToSpeechResponse, WebSearchRequest, WebSearchResponse } from "./gateway_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 
 /**
@@ -558,6 +558,17 @@ export const ModelGateway = {
       name: "Health",
       I: HealthRequest,
       O: HealthResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * WS26-S7: Do-mode content screening. A verdict only; the content is never returned.
+     *
+     * @generated from rpc model_plane.v1.ModelGateway.ScreenContent
+     */
+    screenContent: {
+      name: "ScreenContent",
+      I: ScreenContentRequest,
+      O: ScreenContentResponse,
       kind: MethodKind.Unary,
     },
   }

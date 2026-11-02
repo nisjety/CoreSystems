@@ -2669,145 +2669,6 @@ func TestRecordTokenLeaseFailsClosedOnMissingConnectionOrAuditIntent(t *testing.
 	}
 }
 
-func TestSCIMProvisioningRequiresBearerToken(t *testing.T) {
-	cfg, repo, service := testOAuthStack(t)
-	cfg.SCIMBearerToken = "scim-secret"
-	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service})
-
-	req := httptest.NewRequest("POST", "/api/v1/scim/v2/Users", strings.NewReader(`{"userName":"ada@example.com"}`))
-	req.Header.Set("Content-Type", "application/scim+json")
-	resp, err := app.Test(req)
-	if err != nil {
-		t.Fatalf("app.Test error: %v", err)
-	}
-	if resp.StatusCode != 401 {
-		t.Fatalf("status = %d, want 401", resp.StatusCode)
-	}
-}
-
-func TestSCIMProvisioningStoresInboundEvent(t *testing.T) {
-	cfg, repo, service := testOAuthStack(t)
-	cfg.SCIMBearerToken = "scim-secret"
-	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service})
-
-	req := httptest.NewRequest("POST", "/api/v1/scim/v2/Users", strings.NewReader(`{"externalId":"u-1","userName":"ada@example.com","active":true}`))
-	req.Header.Set("Content-Type", "application/scim+json")
-	req.Header.Set("Authorization", "Bearer scim-secret")
-	req.Header.Set("X-Org-ID", "org-1")
-	resp, err := app.Test(req)
-	if err != nil {
-		t.Fatalf("app.Test error: %v", err)
-	}
-	if resp.StatusCode != 201 {
-		t.Fatalf("status = %d, want 201", resp.StatusCode)
-	}
-	var decoded struct {
-		ID       string `json:"id"`
-		UserName string `json:"userName"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
-		t.Fatalf("Decode error: %v", err)
-	}
-	if decoded.UserName != "ada@example.com" {
-		t.Fatalf("userName = %q, want ada@example.com", decoded.UserName)
-	}
-}
-
-func TestSCIMTokenCRUDAndInboundAuth(t *testing.T) {
-	cfg, repo, service := testOAuthStack(t)
-	cfg.SCIMBearerToken = ""
-	cfg.SCIMBearerTokens = map[string]string{}
-	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service})
-
-	req := httptest.NewRequest("POST", "/api/v1/scim/tokens", strings.NewReader(`{"organizationId":"org-1","name":"Okta SCIM"}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Internal-API-Key", "dev-key")
-	resp, err := app.Test(req)
-	if err != nil {
-		t.Fatalf("app.Test create token error: %v", err)
-	}
-	if resp.StatusCode != 201 {
-		t.Fatalf("create token status = %d, want 201", resp.StatusCode)
-	}
-	var created struct {
-		Data struct {
-			Token       store.SCIMToken `json:"token"`
-			BearerToken string          `json:"bearerToken"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
-		t.Fatalf("Decode create token error: %v", err)
-	}
-	if !strings.HasPrefix(created.Data.BearerToken, "scim_") {
-		t.Fatalf("bearer token = %q, want scim_ prefix", created.Data.BearerToken)
-	}
-	if created.Data.Token.TokenPrefix == "" || len(created.Data.Token.TokenPrefix) >= len(created.Data.BearerToken) {
-		t.Fatalf("token prefix = %q, want short non-empty prefix", created.Data.Token.TokenPrefix)
-	}
-
-	req = httptest.NewRequest("GET", "/api/v1/scim/tokens?organizationId=org-1", nil)
-	req.Header.Set("X-Internal-API-Key", "dev-key")
-	resp, err = app.Test(req)
-	if err != nil {
-		t.Fatalf("app.Test list token error: %v", err)
-	}
-	if resp.StatusCode != 200 {
-		t.Fatalf("list token status = %d, want 200", resp.StatusCode)
-	}
-	var listed struct {
-		Data struct {
-			Tokens []store.SCIMToken `json:"tokens"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&listed); err != nil {
-		t.Fatalf("Decode list token error: %v", err)
-	}
-	if len(listed.Data.Tokens) != 1 || listed.Data.Tokens[0].ID != created.Data.Token.ID {
-		t.Fatalf("tokens = %#v, want created token", listed.Data.Tokens)
-	}
-
-	req = httptest.NewRequest("POST", "/api/v1/scim/v2/Users", strings.NewReader(`{"externalId":"u-1","userName":"ada@example.com","active":true}`))
-	req.Header.Set("Content-Type", "application/scim+json")
-	req.Header.Set("Authorization", "Bearer "+created.Data.BearerToken)
-	req.Header.Set("X-Org-ID", "org-1")
-	resp, err = app.Test(req)
-	if err != nil {
-		t.Fatalf("app.Test scim inbound error: %v", err)
-	}
-	if resp.StatusCode != 201 {
-		t.Fatalf("scim inbound status = %d, want 201", resp.StatusCode)
-	}
-	tokenAfterUse, err := repo.FindActiveSCIMTokenByHash(t.Context(), "org-1", scimTokenHash(created.Data.BearerToken))
-	if err != nil {
-		t.Fatalf("FindActiveSCIMTokenByHash error: %v", err)
-	}
-	if tokenAfterUse.LastUsedAt == nil {
-		t.Fatal("LastUsedAt was not updated after inbound SCIM auth")
-	}
-
-	req = httptest.NewRequest("DELETE", "/api/v1/scim/tokens/"+created.Data.Token.ID+"?organizationId=org-1", nil)
-	req.Header.Set("X-Internal-API-Key", "dev-key")
-	resp, err = app.Test(req)
-	if err != nil {
-		t.Fatalf("app.Test revoke token error: %v", err)
-	}
-	if resp.StatusCode != 200 {
-		t.Fatalf("revoke status = %d, want 200", resp.StatusCode)
-	}
-
-	req = httptest.NewRequest("POST", "/api/v1/scim/v2/Users", strings.NewReader(`{"externalId":"u-2","userName":"grace@example.com","active":true}`))
-	req.Header.Set("Content-Type", "application/scim+json")
-	req.Header.Set("Authorization", "Bearer "+created.Data.BearerToken)
-	req.Header.Set("X-Org-ID", "org-1")
-	resp, err = app.Test(req)
-	if err != nil {
-		t.Fatalf("app.Test revoked scim inbound error: %v", err)
-	}
-	if resp.StatusCode != 401 {
-		t.Fatalf("revoked scim status = %d, want 401", resp.StatusCode)
-	}
-}
-
 type auditInsertFailureTransaction struct {
 	store.AuditTransaction
 }
@@ -2830,86 +2691,226 @@ func (r auditInsertFailureRepository) WithAuditTransaction(ctx context.Context, 
 	})
 }
 
-func TestSCIMTokenCreateRollsBackWhenAuditIntentCannotPersist(t *testing.T) {
-	cfg, repo, service := testOAuthStack(t)
-	cfg.SCIMBearerToken = ""
-	cfg.SCIMBearerTokens = map[string]string{}
-	app := NewServer(ServerConfig{
-		Config: cfg,
-		Repo:   auditInsertFailureRepository{Repository: repo},
-		OAuth:  service,
-	})
+// WS05-S2: SCIM provisioning is not implemented in this service. Every
+// /api/v1/scim/v2/* request is an honest 501 with a SCIM error body, and nothing
+// about the request (payload, token, org) is stored or published.
 
-	req := httptest.NewRequest("POST", "/api/v1/scim/tokens", strings.NewReader(`{"organizationId":"org-1","name":"must rollback"}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Internal-API-Key", "dev-key")
-	resp, err := app.Test(req)
-	if err != nil {
-		t.Fatalf("app.Test error: %v", err)
+// webhookCountingRepository counts the inbound-event writes the former SCIM stub made.
+type webhookCountingRepository struct {
+	store.Repository
+	webhookInserts int
+}
+
+func (r *webhookCountingRepository) InsertWebhookEvent(ctx context.Context, event store.WebhookEvent) error {
+	r.webhookInserts++
+	return r.Repository.InsertWebhookEvent(ctx, event)
+}
+
+func scimStubServer(t *testing.T) (*fiber.App, *webhookCountingRepository, *fakeEventsPublisher, *store.MemoryRepository) {
+	t.Helper()
+	cfg, repo, service := testOAuthStack(t)
+	counting := &webhookCountingRepository{Repository: repo}
+	publisher := &fakeEventsPublisher{}
+	app := NewServer(ServerConfig{Config: cfg, Repo: counting, OAuth: service, Events: publisher})
+	return app, counting, publisher, repo
+}
+
+func TestSCIMV2AnswersHonest501ForEveryMethodPathAndCredential(t *testing.T) {
+	app, repo, publisher, _ := scimStubServer(t)
+	paths := []string{
+		"/api/v1/scim/v2/Users",
+		"/api/v1/scim/v2/Users/u-1",
+		"/api/v1/scim/v2/Groups",
+		"/api/v1/scim/v2/Groups/g-1",
+		"/api/v1/scim/v2/ServiceProviderConfig",
+		"/api/v1/scim/v2/Schemas",
+		"/api/v1/scim/v2/anything/else",
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != fiber.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500", resp.StatusCode)
+	authorizations := map[string]string{
+		"no credential":        "",
+		"unknown bearer":       "Bearer scim-secret",
+		"scim prefixed bearer": "Bearer scim_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"basic credential":     "Basic YTpi",
+		"empty bearer":         "Bearer ",
 	}
-	tokens, err := repo.ListSCIMTokens(t.Context(), "org-1")
-	if err != nil {
-		t.Fatalf("ListSCIMTokens: %v", err)
+	bodies := map[string]string{
+		"valid":        `{"externalId":"u-1","userName":"ada@example.com","active":true}`,
+		"invalid json": `{"userName": `,
+		"empty":        ``,
 	}
-	if len(tokens) != 0 {
-		t.Fatalf("SCIM token committed without audit intent: %#v", tokens)
+	calls := 0
+	for _, method := range []string{"GET", "POST", "PUT", "PATCH", "DELETE"} {
+		for _, path := range paths {
+			for authName, authorization := range authorizations {
+				for bodyName, body := range bodies {
+					req := httptest.NewRequest(method, path, strings.NewReader(body))
+					req.Header.Set("Content-Type", "application/scim+json")
+					req.Header.Set("X-Org-ID", "org-1")
+					if authorization != "" {
+						req.Header.Set("Authorization", authorization)
+					}
+					resp, err := app.Test(req)
+					if err != nil {
+						t.Fatalf("%s %s (%s, %s): app.Test error: %v", method, path, authName, bodyName, err)
+					}
+					raw, _ := io.ReadAll(resp.Body)
+					_ = resp.Body.Close()
+					calls++
+					if resp.StatusCode != fiber.StatusNotImplemented {
+						t.Fatalf("%s %s (%s, %s): status = %d, want 501: %s", method, path, authName, bodyName, resp.StatusCode, raw)
+					}
+					if contentType := resp.Header.Get("Content-Type"); !strings.HasPrefix(contentType, "application/scim+json") {
+						t.Fatalf("%s %s: Content-Type = %q, want application/scim+json", method, path, contentType)
+					}
+					var decoded struct {
+						Schemas []string `json:"schemas"`
+						Detail  string   `json:"detail"`
+						Status  string   `json:"status"`
+					}
+					if err := json.Unmarshal(raw, &decoded); err != nil {
+						t.Fatalf("%s %s: body is not JSON: %v: %s", method, path, err, raw)
+					}
+					if len(decoded.Schemas) != 1 || decoded.Schemas[0] != "urn:ietf:params:scim:api:messages:2.0:Error" {
+						t.Fatalf("%s %s: schemas = %v, want the SCIM Error schema", method, path, decoded.Schemas)
+					}
+					if decoded.Status != "501" || decoded.Detail == "" {
+						t.Fatalf("%s %s: status/detail = %q/%q", method, path, decoded.Status, decoded.Detail)
+					}
+				}
+			}
+		}
+	}
+	if calls == 0 {
+		t.Fatal("no SCIM request was made")
+	}
+	if repo.webhookInserts != 0 {
+		t.Fatalf("InsertWebhookEvent calls = %d, want 0: the stub must persist nothing", repo.webhookInserts)
+	}
+	if len(publisher.events) != 0 {
+		t.Fatalf("published events = %d, want 0: %#v", len(publisher.events), publisher.events)
 	}
 }
 
-func TestSCIMProvisioningUsesOrgScopedBearerToken(t *testing.T) {
-	cfg, repo, service := testOAuthStack(t)
-	cfg.SCIMBearerTokens = map[string]string{"org-1": "org-scim-secret"}
-	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service})
+func TestSCIMV2IgnoresAnIssuedTokenAndStillWritesNothing(t *testing.T) {
+	app, repo, publisher, memory := scimStubServer(t)
+	hash := strings.Repeat("a", 64)
+	if _, err := memory.CreateSCIMToken(t.Context(), store.SCIMToken{
+		ID: "tok-legacy", OrganizationID: "org-1", Name: "legacy", TokenPrefix: "scim_aaaa",
+	}, hash); err != nil {
+		t.Fatalf("seed legacy token: %v", err)
+	}
 
 	req := httptest.NewRequest("POST", "/api/v1/scim/v2/Users", strings.NewReader(`{"userName":"ada@example.com"}`))
 	req.Header.Set("Content-Type", "application/scim+json")
-	req.Header.Set("Authorization", "Bearer org-scim-secret")
+	req.Header.Set("Authorization", "Bearer scim_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	req.Header.Set("X-Org-ID", "org-1")
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("app.Test error: %v", err)
 	}
-	if resp.StatusCode != 201 {
-		t.Fatalf("status = %d, want 201", resp.StatusCode)
+	_ = resp.Body.Close()
+	if resp.StatusCode != fiber.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501", resp.StatusCode)
+	}
+	if repo.webhookInserts != 0 || len(publisher.events) != 0 {
+		t.Fatalf("webhook inserts = %d, published = %d, want none", repo.webhookInserts, len(publisher.events))
+	}
+	tokens, err := memory.ListSCIMTokens(t.Context(), "org-1")
+	if err != nil || len(tokens) != 1 || tokens[0].LastUsedAt != nil {
+		t.Fatalf("an inbound call must not authenticate or touch a token: %#v err=%v", tokens, err)
 	}
 }
 
-func TestSCIMProvisioningRejectsWrongOrgScopedBearerToken(t *testing.T) {
-	cfg, repo, service := testOAuthStack(t)
-	cfg.SCIMBearerTokens = map[string]string{"org-1": "org-scim-secret"}
-	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service})
+func TestSCIMTokenCreateIs501AndMintsNothing(t *testing.T) {
+	app, _, _, memory := scimStubServer(t)
 
-	req := httptest.NewRequest("POST", "/api/v1/scim/v2/Users", strings.NewReader(`{"userName":"ada@example.com"}`))
-	req.Header.Set("Content-Type", "application/scim+json")
-	req.Header.Set("Authorization", "Bearer org-scim-secret")
-	req.Header.Set("X-Org-ID", "org-2")
+	req := httptest.NewRequest("POST", "/api/v1/scim/tokens", strings.NewReader(`{"organizationId":"org-1","name":"Okta SCIM"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-API-Key", "dev-key")
 	resp, err := app.Test(req)
 	if err != nil {
-		t.Fatalf("app.Test error: %v", err)
+		t.Fatalf("app.Test create token error: %v", err)
 	}
-	if resp.StatusCode != 401 {
-		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	raw, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != fiber.StatusNotImplemented {
+		t.Fatalf("create token status = %d, want 501: %s", resp.StatusCode, raw)
+	}
+	if !strings.Contains(string(raw), "scim_not_implemented") {
+		t.Fatalf("create token body = %s, want code scim_not_implemented", raw)
+	}
+	if strings.Contains(string(raw), "bearerToken") {
+		t.Fatalf("create token body leaks a bearer token: %s", raw)
+	}
+	tokens, err := memory.ListSCIMTokens(t.Context(), "org-1")
+	if err != nil || len(tokens) != 0 {
+		t.Fatalf("a refused create must mint no token: %#v err=%v", tokens, err)
 	}
 }
 
-func TestSCIMProvisioningRequiresOrganizationForOrgScopedBearerToken(t *testing.T) {
-	cfg, repo, service := testOAuthStack(t)
-	cfg.SCIMBearerTokens = map[string]string{"org-1": "org-scim-secret"}
-	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service})
+func TestSCIMTokenListAndRevokeStillWork(t *testing.T) {
+	app, _, _, memory := scimStubServer(t)
+	if _, err := memory.CreateSCIMToken(t.Context(), store.SCIMToken{
+		ID: "tok-legacy", OrganizationID: "org-1", Name: "legacy", TokenPrefix: "scim_aaaa",
+	}, strings.Repeat("a", 64)); err != nil {
+		t.Fatalf("seed legacy token: %v", err)
+	}
 
-	req := httptest.NewRequest("POST", "/api/v1/scim/v2/Users", strings.NewReader(`{"userName":"ada@example.com"}`))
-	req.Header.Set("Content-Type", "application/scim+json")
-	req.Header.Set("Authorization", "Bearer org-scim-secret")
+	req := httptest.NewRequest("GET", "/api/v1/scim/tokens?organizationId=org-1", nil)
+	req.Header.Set("X-Internal-API-Key", "dev-key")
 	resp, err := app.Test(req)
 	if err != nil {
-		t.Fatalf("app.Test error: %v", err)
+		t.Fatalf("app.Test list token error: %v", err)
 	}
-	if resp.StatusCode != 400 {
-		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	if resp.StatusCode != 200 {
+		t.Fatalf("list token status = %d, want 200", resp.StatusCode)
+	}
+	var listed struct {
+		Data struct {
+			Tokens []store.SCIMToken `json:"tokens"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&listed); err != nil {
+		t.Fatalf("Decode list token error: %v", err)
+	}
+	_ = resp.Body.Close()
+	if len(listed.Data.Tokens) != 1 || listed.Data.Tokens[0].ID != "tok-legacy" {
+		t.Fatalf("tokens = %#v, want the legacy token", listed.Data.Tokens)
+	}
+
+	req = httptest.NewRequest("DELETE", "/api/v1/scim/tokens/tok-legacy?organizationId=org-1", nil)
+	req.Header.Set("X-Internal-API-Key", "dev-key")
+	resp, err = app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test revoke token error: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("revoke status = %d, want 200", resp.StatusCode)
+	}
+	tokens, err := memory.ListSCIMTokens(t.Context(), "org-1")
+	if err != nil || len(tokens) != 1 || tokens[0].RevokedAt == nil {
+		t.Fatalf("token was not revoked: %#v err=%v", tokens, err)
+	}
+}
+
+func TestSCIMTokenRoutesStillRequireInternalAuth(t *testing.T) {
+	app, _, _, _ := scimStubServer(t)
+	for _, tt := range []struct{ method, path string }{
+		{"GET", "/api/v1/scim/tokens?organizationId=org-1"},
+		{"POST", "/api/v1/scim/tokens"},
+		{"DELETE", "/api/v1/scim/tokens/tok-1?organizationId=org-1"},
+	} {
+		req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(`{"organizationId":"org-1"}`))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatalf("%s %s: app.Test error: %v", tt.method, tt.path, err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != fiber.StatusUnauthorized {
+			t.Fatalf("%s %s without credentials: status = %d, want 401", tt.method, tt.path, resp.StatusCode)
+		}
 	}
 }
 

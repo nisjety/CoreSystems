@@ -29,6 +29,7 @@ import (
 	"github.com/triodelab/model-plane/services/capability-core/internal/commands"
 	"github.com/triodelab/model-plane/services/capability-core/internal/cron"
 	"github.com/triodelab/model-plane/services/capability-core/internal/crypto"
+	"github.com/triodelab/model-plane/services/capability-core/internal/decisionkey"
 	"github.com/triodelab/model-plane/services/capability-core/internal/lettatools"
 	"github.com/triodelab/model-plane/services/capability-core/internal/notifyclient"
 	"github.com/triodelab/model-plane/services/capability-core/internal/policy"
@@ -67,6 +68,14 @@ func main() {
 			os.Exit(1)
 		}
 		return
+	}
+
+	// F11: a configured-but-unusable Control decision key is a boot error, not a
+	// lane that quietly stays disabled. Unset is allowed (warned) so a plane without
+	// Space keeps starting.
+	if err := decisionkey.BootCheck(logger, "capability-core", os.Getenv("CONTROL_SPACE_DECISION_KEY_ID"), os.Getenv("CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64")); err != nil {
+		slog.Error("Control decision key configuration is unusable; refusing to start", "error", err)
+		os.Exit(1)
 	}
 
 	authConfig, err := authConfigFromEnv()

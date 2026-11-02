@@ -62,6 +62,8 @@ macro_rules! one_call_per_client {
             call!(state, thread_fork_client.fork_thread),
             call!(state, attention_client.list_attention),
             call!(state, learning_client.list_learning_ledger),
+            call!(state, space_events_client.stream_space_events),
+            call!(state, space_room_read_client.list_space_artifacts),
             call!(state, managed_run_client.start_managed_run),
             call!(state, run_client.get_run),
             call!(state, orchestration_client.list_plans),
@@ -99,7 +101,7 @@ async fn every_grpc_client_of_the_offline_state_is_unavailable_at_once() {
     assert_eq!(answers.len(), 22, "one call per gRPC client of AppState");
     assert!(
         started.elapsed() < Duration::from_secs(5),
-        "all nineteen answered in {:?}",
+        "all twenty-one answered in {:?}",
         started.elapsed()
     );
 }

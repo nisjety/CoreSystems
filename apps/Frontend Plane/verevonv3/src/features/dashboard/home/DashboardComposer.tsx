@@ -1,3 +1,9 @@
+import {
+	PASTE_TEXT_ATTACHMENT_THRESHOLD,
+	pastedImageFiles,
+	pastedPlainText,
+	pastedTextAttachmentFile,
+} from "@/shared/composer/paste-attachments";
 import { registerReloadGuard } from "@/app/chunk-recovery";
 import { chatAppearanceActive } from "@/features/chat/lib/chat-appearance-preview";
 import {
@@ -657,17 +663,9 @@ export function matchDraftCommand(
 
 const TEXTAREA_AUTO_MAX_PX = 240;
 
-/**
- * ChatGPT and Claude both convert a sufficiently long paste into a "pasted
- * text" attachment instead of dumping it inline into the composer
- * (CHAT_PARITY_AUDIT_2026-09-15.md §3.6 / F-... "long paste"). This is the
- * length, in `string.length` code units, above which Verevon does the same.
- * It sits in the "a few thousand characters" range those products use: short
- * enough that a genuine document-scale paste (a log dump, an article, a long
- * spec) becomes a tidy attachment chip, long enough that an ordinary
- * paragraph-or-two paste still lands inline exactly as before.
- */
-export const PASTE_TEXT_ATTACHMENT_THRESHOLD = 4000;
+// The threshold and the paste helpers live in `@/shared/composer/paste-attachments` (WS15-S3); the
+// threshold is re-exported here because Home's tests and callers import it from this module.
+export { PASTE_TEXT_ATTACHMENT_THRESHOLD };
 
 // Inline rather than in global.css: `.dashboard-composer-autocomplete-menu
 // button span` there sets every span in a row to 14px/600, which is right for a
@@ -870,34 +868,6 @@ function dragEventHasFiles(event: DragEvent) {
 
 function droppedFiles(event: DragEvent) {
 	return Array.from(event.dataTransfer?.files ?? []);
-}
-
-function pastedImageFiles(event: ClipboardEvent) {
-	return Array.from(event.clipboardData?.files ?? []).filter((file) =>
-		file.type.startsWith("image/"),
-	);
-}
-
-function pastedPlainText(event: ClipboardEvent) {
-	return event.clipboardData?.getData("text/plain") ?? "";
-}
-
-/** A short, readable name for a paste-generated text attachment, e.g. "Limt inn tekst: some preview text….txt". */
-function pastedTextAttachmentName(text: string, label: string): string {
-	const trimmed = text.trim();
-	const preview = trimmed.replace(/\s+/g, " ").slice(0, 60);
-	if (preview.length === 0) {
-		return `${label} ${new Date().toLocaleTimeString()}.txt`;
-	}
-	const truncated = trimmed.length > preview.length ? "…" : "";
-	return `${label}: ${preview}${truncated}.txt`;
-}
-
-/** Wraps pasted text as a `.txt`-equivalent File so it flows through the existing attachment pipeline (`addFiles`). */
-function pastedTextAttachmentFile(text: string, label: string): File {
-	return new File([text], pastedTextAttachmentName(text, label), {
-		type: "text/plain",
-	});
 }
 
 export function DashboardComposer(props: {

@@ -235,6 +235,42 @@ impl MockOrchestration {
 
 #[tonic::async_trait]
 impl OrchestrationCoreService for MockOrchestration {
+    // Main's RPCs (merged 2026-11-02); this double does not serve them.
+    async fn reroute_approval(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::RerouteApprovalRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::RerouteApprovalResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("reroute_approval is not served by this double"))
+    }
+
+    async fn claim_once_approval(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::ClaimOnceApprovalRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ClaimOnceApprovalResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("claim_once_approval is not served by this double"))
+    }
+
+    async fn hold_quarantined_output(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::HoldQuarantinedOutputRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::HoldQuarantinedOutputResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("hold_quarantined_output is not served by this double"))
+    }
+
+    async fn claim_quarantine_release(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::ClaimQuarantineReleaseRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ClaimQuarantineReleaseResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("claim_quarantine_release is not served by this double"))
+    }
+
+    async fn get_quarantine_preview(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::GetQuarantinePreviewRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetQuarantinePreviewResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("get_quarantine_preview is not served by this double"))
+    }
+
     type StreamRunEventsStream = MockEventStream;
 
     async fn list_plans(
@@ -471,6 +507,9 @@ impl OrchestrationCoreService for MockOrchestration {
         Ok(Response::new(ListApprovalsResponse {
             approvals: vec![Approval {
                 consumed_at: None,
+                tool_key: String::new(),
+                action_label: String::new(),
+                continuation: None,
                 continuation_mode: String::new(),
                 cause: None,
                 id: "appr-1".into(),
@@ -486,6 +525,7 @@ impl OrchestrationCoreService for MockOrchestration {
                 decided_at: None,
                 expires_at: None,
                 org_id: "org-1".into(),
+                ..Default::default()
             }],
         }))
     }
@@ -498,6 +538,9 @@ impl OrchestrationCoreService for MockOrchestration {
         Ok(Response::new(OrgPendingApprovalsResponse {
             approvals: vec![Approval {
                 consumed_at: None,
+                tool_key: String::new(),
+                action_label: String::new(),
+                continuation: None,
                 continuation_mode: String::new(),
                 cause: None,
                 id: "appr-pending-1".into(),
@@ -517,6 +560,7 @@ impl OrchestrationCoreService for MockOrchestration {
                 } else {
                     request.org_id
                 },
+                ..Default::default()
             }],
         }))
     }
@@ -530,6 +574,9 @@ impl OrchestrationCoreService for MockOrchestration {
         Ok(Response::new(GetApprovalResponse {
             approval: Some(Approval {
                 consumed_at: None,
+                tool_key: String::new(),
+                action_label: String::new(),
+                continuation: None,
                 continuation_mode: String::new(),
                 cause: None,
                 id: request.approval_id,
@@ -545,6 +592,7 @@ impl OrchestrationCoreService for MockOrchestration {
                 decided_at: None,
                 expires_at: None,
                 org_id: "org-1".into(),
+                ..Default::default()
             }),
         }))
     }
@@ -557,6 +605,9 @@ impl OrchestrationCoreService for MockOrchestration {
         Ok(Response::new(CreateApprovalResponse {
             approval: Some(Approval {
                 consumed_at: None,
+                tool_key: String::new(),
+                action_label: String::new(),
+                continuation: None,
                 continuation_mode: String::new(),
                 cause: None,
                 id: "appr-mock".into(),
@@ -572,6 +623,7 @@ impl OrchestrationCoreService for MockOrchestration {
                 decided_at: None,
                 expires_at: None,
                 org_id: request.org_id,
+                ..Default::default()
             }),
         }))
     }
@@ -603,6 +655,9 @@ impl OrchestrationCoreService for MockOrchestration {
         Ok(Response::new(DecideApprovalResponse {
             approval: Some(Approval {
                 consumed_at: None,
+                tool_key: String::new(),
+                action_label: String::new(),
+                continuation: None,
                 continuation_mode,
                 cause: None,
                 id: request.approval_id,
@@ -618,6 +673,7 @@ impl OrchestrationCoreService for MockOrchestration {
                 decided_at: None,
                 expires_at: None,
                 org_id: "org-1".into(),
+                ..Default::default()
             }),
         }))
     }
@@ -881,6 +937,14 @@ struct MockRunOwner {
 
 #[tonic::async_trait]
 impl RunService for MockRunOwner {
+    // Main's RPCs (merged 2026-11-02); this double does not serve them.
+    async fn resolve_approval_authority(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::ResolveApprovalAuthorityRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ResolveApprovalAuthorityResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("resolve_approval_authority is not served by this double"))
+    }
+
     async fn get_run(
         &self,
         request: TonicRequest<GetRunRequest>,
@@ -989,6 +1053,20 @@ impl RunService for MockRunOwner {
         Err(Status::unimplemented(
             "scheduled step authority not needed in orchestration route test",
         ))
+    }
+
+    async fn authorize_room_run_attach(
+        &self,
+        _: TonicRequest<mp_contracts::model_plane::v1::AuthorizeRoomRunAttachRequest>,
+    ) -> Result<Response<mp_contracts::model_plane::v1::AuthorizeRoomRunAttachResponse>, Status> {
+        Err(Status::unimplemented("room run attach not needed in this test"))
+    }
+
+    async fn cancel_run_as_room_manager(
+        &self,
+        _: TonicRequest<mp_contracts::model_plane::v1::CancelRunAsRoomManagerRequest>,
+    ) -> Result<Response<mp_contracts::model_plane::v1::CancelRunAsRoomManagerResponse>, Status> {
+        Err(Status::unimplemented("room run stop not needed in this test"))
     }
 
     async fn get_scheduled_step_context(
@@ -1302,6 +1380,42 @@ struct OrgScopedMock {
 
 #[tonic::async_trait]
 impl OrchestrationCoreService for OrgScopedMock {
+    // Main's RPCs (merged 2026-11-02); this double does not serve them.
+    async fn reroute_approval(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::RerouteApprovalRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::RerouteApprovalResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("reroute_approval is not served by this double"))
+    }
+
+    async fn claim_once_approval(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::ClaimOnceApprovalRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ClaimOnceApprovalResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("claim_once_approval is not served by this double"))
+    }
+
+    async fn hold_quarantined_output(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::HoldQuarantinedOutputRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::HoldQuarantinedOutputResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("hold_quarantined_output is not served by this double"))
+    }
+
+    async fn claim_quarantine_release(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::ClaimQuarantineReleaseRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ClaimQuarantineReleaseResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("claim_quarantine_release is not served by this double"))
+    }
+
+    async fn get_quarantine_preview(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::GetQuarantinePreviewRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetQuarantinePreviewResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("get_quarantine_preview is not served by this double"))
+    }
+
     async fn list_plans(
         &self,
         _: TonicRequest<ListPlansRequest>,
@@ -1507,6 +1621,9 @@ impl OrchestrationCoreService for OrgScopedMock {
 fn owned_approval(state: ApprovalState) -> Approval {
     Approval {
         consumed_at: None,
+        tool_key: String::new(),
+        action_label: String::new(),
+        continuation: None,
         continuation_mode: String::new(),
         cause: None,
         id: "appr-owned".into(),
@@ -1522,6 +1639,7 @@ fn owned_approval(state: ApprovalState) -> Approval {
         decided_at: None,
         expires_at: None,
         org_id: OWNER_ORG.into(),
+        ..Default::default()
     }
 }
 

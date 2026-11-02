@@ -1421,7 +1421,7 @@ impl ExecutionCore for ExecutionService {
         } else {
             None
         };
-        // Demanded only for a Space-scoped code_interpreter or workspace read (WS24-S3) step —
+        // Demanded only for a Space-scoped code_interpreter, shell (WS06-S9) or workspace read (WS24-S3) step —
         // every other step, and a non-Space one, is unaffected.
         // sandbox-manager's own AcquireLease binds a Space capability
         // decision to the CALLING principal, so a service-level credential
@@ -1439,6 +1439,7 @@ impl ExecutionCore for ExecutionService {
         )
         .map(str::to_owned);
         let sandbox_bearer = if ((request.get_ref().tool_name == "code_interpreter"
+            || request.get_ref().tool_name == "shell"
             || crate::workspace_tools::is_workspace_tool(&request.get_ref().tool_name))
             && !request.get_ref().space_id.is_empty())
             || thread_scope_id.is_some()
@@ -1599,12 +1600,22 @@ impl ExecutionCore for ExecutionService {
                     // (org_id, idempotency_key) ON CONFLICT guard.
                     idempotency_key: format!("{run_id}:{step_id}"),
                     continuation_descriptor_json: String::new(),
+                    tool_key: String::new(),
+                    action_digest: String::new(),
+                    turn_origin: String::new(),
+                    grant_use_token: String::new(),
+                    context_json: crate::space_gate::card_context_json(
+                        &req.tool_name,
+                        &req.tool_input,
+                        crate::space_gate::RESUME_NONE,
+                    ),
                     cause: Some(approval_cause::for_call(
                         outcome.cause.unwrap_or(CauseCode::UnclassifiedGate),
                         &run_id,
                         &req.tool_name,
                         &req.tool_input,
                     )),
+                    ..Default::default()
                 },
                 session_bearer.as_str(),
             )
@@ -1720,6 +1731,7 @@ impl ExecutionCore for ExecutionService {
                     pb::GetApprovalRequest {
                         approval_id: req.approval_id.clone(),
                         org_id: req.org_id.clone(),
+                        ..Default::default()
                     },
                     session_bearer.as_str(),
                 )?)

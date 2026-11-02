@@ -106,6 +106,13 @@ const NOT_TRANSIENT_MARKERS: &[&str] = &[
     "may never run",
     "delegation refused",
     "refusing unsandboxed",
+    // WS06-S8: a resource limit is deterministic (the same input hits the same
+    // ceiling), and a missing lease or egress is a policy refusal. "sandbox is
+    // busy" is deliberately NOT here: it is transient.
+    "resource limit exceeded",
+    "refusing unlimited execution",
+    "requires a sandbox lease",
+    "sandbox egress is not available",
     "refusing to grant",
     "denied by",
     "unauthorized",

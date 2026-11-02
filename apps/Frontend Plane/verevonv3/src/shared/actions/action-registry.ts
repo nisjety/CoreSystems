@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { ActionDescriptor } from '@/shared/actions/types'
+import { spaceActions } from '@/shared/actions/domains/spaces'
 
 const sourceInput = z.object({
   sourceId: z.string().min(1),
@@ -253,96 +254,6 @@ const ticketUpdateMacroInput = z.object({
   status: z.enum(['waiting_customer', 'waiting_team', 'resolved']).optional(),
   visibility: z.enum(['personal', 'team', 'org']).optional(),
   active: z.boolean().optional(),
-})
-
-// The spaces.* schemas below all forward to the same domains::spaces route
-// handlers the direct REST routes use (apps/gateway/src/domains/spaces.rs,
-// exposed to the action dispatcher via pub(crate) rather than proxied a
-// second time), so per-room grant checks and the create/bind-then-confirm
-// sequence stay in exactly one place.
-const spaceCreatePersonalInput = z.object({
-  name: z.string().trim().min(1).optional(),
-})
-
-const spaceEnsureOrganizationRoomInput = z.object({
-  name: z.string().trim().min(1).optional(),
-})
-
-const spaceUpdateInstructionsInput = z.object({
-  spaceRef: z.string().min(1),
-  instructions: z.string().trim().max(4000).optional(),
-})
-
-const spaceCreateAgentInput = z.object({
-  spaceRef: z.string().min(1),
-  name: z.string().trim().min(2).max(60),
-  instructions: z.string().trim().max(4000).optional(),
-  avatarColor: z
-    .string()
-    .trim()
-    .regex(/^#[0-9a-fA-F]{6}$/, 'avatarColor must be a 6-digit hex color')
-    .optional(),
-})
-
-const spaceBindAgentInput = z.object({
-  spaceRef: z.string().min(1),
-  agentRef: z.string().min(1),
-})
-
-const spaceRequestPersonalDeletionInput = z.object({
-  spaceRef: z.string().min(1),
-  idempotencyKey: z.string().trim().min(1).max(160),
-})
-
-const spaceUpdateThreadPresentationInput = z
-  .object({
-    spaceRef: z.string().min(1),
-    threadId: z.string().min(1),
-    title: z.string().trim().max(200).optional(),
-    pinned: z.boolean().optional(),
-  })
-  .refine((value) => value.title !== undefined || value.pinned !== undefined, {
-    message: "Provide either 'title' or 'pinned'",
-  })
-
-const spaceMarkReadInput = z.object({
-  spaceRef: z.string().min(1),
-})
-
-const spaceRecordPresenceInput = z.object({
-  spaceRef: z.string().min(1),
-  status: z.enum(['online', 'typing', 'offline']).optional(),
-})
-
-const spaceSetAgentStateInput = z.object({
-  spaceRef: z.string().min(1),
-  bindingRef: z.string().min(1),
-  status: z.enum(['active', 'paused']),
-})
-
-const spaceRevokeAgentInput = z.object({
-  spaceRef: z.string().min(1),
-  bindingRef: z.string().min(1),
-})
-
-// A distinct id from spaces.create_personal_space even though both post to
-// the same route and handler (domains/spaces.rs's create_personal_space,
-// which dispatches on the body's `kind`): the registered personal-space
-// schema has no `kind` field, so it could not express a room create, and a
-// room needs a non-empty `name` where a personal Space's is optional.
-const spaceCreateRoomInput = z.object({
-  kind: z.literal('room'),
-  name: z.string().trim().min(1),
-})
-
-const spaceAddMemberInput = z.object({
-  spaceRef: z.string().min(1),
-  memberId: z.string().min(1),
-})
-
-const spaceRemoveMemberInput = z.object({
-  spaceRef: z.string().min(1),
-  memberId: z.string().min(1),
 })
 
 const inboxFollowConversationInput = z.object({
@@ -809,6 +720,10 @@ const settingsUpdatePreferencesInput = z.object({
   theme: z.string().trim().optional(),
   language: z.string().trim().optional(),
   timezone: z.string().trim().optional(),
+  // Contract v2: 'auto' means follow the locale (stored, but not an explicit choice).
+  dateFormat: z.enum(['MM/DD/YYYY', 'DD/MM/YYYY', 'YYYY-MM-DD', 'auto']).optional(),
+  timeFormat: z.enum(['12h', '24h', 'auto']).optional(),
+  compactMode: z.boolean().optional(),
   notifications: z.record(z.string(), z.boolean()).optional(),
   crawlIngestMode: z.enum(['auto', 'never', 'prompt']).optional(),
 })
@@ -1134,6 +1049,48 @@ const orgSetModelEntitlementInput = z.object({
   org_default: modelPolicyLayer.nullable().optional(),
   roles: z.record(z.string().min(1), modelPolicyLayer).optional(),
 }).strict()
+
+// Domain verification (WS05-S6). The domain is a hostname; org-core normalizes it, refuses IP
+// literals, public suffixes and free-mail providers, and owns every other rule.
+const orgDomainInput = z.object({
+  orgId: z.string().min(1),
+  domain: z.string().trim().min(1).max(253),
+})
+
+// SSO policy and providers (WS05-S7). org-core owns the policy, the verified-domain precondition
+// and the enforce checks; the provider's client secret is write-only and never echoed back.
+const orgUpdateSsoPolicyInput = z.object({
+  orgId: z.string().min(1),
+  mode: z.enum(['off', 'report', 'enforce']),
+  breakGlassUserIds: z.array(z.string().trim().min(1).max(128)).max(2),
+  expectedRevision: z.number().int().min(0),
+})
+
+const orgAddSsoProviderInput = z.object({
+  orgId: z.string().min(1),
+  providerId: z.string().trim().min(3).max(64),
+  domain: z.string().trim().min(1).max(253),
+  issuer: z.string().trim().url().max(2048),
+  clientId: z.string().trim().min(1).max(512),
+  clientSecret: z.string().trim().min(1).max(512),
+})
+
+const orgRemoveSsoProviderInput = z.object({
+  orgId: z.string().min(1),
+  providerId: z.string().trim().min(3).max(64),
+})
+
+// SCIM tokens (WS05-S8). org-core mints the bearer token and shows it once; revoking is immediate.
+const orgCreateScimTokenInput = z.object({
+  orgId: z.string().min(1),
+  name: z.string().trim().min(1).max(80),
+  expiresInDays: z.number().int().min(1).max(365),
+})
+
+const orgRevokeScimTokenInput = z.object({
+  orgId: z.string().min(1),
+  tokenId: z.string().trim().min(1).max(64),
+})
 
 const orgUpdateInstructionsInput = z.object({
   orgId: z.string().min(1),
@@ -1696,6 +1653,20 @@ const auditVerifyChainInput = z.object({
   fromSeq: z.number().int().min(0).optional(),
   fromHash: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   maxRows: z.number().int().min(1).max(1_000_000).optional(),
+})
+
+// Audit list v2 (WS05-S4): the paged admin view, no export (export is audit.export_log).
+const auditListEventsInput = z.object({
+  event: z.string().trim().max(128).optional(),
+  userId: z.string().trim().max(128).optional(),
+  plane: z.string().trim().max(128).optional(),
+  outcome: z.string().trim().max(128).optional(),
+  subject: z.string().trim().max(256).optional(),
+  resourceId: z.string().trim().max(256).optional(),
+  since: z.string().datetime().optional(),
+  until: z.string().datetime().optional(),
+  limit: z.number().int().min(1).max(200).optional(),
+  cursor: z.string().trim().max(512).optional(),
 })
 
 const auditExportLogInput = z.object({
@@ -2438,160 +2409,7 @@ export const actionRegistry = [
     inputSchema: ticketUpdateMacroInput,
     outputSchema: ticketConfigOutput,
   },
-  {
-    id: 'spaces.create_personal_space',
-    label: 'Create personal Space',
-    description: 'Create (or idempotently resolve) the caller\'s own personal Space for the active organization.',
-    ownerPlane: 'application',
-    risk: 'low',
-    requiresApproval: false,
-    reversible: true,
-    inputSchema: spaceCreatePersonalInput,
-    outputSchema: envelopeStatusOutput,
-  },
-  {
-    id: 'spaces.ensure_organization_room',
-    label: 'Ensure organization room',
-    description: 'Idempotently provision the organization\'s single shared room, the org-wide channel every member lands in.',
-    ownerPlane: 'application',
-    risk: 'low',
-    requiresApproval: false,
-    reversible: false,
-    inputSchema: spaceEnsureOrganizationRoomInput,
-    outputSchema: envelopeStatusOutput,
-  },
-  {
-    id: 'spaces.update_space_instructions',
-    label: 'Update Space instructions',
-    description: 'Update the standing instructions agents in a Space follow. Requires the editor, manager, or owner room role.',
-    ownerPlane: 'application',
-    risk: 'medium',
-    requiresApproval: false,
-    reversible: true,
-    inputSchema: spaceUpdateInstructionsInput,
-    outputSchema: envelopeStatusOutput,
-  },
-  {
-    id: 'spaces.create_space_agent',
-    label: 'Create Space agent',
-    description: 'Create a new agent definition and grant it a place in this Space. No removal path exists yet, so this is not reversible.',
-    ownerPlane: 'application',
-    risk: 'medium',
-    requiresApproval: false,
-    reversible: false,
-    inputSchema: spaceCreateAgentInput,
-    outputSchema: envelopeStatusOutput,
-  },
-  {
-    id: 'spaces.bind_space_agent',
-    label: 'Bind existing agent to Space',
-    description: 'Grant an org\'s existing agent definition a place in this Space. No removal path exists yet, so this is not reversible.',
-    ownerPlane: 'application',
-    risk: 'low',
-    requiresApproval: false,
-    reversible: false,
-    inputSchema: spaceBindAgentInput,
-    outputSchema: envelopeStatusOutput,
-  },
-  {
-    id: 'spaces.request_personal_space_deletion',
-    label: 'Request personal Space deletion',
-    description: 'Request deletion of the caller\'s own personal Space. Irreversible once processed.',
-    ownerPlane: 'application',
-    risk: 'high',
-    requiresApproval: true,
-    reversible: false,
-    inputSchema: spaceRequestPersonalDeletionInput,
-    outputSchema: envelopeStatusOutput,
-  },
-  {
-    id: 'spaces.update_thread_presentation',
-    label: 'Update Space thread presentation',
-    description: 'Retitle or pin a post in a room. Only the member who started the post may change it.',
-    ownerPlane: 'application',
-    risk: 'low',
-    requiresApproval: false,
-    reversible: true,
-    inputSchema: spaceUpdateThreadPresentationInput,
-    outputSchema: envelopeStatusOutput,
-  },
-  {
-    id: 'spaces.mark_read',
-    label: 'Mark Space read',
-    description: 'Advance the caller\'s own read marker for a Space to now.',
-    ownerPlane: 'application',
-    risk: 'low',
-    requiresApproval: false,
-    reversible: true,
-    inputSchema: spaceMarkReadInput,
-    outputSchema: envelopeStatusOutput,
-  },
-  {
-    id: 'spaces.record_presence',
-    label: 'Record Space presence',
-    description: '"I am here" — and, in the same answer, who else is. A heartbeat the room already polls on.',
-    ownerPlane: 'application',
-    risk: 'low',
-    requiresApproval: false,
-    reversible: true,
-    inputSchema: spaceRecordPresenceInput,
-    outputSchema: envelopeStatusOutput,
-  },
-  {
-    id: 'spaces.set_agent_state',
-    label: 'Pause or resume Space agent',
-    description: 'Pause or resume one bound agent in this room only. Gated to the room\'s owner or manager. Use spaces.revoke_agent to remove it instead.',
-    ownerPlane: 'application',
-    risk: 'medium',
-    requiresApproval: false,
-    reversible: true,
-    inputSchema: spaceSetAgentStateInput,
-    outputSchema: envelopeStatusOutput,
-  },
-  {
-    id: 'spaces.revoke_agent',
-    label: 'Revoke Space agent',
-    description: 'Revoke a bound agent from this room. The binding record survives for audit history; reinstating means binding again through the grant flow.',
-    ownerPlane: 'application',
-    risk: 'medium',
-    requiresApproval: false,
-    reversible: false,
-    inputSchema: spaceRevokeAgentInput,
-    outputSchema: envelopeStatusOutput,
-  },
-  {
-    id: 'spaces.create_room',
-    label: 'Create room',
-    description: 'Create a named shared room. It starts with its creator and grows by explicit grant; it does not inherit the organization\'s roster.',
-    ownerPlane: 'application',
-    risk: 'low',
-    requiresApproval: false,
-    reversible: false,
-    inputSchema: spaceCreateRoomInput,
-    outputSchema: envelopeStatusOutput,
-  },
-  {
-    id: 'spaces.add_member',
-    label: 'Add Space member',
-    description: 'Add one person to a named room. Gated to the room\'s owner or manager; the person must already be in the organization.',
-    ownerPlane: 'application',
-    risk: 'medium',
-    requiresApproval: false,
-    reversible: true,
-    inputSchema: spaceAddMemberInput,
-    outputSchema: envelopeStatusOutput,
-  },
-  {
-    id: 'spaces.remove_member',
-    label: 'Remove Space member',
-    description: 'Remove one person from a named room. The room\'s registered owner cannot be removed this way.',
-    ownerPlane: 'application',
-    risk: 'medium',
-    requiresApproval: false,
-    reversible: true,
-    inputSchema: spaceRemoveMemberInput,
-    outputSchema: envelopeStatusOutput,
-  },
+  ...spaceActions,
   {
     id: 'social.create_draft',
     label: 'Create social draft',
@@ -2794,7 +2612,7 @@ export const actionRegistry = [
     id: 'ownership.share_document',
     label: 'Share document',
     description: 'Grant another org member access to a document.',
-    ownerPlane: 'control',
+    ownerPlane: 'data',
     risk: 'medium',
     requiresApproval: false,
     reversible: true,
@@ -2805,7 +2623,7 @@ export const actionRegistry = [
     id: 'ownership.revoke_document_share',
     label: 'Revoke document share',
     description: 'Revoke a previously granted document share.',
-    ownerPlane: 'control',
+    ownerPlane: 'data',
     risk: 'medium',
     requiresApproval: false,
     reversible: true,
@@ -2903,7 +2721,7 @@ export const actionRegistry = [
   {
     id: 'settings.update_preferences',
     label: 'Update preferences',
-    description: 'Update the caller\'s own preferences (theme, language, timezone, notification and crawl-ingest settings).',
+    description: 'Update the caller\'s own preferences (theme, language, timezone, date format, time format, compact mode, notification and crawl-ingest settings).',
     ownerPlane: 'control',
     risk: 'low',
     requiresApproval: false,
@@ -3374,6 +3192,39 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
+    id: 'org.add_domain',
+    label: 'Add organization domain',
+    description: 'Claim a company domain for the organization. Returns a DNS TXT challenge to publish; nothing is trusted until it is verified. Owner or admin only.',
+    ownerPlane: 'control',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: orgDomainInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'org.verify_domain',
+    label: 'Verify organization domain',
+    description: 'Check the published DNS TXT challenge for a claimed domain. DNS is the only proof; limited to six attempts per domain per hour. Owner or admin only.',
+    ownerPlane: 'control',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: orgDomainInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'org.revoke_domain',
+    label: 'Remove organization domain',
+    description: 'Withdraw a claimed or verified company domain. Refused while the domain backs an enforced single sign-on policy. Owner or admin only.',
+    ownerPlane: 'control',
+    risk: 'high',
+    requiresApproval: true,
+    reversible: true,
+    inputSchema: orgDomainInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
     id: 'org.update_instructions',
     label: 'Update organization instructions',
     description: 'Update the organization-wide standing instructions agents follow.',
@@ -3393,6 +3244,61 @@ export const actionRegistry = [
     requiresApproval: true,
     reversible: true,
     inputSchema: orgUpdateZdrInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'org.update_sso_policy',
+    label: 'Update organization single sign-on policy',
+    description: 'Set the single sign-on policy to off, report or enforce, and name the break-glass owners. Enforce needs a verified domain, a working provider, your own recent SSO sign-in and two-factor break-glass owners; it ends the password sessions of covered users. Owner or admin only.',
+    ownerPlane: 'control',
+    risk: 'high',
+    requiresApproval: true,
+    reversible: true,
+    inputSchema: orgUpdateSsoPolicyInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'org.add_sso_provider',
+    label: 'Add single sign-on provider',
+    description: 'Register an OpenID Connect identity provider for a verified organization domain. The client secret is write-only. Owner or admin only.',
+    ownerPlane: 'control',
+    risk: 'high',
+    requiresApproval: true,
+    reversible: true,
+    inputSchema: orgAddSsoProviderInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'org.remove_sso_provider',
+    label: 'Remove single sign-on provider',
+    description: 'Remove an identity provider. Refused for the last provider of an enforced policy. Owner or admin only.',
+    ownerPlane: 'control',
+    risk: 'high',
+    requiresApproval: true,
+    reversible: false,
+    inputSchema: orgRemoveSsoProviderInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'org.create_scim_token',
+    label: 'Create SCIM token',
+    description: 'Create a bearer token your identity provider uses to provision and deprovision members through SCIM. The token is shown once. Needs a verified domain. Owner or admin only.',
+    ownerPlane: 'control',
+    risk: 'high',
+    requiresApproval: true,
+    reversible: true,
+    inputSchema: orgCreateScimTokenInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'org.revoke_scim_token',
+    label: 'Revoke SCIM token',
+    description: 'Revoke a SCIM token so the identity provider can no longer provision or deprovision members. Owner or admin only.',
+    ownerPlane: 'control',
+    risk: 'high',
+    requiresApproval: true,
+    reversible: false,
+    inputSchema: orgRevokeScimTokenInput,
     outputSchema: envelopeStatusOutput,
   },
   {
@@ -3922,6 +3828,17 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: auditVerifyChainInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'audit.list_events',
+    label: 'List audit log events',
+    description: 'Page the organization\'s audit trail newest first with a cursor and filters on event, user, plane, outcome, subject and resource. Read-only metadata, no export. Owner or admin see the organization; other roles only their own rows. Human sessions only.',
+    ownerPlane: 'control',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: auditListEventsInput,
     outputSchema: envelopeStatusOutput,
   },
   {

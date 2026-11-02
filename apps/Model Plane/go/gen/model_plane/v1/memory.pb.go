@@ -346,9 +346,17 @@ type MemoryEntry struct {
 	// ("husk at ..."), which are equally the user's own words; "inferred" is a
 	// model's reading of a conversation; "unknown" is an older row written before
 	// provenance was recorded, and must not be presented as either.
-	Provenance    MemoryProvenance `protobuf:"varint,8,opt,name=provenance,proto3,enum=model_plane.v1.MemoryProvenance" json:"provenance,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Provenance MemoryProvenance `protobuf:"varint,8,opt,name=provenance,proto3,enum=model_plane.v1.MemoryProvenance" json:"provenance,omitempty"`
+	// Space this row was learned in, set only when the row is withheld (see
+	// withheld_reason). Ids only, never content. Empty for every ordinary row.
+	OriginSpaceRef string `protobuf:"bytes,9,opt,name=origin_space_ref,json=originSpaceRef,proto3" json:"origin_space_ref,omitempty"`
+	// Why this row is listed but never recalled. Closed vocabulary shared with
+	// the personal-chat hidden_reason: "room_origin_unverified" is a row learned
+	// in a shared room before containment existed. The owner may keep or delete
+	// it; no conversation recalls it. Empty for an ordinary row.
+	WithheldReason string `protobuf:"bytes,10,opt,name=withheld_reason,json=withheldReason,proto3" json:"withheld_reason,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *MemoryEntry) Reset() {
@@ -435,6 +443,20 @@ func (x *MemoryEntry) GetProvenance() MemoryProvenance {
 		return x.Provenance
 	}
 	return MemoryProvenance_MEMORY_PROVENANCE_UNSPECIFIED
+}
+
+func (x *MemoryEntry) GetOriginSpaceRef() string {
+	if x != nil {
+		return x.OriginSpaceRef
+	}
+	return ""
+}
+
+func (x *MemoryEntry) GetWithheldReason() string {
+	if x != nil {
+		return x.WithheldReason
+	}
+	return ""
 }
 
 type IndexMemoryRequest struct {
@@ -1458,7 +1480,7 @@ const file_model_plane_v1_memory_proto_rawDesc = "" +
 	"\bdegraded\x18\x02 \x01(\bR\bdegraded\x12-\n" +
 	"\x12degradation_reason\x18\x03 \x01(\tR\x11degradationReason\x12\x1f\n" +
 	"\vskip_reason\x18\x04 \x01(\tR\n" +
-	"skipReason\"\xa3\x02\n" +
+	"skipReason\"\xf6\x02\n" +
 	"\vMemoryEntry\x12\x1b\n" +
 	"\tmemory_id\x18\x01 \x01(\tR\bmemoryId\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x14\n" +
@@ -1470,7 +1492,10 @@ const file_model_plane_v1_memory_proto_rawDesc = "" +
 	"\auser_id\x18\a \x01(\tR\x06userId\x12@\n" +
 	"\n" +
 	"provenance\x18\b \x01(\x0e2 .model_plane.v1.MemoryProvenanceR\n" +
-	"provenance\"\xc6\x01\n" +
+	"provenance\x12(\n" +
+	"\x10origin_space_ref\x18\t \x01(\tR\x0eoriginSpaceRef\x12'\n" +
+	"\x0fwithheld_reason\x18\n" +
+	" \x01(\tR\x0ewithheldReason\"\xc6\x01\n" +
 	"\x12IndexMemoryRequest\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x12\x14\n" +
 	"\x05topic\x18\x02 \x01(\tR\x05topic\x12\x18\n" +

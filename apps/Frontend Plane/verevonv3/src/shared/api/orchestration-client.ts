@@ -46,6 +46,26 @@ export type ApprovalDecision = 'approve' | 'reject'
 export type ApprovalScope = 'once' | 'thread' | 'run'
 
 const APPROVAL_SCOPES: readonly ApprovalScope[] = ['once', 'thread', 'run']
+/** What approving does with the paused work (build plan WS10 S1). Server-stated, never guessed. */
+export type ApprovalResumeClass = 'action_continuation' | 'live_poll' | 'none'
+
+/** Where an approved action stands. Derived server-side from the delivery rows. */
+export type ApprovalContinuationState =
+  | 'queued'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'not_resumable'
+  | 'live'
+  | 'awaiting_continue'
+
+export type ApprovalContinuation = {
+  state: ApprovalContinuationState
+  failureCode?: string
+  /** Independent read-back of the outcome, when one exists. */
+  verification?: string
+  providerReceiptId?: string
+}
 
 /** A pending/decided approval as reported by model-gateway's orchestration API. */
 export type Approval = {
@@ -60,6 +80,14 @@ export type Approval = {
   kind?: string
   /** Why the pause was raised, when the creator stated it. Absent on an older approval. */
   cause?: ApprovalCause
+  /** Stable key of the gated tool, when the creator stated it. */
+  toolKey?: string
+  /** Short allowlisted label of the gated action. Never raw arguments. */
+  actionLabel?: string
+  /** What approving does. Absent on an approval created before the card context existed. */
+  resumeClass?: ApprovalResumeClass
+  /** Where the approved action stands. Absent until the approval is granted. */
+  continuation?: ApprovalContinuation
   /** PENDING | GRANTED | DENIED | EXPIRED (uppercased provider enum name). */
   status?: string
   requestedBy?: string
@@ -121,8 +149,33 @@ export function normalizeApprovalCause(raw: unknown): ApprovalCause | undefined 
   }
 }
 
+const RESUME_CLASSES: readonly ApprovalResumeClass[] = ['action_continuation', 'live_poll', 'none']
+const CONTINUATION_STATES: readonly ApprovalContinuationState[] = [
+  'queued',
+  'running',
+  'completed',
+  'failed',
+  'not_resumable',
+  'live',
+  'awaiting_continue',
+]
+
+/** The typed continuation, read through the closed vocabulary; an unknown state is no claim. */
+export function normalizeApprovalContinuation(raw: unknown): ApprovalContinuation | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
+  const value = raw as Record<string, unknown>
+  const state = CONTINUATION_STATES.find((candidate) => candidate === value.state)
+  if (!state) return undefined
+  return {
+    state,
+    failureCode: str(value.failure_code),
+    verification: str(value.verification),
+    providerReceiptId: str(value.provider_receipt_id),
+  }
+}
+
 /** Normalize a model-gateway approval object (snake_case) to our camelCase shape. */
-function normalizeApproval(raw: RawApproval): Approval | null {
+export function normalizeApproval(raw: RawApproval): Approval | null {
   const id = str(raw.id) ?? str(raw.approval_id)
   if (!id) return null
   return {
@@ -132,6 +185,10 @@ function normalizeApproval(raw: RawApproval): Approval | null {
     stepId: str(raw.step_id) ?? str(raw.stepId),
     kind: str(raw.kind) ?? str(raw.approval_kind),
     cause: normalizeApprovalCause(raw.cause),
+    toolKey: str(raw.tool_key),
+    actionLabel: str(raw.action_label),
+    resumeClass: RESUME_CLASSES.find((candidate) => candidate === raw.resume_class),
+    continuation: normalizeApprovalContinuation(raw.continuation),
     status: canonicalApprovalStatus(str(raw.status) ?? str(raw.state)),
     requestedBy: str(raw.requested_by) ?? str(raw.requestedBy),
     detail: str(raw.detail) ?? str(raw.summary) ?? str(raw.reason) ?? str(raw.tool),
@@ -238,6 +295,40 @@ export async function confirmApprovalRule(
     body: JSON.stringify(body),
     signal,
   })
+}
+
+/** The kind token of an approval that holds tool output back for review (build plan WS10 S8). */
+export const UNTRUSTED_CONTENT_KIND = 'APPROVAL_KIND_UNTRUSTED_CONTENT'
+
+/** The inert preview of held tool output. Plain text only: render it as text, never as markup. */
+export type QuarantinePreview = {
+  text: string
+  truncated: boolean
+  toolKey?: string
+  trustClass?: string
+}
+
+/**
+ * Read the plain-text preview (at most 1 KiB) of output held for review. Answered only to the
+ * person the approval is addressed to while it is pending or granted and unspent; any other case
+ * is a 404, which a caller shows as "no preview available".
+ */
+export async function readQuarantinePreview(
+  approvalId: string,
+  signal?: AbortSignal,
+): Promise<QuarantinePreview | null> {
+  const payload = await requestJson<{ preview?: Record<string, unknown> }>(
+    `/api/v1/orchestration/approvals/${encodeURIComponent(approvalId)}/quarantine-preview`,
+    { signal },
+  )
+  const raw = payload.preview
+  if (!raw || typeof raw.text !== 'string') return null
+  return {
+    text: raw.text,
+    truncated: raw.truncated === true,
+    toolKey: str(raw.tool_key),
+    trustClass: str(raw.trust_class),
+  }
 }
 
 /** Resume a run that paused for approval, after the decision is recorded. */

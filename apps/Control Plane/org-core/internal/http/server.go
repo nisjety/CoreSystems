@@ -41,6 +41,18 @@ type Server struct {
 	// ORG_SIEM_DESTINATIONS_ENABLED); siem is the service behind them.
 	siemEnabled bool
 	siem        siemDestinationService
+
+	// identityEnabled mounts the domain verification routes (WS05-S6,
+	// ORG_DOMAIN_VERIFICATION_ENABLED); identity is the service behind them.
+	identityEnabled bool
+	identity        identityDomainService
+	sso             identitySSOService // SSO policy and providers (WS05-S7), same gate
+
+	// scimOn mounts the SCIM routes (WS05-S8, ORG_SCIM_ENABLED); scim is the
+	// service behind them and scimLimiter the per-token rate limit.
+	scimOn      bool
+	scim        scimService
+	scimLimiter *scimRateLimiter
 }
 
 func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository, authServiceURL, userServiceURL string) *Server {
@@ -51,6 +63,9 @@ func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository,
 	if credentialErr != nil {
 		log.Printf("org-core service authentication unavailable: %v", credentialErr)
 		serviceCredentials = nil
+	}
+	if scimEnabled(os.Getenv) && len(serviceCredentials) > 0 {
+		serviceCredentials = withSCIMEdgeCredential(serviceCredentials, os.Getenv(scimEdgeTokenEnv))
 	}
 	router.Use(serviceAuthMiddleware(serviceCredentials, time.Now))
 
@@ -81,6 +96,37 @@ func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository,
 			} else {
 				orgService.EnableSIEMDestinations(sealer)
 				s.siem = orgService
+			}
+		}
+	}
+	if domainVerificationEnabled(os.Getenv) {
+		s.identityEnabled = true
+		if orgService != nil {
+			orgService.EnableDomainVerification(orgcore.NewDomainTXTResolver(domainDNSResolvers(os.Getenv)))
+			s.identity = orgService
+			s.sso = orgService
+			// auth-core owns providers, sign-in evidence and the two-factor flag.
+			// Without ORG_CORE_IDENTITY_SERVICE_TOKEN the SSO administration
+			// answers 503 and enforce cannot be set.
+			if client := orgcore.NewAuthCoreIdentityClient(authCoreIdentityURL(os.Getenv), os.Getenv(authCoreIdentityTokenEnv)); client != nil {
+				orgService.SetIdentityProviderAdmin(client)
+			} else {
+				log.Printf("org-core sso administration: %s is not set; provider administration and enforce are unavailable", authCoreIdentityTokenEnv)
+			}
+		}
+	}
+	if scimEnabled(os.Getenv) {
+		s.scimOn = true
+		s.scimLimiter = newSCIMRateLimiter(scimRatePerMinute, time.Now)
+		if orgService != nil {
+			// SCIM needs auth-core for every membership change. Without the
+			// credential the routes stay mounted and answer 503: a SCIM request
+			// never half-applies.
+			if client := orgcore.NewAuthCoreIdentityClient(authCoreIdentityURL(os.Getenv), os.Getenv(authCoreIdentityTokenEnv)); client != nil {
+				orgService.SetScimProvisioner(client)
+				s.scim = orgService
+			} else {
+				log.Printf("org-core scim: %s is not set; SCIM is unavailable", authCoreIdentityTokenEnv)
 			}
 		}
 	}
@@ -180,6 +226,30 @@ func (s *Server) setupRoutes() {
 	s.router.PATCH("/orgs/:id/siem-destinations/:destinationId", siemGate, guard, s.updateSIEMDestination)
 	s.router.DELETE("/orgs/:id/siem-destinations/:destinationId", siemGate, guard, s.deleteSIEMDestination)
 
+	// Domain verification (WS05-S6): owner/admin DNS proof of a company domain. Every
+	// path answers 404 until ORG_DOMAIN_VERIFICATION_ENABLED is on. The handlers check
+	// the caller's role against the membership table (a platform role is not enough);
+	// the guard is the second layer the other mutations use.
+	identityGate := s.requireIdentityEnabled()
+	s.router.GET("/orgs/:id/domains", identityGate, s.listIdentityDomains)
+	s.router.POST("/orgs/:id/domains", identityGate, guard, s.addIdentityDomain)
+	s.router.POST("/orgs/:id/domains/:domain/verify", identityGate, guard, s.verifyIdentityDomain)
+	s.router.DELETE("/orgs/:id/domains/:domain", identityGate, guard, s.revokeIdentityDomain)
+
+	// SSO policy and provider administration (WS05-S7), same gate and authority.
+	s.router.GET("/orgs/:id/sso/policy", identityGate, s.getSSOPolicy)
+	s.router.PUT("/orgs/:id/sso/policy", identityGate, guard, s.putSSOPolicy)
+	s.router.POST("/orgs/:id/sso/providers", identityGate, guard, s.addSSOProvider)
+	s.router.DELETE("/orgs/:id/sso/providers/:providerId", identityGate, guard, s.removeSSOProvider)
+
+	// SCIM token management (WS05-S8): owner/admin, same authority as the domain
+	// routes. Every path answers 404 until ORG_SCIM_ENABLED is on.
+	scimGate := s.requireSCIMEnabled()
+	s.router.GET("/orgs/:id/scim/tokens", scimGate, s.listSCIMTokens)
+	s.router.POST("/orgs/:id/scim/tokens", scimGate, guard, s.createSCIMToken)
+	s.router.DELETE("/orgs/:id/scim/tokens/:tokenId", scimGate, guard, s.revokeSCIMToken)
+	s.router.GET("/orgs/:id/scim/status", scimGate, s.getSCIMStatus)
+
 	// Read-only projection/RBAC catalog. Membership, role assignment, and custom
 	// policy mutations are intentionally not mounted for the secure MVP: Auth
 	// Core is the sole membership authority, while fine-grained policy editing is
@@ -242,7 +312,29 @@ func (s *Server) setupRoutes() {
 	// Registered even while the feature is off so the path cannot fall through to
 	// /orgs/:orgId and be read as an organisation id.
 	internal.GET("/orgs/siem-destinations", siemGate, s.listSIEMDestinationsInternal)
+	// Which organisation holds a verified domain (WS05-S6). Own scope
+	// org:domain:read:any, held by auth-core alone; no-store.
+	internal.GET("/orgs/by-domain/:domain", identityGate, s.getVerifiedDomainOwnerInternal)
+	// The SSO policy covering an email domain, for auth-core's enforcement hook
+	// (WS05-S7). Same scope; no-store.
+	internal.GET("/orgs/by-domain/:domain/sso-policy", identityGate, s.getSSOPolicyByDomainInternal)
 	internal.GET("/orgs/:orgId/roles/:roleName/capabilities", s.getEffectiveCapabilities)
+
+	// The SCIM surface (WS05-S8), reached only by the gateway edge under the
+	// verevon-scim-edge principal (scope org:scim:any). The IdP bearer token in
+	// Authorization names the organisation; Groups are not supported.
+	scim := internal.Group("/scim/v2", scimGate, s.scimAuthenticate())
+	scim.GET("/ServiceProviderConfig", scimServiceProviderConfig)
+	scim.GET("/ResourceTypes", scimResourceTypes)
+	scim.GET("/Schemas", scimSchemas)
+	scim.GET("/Users", s.scimListUsers)
+	scim.POST("/Users", s.scimCreateUser)
+	scim.GET("/Users/:id", s.scimGetUser)
+	scim.PUT("/Users/:id", s.scimReplaceUser)
+	scim.PATCH("/Users/:id", s.scimPatchUser)
+	scim.DELETE("/Users/:id", s.scimDeleteUser)
+	scim.Any("/Groups", scimNotImplemented)
+	scim.Any("/Groups/:id", scimNotImplemented)
 	internal.GET("/orgs/by-tenant", s.getOrganizationByTenant)
 	internal.POST("/orgs/ensure-from-tenant", s.ensureOrganizationFromTenant)
 	internal.POST("/orgs/:orgId/onboarding/state", s.updateOnboardingState)

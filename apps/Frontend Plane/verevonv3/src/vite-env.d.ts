@@ -14,8 +14,13 @@ interface ImportMetaEnv {
 	readonly VITE_CHAT_VISION_AS_PARTS_ENABLED?: string;
 	readonly VITE_QUOTA_READOUT?: string;
 	readonly VITE_QUOTA_READOUT_METRIC?: string;
+	/** "1"/"0" forces the Space command palette on/off; unset is on in dev only (WS13-S6). */
+	readonly VITE_SPACE_COMMAND_PALETTE_UI?: string;
 }
 
 interface ImportMeta {
 	readonly env: ImportMetaEnv;
 }
+
+/** Compile-time build id from vite.config.ts `define` (`dev` outside an image build). */
+declare const __VEREVON_BUILD_ID__: string;

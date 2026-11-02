@@ -40,6 +40,17 @@ func (s *Server) requireVerifiedAuthzDelegation(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "bounded authz delegation required"})
 		return
 	}
+	// WS14-S2: the grant write surface and the Space read are gated by their own
+	// reviewed modes (authz_owner_asserted.go). Anything else keeps the
+	// claim-pinned read-only rules below.
+	switch c.Request.URL.Path {
+	case authzGrantPath, authzGrantsPath:
+		s.requireOwnerAssertedGrant(c)
+		return
+	case authzSpaceVisiblePath:
+		s.requireSpaceVisibleDelegation(c)
+		return
+	}
 	if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "verified resource-owner delegation required"})
 		return
@@ -188,6 +199,17 @@ func (s *Server) authzGrant(c *gin.Context) {
 	if s.aclRepo == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "authz facade not configured"})
 		return
+	}
+	// WS14-S2 owner-asserted mode: the granter is the delegated user (never the
+	// body), only user subjects can be written here (a Space subject is written
+	// by file-grant alone), and a role the owning service does not enforce is
+	// refused. The owning service has already proved the actor owns the resource.
+	if c.GetBool(ownerAssertedContextKey) {
+		var refused bool
+		req.Role, req.GrantedBy, refused = s.applyOwnerAssertedGrantRules(c, req.ResourceType, req.SubjectID, req.SubjectType, req.Role)
+		if refused {
+			return
+		}
 	}
 
 	out, err := s.aclRepo.Grant(c.Request.Context(), &users.ResourceGrant{

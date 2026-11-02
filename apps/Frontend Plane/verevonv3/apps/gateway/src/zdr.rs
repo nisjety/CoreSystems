@@ -100,6 +100,43 @@ pub(crate) async fn org_zdr_enabled(state: &AppState, user: &AuthenticatedUser) 
     enabled
 }
 
+/// Tri-state org ZDR posture for the Space durable-write guard. `Unknown` means the lookup failed or
+/// there is no authorized org scope: it is NOT "not ZDR". Persisting callers must go through
+/// [`Self::treat_as_zdr`] (which is true for `Unknown`) so a failed lookup fails closed; callers that
+/// need to tell an outage from a real posture (to answer a typed refusal instead of silently skipping
+/// a write) match it. The same three answers as [`OrgPosture`], in the Space surface's words.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OrgZdrPosture {
+    Enabled,
+    Disabled,
+    Unknown,
+}
+
+impl OrgZdrPosture {
+    /// Fail-closed collapse: only a successful lookup that says "not ZDR" permits persisting.
+    #[allow(dead_code, reason = "the collapse a persisting Space caller uses; pinned by tests")]
+    pub(crate) fn treat_as_zdr(self) -> bool {
+        !matches!(self, OrgZdrPosture::Disabled)
+    }
+}
+
+impl From<OrgPosture> for OrgZdrPosture {
+    fn from(posture: OrgPosture) -> Self {
+        match posture {
+            OrgPosture::Zdr => OrgZdrPosture::Enabled,
+            OrgPosture::NotZdr => OrgZdrPosture::Disabled,
+            OrgPosture::Unknown => OrgZdrPosture::Unknown,
+        }
+    }
+}
+
+/// The lookup behind [`org_zdr_enabled`], with the failure case kept distinguishable. A thin view of
+/// [`org_posture`]: same cache, same org-core call, same non-caching of failures, and the same span
+/// marking on a ZDR answer.
+pub(crate) async fn org_zdr_lookup(state: &AppState, user: &AuthenticatedUser) -> OrgZdrPosture {
+    org_posture(state, user).await.into()
+}
+
 /// The tri-state behind [`org_zdr_enabled`]; see there for the failure policy.
 pub(crate) async fn org_posture(state: &AppState, user: &AuthenticatedUser) -> OrgPosture {
     let org_id = crate::upstream::authorized_org_id(state, user).await;
@@ -183,6 +220,76 @@ fn read_zdr_flag(organization: &Value) -> bool {
         .unwrap_or(false)
 }
 
+/// The catalogue refusal a durable Space write answers when the caller's posture is Zero Data
+/// Retention (`zdr_durable_mutation_forbidden`) or cannot be established
+/// (`zdr_decision_unavailable`). Body shape `{error:{code,message,retryable,action}}`, with the
+/// message, retryable flag and action copied from the Model Plane catalogue
+/// (`mp-contracts` `zdr_refusal.rs`, pinned for the SPA in `contracts/zdr-refusals.json`) so the
+/// browser renders the same text whichever plane refused. Any other code falls back to the
+/// stricter durable-mutation refusal.
+pub(crate) fn zdr_refusal_body(code: &str) -> Value {
+    let (code, message, retryable, action) = if code == ZDR_DECISION_UNAVAILABLE {
+        (
+            ZDR_DECISION_UNAVAILABLE,
+            "The zero data retention settings cannot be confirmed right now. The request was not sent to any model. Try again shortly.",
+            true,
+            "retry",
+        )
+    } else {
+        (
+            ZDR_DURABLE_MUTATION_FORBIDDEN,
+            "Zero Data Retention credentials cannot create, change, or delete durable state.",
+            false,
+            "none",
+        )
+    };
+    serde_json::json!({
+        "error": {
+            "code": code,
+            "message": message,
+            "retryable": retryable,
+            "action": action,
+        }
+    })
+}
+
+pub(crate) const ZDR_DURABLE_MUTATION_FORBIDDEN: &str = "zdr_durable_mutation_forbidden";
+pub(crate) const ZDR_DECISION_UNAVAILABLE: &str = "zdr_decision_unavailable";
+
+/// A durable write of stored content is refused for a Zero Data Retention org, typed, before any
+/// Control or model call: the guard behind every `DurableWrite` row of the Space surface registry
+/// (`space-surface.v1.json`). `Some` is the response to send.
+///
+/// A request-level flag (the header or a body `zdr`) counts as ZDR. The org posture comes from
+/// org-core and fails closed in its own words: an outage is the typed, retryable
+/// `zdr_decision_unavailable` (503), never a guess in either direction.
+pub(crate) async fn durable_write_refusal(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: Option<&HeaderMap>,
+    body: Option<&Value>,
+) -> Option<(axum::http::StatusCode, axum::Json<Value>)> {
+    use axum::http::StatusCode;
+    let forbidden = || {
+        (
+            StatusCode::PRECONDITION_FAILED,
+            axum::Json(zdr_refusal_body(ZDR_DURABLE_MUTATION_FORBIDDEN)),
+        )
+    };
+    let no_headers = HeaderMap::new();
+    if request_zdr(headers.unwrap_or(&no_headers), body) {
+        return Some(forbidden());
+    }
+    match org_zdr_lookup(state, user).await {
+        OrgZdrPosture::Enabled => Some(forbidden()),
+        OrgZdrPosture::Unknown => Some((
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(zdr_refusal_body(ZDR_DECISION_UNAVAILABLE)),
+        )),
+        OrgZdrPosture::Disabled => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,5 +356,64 @@ mod tests {
         assert!(!read_zdr_flag(
             &json!({ "metadata": { "interactiveRetention": { "zdr": false } } })
         ));
+    }
+
+    #[test]
+    fn treat_as_zdr_is_true_for_enabled_and_unknown_and_false_only_for_disabled() {
+        assert!(OrgZdrPosture::Enabled.treat_as_zdr());
+        assert!(OrgZdrPosture::Unknown.treat_as_zdr());
+        assert!(!OrgZdrPosture::Disabled.treat_as_zdr());
+    }
+
+    fn test_user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.com".to_owned(),
+            user_name: "User One".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    /// A lookup against an unreachable org-core is `Unknown` (an outage, not a posture) and the
+    /// fail-closed collapse reads it as ZDR.
+    #[tokio::test]
+    async fn an_unreachable_org_core_is_unknown_and_fails_closed() {
+        let state = AppState::for_tests();
+        let user = test_user();
+        assert_eq!(org_zdr_lookup(&state, &user).await, OrgZdrPosture::Unknown);
+        assert!(org_zdr_enabled(&state, &user).await);
+    }
+
+    /// No authorized org scope is also `Unknown`, without any call.
+    #[tokio::test]
+    async fn no_authorized_org_scope_is_unknown() {
+        let state = AppState::for_tests();
+        let mut user = test_user();
+        user.authorized_membership = None;
+        assert_eq!(org_zdr_lookup(&state, &user).await, OrgZdrPosture::Unknown);
+    }
+
+    #[test]
+    fn refusal_bodies_use_the_catalogue_shape() {
+        let forbidden = zdr_refusal_body(ZDR_DURABLE_MUTATION_FORBIDDEN);
+        assert_eq!(forbidden["error"]["code"], "zdr_durable_mutation_forbidden");
+        assert_eq!(forbidden["error"]["retryable"], false);
+        assert_eq!(forbidden["error"]["action"], "none");
+        let unavailable = zdr_refusal_body(ZDR_DECISION_UNAVAILABLE);
+        assert_eq!(unavailable["error"]["code"], "zdr_decision_unavailable");
+        assert_eq!(unavailable["error"]["retryable"], true);
+        assert_eq!(unavailable["error"]["action"], "retry");
+        // Any other code falls back to the stricter refusal.
+        assert_eq!(
+            zdr_refusal_body("something_else")["error"]["code"],
+            "zdr_durable_mutation_forbidden"
+        );
     }
 }

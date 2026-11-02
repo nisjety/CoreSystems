@@ -1,7 +1,19 @@
 import { Loader2, ShieldCheck } from '@/shared/icons'
-import { createSignal, For, Show } from 'solid-js'
+import { createEffect, createSignal, For, Show } from 'solid-js'
 
-import type { Approval, ApprovalDecision } from '@/shared/api/orchestration-client'
+import {
+  readQuarantinePreview,
+  UNTRUSTED_CONTENT_KIND,
+  type Approval,
+  type ApprovalDecision,
+} from '@/shared/api/orchestration-client'
+import {
+  offerableScopes,
+  readSpaceApprovalPolicy,
+  type ApprovalScope,
+  type SpaceGrantResult,
+} from '@/shared/api/space-approvals-client'
+import { announce } from '@/shared/a11y/announcer'
 import { useI18n } from '@/shared/i18n'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import {
@@ -10,6 +22,7 @@ import {
   settleApproval,
   type ApprovalOutcome,
 } from '../lib/space-approvals'
+import { SpaceApprovalScopePicker } from './SpaceApprovalScopePicker'
 
 /**
  * The decision a paused run is waiting for, shown where the waiting happened.
@@ -29,6 +42,14 @@ import {
  * "allow once" while promising more. Approve and Deny are what the mechanism
  * actually supports, so they are what the room offers.
  *
+ * # The card says what approving does
+ *
+ * A grant records authority; it does not resume an approval-gated run. What
+ * follows depends on the approval, and the server states it (`resumeClass`,
+ * then `continuation` once granted): an action the worker can run is run as
+ * the requester, anything else lets the agent retry that exact action once.
+ * The copy below follows those fields and never promises the run continues.
+ *
  * # It does not pretend
  *
  * A run belongs to the member who started it. Another member can see that a
@@ -41,7 +62,17 @@ export interface SpaceApprovalPanelProps {
   readonly runId: string
   /** Called once a decision settles, so the room can re-read its projection. */
   readonly onSettled?: () => void
+  /** The room. With it, a decision goes through the Space route (the one that carries a scope). */
+  readonly spaceRef?: string
+  /** The viewer's room role; only managers and owners are offered a standing rule. Control decides. */
+  readonly viewerRole?: string
 }
+
+/** Where the preview of one held output stands. */
+type PreviewState =
+  | { status: 'loading'; text?: undefined; truncated?: undefined }
+  | { status: 'unavailable'; text?: undefined; truncated?: undefined }
+  | { status: 'ready'; text: string; truncated: boolean }
 
 export function SpaceApprovalPanel(props: SpaceApprovalPanelProps) {
   const i18n = useI18n()
@@ -54,20 +85,76 @@ export function SpaceApprovalPanel(props: SpaceApprovalPanelProps) {
     },
   )
   const [decidingId, setDecidingId] = createSignal<string | undefined>(undefined)
+  // Only a manager or owner can be offered a wider scope, so only they cause the policy read.
+  const mayManageRules = () => props.viewerRole === 'manager' || props.viewerRole === 'owner'
+  const [policy] = createResource(
+    () => (props.spaceRef && mayManageRules() ? props.spaceRef : undefined),
+    (spaceRef) => readSpaceApprovalPolicy(spaceRef),
+  )
+  const [scopes, setScopes] = createSignal<Record<string, ApprovalScope>>({})
+  const [grant, setGrant] = createSignal<SpaceGrantResult | undefined>(undefined)
+  const optionsFor = (approval: Approval): ApprovalScope[] =>
+    props.spaceRef
+      ? offerableScopes({
+          policy: policy.error ? undefined : policy(),
+          viewerRole: props.viewerRole,
+          toolKey: approval.toolKey,
+        })
+      : ['once']
+  const scopeFor = (approval: Approval): ApprovalScope => {
+    const chosen = scopes()[approval.id] ?? 'once'
+    return optionsFor(approval).includes(chosen) ? chosen : 'once'
+  }
   const [outcome, setOutcome] = createSignal<ApprovalOutcome | undefined>(undefined)
+  // The inert preview of held tool output, read only when the person asks for it (WS10-S8).
+  const [previews, setPreviews] = createSignal<Record<string, PreviewState>>({})
+  async function showPreview(approvalId: string) {
+    setPreviews((current) => ({ ...current, [approvalId]: { status: 'loading' } }))
+    try {
+      const preview = await readQuarantinePreview(approvalId)
+      setPreviews((current) => ({
+        ...current,
+        [approvalId]: preview
+          ? { status: 'ready', text: preview.text, truncated: preview.truncated }
+          : { status: 'unavailable' },
+      }))
+    } catch {
+      setPreviews((current) => ({ ...current, [approvalId]: { status: 'unavailable' } }))
+    }
+  }
 
   const approvals = () => (pending.error ? [] : pending()?.approvals ?? [])
   const refused = () => (pending.error ? false : pending()?.refused === true)
+
+  // Tell a screen-reader user that a decision is waiting for them, once per run. The room's own
+  // narration uses the same key, so the two collapse into a single announcement.
+  let announcedFor: string | undefined
+  createEffect(
+    () => ({ runId: props.runId, waiting: !pending.loading && !pending.error && !refused() && approvals().length > 0 }),
+    ({ runId, waiting }) => {
+      if (!waiting || announcedFor === runId) return
+      announcedFor = runId
+      announce(i18n.tr('Venter på din godkjenning', 'Waiting for your approval'), {
+        politeness: 'assertive',
+        key: `approval:${runId}`,
+        coalesceMs: 10_000,
+      })
+    },
+  )
 
   async function decide(approval: Approval, decision: ApprovalDecision) {
     if (decidingId()) return
     setDecidingId(approval.id)
     setOutcome(undefined)
+    setGrant(undefined)
     try {
       const settled = await settleApproval({
         approvalId: approval.id,
         runId: props.runId,
         decision,
+        spaceRef: props.spaceRef,
+        scope: decision === 'approve' ? scopeFor(approval) : 'once',
+        onGrant: setGrant,
       })
       setOutcome(settled)
       // Re-read rather than assume: the card leaves only when the server says
@@ -110,8 +197,8 @@ export function SpaceApprovalPanel(props: SpaceApprovalPanelProps) {
       <Show when={refused()}>
         <p class="verevon-room-approval__note">
           {i18n.tr(
-            'Denne kjøringen tilhører et annet medlem, så det er de som avgjør den. Du ser at den venter, men kan ikke svare for dem.',
-            'This run belongs to another member, so it is theirs to decide. You can see that it is waiting, but you cannot answer for them.',
+            'Venter på medlemmet som startet kjøringen. Du ser at den venter, men kan ikke svare for dem.',
+            'Waiting for the member who started the run. You can see that it is waiting, but you cannot answer for them.',
           )}
         </p>
       </Show>
@@ -129,6 +216,9 @@ export function SpaceApprovalPanel(props: SpaceApprovalPanelProps) {
         <For each={approvals()}>
           {(approval) => (
             <li class="verevon-room-approval__item">
+              <Show when={approval.actionLabel?.trim()}>
+                {(label) => <p class="verevon-room-approval__detail">{label()}</p>}
+              </Show>
               <p class="verevon-room-approval__detail">{describeApproval(approval, i18n.tr)}</p>
               <Show when={approval.requestedBy?.trim()}>
                 {(requestedBy) => (
@@ -138,6 +228,57 @@ export function SpaceApprovalPanel(props: SpaceApprovalPanelProps) {
                   </p>
                 )}
               </Show>
+              <Show when={approval.kind === UNTRUSTED_CONTENT_KIND}>
+                <div class="verevon-room-approval__detail">
+                  <Show
+                    when={previews()[approval.id]}
+                    fallback={
+                      <button type="button" onClick={() => void showPreview(approval.id)}>
+                        {i18n.tr('Vis en ren tekstforhåndsvisning', 'Show a plain-text preview')}
+                      </button>
+                    }
+                  >
+                    {(preview) => (
+                      <>
+                        <Show when={preview().status === 'loading'}>
+                          <p role="status">{i18n.tr('Henter forhåndsvisningen …', 'Loading the preview…')}</p>
+                        </Show>
+                        <Show when={preview().status === 'unavailable'}>
+                          <p role="status">
+                            {i18n.tr(
+                              'Ingen forhåndsvisning er tilgjengelig for deg.',
+                              'No preview is available to you.',
+                            )}
+                          </p>
+                        </Show>
+                        <Show when={preview().text !== undefined}>
+                          {/* Text node only: the content is untrusted, so it is never markup or a link. */}
+                          <pre
+                            style={{
+                              'white-space': 'pre-wrap',
+                              'overflow-wrap': 'anywhere',
+                              'max-height': '12rem',
+                              overflow: 'auto',
+                            }}
+                          >
+                            {preview().text}
+                          </pre>
+                          <Show when={preview().truncated}>
+                            <p>{i18n.tr('Vist: de første 1024 byte.', 'Shown: the first 1024 bytes.')}</p>
+                          </Show>
+                        </Show>
+                      </>
+                    )}
+                  </Show>
+                </div>
+              </Show>
+              <SpaceApprovalScopePicker
+                approvalId={approval.id}
+                options={optionsFor(approval)}
+                value={scopeFor(approval)}
+                disabled={decidingId() !== undefined}
+                onChange={(scope) => setScopes((current) => ({ ...current, [approval.id]: scope }))}
+              />
               <div class="verevon-room-approval__actions">
                 <button
                   type="button"
@@ -163,17 +304,32 @@ export function SpaceApprovalPanel(props: SpaceApprovalPanelProps) {
                 </button>
               </div>
               {/* Said once, next to the buttons, because denying stops the run
-                  rather than nudging the agent to try something else. */}
+                  rather than nudging the agent to try something else. What approving
+                  does is chosen by the server's `resumeClass`, never by static copy. */}
               <p class="verevon-room-approval__consequence">
-                {i18n.tr(
-                  'Godkjenning lar kjøringen fortsette. Avslag stopper den.',
-                  'Approving lets the run continue. Denying stops it.',
-                )}
+                {consequenceMessage(approval, i18n.tr)}
               </p>
             </li>
           )}
         </For>
       </ul>
+
+      <Show when={grant()?.status === 'recorded'}>
+        <p class="verevon-room-approval__note" role="status">
+          {i18n.tr(
+            'Fast regel opprettet for dette verktøyet i rommet. Du finner den under Agent, og kan trekke den tilbake der.',
+            'Standing rule created for this tool in this room. You can find it under Agent and revoke it there.',
+          )}
+        </p>
+      </Show>
+      <Show when={grant()?.status === 'not_recorded'}>
+        <p class="verevon-space-projection-error" role="alert">
+          {i18n.tr(
+            'Godkjent denne gangen, men den faste regelen ble ikke opprettet. Agenten spør igjen neste gang.',
+            'Approved this time, but the standing rule was not created. The agent will ask again next time.',
+          )}
+        </p>
+      </Show>
 
       <Show when={outcome()}>
         {(settled) => (
@@ -193,13 +349,72 @@ export function SpaceApprovalPanel(props: SpaceApprovalPanelProps) {
   )
 }
 
+/**
+ * What approving this card does, from the server-stated resume class. An approval with no stated
+ * class says only what is certain: the decision is recorded and denying stops the run.
+ */
+function consequenceMessage(
+  approval: Approval,
+  tr: (no: string, en: string) => string,
+): string {
+  // Held tool output: nothing runs on approval, and the agent was not shown the content.
+  if (approval.kind === UNTRUSTED_CONTENT_KIND) {
+    return tr(
+      'Agenten har ikke sett dette innholdet. Godkjenning lar agenten gjenta akkurat dette kallet én gang og få innholdet som ikke-klarert data. Avslag sletter det.',
+      'The agent has not seen this content. Approving lets the agent repeat this exact call once and receive the content as untrusted data. Denying deletes it.',
+    )
+  }
+  switch (approval.resumeClass) {
+    case 'action_continuation':
+      return tr(
+        'Godkjenning kjører denne handlingen som medlemmet som ba om den. Agenten fortsetter ikke av seg selv. Avslag stopper kjøringen.',
+        'Approving runs this action as the member who asked for it. The agent does not continue by itself. Denying stops the run.',
+      )
+    case 'none':
+      return tr(
+        'Godkjenning lar agenten prøve akkurat denne handlingen på nytt én gang. Avslag stopper kjøringen.',
+        'Approving lets the agent retry this exact action once. Denying stops the run.',
+      )
+    case 'live_poll':
+      return tr(
+        'Godkjenning lar det kjørende nettleser-steget gå videre. Avslag stopper det.',
+        'Approving lets the running browser step go ahead. Denying stops it.',
+      )
+    default:
+      return tr(
+        'Godkjenning registrerer avgjørelsen din. Avslag stopper kjøringen.',
+        'Approving records your decision. Denying stops the run.',
+      )
+  }
+}
+
 function outcomeMessage(
   outcome: ApprovalOutcome,
   tr: (no: string, en: string) => string,
 ): string {
   switch (outcome) {
     case 'granted':
-      return tr('Godkjent. Kjøringen fortsetter.', 'Approved. The run continues.')
+      return tr('Godkjent. Avgjørelsen er registrert.', 'Approved. The decision is recorded.')
+    case 'granted_action':
+      return tr(
+        'Godkjent. Handlingen kjøres som medlemmet som ba om den. Agenten fortsetter ikke av seg selv.',
+        'Approved. The action runs as the member who asked for it. The agent does not continue by itself.',
+      )
+    case 'granted_retry':
+      return tr(
+        'Godkjent. Ingenting kjøres nå: agenten kan prøve akkurat denne handlingen på nytt én gang.',
+        'Approved. Nothing runs now: the agent may retry this exact action once.',
+      )
+    case 'granted_live':
+      return tr(
+        'Godkjent. Det kjørende nettleser-steget går videre.',
+        'Approved. The running browser step goes ahead.',
+      )
+    case 'granted_continue':
+      return tr(
+        'Godkjent. Handlingen brukes når kjøringen fortsetter.',
+        'Approved. The action is applied when the run is continued.',
+      )
     case 'denied':
       return tr('Avslått. Kjøringen er stoppet.', 'Denied. The run has been stopped.')
     case 'already_decided':
@@ -209,8 +424,8 @@ function outcomeMessage(
       )
     case 'refused':
       return tr(
-        'Du kan ikke avgjøre denne. Den tilhører medlemmet som startet kjøringen.',
-        'You cannot decide this one. It belongs to the member who started the run.',
+        'Du kan ikke avgjøre denne. Den venter på medlemmet som startet kjøringen.',
+        'You cannot decide this one. It is waiting for the member who started the run.',
       )
     case 'unconfirmed':
     default:

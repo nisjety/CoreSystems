@@ -560,6 +560,360 @@ func (x *CreateThreadResponse) GetCreatedAt() *timestamppb.Timestamp {
 	return nil
 }
 
+// One mentioned subject of a human post (WS08-S2). Ids only, never text. Session Core
+// accepts mentions only on a role "user" row with post_kind "post" from a human caller.
+type MentionInput struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The mentioned person's or agent's subject id (^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$).
+	SubjectId string `protobuf:"bytes,1,opt,name=subject_id,json=subjectId,proto3" json:"subject_id,omitempty"`
+	// "user" or "agent".
+	Kind string `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"`
+	// "typed" (the author wrote @name) or "locked" (the composer's address lock). Empty = typed.
+	Source string `protobuf:"bytes,3,opt,name=source,proto3" json:"source,omitempty"`
+	// Agents only: "expected" (a wake may start one run) or "refused". Empty for a person.
+	WakeExpectation string `protobuf:"bytes,4,opt,name=wake_expectation,json=wakeExpectation,proto3" json:"wake_expectation,omitempty"`
+	// Set only with wake_expectation "refused": respond_to_denied, mention_not_enabled,
+	// invocation_blocked or owner_only_thread.
+	RefusalCode string `protobuf:"bytes,5,opt,name=refusal_code,json=refusalCode,proto3" json:"refusal_code,omitempty"`
+	// Wake order among the agents of this post (0-based). Persons carry 0.
+	Ordinal       uint32 `protobuf:"varint,6,opt,name=ordinal,proto3" json:"ordinal,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MentionInput) Reset() {
+	*x = MentionInput{}
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MentionInput) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MentionInput) ProtoMessage() {}
+
+func (x *MentionInput) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MentionInput.ProtoReflect.Descriptor instead.
+func (*MentionInput) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *MentionInput) GetSubjectId() string {
+	if x != nil {
+		return x.SubjectId
+	}
+	return ""
+}
+
+func (x *MentionInput) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *MentionInput) GetSource() string {
+	if x != nil {
+		return x.Source
+	}
+	return ""
+}
+
+func (x *MentionInput) GetWakeExpectation() string {
+	if x != nil {
+		return x.WakeExpectation
+	}
+	return ""
+}
+
+func (x *MentionInput) GetRefusalCode() string {
+	if x != nil {
+		return x.RefusalCode
+	}
+	return ""
+}
+
+func (x *MentionInput) GetOrdinal() uint32 {
+	if x != nil {
+		return x.Ordinal
+	}
+	return 0
+}
+
+// One recorded mention as a read or an append reports it. `wake_state` is derived at read:
+// refused, expected, running, awaiting_approval, completed, failed or cancelled; empty for a
+// person.
+type MentionRef struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	SubjectId string                 `protobuf:"bytes,1,opt,name=subject_id,json=subjectId,proto3" json:"subject_id,omitempty"`
+	Kind      string                 `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"`
+	WakeState string                 `protobuf:"bytes,3,opt,name=wake_state,json=wakeState,proto3" json:"wake_state,omitempty"`
+	// The refusal code when wake_state is refused.
+	Reason        string `protobuf:"bytes,4,opt,name=reason,proto3" json:"reason,omitempty"`
+	Source        string `protobuf:"bytes,5,opt,name=source,proto3" json:"source,omitempty"`
+	Ordinal       uint32 `protobuf:"varint,6,opt,name=ordinal,proto3" json:"ordinal,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MentionRef) Reset() {
+	*x = MentionRef{}
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MentionRef) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MentionRef) ProtoMessage() {}
+
+func (x *MentionRef) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MentionRef.ProtoReflect.Descriptor instead.
+func (*MentionRef) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *MentionRef) GetSubjectId() string {
+	if x != nil {
+		return x.SubjectId
+	}
+	return ""
+}
+
+func (x *MentionRef) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *MentionRef) GetWakeState() string {
+	if x != nil {
+		return x.WakeState
+	}
+	return ""
+}
+
+func (x *MentionRef) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *MentionRef) GetSource() string {
+	if x != nil {
+		return x.Source
+	}
+	return ""
+}
+
+func (x *MentionRef) GetOrdinal() uint32 {
+	if x != nil {
+		return x.Ordinal
+	}
+	return 0
+}
+
+// The Control-signed authority and the stored post a wake starts a run from (WS08-S2). The
+// decision fields are the twelve of AppendMessageRequest 5 to 16, in that order, for the
+// action "model.run.wake" (schema sha256:run-wake-v1, permission run:wake); the four wake
+// fields follow. Session Core recomputes the payload digest from these fields and the verified
+// caller, and never takes turn_origin from anywhere but the verified decision.
+type RunWakeContext struct {
+	state                     protoimpl.MessageState `protogen:"open.v1"`
+	SpaceId                   string                 `protobuf:"bytes,1,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	SpaceDecisionRef          string                 `protobuf:"bytes,2,opt,name=space_decision_ref,json=spaceDecisionRef,proto3" json:"space_decision_ref,omitempty"`
+	RecipientAudienceRef      string                 `protobuf:"bytes,3,opt,name=recipient_audience_ref,json=recipientAudienceRef,proto3" json:"recipient_audience_ref,omitempty"`
+	RecipientAudienceRevision uint64                 `protobuf:"varint,4,opt,name=recipient_audience_revision,json=recipientAudienceRevision,proto3" json:"recipient_audience_revision,omitempty"`
+	RecipientAudienceHash     string                 `protobuf:"bytes,5,opt,name=recipient_audience_hash,json=recipientAudienceHash,proto3" json:"recipient_audience_hash,omitempty"`
+	PrivacyPolicyRef          string                 `protobuf:"bytes,6,opt,name=privacy_policy_ref,json=privacyPolicyRef,proto3" json:"privacy_policy_ref,omitempty"`
+	AuthorityRevision         uint64                 `protobuf:"varint,7,opt,name=authority_revision,json=authorityRevision,proto3" json:"authority_revision,omitempty"`
+	ResourceAuthorizationRef  string                 `protobuf:"bytes,8,opt,name=resource_authorization_ref,json=resourceAuthorizationRef,proto3" json:"resource_authorization_ref,omitempty"`
+	SpaceDecisionToken        string                 `protobuf:"bytes,9,opt,name=space_decision_token,json=spaceDecisionToken,proto3" json:"space_decision_token,omitempty"`
+	ActionSchemaHash          string                 `protobuf:"bytes,10,opt,name=action_schema_hash,json=actionSchemaHash,proto3" json:"action_schema_hash,omitempty"`
+	PayloadDigest             string                 `protobuf:"bytes,11,opt,name=payload_digest,json=payloadDigest,proto3" json:"payload_digest,omitempty"`
+	IdempotencyKey            string                 `protobuf:"bytes,12,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
+	// The caller's own stored post this run answers.
+	TriggerMessageId string `protobuf:"bytes,13,opt,name=trigger_message_id,json=triggerMessageId,proto3" json:"trigger_message_id,omitempty"`
+	// sha256:<hex> of that post's stored text; must equal the digest the decision bound.
+	TriggerContentDigest string `protobuf:"bytes,14,opt,name=trigger_content_digest,json=triggerContentDigest,proto3" json:"trigger_content_digest,omitempty"`
+	// The bound agent to run (must be an `expected` mention on the trigger post).
+	AgentSubjectId string `protobuf:"bytes,15,opt,name=agent_subject_id,json=agentSubjectId,proto3" json:"agent_subject_id,omitempty"`
+	// "direct" today; Control refuses the others until their slices exist.
+	TurnOrigin    string `protobuf:"bytes,16,opt,name=turn_origin,json=turnOrigin,proto3" json:"turn_origin,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RunWakeContext) Reset() {
+	*x = RunWakeContext{}
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RunWakeContext) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RunWakeContext) ProtoMessage() {}
+
+func (x *RunWakeContext) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RunWakeContext.ProtoReflect.Descriptor instead.
+func (*RunWakeContext) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *RunWakeContext) GetSpaceId() string {
+	if x != nil {
+		return x.SpaceId
+	}
+	return ""
+}
+
+func (x *RunWakeContext) GetSpaceDecisionRef() string {
+	if x != nil {
+		return x.SpaceDecisionRef
+	}
+	return ""
+}
+
+func (x *RunWakeContext) GetRecipientAudienceRef() string {
+	if x != nil {
+		return x.RecipientAudienceRef
+	}
+	return ""
+}
+
+func (x *RunWakeContext) GetRecipientAudienceRevision() uint64 {
+	if x != nil {
+		return x.RecipientAudienceRevision
+	}
+	return 0
+}
+
+func (x *RunWakeContext) GetRecipientAudienceHash() string {
+	if x != nil {
+		return x.RecipientAudienceHash
+	}
+	return ""
+}
+
+func (x *RunWakeContext) GetPrivacyPolicyRef() string {
+	if x != nil {
+		return x.PrivacyPolicyRef
+	}
+	return ""
+}
+
+func (x *RunWakeContext) GetAuthorityRevision() uint64 {
+	if x != nil {
+		return x.AuthorityRevision
+	}
+	return 0
+}
+
+func (x *RunWakeContext) GetResourceAuthorizationRef() string {
+	if x != nil {
+		return x.ResourceAuthorizationRef
+	}
+	return ""
+}
+
+func (x *RunWakeContext) GetSpaceDecisionToken() string {
+	if x != nil {
+		return x.SpaceDecisionToken
+	}
+	return ""
+}
+
+func (x *RunWakeContext) GetActionSchemaHash() string {
+	if x != nil {
+		return x.ActionSchemaHash
+	}
+	return ""
+}
+
+func (x *RunWakeContext) GetPayloadDigest() string {
+	if x != nil {
+		return x.PayloadDigest
+	}
+	return ""
+}
+
+func (x *RunWakeContext) GetIdempotencyKey() string {
+	if x != nil {
+		return x.IdempotencyKey
+	}
+	return ""
+}
+
+func (x *RunWakeContext) GetTriggerMessageId() string {
+	if x != nil {
+		return x.TriggerMessageId
+	}
+	return ""
+}
+
+func (x *RunWakeContext) GetTriggerContentDigest() string {
+	if x != nil {
+		return x.TriggerContentDigest
+	}
+	return ""
+}
+
+func (x *RunWakeContext) GetAgentSubjectId() string {
+	if x != nil {
+		return x.AgentSubjectId
+	}
+	return ""
+}
+
+func (x *RunWakeContext) GetTurnOrigin() string {
+	if x != nil {
+		return x.TurnOrigin
+	}
+	return ""
+}
+
 type AppendMessageRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Thread to append to.
@@ -601,13 +955,29 @@ type AppendMessageRequest struct {
 	// derived from content, and never sent for a zero-retention turn (such a
 	// credential cannot append at all). Empty = no receipt, today's behaviour.
 	ClientMessageId string `protobuf:"bytes,18,opt,name=client_message_id,json=clientMessageId,proto3" json:"client_message_id,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// What kind of row this is in the room: "" and "turn" are today's
+	// conversation turn (the owner's prompt, the agent's answer); "post" is a
+	// human message written to the room and never sent to the agent. Posts are
+	// kept out of model context, agent memory and Dreaming (see
+	// ListConversationRequest.include_human_posts). Any other value is refused.
+	PostKind string `protobuf:"bytes,19,opt,name=post_kind,json=postKind,proto3" json:"post_kind,omitempty"`
+	// Mentions of a human post (WS08-S2): at most 20 people and 3 agents, no duplicates. Honoured
+	// only for role "user", post_kind "post", a human caller and SPACE_MENTION_RECORDS_CORE on;
+	// otherwise ignored. Never written for a zero-retention caller. An agent mention on a
+	// thread the caller does not own is recorded as refused/owner_only_thread.
+	Mentions []*MentionInput `protobuf:"bytes,20,rep,name=mentions,proto3" json:"mentions,omitempty"`
+	// Typed room entry of a human post (WS15-S9): kind "link_previews", version 1, one to three
+	// text-only previews. Honoured only with post_kind "post"; on any other append it is refused
+	// (invalid_argument), and a failed validation refuses the append. Stored under
+	// messages.metadata.entry; never part of model context. Unset = no entry.
+	Entry         *MessageEntry `protobuf:"bytes,21,opt,name=entry,proto3" json:"entry,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *AppendMessageRequest) Reset() {
 	*x = AppendMessageRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[2]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -619,7 +989,7 @@ func (x *AppendMessageRequest) String() string {
 func (*AppendMessageRequest) ProtoMessage() {}
 
 func (x *AppendMessageRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[2]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -632,7 +1002,7 @@ func (x *AppendMessageRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AppendMessageRequest.ProtoReflect.Descriptor instead.
 func (*AppendMessageRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{2}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *AppendMessageRequest) GetThreadId() string {
@@ -761,6 +1131,27 @@ func (x *AppendMessageRequest) GetClientMessageId() string {
 	return ""
 }
 
+func (x *AppendMessageRequest) GetPostKind() string {
+	if x != nil {
+		return x.PostKind
+	}
+	return ""
+}
+
+func (x *AppendMessageRequest) GetMentions() []*MentionInput {
+	if x != nil {
+		return x.Mentions
+	}
+	return nil
+}
+
+func (x *AppendMessageRequest) GetEntry() *MessageEntry {
+	if x != nil {
+		return x.Entry
+	}
+	return nil
+}
+
 type AppendMessageResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Assigned message sequence number within the thread.
@@ -770,14 +1161,16 @@ type AppendMessageResponse struct {
 	MessageId string `protobuf:"bytes,2,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
 	// True when the append found the caller's `client_message_id` already stored
 	// and wrote nothing.
-	Deduplicated  bool `protobuf:"varint,3,opt,name=deduplicated,proto3" json:"deduplicated,omitempty"`
+	Deduplicated bool `protobuf:"varint,3,opt,name=deduplicated,proto3" json:"deduplicated,omitempty"`
+	// The mentions as stored (effective wake states after Session Core's own downgrade).
+	Mentions      []*MentionRef `protobuf:"bytes,4,rep,name=mentions,proto3" json:"mentions,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *AppendMessageResponse) Reset() {
 	*x = AppendMessageResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[3]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -789,7 +1182,7 @@ func (x *AppendMessageResponse) String() string {
 func (*AppendMessageResponse) ProtoMessage() {}
 
 func (x *AppendMessageResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[3]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -802,7 +1195,7 @@ func (x *AppendMessageResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AppendMessageResponse.ProtoReflect.Descriptor instead.
 func (*AppendMessageResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{3}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *AppendMessageResponse) GetSequence() uint64 {
@@ -826,6 +1219,13 @@ func (x *AppendMessageResponse) GetDeduplicated() bool {
 	return false
 }
 
+func (x *AppendMessageResponse) GetMentions() []*MentionRef {
+	if x != nil {
+		return x.Mentions
+	}
+	return nil
+}
+
 type StartRunRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Thread this run executes within.
@@ -847,7 +1247,7 @@ type StartRunRequest struct {
 
 func (x *StartRunRequest) Reset() {
 	*x = StartRunRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[4]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -859,7 +1259,7 @@ func (x *StartRunRequest) String() string {
 func (*StartRunRequest) ProtoMessage() {}
 
 func (x *StartRunRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[4]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -872,7 +1272,7 @@ func (x *StartRunRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartRunRequest.ProtoReflect.Descriptor instead.
 func (*StartRunRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{4}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *StartRunRequest) GetThreadId() string {
@@ -946,7 +1346,7 @@ type StartRunResponse struct {
 
 func (x *StartRunResponse) Reset() {
 	*x = StartRunResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[5]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -958,7 +1358,7 @@ func (x *StartRunResponse) String() string {
 func (*StartRunResponse) ProtoMessage() {}
 
 func (x *StartRunResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[5]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -971,7 +1371,7 @@ func (x *StartRunResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartRunResponse.ProtoReflect.Descriptor instead.
 func (*StartRunResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{5}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *StartRunResponse) GetRunId() string {
@@ -1039,7 +1439,7 @@ type StartScheduledRunRequest struct {
 
 func (x *StartScheduledRunRequest) Reset() {
 	*x = StartScheduledRunRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[6]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1051,7 +1451,7 @@ func (x *StartScheduledRunRequest) String() string {
 func (*StartScheduledRunRequest) ProtoMessage() {}
 
 func (x *StartScheduledRunRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[6]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1064,7 +1464,7 @@ func (x *StartScheduledRunRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartScheduledRunRequest.ProtoReflect.Descriptor instead.
 func (*StartScheduledRunRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{6}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *StartScheduledRunRequest) GetThreadId() string {
@@ -1206,7 +1606,7 @@ type PrepareScheduledRunThreadRequest struct {
 
 func (x *PrepareScheduledRunThreadRequest) Reset() {
 	*x = PrepareScheduledRunThreadRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[7]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1218,7 +1618,7 @@ func (x *PrepareScheduledRunThreadRequest) String() string {
 func (*PrepareScheduledRunThreadRequest) ProtoMessage() {}
 
 func (x *PrepareScheduledRunThreadRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[7]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1231,7 +1631,7 @@ func (x *PrepareScheduledRunThreadRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrepareScheduledRunThreadRequest.ProtoReflect.Descriptor instead.
 func (*PrepareScheduledRunThreadRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{7}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *PrepareScheduledRunThreadRequest) GetOrgId() string {
@@ -1378,7 +1778,7 @@ type PrepareScheduledRunThreadResponse struct {
 
 func (x *PrepareScheduledRunThreadResponse) Reset() {
 	*x = PrepareScheduledRunThreadResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[8]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1390,7 +1790,7 @@ func (x *PrepareScheduledRunThreadResponse) String() string {
 func (*PrepareScheduledRunThreadResponse) ProtoMessage() {}
 
 func (x *PrepareScheduledRunThreadResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[8]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1403,7 +1803,7 @@ func (x *PrepareScheduledRunThreadResponse) ProtoReflect() protoreflect.Message 
 
 // Deprecated: Use PrepareScheduledRunThreadResponse.ProtoReflect.Descriptor instead.
 func (*PrepareScheduledRunThreadResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{8}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *PrepareScheduledRunThreadResponse) GetThreadId() string {
@@ -1452,7 +1852,7 @@ type PrepareUserOwnedThreadRequest struct {
 
 func (x *PrepareUserOwnedThreadRequest) Reset() {
 	*x = PrepareUserOwnedThreadRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[9]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1464,7 +1864,7 @@ func (x *PrepareUserOwnedThreadRequest) String() string {
 func (*PrepareUserOwnedThreadRequest) ProtoMessage() {}
 
 func (x *PrepareUserOwnedThreadRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[9]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1477,7 +1877,7 @@ func (x *PrepareUserOwnedThreadRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrepareUserOwnedThreadRequest.ProtoReflect.Descriptor instead.
 func (*PrepareUserOwnedThreadRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{9}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *PrepareUserOwnedThreadRequest) GetOrgId() string {
@@ -1524,7 +1924,7 @@ type PrepareUserOwnedThreadResponse struct {
 
 func (x *PrepareUserOwnedThreadResponse) Reset() {
 	*x = PrepareUserOwnedThreadResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[10]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1536,7 +1936,7 @@ func (x *PrepareUserOwnedThreadResponse) String() string {
 func (*PrepareUserOwnedThreadResponse) ProtoMessage() {}
 
 func (x *PrepareUserOwnedThreadResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[10]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1549,7 +1949,7 @@ func (x *PrepareUserOwnedThreadResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrepareUserOwnedThreadResponse.ProtoReflect.Descriptor instead.
 func (*PrepareUserOwnedThreadResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{10}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *PrepareUserOwnedThreadResponse) GetThreadId() string {
@@ -1578,13 +1978,16 @@ type StartManagedRunRequest struct {
 	StartKey string `protobuf:"bytes,8,opt,name=start_key,json=startKey,proto3" json:"start_key,omitempty"`
 	// The server validates this source and stores the matching canonical step.
 	TerminalSource ManagedRunSource `protobuf:"varint,9,opt,name=terminal_source,json=terminalSource,proto3,enum=model_plane.v1.ManagedRunSource" json:"terminal_source,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Wake mode (WS08-S2): start this run from a stored human post for one addressed agent.
+	// Absent keeps every existing start unchanged. Refused for a zero-retention caller.
+	Wake          *RunWakeContext `protobuf:"bytes,10,opt,name=wake,proto3" json:"wake,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *StartManagedRunRequest) Reset() {
 	*x = StartManagedRunRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[11]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1596,7 +1999,7 @@ func (x *StartManagedRunRequest) String() string {
 func (*StartManagedRunRequest) ProtoMessage() {}
 
 func (x *StartManagedRunRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[11]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1609,7 +2012,7 @@ func (x *StartManagedRunRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartManagedRunRequest.ProtoReflect.Descriptor instead.
 func (*StartManagedRunRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{11}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *StartManagedRunRequest) GetThreadId() string {
@@ -1675,6 +2078,13 @@ func (x *StartManagedRunRequest) GetTerminalSource() ManagedRunSource {
 	return ManagedRunSource_MANAGED_RUN_SOURCE_UNSPECIFIED
 }
 
+func (x *StartManagedRunRequest) GetWake() *RunWakeContext {
+	if x != nil {
+		return x.Wake
+	}
+	return nil
+}
+
 type StartManagedRunResponse struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	RunId     string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
@@ -1692,7 +2102,7 @@ type StartManagedRunResponse struct {
 
 func (x *StartManagedRunResponse) Reset() {
 	*x = StartManagedRunResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[12]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1704,7 +2114,7 @@ func (x *StartManagedRunResponse) String() string {
 func (*StartManagedRunResponse) ProtoMessage() {}
 
 func (x *StartManagedRunResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[12]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1717,7 +2127,7 @@ func (x *StartManagedRunResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartManagedRunResponse.ProtoReflect.Descriptor instead.
 func (*StartManagedRunResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{12}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *StartManagedRunResponse) GetRunId() string {
@@ -1770,7 +2180,7 @@ type RecordTerminalOutcomeRequest struct {
 
 func (x *RecordTerminalOutcomeRequest) Reset() {
 	*x = RecordTerminalOutcomeRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[13]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1782,7 +2192,7 @@ func (x *RecordTerminalOutcomeRequest) String() string {
 func (*RecordTerminalOutcomeRequest) ProtoMessage() {}
 
 func (x *RecordTerminalOutcomeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[13]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1795,7 +2205,7 @@ func (x *RecordTerminalOutcomeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecordTerminalOutcomeRequest.ProtoReflect.Descriptor instead.
 func (*RecordTerminalOutcomeRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{13}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *RecordTerminalOutcomeRequest) GetRunId() string {
@@ -1846,7 +2256,7 @@ type RecordTerminalOutcomeResponse struct {
 
 func (x *RecordTerminalOutcomeResponse) Reset() {
 	*x = RecordTerminalOutcomeResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[14]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1858,7 +2268,7 @@ func (x *RecordTerminalOutcomeResponse) String() string {
 func (*RecordTerminalOutcomeResponse) ProtoMessage() {}
 
 func (x *RecordTerminalOutcomeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[14]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1871,7 +2281,7 @@ func (x *RecordTerminalOutcomeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecordTerminalOutcomeResponse.ProtoReflect.Descriptor instead.
 func (*RecordTerminalOutcomeResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{14}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *RecordTerminalOutcomeResponse) GetRunId() string {
@@ -1950,7 +2360,7 @@ type RecordRunOutputRequest struct {
 
 func (x *RecordRunOutputRequest) Reset() {
 	*x = RecordRunOutputRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[15]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1962,7 +2372,7 @@ func (x *RecordRunOutputRequest) String() string {
 func (*RecordRunOutputRequest) ProtoMessage() {}
 
 func (x *RecordRunOutputRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[15]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1975,7 +2385,7 @@ func (x *RecordRunOutputRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecordRunOutputRequest.ProtoReflect.Descriptor instead.
 func (*RecordRunOutputRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{15}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *RecordRunOutputRequest) GetRunId() string {
@@ -2004,7 +2414,7 @@ type RecordRunOutputResponse struct {
 
 func (x *RecordRunOutputResponse) Reset() {
 	*x = RecordRunOutputResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[16]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2016,7 +2426,7 @@ func (x *RecordRunOutputResponse) String() string {
 func (*RecordRunOutputResponse) ProtoMessage() {}
 
 func (x *RecordRunOutputResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[16]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2029,7 +2439,7 @@ func (x *RecordRunOutputResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecordRunOutputResponse.ProtoReflect.Descriptor instead.
 func (*RecordRunOutputResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{16}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *RecordRunOutputResponse) GetRunId() string {
@@ -2058,7 +2468,7 @@ type HeartbeatManagedRunRequest struct {
 
 func (x *HeartbeatManagedRunRequest) Reset() {
 	*x = HeartbeatManagedRunRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[17]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2070,7 +2480,7 @@ func (x *HeartbeatManagedRunRequest) String() string {
 func (*HeartbeatManagedRunRequest) ProtoMessage() {}
 
 func (x *HeartbeatManagedRunRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[17]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2083,7 +2493,7 @@ func (x *HeartbeatManagedRunRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatManagedRunRequest.ProtoReflect.Descriptor instead.
 func (*HeartbeatManagedRunRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{17}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *HeartbeatManagedRunRequest) GetRunId() string {
@@ -2111,7 +2521,7 @@ type HeartbeatManagedRunResponse struct {
 
 func (x *HeartbeatManagedRunResponse) Reset() {
 	*x = HeartbeatManagedRunResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[18]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2123,7 +2533,7 @@ func (x *HeartbeatManagedRunResponse) String() string {
 func (*HeartbeatManagedRunResponse) ProtoMessage() {}
 
 func (x *HeartbeatManagedRunResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[18]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2136,7 +2546,7 @@ func (x *HeartbeatManagedRunResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HeartbeatManagedRunResponse.ProtoReflect.Descriptor instead.
 func (*HeartbeatManagedRunResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{18}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *HeartbeatManagedRunResponse) GetRenewedUntil() *timestamppb.Timestamp {
@@ -2181,7 +2591,7 @@ type CompleteDirectRunWithMessageRequest struct {
 
 func (x *CompleteDirectRunWithMessageRequest) Reset() {
 	*x = CompleteDirectRunWithMessageRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[19]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2193,7 +2603,7 @@ func (x *CompleteDirectRunWithMessageRequest) String() string {
 func (*CompleteDirectRunWithMessageRequest) ProtoMessage() {}
 
 func (x *CompleteDirectRunWithMessageRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[19]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2206,7 +2616,7 @@ func (x *CompleteDirectRunWithMessageRequest) ProtoReflect() protoreflect.Messag
 
 // Deprecated: Use CompleteDirectRunWithMessageRequest.ProtoReflect.Descriptor instead.
 func (*CompleteDirectRunWithMessageRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{19}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *CompleteDirectRunWithMessageRequest) GetRunId() string {
@@ -2270,7 +2680,7 @@ type CompleteDirectRunWithMessageResponse struct {
 
 func (x *CompleteDirectRunWithMessageResponse) Reset() {
 	*x = CompleteDirectRunWithMessageResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[20]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2282,7 +2692,7 @@ func (x *CompleteDirectRunWithMessageResponse) String() string {
 func (*CompleteDirectRunWithMessageResponse) ProtoMessage() {}
 
 func (x *CompleteDirectRunWithMessageResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[20]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2295,7 +2705,7 @@ func (x *CompleteDirectRunWithMessageResponse) ProtoReflect() protoreflect.Messa
 
 // Deprecated: Use CompleteDirectRunWithMessageResponse.ProtoReflect.Descriptor instead.
 func (*CompleteDirectRunWithMessageResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{20}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *CompleteDirectRunWithMessageResponse) GetAlreadyTerminal() bool {
@@ -2342,7 +2752,7 @@ type CompleteStepRequest struct {
 
 func (x *CompleteStepRequest) Reset() {
 	*x = CompleteStepRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[21]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2354,7 +2764,7 @@ func (x *CompleteStepRequest) String() string {
 func (*CompleteStepRequest) ProtoMessage() {}
 
 func (x *CompleteStepRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[21]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2367,7 +2777,7 @@ func (x *CompleteStepRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CompleteStepRequest.ProtoReflect.Descriptor instead.
 func (*CompleteStepRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{21}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *CompleteStepRequest) GetRunId() string {
@@ -2423,7 +2833,7 @@ type CompleteStepResponse struct {
 
 func (x *CompleteStepResponse) Reset() {
 	*x = CompleteStepResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[22]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2435,7 +2845,7 @@ func (x *CompleteStepResponse) String() string {
 func (*CompleteStepResponse) ProtoMessage() {}
 
 func (x *CompleteStepResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[22]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2448,7 +2858,7 @@ func (x *CompleteStepResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CompleteStepResponse.ProtoReflect.Descriptor instead.
 func (*CompleteStepResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{22}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *CompleteStepResponse) GetStepIndex() uint32 {
@@ -2486,7 +2896,7 @@ type ReserveToolActionRequest struct {
 
 func (x *ReserveToolActionRequest) Reset() {
 	*x = ReserveToolActionRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[23]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2498,7 +2908,7 @@ func (x *ReserveToolActionRequest) String() string {
 func (*ReserveToolActionRequest) ProtoMessage() {}
 
 func (x *ReserveToolActionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[23]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2511,7 +2921,7 @@ func (x *ReserveToolActionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReserveToolActionRequest.ProtoReflect.Descriptor instead.
 func (*ReserveToolActionRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{23}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *ReserveToolActionRequest) GetRunId() string {
@@ -2581,7 +2991,7 @@ type ReserveToolActionResponse struct {
 
 func (x *ReserveToolActionResponse) Reset() {
 	*x = ReserveToolActionResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[24]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2593,7 +3003,7 @@ func (x *ReserveToolActionResponse) String() string {
 func (*ReserveToolActionResponse) ProtoMessage() {}
 
 func (x *ReserveToolActionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[24]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2606,7 +3016,7 @@ func (x *ReserveToolActionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReserveToolActionResponse.ProtoReflect.Descriptor instead.
 func (*ReserveToolActionResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{24}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *ReserveToolActionResponse) GetCreated() bool {
@@ -2636,7 +3046,7 @@ type FinalizeToolActionRequest struct {
 
 func (x *FinalizeToolActionRequest) Reset() {
 	*x = FinalizeToolActionRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[25]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2648,7 +3058,7 @@ func (x *FinalizeToolActionRequest) String() string {
 func (*FinalizeToolActionRequest) ProtoMessage() {}
 
 func (x *FinalizeToolActionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[25]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2661,7 +3071,7 @@ func (x *FinalizeToolActionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FinalizeToolActionRequest.ProtoReflect.Descriptor instead.
 func (*FinalizeToolActionRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{25}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *FinalizeToolActionRequest) GetRunId() string {
@@ -2703,7 +3113,7 @@ type FinalizeToolActionResponse struct {
 
 func (x *FinalizeToolActionResponse) Reset() {
 	*x = FinalizeToolActionResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[26]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2715,7 +3125,7 @@ func (x *FinalizeToolActionResponse) String() string {
 func (*FinalizeToolActionResponse) ProtoMessage() {}
 
 func (x *FinalizeToolActionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[26]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2728,7 +3138,7 @@ func (x *FinalizeToolActionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FinalizeToolActionResponse.ProtoReflect.Descriptor instead.
 func (*FinalizeToolActionResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{26}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *FinalizeToolActionResponse) GetUpdated() bool {
@@ -2752,7 +3162,7 @@ type SaveCheckpointRequest struct {
 
 func (x *SaveCheckpointRequest) Reset() {
 	*x = SaveCheckpointRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[27]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2764,7 +3174,7 @@ func (x *SaveCheckpointRequest) String() string {
 func (*SaveCheckpointRequest) ProtoMessage() {}
 
 func (x *SaveCheckpointRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[27]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2777,7 +3187,7 @@ func (x *SaveCheckpointRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SaveCheckpointRequest.ProtoReflect.Descriptor instead.
 func (*SaveCheckpointRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{27}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *SaveCheckpointRequest) GetRunId() string {
@@ -2813,7 +3223,7 @@ type SaveCheckpointResponse struct {
 
 func (x *SaveCheckpointResponse) Reset() {
 	*x = SaveCheckpointResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[28]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2825,7 +3235,7 @@ func (x *SaveCheckpointResponse) String() string {
 func (*SaveCheckpointResponse) ProtoMessage() {}
 
 func (x *SaveCheckpointResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[28]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2838,7 +3248,7 @@ func (x *SaveCheckpointResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SaveCheckpointResponse.ProtoReflect.Descriptor instead.
 func (*SaveCheckpointResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{28}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *SaveCheckpointResponse) GetCheckpointIndex() uint32 {
@@ -2869,7 +3279,7 @@ type ReplayThreadRequest struct {
 
 func (x *ReplayThreadRequest) Reset() {
 	*x = ReplayThreadRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[29]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2881,7 +3291,7 @@ func (x *ReplayThreadRequest) String() string {
 func (*ReplayThreadRequest) ProtoMessage() {}
 
 func (x *ReplayThreadRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[29]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2894,7 +3304,7 @@ func (x *ReplayThreadRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReplayThreadRequest.ProtoReflect.Descriptor instead.
 func (*ReplayThreadRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{29}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *ReplayThreadRequest) GetThreadId() string {
@@ -2948,7 +3358,7 @@ type GetContextAssemblyRequest struct {
 
 func (x *GetContextAssemblyRequest) Reset() {
 	*x = GetContextAssemblyRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[30]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2960,7 +3370,7 @@ func (x *GetContextAssemblyRequest) String() string {
 func (*GetContextAssemblyRequest) ProtoMessage() {}
 
 func (x *GetContextAssemblyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[30]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2973,7 +3383,7 @@ func (x *GetContextAssemblyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetContextAssemblyRequest.ProtoReflect.Descriptor instead.
 func (*GetContextAssemblyRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{30}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *GetContextAssemblyRequest) GetThreadId() string {
@@ -3046,7 +3456,7 @@ type GetContextAssemblyResponse struct {
 
 func (x *GetContextAssemblyResponse) Reset() {
 	*x = GetContextAssemblyResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[31]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3058,7 +3468,7 @@ func (x *GetContextAssemblyResponse) String() string {
 func (*GetContextAssemblyResponse) ProtoMessage() {}
 
 func (x *GetContextAssemblyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[31]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3071,7 +3481,7 @@ func (x *GetContextAssemblyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetContextAssemblyResponse.ProtoReflect.Descriptor instead.
 func (*GetContextAssemblyResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{31}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *GetContextAssemblyResponse) GetSegments() []*ContextSegment {
@@ -3111,7 +3521,7 @@ type ContextSegment struct {
 
 func (x *ContextSegment) Reset() {
 	*x = ContextSegment{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[32]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3123,7 +3533,7 @@ func (x *ContextSegment) String() string {
 func (*ContextSegment) ProtoMessage() {}
 
 func (x *ContextSegment) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[32]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3136,7 +3546,7 @@ func (x *ContextSegment) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ContextSegment.ProtoReflect.Descriptor instead.
 func (*ContextSegment) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{32}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *ContextSegment) GetKind() string {
@@ -3170,7 +3580,7 @@ type CompactNowRequest struct {
 
 func (x *CompactNowRequest) Reset() {
 	*x = CompactNowRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[33]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3182,7 +3592,7 @@ func (x *CompactNowRequest) String() string {
 func (*CompactNowRequest) ProtoMessage() {}
 
 func (x *CompactNowRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[33]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3195,7 +3605,7 @@ func (x *CompactNowRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CompactNowRequest.ProtoReflect.Descriptor instead.
 func (*CompactNowRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{33}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *CompactNowRequest) GetToon() bool {
@@ -3217,7 +3627,7 @@ type CompactNowResponse struct {
 
 func (x *CompactNowResponse) Reset() {
 	*x = CompactNowResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[34]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3229,7 +3639,7 @@ func (x *CompactNowResponse) String() string {
 func (*CompactNowResponse) ProtoMessage() {}
 
 func (x *CompactNowResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[34]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3242,7 +3652,7 @@ func (x *CompactNowResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CompactNowResponse.ProtoReflect.Descriptor instead.
 func (*CompactNowResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{34}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *CompactNowResponse) GetCompactedCount() int64 {
@@ -3279,7 +3689,7 @@ type SetAgentSkillEnabledRequest struct {
 
 func (x *SetAgentSkillEnabledRequest) Reset() {
 	*x = SetAgentSkillEnabledRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[35]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3291,7 +3701,7 @@ func (x *SetAgentSkillEnabledRequest) String() string {
 func (*SetAgentSkillEnabledRequest) ProtoMessage() {}
 
 func (x *SetAgentSkillEnabledRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[35]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3304,7 +3714,7 @@ func (x *SetAgentSkillEnabledRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetAgentSkillEnabledRequest.ProtoReflect.Descriptor instead.
 func (*SetAgentSkillEnabledRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{35}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *SetAgentSkillEnabledRequest) GetOrgId() string {
@@ -3348,7 +3758,7 @@ type SetAgentSkillEnabledResponse struct {
 
 func (x *SetAgentSkillEnabledResponse) Reset() {
 	*x = SetAgentSkillEnabledResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[36]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3360,7 +3770,7 @@ func (x *SetAgentSkillEnabledResponse) String() string {
 func (*SetAgentSkillEnabledResponse) ProtoMessage() {}
 
 func (x *SetAgentSkillEnabledResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[36]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3373,7 +3783,7 @@ func (x *SetAgentSkillEnabledResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetAgentSkillEnabledResponse.ProtoReflect.Descriptor instead.
 func (*SetAgentSkillEnabledResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{36}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *SetAgentSkillEnabledResponse) GetUpdated() bool {
@@ -3423,7 +3833,7 @@ type UpsertAgentSkillRequest struct {
 
 func (x *UpsertAgentSkillRequest) Reset() {
 	*x = UpsertAgentSkillRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[37]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3435,7 +3845,7 @@ func (x *UpsertAgentSkillRequest) String() string {
 func (*UpsertAgentSkillRequest) ProtoMessage() {}
 
 func (x *UpsertAgentSkillRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[37]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3448,7 +3858,7 @@ func (x *UpsertAgentSkillRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpsertAgentSkillRequest.ProtoReflect.Descriptor instead.
 func (*UpsertAgentSkillRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{37}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *UpsertAgentSkillRequest) GetOrgId() string {
@@ -3579,7 +3989,7 @@ type UpsertAgentSkillResponse struct {
 
 func (x *UpsertAgentSkillResponse) Reset() {
 	*x = UpsertAgentSkillResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[38]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3591,7 +4001,7 @@ func (x *UpsertAgentSkillResponse) String() string {
 func (*UpsertAgentSkillResponse) ProtoMessage() {}
 
 func (x *UpsertAgentSkillResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[38]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3604,7 +4014,7 @@ func (x *UpsertAgentSkillResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpsertAgentSkillResponse.ProtoReflect.Descriptor instead.
 func (*UpsertAgentSkillResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{38}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *UpsertAgentSkillResponse) GetId() string {
@@ -3659,7 +4069,7 @@ type ListAgentSkillsRequest struct {
 
 func (x *ListAgentSkillsRequest) Reset() {
 	*x = ListAgentSkillsRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[39]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3671,7 +4081,7 @@ func (x *ListAgentSkillsRequest) String() string {
 func (*ListAgentSkillsRequest) ProtoMessage() {}
 
 func (x *ListAgentSkillsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[39]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3684,7 +4094,7 @@ func (x *ListAgentSkillsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListAgentSkillsRequest.ProtoReflect.Descriptor instead.
 func (*ListAgentSkillsRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{39}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *ListAgentSkillsRequest) GetOrgId() string {
@@ -3743,7 +4153,7 @@ type AgentSkill struct {
 
 func (x *AgentSkill) Reset() {
 	*x = AgentSkill{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[40]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3755,7 +4165,7 @@ func (x *AgentSkill) String() string {
 func (*AgentSkill) ProtoMessage() {}
 
 func (x *AgentSkill) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[40]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3768,7 +4178,7 @@ func (x *AgentSkill) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentSkill.ProtoReflect.Descriptor instead.
 func (*AgentSkill) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{40}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *AgentSkill) GetId() string {
@@ -3906,7 +4316,7 @@ type ListAgentSkillsResponse struct {
 
 func (x *ListAgentSkillsResponse) Reset() {
 	*x = ListAgentSkillsResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[41]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3918,7 +4328,7 @@ func (x *ListAgentSkillsResponse) String() string {
 func (*ListAgentSkillsResponse) ProtoMessage() {}
 
 func (x *ListAgentSkillsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[41]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3931,7 +4341,7 @@ func (x *ListAgentSkillsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListAgentSkillsResponse.ProtoReflect.Descriptor instead.
 func (*ListAgentSkillsResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{41}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *ListAgentSkillsResponse) GetSkills() []*AgentSkill {
@@ -3972,13 +4382,27 @@ type ListConversationRequest struct {
 	// `on_active_path = false` (WS17 S8). Off, the read is the active path only, and
 	// every prompt, learning and Dreaming reader leaves it off.
 	IncludeInactive bool `protobuf:"varint,8,opt,name=include_inactive,json=includeInactive,proto3" json:"include_inactive,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Human posts (post_kind "post") are filtered out of every read unless the
+	// caller sets this. False is the default so every caller, the model-callable
+	// reattach_context included, is contained without doing anything; only the
+	// UI transcript route opts in.
+	IncludeHumanPosts bool `protobuf:"varint,9,opt,name=include_human_posts,json=includeHumanPosts,proto3" json:"include_human_posts,omitempty"`
+	// With include_human_posts, keep only the newest N human posts in the returned page (0 = no
+	// cap). Used by a wake that opts in to fenced room-post context (WS08-S3).
+	PostContextCap uint32 `protobuf:"varint,10,opt,name=post_context_cap,json=postContextCap,proto3" json:"post_context_cap,omitempty"`
+	// Space timeline tail transcript (WS15-S6). With a positive `limit` and no
+	// `before_message_id`, also return the thread's first readable turn ahead of
+	// the newest page (unless the page already holds it) and report in
+	// `omitted_before` how many readable turns lie between the two. Only read
+	// while SPACE_TIMELINE_CORE is on; otherwise the read is the plain page.
+	IncludeFirst  bool `protobuf:"varint,11,opt,name=include_first,json=includeFirst,proto3" json:"include_first,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ListConversationRequest) Reset() {
 	*x = ListConversationRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[42]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3990,7 +4414,7 @@ func (x *ListConversationRequest) String() string {
 func (*ListConversationRequest) ProtoMessage() {}
 
 func (x *ListConversationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[42]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4003,7 +4427,7 @@ func (x *ListConversationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListConversationRequest.ProtoReflect.Descriptor instead.
 func (*ListConversationRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{42}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *ListConversationRequest) GetOrgId() string {
@@ -4062,6 +4486,27 @@ func (x *ListConversationRequest) GetIncludeInactive() bool {
 	return false
 }
 
+func (x *ListConversationRequest) GetIncludeHumanPosts() bool {
+	if x != nil {
+		return x.IncludeHumanPosts
+	}
+	return false
+}
+
+func (x *ListConversationRequest) GetPostContextCap() uint32 {
+	if x != nil {
+		return x.PostContextCap
+	}
+	return 0
+}
+
+func (x *ListConversationRequest) GetIncludeFirst() bool {
+	if x != nil {
+		return x.IncludeFirst
+	}
+	return false
+}
+
 // One conversation turn. Named SessionMessage (not ThreadMessage, which the
 // gateway proto already defines in this package) to avoid a name collision.
 type SessionMessage struct {
@@ -4104,14 +4549,41 @@ type SessionMessage struct {
 	SiblingCount uint32 `protobuf:"varint,9,opt,name=sibling_count,json=siblingCount,proto3" json:"sibling_count,omitempty"`
 	// True when the turn is on the active path: the chain from the first turn to the
 	// thread's active leaf. Only inactive turns are read with `include_inactive`.
-	OnActivePath  bool `protobuf:"varint,10,opt,name=on_active_path,json=onActivePath,proto3" json:"on_active_path,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	OnActivePath bool `protobuf:"varint,10,opt,name=on_active_path,json=onActivePath,proto3" json:"on_active_path,omitempty"`
+	// "turn" or "post" (see AppendMessageRequest.post_kind). Rows written before
+	// the column existed read as "turn".
+	PostKind string `protobuf:"bytes,11,opt,name=post_kind,json=postKind,proto3" json:"post_kind,omitempty"`
+	// When this turn was stored (messages.created_at). A room shows a time beside
+	// each message and this is the only source for it; absent only when a caller
+	// built the message without reading it from the store.
+	CreatedAt *timestamppb.Timestamp `protobuf:"bytes,12,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	// The mentions recorded on this post (WS08-S2), with the wake state derived from the newest
+	// run per (post, agent). Empty on turns and on posts without mentions.
+	Mentions []*MentionRef `protobuf:"bytes,13,rep,name=mentions,proto3" json:"mentions,omitempty"`
+	// Typed room entry of a human post (WS15-S6 declares it, WS15-S9 validates and fills it). Unset
+	// on every turn and on a post without one; a reader renders an unset or unknown kind neutrally.
+	Entry *MessageEntry `protobuf:"bytes,14,opt,name=entry,proto3" json:"entry,omitempty"`
+	// The latest revision applied to this message (WS12-S4): "" (never revised),
+	// "edited" or "deleted". A deleted message arrives with empty `content` and no
+	// `metadata`; an edited one arrives with its effective (edited) content.
+	RevisionState string `protobuf:"bytes,15,opt,name=revision_state,json=revisionState,proto3" json:"revision_state,omitempty"`
+	// When the latest applied revision was made; absent when never revised.
+	RevisedAt *timestamppb.Timestamp `protobuf:"bytes,16,opt,name=revised_at,json=revisedAt,proto3" json:"revised_at,omitempty"`
+	// Who made the latest applied revision (the author, the thread owner for an
+	// agent answer, or a moderator).
+	RevisedBySubjectId string `protobuf:"bytes,17,opt,name=revised_by_subject_id,json=revisedBySubjectId,proto3" json:"revised_by_subject_id,omitempty"`
+	// 1-based number of the latest applied revision; 0 when never revised.
+	RevisionNo uint32 `protobuf:"varint,18,opt,name=revision_no,json=revisionNo,proto3" json:"revision_no,omitempty"`
+	// Set only on a deleted user message: an agent answer to it already exists, and
+	// that answer is not retracted by the deletion.
+	AgentFollowedUp bool `protobuf:"varint,19,opt,name=agent_followed_up,json=agentFollowedUp,proto3" json:"agent_followed_up,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *SessionMessage) Reset() {
 	*x = SessionMessage{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[43]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4123,7 +4595,7 @@ func (x *SessionMessage) String() string {
 func (*SessionMessage) ProtoMessage() {}
 
 func (x *SessionMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[43]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4136,7 +4608,7 @@ func (x *SessionMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionMessage.ProtoReflect.Descriptor instead.
 func (*SessionMessage) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{43}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *SessionMessage) GetRole() string {
@@ -4209,20 +4681,87 @@ func (x *SessionMessage) GetOnActivePath() bool {
 	return false
 }
 
+func (x *SessionMessage) GetPostKind() string {
+	if x != nil {
+		return x.PostKind
+	}
+	return ""
+}
+
+func (x *SessionMessage) GetCreatedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return nil
+}
+
+func (x *SessionMessage) GetMentions() []*MentionRef {
+	if x != nil {
+		return x.Mentions
+	}
+	return nil
+}
+
+func (x *SessionMessage) GetEntry() *MessageEntry {
+	if x != nil {
+		return x.Entry
+	}
+	return nil
+}
+
+func (x *SessionMessage) GetRevisionState() string {
+	if x != nil {
+		return x.RevisionState
+	}
+	return ""
+}
+
+func (x *SessionMessage) GetRevisedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.RevisedAt
+	}
+	return nil
+}
+
+func (x *SessionMessage) GetRevisedBySubjectId() string {
+	if x != nil {
+		return x.RevisedBySubjectId
+	}
+	return ""
+}
+
+func (x *SessionMessage) GetRevisionNo() uint32 {
+	if x != nil {
+		return x.RevisionNo
+	}
+	return 0
+}
+
+func (x *SessionMessage) GetAgentFollowedUp() bool {
+	if x != nil {
+		return x.AgentFollowedUp
+	}
+	return false
+}
+
 type ListConversationResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Messages in conversation order (by sequence).
 	Messages []*SessionMessage `protobuf:"bytes,1,rep,name=messages,proto3" json:"messages,omitempty"`
 	// True when messages older than this page exist. Always false for an
 	// unpaged read.
-	HasMore       bool `protobuf:"varint,2,opt,name=has_more,json=hasMore,proto3" json:"has_more,omitempty"`
+	HasMore bool `protobuf:"varint,2,opt,name=has_more,json=hasMore,proto3" json:"has_more,omitempty"`
+	// Readable turns between the first turn (ListConversationRequest.include_first) and the
+	// returned page; 0 when the request did not ask for the first turn or nothing is omitted
+	// (WS15-S6).
+	OmittedBefore uint32 `protobuf:"varint,3,opt,name=omitted_before,json=omittedBefore,proto3" json:"omitted_before,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ListConversationResponse) Reset() {
 	*x = ListConversationResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[44]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4234,7 +4773,7 @@ func (x *ListConversationResponse) String() string {
 func (*ListConversationResponse) ProtoMessage() {}
 
 func (x *ListConversationResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[44]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4247,7 +4786,7 @@ func (x *ListConversationResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListConversationResponse.ProtoReflect.Descriptor instead.
 func (*ListConversationResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{44}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *ListConversationResponse) GetMessages() []*SessionMessage {
@@ -4262,6 +4801,592 @@ func (x *ListConversationResponse) GetHasMore() bool {
 		return x.HasMore
 	}
 	return false
+}
+
+func (x *ListConversationResponse) GetOmittedBefore() uint32 {
+	if x != nil {
+		return x.OmittedBefore
+	}
+	return 0
+}
+
+// A typed room entry carried by a human post (WS15). `kind` is a closed word; a reader that
+// does not know a kind shows `{kind, version}` neutrally. Today's only kind is "link_previews".
+type MessageEntry struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Kind          string                 `protobuf:"bytes,1,opt,name=kind,proto3" json:"kind,omitempty"`
+	Version       uint32                 `protobuf:"varint,2,opt,name=version,proto3" json:"version,omitempty"`
+	LinkPreviews  []*LinkPreview         `protobuf:"bytes,3,rep,name=link_previews,json=linkPreviews,proto3" json:"link_previews,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MessageEntry) Reset() {
+	*x = MessageEntry{}
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[48]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MessageEntry) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MessageEntry) ProtoMessage() {}
+
+func (x *MessageEntry) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[48]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MessageEntry.ProtoReflect.Descriptor instead.
+func (*MessageEntry) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{48}
+}
+
+func (x *MessageEntry) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *MessageEntry) GetVersion() uint32 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
+func (x *MessageEntry) GetLinkPreviews() []*LinkPreview {
+	if x != nil {
+		return x.LinkPreviews
+	}
+	return nil
+}
+
+// One captured link preview, text only (no image), snapshotted when the post was sent.
+type LinkPreview struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Url           string                 `protobuf:"bytes,1,opt,name=url,proto3" json:"url,omitempty"`
+	FinalUrl      string                 `protobuf:"bytes,2,opt,name=final_url,json=finalUrl,proto3" json:"final_url,omitempty"`
+	Host          string                 `protobuf:"bytes,3,opt,name=host,proto3" json:"host,omitempty"`
+	Title         string                 `protobuf:"bytes,4,opt,name=title,proto3" json:"title,omitempty"`
+	Description   string                 `protobuf:"bytes,5,opt,name=description,proto3" json:"description,omitempty"`
+	SiteName      string                 `protobuf:"bytes,6,opt,name=site_name,json=siteName,proto3" json:"site_name,omitempty"`
+	FetchedAt     *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=fetched_at,json=fetchedAt,proto3" json:"fetched_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LinkPreview) Reset() {
+	*x = LinkPreview{}
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[49]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LinkPreview) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LinkPreview) ProtoMessage() {}
+
+func (x *LinkPreview) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[49]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LinkPreview.ProtoReflect.Descriptor instead.
+func (*LinkPreview) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{49}
+}
+
+func (x *LinkPreview) GetUrl() string {
+	if x != nil {
+		return x.Url
+	}
+	return ""
+}
+
+func (x *LinkPreview) GetFinalUrl() string {
+	if x != nil {
+		return x.FinalUrl
+	}
+	return ""
+}
+
+func (x *LinkPreview) GetHost() string {
+	if x != nil {
+		return x.Host
+	}
+	return ""
+}
+
+func (x *LinkPreview) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
+func (x *LinkPreview) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
+func (x *LinkPreview) GetSiteName() string {
+	if x != nil {
+		return x.SiteName
+	}
+	return ""
+}
+
+func (x *LinkPreview) GetFetchedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.FetchedAt
+	}
+	return nil
+}
+
+type ReviseMessageRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Required. The owning org; must equal the caller's org and the thread's org.
+	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// Required. The thread holding the message; it must belong to `space_id`.
+	ThreadId string `protobuf:"bytes,2,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
+	// Required. The message to revise.
+	MessageId string `protobuf:"bytes,3,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
+	// Required. "edit" or "delete".
+	Action string `protobuf:"bytes,4,opt,name=action,proto3" json:"action,omitempty"`
+	// The new text of an edit (1 to 32768 bytes). Must be empty for a delete.
+	Content string `protobuf:"bytes,5,opt,name=content,proto3" json:"content,omitempty"`
+	// Optional closed set, honoured only for a moderator delete: policy_violation,
+	// spam, harassment, privacy or other. Ignored (stored empty) for any other class.
+	ModerationReason string `protobuf:"bytes,6,opt,name=moderation_reason,json=moderationReason,proto3" json:"moderation_reason,omitempty"`
+	// The complete Control `model.thread.revise` decision envelope, the same fields
+	// as AppendMessageRequest 5 to 16. `action_schema_hash` is
+	// "sha256:thread-revise-v1" and `payload_digest` binds the org, caller, thread,
+	// message, action, new-content digest and idempotency key. A v1/v2 append
+	// decision is refused. The token is verified and never persisted.
+	SpaceId                   string `protobuf:"bytes,7,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	SpaceDecisionRef          string `protobuf:"bytes,8,opt,name=space_decision_ref,json=spaceDecisionRef,proto3" json:"space_decision_ref,omitempty"`
+	RecipientAudienceRef      string `protobuf:"bytes,9,opt,name=recipient_audience_ref,json=recipientAudienceRef,proto3" json:"recipient_audience_ref,omitempty"`
+	RecipientAudienceRevision uint64 `protobuf:"varint,10,opt,name=recipient_audience_revision,json=recipientAudienceRevision,proto3" json:"recipient_audience_revision,omitempty"`
+	RecipientAudienceHash     string `protobuf:"bytes,11,opt,name=recipient_audience_hash,json=recipientAudienceHash,proto3" json:"recipient_audience_hash,omitempty"`
+	PrivacyPolicyRef          string `protobuf:"bytes,12,opt,name=privacy_policy_ref,json=privacyPolicyRef,proto3" json:"privacy_policy_ref,omitempty"`
+	AuthorityRevision         uint64 `protobuf:"varint,13,opt,name=authority_revision,json=authorityRevision,proto3" json:"authority_revision,omitempty"`
+	ResourceAuthorizationRef  string `protobuf:"bytes,14,opt,name=resource_authorization_ref,json=resourceAuthorizationRef,proto3" json:"resource_authorization_ref,omitempty"`
+	SpaceDecisionToken        string `protobuf:"bytes,15,opt,name=space_decision_token,json=spaceDecisionToken,proto3" json:"space_decision_token,omitempty"`
+	ActionSchemaHash          string `protobuf:"bytes,16,opt,name=action_schema_hash,json=actionSchemaHash,proto3" json:"action_schema_hash,omitempty"`
+	PayloadDigest             string `protobuf:"bytes,17,opt,name=payload_digest,json=payloadDigest,proto3" json:"payload_digest,omitempty"`
+	IdempotencyKey            string `protobuf:"bytes,18,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
+	unknownFields             protoimpl.UnknownFields
+	sizeCache                 protoimpl.SizeCache
+}
+
+func (x *ReviseMessageRequest) Reset() {
+	*x = ReviseMessageRequest{}
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[50]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReviseMessageRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReviseMessageRequest) ProtoMessage() {}
+
+func (x *ReviseMessageRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[50]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReviseMessageRequest.ProtoReflect.Descriptor instead.
+func (*ReviseMessageRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{50}
+}
+
+func (x *ReviseMessageRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *ReviseMessageRequest) GetThreadId() string {
+	if x != nil {
+		return x.ThreadId
+	}
+	return ""
+}
+
+func (x *ReviseMessageRequest) GetMessageId() string {
+	if x != nil {
+		return x.MessageId
+	}
+	return ""
+}
+
+func (x *ReviseMessageRequest) GetAction() string {
+	if x != nil {
+		return x.Action
+	}
+	return ""
+}
+
+func (x *ReviseMessageRequest) GetContent() string {
+	if x != nil {
+		return x.Content
+	}
+	return ""
+}
+
+func (x *ReviseMessageRequest) GetModerationReason() string {
+	if x != nil {
+		return x.ModerationReason
+	}
+	return ""
+}
+
+func (x *ReviseMessageRequest) GetSpaceId() string {
+	if x != nil {
+		return x.SpaceId
+	}
+	return ""
+}
+
+func (x *ReviseMessageRequest) GetSpaceDecisionRef() string {
+	if x != nil {
+		return x.SpaceDecisionRef
+	}
+	return ""
+}
+
+func (x *ReviseMessageRequest) GetRecipientAudienceRef() string {
+	if x != nil {
+		return x.RecipientAudienceRef
+	}
+	return ""
+}
+
+func (x *ReviseMessageRequest) GetRecipientAudienceRevision() uint64 {
+	if x != nil {
+		return x.RecipientAudienceRevision
+	}
+	return 0
+}
+
+func (x *ReviseMessageRequest) GetRecipientAudienceHash() string {
+	if x != nil {
+		return x.RecipientAudienceHash
+	}
+	return ""
+}
+
+func (x *ReviseMessageRequest) GetPrivacyPolicyRef() string {
+	if x != nil {
+		return x.PrivacyPolicyRef
+	}
+	return ""
+}
+
+func (x *ReviseMessageRequest) GetAuthorityRevision() uint64 {
+	if x != nil {
+		return x.AuthorityRevision
+	}
+	return 0
+}
+
+func (x *ReviseMessageRequest) GetResourceAuthorizationRef() string {
+	if x != nil {
+		return x.ResourceAuthorizationRef
+	}
+	return ""
+}
+
+func (x *ReviseMessageRequest) GetSpaceDecisionToken() string {
+	if x != nil {
+		return x.SpaceDecisionToken
+	}
+	return ""
+}
+
+func (x *ReviseMessageRequest) GetActionSchemaHash() string {
+	if x != nil {
+		return x.ActionSchemaHash
+	}
+	return ""
+}
+
+func (x *ReviseMessageRequest) GetPayloadDigest() string {
+	if x != nil {
+		return x.PayloadDigest
+	}
+	return ""
+}
+
+func (x *ReviseMessageRequest) GetIdempotencyKey() string {
+	if x != nil {
+		return x.IdempotencyKey
+	}
+	return ""
+}
+
+type ReviseMessageResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The message that was revised.
+	MessageId string `protobuf:"bytes,1,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
+	// 1-based number of the revision that was recorded (or replayed).
+	RevisionNo uint32 `protobuf:"varint,2,opt,name=revision_no,json=revisionNo,proto3" json:"revision_no,omitempty"`
+	// "edited" or "deleted".
+	RevisionState string                 `protobuf:"bytes,3,opt,name=revision_state,json=revisionState,proto3" json:"revision_state,omitempty"`
+	RevisedAt     *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=revised_at,json=revisedAt,proto3" json:"revised_at,omitempty"`
+	// True when the idempotency key had already recorded this exact revision.
+	Deduplicated bool `protobuf:"varint,5,opt,name=deduplicated,proto3" json:"deduplicated,omitempty"`
+	// "author", "agent_owner" or "moderator": the class the caller was revised under.
+	ActorClass    string `protobuf:"bytes,6,opt,name=actor_class,json=actorClass,proto3" json:"actor_class,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReviseMessageResponse) Reset() {
+	*x = ReviseMessageResponse{}
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[51]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReviseMessageResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReviseMessageResponse) ProtoMessage() {}
+
+func (x *ReviseMessageResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[51]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReviseMessageResponse.ProtoReflect.Descriptor instead.
+func (*ReviseMessageResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{51}
+}
+
+func (x *ReviseMessageResponse) GetMessageId() string {
+	if x != nil {
+		return x.MessageId
+	}
+	return ""
+}
+
+func (x *ReviseMessageResponse) GetRevisionNo() uint32 {
+	if x != nil {
+		return x.RevisionNo
+	}
+	return 0
+}
+
+func (x *ReviseMessageResponse) GetRevisionState() string {
+	if x != nil {
+		return x.RevisionState
+	}
+	return ""
+}
+
+func (x *ReviseMessageResponse) GetRevisedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.RevisedAt
+	}
+	return nil
+}
+
+func (x *ReviseMessageResponse) GetDeduplicated() bool {
+	if x != nil {
+		return x.Deduplicated
+	}
+	return false
+}
+
+func (x *ReviseMessageResponse) GetActorClass() string {
+	if x != nil {
+		return x.ActorClass
+	}
+	return ""
+}
+
+type ResolveMessageTargetRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Required. The owning org.
+	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// Required. The thread holding the message.
+	ThreadId string `protobuf:"bytes,2,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
+	// Required. The message to resolve.
+	MessageId string `protobuf:"bytes,3,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
+	// Required Space read decision (same envelope as ListConversationRequest 3 to 5):
+	// an absent decision is refused, there is no owner-bound fallback.
+	SpaceId                string `protobuf:"bytes,4,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	SpaceReadDecisionRef   string `protobuf:"bytes,5,opt,name=space_read_decision_ref,json=spaceReadDecisionRef,proto3" json:"space_read_decision_ref,omitempty"`
+	SpaceReadDecisionToken string `protobuf:"bytes,6,opt,name=space_read_decision_token,json=spaceReadDecisionToken,proto3" json:"space_read_decision_token,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
+}
+
+func (x *ResolveMessageTargetRequest) Reset() {
+	*x = ResolveMessageTargetRequest{}
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[52]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResolveMessageTargetRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResolveMessageTargetRequest) ProtoMessage() {}
+
+func (x *ResolveMessageTargetRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[52]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResolveMessageTargetRequest.ProtoReflect.Descriptor instead.
+func (*ResolveMessageTargetRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{52}
+}
+
+func (x *ResolveMessageTargetRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *ResolveMessageTargetRequest) GetThreadId() string {
+	if x != nil {
+		return x.ThreadId
+	}
+	return ""
+}
+
+func (x *ResolveMessageTargetRequest) GetMessageId() string {
+	if x != nil {
+		return x.MessageId
+	}
+	return ""
+}
+
+func (x *ResolveMessageTargetRequest) GetSpaceId() string {
+	if x != nil {
+		return x.SpaceId
+	}
+	return ""
+}
+
+func (x *ResolveMessageTargetRequest) GetSpaceReadDecisionRef() string {
+	if x != nil {
+		return x.SpaceReadDecisionRef
+	}
+	return ""
+}
+
+func (x *ResolveMessageTargetRequest) GetSpaceReadDecisionToken() string {
+	if x != nil {
+		return x.SpaceReadDecisionToken
+	}
+	return ""
+}
+
+type ResolveMessageTargetResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// "user" | "assistant" | "system" | "tool".
+	Role string `protobuf:"bytes,1,opt,name=role,proto3" json:"role,omitempty"`
+	// "" (never revised), "edited" or "deleted".
+	RevisionState string `protobuf:"bytes,2,opt,name=revision_state,json=revisionState,proto3" json:"revision_state,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResolveMessageTargetResponse) Reset() {
+	*x = ResolveMessageTargetResponse{}
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[53]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResolveMessageTargetResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResolveMessageTargetResponse) ProtoMessage() {}
+
+func (x *ResolveMessageTargetResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[53]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResolveMessageTargetResponse.ProtoReflect.Descriptor instead.
+func (*ResolveMessageTargetResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{53}
+}
+
+func (x *ResolveMessageTargetResponse) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+func (x *ResolveMessageTargetResponse) GetRevisionState() string {
+	if x != nil {
+		return x.RevisionState
+	}
+	return ""
 }
 
 type ListThreadsRequest struct {
@@ -4311,7 +5436,7 @@ type ListThreadsRequest struct {
 
 func (x *ListThreadsRequest) Reset() {
 	*x = ListThreadsRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[45]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4323,7 +5448,7 @@ func (x *ListThreadsRequest) String() string {
 func (*ListThreadsRequest) ProtoMessage() {}
 
 func (x *ListThreadsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[45]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4336,7 +5461,7 @@ func (x *ListThreadsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListThreadsRequest.ProtoReflect.Descriptor instead.
 func (*ListThreadsRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{45}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{54}
 }
 
 func (x *ListThreadsRequest) GetOrgId() string {
@@ -4473,13 +5598,30 @@ type ThreadSummary struct {
 	// Whether the thread has an unread assistant reply. The same definition as `unread` above,
 	// repeated so the attention surfaces read one message (DEC-11).
 	AttentionUnseen bool `protobuf:"varint,18,opt,name=attention_unseen,json=attentionUnseen,proto3" json:"attention_unseen,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Human replies in the thread: user rows after the first, counted under the
+	// same audience ceiling as the rest of the read so a count never reveals a
+	// row the reader could not open. Presentation only.
+	ReplyCount uint32 `protobuf:"varint,23,opt,name=reply_count,json=replyCount,proto3" json:"reply_count,omitempty"`
+	// Author subject of the latest human row the reader may see; empty when
+	// there is none. Presentation only, never a grant.
+	LastAuthorSubjectId string `protobuf:"bytes,24,opt,name=last_author_subject_id,json=lastAuthorSubjectId,proto3" json:"last_author_subject_id,omitempty"`
+	// Thread activity summary (WS15-S5 columns, read by ListSpaceTimeline, WS15-S6). Ids, counts and
+	// a role word only; set by ListSpaceTimeline and left at the defaults by ListThreads.
+	// Sequence of the thread's newest message: the timeline's keyset position.
+	LastMessageSeq uint64 `protobuf:"varint,25,opt,name=last_message_seq,json=lastMessageSeq,proto3" json:"last_message_seq,omitempty"`
+	// Up to five most recent human authors, newest first. Presentation only, never a grant.
+	RecentAuthorSubjectIds []string `protobuf:"bytes,26,rep,name=recent_author_subject_ids,json=recentAuthorSubjectIds,proto3" json:"recent_author_subject_ids,omitempty"`
+	// Role of the newest message ("user", "assistant", ...).
+	LastRole string `protobuf:"bytes,27,opt,name=last_role,json=lastRole,proto3" json:"last_role,omitempty"`
+	// Messages with role user or assistant in the thread.
+	TurnCount     uint32 `protobuf:"varint,28,opt,name=turn_count,json=turnCount,proto3" json:"turn_count,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ThreadSummary) Reset() {
 	*x = ThreadSummary{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[46]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4491,7 +5633,7 @@ func (x *ThreadSummary) String() string {
 func (*ThreadSummary) ProtoMessage() {}
 
 func (x *ThreadSummary) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[46]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4504,7 +5646,7 @@ func (x *ThreadSummary) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ThreadSummary.ProtoReflect.Descriptor instead.
 func (*ThreadSummary) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{46}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{55}
 }
 
 func (x *ThreadSummary) GetThreadId() string {
@@ -4661,6 +5803,48 @@ func (x *ThreadSummary) GetAttentionUnseen() bool {
 	return false
 }
 
+func (x *ThreadSummary) GetReplyCount() uint32 {
+	if x != nil {
+		return x.ReplyCount
+	}
+	return 0
+}
+
+func (x *ThreadSummary) GetLastAuthorSubjectId() string {
+	if x != nil {
+		return x.LastAuthorSubjectId
+	}
+	return ""
+}
+
+func (x *ThreadSummary) GetLastMessageSeq() uint64 {
+	if x != nil {
+		return x.LastMessageSeq
+	}
+	return 0
+}
+
+func (x *ThreadSummary) GetRecentAuthorSubjectIds() []string {
+	if x != nil {
+		return x.RecentAuthorSubjectIds
+	}
+	return nil
+}
+
+func (x *ThreadSummary) GetLastRole() string {
+	if x != nil {
+		return x.LastRole
+	}
+	return ""
+}
+
+func (x *ThreadSummary) GetTurnCount() uint32 {
+	if x != nil {
+		return x.TurnCount
+	}
+	return 0
+}
+
 type ListThreadsResponse struct {
 	state   protoimpl.MessageState `protogen:"open.v1"`
 	Threads []*ThreadSummary       `protobuf:"bytes,1,rep,name=threads,proto3" json:"threads,omitempty"`
@@ -4672,7 +5856,7 @@ type ListThreadsResponse struct {
 
 func (x *ListThreadsResponse) Reset() {
 	*x = ListThreadsResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[47]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4684,7 +5868,7 @@ func (x *ListThreadsResponse) String() string {
 func (*ListThreadsResponse) ProtoMessage() {}
 
 func (x *ListThreadsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[47]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4697,7 +5881,7 @@ func (x *ListThreadsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListThreadsResponse.ProtoReflect.Descriptor instead.
 func (*ListThreadsResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{47}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{56}
 }
 
 func (x *ListThreadsResponse) GetThreads() []*ThreadSummary {
@@ -4764,7 +5948,7 @@ type UpdateThreadPresentationRequest struct {
 
 func (x *UpdateThreadPresentationRequest) Reset() {
 	*x = UpdateThreadPresentationRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[48]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4776,7 +5960,7 @@ func (x *UpdateThreadPresentationRequest) String() string {
 func (*UpdateThreadPresentationRequest) ProtoMessage() {}
 
 func (x *UpdateThreadPresentationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[48]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4789,7 +5973,7 @@ func (x *UpdateThreadPresentationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateThreadPresentationRequest.ProtoReflect.Descriptor instead.
 func (*UpdateThreadPresentationRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{48}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{57}
 }
 
 func (x *UpdateThreadPresentationRequest) GetOrgId() string {
@@ -4873,7 +6057,7 @@ type UpdateThreadPresentationResponse struct {
 
 func (x *UpdateThreadPresentationResponse) Reset() {
 	*x = UpdateThreadPresentationResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[49]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[58]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4885,7 +6069,7 @@ func (x *UpdateThreadPresentationResponse) String() string {
 func (*UpdateThreadPresentationResponse) ProtoMessage() {}
 
 func (x *UpdateThreadPresentationResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[49]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[58]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4898,7 +6082,7 @@ func (x *UpdateThreadPresentationResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateThreadPresentationResponse.ProtoReflect.Descriptor instead.
 func (*UpdateThreadPresentationResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{49}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{58}
 }
 
 func (x *UpdateThreadPresentationResponse) GetThreadId() string {
@@ -4921,7 +6105,7 @@ type ArchiveThreadRequest struct {
 
 func (x *ArchiveThreadRequest) Reset() {
 	*x = ArchiveThreadRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[50]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[59]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4933,7 +6117,7 @@ func (x *ArchiveThreadRequest) String() string {
 func (*ArchiveThreadRequest) ProtoMessage() {}
 
 func (x *ArchiveThreadRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[50]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[59]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4946,7 +6130,7 @@ func (x *ArchiveThreadRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArchiveThreadRequest.ProtoReflect.Descriptor instead.
 func (*ArchiveThreadRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{50}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{59}
 }
 
 func (x *ArchiveThreadRequest) GetOrgId() string {
@@ -4976,7 +6160,7 @@ type ArchiveThreadResponse struct {
 
 func (x *ArchiveThreadResponse) Reset() {
 	*x = ArchiveThreadResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[51]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4988,7 +6172,7 @@ func (x *ArchiveThreadResponse) String() string {
 func (*ArchiveThreadResponse) ProtoMessage() {}
 
 func (x *ArchiveThreadResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[51]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5001,7 +6185,7 @@ func (x *ArchiveThreadResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArchiveThreadResponse.ProtoReflect.Descriptor instead.
 func (*ArchiveThreadResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{51}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{60}
 }
 
 func (x *ArchiveThreadResponse) GetThreadId() string {
@@ -5031,7 +6215,7 @@ type ArchiveThreadsRequest struct {
 
 func (x *ArchiveThreadsRequest) Reset() {
 	*x = ArchiveThreadsRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[52]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[61]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5043,7 +6227,7 @@ func (x *ArchiveThreadsRequest) String() string {
 func (*ArchiveThreadsRequest) ProtoMessage() {}
 
 func (x *ArchiveThreadsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[52]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[61]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5056,7 +6240,7 @@ func (x *ArchiveThreadsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArchiveThreadsRequest.ProtoReflect.Descriptor instead.
 func (*ArchiveThreadsRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{52}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{61}
 }
 
 func (x *ArchiveThreadsRequest) GetOrgId() string {
@@ -5084,7 +6268,7 @@ type ArchiveThreadsResponse struct {
 
 func (x *ArchiveThreadsResponse) Reset() {
 	*x = ArchiveThreadsResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[53]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[62]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5096,7 +6280,7 @@ func (x *ArchiveThreadsResponse) String() string {
 func (*ArchiveThreadsResponse) ProtoMessage() {}
 
 func (x *ArchiveThreadsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[53]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[62]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5109,7 +6293,7 @@ func (x *ArchiveThreadsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArchiveThreadsResponse.ProtoReflect.Descriptor instead.
 func (*ArchiveThreadsResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{53}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{62}
 }
 
 func (x *ArchiveThreadsResponse) GetArchivedCount() uint32 {
@@ -5132,7 +6316,7 @@ type DeleteThreadRequest struct {
 
 func (x *DeleteThreadRequest) Reset() {
 	*x = DeleteThreadRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[54]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[63]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5144,7 +6328,7 @@ func (x *DeleteThreadRequest) String() string {
 func (*DeleteThreadRequest) ProtoMessage() {}
 
 func (x *DeleteThreadRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[54]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[63]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5157,7 +6341,7 @@ func (x *DeleteThreadRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteThreadRequest.ProtoReflect.Descriptor instead.
 func (*DeleteThreadRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{54}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{63}
 }
 
 func (x *DeleteThreadRequest) GetOrgId() string {
@@ -5185,7 +6369,7 @@ type DeleteThreadResponse struct {
 
 func (x *DeleteThreadResponse) Reset() {
 	*x = DeleteThreadResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[55]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[64]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5197,7 +6381,7 @@ func (x *DeleteThreadResponse) String() string {
 func (*DeleteThreadResponse) ProtoMessage() {}
 
 func (x *DeleteThreadResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[55]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[64]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5210,7 +6394,7 @@ func (x *DeleteThreadResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteThreadResponse.ProtoReflect.Descriptor instead.
 func (*DeleteThreadResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{55}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{64}
 }
 
 func (x *DeleteThreadResponse) GetThreadId() string {
@@ -5240,7 +6424,7 @@ type DeleteThreadsRequest struct {
 
 func (x *DeleteThreadsRequest) Reset() {
 	*x = DeleteThreadsRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[56]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[65]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5252,7 +6436,7 @@ func (x *DeleteThreadsRequest) String() string {
 func (*DeleteThreadsRequest) ProtoMessage() {}
 
 func (x *DeleteThreadsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[56]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[65]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5265,7 +6449,7 @@ func (x *DeleteThreadsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteThreadsRequest.ProtoReflect.Descriptor instead.
 func (*DeleteThreadsRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{56}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{65}
 }
 
 func (x *DeleteThreadsRequest) GetOrgId() string {
@@ -5292,7 +6476,7 @@ type DeleteThreadsResponse struct {
 
 func (x *DeleteThreadsResponse) Reset() {
 	*x = DeleteThreadsResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[57]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[66]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5304,7 +6488,7 @@ func (x *DeleteThreadsResponse) String() string {
 func (*DeleteThreadsResponse) ProtoMessage() {}
 
 func (x *DeleteThreadsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[57]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[66]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5317,7 +6501,7 @@ func (x *DeleteThreadsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteThreadsResponse.ProtoReflect.Descriptor instead.
 func (*DeleteThreadsResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{57}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{66}
 }
 
 func (x *DeleteThreadsResponse) GetDeletedCount() uint32 {
@@ -5345,7 +6529,7 @@ type DeleteSpaceThreadsRequest struct {
 
 func (x *DeleteSpaceThreadsRequest) Reset() {
 	*x = DeleteSpaceThreadsRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[58]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[67]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5357,7 +6541,7 @@ func (x *DeleteSpaceThreadsRequest) String() string {
 func (*DeleteSpaceThreadsRequest) ProtoMessage() {}
 
 func (x *DeleteSpaceThreadsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[58]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[67]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5370,7 +6554,7 @@ func (x *DeleteSpaceThreadsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteSpaceThreadsRequest.ProtoReflect.Descriptor instead.
 func (*DeleteSpaceThreadsRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{58}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{67}
 }
 
 func (x *DeleteSpaceThreadsRequest) GetOrgId() string {
@@ -5417,7 +6601,7 @@ type DeleteSpaceThreadsResponse struct {
 
 func (x *DeleteSpaceThreadsResponse) Reset() {
 	*x = DeleteSpaceThreadsResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[59]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[68]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5429,7 +6613,7 @@ func (x *DeleteSpaceThreadsResponse) String() string {
 func (*DeleteSpaceThreadsResponse) ProtoMessage() {}
 
 func (x *DeleteSpaceThreadsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[59]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[68]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5442,7 +6626,7 @@ func (x *DeleteSpaceThreadsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteSpaceThreadsResponse.ProtoReflect.Descriptor instead.
 func (*DeleteSpaceThreadsResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{59}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{68}
 }
 
 func (x *DeleteSpaceThreadsResponse) GetDeletedCount() uint32 {
@@ -5514,7 +6698,7 @@ type SetRunModeRequest struct {
 
 func (x *SetRunModeRequest) Reset() {
 	*x = SetRunModeRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[60]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[69]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5526,7 +6710,7 @@ func (x *SetRunModeRequest) String() string {
 func (*SetRunModeRequest) ProtoMessage() {}
 
 func (x *SetRunModeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[60]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[69]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5539,7 +6723,7 @@ func (x *SetRunModeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetRunModeRequest.ProtoReflect.Descriptor instead.
 func (*SetRunModeRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{60}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{69}
 }
 
 func (x *SetRunModeRequest) GetRunId() string {
@@ -5597,7 +6781,7 @@ type SetRunModeResponse struct {
 
 func (x *SetRunModeResponse) Reset() {
 	*x = SetRunModeResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[61]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[70]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5609,7 +6793,7 @@ func (x *SetRunModeResponse) String() string {
 func (*SetRunModeResponse) ProtoMessage() {}
 
 func (x *SetRunModeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[61]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[70]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5622,7 +6806,7 @@ func (x *SetRunModeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetRunModeResponse.ProtoReflect.Descriptor instead.
 func (*SetRunModeResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{61}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{70}
 }
 
 func (x *SetRunModeResponse) GetRunId() string {
@@ -5665,7 +6849,7 @@ type ClaimScheduledStepRequest struct {
 
 func (x *ClaimScheduledStepRequest) Reset() {
 	*x = ClaimScheduledStepRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[62]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[71]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5677,7 +6861,7 @@ func (x *ClaimScheduledStepRequest) String() string {
 func (*ClaimScheduledStepRequest) ProtoMessage() {}
 
 func (x *ClaimScheduledStepRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[62]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[71]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5690,7 +6874,7 @@ func (x *ClaimScheduledStepRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClaimScheduledStepRequest.ProtoReflect.Descriptor instead.
 func (*ClaimScheduledStepRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{62}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{71}
 }
 
 func (x *ClaimScheduledStepRequest) GetRunId() string {
@@ -5781,7 +6965,7 @@ type ClaimScheduledStepResponse struct {
 
 func (x *ClaimScheduledStepResponse) Reset() {
 	*x = ClaimScheduledStepResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[63]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[72]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5793,7 +6977,7 @@ func (x *ClaimScheduledStepResponse) String() string {
 func (*ClaimScheduledStepResponse) ProtoMessage() {}
 
 func (x *ClaimScheduledStepResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[63]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[72]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5806,7 +6990,7 @@ func (x *ClaimScheduledStepResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClaimScheduledStepResponse.ProtoReflect.Descriptor instead.
 func (*ClaimScheduledStepResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{63}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{72}
 }
 
 func (x *ClaimScheduledStepResponse) GetClaimed() bool {
@@ -5847,7 +7031,7 @@ type RecordScheduledStepReceiptRequest struct {
 
 func (x *RecordScheduledStepReceiptRequest) Reset() {
 	*x = RecordScheduledStepReceiptRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[64]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[73]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5859,7 +7043,7 @@ func (x *RecordScheduledStepReceiptRequest) String() string {
 func (*RecordScheduledStepReceiptRequest) ProtoMessage() {}
 
 func (x *RecordScheduledStepReceiptRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[64]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[73]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5872,7 +7056,7 @@ func (x *RecordScheduledStepReceiptRequest) ProtoReflect() protoreflect.Message 
 
 // Deprecated: Use RecordScheduledStepReceiptRequest.ProtoReflect.Descriptor instead.
 func (*RecordScheduledStepReceiptRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{64}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{73}
 }
 
 func (x *RecordScheduledStepReceiptRequest) GetRunId() string {
@@ -5949,7 +7133,7 @@ type RecordScheduledStepReceiptResponse struct {
 
 func (x *RecordScheduledStepReceiptResponse) Reset() {
 	*x = RecordScheduledStepReceiptResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[65]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[74]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5961,7 +7145,7 @@ func (x *RecordScheduledStepReceiptResponse) String() string {
 func (*RecordScheduledStepReceiptResponse) ProtoMessage() {}
 
 func (x *RecordScheduledStepReceiptResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[65]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[74]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5974,7 +7158,7 @@ func (x *RecordScheduledStepReceiptResponse) ProtoReflect() protoreflect.Message
 
 // Deprecated: Use RecordScheduledStepReceiptResponse.ProtoReflect.Descriptor instead.
 func (*RecordScheduledStepReceiptResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{65}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{74}
 }
 
 func (x *RecordScheduledStepReceiptResponse) GetReceiptId() string {
@@ -6024,7 +7208,7 @@ type RecordScheduledRunResultRequest struct {
 
 func (x *RecordScheduledRunResultRequest) Reset() {
 	*x = RecordScheduledRunResultRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[66]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[75]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6036,7 +7220,7 @@ func (x *RecordScheduledRunResultRequest) String() string {
 func (*RecordScheduledRunResultRequest) ProtoMessage() {}
 
 func (x *RecordScheduledRunResultRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[66]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[75]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6049,7 +7233,7 @@ func (x *RecordScheduledRunResultRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecordScheduledRunResultRequest.ProtoReflect.Descriptor instead.
 func (*RecordScheduledRunResultRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{66}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{75}
 }
 
 func (x *RecordScheduledRunResultRequest) GetRunId() string {
@@ -6163,7 +7347,7 @@ type RecordScheduledRunResultResponse struct {
 
 func (x *RecordScheduledRunResultResponse) Reset() {
 	*x = RecordScheduledRunResultResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[67]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[76]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6175,7 +7359,7 @@ func (x *RecordScheduledRunResultResponse) String() string {
 func (*RecordScheduledRunResultResponse) ProtoMessage() {}
 
 func (x *RecordScheduledRunResultResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[67]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[76]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6188,7 +7372,7 @@ func (x *RecordScheduledRunResultResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecordScheduledRunResultResponse.ProtoReflect.Descriptor instead.
 func (*RecordScheduledRunResultResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{67}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{76}
 }
 
 func (x *RecordScheduledRunResultResponse) GetReceiptId() string {
@@ -6224,7 +7408,7 @@ type CountWaivedRunsRequest struct {
 
 func (x *CountWaivedRunsRequest) Reset() {
 	*x = CountWaivedRunsRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[68]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[77]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6236,7 +7420,7 @@ func (x *CountWaivedRunsRequest) String() string {
 func (*CountWaivedRunsRequest) ProtoMessage() {}
 
 func (x *CountWaivedRunsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[68]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[77]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6249,7 +7433,7 @@ func (x *CountWaivedRunsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CountWaivedRunsRequest.ProtoReflect.Descriptor instead.
 func (*CountWaivedRunsRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{68}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{77}
 }
 
 func (x *CountWaivedRunsRequest) GetOrgId() string {
@@ -6271,7 +7455,7 @@ type CountWaivedRunsResponse struct {
 
 func (x *CountWaivedRunsResponse) Reset() {
 	*x = CountWaivedRunsResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[69]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[78]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6283,7 +7467,7 @@ func (x *CountWaivedRunsResponse) String() string {
 func (*CountWaivedRunsResponse) ProtoMessage() {}
 
 func (x *CountWaivedRunsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[69]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[78]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6296,7 +7480,7 @@ func (x *CountWaivedRunsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CountWaivedRunsResponse.ProtoReflect.Descriptor instead.
 func (*CountWaivedRunsResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{69}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{78}
 }
 
 func (x *CountWaivedRunsResponse) GetCounts() []*WaivedRunCount {
@@ -6323,7 +7507,7 @@ type WaivedRunCount struct {
 
 func (x *WaivedRunCount) Reset() {
 	*x = WaivedRunCount{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[70]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[79]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6335,7 +7519,7 @@ func (x *WaivedRunCount) String() string {
 func (*WaivedRunCount) ProtoMessage() {}
 
 func (x *WaivedRunCount) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[70]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[79]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6348,7 +7532,7 @@ func (x *WaivedRunCount) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WaivedRunCount.ProtoReflect.Descriptor instead.
 func (*WaivedRunCount) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{70}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{79}
 }
 
 func (x *WaivedRunCount) GetConnectionId() string {
@@ -6391,7 +7575,7 @@ type GetThreadGrantRequest struct {
 
 func (x *GetThreadGrantRequest) Reset() {
 	*x = GetThreadGrantRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[71]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[80]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6403,7 +7587,7 @@ func (x *GetThreadGrantRequest) String() string {
 func (*GetThreadGrantRequest) ProtoMessage() {}
 
 func (x *GetThreadGrantRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[71]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[80]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6416,7 +7600,7 @@ func (x *GetThreadGrantRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetThreadGrantRequest.ProtoReflect.Descriptor instead.
 func (*GetThreadGrantRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{71}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{80}
 }
 
 func (x *GetThreadGrantRequest) GetThreadId() string {
@@ -6452,7 +7636,7 @@ type GetThreadGrantResponse struct {
 
 func (x *GetThreadGrantResponse) Reset() {
 	*x = GetThreadGrantResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[72]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[81]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6464,7 +7648,7 @@ func (x *GetThreadGrantResponse) String() string {
 func (*GetThreadGrantResponse) ProtoMessage() {}
 
 func (x *GetThreadGrantResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[72]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[81]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6477,7 +7661,7 @@ func (x *GetThreadGrantResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetThreadGrantResponse.ProtoReflect.Descriptor instead.
 func (*GetThreadGrantResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{72}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{81}
 }
 
 func (x *GetThreadGrantResponse) GetGrantedRung() AutonomyRung {
@@ -6523,7 +7707,7 @@ type BindGrantToRunRequest struct {
 
 func (x *BindGrantToRunRequest) Reset() {
 	*x = BindGrantToRunRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[73]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[82]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6535,7 +7719,7 @@ func (x *BindGrantToRunRequest) String() string {
 func (*BindGrantToRunRequest) ProtoMessage() {}
 
 func (x *BindGrantToRunRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[73]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[82]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6548,7 +7732,7 @@ func (x *BindGrantToRunRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BindGrantToRunRequest.ProtoReflect.Descriptor instead.
 func (*BindGrantToRunRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{73}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{82}
 }
 
 func (x *BindGrantToRunRequest) GetRunId() string {
@@ -6593,7 +7777,7 @@ type BindGrantToRunResponse struct {
 
 func (x *BindGrantToRunResponse) Reset() {
 	*x = BindGrantToRunResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[74]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[83]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6605,7 +7789,7 @@ func (x *BindGrantToRunResponse) String() string {
 func (*BindGrantToRunResponse) ProtoMessage() {}
 
 func (x *BindGrantToRunResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[74]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[83]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6618,7 +7802,7 @@ func (x *BindGrantToRunResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BindGrantToRunResponse.ProtoReflect.Descriptor instead.
 func (*BindGrantToRunResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{74}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{83}
 }
 
 func (x *BindGrantToRunResponse) GetGrantedRung() AutonomyRung {
@@ -6655,7 +7839,7 @@ type RecordRunContextRequest struct {
 
 func (x *RecordRunContextRequest) Reset() {
 	*x = RecordRunContextRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[75]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[84]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6667,7 +7851,7 @@ func (x *RecordRunContextRequest) String() string {
 func (*RecordRunContextRequest) ProtoMessage() {}
 
 func (x *RecordRunContextRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[75]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[84]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6680,7 +7864,7 @@ func (x *RecordRunContextRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecordRunContextRequest.ProtoReflect.Descriptor instead.
 func (*RecordRunContextRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{75}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{84}
 }
 
 func (x *RecordRunContextRequest) GetRunId() string {
@@ -6713,7 +7897,7 @@ type RecordRunContextResponse struct {
 
 func (x *RecordRunContextResponse) Reset() {
 	*x = RecordRunContextResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[76]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[85]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6725,7 +7909,7 @@ func (x *RecordRunContextResponse) String() string {
 func (*RecordRunContextResponse) ProtoMessage() {}
 
 func (x *RecordRunContextResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[76]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[85]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6738,7 +7922,7 @@ func (x *RecordRunContextResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecordRunContextResponse.ProtoReflect.Descriptor instead.
 func (*RecordRunContextResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{76}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{85}
 }
 
 // Save the fold of a run's loop. The fold is encrypted before it is stored.
@@ -6766,7 +7950,7 @@ type SaveLoopCheckpointRequest struct {
 
 func (x *SaveLoopCheckpointRequest) Reset() {
 	*x = SaveLoopCheckpointRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[77]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[86]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6778,7 +7962,7 @@ func (x *SaveLoopCheckpointRequest) String() string {
 func (*SaveLoopCheckpointRequest) ProtoMessage() {}
 
 func (x *SaveLoopCheckpointRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[77]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[86]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6791,7 +7975,7 @@ func (x *SaveLoopCheckpointRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SaveLoopCheckpointRequest.ProtoReflect.Descriptor instead.
 func (*SaveLoopCheckpointRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{77}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{86}
 }
 
 func (x *SaveLoopCheckpointRequest) GetRunId() string {
@@ -6866,7 +8050,7 @@ type SaveLoopCheckpointResponse struct {
 
 func (x *SaveLoopCheckpointResponse) Reset() {
 	*x = SaveLoopCheckpointResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[78]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[87]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6878,7 +8062,7 @@ func (x *SaveLoopCheckpointResponse) String() string {
 func (*SaveLoopCheckpointResponse) ProtoMessage() {}
 
 func (x *SaveLoopCheckpointResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[78]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[87]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6891,7 +8075,7 @@ func (x *SaveLoopCheckpointResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SaveLoopCheckpointResponse.ProtoReflect.Descriptor instead.
 func (*SaveLoopCheckpointResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{78}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{87}
 }
 
 func (x *SaveLoopCheckpointResponse) GetSeq() uint64 {
@@ -6928,7 +8112,7 @@ type ClaimLoopCheckpointRequest struct {
 
 func (x *ClaimLoopCheckpointRequest) Reset() {
 	*x = ClaimLoopCheckpointRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[79]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[88]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6940,7 +8124,7 @@ func (x *ClaimLoopCheckpointRequest) String() string {
 func (*ClaimLoopCheckpointRequest) ProtoMessage() {}
 
 func (x *ClaimLoopCheckpointRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[79]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[88]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6953,7 +8137,7 @@ func (x *ClaimLoopCheckpointRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClaimLoopCheckpointRequest.ProtoReflect.Descriptor instead.
 func (*ClaimLoopCheckpointRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{79}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{88}
 }
 
 func (x *ClaimLoopCheckpointRequest) GetRunId() string {
@@ -6996,7 +8180,7 @@ type ClaimLoopCheckpointResponse struct {
 
 func (x *ClaimLoopCheckpointResponse) Reset() {
 	*x = ClaimLoopCheckpointResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[80]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[89]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7008,7 +8192,7 @@ func (x *ClaimLoopCheckpointResponse) String() string {
 func (*ClaimLoopCheckpointResponse) ProtoMessage() {}
 
 func (x *ClaimLoopCheckpointResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[80]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[89]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7021,7 +8205,7 @@ func (x *ClaimLoopCheckpointResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClaimLoopCheckpointResponse.ProtoReflect.Descriptor instead.
 func (*ClaimLoopCheckpointResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{80}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{89}
 }
 
 func (x *ClaimLoopCheckpointResponse) GetSeq() uint64 {
@@ -7074,7 +8258,7 @@ type CloseLoopCheckpointRequest struct {
 
 func (x *CloseLoopCheckpointRequest) Reset() {
 	*x = CloseLoopCheckpointRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[81]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[90]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7086,7 +8270,7 @@ func (x *CloseLoopCheckpointRequest) String() string {
 func (*CloseLoopCheckpointRequest) ProtoMessage() {}
 
 func (x *CloseLoopCheckpointRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[81]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[90]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7099,7 +8283,7 @@ func (x *CloseLoopCheckpointRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CloseLoopCheckpointRequest.ProtoReflect.Descriptor instead.
 func (*CloseLoopCheckpointRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{81}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{90}
 }
 
 func (x *CloseLoopCheckpointRequest) GetRunId() string {
@@ -7132,7 +8316,7 @@ type CloseLoopCheckpointResponse struct {
 
 func (x *CloseLoopCheckpointResponse) Reset() {
 	*x = CloseLoopCheckpointResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[82]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[91]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7144,7 +8328,7 @@ func (x *CloseLoopCheckpointResponse) String() string {
 func (*CloseLoopCheckpointResponse) ProtoMessage() {}
 
 func (x *CloseLoopCheckpointResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[82]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[91]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7157,7 +8341,7 @@ func (x *CloseLoopCheckpointResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CloseLoopCheckpointResponse.ProtoReflect.Descriptor instead.
 func (*CloseLoopCheckpointResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{82}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{91}
 }
 
 // Read the ledger rows of the named tool calls of one run.
@@ -7175,7 +8359,7 @@ type ListToolActionsRequest struct {
 
 func (x *ListToolActionsRequest) Reset() {
 	*x = ListToolActionsRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[83]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[92]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7187,7 +8371,7 @@ func (x *ListToolActionsRequest) String() string {
 func (*ListToolActionsRequest) ProtoMessage() {}
 
 func (x *ListToolActionsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[83]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[92]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7200,7 +8384,7 @@ func (x *ListToolActionsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListToolActionsRequest.ProtoReflect.Descriptor instead.
 func (*ListToolActionsRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{83}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{92}
 }
 
 func (x *ListToolActionsRequest) GetRunId() string {
@@ -7239,7 +8423,7 @@ type ToolActionState struct {
 
 func (x *ToolActionState) Reset() {
 	*x = ToolActionState{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[84]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[93]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7251,7 +8435,7 @@ func (x *ToolActionState) String() string {
 func (*ToolActionState) ProtoMessage() {}
 
 func (x *ToolActionState) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[84]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[93]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7264,7 +8448,7 @@ func (x *ToolActionState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolActionState.ProtoReflect.Descriptor instead.
 func (*ToolActionState) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{84}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{93}
 }
 
 func (x *ToolActionState) GetActionId() string {
@@ -7322,7 +8506,7 @@ type ListToolActionsResponse struct {
 
 func (x *ListToolActionsResponse) Reset() {
 	*x = ListToolActionsResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[85]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[94]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7334,7 +8518,7 @@ func (x *ListToolActionsResponse) String() string {
 func (*ListToolActionsResponse) ProtoMessage() {}
 
 func (x *ListToolActionsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[85]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[94]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7347,7 +8531,7 @@ func (x *ListToolActionsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListToolActionsResponse.ProtoReflect.Descriptor instead.
 func (*ListToolActionsResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{85}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{94}
 }
 
 func (x *ListToolActionsResponse) GetActions() []*ToolActionState {
@@ -7395,7 +8579,7 @@ type SearchMessagesRequest struct {
 
 func (x *SearchMessagesRequest) Reset() {
 	*x = SearchMessagesRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[86]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[95]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7407,7 +8591,7 @@ func (x *SearchMessagesRequest) String() string {
 func (*SearchMessagesRequest) ProtoMessage() {}
 
 func (x *SearchMessagesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[86]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[95]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7420,7 +8604,7 @@ func (x *SearchMessagesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchMessagesRequest.ProtoReflect.Descriptor instead.
 func (*SearchMessagesRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{86}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{95}
 }
 
 func (x *SearchMessagesRequest) GetOrgId() string {
@@ -7541,7 +8725,7 @@ type SearchHit struct {
 
 func (x *SearchHit) Reset() {
 	*x = SearchHit{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[87]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[96]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7553,7 +8737,7 @@ func (x *SearchHit) String() string {
 func (*SearchHit) ProtoMessage() {}
 
 func (x *SearchHit) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[87]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[96]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7566,7 +8750,7 @@ func (x *SearchHit) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchHit.ProtoReflect.Descriptor instead.
 func (*SearchHit) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{87}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{96}
 }
 
 func (x *SearchHit) GetThreadId() string {
@@ -7638,7 +8822,7 @@ type SearchMessagesResponse struct {
 
 func (x *SearchMessagesResponse) Reset() {
 	*x = SearchMessagesResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[88]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[97]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7650,7 +8834,7 @@ func (x *SearchMessagesResponse) String() string {
 func (*SearchMessagesResponse) ProtoMessage() {}
 
 func (x *SearchMessagesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[88]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[97]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7663,7 +8847,7 @@ func (x *SearchMessagesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchMessagesResponse.ProtoReflect.Descriptor instead.
 func (*SearchMessagesResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{88}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{97}
 }
 
 func (x *SearchMessagesResponse) GetHits() []*SearchHit {
@@ -7694,7 +8878,7 @@ type DecideSkillProposalRequest struct {
 
 func (x *DecideSkillProposalRequest) Reset() {
 	*x = DecideSkillProposalRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[89]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[98]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7706,7 +8890,7 @@ func (x *DecideSkillProposalRequest) String() string {
 func (*DecideSkillProposalRequest) ProtoMessage() {}
 
 func (x *DecideSkillProposalRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[89]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[98]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7719,7 +8903,7 @@ func (x *DecideSkillProposalRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DecideSkillProposalRequest.ProtoReflect.Descriptor instead.
 func (*DecideSkillProposalRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{89}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{98}
 }
 
 func (x *DecideSkillProposalRequest) GetOrgId() string {
@@ -7758,7 +8942,7 @@ type DecideSkillProposalResponse struct {
 
 func (x *DecideSkillProposalResponse) Reset() {
 	*x = DecideSkillProposalResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[90]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[99]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7770,7 +8954,7 @@ func (x *DecideSkillProposalResponse) String() string {
 func (*DecideSkillProposalResponse) ProtoMessage() {}
 
 func (x *DecideSkillProposalResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[90]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[99]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7783,7 +8967,7 @@ func (x *DecideSkillProposalResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DecideSkillProposalResponse.ProtoReflect.Descriptor instead.
 func (*DecideSkillProposalResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{90}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{99}
 }
 
 func (x *DecideSkillProposalResponse) GetReviewState() string {
@@ -7820,7 +9004,7 @@ type UndoLearningEntryRequest struct {
 
 func (x *UndoLearningEntryRequest) Reset() {
 	*x = UndoLearningEntryRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[91]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[100]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7832,7 +9016,7 @@ func (x *UndoLearningEntryRequest) String() string {
 func (*UndoLearningEntryRequest) ProtoMessage() {}
 
 func (x *UndoLearningEntryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[91]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[100]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7845,7 +9029,7 @@ func (x *UndoLearningEntryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UndoLearningEntryRequest.ProtoReflect.Descriptor instead.
 func (*UndoLearningEntryRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{91}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{100}
 }
 
 func (x *UndoLearningEntryRequest) GetOrgId() string {
@@ -7877,7 +9061,7 @@ type UndoLearningEntryResponse struct {
 
 func (x *UndoLearningEntryResponse) Reset() {
 	*x = UndoLearningEntryResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[92]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[101]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7889,7 +9073,7 @@ func (x *UndoLearningEntryResponse) String() string {
 func (*UndoLearningEntryResponse) ProtoMessage() {}
 
 func (x *UndoLearningEntryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[92]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[101]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7902,7 +9086,7 @@ func (x *UndoLearningEntryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UndoLearningEntryResponse.ProtoReflect.Descriptor instead.
 func (*UndoLearningEntryResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{92}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{101}
 }
 
 func (x *UndoLearningEntryResponse) GetAction() string {
@@ -7946,7 +9130,7 @@ type ListLearningLedgerRequest struct {
 
 func (x *ListLearningLedgerRequest) Reset() {
 	*x = ListLearningLedgerRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[93]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[102]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7958,7 +9142,7 @@ func (x *ListLearningLedgerRequest) String() string {
 func (*ListLearningLedgerRequest) ProtoMessage() {}
 
 func (x *ListLearningLedgerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[93]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[102]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7971,7 +9155,7 @@ func (x *ListLearningLedgerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListLearningLedgerRequest.ProtoReflect.Descriptor instead.
 func (*ListLearningLedgerRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{93}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{102}
 }
 
 func (x *ListLearningLedgerRequest) GetOrgId() string {
@@ -8044,7 +9228,7 @@ type LearningLedgerEntry struct {
 
 func (x *LearningLedgerEntry) Reset() {
 	*x = LearningLedgerEntry{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[94]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[103]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8056,7 +9240,7 @@ func (x *LearningLedgerEntry) String() string {
 func (*LearningLedgerEntry) ProtoMessage() {}
 
 func (x *LearningLedgerEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[94]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[103]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8069,7 +9253,7 @@ func (x *LearningLedgerEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LearningLedgerEntry.ProtoReflect.Descriptor instead.
 func (*LearningLedgerEntry) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{94}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{103}
 }
 
 func (x *LearningLedgerEntry) GetEntryId() string {
@@ -8200,7 +9384,7 @@ type ListLearningLedgerResponse struct {
 
 func (x *ListLearningLedgerResponse) Reset() {
 	*x = ListLearningLedgerResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[95]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[104]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8212,7 +9396,7 @@ func (x *ListLearningLedgerResponse) String() string {
 func (*ListLearningLedgerResponse) ProtoMessage() {}
 
 func (x *ListLearningLedgerResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[95]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[104]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8225,7 +9409,7 @@ func (x *ListLearningLedgerResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListLearningLedgerResponse.ProtoReflect.Descriptor instead.
 func (*ListLearningLedgerResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{95}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{104}
 }
 
 func (x *ListLearningLedgerResponse) GetEntries() []*LearningLedgerEntry {
@@ -8269,7 +9453,7 @@ type SetActiveLeafRequest struct {
 
 func (x *SetActiveLeafRequest) Reset() {
 	*x = SetActiveLeafRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[96]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[105]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8281,7 +9465,7 @@ func (x *SetActiveLeafRequest) String() string {
 func (*SetActiveLeafRequest) ProtoMessage() {}
 
 func (x *SetActiveLeafRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[96]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[105]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8294,7 +9478,7 @@ func (x *SetActiveLeafRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetActiveLeafRequest.ProtoReflect.Descriptor instead.
 func (*SetActiveLeafRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{96}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{105}
 }
 
 func (x *SetActiveLeafRequest) GetOrgId() string {
@@ -8338,7 +9522,7 @@ type SetActiveLeafResponse struct {
 
 func (x *SetActiveLeafResponse) Reset() {
 	*x = SetActiveLeafResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[97]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[106]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8350,7 +9534,7 @@ func (x *SetActiveLeafResponse) String() string {
 func (*SetActiveLeafResponse) ProtoMessage() {}
 
 func (x *SetActiveLeafResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[97]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[106]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8363,7 +9547,7 @@ func (x *SetActiveLeafResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetActiveLeafResponse.ProtoReflect.Descriptor instead.
 func (*SetActiveLeafResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{97}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{106}
 }
 
 func (x *SetActiveLeafResponse) GetActiveLeafMessageId() string {
@@ -8397,7 +9581,7 @@ type ForkThreadRequest struct {
 
 func (x *ForkThreadRequest) Reset() {
 	*x = ForkThreadRequest{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[98]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[107]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8409,7 +9593,7 @@ func (x *ForkThreadRequest) String() string {
 func (*ForkThreadRequest) ProtoMessage() {}
 
 func (x *ForkThreadRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[98]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[107]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8422,7 +9606,7 @@ func (x *ForkThreadRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ForkThreadRequest.ProtoReflect.Descriptor instead.
 func (*ForkThreadRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{98}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{107}
 }
 
 func (x *ForkThreadRequest) GetOrgId() string {
@@ -8466,7 +9650,7 @@ type ForkThreadResponse struct {
 
 func (x *ForkThreadResponse) Reset() {
 	*x = ForkThreadResponse{}
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[99]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[108]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8478,7 +9662,7 @@ func (x *ForkThreadResponse) String() string {
 func (*ForkThreadResponse) ProtoMessage() {}
 
 func (x *ForkThreadResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sessions_proto_msgTypes[99]
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[108]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8491,7 +9675,7 @@ func (x *ForkThreadResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ForkThreadResponse.ProtoReflect.Descriptor instead.
 func (*ForkThreadResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{99}
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{108}
 }
 
 func (x *ForkThreadResponse) GetNewThreadId() string {
@@ -8536,7 +9720,44 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x14CreateThreadResponse\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x129\n" +
 	"\n" +
-	"created_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"\xa3\x06\n" +
+	"created_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"\xc1\x01\n" +
+	"\fMentionInput\x12\x1d\n" +
+	"\n" +
+	"subject_id\x18\x01 \x01(\tR\tsubjectId\x12\x12\n" +
+	"\x04kind\x18\x02 \x01(\tR\x04kind\x12\x16\n" +
+	"\x06source\x18\x03 \x01(\tR\x06source\x12)\n" +
+	"\x10wake_expectation\x18\x04 \x01(\tR\x0fwakeExpectation\x12!\n" +
+	"\frefusal_code\x18\x05 \x01(\tR\vrefusalCode\x12\x18\n" +
+	"\aordinal\x18\x06 \x01(\rR\aordinal\"\xa8\x01\n" +
+	"\n" +
+	"MentionRef\x12\x1d\n" +
+	"\n" +
+	"subject_id\x18\x01 \x01(\tR\tsubjectId\x12\x12\n" +
+	"\x04kind\x18\x02 \x01(\tR\x04kind\x12\x1d\n" +
+	"\n" +
+	"wake_state\x18\x03 \x01(\tR\twakeState\x12\x16\n" +
+	"\x06reason\x18\x04 \x01(\tR\x06reason\x12\x16\n" +
+	"\x06source\x18\x05 \x01(\tR\x06source\x12\x18\n" +
+	"\aordinal\x18\x06 \x01(\rR\aordinal\"\x81\x06\n" +
+	"\x0eRunWakeContext\x12\x19\n" +
+	"\bspace_id\x18\x01 \x01(\tR\aspaceId\x12,\n" +
+	"\x12space_decision_ref\x18\x02 \x01(\tR\x10spaceDecisionRef\x124\n" +
+	"\x16recipient_audience_ref\x18\x03 \x01(\tR\x14recipientAudienceRef\x12>\n" +
+	"\x1brecipient_audience_revision\x18\x04 \x01(\x04R\x19recipientAudienceRevision\x126\n" +
+	"\x17recipient_audience_hash\x18\x05 \x01(\tR\x15recipientAudienceHash\x12,\n" +
+	"\x12privacy_policy_ref\x18\x06 \x01(\tR\x10privacyPolicyRef\x12-\n" +
+	"\x12authority_revision\x18\a \x01(\x04R\x11authorityRevision\x12<\n" +
+	"\x1aresource_authorization_ref\x18\b \x01(\tR\x18resourceAuthorizationRef\x120\n" +
+	"\x14space_decision_token\x18\t \x01(\tR\x12spaceDecisionToken\x12,\n" +
+	"\x12action_schema_hash\x18\n" +
+	" \x01(\tR\x10actionSchemaHash\x12%\n" +
+	"\x0epayload_digest\x18\v \x01(\tR\rpayloadDigest\x12'\n" +
+	"\x0fidempotency_key\x18\f \x01(\tR\x0eidempotencyKey\x12,\n" +
+	"\x12trigger_message_id\x18\r \x01(\tR\x10triggerMessageId\x124\n" +
+	"\x16trigger_content_digest\x18\x0e \x01(\tR\x14triggerContentDigest\x12(\n" +
+	"\x10agent_subject_id\x18\x0f \x01(\tR\x0eagentSubjectId\x12\x1f\n" +
+	"\vturn_origin\x18\x10 \x01(\tR\n" +
+	"turnOrigin\"\xae\a\n" +
 	"\x14AppendMessageRequest\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x12\x12\n" +
 	"\x04role\x18\x02 \x01(\tR\x04role\x12\x18\n" +
@@ -8557,12 +9778,16 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x0fidempotency_key\x18\x10 \x01(\tR\x0eidempotencyKey\x12\x1d\n" +
 	"\n" +
 	"agent_name\x18\x11 \x01(\tR\tagentName\x12*\n" +
-	"\x11client_message_id\x18\x12 \x01(\tR\x0fclientMessageId\"v\n" +
+	"\x11client_message_id\x18\x12 \x01(\tR\x0fclientMessageId\x12\x1b\n" +
+	"\tpost_kind\x18\x13 \x01(\tR\bpostKind\x128\n" +
+	"\bmentions\x18\x14 \x03(\v2\x1c.model_plane.v1.MentionInputR\bmentions\x122\n" +
+	"\x05entry\x18\x15 \x01(\v2\x1c.model_plane.v1.MessageEntryR\x05entry\"\xae\x01\n" +
 	"\x15AppendMessageResponse\x12\x1a\n" +
 	"\bsequence\x18\x01 \x01(\x04R\bsequence\x12\x1d\n" +
 	"\n" +
 	"message_id\x18\x02 \x01(\tR\tmessageId\x12\"\n" +
-	"\fdeduplicated\x18\x03 \x01(\bR\fdeduplicated\"\xc5\x01\n" +
+	"\fdeduplicated\x18\x03 \x01(\bR\fdeduplicated\x126\n" +
+	"\bmentions\x18\x04 \x03(\v2\x1a.model_plane.v1.MentionRefR\bmentions\"\xc5\x01\n" +
 	"\x0fStartRunRequest\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x12\"\n" +
 	"\rparent_run_id\x18\x02 \x01(\tR\vparentRunId\x12\x19\n" +
@@ -8629,7 +9854,7 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"sessionKey\x124\n" +
 	"\x16control_decision_token\x18\x05 \x01(\tR\x14controlDecisionToken\"=\n" +
 	"\x1ePrepareUserOwnedThreadResponse\x12\x1b\n" +
-	"\tthread_id\x18\x01 \x01(\tR\bthreadId\"\xb4\x02\n" +
+	"\tthread_id\x18\x01 \x01(\tR\bthreadId\"\xe8\x02\n" +
 	"\x16StartManagedRunRequest\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x12\"\n" +
 	"\rparent_run_id\x18\x02 \x01(\tR\vparentRunId\x12\x19\n" +
@@ -8639,7 +9864,9 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x06org_id\x18\x06 \x01(\tR\x05orgId\x12\x17\n" +
 	"\auser_id\x18\a \x01(\tR\x06userId\x12\x1b\n" +
 	"\tstart_key\x18\b \x01(\tR\bstartKey\x12I\n" +
-	"\x0fterminal_source\x18\t \x01(\x0e2 .model_plane.v1.ManagedRunSourceR\x0eterminalSource\"\xdb\x01\n" +
+	"\x0fterminal_source\x18\t \x01(\x0e2 .model_plane.v1.ManagedRunSourceR\x0eterminalSource\x122\n" +
+	"\x04wake\x18\n" +
+	" \x01(\v2\x1e.model_plane.v1.RunWakeContextR\x04wake\"\xdb\x01\n" +
 	"\x17StartManagedRunResponse\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x129\n" +
 	"\n" +
@@ -8813,7 +10040,7 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"updated_at\x18\x11 \x01(\tR\tupdatedAt\x12\x1a\n" +
 	"\brevision\x18\x12 \x01(\x03R\brevision\"M\n" +
 	"\x17ListAgentSkillsResponse\x122\n" +
-	"\x06skills\x18\x01 \x03(\v2\x1a.model_plane.v1.AgentSkillR\x06skills\"\xc7\x02\n" +
+	"\x06skills\x18\x01 \x03(\v2\x1a.model_plane.v1.AgentSkillR\x06skills\"\xc6\x03\n" +
 	"\x17ListConversationRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x19\n" +
@@ -8822,7 +10049,11 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x19space_read_decision_token\x18\x05 \x01(\tR\x16spaceReadDecisionToken\x12\x14\n" +
 	"\x05limit\x18\x06 \x01(\rR\x05limit\x12*\n" +
 	"\x11before_message_id\x18\a \x01(\tR\x0fbeforeMessageId\x12)\n" +
-	"\x10include_inactive\x18\b \x01(\bR\x0fincludeInactive\"\xfd\x02\n" +
+	"\x10include_inactive\x18\b \x01(\bR\x0fincludeInactive\x12.\n" +
+	"\x13include_human_posts\x18\t \x01(\bR\x11includeHumanPosts\x12(\n" +
+	"\x10post_context_cap\x18\n" +
+	" \x01(\rR\x0epostContextCap\x12#\n" +
+	"\rinclude_first\x18\v \x01(\bR\fincludeFirst\"\xa3\x06\n" +
 	"\x0eSessionMessage\x12\x12\n" +
 	"\x04role\x18\x01 \x01(\tR\x04role\x12\x18\n" +
 	"\acontent\x18\x02 \x01(\tR\acontent\x12\x1d\n" +
@@ -8836,10 +10067,79 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x0fsibling_ordinal\x18\b \x01(\rR\x0esiblingOrdinal\x12#\n" +
 	"\rsibling_count\x18\t \x01(\rR\fsiblingCount\x12$\n" +
 	"\x0eon_active_path\x18\n" +
-	" \x01(\bR\fonActivePath\"q\n" +
+	" \x01(\bR\fonActivePath\x12\x1b\n" +
+	"\tpost_kind\x18\v \x01(\tR\bpostKind\x129\n" +
+	"\n" +
+	"created_at\x18\f \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x126\n" +
+	"\bmentions\x18\r \x03(\v2\x1a.model_plane.v1.MentionRefR\bmentions\x122\n" +
+	"\x05entry\x18\x0e \x01(\v2\x1c.model_plane.v1.MessageEntryR\x05entry\x12%\n" +
+	"\x0erevision_state\x18\x0f \x01(\tR\rrevisionState\x129\n" +
+	"\n" +
+	"revised_at\x18\x10 \x01(\v2\x1a.google.protobuf.TimestampR\trevisedAt\x121\n" +
+	"\x15revised_by_subject_id\x18\x11 \x01(\tR\x12revisedBySubjectId\x12\x1f\n" +
+	"\vrevision_no\x18\x12 \x01(\rR\n" +
+	"revisionNo\x12*\n" +
+	"\x11agent_followed_up\x18\x13 \x01(\bR\x0fagentFollowedUp\"\x98\x01\n" +
 	"\x18ListConversationResponse\x12:\n" +
 	"\bmessages\x18\x01 \x03(\v2\x1e.model_plane.v1.SessionMessageR\bmessages\x12\x19\n" +
-	"\bhas_more\x18\x02 \x01(\bR\ahasMore\"\x92\x03\n" +
+	"\bhas_more\x18\x02 \x01(\bR\ahasMore\x12%\n" +
+	"\x0eomitted_before\x18\x03 \x01(\rR\romittedBefore\"~\n" +
+	"\fMessageEntry\x12\x12\n" +
+	"\x04kind\x18\x01 \x01(\tR\x04kind\x12\x18\n" +
+	"\aversion\x18\x02 \x01(\rR\aversion\x12@\n" +
+	"\rlink_previews\x18\x03 \x03(\v2\x1b.model_plane.v1.LinkPreviewR\flinkPreviews\"\xe0\x01\n" +
+	"\vLinkPreview\x12\x10\n" +
+	"\x03url\x18\x01 \x01(\tR\x03url\x12\x1b\n" +
+	"\tfinal_url\x18\x02 \x01(\tR\bfinalUrl\x12\x12\n" +
+	"\x04host\x18\x03 \x01(\tR\x04host\x12\x14\n" +
+	"\x05title\x18\x04 \x01(\tR\x05title\x12 \n" +
+	"\vdescription\x18\x05 \x01(\tR\vdescription\x12\x1b\n" +
+	"\tsite_name\x18\x06 \x01(\tR\bsiteName\x129\n" +
+	"\n" +
+	"fetched_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\tfetchedAt\"\x8a\x06\n" +
+	"\x14ReviseMessageRequest\x12\x15\n" +
+	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1b\n" +
+	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x1d\n" +
+	"\n" +
+	"message_id\x18\x03 \x01(\tR\tmessageId\x12\x16\n" +
+	"\x06action\x18\x04 \x01(\tR\x06action\x12\x18\n" +
+	"\acontent\x18\x05 \x01(\tR\acontent\x12+\n" +
+	"\x11moderation_reason\x18\x06 \x01(\tR\x10moderationReason\x12\x19\n" +
+	"\bspace_id\x18\a \x01(\tR\aspaceId\x12,\n" +
+	"\x12space_decision_ref\x18\b \x01(\tR\x10spaceDecisionRef\x124\n" +
+	"\x16recipient_audience_ref\x18\t \x01(\tR\x14recipientAudienceRef\x12>\n" +
+	"\x1brecipient_audience_revision\x18\n" +
+	" \x01(\x04R\x19recipientAudienceRevision\x126\n" +
+	"\x17recipient_audience_hash\x18\v \x01(\tR\x15recipientAudienceHash\x12,\n" +
+	"\x12privacy_policy_ref\x18\f \x01(\tR\x10privacyPolicyRef\x12-\n" +
+	"\x12authority_revision\x18\r \x01(\x04R\x11authorityRevision\x12<\n" +
+	"\x1aresource_authorization_ref\x18\x0e \x01(\tR\x18resourceAuthorizationRef\x120\n" +
+	"\x14space_decision_token\x18\x0f \x01(\tR\x12spaceDecisionToken\x12,\n" +
+	"\x12action_schema_hash\x18\x10 \x01(\tR\x10actionSchemaHash\x12%\n" +
+	"\x0epayload_digest\x18\x11 \x01(\tR\rpayloadDigest\x12'\n" +
+	"\x0fidempotency_key\x18\x12 \x01(\tR\x0eidempotencyKey\"\xfe\x01\n" +
+	"\x15ReviseMessageResponse\x12\x1d\n" +
+	"\n" +
+	"message_id\x18\x01 \x01(\tR\tmessageId\x12\x1f\n" +
+	"\vrevision_no\x18\x02 \x01(\rR\n" +
+	"revisionNo\x12%\n" +
+	"\x0erevision_state\x18\x03 \x01(\tR\rrevisionState\x129\n" +
+	"\n" +
+	"revised_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\trevisedAt\x12\"\n" +
+	"\fdeduplicated\x18\x05 \x01(\bR\fdeduplicated\x12\x1f\n" +
+	"\vactor_class\x18\x06 \x01(\tR\n" +
+	"actorClass\"\xfd\x01\n" +
+	"\x1bResolveMessageTargetRequest\x12\x15\n" +
+	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1b\n" +
+	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x1d\n" +
+	"\n" +
+	"message_id\x18\x03 \x01(\tR\tmessageId\x12\x19\n" +
+	"\bspace_id\x18\x04 \x01(\tR\aspaceId\x125\n" +
+	"\x17space_read_decision_ref\x18\x05 \x01(\tR\x14spaceReadDecisionRef\x129\n" +
+	"\x19space_read_decision_token\x18\x06 \x01(\tR\x16spaceReadDecisionToken\"Y\n" +
+	"\x1cResolveMessageTargetResponse\x12\x12\n" +
+	"\x04role\x18\x01 \x01(\tR\x04role\x12%\n" +
+	"\x0erevision_state\x18\x02 \x01(\tR\rrevisionState\"\x92\x03\n" +
 	"\x12ListThreadsRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x17\n" +
 	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x14\n" +
@@ -8852,7 +10152,7 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\tthread_id\x18\t \x01(\tR\bthreadId\x129\n" +
 	"\barchived\x18\n" +
 	" \x01(\x0e2\x1d.model_plane.v1.ArchiveFilterR\barchived\x12!\n" +
-	"\fstarred_only\x18\v \x01(\bR\vstarredOnly\"\xc9\a\n" +
+	"\fstarred_only\x18\v \x01(\bR\vstarredOnly\"\xc0\t\n" +
 	"\rThreadSummary\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x12\x1f\n" +
 	"\vsession_key\x18\x02 \x01(\tR\n" +
@@ -8881,7 +10181,15 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x15forked_from_thread_id\x18\x13 \x01(\tR\x12forkedFromThreadId\x12G\n" +
 	"\x0fattention_state\x18\x10 \x01(\x0e2\x1e.model_plane.v1.AttentionStateR\x0eattentionState\x12C\n" +
 	"\x0fattention_since\x18\x11 \x01(\v2\x1a.google.protobuf.TimestampR\x0eattentionSince\x12)\n" +
-	"\x10attention_unseen\x18\x12 \x01(\bR\x0fattentionUnseen\"o\n" +
+	"\x10attention_unseen\x18\x12 \x01(\bR\x0fattentionUnseen\x12\x1f\n" +
+	"\vreply_count\x18\x17 \x01(\rR\n" +
+	"replyCount\x123\n" +
+	"\x16last_author_subject_id\x18\x18 \x01(\tR\x13lastAuthorSubjectId\x12(\n" +
+	"\x10last_message_seq\x18\x19 \x01(\x04R\x0elastMessageSeq\x129\n" +
+	"\x19recent_author_subject_ids\x18\x1a \x03(\tR\x16recentAuthorSubjectIds\x12\x1b\n" +
+	"\tlast_role\x18\x1b \x01(\tR\blastRole\x12\x1d\n" +
+	"\n" +
+	"turn_count\x18\x1c \x01(\rR\tturnCount\"o\n" +
 	"\x13ListThreadsResponse\x127\n" +
 	"\athreads\x18\x01 \x03(\v2\x1d.model_plane.v1.ThreadSummaryR\athreads\x12\x1f\n" +
 	"\vnext_cursor\x18\x02 \x01(\tR\n" +
@@ -9266,7 +10574,10 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x19LearningGovernanceService\x12n\n" +
 	"\x13DecideSkillProposal\x12*.model_plane.v1.DecideSkillProposalRequest\x1a+.model_plane.v1.DecideSkillProposalResponse\x12h\n" +
 	"\x11UndoLearningEntry\x12(.model_plane.v1.UndoLearningEntryRequest\x1a).model_plane.v1.UndoLearningEntryResponse\x12k\n" +
-	"\x12ListLearningLedger\x12).model_plane.v1.ListLearningLedgerRequest\x1a*.model_plane.v1.ListLearningLedgerResponse2h\n" +
+	"\x12ListLearningLedger\x12).model_plane.v1.ListLearningLedgerRequest\x1a*.model_plane.v1.ListLearningLedgerResponse2\xe9\x01\n" +
+	"\x16MessageRevisionService\x12\\\n" +
+	"\rReviseMessage\x12$.model_plane.v1.ReviseMessageRequest\x1a%.model_plane.v1.ReviseMessageResponse\x12q\n" +
+	"\x14ResolveMessageTarget\x12+.model_plane.v1.ResolveMessageTargetRequest\x1a,.model_plane.v1.ResolveMessageTargetResponse2h\n" +
 	"\x11ThreadForkService\x12S\n" +
 	"\n" +
 	"ForkThread\x12!.model_plane.v1.ForkThreadRequest\x1a\".model_plane.v1.ForkThreadResponseB\xb5\x01\n" +
@@ -9285,7 +10596,7 @@ func file_model_plane_v1_sessions_proto_rawDescGZIP() []byte {
 }
 
 var file_model_plane_v1_sessions_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
-var file_model_plane_v1_sessions_proto_msgTypes = make([]protoimpl.MessageInfo, 100)
+var file_model_plane_v1_sessions_proto_msgTypes = make([]protoimpl.MessageInfo, 109)
 var file_model_plane_v1_sessions_proto_goTypes = []any{
 	(ManagedRunSource)(0),                        // 0: model_plane.v1.ManagedRunSource
 	(TerminalOutcome)(0),                         // 1: model_plane.v1.TerminalOutcome
@@ -9294,257 +10605,281 @@ var file_model_plane_v1_sessions_proto_goTypes = []any{
 	(SkillDecision)(0),                           // 4: model_plane.v1.SkillDecision
 	(*CreateThreadRequest)(nil),                  // 5: model_plane.v1.CreateThreadRequest
 	(*CreateThreadResponse)(nil),                 // 6: model_plane.v1.CreateThreadResponse
-	(*AppendMessageRequest)(nil),                 // 7: model_plane.v1.AppendMessageRequest
-	(*AppendMessageResponse)(nil),                // 8: model_plane.v1.AppendMessageResponse
-	(*StartRunRequest)(nil),                      // 9: model_plane.v1.StartRunRequest
-	(*StartRunResponse)(nil),                     // 10: model_plane.v1.StartRunResponse
-	(*StartScheduledRunRequest)(nil),             // 11: model_plane.v1.StartScheduledRunRequest
-	(*PrepareScheduledRunThreadRequest)(nil),     // 12: model_plane.v1.PrepareScheduledRunThreadRequest
-	(*PrepareScheduledRunThreadResponse)(nil),    // 13: model_plane.v1.PrepareScheduledRunThreadResponse
-	(*PrepareUserOwnedThreadRequest)(nil),        // 14: model_plane.v1.PrepareUserOwnedThreadRequest
-	(*PrepareUserOwnedThreadResponse)(nil),       // 15: model_plane.v1.PrepareUserOwnedThreadResponse
-	(*StartManagedRunRequest)(nil),               // 16: model_plane.v1.StartManagedRunRequest
-	(*StartManagedRunResponse)(nil),              // 17: model_plane.v1.StartManagedRunResponse
-	(*RecordTerminalOutcomeRequest)(nil),         // 18: model_plane.v1.RecordTerminalOutcomeRequest
-	(*RecordTerminalOutcomeResponse)(nil),        // 19: model_plane.v1.RecordTerminalOutcomeResponse
-	(*RecordRunOutputRequest)(nil),               // 20: model_plane.v1.RecordRunOutputRequest
-	(*RecordRunOutputResponse)(nil),              // 21: model_plane.v1.RecordRunOutputResponse
-	(*HeartbeatManagedRunRequest)(nil),           // 22: model_plane.v1.HeartbeatManagedRunRequest
-	(*HeartbeatManagedRunResponse)(nil),          // 23: model_plane.v1.HeartbeatManagedRunResponse
-	(*CompleteDirectRunWithMessageRequest)(nil),  // 24: model_plane.v1.CompleteDirectRunWithMessageRequest
-	(*CompleteDirectRunWithMessageResponse)(nil), // 25: model_plane.v1.CompleteDirectRunWithMessageResponse
-	(*CompleteStepRequest)(nil),                  // 26: model_plane.v1.CompleteStepRequest
-	(*CompleteStepResponse)(nil),                 // 27: model_plane.v1.CompleteStepResponse
-	(*ReserveToolActionRequest)(nil),             // 28: model_plane.v1.ReserveToolActionRequest
-	(*ReserveToolActionResponse)(nil),            // 29: model_plane.v1.ReserveToolActionResponse
-	(*FinalizeToolActionRequest)(nil),            // 30: model_plane.v1.FinalizeToolActionRequest
-	(*FinalizeToolActionResponse)(nil),           // 31: model_plane.v1.FinalizeToolActionResponse
-	(*SaveCheckpointRequest)(nil),                // 32: model_plane.v1.SaveCheckpointRequest
-	(*SaveCheckpointResponse)(nil),               // 33: model_plane.v1.SaveCheckpointResponse
-	(*ReplayThreadRequest)(nil),                  // 34: model_plane.v1.ReplayThreadRequest
-	(*GetContextAssemblyRequest)(nil),            // 35: model_plane.v1.GetContextAssemblyRequest
-	(*GetContextAssemblyResponse)(nil),           // 36: model_plane.v1.GetContextAssemblyResponse
-	(*ContextSegment)(nil),                       // 37: model_plane.v1.ContextSegment
-	(*CompactNowRequest)(nil),                    // 38: model_plane.v1.CompactNowRequest
-	(*CompactNowResponse)(nil),                   // 39: model_plane.v1.CompactNowResponse
-	(*SetAgentSkillEnabledRequest)(nil),          // 40: model_plane.v1.SetAgentSkillEnabledRequest
-	(*SetAgentSkillEnabledResponse)(nil),         // 41: model_plane.v1.SetAgentSkillEnabledResponse
-	(*UpsertAgentSkillRequest)(nil),              // 42: model_plane.v1.UpsertAgentSkillRequest
-	(*UpsertAgentSkillResponse)(nil),             // 43: model_plane.v1.UpsertAgentSkillResponse
-	(*ListAgentSkillsRequest)(nil),               // 44: model_plane.v1.ListAgentSkillsRequest
-	(*AgentSkill)(nil),                           // 45: model_plane.v1.AgentSkill
-	(*ListAgentSkillsResponse)(nil),              // 46: model_plane.v1.ListAgentSkillsResponse
-	(*ListConversationRequest)(nil),              // 47: model_plane.v1.ListConversationRequest
-	(*SessionMessage)(nil),                       // 48: model_plane.v1.SessionMessage
-	(*ListConversationResponse)(nil),             // 49: model_plane.v1.ListConversationResponse
-	(*ListThreadsRequest)(nil),                   // 50: model_plane.v1.ListThreadsRequest
-	(*ThreadSummary)(nil),                        // 51: model_plane.v1.ThreadSummary
-	(*ListThreadsResponse)(nil),                  // 52: model_plane.v1.ListThreadsResponse
-	(*UpdateThreadPresentationRequest)(nil),      // 53: model_plane.v1.UpdateThreadPresentationRequest
-	(*UpdateThreadPresentationResponse)(nil),     // 54: model_plane.v1.UpdateThreadPresentationResponse
-	(*ArchiveThreadRequest)(nil),                 // 55: model_plane.v1.ArchiveThreadRequest
-	(*ArchiveThreadResponse)(nil),                // 56: model_plane.v1.ArchiveThreadResponse
-	(*ArchiveThreadsRequest)(nil),                // 57: model_plane.v1.ArchiveThreadsRequest
-	(*ArchiveThreadsResponse)(nil),               // 58: model_plane.v1.ArchiveThreadsResponse
-	(*DeleteThreadRequest)(nil),                  // 59: model_plane.v1.DeleteThreadRequest
-	(*DeleteThreadResponse)(nil),                 // 60: model_plane.v1.DeleteThreadResponse
-	(*DeleteThreadsRequest)(nil),                 // 61: model_plane.v1.DeleteThreadsRequest
-	(*DeleteThreadsResponse)(nil),                // 62: model_plane.v1.DeleteThreadsResponse
-	(*DeleteSpaceThreadsRequest)(nil),            // 63: model_plane.v1.DeleteSpaceThreadsRequest
-	(*DeleteSpaceThreadsResponse)(nil),           // 64: model_plane.v1.DeleteSpaceThreadsResponse
-	(*SetRunModeRequest)(nil),                    // 65: model_plane.v1.SetRunModeRequest
-	(*SetRunModeResponse)(nil),                   // 66: model_plane.v1.SetRunModeResponse
-	(*ClaimScheduledStepRequest)(nil),            // 67: model_plane.v1.ClaimScheduledStepRequest
-	(*ClaimScheduledStepResponse)(nil),           // 68: model_plane.v1.ClaimScheduledStepResponse
-	(*RecordScheduledStepReceiptRequest)(nil),    // 69: model_plane.v1.RecordScheduledStepReceiptRequest
-	(*RecordScheduledStepReceiptResponse)(nil),   // 70: model_plane.v1.RecordScheduledStepReceiptResponse
-	(*RecordScheduledRunResultRequest)(nil),      // 71: model_plane.v1.RecordScheduledRunResultRequest
-	(*RecordScheduledRunResultResponse)(nil),     // 72: model_plane.v1.RecordScheduledRunResultResponse
-	(*CountWaivedRunsRequest)(nil),               // 73: model_plane.v1.CountWaivedRunsRequest
-	(*CountWaivedRunsResponse)(nil),              // 74: model_plane.v1.CountWaivedRunsResponse
-	(*WaivedRunCount)(nil),                       // 75: model_plane.v1.WaivedRunCount
-	(*GetThreadGrantRequest)(nil),                // 76: model_plane.v1.GetThreadGrantRequest
-	(*GetThreadGrantResponse)(nil),               // 77: model_plane.v1.GetThreadGrantResponse
-	(*BindGrantToRunRequest)(nil),                // 78: model_plane.v1.BindGrantToRunRequest
-	(*BindGrantToRunResponse)(nil),               // 79: model_plane.v1.BindGrantToRunResponse
-	(*RecordRunContextRequest)(nil),              // 80: model_plane.v1.RecordRunContextRequest
-	(*RecordRunContextResponse)(nil),             // 81: model_plane.v1.RecordRunContextResponse
-	(*SaveLoopCheckpointRequest)(nil),            // 82: model_plane.v1.SaveLoopCheckpointRequest
-	(*SaveLoopCheckpointResponse)(nil),           // 83: model_plane.v1.SaveLoopCheckpointResponse
-	(*ClaimLoopCheckpointRequest)(nil),           // 84: model_plane.v1.ClaimLoopCheckpointRequest
-	(*ClaimLoopCheckpointResponse)(nil),          // 85: model_plane.v1.ClaimLoopCheckpointResponse
-	(*CloseLoopCheckpointRequest)(nil),           // 86: model_plane.v1.CloseLoopCheckpointRequest
-	(*CloseLoopCheckpointResponse)(nil),          // 87: model_plane.v1.CloseLoopCheckpointResponse
-	(*ListToolActionsRequest)(nil),               // 88: model_plane.v1.ListToolActionsRequest
-	(*ToolActionState)(nil),                      // 89: model_plane.v1.ToolActionState
-	(*ListToolActionsResponse)(nil),              // 90: model_plane.v1.ListToolActionsResponse
-	(*SearchMessagesRequest)(nil),                // 91: model_plane.v1.SearchMessagesRequest
-	(*SearchHit)(nil),                            // 92: model_plane.v1.SearchHit
-	(*SearchMessagesResponse)(nil),               // 93: model_plane.v1.SearchMessagesResponse
-	(*DecideSkillProposalRequest)(nil),           // 94: model_plane.v1.DecideSkillProposalRequest
-	(*DecideSkillProposalResponse)(nil),          // 95: model_plane.v1.DecideSkillProposalResponse
-	(*UndoLearningEntryRequest)(nil),             // 96: model_plane.v1.UndoLearningEntryRequest
-	(*UndoLearningEntryResponse)(nil),            // 97: model_plane.v1.UndoLearningEntryResponse
-	(*ListLearningLedgerRequest)(nil),            // 98: model_plane.v1.ListLearningLedgerRequest
-	(*LearningLedgerEntry)(nil),                  // 99: model_plane.v1.LearningLedgerEntry
-	(*ListLearningLedgerResponse)(nil),           // 100: model_plane.v1.ListLearningLedgerResponse
-	(*SetActiveLeafRequest)(nil),                 // 101: model_plane.v1.SetActiveLeafRequest
-	(*SetActiveLeafResponse)(nil),                // 102: model_plane.v1.SetActiveLeafResponse
-	(*ForkThreadRequest)(nil),                    // 103: model_plane.v1.ForkThreadRequest
-	(*ForkThreadResponse)(nil),                   // 104: model_plane.v1.ForkThreadResponse
-	(*structpb.Struct)(nil),                      // 105: google.protobuf.Struct
-	(*timestamppb.Timestamp)(nil),                // 106: google.protobuf.Timestamp
-	(AttentionState)(0),                          // 107: model_plane.v1.AttentionState
-	(AutonomyRung)(0),                            // 108: model_plane.v1.AutonomyRung
-	(*RunContextStatus)(nil),                     // 109: model_plane.v1.RunContextStatus
-	(*Event)(nil),                                // 110: model_plane.v1.Event
+	(*MentionInput)(nil),                         // 7: model_plane.v1.MentionInput
+	(*MentionRef)(nil),                           // 8: model_plane.v1.MentionRef
+	(*RunWakeContext)(nil),                       // 9: model_plane.v1.RunWakeContext
+	(*AppendMessageRequest)(nil),                 // 10: model_plane.v1.AppendMessageRequest
+	(*AppendMessageResponse)(nil),                // 11: model_plane.v1.AppendMessageResponse
+	(*StartRunRequest)(nil),                      // 12: model_plane.v1.StartRunRequest
+	(*StartRunResponse)(nil),                     // 13: model_plane.v1.StartRunResponse
+	(*StartScheduledRunRequest)(nil),             // 14: model_plane.v1.StartScheduledRunRequest
+	(*PrepareScheduledRunThreadRequest)(nil),     // 15: model_plane.v1.PrepareScheduledRunThreadRequest
+	(*PrepareScheduledRunThreadResponse)(nil),    // 16: model_plane.v1.PrepareScheduledRunThreadResponse
+	(*PrepareUserOwnedThreadRequest)(nil),        // 17: model_plane.v1.PrepareUserOwnedThreadRequest
+	(*PrepareUserOwnedThreadResponse)(nil),       // 18: model_plane.v1.PrepareUserOwnedThreadResponse
+	(*StartManagedRunRequest)(nil),               // 19: model_plane.v1.StartManagedRunRequest
+	(*StartManagedRunResponse)(nil),              // 20: model_plane.v1.StartManagedRunResponse
+	(*RecordTerminalOutcomeRequest)(nil),         // 21: model_plane.v1.RecordTerminalOutcomeRequest
+	(*RecordTerminalOutcomeResponse)(nil),        // 22: model_plane.v1.RecordTerminalOutcomeResponse
+	(*RecordRunOutputRequest)(nil),               // 23: model_plane.v1.RecordRunOutputRequest
+	(*RecordRunOutputResponse)(nil),              // 24: model_plane.v1.RecordRunOutputResponse
+	(*HeartbeatManagedRunRequest)(nil),           // 25: model_plane.v1.HeartbeatManagedRunRequest
+	(*HeartbeatManagedRunResponse)(nil),          // 26: model_plane.v1.HeartbeatManagedRunResponse
+	(*CompleteDirectRunWithMessageRequest)(nil),  // 27: model_plane.v1.CompleteDirectRunWithMessageRequest
+	(*CompleteDirectRunWithMessageResponse)(nil), // 28: model_plane.v1.CompleteDirectRunWithMessageResponse
+	(*CompleteStepRequest)(nil),                  // 29: model_plane.v1.CompleteStepRequest
+	(*CompleteStepResponse)(nil),                 // 30: model_plane.v1.CompleteStepResponse
+	(*ReserveToolActionRequest)(nil),             // 31: model_plane.v1.ReserveToolActionRequest
+	(*ReserveToolActionResponse)(nil),            // 32: model_plane.v1.ReserveToolActionResponse
+	(*FinalizeToolActionRequest)(nil),            // 33: model_plane.v1.FinalizeToolActionRequest
+	(*FinalizeToolActionResponse)(nil),           // 34: model_plane.v1.FinalizeToolActionResponse
+	(*SaveCheckpointRequest)(nil),                // 35: model_plane.v1.SaveCheckpointRequest
+	(*SaveCheckpointResponse)(nil),               // 36: model_plane.v1.SaveCheckpointResponse
+	(*ReplayThreadRequest)(nil),                  // 37: model_plane.v1.ReplayThreadRequest
+	(*GetContextAssemblyRequest)(nil),            // 38: model_plane.v1.GetContextAssemblyRequest
+	(*GetContextAssemblyResponse)(nil),           // 39: model_plane.v1.GetContextAssemblyResponse
+	(*ContextSegment)(nil),                       // 40: model_plane.v1.ContextSegment
+	(*CompactNowRequest)(nil),                    // 41: model_plane.v1.CompactNowRequest
+	(*CompactNowResponse)(nil),                   // 42: model_plane.v1.CompactNowResponse
+	(*SetAgentSkillEnabledRequest)(nil),          // 43: model_plane.v1.SetAgentSkillEnabledRequest
+	(*SetAgentSkillEnabledResponse)(nil),         // 44: model_plane.v1.SetAgentSkillEnabledResponse
+	(*UpsertAgentSkillRequest)(nil),              // 45: model_plane.v1.UpsertAgentSkillRequest
+	(*UpsertAgentSkillResponse)(nil),             // 46: model_plane.v1.UpsertAgentSkillResponse
+	(*ListAgentSkillsRequest)(nil),               // 47: model_plane.v1.ListAgentSkillsRequest
+	(*AgentSkill)(nil),                           // 48: model_plane.v1.AgentSkill
+	(*ListAgentSkillsResponse)(nil),              // 49: model_plane.v1.ListAgentSkillsResponse
+	(*ListConversationRequest)(nil),              // 50: model_plane.v1.ListConversationRequest
+	(*SessionMessage)(nil),                       // 51: model_plane.v1.SessionMessage
+	(*ListConversationResponse)(nil),             // 52: model_plane.v1.ListConversationResponse
+	(*MessageEntry)(nil),                         // 53: model_plane.v1.MessageEntry
+	(*LinkPreview)(nil),                          // 54: model_plane.v1.LinkPreview
+	(*ReviseMessageRequest)(nil),                 // 55: model_plane.v1.ReviseMessageRequest
+	(*ReviseMessageResponse)(nil),                // 56: model_plane.v1.ReviseMessageResponse
+	(*ResolveMessageTargetRequest)(nil),          // 57: model_plane.v1.ResolveMessageTargetRequest
+	(*ResolveMessageTargetResponse)(nil),         // 58: model_plane.v1.ResolveMessageTargetResponse
+	(*ListThreadsRequest)(nil),                   // 59: model_plane.v1.ListThreadsRequest
+	(*ThreadSummary)(nil),                        // 60: model_plane.v1.ThreadSummary
+	(*ListThreadsResponse)(nil),                  // 61: model_plane.v1.ListThreadsResponse
+	(*UpdateThreadPresentationRequest)(nil),      // 62: model_plane.v1.UpdateThreadPresentationRequest
+	(*UpdateThreadPresentationResponse)(nil),     // 63: model_plane.v1.UpdateThreadPresentationResponse
+	(*ArchiveThreadRequest)(nil),                 // 64: model_plane.v1.ArchiveThreadRequest
+	(*ArchiveThreadResponse)(nil),                // 65: model_plane.v1.ArchiveThreadResponse
+	(*ArchiveThreadsRequest)(nil),                // 66: model_plane.v1.ArchiveThreadsRequest
+	(*ArchiveThreadsResponse)(nil),               // 67: model_plane.v1.ArchiveThreadsResponse
+	(*DeleteThreadRequest)(nil),                  // 68: model_plane.v1.DeleteThreadRequest
+	(*DeleteThreadResponse)(nil),                 // 69: model_plane.v1.DeleteThreadResponse
+	(*DeleteThreadsRequest)(nil),                 // 70: model_plane.v1.DeleteThreadsRequest
+	(*DeleteThreadsResponse)(nil),                // 71: model_plane.v1.DeleteThreadsResponse
+	(*DeleteSpaceThreadsRequest)(nil),            // 72: model_plane.v1.DeleteSpaceThreadsRequest
+	(*DeleteSpaceThreadsResponse)(nil),           // 73: model_plane.v1.DeleteSpaceThreadsResponse
+	(*SetRunModeRequest)(nil),                    // 74: model_plane.v1.SetRunModeRequest
+	(*SetRunModeResponse)(nil),                   // 75: model_plane.v1.SetRunModeResponse
+	(*ClaimScheduledStepRequest)(nil),            // 76: model_plane.v1.ClaimScheduledStepRequest
+	(*ClaimScheduledStepResponse)(nil),           // 77: model_plane.v1.ClaimScheduledStepResponse
+	(*RecordScheduledStepReceiptRequest)(nil),    // 78: model_plane.v1.RecordScheduledStepReceiptRequest
+	(*RecordScheduledStepReceiptResponse)(nil),   // 79: model_plane.v1.RecordScheduledStepReceiptResponse
+	(*RecordScheduledRunResultRequest)(nil),      // 80: model_plane.v1.RecordScheduledRunResultRequest
+	(*RecordScheduledRunResultResponse)(nil),     // 81: model_plane.v1.RecordScheduledRunResultResponse
+	(*CountWaivedRunsRequest)(nil),               // 82: model_plane.v1.CountWaivedRunsRequest
+	(*CountWaivedRunsResponse)(nil),              // 83: model_plane.v1.CountWaivedRunsResponse
+	(*WaivedRunCount)(nil),                       // 84: model_plane.v1.WaivedRunCount
+	(*GetThreadGrantRequest)(nil),                // 85: model_plane.v1.GetThreadGrantRequest
+	(*GetThreadGrantResponse)(nil),               // 86: model_plane.v1.GetThreadGrantResponse
+	(*BindGrantToRunRequest)(nil),                // 87: model_plane.v1.BindGrantToRunRequest
+	(*BindGrantToRunResponse)(nil),               // 88: model_plane.v1.BindGrantToRunResponse
+	(*RecordRunContextRequest)(nil),              // 89: model_plane.v1.RecordRunContextRequest
+	(*RecordRunContextResponse)(nil),             // 90: model_plane.v1.RecordRunContextResponse
+	(*SaveLoopCheckpointRequest)(nil),            // 91: model_plane.v1.SaveLoopCheckpointRequest
+	(*SaveLoopCheckpointResponse)(nil),           // 92: model_plane.v1.SaveLoopCheckpointResponse
+	(*ClaimLoopCheckpointRequest)(nil),           // 93: model_plane.v1.ClaimLoopCheckpointRequest
+	(*ClaimLoopCheckpointResponse)(nil),          // 94: model_plane.v1.ClaimLoopCheckpointResponse
+	(*CloseLoopCheckpointRequest)(nil),           // 95: model_plane.v1.CloseLoopCheckpointRequest
+	(*CloseLoopCheckpointResponse)(nil),          // 96: model_plane.v1.CloseLoopCheckpointResponse
+	(*ListToolActionsRequest)(nil),               // 97: model_plane.v1.ListToolActionsRequest
+	(*ToolActionState)(nil),                      // 98: model_plane.v1.ToolActionState
+	(*ListToolActionsResponse)(nil),              // 99: model_plane.v1.ListToolActionsResponse
+	(*SearchMessagesRequest)(nil),                // 100: model_plane.v1.SearchMessagesRequest
+	(*SearchHit)(nil),                            // 101: model_plane.v1.SearchHit
+	(*SearchMessagesResponse)(nil),               // 102: model_plane.v1.SearchMessagesResponse
+	(*DecideSkillProposalRequest)(nil),           // 103: model_plane.v1.DecideSkillProposalRequest
+	(*DecideSkillProposalResponse)(nil),          // 104: model_plane.v1.DecideSkillProposalResponse
+	(*UndoLearningEntryRequest)(nil),             // 105: model_plane.v1.UndoLearningEntryRequest
+	(*UndoLearningEntryResponse)(nil),            // 106: model_plane.v1.UndoLearningEntryResponse
+	(*ListLearningLedgerRequest)(nil),            // 107: model_plane.v1.ListLearningLedgerRequest
+	(*LearningLedgerEntry)(nil),                  // 108: model_plane.v1.LearningLedgerEntry
+	(*ListLearningLedgerResponse)(nil),           // 109: model_plane.v1.ListLearningLedgerResponse
+	(*SetActiveLeafRequest)(nil),                 // 110: model_plane.v1.SetActiveLeafRequest
+	(*SetActiveLeafResponse)(nil),                // 111: model_plane.v1.SetActiveLeafResponse
+	(*ForkThreadRequest)(nil),                    // 112: model_plane.v1.ForkThreadRequest
+	(*ForkThreadResponse)(nil),                   // 113: model_plane.v1.ForkThreadResponse
+	(*structpb.Struct)(nil),                      // 114: google.protobuf.Struct
+	(*timestamppb.Timestamp)(nil),                // 115: google.protobuf.Timestamp
+	(AttentionState)(0),                          // 116: model_plane.v1.AttentionState
+	(AutonomyRung)(0),                            // 117: model_plane.v1.AutonomyRung
+	(*RunContextStatus)(nil),                     // 118: model_plane.v1.RunContextStatus
+	(*Event)(nil),                                // 119: model_plane.v1.Event
 }
 var file_model_plane_v1_sessions_proto_depIdxs = []int32{
-	105, // 0: model_plane.v1.CreateThreadRequest.metadata:type_name -> google.protobuf.Struct
-	106, // 1: model_plane.v1.CreateThreadResponse.created_at:type_name -> google.protobuf.Timestamp
-	105, // 2: model_plane.v1.AppendMessageRequest.metadata:type_name -> google.protobuf.Struct
-	106, // 3: model_plane.v1.StartRunResponse.created_at:type_name -> google.protobuf.Timestamp
-	0,   // 4: model_plane.v1.StartManagedRunRequest.terminal_source:type_name -> model_plane.v1.ManagedRunSource
-	106, // 5: model_plane.v1.StartManagedRunResponse.created_at:type_name -> google.protobuf.Timestamp
-	0,   // 6: model_plane.v1.RecordTerminalOutcomeRequest.source:type_name -> model_plane.v1.ManagedRunSource
-	1,   // 7: model_plane.v1.RecordTerminalOutcomeRequest.outcome:type_name -> model_plane.v1.TerminalOutcome
-	0,   // 8: model_plane.v1.RecordTerminalOutcomeResponse.source:type_name -> model_plane.v1.ManagedRunSource
-	106, // 9: model_plane.v1.RecordTerminalOutcomeResponse.applied_at:type_name -> google.protobuf.Timestamp
-	0,   // 10: model_plane.v1.HeartbeatManagedRunRequest.source:type_name -> model_plane.v1.ManagedRunSource
-	106, // 11: model_plane.v1.HeartbeatManagedRunResponse.renewed_until:type_name -> google.protobuf.Timestamp
-	105, // 12: model_plane.v1.CompleteDirectRunWithMessageRequest.metadata:type_name -> google.protobuf.Struct
-	19,  // 13: model_plane.v1.CompleteDirectRunWithMessageResponse.receipt:type_name -> model_plane.v1.RecordTerminalOutcomeResponse
-	106, // 14: model_plane.v1.SaveCheckpointResponse.saved_at:type_name -> google.protobuf.Timestamp
-	37,  // 15: model_plane.v1.GetContextAssemblyResponse.segments:type_name -> model_plane.v1.ContextSegment
-	45,  // 16: model_plane.v1.ListAgentSkillsResponse.skills:type_name -> model_plane.v1.AgentSkill
-	105, // 17: model_plane.v1.SessionMessage.metadata:type_name -> google.protobuf.Struct
-	48,  // 18: model_plane.v1.ListConversationResponse.messages:type_name -> model_plane.v1.SessionMessage
-	2,   // 19: model_plane.v1.ListThreadsRequest.archived:type_name -> model_plane.v1.ArchiveFilter
-	106, // 20: model_plane.v1.ThreadSummary.created_at:type_name -> google.protobuf.Timestamp
-	106, // 21: model_plane.v1.ThreadSummary.updated_at:type_name -> google.protobuf.Timestamp
-	106, // 22: model_plane.v1.ThreadSummary.latest_run_updated_at:type_name -> google.protobuf.Timestamp
-	106, // 23: model_plane.v1.ThreadSummary.archived_at:type_name -> google.protobuf.Timestamp
-	106, // 24: model_plane.v1.ThreadSummary.last_read_at:type_name -> google.protobuf.Timestamp
-	107, // 25: model_plane.v1.ThreadSummary.attention_state:type_name -> model_plane.v1.AttentionState
-	106, // 26: model_plane.v1.ThreadSummary.attention_since:type_name -> google.protobuf.Timestamp
-	51,  // 27: model_plane.v1.ListThreadsResponse.threads:type_name -> model_plane.v1.ThreadSummary
-	106, // 28: model_plane.v1.ArchiveThreadResponse.archived_at:type_name -> google.protobuf.Timestamp
-	108, // 29: model_plane.v1.SetRunModeRequest.granted_rung:type_name -> model_plane.v1.AutonomyRung
-	108, // 30: model_plane.v1.SetRunModeResponse.granted_rung:type_name -> model_plane.v1.AutonomyRung
-	75,  // 31: model_plane.v1.CountWaivedRunsResponse.counts:type_name -> model_plane.v1.WaivedRunCount
-	106, // 32: model_plane.v1.WaivedRunCount.last_used_at:type_name -> google.protobuf.Timestamp
-	108, // 33: model_plane.v1.GetThreadGrantResponse.granted_rung:type_name -> model_plane.v1.AutonomyRung
-	106, // 34: model_plane.v1.GetThreadGrantResponse.expires_at:type_name -> google.protobuf.Timestamp
-	108, // 35: model_plane.v1.BindGrantToRunResponse.granted_rung:type_name -> model_plane.v1.AutonomyRung
-	109, // 36: model_plane.v1.RecordRunContextRequest.status:type_name -> model_plane.v1.RunContextStatus
-	106, // 37: model_plane.v1.SaveLoopCheckpointRequest.park_until:type_name -> google.protobuf.Timestamp
-	89,  // 38: model_plane.v1.ListToolActionsResponse.actions:type_name -> model_plane.v1.ToolActionState
-	3,   // 39: model_plane.v1.SearchMessagesRequest.purpose:type_name -> model_plane.v1.SearchPurpose
-	2,   // 40: model_plane.v1.SearchMessagesRequest.archived:type_name -> model_plane.v1.ArchiveFilter
-	106, // 41: model_plane.v1.SearchHit.created_at:type_name -> google.protobuf.Timestamp
-	92,  // 42: model_plane.v1.SearchMessagesResponse.hits:type_name -> model_plane.v1.SearchHit
-	4,   // 43: model_plane.v1.DecideSkillProposalRequest.decision:type_name -> model_plane.v1.SkillDecision
-	106, // 44: model_plane.v1.LearningLedgerEntry.created_at:type_name -> google.protobuf.Timestamp
-	99,  // 45: model_plane.v1.ListLearningLedgerResponse.entries:type_name -> model_plane.v1.LearningLedgerEntry
-	5,   // 46: model_plane.v1.SessionCore.CreateThread:input_type -> model_plane.v1.CreateThreadRequest
-	7,   // 47: model_plane.v1.SessionCore.AppendMessage:input_type -> model_plane.v1.AppendMessageRequest
-	9,   // 48: model_plane.v1.SessionCore.StartRun:input_type -> model_plane.v1.StartRunRequest
-	11,  // 49: model_plane.v1.SessionCore.StartScheduledRun:input_type -> model_plane.v1.StartScheduledRunRequest
-	12,  // 50: model_plane.v1.SessionCore.PrepareScheduledRunThread:input_type -> model_plane.v1.PrepareScheduledRunThreadRequest
-	14,  // 51: model_plane.v1.SessionCore.PrepareUserOwnedThread:input_type -> model_plane.v1.PrepareUserOwnedThreadRequest
-	26,  // 52: model_plane.v1.SessionCore.CompleteStep:input_type -> model_plane.v1.CompleteStepRequest
-	28,  // 53: model_plane.v1.SessionCore.ReserveToolAction:input_type -> model_plane.v1.ReserveToolActionRequest
-	30,  // 54: model_plane.v1.SessionCore.FinalizeToolAction:input_type -> model_plane.v1.FinalizeToolActionRequest
-	32,  // 55: model_plane.v1.SessionCore.SaveCheckpoint:input_type -> model_plane.v1.SaveCheckpointRequest
-	82,  // 56: model_plane.v1.SessionCore.SaveLoopCheckpoint:input_type -> model_plane.v1.SaveLoopCheckpointRequest
-	84,  // 57: model_plane.v1.SessionCore.ClaimLoopCheckpoint:input_type -> model_plane.v1.ClaimLoopCheckpointRequest
-	86,  // 58: model_plane.v1.SessionCore.CloseLoopCheckpoint:input_type -> model_plane.v1.CloseLoopCheckpointRequest
-	88,  // 59: model_plane.v1.SessionCore.ListToolActions:input_type -> model_plane.v1.ListToolActionsRequest
-	34,  // 60: model_plane.v1.SessionCore.ReplayThread:input_type -> model_plane.v1.ReplayThreadRequest
-	35,  // 61: model_plane.v1.SessionCore.GetContextAssembly:input_type -> model_plane.v1.GetContextAssemblyRequest
-	38,  // 62: model_plane.v1.SessionCore.CompactNow:input_type -> model_plane.v1.CompactNowRequest
-	42,  // 63: model_plane.v1.SessionCore.UpsertAgentSkill:input_type -> model_plane.v1.UpsertAgentSkillRequest
-	44,  // 64: model_plane.v1.SessionCore.ListAgentSkills:input_type -> model_plane.v1.ListAgentSkillsRequest
-	40,  // 65: model_plane.v1.SessionCore.SetAgentSkillEnabled:input_type -> model_plane.v1.SetAgentSkillEnabledRequest
-	47,  // 66: model_plane.v1.SessionCore.ListConversation:input_type -> model_plane.v1.ListConversationRequest
-	50,  // 67: model_plane.v1.SessionCore.ListThreads:input_type -> model_plane.v1.ListThreadsRequest
-	53,  // 68: model_plane.v1.SessionCore.UpdateThreadPresentation:input_type -> model_plane.v1.UpdateThreadPresentationRequest
-	55,  // 69: model_plane.v1.SessionCore.ArchiveThread:input_type -> model_plane.v1.ArchiveThreadRequest
-	57,  // 70: model_plane.v1.SessionCore.ArchiveThreads:input_type -> model_plane.v1.ArchiveThreadsRequest
-	59,  // 71: model_plane.v1.SessionCore.DeleteThread:input_type -> model_plane.v1.DeleteThreadRequest
-	61,  // 72: model_plane.v1.SessionCore.DeleteThreads:input_type -> model_plane.v1.DeleteThreadsRequest
-	63,  // 73: model_plane.v1.SessionCore.DeleteSpaceThreads:input_type -> model_plane.v1.DeleteSpaceThreadsRequest
-	65,  // 74: model_plane.v1.SessionCore.SetRunMode:input_type -> model_plane.v1.SetRunModeRequest
-	67,  // 75: model_plane.v1.SessionCore.ClaimScheduledStep:input_type -> model_plane.v1.ClaimScheduledStepRequest
-	69,  // 76: model_plane.v1.SessionCore.RecordScheduledStepReceipt:input_type -> model_plane.v1.RecordScheduledStepReceiptRequest
-	80,  // 77: model_plane.v1.SessionCore.RecordRunContext:input_type -> model_plane.v1.RecordRunContextRequest
-	71,  // 78: model_plane.v1.SessionCore.RecordScheduledRunResult:input_type -> model_plane.v1.RecordScheduledRunResultRequest
-	16,  // 79: model_plane.v1.ManagedRunLifecycle.StartManagedRun:input_type -> model_plane.v1.StartManagedRunRequest
-	18,  // 80: model_plane.v1.ManagedRunLifecycle.RecordTerminalOutcome:input_type -> model_plane.v1.RecordTerminalOutcomeRequest
-	22,  // 81: model_plane.v1.ManagedRunLifecycle.HeartbeatManagedRun:input_type -> model_plane.v1.HeartbeatManagedRunRequest
-	20,  // 82: model_plane.v1.ManagedRunLifecycle.RecordRunOutput:input_type -> model_plane.v1.RecordRunOutputRequest
-	24,  // 83: model_plane.v1.ManagedRunLifecycle.CompleteDirectRunWithMessage:input_type -> model_plane.v1.CompleteDirectRunWithMessageRequest
-	73,  // 84: model_plane.v1.SessionRetentionService.CountWaivedRuns:input_type -> model_plane.v1.CountWaivedRunsRequest
-	76,  // 85: model_plane.v1.ThreadAutonomy.GetThreadGrant:input_type -> model_plane.v1.GetThreadGrantRequest
-	78,  // 86: model_plane.v1.ThreadAutonomy.BindGrantToRun:input_type -> model_plane.v1.BindGrantToRunRequest
-	91,  // 87: model_plane.v1.MessageSearch.SearchMessages:input_type -> model_plane.v1.SearchMessagesRequest
-	101, // 88: model_plane.v1.MessageTreeService.SetActiveLeaf:input_type -> model_plane.v1.SetActiveLeafRequest
-	94,  // 89: model_plane.v1.LearningGovernanceService.DecideSkillProposal:input_type -> model_plane.v1.DecideSkillProposalRequest
-	96,  // 90: model_plane.v1.LearningGovernanceService.UndoLearningEntry:input_type -> model_plane.v1.UndoLearningEntryRequest
-	98,  // 91: model_plane.v1.LearningGovernanceService.ListLearningLedger:input_type -> model_plane.v1.ListLearningLedgerRequest
-	103, // 92: model_plane.v1.ThreadForkService.ForkThread:input_type -> model_plane.v1.ForkThreadRequest
-	6,   // 93: model_plane.v1.SessionCore.CreateThread:output_type -> model_plane.v1.CreateThreadResponse
-	8,   // 94: model_plane.v1.SessionCore.AppendMessage:output_type -> model_plane.v1.AppendMessageResponse
-	10,  // 95: model_plane.v1.SessionCore.StartRun:output_type -> model_plane.v1.StartRunResponse
-	10,  // 96: model_plane.v1.SessionCore.StartScheduledRun:output_type -> model_plane.v1.StartRunResponse
-	13,  // 97: model_plane.v1.SessionCore.PrepareScheduledRunThread:output_type -> model_plane.v1.PrepareScheduledRunThreadResponse
-	15,  // 98: model_plane.v1.SessionCore.PrepareUserOwnedThread:output_type -> model_plane.v1.PrepareUserOwnedThreadResponse
-	27,  // 99: model_plane.v1.SessionCore.CompleteStep:output_type -> model_plane.v1.CompleteStepResponse
-	29,  // 100: model_plane.v1.SessionCore.ReserveToolAction:output_type -> model_plane.v1.ReserveToolActionResponse
-	31,  // 101: model_plane.v1.SessionCore.FinalizeToolAction:output_type -> model_plane.v1.FinalizeToolActionResponse
-	33,  // 102: model_plane.v1.SessionCore.SaveCheckpoint:output_type -> model_plane.v1.SaveCheckpointResponse
-	83,  // 103: model_plane.v1.SessionCore.SaveLoopCheckpoint:output_type -> model_plane.v1.SaveLoopCheckpointResponse
-	85,  // 104: model_plane.v1.SessionCore.ClaimLoopCheckpoint:output_type -> model_plane.v1.ClaimLoopCheckpointResponse
-	87,  // 105: model_plane.v1.SessionCore.CloseLoopCheckpoint:output_type -> model_plane.v1.CloseLoopCheckpointResponse
-	90,  // 106: model_plane.v1.SessionCore.ListToolActions:output_type -> model_plane.v1.ListToolActionsResponse
-	110, // 107: model_plane.v1.SessionCore.ReplayThread:output_type -> model_plane.v1.Event
-	36,  // 108: model_plane.v1.SessionCore.GetContextAssembly:output_type -> model_plane.v1.GetContextAssemblyResponse
-	39,  // 109: model_plane.v1.SessionCore.CompactNow:output_type -> model_plane.v1.CompactNowResponse
-	43,  // 110: model_plane.v1.SessionCore.UpsertAgentSkill:output_type -> model_plane.v1.UpsertAgentSkillResponse
-	46,  // 111: model_plane.v1.SessionCore.ListAgentSkills:output_type -> model_plane.v1.ListAgentSkillsResponse
-	41,  // 112: model_plane.v1.SessionCore.SetAgentSkillEnabled:output_type -> model_plane.v1.SetAgentSkillEnabledResponse
-	49,  // 113: model_plane.v1.SessionCore.ListConversation:output_type -> model_plane.v1.ListConversationResponse
-	52,  // 114: model_plane.v1.SessionCore.ListThreads:output_type -> model_plane.v1.ListThreadsResponse
-	54,  // 115: model_plane.v1.SessionCore.UpdateThreadPresentation:output_type -> model_plane.v1.UpdateThreadPresentationResponse
-	56,  // 116: model_plane.v1.SessionCore.ArchiveThread:output_type -> model_plane.v1.ArchiveThreadResponse
-	58,  // 117: model_plane.v1.SessionCore.ArchiveThreads:output_type -> model_plane.v1.ArchiveThreadsResponse
-	60,  // 118: model_plane.v1.SessionCore.DeleteThread:output_type -> model_plane.v1.DeleteThreadResponse
-	62,  // 119: model_plane.v1.SessionCore.DeleteThreads:output_type -> model_plane.v1.DeleteThreadsResponse
-	64,  // 120: model_plane.v1.SessionCore.DeleteSpaceThreads:output_type -> model_plane.v1.DeleteSpaceThreadsResponse
-	66,  // 121: model_plane.v1.SessionCore.SetRunMode:output_type -> model_plane.v1.SetRunModeResponse
-	68,  // 122: model_plane.v1.SessionCore.ClaimScheduledStep:output_type -> model_plane.v1.ClaimScheduledStepResponse
-	70,  // 123: model_plane.v1.SessionCore.RecordScheduledStepReceipt:output_type -> model_plane.v1.RecordScheduledStepReceiptResponse
-	81,  // 124: model_plane.v1.SessionCore.RecordRunContext:output_type -> model_plane.v1.RecordRunContextResponse
-	72,  // 125: model_plane.v1.SessionCore.RecordScheduledRunResult:output_type -> model_plane.v1.RecordScheduledRunResultResponse
-	17,  // 126: model_plane.v1.ManagedRunLifecycle.StartManagedRun:output_type -> model_plane.v1.StartManagedRunResponse
-	19,  // 127: model_plane.v1.ManagedRunLifecycle.RecordTerminalOutcome:output_type -> model_plane.v1.RecordTerminalOutcomeResponse
-	23,  // 128: model_plane.v1.ManagedRunLifecycle.HeartbeatManagedRun:output_type -> model_plane.v1.HeartbeatManagedRunResponse
-	21,  // 129: model_plane.v1.ManagedRunLifecycle.RecordRunOutput:output_type -> model_plane.v1.RecordRunOutputResponse
-	25,  // 130: model_plane.v1.ManagedRunLifecycle.CompleteDirectRunWithMessage:output_type -> model_plane.v1.CompleteDirectRunWithMessageResponse
-	74,  // 131: model_plane.v1.SessionRetentionService.CountWaivedRuns:output_type -> model_plane.v1.CountWaivedRunsResponse
-	77,  // 132: model_plane.v1.ThreadAutonomy.GetThreadGrant:output_type -> model_plane.v1.GetThreadGrantResponse
-	79,  // 133: model_plane.v1.ThreadAutonomy.BindGrantToRun:output_type -> model_plane.v1.BindGrantToRunResponse
-	93,  // 134: model_plane.v1.MessageSearch.SearchMessages:output_type -> model_plane.v1.SearchMessagesResponse
-	102, // 135: model_plane.v1.MessageTreeService.SetActiveLeaf:output_type -> model_plane.v1.SetActiveLeafResponse
-	95,  // 136: model_plane.v1.LearningGovernanceService.DecideSkillProposal:output_type -> model_plane.v1.DecideSkillProposalResponse
-	97,  // 137: model_plane.v1.LearningGovernanceService.UndoLearningEntry:output_type -> model_plane.v1.UndoLearningEntryResponse
-	100, // 138: model_plane.v1.LearningGovernanceService.ListLearningLedger:output_type -> model_plane.v1.ListLearningLedgerResponse
-	104, // 139: model_plane.v1.ThreadForkService.ForkThread:output_type -> model_plane.v1.ForkThreadResponse
-	93,  // [93:140] is the sub-list for method output_type
-	46,  // [46:93] is the sub-list for method input_type
-	46,  // [46:46] is the sub-list for extension type_name
-	46,  // [46:46] is the sub-list for extension extendee
-	0,   // [0:46] is the sub-list for field type_name
+	114, // 0: model_plane.v1.CreateThreadRequest.metadata:type_name -> google.protobuf.Struct
+	115, // 1: model_plane.v1.CreateThreadResponse.created_at:type_name -> google.protobuf.Timestamp
+	114, // 2: model_plane.v1.AppendMessageRequest.metadata:type_name -> google.protobuf.Struct
+	7,   // 3: model_plane.v1.AppendMessageRequest.mentions:type_name -> model_plane.v1.MentionInput
+	53,  // 4: model_plane.v1.AppendMessageRequest.entry:type_name -> model_plane.v1.MessageEntry
+	8,   // 5: model_plane.v1.AppendMessageResponse.mentions:type_name -> model_plane.v1.MentionRef
+	115, // 6: model_plane.v1.StartRunResponse.created_at:type_name -> google.protobuf.Timestamp
+	0,   // 7: model_plane.v1.StartManagedRunRequest.terminal_source:type_name -> model_plane.v1.ManagedRunSource
+	9,   // 8: model_plane.v1.StartManagedRunRequest.wake:type_name -> model_plane.v1.RunWakeContext
+	115, // 9: model_plane.v1.StartManagedRunResponse.created_at:type_name -> google.protobuf.Timestamp
+	0,   // 10: model_plane.v1.RecordTerminalOutcomeRequest.source:type_name -> model_plane.v1.ManagedRunSource
+	1,   // 11: model_plane.v1.RecordTerminalOutcomeRequest.outcome:type_name -> model_plane.v1.TerminalOutcome
+	0,   // 12: model_plane.v1.RecordTerminalOutcomeResponse.source:type_name -> model_plane.v1.ManagedRunSource
+	115, // 13: model_plane.v1.RecordTerminalOutcomeResponse.applied_at:type_name -> google.protobuf.Timestamp
+	0,   // 14: model_plane.v1.HeartbeatManagedRunRequest.source:type_name -> model_plane.v1.ManagedRunSource
+	115, // 15: model_plane.v1.HeartbeatManagedRunResponse.renewed_until:type_name -> google.protobuf.Timestamp
+	114, // 16: model_plane.v1.CompleteDirectRunWithMessageRequest.metadata:type_name -> google.protobuf.Struct
+	22,  // 17: model_plane.v1.CompleteDirectRunWithMessageResponse.receipt:type_name -> model_plane.v1.RecordTerminalOutcomeResponse
+	115, // 18: model_plane.v1.SaveCheckpointResponse.saved_at:type_name -> google.protobuf.Timestamp
+	40,  // 19: model_plane.v1.GetContextAssemblyResponse.segments:type_name -> model_plane.v1.ContextSegment
+	48,  // 20: model_plane.v1.ListAgentSkillsResponse.skills:type_name -> model_plane.v1.AgentSkill
+	114, // 21: model_plane.v1.SessionMessage.metadata:type_name -> google.protobuf.Struct
+	115, // 22: model_plane.v1.SessionMessage.created_at:type_name -> google.protobuf.Timestamp
+	8,   // 23: model_plane.v1.SessionMessage.mentions:type_name -> model_plane.v1.MentionRef
+	53,  // 24: model_plane.v1.SessionMessage.entry:type_name -> model_plane.v1.MessageEntry
+	115, // 25: model_plane.v1.SessionMessage.revised_at:type_name -> google.protobuf.Timestamp
+	51,  // 26: model_plane.v1.ListConversationResponse.messages:type_name -> model_plane.v1.SessionMessage
+	54,  // 27: model_plane.v1.MessageEntry.link_previews:type_name -> model_plane.v1.LinkPreview
+	115, // 28: model_plane.v1.LinkPreview.fetched_at:type_name -> google.protobuf.Timestamp
+	115, // 29: model_plane.v1.ReviseMessageResponse.revised_at:type_name -> google.protobuf.Timestamp
+	2,   // 30: model_plane.v1.ListThreadsRequest.archived:type_name -> model_plane.v1.ArchiveFilter
+	115, // 31: model_plane.v1.ThreadSummary.created_at:type_name -> google.protobuf.Timestamp
+	115, // 32: model_plane.v1.ThreadSummary.updated_at:type_name -> google.protobuf.Timestamp
+	115, // 33: model_plane.v1.ThreadSummary.latest_run_updated_at:type_name -> google.protobuf.Timestamp
+	115, // 34: model_plane.v1.ThreadSummary.archived_at:type_name -> google.protobuf.Timestamp
+	115, // 35: model_plane.v1.ThreadSummary.last_read_at:type_name -> google.protobuf.Timestamp
+	116, // 36: model_plane.v1.ThreadSummary.attention_state:type_name -> model_plane.v1.AttentionState
+	115, // 37: model_plane.v1.ThreadSummary.attention_since:type_name -> google.protobuf.Timestamp
+	60,  // 38: model_plane.v1.ListThreadsResponse.threads:type_name -> model_plane.v1.ThreadSummary
+	115, // 39: model_plane.v1.ArchiveThreadResponse.archived_at:type_name -> google.protobuf.Timestamp
+	117, // 40: model_plane.v1.SetRunModeRequest.granted_rung:type_name -> model_plane.v1.AutonomyRung
+	117, // 41: model_plane.v1.SetRunModeResponse.granted_rung:type_name -> model_plane.v1.AutonomyRung
+	84,  // 42: model_plane.v1.CountWaivedRunsResponse.counts:type_name -> model_plane.v1.WaivedRunCount
+	115, // 43: model_plane.v1.WaivedRunCount.last_used_at:type_name -> google.protobuf.Timestamp
+	117, // 44: model_plane.v1.GetThreadGrantResponse.granted_rung:type_name -> model_plane.v1.AutonomyRung
+	115, // 45: model_plane.v1.GetThreadGrantResponse.expires_at:type_name -> google.protobuf.Timestamp
+	117, // 46: model_plane.v1.BindGrantToRunResponse.granted_rung:type_name -> model_plane.v1.AutonomyRung
+	118, // 47: model_plane.v1.RecordRunContextRequest.status:type_name -> model_plane.v1.RunContextStatus
+	115, // 48: model_plane.v1.SaveLoopCheckpointRequest.park_until:type_name -> google.protobuf.Timestamp
+	98,  // 49: model_plane.v1.ListToolActionsResponse.actions:type_name -> model_plane.v1.ToolActionState
+	3,   // 50: model_plane.v1.SearchMessagesRequest.purpose:type_name -> model_plane.v1.SearchPurpose
+	2,   // 51: model_plane.v1.SearchMessagesRequest.archived:type_name -> model_plane.v1.ArchiveFilter
+	115, // 52: model_plane.v1.SearchHit.created_at:type_name -> google.protobuf.Timestamp
+	101, // 53: model_plane.v1.SearchMessagesResponse.hits:type_name -> model_plane.v1.SearchHit
+	4,   // 54: model_plane.v1.DecideSkillProposalRequest.decision:type_name -> model_plane.v1.SkillDecision
+	115, // 55: model_plane.v1.LearningLedgerEntry.created_at:type_name -> google.protobuf.Timestamp
+	108, // 56: model_plane.v1.ListLearningLedgerResponse.entries:type_name -> model_plane.v1.LearningLedgerEntry
+	5,   // 57: model_plane.v1.SessionCore.CreateThread:input_type -> model_plane.v1.CreateThreadRequest
+	10,  // 58: model_plane.v1.SessionCore.AppendMessage:input_type -> model_plane.v1.AppendMessageRequest
+	12,  // 59: model_plane.v1.SessionCore.StartRun:input_type -> model_plane.v1.StartRunRequest
+	14,  // 60: model_plane.v1.SessionCore.StartScheduledRun:input_type -> model_plane.v1.StartScheduledRunRequest
+	15,  // 61: model_plane.v1.SessionCore.PrepareScheduledRunThread:input_type -> model_plane.v1.PrepareScheduledRunThreadRequest
+	17,  // 62: model_plane.v1.SessionCore.PrepareUserOwnedThread:input_type -> model_plane.v1.PrepareUserOwnedThreadRequest
+	29,  // 63: model_plane.v1.SessionCore.CompleteStep:input_type -> model_plane.v1.CompleteStepRequest
+	31,  // 64: model_plane.v1.SessionCore.ReserveToolAction:input_type -> model_plane.v1.ReserveToolActionRequest
+	33,  // 65: model_plane.v1.SessionCore.FinalizeToolAction:input_type -> model_plane.v1.FinalizeToolActionRequest
+	35,  // 66: model_plane.v1.SessionCore.SaveCheckpoint:input_type -> model_plane.v1.SaveCheckpointRequest
+	91,  // 67: model_plane.v1.SessionCore.SaveLoopCheckpoint:input_type -> model_plane.v1.SaveLoopCheckpointRequest
+	93,  // 68: model_plane.v1.SessionCore.ClaimLoopCheckpoint:input_type -> model_plane.v1.ClaimLoopCheckpointRequest
+	95,  // 69: model_plane.v1.SessionCore.CloseLoopCheckpoint:input_type -> model_plane.v1.CloseLoopCheckpointRequest
+	97,  // 70: model_plane.v1.SessionCore.ListToolActions:input_type -> model_plane.v1.ListToolActionsRequest
+	37,  // 71: model_plane.v1.SessionCore.ReplayThread:input_type -> model_plane.v1.ReplayThreadRequest
+	38,  // 72: model_plane.v1.SessionCore.GetContextAssembly:input_type -> model_plane.v1.GetContextAssemblyRequest
+	41,  // 73: model_plane.v1.SessionCore.CompactNow:input_type -> model_plane.v1.CompactNowRequest
+	45,  // 74: model_plane.v1.SessionCore.UpsertAgentSkill:input_type -> model_plane.v1.UpsertAgentSkillRequest
+	47,  // 75: model_plane.v1.SessionCore.ListAgentSkills:input_type -> model_plane.v1.ListAgentSkillsRequest
+	43,  // 76: model_plane.v1.SessionCore.SetAgentSkillEnabled:input_type -> model_plane.v1.SetAgentSkillEnabledRequest
+	50,  // 77: model_plane.v1.SessionCore.ListConversation:input_type -> model_plane.v1.ListConversationRequest
+	59,  // 78: model_plane.v1.SessionCore.ListThreads:input_type -> model_plane.v1.ListThreadsRequest
+	62,  // 79: model_plane.v1.SessionCore.UpdateThreadPresentation:input_type -> model_plane.v1.UpdateThreadPresentationRequest
+	64,  // 80: model_plane.v1.SessionCore.ArchiveThread:input_type -> model_plane.v1.ArchiveThreadRequest
+	66,  // 81: model_plane.v1.SessionCore.ArchiveThreads:input_type -> model_plane.v1.ArchiveThreadsRequest
+	68,  // 82: model_plane.v1.SessionCore.DeleteThread:input_type -> model_plane.v1.DeleteThreadRequest
+	70,  // 83: model_plane.v1.SessionCore.DeleteThreads:input_type -> model_plane.v1.DeleteThreadsRequest
+	72,  // 84: model_plane.v1.SessionCore.DeleteSpaceThreads:input_type -> model_plane.v1.DeleteSpaceThreadsRequest
+	74,  // 85: model_plane.v1.SessionCore.SetRunMode:input_type -> model_plane.v1.SetRunModeRequest
+	76,  // 86: model_plane.v1.SessionCore.ClaimScheduledStep:input_type -> model_plane.v1.ClaimScheduledStepRequest
+	78,  // 87: model_plane.v1.SessionCore.RecordScheduledStepReceipt:input_type -> model_plane.v1.RecordScheduledStepReceiptRequest
+	89,  // 88: model_plane.v1.SessionCore.RecordRunContext:input_type -> model_plane.v1.RecordRunContextRequest
+	80,  // 89: model_plane.v1.SessionCore.RecordScheduledRunResult:input_type -> model_plane.v1.RecordScheduledRunResultRequest
+	19,  // 90: model_plane.v1.ManagedRunLifecycle.StartManagedRun:input_type -> model_plane.v1.StartManagedRunRequest
+	21,  // 91: model_plane.v1.ManagedRunLifecycle.RecordTerminalOutcome:input_type -> model_plane.v1.RecordTerminalOutcomeRequest
+	25,  // 92: model_plane.v1.ManagedRunLifecycle.HeartbeatManagedRun:input_type -> model_plane.v1.HeartbeatManagedRunRequest
+	23,  // 93: model_plane.v1.ManagedRunLifecycle.RecordRunOutput:input_type -> model_plane.v1.RecordRunOutputRequest
+	27,  // 94: model_plane.v1.ManagedRunLifecycle.CompleteDirectRunWithMessage:input_type -> model_plane.v1.CompleteDirectRunWithMessageRequest
+	82,  // 95: model_plane.v1.SessionRetentionService.CountWaivedRuns:input_type -> model_plane.v1.CountWaivedRunsRequest
+	85,  // 96: model_plane.v1.ThreadAutonomy.GetThreadGrant:input_type -> model_plane.v1.GetThreadGrantRequest
+	87,  // 97: model_plane.v1.ThreadAutonomy.BindGrantToRun:input_type -> model_plane.v1.BindGrantToRunRequest
+	100, // 98: model_plane.v1.MessageSearch.SearchMessages:input_type -> model_plane.v1.SearchMessagesRequest
+	110, // 99: model_plane.v1.MessageTreeService.SetActiveLeaf:input_type -> model_plane.v1.SetActiveLeafRequest
+	103, // 100: model_plane.v1.LearningGovernanceService.DecideSkillProposal:input_type -> model_plane.v1.DecideSkillProposalRequest
+	105, // 101: model_plane.v1.LearningGovernanceService.UndoLearningEntry:input_type -> model_plane.v1.UndoLearningEntryRequest
+	107, // 102: model_plane.v1.LearningGovernanceService.ListLearningLedger:input_type -> model_plane.v1.ListLearningLedgerRequest
+	55,  // 103: model_plane.v1.MessageRevisionService.ReviseMessage:input_type -> model_plane.v1.ReviseMessageRequest
+	57,  // 104: model_plane.v1.MessageRevisionService.ResolveMessageTarget:input_type -> model_plane.v1.ResolveMessageTargetRequest
+	112, // 105: model_plane.v1.ThreadForkService.ForkThread:input_type -> model_plane.v1.ForkThreadRequest
+	6,   // 106: model_plane.v1.SessionCore.CreateThread:output_type -> model_plane.v1.CreateThreadResponse
+	11,  // 107: model_plane.v1.SessionCore.AppendMessage:output_type -> model_plane.v1.AppendMessageResponse
+	13,  // 108: model_plane.v1.SessionCore.StartRun:output_type -> model_plane.v1.StartRunResponse
+	13,  // 109: model_plane.v1.SessionCore.StartScheduledRun:output_type -> model_plane.v1.StartRunResponse
+	16,  // 110: model_plane.v1.SessionCore.PrepareScheduledRunThread:output_type -> model_plane.v1.PrepareScheduledRunThreadResponse
+	18,  // 111: model_plane.v1.SessionCore.PrepareUserOwnedThread:output_type -> model_plane.v1.PrepareUserOwnedThreadResponse
+	30,  // 112: model_plane.v1.SessionCore.CompleteStep:output_type -> model_plane.v1.CompleteStepResponse
+	32,  // 113: model_plane.v1.SessionCore.ReserveToolAction:output_type -> model_plane.v1.ReserveToolActionResponse
+	34,  // 114: model_plane.v1.SessionCore.FinalizeToolAction:output_type -> model_plane.v1.FinalizeToolActionResponse
+	36,  // 115: model_plane.v1.SessionCore.SaveCheckpoint:output_type -> model_plane.v1.SaveCheckpointResponse
+	92,  // 116: model_plane.v1.SessionCore.SaveLoopCheckpoint:output_type -> model_plane.v1.SaveLoopCheckpointResponse
+	94,  // 117: model_plane.v1.SessionCore.ClaimLoopCheckpoint:output_type -> model_plane.v1.ClaimLoopCheckpointResponse
+	96,  // 118: model_plane.v1.SessionCore.CloseLoopCheckpoint:output_type -> model_plane.v1.CloseLoopCheckpointResponse
+	99,  // 119: model_plane.v1.SessionCore.ListToolActions:output_type -> model_plane.v1.ListToolActionsResponse
+	119, // 120: model_plane.v1.SessionCore.ReplayThread:output_type -> model_plane.v1.Event
+	39,  // 121: model_plane.v1.SessionCore.GetContextAssembly:output_type -> model_plane.v1.GetContextAssemblyResponse
+	42,  // 122: model_plane.v1.SessionCore.CompactNow:output_type -> model_plane.v1.CompactNowResponse
+	46,  // 123: model_plane.v1.SessionCore.UpsertAgentSkill:output_type -> model_plane.v1.UpsertAgentSkillResponse
+	49,  // 124: model_plane.v1.SessionCore.ListAgentSkills:output_type -> model_plane.v1.ListAgentSkillsResponse
+	44,  // 125: model_plane.v1.SessionCore.SetAgentSkillEnabled:output_type -> model_plane.v1.SetAgentSkillEnabledResponse
+	52,  // 126: model_plane.v1.SessionCore.ListConversation:output_type -> model_plane.v1.ListConversationResponse
+	61,  // 127: model_plane.v1.SessionCore.ListThreads:output_type -> model_plane.v1.ListThreadsResponse
+	63,  // 128: model_plane.v1.SessionCore.UpdateThreadPresentation:output_type -> model_plane.v1.UpdateThreadPresentationResponse
+	65,  // 129: model_plane.v1.SessionCore.ArchiveThread:output_type -> model_plane.v1.ArchiveThreadResponse
+	67,  // 130: model_plane.v1.SessionCore.ArchiveThreads:output_type -> model_plane.v1.ArchiveThreadsResponse
+	69,  // 131: model_plane.v1.SessionCore.DeleteThread:output_type -> model_plane.v1.DeleteThreadResponse
+	71,  // 132: model_plane.v1.SessionCore.DeleteThreads:output_type -> model_plane.v1.DeleteThreadsResponse
+	73,  // 133: model_plane.v1.SessionCore.DeleteSpaceThreads:output_type -> model_plane.v1.DeleteSpaceThreadsResponse
+	75,  // 134: model_plane.v1.SessionCore.SetRunMode:output_type -> model_plane.v1.SetRunModeResponse
+	77,  // 135: model_plane.v1.SessionCore.ClaimScheduledStep:output_type -> model_plane.v1.ClaimScheduledStepResponse
+	79,  // 136: model_plane.v1.SessionCore.RecordScheduledStepReceipt:output_type -> model_plane.v1.RecordScheduledStepReceiptResponse
+	90,  // 137: model_plane.v1.SessionCore.RecordRunContext:output_type -> model_plane.v1.RecordRunContextResponse
+	81,  // 138: model_plane.v1.SessionCore.RecordScheduledRunResult:output_type -> model_plane.v1.RecordScheduledRunResultResponse
+	20,  // 139: model_plane.v1.ManagedRunLifecycle.StartManagedRun:output_type -> model_plane.v1.StartManagedRunResponse
+	22,  // 140: model_plane.v1.ManagedRunLifecycle.RecordTerminalOutcome:output_type -> model_plane.v1.RecordTerminalOutcomeResponse
+	26,  // 141: model_plane.v1.ManagedRunLifecycle.HeartbeatManagedRun:output_type -> model_plane.v1.HeartbeatManagedRunResponse
+	24,  // 142: model_plane.v1.ManagedRunLifecycle.RecordRunOutput:output_type -> model_plane.v1.RecordRunOutputResponse
+	28,  // 143: model_plane.v1.ManagedRunLifecycle.CompleteDirectRunWithMessage:output_type -> model_plane.v1.CompleteDirectRunWithMessageResponse
+	83,  // 144: model_plane.v1.SessionRetentionService.CountWaivedRuns:output_type -> model_plane.v1.CountWaivedRunsResponse
+	86,  // 145: model_plane.v1.ThreadAutonomy.GetThreadGrant:output_type -> model_plane.v1.GetThreadGrantResponse
+	88,  // 146: model_plane.v1.ThreadAutonomy.BindGrantToRun:output_type -> model_plane.v1.BindGrantToRunResponse
+	102, // 147: model_plane.v1.MessageSearch.SearchMessages:output_type -> model_plane.v1.SearchMessagesResponse
+	111, // 148: model_plane.v1.MessageTreeService.SetActiveLeaf:output_type -> model_plane.v1.SetActiveLeafResponse
+	104, // 149: model_plane.v1.LearningGovernanceService.DecideSkillProposal:output_type -> model_plane.v1.DecideSkillProposalResponse
+	106, // 150: model_plane.v1.LearningGovernanceService.UndoLearningEntry:output_type -> model_plane.v1.UndoLearningEntryResponse
+	109, // 151: model_plane.v1.LearningGovernanceService.ListLearningLedger:output_type -> model_plane.v1.ListLearningLedgerResponse
+	56,  // 152: model_plane.v1.MessageRevisionService.ReviseMessage:output_type -> model_plane.v1.ReviseMessageResponse
+	58,  // 153: model_plane.v1.MessageRevisionService.ResolveMessageTarget:output_type -> model_plane.v1.ResolveMessageTargetResponse
+	113, // 154: model_plane.v1.ThreadForkService.ForkThread:output_type -> model_plane.v1.ForkThreadResponse
+	106, // [106:155] is the sub-list for method output_type
+	57,  // [57:106] is the sub-list for method input_type
+	57,  // [57:57] is the sub-list for extension type_name
+	57,  // [57:57] is the sub-list for extension extendee
+	0,   // [0:57] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_sessions_proto_init() }
@@ -9555,17 +10890,17 @@ func file_model_plane_v1_sessions_proto_init() {
 	file_model_plane_v1_runs_proto_init()
 	file_model_plane_v1_events_proto_init()
 	file_model_plane_v1_attention_proto_init()
-	file_model_plane_v1_sessions_proto_msgTypes[31].OneofWrappers = []any{}
-	file_model_plane_v1_sessions_proto_msgTypes[48].OneofWrappers = []any{}
+	file_model_plane_v1_sessions_proto_msgTypes[34].OneofWrappers = []any{}
+	file_model_plane_v1_sessions_proto_msgTypes[57].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_sessions_proto_rawDesc), len(file_model_plane_v1_sessions_proto_rawDesc)),
 			NumEnums:      5,
-			NumMessages:   100,
+			NumMessages:   109,
 			NumExtensions: 0,
-			NumServices:   8,
+			NumServices:   9,
 		},
 		GoTypes:           file_model_plane_v1_sessions_proto_goTypes,
 		DependencyIndexes: file_model_plane_v1_sessions_proto_depIdxs,

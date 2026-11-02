@@ -22,6 +22,18 @@ with a pointer forward. Newest first.
 
 ---
 
+## 2026-11-02 - Main merged into model-plane: Space threads follow main's memory containment; two numbers moved
+
+**Status: implemented on model-plane (merge commit), not deployed.** Main (259 commits: the Space waves, the remote merge, the NATS cutover to `controlplane.*` and `CONTROLPLANE`, the ZDR resolver) was merged into model-plane. Decisions taken in the merge:
+
+- **Memory in a Space.** Main's WS17-S1 containment (`space::memory_scope`) governs every thread inside a Space: a room, a dm or a kind-less thread is contained and a personal Space still learns, under a kill switch that is on by default. EP-8 S2's helper keeps the agent-run rule (read the owner's memory, write none) and closes a Space-origin thread that has lost its Space id; it no longer refuses every Space thread. Dreaming excludes agent-run threads in its query and leaves Space threads to main's contained flag, which records the skip. Open for the owner in the depth register (D0-024).
+- **Session-core migration.** Model-plane's `0071_run_question_consume` became `0088_run_question_consume`: main's `0071_message_post_kind` is applied on the live database, and 0086-0087 are used on mp-w2w3.
+- **Proto.** `DecideApprovalRequest.rule_proposed` moved from 8 to 12; main uses 8-11 for the Space member decide (`space_id`, `space_decision_ref`, `space_decision_token`, `grant_use_token`). The gateway and session-core move together, and neither number was deployed.
+- **Execution-core step gate.** On an enforced Space step every ask joins main's Space gate fold (WS10 S3); elsewhere model-plane's standing grants (WS13 S6) apply as before; a browser act (WS21-S5b) always pauses and is never folded.
+- **CSP.** Main moved the security headers into `nginx-security-headers.conf`; the Web Push worker's `worker-src 'self'` and `manifest-src 'self'` (WS16-S6) were added there, to the enforced and the report-only policy.
+
+---
+
 ## 2026-11-01 - The Do browser zero-retention rule is a golden over the enforcement rows, not a matrix row (WS21-S10)
 
 **Status: implemented (source only).** The browser bearer and Do-tool rules follow from the enforcement decision, as the MCP rules do (api/contracts/README.md, the MCP goldens). The matrix loader requires e_ ids, rejects two rows with the same inputs and has no browser-bearer input, so the plan's bearer row cannot be a distinct row. execution-core/tests/browser_do_contract.rs instead drives every enforcement row through the real resolver and execute_step. The login row waits for WS21-S9, which is deferred.

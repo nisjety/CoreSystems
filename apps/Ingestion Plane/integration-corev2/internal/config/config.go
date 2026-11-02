@@ -252,8 +252,6 @@ type Config struct {
 	OktaClientSecret               string
 	OktaAPIToken                   string
 	OktaAPIBaseURL                 string
-	SCIMBearerToken                string
-	SCIMBearerTokens               map[string]string
 	SessionTTL                     time.Duration
 	TokenRefreshSkew               time.Duration
 }
@@ -538,8 +536,6 @@ func Load() (Config, error) {
 		OktaClientSecret:        strings.TrimSpace(os.Getenv("OKTA_CLIENT_SECRET")),
 		OktaAPIToken:            strings.TrimSpace(os.Getenv("OKTA_API_TOKEN")),
 		OktaAPIBaseURL:          strings.TrimRight(envOr("OKTA_API_BASE_URL", strings.TrimSpace(os.Getenv("OKTA_DOMAIN"))), "/"),
-		SCIMBearerToken:         strings.TrimSpace(os.Getenv("SCIM_BEARER_TOKEN")),
-		SCIMBearerTokens:        parseSCIMBearerTokens(os.Getenv("SCIM_ORG_BEARER_TOKENS")),
 		SessionTTL:              envDuration("INTEGRATION_CONNECT_SESSION_TTL", 10*time.Minute),
 		TokenRefreshSkew:        envDuration("INTEGRATION_TOKEN_REFRESH_SKEW", 2*time.Minute),
 	}, nil
@@ -833,10 +829,6 @@ func (c Config) ValidateProvider(providerKey string) error {
 		if c.OktaAPIToken == "" && (c.OktaClientID == "" || c.OktaClientSecret == "") {
 			return fmt.Errorf("OKTA_API_TOKEN or OKTA_CLIENT_ID/OKTA_CLIENT_SECRET is required for Okta")
 		}
-	case "scim":
-		if c.SCIMBearerToken == "" && len(c.SCIMBearerTokens) == 0 {
-			return fmt.Errorf("SCIM_BEARER_TOKEN or SCIM_ORG_BEARER_TOKENS is required for SCIM")
-		}
 	}
 	return nil
 }
@@ -935,9 +927,6 @@ func (c Config) ProviderReadiness() map[string][]string {
 	}
 	if strings.TrimSpace(c.OktaAPIToken) == "" && (strings.TrimSpace(c.OktaClientID) == "" || strings.TrimSpace(c.OktaClientSecret) == "") {
 		readiness["okta"] = append(readiness["okta"], "OKTA_API_TOKEN or OKTA_CLIENT_ID/OKTA_CLIENT_SECRET")
-	}
-	if strings.TrimSpace(c.SCIMBearerToken) == "" && len(c.SCIMBearerTokens) == 0 {
-		readiness["scim"] = append(readiness["scim"], "SCIM_BEARER_TOKEN or SCIM_ORG_BEARER_TOKENS")
 	}
 	if !c.CodexSubscriptionEnabled {
 		readiness["openai-codex-subscription"] = append(readiness["openai-codex-subscription"], "CODEX_SUBSCRIPTION_ENABLED=true")
@@ -1134,26 +1123,6 @@ func (c Config) snapchatHTTPSRedirectBaseURL() string {
 		return ""
 	}
 	return baseURL
-}
-
-func parseSCIMBearerTokens(raw string) map[string]string {
-	out := map[string]string{}
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return out
-	}
-	for _, pair := range strings.Split(raw, ",") {
-		orgID, token, ok := strings.Cut(strings.TrimSpace(pair), ":")
-		if !ok {
-			continue
-		}
-		orgID = strings.TrimSpace(orgID)
-		token = strings.TrimSpace(token)
-		if orgID != "" && token != "" {
-			out[orgID] = token
-		}
-	}
-	return out
 }
 
 func microsoftAuthorizeURL(tenant string) string {

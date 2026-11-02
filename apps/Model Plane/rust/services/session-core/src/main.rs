@@ -17,6 +17,7 @@ mod audit_publisher;
 mod auth;
 mod compaction;
 mod continuation_crypto;
+mod decision_keys;
 mod dream_extractor;
 mod dreaming;
 mod finetune_grpc;
@@ -43,10 +44,14 @@ mod orchestration_store;
 mod org_policy;
 mod retention_receipt;
 mod routing_policy_grpc;
+mod room_run_attach;
+mod run_phase;
 mod run_service_grpc;
 mod service_token;
+mod space;
 mod space_deletion_reconciler;
 mod space_membership_nats;
+mod space_stream_grpc;
 mod store;
 mod terminalization;
 mod thread_fork;
@@ -70,15 +75,42 @@ async fn main() -> Result<()> {
 
     let _otel_guard = mp_telemetry::init("session-core")?;
     info!("session-core starting");
+    // Per-thread run guard (WS09-S1): read once, never in a handler. ON unless
+    // SPACE_RUN_THREAD_GUARD is switched off.
+    let thread_run_guard = run_phase::guard_enabled_from_env();
+    run_phase::set_thread_run_guard(thread_run_guard);
+    info!(thread_run_guard, "space thread run guard configured");
 
     // Authentication configuration and JWKS are mandatory and loaded before
     // any listener/background worker starts. A missing issuer/audience or an
     // unavailable verification keyset therefore fails startup closed.
+    // Control Space decision keys (F11): log the configured ids with a public-key fingerprint,
+    // and fail start-up when a key set is configured but unparseable.
+    decision_keys::boot_check()?;
     let grpc_auth = auth::JwtVerifier::from_env().await?;
     let prom_handle = PrometheusBuilder::new().install_recorder()?;
 
     let pool = store::connect_postgres().await?;
     store::run_migrations(&pool).await?;
+    // Thread activity summary (WS15-S5): the trigger from migration 0078 keeps new messages current;
+    // this bounded task fills the threads that predate it. Readers refuse until it is done.
+    tokio::spawn(space::thread_activity::run_backfill(pool.clone()));
+    // Space event log (WS02-S1): the triggers from migration 0072 write rows only while
+    // this flag is on. Off by default; a failure to write the flag leaves the stored value
+    // as it was and never stops startup (the log is a realtime aid, not authority).
+    let space_event_emit = space::events::emit_enabled_from_env();
+    if let Err(error) = space::events::sync_flag(&pool, space_event_emit).await {
+        warn!(%error, "space event log flag could not be synced");
+    }
+    info!(space_event_emit, "space event log configured");
+    // Space attention outbox (WS11-S5): the trigger from migration 0080 enqueues one content-free
+    // event per persistent log row while this flag is on. Refused (stays off) while the log is off.
+    // Off by default; a failure here never stops startup.
+    let space_attention_emit = space::attention_outbox::emit_enabled_from_env();
+    if let Err(error) = space::attention_outbox::sync_flag(&pool, space_attention_emit).await {
+        warn!(%error, "space attention outbox flag could not be synced");
+    }
+    let space_wakes = space::events::SpaceWakes::new();
     // The adapter is optional only when no Letta endpoint is configured. Once
     // enabled, its dedicated Auth Core service-principal configuration is
     // mandatory so background dreaming/search never falls back to anonymous
@@ -96,6 +128,7 @@ async fn main() -> Result<()> {
         events_tx.clone(),
         letta_memory.clone(),
         grpc_auth,
+        space_wakes.clone(),
     ));
     let http_handle = tokio::spawn(http_health::serve(prom_handle));
     let nats_pool = pool.clone();
@@ -235,6 +268,31 @@ async fn main() -> Result<()> {
         })
         .await
     });
+    // Space event log: the NOTIFY listener only runs while emitting is on (it holds one pool
+    // connection); the retention sweeper always runs, because retention is owed for rows
+    // already written.
+    let space_listener_pool = pool.clone();
+    let space_listener_wakes = space_wakes.clone();
+    let space_listener_handle = tokio::spawn(async move {
+        if !space_event_emit {
+            std::future::pending::<()>().await;
+        }
+        supervise_background("session-core Space event listener", move || {
+            let pool = space_listener_pool.clone();
+            let wakes = space_listener_wakes.clone();
+            async move { space::events::run_listener(pool, wakes).await }
+        })
+        .await
+    });
+    let space_sweeper_pool = pool.clone();
+    let space_sweeper_handle = tokio::spawn(supervise_background(
+        "session-core Space event retention sweeper",
+        move || {
+            let pool = space_sweeper_pool.clone();
+            async move { space::events::run_retention_sweeper(pool).await }
+        },
+    ));
+
     let shutdown = shutdown_signal();
 
     tokio::select! {
@@ -251,6 +309,8 @@ async fn main() -> Result<()> {
         result = terminalization_handle => result??,
         result = tool_ledger_handle => result??,
         result = attention_events_handle => result??,
+        result = space_listener_handle => result??,
+        result = space_sweeper_handle => result??,
         () = shutdown => {},
     }
 

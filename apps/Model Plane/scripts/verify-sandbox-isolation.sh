@@ -15,8 +15,21 @@
 # unprivileged userns, or hold the needed capabilities.
 #
 # Usage:   ./scripts/verify-sandbox-isolation.sh
+#          ./scripts/verify-sandbox-isolation.sh --production-profile [--image REF | --container NAME]
 # Requires: docker (will pull debian:bookworm-slim, run --privileged).
+#
+# --production-profile (WS06-S10) does not use --privileged: it runs the execution-core
+# image under the production container profile (cap_drop ALL, read-only root, scoped
+# seccomp, mem/cpu/pids limits read from the compose files) and checks the per-spawn
+# prlimit ceilings against a fork bomb, memory bomb, CPU spin, file flood and output
+# flood, with /healthz as the liveness canary. See verify-sandbox-production-profile.sh.
 set -euo pipefail
+
+for arg in "$@"; do
+  if [ "$arg" = "--production-profile" ]; then
+    exec bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/verify-sandbox-production-profile.sh" "$@"
+  fi
+done
 
 # The shared base argv from build_bwrap_argv (assemble_argv), pre `-- <prog>`.
 #

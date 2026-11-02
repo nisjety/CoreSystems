@@ -1,0 +1,45 @@
+/*
+ * The "who can wake it" editor in the Agent tab (WS08-S8). It reuses the tool policy editor's shell
+ * (space-tool-policy.css); only the radio and checkbox groups are new.
+ */
+
+.verevon-wake-policy__modes,
+.verevon-wake-policy__people {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+.verevon-wake-policy__mode {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  color: var(--verevon-text);
+  font-size: 12px;
+}
+
+.verevon-wake-policy__mode input {
+  margin-top: 2px;
+}
+
+.verevon-wake-policy__list {
+  display: grid;
+  gap: 4px;
+  max-height: 220px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+  color: var(--verevon-text);
+  font-size: 12px;
+}
+
+.verevon-wake-policy__chip-hint {
+  margin: 4px 0 0;
+  color: var(--verevon-text-muted);
+  font-size: 11px;
+}

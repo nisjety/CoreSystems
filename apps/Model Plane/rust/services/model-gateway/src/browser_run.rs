@@ -1035,7 +1035,10 @@ fn browser_derive_status_to_http(status: &tonic::Status) -> ApiError {
 fn browser_run_zdr_refusal() -> ApiError {
     (
         StatusCode::PRECONDITION_FAILED,
-        Json(mp_contracts::zdr_refusal::Refusal::feature_not_supported("browser_run").json_body()),
+        Json(
+            mp_contracts::zdr_refusal::Refusal::feature_not_supported("browser_run")
+                .json_body(),
+        ),
     )
 }
 
@@ -3570,7 +3573,13 @@ mod tests {
                 ..TestBrowserBroker::validating(Ok(validation))
             };
             let (result, broker) = resolve_with(broker, browser_request("grant-x")).await;
-            assert_eq!(result.expect_err(kind).0, want, "{kind} zdr={zdr}");
+            let error = result.expect_err(kind);
+            assert_eq!(error.0, want, "{kind} zdr={zdr}");
+            if zdr {
+                // The refusal is the catalogue's typed one, not a bare sentence.
+                assert_eq!(error.1 .0["error"]["code"], "zdr_feature_not_supported");
+                assert_eq!(error.1 .0["error"]["feature"], "browser_run");
+            }
             assert!(broker.derive_requests.lock().expect("recorder").is_empty());
         }
     }

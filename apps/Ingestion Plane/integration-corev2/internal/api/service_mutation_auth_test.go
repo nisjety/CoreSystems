@@ -1,6 +1,8 @@
 package api
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -24,8 +26,14 @@ var tenantMutations = []struct {
 	{"capabilities", http.MethodPatch, "/api/v1/connections/conn-guard/capabilities", `{"capabilities":["workspace.read","channels.read"]}`, http.StatusOK},
 	{"disconnect", http.MethodDelete, "/api/v1/connections/conn-guard", "", http.StatusNoContent},
 	{"consents", http.MethodPost, "/api/v1/connections/conn-guard/consents", `{"source":"mail","purpose":"inbox","granted":true}`, http.StatusOK},
-	{"scim-create", http.MethodPost, "/api/v1/scim/tokens", `{"organizationId":"org-1","name":"fixture"}`, http.StatusCreated},
+	{"scim-create", http.MethodPost, "/api/v1/scim/tokens", `{"organizationId":"org-1","name":"fixture"}`, http.StatusNotImplemented}, // WS05-S2: creation is an honest 501, behind the write-scope guard
 	{"scim-revoke", http.MethodDelete, "/api/v1/scim/tokens/scim-guard?organizationId=org-1", "", http.StatusOK},
+}
+
+// fixtureTokenHash seeds a pre-existing token row; SCIM minting no longer exists in the service.
+func fixtureTokenHash(token string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(token)))
+	return hex.EncodeToString(sum[:])
 }
 
 func mutationFixture(t *testing.T, principal auth.Principal) (*store.MemoryRepository, func(string, string, string) *http.Response) {
@@ -48,7 +56,7 @@ func mutationFixture(t *testing.T, principal auth.Principal) (*store.MemoryRepos
 	_, err = repo.CreateSCIMToken(t.Context(), store.SCIMToken{
 		ID: "scim-guard", OrganizationID: "org-1", Name: "existing", CreatedBy: "user-1",
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
-	}, scimTokenHash("synthetic-scim-bearer"))
+	}, fixtureTokenHash("synthetic-scim-bearer"))
 	if err != nil {
 		t.Fatal(err)
 	}

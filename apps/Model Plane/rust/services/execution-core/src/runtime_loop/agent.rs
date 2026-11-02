@@ -4049,6 +4049,7 @@ async fn run_rounds(
                     // only where it is used keeps the "absent unless relevant"
                     // invariant visible at the call sites that care.
                     let reads_sandbox = call.name == "code_interpreter"
+                        || call.name == "shell"
                         || crate::process_tools::is_process_tool(&call.name)
                         || crate::workspace_tools::is_workspace_tool(&call.name);
                     let sandbox = if reads_sandbox && !ctx.req.space_id.is_empty() {
@@ -5277,6 +5278,7 @@ async fn register_delegated_child_run(
             user_id: parent.req.user_id.clone(),
             start_key: start_key.clone(),
             terminal_source: pb::ManagedRunSource::ExecutionAgent as i32,
+            wake: None,
         },
         parent.session_bearer,
     ) {
@@ -7633,6 +7635,7 @@ async fn declined_earlier_in_run(
             run_id: ctx.req.run_id.clone(),
             step_id: String::new(),
             org_id: ctx.req.org_id.clone(),
+            ..Default::default()
         },
         ctx.session_bearer,
     ) else {
@@ -7743,6 +7746,20 @@ async fn pause_for_approval(
     } else {
         String::new()
     };
+    // Build plan WS10 S3: a Space run's pause states the tool key and the digest of the call, so
+    // the agent's retry of this exact action can spend the once-approval a person grants. The
+    // digest is all that is kept of the call; a zero-retention run states neither.
+    let (gate_tool_key, gate_action_digest) = if !req.space_id.trim().is_empty()
+        && !req.zdr
+        && crate::space_gate::GateMode::from_env() != crate::space_gate::GateMode::Off
+    {
+        (
+            crate::space_gate::tool_key(tool_name).to_owned(),
+            crate::space_gate::action_digest(tool_name, tool_input),
+        )
+    } else {
+        (String::new(), String::new())
+    };
     let request = authenticated_session_request(
         pb::CreateApprovalRequest {
             // Cold (the delivery worker) unless the durable-loop switch is on, the
@@ -7769,6 +7786,21 @@ async fn pause_for_approval(
             // collapses onto the existing durable approval instead of creating
             // a duplicate via the (org_id, idempotency_key) ON CONFLICT guard.
             idempotency_key: format!("{}:{step_id}", req.run_id),
+            // The honest card (build plan WS10 S1): an allowlisted tool key and label, and
+            // what this pause expects. Only a call with a descriptor can be run by the
+            // delivery worker; everything else is a retry of the exact action.
+            tool_key: gate_tool_key,
+            action_digest: gate_action_digest,
+            turn_origin: String::new(),
+            grant_use_token: String::new(),
+            context_json: crate::space_gate::card_context_json(
+                tool_name,
+                tool_input,
+                crate::space_gate::resume_class_for(
+                    tool_name,
+                    !continuation_descriptor_json.is_empty(),
+                ),
+            ),
             continuation_descriptor_json,
             cause: Some(approval_cause_for_pause(
                 cause,
@@ -7776,6 +7808,7 @@ async fn pause_for_approval(
                 tool_name,
                 tool_input,
             )),
+            ..Default::default()
         },
         bearer,
     );
@@ -7935,6 +7968,11 @@ async fn continuation_descriptor(
         "permission_mode": permission_mode,
         "action_fingerprint": action_fingerprint,
     });
+    // The Space the run belongs to, so the delivery worker knows to re-check the requester's
+    // authority with Control before it runs the action (WS10 S3). Outside the fingerprint.
+    if !req.space_id.trim().is_empty() {
+        descriptor["space_id"] = json!(req.space_id);
+    }
     if let Some((schema_sha256, payload_sha256, ticket_idempotency_key)) = ticket_binding {
         let object = descriptor
             .as_object_mut()
@@ -10823,7 +10861,7 @@ mod tests {
                     .appended_assistant
                     .push(req.content);
             }
-            Ok(Response::new(pb::AppendMessageResponse { sequence: 1, message_id: String::new(), deduplicated: false }))
+            Ok(Response::new(pb::AppendMessageResponse { sequence: 1, message_id: String::new(), deduplicated: false, ..Default::default() }))
         }
 
         async fn start_run(
@@ -11155,6 +11193,28 @@ mod tests {
 
     #[tonic::async_trait]
     impl pb::run_service_server::RunService for MockRunService {
+        // Main's RPCs (merged 2026-11-02); this double does not serve them.
+        async fn resolve_approval_authority(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::ResolveApprovalAuthorityRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ResolveApprovalAuthorityResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("resolve_approval_authority is not served by this double"))
+        }
+
+        async fn authorize_room_run_attach(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::AuthorizeRoomRunAttachRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::AuthorizeRoomRunAttachResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("authorize_room_run_attach is not served by this double"))
+        }
+
+        async fn cancel_run_as_room_manager(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::CancelRunAsRoomManagerRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::CancelRunAsRoomManagerResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("cancel_run_as_room_manager is not served by this double"))
+        }
+
         async fn get_run(
             &self,
             request: Request<pb::GetRunRequest>,
@@ -11449,6 +11509,42 @@ mod tests {
 
     #[tonic::async_trait]
     impl OrchestrationCoreService for MockOrchestration {
+        // Main's RPCs (merged 2026-11-02); this double does not serve them.
+        async fn reroute_approval(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::RerouteApprovalRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::RerouteApprovalResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("reroute_approval is not served by this double"))
+        }
+
+        async fn claim_once_approval(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::ClaimOnceApprovalRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ClaimOnceApprovalResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("claim_once_approval is not served by this double"))
+        }
+
+        async fn hold_quarantined_output(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::HoldQuarantinedOutputRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::HoldQuarantinedOutputResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("hold_quarantined_output is not served by this double"))
+        }
+
+        async fn claim_quarantine_release(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::ClaimQuarantineReleaseRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ClaimQuarantineReleaseResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("claim_quarantine_release is not served by this double"))
+        }
+
+        async fn get_quarantine_preview(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::GetQuarantinePreviewRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetQuarantinePreviewResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("get_quarantine_preview is not served by this double"))
+        }
+
         type StreamRunEventsStream = RunEventStream;
 
         async fn get_run_proof_bundle(

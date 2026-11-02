@@ -1,0 +1,201 @@
+/*
+ * The room's Files tab (WS14-S9): the list, the drop zone and the text preview sheet.
+ * Its own sheet on purpose: global.css carries uncommitted lines.
+ */
+
+.verevon-space-files__add {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.verevon-space-files__run {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 12px;
+  background: var(--verevon-surface-soft);
+  font-size: 0.875rem;
+}
+
+.verevon-space-files__run ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.verevon-space-files__drop {
+  margin: 8px 0 12px;
+  padding: 14px;
+  border: 1px dashed var(--verevon-border-strong);
+  border-radius: 12px;
+  color: var(--verevon-text-muted);
+  font-size: 0.8125rem;
+  text-align: center;
+}
+
+.verevon-space-files__drop[data-active='true'] {
+  border-color: var(--verevon-accent);
+  background: var(--verevon-surface-soft);
+}
+
+.verevon-space-files__list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-space-files__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.verevon-space-files__entry {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 12px;
+  background: var(--verevon-surface);
+  color: var(--verevon-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.verevon-space-files__entry:hover:not(:disabled) {
+  background: var(--verevon-surface-soft);
+  border-color: var(--verevon-border-strong);
+}
+
+.verevon-space-files__entry:focus-visible,
+.verevon-space-files__close:focus-visible {
+  outline: 2px solid var(--verevon-accent);
+  outline-offset: 2px;
+}
+
+.verevon-space-files__icon {
+  display: inline-flex;
+  color: var(--verevon-text-muted);
+}
+
+.verevon-space-files__body {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.verevon-space-files__title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.verevon-space-files__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  color: var(--verevon-text-muted);
+  font-size: 0.75rem;
+}
+
+.verevon-space-files__more {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  justify-items: start;
+}
+
+.verevon-space-files__sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgb(15 18 20 / 42%);
+}
+
+.verevon-space-files__dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(860px, 100%);
+  height: min(86vh, 760px);
+  overflow: hidden;
+  border: 1px solid var(--verevon-border);
+  border-radius: 18px;
+  background: var(--verevon-surface);
+  box-shadow: 0 24px 64px rgb(0 0 0 / 24%);
+}
+
+.verevon-space-files__dialog:focus {
+  outline: none;
+}
+
+.verevon-space-files__dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--verevon-border);
+}
+
+.verevon-space-files__dialog-header h3 {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 1rem;
+}
+
+.verevon-space-files__close {
+  display: inline-flex;
+  padding: 6px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--verevon-text-muted);
+  cursor: pointer;
+}
+
+.verevon-space-files__dialog-body {
+  flex: 1;
+  min-height: 0;
+  padding: 14px 18px;
+  overflow: auto;
+}
+
+.verevon-space-files__note {
+  margin: 0 0 8px;
+  color: var(--verevon-text-muted);
+  font-size: 0.8125rem;
+}
+
+.verevon-space-files__text {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+@media (max-width: 640px) {
+  .verevon-space-files__sheet {
+    padding: 0;
+  }
+
+  .verevon-space-files__dialog {
+    width: 100%;
+    height: 100%;
+    border-radius: 0;
+  }
+}

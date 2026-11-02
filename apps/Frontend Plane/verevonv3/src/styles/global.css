@@ -2067,6 +2067,13 @@ h3 {
   line-height: 20px;
 }
 
+/* The group headings take the dark surface's own colour as ink, and the panel title has none: both were
+   near-invisible on the dark sidebar. */
+.dark .verevon-sidebar-group-title,
+.dark .verevon-sidebar-title {
+  color: var(--verevon-sidebar-text);
+}
+
 .verevon-sidebar-row {
   font-size: 13px;
   font-weight: 500;
@@ -28333,6 +28340,40 @@ body.verevon-chat-canvas-resizing * {
   line-height: 1.5;
 }
 
+.verevon-chat-artifact-failure--neutral {
+  background: var(--verevon-surface-subtle, color-mix(in srgb, currentColor 6%, transparent));
+  color: var(--verevon-e-muted);
+}
+
+/* Room HTML artifacts: the click-to-run gate shown in place of the preview. */
+.verevon-chat-artifact-gate {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  border-radius: var(--chat-r-md, 12px);
+  background: color-mix(in srgb, currentColor 5%, transparent);
+  padding: 16px;
+}
+
+.verevon-chat-artifact-gate > div {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.verevon-chat-artifact-gate strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.verevon-chat-artifact-gate p {
+  margin-top: 3px;
+  color: var(--verevon-e-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .verevon-chat-steps-header {
   display: flex;
   align-items: center;
@@ -45347,6 +45388,23 @@ so it
   color: var(--verevon-surface);
 }
 
+/* WS07-S7: shared agent/member avatar. Fill and glyph colour come inline from a
+   validated #rrggbb; without one the neutral treatment below applies. */
+.verevon-agent-avatar {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 999px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1;
+}
+
+.verevon-agent-avatar--neutral {
+  background: var(--verevon-text);
+  color: var(--verevon-surface);
+}
+
 .verevon-room-turn__content {
   display: grid;
   gap: 3px;
@@ -49009,6 +49067,20 @@ so it
    marker — it is the same kind of information. */
 .core-sidebar-panel-link[data-working] .core-sidebar-working-dot {
   margin-left: auto;
+}
+
+/* An archived room stays in the list, quieter, with a small trailing tag. */
+.core-sidebar-panel-link[data-archived] .core-sidebar-panel-link__label {
+  opacity: 0.62;
+}
+
+.core-sidebar-archived-tag {
+  flex: none;
+  margin-left: auto;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--verevon-sidebar-text, currentColor);
+  opacity: 0.6;
 }
 
 @media (prefers-reduced-motion: no-preference) {

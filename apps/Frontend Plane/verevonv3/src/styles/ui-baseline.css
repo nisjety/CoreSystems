@@ -1,0 +1,87 @@
+/*
+ * Space UI baseline (WS16-S5): forced-colors, prefers-contrast and density.
+ *
+ * This file is imported from the app tree (UserPreferencesProvider), and
+ * index.tsx imports App before global.css, so these rules are emitted BEFORE
+ * global.css. Every selector therefore carries an `html:root` prefix (extra
+ * specificity) instead of relying on source order.
+ *
+ * Motion is not handled here: every Space `animation:` already sits inside a
+ * `prefers-reduced-motion: no-preference` block in global.css.
+ */
+
+/* ---- forced colors -------------------------------------------------------
+   Status dots are background-only, and the critical row is a 2% tint; both
+   vanish when the UA replaces author colours. Give them system colours and a
+   border so they survive. The AGENT_STATUS_MARKS shapes already work without
+   colour and stay as they are. */
+@media (forced-colors: active) {
+  html:root .core-sidebar-working-dot,
+  html:root .core-sidebar-unread-dot,
+  html:root .verevon-space-presence__dot {
+    forced-color-adjust: none;
+    background: Highlight;
+    border: 1px solid CanvasText;
+    opacity: 1;
+    box-shadow: none;
+  }
+
+  html:root .verevon-activity-row.verevon-activity-row--critical {
+    border: 2px solid CanvasText;
+  }
+
+  html:root .verevon-activity-row.verevon-activity-row--muted,
+  html:root .core-sidebar-panel-link[data-archived] .core-sidebar-panel-link__label {
+    opacity: 1;
+  }
+
+  html:root :where(button, a, summary, input, select, textarea, [tabindex]):focus-visible {
+    outline-color: Highlight;
+  }
+}
+
+/* ---- prefers-contrast: more ----------------------------------------------
+   Muted text, borders and the sidebar text tokens move to high-contrast
+   values. The chat page redefines the muted/border tokens under `.dark`, so
+   that scope is overridden too. */
+@media (prefers-contrast: more) {
+  html:root {
+    --verevon-text-muted: #403d38;
+    --verevon-e-muted: #403d38;
+    --verevon-text-subtle: #55524c;
+    --verevon-border: #6b6b66;
+    --verevon-border-soft: #85857f;
+    --verevon-border-strong: #4a4a46;
+    --verevon-sidebar-text: #ffffff;
+    --verevon-sidebar-muted: #d5d7df;
+  }
+
+  html:root.dark,
+  html:root.dark .verevon-chat-page {
+    --verevon-text-muted: #d5d7df;
+    --verevon-e-muted: #d5d7df;
+    --verevon-text-subtle: #b9bcc6;
+    --verevon-border: rgb(255 255 255 / 55%);
+    --verevon-border-soft: rgb(255 255 255 / 40%);
+    --verevon-d-border: rgb(255 255 255 / 55%);
+    --verevon-sidebar-text: #ffffff;
+    --verevon-sidebar-muted: #e1e3ea;
+  }
+}
+
+/* ---- density --------------------------------------------------------------
+   Comfortable is today's CSS and has no rule. Compact tightens the sidebar
+   row, the activity row and the room turn spacing. Vertical padding only on
+   the activity row: the Space view zeroes its horizontal padding. */
+html:root[data-density="compact"] .core-sidebar-panel-link {
+  height: 30px;
+}
+
+html:root[data-density="compact"] .verevon-activity-row {
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
+html:root[data-density="compact"] .verevon-room-turn {
+  gap: 7px;
+}

@@ -129,6 +129,16 @@ message MemoryEntry {
   // model's reading of a conversation; "unknown" is an older row written before
   // provenance was recorded, and must not be presented as either.
   MemoryProvenance provenance = 8;
+
+  // Space this row was learned in, set only when the row is withheld (see
+  // withheld_reason). Ids only, never content. Empty for every ordinary row.
+  string origin_space_ref = 9;
+
+  // Why this row is listed but never recalled. Closed vocabulary shared with
+  // the personal-chat hidden_reason: "room_origin_unverified" is a row learned
+  // in a shared room before containment existed. The owner may keep or delete
+  // it; no conversation recalls it. Empty for an ordinary row.
+  string withheld_reason = 10;
 }
 
 // MemoryProvenance — who decided a memory was worth keeping.

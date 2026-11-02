@@ -217,6 +217,19 @@ services:
       MP_COMPAT_MODE: v1_only
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: model-gateway
+      # Shared-Space transcript reads return only allowlisted metadata keys
+      # (WS07-S9a). `1` restores the old pass-through (kill switch only).
+      SPACE_ROOM_METADATA_LEGACY_PASSTHROUGH: ${SPACE_ROOM_METADATA_LEGACY_PASSTHROUGH:-false}
+      # Human post routes (WS01-S4): POST /v1/threads and POST /v1/threads/:id/messages.
+      # Off unless an explicit on-word; a rollout control, never an authorization input.
+      SPACE_HUMAN_POSTS_API: ${SPACE_HUMAN_POSTS_API:-0}
+      # Edit, delete and target routes for one message (WS12-S6). Off unless an explicit on-word;
+      # a rollout control, never an authorization input. Session Core has its own CORE switch.
+      SPACE_MESSAGE_REVISE_API: ${SPACE_MESSAGE_REVISE_API:-0}
+      # Mentions on posts and the addressed-wake invoke mode (WS08-S3). Rollout controls, never
+      # authorization inputs. The room context stays off until decision D-6.
+      SPACE_WAKE_API: ${SPACE_WAKE_API:-0}
+      SPACE_WAKE_ROOM_CONTEXT: ${SPACE_WAKE_ROOM_CONTEXT:-0}
       # Empty by default = "Verevon Auto": inference-core resolves an unpinned
       # request to the configured provider's own default (per-provider), so chat
       # works with whichever provider key is set (Anthropic-only, OpenAI-only,
@@ -614,6 +627,25 @@ services:
       # Wave 7 — fine-tuning kill switch + budget guard (off by default in
       # production-style profile; dev override flips FINETUNE_ENABLED=1).
       FINETUNE_ENABLED: ${FINETUNE_ENABLED:-0}
+      # WS09-S3: save a room turn's work summary (steps and steer count, no text) with its answer.
+      # Off in production-style profiles; the dev override turns it on. Never an authorization input.
+      SPACE_RUN_WORK_SUMMARY: ${SPACE_RUN_WORK_SUMMARY:-false}
+      # WS09-S4: the member live view of a room run (steps), and its answer text (SD-20: off in
+      # production first). Both off in production-style profiles; never an authorization input.
+      SPACE_RUN_LIVE_VIEW: ${SPACE_RUN_LIVE_VIEW:-false}
+      SPACE_RUN_LIVE_TEXT: ${SPACE_RUN_LIVE_TEXT:-false}
+      # WS09-S8: the room manager's Stop route. Off in production-style profiles; the dev override
+      # turns it on. Never an authorization input (Session Core verifies the Control decision).
+      SPACE_RUN_MANAGER_STOP: ${SPACE_RUN_MANAGER_STOP:-false}
+      # WS11-S2: POST /v1/spaces/attention, the cross-room attention aggregate. Off unless set; dev
+      # override turns it on. A rollout control, never an authorization input.
+      SPACE_ATTENTION_SUMMARY: ${SPACE_ATTENTION_SUMMARY:-0}
+      # WS15-S6: GET /v1/spaces/:space_id/timeline and the tail transcript parameters. Off unless set; dev
+      # override turns it on. A rollout control, never an authorization input.
+      SPACE_TIMELINE_API: ${SPACE_TIMELINE_API:-0}
+      # WS13-S2: POST /v1/spaces/:space_id/messages/search and /resolve. Off unless set; dev override
+      # turns it on. A rollout control, never an authorization input.
+      SPACE_MESSAGE_SEARCH_API: ${SPACE_MESSAGE_SEARCH_API:-0}
       FINETUNE_ORG_BUDGET_USD: ${FINETUNE_ORG_BUDGET_USD:-50}
       FINETUNE_PER_JOB_BUDGET_USD: ${FINETUNE_PER_JOB_BUDGET_USD:-20}
       # Dedicated finetune-poller session-core credential — NOT
@@ -928,6 +960,9 @@ services:
       # fail-closed, which is the intended unprovisioned-development state.
       CONTROL_SPACE_DECISION_KEY_ID: ${CONTROL_SPACE_DECISION_KEY_ID:-}
       CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64: ${CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64:-}
+      # One live root run per Space thread (WS09-S1): a second start is refused
+      # with thread_run_active. ON by default; `false` is the kill switch.
+      SPACE_RUN_THREAD_GUARD: ${SPACE_RUN_THREAD_GUARD:-true}
       # Dedicated short-lived service-principal credentials for the optional
       # session-core -> letta-bridge path. When LETTA_MEMORY_ADDR is non-empty,
       # session-core fails startup closed unless all three are configured.
@@ -940,6 +975,58 @@ services:
       SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY: ${SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY:-}
       # Durable loop fold store (WS03 S4). Off by default: a loop keeps its fold in
       # memory and a pause cannot be resumed from the store. Sealed under the key above.
+      # Space decision ZDR flag on the legacy owner create/append paths (WS06-S2). `observe`
+      # counts and proceeds; only the exact value `enforce` refuses typed. Never an authorization input.
+      SESSION_CORE_SPACE_ZDR: ${SESSION_CORE_SPACE_ZDR:-observe}
+      # Space event log (WS02-S1): the migration-0072 triggers write ids-and-kinds rows only
+      # while this is `true` (or `1`). On here for dev; docker-compose.production.yml and
+      # docker-compose.release.yml pin it to "false". Off to on bumps every Space's generation
+      # (clients resnapshot). Never an authorization input. Zero-retention runs never write rows.
+      SPACE_REALTIME_EMIT: ${SPACE_REALTIME_EMIT:-true}
+      # Space attention outbox (WS11-S5): one content-free event per persistent log row on
+      # mp.v1.space.<ref>.event. Stays off while SPACE_REALTIME_EMIT is off. On here for dev;
+      # docker-compose.production.yml and docker-compose.release.yml pin it to "false".
+      # Never an authorization input and never a ZDR control.
+      SPACE_ATTENTION_EMIT: ${SPACE_ATTENTION_EMIT:-true}
+      SPACE_EVENT_LOG_RETENTION_DAYS: ${SPACE_EVENT_LOG_RETENTION_DAYS:-14}
+      # Read by the SpaceEvents stream (WS02-S3), inert until then.
+      SPACE_STREAM_DB_POOL: ${SPACE_STREAM_DB_POOL:-8}
+      SPACE_STREAM_MAX_STREAMS: ${SPACE_STREAM_MAX_STREAMS:-5000}
+      # Space memory containment (WS17-S1): a shared-room thread learns nothing into personal or
+      # tenant memory and recalls only its own rows. ON in every environment; only an exact
+      # `0`, `false` or `off` (plus a restart) restores the old behaviour. Never an authorization input.
+      MEMORY_SPACE_CONTAINMENT: ${MEMORY_SPACE_CONTAINMENT:-1}
+      # Member append path (WS01-S3): a Space member who does not own a thread may append a human
+      # `post` to it, only with a v2 Control decision. OFF unless set; dev override turns it on.
+      # Never an authorization input.
+      SPACE_HUMAN_POSTS_CORE: ${SPACE_HUMAN_POSTS_CORE:-0}
+      # Space message search (WS13-S1): SpaceHistoryService answers SearchMessages/ResolveMessage over
+      # the 0077 index. OFF unless set; dev override turns it on. Gates the query path only (the index
+      # is built either way). Never an authorization input.
+      SPACE_MESSAGE_SEARCH_CORE: ${SPACE_MESSAGE_SEARCH_CORE:-0}
+      # Message revisions (WS12-S4): ReviseMessage edits or deletes one Space message under a
+      # Control `model.thread.revise` decision. OFF unless set; dev override turns it on. The
+      # fold that shows revisions on every read has no switch. Never an authorization input.
+      SPACE_MESSAGE_REVISE_CORE: ${SPACE_MESSAGE_REVISE_CORE:-0}
+      # Identity-bound mentions of a human post, and addressed agent wake-up (WS08-S2). Rollout
+      # controls, never authorization inputs: Control's signed decision decides.
+      SPACE_MENTION_RECORDS_CORE: ${SPACE_MENTION_RECORDS_CORE:-0}
+      # Cross-room attention aggregate (WS11-S2): SpaceAttention.GetSpaceAttention. OFF unless set;
+      # dev override turns it on. Never an authorization input: each Space's Control read decision decides.
+      SPACE_ATTENTION_SUMMARY: ${SPACE_ATTENTION_SUMMARY:-0}
+      # WS15-S6: SpaceRoomReadService.ListSpaceTimeline and the include_first tail transcript. OFF unless
+      # set; dev override turns it on. The activity trigger and backfill (0078) always run. Never an
+      # authorization input: each Space read decision decides.
+      SPACE_TIMELINE_CORE: ${SPACE_TIMELINE_CORE:-0}
+      # Approval addressee and member decide (WS10-S6): a Space member other than the run owner
+      # decides, or reroutes, an approval with a Control `model.approval.decide` / `.reroute`
+      # decision. OFF unless set; dev override turns it on. Never an authorization input.
+      SESSION_CORE_APPROVAL_MEMBER_DECIDE: ${SESSION_CORE_APPROVAL_MEMBER_DECIDE:-0}
+      # WS04-S11: honour the signed `history_floor_revision` claim of a `since_join` room on transcript,
+      # thread and run reads. OFF unless set (full history); dev override turns it on. Paired with
+      # user-core SPACE_HISTORY_WINDOW_CLAIM. Never an authorization input: a presentation rule only.
+      SESSION_CORE_SPACE_HISTORY_FLOOR: ${SESSION_CORE_SPACE_HISTORY_FLOOR:-0}
+      SPACE_WAKE_CORE: ${SPACE_WAKE_CORE:-0}
       SESSION_CORE_LOOP_CHECKPOINT_ENABLED: ${SESSION_CORE_LOOP_CHECKPOINT_ENABLED:-false}
       # Sweep that closes a tool reservation still open long after its run ended or
       # parked, as `unknown_outcome` (WS03 S5). Off by default: turning it on changes
@@ -1288,6 +1375,17 @@ services:
     # sysctl `kernel.unprivileged_userns_clone=1` (host-level, not compose).
     security_opt:
       - seccomp=./seccomp-bwrap.json
+    # Container resource limits (WS06-S7). Starting values, calibrated by WS06-S10:
+    # the tmpfs /tmp (512m in production) counts against mem_limit, and the pids
+    # budget covers tokio's blocking pool (up to 512 threads) plus a fork-bomb margin.
+    mem_limit: ${EXECUTION_CORE_MEM_LIMIT:-3g}
+    memswap_limit: ${EXECUTION_CORE_MEM_LIMIT:-3g}
+    cpus: ${EXECUTION_CORE_CPUS:-3.0}
+    pids_limit: ${EXECUTION_CORE_PIDS_LIMIT:-1536}
+    ulimits:
+      nofile:
+        soft: 16384
+        hard: 16384
     build:
       context: ..
       dockerfile: rust/services/execution-core/Dockerfile
@@ -1297,6 +1395,37 @@ services:
       - "127.0.0.1:9093:9093"   # gRPC compatibility probe; production overlay removes host ports
     environment:
       RUST_LOG: info
+      # Sandbox spawn bounds (WS06-S7). Per-stream output cap in bytes (the child is killed
+      # past it), process-wide concurrent sandbox spawns, and how long a spawn waits for a
+      # permit before the step fails "sandbox is busy, retry later". Invalid or zero values
+      # fall back to these defaults. Starting values, calibrated by WS06-S10.
+      EXECUTION_SANDBOX_MAX_OUTPUT_BYTES: ${EXECUTION_SANDBOX_MAX_OUTPUT_BYTES:-1048576}
+      EXECUTION_SANDBOX_MAX_CONCURRENT: ${EXECUTION_SANDBOX_MAX_CONCURRENT:-8}
+      EXECUTION_SANDBOX_QUEUE_WAIT_MS: ${EXECUTION_SANDBOX_QUEUE_WAIT_MS:-5000}
+      # WS06-S8 per-spawn prlimit ceilings on every sandboxed child. `off` is the only
+      # way out and warns at every start; any other value enforces. CPU seconds are the
+      # call's wall timeout times the factor. Starting values, calibrated by WS06-S10.
+      EXECUTION_SANDBOX_LIMITS: ${EXECUTION_SANDBOX_LIMITS:-enforce}
+      EXECUTION_SANDBOX_CPU_FACTOR: ${EXECUTION_SANDBOX_CPU_FACTOR:-2}
+      EXECUTION_SANDBOX_MAX_ADDRESS_SPACE_MB: ${EXECUTION_SANDBOX_MAX_ADDRESS_SPACE_MB:-4096}
+      EXECUTION_SANDBOX_MAX_FILE_MB: ${EXECUTION_SANDBOX_MAX_FILE_MB:-64}
+      EXECUTION_SANDBOX_MAX_OPEN_FILES: ${EXECUTION_SANDBOX_MAX_OPEN_FILES:-1024}
+      # WS06-S9 Space `shell` lease rule: `observe` (default) leases when it can and counts
+      # the unleased calls; `enforce` refuses a Space shell call without a sandbox lease.
+      EXECUTION_CORE_SPACE_SHELL_LEASE: ${EXECUTION_CORE_SPACE_SHELL_LEASE:-observe}
+      # Build plan WS10-S3 Space approval gate: `off` keeps today's behaviour, `shadow` reads
+      # Control's per-tool levels and only counts where they would differ, `enforce` folds them
+      # with the existing gates and passes an ask by a spent once-approval or a Control
+      # standing rule. Dev enforces; production and release ship `off`. Never an authorization
+      # input. The Control token is a service credential for tool-gate-view,
+      # approval-grants/use and approval-continuation-check; blank means the gate runs
+      # without Control (the once-token still works, per-tool levels and standing rules do not).
+      EXECUTION_CORE_SPACE_APPROVAL_GATE: ${EXECUTION_CORE_SPACE_APPROVAL_GATE:-enforce}
+      # Quarantine-and-release of flagged tool output (WS10-S8): dev counts and logs only; a Space
+      # must also set its own quarantine_mode in Control before anything is held.
+      EXECUTION_CORE_QUARANTINE_MODE: ${EXECUTION_CORE_QUARANTINE_MODE:-shadow}
+      EXECUTION_CORE_CONTROL_APPROVAL_GATE_TOKEN: ${EXECUTION_CORE_CONTROL_APPROVAL_GATE_TOKEN:-}
+      EXECUTION_CORE_ALLOW_INSECURE_APPROVAL_GATE_LOOPBACK: ${EXECUTION_CORE_ALLOW_INSECURE_APPROVAL_GATE_LOOPBACK:-false}
       # Build plan WS03 S2: raise Do-loop approvals as loop-owned (consumed once by
       # the durable loop through ConsumeApproval) instead of the cold delivery
       # worker's. OFF by default and never for ZDR runs. Stage 1 `/continue` is
@@ -2022,6 +2151,8 @@ services:
       SANDBOX_MANAGER_THREAD_WORKSPACE: ${SANDBOX_MANAGER_THREAD_WORKSPACE:-}
       SANDBOX_MANAGER_THREAD_MAX_FILES: ${SANDBOX_MANAGER_THREAD_MAX_FILES:-256}
       SANDBOX_MANAGER_THREAD_MAX_BYTES: ${SANDBOX_MANAGER_THREAD_MAX_BYTES:-67108864}
+      # WS06-S6: refuse a token with no retention claim at all. Exact match, only "on" enables; a token that says zdr:true is refused regardless.
+      SANDBOX_MANAGER_REQUIRE_RETENTION_CLAIM: ${SANDBOX_MANAGER_REQUIRE_RETENTION_CLAIM:-off}
       CONTROL_SPACE_DECISION_KEY_ID: ${CONTROL_SPACE_DECISION_KEY_ID:-}
       CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64: ${CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64:-}
     depends_on:

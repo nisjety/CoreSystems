@@ -319,6 +319,17 @@ impl BrowserEventSink for OrchestrationEventSink {
                 detail.risk_category.as_str()
             ),
             continuation_descriptor_json: String::new(),
+            // A live approval: the running browser loop polls it, no worker resumes it, and
+            // the card must say so (build plan WS10 S1).
+            tool_key: String::new(),
+            action_digest: String::new(),
+            turn_origin: String::new(),
+            grant_use_token: String::new(),
+            context_json: crate::space_gate::card_context_json(
+                BROWSER_AGENT_TOOL,
+                "",
+                crate::space_gate::RESUME_LIVE_POLL,
+            ),
             // The in-loop gate has no tool call to key on, only the category the
             // risk classifier assigned the Model's proposed action.
             cause: Some(pb::ApprovalCause {
@@ -327,6 +338,7 @@ impl BrowserEventSink for OrchestrationEventSink {
                 risk_category: detail.risk_category.as_str().to_owned(),
                 ..approval_cause::for_code(CauseCode::BrowserActionRisk)
             }),
+            ..Default::default()
         }) {
             Ok(request) => orchestration.create_approval(request).await,
             Err(error) => Err(error),
@@ -401,6 +413,7 @@ impl BrowserEventSink for OrchestrationEventSink {
                 // created with this same org_id above, so asserting it
                 // here is a real ownership check, not a no-op.
                 org_id: config.org_id.clone(),
+                ..Default::default()
             });
             let approval_result = match approval_request {
                 Ok(request) => orchestration.get_approval(request).await,
@@ -545,6 +558,42 @@ mod tests {
 
     #[tonic::async_trait]
     impl OrchestrationCoreService for NeverResolvingOrchestration {
+        // Main's RPCs (merged 2026-11-02); this double does not serve them.
+        async fn reroute_approval(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::RerouteApprovalRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::RerouteApprovalResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("reroute_approval is not served by this double"))
+        }
+
+        async fn claim_once_approval(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::ClaimOnceApprovalRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ClaimOnceApprovalResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("claim_once_approval is not served by this double"))
+        }
+
+        async fn hold_quarantined_output(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::HoldQuarantinedOutputRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::HoldQuarantinedOutputResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("hold_quarantined_output is not served by this double"))
+        }
+
+        async fn claim_quarantine_release(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::ClaimQuarantineReleaseRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ClaimQuarantineReleaseResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("claim_quarantine_release is not served by this double"))
+        }
+
+        async fn get_quarantine_preview(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::GetQuarantinePreviewRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetQuarantinePreviewResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("get_quarantine_preview is not served by this double"))
+        }
+
         async fn get_run_proof_bundle(
             &self,
             _: TonicRequest<mp_contracts::model_plane::v1::GetRunProofBundleRequest>,
@@ -610,6 +659,9 @@ mod tests {
             Ok(Response::new(CreateApprovalResponse {
                 approval: Some(pb::Approval {
                     consumed_at: None,
+                    tool_key: String::new(),
+                    action_label: String::new(),
+                    continuation: None,
                     continuation_mode: String::new(),
                     id: "appr-test-1".into(),
                     run_id: request.run_id,
@@ -625,6 +677,7 @@ mod tests {
                     expires_at: None,
                     org_id: request.org_id,
                     cause: request.cause,
+                    ..Default::default()
                 }),
             }))
         }
@@ -651,6 +704,9 @@ mod tests {
             Ok(Response::new(GetApprovalResponse {
                 approval: Some(pb::Approval {
                     consumed_at: None,
+                    tool_key: String::new(),
+                    action_label: String::new(),
+                    continuation: None,
                     continuation_mode: String::new(),
                     id: approval_id,
                     run_id: "run_001".into(),
@@ -666,6 +722,7 @@ mod tests {
                     expires_at: None,
                     org_id: "org_test".into(),
                     cause: None,
+                    ..Default::default()
                 }),
             }))
         }
@@ -717,6 +774,9 @@ mod tests {
             Ok(Response::new(DecideApprovalResponse {
                 approval: Some(pb::Approval {
                     consumed_at: None,
+                    tool_key: String::new(),
+                    action_label: String::new(),
+                    continuation: None,
                     continuation_mode: String::new(),
                     id: request.approval_id,
                     run_id: "run_001".into(),
@@ -732,6 +792,7 @@ mod tests {
                     expires_at: None,
                     org_id: "org_test".into(),
                     cause: None,
+                    ..Default::default()
                 }),
             }))
         }

@@ -717,6 +717,20 @@ describe('mid-run queued input', () => {
       expect('idempotency_key' in buildChatWireBody({ content: 'hi', clientMessageId: 'msg-1', zdr: true })).toBe(false)
       expect('idempotency_key' in buildChatWireBody({ content: 'hi', clientMessageId: '' })).toBe(false)
     })
+
+    // WS01-S8: a send that opens a new Space thread names its session key from the send id, so a
+    // repeat resolves to the thread the first one created. A reply keeps the thread id as before.
+    it('puts the session key on the wire for a new-thread send, and falls back to the thread id for a reply', () => {
+      const sendId = 'a'.repeat(32)
+      const fresh = buildChatWireBody({ content: 'hi', clientMessageId: sendId, sessionKey: `space-post-${sendId}` })
+      expect(fresh.idempotency_key).toBe(sendId)
+      expect(fresh.session_key).toBe(`space-post-${sendId}`)
+      const reply = buildChatWireBody({ content: 'hi', clientMessageId: sendId, threadId: 'thr_7' })
+      expect(reply.session_key).toBe('thr_7')
+      expect(reply.thread_id).toBe('thr_7')
+      // A blank key is no key.
+      expect(buildChatWireBody({ content: 'hi', sessionKey: '   ', threadId: 'thr_7' }).session_key).toBe('thr_7')
+    })
   })
 })
 

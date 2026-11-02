@@ -1,0 +1,13 @@
+/* Space connectivity banner (WS01-S8). Lives beside the component rather than
+   in global.css so it does not touch that file's uncommitted lines. Warm, not
+   red: the message is safe and a send is never lost silently. */
+
+.verevon-space-connectivity {
+  margin: 0;
+  border: 1px solid color-mix(in srgb, var(--warning) 34%, var(--verevon-border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--warning) 7%, var(--verevon-surface));
+  padding: 8px 12px;
+  color: var(--warning-ink);
+  font-size: 12px;
+}

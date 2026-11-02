@@ -7,6 +7,7 @@ export const workspaceSettingsSectionIds = [
   'org-security',
   'integrations',
   'trust',
+  'audit-log',
   'router-policy',
   'finetune',
   'mcp',
@@ -19,6 +20,7 @@ export const workspaceSettingsSectionIds = [
   'model-access',
   'browser-sites',
   'org-browser-policy',
+  'space-policy',
   'memory',
   'learning',
 ] as const
@@ -100,6 +102,14 @@ export const workspaceSettingsSections: SectionDetail[] = [
       'See exactly what each connected app can access, what data the AI has fetched, and how it is retained.',
     saveLabel: 'Save trust settings',
     keywords: ['tillit', 'tillitssenter', 'personvern', 'privacy', 'retensjon', 'retention', 'oppbevaring', 'tilkoblede apper', 'connected apps', 'ai-aktivitet', 'ai activity', 'revisjon', 'audit'],
+  },
+  {
+    id: 'audit-log',
+    label: 'Audit log',
+    title: 'Audit log',
+    description: 'Browse the organization audit trail: who did what, when, and with what outcome. Owners and admins only; content-free by design.',
+    saveLabel: 'Save audit log',
+    keywords: ['revisjonslogg', 'logg', 'audit log', 'audit trail', 'hendelser', 'events', 'hvem gjorde hva'],
   },
   {
     id: 'router-policy',
@@ -196,6 +206,14 @@ export const workspaceSettingsSections: SectionDetail[] = [
     description: 'Hvilke nettsider agenten kan åpne for medlemmene. Bare eiere og administratorer kan endre policyen.',
     saveLabel: 'Lagre nettleserpolicy',
     keywords: ['nettleserpolicy', 'blokkering', 'nettsider', 'blocked', 'websites', 'browser policy'],
+  },
+  {
+    id: 'space-policy',
+    label: 'Rom-policy',
+    title: 'Rom-policy',
+    description: 'Hva organisasjonen tillater i rom: samtale, kunnskap og agenter. Gjelder alle rom; en administrator endrer, Control Plane håndhever og logger.',
+    saveLabel: 'Lagre rom-policy',
+    keywords: ['rom', 'rooms', 'rompolicy', 'room policy', 'space policy', 'agenter i rom', 'kunnskap', 'knowledge'],
   },
   {
     id: 'memory',

@@ -2373,7 +2373,10 @@ fn after() { WRITE }
     /// with the reason. Empty today: every test-seeding write sits in a
     /// `#[cfg(test)]` module of its file, which the scan leaves out. An entry that
     /// no longer matches a write fails the tripwire, so the list cannot go stale.
-    const TEST_SEEDING_WRITES: &[(&str, &str)] = &[];
+    const TEST_SEEDING_WRITES: &[(&str, &str)] = &[(
+        "run_phase_tests.rs",
+        "WS09-S1 DB tests seed a terminal status to prove the thread run guard releases",
+    )];
 
     fn rust_sources(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
         for entry in std::fs::read_dir(dir).expect("read a source directory") {

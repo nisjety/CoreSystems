@@ -248,6 +248,23 @@ func (r *Repository) CompleteErasureLocalStage(ctx context.Context, operation Er
 		}
 	}
 
+	// WS04-S4: the Space membership ledger keeps ids only; the erased user's
+	// ids are replaced by a one-way pseudonym so the history stays countable
+	// without naming anyone.
+	pseudonymDigest := sha256.Sum256([]byte("space-membership-ledger:" + operation.UserID))
+	ledgerPseudonym := fmt.Sprintf("erased_%x", pseudonymDigest[:16])
+	for _, statement := range []struct {
+		name  string
+		query string
+	}{
+		{name: "space membership ledger actor", query: `UPDATE space_membership_events SET actor_id = $2 WHERE actor_kind = 'user' AND actor_id = $1`},
+		{name: "space membership ledger subject", query: `UPDATE space_membership_events SET subject_id = $2 WHERE subject_type = 'user' AND subject_id = $1`},
+	} {
+		if _, err := tx.Exec(ctx, statement.query, operation.UserID, ledgerPseudonym); err != nil {
+			return fmt.Errorf("pseudonymize %s: %w", statement.name, err)
+		}
+	}
+
 	switch operation.Mode {
 	case ErasureModeHardDelete:
 		if _, err := tx.Exec(ctx, `DELETE FROM user_org_memberships WHERE user_id = $1`, operation.UserID); err != nil {

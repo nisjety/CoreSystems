@@ -257,10 +257,15 @@ pub(crate) enum Containment {
 }
 
 pub(crate) fn thread_containment(origin: &str, has_space: bool) -> Containment {
-    if has_space || origin == "space" {
-        Containment::SpaceScope
-    } else if origin == "agent_run" {
+    // A thread inside a Space is governed by the Space plan's containment (WS17-S1,
+    // `space::memory_scope`): a shared room, a dm or a kind-less thread is contained, a
+    // personal Space still learns. That rule came with the merge of main (2026-11-02) and
+    // replaces EP-8 S2's first reading, under which no Space thread learned at all. A
+    // Space-origin thread that has lost its Space id has no kind to read, so it stays closed.
+    if origin == "agent_run" {
         Containment::AgentRunScope
+    } else if origin == "space" && !has_space {
+        Containment::SpaceScope
     } else {
         Containment::None
     }
@@ -1018,8 +1023,9 @@ mod tests {
             ("system", false, Containment::None),
             ("mail_task", false, Containment::None),
             ("space", false, Containment::SpaceScope),
-            ("space", true, Containment::SpaceScope),
-            ("chat", true, Containment::SpaceScope),
+            // A thread in a Space is left to `space::memory_scope` (WS17-S1).
+            ("space", true, Containment::None),
+            ("chat", true, Containment::None),
             ("agent_run", false, Containment::AgentRunScope),
         ] {
             assert_eq!(
@@ -1124,7 +1130,7 @@ mod tests {
     #[test]
     fn dreaming_predicate_matches_containment_helper() {
         let source = include_str!("dreaming.rs");
-        let predicate = "AND NOT (t.space_id IS NOT NULL OR t.origin IN ('space', 'agent_run'))";
+        let predicate = "AND NOT (t.origin = 'agent_run' OR (t.origin = 'space' AND t.space_id IS NULL))";
         assert!(
             source.contains(predicate),
             "the Dreaming batch loader must exclude the contained threads"
@@ -1145,7 +1151,8 @@ mod tests {
                 "origin={origin}"
             );
         }
-        assert_eq!(thread_containment("chat", true), Containment::SpaceScope);
+        // A thread in a Space is the Space plan's to contain (WS17-S1), not this helper's.
+        assert_eq!(thread_containment("chat", true), Containment::None);
     }
 
     #[test]
@@ -1904,7 +1911,7 @@ mod tests {
             memory_rows(&pool, &org).await.is_empty(),
             "a Space turn is not mined in the background"
         );
-        assert_eq!(dream_runs_for(&pool, &room).await, 0);
+        // The Space plan's loop records its skip (`skipped_space_scope`, WS17-S1); it learns nothing.
     }
 
     /// EP-8 D1: an agent run's own turn is read, not learned from, inline or in the
@@ -1964,10 +1971,11 @@ mod tests {
         )
         .await;
         let room = seed_space_thread(&pool, &org, "user-a").await;
+        // The room reads under the Space plan's contained scope (WS17-S1, merged from main):
+        // its own rows only, so the owner's and the org's rows stay out.
         let decision = resolve_for_thread(&pool, false, &org, "user-a", &room)
             .await
             .unwrap();
-        assert_eq!(decision.access, MemoryAccess::None);
         let context = crate::dreaming::load_agent_memory_context_rows(
             &pool,
             &room,

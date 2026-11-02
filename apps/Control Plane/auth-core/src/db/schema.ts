@@ -5,6 +5,7 @@ import {
   boolean,
   integer,
   bigint,
+  bigserial,
   uniqueIndex,
   uuid,
   check,
@@ -272,6 +273,21 @@ export const ssoProvider = pgTable('sso_provider', {
   samlConfig: text('saml_config'),
   userId: text('user_id').references(() => user.id, { onDelete: 'cascade' }),
   organizationId: text('organization_id'),
+});
+
+// Proof that a user signed in through an organisation's identity provider
+// (WS05-S7, migration 029). Ids and a time only; read by org-core before it
+// lets an organisation switch its SSO policy to enforce.
+export const ssoSigninEvidence = pgTable('sso_signin_evidence', {
+  id: bigserial('id', { mode: 'number' }).primaryKey(),
+  userId: text('user_id')
+    .notNull()
+    .references(() => user.id, { onDelete: 'cascade' }),
+  organizationId: text('organization_id').notNull(),
+  providerId: text('provider_id').notNull(),
+  signedInAt: timestamp('signed_in_at', { withTimezone: true })
+    .notNull()
+    .defaultNow(),
 });
 
 // OIDC Provider - OAuth Applications

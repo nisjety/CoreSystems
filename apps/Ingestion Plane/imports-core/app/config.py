@@ -87,6 +87,14 @@ class Settings(BaseSettings):
     allowed_file_types_raw: str = Field(
         default="pdf,docx,txt,md,csv,json,html,htm", alias="ALLOWED_FILE_TYPES"
     )
+    # WS14-S6 room files. A rollout control, never an authorization input: only
+    # the literal "true" turns it on, and the route still needs a Control decision.
+    imports_space_upload: str = Field(default="false", alias="IMPORTS_SPACE_UPLOAD")
+    space_upload_allowed_types_raw: str = Field(
+        default="pdf,docx,xlsx,pptx,txt,md,csv,json", alias="SPACE_UPLOAD_ALLOWED_TYPES"
+    )
+    space_upload_max_files: int = Field(default=10, alias="SPACE_UPLOAD_MAX_FILES")
+    space_upload_max_file_mb: int = Field(default=25, alias="SPACE_UPLOAD_MAX_FILE_MB")
     document_processor_order_raw: str = Field(
         default="local", alias="DOCUMENT_PROCESSOR_ORDER"
     )
@@ -103,6 +111,14 @@ class Settings(BaseSettings):
     @property
     def allowed_file_types(self) -> List[str]:
         return [item.strip().lower() for item in self.allowed_file_types_raw.split(",") if item.strip()]
+
+    @property
+    def space_upload_allowed_types(self) -> List[str]:
+        return [
+            item.strip().lower()
+            for item in self.space_upload_allowed_types_raw.split(",")
+            if item.strip()
+        ]
 
     @property
     def document_processor_order(self) -> List[str]:

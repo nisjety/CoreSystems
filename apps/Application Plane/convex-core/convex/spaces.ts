@@ -17,6 +17,15 @@ import {
   recipientAudienceHash,
   spaceRecipientAudienceRef,
 } from "./spaceAudience";
+import { normalizeRoomDetails } from "./spaceRoomRules";
+import { recordRoomNotice } from "./spaceRoomNotices";
+import {
+  DmParticipantError,
+  canonicalParticipants,
+  dmKindForCount,
+  dmOpenEnabled,
+  participantSetHash,
+} from "./spaceParticipants";
 import {
   SPACE_DELETION_OWNERS,
   aggregateDeletionReceipts,
@@ -403,6 +412,133 @@ export const createRoomForGateway = mutation({
 });
 
 /**
+ * WS12-S2 -- open (or return) the direct message for one exact set of people.
+ *
+ * `participantExternalAuthIds` are the OTHER people; the caller is added here, so
+ * the roster is `caller + others` canonicalised (byte order, 2 to 9, no
+ * duplicates, no self). The set's hash (`spaceParticipants.ts`, equal to
+ * Control's `ParticipantSetHash`) is the identity: the same set always resolves
+ * to the one live DM of the organization whoever opens it. A second caller (or a
+ * second tab) gets `created:false` and the existing Space; Convex mutations are
+ * serializable, so two simultaneous opens cannot create two Spaces.
+ *
+ * What this mutation is NOT: an authority. The gateway has already asked Control
+ * `dm-eligibility` (entitlements, ZDR, active org members) and passes Control's
+ * hash as `expectedHash`; a mismatch is refused. Control still registers the Space
+ * and its fixed membership when the lifecycle event is delivered
+ * (`spaceRegistration.ts` sends `participants` + `participant_hash`), and nothing
+ * can be posted until it is `active`.
+ *
+ * Flag `SPACE_DM_OPEN` (Convex env, off by default): off refuses before any read
+ * or write. Failures throw a stable `code[:detail]` message the gateway maps to
+ * its typed envelope: `dm_disabled`, `dm_participants_invalid:<count|duplicate|
+ * empty|self>`, `dm_participant_hash_mismatch`, `dm_participant_not_member`,
+ * `dm_registration_failed`.
+ */
+export const openDmForGateway = mutation({
+  args: {
+    serviceKey: v.string(),
+    externalAuthId: v.string(),
+    externalOrgId: v.string(),
+    participantExternalAuthIds: v.array(v.string()),
+    expectedHash: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    assertServiceKey(args.serviceKey);
+    if (!dmOpenEnabled()) throw new Error("dm_disabled");
+    const organization = await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
+
+    const caller = args.externalAuthId.trim();
+    if (args.participantExternalAuthIds.some((id) => id.trim() === caller)) {
+      throw new Error("dm_participants_invalid:self");
+    }
+    let roster: string[];
+    let hash: string;
+    let kind: "dm" | "group_dm";
+    try {
+      roster = canonicalParticipants([caller, ...args.participantExternalAuthIds]);
+      kind = dmKindForCount(roster.length);
+      hash = await participantSetHash(roster);
+    } catch (error) {
+      if (error instanceof DmParticipantError) {
+        throw new Error(`dm_participants_invalid:${error.reason}`);
+      }
+      throw error;
+    }
+    if (args.expectedHash !== undefined && args.expectedHash !== hash) {
+      throw new Error("dm_participant_hash_mismatch");
+    }
+
+    // Every participant must be an active Application member of this
+    // organization (the same lookup `replaceRecipientAudience` makes).
+    for (const participant of roster) {
+      const candidates = await ctx.db
+        .query("users")
+        .withIndex("by_external_and_org", (q: any) =>
+          q.eq("externalAuthId", participant).eq("orgId", organization._id),
+        )
+        .collect();
+      if (!candidates.some((candidate: any) => candidate.syncStatus !== "deleted")) {
+        throw new Error("dm_participant_not_member");
+      }
+    }
+
+    const sameSet = await ctx.db
+      .query("spaces")
+      .withIndex("by_org_participant_hash", (q: any) =>
+        q.eq("externalOrgId", args.externalOrgId).eq("participantHash", hash),
+      )
+      .collect();
+    const live = sameSet.find((space: any) =>
+      space.lifecycle === "pending_registration" ||
+      space.lifecycle === "active" ||
+      space.lifecycle === "suspended",
+    );
+    if (live) {
+      // Opening a DM is a deliberate act: it shows the DM again for the caller.
+      const hides = await ctx.db
+        .query("spaceDmHides")
+        .withIndex("by_space_and_viewer", (q: any) =>
+          q.eq("spaceRef", live.spaceRef).eq("externalAuthId", caller),
+        )
+        .collect();
+      for (const hide of hides) await ctx.db.delete(hide._id);
+      return { space: live, created: false };
+    }
+    if (sameSet.some((space: any) => space.lifecycle === "failed_registration")) {
+      throw new Error("dm_registration_failed");
+    }
+
+    const now = Date.now();
+    const recordId = await ctx.db.insert("spaces", {
+      spaceRef: "pending",
+      externalOrgId: args.externalOrgId,
+      kind,
+      // A label only: the SPA renders the other participants' names, and the
+      // stored name never carries a person's name (it would leak into labels).
+      name: "Direct message",
+      participantHash: hash,
+      participantExternalAuthIds: roster,
+      // The opener is the registration owner, a registration fact: Control's
+      // Register needs an owner principal inside the participant set. It is not
+      // a role in the DM, whose roster is fixed and has no managers.
+      ownerExternalAuthId: caller,
+      createdByExternalAuthId: caller,
+      lifecycle: "pending_registration",
+      lifecycleRevision: 1,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const spaceRef = String(recordId);
+    await ctx.db.patch(recordId, { spaceRef });
+    const space = await ctx.db.get(recordId);
+    if (!space) throw new Error("direct message creation failed");
+    await appendLifecycleEvent(ctx, space, now);
+    return { space, created: true };
+  },
+});
+
+/**
  * Display facts for every Space in an organization: name, kind, lifecycle.
  *
  * This is a LABEL source, not an access decision. Control owns memberships and
@@ -432,10 +568,87 @@ export const spacesForOrgForGateway = query({
     return spaces.map((space: any) => ({
       spaceRef: space.spaceRef,
       name: space.name,
+      topic: space.topic ?? null,
       kind: space.kind,
       lifecycle: space.lifecycle,
       isOrganizationRoom: space.isOrganizationRoom === true,
     }));
+  },
+});
+
+/**
+ * WS04-S2 -- rename a room and/or set its topic.
+ *
+ * Name and topic are display labels: not an authorization input, and never put
+ * in a prompt, event or notification (D-WS04-6). The role gate (Space owner or
+ * manager) is the gateway's Control check, the same trust split
+ * `setInstructionsForGateway` uses; this mutation re-verifies org membership,
+ * that the Space is a live `room` of that organization, and normalises the
+ * text with the shared pure rules. Failures throw a stable `code[:detail]`
+ * message the gateway maps to its typed envelope: `room_details_invalid:<field>:<reason>`,
+ * `space_not_found`, `space_kind_not_editable`, `room_not_active`.
+ */
+export const updateRoomDetailsForGateway = mutation({
+  args: {
+    serviceKey: v.string(),
+    externalAuthId: v.string(),
+    externalOrgId: v.string(),
+    spaceRef: v.string(),
+    name: v.optional(v.string()),
+    // Empty string clears the topic.
+    topic: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    assertServiceKey(args.serviceKey);
+    await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
+    const space = await getSpaceByRef(ctx, args.spaceRef);
+    if (!space || space.externalOrgId !== args.externalOrgId) throw new Error("space_not_found");
+    if (space.kind !== "room") throw new Error("space_kind_not_editable");
+    if (space.lifecycle !== "active") throw new Error("room_not_active");
+
+    if (args.name === undefined && args.topic === undefined) {
+      throw new Error("room_details_invalid:details:empty_update");
+    }
+    const normalized = normalizeRoomDetails({ name: args.name, topic: args.topic });
+    if (!normalized.ok) {
+      throw new Error(`room_details_invalid:${normalized.field}:${normalized.reason}`);
+    }
+
+    const patch: Record<string, unknown> = {
+      updatedAt: Date.now(),
+      updatedByExternalAuthId: args.externalAuthId,
+    };
+    if (normalized.value.name !== undefined) patch.name = normalized.value.name;
+    if (normalized.value.topic !== undefined) patch.topic = normalized.value.topic ?? undefined;
+    await ctx.db.patch(space._id, patch);
+
+    // WS15-S12: one timeline row per field that actually changed, in the same transaction.
+    // Ids and kinds only: the new name and topic are never copied into a notice.
+    if (normalized.value.name !== undefined && normalized.value.name !== space.name) {
+      await recordRoomNotice(ctx, {
+        spaceRef: space.spaceRef,
+        externalOrgId: args.externalOrgId,
+        kind: "room_renamed",
+        actorExternalAuthId: args.externalAuthId,
+      });
+    }
+    if (
+      normalized.value.topic !== undefined &&
+      (normalized.value.topic ?? null) !== (space.topic ?? null)
+    ) {
+      await recordRoomNotice(ctx, {
+        spaceRef: space.spaceRef,
+        externalOrgId: args.externalOrgId,
+        kind: "topic_changed",
+        actorExternalAuthId: args.externalAuthId,
+      });
+    }
+
+    return {
+      spaceRef: space.spaceRef,
+      name: normalized.value.name ?? space.name,
+      topic: normalized.value.topic !== undefined ? normalized.value.topic : (space.topic ?? null),
+    };
   },
 });
 
@@ -455,6 +668,44 @@ export const listActiveOrganizationRooms = internalQuery({
         spaceRef: space.spaceRef,
         externalOrgId: space.externalOrgId,
       }));
+  },
+});
+
+/** Every active non-personal Space: the set whose recipient audience the reconcile maintains (WS04-S5). */
+export const listActiveSharedSpaces = internalQuery({
+  args: {},
+  handler: async (ctx) => {
+    const spaces = await ctx.db.query("spaces").collect();
+    return spaces
+      .filter((space: any) => space.kind !== "personal" && space.lifecycle === "active")
+      .map((space: any) => ({
+        spaceRef: space.spaceRef,
+        externalOrgId: space.externalOrgId,
+      }));
+  },
+});
+
+/**
+ * The Space and its active recipient audience, for the reconcile's plan
+ * (WS04-S5). Returns ids that already live in Application; nothing goes to a
+ * browser.
+ */
+export const activeAudienceForReconcile = internalQuery({
+  args: { spaceRef: v.string() },
+  handler: async (ctx, args) => {
+    const space = await getSpaceByRef(ctx, args.spaceRef);
+    if (!space) return { space: null, audience: null };
+    const audience = await activeRecipientAudience(ctx, args.spaceRef);
+    return {
+      space: { kind: space.kind, lifecycle: space.lifecycle, externalOrgId: space.externalOrgId },
+      audience: audience
+        ? {
+            revision: audience.revision,
+            controlState: audience.controlState,
+            recipientExternalAuthIds: audience.recipientExternalAuthIds,
+          }
+        : null,
+    };
   },
 });
 
@@ -1039,6 +1290,12 @@ export const acknowledgeDeletionAuthorizationClaim = internalMutation({
     for (const audienceEvent of audienceEvents.filter((candidate: any) => candidate.spaceRef === request.spaceRef)) {
       await ctx.db.delete(audienceEvent._id);
     }
+    // WS11-S6: attention items, follows, preferences, reminders, agent activity,
+    // read markers and presence for the Space; pages itself in the background.
+    await ctx.scheduler.runAfter(0, internal.spaceAttentionIngest.purgeSpace, {
+      externalOrgId: space.externalOrgId,
+      spaceRef: request.spaceRef,
+    });
     const applicationReceipt = await ctx.db.query("spaceDeletionOwnerReceipts")
       .withIndex("by_request_and_owner", (q: any) => q.eq("requestId", request.requestId).eq("ownerPlane", "application"))
       .first();
@@ -1353,6 +1610,9 @@ export const claimNextRegistration = internalMutation({
       space: {
         kind: space.kind,
         ownerPrincipalId: space.ownerExternalAuthId ?? space.createdByExternalAuthId,
+        // WS12-S2: DM kinds only; undefined (and so omitted) for every other kind.
+        participantExternalAuthIds: space.participantExternalAuthIds,
+        participantHash: space.participantHash,
       },
     };
   },
@@ -1441,6 +1701,16 @@ export const acknowledgeRegistrationClaim = internalMutation({
         await ctx.scheduler.runAfter(0, internal.spaceMembershipSync.syncOrganizationRoom, {
           spaceRef: updated.spaceRef,
           externalOrgId: updated.externalOrgId,
+        });
+      }
+      // WS04-S5: every shared kind needs a recipient audience before any
+      // member can obtain a shared decision, not only the organization room.
+      // The action is flag-gated and idempotent; for the organization room it
+      // may run before the roster sync lands, and the post-sync call replaces
+      // the owner-only snapshot.
+      if (updated.kind !== "personal") {
+        await ctx.scheduler.runAfter(0, internal.spaceAudienceReconcile.reconcileRoomAudience, {
+          spaceRef: updated.spaceRef,
         });
       }
     }

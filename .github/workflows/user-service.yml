@@ -13,10 +13,14 @@ on:
     paths:
       - 'apps/Control Plane/user-core/**'
       - '.github/workflows/user-service.yml'
+      - 'scripts/lint-resource-taxonomy.sh'
+      - 'apps/Data Plane v2/services/retrieval-engine-rs/src/authz/taxonomy.rs'
   pull_request:
     branches: [main, develop]
     paths:
       - 'apps/Control Plane/user-core/**'
+      - 'scripts/lint-resource-taxonomy.sh'
+      - 'apps/Data Plane v2/services/retrieval-engine-rs/src/authz/taxonomy.rs'
 
 env:
   SERVICE_NAME: user-service
@@ -60,6 +64,12 @@ jobs:
 
       - name: Install dependencies
         run: go mod download
+
+      # WS14-S2: the ownable-vs-team resource taxonomy is one source of truth
+      # (user-core JSON, retrieval-engine Rust mirror); drift fails the build.
+      - name: Resource taxonomy lint
+        working-directory: '.'
+        run: bash scripts/lint-resource-taxonomy.sh
 
       - name: Run tests
         env:

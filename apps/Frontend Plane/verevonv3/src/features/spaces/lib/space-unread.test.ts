@@ -71,4 +71,53 @@ describe('unreadThreadIds', () => {
     expect(unreadThreadIds(threads, arrival, 'viewer').has('t1')).toBe(true)
     expect(unreadThreadIds(threads, advanced, 'viewer').has('t1')).toBe(false)
   })
+
+  // WS01-S7b: with last_author_subject_id the rule is "the latest message is
+  // mine", not "I started the thread". Kept identical to the Convex test.
+  describe('last_author_subject_id', () => {
+    const since = marker('2026-09-07T10:00:00Z')
+
+    it('badges a thread I started whose latest message is someone else’s', () => {
+      const ids = unreadThreadIds(
+        [thread('t1', '2026-09-07T11:00:00Z', { owner_subject_id: 'viewer', last_author_subject_id: 'someone-else' })],
+        since,
+        'viewer',
+      )
+      expect([...ids]).toEqual(['t1'])
+    })
+
+    it('does not badge a thread whose latest message is mine', () => {
+      const ids = unreadThreadIds(
+        [thread('t1', '2026-09-07T11:00:00Z', { owner_subject_id: 'someone-else', last_author_subject_id: 'viewer' })],
+        since,
+        'viewer',
+      )
+      expect(ids.size).toBe(0)
+    })
+
+    it('still applies the owner rule when the field is absent', () => {
+      const ids = unreadThreadIds(
+        [
+          thread('mine', '2026-09-07T11:00:00Z', { owner_subject_id: 'viewer' }),
+          thread('theirs', '2026-09-07T11:00:00Z'),
+        ],
+        since,
+        'viewer',
+      )
+      expect([...ids]).toEqual(['theirs'])
+    })
+
+    it('treats an empty string as absent', () => {
+      const ids = unreadThreadIds(
+        [
+          thread('mine', '2026-09-07T11:00:00Z', { owner_subject_id: 'viewer', last_author_subject_id: '' }),
+          thread('blank', '2026-09-07T11:00:00Z', { owner_subject_id: 'viewer', last_author_subject_id: '  ' }),
+          thread('theirs', '2026-09-07T11:00:00Z', { last_author_subject_id: '' }),
+        ],
+        since,
+        'viewer',
+      )
+      expect([...ids]).toEqual(['theirs'])
+    })
+  })
 })

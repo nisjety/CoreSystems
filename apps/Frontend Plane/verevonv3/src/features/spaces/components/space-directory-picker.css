@@ -1,0 +1,17 @@
+/* WS04-S9: the shared people-and-agent picker. Inherits the member-picker tokens; no new colours. */
+.verevon-directory-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.verevon-directory-picker__agent {
+  opacity: 0.9;
+}
+.verevon-directory-picker__badge {
+  flex: none;
+  padding: 0.1rem 0.5rem;
+  border: 1px solid rgb(128 128 128 / 0.4);
+  border-radius: 999px;
+  font-size: 0.75rem;
+  white-space: nowrap;
+}

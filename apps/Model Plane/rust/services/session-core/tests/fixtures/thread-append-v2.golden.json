@@ -1,0 +1,24 @@
+{
+  "comment": "Shared Control/Session Core vector for the thread-append payload digest. v1 authorizes a turn, v2 binds post_kind. The Rust copy lives at apps/Model Plane/rust/services/session-core/tests/fixtures/thread-append-v2.golden.json and is sha-pinned in grpc.rs. Change the digests only on an intended wire change, on both sides.",
+  "input": {
+    "org_id": "org-1",
+    "user_id": "user-2",
+    "thread_id": "thread-1",
+    "space_id": "space-room-1",
+    "space_decision_ref": "decision-1",
+    "recipient_audience_ref": "audience:space-room-1:4",
+    "recipient_audience_hash": "sha256:audience-hash",
+    "privacy_policy_ref": "privacy:org-1:5",
+    "resource_authorization_ref": "control:space-room-1:thread-append:7",
+    "content": "hello room",
+    "idempotency_key": "append-1",
+    "authority_revision": 7,
+    "recipient_audience_revision": 4
+  },
+  "expected": {
+    "v1_schema": "sha256:thread-append-v1",
+    "v1_digest": "sha256:8bd67bb42586cfdb8bc89dd6da99cfc1eab872b697d29c59f8a2ed1e898fcf2f",
+    "v2_schema": "sha256:thread-append-v2",
+    "v2_post_digest": "sha256:88f9cb97146c5c20b7a496698c9cf28af9d682adef09faf0bea790f7f41f9a8e"
+  }
+}

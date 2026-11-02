@@ -91,3 +91,5 @@ replace google.golang.org/genproto => google.golang.org/genproto v0.0.0-20260414
 replace github.com/triodelab/model-plane/gen/go => ../../gen
 
 replace github.com/triodelab/model-plane/pkg/authctx => ../../pkg/authctx
+
+replace github.com/triodelab/model-plane/pkg/zdrrefusal => ../../pkg/zdrrefusal

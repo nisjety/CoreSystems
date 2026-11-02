@@ -34,6 +34,11 @@ services:
     build: !reset null
     image: ${SESSION_CORE_RELEASE_IMAGE:?SESSION_CORE_RELEASE_IMAGE digest is required}
     pull_policy: never
+    environment:
+      # Space event log (WS02-S1): release artifacts ship with emit off.
+      SPACE_REALTIME_EMIT: "false"
+      # Space attention outbox (WS11-S5): release artifacts ship with emit off.
+      SPACE_ATTENTION_EMIT: "false"
   inference-core:
     build: !reset null
     image: ${INFERENCE_CORE_RELEASE_IMAGE:?INFERENCE_CORE_RELEASE_IMAGE digest is required}
@@ -42,6 +47,10 @@ services:
     build: !reset null
     image: ${EXECUTION_CORE_RELEASE_IMAGE:?EXECUTION_CORE_RELEASE_IMAGE digest is required}
     pull_policy: never
+    environment:
+      # Space approval gate (WS10-S3): release artifacts ship with the gate off.
+      EXECUTION_CORE_SPACE_APPROVAL_GATE: "off"
+      EXECUTION_CORE_QUARANTINE_MODE: "off"
   orchestrator-core:
     build: !reset null
     image: ${ORCHESTRATOR_CORE_RELEASE_IMAGE:?ORCHESTRATOR_CORE_RELEASE_IMAGE digest is required}

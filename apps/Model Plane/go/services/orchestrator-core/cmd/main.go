@@ -28,6 +28,7 @@ import (
 	"github.com/triodelab/model-plane/services/orchestrator-core/cmd/workflows"
 	"github.com/triodelab/model-plane/services/orchestrator-core/internal/compat"
 	"github.com/triodelab/model-plane/services/orchestrator-core/internal/config"
+	"github.com/triodelab/model-plane/services/orchestrator-core/internal/decisionkey"
 	"github.com/triodelab/model-plane/services/orchestrator-core/internal/feedback"
 	"github.com/triodelab/model-plane/services/orchestrator-core/internal/grpcclient"
 	"github.com/triodelab/model-plane/services/orchestrator-core/internal/natsadapter"
@@ -42,6 +43,13 @@ func main() {
 	slog.Info("orchestrator-core starting")
 
 	cfg := config.Load()
+
+	// F11: a configured-but-unusable Control decision key is a boot error, not a
+	// scheduled-run lane that quietly fails closed. Unset is allowed (warned).
+	if err := decisionkey.BootCheck(logger, "orchestrator-core", cfg.ControlSpaceDecisionKeyID, cfg.ControlSpaceDecisionPublicKeyBase64); err != nil {
+		slog.Error("Control decision key configuration is unusable; refusing to start", "error", err)
+		os.Exit(1)
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()

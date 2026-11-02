@@ -890,6 +890,7 @@ mod db_tests {
         parent_run_id: &str,
     ) -> pb::StartManagedRunRequest {
         pb::StartManagedRunRequest {
+            wake: None,
             thread_id: seeded.thread.clone(),
             parent_run_id: parent_run_id.to_owned(),
             agent_id: "general-v1".to_owned(),

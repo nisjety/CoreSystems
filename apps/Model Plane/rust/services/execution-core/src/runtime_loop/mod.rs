@@ -967,6 +967,16 @@ async fn execute_step_inner(
     // Set when the user's broker-validated run grant satisfied the high-risk ask
     // (`browser_grant_approval`); recorded on the run once every later gate passed.
     let mut grant_approval: Option<browser_grant_approval::GrantApproval> = None;
+    // Build plan WS10 S3: on a Space-scoped step the three existing `ask` gates below become inputs
+    // to one fold with Control's per-tool level instead of returning at once (enforce), or are
+    // observed against it (shadow). `off`, and every non-Space step, keeps today's returns.
+    let gate_mode = if sandbox.is_some() && !released {
+        crate::space_gate::GateMode::from_env()
+    } else {
+        crate::space_gate::GateMode::Off
+    };
+    let gate_enforced = gate_mode == crate::space_gate::GateMode::Enforce;
+    let mut deferred_ask: Option<CauseCode> = None;
     match capability_policy
         .evaluate_tool_call(tool_name, run_id, org_id, user_id)
         .await
@@ -998,6 +1008,7 @@ async fn execute_step_inner(
                 &evaluation.approval_floor,
             );
             if !released {
+              {
                 // A managed browser run's start was already approved by its user, in
                 // a narrower form: a derived run grant the broker just validated.
                 // That satisfies only this ask; the hook and permission gates below
@@ -1024,22 +1035,27 @@ async fn execute_step_inner(
                     } else {
                         CauseCode::CapabilityHighRisk
                     };
-                    let standing = StandingCall {
-                        channel: session_channel.as_ref(),
-                        org_id,
-                        user_id,
-                        thread_id,
-                        run_id,
-                        tool_name,
-                        tool_input,
-                        effect_class: &signed_class.class,
-                        zdr,
-                        waived,
-                    };
-                    if !standing.grantable(cause) {
-                        return StepOutcome::awaiting_approval(cause);
+                    if gate_enforced {
+                        // The Space gate folds this ask with Control's level below.
+                        deferred_ask.get_or_insert(cause);
+                    } else {
+                        let standing = StandingCall {
+                            channel: session_channel.as_ref(),
+                            org_id,
+                            user_id,
+                            thread_id,
+                            run_id,
+                            tool_name,
+                            tool_input,
+                            effect_class: &signed_class.class,
+                            zdr,
+                            waived,
+                        };
+                        if !standing.grantable(cause) {
+                            return StepOutcome::awaiting_approval(cause);
+                        }
+                        deferred_pause = Some(cause);
                     }
-                    deferred_pause = Some(cause);
                 }
                 if let Some(approval) = &grant_approval {
                     // Metadata only: no URL, domain, goal or prompt.
@@ -1055,6 +1071,7 @@ async fn execute_step_inner(
                         "high-risk capability ask satisfied by a broker-validated browser run grant"
                     );
                 }
+              }
             }
             // The user approved this exact call: the ask gate is satisfied.
         }
@@ -1118,7 +1135,10 @@ async fn execute_step_inner(
             return StepOutcome::failed(&format!("blocked by pre-tool hook: {reason}"));
         }
         hook::HookDecision::Ask { .. } if !released => {
-            return StepOutcome::awaiting_approval(CauseCode::HookAsk);
+            if !gate_enforced {
+                return StepOutcome::awaiting_approval(CauseCode::HookAsk);
+            }
+            deferred_ask.get_or_insert(CauseCode::HookAsk);
         }
         hook::HookDecision::Ask { .. } | hook::HookDecision::Allow => {}
     }
@@ -1157,9 +1177,18 @@ async fn execute_step_inner(
             permission_pause_cause(permission::RunGate::for_run(org_id, run_id), tool_name)
         }
     });
-    // The pause the gate returns is the capability pause when there is one, as it always was. A
-    // standing grant releases it only when every pause held for this call is one a grant may cover.
-    if let Some(cause) = deferred_pause.or(permission_pause) {
+    if gate_enforced {
+        // On an enforced Space step the permission ask joins the fold below (WS10 S3). A browser
+        // act never does: no standing rule there may pass it, so it pauses here.
+        if let Some(cause) = permission_pause {
+            if act_dispatch.is_some() {
+                return StepOutcome::awaiting_approval(cause);
+            }
+            deferred_ask.get_or_insert(cause);
+        }
+    } else if let Some(cause) = deferred_pause.or(permission_pause) {
+        // The pause the gate returns is the capability pause when there is one, as it always was. A
+        // standing grant releases it only when every pause held for this call is one a grant may cover.
         let standing = StandingCall {
             channel: session_channel.as_ref(),
             org_id,
@@ -1178,6 +1207,44 @@ async fn execute_step_inner(
         }
         if !covered || !standing.released().await {
             return StepOutcome::awaiting_approval(cause);
+        }
+    }
+
+    // Build plan WS10 S3: the Space approval gate. Every source that asked is folded with
+    // Control's level for this call (`allow < ask < block`, the most restrictive wins). An ask
+    // is then passed by a spent once-approval or a Control standing rule, or pauses as it
+    // always did; a `block` refuses. Shadow only reads the view and counts where it differs.
+    if gate_mode != crate::space_gate::GateMode::Off {
+        let gate_call = crate::space_gate::GateCall {
+            tool_name,
+            tool_input,
+            org_id,
+            user_id,
+            run_id,
+            step_id,
+            zdr,
+            waived,
+            session_channel: session_channel.as_ref(),
+            session_bearer,
+            fallback_cause: permission_pause_cause(
+                permission::RunGate::for_run(org_id, run_id),
+                tool_name,
+            ),
+        };
+        if gate_enforced {
+            match crate::space_gate::resolve(&gate_call, deferred_ask).await {
+                crate::space_gate::GateOutcome::Pass => {}
+                crate::space_gate::GateOutcome::Pause(cause) => {
+                    return StepOutcome::awaiting_approval(cause);
+                }
+                crate::space_gate::GateOutcome::Block(source) => {
+                    return StepOutcome::permission_denied_with_reason(format!(
+                        "permission denied by policy (space_tool_policy: {source})"
+                    ));
+                }
+            }
+        } else {
+            crate::space_gate::observe_shadow(&gate_call).await;
         }
     }
 
@@ -1243,7 +1310,7 @@ async fn execute_step_inner(
     } else if browser_session::is_do_tool(tool_name) {
         tool_bridge::browser_do_unavailable(zdr)
     } else if tool_name == SHELL_TOOL {
-        execute_shell(tool_input).await
+        execute_shell(tool_input, org_id, user_id, run_id, state, sandbox).await
     } else if tool_name == CODE_INTERPRETER_TOOL {
         let workspace_root = if let Some(sandbox) = sandbox {
             let Some(state) = state else {
@@ -1258,6 +1325,11 @@ async fn execute_step_inner(
         } else {
             None
         };
+        // The lease `ensure_space_workspace` just cached: the spawn is admitted on it (WS06-S9).
+        let lease_id: Option<String> = sandbox
+            .and(state)
+            .and_then(|state| state.sandbox_lease(run_id))
+            .map(|lease| lease.lease_id);
         // The files the request carrying this step attached, registered under the
         // run for the length of the call (`ExecuteStep`). Read here, not passed
         // down, so the model's own tool input cannot name or replace them. A
@@ -1312,6 +1384,7 @@ async fn execute_step_inner(
                 skill_tree
                     .as_deref()
                     .map(crate::skill_mounts::SkillTree::path),
+                lease_id.as_deref(),
             )
             .await;
             // The step's changes are recorded before the lock is released, so the record holds
@@ -1540,7 +1613,7 @@ async fn execute_step_inner(
     // rendered, parked or measured, so a withheld result never reaches the model (WS26-S7).
     let compaction_triggered = output.len() > 2048;
     let local = crate::provenance::assess(tool_name, &output);
-    let screened = crate::provenance::screening_client::screen_result(
+    let mut screened = crate::provenance::screening_client::screen_result(
         crate::provenance::screening_client::production(),
         tool_name,
         output,
@@ -1552,6 +1625,38 @@ async fn execute_step_inner(
     )
     .await;
     crate::provenance::audit(tool_name, org_id, run_id, zdr, &screened.provenance);
+    // Build plan WS10 S8: a flagged external result of a Space run may be held for a person's
+    // review (the model gets a placeholder with no content) or, when a person released this exact
+    // call, handed over once. `off`, and every non-Space step, renders exactly as before.
+    match crate::quarantine::apply(
+        &crate::quarantine::QuarantineCall {
+            tool_name,
+            tool_input,
+            org_id,
+            user_id,
+            run_id,
+            step_id,
+            space_scoped: sandbox.is_some(),
+            zdr,
+            waived,
+            session_channel: session_channel.as_ref(),
+            session_bearer,
+        },
+        &screened.output,
+        &screened.provenance,
+    )
+    .await
+    {
+        crate::quarantine::Verdict::Unchanged => {}
+        crate::quarantine::Verdict::Withheld(placeholder) => {
+            return StepOutcome::completed(placeholder);
+        }
+        crate::quarantine::Verdict::Released { content } => {
+            // Re-read in full: the released content is framed and flagged on its own evidence.
+            screened.provenance = crate::provenance::assess(tool_name, &content);
+            screened.output = content;
+        }
+    }
     let rendered = crate::provenance::render(&screened.output, &screened.provenance);
     // An oversized read-class result is held by the run and the model gets its handle
     // (WS25-S5). The label is the render prefix alone, so the held body is exactly the
@@ -1616,7 +1721,20 @@ async fn execute_subagent(
 /// privileges; a broader per-call policy is a future extension (the input
 /// contract can grow a `policy` field). Output is already secret-scrubbed by
 /// the executor before it returns here.
-async fn execute_shell(tool_input: &str) -> tool_bridge::ToolExecution {
+///
+/// WS06-S9: a Space-scoped call (`sandbox` is `Some`) takes the run's sandbox
+/// lease first and is admitted on it. `EXECUTION_CORE_SPACE_SHELL_LEASE=enforce`
+/// refuses a call that cannot get one; `observe` (the default) runs it as before
+/// and counts it. The command starts from `/` with `PATH` as its whole
+/// environment, so no service credential reaches it.
+async fn execute_shell(
+    tool_input: &str,
+    org_id: &str,
+    user_id: &str,
+    run_id: &str,
+    state: Option<&crate::state::StateStore>,
+    sandbox: Option<&crate::sandbox_lease::SandboxLeaseContext<'_>>,
+) -> tool_bridge::ToolExecution {
     #[derive(serde::Deserialize)]
     struct ShellInput {
         program: String,
@@ -1635,10 +1753,54 @@ async fn execute_shell(tool_input: &str) -> tool_bridge::ToolExecution {
     let policy = MpSandboxPolicy::ReadOnly {
         network: MpNetworkPolicy::Disabled,
     };
-    match crate::executor::execute_sandboxed(&policy, &input.program, &input.args).await {
+    let enforce = crate::policy::ShellLeaseMode::current() == crate::policy::ShellLeaseMode::Enforce;
+    let mut lease_id: Option<String> = None;
+    if let Some(sandbox) = sandbox {
+        let leased = match state {
+            Some(state) => {
+                crate::sandbox_lease::ensure_sandbox_lease(sandbox, state, run_id, org_id, user_id)
+                    .await
+                    .map(|lease| lease.lease_id)
+                    .map_err(|status| status.message().to_owned())
+            }
+            None => Err("a Space-scoped shell call requires a sandbox lease, and run state \
+                         tracking is unavailable"
+                .to_owned()),
+        };
+        match leased {
+            Ok(id) => lease_id = Some(id),
+            Err(message) if enforce => {
+                return tool_bridge::ToolExecution {
+                    output: String::new(),
+                    error: Some(message),
+                };
+            }
+            Err(_) => crate::executor::record_shell_unleased(),
+        }
+    }
+    // Observe mode runs a call that could not get a lease as the unscoped spawn it was before.
+    let admission = crate::executor::SpawnAdmission {
+        space_scoped: lease_id.is_some(),
+        lease_id: lease_id.as_deref(),
+    };
+    match crate::executor::execute_sandboxed_in_dir_with_ro_binds(
+        &policy,
+        &input.program,
+        &input.args,
+        Path::new("/"),
+        &crate::code_interpreter::shell_env(),
+        &[],
+        crate::executor::exec_timeout(),
+        &admission,
+    )
+    .await
+    {
         Ok(o) => tool_bridge::ToolExecution {
             output: o.stdout,
-            error: if o.exit_code == 0 {
+            error: if let Some(hit) = o.limit_hit {
+                // WS06-S8: a stopped-for-limit command is a typed, non-retryable failure.
+                Some(hit.describe())
+            } else if o.exit_code == 0 {
                 None
             } else if o.stderr.is_empty() {
                 Some(format!("shell exited with code {}", o.exit_code))
@@ -1669,6 +1831,7 @@ async fn execute_code_interpreter(
     workspace_root: Option<&Path>,
     ro_inputs: Option<std::sync::Arc<crate::run_inputs::InputSet>>,
     skills: Option<&Path>,
+    lease_id: Option<&str>,
 ) -> tool_bridge::ToolExecution {
     match crate::code_interpreter::run_with_skills(
         tool_input,
@@ -1677,6 +1840,7 @@ async fn execute_code_interpreter(
         workspace_root,
         ro_inputs,
         skills,
+        lease_id,
     )
     .await
     {
@@ -1741,6 +1905,8 @@ async fn execute_thread_code_interpreter(
         Some(workspace.path()),
         ro_inputs,
         skills,
+        // The thread's own lease: a workspace-rooted spawn is refused without one (WS06-S9).
+        Some(lease.lease_id.as_str()),
     )
     .await;
     let report = match workspace.commit().await {
@@ -2974,6 +3140,16 @@ async fn resolve_write_approval(
                 cause: Some(approval_cause::for_call(
                     cause, run_id, tool_name, tool_input,
                 )),
+                tool_key: String::new(),
+                action_digest: String::new(),
+                turn_origin: String::new(),
+                grant_use_token: String::new(),
+                context_json: crate::space_gate::card_context_json(
+                    tool_name,
+                    tool_input,
+                    crate::space_gate::RESUME_NONE,
+                ),
+                ..Default::default()
             },
             bearer,
         )?)
@@ -3052,6 +3228,7 @@ fn auto_posture_decision_request(
         decision_source: pb::ApprovalDecisionSource::PostureAuto as i32,
         scope: pb::ApprovalScope::Once as i32,
         rule_proposed: false,
+        ..Default::default()
     }
 }
 

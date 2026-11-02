@@ -45,6 +45,13 @@ on:
       - "apps/Frontend Plane/verevonv3/src/shared/actions/chat-run-continue-contract*"
       - "apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client*"
       - "scripts/tests/zdr-contract-sync.test.sh"
+      # WS06-S10: the production-profile sandbox verification reads these.
+      - "apps/Model Plane/scripts/verify-sandbox-isolation.sh"
+      - "apps/Model Plane/scripts/verify-sandbox-production-profile.sh"
+      - "apps/Model Plane/deploy/seccomp-bwrap.json"
+      - "apps/Model Plane/deploy/docker-compose.yml"
+      - "apps/Model Plane/deploy/docker-compose.production.yml"
+      - "apps/Model Plane/rust/services/execution-core/Dockerfile"
       - ".github/workflows/model-plane-rust-ci.yml"
   push:
     branches: [main, fix/ui-premium-restore]
@@ -66,6 +73,13 @@ on:
       - "apps/Frontend Plane/verevonv3/src/shared/actions/chat-run-continue-contract*"
       - "apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client*"
       - "scripts/tests/zdr-contract-sync.test.sh"
+      # WS06-S10: the production-profile sandbox verification reads these.
+      - "apps/Model Plane/scripts/verify-sandbox-isolation.sh"
+      - "apps/Model Plane/scripts/verify-sandbox-production-profile.sh"
+      - "apps/Model Plane/deploy/seccomp-bwrap.json"
+      - "apps/Model Plane/deploy/docker-compose.yml"
+      - "apps/Model Plane/deploy/docker-compose.production.yml"
+      - "apps/Model Plane/rust/services/execution-core/Dockerfile"
       - ".github/workflows/model-plane-rust-ci.yml"
 
 defaults:
@@ -217,6 +231,79 @@ jobs:
             echo "expected at least 18 loop checkpoint tests to run, got ${passed:-0}"
             exit 1
           fi
+      # WS09 S1: the honest run phase and the per-thread run guard against a
+      # migrated Postgres (two-member characterization, guard on and off, terminal,
+      # stale, child-run and non-Space cases). The count fails the job if the
+      # filter stops matching them.
+      - name: Run the run phase and thread run guard tests against a migrated database
+        run: |
+          set -euo pipefail
+          cargo test -p session-core --bin session-core run_phase -- --ignored --test-threads=1 2>&1 | tee run-phase-tests.log
+          passed=$(grep -oE "test result: ok\. [0-9]+ passed" run-phase-tests.log | grep -oE "[0-9]+" | head -1)
+          if [ -z "$passed" ] || [ "$passed" -lt 7 ]; then
+            echo "expected at least 7 run phase tests to run, got ${passed:-0}"
+            exit 1
+          fi
+      # WS02 S1: the Space event log's Postgres tests (contiguous seq under concurrent
+      # writers, rollback leaves no hole, NOTIFY after commit, trigger failure swallowed
+      # and counted, sweeper moves min_seq, suppress prevents rows during purge, no row
+      # for a zdr run, redacted after erase). The count fails the job if the filter
+      # stops matching them.
+      - name: Run the Space event log tests against a migrated database
+        run: |
+          set -euo pipefail
+          cargo test -p session-core --bin session-core space_event -- --ignored --test-threads=1 2>&1 | tee space-event-tests.log
+          passed=$(grep -oE "test result: ok\. [0-9]+ passed" space-event-tests.log | grep -oE "[0-9]+" | head -1)
+          if [ -z "$passed" ] || [ "$passed" -lt 8 ]; then
+            echo "expected at least 8 space event log tests to run, got ${passed:-0}"
+            exit 1
+          fi
+
+  # WS06 S10 (F-t1-021): the production-profile sandbox verification. Builds the
+  # execution-core image, runs it under the production container profile (cap_drop
+  # ALL, read-only root, scoped seccomp, mem/cpu/pids limits read from the compose
+  # files) and throws a fork bomb, memory bomb, CPU spin, file flood and output flood
+  # at the per-spawn prlimit ceilings, with /healthz as the liveness canary. The CALIB
+  # lines are the calibration numbers for the S7/S8 defaults and land in the job summary.
+  # UNVERIFIED on a hosted runner: ubuntu AppArmor may forbid bwrap's mounts inside the
+  # container, hence apparmor=unconfined below (it only drops the docker-default LSM
+  # profile; seccomp, cap_drop and no-new-privileges stay as in production).
+  sandbox-production-profile:
+    name: Sandbox production-profile verification (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    defaults:
+      run:
+        working-directory: "."
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the execution-core image
+        uses: docker/build-push-action@v6
+        with:
+          context: "apps/Model Plane"
+          file: "apps/Model Plane/rust/services/execution-core/Dockerfile"
+          load: true
+          tags: model-plane-execution-core:ci
+          cache-from: type=gha,scope=execution-core-image
+          cache-to: type=gha,mode=max,scope=execution-core-image
+      - name: Run the production-profile verification
+        env:
+          EXECUTION_CORE_IMAGE: model-plane-execution-core:ci
+          SANDBOX_VERIFY_REPORT: ${{ runner.temp }}/sandbox-calibration.txt
+          SANDBOX_VERIFY_EXTRA_DOCKER_ARGS: "--security-opt apparmor=unconfined"
+        run: |
+          set -euo pipefail
+          "apps/Model Plane/scripts/verify-sandbox-isolation.sh" --production-profile 2>&1 | tee "$RUNNER_TEMP/sandbox-profile.log"
+      - name: Publish the calibration numbers
+        if: always()
+        run: |
+          {
+            echo "### Sandbox production-profile calibration (WS06-S10)"
+            echo '```'
+            cat "$RUNNER_TEMP/sandbox-calibration.txt" 2>/dev/null || echo "no report written"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # WS12 S11 (D11): an optional clippy warning-count ratchet. It never denies a
   # warning. It is off unless the repo variable MODEL_PLANE_CLIPPY_RATCHET is the

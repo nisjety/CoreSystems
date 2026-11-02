@@ -59,6 +59,9 @@ type Service struct {
 	auditPublisher  AuditPublisher     // durable verevon.audit.v2.* dispatch on local controlplane-nats
 	cache           *rediscache.Client // optional, nil if Redis disabled
 	siemSealer      *SIEMSealer        // nil unless ORG_SIEM_DESTINATIONS_ENABLED (WS06-S7)
+	domainResolver  DomainTXTResolver  // nil unless ORG_DOMAIN_VERIFICATION_ENABLED (WS05-S6)
+	identityAdmin   IdentityProviderAdmin // nil unless auth-core's SSO admin credential is set (WS05-S7)
+	scimProvisioner ScimMembershipProvisioner // nil unless ORG_SCIM_ENABLED and the auth-core credential are set (WS05-S8)
 }
 
 func NewService(repo *Repository, publisher Publisher, cache ...*rediscache.Client) *Service {

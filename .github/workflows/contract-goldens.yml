@@ -28,8 +28,12 @@ on:
       - "apps/**/cross-plane-token-requests.json*"
       - "apps/**/zdr-feature-matrix.json*"
       - "apps/**/secret-shapes.v1.json*"
+      - "apps/**/space-sidebar-limits.json*"
       - "apps/**/web-policy-catalogue.v1.json*"
       - "apps/**/sse-event-payloads.json*"
+      - "apps/**/space-denial-codes.golden.json*"
+      - "apps/**/space-events.json*"
+      - "apps/**/space-room-run-frames*"
       - "scripts/tests/zdr-contract-sync.test.sh"
       - "scripts/tests/zdr-contract-schema.mjs"
       - "scripts/tests/zdr-contract-schema.test.mjs"
@@ -51,8 +55,12 @@ on:
       - "apps/**/cross-plane-token-requests.json*"
       - "apps/**/zdr-feature-matrix.json*"
       - "apps/**/secret-shapes.v1.json*"
+      - "apps/**/space-sidebar-limits.json*"
       - "apps/**/web-policy-catalogue.v1.json*"
       - "apps/**/sse-event-payloads.json*"
+      - "apps/**/space-denial-codes.golden.json*"
+      - "apps/**/space-events.json*"
+      - "apps/**/space-room-run-frames*"
       - "scripts/tests/zdr-contract-sync.test.sh"
       - "scripts/tests/zdr-contract-schema.mjs"
       - "scripts/tests/zdr-contract-schema.test.mjs"
@@ -101,3 +109,10 @@ jobs:
 
       - name: Loader tests for the model entitlement golden
         run: node --test scripts/tests/model-entitlement-contract-schema.test.mjs
+
+      # The Space room run frame golden (WS09-S3): its pin and the SPA copy must match.
+      - name: Drift check for the Space room run frame golden
+        run: bash "apps/Model Plane/scripts/tests/room-run-frames-contract.test.sh"
+
+      - name: Prove the room run frame check can fail
+        run: bash "apps/Model Plane/scripts/tests/room-run-frames-contract.test.sh" --self-test

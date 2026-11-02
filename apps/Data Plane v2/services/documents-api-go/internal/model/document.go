@@ -83,6 +83,23 @@ type CreateDocumentInput struct {
 	// client-supplied workspace filter as a mapping. Empty means the create
 	// carried no Space authority and the column stays NULL.
 	SpaceRef string `json:"-"`
+	// SpaceFile is set ONLY by the handler, for a room file accepted under a
+	// verified `space_upload` import decision (WS14-S3) — hence `json:"-"`.
+	// It carries the per-Space limits and the content hash the repository
+	// enforces under a per-Space advisory lock when it inserts a new row.
+	SpaceFile *SpaceFileConstraints `json:"-"`
+}
+
+// SpaceFileConstraints are the room-file rules CreateWithOutbox enforces on a
+// NEW row only (an idempotent retry reuses the existing row and skips them).
+type SpaceFileConstraints struct {
+	// SHA256 is the hex digest of the uploaded bytes, recorded in metadata by
+	// imports-core. At most one live room file per (org, Space, hash).
+	SHA256 string
+	// MaxFiles and MaxTextBytes bound the Space's live room files. Zero or
+	// less means no limit on that axis.
+	MaxFiles     int
+	MaxTextBytes int64
 }
 
 // IngestPolicy mirrors `dataplane.documents.v2.IngestPolicy`. When

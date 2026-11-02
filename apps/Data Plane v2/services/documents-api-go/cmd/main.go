@@ -26,6 +26,7 @@ import (
 	"github.com/triodelab/dataplane/services/documents-api-go/internal/metrics"
 	apmotel "github.com/triodelab/dataplane/services/documents-api-go/internal/otel"
 	"github.com/triodelab/dataplane/services/documents-api-go/internal/repo"
+	"github.com/triodelab/dataplane/services/documents-api-go/internal/spacegrant"
 	"github.com/triodelab/dataplane/services/documents-api-go/internal/userauthz"
 	"github.com/triodelab/dataplane/services/documents-api-go/pkg/authctx"
 	"github.com/triodelab/dataplane/services/documents-api-go/pkg/usagepub"
@@ -163,6 +164,30 @@ func main() {
 		authzClient = userauthz.New(cfg.UserCoreURL, cfg.UserCoreServiceToken)
 	}
 	docHandler := handler.NewDocumentHandler(docRepo, authzClient)
+	// WS14-S3 room files (DOCUMENTS_SPACE_FILES, off by default). The Control
+	// client carries the same documents-api service credential as authzClient.
+	spaceFilesConfig := handler.SpaceFilesConfig{
+		Enabled:             cfg.SpaceFilesEnabled,
+		MaxPerRoom:          cfg.SpaceFilesMaxPerRoom,
+		MaxTextBytesPerRoom: cfg.SpaceFilesMaxTextBytesPerRoom,
+	}
+	if cfg.SpaceFilesEnabled && cfg.UserCoreServiceToken != "" {
+		spaceFilesConfig.Grants = spacegrant.New(cfg.UserCoreURL, cfg.UserCoreServiceToken)
+	}
+	if cfg.SpaceFilesEnabled && spaceFilesConfig.Grants == nil {
+		log.Warn().Msg("DOCUMENTS_SPACE_FILES is on but no user-core service credential is configured; room files will be refused (fail closed)")
+	}
+	docHandler.WithSpaceFiles(spaceFilesConfig)
+	// WS14-S4 document sharing (DOCUMENTS_SHARE_WRITES, off by default). The
+	// same user-core client signs the owner-asserted grant calls.
+	sharesConfig := handler.SharesConfig{Enabled: cfg.ShareWritesEnabled}
+	if authzClient != nil {
+		sharesConfig.Grants = authzClient
+	}
+	if cfg.ShareWritesEnabled && sharesConfig.Grants == nil {
+		log.Warn().Msg("DOCUMENTS_SHARE_WRITES is on but no user-core service credential is configured; share routes will answer unavailable (fail closed)")
+	}
+	docHandler.WithShares(sharesConfig)
 	sourceObjectHandler := handler.NewSourceObjectHandler(sourceObjectRepo)
 
 	// §16.2.6 — start outbox publisher loop. Drains `documents_outbox`
@@ -262,6 +287,11 @@ func main() {
 		read := r.With(authctx.RequireServiceScope("documents:read"))
 		write := r.With(authctx.RequireServiceScope("documents:write"))
 		read.Get("/", docHandler.List)
+		// WS14-S4 share routes. The static "shared-with-me" wins over {documentID}.
+		read.Get("/shared-with-me", docHandler.SharedWithMe)
+		read.Get("/{documentID}/shares", docHandler.ListShares)
+		write.Post("/{documentID}/shares", docHandler.CreateShare)
+		write.Delete("/{documentID}/shares/{subjectID}", docHandler.DeleteShare)
 		write.Post("/", docHandler.Create)
 		write.Post("/bulk", docHandler.BulkIngest)
 		read.Get("/{documentID}", docHandler.Get)

@@ -128,8 +128,13 @@ const NOT_CONVERTED: Record<string, { sites: number; reason: string }> = {
       "shows the integration's own sentence for an integration_error on purpose (the library-picker test pins it); translateApiError has no copy for that code by design, so a conversion would hide it",
   },
   'features/spaces/components/SpaceRoomComposer.tsx': {
-    sites: 2,
-    reason: `${UNREVIEWED} (one line holds both error.message and String(error), the abort or failure of a send)`,
+    sites: 1,
+    reason: `${UNREVIEWED} (the abort or failure of a send; the streamed send moved to the send pipeline)`,
+  },
+  'features/spaces/lib/space-send-pipeline.ts': {
+    sites: 3,
+    reason:
+      'the streamed send the composer used to hold: a thrown ApiError hands its message to describeError as the fallback of an unknown code (a known code or a typed Space denial gets the room words), and a non-API failure keeps its own text; unreviewed for what a person sees',
   },
   'features/support/components/RemoteSupportPage.tsx': {
     sites: 5,
@@ -142,9 +147,9 @@ const NOT_CONVERTED: Record<string, { sites: number; reason: string }> = {
       'a connection failure on the agent stream becomes RUN_ERROR with code connection_error, which the controller treats as a lost transport; the text is unreviewed',
   },
   'shared/api/chat-client.ts': {
-    sites: 8,
+    sites: 9,
     reason:
-      'the chat stream connection failure (code connection_error, pinned by chat-client.test) and the mid-run refusal message carry the ApiError text; unreviewed for what a person sees',
+      'the chat stream connection failure (code connection_error, pinned by chat-client.test), the mid-run refusal message and the typed Space denial (code and details kept, the message only the fallback of an unknown reason) carry the ApiError text; unreviewed for what a person sees',
   },
   'shared/api/http.ts': {
     sites: 3,

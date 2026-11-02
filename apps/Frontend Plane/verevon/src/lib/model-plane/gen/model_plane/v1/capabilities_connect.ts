@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { CapabilityDetail, CheckSkillPromotionRequest, CheckSkillPromotionResponse, EvaluatePolicyRequest, EvaluatePolicyResponse, GetCapabilityRequest, ListCapabilitiesRequest, ListCapabilitiesResponse, PromoteSkillRequest, PromoteSkillResponse, ValidateSkillBundleRequest, ValidateSkillBundleResponse } from "./capabilities_pbjs";
+import { CapabilityDetail, CheckSkillPromotionRequest, CheckSkillPromotionResponse, EvaluatePolicyRequest, EvaluatePolicyResponse, GetCapabilityRequest, GetSkillBlobRequest, GetSkillBlobResponse, GetSkillBundleManifestRequest, ListCapabilitiesRequest, ListCapabilitiesResponse, ListSkillBundlesRequest, ListSkillBundlesResponse, PromoteSkillRequest, PromoteSkillResponse, ResolveToolBindingsRequest, ResolveToolBindingsResponse, SkillBundleManifest, ValidateSkillBundleRequest, ValidateSkillBundleResponse } from "./capabilities_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 
 /**
@@ -51,6 +51,20 @@ export const CapabilityCore = {
       kind: MethodKind.Unary,
     },
     /**
+     * Resolve the registry-owned binding of each named tool: the capability that
+     * governs it, its declared class and approval floor, and, for an MCP tool,
+     * its pinned definition digest and review state. This is the only source of
+     * an `mcp__` binding; a name the registry does not hold is simply absent.
+     *
+     * @generated from rpc model_plane.v1.CapabilityCore.ResolveToolBindings
+     */
+    resolveToolBindings: {
+      name: "ResolveToolBindings",
+      I: ResolveToolBindingsRequest,
+      O: ResolveToolBindingsResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
      * Validate that a skill bundle exists and is structurally promotable.
      *
      * @generated from rpc model_plane.v1.CapabilityCore.ValidateSkillBundle
@@ -81,6 +95,39 @@ export const CapabilityCore = {
       name: "PromoteSkill",
       I: PromoteSkillRequest,
       O: PromoteSkillResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * List the skill bundles an org holds, optionally narrowed to some skills.
+     *
+     * @generated from rpc model_plane.v1.CapabilityCore.ListSkillBundles
+     */
+    listSkillBundles: {
+      name: "ListSkillBundles",
+      I: ListSkillBundlesRequest,
+      O: ListSkillBundlesResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Read one skill bundle manifest: its files, digests and sizes.
+     *
+     * @generated from rpc model_plane.v1.CapabilityCore.GetSkillBundleManifest
+     */
+    getSkillBundleManifest: {
+      name: "GetSkillBundleManifest",
+      I: GetSkillBundleManifestRequest,
+      O: SkillBundleManifest,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Read one blob of a skill bundle by its sha256 digest.
+     *
+     * @generated from rpc model_plane.v1.CapabilityCore.GetSkillBlob
+     */
+    getSkillBlob: {
+      name: "GetSkillBlob",
+      I: GetSkillBlobRequest,
+      O: GetSkillBlobResponse,
       kind: MethodKind.Unary,
     },
   }

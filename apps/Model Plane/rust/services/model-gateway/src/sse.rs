@@ -173,17 +173,23 @@ fn agentic_space_retrieval(space_id: &str, decision: Option<&str>, enabled: bool
 /// carries `space_context`; a later one carries `space_append_context`, which is read only while the
 /// switch is on. An empty token is the BFF's FORBIDDEN answer, which `retrieval::scoped_retrieval_token`
 /// suppresses rather than letting the search run organisation-wide.
+///
+/// A follow-up whose retrieval Control declined (D1-242) reads with an empty token whatever the
+/// switch says, so a declined append is never searched organisation-wide; one Control did not
+/// decline reads its own token only while the switch is on.
 fn space_retrieval_decision<'a>(
     space_context: Option<&'a crate::session_flow::ThreadSpaceContext>,
     space_append_context: Option<&'a crate::session_flow::ThreadSpaceContext>,
     append_enabled: bool,
 ) -> Option<&'a str> {
-    let context = if append_enabled {
-        space_context.or(space_append_context)
-    } else {
-        space_context
-    };
-    context.map(|context| context.retrieval_decision_token.as_str())
+    if let Some(context) = space_context {
+        return Some(context.retrieval_decision_token.as_str());
+    }
+    let context = space_append_context?;
+    if context.retrieval_decline_reason.is_some() {
+        return Some("");
+    }
+    append_enabled.then_some(context.retrieval_decision_token.as_str())
 }
 
 /// The attachments a Do run carries, as `RunAttachment`s: files (staged read-only for the
@@ -1529,6 +1535,30 @@ fn is_connection_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
+/// Why Control declined retrieval for this turn (D1-242), if it did. A thread's first message carries it on
+/// `space_context`, every later one on `space_append_context`; the BFF sets it on whichever it injected. The
+/// reason is advisory wording for this turn alone: it is never written into a request to Session Core.
+fn declined_retrieval_reason(
+    req: &InvokeRequest,
+) -> Option<crate::retrieval_metadata::RetrievalDeclineReason> {
+    req.space_context
+        .as_ref()
+        .or(req.space_append_context.as_ref())
+        .and_then(|context| context.retrieval_decline_reason)
+}
+
+/// The Control retrieval authority this turn's grounding reads with. A first message carries its own token.
+/// An appended message carries none, so its retrieval was unscoped; when Control declined retrieval for it
+/// that must not stay true, so a declined append reads with an empty token, which retrieval treats as absent
+/// authority and suppresses (`scoped_retrieval_token`). An append Control did not decline reads as before.
+fn retrieval_space_decision(req: &InvokeRequest) -> Option<&str> {
+    space_retrieval_decision(
+        req.space_context.as_ref(),
+        req.space_append_context.as_ref(),
+        space_append_retrieval_enabled(),
+    )
+}
+
 pub async fn invoke_stream_sse(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -1627,6 +1657,25 @@ pub async fn invoke_stream_sse(
         Ok(turn_posture) => turn_posture,
         Err(refusal) => return zdr_refusal_stream(&request_id, refusal),
     };
+    // A wake starts a durable run from a stored post (WS08-S3): refused, typed, for a zero-retention
+    // or waived turn before anything else, then checked against the post it was approved for.
+    if let Some(wake) = req.wake_context.as_ref() {
+        if let Err(refusal) = crate::space_sse::check_wake(
+            wake,
+            &req.content,
+            req.thread_id.as_deref(),
+            turn_posture.zdr() || turn_posture.retention_class().is_some(),
+            mp_contracts::space_mentions::wake_api_enabled(),
+        ) {
+            return match refusal {
+                crate::space_sse::WakeRefusal::Zdr => zdr_refusal_stream(
+                    &request_id,
+                    mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN,
+                ),
+                other => error_stream(&request_id, other.code(), other.message(), false),
+            };
+        }
+    }
     // The connected accounts the person selected (build plan WS23 S4), checked before any run or model
     // call. An empty selection selects nothing and is never refused.
     let connector_ids = match connector_selection(
@@ -1887,11 +1936,7 @@ pub async fn invoke_stream_sse(
                 &req.content,
                 data_plane_mode.clone(),
                 sovereign_retrieval,
-                space_retrieval_decision(
-                    req.space_context.as_ref(),
-                    req.space_append_context.as_ref(),
-                    space_append_retrieval_enabled(),
-                ),
+                retrieval_space_decision(&req),
             )
             .await
             {
@@ -1925,14 +1970,24 @@ pub async fn invoke_stream_sse(
                 }
             })
             .filter(|value| !value.is_empty());
+        // Why Control declined retrieval for this turn (D1-242), only when the turn goes on to answer without
+        // knowledge-base context, as on the durable path. This path stores nothing, so the reason is said to the
+        // model and to the client on this one stream and is kept nowhere.
+        let retrieval_decline = declined_retrieval_reason(&req).filter(|_| {
+            !conversation_only
+                && retrieval_scope != crate::normalize::RetrievalScope::WebOnly
+                && grounding_requested
+                && crate::retrieval::is_effectively_empty(&grounding)
+        });
         let provider_content = match grounding_context {
             Some(context) => {
                 format!("Relevant organization context:\n{context}\n\nUser: {user_content}")
             }
             None if grounding_requested && crate::retrieval::is_effectively_empty(&grounding) => {
+                // A retrieval Control declined says why (D1-242); with no reason this is the notice as it was.
                 format!(
                     "{}\n\nUser: {user_content}",
-                    crate::retrieval::NO_GROUNDING_SYSTEM_NOTICE
+                    crate::retrieval::no_grounding_notice(retrieval_decline)
                 )
             }
             None => user_content.clone(),
@@ -1957,6 +2012,7 @@ pub async fn invoke_stream_sse(
             provider_content,
             features,
             grounding,
+            retrieval_decline.map(crate::retrieval_metadata::RetrievalDeclineReason::notice),
             min_privacy_tier_wire,
             route,
             settings,
@@ -2313,7 +2369,11 @@ pub async fn invoke_stream_sse(
     let managed_start_key = state.managed_start_keys.derive(
         &org_id,
         &user_id,
-        req.idempotency_key.as_deref(),
+        // A wake names its durable start by the browser's per-(post, agent) wake id (WS08-S3).
+        req.wake_context
+            .as_ref()
+            .map(|wake| wake.client_wake_id.as_str())
+            .or(req.idempotency_key.as_deref()),
         &request_id,
         if agentic_requested {
             "execution-agent"
@@ -2359,11 +2419,20 @@ pub async fn invoke_stream_sse(
             req.edited_resubmit,
             req.idempotency_key.as_deref(),
         ),
+        req.wake_context.as_ref(),
     )
     .await
     {
         Ok(run) => run,
         Err(error) => {
+            if crate::session_flow::thread_run_active(&error) {
+                return error_stream(
+                    &request_id,
+                    crate::session_flow::THREAD_RUN_ACTIVE_CODE,
+                    "This thread already has an agent run in progress. Try again when it finishes.",
+                    true,
+                );
+            }
             tracing::warn!(%error, request_id = %request_id, "session-core managed start failed");
             return error_stream(
                 &request_id,
@@ -2631,6 +2700,11 @@ pub async fn invoke_stream_sse(
         sovereign_retrieval,
     )
     .await };
+    let wake_history = req.wake_context.as_ref().map(|wake| crate::space_sse::WakeHistory {
+        trigger_message_id: &wake.trigger_message_id,
+        room_context: mp_contracts::space_mentions::wake_room_context_enabled(),
+        participants: &wake.participants,
+    });
     let recent_thread = load_recent_thread_messages(
         &state,
         &org_id,
@@ -2649,6 +2723,7 @@ pub async fn invoke_stream_sse(
             inference_bearer: &inference_bearer,
             token_budget: cache_options.compaction_token_budget,
         },
+        wake_history.as_ref(),
     )
     .await;
     // A summary written this turn, persisted with the answer so later turns
@@ -2766,11 +2841,7 @@ pub async fn invoke_stream_sse(
                     &req.content,
                     data_plane_mode.clone(),
                     sovereign_retrieval,
-                    space_retrieval_decision(
-                        req.space_context.as_ref(),
-                        req.space_append_context.as_ref(),
-                        space_append_retrieval_enabled(),
-                    ),
+                    retrieval_space_decision(&req),
                 )
                 .await
                 {
@@ -2807,11 +2878,7 @@ pub async fn invoke_stream_sse(
                     &req.content,
                     data_plane_mode.clone(),
                     sovereign_retrieval,
-                    space_retrieval_decision(
-                        req.space_context.as_ref(),
-                        req.space_append_context.as_ref(),
-                        space_append_retrieval_enabled(),
-                    ),
+                    retrieval_space_decision(&req),
                 )
                 .await
                 {
@@ -2875,6 +2942,17 @@ pub async fn invoke_stream_sse(
             payload.context_block.clone()
         }
     });
+    // Why Control declined retrieval for this turn (D1-242), only when the turn goes on to answer without
+    // knowledge-base context: the same condition as the no-grounding notice below. It rides this turn's stream
+    // and is stored on the answer only as its typed notice code (`with_retrieval_decline`); it is never part of
+    // a request to Session Core. A later message of a thread carries it on `space_append_context`.
+    let retrieval_decline = declined_retrieval_reason(&req)
+        .filter(|_| {
+            !conversation_only
+                && retrieval_scope != crate::normalize::RetrievalScope::WebOnly
+                && !assembly_supplied_grounding
+                && crate::retrieval::is_effectively_empty(&grounding)
+        });
 
     if let Some(context_block) = context_block.filter(|block| !block.is_empty()) {
         // Insert whenever assembly did not already carry evidence. Gating this on
@@ -2897,7 +2975,7 @@ pub async fn invoke_stream_sse(
         prompt.grounding = Some(ChatMessage {
             compaction_summary: String::new(),
             role: "system".to_owned(),
-            content: crate::retrieval::NO_GROUNDING_SYSTEM_NOTICE.to_owned(),
+            content: crate::retrieval::no_grounding_notice(retrieval_decline),
             name: String::new(),
         });
     }
@@ -3227,6 +3305,20 @@ pub async fn invoke_stream_sse(
     // /v1/orchestration/runs/{id}/cancel) stops it the same way.
     let cancels = state.cancels.clone();
     let cancel_flag = cancels.register_run(&request_id, &org_id, &user_id, &session_run.run_id);
+    // WS09-S3: a Space turn leaves a content-free pointer from its run id to its buffer, so the room
+    // projector can find the frames without the owner's identity. Never for a zero-retention turn
+    // (that path buffers nothing worth finding), and it authorizes nothing on its own.
+    let room_turn = req
+        .space_context
+        .as_ref()
+        .or(req.space_append_context.as_ref())
+        .is_some_and(|context| !context.space_id.is_empty());
+    if room_turn && !effective_zdr {
+        state
+            .stream_buffers
+            .index_run(&org_id, &session_run.run_id, &buffer_key, req.agent_name.as_deref().unwrap_or_default())
+            .await;
+    }
     // A Stop that lands on another replica reaches this stream over the run-control bus; the
     // subscription is in place before `connected`. Nothing happens with the bus off.
     state.run_control.attach(&cancels, &state.queued_inputs, &request_id, &session_run.run_id).await;
@@ -3262,20 +3354,11 @@ pub async fn invoke_stream_sse(
     // owns, never sending the answer to an external engine unasked.
     let verify_bearer = data_plane_bearer.clone();
     let verify_sovereign = sovereign_retrieval;
-    let verify_space_decision = space_retrieval_decision(
-        req.space_context.as_ref(),
-        req.space_append_context.as_ref(),
-        space_append_retrieval_enabled(),
-    )
-    .map(str::to_owned);
+    let verify_space_decision = retrieval_space_decision(&req).map(str::to_owned);
     // The turn's knowledge receipt (WS18-S3), read from the Space decision that scoped its retrieval and the
     // search it returned, before `grounding` moves into the task. A turn no Space scopes has none.
     let knowledge = {
-        let decision = space_retrieval_decision(
-            req.space_context.as_ref(),
-            req.space_append_context.as_ref(),
-            space_append_retrieval_enabled(),
-        );
+        let decision = retrieval_space_decision(&req);
         crate::knowledge_receipt::knowledge_receipt(
             decision.is_some(),
             decision.is_some_and(|token| token.trim().is_empty()),
@@ -3375,7 +3458,14 @@ pub async fn invoke_stream_sse(
         // A reduced answer says so before it streams (Z-41b). Buffered like every frame, so a resumed stream
         // replays it. Emitted even when the grounding is empty: an answer from text search that found nothing is
         // still an answer from text search only.
-        if let Some(notice) = grounding.as_ref().and_then(|payload| payload.notice) {
+        //
+        // A retrieval Control declined states its reason the same way (D1-242): a typed code and a wording key,
+        // never a sentence. It rides this frame, so a resumed stream replays it and nothing is stored.
+        if let Some(notice) = grounding
+            .as_ref()
+            .and_then(|payload| payload.notice)
+            .or_else(|| retrieval_decline.map(crate::retrieval_metadata::RetrievalDeclineReason::notice))
+        {
             emit_and_buffer(
                 &tx,
                 &stream_buffers,
@@ -4276,6 +4366,7 @@ pub async fn invoke_stream_sse(
                 retention_class,
                 &tool_usage,
                 &sink,
+                retrieval_decline,
             )
             .await;
             finish_stream_registrations(&cancels, &queued_inputs, &req_id);
@@ -5100,6 +5191,15 @@ pub async fn invoke_stream_sse(
                         .await;
                         break;
                     }
+                    // WS09-S3: a room turn saves what it did (steps and a steer count, no text)
+                    // with its answer, rebuilt from this producer's own buffer. Nothing under ZDR,
+                    // with the switch off, or for a turn outside a Space.
+                    let work_summary = if room_turn && !effective_zdr && session_state.space_run_policy.work_summary {
+                        let replay = stream_buffers.replay_after(&buffer_key, None).await;
+                        crate::room_run::work_summary_from_buffer(&replay, session_state.space_run_policy.limits)
+                    } else {
+                        None
+                    };
                     // One Session Core transaction saves the answer and records
                     // the Completed receipt, so a durable cancel can no longer
                     // land between the two, and the save rides the Gateway's
@@ -5115,9 +5215,14 @@ pub async fn invoke_stream_sse(
                                 agent_name: session_agent_name.as_deref(),
                                 metadata: with_loop_stop(
                                     crate::compaction::stamp_generation(
+                                        crate::session_flow::with_work_summary(
                                         crate::session_flow::with_head_summary(
                                             crate::session_flow::with_compaction_summary(
                                                 crate::session_flow::with_result_receipt(
+                                                    // Why Control declined retrieval for this turn (D1-242) is
+                                                    // stored as its typed code beside the evidence, so a thread
+                                                    // reopened later says what the live stream said.
+                                                    crate::session_flow::with_retrieval_decline(
                                                     crate::session_flow::turn_evidence_metadata(
                                                         session_grounding.as_ref(),
                                                         &sink.recorded_citations(),
@@ -5141,6 +5246,8 @@ pub async fn invoke_stream_sse(
                                                                 }),
                                                         },
                                                     ),
+                                                    retrieval_decline,
+                                                    ),
                                                     result_receipt
                                                         .lock()
                                                         .ok()
@@ -5152,6 +5259,9 @@ pub async fn invoke_stream_sse(
                                             ),
                                             head_summary.as_ref().map(|new| &new.record),
                                             effective_zdr,
+                                        ),
+                                        work_summary.as_ref(),
+                                        effective_zdr,
                                         ),
                                         head_summary.as_ref(),
                                     ),
@@ -6778,8 +6888,14 @@ async fn load_recent_thread_messages(
     pinned_message_ids: &[String],
     bearer: &VerifiedModelBearer,
     summarizer: &SummarizerContext<'_>,
+    // Wake mode (WS08-S3): the current turn is a stored post, pushed rather than spliced.
+    wake: Option<&crate::space_sse::WakeHistory<'_>>,
 ) -> RecentThread {
     use mp_contracts::model_plane::v1::ListConversationRequest;
+
+    let wake_post_reads = crate::space_sse::history_read_options(wake);
+    // Room posts newer than the last answer, offered only to a wake that opted in.
+    let mut room_posts: Vec<crate::space_sse::RoomPost> = Vec::new();
 
     // Forward the verified session bearer — session-core's interceptor rejects
     // an unauthenticated ListConversation, which would silently strip all prior
@@ -6798,6 +6914,9 @@ async fn load_recent_thread_messages(
             // Unpaged (WS09-S8): the whole conversation in sequence order.
             limit: 0,
             before_message_id: String::new(),
+            include_human_posts: wake_post_reads.0,
+            post_context_cap: wake_post_reads.1,
+            ..Default::default()
         },
         bearer,
     ) {
@@ -6825,10 +6944,24 @@ async fn load_recent_thread_messages(
         .list_conversation(request)
         .await
     {
-        Ok(response) => response
-            .into_inner()
-            .messages
-            .into_iter()
+        Ok(response) => crate::space_sse::split_room_posts(
+            response.into_inner().messages,
+            wake,
+            &mut room_posts,
+        )
+        .into_iter()
+            // WS12-S4: a deleted turn reaches the model as one static system line and an edited
+            // one carries its effective text plus a marker (session-core folds revisions).
+            .filter_map(|mut message| {
+                let (role, content) = mp_contracts::message_revision::render_for_model(
+                    &message.role,
+                    &message.content,
+                    &message.revision_state,
+                )?;
+                message.role = role;
+                message.content = content;
+                Some(message)
+            })
             .filter(|message| {
                 matches!(message.role.as_str(), "system" | "user" | "assistant")
                     && !message.content.trim().is_empty()
@@ -6868,24 +7001,7 @@ async fn load_recent_thread_messages(
     // so the indices the pin bound is measured against are the ones the hoist
     // will see.
     let mut loaded = loaded;
-    match loaded
-        .iter_mut()
-        .rev()
-        .find(|entry| entry.message.role == "user")
-    {
-        Some(entry) => current_user_content.clone_into(&mut entry.message.content),
-        None => loaded.push(crate::compaction::IdentifiedMessage {
-            // No durable id: session-core has not persisted this turn yet, and an
-            // empty id matches no pin.
-            id: String::new(),
-            message: ChatMessage {
-                compaction_summary: String::new(),
-                role: "user".to_owned(),
-                content: current_user_content.to_owned(),
-                name: String::new(),
-            },
-        }),
-    }
+    crate::space_sse::place_current_turn(&mut loaded, current_user_content, wake, &room_posts);
 
     if let Some(budget) = summarizer.token_budget {
         return budget_compacted_thread(
@@ -8041,6 +8157,8 @@ async fn run_infer_fallback(
     tool_usage: &[crate::usage_meter::CallUsage],
     // The turn's sink: the fallback answer's frame states the turn's run ceiling through it (WS27-S6).
     sink: &crate::sse_events::RichEventSink,
+    // Why Control declined retrieval for this turn (D1-242), stored on the answer as on the streaming path.
+    retrieval_decline: Option<crate::retrieval_metadata::RetrievalDeclineReason>,
 ) {
     let publisher = state.publisher.clone();
     let buffers = state.stream_buffers.clone();
@@ -8260,14 +8378,17 @@ async fn run_infer_fallback(
                     metadata: crate::compaction::stamp_generation(
                         crate::session_flow::with_head_summary(
                             crate::session_flow::with_compaction_summary(
-                                crate::session_flow::turn_evidence_metadata(
-                                    grounding,
-                                    &[],
-                                    &[],
-                                    crate::session_flow::TurnQuality {
-                                        confidence,
-                                        verification: None,
-                                    },
+                                crate::session_flow::with_retrieval_decline(
+                                    crate::session_flow::turn_evidence_metadata(
+                                        grounding,
+                                        &[],
+                                        &[],
+                                        crate::session_flow::TurnQuality {
+                                            confidence,
+                                            verification: None,
+                                        },
+                                    ),
+                                    retrieval_decline,
                                 ),
                                 &resp.compaction_summary,
                                 fallback_zdr,
@@ -9289,6 +9410,7 @@ async fn read_latest_assistant(
             // Unpaged (WS09-S8): the whole conversation in sequence order.
             limit: 0,
             before_message_id: String::new(),
+            ..Default::default()
         },
         bearer,
     )
@@ -10239,6 +10361,9 @@ async fn zdr_direct_stream(
     content: String,
     features: Vec<String>,
     grounding: Option<crate::retrieval::Grounding>,
+    // The typed notice of why Control declined retrieval for this turn (D1-242), when it did and the turn
+    // answers without knowledge-base context. Streamed once and kept nowhere.
+    retrieval_decline: Option<crate::retrieval_metadata::RetrievalNotice>,
     // Caller's minimum privacy tier (wire numeric; 0 = no constraint). The
     // persistence-free path still enforces the residency axis.
     min_privacy_tier: i32,
@@ -10344,6 +10469,7 @@ async fn zdr_direct_stream(
     zdr_answer_stream(
         request_id,
         grounding,
+        retrieval_decline,
         features,
         min_privacy_tier,
         answer,
@@ -10359,6 +10485,7 @@ async fn zdr_direct_stream(
 fn zdr_answer_stream(
     request_id: String,
     grounding: Option<crate::retrieval::Grounding>,
+    retrieval_decline: Option<crate::retrieval_metadata::RetrievalNotice>,
     features: Vec<String>,
     min_privacy_tier: i32,
     answer: DirectAnswer,
@@ -10404,7 +10531,13 @@ fn zdr_answer_stream(
     tokio::spawn(async move {
         // A reduced answer says so before anything else it streams (Z-41b). Control: a ZDR answer's client is told
         // whatever it opted into, and a turn without a notice streams exactly as it always did.
-        if let Some(notice) = grounding.as_ref().and_then(|payload| payload.notice) {
+        //
+        // A retrieval Control declined states its reason the same way (D1-242): a typed code and a wording key.
+        if let Some(notice) = grounding
+            .as_ref()
+            .and_then(|payload| payload.notice)
+            .or(retrieval_decline)
+        {
             let event = crate::sse_events::ChatEvent::RetrievalNotice { notice };
             let _ = tx.send(Ok(event.to_sse(&request_id))).await;
         }
@@ -17977,6 +18110,7 @@ mod zdr_provenance_tests {
         frames(zdr_answer_stream(
             "req-zdr".to_owned(),
             None,
+            None,
             features
                 .iter()
                 .map(|feature| (*feature).to_owned())
@@ -18014,6 +18148,7 @@ mod zdr_provenance_tests {
         let out = frames(zdr_answer_stream(
             "req-zdr".to_owned(),
             Some(grounding_with_notice(Some(zdr_notice()))),
+            None,
             Vec::new(),
             0,
             answer,
@@ -18057,6 +18192,7 @@ mod zdr_provenance_tests {
             let out = frames(zdr_answer_stream(
                 "req-zdr".to_owned(),
                 grounding,
+                None,
                 Vec::new(),
                 0,
                 answer,
@@ -18068,6 +18204,108 @@ mod zdr_provenance_tests {
                 out.iter().all(|(name, _)| name != "retrieval_notice"),
                 "{out:?}"
             );
+        }
+    }
+
+    /// A ZDR turn whose retrieval Control declined says why before its first answer chunk (D1-242), to a client
+    /// that opted into no feature family. The payload is the typed code and the wording key, nothing else, and a
+    /// Data Plane notice on the same turn keeps its place (one notice per answer).
+    /// Mutation: dropping the decline from `zdr_answer_stream` fails here.
+    #[tokio::test]
+    async fn a_zdr_turn_whose_retrieval_was_declined_says_why_before_it_streams() {
+        let declined = crate::retrieval_metadata::RetrievalDeclineReason::ZdrForbidsEffect.notice();
+        for grounding in [None, Some(grounding_with_notice(None))] {
+            let answer = DirectAnswer::from_response(served("SECRET-ANSWER-3 hei"), "requested-model");
+            let out = frames(zdr_answer_stream(
+                "req-zdr".to_owned(),
+                grounding,
+                Some(declined),
+                Vec::new(),
+                0,
+                answer,
+                None,
+                12,
+            ))
+            .await;
+            let names: Vec<&str> = out.iter().map(|(name, _)| name.as_str()).collect();
+            assert_eq!(
+                names.iter().filter(|name| **name == "retrieval_notice").count(),
+                1,
+                "{names:?}"
+            );
+            assert_eq!(names.first(), Some(&"retrieval_notice"), "the notice comes first: {names:?}");
+            let payload = &out[0].1;
+            assert_eq!(payload["code"], "retrieval_declined_zdr_forbids_effect", "{payload}");
+            assert_eq!(payload["wording_key"], "retrieval.declined.zdr_forbids_effect", "{payload}");
+            assert_eq!(payload["request_id"], "req-zdr", "{payload}");
+            assert!(!payload.to_string().contains("SECRET-ANSWER"), "{payload}");
+        }
+        // The Data Plane's own notice wins when both exist: one notice per answer, and the reduction it states
+        // is the more specific statement.
+        let answer = DirectAnswer::from_response(served("plain"), "requested-model");
+        let out = frames(zdr_answer_stream(
+            "req-zdr".to_owned(),
+            Some(grounding_with_notice(Some(zdr_notice()))),
+            Some(declined),
+            Vec::new(),
+            0,
+            answer,
+            None,
+            12,
+        ))
+        .await;
+        let notices: Vec<_> = out.iter().filter(|(name, _)| name == "retrieval_notice").collect();
+        assert_eq!(notices.len(), 1, "{out:?}");
+        assert_eq!(notices[0].1["code"], "zdr_dense_unavailable");
+    }
+
+    /// The reason reaches the ZDR turn from either context, and a declined append reads with no retrieval
+    /// authority instead of the unscoped read an append otherwise has. A first message keeps its own token, an
+    /// append Control did not decline reads exactly as before, and a reason outside the closed set is no reason.
+    #[test]
+    fn a_declined_append_carries_the_reason_and_reads_with_no_retrieval_authority() {
+        use crate::retrieval_metadata::RetrievalDeclineReason;
+        let context = |extra: serde_json::Value| {
+            let mut base = serde_json::json!({
+                "space_id": "space-1", "space_decision_ref": "decision-1", "recipient_audience_ref": "audience-1",
+                "recipient_audience_revision": 1, "recipient_audience_hash": "hash-1",
+                "privacy_policy_ref": "privacy-1", "authority_revision": 1,
+                "resource_authorization_ref": "resource-1", "space_decision_token": "token",
+                "action_schema_hash": "schema", "payload_digest": "digest", "idempotency_key": "key",
+            });
+            base.as_object_mut().expect("object").extend(extra.as_object().expect("object").clone());
+            base
+        };
+        let request = |extra: serde_json::Value| -> crate::http_routes::InvokeRequest {
+            let mut body = serde_json::json!({"content": "hei", "model": "m"});
+            body.as_object_mut().expect("object").extend(extra.as_object().expect("object").clone());
+            serde_json::from_value(body).expect("a valid invoke request")
+        };
+
+        let none = request(serde_json::json!({}));
+        assert_eq!(crate::sse::declined_retrieval_reason(&none), None);
+        assert_eq!(crate::sse::retrieval_space_decision(&none), None);
+
+        let first = request(serde_json::json!({"space_context": context(serde_json::json!({
+            "retrieval_decision_token": "data-token", "retrieval_decline_reason": "entitlement_off"
+        }))}));
+        assert_eq!(crate::sse::declined_retrieval_reason(&first), Some(RetrievalDeclineReason::EntitlementOff));
+        assert_eq!(crate::sse::retrieval_space_decision(&first), Some("data-token"), "a first message keeps its own token");
+
+        let declined = request(serde_json::json!({"space_append_context": context(serde_json::json!({
+            "retrieval_decline_reason": "role_below_floor"
+        }))}));
+        assert_eq!(crate::sse::declined_retrieval_reason(&declined), Some(RetrievalDeclineReason::RoleBelowFloor));
+        assert_eq!(crate::sse::retrieval_space_decision(&declined), Some(""), "a declined append reads with no authority");
+
+        for append in [
+            context(serde_json::json!({})),
+            context(serde_json::json!({"retrieval_decline_reason": "a_reason_from_the_future"})),
+            context(serde_json::json!({"retrieval_decline_reason": 7})),
+        ] {
+            let undeclined = request(serde_json::json!({"space_append_context": append}));
+            assert_eq!(crate::sse::declined_retrieval_reason(&undeclined), None);
+            assert_eq!(crate::sse::retrieval_space_decision(&undeclined), None, "an append Control did not decline reads as before");
         }
     }
 
@@ -18336,6 +18574,7 @@ mod zdr_provenance_tests {
         let out = frames(zdr_answer_stream(
             "req-zdr".to_owned(),
             None,
+            None,
             vec!["usage".to_owned()],
             0,
             answer,
@@ -18371,6 +18610,7 @@ mod zdr_provenance_tests {
         };
         let out = frames(zdr_answer_stream(
             "req-zdr".to_owned(),
+            None,
             None,
             vec!["usage".to_owned()],
             0,
@@ -19438,6 +19678,7 @@ pub(crate) async fn continue_run(
                     approval_id: req.approval_id.clone(),
                     // Scoped to the verified org, never a client value.
                     org_id: claims.org_id.clone(),
+                    ..Default::default()
                 },
                 &model_bearer,
             )
@@ -24120,6 +24361,7 @@ mod do_attachment_tests {
             resource_authorization_ref: "resource-1".to_owned(),
             space_decision_token: "space-token".to_owned(),
             retrieval_decision_token: retrieval_token.to_owned(),
+            retrieval_decline_reason: None,
             action_schema_hash: "sha256:schema".to_owned(),
             payload_digest: "sha256:payload".to_owned(),
             idempotency_key: "idem-1".to_owned(),

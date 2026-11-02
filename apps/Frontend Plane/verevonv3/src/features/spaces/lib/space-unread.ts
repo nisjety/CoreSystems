@@ -12,7 +12,10 @@ import type { SpaceReadMarker, SpaceThread } from '@/shared/api/spaces-client'
  * - No marker (never caught up) badges nothing: there is no last visit to be
  *   new since, and badging every post on a first visit teaches people to
  *   ignore the badge.
- * - The reader's own posts are never new to them.
+ * - Activity the reader wrote themselves is never new to them. With
+ *   `last_author_subject_id` (WS01-S7b) that is "the latest message is mine",
+ *   so a reply from someone else in a thread I started DOES badge; without it
+ *   the older rule applies (a thread I started is never new).
  * - A post with no readable timestamp is left alone rather than guessed at.
  *
  * `asOf` is the marker snapshotted when the visit STARTED. The page advances
@@ -34,12 +37,41 @@ export function unreadThreadIds(
   for (const thread of threads) {
     const id = thread.thread_id?.trim()
     if (!id) continue
-    if (viewer && (thread.owner_subject_id ?? '').trim() === viewer) continue
+    if (viewer && lastWriterOf(thread) === viewer) continue
     const at = latestActivityMillis(thread)
     if (at === undefined) continue
     if (at > lastReadAt) out.add(id)
   }
   return out
+}
+
+/**
+ * Who wrote the latest activity: the latest message's author when the listing
+ * names one, else the thread's starter (the rule before human replies existed).
+ */
+function lastWriterOf(thread: SpaceThread): string {
+  const last = (thread.last_author_subject_id ?? '').trim()
+  return last || (thread.owner_subject_id ?? '').trim()
+}
+
+/**
+ * Where the "N new" divider goes: the index of the first post (in the order the room draws them,
+ * oldest first) that is new since the reader arrived, or -1 when none is. Pure, so the timeline and
+ * its test agree on one answer (WS11-S4).
+ */
+export function firstUnreadIndex(ordered: readonly SpaceThread[], unread: ReadonlySet<string>): number {
+  if (unread.size === 0) return -1
+  return ordered.findIndex((thread) => unread.has(thread.thread_id))
+}
+
+/**
+ * The `before_ms` for "mark unread from this post": one millisecond before the post's latest
+ * activity, so the marker lands just under it and the post reads as new again. Undefined when the
+ * post has no readable timestamp (the control is then not offered rather than guessed at).
+ */
+export function markUnreadBeforeMs(thread: SpaceThread): number | undefined {
+  const at = latestActivityMillis(thread)
+  return at === undefined ? undefined : Math.max(0, at - 1)
 }
 
 function latestActivityMillis(thread: SpaceThread): number | undefined {

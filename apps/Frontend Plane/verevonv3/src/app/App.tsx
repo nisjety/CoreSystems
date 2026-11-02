@@ -36,6 +36,9 @@ const KnowledgePage = lazy(() => import('@/features/knowledge/components/Knowled
 const SharedWithMePage = lazy(() => import('@/features/knowledge/components/SharedWithMePage'))
 const SpacePage = lazy(() => import('@/features/spaces/components/SpacePage'))
 const SpacesIndexPage = lazy(() => import('@/features/spaces/components/SpacesIndexPage'))
+const SpacesDirectoryPage = lazy(() => import('@/features/spaces/components/SpacesDirectoryPage'))
+const SpaceEntryRedirect = lazy(() => import('@/features/spaces/components/SpaceEntryRedirect'))
+const AttentionPage = lazy(() => import('@/features/attention/components/AttentionPage'))
 const LeadsPage = lazy(() => import('@/features/leads/components/LeadsPage'))
 const AnbudPage = lazy(() => import('@/features/anbud/components/AnbudPage'))
 const VerevonIngestionsPage = lazy(() => import('@/features/ingestions/components/VerevonIngestionsPage'))
@@ -195,8 +198,11 @@ export const Router = createRouter({
         { path: '/chat/findings', component: () => <ChatUtilityPage section="findings" /> },
         { path: '/chat/reports', component: () => <ChatUtilityPage section="reports" /> },
         { path: '/chat/routines', component: () => <ChatUtilityPage section="routines" /> },
+        { path: '/attention', component: AttentionPage },
         { path: '/spaces', component: SpacesIndexPage },
+        { path: '/spaces/directory', component: SpacesDirectoryPage },
         { path: '/spaces/:spaceId', component: SpacePage },
+        { path: '/spaces/:spaceId/m/:messageId', component: SpaceEntryRedirect },
         { path: '/studio', component: () => <StudioPage section="canvas" /> },
         { path: '/studio/canvas', component: () => <StudioPage section="canvas" /> },
         { path: '/studio/campaigns', component: () => <StudioPage section="campaigns" /> },

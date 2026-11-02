@@ -2631,6 +2631,169 @@ var LearningGovernanceService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
+	MessageRevisionService_ReviseMessage_FullMethodName        = "/model_plane.v1.MessageRevisionService/ReviseMessage"
+	MessageRevisionService_ResolveMessageTarget_FullMethodName = "/model_plane.v1.MessageRevisionService/ResolveMessageTarget"
+)
+
+// MessageRevisionServiceClient is the client API for MessageRevisionService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// MessageRevisionService: edit or delete ONE message of a Space thread (build plan WS12-S4).
+// A separate service, as MessageSearch and LearningGovernanceService are, so that SessionCore
+// and every mock of it stay source-compatible. Both RPCs are the caller's own: a service
+// credential is refused, and the caller carries a Control decision for the Space.
+type MessageRevisionServiceClient interface {
+	// The caller carries a Control `model.thread.revise` decision; Session Core verifies it,
+	// records an append-only revision and folds it into every read. Refused for a
+	// zero-retention credential and when SPACE_MESSAGE_REVISE_CORE is off.
+	ReviseMessage(ctx context.Context, in *ReviseMessageRequest, opts ...grpc.CallOption) (*ReviseMessageResponse, error)
+	// Resolve what a caller may need to know about a message before asking Control
+	// to authorize a revision: its role and revision state, never its content or
+	// author. Read class: authorized like ListConversation (a Space read decision).
+	ResolveMessageTarget(ctx context.Context, in *ResolveMessageTargetRequest, opts ...grpc.CallOption) (*ResolveMessageTargetResponse, error)
+}
+
+type messageRevisionServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewMessageRevisionServiceClient(cc grpc.ClientConnInterface) MessageRevisionServiceClient {
+	return &messageRevisionServiceClient{cc}
+}
+
+func (c *messageRevisionServiceClient) ReviseMessage(ctx context.Context, in *ReviseMessageRequest, opts ...grpc.CallOption) (*ReviseMessageResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReviseMessageResponse)
+	err := c.cc.Invoke(ctx, MessageRevisionService_ReviseMessage_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *messageRevisionServiceClient) ResolveMessageTarget(ctx context.Context, in *ResolveMessageTargetRequest, opts ...grpc.CallOption) (*ResolveMessageTargetResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ResolveMessageTargetResponse)
+	err := c.cc.Invoke(ctx, MessageRevisionService_ResolveMessageTarget_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// MessageRevisionServiceServer is the server API for MessageRevisionService service.
+// All implementations must embed UnimplementedMessageRevisionServiceServer
+// for forward compatibility.
+//
+// MessageRevisionService: edit or delete ONE message of a Space thread (build plan WS12-S4).
+// A separate service, as MessageSearch and LearningGovernanceService are, so that SessionCore
+// and every mock of it stay source-compatible. Both RPCs are the caller's own: a service
+// credential is refused, and the caller carries a Control decision for the Space.
+type MessageRevisionServiceServer interface {
+	// The caller carries a Control `model.thread.revise` decision; Session Core verifies it,
+	// records an append-only revision and folds it into every read. Refused for a
+	// zero-retention credential and when SPACE_MESSAGE_REVISE_CORE is off.
+	ReviseMessage(context.Context, *ReviseMessageRequest) (*ReviseMessageResponse, error)
+	// Resolve what a caller may need to know about a message before asking Control
+	// to authorize a revision: its role and revision state, never its content or
+	// author. Read class: authorized like ListConversation (a Space read decision).
+	ResolveMessageTarget(context.Context, *ResolveMessageTargetRequest) (*ResolveMessageTargetResponse, error)
+	mustEmbedUnimplementedMessageRevisionServiceServer()
+}
+
+// UnimplementedMessageRevisionServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedMessageRevisionServiceServer struct{}
+
+func (UnimplementedMessageRevisionServiceServer) ReviseMessage(context.Context, *ReviseMessageRequest) (*ReviseMessageResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReviseMessage not implemented")
+}
+func (UnimplementedMessageRevisionServiceServer) ResolveMessageTarget(context.Context, *ResolveMessageTargetRequest) (*ResolveMessageTargetResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ResolveMessageTarget not implemented")
+}
+func (UnimplementedMessageRevisionServiceServer) mustEmbedUnimplementedMessageRevisionServiceServer() {
+}
+func (UnimplementedMessageRevisionServiceServer) testEmbeddedByValue() {}
+
+// UnsafeMessageRevisionServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to MessageRevisionServiceServer will
+// result in compilation errors.
+type UnsafeMessageRevisionServiceServer interface {
+	mustEmbedUnimplementedMessageRevisionServiceServer()
+}
+
+func RegisterMessageRevisionServiceServer(s grpc.ServiceRegistrar, srv MessageRevisionServiceServer) {
+	// If the following call panics, it indicates UnimplementedMessageRevisionServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&MessageRevisionService_ServiceDesc, srv)
+}
+
+func _MessageRevisionService_ReviseMessage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReviseMessageRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MessageRevisionServiceServer).ReviseMessage(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MessageRevisionService_ReviseMessage_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MessageRevisionServiceServer).ReviseMessage(ctx, req.(*ReviseMessageRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MessageRevisionService_ResolveMessageTarget_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResolveMessageTargetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MessageRevisionServiceServer).ResolveMessageTarget(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MessageRevisionService_ResolveMessageTarget_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MessageRevisionServiceServer).ResolveMessageTarget(ctx, req.(*ResolveMessageTargetRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// MessageRevisionService_ServiceDesc is the grpc.ServiceDesc for MessageRevisionService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var MessageRevisionService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "model_plane.v1.MessageRevisionService",
+	HandlerType: (*MessageRevisionServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "ReviseMessage",
+			Handler:    _MessageRevisionService_ReviseMessage_Handler,
+		},
+		{
+			MethodName: "ResolveMessageTarget",
+			Handler:    _MessageRevisionService_ResolveMessageTarget_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "model_plane/v1/sessions.proto",
+}
+
+const (
 	ThreadForkService_ForkThread_FullMethodName = "/model_plane.v1.ThreadForkService/ForkThread"
 )
 

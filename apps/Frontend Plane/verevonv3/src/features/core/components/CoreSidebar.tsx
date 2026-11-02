@@ -51,6 +51,7 @@ import { VisibilitySidebarPanel } from '@/features/visibility/components/Visibil
 import { AnbudExpandedSidebarPanel } from '@/features/core/components/sidebar/CoreSidebarAnbudPanel'
 import { SupportExpandedSidebarPanel } from '@/features/core/components/sidebar/CoreSidebarSupportPanel'
 import { SpacesExpandedSidebarPanel } from '@/features/core/components/sidebar/CoreSidebarSpacesPanel'
+import { SpaceTotalAttentionBadge } from '@/features/core/components/sidebar/SpaceAttentionBadge'
 import {
   SidebarPanelTitle,
   SidebarSearchField,
@@ -1331,6 +1332,9 @@ function SidebarPanelLink(props: {
       <Show when={homeSection()} fallback={<a href={props.item.href} link aria-current={active() ? 'page' : undefined} class={cn('core-sidebar-panel-link', active() ? 'verevon-sidebar-panel-active core-sidebar-panel-link--active' : '')}>
         <PanelItemIcon icon={props.item.icon} active={active()} />
         <span class={cn('core-sidebar-panel-link__label', active() ? 'verevon-sidebar-row' : 'verevon-sidebar-row-normal')}>{props.item.label}</span>
+        <Show when={props.item.badge === 'attention'}>
+          <SpaceTotalAttentionBadge />
+        </Show>
       </a>}>
         <button type="button" aria-pressed={homeActive() ? 'true' : 'false'} class={cn('core-sidebar-panel-link', homeActive() && 'verevon-sidebar-panel-active core-sidebar-panel-link--active')} onClick={() => {
           const action = homeOverviewActionSchema.parse({ type: 'home.overview.select', section: homeSection() })

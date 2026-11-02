@@ -33,6 +33,8 @@ export interface ThreadActivityLike {
   readonly updated_at?: string | null;
   readonly latest_run_updated_at?: string | null;
   readonly owner_subject_id?: string | null;
+  /** Who wrote the latest message (WS01-S1). Absent means unknown: the owner rule applies. */
+  readonly last_author_subject_id?: string | null;
 }
 
 /**
@@ -42,8 +44,11 @@ export interface ThreadActivityLike {
  *   the sense the badge means, because there is no last visit to be new since.
  *   Marking everything unread on a first visit would badge a hundred posts at
  *   once and teach people to ignore the badge.
- * - A thread the member started themselves is never unread to them. Their own
- *   post arriving is not news.
+ * - Activity the member wrote themselves is never unread to them. With
+ *   `last_author_subject_id` that is "the latest message is theirs", so someone
+ *   else's reply in a thread they started badges; without the field the older
+ *   rule applies (a thread they started is never unread). Mirrors the SPA's
+ *   `space-unread.ts`; they must agree.
  * - A thread with no readable timestamp cannot be placed relative to the
  *   marker and is left alone rather than guessed at.
  */
@@ -58,12 +63,17 @@ export function unreadThreadIds(
   for (const thread of threads) {
     const id = (thread.thread_id ?? "").trim();
     if (!id) continue;
-    if (viewer && (thread.owner_subject_id ?? "").trim() === viewer) continue;
+    if (viewer && lastWriterOf(thread) === viewer) continue;
     const at = latestActivityMillis(thread);
     if (at === undefined) continue;
     if (at > lastReadAt) out.push(id);
   }
   return out;
+}
+
+function lastWriterOf(thread: ThreadActivityLike): string {
+  const last = (thread.last_author_subject_id ?? "").trim();
+  return last || (thread.owner_subject_id ?? "").trim();
 }
 
 function latestActivityMillis(thread: ThreadActivityLike): number | undefined {
@@ -83,6 +93,80 @@ export function advanceMarker(existing: number | null | undefined, now: number):
   return Math.max(existing, now);
 }
 
+export type MarkReadReason = "enter" | "while_open";
+
+export interface MarkerRowLike {
+  readonly lastReadAt: number;
+  readonly unreadFloor?: number | null;
+}
+
+/**
+ * The marker unread is measured against: the manual floor when one is set,
+ * otherwise `lastReadAt`. The floor is always <= `lastReadAt`.
+ */
+export function effectiveMarker(row: MarkerRowLike | null | undefined): number | null {
+  if (!row) return null;
+  const floor = row.unreadFloor;
+  if (typeof floor === "number" && Number.isFinite(floor)) return Math.min(floor, row.lastReadAt);
+  return row.lastReadAt;
+}
+
+export interface MarkReadPlan {
+  readonly lastReadAt: number;
+  /** `null` when no floor remains. */
+  readonly unreadFloor: number | null;
+  readonly write: boolean;
+}
+
+/**
+ * What one "I have the room open" call does.
+ *
+ * - `while_open` (the default, and what every poll of an open room sends): while
+ *   a manual floor is set it is a no-op, so a slow poll cannot undo "mark
+ *   unread"; otherwise the marker advances, never backwards.
+ * - `enter` (the first call after navigating to the room): clears the floor and
+ *   advances. This is the only way a floor goes away besides read-all.
+ */
+export function planMarkRead(
+  existing: MarkerRowLike | null | undefined,
+  now: number,
+  reason: MarkReadReason,
+): MarkReadPlan {
+  if (!existing) return { lastReadAt: now, unreadFloor: null, write: true };
+  const hasFloor =
+    typeof existing.unreadFloor === "number" && Number.isFinite(existing.unreadFloor);
+  if (hasFloor && reason !== "enter") {
+    return {
+      lastReadAt: existing.lastReadAt,
+      unreadFloor: existing.unreadFloor as number,
+      write: false,
+    };
+  }
+  const lastReadAt = advanceMarker(existing.lastReadAt, now);
+  return {
+    lastReadAt,
+    unreadFloor: null,
+    write: lastReadAt !== existing.lastReadAt || hasFloor,
+  };
+}
+
+/**
+ * "Mark unread from here": the floor becomes `min(existing floor ?? lastReadAt,
+ * beforeMs)`. Ignored (`null`) when there is no marker or `beforeMs` is not
+ * earlier than the effective marker, because then nothing would become unread.
+ * This is the one deliberate backward move, and it is an explicit user action.
+ */
+export function planMarkUnread(
+  existing: MarkerRowLike | null | undefined,
+  beforeMs: number,
+): number | null {
+  if (!existing) return null;
+  if (typeof beforeMs !== "number" || !Number.isFinite(beforeMs) || beforeMs <= 0) return null;
+  const current = effectiveMarker(existing) as number;
+  if (beforeMs >= current) return null;
+  return Math.floor(beforeMs);
+}
+
 async function loadMarker(ctx: any, spaceRef: string, externalAuthId: string) {
   return ctx.db
     .query("spaceReadMarkers")
@@ -92,7 +176,28 @@ async function loadMarker(ctx: any, spaceRef: string, externalAuthId: string) {
     .unique();
 }
 
-/** The caller's own marker for a room. `null` when they have never caught up. */
+export interface MarkerView {
+  /**
+   * The EFFECTIVE marker (floor if set, else the real one). Keeping this name
+   * means a caller written before the floor existed stays correct.
+   */
+  lastReadAt: number | null;
+  /** The real catch-up time, ignoring the floor. */
+  readThroughAt: number | null;
+  manualUnread: boolean;
+}
+
+function viewOf(row: MarkerRowLike | null | undefined): MarkerView {
+  if (!row) return { lastReadAt: null, readThroughAt: null, manualUnread: false };
+  const manual = typeof row.unreadFloor === "number" && Number.isFinite(row.unreadFloor);
+  return {
+    lastReadAt: effectiveMarker(row),
+    readThroughAt: row.lastReadAt,
+    manualUnread: manual,
+  };
+}
+
+/** The caller's own marker for a room. `lastReadAt` is `null` when they have never caught up. */
 export const spaceReadMarkerForGateway = query({
   args: {
     serviceKey: v.string(),
@@ -100,20 +205,24 @@ export const spaceReadMarkerForGateway = query({
     externalOrgId: v.string(),
     spaceRef: v.string(),
   },
-  handler: async (ctx, args): Promise<{ lastReadAt: number | null }> => {
+  handler: async (ctx, args): Promise<MarkerView> => {
     assertServiceKey(args.serviceKey);
     await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
     const spaceRef = args.spaceRef.trim();
     if (!spaceRef) throw new Error("A Space reference is required");
     const marker = await loadMarker(ctx, spaceRef, args.externalAuthId);
-    if (!marker || marker.externalOrgId !== args.externalOrgId) return { lastReadAt: null };
-    return { lastReadAt: marker.lastReadAt };
+    if (!marker || marker.externalOrgId !== args.externalOrgId) return viewOf(null);
+    return viewOf(marker);
   },
 });
 
 /**
  * The caller has the room open now. Records nothing about which threads exist
  * or what they say — only that this person caught up at this moment.
+ *
+ * `reason` (WS11-S3): absent means `while_open`. While a manual unread floor is
+ * set, `while_open` changes nothing and answers with the floor; `enter` clears
+ * the floor and advances (see {@link planMarkRead}).
  *
  * Space membership is the calling gateway's check (it verifies lifecycle and
  * current Control membership before calling, as it does for every Space read);
@@ -126,27 +235,58 @@ export const markSpaceReadForGateway = mutation({
     externalAuthId: v.string(),
     externalOrgId: v.string(),
     spaceRef: v.string(),
+    reason: v.optional(v.union(v.literal("enter"), v.literal("while_open"))),
   },
-  handler: async (ctx, args): Promise<{ lastReadAt: number }> => {
+  handler: async (ctx, args): Promise<MarkerView> => {
     assertServiceKey(args.serviceKey);
     await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
     const spaceRef = args.spaceRef.trim();
     if (!spaceRef) throw new Error("A Space reference is required");
     const now = Date.now();
     const existing = await loadMarker(ctx, spaceRef, args.externalAuthId);
+    const plan = planMarkRead(existing, now, args.reason ?? "while_open");
     if (existing) {
-      const lastReadAt = advanceMarker(existing.lastReadAt, now);
-      if (lastReadAt !== existing.lastReadAt) {
-        await ctx.db.patch(existing._id, { lastReadAt });
+      if (plan.write) {
+        await ctx.db.patch(existing._id, {
+          lastReadAt: plan.lastReadAt,
+          unreadFloor: plan.unreadFloor ?? undefined,
+        });
       }
-      return { lastReadAt };
+    } else {
+      await ctx.db.insert("spaceReadMarkers", {
+        spaceRef,
+        externalOrgId: args.externalOrgId,
+        externalAuthId: args.externalAuthId,
+        lastReadAt: plan.lastReadAt,
+      });
     }
-    await ctx.db.insert("spaceReadMarkers", {
-      spaceRef,
-      externalOrgId: args.externalOrgId,
-      externalAuthId: args.externalAuthId,
-      lastReadAt: now,
-    });
-    return { lastReadAt: now };
+    return viewOf({ lastReadAt: plan.lastReadAt, unreadFloor: plan.unreadFloor });
+  },
+});
+
+/**
+ * "Mark unread": sets the manual floor so everything newer than `beforeMs`
+ * reads as unread again. Ignored (answers the unchanged marker) when the caller
+ * has no marker or `beforeMs` is not earlier than the effective marker.
+ */
+export const markUnreadForGateway = mutation({
+  args: {
+    serviceKey: v.string(),
+    externalAuthId: v.string(),
+    externalOrgId: v.string(),
+    spaceRef: v.string(),
+    beforeMs: v.number(),
+  },
+  handler: async (ctx, args): Promise<MarkerView> => {
+    assertServiceKey(args.serviceKey);
+    await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
+    const spaceRef = args.spaceRef.trim();
+    if (!spaceRef) throw new Error("A Space reference is required");
+    const existing = await loadMarker(ctx, spaceRef, args.externalAuthId);
+    if (!existing || existing.externalOrgId !== args.externalOrgId) return viewOf(null);
+    const floor = planMarkUnread(existing, args.beforeMs);
+    if (floor === null) return viewOf(existing);
+    await ctx.db.patch(existing._id, { unreadFloor: floor });
+    return viewOf({ lastReadAt: existing.lastReadAt, unreadFloor: floor });
   },
 });

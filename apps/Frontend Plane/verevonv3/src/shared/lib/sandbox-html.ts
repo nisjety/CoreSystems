@@ -28,8 +28,7 @@ const CSP_META = `<meta http-equiv="Content-Security-Policy" content="${PREVIEW_
 
 export function sandboxHtmlDocument(html: string): string {
   const source = html.trim()
-  if (/<head(?:\s[^>]*)?>/i.test(source)) {
-    return source.replace(/<head(?:\s[^>]*)?>/i, (head) => `${head}${CSP_META}`)
-  }
+  // Always our own head first: splicing into the artifact's first `<head>`
+  // match could hit a comment or a script string and leave no CSP at all.
   return `<!doctype html><html><head>${CSP_META}</head><body>${source}</body></html>`
 }

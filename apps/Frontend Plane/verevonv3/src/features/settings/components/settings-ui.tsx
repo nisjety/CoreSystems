@@ -148,7 +148,7 @@ export function SettingsSelect(props: {
   id: string
   label: string
   onChange?: JSX.EventHandler<HTMLSelectElement, Event>
-  options: Array<{ value: string; label: string }>
+  options: Array<{ value: string; label: string; disabled?: boolean }>
   value: string
 }) {
   return (
@@ -163,7 +163,7 @@ export function SettingsSelect(props: {
           class="verevon-settings-input verevon-settings-select"
         >
           <For each={props.options}>
-            {(option) => <option value={option.value}>{option.label}</option>}
+            {(option) => <option value={option.value} disabled={option.disabled}>{option.label}</option>}
           </For>
         </VerevonSelect>
         <ChevronDown
@@ -293,6 +293,8 @@ export function FeaturePanel(props: {
   children: JSX.Element
   class?: string
   description: string
+  /** When set the header button runs it; without it the button is inert as before. */
+  onAction?: () => void
   title: string
 }) {
   return (
@@ -302,7 +304,7 @@ export function FeaturePanel(props: {
           <h3>{props.title}</h3>
           <p>{props.description}</p>
         </div>
-        <SettingsButton settingsSize="xs">{props.actionLabel}</SettingsButton>
+        <SettingsButton settingsSize="xs" onClick={props.onAction}>{props.actionLabel}</SettingsButton>
       </div>
       {props.children}
     </div>

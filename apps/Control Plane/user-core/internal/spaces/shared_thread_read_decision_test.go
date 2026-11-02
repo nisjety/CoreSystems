@@ -208,3 +208,85 @@ func TestIssueSharedThreadReadDecisionRefusesAnUnknownAudience(t *testing.T) {
 		t.Fatalf("blank audience resolved to %q, want the Session Core default", decision.ServiceAudience)
 	}
 }
+
+// WS02-S2: the SpaceEvents stream is a third recipient of the same read
+// authority. Only the signed service_audience differs.
+func TestIssueSharedThreadReadDecisionForSpaceStreamKeepsTheSameAuthority(t *testing.T) {
+	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	base := SharedThreadReadDecisionRequest{DecisionRef: "read-decision-1", IdempotencyKey: "read-1", Nonce: "nonce-1"}
+	forSession, err := IssueSharedThreadReadDecision(validSharedThreadReadEvidence(), base, now)
+	if err != nil {
+		t.Fatalf("session-core decision: %v", err)
+	}
+	scoped := base
+	scoped.ServiceAudience = ThreadReadAudienceSpaceStream
+	forStream, err := IssueSharedThreadReadDecision(validSharedThreadReadEvidence(), scoped, now)
+	if err != nil {
+		t.Fatalf("space-stream decision: %v", err)
+	}
+	if forStream.ServiceAudience != "model-plane-space-stream" {
+		t.Fatalf("signed service_audience = %q, want model-plane-space-stream", forStream.ServiceAudience)
+	}
+	if ThreadReadAudienceSpaceStream != "model-plane-space-stream" {
+		t.Fatalf("the stream audience literal changed to %q; Session Core's SpaceEvents verifier pins it", ThreadReadAudienceSpaceStream)
+	}
+	if forStream.ActionID != forSession.ActionID || forStream.ActionSchemaHash != forSession.ActionSchemaHash {
+		t.Fatal("the stream audience must describe the same action and schema as the default read")
+	}
+	if len(forStream.Permissions) != 1 || forStream.Permissions[0] != "thread:read" {
+		t.Fatalf("stream read permissions = %#v; a read decision must never widen", forStream.Permissions)
+	}
+	if forStream.PayloadDigest != forSession.PayloadDigest {
+		t.Fatal("the audience is not a digest input; the stream decision's payload digest differs from the default")
+	}
+	if forStream.RecipientAudienceRevision != forSession.RecipientAudienceRevision ||
+		forStream.SubjectID != forSession.SubjectID || forStream.SpaceRef != forSession.SpaceRef {
+		t.Fatal("the stream decision must carry the same subject, Space and audience revision")
+	}
+	if forStream.ServiceAudience == forSession.ServiceAudience {
+		t.Fatal("the stream and default read decisions must differ in audience, or neither verifier is isolated")
+	}
+}
+
+func TestSharedThreadReadRequestValidateAcceptsStreamAudienceAndRefusesNearMisses(t *testing.T) {
+	valid := SharedThreadReadDecisionRequest{
+		DecisionRef: "read-decision-1", IdempotencyKey: "read-1", Nonce: "nonce-1",
+		ServiceAudience: ThreadReadAudienceSpaceStream,
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("the space-stream audience was refused: %v", err)
+	}
+	for _, audience := range []string{"model-plane-space-stream-x", "space-stream", "model-plane-session-core", "MODEL-PLANE-SPACE-STREAM"} {
+		request := valid
+		request.ServiceAudience = audience
+		if err := request.Validate(); err == nil {
+			t.Errorf("near-miss audience %q passed validation", audience)
+		}
+	}
+}
+
+func TestIssueSharedThreadReadDecisionRefusesUnentitledViewerForStreamAudienceLikeRead(t *testing.T) {
+	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	evidence := validSharedThreadReadEvidence()
+	evidence.Membership.Role = "viewer"
+	evidence.ThreadReadEntitled = false
+
+	var messages []string
+	for _, audience := range []string{"", ThreadReadAudienceSessionCore, ThreadReadAudienceSpaceStream} {
+		request := SharedThreadReadDecisionRequest{
+			DecisionRef: "read-decision-1", IdempotencyKey: "read-1", Nonce: "nonce-1", ServiceAudience: audience,
+		}
+		_, err := IssueSharedThreadReadDecision(evidence, request, now)
+		if err == nil {
+			t.Fatalf("audience %q: an unentitled viewer was issued a read decision", audience)
+		}
+		denial, ok := AsDenial(err)
+		if !ok || denial.Code != DenialEntitlementOff {
+			t.Fatalf("audience %q: refusal = %v, want an entitlement_off denial", audience, err)
+		}
+		messages = append(messages, err.Error())
+	}
+	if messages[0] != messages[1] || messages[1] != messages[2] {
+		t.Fatalf("the stream audience is refused differently from the read audience: %q", messages)
+	}
+}

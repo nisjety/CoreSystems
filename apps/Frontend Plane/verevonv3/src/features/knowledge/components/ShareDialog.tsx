@@ -163,15 +163,22 @@ export function ShareDialog(props: {
                     <li class="knowledge-share-row">
                       <span class="knowledge-share-subject">{grant.subject_id}</span>
                       <span class="knowledge-muted-copy">Can view</span>
-                      <button
-                        type="button"
-                        class="knowledge-share-remove"
-                        disabled={busy()}
-                        onClick={() => void removeShare(grant.subject_id)}
-                        aria-label={`Remove ${grant.subject_id}`}
+                      {/* A room (space) row is written by the room-file attach path
+                          and removed with the file; it is not removable here. */}
+                      <Show
+                        when={(grant.subject_type ?? 'user') === 'user'}
+                        fallback={<span class="knowledge-muted-copy">Room</span>}
                       >
-                        Remove
-                      </button>
+                        <button
+                          type="button"
+                          class="knowledge-share-remove"
+                          disabled={busy()}
+                          onClick={() => void removeShare(grant.subject_id)}
+                          aria-label={`Remove ${grant.subject_id}`}
+                        >
+                          Remove
+                        </button>
+                      </Show>
                     </li>
                   )}
                 </For>
