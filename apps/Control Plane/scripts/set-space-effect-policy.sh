@@ -81,6 +81,7 @@ schedule_fire_entitled=""
 thread_read_entitled=""
 sandbox_capability_entitled=""
 process_registry_entitled=""
+run_control_entitled=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -102,6 +103,7 @@ while [[ $# -gt 0 ]]; do
     --thread-read-entitled) thread_read_entitled=true; shift ;;
     --sandbox-capability-entitled) sandbox_capability_entitled=true; shift ;;
     --process-registry-entitled) process_registry_entitled=true; shift ;;
+    --run-control-entitled) run_control_entitled=true; shift ;;
     *) echo "unknown argument: $1" >&2; exit 1 ;;
   esac
 done
@@ -115,7 +117,7 @@ done
 
 # Send an entitlement key only when its flag was passed.
 entitlement_json=""
-for key in thread_create retrieval_read import_write agent_action schedule_fire thread_read sandbox_capability process_registry; do
+for key in thread_create retrieval_read import_write agent_action schedule_fire thread_read sandbox_capability process_registry run_control; do
   var="${key}_entitled"
   if [[ -n "${!var}" ]]; then
     entitlement_json+=$',\n  "'"${key}"'_entitled": '"${!var}"

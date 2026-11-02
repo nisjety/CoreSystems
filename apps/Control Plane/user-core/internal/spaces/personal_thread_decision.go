@@ -117,6 +117,7 @@ type PersonalThreadDecisionEvidence struct {
 	ScheduleFireEntitled      bool
 	SandboxCapabilityEntitled bool
 	ProcessRegistryEntitled   bool
+	RunControlEntitled        bool
 	ResourceAuthorizationRef  string
 }
 
@@ -231,6 +232,37 @@ func (e PersonalThreadDecisionEvidence) ValidateForSharedThreadRead() error {
 	}
 	if strings.TrimSpace(e.ResourceAuthorizationRef) == "" {
 		return authorityIncompleteDenial("shared Space thread read authority is incomplete")
+	}
+	return e.Privacy.Validate()
+}
+
+// ValidateForSharedRunControl authorizes cancelling a live run in a shared
+// Space (WS09-S7). It is stricter than the read and write validators on
+// purpose: the role floor is manager (owner included), not editor or viewer,
+// because ending another member's turn is a room-management power, and it
+// binds the independent run_control_entitled bit, never thread_create or
+// thread_read. The current-recipient-audience join is the same one the read
+// evidence uses, so a removed participant stops resolving at once. Personal
+// Spaces are refused: their only member can already cancel their own runs
+// through the owner-bound path.
+func (e PersonalThreadDecisionEvidence) ValidateForSharedRunControl() error {
+	if err := e.Membership.Validate(); err != nil {
+		return err
+	}
+	if e.Membership.Kind == KindPersonal {
+		return kindUnsupportedDenial(string(e.Membership.Kind), "shared run control decision requires a non-personal Space")
+	}
+	if !matchesOneOf(e.Membership.Role, "manager", "owner") {
+		return roleBelowFloorDenial(fmt.Sprintf("space role %q cannot control another member's run", e.Membership.Role), "manager", "owner")
+	}
+	if strings.TrimSpace(e.RecipientAudienceRef) == "" || strings.TrimSpace(e.RecipientAudienceHash) == "" {
+		return authorityIncompleteDenial("shared Space recipient audience is required")
+	}
+	if !e.RunControlEntitled {
+		return entitlementOffDenial("run_control", "shared Space run control authority is incomplete")
+	}
+	if strings.TrimSpace(e.ResourceAuthorizationRef) == "" {
+		return authorityIncompleteDenial("shared Space run control authority is incomplete")
 	}
 	return e.Privacy.Validate()
 }

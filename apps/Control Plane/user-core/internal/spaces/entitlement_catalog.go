@@ -93,6 +93,12 @@ var entitlementCatalog = []EntitlementSpec{
 		Get: func(p EffectPolicy) bool { return p.ProcessRegistryEntitled },
 		Set: func(p *EffectPolicy, v bool) { p.ProcessRegistryEntitled = v },
 	},
+	{
+		Key: "run_control", Column: "run_control_entitled",
+		Decisions: []string{"model.run.control"}, ZDR: ZDRCompatible,
+		Get: func(p EffectPolicy) bool { return p.RunControlEntitled },
+		Set: func(p *EffectPolicy, v bool) { p.RunControlEntitled = v },
+	},
 }
 
 // effectPolicyPrivacyColumns are the nine privacy/attestation columns, in the

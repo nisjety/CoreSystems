@@ -195,6 +195,11 @@ type EffectPolicy struct {
 	// later. A Space allowed the first is not thereby allowed the second. See
 	// apps/Frontend Plane/verevonv3/docs/S4_2_PROCESS_REGISTRY_DESIGN_2026-09-13.md §4.
 	ProcessRegistryEntitled bool `json:"process_registry_entitled"`
+	// RunControlEntitled (WS09-S7) lets a room manager or owner cancel another
+	// member's live run. Stopping someone else's turn is a different power from
+	// speaking or reading in the room, so it is its own deny-by-default floor
+	// and is never inherited from ThreadCreateEntitled or ThreadReadEntitled.
+	RunControlEntitled bool `json:"run_control_entitled"`
 }
 
 func (p EffectPolicy) Validate() error {
