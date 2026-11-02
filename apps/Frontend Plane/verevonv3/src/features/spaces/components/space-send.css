@@ -162,3 +162,65 @@
   outline: 2px dashed var(--verevon-accent, currentColor);
   outline-offset: 2px;
 }
+
+/* Markdown authoring (WS15-S3): format bar, preview pane. Only rendered while features.composer_markdown is on. */
+.verevon-space-room-composer__format {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-wrap: wrap;
+}
+
+.verevon-space-room-composer__format-spacer {
+  flex: 1 1 auto;
+}
+
+.verevon-space-room-composer__format-button,
+.verevon-space-room-composer__format-toggle {
+  border: 0;
+  background: transparent;
+  color: var(--verevon-text-muted);
+  font: inherit;
+  font-size: 0.8125rem;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.verevon-space-room-composer__format-button:hover:not(:disabled),
+.verevon-space-room-composer__format-toggle:hover:not(:disabled) {
+  background: var(--verevon-surface-hover, rgba(127, 127, 127, 0.12));
+  color: inherit;
+}
+
+.verevon-space-room-composer__format-button:disabled,
+.verevon-space-room-composer__format-toggle:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.verevon-space-room-composer__format-button:focus-visible,
+.verevon-space-room-composer__format-toggle:focus-visible {
+  outline: 2px solid var(--verevon-accent, currentColor);
+  outline-offset: 1px;
+}
+
+.verevon-space-room-composer__format-toggle[aria-pressed="true"] {
+  color: inherit;
+  background: var(--verevon-surface-hover, rgba(127, 127, 127, 0.12));
+}
+
+.verevon-space-room-composer__preview {
+  min-height: 3.5rem;
+  max-height: 16rem;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px dashed var(--verevon-border, rgba(127, 127, 127, 0.4));
+  border-radius: 8px;
+}
+
+.verevon-space-room-composer textarea[hidden] {
+  display: none;
+}

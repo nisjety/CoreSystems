@@ -1,4 +1,4 @@
-import { createMemo, createSignal, For, onCleanup, Show } from 'solid-js'
+import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'solid-js'
 
 import { ChatMarkdown } from '@/features/chat/components/ChatMessages'
 import type { ChatArtifact } from '@/features/chat/components/chat-types'
@@ -54,6 +54,7 @@ import { OPENAI_CODEX_SUBSCRIPTION_PROVIDER } from '@/shared/api/chatgpt-subscri
 import { getSession } from '@/shared/session/session-store'
 import { useHomeDraft } from '@/features/dashboard/home/home-draft'
 import { spaceRoomFeatureWithDevOverride } from '../lib/space-room-features'
+import { applyFormat, markdownShortcut, type MarkdownFormatKind } from '../lib/markdown-edit'
 import './space-send.css'
 
 /**
@@ -197,6 +198,12 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
     zeroRetention: () => false,
     scope: () => (draftsOn() ? `space:${props.spaceRef}:${props.replyTarget?.()?.threadId ?? 'new'}` : undefined),
   })
+  // Markdown authoring (WS15-S3): a small format bar, a Write/Preview toggle, a box that grows from two
+  // to ten rows and an always-on counter, all behind `features.composer_markdown`. Off, the box is
+  // today's byte for byte. The text stays plain markdown in the textarea; nothing is stored beyond
+  // the draft above. Presentation only, never an authorization input.
+  const markdownOn = () => spaceRoomFeatureWithDevOverride('composer_markdown', import.meta.env.VITE_SPACE_COMPOSER_MARKDOWN)
+  const [previewing, setPreviewing] = createSignal(false)
   const [mentionQuery, setMentionQuery] = createSignal<string | undefined>(undefined)
   const [mentionedAgentRef, setMentionedAgentRef] = createSignal<string | undefined>(undefined)
   // `/` skills (later tier). The catalogue is fetched on the first `/`, never on
@@ -225,6 +232,31 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
     spaceRoomFeatureWithDevOverride('turn_attachments', import.meta.env.VITE_SPACE_TURN_ATTACHMENTS)
   let fileInputRef: HTMLInputElement | undefined
   let textareaRef: HTMLTextAreaElement | undefined
+  const MARKDOWN_ROWS_MIN = 2
+  const MARKDOWN_ROWS_MAX = 10
+  // Grow with the text, two rows up to ten, then scroll. Measured from scrollHeight so wrapped lines
+  // count; a layout-less environment measures zero and stays at two.
+  createEffect(() => {
+    text()
+    previewing()
+    const element = textareaRef
+    if (!element) return
+    if (!markdownOn()) {
+      element.rows = MARKDOWN_ROWS_MIN
+      return
+    }
+    element.rows = MARKDOWN_ROWS_MIN
+    const lineHeight = Number.parseFloat(getComputedStyle(element).lineHeight)
+    if (!Number.isFinite(lineHeight) || lineHeight <= 0 || element.scrollHeight <= 0) return
+    const style = getComputedStyle(element)
+    const padding = (Number.parseFloat(style.paddingTop) || 0) + (Number.parseFloat(style.paddingBottom) || 0)
+    const needed = Math.ceil((element.scrollHeight - padding) / lineHeight)
+    element.rows = Math.max(MARKDOWN_ROWS_MIN, Math.min(MARKDOWN_ROWS_MAX, needed))
+  })
+  // An emptied box (a sent message) leaves Preview.
+  createEffect(() => {
+    if (previewing() && (!markdownOn() || text().trim() === '')) setPreviewing(false)
+  })
   // What to clear once the in-flight turn is accepted; set only while drafts keep the words in the box.
   let acceptSend: (() => void) | undefined
   // The send path (in-flight handles, exchange state, Stop) lives in the send
@@ -559,7 +591,26 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
     else selectSkill(item.skill)
   }
 
+  // Apply one markdown format to the textarea's selection and put the caret where the transform says.
+  function formatSelection(kind: MarkdownFormatKind): void {
+    const element = textareaRef
+    if (!element || !markdownOn() || previewing()) return
+    const edit = applyFormat(element.value, element.selectionStart ?? element.value.length, element.selectionEnd ?? element.value.length, kind)
+    element.value = edit.value
+    setText(edit.value)
+    element.focus()
+    element.setSelectionRange(edit.selStart, edit.selEnd)
+  }
+
   function handleKeyDown(event: KeyboardEvent & { currentTarget: HTMLTextAreaElement }): void {
+    if (markdownOn() && (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey) {
+      const kind = markdownShortcut(event.key)
+      if (kind) {
+        event.preventDefault()
+        formatSelection(kind)
+        return
+      }
+    }
     const items = pickerItems()
     if (items.length > 0) {
       if (event.key === 'ArrowDown') {
@@ -1014,8 +1065,53 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
             <p class="verevon-space-room-composer__blocked" role="alert">{notice()}</p>
           )}
         </Show>
+        <Show when={markdownOn() && !roleBlocked()}>
+          <div class="verevon-space-room-composer__format" role="toolbar" aria-label={i18n.tr('Formatering', 'Formatting')}>
+            <For
+              each={[
+                { kind: 'bold' as const, label: i18n.tr('Fet (Ctrl+B)', 'Bold (Ctrl+B)'), glyph: 'B' },
+                { kind: 'italic' as const, label: i18n.tr('Kursiv (Ctrl+I)', 'Italic (Ctrl+I)'), glyph: 'I' },
+                { kind: 'code' as const, label: i18n.tr('Kode', 'Code'), glyph: '</>' },
+                { kind: 'link' as const, label: i18n.tr('Lenke (Ctrl+K)', 'Link (Ctrl+K)'), glyph: '🔗' },
+                { kind: 'bullet' as const, label: i18n.tr('Punktliste', 'Bulleted list'), glyph: '•' },
+                { kind: 'quote' as const, label: i18n.tr('Sitat', 'Quote'), glyph: '❝' },
+              ]}
+            >
+              {(entry) => (
+                <button
+                  type="button"
+                  class="verevon-space-room-composer__format-button"
+                  data-format={entry.kind}
+                  aria-label={entry.label}
+                  title={entry.label}
+                  disabled={previewing() || submitting() || preparing() || blockedByApproval() || postBusy()}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => formatSelection(entry.kind)}
+                >
+                  {entry.glyph}
+                </button>
+              )}
+            </For>
+            <span class="verevon-space-room-composer__format-spacer" />
+            <button
+              type="button"
+              class="verevon-space-room-composer__format-toggle"
+              aria-pressed={previewing() ? 'true' : 'false'}
+              disabled={!previewing() && text().trim() === ''}
+              onClick={() => setPreviewing((current) => !current)}
+            >
+              {previewing() ? i18n.tr('Skriv', 'Write') : i18n.tr('Forhåndsvis', 'Preview')}
+            </button>
+          </div>
+        </Show>
+        <Show when={markdownOn() && previewing()}>
+          <div class="verevon-space-room-composer__preview" aria-label={i18n.tr('Forhåndsvisning', 'Preview')}>
+            <ChatMarkdown content={text()} />
+          </div>
+        </Show>
         <textarea
           ref={textareaRef}
+          hidden={markdownOn() && previewing()}
           value={text()}
           onInput={handleInput}
           onPaste={handlePaste}
@@ -1069,7 +1165,7 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
             </p>
           )}
         </Show>
-        <Show when={effectiveMode() === 'post' && postLength(text().trim()) > postMax() * 0.8}>
+        <Show when={effectiveMode() === 'post' && (markdownOn() || postLength(text().trim()) > postMax() * 0.8)}>
           <p
             class={overLimit() ? 'verevon-space-room-composer__blocked' : 'verevon-space-room-composer__hint'}
             role={overLimit() ? 'alert' : undefined}
