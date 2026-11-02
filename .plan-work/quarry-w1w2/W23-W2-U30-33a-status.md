@@ -15,7 +15,7 @@ Nothing existed beforehand (the stub carried the scope; the answer routes never 
    - `policy_fp` unchanged: the gate only reads the decision; no layer, no RunPolicy, no fingerprint input is added (the answer routes never compute a policy_fp).
 
 ## Commits
-See the end of this file (filled after commit).
+ea662b480 (stub scope + gate_url on /v1/answer and /stream), 15d19421f (status, depth rows, runbook note), 7ae4efbd1 (security review: gate include_answer, keep restricted-policy runs off the answer caches). Re-run on the integ-merged lane c tree 2026-11-02: answer_gate 11 passed, quarry-edge --lib auth:: 44 passed, profile_roundtrip 12 passed.
 
 ## Tests and counts
 Run through the lane c wrapper (Redis started inside the container, so the cache test ran, not skipped):
