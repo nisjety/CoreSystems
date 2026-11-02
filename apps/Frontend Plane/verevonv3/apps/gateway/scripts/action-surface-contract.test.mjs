@@ -84,6 +84,9 @@ for (const [fragment, ids] of [
   ['ws01.ts', ['spaces.create_post', 'spaces.reply_in_thread']],
   ['ws03.ts', ['spaces.set_effect_entitlements', 'spaces.apply_effect_preset']],
   ['ws04.ts', ['spaces.update_room_details', 'spaces.change_member_role', 'spaces.leave_room']],
+  ['ws08.ts', ['spaces.set_agent_wake_policy']],
+  ['ws12.ts', ['spaces.open_dm', 'spaces.hide_space']],
+  ['ws16.ts', ['spaces.update_sidebar']],
 ]) {
   test(`${fragment} action ids are in the registry set and reach a gateway dispatcher`, () => {
     const fragmentSource = fs.readFileSync(path.join(spaceFragmentsDirectory, fragment), 'utf8');
@@ -115,6 +118,26 @@ test('the WS04 room admin actions are not model executable', () => {
     'spaces.update_room_details',
     'spaces.change_member_role',
     'spaces.leave_room',
+  ]) {
+    const row = modelAccessSource.match(new RegExp(`'${actionId.replace('.', '\\.')}':\\s*([^\\n]+)`));
+    assert.ok(row, `${actionId} has a model-access row`);
+    assert.match(row[1], /^exempt\(/, `${actionId} is a closed (access none) row`);
+    assert.doesNotMatch(row[1], /eligible:\s*true/, `${actionId} must not be eligible`);
+  }
+});
+
+// WS16-S8 and WS12-S3: the sidebar layout and the direct message actions are human-only as well.
+test('the WS16-S8, WS12-S3 and WS08-S5 actions are not model executable', () => {
+  const modelAccessSource = fs.readFileSync(
+    path.join(verevonDirectory, 'src/shared/actions/model-access.ts'),
+    'utf8',
+  );
+  for (const actionId of [
+    'spaces.update_sidebar',
+    'spaces.open_dm',
+    'spaces.hide_space',
+    // WS08-S5: who may wake an agent is a human decision; an agent cannot govern itself.
+    'spaces.set_agent_wake_policy',
   ]) {
     const row = modelAccessSource.match(new RegExp(`'${actionId.replace('.', '\\.')}':\\s*([^\\n]+)`));
     assert.ok(row, `${actionId} has a model-access row`);

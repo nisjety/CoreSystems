@@ -1330,6 +1330,35 @@ mod tests {
         });
     }
 
+    /// WS04-S9 / WS16-S6 / WS16-S8 / WS12-S3: the resolver, the locale hint, the sidebar and the DM
+    /// flags default OFF, are OFF under `APP_ENV=production` when unset, ON in dev, and an
+    /// explicit value wins.
+    #[test]
+    fn w2_gateway_flags_default_off_and_follow_their_variables() {
+        let default = super::SpaceFeatureFlags::default();
+        assert!(!default.directory_resolver_api);
+        assert!(!default.sidebar);
+        assert!(!default.chat_locale_hint);
+        assert!(!default.dm_api);
+        let vars = |env: &'static str, value: Option<&'static str>| {
+            vec![
+                ("APP_ENV", Some(env)),
+                ("SPACE_DIRECTORY_RESOLVER_API", value),
+                ("SPACE_SIDEBAR_API", value),
+                ("CHAT_LOCALE_HINT", value),
+                ("SPACE_DM_API", value),
+            ]
+        };
+        let read = || {
+            let flags = super::SpaceFeatureFlags::from_env();
+            [flags.directory_resolver_api, flags.sidebar, flags.chat_locale_hint, flags.dm_api]
+        };
+        with_env(&vars("production", None), || assert_eq!(read(), [false; 4]));
+        with_env(&vars("development", None), || assert_eq!(read(), [true; 4]));
+        with_env(&vars("production", Some("true")), || assert_eq!(read(), [true; 4]));
+        with_env(&vars("development", Some("false")), || assert_eq!(read(), [false; 4]));
+    }
+
     /// WS07-S6: `CSP_REPORT_LOG_HOSTS` is a dev-only flag: it follows its variable outside
     /// production and stays off under `APP_ENV=production` or `prod` even when set to true.
     #[test]

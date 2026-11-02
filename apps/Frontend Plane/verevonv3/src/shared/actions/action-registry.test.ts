@@ -5,6 +5,7 @@ import {
   integrationsBrowseConnectionInput,
   integrationsFetchConnectionContentInput,
 } from '@/shared/actions/action-registry'
+import { spaceActions } from '@/shared/actions/domains/spaces'
 import { isModelExecutableAction } from '@/shared/actions/model-eligibility'
 import { buildModelContextPack } from '@/shared/context-packs/context-pack'
 
@@ -552,6 +553,42 @@ describe('action registry', () => {
     expect(preset?.inputSchema.safeParse({ orgId: 'org_1', expectedEntitlementRevision: 0, presetId: 'p'.repeat(49) }).success).toBe(false)
   })
 
+  it('registers spaces.update_sidebar as a low-risk, ungated, reversible application action the model cannot execute (WS16-S8)', () => {
+    const action = getActionDescriptor('spaces.update_sidebar')
+    expect(action).toBeDefined()
+    expect(action?.ownerPlane).toBe('application')
+    expect(action?.risk).toBe('low')
+    expect(action?.requiresApproval).toBe(false)
+    expect(action?.reversible).toBe(true)
+    expect(isModelExecutableAction('spaces.update_sidebar')).toBe(false)
+    expect(action?.inputSchema.safeParse({ baseRevision: 0, doc: { starred: [] } }).success).toBe(true)
+    expect(action?.inputSchema.safeParse({ baseRevision: -1, doc: {} }).success).toBe(false)
+    expect(action?.inputSchema.safeParse({ baseRevision: 1.5, doc: {} }).success).toBe(false)
+    expect(action?.inputSchema.safeParse({ baseRevision: 0 }).success).toBe(false)
+    expect(action?.inputSchema.safeParse({ baseRevision: 0, doc: [] }).success).toBe(false)
+  })
+
+  it('registers the direct message actions as low-risk application actions the model cannot execute (WS12-S3)', () => {
+    for (const id of ['spaces.open_dm', 'spaces.hide_space'] as const) {
+      const action = getActionDescriptor(id)
+      expect(action, id).toBeDefined()
+      expect(action?.ownerPlane).toBe('application')
+      expect(action?.risk).toBe('low')
+      expect(action?.requiresApproval).toBe(false)
+      expect(isModelExecutableAction(id)).toBe(false)
+    }
+    const open = getActionDescriptor('spaces.open_dm')
+    const ids = (n: number) => Array.from({ length: n }, (_, i) => `u-${i}`)
+    expect(open?.reversible).toBe(false)
+    expect(open?.inputSchema.safeParse({ participants: ids(1), clientRequestId: 'r' }).success).toBe(true)
+    expect(open?.inputSchema.safeParse({ participants: ids(8), clientRequestId: 'r' }).success).toBe(true)
+    expect(open?.inputSchema.safeParse({ participants: ids(9), clientRequestId: 'r' }).success).toBe(false)
+    expect(open?.inputSchema.safeParse({ participants: [], clientRequestId: 'r' }).success).toBe(false)
+    expect(open?.inputSchema.safeParse({ participants: ids(1) }).success).toBe(false)
+    expect(open?.inputSchema.safeParse({ participants: [' '], clientRequestId: 'r' }).success).toBe(false)
+    expect(getActionDescriptor('spaces.hide_space')?.reversible).toBe(true)
+  })
+
   // P-SPA1 moved the spaces.* entries into per-workstream fragments under
   // domains/spaces/*.ts and spread them once. The move must not add, drop, rename
   // or reorder an id: the order is what the contract probes and the context pack read.
@@ -560,10 +597,14 @@ describe('action registry', () => {
     expect(new Set(ids).size).toBe(ids.length)
     // 187 before the move, plus the seven W1 additions (create_post, reply_in_thread, the two
     // effect-policy actions, update_room_details, change_member_role, leave_room), plus the
-    // eight actions main added on its own side (195 before the Space merge).
-    expect(ids).toHaveLength(202)
+    // eight actions main added on its own side (195 before the Space merge), plus the Wave 2
+    // Space fragments and the Model Plane additions that landed with them (236 at W2 test time).
+    expect(ids).toHaveLength(236)
 
-    const spaceIds = ids.filter((id) => id.startsWith('spaces.'))
+    // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
+    // entries are the ones the fragments declare.
+    const fragmentIds = new Set<string>(spaceActions.map((action) => action.id))
+    const spaceIds = ids.filter((id) => fragmentIds.has(id))
     const first = ids.indexOf(spaceIds[0] as string)
     expect(ids.slice(first, first + spaceIds.length)).toEqual(spaceIds)
 
@@ -584,8 +625,8 @@ describe('action registry', () => {
       'spaces.add_member',
       'spaces.remove_member',
     ])
-    // The later workstream fragments follow them in fragment order (ws01, ws03, ws04).
-    expect(spaceIds.slice(14)).toEqual([
+    // The later workstream fragments follow them in fragment order (ws01, ws03, ws04, ...).
+    expect(spaceIds.slice(14, 21)).toEqual([
       'spaces.create_post',
       'spaces.reply_in_thread',
       'spaces.set_effect_entitlements',
@@ -594,5 +635,8 @@ describe('action registry', () => {
       'spaces.change_member_role',
       'spaces.leave_room',
     ])
+    expect(spaceIds.indexOf('spaces.set_agent_wake_policy')).toBeGreaterThan(spaceIds.indexOf('spaces.leave_room'))
+    // Every fragment entry is spread once, in the order domains/spaces/index.ts lists them.
+    expect(spaceIds).toEqual(spaceActions.map((action) => action.id))
   })
 })
