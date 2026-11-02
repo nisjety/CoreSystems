@@ -325,8 +325,15 @@ async fn main() -> anyhow::Result<()> {
     // silently never resolve). Matches documents-api's USER_CORE_URL.
     let user_core_url =
         std::env::var("USER_CORE_HTTP_URL").unwrap_or_else(|_| "http://user-core:3012".into());
+    // WS14-S5: Space-subject grants (room files) are honoured only inside a
+    // verified Space read, and only when this rollout flag is the strict literal
+    // `true`. Off by default; never an authorization input.
+    let space_grants = std::env::var("RETRIEVAL_SPACE_GRANTS")
+        .map(|v| v.trim() == "true")
+        .unwrap_or(false);
     let visibility: std::sync::Arc<dyn authz::VisibilityClient> = std::sync::Arc::new(
-        authz::HttpVisibilityClient::new(user_core_url, cfg.user_core_service_token.clone()),
+        authz::HttpVisibilityClient::new(user_core_url, cfg.user_core_service_token.clone())
+            .with_space_grants(space_grants),
     );
     // Grant reads are intentionally uncached in the secure MVP. This keeps
     // revocations effective on the next request even when the cross-plane

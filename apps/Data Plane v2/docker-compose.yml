@@ -599,6 +599,10 @@ services:
       # facade (reached over inter-plane-bus). HTTP/facade port is 3012, NOT 8080.
       USER_CORE_HTTP_URL: ${USER_CORE_HTTP_URL:-http://user-core:3012}
       USER_CORE_SERVICE_TOKEN: ${USER_CORE_RETRIEVAL_TOKEN:-}
+      # WS14-S5: honour the owner's Space-subject grants (room files) inside a
+      # verified Space read. Off unless the literal "true"; a rollout switch
+      # only, never an authorization input. Needs CONTROL_SPACE_SUBJECT_GRANTS.
+      RETRIEVAL_SPACE_GRANTS: ${RETRIEVAL_SPACE_GRANTS:-false}
       # Org-axis membership and per-user ownership are both enforced. Only an
       # explicitly gated insecure development posture can select the no-op:
       # setting CONTROL_PLANE_ENFORCEMENT=off ALSO requires
