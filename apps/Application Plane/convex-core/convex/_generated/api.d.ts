@@ -35,6 +35,8 @@ import type * as reconciliationNonces from "../reconciliationNonces.js";
 import type * as searches from "../searches.js";
 import type * as spaceAgents from "../spaceAgents.js";
 import type * as spaceAttention from "../spaceAttention.js";
+import type * as spaceAttentionEnvelope from "../spaceAttentionEnvelope.js";
+import type * as spaceAttentionIngest from "../spaceAttentionIngest.js";
 import type * as spaceAttentionRules from "../spaceAttentionRules.js";
 import type * as spaceAudience from "../spaceAudience.js";
 import type * as spaceAudiencePlan from "../spaceAudiencePlan.js";
@@ -95,6 +97,8 @@ declare const fullApi: ApiFromModules<{
   searches: typeof searches;
   spaceAgents: typeof spaceAgents;
   spaceAttention: typeof spaceAttention;
+  spaceAttentionEnvelope: typeof spaceAttentionEnvelope;
+  spaceAttentionIngest: typeof spaceAttentionIngest;
   spaceAttentionRules: typeof spaceAttentionRules;
   spaceAudience: typeof spaceAudience;
   spaceAudiencePlan: typeof spaceAudiencePlan;

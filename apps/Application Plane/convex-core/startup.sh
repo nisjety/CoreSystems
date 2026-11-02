@@ -130,6 +130,13 @@ set_convex_env "SPACE_AUDIENCE_RECONCILE" "${SPACE_AUDIENCE_RECONCILE:-0}"
 # DMs and hides are unaffected). A rollout control only, never an authorization
 # input. DMs also need WS04-S5's audience registration on (SPACE_AUDIENCE_RECONCILE).
 set_convex_env "SPACE_DM_OPEN" "${SPACE_DM_OPEN:-0}"
+# WS11-S6 flag SPACE_ATTENTION_INGEST: spaceAttentionIngest:ingestSpaceEvent (Space
+# attention items, follows and agent activity from the MODEL_PLANE_SPACE_EVENTS
+# durable). Off unless a compose file turns it on; read by the function at call
+# time, so set it empty and `docker restart convex-gateway` to stop (events are
+# then acknowledged and dropped). A rollout control only, never an authorization
+# input. Needs Model Plane SPACE_ATTENTION_EMIT on to receive anything.
+set_convex_env "SPACE_ATTENTION_INGEST" "${SPACE_ATTENTION_INGEST:-0}"
 
 # ─────────────────────────────────────────────────────────────────────────
 # Force-deploy functions before starting dev mode.

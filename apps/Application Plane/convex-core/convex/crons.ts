@@ -38,4 +38,13 @@ crons.interval(
   {},
 );
 
+// WS11-S6: expire attention items and drop old dedupe rows. Deletes only, so it
+// is safe whether or not SPACE_ATTENTION_INGEST is on.
+crons.interval(
+  "space attention sweep",
+  { hours: 1 },
+  internal.spaceAttentionIngest.sweep,
+  {},
+);
+
 export default crons;

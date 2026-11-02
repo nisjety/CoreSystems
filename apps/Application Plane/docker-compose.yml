@@ -166,6 +166,10 @@ services:
             # by default everywhere; needs SPACE_AUDIENCE_RECONCILE on and
             # Control's SPACE_DM_REGISTRATION + dm_create_entitled first.
             SPACE_DM_OPEN: ${SPACE_DM_OPEN:-0}
+            # WS11-S6 flag SPACE_ATTENTION_INGEST: apply Space attention events from the
+            # MODEL_PLANE_SPACE_EVENTS durable. Off by default everywhere (never an
+            # authorization input); set empty to acknowledge and drop events.
+            SPACE_ATTENTION_INGEST: ${SPACE_ATTENTION_INGEST:-0}
         volumes:
             # `npx convex dev` (startup.sh) only pushes what it can see. Without this
             # mount /app/convex is the snapshot baked at image-build time, so every

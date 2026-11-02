@@ -415,6 +415,11 @@ export const onOrganizationMembershipProjectionChanged = internalMutation({
       )
       .collect();
     for (const session of sessions) await ctx.db.delete(session._id);
+    // WS11-S6: the member's attention rows in this organization go with them.
+    await ctx.scheduler.runAfter(0, internal.spaceAttentionIngest.purgeSubject, {
+      externalOrgId: args.orgId,
+      externalAuthId: args.userId,
+    });
     await requestOrgRoomRosterSync(ctx, args.orgId);
     return { status: membership ? "removed" : "tombstoned" };
   },

@@ -157,6 +157,10 @@ services:
       # default everywhere; needs SPACE_AUDIENCE_RECONCILE on and Control's
       # SPACE_DM_REGISTRATION + dm_create_entitled before a DM can exist.
       SPACE_DM_OPEN: ${SPACE_DM_OPEN:-0}
+      # WS11-S6 flag SPACE_ATTENTION_INGEST: apply Space attention events from the
+      # MODEL_PLANE_SPACE_EVENTS durable. Off by default everywhere (never an
+      # authorization input); set empty to acknowledge and drop events.
+      SPACE_ATTENTION_INGEST: ${SPACE_ATTENTION_INGEST:-0}
     # G49 (verevon-gap.md §8.33): mount the host `./convex/` directory so
     # the dev server (running `npx convex dev` per startup.sh) picks up
     # function changes without requiring an image rebuild. Without this

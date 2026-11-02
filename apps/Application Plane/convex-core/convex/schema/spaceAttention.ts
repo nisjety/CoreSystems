@@ -38,7 +38,9 @@ export const spaceAttentionTables = {
     updatedAt: v.number(),
   })
     .index("by_subject_and_space", ["externalAuthId", "spaceRef"])
-    .index("by_subject", ["externalOrgId", "externalAuthId"]),
+    .index("by_subject", ["externalOrgId", "externalAuthId"])
+    // WS11-S6: Space erasure (`spaceAttentionIngest:purgeSpace`).
+    .index("by_space", ["spaceRef"]),
 
   // Per-member notification settings that are not per room (hide previews in
   // the inbox and in out-of-app messages).
@@ -159,5 +161,7 @@ export const spaceAttentionTables = {
     createdAt: v.number(),
   })
     .index("by_subject_and_state", ["externalAuthId", "state"])
-    .index("by_due", ["state", "remindAt"]),
+    .index("by_due", ["state", "remindAt"])
+    // WS11-S6: Space erasure (`spaceAttentionIngest:purgeSpace`).
+    .index("by_space", ["spaceRef"]),
 };

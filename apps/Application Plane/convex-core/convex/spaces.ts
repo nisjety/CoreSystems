@@ -1267,6 +1267,12 @@ export const acknowledgeDeletionAuthorizationClaim = internalMutation({
     for (const audienceEvent of audienceEvents.filter((candidate: any) => candidate.spaceRef === request.spaceRef)) {
       await ctx.db.delete(audienceEvent._id);
     }
+    // WS11-S6: attention items, follows, preferences, reminders, agent activity,
+    // read markers and presence for the Space; pages itself in the background.
+    await ctx.scheduler.runAfter(0, internal.spaceAttentionIngest.purgeSpace, {
+      externalOrgId: space.externalOrgId,
+      spaceRef: request.spaceRef,
+    });
     const applicationReceipt = await ctx.db.query("spaceDeletionOwnerReceipts")
       .withIndex("by_request_and_owner", (q: any) => q.eq("requestId", request.requestId).eq("ownerPlane", "application"))
       .first();
