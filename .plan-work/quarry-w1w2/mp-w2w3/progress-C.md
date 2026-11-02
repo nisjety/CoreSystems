@@ -179,3 +179,25 @@ Lead to land (shared files I may not edit):
 Not verified / left: `bash scripts/tests/zdr-contract-sync.test.sh` (rows not landed); part (b) wiring; the D16 MCP-facade site; no perf test of the Live set on 1 MiB (Quarry has a release-only budget test; none here).
 
 Results (target `C:/dev/mp-w2w3-target-C`, 2 jobs): `cargo test -p mp-scrub` 24 lib (12 legacy + 12 live) + 8 golden = 32 passed; `cargo test -p execution-core --lib scrub` 16 passed; `cargo test -p execution-core --test scrub_checkpoint_test` 9 passed (callers via the re-export); `cargo test -p model-gateway --lib suggest` 8 passed (incl. the 2 new); `cargo test -p model-gateway --lib zdr_posture` 25 passed (no entry needed for the suggest path change).
+
+Commit note: `3196edefe` also swept in `model-gateway/src/schema_check.rs` (6 lines), which another lane had staged in the shared index; I did not touch that file. Lane that owns it: its hunk is now in my commit, so it needs no re-add of those lines.
+
+### E3.6-8 model-gateway half (W3, built and compile-checked; the two route-table checks run)
+
+Finding: `ai_documents_layout` (`POST /v1/ai/documents/layout`) and `ai_language_pii` (`POST /v1/ai/language/pii`) ALREADY exist as user routes in `http_routes.rs` (registered ~566 and ~574; their handlers read no user field, only `claims.org_id`, so they already work for a service principal). What E3.6-8 adds is the SERVICE lane. So `http_routes.rs` is NOT touched for this row; the work is in `auth.rs`.
+
+Built:
+- `auth.rs`: `ServiceRouteGrant` gains `flag: Option<&'static str>`; the 4 existing rows get `flag: None`; two new rows, `POST /v1/ai/documents/layout` and `POST /v1/ai/language/pii`, scope `models:invoke`, any service (like `/v1/ai/chat`), flags `MODEL_GATEWAY_AI_LAYOUT_SERVICE` and `MODEL_GATEWAY_AI_PII_SERVICE` (consts `SERVICE_FLAG_AI_LAYOUT`, `SERVICE_FLAG_AI_PII`). `authorize_principal_route`: after the existing scope check, a service that holds a row whose flag is not `1`/`true`/`on` gets `404` (`service_route_switched_off`, env read per request through an injected lookup so it is testable); a caller without the scope still gets `403` (learns nothing about the lane). Users, the routes' handlers and ZDR gates are unchanged by the flags (the flags gate only the service lane). The second bearer (`x-inference-authorization`) rule is the same as `/v1/ai/chat`'s and needs no change: the extractor is path-independent.
+- Golden `api/contracts/model-gateway-service-routes.json` regenerated (`MP_UPDATE_GOLDEN=1`): every row gains `"flag"` (null or the env name) and the two rows appear. `.sha256` pin rewritten by the test.
+- Tests (all pass): `the_layout_and_pii_rows_carry_their_switch_and_no_other_row_does` (exact flagged set; sibling routes such as `/v1/ai/documents/forms`, `/v1/ai/language/entities` stay closed to services; GET refused), `a_service_switch_is_on_only_for_the_three_literals`, `a_flagged_route_is_switched_off_by_default_and_only_for_a_caller_who_holds_it` (each switch opens its own route only; `yes` stays off), `the_middleware_answers_404_while_the_switch_is_off_and_403_without_the_scope` (real middleware, env toggled, `#[serial]`), plus the existing `service_route_table_matches_the_golden` and `the_table_keeps_the_semantics_of_the_match_it_replaced`.
+
+Lead to land:
+1. `scripts/tests/zdr-contract-sync.test.sh` line ~221: the digest for `apps/Model Plane/api/contracts/model-gateway-service-routes.json` changes from `f4965cb3b7ecb0390aa5520fd9af4ef25663216b42570a4efce9f6d981de2f10` to `72302d575946f4183897df8e66098ec45b4c0dd2a3d1e45d3af967bbb29c3cc3`.
+2. `deploy/docker-compose.yml*`, model-gateway environment block (append-only, default off): `MODEL_GATEWAY_AI_PII_SERVICE: ${MODEL_GATEWAY_AI_PII_SERVICE:-0}` and `MODEL_GATEWAY_AI_LAYOUT_SERVICE: ${MODEL_GATEWAY_AI_LAYOUT_SERVICE:-0}`.
+3. zdr_posture: NO entry needed (both handlers already route through `decide_content_route`; `zdr_posture` tests 25 pass).
+
+Asks (add to MP-ASKS by the lead): Control: grant `models:invoke` (already the chat scope) to the calling service principal; no new scope. Quarry: the fake gateway reading the golden must treat a row with `flag != null` as unavailable until that flag is on (404); `ai_language_pii` response offsets are still unverified (D2-326), use them only after a response-shape test.
+
+Not verified / depth: the service lane for `layout` accepts a `url`/`document_url` the inference side may fetch (same as the user lane); whether a service caller may name an arbitrary URL is an SSRF question for inference-core, not decided here. No `purpose` gating (the chat `quarry.extract` purpose has no analogue on these two request bodies). Rate: services already draw from the `<org>|svc:<service>` bucket, so no change.
+
+Full run: `cargo test -p model-gateway --lib` 2632 passed, 1 failed (the known pre-existing `auth::tests::service_inference_bearer_may_hold_a_different_posture_by_audience`), 4 ignored.

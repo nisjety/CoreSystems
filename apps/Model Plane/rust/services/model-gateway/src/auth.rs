@@ -1609,13 +1609,25 @@ const SERVICE_SCOPE_MAIL_TASK_PREPARE_THREAD: &str = "mail-task:prepare-thread";
 /// One row of the service route table: a service principal may call `method path` when it holds
 /// `scope` and, if `service` is set, is exactly that service. `service: None` means any service
 /// holding the scope.
+///
+/// `flag` (E3.6-8) names an environment switch that must be `1`, `true` or `on` for the SERVICE
+/// lane of this route to exist: while it is off the gateway answers a service that holds the
+/// scope with `404`, as if the row were not there. The route itself, and what users may do with
+/// it, are unchanged by the switch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ServiceRouteGrant {
     pub service: Option<&'static str>,
     pub method: &'static str,
     pub path: &'static str,
     pub scope: &'static str,
+    pub flag: Option<&'static str>,
 }
+
+/// E3.6-8: the service lane of `POST /v1/ai/language/pii` (the optional model tier of the
+/// document PII stage). Default off.
+pub const SERVICE_FLAG_AI_PII: &str = "MODEL_GATEWAY_AI_PII_SERVICE";
+/// E3.6-8: the service lane of `POST /v1/ai/documents/layout` (OCR / layout). Default off.
+pub const SERVICE_FLAG_AI_LAYOUT: &str = "MODEL_GATEWAY_AI_LAYOUT_SERVICE";
 
 /// Every route a SERVICE principal may reach (WS16.S1). Users keep the existing route policy.
 /// This table is the single source of the machine-route policy and is pinned by the golden
@@ -1627,24 +1639,43 @@ pub const SERVICE_ROUTE_GRANTS: &[ServiceRouteGrant] = &[
         method: "POST",
         path: "/v1/ai/chat",
         scope: SERVICE_SCOPE_MODELS_INVOKE,
+        flag: None,
     },
     ServiceRouteGrant {
         service: None,
         method: "POST",
         path: "/v1/ai/embeddings",
         scope: SERVICE_SCOPE_MODELS_INVOKE,
+        flag: None,
     },
     ServiceRouteGrant {
         service: Some(CONTROL_SPACE_DELETION_SERVICE),
         method: "POST",
         path: "/v1/internal/space-deletion/threads",
         scope: SERVICE_SCOPE_MODEL_SPACE_DELETE,
+        flag: None,
     },
     ServiceRouteGrant {
         service: Some(MAIL_TASK_BRIDGE_CALLER_SERVICE),
         method: "POST",
         path: "/v1/internal/mail-task/prepare-thread",
         scope: SERVICE_SCOPE_MAIL_TASK_PREPARE_THREAD,
+        flag: None,
+    },
+    // E3.6-8: the two routes below exist for a service only while their switch is on.
+    ServiceRouteGrant {
+        service: None,
+        method: "POST",
+        path: "/v1/ai/documents/layout",
+        scope: SERVICE_SCOPE_MODELS_INVOKE,
+        flag: Some(SERVICE_FLAG_AI_LAYOUT),
+    },
+    ServiceRouteGrant {
+        service: None,
+        method: "POST",
+        path: "/v1/ai/language/pii",
+        scope: SERVICE_SCOPE_MODELS_INVOKE,
+        flag: Some(SERVICE_FLAG_AI_PII),
     },
 ];
 
@@ -1662,6 +1693,32 @@ fn service_route_allowed(claims: &Claims, method: &str, path: &str) -> bool {
     })
 }
 
+/// Whether a switch value turns a flag on: only the literals `1`, `true` and `on`.
+fn service_flag_on(value: Option<&str>) -> bool {
+    matches!(value.map(str::trim), Some("1" | "true" | "on"))
+}
+
+/// Whether `claims` holds a row for `method path` whose switch is OFF, so the route does not
+/// exist for it yet. `lookup` reads the environment (injected for tests). A row without a
+/// switch, a row the caller does not hold, and a route in no row all answer `false`: this
+/// only ever turns an admitted request into a `404`.
+fn service_route_switched_off(
+    claims: &Claims,
+    method: &str,
+    path: &str,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> bool {
+    SERVICE_ROUTE_GRANTS.iter().any(|grant| {
+        grant.method == method
+            && grant.path == path
+            && grant.service.is_none_or(|service| claims.sub == service)
+            && claims.has_scope(grant.scope)
+            && grant
+                .flag
+                .is_some_and(|flag| !service_flag_on(lookup(flag).as_deref()))
+    })
+}
+
 /// The route table and the second-bearer requirement as the JSON golden pins them.
 #[must_use]
 pub fn service_route_table_json() -> serde_json::Value {
@@ -1676,6 +1733,7 @@ pub fn service_route_table_json() -> serde_json::Value {
                 "method": grant.method,
                 "path": grant.path,
                 "scope": grant.scope,
+                "flag": grant.flag,
             }))
             .collect::<Vec<_>>(),
         "service_inference_bearer": {
@@ -1717,6 +1775,13 @@ pub async fn authorize_principal_route(req: Request, next: Next) -> Result<Respo
                     "service principal route or scope denied"
                 );
                 return Err(StatusCode::FORBIDDEN);
+            }
+            // E3.6-8: a switched-off lane is a 404, after the scope check so a caller without
+            // the scope learns nothing about it (it gets the same 403 as any other route).
+            if service_route_switched_off(claims, req.method().as_str(), req.uri().path(), &|name| {
+                std::env::var(name).ok()
+            }) {
+                return Err(StatusCode::NOT_FOUND);
             }
             Ok(next.run(req).await)
         }
@@ -4059,6 +4124,8 @@ mod tests {
 mod service_route_table_tests {
     use super::*;
     use sha2::{Digest, Sha256};
+    use axum::{body::Body, http::Request as HttpRequest, middleware, Router};
+    use tower::ServiceExt;
 
     const GOLDEN_PATH: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -4186,5 +4253,124 @@ mod service_route_table_tests {
         let mut user = svc.clone();
         user.principal_type = Some("user".to_owned());
         assert_eq!(user.service_principal_id(), None);
+    }
+
+    /// E3.6-8: the two extra routes are in the table, flagged, and nothing else is.
+    #[test]
+    fn the_layout_and_pii_rows_carry_their_switch_and_no_other_row_does() {
+        let flagged: Vec<(&str, &str)> = SERVICE_ROUTE_GRANTS
+            .iter()
+            .filter_map(|grant| grant.flag.map(|flag| (grant.path, flag)))
+            .collect();
+        assert_eq!(
+            flagged,
+            vec![
+                ("/v1/ai/documents/layout", "MODEL_GATEWAY_AI_LAYOUT_SERVICE"),
+                ("/v1/ai/language/pii", "MODEL_GATEWAY_AI_PII_SERVICE"),
+            ]
+        );
+        for grant in SERVICE_ROUTE_GRANTS.iter().filter(|g| g.flag.is_some()) {
+            assert_eq!(grant.method, "POST");
+            assert_eq!(grant.scope, "models:invoke");
+            assert_eq!(grant.service, None);
+        }
+        // Still never /v1/invoke, and no sibling route of the flagged two opened by accident.
+        let any = service("service:anything", &["models:invoke"]);
+        assert!(service_route_allowed(&any, "POST", "/v1/ai/documents/layout"));
+        assert!(service_route_allowed(&any, "POST", "/v1/ai/language/pii"));
+        for path in [
+            "/v1/ai/documents",
+            "/v1/ai/documents/analyze",
+            "/v1/ai/documents/forms",
+            "/v1/ai/language",
+            "/v1/ai/language/entities",
+            "/v1/ai/language/detect",
+        ] {
+            assert!(!service_route_allowed(&any, "POST", path), "{path}");
+        }
+        assert!(!service_route_allowed(&any, "GET", "/v1/ai/language/pii"));
+    }
+
+    #[test]
+    fn a_service_switch_is_on_only_for_the_three_literals() {
+        for on in ["1", "true", "on", " 1 "] {
+            assert!(service_flag_on(Some(on)), "{on:?}");
+        }
+        for off in ["", "0", "false", "off", "yes", "TRUE", "enabled", "2"] {
+            assert!(!service_flag_on(Some(off)), "{off:?}");
+        }
+        assert!(!service_flag_on(None));
+    }
+
+    #[test]
+    fn a_flagged_route_is_switched_off_by_default_and_only_for_a_caller_who_holds_it() {
+        let svc = service("service:quarry-edge", &["models:invoke"]);
+        let unset = |_: &str| None;
+        let only = |name: &'static str| {
+            move |asked: &str| (asked == name).then(|| "1".to_owned())
+        };
+        for path in ["/v1/ai/language/pii", "/v1/ai/documents/layout"] {
+            assert!(service_route_switched_off(&svc, "POST", path, &unset), "{path}");
+        }
+        // Each switch opens its own route only.
+        let pii_on = only("MODEL_GATEWAY_AI_PII_SERVICE");
+        assert!(!service_route_switched_off(&svc, "POST", "/v1/ai/language/pii", &pii_on));
+        assert!(service_route_switched_off(&svc, "POST", "/v1/ai/documents/layout", &pii_on));
+        let layout_on = only("MODEL_GATEWAY_AI_LAYOUT_SERVICE");
+        assert!(!service_route_switched_off(&svc, "POST", "/v1/ai/documents/layout", &layout_on));
+        assert!(service_route_switched_off(&svc, "POST", "/v1/ai/language/pii", &layout_on));
+        // A switch value that is not a literal stays off.
+        let wrong = |_: &str| Some("yes".to_owned());
+        assert!(service_route_switched_off(&svc, "POST", "/v1/ai/language/pii", &wrong));
+        // No scope, wrong method, an unflagged route: not this function's business (403 / allowed).
+        let no_scope = service("service:quarry-edge", &[]);
+        assert!(!service_route_switched_off(&no_scope, "POST", "/v1/ai/language/pii", &unset));
+        assert!(!service_route_switched_off(&svc, "GET", "/v1/ai/language/pii", &unset));
+        assert!(!service_route_switched_off(&svc, "POST", "/v1/ai/chat", &unset));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn the_middleware_answers_404_while_the_switch_is_off_and_403_without_the_scope() {
+        async fn ok_handler() -> &'static str {
+            "ok"
+        }
+        async fn status_of(claims: Claims, path: &str) -> StatusCode {
+            Router::new()
+                .route("/v1/ai/language/pii", axum::routing::post(ok_handler))
+                .route("/v1/ai/documents/layout", axum::routing::post(ok_handler))
+                .route("/v1/ai/chat", axum::routing::post(ok_handler))
+                .layer(middleware::from_fn(authorize_principal_route))
+                .layer(axum::Extension(claims))
+                .oneshot(
+                    HttpRequest::builder()
+                        .method("POST")
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+        }
+        std::env::remove_var(SERVICE_FLAG_AI_PII);
+        std::env::remove_var(SERVICE_FLAG_AI_LAYOUT);
+        let svc = service("service:quarry-edge", &["models:invoke"]);
+        let no_scope = service("service:quarry-edge", &[]);
+
+        assert_eq!(status_of(svc.clone(), "/v1/ai/language/pii").await, StatusCode::NOT_FOUND);
+        assert_eq!(status_of(svc.clone(), "/v1/ai/documents/layout").await, StatusCode::NOT_FOUND);
+        assert_eq!(status_of(svc.clone(), "/v1/ai/chat").await, StatusCode::OK);
+        assert_eq!(status_of(no_scope, "/v1/ai/language/pii").await, StatusCode::FORBIDDEN);
+
+        std::env::set_var(SERVICE_FLAG_AI_PII, "1");
+        assert_eq!(status_of(svc.clone(), "/v1/ai/language/pii").await, StatusCode::OK);
+        assert_eq!(status_of(svc.clone(), "/v1/ai/documents/layout").await, StatusCode::NOT_FOUND);
+        std::env::set_var(SERVICE_FLAG_AI_LAYOUT, "true");
+        assert_eq!(status_of(svc.clone(), "/v1/ai/documents/layout").await, StatusCode::OK);
+        std::env::set_var(SERVICE_FLAG_AI_PII, "0");
+        assert_eq!(status_of(svc, "/v1/ai/language/pii").await, StatusCode::NOT_FOUND);
+        std::env::remove_var(SERVICE_FLAG_AI_PII);
+        std::env::remove_var(SERVICE_FLAG_AI_LAYOUT);
     }
 }

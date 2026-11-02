@@ -3,28 +3,46 @@
   "generated_by": "model-gateway auth tests (MP_UPDATE_GOLDEN=1)",
   "routes": [
     {
+      "flag": null,
       "method": "POST",
       "path": "/v1/ai/chat",
       "scope": "models:invoke",
       "service": null
     },
     {
+      "flag": null,
       "method": "POST",
       "path": "/v1/ai/embeddings",
       "scope": "models:invoke",
       "service": null
     },
     {
+      "flag": null,
       "method": "POST",
       "path": "/v1/internal/space-deletion/threads",
       "scope": "model:space-delete",
       "service": "service:control-space-deletion"
     },
     {
+      "flag": null,
       "method": "POST",
       "path": "/v1/internal/mail-task/prepare-thread",
       "scope": "mail-task:prepare-thread",
       "service": "service:verevon-gateway"
+    },
+    {
+      "flag": "MODEL_GATEWAY_AI_LAYOUT_SERVICE",
+      "method": "POST",
+      "path": "/v1/ai/documents/layout",
+      "scope": "models:invoke",
+      "service": null
+    },
+    {
+      "flag": "MODEL_GATEWAY_AI_PII_SERVICE",
+      "method": "POST",
+      "path": "/v1/ai/language/pii",
+      "scope": "models:invoke",
+      "service": null
     }
   ],
   "service_inference_bearer": {
