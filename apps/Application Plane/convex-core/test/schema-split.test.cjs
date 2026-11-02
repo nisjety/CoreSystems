@@ -34,7 +34,6 @@ const PRE_SPLIT_TABLES = [
   'spaceDeletionAuthorizationEvents',
   'spaceDeletionOwnerReceipts',
   'spaceDeletionOwnerDeliveryEvents',
-  'spaceMemberGrants',
   'spaceReadMarkers',
   'spaceRecipientAudiences',
   'spaceRecipientAudienceEvents',

@@ -3649,123 +3649,6 @@ pub(crate) async fn create_space_agent(
     )
 }
 
-/// Who may grant a new agent (created or bound) a place in this room: the
-/// caller's own Control-resolved room role, checked under their signed
-/// delegation — never an org-wide role, and never something the request body
-/// could assert. Shared by §UI-3b (create new) and §UI-3 (bind existing) so
-/// the two routes can never quietly diverge on who is allowed to grant.
-/// Declare a managed room's people to Control after a grant or revocation.
-///
-/// Separate from `confirm_space_agent_membership` because the two converge
-/// different subject types: this one says `["user"]`, that one says
-/// `["service"]`. Merging them would let a human roster change revoke the
-/// room's agents.
-async fn sync_room_members(state: &AppState, org_id: &str, space_ref: &str) -> bool {
-    convex_gateway_call(
-        state,
-        "action",
-        "spaceMembers:syncRoomMembersForGateway",
-        json!({
-            "externalOrgId": org_id,
-            "spaceRef": space_ref,
-        }),
-    )
-    .await
-    .map(|value| {
-        value
-            .get("status")
-            .and_then(Value::as_str)
-            .is_some_and(|status| status == "applied")
-    })
-    .unwrap_or(false)
-}
-
-/// Shared body of "change who is in this room".
-///
-/// Adding and removing differ only in the mutation called, so they share the
-/// role gate, the Control convergence, and the refusal shapes. Both use the
-/// same owner/manager floor as granting an agent: deciding who may read a
-/// room's shared record is at least as consequential.
-async fn apply_room_membership(
-    state: &AppState,
-    user: &AuthenticatedUser,
-    space_ref: &str,
-    member_id: &str,
-    add: bool,
-) -> (StatusCode, Json<Value>) {
-    let org_id = crate::upstream::authorized_org_id(state, user).await;
-    let space_ref = space_ref.trim();
-    let member_id = member_id.trim();
-    if org_id.is_empty() || space_ref.is_empty() {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(error(
-                "active_membership_required",
-                "An active organization membership and Space are required.",
-            )),
-        );
-    }
-    if member_id.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(error("member_required", "A member is required.")),
-        );
-    }
-    if let Err(response) = require_space_agent_grant_role(state, user, &org_id, space_ref).await {
-        return response;
-    }
-
-    let mutation = if add {
-        "spaceMembers:addSpaceMemberForGateway"
-    } else {
-        "spaceMembers:removeSpaceMemberForGateway"
-    };
-    let Ok(result) = convex_gateway_call(
-        state,
-        "mutation",
-        mutation,
-        json!({
-            "externalAuthId": user.user_id,
-            "externalOrgId": org_id,
-            "spaceRef": space_ref,
-            "memberExternalAuthId": member_id,
-        }),
-    )
-    .await
-    else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(error(
-                "room_membership_unavailable",
-                "The room's members could not be changed. Nothing was altered.",
-            )),
-        );
-    };
-
-    // Application's list is only an intent until Control accepts it. Say so
-    // rather than reporting success on a list nobody is enforcing yet.
-    if !sync_room_members(state, &org_id, space_ref).await {
-        return (
-            StatusCode::BAD_GATEWAY,
-            Json(error(
-                "room_membership_unconfirmed",
-                "The change was recorded, but Control has not confirmed the room's members yet.",
-            )),
-        );
-    }
-
-    (
-        StatusCode::OK,
-        Json(json!({"data": {
-            "member_count": result.get("memberCount").and_then(Value::as_u64).unwrap_or(0),
-            "changed": result
-                .get(if add { "added" } else { "removed" })
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-        }})),
-    )
-}
-
 /// `POST /api/v1/spaces/{space_ref}/members` — add one person to a named room.
 pub(crate) async fn add_space_member(
     State(state): State<AppState>,
@@ -3773,15 +3656,12 @@ pub(crate) async fn add_space_member(
     Path(space_ref): Path<String>,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
-    if room_admin::writer_enabled(&state) {
-        return room_admin::add_member(&state, &user, &space_ref, &body).await;
+    // WS04-S12: the Control writer is the only path. The legacy Application
+    // member list is retired, so the flag off is a plain feature_disabled.
+    if !room_admin::writer_enabled(&state) {
+        return room_admin::feature_disabled();
     }
-    let member_id = body
-        .get("member_id")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    apply_room_membership(&state, &user, &space_ref, &member_id, true).await
+    room_admin::add_member(&state, &user, &space_ref, &body).await
 }
 
 /// `DELETE /api/v1/spaces/{space_ref}/members/{member_id}` — remove one person.
@@ -3790,10 +3670,10 @@ pub(crate) async fn remove_space_member(
     Extension(user): Extension<AuthenticatedUser>,
     Path((space_ref, member_id)): Path<(String, String)>,
 ) -> (StatusCode, Json<Value>) {
-    if room_admin::writer_enabled(&state) {
-        return room_admin::remove_member(&state, &user, &space_ref, &member_id).await;
+    if !room_admin::writer_enabled(&state) {
+        return room_admin::feature_disabled();
     }
-    apply_room_membership(&state, &user, &space_ref, &member_id, false).await
+    room_admin::remove_member(&state, &user, &space_ref, &member_id).await
 }
 
 /// Shared body of "change one binding's standing in this room".
@@ -3928,6 +3808,11 @@ pub(crate) async fn revoke_space_agent(
     apply_space_agent_state(&state, &user, &space_ref, &binding_ref, "revoked").await
 }
 
+/// Who may grant a new agent (created or bound) a place in this room: the
+/// caller's own Control-resolved room role, checked under their signed
+/// delegation — never an org-wide role, and never something the request body
+/// could assert. Shared by §UI-3b (create new) and §UI-3 (bind existing) so
+/// the two routes can never quietly diverge on who is allowed to grant.
 async fn require_space_agent_grant_role(
     state: &AppState,
     user: &AuthenticatedUser,
