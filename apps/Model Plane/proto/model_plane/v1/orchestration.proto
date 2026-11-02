@@ -70,6 +70,12 @@ service OrchestrationCoreService {
   // delivery worker. Caller-scoped (user bearer), not service-only.
   rpc ConsumeApproval(ConsumeApprovalRequest) returns (ConsumeApprovalResponse);
 
+  // Claim the granted once-approval for one exact action, so the agent's retry of a
+  // non-resumable call passes the Space gate exactly once (build plan WS10 S3). The
+  // caller is the run owner's session; the claim is one atomic update, so two
+  // concurrent claims have one winner. Refused for a zero-retention caller.
+  rpc ClaimOnceApproval(ClaimOnceApprovalRequest) returns (ClaimOnceApprovalResponse);
+
   // Claim due durable approval deliveries for an authenticated internal
   // worker. Claims are tenant-scoped, leased, and opaque; the caller identity
   // is derived from its verified service credential, never from this request.
@@ -857,6 +863,47 @@ message CreateApprovalRequest {
   // string values of at most 128 characters. Unknown keys or credential-like
   // keys are refused. Never raw tool arguments.
   string context_json = 14;
+
+  // Tag 15 is reserved for the approval addressee (build plan WS10 S6).
+
+  // Stable key of the gated tool (build plan WS10 S3). Stored on the approval so a
+  // once-approval can be matched to the retried call. Plain identifier only.
+  string tool_key = 16;
+
+  // Hex sha256 of the canonical JSON of the gated call (`{tool, input}`, keys
+  // sorted), computed by the creator. The once-token matches on it; the call itself
+  // is never stored. Ignored (stored NULL) for a zero-retention caller.
+  string action_digest = 17;
+
+  // Where the turn came from (`direct`, `ambient`, `automation`); empty is read as
+  // `direct`. Consumed by WS10 S7; stored only.
+  string turn_origin = 18;
+
+  // A Control-signed `approval-grant-use-v1` token proving a standing rule covers this
+  // call (build plan WS10 S3). When valid, the approval is recorded already granted
+  // with `decided_by` `grant:<rule id>`. Refused for a zero-retention caller; a token
+  // that does not verify is refused, never ignored.
+  string grant_use_token = 19;
+}
+
+// ClaimOnceApproval spends the once-approval for one exact action.
+message ClaimOnceApprovalRequest {
+  // Server-authoritative org scope; must match the caller.
+  string org_id = 1;
+  // The run asking to retry the action; its thread bounds the claim.
+  string run_id = 2;
+  // Stable key of the tool being retried.
+  string tool_key = 3;
+  // Hex sha256 of the canonical `{tool, input}` of the retried call.
+  string action_digest = 4;
+}
+
+// The outcome of a ClaimOnceApproval.
+message ClaimOnceApprovalResponse {
+  // True when a granted, unspent, unexpired once-approval matched and was spent now.
+  bool claimed = 1;
+  // The spent approval; empty when nothing was claimed.
+  string approval_id = 2;
 }
 
 // ConsumeApproval claims one granted loop-mode approval for the loop that is

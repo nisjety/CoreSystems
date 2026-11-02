@@ -137,6 +137,9 @@ const FAILURE_DEFINITELY_NOT_ACCEPTED: &str = "definitely_not_accepted";
 /// code outside that list, so it has to accept this one before a worker
 /// carrying it is deployed.
 const FAILURE_POSTCONDITION_REFUTED: &str = "postcondition_refuted";
+/// The requester no longer holds the Space authority the run started with (WS10-S3); also on
+/// session-core's allowlist.
+const FAILURE_AUTHORITY_CHANGED: &str = "authority_changed";
 
 // ---------------------------------------------------------------------
 // Token provider — mints session-core `approval:deliver` tokens, one per
@@ -355,6 +358,10 @@ struct ContinuationDescriptor {
     ticket_idempotency_key: String,
     #[serde(default)]
     owner_user_id: String,
+    /// The Space the run belongs to; absent on a non-Space run (WS10-S3). Read only to decide
+    /// whether Control re-checks the requester's authority before the action runs.
+    #[serde(default)]
+    space_id: String,
 }
 
 #[derive(Debug)]
@@ -961,6 +968,39 @@ async fn process_delivery(
             return;
         }
     };
+
+    // Build plan WS10 S3: a Space-scoped continuation runs as the requester, so Control re-checks
+    // that the requester still holds the authority the run started with before anything starts.
+    // Control saying no ends the delivery; Control being unreachable leaves the lease to expire
+    // (the action never starts on a guess). Without a configured Control client the check is not
+    // made, as with every other Control input of the gate.
+    if !descriptor.space_id.is_empty()
+        && crate::space_gate::GateMode::from_env() == crate::space_gate::GateMode::Enforce
+    {
+        if let Some(control) = crate::space_gate::ControlGateClient::shared() {
+            match control
+                .continuation_authorized(&descriptor.org_id, &delivery.run_id, &delivery.approval_id)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    let disposition = Disposition::RejectBeforeStart {
+                        failure_code: FAILURE_AUTHORITY_CHANGED,
+                    };
+                    finalize_before_start(channel, bearer, org_id, &delivery, &disposition).await;
+                    return;
+                }
+                Err(error) => {
+                    warn!(
+                        delivery_id = %delivery.delivery_id,
+                        ?error,
+                        "approval_delivery_worker: Control authority check unavailable, leaving lease to expire"
+                    );
+                    return;
+                }
+            }
+        }
+    }
 
     let (receipt_id, already_started) =
         match record_continuation_started(channel, bearer, org_id, &delivery).await {

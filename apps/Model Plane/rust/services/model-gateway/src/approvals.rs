@@ -75,6 +75,10 @@ pub fn to_create_approval_request(a: &GatewayApproval) -> CreateApprovalRequest 
         // it states no cause rather than guessing one (build plan WS13 S1).
         cause: None,
         // Nor does it know the tool, so it states no card context (build plan WS10 S1).
+        tool_key: String::new(),
+        action_digest: String::new(),
+        turn_origin: String::new(),
+        grant_use_token: String::new(),
         context_json: String::new(),
     }
 }

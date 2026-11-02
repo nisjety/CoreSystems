@@ -1513,6 +1513,10 @@ impl ExecutionCore for ExecutionService {
                     // (org_id, idempotency_key) ON CONFLICT guard.
                     idempotency_key: format!("{run_id}:{step_id}"),
                     continuation_descriptor_json: String::new(),
+                    tool_key: String::new(),
+                    action_digest: String::new(),
+                    turn_origin: String::new(),
+                    grant_use_token: String::new(),
                     context_json: crate::space_gate::card_context_json(
                         &req.tool_name,
                         &req.tool_input,

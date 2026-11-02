@@ -32,6 +32,7 @@ const (
 	OrchestrationCoreService_GetApproval_FullMethodName                       = "/model_plane.v1.OrchestrationCoreService/GetApproval"
 	OrchestrationCoreService_DecideApproval_FullMethodName                    = "/model_plane.v1.OrchestrationCoreService/DecideApproval"
 	OrchestrationCoreService_ConsumeApproval_FullMethodName                   = "/model_plane.v1.OrchestrationCoreService/ConsumeApproval"
+	OrchestrationCoreService_ClaimOnceApproval_FullMethodName                 = "/model_plane.v1.OrchestrationCoreService/ClaimOnceApproval"
 	OrchestrationCoreService_ClaimApprovalDeliveries_FullMethodName           = "/model_plane.v1.OrchestrationCoreService/ClaimApprovalDeliveries"
 	OrchestrationCoreService_GetApprovalContinuation_FullMethodName           = "/model_plane.v1.OrchestrationCoreService/GetApprovalContinuation"
 	OrchestrationCoreService_RecordApprovalContinuationStarted_FullMethodName = "/model_plane.v1.OrchestrationCoreService/RecordApprovalContinuationStarted"
@@ -100,6 +101,11 @@ type OrchestrationCoreServiceClient interface {
 	// a granted approval is executed by the loop once and never also by the cold
 	// delivery worker. Caller-scoped (user bearer), not service-only.
 	ConsumeApproval(ctx context.Context, in *ConsumeApprovalRequest, opts ...grpc.CallOption) (*ConsumeApprovalResponse, error)
+	// Claim the granted once-approval for one exact action, so the agent's retry of a
+	// non-resumable call passes the Space gate exactly once (build plan WS10 S3). The
+	// caller is the run owner's session; the claim is one atomic update, so two
+	// concurrent claims have one winner. Refused for a zero-retention caller.
+	ClaimOnceApproval(ctx context.Context, in *ClaimOnceApprovalRequest, opts ...grpc.CallOption) (*ClaimOnceApprovalResponse, error)
 	// Claim due durable approval deliveries for an authenticated internal
 	// worker. Claims are tenant-scoped, leased, and opaque; the caller identity
 	// is derived from its verified service credential, never from this request.
@@ -286,6 +292,16 @@ func (c *orchestrationCoreServiceClient) ConsumeApproval(ctx context.Context, in
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ConsumeApprovalResponse)
 	err := c.cc.Invoke(ctx, OrchestrationCoreService_ConsumeApproval_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *orchestrationCoreServiceClient) ClaimOnceApproval(ctx context.Context, in *ClaimOnceApprovalRequest, opts ...grpc.CallOption) (*ClaimOnceApprovalResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ClaimOnceApprovalResponse)
+	err := c.cc.Invoke(ctx, OrchestrationCoreService_ClaimOnceApproval_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -493,6 +509,11 @@ type OrchestrationCoreServiceServer interface {
 	// a granted approval is executed by the loop once and never also by the cold
 	// delivery worker. Caller-scoped (user bearer), not service-only.
 	ConsumeApproval(context.Context, *ConsumeApprovalRequest) (*ConsumeApprovalResponse, error)
+	// Claim the granted once-approval for one exact action, so the agent's retry of a
+	// non-resumable call passes the Space gate exactly once (build plan WS10 S3). The
+	// caller is the run owner's session; the claim is one atomic update, so two
+	// concurrent claims have one winner. Refused for a zero-retention caller.
+	ClaimOnceApproval(context.Context, *ClaimOnceApprovalRequest) (*ClaimOnceApprovalResponse, error)
 	// Claim due durable approval deliveries for an authenticated internal
 	// worker. Claims are tenant-scoped, leased, and opaque; the caller identity
 	// is derived from its verified service credential, never from this request.
@@ -593,6 +614,9 @@ func (UnimplementedOrchestrationCoreServiceServer) DecideApproval(context.Contex
 }
 func (UnimplementedOrchestrationCoreServiceServer) ConsumeApproval(context.Context, *ConsumeApprovalRequest) (*ConsumeApprovalResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ConsumeApproval not implemented")
+}
+func (UnimplementedOrchestrationCoreServiceServer) ClaimOnceApproval(context.Context, *ClaimOnceApprovalRequest) (*ClaimOnceApprovalResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ClaimOnceApproval not implemented")
 }
 func (UnimplementedOrchestrationCoreServiceServer) ClaimApprovalDeliveries(context.Context, *ClaimApprovalDeliveriesRequest) (*ClaimApprovalDeliveriesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ClaimApprovalDeliveries not implemented")
@@ -888,6 +912,24 @@ func _OrchestrationCoreService_ConsumeApproval_Handler(srv interface{}, ctx cont
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(OrchestrationCoreServiceServer).ConsumeApproval(ctx, req.(*ConsumeApprovalRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _OrchestrationCoreService_ClaimOnceApproval_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ClaimOnceApprovalRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrchestrationCoreServiceServer).ClaimOnceApproval(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrchestrationCoreService_ClaimOnceApproval_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrchestrationCoreServiceServer).ClaimOnceApproval(ctx, req.(*ClaimOnceApprovalRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1195,6 +1237,10 @@ var OrchestrationCoreService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ConsumeApproval",
 			Handler:    _OrchestrationCoreService_ConsumeApproval_Handler,
+		},
+		{
+			MethodName: "ClaimOnceApproval",
+			Handler:    _OrchestrationCoreService_ClaimOnceApproval_Handler,
 		},
 		{
 			MethodName: "ClaimApprovalDeliveries",

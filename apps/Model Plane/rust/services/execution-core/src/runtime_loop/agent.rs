@@ -7286,6 +7286,20 @@ async fn pause_for_approval(
     } else {
         String::new()
     };
+    // Build plan WS10 S3: a Space run's pause states the tool key and the digest of the call, so
+    // the agent's retry of this exact action can spend the once-approval a person grants. The
+    // digest is all that is kept of the call; a zero-retention run states neither.
+    let (gate_tool_key, gate_action_digest) = if !req.space_id.trim().is_empty()
+        && !req.zdr
+        && crate::space_gate::GateMode::from_env() != crate::space_gate::GateMode::Off
+    {
+        (
+            crate::space_gate::tool_key(tool_name).to_owned(),
+            crate::space_gate::action_digest(tool_name, tool_input),
+        )
+    } else {
+        (String::new(), String::new())
+    };
     let request = authenticated_session_request(
         pb::CreateApprovalRequest {
             // Cold (the delivery worker) unless the durable-loop switch is on, the
@@ -7315,6 +7329,10 @@ async fn pause_for_approval(
             // The honest card (build plan WS10 S1): an allowlisted tool key and label, and
             // what this pause expects. Only a call with a descriptor can be run by the
             // delivery worker; everything else is a retry of the exact action.
+            tool_key: gate_tool_key,
+            action_digest: gate_action_digest,
+            turn_origin: String::new(),
+            grant_use_token: String::new(),
             context_json: crate::space_gate::card_context_json(
                 tool_name,
                 tool_input,
@@ -7489,6 +7507,11 @@ async fn continuation_descriptor(
         "permission_mode": permission_mode,
         "action_fingerprint": action_fingerprint,
     });
+    // The Space the run belongs to, so the delivery worker knows to re-check the requester's
+    // authority with Control before it runs the action (WS10 S3). Outside the fingerprint.
+    if !req.space_id.trim().is_empty() {
+        descriptor["space_id"] = json!(req.space_id);
+    }
     if let Some((schema_sha256, payload_sha256, ticket_idempotency_key)) = ticket_binding {
         let object = descriptor
             .as_object_mut()

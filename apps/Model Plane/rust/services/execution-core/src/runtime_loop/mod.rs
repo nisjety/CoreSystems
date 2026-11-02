@@ -817,6 +817,16 @@ async fn execute_step_inner(
     // Set when the user's broker-validated run grant satisfied the high-risk ask
     // (`browser_grant_approval`); recorded on the run once every later gate passed.
     let mut grant_approval: Option<browser_grant_approval::GrantApproval> = None;
+    // Build plan WS10 S3: on a Space-scoped step the three existing `ask` gates below become inputs
+    // to one fold with Control's per-tool level instead of returning at once (enforce), or are
+    // observed against it (shadow). `off`, and every non-Space step, keeps today's returns.
+    let gate_mode = if sandbox.is_some() && !released {
+        crate::space_gate::GateMode::from_env()
+    } else {
+        crate::space_gate::GateMode::Off
+    };
+    let gate_enforced = gate_mode == crate::space_gate::GateMode::Enforce;
+    let mut deferred_ask: Option<CauseCode> = None;
     match capability_policy
         .evaluate_tool_call(tool_name, run_id, org_id, user_id)
         .await
@@ -848,6 +858,7 @@ async fn execute_step_inner(
                 &evaluation.approval_floor,
             );
             if !released {
+              'ask_gate: {
                 // A managed browser run's start was already approved by its user, in
                 // a narrower form: a derived run grant the broker just validated.
                 // That satisfies only this ask; the hook and permission gates below
@@ -874,7 +885,12 @@ async fn execute_step_inner(
                     } else {
                         CauseCode::CapabilityHighRisk
                     };
-                    return StepOutcome::awaiting_approval(cause);
+                    if !gate_enforced {
+                        return StepOutcome::awaiting_approval(cause);
+                    }
+                    // The Space gate folds this ask with Control's level below.
+                    deferred_ask.get_or_insert(cause);
+                    break 'ask_gate;
                 };
                 // Metadata only: no URL, domain, goal or prompt.
                 tracing::info!(
@@ -888,6 +904,7 @@ async fn execute_step_inner(
                     grant_ref = %approval.grant_ref,
                     "high-risk capability ask satisfied by a broker-validated browser run grant"
                 );
+              }
             }
             // The user approved this exact call: the ask gate is satisfied.
         }
@@ -951,7 +968,10 @@ async fn execute_step_inner(
             return StepOutcome::failed(&format!("blocked by pre-tool hook: {reason}"));
         }
         hook::HookDecision::Ask { .. } if !released => {
-            return StepOutcome::awaiting_approval(CauseCode::HookAsk);
+            if !gate_enforced {
+                return StepOutcome::awaiting_approval(CauseCode::HookAsk);
+            }
+            deferred_ask.get_or_insert(CauseCode::HookAsk);
         }
         hook::HookDecision::Ask { .. } | hook::HookDecision::Allow => {}
     }
@@ -968,12 +988,51 @@ async fn execute_step_inner(
     match permission::RunGate::for_run(org_id, run_id).evaluate_call(mode, tool_name, tool_input) {
         PermissionDecision::Deny => return StepOutcome::permission_denied(),
         PermissionDecision::AwaitApproval if !released => {
-            return StepOutcome::awaiting_approval(permission_pause_cause(
-                permission::RunGate::for_run(org_id, run_id),
-                tool_name,
-            ));
+            let cause = permission_pause_cause(permission::RunGate::for_run(org_id, run_id), tool_name);
+            if !gate_enforced {
+                return StepOutcome::awaiting_approval(cause);
+            }
+            deferred_ask.get_or_insert(cause);
         }
         PermissionDecision::AwaitApproval | PermissionDecision::Allow => {}
+    }
+
+    // Build plan WS10 S3: the Space approval gate. Every source that asked is folded with
+    // Control's level for this call (`allow < ask < block`, the most restrictive wins). An ask
+    // is then passed by a spent once-approval or a Control standing rule, or pauses as it
+    // always did; a `block` refuses. Shadow only reads the view and counts where it differs.
+    if gate_mode != crate::space_gate::GateMode::Off {
+        let gate_call = crate::space_gate::GateCall {
+            tool_name,
+            tool_input,
+            org_id,
+            user_id,
+            run_id,
+            step_id,
+            zdr,
+            waived,
+            session_channel: session_channel.as_ref(),
+            session_bearer,
+            fallback_cause: permission_pause_cause(
+                permission::RunGate::for_run(org_id, run_id),
+                tool_name,
+            ),
+        };
+        if gate_enforced {
+            match crate::space_gate::resolve(&gate_call, deferred_ask).await {
+                crate::space_gate::GateOutcome::Pass => {}
+                crate::space_gate::GateOutcome::Pause(cause) => {
+                    return StepOutcome::awaiting_approval(cause);
+                }
+                crate::space_gate::GateOutcome::Block(source) => {
+                    return StepOutcome::permission_denied_with_reason(format!(
+                        "permission denied by policy (space_tool_policy: {source})"
+                    ));
+                }
+            }
+        } else {
+            crate::space_gate::observe_shadow(&gate_call).await;
+        }
     }
 
     // Browser-agent returns a structured lifecycle result, not a generic tool
@@ -2632,6 +2691,10 @@ async fn resolve_write_approval(
                 cause: Some(approval_cause::for_call(
                     cause, run_id, tool_name, tool_input,
                 )),
+                tool_key: String::new(),
+                action_digest: String::new(),
+                turn_origin: String::new(),
+                grant_use_token: String::new(),
                 context_json: crate::space_gate::card_context_json(
                     tool_name,
                     tool_input,

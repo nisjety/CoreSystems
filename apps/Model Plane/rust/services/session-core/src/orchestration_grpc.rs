@@ -3247,8 +3247,69 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                     map.insert("card".to_owned(), card);
                 }
             }
+            // The gate context (build plan WS10 S3): the tool key and call digest a retry is
+            // matched on, and the standing-rule proof that passed the prompt. A proof that does
+            // not verify is refused rather than ignored.
+            let gate_context = crate::space::approval_gate::validate_gate_context(
+                &req.tool_key,
+                &req.action_digest,
+                &req.turn_origin,
+                caller.zdr(),
+            )?;
+            let granted_by_rule = if req.grant_use_token.is_empty() {
+                None
+            } else {
+                retention_receipt::refuse_zdr_continuation(&caller)?;
+                if continuation_descriptor.is_some() || !req.continuation_mode.is_empty() {
+                    return Err(Status::invalid_argument(
+                        "a standing-rule pass carries no continuation",
+                    ));
+                }
+                let run_space: String =
+                    sqlx::query_scalar("SELECT COALESCE(space_id, '') FROM runs WHERE id = $1")
+                        .bind(&req.run_id)
+                        .fetch_one(&self.pool)
+                        .await
+                        .map_err(|e| Status::internal(e.to_string()))?;
+                Some(crate::space::approval_gate::verify_grant_use_token(
+                    &req.grant_use_token,
+                    &req.org_id,
+                    &req.user_id,
+                    &req.run_id,
+                    &run_space,
+                    &req.tool_key,
+                    Utc::now(),
+                )?)
+            };
 
-            let created = store::request_approval(
+            let created = match granted_by_rule.as_ref() {
+                Some(claims) => {
+                    if let Some(map) = metadata.as_object_mut() {
+                        map.insert(
+                            "decision".to_owned(),
+                            crate::space::approval_gate::standing_rule_decision(&claims.rule_id),
+                        );
+                    }
+                    crate::space::approval_gate::insert_granted_by_rule(
+                        &self.pool,
+                        &crate::space::approval_gate::GrantedApproval {
+                            id: &id,
+                            run_id: &req.run_id,
+                            kind,
+                            requested_by: &req.requested_of,
+                            org_id: &req.org_id,
+                            user_id: &req.user_id,
+                            idempotency_key: &req.idempotency_key,
+                            metadata: &metadata,
+                            expires_at,
+                            context: &gate_context,
+                            claims,
+                        },
+                    )
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?
+                }
+                None => store::request_approval(
                 &self.pool,
                 &id,
                 &req.run_id,
@@ -3269,7 +3330,15 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 &req.continuation_mode,
             )
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| Status::internal(e.to_string()))?,
+            };
+            // The context goes on a row this request created; an idempotent retry that resolved
+            // to an older row leaves it alone.
+            if let (Some(new_id), None) = (&created, &granted_by_rule) {
+                crate::space::approval_gate::record_gate_context(&self.pool, new_id, &gate_context)
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?;
+            }
 
             // Counted when a row was inserted, so a retried request that collapses onto
             // an existing approval is not counted twice.
@@ -3299,7 +3368,9 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             let approval = approval_from_row(&row);
 
             // Operator surfaces (run-event feed, snapshot) consume both: the
-            // approval entering REQUESTED and the run pausing for it.
+            // approval entering REQUESTED and the run pausing for it. A row a standing rule
+            // already granted neither waits nor pauses the run, so it announces neither.
+            if granted_by_rule.is_none() {
             broadcast_event(
                 &self.events_tx,
                 &self.replay,
@@ -3332,6 +3403,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                     )),
                 },
             );
+            }
 
             Ok(Response::new(proto::CreateApprovalResponse {
                 approval: Some(approval),
@@ -3516,6 +3588,59 @@ impl OrchestrationCoreService for OrchestrationGrpc {
     // exactly once when it re-enters. The cold delivery worker never sees a
     // loop-mode approval (decide_approval makes no delivery row for it), so the
     // call is run by the loop once and never also by the worker.
+    // Build plan WS10 S3: spend the once-approval for one exact action. The caller is the run
+    // owner's session; the claim is one atomic update (`approval_gate::claim_once`).
+    async fn claim_once_approval(
+        &self,
+        request: Request<proto::ClaimOnceApprovalRequest>,
+    ) -> Result<Response<proto::ClaimOnceApprovalResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::ClaimOnceApprovalResponse>, Status> = async {
+            let caller = identity(&request)?;
+            retention_receipt::refuse_zdr_continuation(&caller)?;
+            authorize_operation(&caller, "orchestration:write")?;
+            let req = request.into_inner();
+            if req.run_id.is_empty() || req.org_id.is_empty() {
+                return Err(Status::invalid_argument("run_id and org_id are required"));
+            }
+            let context = crate::space::approval_gate::validate_gate_context(
+                &req.tool_key,
+                &req.action_digest,
+                "",
+                false,
+            )?;
+            let (Some(tool_key), Some(action_digest)) = (context.tool_key, context.action_digest)
+            else {
+                return Err(Status::invalid_argument(
+                    "tool_key and action_digest are required",
+                ));
+            };
+            caller.authorize_org(&req.org_id)?;
+            let user_id = caller
+                .user_id()
+                .ok_or_else(|| Status::permission_denied("user-bound approval credential required"))?
+                .to_owned();
+            authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
+            let claimed = crate::space::approval_gate::claim_once(
+                &self.pool,
+                &req.org_id,
+                &user_id,
+                &req.run_id,
+                &tool_key,
+                &action_digest,
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+            Ok(Response::new(proto::ClaimOnceApprovalResponse {
+                claimed: claimed.is_some(),
+                approval_id: claimed.unwrap_or_default(),
+            }))
+        }
+        .await;
+        record_metrics("claim_once_approval", started, result.is_ok());
+        result
+    }
+
     async fn consume_approval(
         &self,
         request: Request<proto::ConsumeApprovalRequest>,

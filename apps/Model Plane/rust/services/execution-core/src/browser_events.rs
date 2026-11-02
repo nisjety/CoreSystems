@@ -321,6 +321,10 @@ impl BrowserEventSink for OrchestrationEventSink {
             continuation_descriptor_json: String::new(),
             // A live approval: the running browser loop polls it, no worker resumes it, and
             // the card must say so (build plan WS10 S1).
+            tool_key: String::new(),
+            action_digest: String::new(),
+            turn_origin: String::new(),
+            grant_use_token: String::new(),
             context_json: crate::space_gate::card_context_json(
                 BROWSER_AGENT_TOOL,
                 "",

@@ -1329,6 +1329,16 @@ services:
       # WS06-S9 Space `shell` lease rule: `observe` (default) leases when it can and counts
       # the unleased calls; `enforce` refuses a Space shell call without a sandbox lease.
       EXECUTION_CORE_SPACE_SHELL_LEASE: ${EXECUTION_CORE_SPACE_SHELL_LEASE:-observe}
+      # Build plan WS10-S3 Space approval gate: `off` keeps today's behaviour, `shadow` reads
+      # Control's per-tool levels and only counts where they would differ, `enforce` folds them
+      # with the existing gates and passes an ask by a spent once-approval or a Control
+      # standing rule. Dev enforces; production and release ship `off`. Never an authorization
+      # input. The Control token is a service credential for tool-gate-view,
+      # approval-grants/use and approval-continuation-check; blank means the gate runs
+      # without Control (the once-token still works, per-tool levels and standing rules do not).
+      EXECUTION_CORE_SPACE_APPROVAL_GATE: ${EXECUTION_CORE_SPACE_APPROVAL_GATE:-enforce}
+      EXECUTION_CORE_CONTROL_APPROVAL_GATE_TOKEN: ${EXECUTION_CORE_CONTROL_APPROVAL_GATE_TOKEN:-}
+      EXECUTION_CORE_ALLOW_INSECURE_APPROVAL_GATE_LOOPBACK: ${EXECUTION_CORE_ALLOW_INSECURE_APPROVAL_GATE_LOOPBACK:-false}
       # Build plan WS03 S2: raise Do-loop approvals as loop-owned (consumed once by
       # the durable loop through ConsumeApproval) instead of the cold delivery
       # worker's. OFF by default and never for ZDR runs. Stage 1 `/continue` is

@@ -84,3 +84,669 @@ pub(crate) fn card_context_json(tool_name: &str, tool_input: &str, resume_class:
     })
     .to_string()
 }
+
+// ---------------------------------------------------------------------------------------------
+// WS10-S3: the Space approval gate.
+//
+// A Space run's gated call is folded with Control's per-tool levels: `allow < ask < block`, the
+// most restrictive wins. A source can only tighten, so no layer loosens another. An `ask` is then
+// resolved in a fixed order: the never-auto set always pauses; the once-token (a person already
+// granted this exact action and the agent is retrying it) passes once; a Control standing rule
+// (MCP tools only) passes with a signed proof Session Core verifies; otherwise the call pauses
+// as it always did. Non-Space runs never reach this code, and `EXECUTION_CORE_SPACE_APPROVAL_GATE=off`
+// restores today's behaviour exactly.
+// ---------------------------------------------------------------------------------------------
+
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+use mp_contracts::approval_cause::CauseCode;
+use mp_contracts::model_plane::v1 as pb;
+use reqwest::{Client, StatusCode, Url};
+use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
+use sha2::{Digest, Sha256};
+use tonic::transport::Channel;
+
+use crate::control_http_client::{bounded_secret, env_flag, env_value, service_base_url, service_endpoint};
+
+const GATE_ENV: &str = "EXECUTION_CORE_SPACE_APPROVAL_GATE";
+const CONTROL_URL_ENV: &str = "CONTROL_PLANE_USER_CORE_URL";
+const CONTROL_TOKEN_ENV: &str = "EXECUTION_CORE_CONTROL_APPROVAL_GATE_TOKEN";
+const CONTROL_LOOPBACK_ENV: &str = "EXECUTION_CORE_ALLOW_INSECURE_APPROVAL_GATE_LOOPBACK";
+const GATE_VIEW_PATH: &str = "/api/v1/internal/spaces/tool-gate-view";
+const GRANT_USE_PATH: &str = "/api/v1/internal/spaces/approval-grants/use";
+const CONTINUATION_CHECK_PATH: &str = "/api/v1/internal/spaces/approval-continuation-check";
+const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Longest a gate view is reused (Control's own bound; the signed decisions live 120 s).
+const VIEW_CACHE_MAX: Duration = Duration::from_secs(100);
+const VIEW_CACHE_CAPACITY: usize = 1024;
+/// Standing rules cover MCP tools only.
+const STANDING_RULE_TOOL_PREFIX: &str = "mcp__";
+
+/// How the gate runs (`EXECUTION_CORE_SPACE_APPROVAL_GATE`). Unset or unknown is `off`: a
+/// deployment that does not name the mode keeps today's behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GateMode {
+    Off,
+    /// Reads the Control view and logs/counts where it would differ; changes nothing.
+    Shadow,
+    Enforce,
+}
+
+impl GateMode {
+    pub(crate) fn parse(value: Option<&str>) -> Self {
+        match value.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+            Some("enforce") => Self::Enforce,
+            Some("shadow") => Self::Shadow,
+            _ => Self::Off,
+        }
+    }
+
+    pub(crate) fn from_env() -> Self {
+        Self::parse(std::env::var(GATE_ENV).ok().as_deref())
+    }
+}
+
+/// A tool's level. Ordered so the most restrictive is the maximum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum GateLevel {
+    Allow,
+    Ask,
+    Block,
+}
+
+impl GateLevel {
+    fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "allow" => Some(Self::Allow),
+            "ask" => Some(Self::Ask),
+            "block" => Some(Self::Block),
+            _ => None,
+        }
+    }
+}
+
+/// Fold the levels of every source: the most restrictive wins; no sources is `allow`.
+pub(crate) fn fold(levels: &[GateLevel]) -> GateLevel {
+    levels.iter().copied().max().unwrap_or(GateLevel::Allow)
+}
+
+/// The key a policy row and a standing rule name a call by: the tool, or for a provider action
+/// `execute_provider_action:<operation>`. Never arguments.
+pub(crate) fn action_key(tool_name: &str, tool_input: &str) -> String {
+    if tool_name == PROVIDER_ACTION_TOOL {
+        let operation = serde_json::from_str::<JsonValue>(tool_input)
+            .ok()
+            .and_then(|input| input.get("operation")?.as_str().map(str::to_owned));
+        if let Some(operation) = operation.as_deref().and_then(safe_identifier) {
+            return format!("{PROVIDER_ACTION_TOOL}:{operation}");
+        }
+    }
+    tool_name.to_owned()
+}
+
+/// Canonical JSON: object keys sorted at every depth, no whitespace. Written out here so the
+/// digest does not depend on a serde feature another crate might switch on.
+fn canonical_json(value: &JsonValue, out: &mut String) {
+    match value {
+        JsonValue::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            out.push('{');
+            for (index, key) in keys.into_iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                out.push_str(&JsonValue::String(key.clone()).to_string());
+                out.push(':');
+                canonical_json(&map[key], out);
+            }
+            out.push('}');
+        }
+        JsonValue::Array(items) => {
+            out.push('[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                canonical_json(item, out);
+            }
+            out.push(']');
+        }
+        other => out.push_str(&other.to_string()),
+    }
+}
+
+/// Hex sha256 of the canonical `{"input":<input>,"tool":<tool>}`. Input that is not JSON is
+/// digested as the string it is. The digest is all Session Core keeps of the call.
+pub(crate) fn action_digest(tool_name: &str, tool_input: &str) -> String {
+    let input = serde_json::from_str::<JsonValue>(tool_input)
+        .unwrap_or_else(|_| JsonValue::String(tool_input.to_owned()));
+    let mut canonical = String::new();
+    canonical_json(
+        &serde_json::json!({ "tool": tool_name, "input": input }),
+        &mut canonical,
+    );
+    Sha256::digest(canonical.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// A tool's rule registry digest as the `sha256:<hex>` commitment Control binds a rule to.
+fn schema_commitment(digest: &str) -> Option<String> {
+    let digest = digest.trim();
+    let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
+    (hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+        .then(|| format!("sha256:{hex}"))
+}
+
+#[derive(Debug)]
+#[allow(dead_code)] // the fields are read through `Debug` in the gate's log lines
+pub(crate) enum ControlGateError {
+    /// Control answered a final refusal (4xx); `code` is its typed code.
+    Refused { status: u16, code: Option<String> },
+    /// Transport failure, 5xx or a malformed body.
+    Unavailable(String),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ToolLevel {
+    #[serde(default)]
+    level: String,
+    #[serde(default)]
+    source: String,
+}
+
+/// What Control says the gate may fold for one run (`tool-gate-view`). Every field is optional:
+/// an absent `tools` entry means "no Control-side level", never `allow`-by-policy.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct GateView {
+    #[serde(default)]
+    tools: HashMap<String, ToolLevel>,
+    #[serde(default)]
+    standing_rules_enabled: bool,
+    #[serde(default)]
+    agent_subject_id: Option<String>,
+}
+
+impl GateView {
+    /// The level and source layer for a call: the specific action key first, then the tool, then
+    /// the `*` row. Absent rows are `allow`.
+    fn level_for(&self, action_key: &str, tool_key: &str) -> (GateLevel, String) {
+        for key in [action_key, tool_key, "*"] {
+            if let Some(row) = self.tools.get(key) {
+                if let Some(level) = GateLevel::from_wire(&row.level) {
+                    return (level, row.source.clone());
+                }
+            }
+        }
+        (GateLevel::Allow, String::new())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct DataEnvelope<T> {
+    data: T,
+}
+
+#[derive(Debug, Deserialize)]
+struct GrantUseResponse {
+    token: String,
+}
+
+/// `skip_serializing_if` helper: an empty field is left out of the request.
+fn blank(value: &&str) -> bool {
+    value.is_empty()
+}
+
+#[derive(Debug, Serialize)]
+struct RunRequest<'a> {
+    run_id: &'a str,
+    org_id: &'a str,
+    #[serde(skip_serializing_if = "blank")]
+    agent_subject_id: &'a str,
+    #[serde(skip_serializing_if = "blank")]
+    tool_key: &'a str,
+    #[serde(skip_serializing_if = "blank")]
+    action_key: &'a str,
+    #[serde(skip_serializing_if = "blank")]
+    schema_hash: &'a str,
+    #[serde(skip_serializing_if = "blank")]
+    approval_id: &'a str,
+}
+
+/// Control's approval-gate surface for execution-core: the per-run view (cached at most 100 s), the
+/// standing-rule use, and the continuation authority check. Authenticated with this service's
+/// own `X-Service-Token`; the request names the run and Control resolves the requester, Space
+/// and organisation itself. Absent configuration is a valid disabled state, not an error.
+pub(crate) struct ControlGateClient {
+    http: Client,
+    base_url: Url,
+    service_token: String,
+    views: Mutex<HashMap<(String, String), (Instant, GateView)>>,
+}
+
+impl ControlGateClient {
+    fn from_env() -> Result<Option<Self>, String> {
+        let (Some(base_url), Some(token)) =
+            (env_value(CONTROL_URL_ENV), env_value(CONTROL_TOKEN_ENV))
+        else {
+            return Ok(None);
+        };
+        Self::new(&base_url, &token, env_flag(CONTROL_LOOPBACK_ENV)).map(Some)
+    }
+
+    fn new(base_url: &str, token: &str, allow_insecure_loopback: bool) -> Result<Self, String> {
+        let base_url = service_base_url(base_url, "Control Plane approval gate", allow_insecure_loopback)?;
+        let service_token = bounded_secret(token, "Control approval gate service token")?;
+        let http = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(3))
+            .timeout(HTTP_TIMEOUT)
+            .build()
+            .map_err(|error| format!("approval gate HTTP client: {error}"))?;
+        Ok(Self {
+            http,
+            base_url,
+            service_token,
+            views: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// The process-wide client. `None` when unconfigured (the gate then behaves as `off` for the
+    /// Control inputs) or when the configuration is malformed (logged once, never panics).
+    pub(crate) fn shared() -> Option<&'static Self> {
+        static CLIENT: OnceLock<Option<ControlGateClient>> = OnceLock::new();
+        CLIENT
+            .get_or_init(|| match Self::from_env() {
+                Ok(client) => client,
+                Err(error) => {
+                    tracing::error!(%error, "Space approval gate: Control client configuration is invalid; the gate runs without Control");
+                    None
+                }
+            })
+            .as_ref()
+    }
+
+    async fn post<T: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        body: &RunRequest<'_>,
+    ) -> Result<T, ControlGateError> {
+        let endpoint = service_endpoint(&self.base_url, path).map_err(ControlGateError::Unavailable)?;
+        let response = self
+            .http
+            .post(endpoint)
+            .header("X-Service-Id", "execution-core")
+            .header("X-Service-Token", &self.service_token)
+            .json(body)
+            .send()
+            .await
+            .map_err(|error| ControlGateError::Unavailable(format!("request failed: {error}")))?;
+        let status = response.status();
+        if status.is_success() {
+            return response
+                .json::<DataEnvelope<T>>()
+                .await
+                .map(|envelope| envelope.data)
+                .map_err(|error| ControlGateError::Unavailable(format!("response malformed: {error}")));
+        }
+        if status.is_client_error() && status != StatusCode::REQUEST_TIMEOUT && status != StatusCode::TOO_MANY_REQUESTS {
+            // Only the typed code is read from a refusal; nothing else of the body is kept.
+            let code = response.json::<JsonValue>().await.ok().and_then(|body| {
+                body.pointer("/error/code")
+                    .or_else(|| body.get("code"))?
+                    .as_str()
+                    .map(str::to_owned)
+            });
+            return Err(ControlGateError::Refused { status: status.as_u16(), code });
+        }
+        Err(ControlGateError::Unavailable(format!("returned {status}")))
+    }
+
+    /// The run's gate view, from the cache while it is younger than 100 s.
+    pub(crate) async fn gate_view(&self, org_id: &str, run_id: &str) -> Result<GateView, ControlGateError> {
+        let key = (org_id.to_owned(), run_id.to_owned());
+        if let Ok(views) = self.views.lock() {
+            if let Some((at, view)) = views.get(&key) {
+                if at.elapsed() < VIEW_CACHE_MAX {
+                    return Ok(view.clone());
+                }
+            }
+        }
+        let view: GateView = self
+            .post(
+                GATE_VIEW_PATH,
+                &RunRequest { run_id, org_id, agent_subject_id: "", tool_key: "", action_key: "", schema_hash: "", approval_id: "" },
+            )
+            .await?;
+        if let Ok(mut views) = self.views.lock() {
+            if views.len() >= VIEW_CACHE_CAPACITY {
+                views.retain(|_, (at, _)| at.elapsed() < VIEW_CACHE_MAX);
+                if views.len() >= VIEW_CACHE_CAPACITY {
+                    views.clear();
+                }
+            }
+            views.insert(key, (Instant::now(), view.clone()));
+        }
+        Ok(view)
+    }
+
+    /// Ask Control whether a standing rule covers this call. `Ok(None)` is "no applicable rule".
+    async fn use_grant(
+        &self,
+        org_id: &str,
+        run_id: &str,
+        agent_subject_id: &str,
+        tool_key: &str,
+        action_key: &str,
+        schema_hash: &str,
+    ) -> Result<Option<String>, ControlGateError> {
+        match self
+            .post::<GrantUseResponse>(
+                GRANT_USE_PATH,
+                &RunRequest { run_id, org_id, agent_subject_id, tool_key, action_key, schema_hash, approval_id: "" },
+            )
+            .await
+        {
+            Ok(grant) => Ok(Some(grant.token)),
+            Err(ControlGateError::Refused { status: 404, .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The freshness fence before a worker runs an approved action as the requester. `Ok(false)`
+    /// is Control's `authority_changed`.
+    pub(crate) async fn continuation_authorized(
+        &self,
+        org_id: &str,
+        run_id: &str,
+        approval_id: &str,
+    ) -> Result<bool, ControlGateError> {
+        #[derive(Deserialize)]
+        struct Authorized {
+            #[serde(default)]
+            authorized: bool,
+        }
+        match self
+            .post::<Authorized>(
+                CONTINUATION_CHECK_PATH,
+                &RunRequest { run_id, org_id, agent_subject_id: "", tool_key: "", action_key: "", schema_hash: "", approval_id },
+            )
+            .await
+        {
+            Ok(answer) => Ok(answer.authorized),
+            Err(ControlGateError::Refused { status: 403, code }) if code.as_deref() == Some("authority_changed") => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+/// One gated call, as the gate needs to see it.
+pub(crate) struct GateCall<'a> {
+    pub tool_name: &'a str,
+    pub tool_input: &'a str,
+    pub org_id: &'a str,
+    pub user_id: &'a str,
+    pub run_id: &'a str,
+    pub step_id: &'a str,
+    pub zdr: bool,
+    pub waived: bool,
+    pub session_channel: Option<&'a Channel>,
+    pub session_bearer: Option<&'a str>,
+    /// The cause the existing gates would pause under, used when this fold adds none of its own.
+    pub fallback_cause: CauseCode,
+}
+
+/// What the gate decided for a call that some source asked about.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum GateOutcome {
+    /// Run the call: nothing asked, or a spent once-approval / a standing rule passed the prompt.
+    Pass,
+    /// Pause for a person, under this cause.
+    Pause(CauseCode),
+    /// Refuse the call: a Control policy row says `block`. The string is a source slug.
+    Block(String),
+}
+
+/// A plain slug is shown; anything else is not.
+fn source_slug(source: &str) -> String {
+    let ok = !source.is_empty()
+        && source.len() <= 64
+        && source.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+    if ok { source.to_owned() } else { "policy".to_owned() }
+}
+
+/// Whether the call is one a grant or the once-token may never pass: owner-plane effects and
+/// consent-to-disclose reads.
+fn is_never_auto(tool_name: &str) -> bool {
+    crate::permission::requires_durable_owner_approval(tool_name)
+        || crate::permission::requires_consent_to_disclose(tool_name)
+}
+
+/// Fold the existing gates' ask (`prior_ask`, the cause they would pause under) with Control's
+/// level for this call, then resolve an `ask`. Only called for a Space-scoped step in `enforce`.
+pub(crate) async fn resolve(call: &GateCall<'_>, prior_ask: Option<CauseCode>) -> GateOutcome {
+    let action_key = action_key(call.tool_name, call.tool_input);
+    let tool_key = tool_key(call.tool_name);
+    let client = ControlGateClient::shared();
+    let (view, view_failed) = match client {
+        Some(client) => match client.gate_view(call.org_id, call.run_id).await {
+            Ok(view) => (Some(view), false),
+            Err(error) => {
+                tracing::warn!(?error, run_id = call.run_id, "Space approval gate: Control view unavailable");
+                metrics::counter!("space_approval_gate_view_unavailable_total").increment(1);
+                (None, true)
+            }
+        },
+        None => (None, false),
+    };
+
+    let mut levels = Vec::with_capacity(3);
+    let mut policy_source = String::new();
+    if prior_ask.is_some() {
+        levels.push(GateLevel::Ask);
+    }
+    if let Some(view) = &view {
+        let (level, source) = view.level_for(&action_key, tool_key);
+        policy_source = source;
+        levels.push(level);
+    }
+    // View unavailable (configured but failing): a risky call asks, with grants disabled; a
+    // non-risky call stays as the existing gates decided.
+    let grants_available = view.as_ref().is_some_and(|view| view.standing_rules_enabled);
+    if view_failed && crate::permission::is_risky_call(call.tool_name, call.tool_input) {
+        levels.push(GateLevel::Ask);
+    }
+
+    match fold(&levels) {
+        GateLevel::Allow => GateOutcome::Pass,
+        GateLevel::Block => GateOutcome::Block(source_slug(&policy_source)),
+        GateLevel::Ask => {
+            let cause = prior_ask.unwrap_or(if view.as_ref().is_some_and(|v| v.level_for(&action_key, tool_key).0 == GateLevel::Ask) {
+                CauseCode::CapabilityPolicyAsk
+            } else {
+                call.fallback_cause
+            });
+            if is_never_auto(call.tool_name) || call.zdr || call.waived {
+                return GateOutcome::Pause(cause);
+            }
+            if try_once_token(call, tool_key).await {
+                metrics::counter!("space_approval_gate_pass_total", "via" => "once").increment(1);
+                return GateOutcome::Pass;
+            }
+            if grants_available && try_standing_rule(call, view.as_ref(), tool_key, &action_key).await {
+                metrics::counter!("space_approval_gate_pass_total", "via" => "standing_rule").increment(1);
+                return GateOutcome::Pass;
+            }
+            GateOutcome::Pause(cause)
+        }
+    }
+}
+
+/// Spend the once-approval for this exact action. Only a non-resumable call has one (a resumable
+/// call's grant is its continuation, which the worker runs; a retry would run it twice).
+async fn try_once_token(call: &GateCall<'_>, tool_key: &str) -> bool {
+    if RESUMABLE_TOOLS.contains(&call.tool_name) || tool_key.is_empty() {
+        return false;
+    }
+    let (Some(channel), Some(bearer)) = (call.session_channel, call.session_bearer) else {
+        return false;
+    };
+    let Ok(request) = crate::runtime_loop::authenticated_session_request(
+        pb::ClaimOnceApprovalRequest {
+            org_id: call.org_id.to_owned(),
+            run_id: call.run_id.to_owned(),
+            tool_key: tool_key.to_owned(),
+            action_digest: action_digest(call.tool_name, call.tool_input),
+        },
+        bearer,
+    ) else {
+        return false;
+    };
+    match pb::orchestration_core_service_client::OrchestrationCoreServiceClient::new(channel.clone())
+        .claim_once_approval(request)
+        .await
+    {
+        Ok(response) => response.into_inner().claimed,
+        Err(status) => {
+            tracing::warn!(code = ?status.code(), run_id = call.run_id, "Space approval gate: once-token claim failed; the call pauses");
+            false
+        }
+    }
+}
+
+/// Ask Control for a standing-rule proof and have Session Core record the approval already
+/// granted. The call passes only when the stored approval is granted.
+async fn try_standing_rule(
+    call: &GateCall<'_>,
+    view: Option<&GateView>,
+    tool_key: &str,
+    action_key: &str,
+) -> bool {
+    if !call.tool_name.starts_with(STANDING_RULE_TOOL_PREFIX) || tool_key.is_empty() {
+        return false;
+    }
+    // The agent whose rule applies comes from Control's view; without it no rule can be named.
+    let Some(agent_subject_id) = view.and_then(|view| view.agent_subject_id.as_deref()).filter(|id| !id.is_empty()) else {
+        return false;
+    };
+    let Some(schema_hash) = crate::permission::run_view(call.org_id, call.run_id, call.tool_name)
+        .and_then(|view| schema_commitment(view.digest()))
+    else {
+        return false;
+    };
+    let (Some(client), Some(channel), Some(bearer)) = (ControlGateClient::shared(), call.session_channel, call.session_bearer) else {
+        return false;
+    };
+    let token = match client
+        .use_grant(call.org_id, call.run_id, agent_subject_id, tool_key, action_key, &schema_hash)
+        .await
+    {
+        Ok(Some(token)) => token,
+        Ok(None) => return false,
+        Err(error) => {
+            tracing::warn!(?error, run_id = call.run_id, "Space approval gate: standing-rule use failed; the call pauses");
+            return false;
+        }
+    };
+    let Ok(request) = crate::runtime_loop::authenticated_session_request(
+        pb::CreateApprovalRequest {
+            run_id: call.run_id.to_owned(),
+            step_id: call.step_id.to_owned(),
+            kind: pb::ApprovalKind::ToolCall as i32,
+            requested_of: call.org_id.to_owned(),
+            org_id: call.org_id.to_owned(),
+            user_id: call.user_id.to_owned(),
+            reason: "a standing rule passed this call".to_owned(),
+            expires_in_seconds: 3600,
+            // The same key the pause path mints under, so a step has one approval.
+            idempotency_key: format!("{}:{}", call.run_id, call.step_id),
+            context_json: card_context_json(call.tool_name, call.tool_input, RESUME_NONE),
+            tool_key: tool_key.to_owned(),
+            action_digest: action_digest(call.tool_name, call.tool_input),
+            grant_use_token: token,
+            ..Default::default()
+        },
+        bearer,
+    ) else {
+        return false;
+    };
+    match pb::orchestration_core_service_client::OrchestrationCoreServiceClient::new(channel.clone())
+        .create_approval(request)
+        .await
+    {
+        Ok(response) => response
+            .into_inner()
+            .approval
+            .is_some_and(|approval| approval.state == pb::ApprovalState::Granted as i32),
+        Err(status) => {
+            tracing::warn!(code = ?status.code(), run_id = call.run_id, "Space approval gate: standing-rule approval refused; the call pauses");
+            false
+        }
+    }
+}
+
+/// Shadow mode: read Control's level for a call every existing gate allowed, and count where the
+/// enforced gate would have asked or blocked. Changes nothing.
+pub(crate) async fn observe_shadow(call: &GateCall<'_>) {
+    let Some(client) = ControlGateClient::shared() else {
+        return;
+    };
+    let Ok(view) = client.gate_view(call.org_id, call.run_id).await else {
+        metrics::counter!("space_approval_gate_view_unavailable_total").increment(1);
+        return;
+    };
+    let (level, source) = view.level_for(&action_key(call.tool_name, call.tool_input), tool_key(call.tool_name));
+    if level != GateLevel::Allow {
+        metrics::counter!("space_approval_gate_shadow_would_differ_total", "level" => if level == GateLevel::Block { "block" } else { "ask" }).increment(1);
+        tracing::info!(
+            run_id = call.run_id,
+            tool = call.tool_name,
+            would_be = if level == GateLevel::Block { "block" } else { "ask" },
+            source = %source_slug(&source),
+            "Space approval gate (shadow): Control would not allow this call"
+        );
+    }
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+
+    #[test]
+    fn fold_takes_the_most_restrictive_level() {
+        assert_eq!(fold(&[]), GateLevel::Allow);
+        assert_eq!(fold(&[GateLevel::Allow, GateLevel::Ask]), GateLevel::Ask);
+        assert_eq!(fold(&[GateLevel::Ask, GateLevel::Block, GateLevel::Allow]), GateLevel::Block);
+    }
+
+    #[test]
+    fn mode_defaults_to_off() {
+        assert_eq!(GateMode::parse(None), GateMode::Off);
+        assert_eq!(GateMode::parse(Some("bogus")), GateMode::Off);
+        assert_eq!(GateMode::parse(Some(" Enforce ")), GateMode::Enforce);
+        assert_eq!(GateMode::parse(Some("shadow")), GateMode::Shadow);
+    }
+
+    #[test]
+    fn the_digest_ignores_key_order_and_whitespace() {
+        let a = action_digest("shell", r#"{"b":1,"a":{"y":2,"x":[1,2]}}"#);
+        let b = action_digest("shell", r#"{ "a": {"x":[1,2], "y":2}, "b": 1 }"#);
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 64);
+        assert_ne!(a, action_digest("other", r#"{"b":1,"a":{"y":2,"x":[1,2]}}"#));
+    }
+
+    #[test]
+    fn provider_action_keys_name_the_operation_only() {
+        assert_eq!(
+            action_key(PROVIDER_ACTION_TOOL, r#"{"operation":"mail.send","body":"secret"}"#),
+            "execute_provider_action:mail.send"
+        );
+        assert_eq!(action_key("shell", "{}"), "shell");
+    }
+}

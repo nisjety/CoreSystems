@@ -47,6 +47,9 @@ services:
     build: !reset null
     image: ${EXECUTION_CORE_RELEASE_IMAGE:?EXECUTION_CORE_RELEASE_IMAGE digest is required}
     pull_policy: never
+    environment:
+      # Space approval gate (WS10-S3): release artifacts ship with the gate off.
+      EXECUTION_CORE_SPACE_APPROVAL_GATE: "off"
   orchestrator-core:
     build: !reset null
     image: ${ORCHESTRATOR_CORE_RELEASE_IMAGE:?ORCHESTRATOR_CORE_RELEASE_IMAGE digest is required}
