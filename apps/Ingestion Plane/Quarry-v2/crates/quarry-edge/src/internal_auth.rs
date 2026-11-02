@@ -192,21 +192,127 @@ impl InternalSigner {
     /// is lowercase-hex of HMAC-SHA256(secret, canonical), compared in
     /// constant time so a near-miss can't be timing-oracled into a forgery.
     pub fn verify_run_binding(&self, org_id: &str, url: &str, provided_hex: &str) -> bool {
-        // Field-confusion guard: a `\n` inside org_id (or url) would shift the
-        // canonical boundary so (org="a", url="\nX") forges the same HMAC as
-        // (org="a\nX", url="…"). Org ids + URLs are newline-free in practice;
-        // reject any that aren't rather than hash an ambiguous string.
-        if org_id.contains('\n') || url.contains('\n') {
+        self.verify_run_binding_with(org_id, url, &RunBindingExtras::default(), provided_hex)
+    }
+
+    /// [`InternalSigner::verify_run_binding`] over the canonical string with the page's extras
+    /// appended (WS7.G 6b: the policy snapshot). With no extras this is byte-for-byte the
+    /// two-field string, so an orchestrator that predates the extras still verifies.
+    pub fn verify_run_binding_with(
+        &self,
+        org_id: &str,
+        url: &str,
+        extras: &RunBindingExtras,
+        provided_hex: &str,
+    ) -> bool {
+        let Some(expected) = self.run_binding_sig(org_id, url, extras) else {
             return false;
+        };
+        crate::change_routes::ct_eq(expected.as_bytes(), provided_hex.as_bytes())
+    }
+
+    /// The lowercase-hex run-binding signature, or `None` when org_id or url carries a `\n`.
+    ///
+    /// Field-confusion guard: a `\n` inside org_id (or url) would shift the canonical
+    /// boundary so (org="a", url="\nX") forges the same HMAC as (org="a\nX", url="…"). Org
+    /// ids + URLs are newline-free in practice; reject any that aren't rather than hash an
+    /// ambiguous string.
+    pub fn run_binding_sig(
+        &self,
+        org_id: &str,
+        url: &str,
+        extras: &RunBindingExtras,
+    ) -> Option<String> {
+        if org_id.contains('\n') || url.contains('\n') {
+            return None;
         }
-        let canonical = format!("{org_id}\n{url}");
+        let mut canonical = format!("{org_id}\n{url}");
+        extras.append_to(&mut canonical);
         let mut mac = HmacSha256::new_from_slice(self.secret.as_bytes())
             .expect("HMAC accepts any key length");
         mac.update(canonical.as_bytes());
         // Lowercase-hex — same style as `body_digest`'s `{:x}`.
-        let expected = format!("{:x}", mac.finalize().into_bytes());
-        crate::change_routes::ct_eq(expected.as_bytes(), provided_hex.as_bytes())
+        Some(format!("{:x}", mac.finalize().into_bytes()))
     }
+}
+
+/// What the run-binding string covers beyond `org_id` and `url` (WS7.G 6b).
+///
+/// Each present extra adds one line `\n<tag>=<lowercase hex sha256>` after the url, in the
+/// fixed order of the fields below. An absent extra adds nothing, so a request without extras
+/// signs exactly the two-field string. The Go signer (`runBindingSigExtras`) mirrors this
+/// byte-for-byte; the two sides are pinned by the golden constants in the tests on both.
+///
+/// WS14.S7a adds `robots` (the sha256 of the canonical `crawl.robots` object) as the next
+/// field, after `policy`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunBindingExtras {
+    /// `sha256(canonical_json(policy_snapshot))` in lowercase hex.
+    pub policy_snapshot_sha256: Option<String>,
+}
+
+impl RunBindingExtras {
+    /// The extras of a page whose body carried `snapshot` (`None` or JSON null: none).
+    pub fn for_snapshot(snapshot: Option<&serde_json::Value>) -> Self {
+        Self {
+            policy_snapshot_sha256: snapshot
+                .filter(|value| !value.is_null())
+                .map(snapshot_sha256_hex),
+        }
+    }
+
+    fn append_to(&self, canonical: &mut String) {
+        if let Some(hash) = &self.policy_snapshot_sha256 {
+            canonical.push_str("\npolicy=");
+            canonical.push_str(hash);
+        }
+    }
+}
+
+/// The canonical JSON the policy snapshot is hashed in: object keys sorted by byte order at
+/// every level, no whitespace, arrays in order, strings JSON-escaped. The Go side
+/// (`canonicalPolicySnapshot`) writes the same bytes. The snapshot only ever holds integers,
+/// ASCII host names and closed labels, so no number or escape form can differ between the two.
+pub fn canonical_json(value: &serde_json::Value) -> String {
+    use serde_json::Value;
+    let mut out = String::new();
+    fn write(value: &Value, out: &mut String) {
+        match value {
+            Value::Object(map) => {
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort();
+                out.push('{');
+                for (index, key) in keys.into_iter().enumerate() {
+                    if index > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&serde_json::to_string(key).expect("a string key serialises"));
+                    out.push(':');
+                    write(&map[key], out);
+                }
+                out.push('}');
+            }
+            Value::Array(items) => {
+                out.push('[');
+                for (index, item) in items.iter().enumerate() {
+                    if index > 0 {
+                        out.push(',');
+                    }
+                    write(item, out);
+                }
+                out.push(']');
+            }
+            other => out.push_str(&serde_json::to_string(other).expect("a scalar serialises")),
+        }
+    }
+    write(value, &mut out);
+    out
+}
+
+/// Lowercase-hex sha256 of [`canonical_json`].
+pub fn snapshot_sha256_hex(value: &serde_json::Value) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(canonical_json(value).as_bytes()))
 }
 
 /// Three-tuple of header values applied by `apply_to_request` —
@@ -410,5 +516,84 @@ mod tests {
             !s.verify_run_binding(org, url, ""),
             "a missing signature MUST fail"
         );
+    }
+
+    /// The golden snapshot both sides pin (the Go test `TestPolicySnapshotGolden` holds the same
+    /// document and the same two constants). Key order and whitespace are deliberately not the
+    /// canonical ones.
+    const GOLDEN_SNAPSHOT: &str = r#"{
+        "v": 1,
+        "proxy_max": "none",
+        "robots_max": "respect",
+        "modes": {"search.paid_provider": "disabled", "browser.act.input": "disabled"},
+        "deny": ["bad.example", "evil.test"],
+        "allow": [["docs.example.org", "example.com"], ["example.com"]],
+        "org_rev": 7
+    }"#;
+    const GOLDEN_CANONICAL: &str = r#"{"allow":[["docs.example.org","example.com"],["example.com"]],"deny":["bad.example","evil.test"],"modes":{"browser.act.input":"disabled","search.paid_provider":"disabled"},"org_rev":7,"proxy_max":"none","robots_max":"respect","v":1}"#;
+    const GOLDEN_SHA256: &str = "eac471399cd4fdd009a071ed0ce1605c547b4c26b1a77adb140b1a913b78782c";
+    const GOLDEN_SIG: &str = "e85e8d3b76888dbce0f63b66035a3fb7d79280d2ec04f86017852256295e888a";
+
+    #[test]
+    fn canonical_json_sorts_keys_and_drops_whitespace() {
+        let value: serde_json::Value = serde_json::from_str(GOLDEN_SNAPSHOT).unwrap();
+        assert_eq!(canonical_json(&value), GOLDEN_CANONICAL);
+        // Arrays keep their order; only object keys are sorted.
+        let swapped: serde_json::Value =
+            serde_json::from_str(r#"{"b":[2,1],"a":{"d":null,"c":"x\"y"}}"#).unwrap();
+        assert_eq!(canonical_json(&swapped), r#"{"a":{"c":"x\"y","d":null},"b":[2,1]}"#);
+    }
+
+    #[test]
+    fn policy_snapshot_golden_matches_the_go_signer() {
+        let value: serde_json::Value = serde_json::from_str(GOLDEN_SNAPSHOT).unwrap();
+        assert_eq!(snapshot_sha256_hex(&value), GOLDEN_SHA256);
+        let s = signer();
+        let extras = RunBindingExtras::for_snapshot(Some(&value));
+        let sig = s
+            .run_binding_sig("org_a", "https://example.com/pricing", &extras)
+            .expect("no newline in the fields");
+        assert_eq!(sig, GOLDEN_SIG);
+        assert!(s.verify_run_binding_with("org_a", "https://example.com/pricing", &extras, GOLDEN_SIG));
+    }
+
+    #[test]
+    fn run_binding_without_extras_is_the_two_field_string() {
+        let s = signer();
+        let with_none = s
+            .run_binding_sig("org_a", "https://example.com/", &RunBindingExtras::default())
+            .unwrap();
+        let mut mac = HmacSha256::new_from_slice(s.secret.as_bytes()).unwrap();
+        mac.update(b"org_a\nhttps://example.com/");
+        assert_eq!(with_none, format!("{:x}", mac.finalize().into_bytes()));
+        // JSON null counts as no snapshot.
+        assert_eq!(
+            RunBindingExtras::for_snapshot(Some(&serde_json::Value::Null)),
+            RunBindingExtras::default()
+        );
+        assert_eq!(RunBindingExtras::for_snapshot(None), RunBindingExtras::default());
+    }
+
+    #[test]
+    fn a_snapshot_cannot_be_added_swapped_or_stripped_without_the_secret() {
+        let s = signer();
+        let (org, url) = ("org_a", "https://example.com/p");
+        let snapshot: serde_json::Value = serde_json::from_str(GOLDEN_SNAPSHOT).unwrap();
+        let with = RunBindingExtras::for_snapshot(Some(&snapshot));
+        let none = RunBindingExtras::default();
+        let signed_with = s.run_binding_sig(org, url, &with).unwrap();
+        let signed_without = s.run_binding_sig(org, url, &none).unwrap();
+        assert_ne!(signed_with, signed_without);
+        // Stripped: the body no longer carries the snapshot the signature covered.
+        assert!(!s.verify_run_binding_with(org, url, &none, &signed_with));
+        // Added: a body that gained a snapshot under a signature made without one.
+        assert!(!s.verify_run_binding_with(org, url, &with, &signed_without));
+        // Swapped: one deny host removed.
+        let mut loosened = snapshot.clone();
+        loosened["deny"] = serde_json::json!(["bad.example"]);
+        let swapped = RunBindingExtras::for_snapshot(Some(&loosened));
+        assert!(!s.verify_run_binding_with(org, url, &swapped, &signed_with));
+        // The plain two-field check does not accept the extended signature either.
+        assert!(!s.verify_run_binding(org, url, &signed_with));
     }
 }

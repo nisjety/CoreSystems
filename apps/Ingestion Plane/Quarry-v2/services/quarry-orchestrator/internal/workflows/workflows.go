@@ -79,6 +79,9 @@ type BatchJobInput struct {
 	Policy Policy   `json:"policy,omitempty"`
 	// Robots is the robots mode the batch runs with (WS14.S5). Absent or unknown is respect.
 	Robots string `json:"robots,omitempty"`
+	// PolicySnapshot is the web policy the edge resolved at the handoff (WS7.G 6b), carried to
+	// every page of the batch. Empty means the job was admitted without one.
+	PolicySnapshot json.RawMessage `json:"policy_snapshot,omitempty"`
 }
 
 // CrawlJobInput drives a bounded BFS crawl.
@@ -107,6 +110,11 @@ type CrawlJobInput struct {
 	// ScrapeOptions is the crawl's per-page scrape options (INNH-6b), the canonical JSON the
 	// edge stamped on the job. Empty means the default cleaning.
 	ScrapeOptions json.RawMessage `json:"scrape_options,omitempty"`
+	// PolicySnapshot is the web policy the edge resolved at the handoff (WS7.G 6b), carried to
+	// every page of the crawl. Empty means the job was admitted without one. Adding it changes
+	// no command of the workflow (it only rides in the page activity's input), so histories
+	// recorded before it replay unchanged and need no GetVersion marker.
+	PolicySnapshot json.RawMessage `json:"policy_snapshot,omitempty"`
 }
 
 type frontierEntry struct {
@@ -236,16 +244,36 @@ func runPageScrape(
 	crawl *activities.CrawlContext,
 	scrape json.RawMessage,
 ) (activities.RunPageResult, error) {
+	return runPageSnapshot(ctx, a, ids, org, userID, ingest, kind, url, crawl, scrape, nil)
+}
+
+// runPageSnapshot is runPageScrape for a page of a job that carries the policy the edge
+// resolved at the handoff (WS7.G 6b). A nil snapshot leaves the page call exactly what
+// runPageScrape made.
+func runPageSnapshot(
+	ctx workflow.Context,
+	a *activities.Activities,
+	ids runIDs,
+	org string,
+	userID string,
+	ingest bool,
+	kind string,
+	url string,
+	crawl *activities.CrawlContext,
+	scrape json.RawMessage,
+	policySnapshot json.RawMessage,
+) (activities.RunPageResult, error) {
 	var res activities.RunPageResult
 	err := workflow.ExecuteActivity(ctx, a.RunPage, activities.RunPageInput{
-		RunID:  ids.RunID,
-		URL:    url,
-		OrgID:  org,
-		UserID: userID,
-		Ingest: ingest,
-		Kind:   kind,
-		Crawl:  crawl,
-		Scrape: scrape,
+		RunID:          ids.RunID,
+		URL:            url,
+		OrgID:          org,
+		UserID:         userID,
+		Ingest:         ingest,
+		Kind:           kind,
+		Crawl:          crawl,
+		Scrape:         scrape,
+		PolicySnapshot: policySnapshot,
 	}).Get(ctx, &res)
 	if err != nil {
 		cat := errs.CategoryUnknown
@@ -522,7 +550,7 @@ func BatchJobWF(ctx workflow.Context, in BatchJobInput, a *activities.Activities
 		if checked {
 			crawl = batchCrawlContext(in.Robots)
 		}
-		res, err := runPageWith(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, "batch", url, crawl)
+		res, err := runPageSnapshot(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, "batch", url, crawl, nil, in.PolicySnapshot)
 		if err != nil {
 			if checked && errs.CategoryOf(err) == errs.CategoryBlocklist {
 				// WS14.S5: a page the edge refused (a denial) is also counted as blocked. It stays
@@ -732,7 +760,7 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 		if scope != nil {
 			crawl = scope.contextFor(cur.Depth)
 		}
-		res, err := runPageScrape(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, "crawl", cur.URL, crawl, in.ScrapeOptions)
+		res, err := runPageSnapshot(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, "crawl", cur.URL, crawl, in.ScrapeOptions, in.PolicySnapshot)
 		if err != nil && scope != nil && errs.CategoryOf(err) == errs.CategoryBlocklist {
 			// The edge refused the page (scope or robots). It is counted as blocked.
 			pagesBlocked++
@@ -928,7 +956,7 @@ func crawlJobDurableFrontier(
 		if scope != nil {
 			crawl = scope.contextFor(depth)
 		}
-		res, pageErr := runPageScrape(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, "crawl", item.URL, crawl, in.ScrapeOptions)
+		res, pageErr := runPageSnapshot(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, "crawl", item.URL, crawl, in.ScrapeOptions, in.PolicySnapshot)
 		if pageErr != nil && scope != nil && errs.CategoryOf(pageErr) == errs.CategoryBlocklist {
 			pagesBlocked++
 			if robotsRefused(pageErr) {

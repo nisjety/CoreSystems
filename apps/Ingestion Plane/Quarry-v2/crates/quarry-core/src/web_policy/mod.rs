@@ -289,6 +289,34 @@ impl PolicyLayer {
         &self.deny
     }
 
+    /// WS7.G 6b: rebuild the layer a [`ResolvedPolicy::snapshot_json`] describes. Anything the
+    /// current version does not know is refused, never guessed at: a snapshot is a security
+    /// input, so a newer shape fails closed at the caller instead of running looser.
+    pub fn from_snapshot_json(value: &serde_json::Value) -> Result<Self, SnapshotError> {
+        let wire: SnapshotWire =
+            serde_json::from_value(value.clone()).map_err(|_| SnapshotError::Malformed)?;
+        if wire.v != SNAPSHOT_VERSION {
+            return Err(SnapshotError::Version(wire.v));
+        }
+        if wire.allow.len() > MAX_SNAPSHOT_ALLOW_TERMS {
+            return Err(SnapshotError::Layer(LayerError::RulesTooLarge));
+        }
+        let mut modes = BTreeMap::new();
+        for (raw, mode) in wire.modes {
+            let key = CapKey::parse(&raw)
+                .ok_or_else(|| SnapshotError::Layer(LayerError::UnknownCapability(raw.clone())))?;
+            modes.insert(key, mode);
+        }
+        let mut layer = Self::new(modes, wire.robots_max, wire.proxy_max, None, wire.deny)
+            .map_err(SnapshotError::Layer)?;
+        for term in wire.allow {
+            let term_layer = Self::new(BTreeMap::new(), None, None, Some(term), Vec::new())
+                .map_err(SnapshotError::Layer)?;
+            layer = layer.meet(&term_layer);
+        }
+        Ok(layer)
+    }
+
     fn mode_or_neutral(&self, key: CapKey) -> Mode {
         self.mode(key).unwrap_or_else(|| neutral(key.kind()))
     }
@@ -426,6 +454,42 @@ impl TryFrom<LayerWire> for PolicyLayer {
             wire.domains.deny,
         )
     }
+}
+
+/// The version of the snapshot a durable job carries (WS7.G 6b).
+pub const SNAPSHOT_VERSION: u64 = 1;
+/// A snapshot states at most this many allow lists (one per layer that has one).
+const MAX_SNAPSHOT_ALLOW_TERMS: usize = 16;
+
+/// Why a snapshot was refused.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SnapshotError {
+    #[error("the policy snapshot is not the shape this version reads")]
+    Malformed,
+    #[error("unsupported policy snapshot version {0}")]
+    Version(u64),
+    #[error("the policy snapshot states something a layer may not: {0}")]
+    Layer(LayerError),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SnapshotWire {
+    v: u64,
+    #[serde(default)]
+    modes: BTreeMap<String, Mode>,
+    #[serde(default)]
+    robots_max: Option<RobotsMax>,
+    #[serde(default)]
+    proxy_max: Option<ProxyMax>,
+    #[serde(default)]
+    allow: Vec<Vec<String>>,
+    #[serde(default)]
+    deny: Vec<String>,
+    /// Informational (the org policy revision the snapshot was resolved under).
+    #[serde(default)]
+    #[allow(dead_code)]
+    org_rev: Option<u64>,
 }
 
 /// What a request asks for on top of its policy. It can only tighten: it names
@@ -781,6 +845,40 @@ impl ResolvedPolicy {
         hosts
     }
 
+    /// WS7.G 6b: the policy as a snapshot a durable job carries from the handoff to every
+    /// page run. It states only what a layer can state, so [`PolicyLayer::from_snapshot_json`]
+    /// turns it back into a layer that the page's own policy meets (tighten-only). Modes equal
+    /// to the neutral value are left out. It carries host names and closed labels only: never a
+    /// URL, a path, a query or caller data. Key order is not significant; the edge and the
+    /// orchestrator hash the canonical (sorted, compact) form.
+    pub fn snapshot_json(&self) -> serde_json::Value {
+        let modes: serde_json::Map<String, serde_json::Value> = self
+            .modes
+            .iter()
+            .filter(|(key, (mode, _))| *mode != neutral(key.kind()))
+            .map(|(key, (mode, _))| (key.as_str().to_string(), json!(mode_str(*mode))))
+            .collect();
+        let mut allow: Vec<Vec<String>> = self
+            .allow_terms
+            .iter()
+            .map(|(_, term)| term.iter().cloned().collect())
+            .collect();
+        allow.sort();
+        allow.dedup();
+        let mut snapshot = json!({
+            "v": SNAPSHOT_VERSION,
+            "modes": modes,
+            "robots_max": self.robots_max.0.as_str(),
+            "proxy_max": self.proxy_max.0.as_str(),
+            "allow": allow,
+            "deny": self.denied_hosts(),
+        });
+        if let (Some(rev), Some(object)) = (self.org_rev, snapshot.as_object_mut()) {
+            object.insert("org_rev".to_string(), json!(rev));
+        }
+        snapshot
+    }
+
     /// Keep only the egress hosts the policy still allows.
     pub fn narrow_egress(&self, hosts: &[String]) -> EgressNarrowing {
         let kept: Vec<String> = hosts
@@ -866,5 +964,127 @@ mod tests {
         for key in CapKey::ALL {
             assert_eq!(key.spec().key, key);
         }
+    }
+
+    // ---- WS7.G 6b: the snapshot a durable job carries ----
+
+    fn layer(json: &str) -> PolicyLayer {
+        serde_json::from_str(json).expect("a valid layer document")
+    }
+
+    fn inputs(principal: Principal, baseline: PolicyLayer, request: Option<PolicyLayer>) -> PolicyInputs {
+        PolicyInputs {
+            principal,
+            zdr: false,
+            baseline,
+            org: OrgInput::Absent,
+            grant: None,
+            request,
+        }
+    }
+
+    const STRICT_BASELINE: &str = r#"{
+        "modes": {"search.paid_provider": "disabled", "browser.act.input": "disabled"},
+        "robots_max": "respect",
+        "domains": {"allow": ["example.com", "docs.example.org"], "deny": ["bad.example"]}
+    }"#;
+
+    #[test]
+    fn a_snapshot_rebuilt_as_a_layer_resolves_to_the_policy_it_was_taken_from() {
+        let handoff = resolve(&inputs(Principal::Autonomous, layer(STRICT_BASELINE), None)).unwrap();
+        let snapshot = handoff.snapshot_json();
+        assert_eq!(snapshot["v"], 1);
+        assert_eq!(snapshot["deny"], serde_json::json!(["bad.example"]));
+        let rebuilt = PolicyLayer::from_snapshot_json(&snapshot).unwrap();
+        // A page with no baseline of its own, meeting the snapshot, decides what the handoff did.
+        let page = resolve(&inputs(Principal::Autonomous, PolicyLayer::default(), Some(rebuilt))).unwrap();
+        assert_eq!(page.digest(), handoff.digest());
+        assert!(page.check_url("https://bad.example/x").is_err());
+        assert!(page.check_url("https://other.test/x").is_err(), "outside the allow list");
+        assert!(page.check_url("https://www.example.com/x").is_ok());
+        assert!(!page.allows(CapKey::SearchPaidProvider));
+        assert!(!page.allows(CapKey::ActInput));
+    }
+
+    #[test]
+    fn a_snapshot_can_only_tighten_the_page_policy() {
+        // The handoff was lenient; the page's own baseline is strict. The snapshot adds nothing
+        // and removes nothing: the strict baseline still binds.
+        let lenient = resolve(&inputs(Principal::Autonomous, PolicyLayer::default(), None)).unwrap();
+        let snapshot = PolicyLayer::from_snapshot_json(&lenient.snapshot_json()).unwrap();
+        let page = resolve(&inputs(Principal::Autonomous, layer(STRICT_BASELINE), Some(snapshot))).unwrap();
+        let strict_alone = resolve(&inputs(Principal::Autonomous, layer(STRICT_BASELINE), None)).unwrap();
+        assert_eq!(page.digest(), strict_alone.digest());
+
+        // The handoff was strict; the page's baseline is empty. The snapshot binds.
+        let strict = resolve(&inputs(Principal::Autonomous, layer(STRICT_BASELINE), None)).unwrap();
+        let snapshot = PolicyLayer::from_snapshot_json(&strict.snapshot_json()).unwrap();
+        let page = resolve(&inputs(
+            Principal::Autonomous,
+            layer(r#"{"domains": {"deny": ["other.bad"]}}"#),
+            Some(snapshot),
+        ))
+        .unwrap();
+        assert!(page.check_url("https://bad.example/").is_err(), "the snapshot's deny");
+        assert!(page.check_url("https://other.bad/").is_err(), "the page's own deny");
+        assert!(!page.allows(CapKey::SearchPaidProvider));
+    }
+
+    #[test]
+    fn the_default_snapshot_leaves_the_default_policy_unchanged() {
+        let default = resolve(&inputs(Principal::Autonomous, PolicyLayer::default(), None)).unwrap();
+        let snapshot = PolicyLayer::from_snapshot_json(&default.snapshot_json()).unwrap();
+        let page = resolve(&inputs(Principal::Autonomous, PolicyLayer::default(), Some(snapshot))).unwrap();
+        assert_eq!(page.digest(), default.digest());
+    }
+
+    #[test]
+    fn a_snapshot_the_version_cannot_read_is_refused() {
+        let ok = serde_json::json!({"v": 1});
+        assert!(PolicyLayer::from_snapshot_json(&ok).is_ok());
+        assert_eq!(
+            PolicyLayer::from_snapshot_json(&serde_json::json!({"v": 2})),
+            Err(SnapshotError::Version(2))
+        );
+        for bad in [
+            serde_json::json!("not an object"),
+            serde_json::json!({}),
+            serde_json::json!({"v": 1, "extra": true}),
+            serde_json::json!({"v": 1, "robots_max": "anything"}),
+            serde_json::json!({"v": 1, "deny": "bad.example"}),
+        ] {
+            assert_eq!(PolicyLayer::from_snapshot_json(&bad), Err(SnapshotError::Malformed), "{bad}");
+        }
+        assert!(matches!(
+            PolicyLayer::from_snapshot_json(&serde_json::json!({"v": 1, "modes": {"nope.key": "disabled"}})),
+            Err(SnapshotError::Layer(LayerError::UnknownCapability(_)))
+        ));
+        assert!(matches!(
+            PolicyLayer::from_snapshot_json(&serde_json::json!({"v": 1, "modes": {"browser.act.input": "forced"}})),
+            Err(SnapshotError::Layer(LayerError::ForcedOnAbility(_)))
+        ));
+        assert!(matches!(
+            PolicyLayer::from_snapshot_json(&serde_json::json!({"v": 1, "deny": ["Bad.Example"]})),
+            Err(SnapshotError::Layer(LayerError::InvalidHost))
+        ));
+        assert!(matches!(
+            PolicyLayer::from_snapshot_json(&serde_json::json!({"v": 1, "deny": ["10.0.0.1"]})),
+            Err(SnapshotError::Layer(LayerError::InvalidHost))
+        ));
+        let many_terms: Vec<serde_json::Value> = (0..17).map(|_| serde_json::json!(["a.example"])).collect();
+        assert!(matches!(
+            PolicyLayer::from_snapshot_json(&serde_json::json!({"v": 1, "allow": many_terms})),
+            Err(SnapshotError::Layer(LayerError::RulesTooLarge))
+        ));
+    }
+
+    #[test]
+    fn the_snapshot_holds_host_names_and_closed_labels_only() {
+        let handoff = resolve(&inputs(Principal::Autonomous, layer(STRICT_BASELINE), None)).unwrap();
+        let text = handoff.snapshot_json().to_string();
+        assert!(!text.contains("http"), "no URL: {text}");
+        assert!(!text.contains('/'), "no path: {text}");
+        // Key order is the writer's business; the hash is over the canonical form.
+        assert!(text.contains("bad.example"));
     }
 }
