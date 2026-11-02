@@ -61,6 +61,8 @@ const MAX_ID_LEN: usize = 128;
 pub(super) const TAIL_WINDOW_TURNS: u32 = 12;
 /// The most turns one tail request may ask for.
 const MAX_TAIL_TURNS: u32 = 50;
+/// The most system rows one page asks Control for (WS15-S11); Control restates the ceiling.
+const MAX_SYSTEM_ENTRIES: u32 = 100;
 const CURSOR_PREFIX: &str = "v1|";
 const BACKFILL_PENDING: &str = "summary_backfill_pending";
 const UPSTREAM_DISABLED: &str = "space_timeline_disabled";
@@ -90,19 +92,31 @@ fn valid_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
-/// An opaque position: `base64url("v1|" + sequence)`. Carries no authority.
-fn encode_cursor(sequence: u64) -> Value {
+/// An opaque position: `base64url("v1|" + sequence)`, optionally `"v1|" + sequence + "|" +
+/// unix-ms` where the time is the activity time of the post at that position (WS15-S11: it lets
+/// the next page cut the room's system rows to exactly the interval it covers). Carries no
+/// authority.
+fn encode_cursor(sequence: u64, at_ms: Option<i64>) -> Value {
     if sequence == 0 {
         return Value::Null;
     }
-    Value::String(URL_SAFE_NO_PAD.encode(format!("{CURSOR_PREFIX}{sequence}")))
+    let raw = match at_ms {
+        Some(ms) => format!("{CURSOR_PREFIX}{sequence}|{ms}"),
+        None => format!("{CURSOR_PREFIX}{sequence}"),
+    };
+    Value::String(URL_SAFE_NO_PAD.encode(raw))
 }
 
-fn decode_cursor(raw: &str) -> Option<u64> {
+fn decode_cursor(raw: &str) -> Option<(u64, Option<i64>)> {
     let bytes = URL_SAFE_NO_PAD.decode(raw.trim()).ok()?;
     let text = String::from_utf8(bytes).ok()?;
-    let sequence: u64 = text.strip_prefix(CURSOR_PREFIX)?.parse().ok()?;
-    (sequence > 0).then_some(sequence)
+    let rest = text.strip_prefix(CURSOR_PREFIX)?;
+    let (sequence, at_ms) = match rest.split_once('|') {
+        Some((sequence, ms)) => (sequence, Some(ms.parse::<i64>().ok()?)),
+        None => (rest, None),
+    };
+    let sequence: u64 = sequence.parse().ok()?;
+    (sequence > 0).then_some((sequence, at_ms))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -118,6 +132,9 @@ struct TimelineWindow {
     limit: u32,
     before_seq: u64,
     after_seq: u64,
+    /// Activity time (unix ms) carried by the cursor, for the system-row interval (WS15-S11).
+    before_ms: Option<i64>,
+    after_ms: Option<i64>,
     refresh: Vec<String>,
 }
 
@@ -143,9 +160,9 @@ fn parse_window(query: &TimelineQuery) -> Result<TimelineWindow, Reply> {
             }
         },
     };
-    let cursor = |raw: &Option<String>| -> Result<u64, Reply> {
+    let cursor = |raw: &Option<String>| -> Result<(u64, Option<i64>), Reply> {
         match raw.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
-            None => Ok(0),
+            None => Ok((0, None)),
             Some(raw) => decode_cursor(raw).ok_or_else(|| {
                 refuse(
                     StatusCode::BAD_REQUEST,
@@ -155,8 +172,8 @@ fn parse_window(query: &TimelineQuery) -> Result<TimelineWindow, Reply> {
             }),
         }
     };
-    let before_seq = cursor(&query.before)?;
-    let after_seq = cursor(&query.after)?;
+    let (before_seq, before_ms) = cursor(&query.before)?;
+    let (after_seq, after_ms) = cursor(&query.after)?;
     if before_seq > 0 && after_seq > 0 {
         return Err(refuse(
             StatusCode::BAD_REQUEST,
@@ -188,6 +205,8 @@ fn parse_window(query: &TimelineQuery) -> Result<TimelineWindow, Reply> {
         limit,
         before_seq,
         after_seq,
+        before_ms,
+        after_ms,
         refresh,
     })
 }
@@ -383,15 +402,17 @@ async fn space_timeline(
     let newest_seq = payload.get("newest_seq").and_then(Value::as_u64).unwrap_or(0);
     let first_page = window.is_first_page();
     let after_direction = window.after_seq > 0;
+    // WS15-S11: the activity-time span of this window, for the cursors and the system-row interval.
+    let (oldest_ms, newest_ms) = post_time_span(&posts);
     let page = json!({
         "windowed": true,
         "limit": window.limit,
         "has_more": has_more,
         // Older direction only: where "Load earlier" continues.
-        "next_before": if has_more && !after_direction { encode_cursor(oldest_seq) } else { Value::Null },
+        "next_before": if has_more && !after_direction { encode_cursor(oldest_seq, oldest_ms) } else { Value::Null },
         // Newer direction only: where an `after` refresh continues when the window was cut.
-        "next_after": if has_more && after_direction { encode_cursor(newest_seq) } else { Value::Null },
-        "newest": encode_cursor(newest_seq),
+        "next_after": if has_more && after_direction { encode_cursor(newest_seq, newest_ms) } else { Value::Null },
+        "newest": encode_cursor(newest_seq, newest_ms),
         "total_posts": if first_page {
             payload.get("total_posts").cloned().unwrap_or(Value::Null)
         } else {
@@ -402,11 +423,29 @@ async fn space_timeline(
         "space": public_space(&space),
         "threads": posts,
         "pinned": pinned,
-        // The `system_entries` slot is filled by WS15-S11; an empty list keeps the shape stable.
         "system_entries": [],
         "page": page,
         "refreshed": refreshed,
     });
+    // 7b. WS15-S11: the room's system rows for the interval this page covers. Control failing is a
+    //     named gap, never a failed window.
+    let mut system_gap: Option<Value> = None;
+    if state.space_features.system_entries_api {
+        let interval = system_interval(&window, has_more, oldest_ms, newest_ms);
+        match system_entries(&state, &org_id, &space_ref, &actor, interval).await {
+            Some((entries, truncated)) => {
+                data["system_entries"] = Value::Array(entries);
+                data["system_truncated"] = Value::Bool(truncated);
+            }
+            None => {
+                system_gap = Some(json!({
+                    "section": "system_entries",
+                    "code": "system_entries_unavailable",
+                    "reason": "Control could not return the room's membership changes.",
+                }));
+            }
+        }
+    }
     // 8. First page only: the membership fact, the room's own pins, the agent-work offer, where the
     //    member last caught up. Application answering slowly or not at all is a named gap, never a
     //    failed window.
@@ -443,9 +482,127 @@ async fn space_timeline(
         data["agent_work"] = super::agent_work_offer(&state, &user).await;
         data["shared_read"] = json!({ "available": true });
         data["read_marker"] = read_marker;
+        if let Some(gap) = system_gap.take() {
+            unavailable.push(gap);
+        }
         data["unavailable"] = Value::Array(unavailable);
     }
+    if let Some(gap) = system_gap {
+        data["unavailable"] = json!([gap]);
+    }
     (StatusCode::OK, Json(json!({ "data": data })))
+}
+
+/// The oldest and newest activity time (unix ms) among the posts of a window, from each post's
+/// `updated_at`. `None` when no post carries a parseable time.
+fn post_time_span(posts: &[Value]) -> (Option<i64>, Option<i64>) {
+    let mut times = posts.iter().filter_map(|post| {
+        let raw = post.get("updated_at")?.as_str()?;
+        chrono::DateTime::parse_from_rfc3339(raw)
+            .ok()
+            .map(|at| at.timestamp_millis())
+    });
+    let Some(first) = times.next() else {
+        return (None, None);
+    };
+    let (lo, hi) = times.fold((first, first), |(lo, hi), ms| (lo.min(ms), hi.max(ms)));
+    (Some(lo), Some(hi))
+}
+
+/// The interval a page's system rows cover, `[lo, hi)` in unix ms; `None` is unbounded.
+///
+/// Older pages tile by time without a merged cursor: a page covers from its own oldest post
+/// (unbounded when the window reached the start of the room) up to the oldest post of the page
+/// before it, which the `before` cursor carries. The first page is open at the top, so rows newer
+/// than the newest post still show. A refresh (`after`) covers from the cursor's post time upward;
+/// a cut refresh window stops at its own newest post and the next `after` page continues.
+fn system_interval(
+    window: &TimelineWindow,
+    has_more: bool,
+    oldest_ms: Option<i64>,
+    newest_ms: Option<i64>,
+) -> (Option<i64>, Option<i64>) {
+    if window.after_seq > 0 {
+        let hi = if has_more { newest_ms.map(|ms| ms + 1) } else { None };
+        return (window.after_ms, hi);
+    }
+    let lo = if has_more { oldest_ms } else { None };
+    (lo, window.before_ms)
+}
+
+fn rfc3339_from_ms(ms: i64) -> Option<String> {
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+}
+
+/// The closed set of ledger words the room shows; anything else is dropped.
+const SYSTEM_ACTIONS: [&str; 9] = [
+    "member_added",
+    "member_joined",
+    "role_changed",
+    "member_removed",
+    "member_left",
+    "archived",
+    "unarchived",
+    "visibility_changed",
+    "settings_changed",
+];
+
+/// Control's membership ledger rows for the interval, as timeline rows newest first, plus whether
+/// Control cut the list. `None` when Control could not answer. Rows hold ids and closed words
+/// only; the BFF stores nothing and logs nothing from them.
+async fn system_entries(
+    state: &AppState,
+    org_id: &str,
+    space_ref: &str,
+    actor: &ActionActor,
+    interval: (Option<i64>, Option<i64>),
+) -> Option<(Vec<Value>, bool)> {
+    let mut url = format!(
+        "{}/api/v1/internal/spaces/{}/membership-events?limit={}",
+        state.user_core_url,
+        urlencoding::encode(space_ref),
+        MAX_SYSTEM_ENTRIES
+    );
+    if let Some(lo) = interval.0.and_then(rfc3339_from_ms) {
+        url.push_str(&format!("&after={}", urlencoding::encode(&lo)));
+    }
+    if let Some(hi) = interval.1.and_then(rfc3339_from_ms) {
+        url.push_str(&format!("&before={}", urlencoding::encode(&hi)));
+    }
+    let (status, Json(body)) =
+        proxy_json(state, Method::GET, &url, None, Some(org_id), Some(actor), None).await;
+    if !status.is_success() {
+        return None;
+    }
+    let data = crate::envelope::unwrap_data(&body);
+    let events = data.get("events")?.as_array()?;
+    let truncated = data
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut entries = Vec::with_capacity(events.len());
+    for event in events {
+        let field = |name: &str| event.get(name).and_then(Value::as_str).unwrap_or("");
+        let action = field("action");
+        if field("event_id").is_empty() || !SYSTEM_ACTIONS.contains(&action) {
+            continue;
+        }
+        entries.push(json!({
+            "id": field("event_id"),
+            "kind": "membership",
+            "action": action,
+            "space_seq": event.get("space_seq").cloned().unwrap_or(Value::Null),
+            "actor_kind": field("actor_kind"),
+            "actor_id": field("actor_id"),
+            "subject_type": field("subject_type"),
+            "subject_id": field("subject_id"),
+            "from_role": field("from_role"),
+            "to_role": field("to_role"),
+            "created_at": field("created_at"),
+        }));
+    }
+    Some((entries, truncated))
 }
 
 /// The legacy thread listing, shaped as one complete page. It re-runs the legacy handler's own

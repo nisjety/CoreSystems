@@ -5507,7 +5507,8 @@ async fn space_context(
                     "human_markdown": state.space_features.human_markdown_ui,
                     "timeline_anchor": state.space_features.timeline_anchor_ui,
                     "timeline_windows": state.space_features.timeline_api,
-                    "system_entries": false,
+                    "system_entries": state.space_features.system_entries_api
+                        && state.space_features.timeline_api,
                     "link_previews": false,
                 },
                 "limits": {

@@ -265,6 +265,8 @@ services:
       # SPACE_TIMELINE_CORE; with this on and those off the route falls back to the legacy listing.
       # The four UI flags only change what the SPA offers (composer drafts and markdown, anchored timeline).
       SPACE_TIMELINE_API: ${SPACE_TIMELINE_API:-false}
+      # WS15-S11: room system rows (membership changes from Control's ledger) in the timeline answer. Needs SPACE_TIMELINE_API. Rollout control only.
+      SPACE_SYSTEM_ENTRIES_API: ${SPACE_SYSTEM_ENTRIES_API:-false}
       SPACE_TIMELINE_ANCHOR_UI: ${SPACE_TIMELINE_ANCHOR_UI:-true}
       SPACE_COMPOSER_DRAFTS_UI: ${SPACE_COMPOSER_DRAFTS_UI:-true}
       SPACE_COMPOSER_MARKDOWN_UI: ${SPACE_COMPOSER_MARKDOWN_UI:-true}

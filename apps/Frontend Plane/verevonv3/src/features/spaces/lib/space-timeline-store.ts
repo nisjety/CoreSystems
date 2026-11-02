@@ -4,8 +4,10 @@ import type { Signal } from 'solid-js'
 import { getSpaceTimeline, loadSpaceTranscript } from '@/shared/api/spaces-client'
 import type {
   SpaceThread,
+  SpaceSystemEntry,
   SpaceThreads,
   SpaceTimeline,
+  SpaceTimelineRequest,
   SpaceTranscriptDenial,
 } from '@/shared/api/spaces-client'
 import { normalizeTranscriptTurns } from '../components/sidepane/SpaceTurnList'
@@ -41,6 +43,8 @@ export const TAIL_TURNS = 12
 const MAX_REFRESH_PAGES = 4
 /** Most thread ids one refresh names (the gateway's bound). */
 const MAX_REFRESH_IDS = 30
+/** The most room system rows kept at once (WS15-S11); the oldest are dropped first. */
+const MAX_SYSTEM_ENTRIES = 500
 
 export type TimelineTranscriptState = 'ok' | 'restricted' | 'missing' | 'error'
 
@@ -98,6 +102,21 @@ export function createSpaceTimelineStore(spaceRef: string) {
   let loadingLaterNow = false
   let refreshing: Promise<void> | undefined
   let firstLoaded = false
+  // WS15-S11: the room's system rows (Control's membership ledger), by id. They are merged from every
+  // answer, so a row read twice (a refresh edge, a page boundary) is kept once.
+  const systemRows = new Map<string, SpaceSystemEntry>()
+
+  /** `getSpaceTimeline`, keeping the system rows each answer carries. */
+  async function fetchTimeline(request: SpaceTimelineRequest): Promise<SpaceTimeline> {
+    const timeline = await getSpaceTimeline(spaceRef, request)
+    if (disposed) return timeline
+    for (const entry of timeline.systemEntries) systemRows.set(entry.id, entry)
+    if (systemRows.size > MAX_SYSTEM_ENTRIES) {
+      const oldestFirst = [...systemRows.values()].sort((a, b) => a.at.localeCompare(b.at) || a.id.localeCompare(b.id))
+      for (const entry of oldestFirst.slice(0, systemRows.size - MAX_SYSTEM_ENTRIES)) systemRows.delete(entry.id)
+    }
+    return timeline
+  }
 
   const [version, setVersion] = createSignal(0)
   const bump = () => setVersion((current) => current + 1)
@@ -185,6 +204,25 @@ export function createSpaceTimelineStore(spaceRef: string) {
     version()
     return !legacy
   }
+  /**
+   * The room's system rows, oldest first. While older posts are not loaded, rows older than the oldest
+   * loaded post are held back: they belong to the part of the room the reader has not paged to, and
+   * "Load earlier" brings them (the row ids de-duplicate).
+   */
+  function systemEntries(): readonly SpaceSystemEntry[] {
+    version()
+    if (systemRows.size === 0 || legacy) return []
+    let floor = Number.NEGATIVE_INFINITY
+    if (oldestPage()?.olderCursor != null) {
+      for (const thread of items.values()) {
+        const ms = Date.parse(thread.updated_at ?? thread.latest_run_updated_at ?? '')
+        if (Number.isFinite(ms) && (floor === Number.NEGATIVE_INFINITY || ms < floor)) floor = ms
+      }
+    }
+    return [...systemRows.values()]
+      .filter((entry) => Date.parse(entry.at) >= floor)
+      .sort((a, b) => a.at.localeCompare(b.at) || a.id.localeCompare(b.id))
+  }
   /** Bumps whenever a page is added at the top or posts are trimmed: the reader's baseline moved. */
   function windowVersion(): number {
     return earlierVersion()
@@ -211,7 +249,7 @@ export function createSpaceTimelineStore(spaceRef: string) {
 
   /** The first page, merged. Throws what the request threw so the caller can read a 404 as "off". */
   async function loadFirst(): Promise<void> {
-    const timeline = await getSpaceTimeline(spaceRef, { limit: TIMELINE_PAGE_LIMIT })
+    const timeline = await fetchTimeline({ limit: TIMELINE_PAGE_LIMIT })
     if (disposed) return
     takeHead(timeline)
     if (!timeline.page.windowed) {
@@ -255,7 +293,7 @@ export function createSpaceTimelineStore(spaceRef: string) {
     }
     if (legacy) {
       // The legacy listing is the whole room every time.
-      const timeline = await getSpaceTimeline(spaceRef, { limit: TIMELINE_PAGE_LIMIT })
+      const timeline = await fetchTimeline({ limit: TIMELINE_PAGE_LIMIT })
       if (disposed) return
       takeHead(timeline)
       if (timeline.page.windowed) {
@@ -278,7 +316,7 @@ export function createSpaceTimelineStore(spaceRef: string) {
       const cursor = page?.newestCursor ?? null
       const ids = refreshIds()
       // While newer pages are hidden an `after` read would leave a gap: only re-read what is loaded.
-      const timeline = await getSpaceTimeline(spaceRef, {
+      const timeline = await fetchTimeline({
         limit: TIMELINE_PAGE_LIMIT,
         ...(newerHidden || cursor === null ? {} : { after: cursor }),
         ...(ids.length > 0 ? { refresh: ids } : {}),
@@ -339,7 +377,7 @@ export function createSpaceTimelineStore(spaceRef: string) {
   /** Re-reads the first page's extras (pins, agent work, shared read) and then catches up. */
   async function reloadHead(): Promise<void> {
     if (!firstLoaded) return loadFirst()
-    const timeline = await getSpaceTimeline(spaceRef, { limit: TIMELINE_PAGE_LIMIT })
+    const timeline = await fetchTimeline({ limit: TIMELINE_PAGE_LIMIT })
     if (disposed) return
     takeHead(timeline)
     if (!timeline.page.windowed) {
@@ -360,7 +398,7 @@ export function createSpaceTimelineStore(spaceRef: string) {
     loadingEarlierNow = true
     setBusy('earlier')
     try {
-      const timeline = await getSpaceTimeline(spaceRef, { limit: TIMELINE_PAGE_LIMIT, before: cursor })
+      const timeline = await fetchTimeline({ limit: TIMELINE_PAGE_LIMIT, before: cursor })
       if (disposed || !timeline.page.windowed) return
       const page: Page = { ids: new Set(), olderCursor: timeline.page.nextBefore, newestCursor: timeline.page.newest }
       // A post that moved to the newer end while the reader paged back is already loaded, newer.
@@ -387,7 +425,7 @@ export function createSpaceTimelineStore(spaceRef: string) {
     loadingLaterNow = true
     setBusy('later')
     try {
-      const timeline = await getSpaceTimeline(spaceRef, { limit: TIMELINE_PAGE_LIMIT, after: cursor })
+      const timeline = await fetchTimeline({ limit: TIMELINE_PAGE_LIMIT, after: cursor })
       if (disposed || !timeline.page.windowed) return
       const page: Page = { ids: new Set(), olderCursor: null, newestCursor: timeline.page.newest ?? cursor }
       for (const thread of timeline.threads) assign(thread, page)
@@ -563,6 +601,7 @@ export function createSpaceTimelineStore(spaceRef: string) {
     totalPosts,
     unloadedBefore,
     windowed,
+    systemEntries,
     windowVersion,
     loadingMore,
     loadFirst,

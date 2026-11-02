@@ -390,6 +390,12 @@ pub(crate) struct SpaceFeatureFlags {
     /// transcript whole. A rollout control, never an authorization input: Control's membership and
     /// per-page read decision and Session Core's audience ceiling decide what a window holds.
     pub(crate) timeline_api: bool,
+    /// `SPACE_SYSTEM_ENTRIES_API` (WS15-S11): the room's system rows (membership changes read from
+    /// Control's ledger) merged into the timeline answer, reported as `features.system_entries`.
+    /// Needs `SPACE_TIMELINE_API`. Off leaves `system_entries` empty. A rollout control, never an
+    /// authorization input: Control's feed route requires a live membership, and the rows hold ids
+    /// and closed words only.
+    pub(crate) system_entries_api: bool,
     /// `SCIM_EDGE_ENABLED` (WS05-S8): the public, session-less SCIM edge `/api/v1/scim/v2/*`
     /// that forwards an identity provider's bearer token to org-core. Off (the default, in
     /// development too) answers the same 501 SCIM error as before the feature existed. A rollout
@@ -480,6 +486,7 @@ impl SpaceFeatureFlags {
             human_markdown_ui: space_flag("SPACE_HUMAN_MARKDOWN_UI"),
             timeline_anchor_ui: space_flag("SPACE_TIMELINE_ANCHOR_UI"),
             timeline_api: space_flag("SPACE_TIMELINE_API"),
+            system_entries_api: space_flag("SPACE_SYSTEM_ENTRIES_API"),
             scim_edge: ScimEdgeConfig::from_env(),
         }
     }

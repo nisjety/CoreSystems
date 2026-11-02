@@ -24,12 +24,22 @@ export function SystemNoticeRow(props: {
     switch (props.entry.code) {
       case 'member_added':
         return i18n.tr(`${actor()} la til ${subject()}`, `${actor()} added ${subject()}`)
+      case 'member_joined':
+        return i18n.tr(`${subject()} ble med i rommet`, `${subject()} joined the room`)
       case 'member_removed':
         return i18n.tr(`${actor()} fjernet ${subject()}`, `${actor()} removed ${subject()}`)
       case 'member_left':
         return i18n.tr(`${subject()} forlot rommet`, `${subject()} left the room`)
       case 'role_changed':
         return i18n.tr(`${actor()} endret rollen til ${subject()}`, `${actor()} changed ${subject()}'s role`)
+      case 'archived':
+        return i18n.tr(`${actor()} arkiverte rommet`, `${actor()} archived the room`)
+      case 'unarchived':
+        return i18n.tr(`${actor()} gjenopprettet rommet`, `${actor()} restored the room`)
+      case 'visibility_changed':
+        return i18n.tr(`${actor()} endret hvem som kan finne rommet`, `${actor()} changed who can find the room`)
+      case 'settings_changed':
+        return i18n.tr(`${actor()} endret rominnstillingene`, `${actor()} changed the room settings`)
       case 'agent_bound':
         return i18n.tr(`${actor()} la til en agent`, `${actor()} added an agent`)
       case 'agent_paused':

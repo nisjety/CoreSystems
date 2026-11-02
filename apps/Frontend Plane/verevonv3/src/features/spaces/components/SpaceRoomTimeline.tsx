@@ -26,6 +26,8 @@ import {
   resolveAuthorName,
 } from './sidepane/SpaceTurnList'
 import type { PostHeadMeta, PostStatus, TranscriptTurn } from './sidepane/SpaceTurnList'
+import { SystemRowsGroup } from './entries/SystemRowsGroup'
+import type { SpaceSystemEntry } from '@/shared/api/spaces-client'
 import { SpaceRestrictedNotice } from './SpaceRestrictedNotice'
 import { SpacePendingNewPost, SpacePendingReplies } from './SpacePendingPost'
 import type { SpaceJournalEntry } from '../lib/space-send-journal'
@@ -199,6 +201,35 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
       .filter((thread) => pins.has(thread.thread_id))
       .sort((a, b) => (pins.get(b.thread_id)?.pinned_at ?? 0) - (pins.get(a.thread_id)?.pinned_at ?? 0))
     return [...pinned, ...chronologicalThreads().filter((thread) => !pins.has(thread.thread_id))]
+  })
+
+  // WS15-S11: the room's system rows (membership changes from Control's ledger) sit between the posts
+  // by time. Each row goes before the first post whose activity is later; rows after the last post
+  // trail the list. Room-pinned posts are lifted out of time order, so they never anchor a row.
+  const systemPlacement = createMemo(() => {
+    const rows = props.timeline?.systemEntries() ?? []
+    const before = new Map<string, SpaceSystemEntry[]>()
+    const trailing: SpaceSystemEntry[] = []
+    if (rows.length === 0) return { before, trailing }
+    const pins = pinByThread()
+    const anchors = chronologicalThreads()
+      .filter((thread) => !pins.has(thread.thread_id))
+      .map((thread) => ({
+        id: thread.thread_id,
+        at: Date.parse(thread.updated_at ?? thread.latest_run_updated_at ?? ''),
+      }))
+    for (const row of rows) {
+      const at = Date.parse(row.at)
+      const anchor = anchors.find((candidate) => Number.isFinite(candidate.at) && candidate.at > at)
+      if (!anchor) {
+        trailing.push(row)
+        continue
+      }
+      const list = before.get(anchor.id) ?? []
+      list.push(row)
+      before.set(anchor.id, list)
+    }
+    return { before, trailing }
   })
 
   const agentName = createMemo(() => roomAgentName(props.agents()))
@@ -420,6 +451,11 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
         <For each={orderedThreads()}>
           {(thread, index) => (
             <>
+            <Show when={systemPlacement().before.get(thread.thread_id)}>
+              {(rows) => (
+                <SystemRowsGroup entries={rows()} roster={props.roster} viewerSubjectId={props.viewerSubjectId} />
+              )}
+            </Show>
             <Show when={firstUnreadId() === thread.thread_id}>
               <li class="verevon-room-new-divider-item" role="presentation">
                 <div
@@ -464,6 +500,11 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
             </>
           )}
         </For>
+        <Show when={systemPlacement().trailing.length > 0 ? systemPlacement().trailing : undefined}>
+          {(rows) => (
+            <SystemRowsGroup entries={rows()} roster={props.roster} viewerSubjectId={props.viewerSubjectId} />
+          )}
+        </Show>
         <Show when={props.timeline?.hasNewer() === true}>
           <li class="verevon-room-earlier-item" role="presentation">
             <button

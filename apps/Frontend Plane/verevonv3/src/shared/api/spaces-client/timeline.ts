@@ -23,8 +23,30 @@ export type SpaceTimelinePage = {
   readonly totalPosts: number | null
 }
 
+/**
+ * A room-level system row (WS15-S11): one fact from Control's membership ledger. Ids and closed
+ * words only; the reader resolves names from the roster. Same shape as the `system` timeline entry
+ * of the Space feature's entry registry.
+ */
+export type SpaceSystemEntry = {
+  readonly kind: 'system'
+  readonly id: string
+  /** ISO-8601 time the ledger recorded the change. */
+  readonly at: string
+  /** The ledger's closed action word, e.g. `member_added`. */
+  readonly code: string
+  readonly actorId?: string
+  readonly subjectId?: string
+  readonly fromRole?: string
+  readonly toRole?: string
+}
+
 export type SpaceTimeline = {
   readonly page: SpaceTimelinePage
+  /** The room's system rows for the interval this answer covers, oldest first. Empty when the gateway has the feature off. */
+  readonly systemEntries: readonly SpaceSystemEntry[]
+  /** The gateway cut the system rows to its per-page bound; the interval held more. */
+  readonly systemTruncated: boolean
   /** Oldest first within the page (the gateway reverses Session Core's newest-first order). */
   readonly threads: readonly SpaceThread[]
   /** First page only: the room's pinned posts, which may be older than the window. */
@@ -52,6 +74,37 @@ function threadsOf(value: unknown): readonly SpaceThread[] {
     (item): item is SpaceThread =>
       Boolean(item) && typeof item === 'object' && typeof (item as { thread_id?: unknown }).thread_id === 'string',
   )
+}
+
+function systemEntriesOf(value: unknown): readonly SpaceSystemEntry[] {
+  if (!Array.isArray(value)) return []
+  const out: SpaceSystemEntry[] = []
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue
+    const record = item as Record<string, unknown>
+    const text = (key: string): string | undefined => {
+      const field = record[key]
+      return typeof field === 'string' && field.trim() ? field.trim() : undefined
+    }
+    const id = text('id')
+    const code = text('action')
+    const atRaw = text('created_at')
+    const atMs = atRaw ? Date.parse(atRaw) : Number.NaN
+    // A row with no id, no word or no readable time cannot be placed or de-duplicated: drop it.
+    if (!id || !code || !Number.isFinite(atMs) || record.kind !== 'membership') continue
+    out.push({
+      kind: 'system',
+      id,
+      at: new Date(atMs).toISOString(),
+      code,
+      ...(text('actor_id') ? { actorId: text('actor_id') } : {}),
+      ...(text('subject_id') ? { subjectId: text('subject_id') } : {}),
+      ...(text('from_role') ? { fromRole: text('from_role') } : {}),
+      ...(text('to_role') ? { toRole: text('to_role') } : {}),
+    })
+  }
+  // The gateway sends newest first; the room reads oldest first.
+  return out.sort((a, b) => a.at.localeCompare(b.at) || a.id.localeCompare(b.id))
 }
 
 function cursorOf(value: unknown): string | null {
@@ -84,8 +137,10 @@ export async function getSpaceTimeline(spaceRef: string, request: SpaceTimelineR
   const hasHead = Boolean(response.membership) && typeof response.membership === 'object'
   return {
     page,
+    systemEntries: systemEntriesOf(response.system_entries),
+    systemTruncated: response.system_truncated === true,
     threads,
-    pinned: threadsOf(response.pinned),
+    pinned:threadsOf(response.pinned),
     refreshed: threadsOf(response.refreshed),
     ...(hasHead ? { head: spaceThreadsFromBody({ ...(response as unknown as SpaceThreadsBody), threads }) } : {}),
   }
