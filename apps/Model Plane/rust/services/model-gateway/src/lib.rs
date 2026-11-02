@@ -13,6 +13,7 @@ pub mod calibration;
 pub mod calendar_context;
 pub mod cancel_registry;
 pub mod capability_consumer;
+pub mod catalogue_prices;
 pub mod chat_turn_registry;
 pub mod citation_anchors;
 pub mod compaction;

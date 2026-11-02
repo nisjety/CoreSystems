@@ -1,6 +1,8 @@
-import { createEffect, createMemo, createSignal, For, Show, untrack } from 'solid-js'
+import { createEffect, createMemo, createSignal, createUniqueId, For, Show, untrack } from 'solid-js'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import {
+  filterModels,
+  formatModelListPrice,
   getModelEntitlementMeta,
   groupChatModels,
   isExpensiveModel,
@@ -26,6 +28,7 @@ import {
 } from '@/shared/ai/model-selection'
 import { rememberedPrivacyTier } from '@/features/dashboard/home/submit-privacy-tier'
 import { cn } from '@/shared/lib/cn'
+import { ModelSearchField } from './ModelSearchField'
 
 export function AiModelPicker(props: {
   orgId: string
@@ -42,6 +45,8 @@ export function AiModelPicker(props: {
 }) {
   const i18n = useI18n()
   const [open, setOpen] = createSignal(false)
+  const [query, setQuery] = createSignal('')
+  const catalogId = `ai-model-catalog-${createUniqueId()}`
   const [selected, setSelected] = createSignal<AiModelSelection>(DEFAULT_AI_MODEL_SELECTION)
   const [models] = createResource(async () => {
     try {
@@ -72,10 +77,17 @@ export function AiModelPicker(props: {
     (subscriptions() ?? []).find((connection) => connection.status.trim().toLocaleLowerCase() === 'active'),
   )
   const subscriptionBlocked = createMemo(() => props.respectOrgZdr && organizationSettings()?.zdr === true)
-  const modelGroups = createMemo(() => groupChatModels(models() ?? []).filter(
+  const catalogGroups = createMemo(() => groupChatModels(models() ?? []).filter(
     (group) => group.label !== 'Subscription' || Boolean(activeSubscription()),
   ))
-  const flatModels = createMemo(() => modelGroups().flatMap((group) => group.models))
+  const flatModels = createMemo(() => catalogGroups().flatMap((group) => group.models))
+  // The search applies only while its field is shown (more than six chat models). Selection and
+  // the policy check keep reading the whole catalogue.
+  const activeQuery = () => (flatModels().length > 6 ? query().trim() : '')
+  const modelGroups = createMemo(() => activeQuery() === ''
+    ? catalogGroups()
+    : groupChatModels(filterModels(flatModels(), activeQuery())),
+  )
 
   createEffect(
     () => props.orgId,
@@ -181,7 +193,10 @@ export function AiModelPicker(props: {
       </Show>
       <Show when={open()}>
         <div class="dashboard-composer-model-menu verevon-popover verevon-ai-model-picker__menu">
-          <div class="dashboard-composer-model-catalog" role="region" aria-label={i18n.tr('Tilgjengelige AI-modeller', 'Available AI models')} tabindex={0}>
+          <Show when={flatModels().length > 6}>
+            <ModelSearchField value={query()} controlsId={catalogId} onChange={setQuery} />
+          </Show>
+          <div id={catalogId} class="dashboard-composer-model-catalog" role="region" aria-label={i18n.tr('Tilgjengelige AI-modeller', 'Available AI models')} tabindex={0}>
             <div class="dashboard-composer-model-group">
               <p class="dashboard-composer-model-group__label">Verevon</p>
               <For each={VEREVON_MODES}>{(mode) => (
@@ -215,7 +230,7 @@ export function AiModelPicker(props: {
                       onClick={() => chooseCatalogModel(model)}
                       class={{ 'dashboard-composer-model-menu__item--active': selected().model === model.id && selected().provider === model.provider }}
                     >
-                      <span><span><Zap class="size-3" /></span><span>{model.name}</span></span>
+                      <span><span><Zap class="size-3" /></span><span>{model.name}<Show when={model.price}>{(price) => <span class="dashboard-composer-model-price">{formatModelListPrice(price(), i18n.locale())}</span>}</Show></span></span>
                       <span class="dashboard-composer-model-menu__right">
                         <Show when={model.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER}>
                           <span class="dashboard-composer-model-badge dashboard-composer-model-badge--cheap">{i18n.tr('Tilkoblet', 'Connected')}</span>
@@ -230,6 +245,9 @@ export function AiModelPicker(props: {
                 }}</For>
               </div>
             )}</For>
+            <Show when={activeQuery() !== '' && modelGroups().length === 0}>
+              <p class="dashboard-composer-model-empty" role="status">{i18n.tr('Ingen modeller passer', 'No models match')}</p>
+            </Show>
           </div>
         </div>
       </Show>

@@ -22,6 +22,7 @@ import {
 import { createSelectedAgentToolSpecs } from '@/shared/actions/agent-tools'
 import { parseChatHistoryAction } from '@/shared/actions/chat-history'
 import { isSupportChatThread } from '@/shared/chat/support-chat-thread'
+import { localeIntl, type Locale } from '@/shared/i18n/locales'
 import { isAgUiEventName, toVerevonUiEvent, type VerevonUiEvent } from '@/shared/chat/verevon-ui-events'
 import {
   applyServerRetention,
@@ -1220,6 +1221,16 @@ export function isEffortLevel(value: unknown): value is EffortLevel {
   return typeof value === 'string' && (EFFORT_LEVELS as readonly string[]).includes(value)
 }
 
+/**
+ * A chat model's list price per one million tokens, as the catalogue states it
+ * (`price` on `/v1/models`). It is shown only when every part is present.
+ */
+export type ModelPrice = {
+  inputPerMillion: number
+  outputPerMillion: number
+  currency: string
+}
+
 export type ModelInfo = {
   id: string
   name: string
@@ -1246,6 +1257,11 @@ export type ModelInfo = {
    * or the gateway's ladder is off.
    */
   effortLevels?: EffortLevel[]
+  /**
+   * The catalogue's list price for a chat model (`price` on `/v1/models`). Present only when
+   * the gateway's list-price switch is on and the catalogue names a price.
+   */
+  price?: ModelPrice
 }
 
 // Opt-in rich SSE families the model-gateway understands (chat-parity §2).
@@ -3575,6 +3591,22 @@ function normalizeEffortLevels(value: unknown): ModelInfo['effortLevels'] {
   return levels.length > 0 ? levels : undefined
 }
 
+/**
+ * A list price is kept whole or not at all: two finite, non-negative rates and a three-letter
+ * currency. A partial or unexpected shape is dropped, never completed with a guess.
+ */
+function normalizeModelPrice(value: unknown): ModelPrice | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  const input = record.input_per_million
+  const output = record.output_per_million
+  const currency = str(record.currency)?.trim().toUpperCase()
+  if (typeof input !== 'number' || typeof output !== 'number') return undefined
+  if (!Number.isFinite(input) || !Number.isFinite(output) || input < 0 || output < 0) return undefined
+  if (!currency || !/^[A-Z]{3}$/.test(currency)) return undefined
+  return { inputPerMillion: input, outputPerMillion: output, currency }
+}
+
 function readBool(value: unknown): boolean | undefined {
   if (typeof value === 'boolean') return value
   if (typeof value === 'string') {
@@ -3818,6 +3850,7 @@ export async function listModelCatalogue(): Promise<ModelCatalogue> {
         residency: str(item.residency),
         cheap: readBool(item.cheap) ?? readBool(item.is_cheap),
         effortLevels: normalizeEffortLevels(item.effort_levels ?? item.effortLevels),
+        price: normalizeModelPrice(item.price),
       }
     })
     .filter((model) => model.id.length > 0)
@@ -4045,6 +4078,48 @@ export function groupChatModels(models: readonly ModelInfo[]): ModelGroup[] {
   const other = buckets.get(otherLabel)
   if (other && other.length > 0) ordered.push({ label: otherLabel, models: other })
   return ordered
+}
+
+/**
+ * Lower-cases and drops accents so `cafe` finds `café`. The Norwegian letters æ, ø and å are kept
+ * as they are: they are letters of their own, not accented forms of other letters.
+ */
+const NORWEGIAN_LETTERS: ReadonlySet<string> = new Set(['æ', 'ø', 'å'])
+
+function searchKey(value: string): string {
+  return Array.from(value.normalize('NFC').toLowerCase(), (char) =>
+    NORWEGIAN_LETTERS.has(char) ? char : char.normalize('NFD').replace(/\p{M}/gu, ''),
+  ).join('')
+}
+
+function matchesModelQuery(query: string, ...fields: readonly string[]): boolean {
+  const needle = searchKey(query.trim())
+  if (needle === '') return true
+  return fields.some((field) => searchKey(field).includes(needle))
+}
+
+/**
+ * The models whose name, id or provider match the query, case- and accent-insensitively. An empty
+ * query keeps every model in its order.
+ */
+export function filterModels(models: readonly ModelInfo[], query: string): ModelInfo[] {
+  if (query.trim() === '') return [...models]
+  return models.filter((model) => matchesModelQuery(query, model.name, model.id, model.provider ?? ''))
+}
+
+/** A list price as one line of picker copy, in the reader's language and currency format. */
+export function formatModelListPrice(price: ModelPrice, locale: Locale): string {
+  const money = new Intl.NumberFormat(localeIntl(locale), {
+    style: 'currency',
+    currency: price.currency,
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 4,
+  })
+  const input = money.format(price.inputPerMillion)
+  const output = money.format(price.outputPerMillion)
+  return locale === 'no'
+    ? `${input} inn / ${output} ut per million tokens`
+    : `${input} in / ${output} out per million tokens`
 }
 
 export type ChatFeedbackRating = 'positive' | 'negative'

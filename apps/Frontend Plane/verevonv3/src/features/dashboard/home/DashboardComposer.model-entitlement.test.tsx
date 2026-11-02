@@ -167,6 +167,21 @@ describe('composer reconciles to the organisation model policy', () => {
   })
 })
 
+describe('composer model search under a policy notice', () => {
+  it('keeps the notice while the search narrows the catalogue', async () => {
+    rememberSelection('gpt-big', 'GPT Big')
+    const many = ['gpt-mini', 'gpt-nano', 'gpt-large', 'gpt-vision', 'gpt-audio', 'gpt-turbo', 'gpt-omni'].map((id) => model(id))
+    renderComposer(many, meta())
+
+    expect(await screen.findByText(/Organisasjonen din tillater ikke lenger gpt-big/)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: /velg ai-modell/i }))
+    fireEvent.input(await screen.findByRole('searchbox', { name: /søk etter modell/i }), { target: { value: 'claude' } })
+
+    expect(await screen.findByText('Ingen modeller passer')).toBeTruthy()
+    expect(screen.getByText(/Organisasjonen din tillater ikke lenger gpt-big/)).toBeTruthy()
+  })
+})
+
 describe('composer effort select under a policy ceiling', () => {
   const ladder = ['low', 'medium', 'high', 'xhigh'] as const
 

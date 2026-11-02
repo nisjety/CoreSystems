@@ -116,6 +116,8 @@ import {
 	getModelEntitlementMeta,
 	groupChatModels,
 	catalogueAdvertisesConnectorScope,
+	filterModels,
+	formatModelListPrice,
 	hasZeroRetentionModel,
 	isExpensiveModel,
 	listChatThreads,
@@ -135,6 +137,7 @@ import {
 	type ModelGroup,
 	type ModelInfo,
 } from "@/shared/api/chat-client";
+import { ModelSearchField } from "@/shared/components/ModelSearchField";
 import { agentModeLabel, agentModesWithinCap } from "@/features/customize/AgentModesSection";
 import {
 	browseConnection,
@@ -1083,6 +1086,8 @@ export function DashboardComposer(props: {
 		null,
 	);
 	const [modelOpen, setModelOpen] = createSignal(false);
+	const [modelQuery, setModelQuery] = createSignal("");
+	const modelCatalogId = `composer-model-catalog-${createUniqueId()}`;
 	const [contextScopeOpen, setContextScopeOpen] = createSignal(false);
 	const [responseMode, setResponseMode] = createSignal<ResponseMode>("auto");
 	// The picker pins three first-class Verevon intent modes (Budget/Balance/Genius)
@@ -1238,6 +1243,13 @@ export function DashboardComposer(props: {
 	);
 	const flatChatModels = createMemo<ModelInfo[]>(() =>
 		chatModelGroups().flatMap((group) => group.models),
+	);
+	const activeModelQuery = () =>
+		flatChatModels().length > 6 ? modelQuery().trim() : "";
+	const shownChatModelGroups = createMemo<ModelGroup[]>(() =>
+		activeModelQuery() === ""
+			? chatModelGroups()
+			: groupChatModels(filterModels(flatChatModels(), modelQuery())),
 	);
 	const selectedCatalogModel = createMemo(() => {
 		// No truthiness guard on the provider: plenty of real catalog models have
@@ -3109,7 +3121,15 @@ export function DashboardComposer(props: {
 									<summary>
 										{i18n.tr('Velg modell selv', 'Choose a model yourself')}
 									</summary>
+									<Show when={flatChatModels().length > 6}>
+										<ModelSearchField
+											value={modelQuery()}
+											controlsId={modelCatalogId}
+											onChange={setModelQuery}
+										/>
+									</Show>
 									<div
+										id={modelCatalogId}
 										class="dashboard-composer-model-catalog"
 										role="region"
 										aria-label={i18n.tr(
@@ -3118,7 +3138,7 @@ export function DashboardComposer(props: {
 										)}
 										tabindex={0}
 									>
-										<For each={chatModelGroups()}>
+										<For each={shownChatModelGroups()}>
 											{(group) => (
 												<div class="dashboard-composer-model-group">
 													<p class="dashboard-composer-model-group__label">
@@ -3148,6 +3168,13 @@ export function DashboardComposer(props: {
 															</span>
 															<span>
 																{model.name}
+																<Show when={model.price}>
+																	{(price) => (
+																		<span class="dashboard-composer-model-price">
+																			{formatModelListPrice(price(), i18n.locale())}
+																		</span>
+																	)}
+																</Show>
 															</span>
 														</span>
 														<span class="dashboard-composer-model-menu__right">
@@ -3201,6 +3228,11 @@ export function DashboardComposer(props: {
 												</div>
 											)}
 										</For>
+										<Show when={activeModelQuery() !== "" && shownChatModelGroups().length === 0}>
+											<p class="dashboard-composer-model-empty" role="status">
+												{i18n.tr("Ingen modeller passer", "No models match")}
+											</p>
+										</Show>
 									</div>
 								</details>
 								<Show when={selectedPrivacyTier() === "sovereign"}>

@@ -10084,6 +10084,11 @@ struct ModelDescriptor {
     /// ladder off serves the same JSON as before.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     effort_levels: Vec<String>,
+    /// The catalogue's list price for a chat model, behind
+    /// `MODEL_GATEWAY_CATALOGUE_PRICES`. Left out when there is none, so a deploy
+    /// with the switch off serves the same JSON as before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    price: Option<crate::catalogue_prices::ModelPrice>,
 }
 
 /// Wire-numeric → tier label. Mirrors inference-core's `PrivacyTier::label`;
@@ -10162,18 +10167,26 @@ async fn list_models(
         })?
         .into_inner();
 
+    // One catalogue snapshot prices the whole listing, and none is taken while the switch is off.
+    let rates = crate::catalogue_prices::snapshot_for_listing(&state.pricing).await;
     let models: Vec<ModelDescriptor> = resp
         .models
         .into_iter()
-        .map(|m| ModelDescriptor {
-            id: m.id,
-            provider: m.provider,
-            modality: m.modality,
-            streaming: m.streaming,
-            features: m.features,
-            privacy_tier: privacy_tier_label(m.privacy_tier),
-            residency: m.residency,
-            effort_levels: m.effort_levels,
+        .map(|m| {
+            let price = rates.as_ref().and_then(|rates| {
+                crate::catalogue_prices::model_price(rates, &m.id, &m.provider, &m.modality)
+            });
+            ModelDescriptor {
+                id: m.id,
+                provider: m.provider,
+                modality: m.modality,
+                streaming: m.streaming,
+                features: m.features,
+                privacy_tier: privacy_tier_label(m.privacy_tier),
+                residency: m.residency,
+                effort_levels: m.effort_levels,
+                price,
+            }
         })
         .collect();
     let entitlement = resp.access.map(|access| ModelEntitlementMeta {
@@ -14189,6 +14202,7 @@ mod run_owner_publish_tests {
             privacy_tier: "unspecified",
             residency: String::new(),
             effort_levels: effort_levels.iter().map(|level| (*level).to_owned()).collect(),
+            price: None,
         }
     }
 
@@ -14199,6 +14213,22 @@ mod run_owner_publish_tests {
         // A model with no effort control serves the JSON it served before.
         let without = serde_json::to_value(descriptor(&[])).unwrap();
         assert!(without.get("effort_levels").is_none(), "{without}");
+    }
+
+    #[test]
+    fn list_models_descriptor_carries_a_price_only_when_there_is_one() {
+        let unpriced = serde_json::to_value(descriptor(&[])).unwrap();
+        assert!(unpriced.get("price").is_none(), "{unpriced}");
+        let mut priced = descriptor(&[]);
+        priced.price = Some(crate::catalogue_prices::ModelPrice {
+            input_per_million: 3.0,
+            output_per_million: 15.0,
+            currency: "USD".to_owned(),
+            source: "prefix",
+        });
+        let json = serde_json::to_value(priced).unwrap();
+        assert_eq!(json["price"]["source"], "prefix");
+        assert_eq!(json["id"], "gpt-5-mini", "the price sits beside the model's own fields");
     }
 
     fn claims(org_id: &str, user_id: &str) -> Claims {
