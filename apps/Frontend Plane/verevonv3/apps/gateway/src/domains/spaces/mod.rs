@@ -39,6 +39,7 @@ pub(crate) mod human_posts;
 pub(crate) mod room_admin;
 pub(crate) mod files;
 mod message_search;
+pub(crate) mod mentions;
 mod timeline;
 mod pins;
 mod room_artifacts;
@@ -69,6 +70,13 @@ const FORGED_SPACE_AUTHORITY_FIELDS: &[&str] = &[
     "space_approval_decision_token",
 ];
 
+/// WS08-S4: the wake fields of a chat body. A browser never supplies `wake_context` (the BFF
+/// injects it after Control signs), `turn_origin` or `participants`; `wake` is the browser's request,
+/// consumed by [`inject_mentioned_space_agent`] and stripped here for every other path. Kept apart
+/// from [`FORGED_SPACE_AUTHORITY_FIELDS`] because that list also cleans action inputs, where
+/// `participants` is a real field (`spaces.open_dm`).
+const FORGED_WAKE_FIELDS: &[&str] = &["wake", "wake_context", "turn_origin", "participants"];
+
 /// Turns an untrusted personal-Space selection into a Control-issued thread
 /// creation/append context. The browser may choose only `space_ref`; all
 /// authority fields are removed before Control is called and are reconstructed
@@ -80,6 +88,21 @@ pub(crate) async fn inject_personal_thread_context(
     org_id: &str,
     body: &mut Value,
 ) -> Result<(), (StatusCode, Json<Value>)> {
+    inject_personal_thread_context_for_wake(state, user, org_id, body, None).await
+}
+
+/// [`inject_personal_thread_context`] with the wake the mention injector verified (WS08-S4). With a
+/// [`mentions::WakeIntent`] and an existing thread, Control is asked for a `model.run.wake` decision
+/// (bound to the stored post, its content digest, the agent and origin `direct`) instead of a
+/// `thread:append` one, and the body carries `wake_context`; model-gateway then appends no turn.
+/// The intent is a typed argument, never a body field, so a browser cannot supply one.
+pub(crate) async fn inject_personal_thread_context_for_wake(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    body: &mut Value,
+    wake: Option<&mentions::WakeIntent>,
+) -> Result<(), (StatusCode, Json<Value>)> {
     let object = body.as_object_mut().ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,
@@ -90,6 +113,9 @@ pub(crate) async fn inject_personal_thread_context(
         )
     })?;
     for field in FORGED_SPACE_AUTHORITY_FIELDS {
+        object.remove(*field);
+    }
+    for field in FORGED_WAKE_FIELDS {
         object.remove(*field);
     }
     // Remove both spellings even if one is malformed/empty. Leaving the second
@@ -156,30 +182,54 @@ pub(crate) async fn inject_personal_thread_context(
                     )),
                 )
             })?;
-        let idempotency_key =
-            required_or_generated(object, "idempotency_key", "space-append", counter);
+        let content_digest = format!("sha256:{}", hex::encode(Sha256::digest(content.as_bytes())));
+        // A wake asks for a `model.run.wake` decision bound to the stored post it answers; every
+        // other follow-up asks for a content-bound `thread:append` one. A wake's idempotency key is
+        // derived from the browser's per-(post, agent) wake id (shape-checked), never free-form.
+        let (decision_path, decision_request) = match wake {
+            Some(wake) => (
+                "run-wake-decision",
+                json!({
+                    "space_ref": space_ref,
+                    "thread_id": thread_id,
+                    "trigger_message_id": wake.trigger_message_id,
+                    "content_digest": content_digest,
+                    "agent_subject_id": wake.agent_subject_id,
+                    "turn_origin": "direct",
+                    "idempotency_key": format!("space-wake-{}", wake.client_wake_id),
+                }),
+            ),
+            None => (
+                "thread-append-decision",
+                json!({
+                    "space_ref": space_ref,
+                    "thread_id": thread_id,
+                    "content_digest": content_digest,
+                    "idempotency_key":
+                        required_or_generated(object, "idempotency_key", "space-append", counter),
+                }),
+            ),
+        };
         let url = format!(
-            "{}/api/v1/internal/spaces/thread-append-decision",
+            "{}/api/v1/internal/spaces/{decision_path}",
             state.user_core_url
         );
-        let content_digest = format!("sha256:{}", hex::encode(Sha256::digest(content.as_bytes())));
         let (status, Json(response)) = proxy_json(
             state,
             Method::POST,
             &url,
-            Some(json!({
-                "space_ref": space_ref,
-                "thread_id": thread_id,
-                "content_digest": content_digest,
-                "idempotency_key": idempotency_key,
-            })),
+            Some(decision_request),
             Some(org_id),
             Some(&actor),
             None,
         )
         .await;
         if !status.is_success() {
-            return Err(typed_response(state, status, response, denial::OP_POST));
+            return Err(if wake.is_some() {
+                wake_decision_failure(state, status, response)
+            } else {
+                typed_response(state, status, response, denial::OP_POST)
+            });
         }
         let data = crate::envelope::unwrap_data(&response);
         let decision = data
@@ -206,6 +256,20 @@ pub(crate) async fn inject_personal_thread_context(
         });
         if token.trim().is_empty() {
             return Err(invalid_decision());
+        }
+        // WS08-S4: the wake's authority travels as `wake_context` (the twelve decision fields as the
+        // wake decision carries them, then the post, digest, agent and origin it binds). `context`
+        // below also becomes `space_append_context` so the wake turn keeps the Space identity and
+        // retrieval scope every follow-up has; a wake appends no turn, so its token is never used
+        // as an append bearer (model-gateway skips the append and Session Core verifies the wake).
+        if let Some(wake) = wake {
+            let mut wake_context = context.clone();
+            wake_context["trigger_message_id"] = json!(wake.trigger_message_id);
+            wake_context["trigger_content_digest"] = json!(content_digest);
+            wake_context["agent_subject_id"] = json!(wake.agent_subject_id);
+            wake_context["turn_origin"] = json!("direct");
+            wake_context["client_wake_id"] = json!(wake.client_wake_id);
+            object.insert("wake_context".to_owned(), wake_context);
         }
         // A follow-up turn answers under the same retrieval decision as the first message (D1-242), so
         // it asks Control for one too. With the append-retrieval switch on (WS18-S2) the grant becomes the
@@ -394,6 +458,47 @@ async fn fetch_retrieval_decision(
     )
     .await;
     (denial::refusal_status(status, &response), response)
+}
+
+/// Control's refusal of a `model.run.wake` decision as the browser envelope (WS08-S4). Control
+/// answers a denial with one fixed internal string (`{"error":"Space run wake is not
+/// authorized"}`); that string never reaches the browser: a 403 is the typed `wake_not_authorized`
+/// (or Control's typed Space denial when `space_denials_typed` is on and the body carries a reason),
+/// a 400 is `invalid_wake`, and everything else (an outage, an unknown answer) is the retryable
+/// `space_decision_unavailable`. Nothing of the upstream body is relayed.
+fn wake_decision_failure(
+    state: &AppState,
+    status: StatusCode,
+    response: Value,
+) -> (StatusCode, Json<Value>) {
+    let status = denial::refusal_status(status, &response);
+    if status == StatusCode::FORBIDDEN {
+        if state.space_features.denials_typed {
+            if let Some(mapped) = denial::map_control_denial(status, &response, denial::OP_POST) {
+                return (status, Json(mapped));
+            }
+        }
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "wake_not_authorized",
+                "You are not allowed to wake this agent from this post.",
+            )),
+        );
+    }
+    if status == StatusCode::BAD_REQUEST {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error("invalid_wake", "The wake request is not valid.")),
+        );
+    }
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(error(
+            "space_decision_unavailable",
+            "The Space authority could not be confirmed. Try again shortly.",
+        )),
+    )
 }
 
 /// Resolves a browser-selected personal Space into the initial, short-lived
@@ -4307,6 +4412,19 @@ async fn compose_space_agents(
     org_id: &str,
     space_ref: &str,
 ) -> Result<Vec<Value>, (StatusCode, Json<Value>)> {
+    let members = fetch_space_roster_members(state, user, org_id, space_ref).await?;
+    Ok(compose_space_agents_from_members(state, user, org_id, space_ref, &members).await)
+}
+
+/// Control's Space roster members (`subject_type` `user` | `service`; sanitized, no email),
+/// exactly as Control answers. Shared by the agent list and the mention planner (WS08-S4) so a post
+/// with mentions reads the roster once.
+async fn fetch_space_roster_members(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    space_ref: &str,
+) -> Result<Vec<Value>, (StatusCode, Json<Value>)> {
     let roster_url = format!(
         "{}/api/v1/internal/spaces/{}/roster",
         state.user_core_url,
@@ -4340,6 +4458,18 @@ async fn compose_space_agents(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    Ok(members)
+}
+
+/// The agent shape `space_agents` returns, from the roster members Control gave: each `service`
+/// member joined with its Application binding (WS08-S4 split of [`compose_space_agents`]).
+async fn compose_space_agents_from_members(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    space_ref: &str,
+    members: &[Value],
+) -> Vec<Value> {
     let bindings = space_agent_bindings(state, user, org_id, space_ref).await;
 
     let agents = members
@@ -4428,7 +4558,7 @@ async fn compose_space_agents(
         })
         .collect();
 
-    Ok(agents)
+    agents
 }
 
 /// An agent avatar colour is exactly `#rrggbb`. Shared by the create path and
@@ -4668,12 +4798,31 @@ pub(crate) async fn inject_persona_instructions(
 ///
 /// Must run before [`inject_personal_thread_context`], which is the call that
 /// actually removes the Space reference fields from the body.
+#[cfg(test)]
 pub(crate) async fn inject_mentioned_space_agent_persona(
     state: &AppState,
     user: &AuthenticatedUser,
     org_id: &str,
     body: &mut Value,
 ) -> Result<(), (StatusCode, Json<Value>)> {
+    inject_mentioned_space_agent(state, user, org_id, body)
+        .await
+        .map(|_| ())
+}
+
+/// [`inject_mentioned_space_agent_persona`] that also reports the wake the body asked for
+/// (WS08-S4). The browser's `wake:{message_id, client_wake_id}` is read here, checked, and
+/// returned as a typed [`mentions::WakeIntent`] for [`inject_personal_thread_context_for_wake`];
+/// it is never left in the body. `None` for every legacy turn (a mention without `wake`).
+///
+/// Order for a wake: flag, Zero Data Retention (typed 412 before any Control call), shape, thread,
+/// single agent, rate bucket, then the same binding policy the legacy mention path applies.
+pub(crate) async fn inject_mentioned_space_agent(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    body: &mut Value,
+) -> Result<Option<mentions::WakeIntent>, (StatusCode, Json<Value>)> {
     let object = body.as_object_mut().ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,
@@ -4683,15 +4832,81 @@ pub(crate) async fn inject_mentioned_space_agent_persona(
             )),
         )
     })?;
+    // The wake request is consumed here whatever happens next; the other wake fields are never the
+    // browser's (see FORGED_WAKE_FIELDS).
+    let wake_request = object.remove("wake").filter(|value| !value.is_null());
+    let spellings: Vec<String> = MENTIONED_AGENT_FIELDS
+        .iter()
+        .filter_map(|field| object.get(*field))
+        .filter_map(|value| value.as_str().map(str::trim))
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect();
 
     let mentioned = MENTIONED_AGENT_FIELDS
         .iter()
         .find_map(|field| object.remove(*field))
         .and_then(|value| value.as_str().map(str::trim).map(str::to_owned))
         .filter(|value| !value.is_empty());
+    // A second spelling of the same field must not travel on to the model request.
+    for field in MENTIONED_AGENT_FIELDS {
+        object.remove(field);
+    }
     let Some(subject_id) = mentioned else {
-        return Ok(());
+        if wake_request.is_some() {
+            return Err(wake_error(
+                StatusCode::BAD_REQUEST,
+                "wake_requires_single_agent",
+                "A wake names exactly one agent.",
+            ));
+        }
+        return Ok(None);
     };
+
+    let mut wake_fields = None;
+    if let Some(raw) = wake_request.as_ref() {
+        if !state.space_features.addressed_wake_api {
+            return Err(wake_error(
+                StatusCode::NOT_FOUND,
+                "space_addressed_wake_disabled",
+                "Addressed wake-up is not enabled.",
+            ));
+        }
+        // A wake is a durable write: a Zero Data Retention caller gets the typed refusal before any
+        // Control call, and keeps the legacy ephemeral mention turn (which sends no `wake`).
+        // `normalized_model_body` already folded the request's ZDR header into the body's `zdr`.
+        let zdr_probe = json!({ "zdr": object.get("zdr").cloned().unwrap_or(Value::Null) });
+        if let Some(refusal) =
+            crate::zdr::durable_write_refusal(state, user, None, Some(&zdr_probe)).await
+        {
+            return Err(refusal);
+        }
+        if spellings.iter().any(|spelling| spelling != &subject_id) {
+            return Err(wake_error(
+                StatusCode::BAD_REQUEST,
+                "wake_requires_single_agent",
+                "A wake names exactly one agent.",
+            ));
+        }
+        let has_thread = object
+            .get("thread_id")
+            .and_then(Value::as_str)
+            .is_some_and(|thread_id| !thread_id.trim().is_empty());
+        if !has_thread {
+            return Err(wake_error(
+                StatusCode::BAD_REQUEST,
+                "wake_requires_thread",
+                "A wake answers a post, so it needs the thread the post is in.",
+            ));
+        }
+        wake_fields = Some(mentions::parse_wake_fields(raw).ok_or_else(|| {
+            wake_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_wake",
+                "A wake needs message_id and client_wake_id.",
+            )
+        })?);
+    }
 
     let Some(space_ref) = peek_space_ref(object) else {
         return Err((
@@ -4712,6 +4927,21 @@ pub(crate) async fn inject_mentioned_space_agent_persona(
         ));
     }
 
+    if wake_fields.is_some() {
+        if let Err(retry_after) =
+            mentions::check_wake_ceiling(state, org_id, &user.user_id, &space_ref).await
+        {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(error_with_details(
+                    "rate_limited",
+                    "Too many agent wake-ups. Retry shortly.",
+                    json!({ "retry_after_seconds": retry_after.max(1) }),
+                )),
+            ));
+        }
+    }
+
     let agent = resolve_mentioned_space_agent(state, user, org_id, &space_ref, &subject_id)
         .await?
         .ok_or_else(|| {
@@ -4728,7 +4958,7 @@ pub(crate) async fn inject_mentioned_space_agent_persona(
     // ABSENT field is the legacy default — bindings created before policy
     // fields existed keep behaving exactly as they did — while a PRESENT
     // field is a human decision and binds.
-    enforce_respond_to(state, user, org_id, &space_ref, &agent).await?;
+    enforce_wake_policy(state, user, org_id, &space_ref, &agent).await?;
     apply_mention_binding_policy(object, &agent)?;
 
     let name = agent
@@ -4748,7 +4978,21 @@ pub(crate) async fn inject_mentioned_space_agent_persona(
         }
     }
 
-    Ok(())
+    // The wake binds the agent the policy just checked (its Control subject id), never a `wake` field.
+    Ok(wake_fields.map(|(trigger_message_id, client_wake_id)| mentions::WakeIntent {
+        trigger_message_id,
+        client_wake_id,
+        agent_subject_id: subject_id,
+    }))
+}
+
+/// A typed wake refusal in the browser envelope.
+fn wake_error(
+    status: StatusCode,
+    code: &'static str,
+    message: &'static str,
+) -> (StatusCode, Json<Value>) {
+    (status, Json(error(code, message)))
 }
 
 /// WS08-S5: whether `respond_to` lets this caller wake the agent. Pure so the matrix is
@@ -4770,39 +5014,108 @@ fn respond_to_allows(respond_to: &str, subjects: &[&str], role: &str, caller_sub
     }
 }
 
-/// Applies [`respond_to_allows`] on the mention path. An ABSENT `respond_to` is today's
+/// Why a binding's policy refuses to wake the agent (WS08-S4 split of the old mention-path checks).
+/// The closed set is exactly the `message_mentions.refusal_code` words `respond_to_denied`,
+/// `mention_not_enabled` and `invocation_blocked` (`owner_only_thread` is a thread fact, not a
+/// binding policy, and lives in the mention planner).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WakeRefusal {
+    RespondToDenied,
+    MentionNotEnabled,
+    InvocationBlocked,
+}
+
+impl WakeRefusal {
+    /// The word recorded on the mention (`refusal_code`).
+    pub(crate) fn reason(self) -> &'static str {
+        match self {
+            Self::RespondToDenied => "respond_to_denied",
+            Self::MentionNotEnabled => "mention_not_enabled",
+            Self::InvocationBlocked => "invocation_blocked",
+        }
+    }
+
+    /// The typed error code a refused mention turn answers with.
+    fn code(self) -> &'static str {
+        match self {
+            Self::RespondToDenied => "agent_respond_to_denied",
+            Self::MentionNotEnabled => "agent_mention_not_enabled",
+            Self::InvocationBlocked => "agent_invocation_blocked",
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::RespondToDenied => "This agent's wake policy does not let you wake it here.",
+            Self::MentionNotEnabled => "This agent's binding does not allow @-mention invocation.",
+            Self::InvocationBlocked => "This agent's binding blocks invocation in this Space.",
+        }
+    }
+
+    fn into_reply(self) -> (StatusCode, Json<Value>) {
+        (StatusCode::FORBIDDEN, Json(error(self.code(), self.message())))
+    }
+}
+
+/// Whether this binding lets `caller_subject` (holding `role` in the Space) wake the agent:
+/// the `respond_to` rule (only when `role` is known), then `trigger_modes`, then `blocked`. Pure.
+/// An ABSENT field is the legacy default; a PRESENT one is a human decision and binds. Not an
+/// authorization grant: Control still decides whether the caller may post or run at all.
+pub(crate) fn evaluate_agent_wake_policy(
+    agent: &Value,
+    role: Option<&str>,
+    caller_subject: &str,
+) -> Result<(), WakeRefusal> {
+    if let (Some(role), Some(respond_to)) = (
+        role,
+        agent
+            .get("respond_to")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty()),
+    ) {
+        let subjects: Vec<&str> = agent
+            .get("respond_to_subjects")
+            .and_then(Value::as_array)
+            .map(|items| items.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        if !respond_to_allows(respond_to, &subjects, role, caller_subject) {
+            return Err(WakeRefusal::RespondToDenied);
+        }
+    }
+    if let Some(trigger_modes) = agent.get("trigger_modes").and_then(Value::as_array) {
+        if !trigger_modes
+            .iter()
+            .any(|mode| mode.as_str() == Some("mention"))
+        {
+            return Err(WakeRefusal::MentionNotEnabled);
+        }
+    }
+    if agent.get("approval_mode").and_then(Value::as_str) == Some("blocked") {
+        return Err(WakeRefusal::InvocationBlocked);
+    }
+    Ok(())
+}
+
+/// Applies [`evaluate_agent_wake_policy`] on the mention path. An ABSENT `respond_to` is today's
 /// behaviour (no extra check, no extra Control read); a PRESENT one is a human decision and
 /// binds. Runs on every entry that shares the injector (chat stream and AG-UI).
-async fn enforce_respond_to(
+async fn enforce_wake_policy(
     state: &AppState,
     user: &AuthenticatedUser,
     org_id: &str,
     space_ref: &str,
     agent: &Value,
 ) -> Result<(), (StatusCode, Json<Value>)> {
-    let Some(respond_to) = agent
+    let has_respond_to = agent
         .get("respond_to")
         .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-    else {
-        return Ok(());
+        .is_some_and(|value| !value.is_empty());
+    let role = if has_respond_to {
+        Some(resolve_space_role(state, user, org_id, space_ref).await?)
+    } else {
+        None
     };
-    let role = resolve_space_role(state, user, org_id, space_ref).await?;
-    let subjects: Vec<&str> = agent
-        .get("respond_to_subjects")
-        .and_then(Value::as_array)
-        .map(|items| items.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-    if respond_to_allows(respond_to, &subjects, &role, &user.user_id) {
-        return Ok(());
-    }
-    Err((
-        StatusCode::FORBIDDEN,
-        Json(error(
-            "agent_respond_to_denied",
-            "This agent's wake policy does not let you wake it here.",
-        )),
-    ))
+    evaluate_agent_wake_policy(agent, role.as_deref(), &user.user_id).map_err(WakeRefusal::into_reply)
 }
 
 /// Enforces the mentioned binding's policy on the outbound turn.
@@ -4828,36 +5141,18 @@ fn apply_mention_binding_policy(
     object: &mut Map<String, Value>,
     agent: &Value,
 ) -> Result<(), (StatusCode, Json<Value>)> {
-    if let Some(trigger_modes) = agent.get("trigger_modes").and_then(Value::as_array) {
-        let mentionable = trigger_modes
-            .iter()
-            .any(|mode| mode.as_str() == Some("mention"));
-        if !mentionable {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(error(
-                    "agent_mention_not_enabled",
-                    "This agent's binding does not allow @-mention invocation.",
-                )),
-            ));
-        }
-    }
+    // WS08-S4: the refusals (`trigger_modes` without "mention", `blocked`) are decided by the pure
+    // evaluator the mention planner also uses; no role is passed, so `respond_to` (which needs the
+    // caller's role) was already applied by `enforce_wake_policy`.
+    evaluate_agent_wake_policy(agent, None, "").map_err(WakeRefusal::into_reply)?;
 
     let approval_mode = agent
         .get("approval_mode")
         .and_then(Value::as_str)
         .unwrap_or("require_confirmation");
     match approval_mode {
-        "blocked" => {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(error(
-                    "agent_invocation_blocked",
-                    "This agent's binding blocks invocation in this Space.",
-                )),
-            ));
-        }
-        "auto" => {}
+        // "blocked" was refused above.
+        "auto" | "blocked" => {}
         _ => {
             object.insert("plan_mode".to_owned(), json!(false));
             // An execute turn is an autonomous run too; the model gateway
@@ -5190,6 +5485,13 @@ async fn space_context(
                     "tool_policy_editor": state.space_features.tool_policy_editor,
                     "attention": state.space_features.attention_api
                         && state.space_features.attention_ui,
+                    // WS08-S4: mentions and addressed wake. The picker follows the record flag;
+                    // a wake needs the records it answers, so both flags must be on.
+                    "mention_records": state.space_features.mention_records_api,
+                    "mention_picker": state.space_features.mention_records_api,
+                    "addressed_wake": state.space_features.addressed_wake_api
+                        && state.space_features.mention_records_api,
+                    "agent_wake_policy": state.space_features.agent_wake_policy_api,
                     "room_files": files::features_json(&state),
                     // WS15-S7 (R5): the timeline and composer rollout controls. `system_entries` and
                     // `link_previews` stay false until WS15-S11 / WS15-S10 add their flags.
@@ -5203,6 +5505,8 @@ async fn space_context(
                 },
                 "limits": {
                     "post_max_chars": human_posts::POST_MAX_CHARS,
+                    "max_people_mentions": mentions::MAX_PEOPLE_MENTIONS,
+                    "max_agent_mentions": mentions::MAX_AGENT_MENTIONS,
                     "room_files": files::limits_json(),
                     "tail_window_turns": timeline::TAIL_WINDOW_TURNS,
                 },

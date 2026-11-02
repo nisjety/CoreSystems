@@ -62,6 +62,7 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
 use super::denial::{typed_response, OP_POST};
+use super::mentions;
 use super::room_admin::{is_error_code, MAX_RELAYED_DETAILS, MAX_RELAYED_MESSAGE_CHARS};
 use crate::{
     config::AppState,
@@ -174,11 +175,16 @@ fn thread_not_found() -> Reply {
 struct PostBody {
     content: String,
     client_send_id: String,
+    /// WS08-S4: `{people:[...], agents:[...]}`. Shape and meaning are checked by `plan_mentions`;
+    /// with `SPACE_MENTION_RECORDS_API` off it is ignored and the post stands.
+    #[serde(default)]
+    mentions: Option<Value>,
 }
 
 struct ValidPost {
     content: String,
     client_send_id: String,
+    mentions: Option<Value>,
 }
 
 /// `^[A-Za-z0-9_-]{16,64}$`.
@@ -209,6 +215,7 @@ fn parse_post(body: &Value) -> Result<ValidPost, Reply> {
     Ok(ValidPost {
         content: content.to_owned(),
         client_send_id: parsed.client_send_id,
+        mentions: parsed.mentions.filter(|mentions| !mentions.is_null()),
     })
 }
 
@@ -316,13 +323,18 @@ async fn submit_post_limited(
         Err(cause) => return delegated_auth_unavailable(cause),
     };
     let send_key = format!("{SEND_KEY_PREFIX}{}", post.client_send_id);
+    let planned = match plan_post_mentions(state, user, headers, &org_id, space_ref, thread_id, &post).await
+    {
+        Ok(planned) => planned,
+        Err(reply) => return reply,
+    };
 
     let Some(thread_id) = thread_id else {
         let context = match mint_create_decision(state, user, &org_id, space_ref, &send_key).await {
             Ok(context) => context,
             Err(reply) => return reply,
         };
-        let request = json!({
+        let mut request = json!({
             "space_context": context,
             "session_key": send_key,
             "first_message": {
@@ -331,6 +343,9 @@ async fn submit_post_limited(
                 "client_message_id": send_key,
             },
         });
+        if let Some(planned) = planned.as_ref().filter(|planned| !planned.entries.is_empty()) {
+            request["first_message"]["mentions"] = Value::Array(planned.entries.clone());
+        }
         let url = format!("{}/v1/threads", state.model_gateway_url);
         let (status, Json(response)) = proxy_model_json_with_session(
             state,
@@ -342,7 +357,12 @@ async fn submit_post_limited(
             user,
         )
         .await;
-        let reply = map_model_response(status, response, Some(space_ref));
+        let recorded = mentions::recorded_from_receipt(&response);
+        let reply = attach_mentions(
+            map_model_response(status, response, Some(space_ref)),
+            planned.as_ref(),
+            recorded,
+        );
         if dm_space && reply.0.is_success() {
             super::dm::resurface(state, user, &org_id, space_ref).await;
         }
@@ -364,12 +384,15 @@ async fn submit_post_limited(
                 Ok(context) => context,
                 Err(reply) => return reply,
             };
-        let request = json!({
+        let mut request = json!({
             "content": post.content,
             "post_kind": "post",
             "client_message_id": send_key,
             "space_append_context": context,
         });
+        if let Some(planned) = planned.as_ref().filter(|planned| !planned.entries.is_empty()) {
+            request["mentions"] = Value::Array(planned.entries.clone());
+        }
         let (status, Json(response)) = proxy_model_json_with_session(
             state,
             Method::POST,
@@ -386,7 +409,12 @@ async fn submit_post_limited(
         if stale && attempt == 0 {
             continue;
         }
-        let reply = map_model_response(status, response, None);
+        let recorded = mentions::recorded_from_receipt(&response);
+        let reply = attach_mentions(
+            map_model_response(status, response, None),
+            planned.as_ref(),
+            recorded,
+        );
         if dm_space && reply.0.is_success() {
             super::dm::resurface(state, user, &org_id, space_ref).await;
         }
@@ -397,6 +425,113 @@ async fn submit_post_limited(
         "space_authority_stale",
         "The Space authority changed; try again.",
     )
+}
+
+/// The mention plan of one post, ready to forward and to report (WS08-S4).
+struct PlannedMentions {
+    /// The `mentions` entries forwarded to model-gateway (Session Core's `MentionInput`).
+    entries: Vec<Value>,
+    /// `data.mentions.rejected`.
+    rejected: Vec<Value>,
+}
+
+/// Plans the post's `mentions` (WS08-S4). `Ok(None)` when the post carries none or the flag is
+/// off. A malformed set is the one hard refusal (400 `invalid_mentions`); every other problem is a
+/// soft per-ref `rejected` entry, because a mention never fails a post. When the roster or the
+/// poster's role cannot be read the post still goes, with no mentions, and each requested ref is
+/// reported `mention_unavailable` (DEVIATION: the code is outside the plan's closed set).
+async fn plan_post_mentions(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    org_id: &str,
+    space_ref: &str,
+    thread_id: Option<&str>,
+    post: &ValidPost,
+) -> Result<Option<PlannedMentions>, Reply> {
+    let Some(raw) = post.mentions.as_ref() else {
+        return Ok(None);
+    };
+    if !state.space_features.mention_records_api {
+        return Ok(None);
+    }
+    let input = mentions::MentionsInput::parse(raw).map_err(invalid_mentions)?;
+    if input.is_empty() {
+        return Ok(None);
+    }
+    let unavailable = || PlannedMentions {
+        entries: Vec::new(),
+        rejected: input
+            .people
+            .iter()
+            .map(|person| person.subject_id.as_str())
+            .chain(input.agents.iter().map(|agent| agent.subject_id.as_str()))
+            .map(|subject_id| json!({ "subject_id": subject_id, "code": "mention_unavailable" }))
+            .collect(),
+    };
+    let Ok(members) = super::fetch_space_roster_members(state, user, org_id, space_ref).await else {
+        return Ok(Some(unavailable()));
+    };
+    let Ok(role) = super::resolve_space_role(state, user, org_id, space_ref).await else {
+        return Ok(Some(unavailable()));
+    };
+    let agents = if input.agents.is_empty() {
+        Vec::new()
+    } else {
+        super::compose_space_agents_from_members(state, user, org_id, space_ref, &members).await
+    };
+    // A new thread is the poster's own. In an existing one only the owner's runs can start, and the
+    // owner-bound by-id read shows the thread to its owner alone: not visible reads as "not theirs".
+    let thread_owner = match thread_id {
+        None => mentions::ThreadOwner::Invoker,
+        Some(_) if input.agents.is_empty() => mentions::ThreadOwner::Unknown,
+        Some(thread_id) => match space_scope_for_thread(state, user, headers, thread_id).await {
+            Ok(SpaceThreadScope::NotVisible) => mentions::ThreadOwner::Other,
+            Ok(_) => mentions::ThreadOwner::Invoker,
+            Err(_) => mentions::ThreadOwner::Unknown,
+        },
+    };
+    let invoker = mentions::Invoker {
+        subject_id: &user.user_id,
+        role: &role,
+    };
+    let plan = mentions::plan_mentions(&post.content, &input, &members, &agents, &invoker, thread_owner)
+        .map_err(invalid_mentions)?;
+    Ok(Some(PlannedMentions {
+        entries: plan.session_entries(),
+        rejected: plan.rejected_json(),
+    }))
+}
+
+/// 400 `invalid_mentions` with the closed `details.reason`.
+fn invalid_mentions(reason: mentions::InvalidMentions) -> Reply {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(error_with_details(
+            "invalid_mentions",
+            "The mentions of this post are not valid.",
+            json!({ "reason": reason.reason() }),
+        )),
+    )
+}
+
+/// Adds `data.mentions:{recorded, rejected}` to a successful post answer when the post carried
+/// mentions. `recorded` is what Session Core says it recorded (never the plan), so a switch that is
+/// off reports nothing as recorded.
+fn attach_mentions(mut reply: Reply, planned: Option<&PlannedMentions>, recorded: Vec<Value>) -> Reply {
+    let Some(planned) = planned else {
+        return reply;
+    };
+    if !reply.0.is_success() {
+        return reply;
+    }
+    if let Some(data) = reply.1 .0.get_mut("data").and_then(Value::as_object_mut) {
+        data.insert(
+            "mentions".to_owned(),
+            json!({ "recorded": recorded, "rejected": planned.rejected }),
+        );
+    }
+    reply
 }
 
 /// A model-gateway failure body as the browser envelope. A typed body

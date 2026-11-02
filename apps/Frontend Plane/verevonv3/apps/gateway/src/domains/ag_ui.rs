@@ -90,13 +90,15 @@ async fn stream_agent_ui(
         return shared::invalid_chat_request(message).into_response();
     }
     let org_id = crate::upstream::authorized_org_id(&state, &user).await;
-    if let Err((status, body)) = crate::domains::spaces::inject_mentioned_space_agent_persona(
+    // WS08-S4: same wake handling as native chat (the injector chain is shared).
+    let wake_intent = match crate::domains::spaces::inject_mentioned_space_agent(
         &state, &user, &org_id, &mut body,
     )
     .await
     {
-        return (status, body).into_response();
-    }
+        Ok(intent) => intent,
+        Err((status, body)) => return (status, body).into_response(),
+    };
     if let Err((status, body)) =
         crate::domains::spaces::inject_authored_instructions(&state, &user, &org_id, &mut body)
             .await
@@ -109,9 +111,14 @@ async fn stream_agent_ui(
     {
         return (status, body).into_response();
     }
-    if let Err((status, body)) =
-        crate::domains::spaces::inject_personal_thread_context(&state, &user, &org_id, &mut body)
-            .await
+    if let Err((status, body)) = crate::domains::spaces::inject_personal_thread_context_for_wake(
+        &state,
+        &user,
+        &org_id,
+        &mut body,
+        wake_intent.as_ref(),
+    )
+    .await
     {
         return (status, body).into_response();
     }

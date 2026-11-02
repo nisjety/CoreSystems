@@ -178,6 +178,18 @@ pub(crate) struct SpaceFeatureFlags {
     /// rollout control, never an authorization input: Control's live role (owner or manager) decides
     /// who may write it, and it moves no content, so Zero Data Retention organizations are unaffected.
     pub(crate) agent_wake_policy_api: bool,
+    /// `SPACE_ADDRESSED_WAKE_API` (WS08-S4): the wake mode of `POST /api/v1/chat/stream` and
+    /// `/api/v1/ag-ui/stream` (`wake:{message_id, client_wake_id}`: one run started from the caller's
+    /// own stored post for one bound agent) and `features.addressed_wake`. Off answers 404
+    /// `space_addressed_wake_disabled` to a body that carries `wake`; the legacy `mentioned_agent_ref`
+    /// turn is unaffected. A rollout control, never an authorization input: Control's signed
+    /// `model.run.wake` decision and Session Core's verifier decide, and a Zero Data Retention caller
+    /// is refused (typed 412) before Control is called.
+    pub(crate) addressed_wake_api: bool,
+    /// `SPACE_MENTION_RECORDS_API` (WS08-S4): `mentions` on the human post routes (planned by
+    /// `plan_mentions`, recorded by Session Core) and `features.mention_records`. Off ignores a
+    /// `mentions` key (the post stands). A rollout control, never an authorization input.
+    pub(crate) mention_records_api: bool,
     /// `SPACE_APPROVAL_SCOPES_ENABLED` (WS10-S4): the standing-rule half of a Space approval decision
     /// (`scope: always` on `POST /api/v1/spaces/{space_ref}/approvals/{approval_id}/decide`) and the
     /// `approval-grants` and `approval-policy` routes. Off answers 404 `feature_disabled` there and a
@@ -417,6 +429,8 @@ impl SpaceFeatureFlags {
     pub(crate) fn from_env() -> Self {
         Self {
             agent_wake_policy_api: space_flag("SPACE_AGENT_WAKE_POLICY_API"),
+            addressed_wake_api: space_flag("SPACE_ADDRESSED_WAKE_API"),
+            mention_records_api: space_flag("SPACE_MENTION_RECORDS_API"),
             approval_scopes: space_flag("SPACE_APPROVAL_SCOPES_ENABLED"),
             append_retrieval: env::var("GATEWAY_SPACE_APPEND_RETRIEVAL").is_ok_and(|value| value == "true"),
             chat_locale_hint: space_flag("CHAT_LOCALE_HINT"),

@@ -98,7 +98,9 @@ async fn stream_chat(
     }
     // Must run before `inject_personal_thread_context`, which is the call
     // that removes the Space reference fields this one still needs to read.
-    if let Err((status, body)) = crate::domains::spaces::inject_mentioned_space_agent_persona(
+    // WS08-S4: also yields the wake the body asked for (`wake`), verified against the binding
+    // policy; `None` for every legacy turn.
+    let wake_intent = match crate::domains::spaces::inject_mentioned_space_agent(
         &state,
         &user,
         &org_id,
@@ -106,8 +108,9 @@ async fn stream_chat(
     )
     .await
     {
-        return (status, body).into_response();
-    }
+        Ok(intent) => intent,
+        Err((status, body)) => return (status, body).into_response(),
+    };
     // ADR-0003 — same ordering requirement as the mention persona above: this
     // only peeks at `space_ref` for the Space layer, so it must run before
     // `inject_personal_thread_context` consumes it.
@@ -128,11 +131,12 @@ async fn stream_chat(
     {
         return (status, body).into_response();
     }
-    if let Err((status, body)) = crate::domains::spaces::inject_personal_thread_context(
+    if let Err((status, body)) = crate::domains::spaces::inject_personal_thread_context_for_wake(
         &state,
         &user,
         &org_id,
         &mut outbound_body,
+        wake_intent.as_ref(),
     )
     .await
     {
