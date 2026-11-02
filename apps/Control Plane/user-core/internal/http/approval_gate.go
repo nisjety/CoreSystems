@@ -56,8 +56,9 @@ func (s *Server) resolveApprovalRun(c *gin.Context, runID, orgID string) (spaces
 // issueToolGateView answers what Execution Core may fold into its gate for one
 // run: the Space ceiling and whether standing rules can apply to this requester
 // right now. It carries no content and is allowed under ZDR (grants are simply
-// reported disabled). Per-tool levels join in WS10-S5a; `tools` is empty until
-// then, which means "no Control-side level", never "allow".
+// reported disabled). `tools` holds the merged per-tool levels of the Space
+// ceiling and the named agent's layer (WS10-S5a): a tool not listed takes the
+// "*" entry, else allow, and allow never loosens a default gate.
 func (s *Server) issueToolGateView(c *gin.Context) {
 	var request approvalRunRequest
 	if !decodeApprovalBody(c, &request) {
@@ -81,6 +82,19 @@ func (s *Server) issueToolGateView(c *gin.Context) {
 		writeApprovalError(c, err)
 		return
 	}
+	// The agent layer is selected by the agent Execution Core names; it can only
+	// add restrictions, so naming another agent of this Space reveals no authority.
+	agentID := strings.TrimSpace(request.AgentSubjectID)
+	if len(agentID) > 200 {
+		abortTypedError(c, http.StatusBadRequest, "invalid_request", "agent_subject_id is oversized", nil)
+		return
+	}
+	tools, err := s.spaceRepo.MergedToolPolicyFor(c.Request.Context(), authority.SpaceRef, authority.OrgID, agentID)
+	if err != nil {
+		// Fail closed: the gate treats an unavailable view as ask with grants off.
+		abortTypedError(c, http.StatusServiceUnavailable, "approval_authority_unavailable", "Tool policy is unavailable", nil)
+		return
+	}
 	disabledReason := ""
 	maxScope := policy.MaxGrantScope
 	if useErr := evidence.ValidateForApprovalRuleUse(); useErr != nil {
@@ -94,8 +108,9 @@ func (s *Server) issueToolGateView(c *gin.Context) {
 		"run_id":                         authority.RunID,
 		"space_ref":                      authority.SpaceRef,
 		"policy_revision":                policy.Revision,
-		"policy_digest":                  spaces.ApprovalGateViewDigest(policy),
-		"tools":                          gin.H{},
+		"policy_digest":                  spaces.GateViewDigestWithTools(policy, tools),
+		"agent_subject_id":               agentID,
+		"tools":                          tools.Tools,
 		"max_grant_scope":                maxScope,
 		"default_addressee_kind":         policy.DefaultAddresseeKind,
 		"quarantine_mode":                policy.QuarantineMode,
