@@ -30,6 +30,11 @@ use crate::state::{RunStatus, StateStore};
 /// The tool whose actions the in-loop gate holds, named on the approval's cause.
 const BROWSER_AGENT_TOOL: &str = "browser_agent";
 
+/// `BrowserRunPaused.reason` when a person took the agent tab (WS8.G).
+pub const PAUSED_REASON_USER_TOOK_OVER: &str = "user_took_over";
+/// `BrowserRunResumed.reason` when the person gave the tab back (WS8.G).
+pub const RESUMED_REASON_CONTROL_RETURNED: &str = "control_returned";
+
 /// Publishes browser-agent events to session-core's orchestration broadcast.
 ///
 /// Holds the shared session-core channel; a fresh client is cheaply cloned per
@@ -212,6 +217,8 @@ impl BrowserEventSink for OrchestrationEventSink {
             orchestration_event::Event::BrowserRunPaused(orchestration_event::BrowserRunPaused {
                 run_id: config.run_id.clone(),
                 plan_id: config.plan_id.clone(),
+                // A user-initiated pause or resume carries no reason.
+                reason: String::new(),
             });
         self.publish(&config.run_id, event).await;
     }
@@ -224,7 +231,63 @@ impl BrowserEventSink for OrchestrationEventSink {
             orchestration_event::Event::BrowserRunResumed(orchestration_event::BrowserRunResumed {
                 run_id: config.run_id.clone(),
                 plan_id: config.plan_id.clone(),
+                // A user-initiated pause or resume carries no reason.
+                reason: String::new(),
             });
+        self.publish(&config.run_id, event).await;
+    }
+
+    /// WS8.G: the person took the agent tab of an attached run. The same
+    /// `BrowserRunPaused` as a user pause, told apart by its reason. The tab id
+    /// is not on the event (the proto carries the run's ids only).
+    async fn paused_by_user(&self, config: &PlanConfig, _tab_id: &str) {
+        if config.run_id.is_empty() {
+            return;
+        }
+        let event =
+            orchestration_event::Event::BrowserRunPaused(orchestration_event::BrowserRunPaused {
+                run_id: config.run_id.clone(),
+                plan_id: config.plan_id.clone(),
+                reason: PAUSED_REASON_USER_TOOK_OVER.to_owned(),
+            });
+        self.publish(&config.run_id, event).await;
+    }
+
+    /// WS8.G: the person gave the agent tab back; the run goes on.
+    async fn resumed_after_takeover(&self, config: &PlanConfig, _tab_id: &str) {
+        if config.run_id.is_empty() {
+            return;
+        }
+        let event =
+            orchestration_event::Event::BrowserRunResumed(orchestration_event::BrowserRunResumed {
+                run_id: config.run_id.clone(),
+                plan_id: config.plan_id.clone(),
+                reason: RESUMED_REASON_CONTROL_RETURNED.to_owned(),
+            });
+        self.publish(&config.run_id, event).await;
+    }
+
+    /// WS8.G (D4): the one-time audit that an attached run shares the person's
+    /// cookie jar. Ids only: never a URL or a page title.
+    async fn attach_shared_jar(
+        &self,
+        config: &PlanConfig,
+        session_run_id: &str,
+        attach_id: &str,
+        tab_id: &str,
+    ) {
+        if config.run_id.is_empty() {
+            return;
+        }
+        let event = orchestration_event::Event::BrowserAttachSharedJar(
+            orchestration_event::BrowserAttachSharedJar {
+                run_id: config.run_id.clone(),
+                plan_id: config.plan_id.clone(),
+                attach_id: attach_id.to_owned(),
+                session_run_id: session_run_id.to_owned(),
+                tab_id: tab_id.to_owned(),
+            },
+        );
         self.publish(&config.run_id, event).await;
     }
 
@@ -1009,6 +1072,62 @@ mod tests {
         assert!(
             cause.call_digest.is_empty() && !cause.action_key.contains("example.com"),
             "no URL or selector reaches the cause: {cause:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn takeover_pause_resume_and_shared_jar_carry_reasons_and_ids_only() {
+        let recorded = Arc::default();
+        let channel = spawn_mock(NeverResolvingOrchestration {
+            recorded: Arc::clone(&recorded),
+            ..Default::default()
+        })
+        .await;
+        let sink = OrchestrationEventSink::new(channel, None).with_verified_bearer("test-bearer");
+        let config = test_config();
+
+        sink.run_paused(&config).await;
+        sink.paused_by_user(&config, "tab_9").await;
+        sink.resumed_after_takeover(&config, "tab_9").await;
+        sink.attach_shared_jar(&config, "run_user", "att_1", "tab_9").await;
+        // No run, no run-scoped event.
+        let no_run = PlanConfig {
+            run_id: String::new(),
+            ..test_config()
+        };
+        sink.attach_shared_jar(&no_run, "run_user", "att_1", "tab_9").await;
+
+        let sent = recorded.lock().unwrap();
+        let events: Vec<_> = sent
+            .iter()
+            .filter_map(|request| request.event.as_ref()?.event.clone())
+            .collect();
+        assert_eq!(events.len(), 4);
+        let orchestration_event::Event::BrowserRunPaused(user_pause) = &events[0] else {
+            panic!("{:?}", events[0]);
+        };
+        assert_eq!(user_pause.reason, "", "a user pause carries no reason");
+        let orchestration_event::Event::BrowserRunPaused(took_over) = &events[1] else {
+            panic!("{:?}", events[1]);
+        };
+        assert_eq!(took_over.reason, "user_took_over");
+        assert_eq!(took_over.run_id, config.run_id);
+        let orchestration_event::Event::BrowserRunResumed(given_back) = &events[2] else {
+            panic!("{:?}", events[2]);
+        };
+        assert_eq!(given_back.reason, "control_returned");
+        let orchestration_event::Event::BrowserAttachSharedJar(jar) = &events[3] else {
+            panic!("{:?}", events[3]);
+        };
+        assert_eq!(
+            jar,
+            &orchestration_event::BrowserAttachSharedJar {
+                run_id: config.run_id.clone(),
+                plan_id: config.plan_id.clone(),
+                attach_id: "att_1".to_owned(),
+                session_run_id: "run_user".to_owned(),
+                tab_id: "tab_9".to_owned(),
+            }
         );
     }
 }
