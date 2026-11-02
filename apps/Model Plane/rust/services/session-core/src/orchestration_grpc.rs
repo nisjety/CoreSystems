@@ -3247,6 +3247,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
+            let created_new = created.is_some();
             // Counted when a row was inserted, so a retried request that collapses onto
             // an existing approval is not counted twice.
             if let (Some(_), Some(code)) = (&created, cause_code) {
@@ -3273,6 +3274,36 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             }
             .ok_or_else(|| Status::internal("approval vanished after insert"))?;
             let approval = approval_from_row(&row);
+
+            // E3.2-d: the approval-requested signal, for a request that inserted a row (a
+            // retried one that collapsed onto an existing approval raises none). Best effort:
+            // a notification that cannot be queued never fails the approval itself.
+            if created_new && crate::audit_publisher::approval_notify_enabled() {
+                if let Err(error) = store::enqueue_approval_requested(
+                    &self.pool,
+                    &crate::audit_publisher::ApprovalRequestedSignal {
+                        org_id: &row.org_id,
+                        user_id: &row.user_id,
+                        run_id: &row.run_id,
+                        approval_id: &row.id,
+                        kind: &row.kind,
+                        tool: &row.metadata["cause"]["tool"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned(),
+                        cause_code: &row.metadata["cause"]["code"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned(),
+                        zdr: caller.zdr(),
+                        occurred_at: Utc::now(),
+                    },
+                )
+                .await
+                {
+                    warn!(error = %error, "approval_requested signal not queued");
+                }
+            }
 
             // Operator surfaces (run-event feed, snapshot) consume both: the
             // approval entering REQUESTED and the run pausing for it.
@@ -3641,6 +3672,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                     source,
                     scope,
                     audit: approval_audit_events_enabled(),
+                    authz_audit: crate::audit_publisher::authz_decision_audit_enabled(),
                 },
             )
             .await

@@ -1004,6 +1004,10 @@ pub struct DecisionRecord<'a> {
     pub source: &'a str,
     pub scope: &'a str,
     pub audit: bool,
+    /// E3.2-a: also enqueue one content-free `authz_decision` row (the deciding principal, the
+    /// decision, the scope and the host class). Read by the caller from
+    /// `SESSION_CORE_AUTHZ_DECISION_AUDIT`, default off.
+    pub authz_audit: bool,
 }
 
 /// The record of a caller that states no source: `unattributed`, one call only, not audited.
@@ -1011,6 +1015,7 @@ const UNATTRIBUTED_DECISION: DecisionRecord<'static> = DecisionRecord {
     source: "unattributed",
     scope: "once",
     audit: false,
+    authz_audit: false,
 };
 
 pub async fn decide_approval(
@@ -1135,6 +1140,44 @@ pub async fn decide_approval_recorded(
     } else {
         None
     };
+
+    if updated && record.authz_audit {
+        let (_, run_id, owner_user_id, metadata): (String, String, String, JsonValue) =
+            sqlx::query_as(APPROVAL_AUDIT_CONTEXT_SQL)
+                .bind(id)
+                .bind(org_id)
+                .fetch_one(&mut *transaction)
+                .await?;
+        // A run that keeps no state (or whose class cannot be read) is reported as ZDR, so the
+        // row carries ids and words only and no host class.
+        let retention: Option<String> = sqlx::query_scalar(APPROVAL_RUN_RETENTION_SQL)
+            .bind(id)
+            .bind(org_id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+        let zdr = retention.as_deref() != Some("persistent");
+        let body = crate::audit_publisher::build_authz_decision_body(
+            &crate::audit_publisher::AuthzDecisionAudit {
+                org_id,
+                owner_user_id: &owner_user_id,
+                actor: decided_by,
+                run_id: &run_id,
+                approval_id: id,
+                decision: status,
+                scope: record.scope,
+                decision_source: record.source,
+                host_class: metadata["host_class"].as_str().unwrap_or_default(),
+                zdr,
+                occurred_at: Utc::now(),
+            },
+        );
+        sqlx::query(INSERT_APPROVAL_AUDIT_OUTBOX_SQL)
+            .bind(crate::audit_publisher::authz_decision_event_id(id, status))
+            .bind(crate::audit_publisher::SUBJECT_MODEL_AUTHZ_DECISION)
+            .bind(&body)
+            .execute(&mut *transaction)
+            .await?;
+    }
 
     if updated && record.audit {
         let (kind, run_id, owner_user_id, metadata): (String, String, String, JsonValue) =
@@ -1546,6 +1589,11 @@ const INSERT_APPROVAL_DELIVERY_OUTBOX_SQL: &str = "INSERT INTO approval_delivery
      RETURNING delivery_id";
 
 /// The approval fields an audit row is built from, read in the decision's own transaction.
+/// The retention class of the run an approval belongs to (E3.2-a). No row reads as not
+/// persistent, so a missing run is treated as ZDR.
+const APPROVAL_RUN_RETENTION_SQL: &str = "SELECT r.retention_class FROM approvals a \
+     JOIN runs r ON r.id = a.run_id WHERE a.id = $1 AND a.org_id = $2";
+
 const APPROVAL_AUDIT_CONTEXT_SQL: &str = "SELECT kind, run_id, user_id, metadata FROM approvals \
      WHERE id = $1 AND org_id = $2";
 
@@ -1566,6 +1614,28 @@ fn cause_text(metadata: &JsonValue, key: &str) -> String {
         .as_str()
         .unwrap_or_default()
         .to_owned()
+}
+
+/// Enqueue the approval-requested signal for a freshly created approval (E3.2-d). One row per
+/// approval: a replayed request names the same event id and is ignored.
+///
+/// # Errors
+///
+/// Returns an error if the insert fails.
+pub async fn enqueue_approval_requested(
+    pool: &Pool,
+    signal: &crate::audit_publisher::ApprovalRequestedSignal<'_>,
+) -> Result<()> {
+    let body = crate::audit_publisher::build_approval_requested_body(signal);
+    sqlx::query(INSERT_APPROVAL_AUDIT_OUTBOX_SQL)
+        .bind(crate::audit_publisher::approval_requested_event_id(
+            signal.approval_id,
+        ))
+        .bind(crate::audit_publisher::SUBJECT_MODEL_APPROVAL_REQUESTED)
+        .bind(&body)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 /// List approvals for a run.
@@ -2985,6 +3055,16 @@ mod approval_decision_db_tests {
 
     /// One requested provider-write approval whose cause is stated, in a fresh org.
     async fn requested_approval(pool: &Pool, tag: &str) -> (String, String, String) {
+        requested_approval_in_class(pool, tag, "persistent").await
+    }
+
+    /// [`requested_approval`] on a run stamped with `retention_class` (the receipt is immutable
+    /// afterwards, so the class has to be named when the run is seeded).
+    async fn requested_approval_in_class(
+        pool: &Pool,
+        tag: &str,
+        retention_class: &str,
+    ) -> (String, String, String) {
         let sfx = mp_ids::new_ulid();
         let (thread_id, run_id, org, user, id) = (
             format!("ad-t-{tag}-{sfx}"),
@@ -3000,11 +3080,12 @@ mod approval_decision_db_tests {
             .execute(pool)
             .await
             .expect("seed thread");
-        sqlx::query("INSERT INTO runs (id,thread_id,goal,org_id,user_id) VALUES ($1,$2,'g',$3,$4)")
+        sqlx::query("INSERT INTO runs (id,thread_id,goal,org_id,user_id,retention_class) VALUES ($1,$2,'g',$3,$4,$5)")
             .bind(&run_id)
             .bind(&thread_id)
             .bind(&org)
             .bind(&user)
+            .bind(retention_class)
             .execute(pool)
             .await
             .expect("seed run");
@@ -3055,6 +3136,7 @@ mod approval_decision_db_tests {
             source: "user",
             scope: "once",
             audit: true,
+            authz_audit: false,
         };
         let write = decide_approval_recorded(
             &pool,
@@ -3089,6 +3171,160 @@ mod approval_decision_db_tests {
         assert!(payload.get("decision_reason").is_none());
     }
 
+    async fn authz_payload(pool: &Pool, approval_id: &str, decision: &str) -> Option<serde_json::Value> {
+        sqlx::query_scalar("SELECT payload FROM session_audit_outbox WHERE event_id = $1")
+            .bind(crate::audit_publisher::authz_decision_event_id(approval_id, decision))
+            .fetch_optional(pool)
+            .await
+            .expect("read authz row")
+    }
+
+    /// E3.2-a: an authorization decision is enqueued in the decision's own transaction, names the
+    /// deciding principal and the host class, and a replay or the switch off writes nothing.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn authz_decision_row_is_written_once_in_the_decision_transaction() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let (id, org, user) = requested_approval(&pool, "authz").await;
+        sqlx::query("UPDATE approvals SET metadata = metadata || '{\"host_class\":\"sensitive\"}'::jsonb WHERE id = $1")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .expect("stamp host class");
+        let record = DecisionRecord {
+            source: "user",
+            scope: "once",
+            audit: false,
+            authz_audit: true,
+        };
+        for attempt in 0..2 {
+            let write = decide_approval_recorded(
+                &pool,
+                &id,
+                &org,
+                Some(user.as_str()),
+                "granted",
+                "principal-7",
+                "ok",
+                &record,
+            )
+            .await
+            .expect("decide");
+            assert_eq!(write.updated, attempt == 0, "the replay changes nothing");
+        }
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM session_audit_outbox WHERE event_id = $1",
+        )
+        .bind(crate::audit_publisher::authz_decision_event_id(&id, "granted"))
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+        assert_eq!(count, 1, "a replay enqueues nothing");
+        let payload = authz_payload(&pool, &id, "granted").await.expect("row");
+        assert_eq!(payload["event"], "authz_decision");
+        assert_eq!(payload["details"]["decided_by"], "principal-7");
+        assert_eq!(payload["details"]["decision"], "granted");
+        assert_eq!(payload["details"]["scope"], "once");
+        assert_eq!(payload["details"]["host_class"], "sensitive");
+        assert_eq!(payload["details"]["zdr"], false);
+        assert!(payload.get("decision_reason").is_none());
+        let subject: String =
+            sqlx::query_scalar("SELECT subject FROM session_audit_outbox WHERE event_id = $1")
+                .bind(crate::audit_publisher::authz_decision_event_id(&id, "granted"))
+                .fetch_one(&pool)
+                .await
+                .expect("subject");
+        assert_eq!(subject, crate::audit_publisher::SUBJECT_MODEL_AUTHZ_DECISION);
+        // The WS13 `approval_decided` row is a separate switch and was not asked for.
+        assert_eq!(audit_rows(&pool, &id, "granted").await, 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn authz_decision_is_off_by_default_and_omits_the_host_class_for_a_zdr_run() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        // Switch off: nothing is written.
+        let (id, org, user) = requested_approval(&pool, "authz-off").await;
+        let off = DecisionRecord {
+            source: "user",
+            scope: "once",
+            audit: false,
+            authz_audit: false,
+        };
+        decide_approval_recorded(&pool, &id, &org, Some(user.as_str()), "denied", &user, "no", &off)
+            .await
+            .expect("decide");
+        assert!(authz_payload(&pool, &id, "denied").await.is_none());
+
+        // A zero-retention run: ids and words only, no host class.
+        let (id, org, user) = requested_approval_in_class(&pool, "authz-zdr", "zdr").await;
+        sqlx::query("UPDATE approvals SET metadata = metadata || '{\"host_class\":\"sensitive\"}'::jsonb WHERE id = $1")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .expect("stamp host class");
+        let on = DecisionRecord {
+            source: "user",
+            scope: "once",
+            audit: false,
+            authz_audit: true,
+        };
+        decide_approval_recorded(&pool, &id, &org, Some(user.as_str()), "granted", &user, "ok", &on)
+            .await
+            .expect("decide");
+        let payload = authz_payload(&pool, &id, "granted").await.expect("row");
+        assert_eq!(payload["details"]["zdr"], true);
+        assert!(payload["details"].get("host_class").is_none(), "{payload}");
+        assert!(!payload.to_string().contains("sensitive"));
+    }
+
+    /// E3.2-d: the signal is one row per approval, title-only under ZDR.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn approval_requested_signal_is_one_row_per_approval() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let (id, org, user) = requested_approval(&pool, "notify").await;
+        let run_id: String = sqlx::query_scalar("SELECT run_id FROM approvals WHERE id = $1")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .expect("run id");
+        for zdr in [false, false, true] {
+            enqueue_approval_requested(
+                &pool,
+                &crate::audit_publisher::ApprovalRequestedSignal {
+                    org_id: &org,
+                    user_id: &user,
+                    run_id: &run_id,
+                    approval_id: &id,
+                    kind: "tool_call",
+                    tool: "execute_provider_action",
+                    cause_code: "provider_write",
+                    zdr,
+                    occurred_at: Utc::now(),
+                },
+            )
+            .await
+            .expect("enqueue");
+        }
+        let rows: Vec<serde_json::Value> = sqlx::query_scalar(
+            "SELECT payload FROM session_audit_outbox WHERE event_id = $1",
+        )
+        .bind(crate::audit_publisher::approval_requested_event_id(&id))
+        .fetch_all(&pool)
+        .await
+        .expect("rows");
+        assert_eq!(rows.len(), 1, "a replay names the same event id");
+        assert_eq!(rows[0]["event"], "approval_requested");
+        assert_eq!(rows[0]["details"]["tool"], "execute_provider_action");
+    }
+
     #[tokio::test]
     #[ignore = "requires DATABASE_URL to a scratch Postgres"]
     async fn a_replayed_decision_enqueues_one_audit_row() {
@@ -3100,6 +3336,7 @@ mod approval_decision_db_tests {
             source: "user",
             scope: "once",
             audit: true,
+            authz_audit: false,
         };
         for attempt in 0..2 {
             let write = decide_approval_recorded(
@@ -3130,6 +3367,7 @@ mod approval_decision_db_tests {
             source: "posture_auto",
             scope: "once",
             audit: false,
+            authz_audit: false,
         };
         decide_approval_recorded(
             &pool,

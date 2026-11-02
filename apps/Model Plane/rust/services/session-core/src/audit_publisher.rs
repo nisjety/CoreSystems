@@ -42,6 +42,28 @@ pub const EVENT_TOOL_ACTION_RESERVED: &str = "tool_action_reserved";
 /// Audit event name of a recorded approval decision (build plan WS13 S3).
 pub const EVENT_APPROVAL_DECIDED: &str = "approval_decided";
 
+/// Audit event name of an authorization decision (E3.2-a): who decided an approval, what, and
+/// under which scope. It sits beside `approval_decided` (the WS13 provenance record, which is
+/// about the call) and answers the access-review question: it names the deciding principal and
+/// the host CLASS of a browser approval. Written by `DecideApproval` behind
+/// `SESSION_CORE_AUTHZ_DECISION_AUDIT` (default off).
+pub const EVENT_AUTHZ_DECISION: &str = "authz_decision";
+
+/// NATS subject of an authorization decision. A single lowercase token under the flat
+/// session-core audit family, so [`classify_outbox_subject`] routes it as `Audit` and the
+/// publish authority needs no new grant.
+pub const SUBJECT_MODEL_AUTHZ_DECISION: &str =
+    "verevon.audit.v2.model.session-core.authz_decision";
+
+/// Audit event name of an approval entering the requested state (E3.2-d): the signal a
+/// notification consumer turns into "an approval is waiting for you". Written by
+/// `CreateApproval` behind `SESSION_CORE_APPROVAL_NOTIFY` (default off).
+pub const EVENT_APPROVAL_REQUESTED: &str = "approval_requested";
+
+/// NATS subject of the approval-requested signal, in the same flat family.
+pub const SUBJECT_MODEL_APPROVAL_REQUESTED: &str =
+    "verevon.audit.v2.model.session-core.approval_requested";
+
 /// Subject family carrying Session Core's flat audit-core bodies.
 const AUDIT_SUBJECT_PREFIX: &str = "verevon.audit.v2.model.session-core.";
 
@@ -393,6 +415,168 @@ pub fn build_approval_decision_body(audit: &ApprovalDecisionAudit<'_>) -> serde_
             "kind": audit.kind,
         },
     })
+}
+
+/// The closed vocabulary of a browser approval's host class. A host name is never a member:
+/// anything outside the list is reported as `unknown`, so a class field cannot carry a host.
+pub const HOST_CLASSES: [&str; 5] = ["none", "general", "sensitive", "internal", "unknown"];
+
+/// The reported host class for a stored value: empty is `none`, a member is itself, anything
+/// else is `unknown`.
+#[must_use]
+pub fn host_class_word(stored: &str) -> &'static str {
+    let stored = stored.trim();
+    if stored.is_empty() {
+        return "none";
+    }
+    HOST_CLASSES
+        .iter()
+        .copied()
+        .find(|class| *class == stored)
+        .unwrap_or("unknown")
+}
+
+/// What an authorization decision tells the audit trail (E3.2-a). Content-free: ids, closed
+/// words and the deciding principal; never the decision reason, the call's arguments, the
+/// approval's context or a host. `zdr` is true when the run keeps no state; the host class is
+/// then omitted and only the ids and the decision word remain.
+#[derive(Debug, Clone, Copy)]
+pub struct AuthzDecisionAudit<'a> {
+    pub org_id: &'a str,
+    /// The approval's owner (the person the run acts for).
+    pub owner_user_id: &'a str,
+    /// The deciding principal (`decided_by`): the verified caller, never request input.
+    pub actor: &'a str,
+    pub run_id: &'a str,
+    pub approval_id: &'a str,
+    /// The decided state: `granted`, `denied` or `timed_out`.
+    pub decision: &'a str,
+    pub scope: &'a str,
+    pub decision_source: &'a str,
+    /// The stored host class of a browser approval, empty for any other kind.
+    pub host_class: &'a str,
+    pub zdr: bool,
+    pub occurred_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// The audit event id of one authorization decision. A replay yields the same id.
+#[must_use]
+pub fn authz_decision_event_id(approval_id: &str, decision: &str) -> String {
+    let digest = blake3::hash(format!("authz\0{approval_id}\0{decision}").as_bytes());
+    format!("authz:session-core:{digest}")
+}
+
+/// Build the FLAT audit body of one authorization decision.
+#[must_use]
+pub fn build_authz_decision_body(audit: &AuthzDecisionAudit<'_>) -> serde_json::Value {
+    let mut details = serde_json::json!({
+        "approval_id": audit.approval_id,
+        "run_id": audit.run_id,
+        "decision": audit.decision,
+        "decided_by": audit.actor,
+        "owner_user_id": audit.owner_user_id,
+        "scope": audit.scope,
+        "decision_source": audit.decision_source,
+        "zdr": audit.zdr,
+    });
+    if !audit.zdr {
+        details["host_class"] = serde_json::json!(host_class_word(audit.host_class));
+    }
+    serde_json::json!({
+        "event_id": authz_decision_event_id(audit.approval_id, audit.decision),
+        "occurred_at": audit.occurred_at.to_rfc3339(),
+        "org_id": audit.org_id,
+        "user_id": if audit.actor.is_empty() { "agent" } else { audit.actor },
+        "plane": "model",
+        "producer": "session-core",
+        "event": EVENT_AUTHZ_DECISION,
+        "subject": audit.run_id,
+        "resource_id": audit.approval_id,
+        "outcome": audit.decision,
+        "details": details,
+    })
+}
+
+/// What the approval-requested signal carries (E3.2-d).
+#[derive(Debug, Clone, Copy)]
+pub struct ApprovalRequestedSignal<'a> {
+    pub org_id: &'a str,
+    /// The approval's owner: the person to notify.
+    pub user_id: &'a str,
+    pub run_id: &'a str,
+    pub approval_id: &'a str,
+    pub kind: &'a str,
+    /// The gated tool's name, empty when the approval states none.
+    pub tool: &'a str,
+    /// The closed cause code, empty when the approval states none.
+    pub cause_code: &'a str,
+    pub zdr: bool,
+    pub occurred_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// The fixed title of an approval-requested notification. Under ZDR it is the whole payload.
+pub const APPROVAL_REQUESTED_TITLE: &str = "Approval requested";
+
+/// The audit event id of one approval-requested signal. A replayed request yields the same id.
+#[must_use]
+pub fn approval_requested_event_id(approval_id: &str) -> String {
+    let digest = blake3::hash(format!("requested\0{approval_id}").as_bytes());
+    format!("approval-requested:session-core:{digest}")
+}
+
+/// Build the FLAT body of the approval-requested signal. Title-only under ZDR: the title is a
+/// fixed string and no tool, kind or cause is named; otherwise the tool name, kind and cause
+/// code (closed words and a tool name, no arguments) ride along so the notification can say
+/// what is waiting.
+#[must_use]
+pub fn build_approval_requested_body(signal: &ApprovalRequestedSignal<'_>) -> serde_json::Value {
+    let mut details = serde_json::json!({
+        "title": APPROVAL_REQUESTED_TITLE,
+        "approval_id": signal.approval_id,
+        "run_id": signal.run_id,
+        "zdr": signal.zdr,
+    });
+    if !signal.zdr {
+        details["kind"] = serde_json::json!(signal.kind);
+        if !signal.tool.is_empty() {
+            details["tool"] = serde_json::json!(signal.tool);
+        }
+        if !signal.cause_code.is_empty() {
+            details["cause_code"] = serde_json::json!(signal.cause_code);
+        }
+    }
+    serde_json::json!({
+        "event_id": approval_requested_event_id(signal.approval_id),
+        "occurred_at": signal.occurred_at.to_rfc3339(),
+        "org_id": signal.org_id,
+        "user_id": if signal.user_id.is_empty() { "agent" } else { signal.user_id },
+        "plane": "model",
+        "producer": "session-core",
+        "event": EVENT_APPROVAL_REQUESTED,
+        "subject": signal.run_id,
+        "resource_id": signal.approval_id,
+        "outcome": "requested",
+        "details": details,
+    })
+}
+
+/// Whether the authorization-decision audit is on: only `1`, `true` or `on` (default off).
+#[must_use]
+pub fn authz_decision_audit_enabled() -> bool {
+    flag_on(std::env::var("SESSION_CORE_AUTHZ_DECISION_AUDIT").ok().as_deref())
+}
+
+/// Whether the approval-requested signal is on: only `1`, `true` or `on` (default off).
+#[must_use]
+pub fn approval_notify_enabled() -> bool {
+    flag_on(std::env::var("SESSION_CORE_APPROVAL_NOTIFY").ok().as_deref())
+}
+
+fn flag_on(value: Option<&str>) -> bool {
+    matches!(
+        value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "on")
+    )
 }
 
 /// Publish one model tool-action audit event and require the transport's
@@ -858,6 +1042,145 @@ impl FailurePlan {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    // --- E3.2-a / E3.2-d: authorization decision and approval-requested signal ---------------
+
+    fn authz_audit<'a>(zdr: bool, host_class: &'a str) -> AuthzDecisionAudit<'a> {
+        AuthzDecisionAudit {
+            org_id: "org-1",
+            owner_user_id: "user-1",
+            actor: "user-2",
+            run_id: "run-1",
+            approval_id: "appr-1",
+            decision: "granted",
+            scope: "once",
+            decision_source: "user",
+            host_class,
+            zdr,
+            occurred_at: chrono::DateTime::parse_from_rfc3339("2026-11-02T10:00:00Z")
+                .expect("time")
+                .with_timezone(&chrono::Utc),
+        }
+    }
+
+    #[test]
+    fn the_authz_and_approval_requested_subjects_are_single_token_audit_subjects() {
+        assert_eq!(
+            SUBJECT_MODEL_AUTHZ_DECISION,
+            "verevon.audit.v2.model.session-core.authz_decision"
+        );
+        for (subject, event) in [
+            (SUBJECT_MODEL_AUTHZ_DECISION, EVENT_AUTHZ_DECISION),
+            (SUBJECT_MODEL_APPROVAL_REQUESTED, EVENT_APPROVAL_REQUESTED),
+        ] {
+            // Session Core may publish it, as a flat audit body.
+            assert_eq!(classify_outbox_subject(subject), Some(OutboxRoute::Audit));
+            // The wire subject is the one the body's own event names, so audit-core's
+            // subject/event authority check passes.
+            assert_eq!(audit_subject_for_event(event).as_deref(), Some(subject));
+        }
+    }
+
+    #[test]
+    fn an_authz_decision_body_names_the_principal_decision_scope_and_host_class() {
+        let body = build_authz_decision_body(&authz_audit(false, "sensitive"));
+        assert_eq!(body["event"], "authz_decision");
+        assert_eq!(body["plane"], "model");
+        assert_eq!(body["producer"], "session-core");
+        assert_eq!(body["org_id"], "org-1");
+        assert_eq!(body["user_id"], "user-2", "the deciding principal");
+        assert_eq!(body["resource_id"], "appr-1");
+        assert_eq!(body["outcome"], "granted");
+        assert_eq!(body["details"]["decided_by"], "user-2");
+        assert_eq!(body["details"]["scope"], "once");
+        assert_eq!(body["details"]["host_class"], "sensitive");
+        assert_eq!(body["details"]["zdr"], false);
+        assert_eq!(
+            body["event_id"],
+            authz_decision_event_id("appr-1", "granted"),
+            "a replay yields the same id"
+        );
+        assert_ne!(
+            authz_decision_event_id("appr-1", "granted"),
+            authz_decision_event_id("appr-1", "denied")
+        );
+        assert_ne!(
+            authz_decision_event_id("appr-1", "granted"),
+            approval_decision_event_id("appr-1", "granted"),
+            "the two decision events never collide in the outbox"
+        );
+        // The outbox authority check accepts it as Session Core's own audit row.
+        let event_id = body["event_id"].as_str().expect("id").to_owned();
+        assert!(check_outbox_authority(OutboxRoute::Audit, &event_id, &body).is_ok());
+    }
+
+    #[test]
+    fn host_class_is_a_closed_word_never_a_host() {
+        assert_eq!(host_class_word(""), "none");
+        assert_eq!(host_class_word("  "), "none");
+        for class in HOST_CLASSES {
+            assert_eq!(host_class_word(class), class);
+        }
+        for host in ["example.com", "intranet.corp.example", "localhost", "10.0.0.7"] {
+            assert_eq!(host_class_word(host), "unknown", "{host}");
+            let body = build_authz_decision_body(&authz_audit(false, host));
+            assert_eq!(body["details"]["host_class"], "unknown");
+            assert!(!body.to_string().contains(host), "{host} leaked: {body}");
+        }
+    }
+
+    #[test]
+    fn a_zdr_authz_decision_carries_ids_and_words_only() {
+        let body = build_authz_decision_body(&authz_audit(true, "sensitive"));
+        assert_eq!(body["details"]["zdr"], true);
+        assert!(body["details"].get("host_class").is_none(), "{body}");
+        assert!(!body.to_string().contains("sensitive"));
+    }
+
+    #[test]
+    fn the_approval_requested_signal_is_title_only_under_zdr() {
+        let at = chrono::Utc::now();
+        let signal = |zdr| ApprovalRequestedSignal {
+            org_id: "org-1",
+            user_id: "user-1",
+            run_id: "run-1",
+            approval_id: "appr-1",
+            kind: "tool_call",
+            tool: "execute_provider_action",
+            cause_code: "provider_write",
+            zdr,
+            occurred_at: at,
+        };
+        let open = build_approval_requested_body(&signal(false));
+        assert_eq!(open["event"], "approval_requested");
+        assert_eq!(open["user_id"], "user-1", "the person to notify");
+        assert_eq!(open["details"]["title"], APPROVAL_REQUESTED_TITLE);
+        assert_eq!(open["details"]["tool"], "execute_provider_action");
+        assert_eq!(open["details"]["cause_code"], "provider_write");
+        assert_eq!(open["details"]["kind"], "tool_call");
+
+        let zdr = build_approval_requested_body(&signal(true));
+        assert_eq!(zdr["details"]["title"], APPROVAL_REQUESTED_TITLE);
+        for key in ["tool", "cause_code", "kind"] {
+            assert!(zdr["details"].get(key).is_none(), "{key} under ZDR: {zdr}");
+        }
+        let text = zdr.to_string();
+        assert!(!text.contains("execute_provider_action") && !text.contains("provider_write"));
+        let event_id = zdr["event_id"].as_str().expect("id").to_owned();
+        assert!(check_outbox_authority(OutboxRoute::Audit, &event_id, &zdr).is_ok());
+        assert_eq!(event_id, approval_requested_event_id("appr-1"));
+    }
+
+    #[test]
+    fn both_switches_are_off_unless_explicitly_on() {
+        assert!(!flag_on(None));
+        for off in ["", "0", "false", "off", "no", "2", "yes"] {
+            assert!(!flag_on(Some(off)), "{off:?}");
+        }
+        for on in ["1", "true", "TRUE", "on", " On "] {
+            assert!(flag_on(Some(on)), "{on:?}");
+        }
+    }
 
     #[test]
     fn durable_audit_outbox_migration_and_transaction_contract() {
