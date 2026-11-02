@@ -65,6 +65,39 @@ describe('BrowserSearchResults', () => {
     await waitFor(() => expect(search).toHaveBeenCalledTimes(1))
   })
 
+  it('names the host the session is limited to, and the refused host, when a result was refused', async () => {
+    search.mockResolvedValue({ results: [{ url: 'https://other.example/a', title: 'Annen side' }] })
+    render(() => (
+      <BrowserSearchResults
+        query="norge"
+        zdr={false}
+        limitedToHost="vg.no"
+        refusedHost="other.example"
+        onOpen={vi.fn()}
+        onClose={vi.fn()}
+      />
+    ))
+    await screen.findByRole('button', { name: 'Annen side' })
+    const notice = screen.getByRole('alert')
+    expect(notice.getAttribute('data-reason')).toBe('outside_scope')
+    expect(notice.textContent).toContain('begrenset til vg.no')
+    expect(notice.textContent).toContain('kan ikke åpne other.example')
+  })
+
+  it('shows the limit without a refused host when none is known, and no notice without a limit', async () => {
+    search.mockResolvedValue({ results: [] })
+    const { unmount } = render(() => (
+      <BrowserSearchResults query="a" zdr={false} limitedToHost="vg.no" onOpen={vi.fn()} onClose={vi.fn()} />
+    ))
+    await waitFor(() => expect(screen.getByText('Ingen treff for «a».')).toBeTruthy())
+    expect(screen.getByRole('alert').textContent).not.toContain('kan ikke åpne')
+    unmount()
+
+    render(() => <BrowserSearchResults query="b" zdr={false} onOpen={vi.fn()} onClose={vi.fn()} />)
+    await waitFor(() => expect(screen.getByText('Ingen treff for «b».')).toBeTruthy())
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
   it('closes from its own button', () => {
     search.mockResolvedValue({ results: [] })
     const onClose = vi.fn()
