@@ -280,8 +280,13 @@ export const spaceTables = {
     externalOrgId: v.string(),
     externalAuthId: v.string(),
     lastReadAt: v.number(),
+    // WS11-S3: a manual "mark unread" floor. While set, the effective marker is
+    // this value (always <= lastReadAt) and a `while_open` poll never moves it;
+    // entering the room clears it. Still a timestamp, never a thread list.
+    unreadFloor: v.optional(v.number()),
   })
-    .index("by_space_and_subject", ["spaceRef", "externalAuthId"]),
+    .index("by_space_and_subject", ["spaceRef", "externalAuthId"])
+    .index("by_org_and_subject", ["externalOrgId", "externalAuthId"]),
 
   // WS16-S7: one row per (organization, member) holding that person's sidebar
   // layout for Spaces (stars, custom sections, hidden rooms, per-group sort).

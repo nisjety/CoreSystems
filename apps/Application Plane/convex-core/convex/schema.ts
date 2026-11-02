@@ -18,6 +18,7 @@ import { spaceTables } from "./schema/spaces";
 import { spaceDeletionTables } from "./schema/spaceDeletion";
 import { spaceAudienceTables } from "./schema/spaceAudience";
 import { spacePinTables } from "./schema/spacePins";
+import { spaceAttentionTables } from "./schema/spaceAttention";
 import { conversationProjectionTables } from "./schema/conversationProjection";
 
 export default defineSchema({
@@ -30,5 +31,6 @@ export default defineSchema({
   ...spaceDeletionTables,
   ...spaceAudienceTables,
   ...spacePinTables,
+  ...spaceAttentionTables,
   ...conversationProjectionTables,
 });
