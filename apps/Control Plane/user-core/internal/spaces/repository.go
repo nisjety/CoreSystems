@@ -868,6 +868,10 @@ func (r *Repository) replaceMemberships(ctx context.Context, replacement Members
 		changed = true
 		if member.SubjectType == "user" {
 			revokedUserSubjects = append(revokedUserSubjects, member.SubjectID)
+		} else if err := revokeApprovalRulesForAgent(ctx, tx, space.SpaceRef, member.SubjectID, "agent_removed"); err != nil {
+			// WS10-S2: an agent that leaves the room takes its standing approval
+			// rules with it, in the same transaction.
+			return nil, nil, nil, "", err
 		}
 		pendingLedger = append(pendingLedger, ledgerEntry{
 			SpaceRef: space.SpaceRef, OrgID: space.OrgID, ActorKind: ActorKindService,
@@ -1210,6 +1214,49 @@ func (r *Repository) ResolveSharedRunControlDecisionEvidence(ctx context.Context
 	if err := evidence.ValidateForSharedRunControl(); err != nil {
 		return PersonalThreadDecisionEvidence{}, fmt.Errorf("invalid shared Space run control authority: %w", err)
 	}
+	return evidence, nil
+}
+
+// ResolveSharedApprovalDecisionEvidence resolves the authority to create or use a
+// standing approval rule in a shared Space (WS10-S2). It reuses the
+// current-membership and current-recipient-audience joins of the shared thread
+// read resolver and binds the independent approval_grant_entitled bit and its
+// own resource reference. It performs the common checks only; the caller picks
+// ValidateForApprovalRuleManage (manager floor) or ValidateForApprovalRuleUse
+// (editor floor). It must never fall back to the thread-create or agent-action
+// entitlement: waiving a prompt is a separate power.
+func (r *Repository) ResolveSharedApprovalDecisionEvidence(ctx context.Context, spaceRef, orgID, subjectID string) (PersonalThreadDecisionEvidence, error) {
+	if r == nil || r.db == nil {
+		return PersonalThreadDecisionEvidence{}, fmt.Errorf("space authority repository unavailable")
+	}
+	var evidence PersonalThreadDecisionEvidence
+	err := r.db.Pool.QueryRow(ctx, `
+		SELECT s.space_ref, s.org_id, m.subject_id, s.space_kind, m.role,
+		       r.authority_revision, r.membership_revision, r.privacy_revision,
+		       r.recipient_audience_revision, r.entitlement_revision,
+		       a.audience_ref, a.audience_hash,
+		       p.privacy_policy_ref, p.purpose, p.lawful_basis, p.privacy_class,
+		       p.third_party_processing_allowed, p.retention_class, p.residency,
+		       p.deletion_scope, p.zero_data_retention, p.approval_grant_entitled
+		FROM registered_spaces s
+		JOIN space_memberships m ON m.space_ref=s.space_ref
+		JOIN space_authority_revisions r ON r.space_ref=s.space_ref
+		JOIN space_recipient_audiences a ON a.space_ref=s.space_ref AND a.revision=r.recipient_audience_revision
+		JOIN space_recipient_audience_members am ON am.space_ref=a.space_ref AND am.revision=a.revision AND am.subject_id=m.subject_id
+		JOIN space_effect_policies p ON p.org_id=s.org_id
+		WHERE s.space_ref=$1 AND s.org_id=$2 AND s.registration_state='active'
+		  AND s.space_kind <> 'personal'
+		  AND m.subject_type='user' AND m.subject_id=$3 AND m.active=TRUE
+		  AND EXISTS (SELECT 1 FROM user_org_memberships u WHERE u.user_id=$3 AND u.org_id=$2 AND u.status='active')`,
+		strings.TrimSpace(spaceRef), strings.TrimSpace(orgID), strings.TrimSpace(subjectID),
+	).Scan(sharedDecisionEvidenceScanDestinations(&evidence, &evidence.ApprovalGrantEntitled)...)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PersonalThreadDecisionEvidence{}, ErrNoCurrentMembership
+	}
+	if err != nil {
+		return PersonalThreadDecisionEvidence{}, fmt.Errorf("resolve shared Space approval authority: %w", err)
+	}
+	evidence.ResourceAuthorizationRef = fmt.Sprintf("control:%s:approval-grant:%d", evidence.Membership.SpaceRef, evidence.Membership.Revisions.Authority)
 	return evidence, nil
 }
 

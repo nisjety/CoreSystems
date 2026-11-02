@@ -118,6 +118,7 @@ type PersonalThreadDecisionEvidence struct {
 	SandboxCapabilityEntitled bool
 	ProcessRegistryEntitled   bool
 	RunControlEntitled        bool
+	ApprovalGrantEntitled     bool
 	ResourceAuthorizationRef  string
 }
 
@@ -265,6 +266,55 @@ func (e PersonalThreadDecisionEvidence) ValidateForSharedRunControl() error {
 		return authorityIncompleteDenial("shared Space run control authority is incomplete")
 	}
 	return e.Privacy.Validate()
+}
+
+// validateSharedApprovalBase is the part of standing-rule authority that both
+// creating a rule (manager floor) and using one (editor floor) share: a current
+// member of a shared Space who is in the current recipient audience, in an org
+// that has approval_grant_entitled on, and not under Zero Data Retention. A
+// standing rule is a durable record of consent, so ZDR fails closed here with
+// the typed zdr refusal (WS10-S2; plan invariant: no grants under ZDR).
+func (e PersonalThreadDecisionEvidence) validateSharedApprovalBase(roles ...string) error {
+	if err := e.Membership.Validate(); err != nil {
+		return err
+	}
+	if e.Membership.Kind == KindPersonal {
+		return kindUnsupportedDenial(string(e.Membership.Kind), "standing approval rules require a non-personal Space")
+	}
+	if !matchesOneOf(e.Membership.Role, roles...) {
+		return roleBelowFloorDenial(fmt.Sprintf("space role %q cannot use standing approval rules", e.Membership.Role), roles...)
+	}
+	if strings.TrimSpace(e.RecipientAudienceRef) == "" || strings.TrimSpace(e.RecipientAudienceHash) == "" {
+		return authorityIncompleteDenial("shared Space recipient audience is required")
+	}
+	if !e.ApprovalGrantEntitled {
+		return entitlementOffDenial("approval_grant", "standing approval rule authority is incomplete")
+	}
+	if strings.TrimSpace(e.ResourceAuthorizationRef) == "" {
+		return authorityIncompleteDenial("standing approval rule authority is incomplete")
+	}
+	if err := e.Privacy.Validate(); err != nil {
+		return err
+	}
+	if e.Privacy.ZeroDataRetention {
+		return zdrForbidsDenial("approval_grant", "standing approval rules are not available under Zero Data Retention")
+	}
+	return nil
+}
+
+// ValidateForApprovalRuleManage authorizes creating a standing approval rule or
+// loosening the Space ceiling: manager or owner only (WS10 open question 1,
+// assumed), entitlement on, shared Space, not ZDR.
+func (e PersonalThreadDecisionEvidence) ValidateForApprovalRuleManage() error {
+	return e.validateSharedApprovalBase("manager", "owner")
+}
+
+// ValidateForApprovalRuleUse authorizes a standing rule passing a prompt for the
+// run's requester: any member who can run an agent (editor floor), entitlement
+// on, shared Space, not ZDR. The entitlement is re-read on every use, so turning
+// it off ends every rule at once.
+func (e PersonalThreadDecisionEvidence) ValidateForApprovalRuleUse() error {
+	return e.validateSharedApprovalBase("editor", "manager", "owner")
 }
 
 // ValidateForOwnScheduledThreadRead authorizes a personal Space's own owner to

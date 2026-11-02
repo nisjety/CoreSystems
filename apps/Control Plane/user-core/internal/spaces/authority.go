@@ -200,6 +200,11 @@ type EffectPolicy struct {
 	// speaking or reading in the room, so it is its own deny-by-default floor
 	// and is never inherited from ThreadCreateEntitled or ThreadReadEntitled.
 	RunControlEntitled bool `json:"run_control_entitled"`
+	// ApprovalGrantEntitled (WS10-S2) lets a room manager record a standing
+	// approval rule and lets the rule pass a prompt. A rule waives a prompt, not
+	// authority, so it is its own deny-by-default floor and is never inherited
+	// from AgentActionEntitled or ThreadCreateEntitled.
+	ApprovalGrantEntitled bool `json:"approval_grant_entitled"`
 }
 
 func (p EffectPolicy) Validate() error {
