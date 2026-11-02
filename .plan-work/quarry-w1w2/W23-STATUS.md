@@ -94,3 +94,24 @@ Open items:
 - Open security depth rows (14 new, appended to W23-depth.md): SR-U16-5 (medium: schedules/desired capped at 500 with no cursor, so the reaper can delete real schedules once more than 500 exist; only with QUARRY_SCHEDULED_JOBS_ENABLED=1), W2-CP-R13-1 gRPC models:invoke reach (medium, Model Plane change recommended, not added to MP-ASKS.md), W2-U30-33a trailing-dot host deny bypass in host_matches (quarry-core web_policy), W2-U31 S6 to S8 (low).
 - Four tracked .sha256 files in the integ worktree show as modified (CRLF/LF checkout artifacts, pre-existing) and a stray untracked q.json; none were committed.
 - Model Plane asks: none.
+
+## Batch W2-B4 (W2), integrated 2026-11-02
+
+Units: W2-U34 (lane a, built: 6b policy snapshot), W2-U64 (lane b, built: crawl scope skew), W2-U63 (lane c, partly built: robots CR-only/Crawl-delay parser, host scheduler wait-before-slot, link-refusal counter helper), W2-U33b (lane d, NOT built in this merge: only the security-review depth commit 9dc9a6868 was committed; the builder's audio_routes.rs, resource_routes.rs, schedule_routes.rs, source_registrar.rs and tests/url_gate_resources.rs were still uncommitted in the innh-lane-d worktree and are not on integ).
+
+Merge commits (--no-ff, no conflicts, nothing regenerated): adb6aec26 (lane a), 86a5b5526 (lane b), 717322529 (lane c), 83a01de52 (lane d). Lanes a and b both edited orchestrator workflows.go and merged cleanly.
+
+Checks at the merged tree:
+- Quarry Rust via the integ wrapper: cargo check --workspace --tests exit 0 (warnings only). quarry-core --lib web_policy 7 passed; quarry-transform --lib robots 32 passed; quarry-runtime --lib host_scheduler 20 passed; quarry-edge --lib 872 passed. quarry-edge integration tests: web_policy_backstop 18, web_policy_routes 11, crawl_scope_robots 16, batch_handoff_check 3, crawl_options_off 3, crawl_options_on 7, zdr_posture_stamp 13, web_policy_claim 12. All 0 failed.
+- Go (GOWORK=off) quarry-orchestrator: go vet ./... clean, go test ./... all 9 packages ok. quarry-control not touched by the batch.
+- node --test scripts/tests/*.test.mjs: 73 tests, 71 pass, 2 fail, both the known inherited ones (/v1/audit/page undocumented; tracked internal SDK files).
+- scripts/tests/zdr-contract-sync.test.sh: 128 passed, 0 failed.
+- No TS package touched, so no tsc run. Golden, schema and route-count regeneration were not needed (no diff in those files; zdr_posture_stamp passes).
+
+Open items:
+- W2-U33b code is unmerged: re-run the lane d builder and merge its commit(s) in the next batch.
+- W2-U63 call sites still to wire: pipeline.rs (reserve_start before the global permit), routes.rs with_crawl and crawl_sitemap.rs (record_robots_link_refusals).
+- W2-U34 is flag-gated (QUARRY_EDGE__WEB_POLICY_SNAPSHOT, default off). Deploy order: page edges first, then the orchestrator, then turn the handoff flag on. Egress-receipt host-only under ZDR was decided but not built.
+- Open security depth rows: SR-U34-2 (medium: run binding has no freshness or job binding, pre-existing), SR-U34-3/4/5 (low), W2-U33b rows 2 to 5 (low: unparsed audio_url host passes the deny list, STT contract gap with Model Plane /v1/ai/transcribe, schedules gated at create time only, other URL keys unchecked). 27 rows appended to W23-depth.md.
+- Four tracked .sha256 files in the integ worktree show as modified (CRLF/LF checkout artifacts, empty diff, pre-pending); none committed.
+- Model Plane asks: none from U34, U64, U63; the U33b transcribe contract gap is recorded as a depth row only (not added to MP-ASKS.md).
