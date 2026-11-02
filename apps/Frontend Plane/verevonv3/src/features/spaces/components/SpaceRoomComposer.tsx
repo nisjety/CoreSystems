@@ -20,8 +20,12 @@ import {
   type RoomAttachment,
 } from '../lib/room-attachments'
 import {
+  getInstallableSpaceAgents,
   SPACE_POST_MAX_CHARS_DEFAULT,
+  type InstallableSpaceAgent,
   type SpaceAgent,
+  type SpaceMentionsInput,
+  type SpacePostReceipt,
   type SpaceAgentWork,
   type SpaceRosterMember,
   type SpaceThread,
@@ -52,6 +56,13 @@ import {
 import { spaceRetrievalDeclineCopy } from '../lib/space-retrieval-decline'
 import { createSpacePostSender } from '../lib/space-post-sender'
 import { createSpaceSendJournal, type SpaceSendJournal } from '../lib/space-send-journal'
+import { qualifyCandidates, REFUSAL_REASON_CODE, type MentionCandidate as RoomMentionCandidate } from '../lib/mention-model'
+import { createMentionState, readRecentMentions } from '../lib/mention-state'
+import { foldForMatch, orderBySection, rankMentionCandidates } from '../lib/mention-ranking'
+import { spaceWakeSequencer } from '../lib/wake-sequencer'
+import { MentionPicker, type MentionPickerRow } from './MentionPicker'
+import { AddressedAgentsBar } from './AddressedAgentsBar'
+import { AgentAddDialog, type AgentAddTarget } from './AgentAddDialog'
 import { DM_SPACE_FEATURE } from '../lib/space-kind'
 import { canPostInSpace, postLength } from '../lib/space-posting'
 import { SpaceConnectivityBanner } from './SpaceConnectivityBanner'
@@ -136,6 +147,7 @@ type MentionCandidate = {
  */
 type PickerItem =
   | { readonly kind: 'mention'; readonly candidate: MentionCandidate }
+  | { readonly kind: 'mentionRow'; readonly row: MentionPickerRow }
   | { readonly kind: 'skill'; readonly skill: Skill }
   | { readonly kind: 'command'; readonly command: PlatformCommand }
 
@@ -240,6 +252,17 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   const [previewing, setPreviewing] = createSignal(false)
   const [mentionQuery, setMentionQuery] = createSignal<string | undefined>(undefined)
   const [mentionedAgentRef, setMentionedAgentRef] = createSignal<string | undefined>(undefined)
+  // Structured mentions (WS08-S6): who the words name, and the agents the address bar holds. The
+  // legacy `mentionedAgentRef` above stays the path for Ask Verevon, skills and a room with the
+  // flags off.
+  const mention = createMentionState(() => props.spaceRef, () => props.replyTarget?.()?.threadId)
+  createEffect(() => {
+    mention.rebind(props.replyTarget?.()?.threadId)
+  })
+  const [mentionNotice, setMentionNotice] = createSignal<string | undefined>(undefined)
+  const [addTarget, setAddTarget] = createSignal<AgentAddTarget | undefined>(undefined)
+  const [installable, setInstallable] = createSignal<readonly InstallableSpaceAgent[] | undefined>(undefined)
+  let installableLoading = false
   // `/` skills (later tier). The catalogue is fetched on the first `/`, never on
   // mount: a room that never picks a skill never pays for the list. `undefined`
   // means not loaded yet; a failed load is its own state so the picker can say
@@ -369,18 +392,73 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
       en: 'The message was not sent. It is kept in the box; try again.',
     }),
     baselineUpdatedAt: (threadId) => props.threads?.().find((thread) => thread.thread_id === threadId)?.updated_at,
-    onAccepted: (entry) => {
+    onAccepted: (entry, receipt) => {
       // Cleared only now, on acceptance: until then the words are still here to retry or edit.
       if (text().trim() === entry.content) {
         setText('')
         discardDraft()
       }
+      startWakes(entry.content, entry.mentions, receipt)
       props.onClearReplyTarget?.()
       props.onExchangeSettled?.()
     },
     onZdrRefused: () => setZdrRefused(true),
   })
   onCleanup(postSender.dispose)
+  // WS08-S6: the post is stored; now wake each agent the server recorded as `expected`, one at a
+  // time in the order named. Refused ones are shown with their reason and never run. A replayed
+  // receipt carries no mention records, so nothing is woken for it.
+  function startWakes(content: string, sent: SpaceMentionsInput | undefined, receipt: SpacePostReceipt): void {
+    const records = receipt.mentions
+    const names = new Map(roomCandidates().filter((c) => c.kind === 'agent').map((c) => [c.subjectId, c.name]))
+    const barLabels = new Map(mention.agents().map((agent) => [agent.subjectId, agent.label]))
+    const wakeOn = addressedWakeOn()
+    mention.sent(sent)
+    if (records) {
+      const rejected = [...new Set(records.rejected.map((entry) => entry.code))]
+      setMentionNotice(
+        rejected.length > 0
+          ? rejected.map((code) => translateApiError({ code }, i18n.tr, { no: 'En omtale ble ikke lagret.', en: 'A mention was not recorded.' })).join(' ')
+          : undefined,
+      )
+    }
+    if (!wakeOn || !records || !receipt.messageId) return
+    const agents = records.recorded
+      .filter((entry) => entry.kind === 'agent' && (entry.wake === 'expected' || entry.wake === 'refused'))
+      .map((entry, index) => ({
+        agentSubjectId: entry.subjectId,
+        agentName: names.get(entry.subjectId) ?? barLabels.get(entry.subjectId) ?? i18n.tr('Agent', 'Agent'),
+        ordinal: entry.ordinal ?? index,
+        ...(entry.wake === 'refused'
+          ? { refusedReason: REFUSAL_REASON_CODE[entry.reason ?? ''] ?? entry.reason ?? 'agent_respond_to_denied' }
+          : {}),
+      }))
+    if (agents.length === 0) return
+    const picked = selectedModel()
+    const subscription = picked.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER
+    void (async () => {
+      let minPrivacyTier: Awaited<ReturnType<typeof privacyTiers.resolve>>['tier'] | undefined
+      if (!subscription) {
+        try {
+          minPrivacyTier = (await privacyTiers.resolve(picked.model, picked.provider)).tier
+        } catch {
+          minPrivacyTier = undefined
+        }
+      }
+      spaceWakeSequencer.start({
+        messageId: receipt.messageId,
+        threadId: receipt.threadId,
+        spaceRef: props.spaceRef,
+        content,
+        agents,
+        ...(subscription ? {} : { model: picked.model }),
+        ...(minPrivacyTier ? { minPrivacyTier } : {}),
+        locale: i18n.locale(),
+      })
+    })()
+  }
+  // A wake that settles changes the room (a run ended, an answer landed): re-read it.
+  onCleanup(spaceWakeSequencer.onSettled(() => props.onExchangeSettled?.()))
   const humanPostsActive = () => props.humanPostsEnabled?.() === true
   const roleMayPost = () => canPostInSpace(props.viewerRole?.())
   // Flag on and a role below editor: nothing is offered. Control would refuse every send, so the
@@ -406,7 +484,13 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
     return Boolean(viewer) && viewer === owner
   }
   // An agent mention or a picked skill can only be a question to the agent.
-  const impliesAsk = () => askAllowedHere() && (Boolean(mentionedAgentRef()) || pickedSkills().length > 0)
+  const mentionPickerOn = () => humanPostsActive() && spaceRoomFeature('mention_picker')
+  // An agent mention is a post plus a wake only while the room says so and the org allows durable
+  // writes; a zero-retention refusal turns it back into the legacy ephemeral turn.
+  const addressedWakeOn = () => mentionPickerOn() && spaceRoomFeature('addressed_wake') && !zdrRefused()
+  const askAgentRef = () => (addressedWakeOn() ? mention.agents()[0]?.subjectId : mentionedAgentRef())
+  const impliesAsk = () =>
+    askAllowedHere() && ((!addressedWakeOn() && Boolean(mentionedAgentRef())) || pickedSkills().length > 0)
   const offeredModes = createMemo<readonly SpaceComposerModeEntry[]>(() => {
     const registered = visibleSpaceComposerModes()
     const ask = askAllowedHere() ? registered.filter((entry) => entry.id === 'ask') : []
@@ -574,6 +658,72 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
     return matches.slice(0, 6)
   })
 
+  // The structured picker's candidates (WS08-S6): the room's people and active agents, namesakes
+  // qualified, without the reader themself.
+  const roomCandidates = createMemo<readonly RoomMentionCandidate[]>(() => {
+    const viewer = props.viewerSubjectId?.()?.trim()
+    return qualifyCandidates([
+      ...props.roster()
+        .filter((member) => member.subject_type === 'user' && member.display_name.trim() && member.subject_id !== viewer)
+        .map((member) => ({
+          kind: 'person' as const,
+          subjectId: member.subject_id,
+          name: member.display_name.trim(),
+          role: member.role,
+        })),
+      ...props.agents()
+        .filter((agent) => agent.identity_published && agent.status === 'active' && agent.name?.trim())
+        .map((agent) => ({
+          kind: 'agent' as const,
+          subjectId: agent.subject_id,
+          name: (agent.name as string).trim(),
+          role: 'agent',
+          color: agentAvatarColor(agent),
+        })),
+    ])
+  })
+  const canBindAgents = () => props.viewerRole?.() === 'manager' || props.viewerRole?.() === 'owner'
+  function ensureInstallableLoaded(): void {
+    if (installable() !== undefined || installableLoading || !canBindAgents()) return
+    installableLoading = true
+    getInstallableSpaceAgents(props.spaceRef)
+      .then((loaded) => setInstallable(loaded))
+      .catch(() => setInstallable([]))
+      .finally(() => {
+        installableLoading = false
+      })
+  }
+  // Most recent first: the last mentions this member sent, then the starters of the room's latest threads.
+  const recentSubjects = () => [
+    ...readRecentMentions(props.spaceRef),
+    ...[...(props.threads?.() ?? [])]
+      .sort((a, b) => (b.updated_at ?? '').localeCompare(a.updated_at ?? ''))
+      .map((thread) => thread.owner_subject_id)
+      .filter((id): id is string => typeof id === 'string' && id !== ''),
+  ]
+  const mentionRows = createMemo<readonly MentionPickerRow[]>(() => {
+    const query = mentionQuery()
+    if (query === undefined || !mentionPickerOn()) return []
+    const ranked = orderBySection(rankMentionCandidates(roomCandidates(), query, recentSubjects()))
+    const rows: MentionPickerRow[] = ranked.map((candidate) => ({ kind: 'candidate' as const, candidate }))
+    const normalized = foldForMatch(query)
+    if (canBindAgents()) {
+      const inRoom = new Set(roomCandidates().filter((c) => c.kind === 'agent').map((c) => foldForMatch(c.name)))
+      let added = 0
+      for (const agent of (installable() ?? []).filter((item) => !item.already_bound && item.name?.trim())) {
+        const name = (agent.name as string).trim()
+        if (inRoom.has(foldForMatch(name)) || !foldForMatch(name).startsWith(normalized)) continue
+        rows.push({ kind: 'add', agentRef: agent.agent_ref, name })
+        added += 1
+        if (added >= 3) break
+      }
+    } else if (ranked.length === 0 && query.trim().length >= 2) {
+      rows.push({ kind: 'request', name: query.trim() })
+    }
+    return rows
+  })
+  const newMentionPickerOpen = () => mentionPickerOn() && mentionQuery() !== undefined && mentionRows().length > 0
+
   function ensureSkillsLoaded(): void {
     if (skills() !== undefined || skillsLoading) return
     skillsLoading = true
@@ -610,6 +760,7 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
 
   const pickerItems = createMemo<readonly PickerItem[]>(() => {
     if (mentionQuery() !== undefined) {
+      if (mentionPickerOn()) return mentionRows().map((row) => ({ kind: 'mentionRow' as const, row }))
       return visibleCandidates().map((candidate) => ({ kind: 'mention' as const, candidate }))
     }
     if (skillQuery() !== undefined) {
@@ -624,6 +775,8 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   })
   // The `/` box also opens on zero matches, to say why (loading, failed, none).
   const pickerOpen = () => pickerItems().length > 0 || skillQuery() !== undefined
+  // The legacy list draws only when the structured picker does not.
+  const legacyPickerOpen = () => pickerOpen() && !(mentionPickerOn() && mentionQuery() !== undefined)
   const skillEmptyText = () => {
     if (skills() === undefined) return i18n.tr('Henter ferdigheter …', 'Loading skills…')
     if (skillsFailed()) {
@@ -645,6 +798,7 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
     setMentionQuery(nextMention)
     setSkillQuery(nextSkill)
     if (nextSkill !== undefined) ensureSkillsLoaded()
+    if (nextMention !== undefined && mentionPickerOn()) ensureInstallableLoaded()
   }
 
   function closePicker(): void {
@@ -659,6 +813,9 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
     if (value.trim()) props.onTyping?.()
     setText(value)
     setCommandStatus(undefined)
+    setMentionNotice(undefined)
+    // A pick leaves the list when its `@name` leaves the words (locked agents stay).
+    if (mentionPickerOn()) mention.reconcile(value)
     const agentLabel = candidates().find((c) => c.subjectId === mentionedAgentRef())?.label
     if (agentLabel && !value.includes(`@${agentLabel}`)) setMentionedAgentRef(undefined)
     detectTriggers(value, event.currentTarget.selectionStart ?? value.length)
@@ -679,6 +836,26 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
     closePicker()
     if (candidate.kind === 'agent') setMentionedAgentRef(candidate.subjectId)
     textareaRef?.focus()
+  }
+
+  // A pick from the structured picker (WS08-S6). A person is recorded by id; an agent joins the
+  // address bar when addressed wake is on, else it is the legacy single mention.
+  function selectRoomCandidate(candidate: RoomMentionCandidate): void {
+    replaceTrigger(/(?:^|\s)@([^\s@]*)$/, `@${candidate.label} `)
+    closePicker()
+    if (candidate.kind === 'agent' && !addressedWakeOn()) {
+      setMentionedAgentRef(candidate.subjectId)
+    } else if (!mention.pick(candidate)) {
+      setMentionNotice(translateApiError({ code: 'invalid_mentions' }, i18n.tr))
+    }
+    textareaRef?.focus()
+  }
+
+  // An agent that is not in this room: leave the name in the words and ask what to do about it.
+  function selectAddRow(row: Extract<MentionPickerRow, { kind: 'add' | 'request' }>): void {
+    replaceTrigger(/(?:^|\s)@([^\s@]*)$/, `@${row.name} `)
+    closePicker()
+    setAddTarget(row.kind === 'add' ? { kind: 'add', agentRef: row.agentRef, name: row.name } : { kind: 'request', name: row.name })
   }
 
   // A picked skill is a chip, not text: the `/query` leaves the message, and the
@@ -737,7 +914,10 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   }
 
   function pickItem(item: PickerItem): void {
-    if (item.kind === 'mention') selectCandidate(item.candidate)
+    if (item.kind === 'mentionRow') {
+      if (item.row.kind === 'candidate') selectRoomCandidate(item.row.candidate)
+      else selectAddRow(item.row)
+    } else if (item.kind === 'mention') selectCandidate(item.candidate)
     else if (item.kind === 'command') {
       // A command picked from the list runs now; `/search` opens search with an empty query.
       void runPlatformCommand(item.command, '')
@@ -800,10 +980,13 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   // A human post starts no run, so it is not queued behind the gate; only a turn for the agent is.
   const blockedByApproval = () => props.replyTarget?.()?.awaitingApproval === true && effectiveMode() !== 'post'
   const subscriptionIncompatible = () => selectedModel().provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER
-    && (Boolean(mentionedAgentRef()) || pickedSkills().length > 0)
+    && (effectiveMode() === 'ask' || !addressedWakeOn())
+    && (Boolean(askAgentRef()) || pickedSkills().length > 0)
 
-  async function submitMessage(): Promise<void> {
-    const content = text().trim()
+  // `override` is the text to send when the box was just rewritten and the signal has not flushed
+  // yet (the request-to-add path appends a line naming the managers).
+  async function submitMessage(override?: string): Promise<void> {
+    const content = (override ?? text()).trim()
     if (!content || nothingOffered()) return
     // A message that is exactly a platform command runs locally instead of being sent. Anything
     // else that starts with `/` is an ordinary message, as before.
@@ -822,7 +1005,12 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
         return
       }
       closePicker()
-      await postSender.send({ content, replyThreadId: props.replyTarget?.()?.threadId })
+      await postSender.send({
+        content,
+        replyThreadId: props.replyTarget?.()?.threadId,
+        // Ids of the people and agents picked in the box; only the words still in the text count.
+        mentions: mentionPickerOn() ? mention.payload(content) : undefined,
+      })
       return
     }
     // The member's own turn is still working and the room allows steering it: hand the message to
@@ -838,12 +1026,13 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
       midRun.defer({
         content,
         threadId: busyThread,
-        mentionedAgentRef: mentionedAgentRef(),
+        mentionedAgentRef: askAgentRef(),
         skills: pickedSkills(),
       })
       setText('')
       discardDraft()
       setMentionedAgentRef(undefined)
+      mention.clear()
       setPickedSkills([])
       closePicker()
       return
@@ -895,7 +1084,7 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
       attachments: sendAttachments,
       mode: 'ask' as const,
       model: selectedModel(),
-      mentionedAgentRef: mentionedAgentRef(),
+      mentionedAgentRef: askAgentRef(),
       locale: i18n.locale(),
       skills: pickedSkills(),
       replyThreadId: props.replyTarget?.()?.threadId,
@@ -908,6 +1097,7 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
         setText('')
         discardDraft()
         setMentionedAgentRef(undefined)
+        mention.clear()
         setPickedSkills([])
         clearFiles()
       }
@@ -917,6 +1107,7 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
     if (!draftsOn()) {
       setText('')
       setMentionedAgentRef(undefined)
+      mention.clear()
       setPickedSkills([])
       clearFiles()
     }
@@ -951,6 +1142,24 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   // The thread pane's composer is aimed at one thread for as long as the pane is open; the pane title
   // already names that thread, so the box talks about "the conversation", not "the room".
   const inThread = () => props.replyTargetFixed === true && props.replyTarget?.() !== undefined
+
+  // A normal post that mentions the room's managers; nothing is bound or granted by asking.
+  function requestToAdd(name: string): void {
+    const managers: RoomMentionCandidate[] = roomCandidates().filter(
+      (c) => c.kind === 'person' && (c.role === 'manager' || c.role === 'owner'),
+    ).slice(0, 5)
+    if (managers.length > 0) {
+      for (const manager of managers) mention.pick(manager)
+      const request = i18n.tr(`kan dere legge til ${name} i rommet?`, `could you add ${name} to this room?`)
+      const next = `${text().trim()}
+
+${managers.map((m) => `@${m.label}`).join(' ')} ${request}`
+      setText(next)
+      void submitMessage(next)
+    } else {
+      setMentionNotice(i18n.tr('Fant ingen ledere å spørre i dette rommet.', 'No managers to ask were found in this room.'))
+    }
+  }
 
   const slotContext: SpaceComposerSlotContext = {
     get spaceRef() { return props.spaceRef },
@@ -1222,7 +1431,24 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
         </Show>
         <SpaceComposerToolbarSlot ctx={slotContext} />
         <SpaceComposerChipSlot ctx={slotContext} />
-        <Show when={pickerOpen()}>
+        <Show when={addressedWakeOn()}>
+          <AddressedAgentsBar
+            agents={mention.agents}
+            onToggleLock={mention.toggleLock}
+            onRemove={mention.removeAgent}
+            disabled={() => postBusy()}
+          />
+        </Show>
+        <Show when={newMentionPickerOpen()}>
+          <MentionPicker
+            id={pickerId}
+            rows={mentionRows}
+            activeIndex={activeIndex}
+            onHover={setActiveIndex}
+            onPick={(row) => pickItem({ kind: 'mentionRow', row })}
+          />
+        </Show>
+        <Show when={legacyPickerOpen()}>
           <ul
             id={pickerId}
             class="verevon-space-room-mentions"
@@ -1478,6 +1704,17 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
             {i18n.tr('Vil invokere en agent når du sender.', 'Will invoke an agent when you send.')}
           </p>
         </Show>
+        <Show when={addressedWakeOn() && effectiveMode() === 'post' && mention.agents().length > 0}>
+          <p class="verevon-space-room-composer__hint">
+            {i18n.tr(
+              'Meldingen sendes til rommet først. Agentene svarer etterpå, én om gangen, i den rekkefølgen de er nevnt.',
+              'The message is posted to the room first. The agents answer afterwards, one at a time, in the order they are named.',
+            )}
+          </p>
+        </Show>
+        <Show when={mentionNotice()}>
+          {(notice) => <p class="verevon-space-room-composer__hint" role="status">{notice()}</p>}
+        </Show>
         <Show when={pickedSkills().length > 0}>
           <p class="verevon-space-room-composer__hint">
             {i18n.tr(
@@ -1508,6 +1745,30 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
               : humanPostsActive() && effectiveMode() === 'ask' ? i18n.tr('Spør Verevon', 'Ask Verevon') : i18n.tr('Send', 'Send')}
         </button>
       </form>
+      <AgentAddDialog
+        spaceRef={props.spaceRef}
+        target={addTarget}
+        onClose={() => setAddTarget(undefined)}
+        onBound={(bound) => {
+          setAddTarget(undefined)
+          setInstallable(undefined)
+          if (addressedWakeOn()) {
+            mention.pick({
+              id: `agent:${bound.subjectId}`,
+              kind: 'agent',
+              subjectId: bound.subjectId,
+              name: bound.name,
+              label: bound.name,
+              role: 'agent',
+            })
+          } else {
+            setMentionedAgentRef(bound.subjectId)
+          }
+          void submitMessage()
+        }}
+        onSendWithout={() => { void submitMessage() }}
+        onRequest={(name) => requestToAdd(name)}
+      />
     </div>
   )
 }

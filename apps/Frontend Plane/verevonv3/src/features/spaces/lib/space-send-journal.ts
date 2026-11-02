@@ -1,5 +1,7 @@
 import { createSignal } from 'solid-js'
 
+import type { SpaceMentionsInput } from '@/shared/api/spaces-client'
+
 /**
  * The send journal (WS01-S6, F-t1-033): what this browser has sent to a room and not yet seen
  * come back in the room's own record. One entry per user action, named by its `sendId`, with
@@ -44,11 +46,13 @@ export interface SpaceJournalEntry {
   readonly createdAt: number
   /** A reply's thread `updated_at` when it was sent, so the projection moving past it means "it is in the record". */
   readonly baselineUpdatedAt?: string
+  /** WS08: the ids picked in the box. Kept so a retry under the same key sends the same body. */
+  readonly mentions?: SpaceMentionsInput
 }
 
 export type SpaceJournalStart = Pick<
   SpaceJournalEntry,
-  'sendId' | 'kind' | 'spaceRef' | 'threadId' | 'content' | 'baselineUpdatedAt'
+  'sendId' | 'kind' | 'spaceRef' | 'threadId' | 'content' | 'baselineUpdatedAt' | 'mentions'
 > & { readonly stage?: SpaceJournalStage }
 
 export interface SpaceSendJournal {
@@ -84,6 +88,7 @@ export function createSpaceSendJournal(): SpaceSendJournal {
       stage: start.stage ?? 'sending',
       createdAt: Date.now(),
       ...(start.baselineUpdatedAt ? { baselineUpdatedAt: start.baselineUpdatedAt } : {}),
+      ...(start.mentions ? { mentions: start.mentions } : {}),
     }
     setEntries((current) => [...current.filter((item) => item.sendId !== entry.sendId), entry])
     return entry

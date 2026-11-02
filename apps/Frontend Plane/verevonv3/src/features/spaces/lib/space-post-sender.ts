@@ -1,7 +1,13 @@
 import { createSignal } from 'solid-js'
 
 import { ApiError } from '@/shared/api/http'
-import { createSpacePost, replyInSpaceThread, type SpacePostReceipt } from '@/shared/api/spaces-client'
+import {
+  createSpacePost,
+  replyInSpaceThread,
+  sameMentions,
+  type SpaceMentionsInput,
+  type SpacePostReceipt,
+} from '@/shared/api/spaces-client'
 import { noteSendTransportLost, noteSendTransportOk } from './space-connectivity'
 import type { SpaceJournalEntry, SpaceJournalFailure, SpaceSendJournal } from './space-send-journal'
 import { newSpaceSendId } from './space-send-pipeline'
@@ -38,6 +44,8 @@ export interface SpacePostInput {
   readonly content: string
   /** Set when the post continues an existing room thread. */
   readonly replyThreadId?: string
+  /** WS08: ids picked in the box (people and agents). Omitted for a plain post. */
+  readonly mentions?: SpaceMentionsInput
 }
 
 export interface SpacePostSenderOptions {
@@ -114,7 +122,7 @@ export function createSpacePostSender(options: SpacePostSenderOptions): SpacePos
     }
     journal.update(sendId, { stage: 'sending' })
     try {
-      const input = { content: entry.content, clientSendId: sendId }
+      const input = { content: entry.content, clientSendId: sendId, mentions: entry.mentions }
       const receipt = entry.kind === 'post_reply' && entry.threadId
         ? await replyInSpaceThread(entry.spaceRef, entry.threadId, input)
         : await createSpacePost(entry.spaceRef, input)
@@ -150,6 +158,7 @@ export function createSpacePostSender(options: SpacePostSenderOptions): SpacePos
       && prior.kind === kind
       && prior.spaceRef === spaceRef
       && prior.content === content
+      && sameMentions(prior.mentions, input.mentions)
       && (kind === 'post_new' || prior.threadId === input.replyThreadId)
     if (prior && !sameSend) journal.remove(prior.sendId)
     const entry = sameSend && prior
@@ -160,6 +169,7 @@ export function createSpacePostSender(options: SpacePostSenderOptions): SpacePos
           spaceRef,
           threadId: input.replyThreadId,
           content,
+          ...(input.mentions ? { mentions: input.mentions } : {}),
           baselineUpdatedAt: input.replyThreadId ? options.baselineUpdatedAt?.(input.replyThreadId) : undefined,
           stage: online() ? 'sending' : 'queued',
         })

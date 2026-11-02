@@ -1010,6 +1010,20 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   space_post_not_authorized: { no: 'Rollen din i dette rommet tillater ikke å skrive her. Be en eier eller leder om redigeringstilgang.', en: 'Your role in this room does not allow posting here. Ask an owner or manager for edit access.' },
   thread_state_conflict: { no: 'Samtalen kan ikke ta imot nye meldinger akkurat nå. Prøv igjen om litt.', en: 'The conversation cannot take new messages right now. Try again shortly.' },
 
+  // WS08 mentions and addressed wake
+  agent_not_bound: { no: 'Denne agenten er ikke lagt til i rommet, så den ble ikke nevnt.', en: 'This agent has not been added to the room, so it was not mentioned.' },
+  agent_respond_to_denied: { no: 'Denne agenten svarer ikke på meldinger fra deg i dette rommet. En leder bestemmer hvem som kan tilkalle den.', en: 'This agent does not answer messages from you in this room. A manager decides who can call it.' },
+  invalid_mentions: { no: 'Meldingen har for mange eller ugyldige omtaler. Fjern noen og send på nytt.', en: 'The message has too many or invalid mentions. Remove some and send again.' },
+  mention_text_missing: { no: 'Navnet står ikke lenger i meldingen, så omtalen ble ikke lagret.', en: 'The name is no longer in the message, so the mention was not recorded.' },
+  mention_unavailable: { no: 'Omtaler kunne ikke lagres akkurat nå. Meldingen ble sendt som vanlig tekst.', en: 'Mentions could not be recorded right now. The message was sent as plain text.' },
+  person_not_in_room: { no: 'Personen er ikke med i rommet, så omtalen ble ikke lagret.', en: 'That person is not in the room, so the mention was not recorded.' },
+  space_addressed_wake_disabled: { no: 'Å tilkalle agenter fra en melding er ikke slått på ennå.', en: 'Calling agents from a message is not turned on yet.' },
+  wake_not_authorized: { no: 'Du kan ikke tilkalle denne agenten her. Meldingen er sendt, men agenten svarer ikke.', en: 'You cannot call this agent here. Your message was sent, but the agent will not answer.' },
+  wake_owner_required: { no: 'Bare den som startet denne samtalen kan tilkalle en agent i den. Meldingen er sendt uten svar fra agenten.', en: 'Only the person who started this conversation can call an agent in it. Your message was sent without an answer from the agent.' },
+  wake_requires_single_agent: { no: 'Én agent kan tilkalles om gangen. Prøv igjen.', en: 'One agent can be called at a time. Try again.' },
+  wake_requires_thread: { no: 'Agenten kan bare tilkalles fra en melding som er lagret i en samtale.', en: 'An agent can only be called from a message stored in a conversation.' },
+  wake_trigger_mismatch: { no: 'Meldingen er endret siden den ble sendt, så agenten ble ikke tilkalt.', en: 'The message changed after it was sent, so the agent was not called.' },
+
   // WS02 realtime stream
   space_stream_capacity: { no: 'Live-oppdateringer er midlertidig full. Rommet oppdateres hvert par sekunder.', en: 'Live updates are temporarily at capacity. The room is refreshing every few seconds.' },
   space_stream_disabled: { no: 'Live-oppdateringer er ikke slått på. Rommet oppdateres hvert par sekunder.', en: 'Live updates are not turned on. The room is refreshing every few seconds.' },
@@ -1077,6 +1091,14 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   revision_limit: { no: 'Meldingen er endret for mange ganger.', en: 'The message has been changed too many times.' },
   message_state_conflict: { no: 'Meldingen ble endret av noen andre mens du jobbet. Last inn på nytt og prøv igjen.', en: 'The message was changed by someone else while you worked. Reload and try again.' },
   invalid_message: { no: 'Meldingen er tom eller for lang, eller valget er ugyldig. Ingenting er endret.', en: 'The message is empty or too long, or the choice is not valid. Nothing was changed.' },
+
+  // WS12-S8 reactions
+  space_reactions_disabled: { no: 'Reaksjoner er ikke slått på.', en: 'Reactions are not turned on.' },
+  space_role_cannot_react: { no: 'Du har lesetilgang i dette rommet og kan ikke reagere.', en: 'You have read-only access in this room, so you cannot react.' },
+  invalid_emoji: { no: 'Velg én emoji.', en: 'Pick a single emoji.' },
+  invalid_reaction: { no: 'Reaksjonen er ikke gyldig. Ingenting er endret.', en: 'The reaction is not valid. Nothing was changed.' },
+  reaction_limit: { no: 'Meldingen har allerede så mange ulike reaksjoner som den kan ha.', en: 'The message already has as many different reactions as it can hold.' },
+  application_unavailable: { no: 'Reaksjonen kunne ikke lagres akkurat nå. Ingenting er endret. Prøv igjen om litt.', en: 'The reaction could not be saved right now. Nothing was changed. Try again shortly.' },
 
   // WS05 org security
 

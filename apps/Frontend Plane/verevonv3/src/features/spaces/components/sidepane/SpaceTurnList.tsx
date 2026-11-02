@@ -4,18 +4,27 @@ import { createSignal, For, Show } from 'solid-js'
 import { ChatMarkdown } from '@/features/chat/components/ChatMessages'
 import type { ChatArtifact } from '@/features/chat/components/chat-types'
 import { SpaceArtifactChip } from '../SpaceArtifactChip'
-import { spaceRunWorkFrom } from '@/shared/api/spaces-client'
-import type { SpaceAgent, SpaceRosterMember, SpaceRunWork, SpaceThread } from '@/shared/api/spaces-client'
+import { spaceReactionsFrom, spaceRunWorkFrom } from '@/shared/api/spaces-client'
+import type {
+  SpaceAgent,
+  SpaceReactionChip,
+  SpaceRosterMember,
+  SpaceRunWork,
+  SpaceThread,
+} from '@/shared/api/spaces-client'
 import { SpaceRunWorkSummary } from '../SpaceRunCard'
 import { SpaceMessageEdit } from '../SpaceMessageEdit'
 import { SpaceMessageToolbar } from '../SpaceMessageToolbar'
+import { SpaceReactionBar } from '../SpaceReactionBar'
 import type { SpaceTurnLifecycle } from '../../lib/space-message-lifecycle'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { AgentAvatar } from '../AgentAvatar'
 import { SpaceIdentityHoverCard } from '../SpaceIdentityHoverCard'
 import { agentAvatarColor, agentForName, memberTint } from '../../lib/agent-avatar'
 import { splitRoomMessage } from '../../lib/room-attachments'
-import { spaceRoomFeatureWithDevOverride } from '../../lib/space-room-features'
+import { spaceRoomFeature, spaceRoomFeatureWithDevOverride } from '../../lib/space-room-features'
+import { MentionText } from '../MentionText'
+import { WakeStatus } from '../WakeStatus'
 import { agentCardModel, memberCardModel } from '../../lib/agent-activity'
 import type { IdentityCardModel } from '../../lib/agent-activity'
 import { continuesTurnGroup, formatTurnTime } from '../../lib/space-thread-presentation'
@@ -66,6 +75,8 @@ export type TranscriptTurn = {
   readonly revisedBySubjectId?: string
   /** A deleted message an agent run had already answered. */
   readonly agentFollowedUp?: boolean
+  /** WS12-S8: emoji reactions on this message, as the server merged them. */
+  readonly reactions?: readonly SpaceReactionChip[]
 }
 
 export const MAX_TURNS_PER_POST = 30
@@ -117,6 +128,7 @@ export function normalizeTranscriptTurns(
       ? asSpaceRetrievalDeclineReason(record.retrievalDeclined)
       : undefined
     const work = role === 'assistant' ? spaceRunWorkFrom(record.work) : undefined
+    const reactions = revisionState === 'deleted' ? [] : spaceReactionsFrom(record.reactions)
     normalized.push({
       role,
       content,
@@ -131,6 +143,7 @@ export function normalizeTranscriptTurns(
       ...(revisionState && revisedAt ? { revisedAt } : {}),
       ...(revisionState && revisedBySubjectId ? { revisedBySubjectId } : {}),
       ...(revisionState === 'deleted' && record.agentFollowedUp === true ? { agentFollowedUp: true } : {}),
+      ...(reactions.length > 0 ? { reactions } : {}),
     })
   }
   // Over the cap, keep the first turn (the post's opening message) and the NEWEST turns, never the
@@ -283,6 +296,29 @@ export function SpaceTurnList(props: SpaceTurnListProps) {
         const [busy, setBusy] = createSignal(false)
         const [lifecycleError, setLifecycleError] = createSignal<string | undefined>(undefined)
         const deleted = () => turn.revisionState === 'deleted'
+        // WS12-S8: the chips after this viewer's own toggle; a refetch builds new turn objects and a
+        // fresh row, so the server's merged list takes over again.
+        const [chipsOverride, setChipsOverride] = createSignal<readonly SpaceReactionChip[] | undefined>(undefined)
+        const [reactBusy, setReactBusy] = createSignal(false)
+        const chips = () => chipsOverride() ?? turn.reactions ?? []
+        const toggleReaction = async (emoji: string, present: boolean) => {
+          const lifecycle = props.lifecycle
+          if (!lifecycle || reactBusy()) return
+          setReactBusy(true)
+          setLifecycleError(undefined)
+          try {
+            setChipsOverride(await lifecycle.react(turn, emoji, present))
+          } catch (error) {
+            setLifecycleError(
+              translateApiError(error, i18n.tr, {
+                no: 'Reaksjonen kunne ikke endres. Ingenting er endret. Prøv igjen om litt.',
+                en: 'The reaction could not be changed. Nothing was changed. Try again shortly.',
+              }),
+            )
+          } finally {
+            setReactBusy(false)
+          }
+        }
         const removeTurn = async () => {
           const lifecycle = props.lifecycle
           if (!lifecycle || busy()) return
@@ -397,11 +433,32 @@ export function SpaceTurnList(props: SpaceTurnListProps) {
                         yields an <img> or an unsafe anchor. Off, it stays the plain pre-wrap line. */}
                     <Show
                       when={humanMarkdownOn() && splitRoomMessage(turn.content).text.length > 0}
-                      fallback={<p class="verevon-room-turn__plain">{splitRoomMessage(turn.content).text}</p>}
+                      fallback={
+                        <p class="verevon-room-turn__plain">
+                          <Show
+                            when={spaceRoomFeature('mention_picker')}
+                            fallback={splitRoomMessage(turn.content).text}
+                          >
+                            <MentionText
+                              text={splitRoomMessage(turn.content).text}
+                              names={[
+                                ...props.roster().map((member) => member.display_name),
+                                ...(props.agents?.() ?? []).map((agent) => agent.name ?? ''),
+                              ]}
+                              viewerName={props.roster().find((member) => member.subject_id === props.viewerSubjectId?.())?.display_name}
+                            />
+                          </Show>
+                        </p>
+                      }
                     >
                       <div class="verevon-room-turn__markdown">
                         <ChatMarkdown content={splitRoomMessage(turn.content).text} />
                       </div>
+                    </Show>
+                    {/* WS08-S6: where the agents named in this post stand. Only the person who posted has
+                        entries (their browser drives the wakes), so nobody else sees anything here. */}
+                    <Show when={turn.messageId}>
+                      {(messageId) => <WakeStatus messageId={messageId()} />}
                     </Show>
                     {/* A turn that carried per-turn files (WS14-S8): the words, then one chip per file
                         by name. The fenced text stays in the stored message and is not shown here. */}
@@ -430,6 +487,14 @@ export function SpaceTurnList(props: SpaceTurnListProps) {
                   {i18n.tr('(redigert)', '(edited)')}
                 </span>
               </Show>
+              </Show>
+              <Show when={!deleted() && !editing()}>
+                <SpaceReactionBar
+                  chips={chips()}
+                  canReact={props.lifecycle?.canReact(turn) === true}
+                  busy={reactBusy()}
+                  onToggle={(emoji, present) => { void toggleReaction(emoji, present) }}
+                />
               </Show>
               <Show when={lifecycleError()}>
                 {(message) => (

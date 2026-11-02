@@ -233,3 +233,102 @@
   font-size: 0.8125rem;
   color: var(--verevon-text-muted);
 }
+
+/* WS08-S6: structured mentions, the address bar, wake status and mention highlight. */
+.verevon-space-mention-picker {
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.verevon-space-mention-picker__section {
+  padding: 6px 10px 2px;
+  color: var(--verevon-text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.verevon-space-addressed {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 6px;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-space-addressed__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 999px;
+  background: var(--verevon-surface);
+  padding: 2px 4px 2px 8px;
+  font-size: 12px;
+}
+
+.verevon-space-addressed__chip[data-locked="true"] {
+  border-color: var(--verevon-accent, currentColor);
+}
+
+.verevon-space-addressed__order {
+  color: var(--verevon-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.verevon-space-addressed__lock,
+.verevon-space-addressed__remove {
+  border: 0;
+  background: transparent;
+  padding: 2px 4px;
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.verevon-space-addressed__lock:focus-visible,
+.verevon-space-addressed__remove:focus-visible {
+  outline: 2px solid var(--verevon-accent, currentColor);
+  outline-offset: 1px;
+}
+
+.verevon-space-wake {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-space-wake__item[data-state="failed"],
+.verevon-space-wake__item[data-state="refused"] {
+  color: var(--danger, #b42318);
+}
+
+.verevon-space-wake__action {
+  margin-left: 8px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--verevon-accent, currentColor);
+  font-size: 12px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.verevon-space-mention {
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--verevon-accent, currentColor) 14%, transparent);
+  padding: 0 2px;
+  color: inherit;
+}
+
+.verevon-space-mention[data-self="true"] {
+  background: color-mix(in srgb, var(--verevon-accent, currentColor) 32%, transparent);
+  font-weight: 600;
+}

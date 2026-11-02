@@ -106,6 +106,13 @@ export type ChatInvokeRequest = {
    * silently ignored or silently granted. Meaningless without `spaceRef`.
    */
   mentionedAgentRef?: string
+  /**
+   * WS08: wake the one agent in `mentionedAgentRef` from a stored human post. `messageId` names the
+   * post (the trigger; its text must be this request's `content`) and `clientWakeId` is this wake's
+   * own retry identity. Needs `threadId`. The gateway signs and Session Core verifies the wake; the
+   * browser only names the post.
+   */
+  wake?: { messageId: string; clientWakeId: string }
   sessionKey?: string
   features?: string[]
   generateImage?: boolean
@@ -1407,6 +1414,8 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     // Narrowed inline like `retrievalScope` above: only the two known codes ever reach the wire.
     locale: request.locale === 'no' || request.locale === 'en' ? request.locale : undefined,
     mentioned_agent_ref: request.mentionedAgentRef?.trim() || undefined,
+    // Present only on a wake, so every other body is byte-identical to what it was.
+    ...(request.wake ? { wake: { message_id: request.wake.messageId, client_wake_id: request.wake.clientWakeId } } : {}),
     // Explicit skill picks. The KEY is absent when none — not `undefined`, not
     // `[]` — so a turn that names no skill is byte-for-byte what it was before
     // this field existed.

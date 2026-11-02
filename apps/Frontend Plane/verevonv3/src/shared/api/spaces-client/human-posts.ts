@@ -15,6 +15,12 @@
 // `clientSendId` names ONE send for its whole life: a retry passes the same id, so a repeat the
 // server already stored comes back `deduplicated: true` and the room holds the post once.
 import { requestJson } from '../http'
+import {
+  mentionsWire,
+  parseMentionsReceipt,
+  type SpaceMentionsInput,
+  type SpaceMentionsReceipt,
+} from './mentions'
 
 /** The longest post the gateway accepts, in characters (`data.limits.post_max_chars` says the live value). */
 export const SPACE_POST_MAX_CHARS_DEFAULT = 8000
@@ -25,6 +31,8 @@ export type SpacePostReceipt = {
   readonly sequence: number
   /** True when the server already had this send and returned the original. */
   readonly deduplicated: boolean
+  /** WS08: what the server recorded for the post's mentions. Absent when none were sent or it was not told. */
+  readonly mentions?: SpaceMentionsReceipt
 }
 
 type PostReceiptWire = {
@@ -32,6 +40,7 @@ type PostReceiptWire = {
   message_id?: unknown
   sequence?: unknown
   deduplicated?: unknown
+  mentions?: unknown
 }
 
 function receiptFrom(wire: PostReceiptWire | null | undefined, fallbackThreadId?: string): SpacePostReceipt {
@@ -39,22 +48,40 @@ function receiptFrom(wire: PostReceiptWire | null | undefined, fallbackThreadId?
   // A receipt with no thread is not an acceptance this browser can show: fail loudly so the
   // send stays retryable (the retry is deduplicated by its key) instead of claiming a post.
   if (!threadId) throw new Error('post_receipt_missing_thread')
+  const mentions = parseMentionsReceipt(wire?.mentions)
   return {
     threadId,
     messageId: typeof wire?.message_id === 'string' ? wire.message_id : '',
     sequence: typeof wire?.sequence === 'number' && Number.isFinite(wire.sequence) ? wire.sequence : 0,
     deduplicated: wire?.deduplicated === true,
+    ...(mentions ? { mentions } : {}),
   }
+}
+
+/** What a post send takes. `mentions` (WS08) is ids the composer picked; the key and the text are unchanged. */
+export type SpacePostRequest = {
+  readonly content: string
+  readonly clientSendId: string
+  readonly mentions?: SpaceMentionsInput
+}
+
+function postBody(input: SpacePostRequest): string {
+  const mentions = mentionsWire(input.mentions)
+  return JSON.stringify({
+    content: input.content,
+    client_send_id: input.clientSendId,
+    ...(mentions ? { mentions } : {}),
+  })
 }
 
 /** Start a new thread in the room with a post from the caller. */
 export async function createSpacePost(
   spaceRef: string,
-  input: { readonly content: string; readonly clientSendId: string },
+  input: SpacePostRequest,
 ): Promise<SpacePostReceipt> {
   const wire = await requestJson<PostReceiptWire>(`/api/v1/spaces/${encodeURIComponent(spaceRef)}/threads`, {
     method: 'POST',
-    body: JSON.stringify({ content: input.content, client_send_id: input.clientSendId }),
+    body: postBody(input),
   })
   return receiptFrom(wire)
 }
@@ -63,13 +90,13 @@ export async function createSpacePost(
 export async function replyInSpaceThread(
   spaceRef: string,
   threadId: string,
-  input: { readonly content: string; readonly clientSendId: string },
+  input: SpacePostRequest,
 ): Promise<SpacePostReceipt> {
   const wire = await requestJson<PostReceiptWire>(
     `/api/v1/spaces/${encodeURIComponent(spaceRef)}/threads/${encodeURIComponent(threadId)}/messages`,
     {
       method: 'POST',
-      body: JSON.stringify({ content: input.content, client_send_id: input.clientSendId }),
+      body: postBody(input),
     },
   )
   return receiptFrom(wire, threadId)
