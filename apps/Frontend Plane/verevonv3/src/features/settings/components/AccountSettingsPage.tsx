@@ -3,6 +3,7 @@ import { ChatGptSubscriptionPanel } from '@/features/integrations/components/Cha
 import { MailTaskAddressSection } from '@/features/settings/components/MailTaskAddressSection'
 import { PasskeySecuritySection } from '@/features/settings/components/PasskeySecuritySection'
 import { PrivacyDataSection } from '@/features/settings/components/PrivacyDataSection'
+import { SpaceNotificationPreferences } from '@/features/settings/components/SpaceNotificationPreferences'
 import { TwoFactorEnrollmentSection } from '@/features/settings/components/TwoFactorEnrollmentSection'
 import {
   SectionHeader,
@@ -277,6 +278,7 @@ export default function AccountSettingsPage() {
       />
       <PreferencesSection form={form} onField={updateField} />
       <AvailabilitySection form={form} onField={updateField} />
+      <SpaceNotificationPreferences />
       <ConnectedAccountsSection profile={profile} />
       <ChatGptSubscriptionSection />
       <TwoFactorEnrollmentSection />

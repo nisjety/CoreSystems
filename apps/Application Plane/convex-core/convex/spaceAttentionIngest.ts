@@ -51,6 +51,7 @@ import {
 } from "./spaceAttentionRules";
 import { parseSpaceEvent, planMessageRecipients, type ParsedSpaceEvent } from "./spaceAttentionEnvelope";
 import { writeAttentionItem } from "./spaceAttention";
+import { COURIER_PATH, buildCourierRequest, signCourierRequest } from "./spaceAttentionCourier";
 
 /** Events are kept for dedupe this long (matches the stream's 48 h retention). */
 const EVENT_DEDUPE_MS = 48 * 60 * 60 * 1000;
@@ -413,9 +414,14 @@ export const ingestSpaceEvent = internalMutation({
 });
 
 /**
- * The out-of-app courier seam. S6 only decides and schedules (flag, rules,
- * budget); the notification-core principal and request are WS11-S9. Until then
- * this is an acknowledged no-op, so nothing leaves the app.
+ * The out-of-app courier (WS11-S9). S6 decides and schedules (flag, rules,
+ * budget); this posts one refs-only request to notification-core as service id
+ * `space-attention`. Off unless `SPACE_ATTENTION_OUT_OF_APP` is on and both
+ * `NOTIFICATION_CORE_URL` and `NOTIFICATION_SPACE_ATTENTION_SERVICE_TOKEN` are
+ * set; a missing one is a quiet "not delivered", never a thrown error. The
+ * idempotency key is `<eventId>:<recipient>`, so a retry cannot double-send.
+ * Whether anything is actually sent also depends on notification-core's own
+ * delivery mode and the recipient's per-type email preference.
  */
 export const deliverOutOfApp = internalAction({
   args: {
@@ -431,7 +437,26 @@ export const deliverOutOfApp = internalAction({
   },
   handler: async (_ctx, args): Promise<{ delivered: boolean; reason: string }> => {
     if (!envFlagOn(process.env.SPACE_ATTENTION_OUT_OF_APP)) return { delivered: false, reason: "disabled" };
-    return { delivered: false, reason: "courier_not_built" };
+    const baseUrl = (process.env.NOTIFICATION_CORE_URL || "").trim().replace(/\/+$/, "");
+    const secret = (process.env.NOTIFICATION_SPACE_ATTENTION_SERVICE_TOKEN || "").trim();
+    if (!baseUrl || !secret) return { delivered: false, reason: "not_configured" };
+    const request = buildCourierRequest(args);
+    if (!request) return { delivered: false, reason: "unsupported_kind" };
+    const body = JSON.stringify(request);
+    try {
+      const response = await fetch(`${baseUrl}${COURIER_PATH}`, {
+        method: "POST",
+        headers: await signCourierRequest(secret, request.organization_id, body),
+        body,
+      });
+      if (response.ok) return { delivered: true, reason: "accepted" };
+      // Status only: the response body is never logged.
+      console.warn(`[space-attention] courier refused: status ${response.status}`);
+      return { delivered: false, reason: `http_${response.status}` };
+    } catch {
+      console.warn("[space-attention] courier unreachable");
+      return { delivered: false, reason: "unreachable" };
+    }
   },
 });
 

@@ -137,6 +137,14 @@ set_convex_env "SPACE_DM_OPEN" "${SPACE_DM_OPEN:-0}"
 # then acknowledged and dropped). A rollout control only, never an authorization
 # input. Needs Model Plane SPACE_ATTENTION_EMIT on to receive anything.
 set_convex_env "SPACE_ATTENTION_INGEST" "${SPACE_ATTENTION_INGEST:-0}"
+# WS11-S9 flag SPACE_ATTENTION_OUT_OF_APP: spaceAttentionIngest:deliverOutOfApp posts
+# a refs-only request to notification-core, signed as service id space-attention.
+# Off unless a compose file turns it on; set it empty and `docker restart
+# convex-gateway` to stop. A rollout control only, never an authorization input.
+# Needs the delegation token below and notification-core's own delivery mode.
+set_convex_env "SPACE_ATTENTION_OUT_OF_APP" "${SPACE_ATTENTION_OUT_OF_APP:-0}"
+set_convex_env "NOTIFICATION_CORE_URL" "${NOTIFICATION_CORE_URL:-}"
+set_convex_env "NOTIFICATION_SPACE_ATTENTION_SERVICE_TOKEN" "${NOTIFICATION_SPACE_ATTENTION_SERVICE_TOKEN:-}"
 
 # ─────────────────────────────────────────────────────────────────────────
 # Force-deploy functions before starting dev mode.
