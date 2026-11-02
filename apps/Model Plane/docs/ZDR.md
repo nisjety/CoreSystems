@@ -502,6 +502,13 @@ A ZDR credential is refused on thread appends by Session Core's ordinary write r
 
 ---
 
+### 5.12 Run trace and the web-taint marker (WS10.S6, WS11.S7)
+
+Two session-core tables/columns added after this section was written, both ZDR-safe by construction:
+
+- `run_trace_events` (migration 0086) holds Quarry's browser-run trace. The consumer (`SESSION_CORE_TRACE_CONSUMER`, off by default) stores an event only when the message carries an explicit `"zdr": false` AND the run's `retention_class` is not `zdr`; a ZDR run never gets a row, and `EventLog.QueryEvents` therefore answers an empty page for it. Rows are removed with their run, with their org on the GDPR purge, and after `SESSION_CORE_TRACE_RETENTION_DAYS` (30) by the sweeper.
+- `runs.external_content_at` (migration 0087) is a TIMESTAMP only. It is set from a tool NAME (`TrustClass::is_external_content`) and holds no URL, query, page text or result, so a ZDR run that used a web tool stores one time value and nothing about what it read. Its only reader is Dreaming, which skips assistant messages written inside a tainted run (`SESSION_CORE_DREAMING_SKIP_EXTERNAL_CONTENT`, default on, only an explicit `0`/`false`/`off`/`no` disables it).
+
 ## 6. Known defects and gaps
 
 1. **Subscription route under token ZDR (Z-00).** With ZDR carried only by the token,

@@ -16,6 +16,7 @@ mod continuation_crypto;
 mod dream_extractor;
 mod dreaming;
 mod eventlog_grpc;
+mod external_content;
 mod finetune_grpc;
 mod gdpr;
 mod gdpr_nats;

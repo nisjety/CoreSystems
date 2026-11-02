@@ -5311,7 +5311,7 @@ async fn record_run_terminal(
 /// Core of `SessionCore::complete_step`, factored out to keep the trait method
 /// small. Appends the `STEP_COMPLETED` event and, on a terminal status, the
 /// run-terminal event + status flip, all in one tx.
-async fn complete_step_inner(
+pub(crate) async fn complete_step_inner(
     pool: &PgPool,
     audit_publisher: Option<&crate::audit_publisher::AuditOutbox>,
     req: pb::CompleteStepRequest,
@@ -5465,6 +5465,13 @@ async fn enqueue_tool_action_audit(
     };
 
     let tool = crate::audit_publisher::resolve_tool_name(&detail, &req.step_id);
+    // WS11.S7: a COMPLETED step of a web, browser or third-party-MCP tool taints the run (and its
+    // ancestors) in the same transaction as the step; a failed one read nothing from outside.
+    if req.status == "completed" && crate::external_content::is_external_content_tool(&tool) {
+        crate::external_content::mark_external_content(tx, &req.run_id)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+    }
     let body = crate::audit_publisher::build_tool_action_body(
         &org_id,
         &user_id,
@@ -5655,6 +5662,14 @@ pub(crate) async fn reserve_tool_action_inner(
         return Err(Status::already_exists(
             "tool action identity is bound to different immutable input",
         ));
+    }
+
+    // WS11.S7: the inline loop has no CompleteStep, so the reservation (before the tool runs, which
+    // also marks a call that later fails: the conservative side) taints the run and its ancestors.
+    if crate::external_content::is_external_content_tool(&req.tool) {
+        crate::external_content::mark_external_content(&mut tx, &req.run_id)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
     }
 
     let detail = tool_action_detail(&req.tool, &req.data_category, req.zdr);

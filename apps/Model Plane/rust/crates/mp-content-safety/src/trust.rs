@@ -76,6 +76,21 @@ impl TrustClass {
         !matches!(self, Self::OrgInternal)
     }
 
+    /// Whether a result of this class is web, browser or third-party-MCP content: text an
+    /// outsider can write, which may carry instructions aimed at the model. This is the web-taint
+    /// guard's question (WS11.S7: no `save_memory` after such a read, and Dreaming skips the
+    /// assistant rows written inside such a run). It is narrower than [`Self::is_external`]:
+    /// `ConnectorContent` (the user's own connected account) is excluded by the plan default,
+    /// because connector reads already have their own screening taint, and `PriorConversation`
+    /// and `RoomMember` have no tool that maps to them.
+    #[must_use]
+    pub const fn is_external_content(self) -> bool {
+        matches!(
+            self,
+            Self::ExternalWeb | Self::BrowserScraped | Self::ThirdPartyMcp
+        )
+    }
+
     /// One-line defensive framing for external classes. It is written from the
     /// class, never from the payload, so a poisoned page cannot pose as it.
     #[must_use]
@@ -118,6 +133,44 @@ mod tests {
         }
         // The neighbours that are not page content stay internal.
         assert_eq!(TrustClass::classify("browser.open"), TrustClass::OrgInternal);
+    }
+
+    // WS11.S7: the one list behind the web-taint guard. execution-core (latch) and session-core
+    // (`runs.external_content_at`) both ask `classify(..).is_external_content()`; neither keeps
+    // its own copy, so this test is the pin for both.
+    #[test]
+    fn external_content_tool_list_is_pinned() {
+        for name in [
+            "web_search",
+            "web_fetch",
+            "fetch_url",
+            "web.search",
+            "web.read",
+            "browser_agent",
+            "browser.observe",
+            "browser.act",
+            "browser.console",
+            "mcp__srv__anything",
+        ] {
+            assert!(TrustClass::classify(name).is_external_content(), "{name}");
+        }
+        for name in [
+            "read_provider_action",
+            "execute_provider_action",
+            "list_provider_actions",
+            "knowledge_search",
+            "save_memory",
+            "recall_memory",
+            "browser.open",
+            "some_future_tool",
+            "",
+        ] {
+            assert!(!TrustClass::classify(name).is_external_content(), "{name}");
+        }
+        assert!(!TrustClass::OrgInternal.is_external_content());
+        assert!(!TrustClass::ConnectorContent.is_external_content());
+        assert!(!TrustClass::PriorConversation.is_external_content());
+        assert!(!TrustClass::RoomMember.is_external_content());
     }
 
     #[test]

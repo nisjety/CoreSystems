@@ -142,6 +142,10 @@ struct PendingMessage {
     org_id: String,
     user_id: String,
     conversation_only: bool,
+    /// An assistant message written inside a run that read web, browser or third-party content
+    /// (`runs.external_content_at`, WS11.S7). Always false for a user message, and always false
+    /// when `SESSION_CORE_DREAMING_SKIP_EXTERNAL_CONTENT` is switched off.
+    external_content: bool,
 }
 
 pub(crate) async fn run(pool: PgPool, letta: Option<LettaMemoryAdapter>) -> anyhow::Result<()> {
@@ -238,6 +242,24 @@ pub(crate) async fn dream_once(
             info!(%thread_id, messages = group.len(), "memory extraction skipped: conversation-only source scope");
             continue;
         }
+
+        // WS11.S7: an assistant message written inside a run that read web, browser or third-party
+        // content may paraphrase a page that carried instructions, so it is never mined and never
+        // shown to the extractor. It is ledgered like any other handled message, so the pending
+        // query stops selecting it. User messages (and later runs that read nothing external) stay
+        // eligible.
+        let (group, tainted): (Vec<PendingMessage>, Vec<PendingMessage>) =
+            group.into_iter().partition(|message| !message.external_content);
+        if !tainted.is_empty() {
+            let mut tx = pool.begin().await?;
+            for message in &tainted {
+                record_dream_run(&mut tx, &org_id, &thread_id, "skipped_external_content", 0, 0, Some(&message.message_id)).await?;
+                processed += 1;
+            }
+            tx.commit().await?;
+            info!(%thread_id, messages = tainted.len(), "memory extraction skipped: assistant text written after external content");
+        }
+        let Some(last) = group.last() else { continue };
 
         // Attached to the newest message of the group: that is the turn whose
         // arrival justified re-reading the window, and source_links should point
@@ -1308,9 +1330,10 @@ async fn load_pending_messages(
     // The org's own policy, on top of the user's: an org that disabled memory is
     // not mined, nor is the period it had memory off after it is switched back on.
     let org_filter = crate::org_policy::pending_filter(3, 4, 5);
+    let tainted = crate::external_content::tainted_assistant_sql(6);
     let gate = crate::org_policy::pending_gate();
-    let rows = sqlx::query_as::<_, (String, String, String, String, String, String, bool)>(
-        &format!("SELECT m.id, m.thread_id, m.role, m.content, t.org_id, t.user_id, t.source_scope = 'conversation' \
+    let rows = sqlx::query_as::<_, (String, String, String, String, String, String, bool, bool)>(
+        &format!("SELECT m.id, m.thread_id, m.role, m.content, t.org_id, t.user_id, t.source_scope = 'conversation', {tainted} \
          FROM messages m \
          JOIN threads t ON t.id = m.thread_id \
          WHERE m.role IN ('user', 'assistant') \
@@ -1340,13 +1363,14 @@ async fn load_pending_messages(
     .bind(gate.active)
     .bind(gate.fail_closed)
     .bind(gate.max_stale_secs)
+    .bind(crate::external_content::skip_enabled())
     .fetch_all(pool)
     .await?;
 
     Ok(rows
         .into_iter()
         .map(
-            |(message_id, thread_id, role, content, org_id, user_id, conversation_only)| PendingMessage {
+            |(message_id, thread_id, role, content, org_id, user_id, conversation_only, external_content)| PendingMessage {
                 message_id,
                 thread_id,
                 role,
@@ -1354,6 +1378,7 @@ async fn load_pending_messages(
                 org_id,
                 user_id,
                 conversation_only,
+                external_content,
             },
         )
         .collect())
@@ -1376,6 +1401,8 @@ async fn load_preceding_context(
     // for are not shown to the extractor as context either, and nor are the turns
     // a thread had off before it was resumed.
     let org_filter = crate::org_policy::pending_filter(5, 6, 7);
+    // WS11.S7: the turns the extractor reads exclude assistant text written after external content.
+    let tainted = crate::external_content::tainted_assistant_sql(8);
     let gate = crate::org_policy::pending_gate();
     let mut rows = sqlx::query_as::<_, (String, String)>(
         &format!("SELECT m.role, m.content \
@@ -1384,6 +1411,7 @@ async fn load_preceding_context(
          WHERE m.thread_id = $1 \
            AND m.on_active_path \
            AND m.role IN ('user', 'assistant') \
+           AND NOT {tainted} \
            AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND m.created_at <= c.extract_after) \
            AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND c.memory_state <> 'on' AND $4) \
            AND (NOT $4 OR t.memory_resumed_at IS NULL OR m.created_at > t.memory_resumed_at) \
@@ -1401,6 +1429,7 @@ async fn load_preceding_context(
     .bind(gate.active)
     .bind(gate.fail_closed)
     .bind(gate.max_stale_secs)
+    .bind(crate::external_content::skip_enabled())
     .fetch_all(pool)
     .await?;
     rows.reverse();
@@ -2386,6 +2415,7 @@ mod tests {
             content: "hei".to_owned(),
             org_id: "org-1".to_owned(),
             user_id: "user-1".to_owned(),
+            external_content: false,
         }
     }
 
@@ -3193,5 +3223,232 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(latest, [target_id], "the target stays the only current row");
+    }
+
+    // ---- WS11.S7: assistant text written after external content is not mined ----
+
+    /// A run of `thread` that started `started_ago_secs` ago and ended `ended_ago_secs` ago,
+    /// tainted or not.
+    async fn seed_run_window(
+        pool: &PgPool,
+        org: &str,
+        thread: &str,
+        started_ago_secs: i64,
+        ended_ago_secs: i64,
+        tainted: bool,
+    ) {
+        sqlx::query(
+            "INSERT INTO runs (id, thread_id, goal, org_id, user_id, status, created_at, ended_at, external_content_at) \
+             VALUES ($1, $2, 'g', $3, 'user-a', 'completed', \
+                     now() - make_interval(secs => $4), now() - make_interval(secs => $5), \
+                     CASE WHEN $6 THEN now() - make_interval(secs => $5 + 1) END)",
+        )
+        .bind(new_ulid())
+        .bind(thread)
+        .bind(org)
+        .bind(started_ago_secs as f64)
+        .bind(ended_ago_secs as f64)
+        .bind(tainted)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn seed_message_at(pool: &PgPool, thread: &str, role: &str, content: &str, ago_secs: i64) -> String {
+        let id = new_ulid();
+        sqlx::query(
+            "INSERT INTO messages (id, thread_id, role, content, created_at) \
+             VALUES ($1, $2, $3, $4, now() - make_interval(secs => $5))",
+        )
+        .bind(&id)
+        .bind(thread)
+        .bind(role)
+        .bind(content)
+        .bind(ago_secs as f64)
+        .execute(pool)
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn seed_memory_thread(pool: &PgPool, org: &str) -> String {
+        let thread = seed_thread(pool, org, "user-a").await;
+        sqlx::query("INSERT INTO user_memory_controls (org_id, user_id) VALUES ($1, 'user-a') ON CONFLICT DO NOTHING")
+            .bind(org)
+            .execute(pool)
+            .await
+            .unwrap();
+        thread
+    }
+
+    /// `(trigger, message_id)` of the thread's dream ledger, oldest first.
+    async fn ledger(pool: &PgPool, thread: &str) -> Vec<(String, String)> {
+        sqlx::query_as(
+            "SELECT trigger, metadata ->> 'message_id' FROM dream_runs WHERE thread_id = $1 ORDER BY id",
+        )
+        .bind(thread)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn thread_memories(pool: &PgPool, org: &str, thread: &str) -> Vec<String> {
+        sqlx::query_scalar("SELECT content FROM agent_memory WHERE org_id = $1 AND session_id = $2 ORDER BY content")
+            .bind(org)
+            .bind(thread)
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn external_content_dreaming_skips_assistant_rows_in_the_window_and_ledgers_them() {
+        let pool = disposable_pool().await;
+        let org = format!("ec-skip-{}", new_ulid());
+        let tainted_thread = seed_memory_thread(&pool, &org).await;
+        let control_thread = seed_memory_thread(&pool, &org).await;
+        // Run window: started 600 s ago, ended 300 s ago. The grace is 60 s.
+        seed_run_window(&pool, &org, &tainted_thread, 600, 300, true).await;
+        seed_run_window(&pool, &org, &control_thread, 600, 300, false).await;
+
+        let mut inside = String::new();
+        let mut late = String::new();
+        let mut control = String::new();
+        for thread in [&tainted_thread, &control_thread] {
+            // 270 s ago is 30 s after the run ended: inside the grace. 180 s ago is 120 s after: outside.
+            let a = seed_message_at(&pool, thread, "assistant", "Generated image artifact: inside-png", 270).await;
+            let b = seed_message_at(&pool, thread, "assistant", "Generated image artifact: late-png", 180).await;
+            if thread == &tainted_thread {
+                inside = a;
+                late = b;
+            } else {
+                control = a;
+            }
+        }
+
+        dream_once(&pool, None, None, None, 1_000).await.unwrap();
+
+        let tainted_ledger = ledger(&pool, &tainted_thread).await;
+        assert!(
+            tainted_ledger.contains(&("skipped_external_content".to_owned(), inside.clone())),
+            "the assistant row inside the window is ledgered as skipped: {tainted_ledger:?}"
+        );
+        assert!(
+            tainted_ledger.contains(&("background_scan".to_owned(), late.clone())),
+            "an assistant row after the window plus grace is mined as before: {tainted_ledger:?}"
+        );
+        assert_eq!(
+            thread_memories(&pool, &org, &tainted_thread).await,
+            vec!["Assistant generated image artifact late-png."],
+            "the tainted row wrote no memory, the late row did"
+        );
+        // The same text in a thread whose run read nothing external IS mined (the baseline).
+        assert!(ledger(&pool, &control_thread).await.contains(&("background_scan".to_owned(), control)));
+        // (Both rows write the thread's one `last_image_artifact` slot, so the later one is what stays.)
+        assert!(!thread_memories(&pool, &org, &control_thread).await.is_empty());
+        assert!(ledger(&pool, &control_thread).await.iter().all(|(trigger, _)| trigger != "skipped_external_content"));
+        // Ledgered, so the next cycle does not select it again.
+        let again = dream_once(&pool, None, None, None, 1_000).await.unwrap();
+        let _ = again;
+        let skipped = ledger(&pool, &tainted_thread)
+            .await
+            .into_iter()
+            .filter(|(trigger, id)| trigger == "skipped_external_content" && *id == inside)
+            .count();
+        assert_eq!(skipped, 1, "skipped once, not once per cycle");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn external_content_dreaming_keeps_user_rows_eligible() {
+        let pool = disposable_pool().await;
+        let org = format!("ec-user-{}", new_ulid());
+        let thread = seed_memory_thread(&pool, &org).await;
+        seed_run_window(&pool, &org, &thread, 600, 300, true).await;
+        // A user message inside the tainted window, and an assistant one beside it.
+        let user = seed_message_at(&pool, &thread, "user", "Husk at jeg heter Kari.", 400).await;
+        let assistant = seed_message_at(&pool, &thread, "assistant", "Generated image artifact: page-png", 350).await;
+
+        dream_once(&pool, None, None, None, 1_000).await.unwrap();
+
+        let entries = ledger(&pool, &thread).await;
+        assert!(entries.contains(&("background_scan".to_owned(), user)), "{entries:?}");
+        assert!(entries.contains(&("skipped_external_content".to_owned(), assistant)), "{entries:?}");
+        let user_memory: Vec<String> = sqlx::query_scalar(
+            "SELECT content FROM agent_memory WHERE org_id = $1 AND scope = 'user'",
+        )
+        .bind(&org)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert!(
+            user_memory.iter().any(|content| content.contains("Kari")),
+            "the user's own statement is still remembered: {user_memory:?}"
+        );
+        assert!(thread_memories(&pool, &org, &thread).await.is_empty(), "the assistant row wrote nothing");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn external_content_extractor_window_excludes_tainted_assistant_rows() {
+        let pool = disposable_pool().await;
+        let org = format!("ec-window-{}", new_ulid());
+        let thread = seed_memory_thread(&pool, &org).await;
+        seed_run_window(&pool, &org, &thread, 1_200, 900, true).await;
+        // Consolidated context before the pending message: a user turn and a tainted assistant turn
+        // inside the tainted window, then an assistant turn long after it.
+        seed_message_at(&pool, &thread, "user", "Search the web for tide tables.", 1_100).await;
+        seed_message_at(&pool, &thread, "assistant", "TAINTED paraphrase of a web page.", 1_000).await;
+        seed_message_at(&pool, &thread, "assistant", "A later answer that read nothing.", 100).await;
+        let pending_id = seed_message_at(&pool, &thread, "user", "Husk at jeg heter Ima.", 50).await;
+
+        let pending = PendingMessage {
+            message_id: pending_id,
+            thread_id: thread.clone(),
+            role: "user".to_owned(),
+            content: "Husk at jeg heter Ima.".to_owned(),
+            org_id: org.clone(),
+            user_id: "user-a".to_owned(),
+            conversation_only: false,
+            external_content: false,
+        };
+        let window = extraction_window(&pool, &thread, &[pending]).await;
+        let contents: Vec<&str> = window.iter().map(|m| m.content.as_str()).collect();
+        assert!(!contents.iter().any(|c| c.contains("TAINTED")), "{contents:?}");
+        assert_eq!(
+            contents,
+            vec![
+                "Search the web for tide tables.",
+                "A later answer that read nothing.",
+                "Husk at jeg heter Ima.",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn external_content_thread_without_external_runs_is_unchanged() {
+        let pool = disposable_pool().await;
+        let org = format!("ec-none-{}", new_ulid());
+        let thread = seed_memory_thread(&pool, &org).await;
+        seed_run_window(&pool, &org, &thread, 600, 300, false).await;
+        let user = seed_message_at(&pool, &thread, "user", "Husk at jeg heter Ola.", 500).await;
+        let assistant = seed_message_at(&pool, &thread, "assistant", "Generated image artifact: plain-png", 400).await;
+
+        let pending = load_pending_messages(&pool, 1_000).await.unwrap();
+        let ours: Vec<&PendingMessage> = pending.iter().filter(|m| m.thread_id == thread).collect();
+        assert_eq!(ours.len(), 2);
+        assert!(ours.iter().all(|m| !m.external_content), "no run is tainted, so no row is flagged");
+
+        dream_once(&pool, None, None, None, 1_000).await.unwrap();
+        let entries = ledger(&pool, &thread).await;
+        assert!(entries.iter().all(|(trigger, _)| trigger != "skipped_external_content"), "{entries:?}");
+        assert!(entries.contains(&("background_scan".to_owned(), user)));
+        assert!(entries.contains(&("background_scan".to_owned(), assistant)));
+        assert_eq!(
+            thread_memories(&pool, &org, &thread).await,
+            vec!["Assistant generated image artifact plain-png."]
+        );
     }
 }

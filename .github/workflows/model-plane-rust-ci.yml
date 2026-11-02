@@ -235,6 +235,17 @@ jobs:
             echo "expected at least 11 run trace tests to run, got ${passed:-0}"
             exit 1
           fi
+      # WS11.S7: the web-taint marker (runs.external_content_at) and Dreaming's skip of assistant
+      # text written inside a tainted run. `external_content` selects them by name.
+      - name: Run the external content tests against a migrated database
+        run: |
+          set -euo pipefail
+          cargo test -p session-core --bin session-core external_content -- --ignored --test-threads=1 2>&1 | tee external-content-tests.log
+          passed=$(grep -oE "test result: ok\. [0-9]+ passed" external-content-tests.log | grep -oE "[0-9]+" | head -1)
+          if [ -z "$passed" ] || [ "$passed" -lt 8 ]; then
+            echo "expected at least 8 external content tests to run, got ${passed:-0}"
+            exit 1
+          fi
 
   # WS10.S5: the NATS provisioner has no other CI. Its contract tests start an
   # in-process broker from the real deploy/nats.conf, provision the real manifest
