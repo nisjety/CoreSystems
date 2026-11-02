@@ -1348,6 +1348,8 @@ async fn crawl_handoff(
             params.insert("scrape_options".to_owned(), options.to_value());
         }
     }
+    // WS7.G 6b: the policy this crawl was admitted under rides with the job to every page.
+    stamp_policy_snapshot(&mut job_params, &state, &decision);
     let ack = crate::handoff::forward_job_signed(
         &state.control_base_url,
         &org_id,
@@ -1498,18 +1500,21 @@ async fn batch_handoff(
     req.urls.truncate(urls_bound.accepted);
     let origin = crate::handoff::run_origin_from_request(&claims, &headers);
     let idempotency_key = crate::handoff::idempotency_key_from_request(&headers);
+    let mut batch_params = serde_json::json!({
+        "kind": "batch",
+        "urls": req.urls,
+        "robots": "respect",
+        "org_id": claims.org_id,
+        "user_id": claims.user_id,
+        "ingest": req.ingest,
+    });
+    // WS7.G 6b: the policy this batch was admitted under rides with the job to every page.
+    stamp_policy_snapshot(&mut batch_params, &state, &decision);
     let ack = crate::handoff::forward_job_signed(
         &state.control_base_url,
         &claims.org_id,
         "batch",
-        crate::handoff::with_admission(serde_json::json!({
-            "kind": "batch",
-            "urls": req.urls,
-            "robots": "respect",
-            "org_id": claims.org_id,
-            "user_id": claims.user_id,
-            "ingest": req.ingest,
-        }), &org_limits),
+        crate::handoff::with_admission(batch_params, &org_limits),
         &origin,
         idempotency_key.as_deref(),
         state.internal_signer.as_deref(),
@@ -1644,6 +1649,14 @@ pub struct InternalRunPage {
     /// the flag off the field is ignored and the response lacks `scrape_applied`.
     #[serde(default)]
     pub scrape: Option<serde_json::Value>,
+    /// WS7.G 6b: the web policy the handoff resolved for the durable job
+    /// (`ResolvedPolicy::snapshot_json`), stamped on the job's params and carried by every page.
+    /// Raw JSON, re-validated here. Its sha256 is part of the signed run-binding string, so it
+    /// cannot be added, swapped or stripped without the shared secret. Honoured only with
+    /// `QUARRY_EDGE__WEB_POLICY_SNAPSHOT` at `enforce` (counted at `observe`); with the flag off
+    /// the field is ignored. Absent (or null) leaves the page run exactly as it was.
+    #[serde(default)]
+    pub policy_snapshot: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1879,6 +1892,96 @@ pub(crate) fn verify_runtime_token(headers: &HeaderMap) -> Result<(), QuarryErro
     }
 }
 
+/// WS7.G 6b: stamp the policy a durable job's handoff resolved onto the job's params, for the
+/// orchestrator to carry to every page run. Stamped only with `QUARRY_EDGE__WEB_POLICY_SNAPSHOT`
+/// at `observe` or `enforce`, and only when the policy differs from the catalogue default (a
+/// default policy carries nothing a page does not already apply), so a job without a tightening
+/// is byte-identical to one built before the snapshot existed.
+///
+/// The policy stamped is the one `enforce` would apply (`shadow` under `observe`): the page's
+/// own web-policy enforcement mode decides whether it binds.
+fn stamp_policy_snapshot(
+    params: &mut serde_json::Value,
+    state: &AppState,
+    decision: &crate::policy_baseline::Decision,
+) {
+    use crate::policy_baseline::Enforcement;
+    if state.policy.snapshot_mode() == Enforcement::Off {
+        return;
+    }
+    let policy = decision.shadow().unwrap_or_else(|| decision.policy());
+    if quarry_runtime::RunPolicy::from(policy).web_policy.is_none() {
+        return;
+    }
+    if let Some(object) = params.as_object_mut() {
+        object.insert("policy_snapshot".to_owned(), policy.snapshot_json());
+    }
+}
+
+/// WS7.G 6b: meet the page's decision with the job's policy snapshot. Returns the decision the
+/// page runs under and whether the snapshot bound it.
+///
+/// * flag `off`, or no snapshot: the decision is returned unchanged;
+/// * `observe`: the decision is returned unchanged; pages the snapshot would tighten, and pages
+///   it would refuse, are counted (`web_policy_snapshot_tighter_total`,
+///   `web_policy_snapshot_would_deny_total`; no label, no URL);
+/// * `enforce`: the decision is resolved again with the snapshot as the request layer, so the
+///   page can only be as restrictive as, or more than, the handoff's policy.
+///
+/// A snapshot the current version cannot read is a 400 in `observe` and `enforce`, never a
+/// silent run under a looser policy.
+fn apply_policy_snapshot(
+    state: &AppState,
+    decision: crate::policy_baseline::Decision,
+    snapshot: Option<&serde_json::Value>,
+    zdr: bool,
+    url: &str,
+    request_id: &str,
+) -> Result<(crate::policy_baseline::Decision, bool), (StatusCode, Json<Envelope<()>>)> {
+    use crate::policy_baseline::Enforcement;
+    use quarry_core::web_policy::{OrgInput, PolicyLayer, Principal};
+    let Some(raw) = snapshot.filter(|value| !value.is_null()) else {
+        return Ok((decision, false));
+    };
+    let mode = state.policy.snapshot_mode();
+    if mode == Enforcement::Off {
+        tracing::warn!(
+            target: "quarry.web_policy",
+            "run_page policy snapshot ignored: QUARRY_EDGE__WEB_POLICY_SNAPSHOT is off"
+        );
+        return Ok((decision, false));
+    }
+    let layer = PolicyLayer::from_snapshot_json(raw).map_err(|_| {
+        let err = QuarryError::new(ErrorCode::BadRequest, "the policy snapshot is invalid")
+            .with_details(serde_json::json!({ "reason": "invalid_policy_snapshot", "retryable": false }));
+        (
+            StatusCode::BAD_REQUEST,
+            Json(Envelope::<()>::err(request_id, err)),
+        )
+    })?;
+    let met = state
+        .policy
+        .decide_with_org(Principal::Autonomous, zdr, OrgInput::Absent, Some(layer))
+        .map_err(|denial| {
+            crate::web_policy_edge::record_denial(&denial, true);
+            crate::web_policy_edge::envelope_error(request_id, crate::web_policy_edge::quarry_error(&denial))
+        })?;
+    if mode == Enforcement::Enforce {
+        return Ok((met, true));
+    }
+    // observe: what `enforce` would have decided, beside what the page decided without it.
+    let with_snapshot = met.shadow().unwrap_or_else(|| met.policy());
+    let without = decision.shadow().unwrap_or_else(|| decision.policy());
+    if with_snapshot.digest() != without.digest() {
+        metrics::counter!("web_policy_snapshot_tighter_total").increment(1);
+        if with_snapshot.check_url(url).is_err() && without.check_url(url).is_ok() {
+            metrics::counter!("web_policy_snapshot_would_deny_total").increment(1);
+            tracing::info!(target: "quarry.web_policy", "policy.snapshot_would_deny");
+        }
+    }
+    Ok((decision, false))
+}
+
 async fn internal_run_page(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1919,7 +2022,10 @@ async fn internal_run_page(
             .get("x-quarry-run-sig")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
-        if !signer.verify_run_binding(&org_id, &req.url, sig) {
+        // WS7.G 6b: a page that carries a policy snapshot signs its hash too, whatever the
+        // snapshot flag says, so the binding holds before anything decides to use it.
+        let extras = crate::internal_auth::RunBindingExtras::for_snapshot(req.policy_snapshot.as_ref());
+        if !signer.verify_run_binding_with(&org_id, &req.url, &extras, sig) {
             tracing::warn!(
                 had_sig = !sig.is_empty(),
                 "run_page HMAC org-binding failed"
@@ -2014,6 +2120,12 @@ async fn internal_run_page(
         None,
     )
     .map_err(|error| crate::web_policy_edge::envelope_error(&request_id, error))?;
+    // WS7.G 6b: the policy the handoff resolved meets this page's own (tighten-only). Under
+    // `observe` the page runs as before and the tightening is counted; under `enforce` the
+    // page runs under the met policy. A tightened page is not a default page, so it neither
+    // reads nor writes the page cache.
+    let (decision, snapshot_tightened) =
+        apply_policy_snapshot(&state, decision, req.policy_snapshot.as_ref(), zdr.is_active(), &req.url, &request_id)?;
     crate::web_policy_edge::gate_url(&decision, &req.url)
         .map_err(|error| crate::web_policy_edge::envelope_error(&request_id, error))?;
 
@@ -2075,7 +2187,8 @@ async fn internal_run_page(
         None => quarry_core::ids::Id::new(),
     };
 
-    if !zdr.is_active() && scrape_cache_ok && should_read(&req.cache) {
+    let snapshot_cache_ok = !(snapshot_tightened && !crate::web_policy_edge::is_default(&decision));
+    if !zdr.is_active() && scrape_cache_ok && snapshot_cache_ok && should_read(&req.cache) {
         if let (Some(prev), Some(cache)) = (req.prev_fingerprint.as_ref(), state.cache.as_ref()) {
             if let Some(cached) = cache.get(&org_id, prev).await {
                 // WS14.S4, D2-161: a cached page gets the robots.txt decision that a fetched

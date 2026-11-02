@@ -39,6 +39,16 @@ pub const REQUIRE_CLAIM_ENV: &str = "QUARRY_EDGE__WEB_POLICY_REQUIRE_CLAIM";
 /// redirects (http to https, www) has been checked.
 pub const FINAL_URL_CHECK_ENV: &str = "QUARRY_EDGE__WEB_POLICY_FINAL_URL_CHECK";
 
+/// `off`, `observe` or `enforce` (WS7.G 6b), default `off`. The durable-job policy snapshot:
+/// * `off`: the crawl and batch handoffs stamp nothing, and a `policy_snapshot` that arrives on
+///   `/v1/internal/run_page` is ignored (its signature is still checked).
+/// * `observe`: the handoffs stamp the snapshot; a page run counts the pages the snapshot would
+///   have denied (`web_policy_snapshot_would_deny_total`) and runs under its own policy.
+/// * `enforce`: the page run meets the snapshot (tighten-only), so the page can never run under
+///   a looser policy than the handoff resolved. The web-policy enforcement mode above still
+///   decides whether the baseline layers apply at all.
+pub const SNAPSHOT_ENV: &str = "QUARRY_EDGE__WEB_POLICY_SNAPSHOT";
+
 /// What a decision does with the policy it resolves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Enforcement {
@@ -74,6 +84,7 @@ pub struct PolicyBaseline {
     enforcement: Enforcement,
     require_claim: bool,
     final_url_check: bool,
+    snapshot: Enforcement,
 }
 
 impl Default for PolicyBaseline {
@@ -84,6 +95,7 @@ impl Default for PolicyBaseline {
             enforcement: Enforcement::Enforce,
             require_claim: false,
             final_url_check: false,
+            snapshot: Enforcement::Off,
         }
     }
 }
@@ -111,11 +123,17 @@ impl PolicyBaseline {
             }
             None => lookup("ENVIRONMENT").is_some_and(|name| is_development(&name)),
         };
+        let snapshot = match lookup(SNAPSHOT_ENV) {
+            Some(raw) => Enforcement::parse(&raw)
+                .map_err(|_| format!("{SNAPSHOT_ENV} must be off, observe or enforce"))?,
+            None => Enforcement::Off,
+        };
         Ok(Self {
             layer,
             enforcement,
             require_claim,
             final_url_check,
+            snapshot,
         })
     }
 
@@ -135,6 +153,11 @@ impl PolicyBaseline {
     /// Whether a page run rechecks the final URL of a redirected fetch (WS7.G).
     pub fn final_url_check(&self) -> bool {
         self.final_url_check
+    }
+
+    /// What the durable-job policy snapshot does (WS7.G 6b). `Off` by default.
+    pub fn snapshot_mode(&self) -> Enforcement {
+        self.snapshot
     }
 
     /// Whether a token without the `web_policy` claim is refused (WS7.J).
@@ -318,6 +341,19 @@ mod tests {
             .unwrap()
             .final_url_check());
         assert!(env(&[(FINAL_URL_CHECK_ENV, "maybe")]).is_err());
+    }
+
+    #[test]
+    fn snapshot_flag_defaults_off_and_parses_the_three_names() {
+        let env = |value: &'static str| {
+            PolicyBaseline::from_lookup(move |name| (name == SNAPSHOT_ENV).then(|| value.to_owned()))
+        };
+        assert_eq!(PolicyBaseline::from_lookup(|_| None).unwrap().snapshot_mode(), Enforcement::Off);
+        assert_eq!(PolicyBaseline::default().snapshot_mode(), Enforcement::Off);
+        assert_eq!(env("off").unwrap().snapshot_mode(), Enforcement::Off);
+        assert_eq!(env("observe").unwrap().snapshot_mode(), Enforcement::Observe);
+        assert_eq!(env("enforce").unwrap().snapshot_mode(), Enforcement::Enforce);
+        assert!(env("on").is_err(), "an unknown value fails the boot, it does not fall back");
     }
 
     #[test]
