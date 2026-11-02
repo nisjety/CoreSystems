@@ -558,6 +558,36 @@ mod tests {
 
     #[tonic::async_trait]
     impl OrchestrationCoreService for NeverResolvingOrchestration {
+        async fn reroute_approval(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::RerouteApprovalRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::RerouteApprovalResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not needed in this test"))
+        }
+        async fn claim_once_approval(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::ClaimOnceApprovalRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ClaimOnceApprovalResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not needed in this test"))
+        }
+        async fn hold_quarantined_output(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::HoldQuarantinedOutputRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::HoldQuarantinedOutputResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not needed in this test"))
+        }
+        async fn claim_quarantine_release(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::ClaimQuarantineReleaseRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ClaimQuarantineReleaseResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not needed in this test"))
+        }
+        async fn get_quarantine_preview(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::GetQuarantinePreviewRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetQuarantinePreviewResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not needed in this test"))
+        }
         async fn get_run_proof_bundle(
             &self,
             _: TonicRequest<mp_contracts::model_plane::v1::GetRunProofBundleRequest>,
@@ -640,7 +670,7 @@ mod tests {
                     decided_at: None,
                     expires_at: None,
                     org_id: request.org_id,
-                    cause: request.cause,
+                    cause: request.cause, ..Default::default()
                 }),
             }))
         }
@@ -684,7 +714,7 @@ mod tests {
                     decided_at: None,
                     expires_at: None,
                     org_id: "org_test".into(),
-                    cause: None,
+                    cause: None, ..Default::default()
                 }),
             }))
         }
@@ -753,7 +783,7 @@ mod tests {
                     decided_at: None,
                     expires_at: None,
                     org_id: "org_test".into(),
-                    cause: None,
+                    cause: None, ..Default::default()
                 }),
             }))
         }

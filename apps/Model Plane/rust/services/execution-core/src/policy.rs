@@ -382,4 +382,105 @@ mod tests {
             "unknown keyword must fall back to read-only"
         );
     }
+
+    // -- WS06-S8 / WS06-S9 postponed tests ---------------------------------
+
+    fn sample_limits() -> ResourceLimits {
+        ResourceLimits {
+            cpu_secs: 10,
+            address_space_bytes: 4096 * 1024 * 1024,
+            file_size_bytes: 64 * 1024 * 1024,
+            open_files: 1024,
+        }
+    }
+
+    #[test]
+    fn prlimit_args_carry_every_ceiling_and_a_hard_cpu_gap() {
+        let args = sample_limits().prlimit_args();
+        assert_eq!(args[0], format!("--cpu=10:{}", 10 + CPU_HARD_GAP_SECS));
+        assert!(args.contains(&format!("--as={}", 4096u64 * 1024 * 1024)));
+        assert!(args.contains(&format!("--fsize={}", 64u64 * 1024 * 1024)));
+        assert!(args.contains(&"--nofile=1024".to_owned()));
+        assert!(args.contains(&"--core=0".to_owned()));
+        assert_eq!(args.len(), 5);
+        // Soft below hard: equal values would make the kernel send SIGKILL, never SIGXCPU.
+        assert!(CPU_HARD_GAP_SECS >= 1);
+        assert!(!args.iter().any(|a| a == "--"));
+    }
+
+    #[test]
+    fn the_cpu_hard_limit_saturates_instead_of_wrapping() {
+        let limits = ResourceLimits {
+            cpu_secs: u64::MAX,
+            ..sample_limits()
+        };
+        assert_eq!(
+            limits.prlimit_args()[0],
+            format!("--cpu={}:{}", u64::MAX, u64::MAX)
+        );
+    }
+
+    #[test]
+    fn limits_mode_only_off_switches_limits_off() {
+        assert_eq!(LimitsMode::from_raw(Some("off")), LimitsMode::Off);
+        assert_eq!(LimitsMode::from_raw(Some(" OFF ")), LimitsMode::Off);
+        // Missing, empty, garbage and a plausible-looking "false" all enforce.
+        for raw in [None, Some(""), Some("garbage"), Some("false"), Some("0"), Some("on"), Some("enforce")] {
+            assert_eq!(LimitsMode::from_raw(raw), LimitsMode::Enforce, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn limits_config_falls_back_on_missing_zero_and_garbage() {
+        let defaults = LimitsConfig::from_raw(None, None, None, None, None);
+        assert_eq!(defaults.mode, LimitsMode::Enforce);
+        assert_eq!(defaults.cpu_factor, 2);
+        assert_eq!(defaults.max_address_space_mb, 4096);
+        assert_eq!(defaults.max_file_mb, 64);
+        assert_eq!(defaults.max_open_files, 1024);
+        let bad = LimitsConfig::from_raw(
+            Some("nonsense"),
+            Some("0"),
+            Some("-5"),
+            Some("abc"),
+            Some(""),
+        );
+        assert_eq!(bad, defaults);
+        let set = LimitsConfig::from_raw(None, Some(" 3 "), Some("512"), Some("8"), Some("64"));
+        assert_eq!(set.cpu_factor, 3);
+        assert_eq!(set.max_address_space_mb, 512);
+        assert_eq!(set.max_file_mb, 8);
+        assert_eq!(set.max_open_files, 64);
+    }
+
+    #[test]
+    fn limits_for_is_none_when_off_and_cpu_is_wall_times_factor_with_a_floor_of_one() {
+        let off = LimitsConfig::from_raw(Some("off"), None, None, None, None);
+        assert_eq!(off.limits_for(std::time::Duration::from_secs(30)), None);
+
+        let on = LimitsConfig::from_raw(None, Some("2"), Some("1"), Some("1"), Some("7"));
+        let limits = on
+            .limits_for(std::time::Duration::from_secs(30))
+            .expect("enforce yields limits");
+        assert_eq!(limits.cpu_secs, 60);
+        assert_eq!(limits.address_space_bytes, 1024 * 1024);
+        assert_eq!(limits.file_size_bytes, 1024 * 1024);
+        assert_eq!(limits.open_files, 7);
+
+        // A sub-second wall budget still gets one CPU second.
+        let tiny = on
+            .limits_for(std::time::Duration::from_millis(200))
+            .unwrap();
+        assert_eq!(tiny.cpu_secs, 1);
+    }
+
+    #[test]
+    fn shell_lease_mode_only_enforce_enforces() {
+        for raw in ["enforce", "ENFORCE", "  Enforce  "] {
+            assert_eq!(ShellLeaseMode::from_raw(Some(raw)), ShellLeaseMode::Enforce, "{raw:?}");
+        }
+        for raw in [None, Some(""), Some("garbage"), Some("true"), Some("1"), Some("on"), Some("observe"), Some("enforced")] {
+            assert_eq!(ShellLeaseMode::from_raw(raw), ShellLeaseMode::Observe, "{raw:?}");
+        }
+    }
 }

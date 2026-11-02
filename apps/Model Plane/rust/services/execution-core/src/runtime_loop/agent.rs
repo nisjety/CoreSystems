@@ -10264,7 +10264,7 @@ mod tests {
                     .appended_assistant
                     .push(req.content);
             }
-            Ok(Response::new(pb::AppendMessageResponse { sequence: 1, message_id: String::new(), deduplicated: false }))
+            Ok(Response::new(pb::AppendMessageResponse { sequence: 1, message_id: String::new(), deduplicated: false, ..Default::default() }))
         }
 
         async fn start_run(
@@ -10596,6 +10596,24 @@ mod tests {
 
     #[tonic::async_trait]
     impl pb::run_service_server::RunService for MockRunService {
+        async fn resolve_approval_authority(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::ResolveApprovalAuthorityRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ResolveApprovalAuthorityResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not needed in this test"))
+        }
+        async fn authorize_room_run_attach(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::AuthorizeRoomRunAttachRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::AuthorizeRoomRunAttachResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not needed in this test"))
+        }
+        async fn cancel_run_as_room_manager(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::CancelRunAsRoomManagerRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::CancelRunAsRoomManagerResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not needed in this test"))
+        }
         async fn get_run(
             &self,
             request: Request<pb::GetRunRequest>,
@@ -10892,6 +10910,36 @@ mod tests {
     impl OrchestrationCoreService for MockOrchestration {
         type StreamRunEventsStream = RunEventStream;
 
+        async fn reroute_approval(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::RerouteApprovalRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::RerouteApprovalResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not needed in this test"))
+        }
+        async fn claim_once_approval(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::ClaimOnceApprovalRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ClaimOnceApprovalResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not needed in this test"))
+        }
+        async fn hold_quarantined_output(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::HoldQuarantinedOutputRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::HoldQuarantinedOutputResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not needed in this test"))
+        }
+        async fn claim_quarantine_release(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::ClaimQuarantineReleaseRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ClaimQuarantineReleaseResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not needed in this test"))
+        }
+        async fn get_quarantine_preview(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::GetQuarantinePreviewRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetQuarantinePreviewResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not needed in this test"))
+        }
         async fn get_run_proof_bundle(
             &self,
             _: Request<pb::GetRunProofBundleRequest>,

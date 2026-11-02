@@ -4971,4 +4971,198 @@ mod tests {
         let agreed = call(SignedToolClass::new("read", "none"), "run-stale-view").await;
         assert!(agreed.contains("credential"), "{agreed}");
     }
+
+    // -- WS06-S9 postponed tests -------------------------------------------
+
+    /// Invariant `space_scoped_spawn_tools_always_receive_a_sandbox_context`:
+    /// the predicate that decides which tools get a `SandboxLeaseContext` in
+    /// the agent loop names every spawn tool. A new spawn tool that is left out
+    /// of it would run Space-scoped work without a lease, so the predicate's
+    /// text is pinned here (the repo's cross-file mutation-guard pattern).
+    #[test]
+    fn space_scoped_spawn_tools_always_receive_a_sandbox_context() {
+        let source = include_str!("agent.rs").replace("\r\n", "\n");
+        let start = source
+            .find("let reads_sandbox =")
+            .expect("agent.rs decides which tools read the sandbox context");
+        let predicate = &source[start..start + source[start..].find(';').expect("statement end")];
+        assert!(
+            predicate.contains("\"code_interpreter\""),
+            "code_interpreter must get the context: {predicate}"
+        );
+        assert!(
+            predicate.contains("\"shell\""),
+            "shell must get the context: {predicate}"
+        );
+        assert!(
+            predicate.contains("is_process_tool"),
+            "the process_* family must get the context: {predicate}"
+        );
+        // The context is withheld only for a run without a Space.
+        let after = &source[start..start + 1500.min(source.len() - start)];
+        assert!(
+            after.contains("reads_sandbox && !ctx.req.space_id.is_empty()"),
+            "the context must be built exactly for Space-scoped runs: {after}"
+        );
+        // And the spawn tools named are the ones the loop dispatches.
+        assert!(crate::process_tools::is_process_tool("process_start"));
+        assert_eq!(SHELL_TOOL, "shell");
+        assert_eq!(CODE_INTERPRETER_TOOL, "code_interpreter");
+    }
+
+    fn unroutable_lease_context_parts() -> (
+        crate::sandbox_manager_client::SandboxManagerClient,
+        crate::sandbox_lease::SandboxManagerTokenProvider,
+    ) {
+        (
+            crate::sandbox_manager_client::SandboxManagerClient::new(
+                tonic::transport::Endpoint::from_shared("http://127.0.0.1:1")
+                    .expect("valid endpoint")
+                    .connect_lazy(),
+            ),
+            crate::sandbox_lease::SandboxManagerTokenProvider::new_for_test(
+                "http://127.0.0.1:1",
+                "execution-core",
+                "test-service-secret-at-least-32-bytes",
+            ),
+        )
+    }
+
+    fn unleased_count() -> u64 {
+        crate::executor::limit_hit_metrics()
+            .lines()
+            .find_map(|line| line.strip_prefix("space_shell_unleased_total "))
+            .and_then(|n| n.parse().ok())
+            .expect("space_shell_unleased_total is always rendered")
+    }
+
+    /// Observe mode (the default): a Space-scoped shell call that cannot get a
+    /// lease is counted and still goes on to the unscoped spawn, so the result
+    /// is never the lease refusal.
+    #[tokio::test]
+    async fn observe_mode_counts_an_unleased_space_shell_call_and_still_runs_it() {
+        if crate::policy::ShellLeaseMode::current() != crate::policy::ShellLeaseMode::Observe {
+            eprintln!("skipping: EXECUTION_CORE_SPACE_SHELL_LEASE is not observe in this process");
+            return;
+        }
+        let (client, tokens) = unroutable_lease_context_parts();
+        let ctx = crate::sandbox_lease::SandboxLeaseContext {
+            space_id: "space-1",
+            sandbox_bearer: "bearer",
+            capability_client: None,
+            sandbox_manager_client: &client,
+            backend_id: "backend-1",
+            cas_client: None,
+            sandbox_tokens: &tokens,
+            process_host: None,
+        };
+        let before = unleased_count();
+        // No run state: the lease cannot be taken.
+        let exec = execute_shell(
+            r#"{"program":"true"}"#,
+            "org-a",
+            "user-a",
+            "run-unleased",
+            None,
+            Some(&ctx),
+        )
+        .await;
+        assert!(unleased_count() > before, "the unleased call must be counted");
+        if let Some(error) = &exec.error {
+            assert!(
+                !error.contains("requires a sandbox lease"),
+                "observe mode must not refuse on the lease: {error}"
+            );
+        }
+    }
+
+    /// Enforce mode needs the process-wide `OnceLock`, which tests cannot flip
+    /// (env mutation is forbidden in this crate). Run with
+    /// `EXECUTION_CORE_SPACE_SHELL_LEASE=enforce cargo test ... -- --ignored`.
+    #[tokio::test]
+    #[ignore = "needs EXECUTION_CORE_SPACE_SHELL_LEASE=enforce in the process environment"]
+    async fn enforce_mode_refuses_a_space_shell_call_without_a_lease() {
+        assert_eq!(
+            crate::policy::ShellLeaseMode::current(),
+            crate::policy::ShellLeaseMode::Enforce,
+            "run this test with EXECUTION_CORE_SPACE_SHELL_LEASE=enforce"
+        );
+        let (client, tokens) = unroutable_lease_context_parts();
+        let ctx = crate::sandbox_lease::SandboxLeaseContext {
+            space_id: "space-1",
+            sandbox_bearer: "bearer",
+            capability_client: None,
+            sandbox_manager_client: &client,
+            backend_id: "backend-1",
+            cas_client: None,
+            sandbox_tokens: &tokens,
+            process_host: None,
+        };
+        let before = unleased_count();
+        // No run state tracking at all.
+        let exec = execute_shell(
+            r#"{"program":"true"}"#,
+            "org-a",
+            "user-a",
+            "run-enforce",
+            None,
+            Some(&ctx),
+        )
+        .await;
+        let error = exec.error.expect("enforce refuses");
+        assert!(error.contains("requires a sandbox lease"), "{error}");
+        assert!(exec.output.is_empty());
+        // Refused, not run: nothing is counted as "ran unleased".
+        assert_eq!(unleased_count(), before);
+
+        // A state store with no cached lease and no capability client: the
+        // acquire fails closed, which enforce turns into a refusal.
+        let state = crate::state::StateStore::new();
+        let exec = execute_shell(
+            r#"{"program":"true"}"#,
+            "org-a",
+            "user-a",
+            "run-enforce-2",
+            Some(&state),
+            Some(&ctx),
+        )
+        .await;
+        assert!(exec.error.is_some(), "lease failure must refuse under enforce");
+    }
+
+    /// Linux with bwrap only: the shell command starts in `/` with `PATH` as its
+    /// whole environment, so no service credential reaches it.
+    #[tokio::test]
+    async fn the_shell_environment_is_path_only_and_the_cwd_is_root() {
+        if !crate::sandbox::is_supported() {
+            eprintln!("skipping: bwrap is not usable on this host");
+            return;
+        }
+        let exec = execute_shell(
+            r#"{"program":"sh","args":["-c","env; echo CWD=$(pwd)"]}"#,
+            "org-a",
+            "user-a",
+            "run-env",
+            None,
+            None,
+        )
+        .await;
+        assert!(exec.error.is_none(), "shell failed: {:?}", exec.error);
+        let lines: Vec<&str> = exec.output.lines().collect();
+        assert!(
+            lines.contains(&"CWD=/"),
+            "the command must start in /: {lines:?}"
+        );
+        // `sh` itself may add PWD/SHLVL/_ ; nothing else may appear.
+        let unexpected: Vec<&&str> = lines
+            .iter()
+            .filter(|line| !line.starts_with("CWD="))
+            .filter(|line| {
+                let name = line.split('=').next().unwrap_or("");
+                !matches!(name, "PATH" | "PWD" | "SHLVL" | "_" | "OLDPWD")
+            })
+            .collect();
+        assert!(unexpected.is_empty(), "leaked environment: {unexpected:?}");
+        assert!(lines.iter().any(|l| l.starts_with("PATH=")), "{lines:?}");
+    }
 }

@@ -1188,6 +1188,7 @@ mod tests {
             user_id: "user-1".to_owned(),
             start_key: "run-1_tool_1".to_owned(),
             terminal_source: pb::ManagedRunSource::ExecutionAgent as i32,
+            ..Default::default()
         }
     }
 
@@ -1409,6 +1410,7 @@ mod tests {
             user_id: "user-1".to_owned(),
             start_key: start_key.to_owned(),
             terminal_source: pb::ManagedRunSource::ExecutionAgent as i32,
+            ..Default::default()
         }
     }
 
