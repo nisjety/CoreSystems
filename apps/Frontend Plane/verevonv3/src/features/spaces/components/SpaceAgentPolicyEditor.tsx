@@ -149,7 +149,7 @@ export function SpaceAgentPolicyEditor(props: {
       <button
         type="button"
         class="verevon-tool-policy__toggle"
-        aria-expanded={open()}
+        aria-expanded={open() ? 'true' : 'false'}
         onClick={toggle}
       >
         {open() ? i18n.tr('Skjul verktøyregler', 'Hide tool rules') : title()}
@@ -226,7 +226,7 @@ export function SpaceAgentPolicyEditor(props: {
                         type="text"
                         class="verevon-tool-policy__input"
                         value={row().toolKey}
-                        maxLength={200}
+                        maxlength={200}
                         spellcheck={false}
                         aria-label={i18n.tr('Verktøynavn', 'Tool name')}
                         placeholder={i18n.tr('verktøynavn eller *', 'tool name or *')}

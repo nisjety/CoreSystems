@@ -1,4 +1,4 @@
-import { createSignal, For, onMount, Show } from 'solid-js'
+import { createSignal, For, onSettled, Show } from 'solid-js'
 import { SectionHeader, ToggleRow } from '@/features/settings/components/settings-ui'
 import { getNotificationPreferences, updateNotificationPreference } from '@/shared/api/notifications-client'
 import { useI18n } from '@/shared/i18n'
@@ -48,7 +48,7 @@ export function SpaceNotificationPreferences() {
   const [explicit, setExplicit] = createSignal<Map<string, boolean>>(new Map())
   const [error, setError] = createSignal<string | null>(null)
 
-  onMount(() => {
+  onSettled(() => {
     getNotificationPreferences()
       .then((rows) => setExplicit(explicitEmailPreferences(rows)))
       .catch(() => {

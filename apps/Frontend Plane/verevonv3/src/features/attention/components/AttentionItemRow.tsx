@@ -79,7 +79,7 @@ export function AttentionItemRow(props: AttentionItemRowProps) {
           <button
             type="button"
             class="verevon-attention-action"
-            aria-expanded={snoozing()}
+            aria-expanded={snoozing() ? 'true' : 'false'}
             disabled={props.busy}
             onClick={() => setSnoozing((open) => !open)}
           >

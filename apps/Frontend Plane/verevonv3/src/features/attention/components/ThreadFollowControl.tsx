@@ -63,7 +63,7 @@ export function ThreadFollowControl(props: ThreadFollowControlProps) {
         <button
           type="button"
           class="verevon-attention-action"
-          aria-pressed={current() === 'following'}
+          aria-pressed={current() === 'following' ? 'true' : 'false'}
           disabled={busy()}
           onClick={() => void choose(current() === 'following' ? 'none' : 'following')}
         >
@@ -72,7 +72,7 @@ export function ThreadFollowControl(props: ThreadFollowControlProps) {
         <button
           type="button"
           class="verevon-attention-action"
-          aria-pressed={current() === 'muted'}
+          aria-pressed={current() === 'muted' ? 'true' : 'false'}
           disabled={busy()}
           onClick={() => void choose(current() === 'muted' ? 'none' : 'muted')}
         >

@@ -129,7 +129,7 @@ export default function AttentionPage() {
               <button
                 type="button"
                 class="verevon-attention__tab"
-                aria-pressed={tab() === candidate}
+                aria-pressed={tab() === candidate ? 'true' : 'false'}
                 onClick={() => choose(candidate)}
               >
                 {tabLabel(candidate, i18n.tr)}
