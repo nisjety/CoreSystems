@@ -1,19 +1,31 @@
-import { useLocation } from '@solidjs/router'
-import { Hash, MessageCircle, Pin, Plus, Users } from '@/shared/icons'
-import { createMemo, createSignal, For, Show } from 'solid-js'
+import { useLocation, useNavigate } from '@solidjs/router'
+import { EyeOff, FolderPlus, Hash, MessageCircle, Pin, Plus, Users } from '@/shared/icons'
+import { createEffect, createMemo, createSignal, For, onCleanup, Show, untrack } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 
 import {
   createRoom,
   getSpaceThreads,
   listSpaces,
+  spaceDmEnabled,
   type SpaceSummary,
   type SpaceThread,
 } from '@/shared/api/spaces-client'
-import { useI18n } from '@/shared/i18n'
+import { announce } from '@/shared/a11y/announcer'
+import type { SidebarAction, SidebarGroupId } from '@/shared/actions/space-sidebar'
+import { translateApiError, useI18n } from '@/shared/i18n'
 import { cn } from '@/shared/lib/cn'
 import { createResource } from '@/shared/lib/create-resource-compat'
+import { getSession } from '@/shared/session/session-store'
+import { narrateSidebarMove } from '@/features/spaces/lib/space-narration'
 import { spaceDisplayName } from '@/features/spaces/lib/space-name'
+import { buildSidebarModel, type SidebarModelSection } from '@/features/spaces/lib/space-sidebar-organization'
+import {
+  createSpaceSidebarStore,
+  spaceSidebarStorageKey,
+  type SidebarStoreState,
+} from '@/features/spaces/lib/space-sidebar-store'
+import { emptySidebarDoc } from '@/shared/actions/space-sidebar'
 import { spaceThreadHref } from '@/features/spaces/lib/space-thread-deep-link'
 import {
   isSpaceObserved,
@@ -22,6 +34,33 @@ import {
   unreadThreadIdsIn,
 } from '@/features/spaces/lib/space-live-work'
 import { SidebarPanelTitle, SidebarSearchField } from './CoreSidebarPrimitives'
+import { SpaceMoveDialog, SpaceSectionNameDialog } from './SpaceMoveDialog'
+import { SpaceRoomMenu, type SpaceMenuItem } from './SpaceRoomMenu'
+import { SpaceSidebarSection } from './SpaceSidebarSection'
+import { spaceSidebarGroups } from './space-sidebar-groups'
+import './space-dm-group'
+import { DmStartDialog } from '@/features/spaces/components/DmStartDialog'
+import { isDmKind } from '@/features/spaces/lib/space-kind'
+
+/** Drag payload type for a room row (the chat organiser uses `application/x-verevon-chat-thread`). */
+const SPACE_ROOM_DRAG_TYPE = 'application/x-verevon-space-room'
+
+/** What the panel draws while there is no signed-in scope (no org or user): nothing to organise. */
+const NO_SCOPE_STATE: SidebarStoreState = {
+  mode: 'server',
+  revision: 0,
+  doc: emptySidebarDoc(),
+  status: 'idle',
+  canEdit: false,
+  browserOnly: false,
+}
+
+/** Where a row is drawn, which decides what a drop on it or an `Alt+Arrow` does. */
+type RowContext =
+  | { kind: 'starred'; refs: readonly string[] }
+  | { kind: 'section'; id: string; refs: readonly string[]; manual: boolean }
+  | { kind: 'group'; id: string }
+  | { kind: 'hidden' }
 
 /**
  * The expanded core sidebar is the one room navigator. It reads the same
@@ -46,6 +85,9 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
   const [createRoomError, setCreateRoomError] = createSignal('')
   const [roomFormOpen, setRoomFormOpen] = createSignal(false)
   const [roomName, setRoomName] = createSignal('')
+  // WS12-S3: "New message" (a DM or group DM). The button shows only when the listing said DMs are on.
+  const navigate = useNavigate()
+  const [dmDialogOpen, setDmDialogOpen] = createSignal(false)
 
   // A named room, alongside the organization's own channel. Until this existed
   // the "Channels" heading sat over a list that could only ever hold one entry.
@@ -93,16 +135,357 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
   // rooms sink to the bottom, the rest keep the server's order. Sorted copy —
   // never mutate the resource value.
   const otherSpaces = createMemo(() => (spaces() ?? [])
-    .filter((space) => space.kind !== 'personal')
+    .filter((space) => space.kind !== 'personal' && !isDmKind(space.kind))
     .slice()
     .sort((a, b) => Number(a.archived === true) - Number(b.archived === true)
       || Number(b.is_organization_room === true) - Number(a.is_organization_room === true)))
   const visiblePersonalSpaces = createMemo(() => personalSpaces().filter((space) => matchesSpace(space, normalizedQuery(), i18n.tr)))
   const visibleOtherSpaces = createMemo(() => otherSpaces().filter((space) => matchesSpace(space, normalizedQuery(), i18n.tr)))
+  // Legacy panel only (the organiser draws DMs through the registered `dms` group). A DM the caller hid is not listed.
+  const visibleDmSpaces = createMemo(() => (spaces() ?? [])
+    .filter((space) => isDmKind(space.kind) && space.hidden !== true)
+    .filter((space) => matchesSpace(space, normalizedQuery(), i18n.tr)))
   const visibleThreads = createMemo(() => (threads()?.threads ?? []).filter((thread) => matchesThread(thread, normalizedQuery())))
   const selectedSpace = createMemo(() => threads()?.space ?? (selectedSpaceRef()
     ? (spaces() ?? []).find((space) => space.space_ref === selectedSpaceRef())
     : undefined))
+
+  // ---- Personal organisation (WS16-S9) -------------------------------------------------------
+  // The room list still comes from `listSpaces()` above (Control's index); the sidebar document only
+  // decides how those rooms are drawn: stars, custom sections, hidden rooms, per-group sort and
+  // collapse. It never adds a room and nothing in authorization reads it. A 404 from the gateway
+  // (flag off) selects the legacy panel below; an organisation under Zero Data Retention keeps the
+  // document in this browser only (the store never PUTs in that mode).
+  const session = getSession()
+  const scopeKey = createMemo(() => spaceSidebarStorageKey(session.activeOrg?.id, session.user?.id))
+  const store = createMemo(() => {
+    const key = scopeKey()
+    if (!key) return null
+    const created = untrack(() => createSpaceSidebarStore({ scopeKey: key }))
+    onCleanup(() => created.dispose())
+    return created
+  })
+  const sidebar = createMemo<SidebarStoreState>(() => store()?.state() ?? NO_SCOPE_STATE)
+  const legacy = () => sidebar().mode === 'disabled'
+  createEffect(
+    () => ({ target: store(), list: spaces(), failed: spacesLoadFailed() }),
+    ({ target, list, failed }) => {
+      // Prune only against a listing we trust: never against a failed or empty one.
+      target?.setVisibleRefs(!failed && list && list.length > 0 ? new Set(list.map((space) => space.space_ref)) : null)
+    },
+  )
+  const [showHidden, setShowHidden] = createSignal(false)
+  const [notice, setNotice] = createSignal('')
+  // Signal writes are batched, so the message a failed `run` leaves for a dialog is kept here too.
+  let lastError = ''
+  const model = createMemo(() => buildSidebarModel({
+    spaces: spaces() ?? [],
+    doc: sidebar().doc,
+    groups: spaceSidebarGroups(),
+    query: normalizedQuery(),
+    matches: (space, term) => matchesSpace(space, term, i18n.tr),
+    displayName: (space) => spaceDisplayName(space, i18n.tr),
+    locale: i18n.localeCode(),
+  }))
+  const groupDefs = new Map(spaceSidebarGroups().map((def) => [def.id as string, def]))
+  const roomLabel = (space: SpaceSummary) => spaceDisplayName(space, i18n.tr)
+  const sectionName = (id: string) => sidebar().doc.sections.find((section) => section.id === id)?.name ?? ''
+  const homeLabel = (space: SpaceSummary) => {
+    const def = spaceSidebarGroups().find((group) => group.match(space)) ?? groupDefs.get('channels')
+    return def ? def.label(i18n.tr) : i18n.tr('Rom', 'Spaces')
+  }
+  const sectionOf = (ref: string) => sidebar().doc.sections.find((section) => section.refs.includes(ref))?.id ?? ''
+
+  /** One dispatch, one announcement. Failures show in the alert line; nothing is half-applied. */
+  function run(actions: SidebarAction[], spoken?: string): boolean {
+    const target = store()
+    if (!target) return false
+    try {
+      target.dispatch(...actions)
+      lastError = ''
+      setNotice('')
+      if (spoken) announce(spoken, { politeness: 'polite', kind: 'status' })
+      return true
+    } catch (reason) {
+      lastError = translateApiError(reason, i18n.tr, {
+        no: 'Kunne ikke lagre oppsettet.',
+        en: 'Could not save your layout.',
+      })
+      setNotice(lastError)
+      return false
+    }
+  }
+  const moved = (space: SpaceSummary, destination: string) => narrateSidebarMove(i18n.tr, roomLabel(space), destination).message
+
+  const toggleStar = (space: SpaceSummary, isStarred: boolean) => {
+    const ref = space.space_ref
+    if (isStarred) run([{ type: 'unstar', ref }], moved(space, homeLabel(space)))
+    else run([{ type: 'star', ref }], moved(space, i18n.tr('Stjernemerkede', 'Starred')))
+  }
+  const toggleHide = (space: SpaceSummary, isHidden: boolean) => {
+    const ref = space.space_ref
+    if (isHidden) run([{ type: 'room.unhide', ref }], moved(space, homeLabel(space)))
+    else run([{ type: 'room.hide', ref }], moved(space, i18n.tr('Skjulte rom', 'Hidden rooms')))
+  }
+  const moveToSection = (space: SpaceSummary, sectionId: string | null, beforeRef?: string | null) => {
+    const destination = sectionId ? sectionName(sectionId) : homeLabel(space)
+    return run([{ type: 'room.move', ref: space.space_ref, sectionId, beforeRef: beforeRef ?? null }], moved(space, destination))
+  }
+  const toggleSection = (section: SidebarModelSection['section']) => {
+    run([{ type: 'section.collapse', id: section.id, collapsed: !section.collapsed }])
+  }
+  const toggleGroup = (id: string, collapsed: boolean) => {
+    run([{ type: 'group.update', groupId: id as SidebarGroupId, collapsed: !collapsed }])
+  }
+
+  // Dialogs
+  const [moveFor, setMoveFor] = createSignal<SpaceSummary | null>(null)
+  const [sectionDialog, setSectionDialog] = createSignal<{ mode: 'create' | 'rename'; id: string; initial: string } | null>(null)
+  const [dialogError, setDialogError] = createSignal('')
+  const closeDialogs = () => {
+    setMoveFor(null)
+    setSectionDialog(null)
+    setDialogError('')
+  }
+  const submitMove = (sectionId: string | null) => {
+    const space = moveFor()
+    if (!space) return
+    if (moveToSection(space, sectionId)) closeDialogs()
+    else setDialogError(lastError)
+  }
+  const submitSectionName = (name: string) => {
+    const dialog = sectionDialog()
+    if (!dialog) return
+    const action: SidebarAction = dialog.mode === 'create'
+      ? { type: 'section.create', id: crypto.randomUUID(), name }
+      : { type: 'section.rename', id: dialog.id, name }
+    if (run([action])) closeDialogs()
+    else setDialogError(lastError)
+  }
+
+  // Reordering by keyboard (Alt+ArrowUp/Down) and by the row menu: the same actions as a drop.
+  function reorder(space: SpaceSummary, context: RowContext, direction: -1 | 1) {
+    if (normalizedQuery() || (context.kind !== 'starred' && !(context.kind === 'section' && context.manual))) return
+    const refs = context.refs
+    const index = refs.indexOf(space.space_ref)
+    const target = index + direction
+    if (index < 0 || target < 0 || target >= refs.length) return
+    const beforeRef = (direction === -1 ? refs[target] : refs[target + 1]) ?? null
+    const ok = run(
+      [context.kind === 'starred'
+        ? { type: 'star.move', ref: space.space_ref, beforeRef }
+        : { type: 'room.move', ref: space.space_ref, sectionId: context.id, beforeRef }],
+      i18n.tr(
+        `${roomLabel(space)}: plass ${target + 1} av ${refs.length}`,
+        `${roomLabel(space)}: position ${target + 1} of ${refs.length}`,
+      ),
+    )
+    if (ok) {
+      // The list re-renders; put focus back on the row that moved.
+      requestAnimationFrame(() => {
+        document
+          .querySelector<HTMLElement>(`[data-room-ref="${CSS.escape(space.space_ref)}"] > a`)
+          ?.focus()
+      })
+    }
+  }
+  const canReorder = (context: RowContext) =>
+    !normalizedQuery() && (context.kind === 'starred' || (context.kind === 'section' && context.manual))
+
+  // Drag and drop (native HTML5, the organiser pattern). `Escape` cancels. Dropping is the same
+  // validated action the menu and the dialog dispatch.
+  let activeDrag: { ref: string } | null = null
+  const [dragRef, setDragRef] = createSignal<string | null>(null)
+  const [dropTarget, setDropTarget] = createSignal<string | null>(null)
+  const [dropBefore, setDropBefore] = createSignal<string | null>(null)
+  const endDrag = () => {
+    activeDrag = null
+    setDragRef(null)
+    setDropTarget(null)
+    setDropBefore(null)
+  }
+  createEffect(() => undefined, () => {
+    const cancel = (event: KeyboardEvent) => { if (event.key === 'Escape') endDrag() }
+    window.addEventListener('dragend', endDrag)
+    window.addEventListener('keydown', cancel)
+    return () => {
+      window.removeEventListener('dragend', endDrag)
+      window.removeEventListener('keydown', cancel)
+    }
+  })
+  const startDrag = (event: DragEvent, space: SpaceSummary) => {
+    if (!sidebar().canEdit || !event.dataTransfer
+      || (event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable="true"]'))) {
+      event.preventDefault()
+      return
+    }
+    activeDrag = { ref: space.space_ref }
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData(SPACE_ROOM_DRAG_TYPE, space.space_ref)
+    setDragRef(space.space_ref)
+    setNotice('')
+  }
+  const accepts = (event: DragEvent) =>
+    sidebar().canEdit && activeDrag !== null && Boolean(event.dataTransfer?.types.includes(SPACE_ROOM_DRAG_TYPE))
+  const draggedSpace = () => (spaces() ?? []).find((space) => space.space_ref === activeDrag?.ref)
+  const overTarget = (event: DragEvent, id: string) => {
+    if (!accepts(event)) return
+    event.preventDefault()
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+    setDropTarget(id)
+  }
+  const leaveTarget = (event: DragEvent) => {
+    if (!(event.relatedTarget instanceof Node) || !(event.currentTarget as Node).contains(event.relatedTarget)) {
+      setDropTarget(null)
+      setDropBefore(null)
+    }
+  }
+  /** Drop on a whole section / group / Starred header: put the room at the end. */
+  const dropOn = (event: DragEvent, target: { kind: 'starred' } | { kind: 'section'; id: string } | { kind: 'group' }) => {
+    event.preventDefault()
+    const space = draggedSpace()
+    const valid = accepts(event) && space && event.dataTransfer?.getData(SPACE_ROOM_DRAG_TYPE) === activeDrag?.ref
+    if (valid && space) {
+      if (target.kind === 'starred') {
+        if (!sidebar().doc.starred.includes(space.space_ref)) toggleStar(space, false)
+      } else if (target.kind === 'section') moveToSection(space, target.id)
+      else moveToSection(space, null)
+    }
+    endDrag()
+  }
+  /** Drop on a row of Starred or a manual section: put the room before that row. */
+  const dropBeforeRow = (event: DragEvent, context: RowContext, before: SpaceSummary) => {
+    if (!accepts(event) || (context.kind !== 'starred' && !(context.kind === 'section' && context.manual))) return
+    event.preventDefault()
+    event.stopPropagation()
+    const space = draggedSpace()
+    if (space && space.space_ref !== before.space_ref) {
+      if (context.kind === 'starred') {
+        const actions: SidebarAction[] = []
+        if (!sidebar().doc.starred.includes(space.space_ref)) actions.push({ type: 'star', ref: space.space_ref })
+        actions.push({ type: 'star.move', ref: space.space_ref, beforeRef: before.space_ref })
+        run(actions, moved(space, i18n.tr('Stjernemerkede', 'Starred')))
+      } else {
+        moveToSection(space, context.id, before.space_ref)
+      }
+    }
+    endDrag()
+  }
+
+  function menuItems(space: SpaceSummary, context: RowContext): SpaceMenuItem[] {
+    const ref = space.space_ref
+    const isStarred = sidebar().doc.starred.includes(ref)
+    const isHidden = sidebar().doc.hidden.includes(ref)
+    const items: SpaceMenuItem[] = [
+      {
+        id: 'star',
+        label: isStarred ? i18n.tr('Fjern stjerne', 'Unstar') : i18n.tr('Stjernemerk', 'Star'),
+        onSelect: () => toggleStar(space, isStarred),
+      },
+      {
+        id: 'move',
+        label: i18n.tr('Flytt til gruppe …', 'Move to section…'),
+        onSelect: () => { setDialogError(''); setMoveFor(space) },
+      },
+      {
+        id: 'hide',
+        label: isHidden ? i18n.tr('Vis igjen', 'Unhide') : i18n.tr('Skjul', 'Hide'),
+        onSelect: () => toggleHide(space, isHidden),
+      },
+    ]
+    if (canReorder(context) && context.kind !== 'group' && context.kind !== 'hidden') {
+      const index = context.refs.indexOf(ref)
+      items.push(
+        { id: 'up', label: i18n.tr('Flytt opp', 'Move up'), disabled: index <= 0, onSelect: () => reorder(space, context, -1) },
+        { id: 'down', label: i18n.tr('Flytt ned', 'Move down'), disabled: index < 0 || index >= context.refs.length - 1, onSelect: () => reorder(space, context, 1) },
+      )
+    }
+    return items
+  }
+
+  function sectionMenuItems(entry: SidebarModelSection): SpaceMenuItem[] {
+    const { section } = entry
+    const index = sidebar().doc.sections.findIndex((item) => item.id === section.id)
+    const total = sidebar().doc.sections.length
+    const nextSection = sidebar().doc.sections[index + 2]?.id ?? null
+    return [
+      {
+        id: 'rename',
+        label: i18n.tr('Gi nytt navn …', 'Rename…'),
+        onSelect: () => { setDialogError(''); setSectionDialog({ mode: 'rename', id: section.id, initial: section.name }) },
+      },
+      {
+        id: 'sort',
+        label: section.sort === 'name' ? i18n.tr('Sorter manuelt', 'Sort by hand') : i18n.tr('Sorter etter navn', 'Sort by name'),
+        onSelect: () => { run([{ type: 'section.sort', id: section.id, sort: section.sort === 'name' ? 'manual' : 'name' }]) },
+      },
+      {
+        id: 'up',
+        label: i18n.tr('Flytt gruppen opp', 'Move section up'),
+        disabled: index <= 0,
+        onSelect: () => { run([{ type: 'section.move', id: section.id, beforeId: sidebar().doc.sections[index - 1]?.id ?? null }]) },
+      },
+      {
+        id: 'down',
+        label: i18n.tr('Flytt gruppen ned', 'Move section down'),
+        disabled: index < 0 || index >= total - 1,
+        onSelect: () => { run([{ type: 'section.move', id: section.id, beforeId: nextSection }]) },
+      },
+      {
+        id: 'remove',
+        label: i18n.tr('Fjern gruppen, behold rommene', 'Remove section, keep rooms'),
+        danger: true,
+        onSelect: () => { run([{ type: 'section.remove', id: section.id }]) },
+      },
+    ]
+  }
+
+  function groupMenuItems(id: string, sort: 'name' | 'activity' | null): SpaceMenuItem[] {
+    return [{
+      id: 'sort',
+      label: sort === 'name' ? i18n.tr('Standard rekkefølge', 'Default order') : i18n.tr('Sorter etter navn', 'Sort by name'),
+      onSelect: () => { run([{ type: 'group.update', groupId: id as SidebarGroupId, sort: sort === 'name' ? null : 'name' }]) },
+    }]
+  }
+
+  /** A room row: the link, its drag behaviour and its menu. */
+  function renderRow(space: SpaceSummary, context: RowContext): JSX.Element {
+    const draggable = () => sidebar().canEdit
+    return (
+      <div
+        class="space-sidebar-row"
+        data-room-ref={space.space_ref}
+        draggable={draggable() ? 'true' : 'false'}
+        data-dragged={dragRef() === space.space_ref ? 'true' : undefined}
+        data-drop-before={dropBefore() === space.space_ref ? 'true' : undefined}
+        title={draggable() ? i18n.tr('Dra til en gruppe, eller bruk menyen.', 'Drag to a section, or use the menu.') : undefined}
+        onDragStart={(event) => startDrag(event, space)}
+        onDragEnd={endDrag}
+        onDragOver={(event) => {
+          if (!accepts(event) || (context.kind !== 'starred' && !(context.kind === 'section' && context.manual))) return
+          if (activeDrag?.ref === space.space_ref) return
+          event.preventDefault()
+          if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+          setDropBefore(space.space_ref)
+        }}
+        onDrop={(event) => dropBeforeRow(event, context, space)}
+        onKeyDown={(event) => {
+          if (!event.altKey || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) return
+          if (!canReorder(context)) return
+          event.preventDefault()
+          reorder(space, context, event.key === 'ArrowUp' ? -1 : 1)
+        }}
+      >
+        <SpaceLink space={space} active={space.space_ref === selectedSpaceRef()} />
+        <SpaceRoomMenu
+          class="space-sidebar-row__menu"
+          label={i18n.tr(`Valg for ${roomLabel(space)}`, `Options for ${roomLabel(space)}`)}
+          disabled={!sidebar().canEdit}
+          items={menuItems(space, context)}
+        />
+      </div>
+    )
+  }
 
   return (
     <div class="core-sidebar-panel core-sidebar-spaces-panel">
@@ -124,12 +507,143 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
           </p>
         </Show>
 
-        <Show when={!spaces.loading && !spacesLoadFailed() && visibleOtherSpaces().length > 0}>
+        <Show when={!legacy() && !spaces.loading && !spacesLoadFailed()}>
+          <Show when={model().starred.length > 0 || dragRef() !== null}>
+            <SpaceSidebarSection
+              id="starred"
+              title={i18n.tr('Stjernemerkede', 'Starred')}
+              count={model().starred.length}
+              collapsed={false}
+              emptyHint={i18n.tr('Slipp et rom her, eller bruk menyen for å stjernemerke det.', 'Drop a room here, or use its menu to star it.')}
+              dropReady={dragRef() !== null}
+              dropActive={dropTarget() === 'starred'}
+              onDragOver={(event) => overTarget(event, 'starred')}
+              onDragLeave={leaveTarget}
+              onDrop={(event) => dropOn(event, { kind: 'starred' })}
+            >
+              <For each={model().starred}>
+                {(space) => renderRow(space, { kind: 'starred', refs: model().starred.map((item) => item.space_ref) })}
+              </For>
+            </SpaceSidebarSection>
+          </Show>
+
+          <For each={model().sections}>
+            {(entry) => (
+              <Show when={!normalizedQuery() || entry.rooms.length > 0}>
+                <SpaceSidebarSection
+                  id={`section-${entry.section.id}`}
+                  title={entry.section.name}
+                  count={entry.rooms.length}
+                  collapsed={entry.section.collapsed && !normalizedQuery()}
+                  onToggle={sidebar().canEdit ? () => toggleSection(entry.section) : undefined}
+                  emptyHint={i18n.tr('Slipp et rom her, eller bruk Flytt til gruppe.', 'Drop a room here, or use Move to section.')}
+                  dropReady={dragRef() !== null}
+                  dropActive={dropTarget() === `section:${entry.section.id}`}
+                  onDragOver={(event) => overTarget(event, `section:${entry.section.id}`)}
+                  onDragLeave={leaveTarget}
+                  onDrop={(event) => dropOn(event, { kind: 'section', id: entry.section.id })}
+                  menu={
+                    <SpaceRoomMenu
+                      label={i18n.tr(`Valg for gruppen ${entry.section.name}`, `Options for section ${entry.section.name}`)}
+                      disabled={!sidebar().canEdit}
+                      items={sectionMenuItems(entry)}
+                    />
+                  }
+                >
+                  <For each={entry.rooms}>
+                    {(space) => renderRow(space, {
+                      kind: 'section',
+                      id: entry.section.id,
+                      refs: entry.rooms.map((item) => item.space_ref),
+                      manual: entry.section.sort === 'manual',
+                    })}
+                  </For>
+                </SpaceSidebarSection>
+              </Show>
+            )}
+          </For>
+
+          <For each={model().groups}>
+            {(group) => {
+              const def = () => groupDefs.get(group.id)
+              return (
+                <SpaceSidebarSection
+                  id={`group-${group.id}`}
+                  title={def()?.label(i18n.tr) ?? group.id}
+                  count={group.rooms.length}
+                  collapsed={group.collapsed && !normalizedQuery()}
+                  onToggle={sidebar().canEdit ? () => toggleGroup(group.id, group.collapsed) : undefined}
+                  dropReady={dragRef() !== null && def()?.dropTarget === true}
+                  dropActive={dropTarget() === `group:${group.id}`}
+                  onDragOver={(event) => { if (def()?.dropTarget) overTarget(event, `group:${group.id}`) }}
+                  onDragLeave={leaveTarget}
+                  onDrop={(event) => dropOn(event, { kind: 'group' })}
+                  menu={
+                    <SpaceRoomMenu
+                      label={i18n.tr(`Valg for ${def()?.label(i18n.tr) ?? group.id}`, `Options for ${def()?.label(i18n.tr) ?? group.id}`)}
+                      disabled={!sidebar().canEdit}
+                      items={groupMenuItems(group.id, group.sort)}
+                    />
+                  }
+                >
+                  <For each={group.rooms}>{(space) => renderRow(space, { kind: 'group', id: group.id })}</For>
+                </SpaceSidebarSection>
+              )
+            }}
+          </For>
+
+          <Show when={model().hiddenCount > 0 && !normalizedQuery()}>
+            <button
+              type="button"
+              class="space-sidebar-hidden-toggle"
+              aria-expanded={showHidden() ? 'true' : 'false'}
+              onClick={() => setShowHidden((open) => !open)}
+            >
+              <EyeOff size={14} aria-hidden="true" />
+              {showHidden()
+                ? i18n.tr(`Skjul skjulte rom (${model().hiddenCount})`, `Hide hidden rooms (${model().hiddenCount})`)
+                : i18n.tr(`Vis skjulte rom (${model().hiddenCount})`, `Show hidden rooms (${model().hiddenCount})`)}
+            </button>
+          </Show>
+          <Show when={(showHidden() || normalizedQuery()) && model().hidden.length > 0}>
+            <SpaceSidebarSection
+              id="hidden"
+              title={i18n.tr('Skjulte rom', 'Hidden rooms')}
+              count={model().hidden.length}
+              collapsed={false}
+            >
+              <For each={model().hidden}>{(space) => renderRow(space, { kind: 'hidden' })}</For>
+            </SpaceSidebarSection>
+          </Show>
+        </Show>
+
+        <Show when={legacy() && !spaces.loading && !spacesLoadFailed() && visibleOtherSpaces().length > 0}>
           <SidebarGroup title={i18n.tr('Kanaler', 'Channels')}>
             <For each={visibleOtherSpaces()}>
               {(space) => <SpaceLink space={space} active={space.space_ref === selectedSpaceRef()} />}
             </For>
           </SidebarGroup>
+        </Show>
+
+        <Show when={legacy() && !spaces.loading && !spacesLoadFailed() && visibleDmSpaces().length > 0}>
+          <SidebarGroup title={i18n.tr('Direktemeldinger', 'Direct messages')}>
+            <For each={visibleDmSpaces()}>
+              {(space) => <SpaceLink space={space} active={space.space_ref === selectedSpaceRef()} />}
+            </For>
+          </SidebarGroup>
+        </Show>
+
+        <Show when={spaceDmEnabled() && !spaces.loading && !spacesLoadFailed()}>
+          <button
+            type="button"
+            class="core-sidebar-panel-link core-sidebar-new-room"
+            onClick={() => setDmDialogOpen(true)}
+          >
+            <MessageCircle class="core-sidebar-panel-link__icon" strokeWidth={1.7} />
+            <span class="core-sidebar-panel-link__label verevon-sidebar-row-normal">
+              {i18n.tr('Ny melding', 'New message')}
+            </span>
+          </button>
         </Show>
 
         <Show when={!spaces.loading && !spacesLoadFailed()}>
@@ -190,7 +704,31 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
           )}
         </Show>
 
-        <Show when={!spaces.loading && !spacesLoadFailed() && visiblePersonalSpaces().length > 0}>
+        <Show when={!legacy() && !spaces.loading && !spacesLoadFailed() && sidebar().canEdit}>
+          <button
+            type="button"
+            class="core-sidebar-panel-link core-sidebar-new-room"
+            onClick={() => { setDialogError(''); setSectionDialog({ mode: 'create', id: '', initial: '' }) }}
+          >
+            <FolderPlus class="core-sidebar-panel-link__icon" strokeWidth={1.7} />
+            <span class="core-sidebar-panel-link__label verevon-sidebar-row-normal">
+              {i18n.tr('Ny gruppe', 'New section')}
+            </span>
+          </button>
+        </Show>
+        <Show when={!legacy() && notice()}>
+          <p class="space-sidebar-notice" role="alert">{notice()}</p>
+        </Show>
+        <Show when={!legacy() && sidebar().browserOnly}>
+          <p class="space-sidebar-local-note">{i18n.tr('Lagret bare i denne nettleseren.', 'Saved in this browser only.')}</p>
+        </Show>
+        <Show when={!legacy() && !sidebar().canEdit && sidebar().mode !== 'loading' && sidebar().status === 'error'}>
+          <p class="space-sidebar-local-note" role="status">
+            {i18n.tr('Oppsettet ditt kan ikke lagres akkurat nå. Rommene er uendret.', 'Your layout cannot be saved right now. Your rooms are unchanged.')}
+          </p>
+        </Show>
+
+        <Show when={legacy() && !spaces.loading && !spacesLoadFailed() && visiblePersonalSpaces().length > 0}>
           <SidebarGroup title={i18n.tr('Personlig rom', 'Personal Space')}>
             <For each={visiblePersonalSpaces()}>
               {(space) => <SpaceLink space={space} active={space.space_ref === selectedSpaceRef()} />}
@@ -230,6 +768,32 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
           </p>
         </Show>
       </nav>
+
+      <DmStartDialog
+        open={dmDialogOpen()}
+        onClose={() => setDmDialogOpen(false)}
+        onOpened={(result) => {
+          setDmDialogOpen(false)
+          // The DM may still be pending registration, so it can be absent from the listing for a moment.
+          void refetchSpaces()
+          navigate(spaceHref(result.spaceRef))
+        }}
+      />
+      <SpaceMoveDialog
+        roomName={moveFor() ? roomLabel(moveFor() as SpaceSummary) : null}
+        sections={sidebar().doc.sections.map((section) => ({ id: section.id, name: section.name }))}
+        current={moveFor() ? sectionOf((moveFor() as SpaceSummary).space_ref) : ''}
+        error={dialogError()}
+        onSubmit={submitMove}
+        onClose={closeDialogs}
+      />
+      <SpaceSectionNameDialog
+        mode={sectionDialog()?.mode ?? null}
+        initial={sectionDialog()?.initial ?? ''}
+        error={dialogError()}
+        onSubmit={submitSectionName}
+        onClose={closeDialogs}
+      />
     </div>
   )
 }
