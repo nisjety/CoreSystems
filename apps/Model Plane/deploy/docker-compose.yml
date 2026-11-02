@@ -935,6 +935,10 @@ services:
       # `post` to it, only with a v2 Control decision. OFF unless set; dev override turns it on.
       # Never an authorization input.
       SPACE_HUMAN_POSTS_CORE: ${SPACE_HUMAN_POSTS_CORE:-0}
+      # Space message search (WS13-S1): SpaceHistoryService answers SearchMessages/ResolveMessage over
+      # the 0077 index. OFF unless set; dev override turns it on. Gates the query path only (the index
+      # is built either way). Never an authorization input.
+      SPACE_MESSAGE_SEARCH_CORE: ${SPACE_MESSAGE_SEARCH_CORE:-0}
       # Message revisions (WS12-S4): ReviseMessage edits or deletes one Space message under a
       # Control `model.thread.revise` decision. OFF unless set; dev override turns it on. The
       # fold that shows revisions on every read has no switch. Never an authorization input.

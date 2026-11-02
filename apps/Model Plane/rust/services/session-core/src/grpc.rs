@@ -27,6 +27,7 @@ use mp_contracts::model_plane::v1::{
     session_core_server::{SessionCore, SessionCoreServer},
     session_retention_service_server::{SessionRetentionService, SessionRetentionServiceServer},
     space_events_server::SpaceEventsServer,
+    space_history_service_server::SpaceHistoryServiceServer,
     space_room_read_service_server::SpaceRoomReadServiceServer,
     thread_autonomy_server::{ThreadAutonomy, ThreadAutonomyServer},
 };
@@ -57,7 +58,7 @@ use crate::terminalization;
 
 /// Standard gRPC health names registered on the unauthenticated health-only
 /// surface. Business RPCs remain independently intercepted.
-pub const HEALTH_SERVICE_NAMES: [&str; 11] = [
+pub const HEALTH_SERVICE_NAMES: [&str; 12] = [
     "model_plane.v1.SessionCore",
     "model_plane.v1.ManagedRunLifecycle",
     "model_plane.v1.OrchestrationCoreService",
@@ -69,6 +70,7 @@ pub const HEALTH_SERVICE_NAMES: [&str; 11] = [
     "model_plane.v1.ThreadAutonomy",
     "model_plane.v1.SpaceRoomReadService",
     "model_plane.v1.SpaceEvents",
+    "model_plane.v1.SpaceHistoryService",
 ];
 
 const RUN_STARTED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.RunStarted";
@@ -10582,6 +10584,8 @@ pub async fn serve(
 
     // Space room read service (WS07-S9): its own handle on the pool, taken before `pool` moves.
     let session_read_pool = pool.clone();
+    // Space message search (WS13-S1): own handle on the pool; the switch is read once, at boot.
+    let space_history_pool = pool.clone();
     // Message revisions (WS12-S4): its own handle on the pool and the Letta mirror, taken before they move.
     let message_revision_pool = pool.clone();
     let letta_for_revisions = letta_memory.clone();
@@ -10639,6 +10643,13 @@ pub async fn serve(
         ))
         .add_service(SpaceRoomReadServiceServer::with_interceptor(
             crate::space::read_service::SpaceRoomReadGrpc::new(session_read_pool),
+            auth.clone(),
+        ))
+        .add_service(SpaceHistoryServiceServer::with_interceptor(
+            crate::space::history::SpaceHistoryGrpc::new(
+                space_history_pool,
+                mp_contracts::space_history::core_enabled(),
+            ),
             auth.clone(),
         ))
         .add_service(SpaceEventsServer::with_interceptor(
@@ -13944,6 +13955,7 @@ mod tests {
                 "model_plane.v1.ThreadAutonomy",
                 "model_plane.v1.SpaceRoomReadService",
                 "model_plane.v1.SpaceEvents",
+                "model_plane.v1.SpaceHistoryService",
             ]
         );
     }

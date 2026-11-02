@@ -12,6 +12,8 @@
 //! - [`read_service`]: `SpaceRoomReadService`, the room read aggregates (D3; `ListSpaceArtifacts` WS07-S9).
 //! - [`events`]: the Space event log's flag sync, listener, sweeper, gate and erasure hooks
 //!   (WS02-S1; the log itself is written by triggers in migration 0072).
+//! - [`history`]: `SpaceHistoryService`, permission-checked message search and message address resolution
+//!   (WS13-S1; the index is migration 0077).
 //! - [`memory_scope`]: the memory containment resolver for shared-room threads (WS17-S1).
 //! - [`revisions`]: `MessageRevisionService` (edit or delete one message), the revision fold every read applies
 //!   (WS12-S4; the log itself is `message_revisions`, migration 0076).
@@ -21,6 +23,7 @@
 pub(crate) mod append;
 pub(crate) mod authz;
 pub(crate) mod events;
+pub(crate) mod history;
 pub(crate) mod memory_scope;
 pub(crate) mod read_service;
 pub(crate) mod revisions;
