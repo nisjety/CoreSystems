@@ -992,6 +992,13 @@ func (s *Server) issuePersonalImportDecision(c *gin.Context) {
 		&request.SpaceRef, &request.IdempotencyKey, &request.SourceType) {
 		return
 	}
+	s.issuePersonalImportDecisionFor(c, request)
+}
+
+// issuePersonalImportDecisionFor is the personal-Space half of the import
+// decision, shared by personal-import-decision and the unified import-decision
+// route (WS14-S1) so both issue exactly the same decision.
+func (s *Server) issuePersonalImportDecisionFor(c *gin.Context, request personalImportDecisionRequest) {
 	evidence, err := s.spaceRepo.ResolvePersonalImportDecisionEvidence(
 		c.Request.Context(), request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"),
 	)
@@ -1402,6 +1409,16 @@ func (s *Server) issuePersonalImportExecutionDecision(c *gin.Context) {
 	if err := intent.Validate(); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "valid import execution intent is required"})
 		return
+	}
+	// WS14-S1: an intent for a shared Space is re-authorized against shared
+	// evidence (flag-gated). Anything else keeps the personal path unchanged.
+	if s.sharedImportDecisions {
+		if membership, mErr := s.spaceRepo.ResolveCurrentUserMembership(
+			c.Request.Context(), intent.SpaceRef, intent.OrgID, intent.SubjectID,
+		); mErr == nil && membership != nil && membership.Kind != spaces.KindPersonal {
+			s.issueSharedImportExecutionDecision(c, intent)
+			return
+		}
 	}
 	evidence, err := s.spaceRepo.ResolvePersonalImportDecisionEvidence(
 		c.Request.Context(), intent.SpaceRef, intent.OrgID, intent.SubjectID,

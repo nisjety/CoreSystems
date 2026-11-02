@@ -104,6 +104,7 @@ var decisionAuditRoutes = map[string]DecisionAuditRoute{
 	"/retrieval-decision":               {Name: "retrieval"},
 	"/watch-observe-decision":           {Name: "watch_observe"},
 	"/personal-import-decision":         {Name: "import", EffectBound: true},
+	"/import-decision":                  {Name: "import", EffectBound: true},
 	"/import-execution-decision":        {Name: "import", EffectBound: true},
 	"/schedule-create-decision":         {Name: "schedule_create", EffectBound: true},
 	"/schedule-fire-decision":           {Name: "schedule_fire", EffectBound: true},

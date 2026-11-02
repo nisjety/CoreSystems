@@ -398,6 +398,9 @@ func main() {
 	// literal true; off by default; rollout controls, never authorization inputs.
 	httpServer.SetOwnerAssertedGrants(os.Getenv("CONTROL_OWNER_ASSERTED_GRANTS") == "true")
 	httpServer.SetSpaceSubjectGrants(os.Getenv("CONTROL_SPACE_SUBJECT_GRANTS") == "true")
+	// WS14-S1: shared-Space import decisions (room uploads). Strict literal true;
+	// off by default; a rollout control, never an authorization input.
+	httpServer.SetSharedImportDecisions(os.Getenv("CONTROL_SPACE_SHARED_IMPORT") == "true")
 	// WS03-S3: org-admin Space policy writes. Strict literal true; off by default.
 	httpServer.SetSpacePolicyAdminWrites(os.Getenv("SPACE_POLICY_ADMIN_WRITES") == "true")
 	// WS04-S10: durable membership events (ledger as outbox, PubAck publish,

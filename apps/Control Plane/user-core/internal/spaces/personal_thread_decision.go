@@ -377,6 +377,40 @@ func (e PersonalThreadDecisionEvidence) ValidateForImport() error {
 	return nil
 }
 
+// ValidateForSharedImport is ValidateForImport for a non-personal Space (WS14-S1).
+// The actor must be a current member with a writing role and one member of the
+// Control-acknowledged recipient audience (the actor is not the sole recipient,
+// unlike a personal Space). The org's import entitlement must be on and Zero
+// Data Retention off: a durable import persists content, so ZDR refuses it
+// before any token exists.
+func (e PersonalThreadDecisionEvidence) ValidateForSharedImport() error {
+	if err := e.Membership.Validate(); err != nil {
+		return err
+	}
+	if e.Membership.Kind == KindPersonal {
+		return kindUnsupportedDenial(string(e.Membership.Kind), "shared import decision requires a non-personal Space")
+	}
+	if !matchesOneOf(e.Membership.Role, "editor", "manager", "owner") {
+		return roleBelowFloorDenial(fmt.Sprintf("space role %q cannot import content", e.Membership.Role), "editor", "manager", "owner")
+	}
+	if strings.TrimSpace(e.RecipientAudienceRef) == "" || strings.TrimSpace(e.RecipientAudienceHash) == "" {
+		return authorityIncompleteDenial("shared Space recipient audience is required")
+	}
+	if !e.ImportWriteEntitled {
+		return entitlementOffDenial("import_write", "import entitlement is not active")
+	}
+	if strings.TrimSpace(e.ResourceAuthorizationRef) == "" {
+		return authorityIncompleteDenial("shared Space import authority is incomplete")
+	}
+	if err := e.Privacy.Validate(); err != nil {
+		return err
+	}
+	if e.Privacy.ZeroDataRetention {
+		return zdrForbidsDenial("import_write", "zero data retention forbids durable import")
+	}
+	return nil
+}
+
 // ValidateForAgentAction is intentionally independent of a thread-create
 // decision. A Model run can request a target-specific owner action only when
 // the current Control policy permits it; the target owner must still authorize

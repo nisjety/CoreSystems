@@ -454,6 +454,8 @@ services:
             # the owning services are re-pointed (never flip the first before WS14-S4).
             CONTROL_OWNER_ASSERTED_GRANTS: ${CONTROL_OWNER_ASSERTED_GRANTS:-false}
             CONTROL_SPACE_SUBJECT_GRANTS: ${CONTROL_SPACE_SUBJECT_GRANTS:-false}
+            # WS14-S1: shared-Space import decisions (room uploads). Strict literal true; off by default.
+            CONTROL_SPACE_SHARED_IMPORT: ${CONTROL_SPACE_SHARED_IMPORT:-false}
             CONTROL_SPACE_DECISION_KEY_ID: ${CONTROL_SPACE_DECISION_KEY_ID:?CONTROL_SPACE_DECISION_KEY_ID is required}
             CONTROL_SPACE_DECISION_PRIVATE_KEY_BASE64: ${CONTROL_SPACE_DECISION_PRIVATE_KEY_BASE64:?CONTROL_SPACE_DECISION_PRIVATE_KEY_BASE64 is required}
             AUTH_CORE_JWT_PUBLIC_KEY_FILE: /app/keys/convex-auth.pub

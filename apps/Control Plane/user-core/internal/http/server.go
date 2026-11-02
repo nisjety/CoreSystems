@@ -50,7 +50,11 @@ type Server struct {
 	ownerAssertedGrants bool
 	// spaceSubjectGrants is CONTROL_SPACE_SUBJECT_GRANTS (WS14-S2). Off:
 	// file-grant and space-visible answer 404.
-	spaceSubjectGrants     bool
+	spaceSubjectGrants bool
+	// sharedImportDecisions is CONTROL_SPACE_SHARED_IMPORT (WS14-S1). Off: a
+	// shared Space import-decision answers 404 shared_import_disabled and the
+	// execution decision keeps the personal-only path.
+	sharedImportDecisions  bool
 	port                   string
 	httpClient             *http.Client
 	orgService             string
