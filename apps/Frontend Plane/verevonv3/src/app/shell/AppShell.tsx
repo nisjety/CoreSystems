@@ -9,6 +9,7 @@ import { SESSION_EXPIRED_EVENT } from '@/shared/api/http'
 import { I18nProvider, translateApiError, useI18n } from '@/shared/i18n'
 import { ClientContractBanner } from '@/shared/ui/resilience/ClientContractBanner'
 import { NewVersionBanner } from '@/shared/ui/resilience/NewVersionBanner'
+import { UserPreferencesProvider } from '@/shared/preferences/UserPreferencesProvider'
 import { clearSession, loadSession } from '@/shared/session/session-store'
 
 export function AppShell(props: { children?: JSX.Element }) {
@@ -32,6 +33,7 @@ export function AppShell(props: { children?: JSX.Element }) {
 
   return (
     <I18nProvider>
+      <UserPreferencesProvider>
       <QueryProvider>
         {/* Outside the boundary, so a failed route cannot take the stale-build notice down with it. */}
         <Errored
@@ -49,6 +51,7 @@ export function AppShell(props: { children?: JSX.Element }) {
         <NewVersionBanner />
         <ClientContractBanner />
       </QueryProvider>
+      </UserPreferencesProvider>
     </I18nProvider>
   )
 }

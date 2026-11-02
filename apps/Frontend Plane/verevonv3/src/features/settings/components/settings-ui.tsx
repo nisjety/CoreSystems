@@ -148,7 +148,7 @@ export function SettingsSelect(props: {
   id: string
   label: string
   onChange?: JSX.EventHandler<HTMLSelectElement, Event>
-  options: Array<{ value: string; label: string }>
+  options: Array<{ value: string; label: string; disabled?: boolean }>
   value: string
 }) {
   return (
@@ -163,7 +163,7 @@ export function SettingsSelect(props: {
           class="verevon-settings-input verevon-settings-select"
         >
           <For each={props.options}>
-            {(option) => <option value={option.value}>{option.label}</option>}
+            {(option) => <option value={option.value} disabled={option.disabled}>{option.label}</option>}
           </For>
         </VerevonSelect>
         <ChevronDown
