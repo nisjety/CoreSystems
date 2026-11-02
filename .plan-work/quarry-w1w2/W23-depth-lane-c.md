@@ -41,3 +41,6 @@ Format: `unit | finding`. Wave first, depth later.
 - W2-U63 | depth | `record_robots_link_refusals` has no caller: routes.rs `with_crawl` and crawl_sitemap.rs should call it when the gate enforces. Add a case to tests/metrics_recorder.rs.
 - W2-U63 | depth | The sitemap-from-robots scanner (separate from `RobotsTxt::parse`) may still use `lines()`: check it for CR-only files.
 - W2-U63 | depth | `GroupRules.crawl_delay_s` still stores an unusable lone value (negative/NaN); readers must go through `crawl_delay_any`. Consider normalising to None at parse.
+- W2-U27 | depth | `receipt_for_read` reduces only `observation.url` for ZDR readers; the observation `title`, a Navigate action URL, and `compile_run_procedure` (which also reads receipts) are not host-reduced. A ZDR run writes no receipts today, so this is defence in depth; decide the ZDR view of title/Navigate if metadata receipts under ZDR (INNH-10 'tombstones') are ever written.
+- W2-U27 | depth | INNH-10 status says ZDR runs keep 'metadata tombstones'; `receipt_plan` still returns Skip for every ZDR step. One of the two statements is stale: check and align the docs or the code.
+- W2-U27 | depth | The lane worktrees have no node_modules, so a Playwright spec cannot be listed (`playwright test --list`) there; only a tsc check against the main checkout's modules was possible.
