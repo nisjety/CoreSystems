@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file model_plane/v1/memory.proto.
  */
 export const file_model_plane_v1_memory: GenFile = /*@__PURE__*/
-  fileDesc("Chttb2RlbF9wbGFuZS92MS9tZW1vcnkucHJvdG8SDm1vZGVsX3BsYW5lLnYxIrABChNTZWFyY2hNZW1vcnlSZXF1ZXN0EhEKCXRocmVhZF9pZBgBIAEoCRINCgVxdWVyeRgCIAEoCRIUCgx0b3BpY19maWx0ZXIYAyADKAkSDQoFbGltaXQYBCABKA0SDgoGb3JnX2lkGAUgASgJEjEKDXVwZGF0ZWRfYWZ0ZXIYBiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEg8KB3VzZXJfaWQYByABKAkicgoUU2VhcmNoTWVtb3J5UmVzcG9uc2USLAoHZW50cmllcxgBIAMoCzIbLm1vZGVsX3BsYW5lLnYxLk1lbW9yeUVudHJ5EhAKCGRlZ3JhZGVkGAIgASgIEhoKEmRlZ3JhZGF0aW9uX3JlYXNvbhgDIAEoCSLZAQoLTWVtb3J5RW50cnkSEQoJbWVtb3J5X2lkGAEgASgJEhEKCXRocmVhZF9pZBgCIAEoCRINCgV0b3BpYxgDIAEoCRIPCgdjb250ZW50GAQgASgJEg0KBXNjb3JlGAUgASgCEi4KCnVwZGF0ZWRfYXQYBiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEg8KB3VzZXJfaWQYByABKAkSNAoKcHJvdmVuYW5jZRgIIAEoDjIgLm1vZGVsX3BsYW5lLnYxLk1lbW9yeVByb3ZlbmFuY2UiewoSSW5kZXhNZW1vcnlSZXF1ZXN0EhEKCXRocmVhZF9pZBgBIAEoCRINCgV0b3BpYxgCIAEoCRIPCgdjb250ZW50GAMgASgJEg4KBm9yZ19pZBgEIAEoCRIPCgd1c2VyX2lkGAUgASgJEhEKCW1lbW9yeV9pZBgGIAEoCSJWChNJbmRleE1lbW9yeVJlc3BvbnNlEhEKCW1lbW9yeV9pZBgBIAEoCRIQCghkZWdyYWRlZBgCIAEoCBIaChJkZWdyYWRhdGlvbl9yZWFzb24YAyABKAkiFQoTTWVtb3J5SGVhbHRoUmVxdWVzdCJMChRNZW1vcnlIZWFsdGhSZXNwb25zZRIOCgZzdGF0dXMYASABKAkSDQoFcmVhZHkYAiABKAgSFQoNbWVtb3J5X3N0YXR1cxgDIAEoCSJDChFMaXN0TWVtb3J5UmVxdWVzdBIOCgZvcmdfaWQYASABKAkSDwoHdXNlcl9pZBgCIAEoCRINCgVsaW1pdBgDIAEoDSJwChJMaXN0TWVtb3J5UmVzcG9uc2USLAoHZW50cmllcxgBIAMoCzIbLm1vZGVsX3BsYW5lLnYxLk1lbW9yeUVudHJ5EhAKCGRlZ3JhZGVkGAIgASgIEhoKEmRlZ3JhZGF0aW9uX3JlYXNvbhgDIAEoCSJJChNEZWxldGVNZW1vcnlSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIPCgd1c2VyX2lkGAIgASgJEhEKCW1lbW9yeV9pZBgDIAEoCSJVChREZWxldGVNZW1vcnlSZXNwb25zZRIPCgdkZWxldGVkGAEgASgIEhAKCGRlZ3JhZGVkGAIgASgIEhoKEmRlZ3JhZGF0aW9uX3JlYXNvbhgDIAEoCSpzChBNZW1vcnlQcm92ZW5hbmNlEiEKHU1FTU9SWV9QUk9WRU5BTkNFX1VOU1BFQ0lGSUVEEAASHAoYTUVNT1JZX1BST1ZFTkFOQ0VfU1RBVEVEEAESHgoaTUVNT1JZX1BST1ZFTkFOQ0VfSU5GRVJSRUQQAjLHAwoNTWVtb3J5U2VydmljZRJZCgxTZWFyY2hNZW1vcnkSIy5tb2RlbF9wbGFuZS52MS5TZWFyY2hNZW1vcnlSZXF1ZXN0GiQubW9kZWxfcGxhbmUudjEuU2VhcmNoTWVtb3J5UmVzcG9uc2USVgoLSW5kZXhNZW1vcnkSIi5tb2RlbF9wbGFuZS52MS5JbmRleE1lbW9yeVJlcXVlc3QaIy5tb2RlbF9wbGFuZS52MS5JbmRleE1lbW9yeVJlc3BvbnNlElMKCkxpc3RNZW1vcnkSIS5tb2RlbF9wbGFuZS52MS5MaXN0TWVtb3J5UmVxdWVzdBoiLm1vZGVsX3BsYW5lLnYxLkxpc3RNZW1vcnlSZXNwb25zZRJZCgxEZWxldGVNZW1vcnkSIy5tb2RlbF9wbGFuZS52MS5EZWxldGVNZW1vcnlSZXF1ZXN0GiQubW9kZWxfcGxhbmUudjEuRGVsZXRlTWVtb3J5UmVzcG9uc2USUwoGSGVhbHRoEiMubW9kZWxfcGxhbmUudjEuTWVtb3J5SGVhbHRoUmVxdWVzdBokLm1vZGVsX3BsYW5lLnYxLk1lbW9yeUhlYWx0aFJlc3BvbnNlQrMBChJjb20ubW9kZWxfcGxhbmUudjFCC01lbW9yeVByb3RvUAFaO2dpdGh1Yi5jb20vdHJpb2RlbGFiL21vZGVsLXBsYW5lL2dlbi9nby9tb2RlbF9wbGFuZS92MTttcHYxogIDTVhYqgINTW9kZWxQbGFuZS5WMcoCDU1vZGVsUGxhbmVcVjHiAhlNb2RlbFBsYW5lXFYxXEdQQk1ldGFkYXRh6gIOTW9kZWxQbGFuZTo6VjFiBnByb3RvMw", [file_google_protobuf_timestamp]);
+  fileDesc("Chttb2RlbF9wbGFuZS92MS9tZW1vcnkucHJvdG8SDm1vZGVsX3BsYW5lLnYxIrABChNTZWFyY2hNZW1vcnlSZXF1ZXN0EhEKCXRocmVhZF9pZBgBIAEoCRINCgVxdWVyeRgCIAEoCRIUCgx0b3BpY19maWx0ZXIYAyADKAkSDQoFbGltaXQYBCABKA0SDgoGb3JnX2lkGAUgASgJEjEKDXVwZGF0ZWRfYWZ0ZXIYBiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEg8KB3VzZXJfaWQYByABKAkihwEKFFNlYXJjaE1lbW9yeVJlc3BvbnNlEiwKB2VudHJpZXMYASADKAsyGy5tb2RlbF9wbGFuZS52MS5NZW1vcnlFbnRyeRIQCghkZWdyYWRlZBgCIAEoCBIaChJkZWdyYWRhdGlvbl9yZWFzb24YAyABKAkSEwoLc2tpcF9yZWFzb24YBCABKAkijAIKC01lbW9yeUVudHJ5EhEKCW1lbW9yeV9pZBgBIAEoCRIRCgl0aHJlYWRfaWQYAiABKAkSDQoFdG9waWMYAyABKAkSDwoHY29udGVudBgEIAEoCRINCgVzY29yZRgFIAEoAhIuCgp1cGRhdGVkX2F0GAYgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIPCgd1c2VyX2lkGAcgASgJEjQKCnByb3ZlbmFuY2UYCCABKA4yIC5tb2RlbF9wbGFuZS52MS5NZW1vcnlQcm92ZW5hbmNlEhgKEG9yaWdpbl9zcGFjZV9yZWYYCSABKAkSFwoPd2l0aGhlbGRfcmVhc29uGAogASgJIosBChJJbmRleE1lbW9yeVJlcXVlc3QSEQoJdGhyZWFkX2lkGAEgASgJEg0KBXRvcGljGAIgASgJEg8KB2NvbnRlbnQYAyABKAkSDgoGb3JnX2lkGAQgASgJEg8KB3VzZXJfaWQYBSABKAkSEQoJbWVtb3J5X2lkGAYgASgJEg4KBm9yaWdpbhgHIAEoCSJWChNJbmRleE1lbW9yeVJlc3BvbnNlEhEKCW1lbW9yeV9pZBgBIAEoCRIQCghkZWdyYWRlZBgCIAEoCBIaChJkZWdyYWRhdGlvbl9yZWFzb24YAyABKAkiFQoTTWVtb3J5SGVhbHRoUmVxdWVzdCJMChRNZW1vcnlIZWFsdGhSZXNwb25zZRIOCgZzdGF0dXMYASABKAkSDQoFcmVhZHkYAiABKAgSFQoNbWVtb3J5X3N0YXR1cxgDIAEoCSJDChFMaXN0TWVtb3J5UmVxdWVzdBIOCgZvcmdfaWQYASABKAkSDwoHdXNlcl9pZBgCIAEoCRINCgVsaW1pdBgDIAEoDSKHAQoSTGlzdE1lbW9yeVJlc3BvbnNlEiwKB2VudHJpZXMYASADKAsyGy5tb2RlbF9wbGFuZS52MS5NZW1vcnlFbnRyeRIQCghkZWdyYWRlZBgCIAEoCBIaChJkZWdyYWRhdGlvbl9yZWFzb24YAyABKAkSFQoNaGlkZGVuX3JlYXNvbhgEIAEoCSJJChNEZWxldGVNZW1vcnlSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIPCgd1c2VyX2lkGAIgASgJEhEKCW1lbW9yeV9pZBgDIAEoCSJVChREZWxldGVNZW1vcnlSZXNwb25zZRIPCgdkZWxldGVkGAEgASgIEhAKCGRlZ3JhZGVkGAIgASgIEhoKEmRlZ3JhZGF0aW9uX3JlYXNvbhgDIAEoCSI7ChhHZXRNZW1vcnlDb250cm9sc1JlcXVlc3QSDgoGb3JnX2lkGAEgASgJEg8KB3VzZXJfaWQYAiABKAkiZwoYU2V0TWVtb3J5Q29udHJvbHNSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIPCgd1c2VyX2lkGAIgASgJEioKBXN0YXRlGAMgASgOMhsubW9kZWxfcGxhbmUudjEuTWVtb3J5U3RhdGUilAIKDk1lbW9yeUNvbnRyb2xzEioKBXN0YXRlGAEgASgOMhsubW9kZWxfcGxhbmUudjEuTWVtb3J5U3RhdGUSGQoRb3JnX21lbW9yeV9wb2xpY3kYAiABKAkSGwoTb3JnX2xlYXJuaW5nX3BvbGljeRgDIAEoCRITCgt1c2VfYWxsb3dlZBgEIAEoCBIaChJnZW5lcmF0aW9uX2FsbG93ZWQYBSABKAgSGAoQbGVhcm5pbmdfYWxsb3dlZBgGIAEoCBIOCgZyZWFzb24YByABKAkSEwoLaGlkZGVuX3Jvd3MYCCABKA0SLgoKdXBkYXRlZF9hdBgJIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAiTQoZR2V0TWVtb3J5Q29udHJvbHNSZXNwb25zZRIwCghjb250cm9scxgBIAEoCzIeLm1vZGVsX3BsYW5lLnYxLk1lbW9yeUNvbnRyb2xzIk0KGVNldE1lbW9yeUNvbnRyb2xzUmVzcG9uc2USMAoIY29udHJvbHMYASABKAsyHi5tb2RlbF9wbGFuZS52MS5NZW1vcnlDb250cm9scyJGChJSZXNldE1lbW9yeVJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEg8KB3VzZXJfaWQYAiABKAkSDwoHY29uZmlybRgDIAEoCCJ6ChNSZXNldE1lbW9yeVJlc3BvbnNlEhcKD2R1cmFibGVfZGVsZXRlZBgBIAEoDRIcChRzZW1hbnRpY191bmNvbmZpcm1lZBgCIAEoDRIQCghkZWdyYWRlZBgDIAEoCBIaChJkZWdyYWRhdGlvbl9yZWFzb24YBCABKAkqcwoQTWVtb3J5UHJvdmVuYW5jZRIhCh1NRU1PUllfUFJPVkVOQU5DRV9VTlNQRUNJRklFRBAAEhwKGE1FTU9SWV9QUk9WRU5BTkNFX1NUQVRFRBABEh4KGk1FTU9SWV9QUk9WRU5BTkNFX0lORkVSUkVEEAIqbwoLTWVtb3J5U3RhdGUSHAoYTUVNT1JZX1NUQVRFX1VOU1BFQ0lGSUVEEAASEwoPTUVNT1JZX1NUQVRFX09OEAESFwoTTUVNT1JZX1NUQVRFX1BBVVNFRBACEhQKEE1FTU9SWV9TVEFURV9PRkYQAzLzBQoNTWVtb3J5U2VydmljZRJZCgxTZWFyY2hNZW1vcnkSIy5tb2RlbF9wbGFuZS52MS5TZWFyY2hNZW1vcnlSZXF1ZXN0GiQubW9kZWxfcGxhbmUudjEuU2VhcmNoTWVtb3J5UmVzcG9uc2USVgoLSW5kZXhNZW1vcnkSIi5tb2RlbF9wbGFuZS52MS5JbmRleE1lbW9yeVJlcXVlc3QaIy5tb2RlbF9wbGFuZS52MS5JbmRleE1lbW9yeVJlc3BvbnNlElMKCkxpc3RNZW1vcnkSIS5tb2RlbF9wbGFuZS52MS5MaXN0TWVtb3J5UmVxdWVzdBoiLm1vZGVsX3BsYW5lLnYxLkxpc3RNZW1vcnlSZXNwb25zZRJZCgxEZWxldGVNZW1vcnkSIy5tb2RlbF9wbGFuZS52MS5EZWxldGVNZW1vcnlSZXF1ZXN0GiQubW9kZWxfcGxhbmUudjEuRGVsZXRlTWVtb3J5UmVzcG9uc2USUwoGSGVhbHRoEiMubW9kZWxfcGxhbmUudjEuTWVtb3J5SGVhbHRoUmVxdWVzdBokLm1vZGVsX3BsYW5lLnYxLk1lbW9yeUhlYWx0aFJlc3BvbnNlEmgKEUdldE1lbW9yeUNvbnRyb2xzEigubW9kZWxfcGxhbmUudjEuR2V0TWVtb3J5Q29udHJvbHNSZXF1ZXN0GikubW9kZWxfcGxhbmUudjEuR2V0TWVtb3J5Q29udHJvbHNSZXNwb25zZRJoChFTZXRNZW1vcnlDb250cm9scxIoLm1vZGVsX3BsYW5lLnYxLlNldE1lbW9yeUNvbnRyb2xzUmVxdWVzdBopLm1vZGVsX3BsYW5lLnYxLlNldE1lbW9yeUNvbnRyb2xzUmVzcG9uc2USVgoLUmVzZXRNZW1vcnkSIi5tb2RlbF9wbGFuZS52MS5SZXNldE1lbW9yeVJlcXVlc3QaIy5tb2RlbF9wbGFuZS52MS5SZXNldE1lbW9yeVJlc3BvbnNlQrMBChJjb20ubW9kZWxfcGxhbmUudjFCC01lbW9yeVByb3RvUAFaO2dpdGh1Yi5jb20vdHJpb2RlbGFiL21vZGVsLXBsYW5lL2dlbi9nby9tb2RlbF9wbGFuZS92MTttcHYxogIDTVhYqgINTW9kZWxQbGFuZS5WMcoCDU1vZGVsUGxhbmVcVjHiAhlNb2RlbFBsYW5lXFYxXEdQQk1ldGFkYXRh6gIOTW9kZWxQbGFuZTo6VjFiBnByb3RvMw", [file_google_protobuf_timestamp]);
 
 /**
  * @generated from message model_plane.v1.SearchMemoryRequest
@@ -110,6 +110,17 @@ export type SearchMemoryResponse = Message<"model_plane.v1.SearchMemoryResponse"
    * @generated from field: string degradation_reason = 3;
    */
   degradationReason: string;
+
+  /**
+   * Why the caller's own memory was not used for this search, one of the
+   * closed MemoryControls.reason tokens: "user_paused", "user_off",
+   * "org_disabled", "policy_unavailable". Empty when it was used. A paused or
+   * off user still receives org-owned entries, so an empty `entries` with this
+   * set means "memory is switched off", never "nothing to recall".
+   *
+   * @generated from field: string skip_reason = 4;
+   */
+  skipReason: string;
 };
 
 /**
@@ -187,6 +198,24 @@ export type MemoryEntry = Message<"model_plane.v1.MemoryEntry"> & {
    * @generated from field: model_plane.v1.MemoryProvenance provenance = 8;
    */
   provenance: MemoryProvenance;
+
+  /**
+   * Space this row was learned in, set only when the row is withheld (see
+   * withheld_reason). Ids only, never content. Empty for every ordinary row.
+   *
+   * @generated from field: string origin_space_ref = 9;
+   */
+  originSpaceRef: string;
+
+  /**
+   * Why this row is listed but never recalled. Closed vocabulary shared with
+   * the personal-chat hidden_reason: "room_origin_unverified" is a row learned
+   * in a shared room before containment existed. The owner may keep or delete
+   * it; no conversation recalls it. Empty for an ordinary row.
+   *
+   * @generated from field: string withheld_reason = 10;
+   */
+  withheldReason: string;
 };
 
 /**
@@ -245,6 +274,17 @@ export type IndexMemoryRequest = Message<"model_plane.v1.IndexMemoryRequest"> & 
    * @generated from field: string memory_id = 6;
    */
   memoryId: string;
+
+  /**
+   * Who asked for this write, for the content policy (WS26-S4): "user" (the
+   * person, through the app), "model_tool" (save_memory), "delegation" (a
+   * subagent's outcome) or "workflow" (an orchestrator write). Empty, and any
+   * other value, is read as "model_tool", so only "user" may write org-wide
+   * memory.
+   *
+   * @generated from field: string origin = 7;
+   */
+  origin: string;
 };
 
 /**
@@ -392,6 +432,15 @@ export type ListMemoryResponse = Message<"model_plane.v1.ListMemoryResponse"> & 
    * @generated from field: string degradation_reason = 3;
    */
   degradationReason: string;
+
+  /**
+   * Why the user's rows were left out of this list: "user_off" or
+   * "org_disabled". Empty when they are listed. Paused is not a reason: a
+   * paused user's rows stay visible and deletable.
+   *
+   * @generated from field: string hidden_reason = 4;
+   */
+  hiddenReason: string;
 };
 
 /**
@@ -470,6 +519,256 @@ export const DeleteMemoryResponseSchema: GenMessage<DeleteMemoryResponse> = /*@_
   messageDesc(file_model_plane_v1_memory, 10);
 
 /**
+ * @generated from message model_plane.v1.GetMemoryControlsRequest
+ */
+export type GetMemoryControlsRequest = Message<"model_plane.v1.GetMemoryControlsRequest"> & {
+  /**
+   * Tenant context.
+   *
+   * @generated from field: string org_id = 1;
+   */
+  orgId: string;
+
+  /**
+   * The user whose controls are read. A user caller may only read their own.
+   *
+   * @generated from field: string user_id = 2;
+   */
+  userId: string;
+};
+
+/**
+ * Describes the message model_plane.v1.GetMemoryControlsRequest.
+ * Use `create(GetMemoryControlsRequestSchema)` to create a new message.
+ */
+export const GetMemoryControlsRequestSchema: GenMessage<GetMemoryControlsRequest> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_memory, 11);
+
+/**
+ * @generated from message model_plane.v1.SetMemoryControlsRequest
+ */
+export type SetMemoryControlsRequest = Message<"model_plane.v1.SetMemoryControlsRequest"> & {
+  /**
+   * Tenant context.
+   *
+   * @generated from field: string org_id = 1;
+   */
+  orgId: string;
+
+  /**
+   * The user whose state is set. Must be the caller.
+   *
+   * @generated from field: string user_id = 2;
+   */
+  userId: string;
+
+  /**
+   * The new state. UNSPECIFIED is refused.
+   *
+   * @generated from field: model_plane.v1.MemoryState state = 3;
+   */
+  state: MemoryState;
+};
+
+/**
+ * Describes the message model_plane.v1.SetMemoryControlsRequest.
+ * Use `create(SetMemoryControlsRequestSchema)` to create a new message.
+ */
+export const SetMemoryControlsRequestSchema: GenMessage<SetMemoryControlsRequest> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_memory, 12);
+
+/**
+ * MemoryControls — the user's state and the one decision every memory reader
+ * and writer in session-core takes from it. Content-free.
+ *
+ * @generated from message model_plane.v1.MemoryControls
+ */
+export type MemoryControls = Message<"model_plane.v1.MemoryControls"> & {
+  /**
+   * The user's stored choice. Always reported, even when the decision below is
+   * dominated by org policy or zero data retention.
+   *
+   * @generated from field: model_plane.v1.MemoryState state = 1;
+   */
+  state: MemoryState;
+
+  /**
+   * The organization's memory policy: "allow", "disabled" or "unavailable".
+   *
+   * @generated from field: string org_memory_policy = 2;
+   */
+  orgMemoryPolicy: string;
+
+  /**
+   * The organization's learning-review policy. Empty until the org policy
+   * mirror exists (build plan WS07 S4).
+   *
+   * @generated from field: string org_learning_policy = 3;
+   */
+  orgLearningPolicy: string;
+
+  /**
+   * Whether memory is recalled for this user's turns.
+   *
+   * @generated from field: bool use_allowed = 4;
+   */
+  useAllowed: boolean;
+
+  /**
+   * Whether new memory is written for this user.
+   *
+   * @generated from field: bool generation_allowed = 5;
+   */
+  generationAllowed: boolean;
+
+  /**
+   * Whether this user's completed runs are announced to the learning loop.
+   *
+   * @generated from field: bool learning_allowed = 6;
+   */
+  learningAllowed: boolean;
+
+  /**
+   * Closed token for what decided the above: "on", "user_paused", "user_off",
+   * "org_disabled", "zdr", "policy_unavailable".
+   *
+   * @generated from field: string reason = 7;
+   */
+  reason: string;
+
+  /**
+   * How many of the user's rows the list hides under this decision (a count,
+   * never a row). Zero unless the state is off or the org disabled memory.
+   *
+   * @generated from field: uint32 hidden_rows = 8;
+   */
+  hiddenRows: number;
+
+  /**
+   * When the state last changed; unset for a user who never set it.
+   *
+   * @generated from field: google.protobuf.Timestamp updated_at = 9;
+   */
+  updatedAt?: Timestamp | undefined;
+};
+
+/**
+ * Describes the message model_plane.v1.MemoryControls.
+ * Use `create(MemoryControlsSchema)` to create a new message.
+ */
+export const MemoryControlsSchema: GenMessage<MemoryControls> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_memory, 13);
+
+/**
+ * @generated from message model_plane.v1.GetMemoryControlsResponse
+ */
+export type GetMemoryControlsResponse = Message<"model_plane.v1.GetMemoryControlsResponse"> & {
+  /**
+   * @generated from field: model_plane.v1.MemoryControls controls = 1;
+   */
+  controls?: MemoryControls | undefined;
+};
+
+/**
+ * Describes the message model_plane.v1.GetMemoryControlsResponse.
+ * Use `create(GetMemoryControlsResponseSchema)` to create a new message.
+ */
+export const GetMemoryControlsResponseSchema: GenMessage<GetMemoryControlsResponse> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_memory, 14);
+
+/**
+ * @generated from message model_plane.v1.SetMemoryControlsResponse
+ */
+export type SetMemoryControlsResponse = Message<"model_plane.v1.SetMemoryControlsResponse"> & {
+  /**
+   * @generated from field: model_plane.v1.MemoryControls controls = 1;
+   */
+  controls?: MemoryControls | undefined;
+};
+
+/**
+ * Describes the message model_plane.v1.SetMemoryControlsResponse.
+ * Use `create(SetMemoryControlsResponseSchema)` to create a new message.
+ */
+export const SetMemoryControlsResponseSchema: GenMessage<SetMemoryControlsResponse> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_memory, 15);
+
+/**
+ * @generated from message model_plane.v1.ResetMemoryRequest
+ */
+export type ResetMemoryRequest = Message<"model_plane.v1.ResetMemoryRequest"> & {
+  /**
+   * Tenant context.
+   *
+   * @generated from field: string org_id = 1;
+   */
+  orgId: string;
+
+  /**
+   * The user whose memory is erased. Must be the caller.
+   *
+   * @generated from field: string user_id = 2;
+   */
+  userId: string;
+
+  /**
+   * Must be true. A reset cannot be undone, so an unset field is a refusal,
+   * never a default.
+   *
+   * @generated from field: bool confirm = 3;
+   */
+  confirm: boolean;
+};
+
+/**
+ * Describes the message model_plane.v1.ResetMemoryRequest.
+ * Use `create(ResetMemoryRequestSchema)` to create a new message.
+ */
+export const ResetMemoryRequestSchema: GenMessage<ResetMemoryRequest> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_memory, 16);
+
+/**
+ * @generated from message model_plane.v1.ResetMemoryResponse
+ */
+export type ResetMemoryResponse = Message<"model_plane.v1.ResetMemoryResponse"> & {
+  /**
+   * How many durable rows were erased (current rows and retired ancestors).
+   *
+   * @generated from field: uint32 durable_deleted = 1;
+   */
+  durableDeleted: number;
+
+  /**
+   * Durable rows whose semantic copy could not be confirmed erased. Their reads
+   * stay suppressed, because every erased id is recorded as forgotten.
+   *
+   * @generated from field: uint32 semantic_unconfirmed = 2;
+   */
+  semanticUnconfirmed: number;
+
+  /**
+   * True when semantic_unconfirmed is not zero.
+   *
+   * @generated from field: bool degraded = 3;
+   */
+  degraded: boolean;
+
+  /**
+   * Stable machine-readable reason, empty when nothing is degraded.
+   *
+   * @generated from field: string degradation_reason = 4;
+   */
+  degradationReason: string;
+};
+
+/**
+ * Describes the message model_plane.v1.ResetMemoryResponse.
+ * Use `create(ResetMemoryResponseSchema)` to create a new message.
+ */
+export const ResetMemoryResponseSchema: GenMessage<ResetMemoryResponse> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_memory, 17);
+
+/**
  * MemoryProvenance — who decided a memory was worth keeping.
  *
  * @generated from enum model_plane.v1.MemoryProvenance
@@ -503,6 +802,46 @@ export enum MemoryProvenance {
  */
 export const MemoryProvenanceSchema: GenEnum<MemoryProvenance> = /*@__PURE__*/
   enumDesc(file_model_plane_v1_memory, 0);
+
+/**
+ * MemoryState — the user's own choice about their memory (build plan WS07 S1).
+ *
+ * @generated from enum model_plane.v1.MemoryState
+ */
+export enum MemoryState {
+  /**
+   * @generated from enum value: MEMORY_STATE_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * The default. Memory is used and learned from.
+   *
+   * @generated from enum value: MEMORY_STATE_ON = 1;
+   */
+  ON = 1,
+
+  /**
+   * Rows stay visible and deletable but are not recalled, and nothing new is
+   * learned. What is said while paused is never mined after a resume.
+   *
+   * @generated from enum value: MEMORY_STATE_PAUSED = 2;
+   */
+  PAUSED = 2,
+
+  /**
+   * As paused, and the user's rows are also hidden from the list.
+   *
+   * @generated from enum value: MEMORY_STATE_OFF = 3;
+   */
+  OFF = 3,
+}
+
+/**
+ * Describes the enum model_plane.v1.MemoryState.
+ */
+export const MemoryStateSchema: GenEnum<MemoryState> = /*@__PURE__*/
+  enumDesc(file_model_plane_v1_memory, 1);
 
 /**
  * MemoryService — memory index and retrieval for session context.
@@ -565,6 +904,40 @@ export const MemoryService: GenService<{
     methodKind: "unary";
     input: typeof MemoryHealthRequestSchema;
     output: typeof MemoryHealthResponseSchema;
+  },
+  /**
+   * The user's memory state and what it currently allows. Readable by a ZDR
+   * caller (it answers reason "zdr"), which writes nothing.
+   *
+   * @generated from rpc model_plane.v1.MemoryService.GetMemoryControls
+   */
+  getMemoryControls: {
+    methodKind: "unary";
+    input: typeof GetMemoryControlsRequestSchema;
+    output: typeof GetMemoryControlsResponseSchema;
+  },
+  /**
+   * Set the user's own memory state (on, paused, off). User callers only, for
+   * themselves; refused for a ZDR or waived credential.
+   *
+   * @generated from rpc model_plane.v1.MemoryService.SetMemoryControls
+   */
+  setMemoryControls: {
+    methodKind: "unary";
+    input: typeof SetMemoryControlsRequestSchema;
+    output: typeof SetMemoryControlsResponseSchema;
+  },
+  /**
+   * Erase every durable memory the caller owns, with its supersession lineage
+   * and semantic copies, in one confirmed step. Org-owned memory is left alone.
+   * Open to a ZDR caller too: erasure only removes, and pre-ZDR rows may exist.
+   *
+   * @generated from rpc model_plane.v1.MemoryService.ResetMemory
+   */
+  resetMemory: {
+    methodKind: "unary";
+    input: typeof ResetMemoryRequestSchema;
+    output: typeof ResetMemoryResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_model_plane_v1_memory, 0);

@@ -1,0 +1,4 @@
+import { it,expect } from 'vitest'
+import { sanitizeGoogleResources } from './google-resources-client'
+import { context } from './__fixtures__/tools'
+it('resource choices never expose access objects or accept foreign contexts',()=>{const value={...context,status:'ready',partial:false,checkedAt:'2026-10-28T12:00:00Z',choices:[{id:`res_${'a'.repeat(32)}`,provider:'ga4',label:'GA4 123 / 456',access:{connectionId:'secret'}}],bearer:'secret'};const out=sanitizeGoogleResources(value,context);expect(JSON.stringify(out)).not.toContain('secret');expect(out.choices[0]?.label).toBe('GA4 123 / 456');expect(()=>sanitizeGoogleResources({...value,websiteRevision:context.websiteRevision+1},context)).toThrow();expect(()=>sanitizeGoogleResources({...value,choices:[{...value.choices[0],id:'conn_forged'}]},context)).toThrow()})

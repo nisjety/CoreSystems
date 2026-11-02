@@ -163,6 +163,11 @@ services:
             start_period: 10s
 
     control-shared-nats:
+        logging:
+            driver: json-file
+            options:
+                max-size: "20m"
+                max-file: "3"
         image: nats:2.10.29-alpine3.22@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927
         container_name: control-shared-nats
         restart: unless-stopped
@@ -292,6 +297,11 @@ services:
             # D-A grant administration (/api/v1/internal/org-groups/*). Required:
             # the controller fails closed rather than accepting an unauthenticated caller.
             ORG_GROUP_GRANT_SERVICE_TOKEN: ${ORG_GROUP_GRANT_SERVICE_TOKEN:?ORG_GROUP_GRANT_SERVICE_TOKEN is required}
+            # WS05-S7: SSO enforcement ceiling (off|report|enforce; report is the default and
+            # applies nothing) and the credential org-core presents to /api/v1/internal/sso/*.
+            # Unset, the SSO administration surface answers 503 (fail closed).
+            SSO_ENFORCEMENT: ${SSO_ENFORCEMENT:-report}
+            ORG_CORE_IDENTITY_SERVICE_TOKEN: ${ORG_CORE_IDENTITY_SERVICE_TOKEN:-}
             # Read-only Auth-canonical membership list used only by the explicit
             # Application operator reconciliation workflow.
             APPLICATION_RECONCILER_AUTH_TOKEN: ${APPLICATION_RECONCILER_AUTH_TOKEN:?APPLICATION_RECONCILER_AUTH_TOKEN is required}
@@ -423,7 +433,7 @@ services:
             # required (`:?`) because user-core refuses to start on a token shorter
             # than 32 characters. Nothing presents it until mail-to-task is switched on.
             USER_CORE_SERVICE_CREDENTIALS: >-
-                [{"principal":"verevon-gateway","audience":"user-core","token":"${USER_CORE_GATEWAY_TOKEN:?USER_CORE_GATEWAY_TOKEN is required}","scopes":["users:read:self","users:write:self","spaces:resolve","spaces:issue"]},{"principal":"session-core","audience":"user-core","token":"${USER_CORE_SESSION_TOKEN:?USER_CORE_SESSION_TOKEN is required}","scopes":["users:read:self"]},{"principal":"org-core","audience":"user-core","token":"${USER_CORE_ORG_TOKEN:?USER_CORE_ORG_TOKEN is required}","scopes":["users:read:any"]},{"principal":"auth-core","audience":"user-core","token":"${USER_CORE_AUTH_TOKEN:?USER_CORE_AUTH_TOKEN is required}","scopes":["users:read:any","users:write:any","users:sync","memberships:write"]},{"principal":"retrieval-engine","audience":"user-core","token":"${USER_CORE_RETRIEVAL_TOKEN:?USER_CORE_RETRIEVAL_TOKEN is required}","scopes":["authz:read"]},{"principal":"documents-api","audience":"user-core","token":"${USER_CORE_DOCUMENTS_TOKEN:?USER_CORE_DOCUMENTS_TOKEN is required}","scopes":["authz:read"]},{"principal":"application-space-lifecycle","audience":"user-core","token":"${APPLICATION_SPACE_LIFECYCLE_TOKEN:?APPLICATION_SPACE_LIFECYCLE_TOKEN is required}","scopes":["spaces:register","spaces:membership:write","spaces:audience:publish"]},{"principal":"control-space-policy","audience":"user-core","token":"${CONTROL_SPACE_POLICY_TOKEN:?CONTROL_SPACE_POLICY_TOKEN is required}","scopes":["spaces:policy:write"]},{"principal":"execution-core","audience":"user-core","token":"${EXECUTION_CORE_CONTROL_RUN_ACTION_TOKEN:?EXECUTION_CORE_CONTROL_RUN_ACTION_TOKEN is required}","scopes":["spaces:agent-action:reauthorize"]},{"principal":"execution-core","audience":"user-core","token":"${EXECUTION_CORE_CONTROL_MODEL_ACTION_VIEW_TOKEN:?EXECUTION_CORE_CONTROL_MODEL_ACTION_VIEW_TOKEN is required}","scopes":["spaces:agent-action:view"]},{"principal":"conversation-core","audience":"user-core","token":"${CONVERSATION_CONTROL_RUN_ACTION_AUTHORITY_TOKEN:?CONVERSATION_CONTROL_RUN_ACTION_AUTHORITY_TOKEN is required}","scopes":["spaces:agent-action:current-authority"]},{"principal":"conversation-core","audience":"user-core","token":"${CONVERSATION_CONTROL_OWNER_EFFECT_RESERVATION_TOKEN:?CONVERSATION_CONTROL_OWNER_EFFECT_RESERVATION_TOKEN is required}","scopes":["spaces:agent-action:reservation"]},{"principal":"integration-mail-task-worker","audience":"user-core","token":"${USER_CORE_MAIL_TASK_WORKER_TOKEN:?USER_CORE_MAIL_TASK_WORKER_TOKEN is required}","scopes":["mail-task:resolve"]}]
+                [{"principal":"verevon-gateway","audience":"user-core","token":"${USER_CORE_GATEWAY_TOKEN:?USER_CORE_GATEWAY_TOKEN is required}","scopes":["users:read:self","users:write:self","spaces:resolve","spaces:issue","spaces:policy:admin:read","spaces:policy:admin:write","directory:read:self","spaces:membership:act"]},{"principal":"session-core","audience":"user-core","token":"${USER_CORE_SESSION_TOKEN:?USER_CORE_SESSION_TOKEN is required}","scopes":["users:read:self"]},{"principal":"org-core","audience":"user-core","token":"${USER_CORE_ORG_TOKEN:?USER_CORE_ORG_TOKEN is required}","scopes":["users:read:any"]},{"principal":"auth-core","audience":"user-core","token":"${USER_CORE_AUTH_TOKEN:?USER_CORE_AUTH_TOKEN is required}","scopes":["users:read:any","users:write:any","users:sync","memberships:write"]},{"principal":"retrieval-engine","audience":"user-core","token":"${USER_CORE_RETRIEVAL_TOKEN:?USER_CORE_RETRIEVAL_TOKEN is required}","scopes":["authz:read"]},{"principal":"documents-api","audience":"user-core","token":"${USER_CORE_DOCUMENTS_TOKEN:?USER_CORE_DOCUMENTS_TOKEN is required}","scopes":["authz:read","authz:write","spaces:file-grant:write"]},{"principal":"application-space-lifecycle","audience":"user-core","token":"${APPLICATION_SPACE_LIFECYCLE_TOKEN:?APPLICATION_SPACE_LIFECYCLE_TOKEN is required}","scopes":["spaces:register","spaces:membership:write","spaces:audience:publish","spaces:membership:read"]},{"principal":"control-space-policy","audience":"user-core","token":"${CONTROL_SPACE_POLICY_TOKEN:?CONTROL_SPACE_POLICY_TOKEN is required}","scopes":["spaces:policy:write"]},{"principal":"execution-core","audience":"user-core","token":"${EXECUTION_CORE_CONTROL_RUN_ACTION_TOKEN:?EXECUTION_CORE_CONTROL_RUN_ACTION_TOKEN is required}","scopes":["spaces:agent-action:reauthorize"]},{"principal":"execution-core","audience":"user-core","token":"${EXECUTION_CORE_CONTROL_MODEL_ACTION_VIEW_TOKEN:?EXECUTION_CORE_CONTROL_MODEL_ACTION_VIEW_TOKEN is required}","scopes":["spaces:agent-action:view"]},{"principal":"conversation-core","audience":"user-core","token":"${CONVERSATION_CONTROL_RUN_ACTION_AUTHORITY_TOKEN:?CONVERSATION_CONTROL_RUN_ACTION_AUTHORITY_TOKEN is required}","scopes":["spaces:agent-action:current-authority"]},{"principal":"conversation-core","audience":"user-core","token":"${CONVERSATION_CONTROL_OWNER_EFFECT_RESERVATION_TOKEN:?CONVERSATION_CONTROL_OWNER_EFFECT_RESERVATION_TOKEN is required}","scopes":["spaces:agent-action:reservation"]},{"principal":"integration-mail-task-worker","audience":"user-core","token":"${USER_CORE_MAIL_TASK_WORKER_TOKEN:?USER_CORE_MAIL_TASK_WORKER_TOKEN is required}","scopes":["mail-task:resolve"]}]
             USER_CORE_GRPC_SERVICE_CREDENTIALS: >-
                 [{"credentialId":"auth-core-primary","principal":"auth-core","audience":"user-core-grpc","token":"${AUTH_USER_CORE_GRPC_SERVICE_TOKEN:?AUTH_USER_CORE_GRPC_SERVICE_TOKEN is required}","methods":["/user.v1.UserService/CreateUser","/user.v1.UserService/UpdateUser","/user.v1.UserService/GetUserByEmail","/user.v1.UserService/CreateSession","/user.v1.UserService/GetUser","/user.v1.UserService/DeleteUser","/user.v1.UserService/HealthCheck"]},{"credentialId":"execution-core-primary","principal":"execution-core","audience":"user-core-grpc","token":"${EXECUTION_CORE_USER_CORE_GRPC_TOKEN:?EXECUTION_CORE_USER_CORE_GRPC_TOKEN is required}","methods":["/user.v1.UserService/GetUser","/user.v1.UserService/GetUserProfile"]}]
             USER_AUTH_INTERNAL_CLIENT_CREDENTIAL: >-
@@ -431,6 +441,29 @@ services:
             # Ed25519 signer for Control Space decisions (thread/action authority
             # tokens). Verifiers (Model Plane session-core et al) hold only the
             # public half; the private key never leaves user-core.
+            # WS03-S3: org-admin Space policy writes (reads and history stay on).
+            # Off in production until the privacy-attestation question (SD-18) is answered.
+            SPACE_POLICY_ADMIN_WRITES: ${SPACE_POLICY_ADMIN_WRITES:-false}
+            # WS04-S10: durable Space membership events (ledger outbox + re-announce).
+            # Strict literal true; off by default and in production until enabled.
+            SPACE_MEMBERSHIP_EVENTS_SWEEPER: ${SPACE_MEMBERSHIP_EVENTS_SWEEPER:-false}
+            # WS04-S11: sign a history floor on shared thread-read decisions for since_join
+            # rooms. Strict literal true; off by default and in production. 0 + restart: full history.
+            SPACE_HISTORY_WINDOW_CLAIM: ${SPACE_HISTORY_WINDOW_CLAIM:-false}
+            # WS12-S1: Control accepts the dm/group_dm kinds and serves
+            # POST /api/v1/internal/spaces/dm-eligibility. Strict literal true; off by
+            # default and in production. 0 + restart: no new DMs, existing DMs keep resolving.
+            SPACE_DM_REGISTRATION: ${SPACE_DM_REGISTRATION:-false}
+            SPACE_AUDIT_DECISION_EVENTS: ${SPACE_AUDIT_DECISION_EVENTS:-false}
+            SPACE_AUDIT_DECISION_KINDS: ${SPACE_AUDIT_DECISION_KINDS:-denied}
+            # WS14-S2: owner-asserted grant writes (only the registered owner service of a
+            # resource type, for a verified user) and Space-subject grants (file-grant,
+            # space-visible). Strict literal true; off by default and in production until
+            # the owning services are re-pointed (never flip the first before WS14-S4).
+            CONTROL_OWNER_ASSERTED_GRANTS: ${CONTROL_OWNER_ASSERTED_GRANTS:-false}
+            CONTROL_SPACE_SUBJECT_GRANTS: ${CONTROL_SPACE_SUBJECT_GRANTS:-false}
+            # WS14-S1: shared-Space import decisions (room uploads). Strict literal true; off by default.
+            CONTROL_SPACE_SHARED_IMPORT: ${CONTROL_SPACE_SHARED_IMPORT:-false}
             CONTROL_SPACE_DECISION_KEY_ID: ${CONTROL_SPACE_DECISION_KEY_ID:?CONTROL_SPACE_DECISION_KEY_ID is required}
             CONTROL_SPACE_DECISION_PRIVATE_KEY_BASE64: ${CONTROL_SPACE_DECISION_PRIVATE_KEY_BASE64:?CONTROL_SPACE_DECISION_PRIVATE_KEY_BASE64 is required}
             AUTH_CORE_JWT_PUBLIC_KEY_FILE: /app/keys/convex-auth.pub
@@ -536,8 +569,21 @@ services:
             # image that predates the scope refuses this whole registry, so this
             # block and the org-core image ship together (org-core internal/http
             # retention_posture_contract_test.go reads this block as written).
+            ORG_SIEM_DESTINATIONS_ENABLED: ${ORG_SIEM_DESTINATIONS_ENABLED:-0}
+            # WS05-S6: DNS domain verification routes. Off (404) unless 1 or true; never an authorization input.
+            ORG_DOMAIN_VERIFICATION_ENABLED: ${ORG_DOMAIN_VERIFICATION_ENABLED:-0}
+            # WS05-S7: SSO provider administration and enforcement go through auth-core.
+            AUTH_CORE_URL: http://auth-core:3011
+            ORG_CORE_IDENTITY_SERVICE_TOKEN: ${ORG_CORE_IDENTITY_SERVICE_TOKEN:-}
+            # WS05-S8: SCIM Users. Off (404) unless 1 or true; never an authorization input.
+            # The edge secret creates the verevon-scim-edge principal (scope org:scim:any)
+            # only while the flag is on; the gateway presents the same value.
+            ORG_SCIM_ENABLED: ${ORG_SCIM_ENABLED:-0}
+            ORG_CORE_SCIM_EDGE_TOKEN: ${ORG_CORE_SCIM_EDGE_TOKEN:-}
+            ORG_CORE_SIEM_SEAL_KEY: ${ORG_CORE_SIEM_SEAL_KEY:-}
+            ORG_CORE_SIEM_SEAL_KEY_ID: ${ORG_CORE_SIEM_SEAL_KEY_ID:-v1}
             ORG_CORE_SERVICE_CREDENTIALS: >-
-                [{"principal":"verevon-gateway","audience":"org-core","token":"${GATEWAY_ORG_CORE_SERVICE_TOKEN:?GATEWAY_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:self","org:provision:self","org:settings:write:self","org:onboarding:write:self","org:brreg:read","org:erase:self","org:deletion:self"]},{"principal":"auth-core","audience":"org-core","token":"${AUTH_ORG_CORE_SERVICE_TOKEN:?AUTH_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:projection:write:any","org:projection:delete:any","org:retention:read:any"]},{"principal":"billing-core","audience":"org-core","token":"${BILLING_ORG_CORE_SERVICE_TOKEN:?BILLING_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]},{"principal":"session-core","audience":"org-core","token":"${SESSION_ORG_CORE_SERVICE_TOKEN:?SESSION_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]},{"principal":"integration-corev2","audience":"org-core","token":"${INTEGRATION_ORG_CORE_SERVICE_TOKEN:?INTEGRATION_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]},{"principal":"execution-core","audience":"org-core","token":"${EXECUTION_ORG_CORE_SERVICE_TOKEN:?EXECUTION_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]},{"principal":"model-gateway","audience":"org-core","token":"${MODEL_GATEWAY_ORG_CORE_SERVICE_TOKEN:?MODEL_GATEWAY_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]},{"principal":"application-space-lifecycle","audience":"org-core","token":"${APPLICATION_ORG_CORE_SERVICE_TOKEN:?APPLICATION_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]}]
+                [{"principal":"anbud-core","audience":"org-core","token":"${ANBUD_ORG_CORE_SERVICE_TOKEN:?ANBUD_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:brreg:read"]},{"principal":"visibility-core","audience":"org-core","token":"${VISIBILITY_ORG_CORE_SERVICE_TOKEN:?VISIBILITY_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:website:read"]},{"principal":"verevon-gateway","audience":"org-core","token":"${GATEWAY_ORG_CORE_SERVICE_TOKEN:?GATEWAY_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:self","org:provision:self","org:settings:write:self","org:onboarding:write:self","org:brreg:read","org:erase:self","org:deletion:self","org:siem:manage:self","org:identity:admin:self"]},{"principal":"auth-core","audience":"org-core","token":"${AUTH_ORG_CORE_SERVICE_TOKEN:?AUTH_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:projection:write:any","org:projection:delete:any","org:retention:read:any","org:domain:read:any"]},{"principal":"billing-core","audience":"org-core","token":"${BILLING_ORG_CORE_SERVICE_TOKEN:?BILLING_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]},{"principal":"session-core","audience":"org-core","token":"${SESSION_ORG_CORE_SERVICE_TOKEN:?SESSION_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any","org:agent-policy:read:any"]},{"principal":"integration-corev2","audience":"org-core","token":"${INTEGRATION_ORG_CORE_SERVICE_TOKEN:?INTEGRATION_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]},{"principal":"execution-core","audience":"org-core","token":"${EXECUTION_ORG_CORE_SERVICE_TOKEN:?EXECUTION_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]},{"principal":"model-gateway","audience":"org-core","token":"${MODEL_GATEWAY_ORG_CORE_SERVICE_TOKEN:?MODEL_GATEWAY_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any","org:model-entitlement:read:any"]},{"principal":"application-space-lifecycle","audience":"org-core","token":"${APPLICATION_ORG_CORE_SERVICE_TOKEN:?APPLICATION_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]},{"principal":"inference-core","audience":"org-core","token":"${INFERENCE_ORG_CORE_SERVICE_TOKEN:?INFERENCE_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:model-entitlement:read:any"]},{"principal":"audit-core","audience":"org-core","token":"${AUDIT_ORG_CORE_SERVICE_TOKEN:?AUDIT_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:siem:read:any"]},{"principal":"browser-broker","audience":"org-core","token":"${BROWSER_BROKER_ORG_CORE_SERVICE_TOKEN:?BROWSER_BROKER_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:browser-site:read:any"]}]
         ports:
             - "127.0.0.1:${ORG_CORE_HTTP_HOST_PORT:-18080}:8080"
             - "127.0.0.1:${ORG_CORE_GRPC_HOST_PORT:-19090}:9090"
@@ -788,6 +834,13 @@ services:
     # convergence and Compose retries failures without gating Control startup.
     # Audit Core connects independently and reports each unavailable plane as
     # degraded until this process succeeds and its fixed consumers can bind.
+    # The application bus is NOT optional (WS01-S4): it owns the application
+    # audit stream and the two audit-core durables, and a skipped failure exited
+    # 0, so Compose never retried and the topology never converged once the
+    # Application Plane came up. A failure now exits 1 and restart: on-failure
+    # retries it; nothing depends on this service, so Control startup is not
+    # gated. The model bus stays optional: Model Plane's own nats-provisioner
+    # converges the same stream (postmortem 0002, follow-up 1).
     audit-extra-nats-provisioner:
         <<: *core-security
         build:
@@ -799,7 +852,7 @@ services:
         entrypoint: ["/usr/local/bin/nats-provisioner"]
         environment:
             AUDIT_NATS_PROVISION_BUSES: >-
-                [{"name":"model","plane":"model","url":"nats://model-nats:4222","user":"observability-provisioner-model","password":"${MODEL_NATS_PROVISIONER_PASSWORD:?MODEL_NATS_PROVISIONER_PASSWORD is required}","optional":true},{"name":"application","plane":"application","url":"nats://application-nats:4222","user":"observability-provisioner-application","password":"${APPLICATION_NATS_PROVISIONER_PASSWORD:?APPLICATION_NATS_PROVISIONER_PASSWORD is required}","optional":true}]
+                [{"name":"model","plane":"model","url":"nats://model-nats:4222","user":"observability-provisioner-model","password":"${MODEL_NATS_PROVISIONER_PASSWORD:?MODEL_NATS_PROVISIONER_PASSWORD is required}","optional":true},{"name":"application","plane":"application","url":"nats://application-nats:4222","user":"observability-provisioner-application","password":"${APPLICATION_NATS_PROVISIONER_PASSWORD:?APPLICATION_NATS_PROVISIONER_PASSWORD is required}"}]
         networks:
             - inter-plane-bus
 
@@ -826,8 +879,23 @@ services:
             AUDIT_EXTRA_NATS_BUSES: >-
                 [{"name":"model","plane":"model","url":"nats://model-nats:4222","user":"audit-core-model","password":"${AUDIT_MODEL_NATS_PASSWORD:?AUDIT_MODEL_NATS_PASSWORD is required}"},{"name":"application","plane":"application","url":"nats://application-nats:4222","user":"audit-core-application","password":"${AUDIT_APPLICATION_NATS_PASSWORD:?AUDIT_APPLICATION_NATS_PASSWORD is required}"}]
             HTTP_PORT: "8187"
+            # The chain switch (WS06-S2): only the literal 1 turns chained inserts on. Without this
+            # line the switch could only arrive through env_file, so an exported value never reached
+            # the container (D1-296). Off by default.
+            AUDIT_CHAIN_ENABLED: ${AUDIT_CHAIN_ENABLED:-0}
+            AUDIT_CHAIN_KEY_ID: ${AUDIT_CHAIN_KEY_ID:-}
+            AUDIT_CHAIN_PRIVATE_KEY_BASE64: ${AUDIT_CHAIN_PRIVATE_KEY_BASE64:-}
+            AUDIT_CHAIN_PUBLIC_KEY_BASE64: ${AUDIT_CHAIN_PUBLIC_KEY_BASE64:-}
+            AUDIT_CHAIN_VERIFY_KEYS: ${AUDIT_CHAIN_VERIFY_KEYS:-}
+            AUDIT_CHAIN_ATTEST_INTERVAL: ${AUDIT_CHAIN_ATTEST_INTERVAL:-60s}
+            AUDIT_CHAIN_PRUNE_ENABLED: ${AUDIT_CHAIN_PRUNE_ENABLED:-0}
+            AUDIT_CHAIN_PRUNE_DRYRUN: ${AUDIT_CHAIN_PRUNE_DRYRUN:-0}
+            AUDIT_CHAIN_VERIFY_ENABLED: ${AUDIT_CHAIN_VERIFY_ENABLED:-}
+            AUDIT_CHAIN_VERIFY_INTERVAL: ${AUDIT_CHAIN_VERIFY_INTERVAL:-24h}
+            ENVIRONMENT: ${ENVIRONMENT:-development}
+            AUDIT_READ_ROLE_ENFORCEMENT: ${AUDIT_READ_ROLE_ENFORCEMENT:-enforce}
             AUDIT_CORE_SERVICE_CREDENTIALS: >-
-                [{"principal":"verevon-gateway","audience":"audit-core","token":"${GATEWAY_AUDIT_CORE_SERVICE_TOKEN:?GATEWAY_AUDIT_CORE_SERVICE_TOKEN is required}","scopes":["audit:read:self"]},{"principal":"integration-corev2","audience":"audit-core","token":"${INTEGRATION_AUDIT_CORE_SERVICE_TOKEN:?INTEGRATION_AUDIT_CORE_SERVICE_TOKEN is required}","scopes":["audit:write"],"planes":["ingestion"]}]
+                [{"principal":"verevon-gateway","audience":"audit-core","token":"${GATEWAY_AUDIT_CORE_SERVICE_TOKEN:?GATEWAY_AUDIT_CORE_SERVICE_TOKEN is required}","scopes":["audit:read:self","audit:compliance:read:self"]},{"principal":"integration-corev2","audience":"audit-core","token":"${INTEGRATION_AUDIT_CORE_SERVICE_TOKEN:?INTEGRATION_AUDIT_CORE_SERVICE_TOKEN is required}","scopes":["audit:write"],"planes":["ingestion"]}]
         ports:
             # Native HTTP port 8187 (host and container). Kept clear of Model
             # Plane's browser-broker so the two never collide on the host.
@@ -871,6 +939,44 @@ services:
             timeout: 5s
             retries: 3
             start_period: 10s
+
+    # WS06-S8: SIEM exporter. Absent unless the compose profile `siem` is selected;
+    # AUDIT_SIEM_EXPORT_ENABLED=0 by default, in which case it idles and exports nothing.
+    audit-siem-exporter:
+        <<: *core-security
+        profiles: ["siem"]
+        build:
+            context: ./audit-core
+            dockerfile: Dockerfile
+            args: *build-metadata
+        container_name: audit-siem-exporter
+        init: true
+        restart: unless-stopped
+        entrypoint: ["/usr/local/bin/siem-exporter"]
+        environment:
+            DATABASE_URL: postgres://${DB_USER}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/${DB_NAME:-controlplane}?sslmode=disable
+            ORG_CORE_URL: http://org-core:8080
+            ORG_CORE_SERVICE_TOKEN: ${AUDIT_ORG_CORE_SERVICE_TOKEN:?AUDIT_ORG_CORE_SERVICE_TOKEN is required}
+            AUDIT_SIEM_EXPORT_ENABLED: ${AUDIT_SIEM_EXPORT_ENABLED:-0}
+            AUDIT_SIEM_ALLOW_PRIVATE_DESTINATIONS: ${AUDIT_SIEM_ALLOW_PRIVATE_DESTINATIONS:-0}
+            ENVIRONMENT: ${ENVIRONMENT:-development}
+        networks:
+            - controlplane-net
+        depends_on:
+            controlplane-postgres:
+                condition: service_healthy
+        deploy:
+            resources:
+                limits:
+                    memory: 64M
+                    cpus: "0.25"
+                reservations:
+                    memory: 16M
+        logging:
+            driver: json-file
+            options:
+                max-size: "10m"
+                max-file: "3"
 
     # ==============================================
     # LAGO (Holdes i CP plane: KUN controlplane-net)
@@ -1018,6 +1124,11 @@ services:
                     memory: 192M
 
     lago-clock:
+        logging:
+            driver: json-file
+            options:
+                max-size: "20m"
+                max-file: "3"
         image: getlago/api:v1.42.0
         container_name: lago-clock
         restart: unless-stopped
@@ -1073,6 +1184,7 @@ services:
             - --storage.tsdb.retention.time=15d
         volumes:
             - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+            - ./observability/rules:/etc/prometheus/rules:ro
             - prometheus-data:/prometheus
         ports:
             - "127.0.0.1:${CONTROL_PROMETHEUS_HOST_PORT:-19095}:9090"

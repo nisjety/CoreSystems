@@ -1,11 +1,4 @@
-import {
-  createEffect,
-  createMemo,
-  createSignal,
-  For,
-  onCleanup,
-  Show,
-} from 'solid-js'
+import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 import { createStore } from 'solid-js'
 import { createResource } from '@/shared/lib/create-resource-compat'
@@ -39,6 +32,7 @@ import {
 } from '@/shared/icons'
 import { Button } from '@/shared/ui/Button'
 import { cn } from '@/shared/lib/cn'
+import { isZdrCode, zdrRefusalPresentation } from '@/shared/api/zdr-refusals'
 import { agentBlueprints } from '@/features/agents/lib/verevon-agent-blueprints'
 import type { AgentBlueprint } from '@/features/agents/lib/verevon-agent-page-types'
 import { controlFocusClass } from '@/features/agents/lib/verevon-agent-page-styles'
@@ -92,6 +86,12 @@ import {
 } from '@/features/chat/components/chat-normalizers'
 import type { PrivacyTier } from '@/shared/api/privacy-tier'
 import { useI18n } from '@/shared/i18n'
+import {
+  approvalFallbackLine,
+  approvalHeadline,
+  approvalKindLabel,
+  approvalReason,
+} from '@/shared/approvals/approval-copy'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -519,7 +519,7 @@ export default function AgentRunConsole() {
           id: `approval-${event.approvalId ?? state.timeline.length}-${event.to ?? ''}`,
           kind: 'pause',
           title: i18n.tr('Godkjenning', 'Approval'),
-          detail: `${event.approvalKind ?? i18n.tr('Handling', 'Action')} · ${event.to ?? i18n.tr('forespurt', 'requested')}`,
+          detail: `${approvalKindLabel(event.approvalKind, i18n)} · ${event.to ?? i18n.tr('forespurt', 'requested')}`,
           status: event.to,
           at: event.at ?? new Date().toISOString(),
         })
@@ -760,7 +760,7 @@ export default function AgentRunConsole() {
         // the durable run is still gated on a human decision.
         setState((s) => { s.status = s.status === 'running' ? 'done' : s.status })
       },
-      onError: ({ message }) => {
+      onError: (failure) => {
         // The agentic stream can close early in a sparse dev stack; only flip to
         // failed if we never produced an answer, so a graceful fallback (direct
         // inference after ~25s) still reads as a completed run.
@@ -769,8 +769,14 @@ export default function AgentRunConsole() {
           setState((s) => { s.status = s.status === 'running' ? 'done' : s.status })
           return
         }
+        // A zero-retention refusal reads in the reader's language, with its next step: the
+        // server's own text for it is English operator wording. Any other failure keeps its message.
+        const refusal = isZdrCode(failure.code) ? zdrRefusalPresentation(failure.code, failure.feature, i18n.tr) : null
+        const text = refusal === null
+          ? failure.message
+          : refusal.next === null ? refusal.message : `${refusal.message} ${refusal.next}`
         setState((s) => { s.status = 'failed' })
-        setState((s) => { s.error = message })
+        setState((s) => { s.error = text })
       },
     }
 
@@ -1299,10 +1305,10 @@ function ApprovalDeck(props: {
                 <PauseCircle size={13} strokeWidth={2.2} />
                 {i18n.tr('Godkjenning kreves', 'Approval required')}
               </span>
-              <span class="verevon-run-approval__kind">{approval.kind ?? i18n.tr('Sperret handling', 'Gated action')}</span>
+              <span class="verevon-run-approval__kind">{approvalHeadline(approval, i18n)}</span>
             </div>
             <p class="verevon-run-approval__detail">
-              {approval.detail ?? i18n.tr('Agenten venter på avgjørelsen din før neste steg.', 'The agent is waiting for your decision before the next step.')}
+              {approvalReason(approval, i18n) ?? approvalFallbackLine(i18n)}
             </p>
             <Show when={approval.requestedBy}>
               <p class="verevon-run-approval__meta">{i18n.tr(`Forespurt av ${approval.requestedBy}`, `Requested by ${approval.requestedBy}`)}</p>
@@ -1796,7 +1802,7 @@ function ProofApprovalCard(props: { approval: ProofApproval }) {
     <article class="verevon-run-proof__approval">
       <div class="verevon-run-proof__approval-head">
         <span class="verevon-run-proof__kind">
-          {props.approval.kind || i18n.tr('Handling', 'Action')}
+          {approvalKindLabel(props.approval.kind, i18n)}
         </span>
         <Show when={props.approval.status}>
           {(status) => (

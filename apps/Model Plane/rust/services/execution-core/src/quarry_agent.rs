@@ -27,7 +27,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::browser_agent::{
-    ActionType, BrowserAction, BrowserObservation, BrowserSnapshotTarget, ObservationStatus,
+    ActionType, BlockReason, BrowserAction, BrowserChallenge, BrowserObservation,
+    BrowserSnapshotTarget, ChallengeKind, ChallengeRecovery, ChallengeStrength, ObservationStatus,
 };
 use crate::quarry_auth::TokenSource;
 
@@ -245,6 +246,55 @@ pub struct WireObservation {
     pub telemetry: serde_json::Value,
     #[serde(default)]
     pub observed_at: String,
+    /// Absent from an older Quarry. A value that does not read as a
+    /// [`WireChallenge`] is dropped rather than failing the observation.
+    #[serde(
+        default,
+        deserialize_with = "lenient_challenge",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub challenge: Option<WireChallenge>,
+}
+
+/// Quarry's `ChallengeSignal` (`challenge-signal.schema.json`). The vocabularies
+/// stay strings here so a value this build does not know cannot fail the
+/// parse; [`observation_from_wire`] reads them into the closed enums. `evidence`
+/// and `requires_escalation` are left out on purpose: evidence is text taken
+/// from the page, and the planner is never given page text through this field.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WireChallenge {
+    #[serde(default = "unknown_kind")]
+    pub kind: String,
+    #[serde(default)]
+    pub confidence: f32,
+    /// A signal from before the strength field existed asked for escalation,
+    /// so it reads as strong (Quarry's own default).
+    #[serde(default = "strong_strength")]
+    pub strength: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_reason: Option<String>,
+    #[serde(default = "not_applicable_recovery")]
+    pub recovery: String,
+}
+
+fn unknown_kind() -> String {
+    "unknown".to_owned()
+}
+
+fn strong_strength() -> String {
+    "strong".to_owned()
+}
+
+fn not_applicable_recovery() -> String {
+    "not_applicable".to_owned()
+}
+
+fn lenient_challenge<'de, D>(deserializer: D) -> Result<Option<WireChallenge>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw.and_then(|value| serde_json::from_value(value).ok()))
 }
 
 /// The public portion of Quarry's active AX snapshot. These fields are enough
@@ -470,6 +520,90 @@ pub fn observation_from_wire(
         snapshot_generation,
         snapshot_targets,
         error_message,
+        challenge: wire.challenge.as_ref().map(challenge_from_wire),
+    }
+}
+
+/// Read Quarry's signal into the closed vocabularies; a value this build does
+/// not know degrades as each `from_wire` documents, so nothing fails to parse.
+#[must_use]
+pub fn challenge_from_wire(wire: &WireChallenge) -> BrowserChallenge {
+    // Clamped to 0..=1 first (NaN casts to 0), so the cast cannot truncate.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let confidence_per_mille = (wire.confidence.clamp(0.0, 1.0) * 1000.0).round() as u16;
+    BrowserChallenge {
+        kind: ChallengeKind::from_wire(&wire.kind),
+        strength: ChallengeStrength::from_wire(&wire.strength),
+        block_reason: wire.block_reason.as_deref().and_then(BlockReason::from_wire),
+        recovery: ChallengeRecovery::from_wire(&wire.recovery),
+        confidence_per_mille,
+    }
+}
+
+/// The error code Quarry answers a refused action or scrape with when a bot
+/// wall stands in the way (`docs/CONTRACTS.md` section 9.2).
+const CHALLENGE_DETECTED_CODE: &str = "CHALLENGE_DETECTED";
+
+/// Read a Quarry `403 CHALLENGE_DETECTED` body as a strong, exhausted signal.
+/// Any other status or code is `None`, so every other 403 stays an error.
+///
+/// The block reason is `details.block_reason` (the scrape path) or
+/// `details.reason` (the agent path), whichever is a value of the closed list;
+/// the code alone is the verdict, so a refusal without a usable reason is still
+/// a strong signal with no reason. Nothing else in the body is read, because
+/// the message and the details are not for the planner.
+fn challenge_from_refusal(status: u16, body: &str) -> Option<BrowserChallenge> {
+    if status != 403 {
+        return None;
+    }
+    let envelope: serde_json::Value = serde_json::from_str(body).ok()?;
+    let error = envelope.get("error")?;
+    if error.get("code")?.as_str()? != CHALLENGE_DETECTED_CODE {
+        return None;
+    }
+    let details = error.get("details");
+    let block_reason = ["block_reason", "reason"].into_iter().find_map(|key| {
+        details?
+            .get(key)?
+            .as_str()
+            .and_then(BlockReason::from_wire)
+    });
+    Some(BrowserChallenge {
+        kind: ChallengeKind::Unknown,
+        strength: ChallengeStrength::Strong,
+        block_reason,
+        // The agent path only refuses after the one recovery was spent.
+        recovery: ChallengeRecovery::Exhausted,
+        // A refusal is a verdict, not a classification, so it carries no
+        // confidence of its own.
+        confidence_per_mille: 1000,
+    })
+}
+
+/// The observation a refused action becomes: blocked, carrying the signal, so
+/// the loop stops on it instead of retrying a refusal it could not clear.
+/// `page_url` is the page the action was aimed at; no page text is carried.
+#[must_use]
+pub fn observation_from_challenge_refusal(
+    challenge: BrowserChallenge,
+    action_id: &str,
+    grant_id: &str,
+    page_url: &str,
+) -> BrowserObservation {
+    BrowserObservation {
+        observation_id: format!("obs_refused_{action_id}"),
+        action_id: action_id.to_owned(),
+        grant_id: grant_id.to_owned(),
+        status: ObservationStatus::Blocked,
+        page_url: page_url.to_owned(),
+        page_title: String::new(),
+        extracted_text: String::new(),
+        screenshot_ref: String::new(),
+        dom_snapshot_ref: String::new(),
+        snapshot_generation: None,
+        snapshot_targets: Vec::new(),
+        error_message: format!("the site refuses automation ({challenge})"),
+        challenge: Some(challenge),
     }
 }
 
@@ -483,6 +617,11 @@ pub enum AgentClientError {
     Transport(String),
     #[error("quarry agent returned {status}: {body}")]
     Status { status: u16, body: String },
+    /// Quarry refused the action because the host is a bot wall (`403
+    /// CHALLENGE_DETECTED`). Not a transient failure: retrying the same action
+    /// is what Quarry just refused.
+    #[error("quarry agent refused the action: bot challenge ({0})")]
+    Challenge(BrowserChallenge),
     #[error("quarry agent decode error: {0}")]
     Decode(String),
     #[error("quarry agent authentication failed: {0}")]
@@ -648,7 +787,15 @@ impl QuarryAgentClient {
             }
             break resp;
         };
-        Self::decode(resp).await
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| AgentClientError::Transport(e.to_string()))?;
+        if let Some(challenge) = challenge_from_refusal(status.as_u16(), &text) {
+            return Err(AgentClientError::Challenge(challenge));
+        }
+        Self::decode_text(status, &text)
     }
 
     /// Release a run and its browser lease. Best-effort; non-2xx is surfaced.
@@ -693,14 +840,21 @@ impl QuarryAgentClient {
             .text()
             .await
             .map_err(|e| AgentClientError::Transport(e.to_string()))?;
+        Self::decode_text(status, &text)
+    }
+
+    fn decode_text<T: for<'de> Deserialize<'de>>(
+        status: reqwest::StatusCode,
+        text: &str,
+    ) -> Result<T, AgentClientError> {
         if !status.is_success() {
             return Err(AgentClientError::Status {
                 status: status.as_u16(),
-                body: text,
+                body: text.to_owned(),
             });
         }
         let env: WireEnvelope<T> =
-            serde_json::from_str(&text).map_err(|e| AgentClientError::Decode(e.to_string()))?;
+            serde_json::from_str(text).map_err(|e| AgentClientError::Decode(e.to_string()))?;
         if let Some(err) = env.error {
             return Err(AgentClientError::Status {
                 status: status.as_u16(),
@@ -817,6 +971,290 @@ mod tests {
         let blocked = observation_from_wire(&wire, "act_9", "grant_9");
         assert_eq!(blocked.status, ObservationStatus::Blocked);
         assert!(blocked.error_message.contains("domain not allowed"));
+    }
+
+    fn wire_from(json: serde_json::Value) -> WireObservation {
+        serde_json::from_value(json).expect("an observation never fails to parse")
+    }
+
+    #[test]
+    fn observation_from_wire_maps_challenge() {
+        let wire = wire_from(serde_json::json!({
+            "run_id": "run_1",
+            "step": 3,
+            "url": "https://example.com/",
+            "challenge": {
+                "kind": "waf",
+                "confidence": 0.874,
+                "evidence": ["page text the planner must never see"],
+                "requires_escalation": true,
+                "strength": "strong",
+                "block_reason": "waf_interstitial",
+                "recovery": "available"
+            }
+        }));
+        let obs = observation_from_wire(&wire, "act_1", "grant_1");
+        assert_eq!(obs.status, ObservationStatus::Success);
+        assert_eq!(
+            obs.challenge,
+            Some(BrowserChallenge {
+                kind: ChallengeKind::Waf,
+                strength: ChallengeStrength::Strong,
+                block_reason: Some(BlockReason::WafInterstitial),
+                recovery: ChallengeRecovery::Available,
+                confidence_per_mille: 874,
+            })
+        );
+        // The wire value kept for the MCP output holds typed fields only.
+        let echoed = serde_json::to_string(&wire).unwrap();
+        assert!(!echoed.contains("never see"), "{echoed}");
+
+        let weak = wire_from(serde_json::json!({
+            "challenge": {"kind": "login", "confidence": 0.4, "strength": "non_signal",
+                           "requires_escalation": false}
+        }));
+        let challenge = observation_from_wire(&weak, "a", "g").challenge.unwrap();
+        assert_eq!(challenge.kind, ChallengeKind::Login);
+        assert_eq!(challenge.strength, ChallengeStrength::NonSignal);
+        assert_eq!(challenge.block_reason, None);
+        assert_eq!(challenge.recovery, ChallengeRecovery::NotApplicable);
+        assert!(!challenge.is_strong());
+    }
+
+    #[test]
+    fn an_observation_from_an_older_quarry_has_no_challenge() {
+        let wire = wire_from(serde_json::json!({"run_id": "r", "step": 1, "url": "https://x.io/"}));
+        assert!(wire.challenge.is_none());
+        assert!(observation_from_wire(&wire, "a", "g").challenge.is_none());
+        assert!(!serde_json::to_string(&wire).unwrap().contains("challenge"));
+
+        // A signal from before the strength field existed reads as strong.
+        let legacy = wire_from(serde_json::json!({"challenge": {"kind": "captcha", "confidence": 0.9}}));
+        let challenge = observation_from_wire(&legacy, "a", "g").challenge.unwrap();
+        assert_eq!(challenge.strength, ChallengeStrength::Strong);
+    }
+
+    #[test]
+    fn an_unknown_vocabulary_value_degrades_and_never_fails_the_observation() {
+        let wire = wire_from(serde_json::json!({
+            "url": "https://example.com/",
+            "challenge": {
+                "kind": "shadow_ban",
+                "confidence": 7.5,
+                "strength": "catastrophic",
+                "block_reason": "moon_phase",
+                "recovery": "later"
+            }
+        }));
+        let obs = observation_from_wire(&wire, "a", "g");
+        assert_eq!(obs.page_url, "https://example.com/");
+        let challenge = obs.challenge.expect("the signal is kept, degraded");
+        assert_eq!(challenge.kind, ChallengeKind::Unknown);
+        // Never a verdict this build cannot name.
+        assert_eq!(challenge.strength, ChallengeStrength::Weak);
+        assert_eq!(challenge.block_reason, None);
+        assert_eq!(challenge.recovery, ChallengeRecovery::NotApplicable);
+        assert_eq!(challenge.confidence_per_mille, 1000);
+
+        // A challenge that is not an object at all is dropped, the page is not.
+        for bad in [
+            serde_json::json!("blocked"),
+            serde_json::json!(7),
+            serde_json::json!({"kind": "waf", "confidence": "high"}),
+        ] {
+            let wire = wire_from(serde_json::json!({"url": "https://example.com/", "challenge": bad}));
+            assert_eq!(wire.url, "https://example.com/");
+            assert!(wire.challenge.is_none());
+        }
+    }
+
+    #[test]
+    fn challenge_confidence_is_clamped_to_per_mille() {
+        let at = |confidence: f32| {
+            challenge_from_wire(&WireChallenge {
+                kind: "waf".into(),
+                confidence,
+                strength: "strong".into(),
+                block_reason: None,
+                recovery: "available".into(),
+            })
+            .confidence_per_mille
+        };
+        assert_eq!(at(0.0), 0);
+        assert_eq!(at(-3.0), 0);
+        assert_eq!(at(f32::NAN), 0);
+        assert_eq!(at(0.5), 500);
+        assert_eq!(at(42.0), 1000);
+    }
+
+    fn refusal_body(details: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "data": null,
+            "meta": {"request_id": "req_9"},
+            "error": {
+                "code": "CHALLENGE_DETECTED",
+                "message": "the site refuses automation",
+                "retryable": false,
+                "details": details
+            }
+        })
+    }
+
+    async fn step_against(status: u16, body: serde_json::Value) -> AgentClientError {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/runs/run_abc/step"))
+            .respond_with(ResponseTemplate::new(status).set_body_json(body))
+            .mount(&server)
+            .await;
+        let client = QuarryAgentClient::new(server.uri(), "tok").unwrap();
+        client
+            .step(
+                "run_abc",
+                "lease_xyz",
+                "org_1",
+                AgentAction::GetContent,
+                &AgentConstraints::default(),
+                false,
+                "grant_broker_validated",
+            )
+            .await
+            .expect_err("a refusal is an error from step")
+    }
+
+    #[tokio::test]
+    async fn a_403_challenge_detected_maps_to_a_challenge_not_a_status_error() {
+        // The agent path: `details.reason`, recovery exhausted, a host.
+        let err = step_against(
+            403,
+            refusal_body(serde_json::json!({
+                "reason": "challenge_loop",
+                "recovery": "exhausted",
+                "next": "user_takeover_or_other_source",
+                "host": "shop.example.com"
+            })),
+        )
+        .await;
+        let AgentClientError::Challenge(challenge) = err else {
+            panic!("expected Challenge, got {err:?}");
+        };
+        assert!(challenge.is_strong());
+        assert_eq!(challenge.block_reason, Some(BlockReason::ChallengeLoop));
+        assert_eq!(challenge.recovery, ChallengeRecovery::Exhausted);
+
+        // The scrape path names the reason `block_reason`.
+        let err = step_against(
+            403,
+            refusal_body(serde_json::json!({
+                "reason": "captcha_widget",
+                "block_reason": "captcha_widget",
+                "recovery": "not_applicable",
+                "next": "other_source"
+            })),
+        )
+        .await;
+        assert!(matches!(
+            err,
+            AgentClientError::Challenge(BrowserChallenge {
+                block_reason: Some(BlockReason::CaptchaWidget),
+                ..
+            })
+        ));
+
+        // The code is the verdict: a reason this build does not know, or none,
+        // is still a refusal, with no reason invented.
+        for details in [serde_json::json!({"reason": "moon_phase"}), serde_json::Value::Null] {
+            let err = step_against(403, refusal_body(details)).await;
+            assert!(
+                matches!(
+                    err,
+                    AgentClientError::Challenge(BrowserChallenge {
+                        block_reason: None,
+                        strength: ChallengeStrength::Strong,
+                        ..
+                    })
+                ),
+                "{err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn other_403s_and_other_statuses_stay_status_errors() {
+        for (status, code) in [
+            (403, "FORBIDDEN"),
+            (403, "SECURITY_BLOCKED"),
+            (403, "USER_TOOK_OVER"),
+            (409, "CHALLENGE_DETECTED"),
+            (429, "CHALLENGE_DETECTED"),
+        ] {
+            let mut body = refusal_body(serde_json::json!({"reason": "captcha_widget"}));
+            body["error"]["code"] = serde_json::json!(code);
+            let err = step_against(status, body).await;
+            assert!(
+                matches!(&err, AgentClientError::Status { status: s, .. } if *s == status),
+                "{status} {code}: {err:?}"
+            );
+        }
+        // A 403 with a body that is not an envelope at all.
+        let err = step_against(403, serde_json::json!("nope")).await;
+        assert!(matches!(err, AgentClientError::Status { status: 403, .. }), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn a_step_observation_with_a_challenge_comes_through_the_client() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/agent/runs/run_abc/step"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "run_id": "run_abc", "step": 2, "url": "https://example.com/",
+                    "challenge": {"kind": "captcha", "confidence": 0.9, "strength": "strong",
+                                  "block_reason": "captcha_widget", "recovery": "available"}
+                },
+                "meta": {}, "error": null
+            })))
+            .mount(&server)
+            .await;
+        let client = QuarryAgentClient::new(server.uri(), "tok").unwrap();
+        let wire = client
+            .step(
+                "run_abc",
+                "lease_xyz",
+                "org_1",
+                AgentAction::GetContent,
+                &AgentConstraints::default(),
+                false,
+                "grant_broker_validated",
+            )
+            .await
+            .unwrap();
+        let obs = observation_from_wire(&wire, "a", "g");
+        assert_eq!(obs.status, ObservationStatus::Success);
+        assert_eq!(
+            obs.challenge.map(|c| (c.kind, c.block_reason)),
+            Some((ChallengeKind::Captcha, Some(BlockReason::CaptchaWidget)))
+        );
+    }
+
+    #[test]
+    fn a_refused_action_becomes_a_blocked_observation_carrying_the_signal() {
+        let challenge = challenge_from_refusal(
+            403,
+            &refusal_body(serde_json::json!({"reason": "challenge_loop"})).to_string(),
+        )
+        .expect("a CHALLENGE_DETECTED refusal");
+        let obs = observation_from_challenge_refusal(
+            challenge.clone(),
+            "act_0004",
+            "grant_1",
+            "https://shop.example.com/",
+        );
+        assert_eq!(obs.status, ObservationStatus::Blocked);
+        assert_eq!(obs.page_url, "https://shop.example.com/");
+        assert_eq!(obs.challenge, Some(challenge));
+        assert!(obs.error_message.contains("block_reason=challenge_loop"));
+        assert!(obs.extracted_text.is_empty() && obs.snapshot_targets.is_empty());
     }
 
     #[tokio::test]

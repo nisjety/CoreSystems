@@ -1,0 +1,76 @@
+{
+  "endpoint_name": "general_ledger_transactions",
+  "bigquery_table": "visma_general_ledger_transactions",
+  "primary_key": [
+    "module",
+    "batchNumber",
+    "lineNumber"
+  ],
+  "source": "erp_rest",
+  "api_method": "get_general_ledger_transactions",
+  "api_endpoint": "/v1/GeneralLedgerTransactions",
+  "pagination_profile": "finance_page_number",
+  "page_size": 1000,
+  "background_mode": "off",
+  "background_poll_secs": 5,
+  "background_timeout_secs": 1800,
+  "default_query": {
+    "ledger": "1",
+    "lastModifiedDateTime": "2020-01-01 00:00:00",
+    "expandAccountInfo": true,
+    "expandBranchInfo": true,
+    "includeTransactionBalance": true
+  },
+  "partitioning": {
+    "mode": "cartesian",
+    "max_partitions": 100,
+    "dimensions": [
+      {
+        "query_param": "ledger",
+        "source_endpoint": "/v1/ledger",
+        "source_path": "__unused__",
+        "fallback_values": [
+          "1"
+        ]
+      }
+    ]
+  },
+  "required_query": [
+    "ledger"
+  ],
+  "modified_field": "lastModifiedDateTime",
+  "merge_type": "upsert",
+  "sync_pattern": "incremental_upsert",
+  "validation_fields": [
+    "batchNumber",
+    "lineNumber",
+    "tranDate",
+    "period",
+    "module",
+    "currency",
+    "lastModifiedDateTime"
+  ],
+  "datamart": {
+    "ready": false,
+    "type_name": "GeneralLedgerTransaction",
+    "query_file": "config/queries/general_ledger_transaction.graphql",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "join_normalizer": "normalize_general_ledger_transaction",
+    "fallback_source": "erp_rest",
+    "tenant_overrides": {
+      "33f319b9-4d57-11ee-960c-025417856183": false
+    }
+  },
+  "notes": "page_size raised from 100 to 1000 (measured 2026-09-30): the API answers 1000 rows in 9.6s versus 8.5s for 100, so a full history walk of ledger 1 (573,553 rows) is ~574 requests instead of ~5,740 and draws far less of the shared rate limit. The key includes module: batch numbers are per module, so a GL, AP or CA batch can share batchNumber and lineNumber with another (Consult AS returned 4 such pairs among 120,651 rows, measured 2026-10-01, and the sync rejected them as duplicate primary keys). The pilot tenant has none, so [batchNumber, lineNumber] passed there. Walked one financial period at a time (period_scan, resume): the old walk of ledger 1 by lastModifiedDateTime alone read the pilot's 575,000 lines as 575 pages of 1,000, and on 2026-10-02 three full runs ended on HTTP 500 'Execution Timeout Expired' at deep pages (the server's own query limit; the slowest page was 48 s on 09-30). fromPeriod/toPeriod give the same rows at about 2 s a page (26,457 lines in 202609), and the API accepts lastModifiedDateTime on top of them, so a scheduled run asks each period only for what changed since its checkpoint (2,030 of 26,457 lines for one day) and a full pass asks for everything. look_ahead_months 12 reaches periods posted ahead of time.",
+  "period_scan": {
+    "first_period": "202001",
+    "query_params": [
+      "fromPeriod",
+      "toPeriod"
+    ],
+    "look_ahead_months": 12,
+    "resume": true
+  }
+}

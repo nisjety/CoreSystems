@@ -21,7 +21,19 @@ export interface MemoryEntry {
   content: string
   updatedAt: string
   provenance: MemoryProvenance
+  /**
+   * Set only for a row learned in a shared room before containment existed:
+   * listed to its owner, never recalled by any conversation. The owner may keep
+   * or delete it. Absent for every ordinary row (including from an older
+   * gateway that never sends the field).
+   */
+  withheldReason?: WithheldReason
+  /** Space the withheld row was learned in (an id, never content). */
+  originSpaceRef?: string
 }
+
+/** Closed vocabulary; an unrecognised value is read as withheld for an unknown reason. */
+export type WithheldReason = 'room_origin_unverified' | 'unknown'
 
 export interface ListMemoriesResult {
   memories: MemoryEntry[]
@@ -44,6 +56,10 @@ interface ListMemoriesResponse {
     updated_at?: string
     updatedAt?: string
     provenance?: string
+    withheld_reason?: string
+    withheldReason?: string
+    origin_space_ref?: string
+    originSpaceRef?: string
   }>
   degraded?: boolean
   degradation_reason?: string
@@ -53,6 +69,8 @@ interface ListMemoriesResponse {
 function normalizeMemory(raw: NonNullable<ListMemoriesResponse['memories']>[number]): MemoryEntry | null {
   const memoryId = raw.memory_id ?? raw.memoryId ?? ''
   if (!memoryId) return null
+  const withheldRaw = raw.withheld_reason ?? raw.withheldReason ?? ''
+  const originSpaceRef = raw.origin_space_ref ?? raw.originSpaceRef ?? ''
   return {
     memoryId,
     topic: raw.topic ?? '',
@@ -62,6 +80,10 @@ function normalizeMemory(raw: NonNullable<ListMemoriesResponse['memories']>[numb
     // at all — is 'unknown'. Never default to a real value.
     provenance:
       raw.provenance === 'stated' || raw.provenance === 'inferred' ? raw.provenance : 'unknown',
+    ...(withheldRaw
+      ? { withheldReason: withheldRaw === 'room_origin_unverified' ? withheldRaw : ('unknown' as const) }
+      : {}),
+    ...(originSpaceRef ? { originSpaceRef } : {}),
   }
 }
 
@@ -186,4 +208,127 @@ export async function correctMemory(
     degraded: response.degraded ?? false,
     degradationReason: response.degradation_reason ?? response.degradationReason ?? '',
   }
+}
+
+/** The user's own choice about their memory. */
+export type MemoryState = 'on' | 'paused' | 'off'
+
+/**
+ * What decided whether memory is used. `zdr`, `org_disabled` and
+ * `policy_unavailable` override the user's own choice; the chosen state is still
+ * reported so the selector shows what they picked.
+ */
+export type MemoryControlsReason =
+  | 'on'
+  | 'user_paused'
+  | 'user_off'
+  | 'org_disabled'
+  | 'zdr'
+  | 'policy_unavailable'
+  | 'unknown'
+
+export interface MemoryControls {
+  /** `null` for a state this client does not know: never read as `on`. */
+  state: MemoryState | null
+  reason: MemoryControlsReason
+  useAllowed: boolean
+  generationAllowed: boolean
+  orgMemoryPolicy: string
+  /** How many of the user's rows the list hides (a count, never a row). */
+  hiddenRows: number
+  updatedAt: string | null
+}
+
+interface MemoryControlsResponse {
+  state?: string
+  reason?: string
+  use_allowed?: boolean
+  generation_allowed?: boolean
+  org_memory_policy?: string
+  hidden_rows?: number
+  updated_at?: string | null
+}
+
+const CONTROL_REASONS: readonly string[] = [
+  'on',
+  'user_paused',
+  'user_off',
+  'org_disabled',
+  'zdr',
+  'policy_unavailable',
+]
+
+function normalizeControls(raw: MemoryControlsResponse): MemoryControls {
+  return {
+    state: raw.state === 'on' || raw.state === 'paused' || raw.state === 'off' ? raw.state : null,
+    reason: CONTROL_REASONS.includes(raw.reason ?? '') ? (raw.reason as MemoryControlsReason) : 'unknown',
+    // A missing flag is "not allowed": the safe reading of an older gateway.
+    useAllowed: raw.use_allowed ?? false,
+    generationAllowed: raw.generation_allowed ?? false,
+    orgMemoryPolicy: raw.org_memory_policy ?? '',
+    hiddenRows: raw.hidden_rows ?? 0,
+    updatedAt: raw.updated_at ?? null,
+  }
+}
+
+/** The signed-in user's memory state and the decision taken from it. */
+export async function getMemoryControls(): Promise<MemoryControls> {
+  return normalizeControls(await requestJson<MemoryControlsResponse>('/api/v1/memory/controls'))
+}
+
+/** Sets the signed-in user's own memory state; the server refuses a ZDR session. */
+export async function setMemoryState(state: MemoryState): Promise<MemoryControls> {
+  return normalizeControls(
+    await requestJson<MemoryControlsResponse>('/api/v1/memory/controls', {
+      method: 'PUT',
+      body: JSON.stringify({ state }),
+    }),
+  )
+}
+
+export interface ResetMemoryResult {
+  durableDeleted: number
+  /** Rows whose semantic copy could not be confirmed erased; their reads stay suppressed. */
+  semanticUnconfirmed: number
+  degraded: boolean
+  degradationReason: string
+}
+
+interface ResetMemoryResponse {
+  durable_deleted?: number
+  semantic_unconfirmed?: number
+  degraded?: boolean
+  degradation_reason?: string
+}
+
+/**
+ * Erases everything Verevon remembers about the signed-in user. Not
+ * recoverable: callers must confirm with the user first. `confirm: true` is
+ * always sent, because the server refuses a reset without it.
+ */
+export async function resetMemory(): Promise<ResetMemoryResult> {
+  const response = await requestJson<ResetMemoryResponse>('/api/v1/memory/reset', {
+    method: 'POST',
+    body: JSON.stringify({ confirm: true }),
+  })
+  return {
+    durableDeleted: response.durable_deleted ?? 0,
+    semanticUnconfirmed: response.semantic_unconfirmed ?? 0,
+    degraded: response.degraded ?? false,
+    degradationReason: response.degradation_reason ?? '',
+  }
+}
+
+/**
+ * "Husk dette": saves one fact the user chose. Rejects (409
+ * `memory_not_enabled`) while memory is paused, off or disabled by the
+ * organization, so a caller never reports a save that did not happen.
+ * `threadId` only proves the caller owns a thread.
+ */
+export async function rememberMemory(threadId: string, content: string): Promise<{ memoryId: string }> {
+  const response = await requestJson<{ memory_id?: string; memoryId?: string }>('/api/v1/memory', {
+    method: 'POST',
+    body: JSON.stringify({ threadId, content }),
+  })
+  return { memoryId: response.memory_id ?? response.memoryId ?? '' }
 }

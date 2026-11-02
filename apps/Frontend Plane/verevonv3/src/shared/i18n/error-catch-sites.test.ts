@@ -70,6 +70,19 @@ const UNREVIEWED =
   'not part of the sites converted in rounds 3 to 5; not yet reviewed for whether the raw text can reach a person'
 
 const NOT_CONVERTED: Record<string, { sites: number; reason: string }> = {
+  'demo/ScenePage.tsx': {
+    sites: 2,
+    reason: 'the product-scene runtime (VITE_SCENE_MODE only) logs a scene failure for the capture operator; it is not a person-facing surface and is not in a normal build',
+  },
+  'demo/install.ts': {
+    sites: 1,
+    reason: 'the product-scene runtime (VITE_SCENE_MODE only) writes a failure of its own fixture API into the scene log for the capture operator; not in a normal build',
+  },
+  'features/agents/components/AgentRunConsole.tsx': {
+    sites: 1,
+    reason:
+      'a zero-retention refusal is shown from the catalogue (zdr-refusals.ts); any other agent-stream failure still shows the stream error text, unreviewed for what a person sees',
+  },
   'features/agents/lib/use-chatbot-support-status.ts': { sites: 1, reason: UNREVIEWED },
   'features/auth/components/AuthPage.tsx': {
     sites: 6,
@@ -114,8 +127,13 @@ const NOT_CONVERTED: Record<string, { sites: number; reason: string }> = {
       "shows the integration's own sentence for an integration_error on purpose (the library-picker test pins it); translateApiError has no copy for that code by design, so a conversion would hide it",
   },
   'features/spaces/components/SpaceRoomComposer.tsx': {
-    sites: 2,
-    reason: `${UNREVIEWED} (one line holds both error.message and String(error), the abort or failure of a send)`,
+    sites: 1,
+    reason: `${UNREVIEWED} (the abort or failure of a send; the streamed send moved to the send pipeline)`,
+  },
+  'features/spaces/lib/space-send-pipeline.ts': {
+    sites: 3,
+    reason:
+      'the streamed send the composer used to hold: a thrown ApiError hands its message to describeError as the fallback of an unknown code (a known code or a typed Space denial gets the room words), and a non-API failure keeps its own text; unreviewed for what a person sees',
   },
   'features/support/components/RemoteSupportPage.tsx': {
     sites: 5,
@@ -123,22 +141,57 @@ const NOT_CONVERTED: Record<string, { sites: number; reason: string }> = {
   },
   'features/voice/VoiceModeDialog.tsx': { sites: 1, reason: UNREVIEWED },
   'shared/api/ag-ui-client.ts': {
-    sites: 2,
+    sites: 3,
     reason:
       'a connection failure on the agent stream becomes RUN_ERROR with code connection_error, which the controller treats as a lost transport; the text is unreviewed',
   },
   'shared/api/chat-client.ts': {
-    sites: 5,
+    sites: 9,
     reason:
-      'the chat stream connection failure (code connection_error, pinned by chat-client.test) and the mid-run refusal message carry the ApiError text; unreviewed for what a person sees',
+      'the chat stream connection failure (code connection_error, pinned by chat-client.test), the mid-run refusal message and the typed Space denial (code and details kept, the message only the fallback of an unknown reason) carry the ApiError text; unreviewed for what a person sees',
   },
   'shared/api/http.ts': {
     sites: 3,
     reason:
       "reviewed: this is the transport itself reading the gateway envelope's message field into ApiError.message (one line); describeApiError and translateApiError never show that text",
   },
+  'shared/api/marketing/algolia-collection-client.ts': {
+    sites: 1,
+    reason:
+      `reviewed: no caught error is read; \`String(x.reason)\` / \`String(x.refreshReason)\` stringifies a payload enumeration field before an \`includes\` check on the response shape (the name heuristic matches the field name \`reason\`)`,
+  },
+  'shared/api/marketing/outcomes-client.ts': {
+    sites: 1,
+    reason:
+      `reviewed: no caught error is read; \`String(x.reason)\` / \`String(x.refreshReason)\` stringifies a payload enumeration field before an \`includes\` check on the response shape (the name heuristic matches the field name \`reason\`)`,
+  },
+  'shared/api/marketing/pagespeed-client.ts': {
+    sites: 2,
+    reason:
+      `reviewed: no caught error is read; \`String(x.reason)\` / \`String(x.refreshReason)\` stringifies a payload enumeration field before an \`includes\` check on the response shape (the name heuristic matches the field name \`reason\`)`,
+  },
+  'shared/api/marketing/pulse-client.ts': {
+    sites: 1,
+    reason:
+      `reviewed: no caught error is read; \`String(x.reason)\` / \`String(x.refreshReason)\` stringifies a payload enumeration field before an \`includes\` check on the response shape (the name heuristic matches the field name \`reason\`)`,
+  },
+  'shared/api/marketing/search-comparison-client.ts': {
+    sites: 1,
+    reason:
+      `reviewed: no caught error is read; \`String(x.reason)\` / \`String(x.refreshReason)\` stringifies a payload enumeration field before an \`includes\` check on the response shape (the name heuristic matches the field name \`reason\`)`,
+  },
+  'shared/api/marketing/trends-client.ts': {
+    sites: 1,
+    reason:
+      `reviewed: no caught error is read; \`String(x.reason)\` / \`String(x.refreshReason)\` stringifies a payload enumeration field before an \`includes\` check on the response shape (the name heuristic matches the field name \`reason\`)`,
+  },
   'shared/api/knowledge-client.ts': { sites: 1, reason: UNREVIEWED },
   'shared/api/search-client.ts': { sites: 1, reason: UNREVIEWED },
+  'shared/api/visibility/research-client.ts': {
+    sites: 1,
+    reason:
+      `reviewed: no caught error is read; \`String(x.reason)\` / \`String(x.refreshReason)\` stringifies a payload enumeration field before an \`includes\` check on the response shape (the name heuristic matches the field name \`reason\`)`,
+  },
 }
 
 // Fallback copy that is the raw message of a stream event, on purpose: the room shows the

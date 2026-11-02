@@ -5,10 +5,13 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -52,8 +55,10 @@ func (h *CapabilitiesHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/capabilities", h.list)
 	mux.HandleFunc("/api/v1/capabilities/availability", h.attestAvailability)
 	mux.HandleFunc("/api/v1/capabilities/owner-actions/health", h.attestOwnerActionHealth)
+	mux.HandleFunc("/api/v1/capabilities/browser/health", h.attestBrowserOwnerHealth)
 	mux.HandleFunc(modelActionViewPath, h.resolveModelActionView)
 	mux.HandleFunc("/api/v1/capabilities/ranked", h.ranked)
+	mux.HandleFunc("/api/v1/capabilities/tools", h.listTools)
 	mux.HandleFunc("/api/v1/capabilities/scopes", h.listScopes)
 	mux.HandleFunc("/api/v1/capabilities/scopes/grant", h.grantScope)
 	mux.HandleFunc("/api/v1/capabilities/scopes/revoke", h.revokeScope)
@@ -99,9 +104,52 @@ func (h *CapabilitiesHandler) list(w http.ResponseWriter, r *http.Request) {
 	}
 	views := make([]map[string]any, 0, len(caps))
 	for _, capability := range caps {
-		views = append(views, capabilityWireView(capability))
+		views = append(views, capabilityView(capability))
 	}
 	writeJSON(w, map[string]any{"capabilities": views, "count": len(views)})
+}
+
+// capabilityView is the capability wire view plus the declared class and floor.
+// Both are read-only on this API: the class comes from the registry's seed and
+// observation paths, never from a request, and an unset or unrecognised stored
+// value is reported as the strictest class rather than a weaker one.
+func capabilityView(row *registry.CapabilityRow) map[string]any {
+	view := capabilityWireView(row)
+	if view == nil {
+		return nil
+	}
+	view["side_effect_class"] = models.NormalizeSideEffectClass(row.SideEffectClass)
+	view["approval_floor"] = models.EffectiveApprovalFloor(row.SideEffectClass, row.ApprovalFloor)
+	return view
+}
+
+// listTools handles GET /api/v1/capabilities/tools?capability_id= — the declared
+// class and approval floor of each tool, the process-wide seed plus the
+// verified tenant's own rows. Read-only: nothing on this API writes a tool row.
+func (h *CapabilitiesHandler) listTools(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	tools, err := h.store.ListToolsForOrg(r.Context(), verifiedOrganizationID(r), r.URL.Query().Get("capability_id"))
+	if err != nil {
+		jsonErr(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	views := make([]map[string]any, 0, len(tools))
+	for _, tool := range tools {
+		views = append(views, map[string]any{
+			"org_id":            tool.OrgID,
+			"capability_id":     tool.CapabilityID,
+			"tool_name":         tool.ToolName,
+			"side_effect_class": models.NormalizeSideEffectClass(tool.SideEffectClass),
+			"approval_floor":    models.EffectiveApprovalFloor(tool.SideEffectClass, tool.ApprovalFloor),
+			"call_refinement":   tool.CallRefinement,
+			"source":            tool.Source,
+		})
+	}
+	writeJSON(w, map[string]any{"tools": views, "count": len(views)})
 }
 
 func (h *CapabilitiesHandler) getByID(w http.ResponseWriter, r *http.Request, id string) {
@@ -110,7 +158,21 @@ func (h *CapabilitiesHandler) getByID(w http.ResponseWriter, r *http.Request, id
 		jsonErr(w, "not found", http.StatusNotFound)
 		return
 	}
-	writeJSON(w, capabilityWireView(cap))
+	writeJSON(w, capabilityView(cap))
+}
+
+// carriesReadOnlyClassField reports whether a request body names the class or
+// floor under any spelling a caller could mean by it: side_effect_class (the
+// documented key), SideEffectClass (the Go field name), sideEffectClass and so
+// on, and the same for approval_floor. Case and underscores are ignored.
+func carriesReadOnlyClassField(keys map[string]json.RawMessage) bool {
+	for key := range keys {
+		switch strings.ToLower(strings.ReplaceAll(key, "_", "")) {
+		case "sideeffectclass", "approvalfloor":
+			return true
+		}
+	}
+	return false
 }
 
 func (h *CapabilitiesHandler) upsert(w http.ResponseWriter, r *http.Request) {
@@ -118,13 +180,44 @@ func (h *CapabilitiesHandler) upsert(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		jsonErr(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	// The class is declared by the registry's seed and observation paths. A
+	// body that carries one is refused rather than ignored, so a caller never
+	// believes it set a class. The check runs on the raw keys, before the body
+	// is decoded into CapabilityRow: that struct has no json tags, so the
+	// documented snake_case keys (side_effect_class, approval_floor) match none
+	// of its fields and would be silently dropped, and a 201 would tell the
+	// caller a class was set.
+	var keys map[string]json.RawMessage
+	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&keys); err != nil {
+		jsonErr(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if carriesReadOnlyClassField(keys) {
+		jsonErr(w, "side_effect_class and approval_floor are read-only", http.StatusBadRequest)
+		return
+	}
 	var row registry.CapabilityRow
-	if err := json.NewDecoder(r.Body).Decode(&row); err != nil {
+	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&row); err != nil {
 		jsonErr(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	if !models.IsSupportedRiskLevel(row.RiskLevel) {
 		jsonErr(w, "risk_level must be one of: low, medium, high", http.StatusBadRequest)
+		return
+	}
+	if row.Kind == models.KindMCPTool {
+		jsonErr(w, "kind mcp_tool is created only by tool observation", http.StatusBadRequest)
+		return
+	}
+	// Defence in depth for the key check above: whatever spelling reached the
+	// struct, a populated class or floor is still refused.
+	if row.SideEffectClass != "" || row.ApprovalFloor != "" {
+		jsonErr(w, "side_effect_class and approval_floor are read-only", http.StatusBadRequest)
 		return
 	}
 	hasRiskOverride := verifiedHasScope(r, authz.RiskOverrideScope)
@@ -264,7 +357,7 @@ func (h *CapabilitiesHandler) ranked(w http.ResponseWriter, r *http.Request) {
 	views := make([]map[string]any, 0, len(scored))
 	for _, item := range scored {
 		views = append(views, map[string]any{
-			"capability": capabilityWireView(item.Row),
+			"capability": capabilityView(item.Row),
 			"score":      item.Score,
 		})
 	}

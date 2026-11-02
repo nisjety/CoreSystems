@@ -1,0 +1,15 @@
+endpoint,window_days,pass,exit,status,records_in,written,bronze,pages,non_200,last_page,min_rate_remaining,max_page_ms,watermark
+ap_payment_lines,,1,0,succeeded,9054,9054,9054,19,0,54,,574,2026-09-29 13:30:40.252+00
+ap_payment_lines,,2,0,succeeded,1,1,9054,1,0,1,,427,2026-09-29 13:30:40.252+00
+customer_document_lines,,1,0,succeeded,71975,71975,71975,144,0,475,,551,2026-09-29 12:17:38.618+00
+customer_document_lines,,2,0,succeeded,12,12,71975,1,0,12,,501,2026-09-29 12:17:38.618+00
+customer_payment_lines,,1,0,succeeded,21699,21699,21699,44,0,199,,535,2026-09-29 13:40:36.766+00
+customer_payment_lines,,2,0,succeeded,3,3,21699,1,0,3,,523,2026-09-29 13:40:36.766+00
+supplier_document_lines,,1,0,succeeded,42298,42298,42298,85,0,298,,641,2026-09-29 13:50:35.241+00
+supplier_document_lines,,2,0,succeeded,1,1,42298,1,0,1,,453,2026-09-29 13:50:35.241+00
+supplier_payment_lines,,1,0,succeeded,9054,9054,9054,19,0,54,,563,2026-09-29 13:30:40.252+00
+supplier_payment_lines,,2,0,succeeded,1,1,9054,1,0,1,,487,2026-09-29 13:30:40.252+00
+sales_order_lines,,1,0,succeeded,67378,67378,67378,135,0,378,,707,2026-09-29 13:57:37.644+00
+sales_order_lines,,2,0,succeeded,1,1,67378,1,0,1,,489,2026-09-29 13:57:37.644+00
+sales_order_lines_v2,,1,0,succeeded,67378,67378,67378,135,0,378,,755,2026-09-29 13:57:37.644+00
+sales_order_lines_v2,,2,0,succeeded,1,1,67378,1,0,1,,473,2026-09-29 13:57:37.644+00

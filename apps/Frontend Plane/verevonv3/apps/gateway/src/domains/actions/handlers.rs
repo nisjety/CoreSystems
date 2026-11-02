@@ -41,10 +41,13 @@ use super::dispatchers::{
     dispatch_integrations_trigger_sync, dispatch_knowledge_create_document,
     dispatch_knowledge_extract_products, dispatch_knowledge_register_sharepoint_source,
     dispatch_knowledge_summarize_products,
-    dispatch_leads_create_list, dispatch_leads_delete_list, dispatch_mcp_delete_server,
+    dispatch_leads_create_list, dispatch_leads_delete_list,
+    dispatch_learning_accept_skill, dispatch_learning_reject_skill, dispatch_learning_undo,
+    dispatch_mcp_delete_server,
     dispatch_mcp_share_server, dispatch_membership_invite_member,
     dispatch_membership_remove_member, dispatch_membership_update_member_role,
-    dispatch_memory_delete, dispatch_monitoring_check_now,
+    dispatch_memory_delete, dispatch_memory_remember, dispatch_memory_reset,
+    dispatch_memory_set_state, dispatch_monitoring_check_now,
     dispatch_monitoring_create_monitor, dispatch_monitoring_delete_monitor,
     dispatch_navbar_create_calendar_event,
     dispatch_navbar_create_calendar_note, dispatch_navbar_mark_notification_read,
@@ -53,9 +56,11 @@ use super::dispatchers::{
     dispatch_notification_mark_read, dispatch_notification_update_preference,
     dispatch_orchestration_cancel_run, dispatch_orchestration_decide_approval,
     dispatch_orchestration_resume_run, dispatch_org_acknowledge_deletion,
-    dispatch_org_mark_exported, dispatch_org_restore, dispatch_org_set_quota,
+    dispatch_org_mark_exported, dispatch_org_restore, dispatch_org_set_model_entitlement,
+    dispatch_org_set_quota,
     dispatch_org_soft_delete, dispatch_org_update_instructions,
-    dispatch_org_update_support_ai_mode, dispatch_org_update_zdr,
+    dispatch_org_update_agent_learning_policy, dispatch_org_update_support_ai_mode,
+    dispatch_org_update_zdr,
     dispatch_organization_switch_active, dispatch_ownership_revoke_document_share,
     dispatch_ownership_share_document, dispatch_privacy_erase_my_account,
     dispatch_router_policy_update, dispatch_settings_create_api_key,
@@ -71,6 +76,34 @@ use super::dispatchers::{
     dispatch_space_update_thread_presentation,
     dispatch_studio_create_project, dispatch_studio_export_social_draft,
     dispatch_studio_save_project,
+};
+use super::dispatchers_spaces::ws01::{dispatch_spaces_create_post, dispatch_spaces_reply_in_thread};
+use super::dispatchers_spaces::ws04::{
+    dispatch_spaces_change_member_role, dispatch_spaces_join_room, dispatch_spaces_leave_room,
+    dispatch_spaces_update_room_details, dispatch_spaces_update_room_settings,
+};
+use super::dispatchers_spaces::ws08::dispatch_spaces_set_agent_wake_policy;
+use super::dispatchers_spaces::ws09::dispatch_spaces_stop_run;
+use super::dispatchers_spaces::ws10::{
+    dispatch_spaces_decide_approval, dispatch_spaces_revoke_approval_grant,
+};
+use super::dispatchers_spaces::ws10b::dispatch_spaces_set_tool_policy;
+use super::dispatchers_spaces::ws11::{
+    dispatch_spaces_mark_all_read, dispatch_spaces_mark_unread, dispatch_spaces_set_attention_item_state,
+    dispatch_spaces_set_notify_level, dispatch_spaces_set_status, dispatch_spaces_set_thread_follow,
+    dispatch_spaces_cancel_reminder, dispatch_spaces_create_reminder,
+};
+use super::dispatchers_spaces::ws12::{
+    dispatch_spaces_delete_message, dispatch_spaces_edit_message, dispatch_spaces_hide_space,
+    dispatch_spaces_open_dm, dispatch_spaces_toggle_reaction,
+};
+use super::dispatchers_spaces::ws14::{
+    dispatch_space_files_attach, dispatch_space_files_delete, dispatch_space_files_list,
+    dispatch_space_files_read_text,
+};
+use super::dispatchers_spaces::ws16::dispatch_spaces_update_sidebar;
+use super::dispatchers_spaces::ws03::{
+    dispatch_spaces_apply_effect_preset, dispatch_spaces_set_effect_entitlements,
 };
 use super::dispatchers::{
     dispatch_brreg_lookup, dispatch_connect_source, dispatch_conversation_csat_preference,
@@ -219,12 +252,24 @@ pub(super) async fn execute_action(
             dispatch_navbar_submit_support_request(&state, &user, &body.input).await
         }
         "ownership.share_document" => {
-            dispatch_ownership_share_document(&state, &user, &body.input).await
+            dispatch_ownership_share_document(&state, &user, &headers, &body.input).await
         }
         "ownership.revoke_document_share" => {
-            dispatch_ownership_revoke_document_share(&state, &user, &body.input).await
+            dispatch_ownership_revoke_document_share(&state, &user, &headers, &body.input).await
         }
         "memory.delete" => dispatch_memory_delete(&state, &user, &headers, &body.input).await,
+        "memory.set_state" => {
+            dispatch_memory_set_state(&state, &user, &headers, &body.input).await
+        }
+        "memory.reset" => dispatch_memory_reset(&state, &user, &headers, &body.input).await,
+        "memory.remember" => dispatch_memory_remember(&state, &user, &headers, &body.input).await,
+        "learning.accept_skill" => {
+            dispatch_learning_accept_skill(&state, &user, &headers, &body.input).await
+        }
+        "learning.reject_skill" => {
+            dispatch_learning_reject_skill(&state, &user, &headers, &body.input).await
+        }
+        "learning.undo" => dispatch_learning_undo(&state, &user, &headers, &body.input).await,
         "settings.update_me" => dispatch_settings_update_me(&state, &user, &body.input).await,
         "settings.update_preferences" => {
             dispatch_settings_update_preferences(&state, &user, &body.input).await
@@ -320,12 +365,18 @@ pub(super) async fn execute_action(
             dispatch_org_acknowledge_deletion(&state, &user, &body.input).await
         }
         "org.set_quota" => dispatch_org_set_quota(&state, &user, &body.input).await,
+        "org.set_model_entitlement" => {
+            dispatch_org_set_model_entitlement(&state, &user, &headers, &body.input).await
+        }
         "org.update_instructions" => {
             dispatch_org_update_instructions(&state, &user, &body.input).await
         }
         "org.update_zdr" => dispatch_org_update_zdr(&state, &user, &headers, &body.input).await,
         "org.update_support_ai_mode" => {
             dispatch_org_update_support_ai_mode(&state, &user, &headers, &body.input).await
+        }
+        "org.update_agent_learning_policy" => {
+            dispatch_org_update_agent_learning_policy(&state, &user, &headers, &body.input).await
         }
         "membership.invite_member" => {
             dispatch_membership_invite_member(&state, &user, &headers, &body.input).await
@@ -537,6 +588,102 @@ pub(super) async fn execute_action(
         "spaces.create_room" => dispatch_space_create_room(&state, &user, &body.input).await,
         "spaces.add_member" => dispatch_space_add_member(&state, &user, &body.input).await,
         "spaces.remove_member" => dispatch_space_remove_member(&state, &user, &body.input).await,
+        "spaces.create_post" => {
+            dispatch_spaces_create_post(&state, &user, &headers, &body.input).await
+        }
+        "spaces.reply_in_thread" => {
+            dispatch_spaces_reply_in_thread(&state, &user, &headers, &body.input).await
+        }
+        "spaces.change_member_role" => {
+            dispatch_spaces_change_member_role(&state, &user, &body.input, &body.idempotency_key)
+                .await
+        }
+        "spaces.leave_room" => dispatch_spaces_leave_room(&state, &user, &body.input).await,
+        "spaces.open_dm" => {
+            dispatch_spaces_open_dm(&state, &user, &headers, &body.input).await
+        }
+        "spaces.hide_space" => dispatch_spaces_hide_space(&state, &user, &body.input).await,
+        "spaces.edit_message" => {
+            dispatch_spaces_edit_message(&state, &user, &headers, &body.input).await
+        }
+        "spaces.delete_message" => {
+            dispatch_spaces_delete_message(&state, &user, &headers, &body.input).await
+        }
+        "spaces.toggle_reaction" => {
+            dispatch_spaces_toggle_reaction(&state, &user, &headers, &body.input).await
+        }
+        "spaces.update_sidebar" => {
+            dispatch_spaces_update_sidebar(&state, &user, &headers, &body.input).await
+        }
+        "spaces.set_agent_wake_policy" => {
+            dispatch_spaces_set_agent_wake_policy(&state, &user, &body.input).await
+        }
+        "spaces.decide_approval" => {
+            dispatch_spaces_decide_approval(&state, &user, &headers, &body.input, &body.idempotency_key)
+                .await
+        }
+        "spaces.revoke_approval_grant" => {
+            dispatch_spaces_revoke_approval_grant(&state, &user, &body.input).await
+        }
+        "spaces.set_tool_policy" => {
+            dispatch_spaces_set_tool_policy(&state, &user, &body.input).await
+        }
+        "spaces.set_attention_item_state" => {
+            dispatch_spaces_set_attention_item_state(&state, &user, &body.input).await
+        }
+        "spaces.stop_run" => {
+            dispatch_spaces_stop_run(&state, &user, &headers, &body.input).await
+        }
+        "spaces.set_thread_follow" => {
+            dispatch_spaces_set_thread_follow(&state, &user, &headers, &body.input).await
+        }
+        "spaces.mark_all_read" => dispatch_spaces_mark_all_read(&state, &user, &body.input).await,
+        "spaces.mark_unread" => dispatch_spaces_mark_unread(&state, &user, &body.input).await,
+        "spaces.set_notify_level" => {
+            dispatch_spaces_set_notify_level(&state, &user, &body.input).await
+        }
+        "spaces.set_status" => {
+            dispatch_spaces_set_status(&state, &user, &headers, &body.input).await
+        }
+        "spaces.create_reminder" => {
+            dispatch_spaces_create_reminder(&state, &user, &headers, &body.input).await
+        }
+        "spaces.cancel_reminder" => {
+            dispatch_spaces_cancel_reminder(&state, &user, &body.input).await
+        }
+        "spaces.update_room_details" => {
+            dispatch_spaces_update_room_details(&state, &user, &body.input).await
+        }
+        "spaces.join_room" => {
+            dispatch_spaces_join_room(&state, &user, &body.input, &body.idempotency_key).await
+        }
+        "spaces.update_room_settings" => {
+            dispatch_spaces_update_room_settings(&state, &user, &body.input, &body.idempotency_key)
+                .await
+        }
+        "spaces.set_effect_entitlements" => {
+            dispatch_spaces_set_effect_entitlements(
+                &state,
+                &user,
+                &body.input,
+                &body.idempotency_key,
+            )
+            .await
+        }
+        "spaces.apply_effect_preset" => {
+            dispatch_spaces_apply_effect_preset(&state, &user, &body.input, &body.idempotency_key)
+                .await
+        }
+        "space.files.attach" => dispatch_space_files_attach().await,
+        "space.files.list" => {
+            dispatch_space_files_list(&state, &user, &headers, &body.input).await
+        }
+        "space.files.read_text" => {
+            dispatch_space_files_read_text(&state, &user, &headers, &body.input).await
+        }
+        "space.files.delete" => {
+            dispatch_space_files_delete(&state, &user, &headers, &body.input).await
+        }
         // Social actions -> social-core via the dedicated dispatchers (real
         // ApprovalState is enforced by social-core before publish/schedule).
         "social.create_draft" => dispatch_social_create_draft(&state, &user, &body.input).await,

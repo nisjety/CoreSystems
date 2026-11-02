@@ -72,6 +72,16 @@ pub const AGENT_SPAWN_CAPABILITY: &str = "cap.agent.spawn";
 /// The S4.2 background-process family (`process_*`).
 pub const PROCESS_CAPABILITY: &str = "cap.process.background";
 
+/// The read-only Space workspace tools (`workspace_read`, `workspace_grep`, `workspace_glob`,
+/// `workspace_list`; WS24-S3). Attested only while the tools are switched on and the workspace
+/// store and the sandbox-manager are configured.
+pub const WORKSPACE_READ_CAPABILITY: &str = "cap.workspace.read";
+
+/// The Space workspace write tools (`workspace_edit`, `workspace_put`; WS24-S4). Attested only while
+/// the switch is `all`, on the same stores as the reads, so an instance that does not offer the
+/// writes cannot report that it does.
+pub const WORKSPACE_WRITE_CAPABILITY: &str = "cap.workspace.write";
+
 /// Knowledge retrieval over Data Plane v2 (`knowledge_search`).
 pub const RETRIEVAL_QUERY_CAPABILITY: &str = "cap.retrieval.query";
 
@@ -187,6 +197,9 @@ pub const SANDBOX_PYTHON_MODULES: &[&str] = &[
 /// there so a wedged import costs the boot probe seconds, not forever.
 const INTERPRETER_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Ceiling on the LibreOffice version probe, run only when the render layer is on.
+const OFFICE_RENDER_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// What the interpreter probe measured.
 ///
 /// Two different facts, kept apart on purpose: `ran` says the probe completed at
@@ -251,9 +264,58 @@ pub fn probe() -> ProbeOutcome {
              import a library the tool advertises; cap.command.sandbox will not be attested"
         );
     }
+    if render_requested() && !office_render_ready() {
+        tracing::warn!(
+            "CODE_INTERPRETER_OFFICE_VERIFY=render, but LibreOffice did not start: Office \
+             files get render warnings, and cap.command.sandbox is unaffected"
+        );
+    }
     ProbeOutcome {
         sandbox: crate::sandbox::is_supported(),
         interpreter: interpreter.healthy(),
+    }
+}
+
+/// Whether `CODE_INTERPRETER_OFFICE_VERIFY` asks for the render layer. Strict, as
+/// the verifier's own parser is: only the named value counts.
+fn render_requested() -> bool {
+    render_requested_in(
+        std::env::var("CODE_INTERPRETER_OFFICE_VERIFY")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn render_requested_in(raw: Option<&str>) -> bool {
+    raw.is_some_and(|value| value.trim().eq_ignore_ascii_case("render"))
+}
+
+/// Whether the LibreOffice converter starts, measured by its version. This is
+/// logged and nothing else: a broken converter removes the render checks, not
+/// the sandbox, so it must not change what `cap.command.sandbox` attests.
+fn office_render_ready() -> bool {
+    let Ok(mut child) = std::process::Command::new("soffice")
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let deadline = Instant::now() + OFFICE_RENDER_PROBE_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
     }
 }
 
@@ -354,6 +416,37 @@ pub fn retrieval_attestations(retrieval_up: bool) -> Vec<Attestation> {
          endpoint answered an unauthenticated call with Unauthenticated.",
         COST_CLASS_BOUNDED,
     )]
+}
+
+/// The `cap.workspace.read` attestation (WS24-S3) and the `cap.workspace.write` one (WS24-S4). The
+/// tools need the workspace store to fetch a Space's tree and the sandbox-manager to lease it, and
+/// nothing else: no bubblewrap and no interpreter, so this does not follow the sandbox probe. Each is
+/// attested only while the switch offers it (the writes only under `all`), so an instance that does
+/// not offer them cannot report that it does. Lease and fetch failures stay per call, as they do for
+/// `code_interpreter`.
+#[must_use]
+pub fn workspace_attestations(
+    mode: crate::workspace_tools::Mode,
+    cas_configured: bool,
+    sandbox_manager_configured: bool,
+) -> Vec<Attestation> {
+    if mode == crate::workspace_tools::Mode::Off || !(cas_configured && sandbox_manager_configured)
+    {
+        return Vec::new();
+    }
+    let mut planned = vec![attestation(
+        WORKSPACE_READ_CAPABILITY,
+        "workspace_store_configured",
+        "The workspace store and the sandbox-manager are configured, and the workspace tools are switched on.",
+    )];
+    if mode == crate::workspace_tools::Mode::All {
+        planned.push(attestation(
+            WORKSPACE_WRITE_CAPABILITY,
+            "workspace_store_configured",
+            "The workspace store and the sandbox-manager are configured, and the workspace write tools are switched on.",
+        ));
+    }
+    planned
 }
 
 /// The `cap.tool.http` attestation, when the web probe passed.
@@ -1003,7 +1096,12 @@ impl HealthAttestor {
 /// outage of execution-core itself.
 pub fn spawn_heartbeat() {
     let outcome = probe();
-    let planned = attestable(outcome);
+    let mut planned = attestable(outcome);
+    planned.extend(workspace_attestations(
+        crate::workspace_tools::mode(),
+        matches!(crate::workspace_cas::CasClient::from_env(), Ok(Some(_))),
+        crate::sandbox_manager_client::SandboxManagerClient::from_env().is_ok(),
+    ));
     if planned.is_empty() {
         tracing::warn!(
             sandbox_probe = outcome.sandbox,
@@ -1127,6 +1225,8 @@ mod tests {
             PROCESS_CAPABILITY,
             RETRIEVAL_QUERY_CAPABILITY,
             WEB_HTTP_CAPABILITY,
+            WORKSPACE_READ_CAPABILITY,
+            WORKSPACE_WRITE_CAPABILITY,
         ] {
             if !allowlist.contains(&format!("\"{capability}\"")) {
                 missing.push(capability);
@@ -1658,6 +1758,31 @@ mod tests {
                     .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
                 && reason_code.len() <= 128,
             "reason_code '{reason_code}' violates the server pattern"
+        );
+    }
+
+    #[test]
+    fn workspace_attestation_needs_the_switch_and_both_stores() {
+        use crate::workspace_tools::Mode;
+        assert!(workspace_attestations(Mode::Off, true, true).is_empty());
+        assert!(workspace_attestations(Mode::Read, false, true).is_empty());
+        assert!(workspace_attestations(Mode::All, true, false).is_empty());
+        let read = workspace_attestations(Mode::Read, true, true);
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].capability_id, WORKSPACE_READ_CAPABILITY);
+    }
+
+    #[test]
+    fn the_write_attestation_is_offered_only_under_all() {
+        use crate::workspace_tools::Mode;
+        let all = workspace_attestations(Mode::All, true, true);
+        let ids: Vec<&str> = all.iter().map(|a| a.capability_id.as_str()).collect();
+        assert_eq!(ids, [WORKSPACE_READ_CAPABILITY, WORKSPACE_WRITE_CAPABILITY]);
+        let read = workspace_attestations(Mode::Read, true, true);
+        assert!(
+            read.iter()
+                .all(|a| a.capability_id != WORKSPACE_WRITE_CAPABILITY),
+            "a read-only switch must not report the write capability"
         );
     }
 
@@ -2309,5 +2434,25 @@ mod tests {
         assert_eq!(attested, 1);
         let posted = posted_attestations(&capability_core).await;
         assert_eq!(posted[0]["id"], WEB_HTTP_CAPABILITY);
+    }
+
+    /// The render probe is logged, never attested: the sandbox capability is
+    /// attested from the sandbox and interpreter probes alone, and only the
+    /// exact value `render` turns the probe on.
+    #[test]
+    fn office_probe_does_not_change_sandbox_capability_health() {
+        let attested = attestable(ProbeOutcome {
+            sandbox: true,
+            interpreter: true,
+        });
+        let sandbox = attested
+            .iter()
+            .find(|row| row.capability_id == SANDBOX_CAPABILITY)
+            .expect("the sandbox is attested from its own probes");
+        assert_eq!(sandbox.reason_code, "code_runtime_probed");
+        assert!(render_requested_in(Some(" Render ")));
+        assert!(!render_requested_in(Some("true")));
+        assert!(!render_requested_in(Some("structural")));
+        assert!(!render_requested_in(None));
     }
 }

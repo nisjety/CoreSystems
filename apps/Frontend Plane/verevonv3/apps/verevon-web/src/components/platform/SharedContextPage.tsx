@@ -1,5 +1,4 @@
 import Image from "next/image";
-import Link from "next/link";
 import { Footer } from "@/components/core/footer/Footer";
 import { ArrowButton } from "@/components/ui/ArrowButton";
 import { ContextExplorer } from "./ContextExplorer";
@@ -90,12 +89,9 @@ export function SharedContextPage() {
 
 							<div className="mt-10 flex flex-wrap items-center gap-x-8 gap-y-5">
 								<ArrowButton href="#eksempel">Se et eksempel</ArrowButton>
-								<Link
-									className="font-geist text-[0.92rem] font-light text-verevon-j-text/62 underline-offset-4 transition-colors hover:text-verevon-j-text hover:underline"
-									href="/#kunnskap"
-								>
+								<ArrowButton href="/#kunnskap" variant="muted">
 									Se hvordan dette passer inn i arbeidsflyten
-								</Link>
+								</ArrowButton>
 							</div>
 						</div>
 

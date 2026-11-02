@@ -59,6 +59,46 @@ fn describe_metrics() {
         "dpv2_service_principal_requests_total",
         "Service-principal requests by service id and admission outcome (admitted or the denial cause)"
     );
+    metrics::describe_counter!(
+        "dpv2_web_rerank_total",
+        "POST /v1/rerank outcomes by outcome (ok, skipped, degraded) and a closed reason list"
+    );
+    metrics::describe_histogram!(
+        "dpv2_web_rerank_duration_seconds",
+        "POST /v1/rerank request latency in seconds"
+    );
+    metrics::describe_histogram!(
+        "dpv2_web_rerank_documents",
+        "Candidate documents per POST /v1/rerank request"
+    );
+    metrics::describe_counter!(
+        "dpv2_web_rerank_search_units_total",
+        "Search units the provider reported as billed for POST /v1/rerank"
+    );
+    metrics::describe_counter!(
+        "dpv2_web_rerank_budget_exceeded_total",
+        "Orgs whose daily web-rerank unit total passed the alert threshold (alert only)"
+    );
+    metrics::describe_counter!(
+        "dpv2_web_rerank_cost_event_failures_total",
+        "Successful web reranks whose signed cost event could not be published"
+    );
+    metrics::describe_counter!(
+        "dpv2_rerank_provider_refused_total",
+        "Provider calls the rerank gate refused before the provider saw them, by lane (web, tenant) and reason (saturated, throttled, circuit_open, tenant_wait_expired)"
+    );
+    metrics::describe_gauge!(
+        "dpv2_rerank_provider_calls_in_flight",
+        "Rerank provider calls admitted and not yet settled, by lane (web, tenant)"
+    );
+    metrics::describe_counter!(
+        "dpv2_rerank_breaker_opened_total",
+        "Times the rerank provider breaker opened on this replica"
+    );
+    metrics::describe_gauge!(
+        "dpv2_rerank_breaker_state",
+        "Rerank provider breaker state on this replica: 0 closed, 1 half-open, 2 open"
+    );
 }
 
 pub struct PrometheusHandle(metrics_exporter_prometheus::PrometheusHandle);
@@ -152,6 +192,65 @@ pub fn record_rate_limit_denied(org_id: &str) {
 
 pub fn record_rate_limit_backend_unavailable() {
     counter!("dpv2_rate_limiter_backend_unavailable_total").increment(1);
+}
+
+/// `POST /v1/rerank` outcome. `outcome` is `ok`, `skipped` or `degraded`; `reason` is a
+/// closed list (`none`, `replay`, a skip reason or a degrade reason), so the labels stay bounded.
+pub fn record_web_rerank(outcome: &str, reason: &str) {
+    counter!(
+        "dpv2_web_rerank_total",
+        "outcome" => outcome.to_string(),
+        "reason" => reason.to_string()
+    )
+    .increment(1);
+}
+
+pub fn record_web_rerank_duration(duration_secs: f64) {
+    histogram!("dpv2_web_rerank_duration_seconds").record(duration_secs);
+}
+
+pub fn record_web_rerank_documents(documents: u64) {
+    histogram!("dpv2_web_rerank_documents").record(documents as f64);
+}
+
+pub fn record_web_rerank_search_units(units: u64) {
+    counter!("dpv2_web_rerank_search_units_total").increment(units);
+}
+
+pub fn record_web_rerank_budget_exceeded(org_id: &str) {
+    counter!("dpv2_web_rerank_budget_exceeded_total", "org_id" => org_id.to_string()).increment(1);
+}
+
+pub fn record_web_rerank_cost_failure() {
+    counter!("dpv2_web_rerank_cost_event_failures_total").increment(1);
+}
+
+/// A provider call the rerank gate refused before the provider saw it. Both labels are closed
+/// lists: `lane` is `web` or `tenant`, `reason` one of the gate's refusals.
+pub fn record_provider_refused(lane: &'static str, reason: &'static str) {
+    counter!(
+        "dpv2_rerank_provider_refused_total",
+        "lane" => lane,
+        "reason" => reason
+    )
+    .increment(1);
+}
+
+pub fn record_provider_call_started(lane: &'static str) {
+    gauge!("dpv2_rerank_provider_calls_in_flight", "lane" => lane).increment(1.0);
+}
+
+pub fn record_provider_call_finished(lane: &'static str) {
+    gauge!("dpv2_rerank_provider_calls_in_flight", "lane" => lane).decrement(1.0);
+}
+
+pub fn record_breaker_opened() {
+    counter!("dpv2_rerank_breaker_opened_total").increment(1);
+}
+
+/// The breaker state as its gauge value: 0 closed, 1 half-open, 2 open.
+pub fn record_breaker_state(code: f64) {
+    gauge!("dpv2_rerank_breaker_state").set(code);
 }
 
 #[allow(dead_code)] // gRPC client interceptor will call this; instrumentation in progress

@@ -522,6 +522,7 @@ func TestStartScheduledRunActivity_ExecutesOnlyWithPreparedExecutionIntent(t *te
 		"schedule-1:2026-08-14T00:00:00Z",
 		"Summarise the queue",
 		"execute",
+		"", "", "",
 	)
 	require.NoError(t, err)
 	require.NotNil(t, fakeSession.startScheduledRunReq)
@@ -661,14 +662,14 @@ func TestExecuteScheduledStepActivityFailsClosedOnInvalidResponse(t *testing.T) 
 
 func TestStartScheduledRunActivity_FailsClosedWithoutSessionCoreOrExecutionAuthority(t *testing.T) {
 	a := activities.NewActivities(testLogger(), &grpcclient.Clients{SessionCore: nil})
-	_, err := a.StartScheduledRunActivity(context.Background(), "task-1", "thread-1", "org-1", "space-1", "user-1", "schedule-1", "fire", "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "id", "g", "execute")
+	_, err := a.StartScheduledRunActivity(context.Background(), "task-1", "thread-1", "org-1", "space-1", "user-1", "schedule-1", "fire", "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "id", "g", "execute", "", "", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "session-core unavailable for prepared scheduled run")
 
 	a = activities.NewActivities(testLogger(), &grpcclient.Clients{SessionCore: nil})
 	fake := &fakeSessionCore{startScheduledRunResp: &mpv1.StartRunResponse{RunId: "task-1", OwnerId: activities.SystemActorID}}
 	a = activities.NewActivities(testLogger(), &grpcclient.Clients{SessionCore: newSessionCoreConn(t, fake)})
-	_, err = a.StartScheduledRunActivity(context.Background(), "task-1", "thread-1", "org-1", "space-1", "user-1", "schedule-1", "fire", "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "id", "g", "execute")
+	_, err = a.StartScheduledRunActivity(context.Background(), "task-1", "thread-1", "org-1", "space-1", "user-1", "schedule-1", "fire", "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "id", "g", "execute", "", "", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Control scheduled-run execution authority is not configured")
 }
@@ -696,6 +697,7 @@ func TestStartScheduledRunActivity_RejectsSessionCoreReceiptMismatch(t *testing.
 		"schedule-1:2026-08-14T00:00:00Z",
 		"Summarise the queue",
 		"execute",
+		"", "", "",
 	)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "prepared scheduled run task-scheduled-1 received mismatched Session Core receipt")
@@ -714,6 +716,7 @@ func TestStartScheduledRunActivity_RejectsSessionCoreReceiptMismatch(t *testing.
 		"schedule-1:2026-08-14T00:00:00Z",
 		"Summarise the queue",
 		"execute",
+		"", "", "",
 	)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "prepared scheduled run task-scheduled-1 received mismatched Session Core receipt")

@@ -27,6 +27,7 @@ async fn main() -> Result<()> {
 
     let app_state = state::AppState::from_env().await?;
     let prom_handle = gateway_metrics::install_recorder().ok();
+    gateway_metrics::record_zdr_waiver_contract_version();
 
     let grpc_readiness = GrpcReadiness::new();
 

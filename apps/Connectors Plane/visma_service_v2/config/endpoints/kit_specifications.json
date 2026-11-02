@@ -1,0 +1,33 @@
+{
+  "endpoint_name": "kit_specifications",
+  "bigquery_table": "visma_kit_specifications",
+  "primary_key": [
+    "kitInventoryID",
+    "revision"
+  ],
+  "source": "erp_rest",
+  "api_method": "get_kit_specifications",
+  "api_endpoint": "/v1/KitSpecifications",
+  "pagination_profile": "finance_page_number",
+  "modified_field": "lastModifiedDateTime",
+  "merge_type": "upsert",
+  "sync_pattern": "incremental_upsert",
+  "validation_fields": [
+    "kitInventoryID",
+    "revision",
+    "isActive",
+    "timestamp",
+    "lastModifiedDateTime"
+  ],
+  "datamart": {
+    "ready": false,
+    "query_file": "config/queries/kit_specification.graphql",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "fallback_source": "erp_rest",
+    "tenant_overrides": {
+      "33f319b9-4d57-11ee-960c-025417856183": false
+    }
+  }
+}

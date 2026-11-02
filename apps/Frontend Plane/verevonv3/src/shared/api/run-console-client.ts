@@ -124,6 +124,24 @@ export type BrowserRunResumedEvent = {
   at?: string
 }
 
+/** WS03 S8: the loop of a run parked at a round boundary (the run stays open and
+ * resumable). Ids only: the gateway never broadcasts the park reason. Display
+ * only; nothing acts on it. */
+export type RunParkedEvent = {
+  runId?: string
+  at?: string
+}
+
+/** WS03 S8: a parked run's loop resumed through the continue route. Distinct from
+ * `RunResumedAfterApprovalEvent` (an approval resumed it). `resumedSegment` is
+ * the segment number the resume started, or undefined when the frame carries
+ * anything but a non-negative integer. */
+export type RunResumedFromParkEvent = {
+  runId?: string
+  resumedSegment?: number
+  at?: string
+}
+
 /** Phase 5 HITL gate: a specific browser action (or a run-level condition
  * like persistent-cookie reuse) requires a human decision before it
  * proceeds. `approvalId` lets the UI decide it via the existing generic
@@ -191,6 +209,8 @@ export type RunEventHandlers = {
   onApproval?: (event: ApprovalStateChangedEvent) => void
   onRunPaused?: (event: RunPausedForApprovalEvent) => void
   onRunResumed?: (event: RunResumedAfterApprovalEvent) => void
+  onRunParked?: (event: RunParkedEvent) => void
+  onRunResumedFromPark?: (event: RunResumedFromParkEvent) => void
   onSubagentAttached?: (event: SubagentAttachedEvent) => void
   onSubagentStopped?: (event: SubagentStoppedEvent) => void
   onBrowserAction?: (event: BrowserActionDispatchedEvent) => void
@@ -207,6 +227,10 @@ export type RunEventHandlers = {
 
 function str(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+function nonNegativeInt(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined
 }
 
 function normalizeOptionalIsoTimestamp(value: string | undefined): string | undefined {
@@ -282,6 +306,19 @@ function dispatch(event: SseEvent, handlers: RunEventHandlers): void {
       handlers.onRunResumed?.({
         runId: str(payload.run_id) ?? str(payload.runId),
         approvalId: str(payload.approval_id) ?? str(payload.approvalId),
+        at: str(payload.at),
+      })
+      break
+    case 'run_parked':
+      handlers.onRunParked?.({
+        runId: str(payload.run_id) ?? str(payload.runId),
+        at: str(payload.at),
+      })
+      break
+    case 'run_resumed':
+      handlers.onRunResumedFromPark?.({
+        runId: str(payload.run_id) ?? str(payload.runId),
+        resumedSegment: nonNegativeInt(payload.resumed_segment),
         at: str(payload.at),
       })
       break

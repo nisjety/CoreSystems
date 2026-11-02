@@ -1,0 +1,80 @@
+{
+  "v": 1,
+  "run_id": "run-golden-w",
+  "segment_no": 1,
+  "rounds_executed": 2,
+  "delegated_rounds": 0,
+  "step_seq": 3,
+  "children_started": 0,
+  "grounded": true,
+  "compaction_triggered": false,
+  "attempted_retrievals": [
+    "hybrid|5|find the contract"
+  ],
+  "messages": [
+    {
+      "role": "system",
+      "content": "SYSTEM_PROMPT_GOLDEN"
+    },
+    {
+      "role": "user",
+      "content": "Find the contract and delete the stale records"
+    },
+    {
+      "role": "assistant",
+      "content": "Searching."
+    },
+    {
+      "role": "user",
+      "content": "Tool results for your previous request: knowledge_search found 1 document"
+    }
+  ],
+  "round_in_flight": {
+    "assistant_content": "Looking and deleting.",
+    "calls": [
+      {
+        "id": "call-2",
+        "name": "knowledge_search",
+        "arguments_json": "{\"query\":\"stale records\"}",
+        "step_id": "tool_2_call-2"
+      },
+      {
+        "id": "call-3",
+        "name": "unknown_tool",
+        "arguments_json": "{}",
+        "step_id": ""
+      },
+      {
+        "id": "call-4",
+        "name": "delete_records",
+        "arguments_json": "{\"table\":\"stale\"}",
+        "step_id": "tool_3_call-4"
+      }
+    ],
+    "completed": [
+      {
+        "step_id": "",
+        "error": "tool 'unknown_tool' is not in this agent's allowed scope",
+        "call_id": "call-3"
+      }
+    ]
+  },
+  "pending": null,
+  "authority": {
+    "mode": "ask",
+    "plan_mode": false,
+    "autonomy_rung": "unspecified",
+    "space_id": "",
+    "min_privacy_tier": 0,
+    "provider_hint": "",
+    "tool_names": [
+      "delete_records",
+      "knowledge_search"
+    ],
+    "max_rounds": 4
+  },
+  "prompt_digest": "41df4662e3c928927466e1ce1283d50c9c2736a894a0dda86742a061a5976f46",
+  "extensions": {
+    "effect_ledger": true
+  }
+}

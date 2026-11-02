@@ -85,6 +85,10 @@ impl KnowledgeClient {
         query: &str,
         top_k: i32,
         zdr: bool,
+        // The caller holds the connection waiver (Z-18): the retrieval runs in the
+        // filtering mode, so restricted documents are dropped before the context
+        // can reach the personal account.
+        waived: bool,
         // The run's `ExecuteStepRequest.min_privacy_tier` (field 10), the wire
         // numeric of the shared `PrivacyTier` enum. Only the SOVEREIGN value
         // says anything on the sovereignty axis; see
@@ -93,7 +97,16 @@ impl KnowledgeClient {
         bearer: &str,
     ) -> Result<String, String> {
         let top_k = top_k.clamp(1, MAX_TOP_K);
-        let request = build_request(org_id, user_id, query, top_k, zdr, min_privacy_tier, bearer)?;
+        let request = build_request(
+            org_id,
+            user_id,
+            query,
+            top_k,
+            zdr,
+            waived,
+            min_privacy_tier,
+            bearer,
+        )?;
         let response = self
             .client
             .clone()
@@ -111,6 +124,7 @@ fn build_request(
     query: &str,
     top_k: i32,
     zdr: bool,
+    waived: bool,
     min_privacy_tier: i32,
     bearer: &str,
 ) -> Result<tonic::Request<RetrieveRequest>, String> {
@@ -145,7 +159,11 @@ fn build_request(
         } else {
             Some(user_id.to_owned())
         },
-        zdr_mode: zdr.then(|| "ephemeral".to_owned()),
+        // Always names a mode (Z-11's helper): `reject` for a waived turn, which
+        // filters restricted documents; `ephemeral` for ZDR; `disabled` otherwise.
+        zdr_mode: Some(
+            mp_contracts::dataplane_posture::data_plane_zdr_mode(zdr, waived).to_owned(),
+        ),
         sovereign_required: Some(sovereign_required),
         ..Default::default()
     });
@@ -480,8 +498,17 @@ pub(crate) mod tests {
 
     #[test]
     fn knowledge_request_forwards_verified_bearer_and_zdr_without_identity_headers() {
-        let request = build_request("org-a", "user-a", "query", 5, true, 0, "signed-token")
-            .expect("build authenticated request");
+        let request = build_request(
+            "org-a",
+            "user-a",
+            "query",
+            5,
+            true,
+            false,
+            0,
+            "signed-token",
+        )
+        .expect("build authenticated request");
 
         assert_eq!(
             request
@@ -495,6 +522,85 @@ pub(crate) mod tests {
         assert_eq!(request.get_ref().org_id, "org-a");
         assert_eq!(request.get_ref().user_id.as_deref(), Some("user-a"));
         assert_eq!(request.get_ref().zdr_mode.as_deref(), Some("ephemeral"));
+    }
+
+    /// The mode a retrieval carries follows the turn's retention: the ZDR mode,
+    /// the filtering mode for a waived turn, and an explicit `disabled` for an
+    /// ordinary one (the Z-11 helper names a mode on every request, Z-18).
+    #[test]
+    fn the_retrieval_mode_on_the_wire_follows_the_turn_retention() {
+        let mode = |zdr: bool, waived: bool| {
+            build_request(
+                "org-a",
+                "user-a",
+                "query",
+                5,
+                zdr,
+                waived,
+                0,
+                "signed-token",
+            )
+            .expect("build authenticated request")
+            .get_ref()
+            .zdr_mode
+            .clone()
+        };
+        assert_eq!(mode(false, false).as_deref(), Some("disabled"));
+        assert_eq!(mode(true, false).as_deref(), Some("ephemeral"));
+        assert_eq!(
+            mode(false, true).as_deref(),
+            Some("reject"),
+            "a waived turn filters restricted documents instead of sending them unfiltered"
+        );
+        assert_eq!(
+            mode(true, true).as_deref(),
+            Some("reject"),
+            "a turn that is both takes the filtering mode"
+        );
+    }
+
+    /// The same, over the wire: the stub Data Plane sees `reject` for a waived
+    /// turn and `disabled` for an ordinary one (Z-18).
+    #[tokio::test]
+    async fn a_waived_turn_reaches_the_data_plane_as_reject() {
+        let (endpoint, seen) = spawn_stub(Answer::Success).await;
+        let client = KnowledgeClient {
+            client: RetrievalServiceClient::new(
+                Endpoint::from_shared(endpoint)
+                    .expect("stub endpoint")
+                    .connect_lazy(),
+            ),
+        };
+        client
+            .search(
+                "org-a",
+                "user-a",
+                "query",
+                5,
+                false,
+                false,
+                0,
+                "signed-token",
+            )
+            .await
+            .expect("the stub answers");
+        client
+            .search(
+                "org-a",
+                "user-a",
+                "query",
+                5,
+                false,
+                true,
+                0,
+                "signed-token",
+            )
+            .await
+            .expect("the stub answers");
+        let seen = seen.lock().expect("seen lock").clone();
+        assert_eq!(seen.len(), 2, "one Retrieve per search");
+        assert_eq!(seen[0].zdr_mode.as_deref(), Some("disabled"));
+        assert_eq!(seen[1].zdr_mode.as_deref(), Some("reject"));
     }
 
     /// The gap this module used to name in a comment: a run pinned to
@@ -511,6 +617,7 @@ pub(crate) mod tests {
             "query",
             5,
             false,
+            false,
             PRIVACY_TIER_SOVEREIGN,
             "signed-token",
         )
@@ -523,8 +630,17 @@ pub(crate) mod tests {
     #[test]
     fn a_non_sovereign_privacy_tier_defers_to_the_no_signal_default() {
         for tier in [0, 1, 2, 3] {
-            let request = build_request("org-a", "user-a", "query", 5, false, tier, "signed-token")
-                .expect("build authenticated request");
+            let request = build_request(
+                "org-a",
+                "user-a",
+                "query",
+                5,
+                false,
+                false,
+                tier,
+                "signed-token",
+            )
+            .expect("build authenticated request");
             assert_eq!(
                 request.get_ref().sovereign_required,
                 Some(mp_contracts::dataplane_posture::SOVEREIGN_REQUIRED_WITHOUT_SIGNAL),
@@ -571,6 +687,8 @@ pub(crate) mod tests {
         org_id: String,
         query: String,
         user_id: Option<String>,
+        /// The `zdr_mode` the request carried on the wire (Z-18).
+        zdr_mode: Option<String>,
     }
 
     struct StubRetrieval {
@@ -598,6 +716,7 @@ pub(crate) mod tests {
                 org_id: request.get_ref().org_id.clone(),
                 query: request.get_ref().query.clone(),
                 user_id: request.get_ref().user_id.clone(),
+                zdr_mode: request.get_ref().zdr_mode.clone(),
             });
             match self.answer {
                 Answer::Unauthenticated => {

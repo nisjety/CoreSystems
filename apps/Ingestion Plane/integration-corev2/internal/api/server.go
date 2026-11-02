@@ -25,6 +25,7 @@ import (
 	"github.com/triodelab/integration-corev2/internal/actions"
 	"github.com/triodelab/integration-corev2/internal/attestation"
 	"github.com/triodelab/integration-corev2/internal/auth"
+	"github.com/triodelab/integration-corev2/internal/clarity"
 	"github.com/triodelab/integration-corev2/internal/codexsubscription"
 	"github.com/triodelab/integration-corev2/internal/config"
 	"github.com/triodelab/integration-corev2/internal/controlplane"
@@ -34,7 +35,9 @@ import (
 	"github.com/triodelab/integration-corev2/internal/hotpath"
 	"github.com/triodelab/integration-corev2/internal/mailtask"
 	"github.com/triodelab/integration-corev2/internal/oauth"
+	"github.com/triodelab/integration-corev2/internal/pagespeed"
 	"github.com/triodelab/integration-corev2/internal/providers"
+	"github.com/triodelab/integration-corev2/internal/readiness"
 	"github.com/triodelab/integration-corev2/internal/store"
 	"github.com/triodelab/integration-corev2/internal/webhookorg"
 )
@@ -51,11 +54,21 @@ type ServerConfig struct {
 	Events            events.Publisher
 	Discovery         *discovery.Service
 	Actions           *actions.Service
+	PageSpeed         *pagespeed.Service
+	Clarity           *clarity.Service
+	PublicSignals     PublicSignalsReader
+	Trends            TrendsReader
+	WebVitals         WebVitalsReader
+	SiteSources       SiteSourcesReader
+	AlgoliaMCP        AlgoliaMCPReader
 	WriteAttestations *attestation.Verifier
 	HotPath           hotpath.WebhookNormalizer
 	// CodexSubscriptions owns ChatGPT subscription device-code flows and
 	// execution. It is nil unless explicitly enabled in deployment config.
 	CodexSubscriptions *codexsubscription.Manager
+	// OrgZDR reads the organisation's ZDR posture from org-core for the acknowledgement API. Nil
+	// refuses every acknowledgement (fail closed), and the routes exist only with the switch on.
+	OrgZDR ZDROrgPosture
 	// WebhookOrg resolves the owning tenant for account-wide provider
 	// webhooks (Meta/Slack callbacks carry no Verevon org id). Nil-safe.
 	WebhookOrg *webhookorg.Resolver
@@ -90,6 +103,16 @@ func NewServer(cfg ServerConfig) *fiber.App {
 			cfg.WriteAttestations = attestation.NewVerifier(keys, nil)
 		}
 	}
+	var marketingReadiness *readiness.Service
+	if cfg.OAuth != nil && cfg.Actions != nil {
+		marketingReadiness = readiness.NewService(func(ctx context.Context, connectionID string) (string, error) {
+			lease, err := cfg.OAuth.AccessTokenForConnection(ctx, connectionID)
+			if err != nil {
+				return "", err
+			}
+			return lease.AccessToken, nil
+		}, cfg.Actions, nil)
+	}
 	app := fiber.New(fiber.Config{
 		DisableStartupMessage: true,
 		// OAuth callbacks arrive from a browser whose `localhost` cookie jar is
@@ -107,6 +130,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		app.Use(requestLogger(*cfg.Logger))
 	}
 
+	app.Get("/", integrationLandingPage)
 	app.Get("/health", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{
 			"status":  "ok",
@@ -211,7 +235,16 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		AllowLegacyTenantKey: cfg.Config.AllowLegacyTenantKey,
 	})
 	proPlanAuth := []fiber.Handler{internalOrBearerAuth, auth.RequirePlan(cfg.Org, "pro")}
+	// Acts on one user's own connection: a verified bearer token only, never the internal key.
+	bearerOnlyAuth := auth.BearerOnly(auth.Config{TokenVerifier: cfg.Auth})
 	rateLimited := rateLimitHandlers(cfg.Config)
+	registerPageSpeed(app, cfg, internalOrBearerAuth, rateLimited)
+	registerClarity(app, cfg, internalOrBearerAuth, rateLimited)
+	registerPublicSignals(app, cfg, internalOrBearerAuth, rateLimited)
+	registerTrends(app, cfg, internalOrBearerAuth, rateLimited)
+	registerWebVitals(app, cfg, internalOrBearerAuth, rateLimited)
+	registerSiteSources(app, cfg, internalOrBearerAuth, rateLimited)
+	registerAlgolia(app, cfg, internalOrBearerAuth, rateLimited)
 
 	app.Get("/api/v1/providers", func(c *fiber.Ctx) error {
 		catalog := providers.WithReadiness(providers.Catalog(), cfg.Config.ProviderReadiness())
@@ -241,6 +274,9 @@ func NewServer(cfg ServerConfig) *fiber.App {
 			ReplaceCapabilities: body.ReplaceCapabilities,
 		})
 		if err != nil {
+			if errors.Is(err, oauth.ErrInvalidReturnURL) {
+				return apiError(c, fiber.StatusBadRequest, "invalid_return_url", "returnUrl must use an approved return origin.")
+			}
 			return apiError(c, fiber.StatusBadRequest, "connect_session_failed", err.Error())
 		}
 		recordUsage(cfg, body.OrganizationID, "connect_session_created", 1, map[string]any{
@@ -252,10 +288,14 @@ func NewServer(cfg ServerConfig) *fiber.App {
 	app.Post("/api/v1/providers/:provider/connect", chainHandlers(rateLimited, append(proPlanAuth, connectSessionHandler)...)...)
 	app.Post("/api/v1/providers/:provider/reconnect-session", chainHandlers(rateLimited, append(proPlanAuth, connectSessionHandler)...)...)
 
-	app.Get("/oauth/callback/:provider", func(c *fiber.Ctx) error {
+	oauthCallbackHandler := func(c *fiber.Ctx) error {
+		providerKey := c.Params("provider")
+		if c.Path() == "/api/v1/providers/algolia/callback" {
+			providerKey = "algolia"
+		}
 		result, err := cfg.OAuth.CompleteCallback(
 			c.UserContext(),
-			c.Params("provider"),
+			providerKey,
 			c.Query("state"),
 			c.Query("code"),
 			c.Query("error"),
@@ -295,7 +335,9 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		}
 		c.Set("Content-Type", "text/html; charset=utf-8")
 		return c.SendString(callbackHTML(result))
-	})
+	}
+	app.Get("/oauth/callback/:provider", oauthCallbackHandler)
+	app.Get("/api/v1/providers/algolia/callback", oauthCallbackHandler)
 
 	app.Get("/api/v1/connect-sessions/:id/status", internalOrBearerAuth, func(c *fiber.Ctx) error {
 		session, err := cfg.Repo.GetConnectSessionByID(c.UserContext(), c.Params("id"))
@@ -383,7 +425,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		})
 	})
 
-	app.Patch("/api/v1/connections/:id/capabilities", internalOrBearerAuth, func(c *fiber.Ctx) error {
+	app.Patch("/api/v1/connections/:id/capabilities", internalOrBearerAuth, requireServiceIntegrationWrite, func(c *fiber.Ctx) error {
 		connection, err := scopedConnection(c, cfg, c.Params("id"))
 		if err != nil {
 			return actionError(c, err)
@@ -446,7 +488,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		return success(c, fiber.Map{"connectionId": connection.ID, "consents": consents})
 	})
 
-	app.Post("/api/v1/connections/:id/consents", internalOrBearerAuth, func(c *fiber.Ctx) error {
+	app.Post("/api/v1/connections/:id/consents", internalOrBearerAuth, requireServiceIntegrationWrite, func(c *fiber.Ctx) error {
 		connection, err := scopedConnection(c, cfg, c.Params("id"))
 		if err != nil {
 			return actionError(c, err)
@@ -543,6 +585,38 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		return success(c, fiber.Map{"action": result})
 	})...)
 
+	// Readiness is a deliberately fixed, user-triggered connectivity check for
+	// marketing sources. It accepts no operation, provider resource, or body, so
+	// callers cannot turn it into a general provider proxy.
+	app.Post("/api/v1/connections/:id/readiness", chainHandlers(rateLimited, internalOrBearerAuth, func(c *fiber.Ctx) error {
+		if len(c.Queries()) > 0 || len(strings.TrimSpace(string(c.Body()))) > 0 {
+			return apiError(c, fiber.StatusBadRequest, "readiness_request_not_allowed", "Readiness checks do not accept query parameters or a request body.")
+		}
+		if marketingReadiness == nil {
+			return readinessError(c, readiness.ErrUnavailable)
+		}
+		connection, err := scopedConnection(c, cfg, c.Params("id"))
+		if err != nil {
+			return actionError(c, err)
+		}
+		result, err := marketingReadiness.Probe(c.UserContext(), connection)
+		if err != nil {
+			return readinessError(c, err)
+		}
+		recordAuditEvent(c.UserContext(), cfg, store.AuditEvent{
+			OrganizationID: connection.OrganizationID,
+			UserID:         connection.UserID,
+			ConnectionID:   connection.ID,
+			EventType:      "connection.readiness.checked",
+			ProviderKey:    connection.ProviderKey,
+			Metadata: map[string]any{
+				"operation": result.Operation,
+				"state":     result.State,
+			},
+		})
+		return success(c, fiber.Map{"readiness": result})
+	})...)
+
 	app.Post("/api/v1/actions/execute", chainHandlers(rateLimited, internalOrBearerAuth, func(c *fiber.Ctx) error {
 		var body executeActionBody
 		if err := c.BodyParser(&body); err != nil {
@@ -566,7 +640,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 
 	registerLegacyIntegrationRoutes(app, internalAuth, cfg)
 
-	app.Delete("/api/v1/connections/:id", internalOrBearerAuth, func(c *fiber.Ctx) error {
+	app.Delete("/api/v1/connections/:id", internalOrBearerAuth, requireServiceIntegrationWrite, func(c *fiber.Ctx) error {
 		connection, err := cfg.Repo.GetConnection(c.UserContext(), c.Params("id"))
 		if err != nil {
 			return storeError(c, err, "connection_not_found")
@@ -1137,70 +1211,14 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		return success(c, fiber.Map{"tokens": tokens})
 	})
 
-	app.Post("/api/v1/scim/tokens", chainHandlers(rateLimited, internalOrBearerAuth, func(c *fiber.Ctx) error {
-		var body scimTokenBody
-		if err := c.BodyParser(&body); err != nil {
-			return apiError(c, fiber.StatusBadRequest, "invalid_body", "Request body is invalid.")
-		}
-		organizationID, err := organizationIDForSCIMTokenRequest(c, body.OrganizationID)
-		if err != nil {
-			return authAwareError(c, err)
-		}
-		raw, err := oauth.RandomURLToken(32)
-		if err != nil {
-			return apiError(c, fiber.StatusInternalServerError, "scim_token_generate_failed", err.Error())
-		}
-		bearer := "scim_" + raw
-		now := time.Now().UTC()
-		createdBy := userIDForRequest(c)
-		if createdBy == "" {
-			createdBy = "internal-service"
-		}
-		name := strings.TrimSpace(body.Name)
-		if name == "" {
-			name = "SCIM token"
-		}
-		candidate := store.SCIMToken{
-			ID:             "scimtok_" + uuid.NewString(),
-			OrganizationID: organizationID,
-			Name:           name,
-			TokenPrefix:    scimTokenPrefix(bearer),
-			CreatedBy:      createdBy,
-			ExpiresAt:      body.ExpiresAt,
-			CreatedAt:      now,
-			UpdatedAt:      now,
-		}
-		var token store.SCIMToken
-		err = withAuditTransaction(c.UserContext(), cfg, func(tx store.AuditTransaction, persist func(store.AuditEvent) error) error {
-			var createErr error
-			token, createErr = tx.CreateSCIMToken(c.UserContext(), candidate, scimTokenHash(bearer))
-			if createErr != nil {
-				return createErr
-			}
-			return persist(store.AuditEvent{
-				ID:             "audit:integration:scim-token-created:" + token.ID,
-				OrganizationID: organizationID,
-				UserID:         createdBy,
-				EventType:      "scim.token.created",
-				ProviderKey:    "scim",
-				Metadata:       map[string]any{"tokenId": token.ID, "tokenPrefix": token.TokenPrefix},
-				CreatedAt:      now,
-			})
-		})
-		if err != nil {
-			return apiError(c, fiber.StatusInternalServerError, "scim_token_create_failed", err.Error())
-		}
-		return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-			"success": true,
-			"data": fiber.Map{
-				"token":       token,
-				"bearerToken": bearer,
-			},
-			"meta": responseMeta(c),
-		})
+	// SCIM provisioning is not implemented in this service (WS05-S2). Minting a
+	// bearer token would imply a working provisioning endpoint, so creation is an
+	// honest 501. Listing and revoking existing tokens stay available.
+	app.Post("/api/v1/scim/tokens", chainHandlers(rateLimited, internalOrBearerAuth, requireServiceIntegrationWrite, func(c *fiber.Ctx) error {
+		return apiError(c, fiber.StatusNotImplemented, "scim_not_implemented", "SCIM provisioning is not available.")
 	})...)
 
-	app.Delete("/api/v1/scim/tokens/:id", chainHandlers(rateLimited, internalOrBearerAuth, func(c *fiber.Ctx) error {
+	app.Delete("/api/v1/scim/tokens/:id", chainHandlers(rateLimited, internalOrBearerAuth, requireServiceIntegrationWrite, func(c *fiber.Ctx) error {
 		organizationID, err := organizationIDForSCIMTokenRequest(c, c.Query("organizationId"))
 		if err != nil {
 			return authAwareError(c, err)
@@ -1229,47 +1247,12 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		return success(c, fiber.Map{"token": revoked})
 	})...)
 
+	// SCIM is not implemented here (WS05-S2). Every method and path answers an
+	// honest 501 with a SCIM error body: no auth decision, no payload parse, no
+	// store write and no event publish, so no provisioning payload is persisted.
 	app.All("/api/v1/scim/v2/*", chainHandlers(rateLimited, func(c *fiber.Ctx) error {
-		headerOrganizationID := firstNonEmpty(c.Get("X-Org-ID"), c.Query("organizationId"))
-		if len(cfg.Config.SCIMBearerTokens) > 0 && headerOrganizationID == "" {
-			return apiError(c, fiber.StatusBadRequest, "organization_required", "X-Org-ID or organizationId is required for SCIM.")
-		}
-		if !scimBearerAuthorized(c, cfg, headerOrganizationID) {
-			return apiError(c, fiber.StatusUnauthorized, "unauthorized", "Invalid SCIM bearer token.")
-		}
-		payload := map[string]any{}
-		if len(c.Body()) > 0 {
-			if err := json.Unmarshal(c.Body(), &payload); err != nil {
-				return scimError(c, fiber.StatusBadRequest, "invalidValue", "SCIM payload must be valid JSON.")
-			}
-		}
-		resourcePath := strings.Trim(c.Params("*"), "/")
-		organizationID := firstNonEmpty(headerOrganizationID, stringFromAny(payload["organizationId"]))
-		eventType := scimEventType(c.Method(), resourcePath)
-		event := store.WebhookEvent{
-			ID:             "scim_" + uuid.NewString(),
-			OrganizationID: organizationID,
-			ProviderKey:    "scim",
-			EventType:      eventType,
-			Payload: map[string]any{
-				"path":    resourcePath,
-				"method":  c.Method(),
-				"payload": payload,
-			},
-			ReceivedAt: time.Now().UTC(),
-		}
-		if err := cfg.Repo.InsertWebhookEvent(c.UserContext(), event); err != nil {
-			return apiError(c, fiber.StatusInternalServerError, "scim_store_failed", err.Error())
-		}
-		if cfg.Events != nil {
-			_ = cfg.Events.Publish(c.UserContext(), events.Event{
-				Type:           "verevon.ingestion.integration.scim_event_received",
-				OrganizationID: organizationID,
-				ProviderKey:    "scim",
-				Data:           map[string]any{"eventType": eventType, "webhookEventId": event.ID},
-			})
-		}
-		return scimResponse(c, event, resourcePath, payload)
+		c.Set(fiber.HeaderContentType, "application/scim+json")
+		return scimError(c, fiber.StatusNotImplemented, "", "SCIM provisioning is not implemented.")
 	})...)
 
 	app.Get("/api/v1/projections/integration-profile", internalOrBearerAuth, func(c *fiber.Ctx) error {
@@ -1348,6 +1331,9 @@ func NewServer(cfg ServerConfig) *fiber.App {
 			token, err = cfg.OAuth.AccessToken(c.UserContext(), body.OrganizationID, connectorType)
 		}
 		if err != nil {
+			if errors.Is(err, oauth.ErrResourceBoundToken) {
+				return apiError(c, fiber.StatusForbidden, "resource_bound_token", "Algolia authority is restricted to Integration Core's read-only MCP adapter.")
+			}
 			if errors.Is(err, store.ErrNotFound) {
 				return apiError(c, fiber.StatusNotFound, "connection_not_found", "No active connection exists for this organization and connector.")
 			}
@@ -1360,6 +1346,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 	})...)
 
 	registerCodexSubscriptionRoutes(app, cfg, codexSubscriptionModelPlaneAuth, internalOrBearerAuth, rateLimited)
+	registerZDRAcknowledgementRoutes(app, cfg, bearerOnlyAuth, rateLimited)
 
 	app.Get("/internal/gdpr/export", internalAuth, func(c *fiber.Ctx) error {
 		organizationID := strings.TrimSpace(c.Query("organizationId"))
@@ -1537,12 +1524,6 @@ type syncSourceRef struct {
 	URL        string `json:"url"`
 }
 
-type scimTokenBody struct {
-	OrganizationID string     `json:"organizationId"`
-	Name           string     `json:"name"`
-	ExpiresAt      *time.Time `json:"expiresAt"`
-}
-
 type actionBody struct {
 	Operation        string         `json:"operation"`
 	Params           map[string]any `json:"params"`
@@ -1558,6 +1539,30 @@ type executeActionBody struct {
 	Body             map[string]any `json:"body"`
 	WriteAttestation string         `json:"writeAttestation"`
 	IdempotencyKey   string         `json:"idempotencyKey"`
+}
+
+func integrationLandingPage(c *fiber.Ctx) error {
+	c.Set(fiber.HeaderContentType, "text/html; charset=utf-8")
+	c.Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+	c.Set("X-Content-Type-Options", "nosniff")
+	c.Set("X-Frame-Options", "DENY")
+	c.Set("Referrer-Policy", "no-referrer")
+	return c.SendString(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Integration Core</title>
+  <style>body{font:16px system-ui,sans-serif;max-width:42rem;margin:4rem auto;padding:0 1.25rem;color:#172033}code{background:#edf2f7;padding:.15rem .3rem;border-radius:.25rem}</style>
+</head>
+<body>
+  <main>
+    <h1>Integration Core</h1>
+    <p>OAuth connections and governed provider actions are available through authenticated services.</p>
+    <p>Service health: <code>/health</code> · readiness: <code>/ready</code></p>
+  </main>
+</body>
+</html>`)
 }
 
 func scopedConnection(c *fiber.Ctx, cfg ServerConfig, connectionID string) (store.Connection, error) {
@@ -2704,102 +2709,21 @@ func userIDForRequest(c *fiber.Ctx) string {
 	return ""
 }
 
-func scimBearerAuthorized(c *fiber.Ctx, cfg ServerConfig, organizationID string) bool {
-	authHeader := strings.TrimSpace(c.Get("Authorization"))
-	if !strings.HasPrefix(authHeader, "Bearer ") {
-		return false
-	}
-	token := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
-	if token == "" {
-		return false
-	}
-	if strings.TrimSpace(organizationID) != "" && cfg.Repo != nil {
-		scimToken, err := cfg.Repo.FindActiveSCIMTokenByHash(c.UserContext(), strings.TrimSpace(organizationID), scimTokenHash(token))
-		if err == nil {
-			_ = cfg.Repo.MarkSCIMTokenUsed(c.UserContext(), scimToken.ID, time.Now().UTC())
-			return true
-		}
-	}
-	expected := strings.TrimSpace(cfg.Config.SCIMBearerToken)
-	if len(cfg.Config.SCIMBearerTokens) > 0 {
-		expected = strings.TrimSpace(cfg.Config.SCIMBearerTokens[strings.TrimSpace(organizationID)])
-	}
-	return expected != "" && hmac.Equal([]byte(token), []byte(expected))
-}
-
-func scimTokenHash(token string) string {
-	sum := sha256.Sum256([]byte(strings.TrimSpace(token)))
-	return hex.EncodeToString(sum[:])
-}
-
-func scimTokenPrefix(token string) string {
-	token = strings.TrimSpace(token)
-	if len(token) <= 12 {
-		return token
-	}
-	return token[:12]
-}
-
-func scimEventType(method, resourcePath string) string {
-	resource := strings.ToLower(strings.Trim(resourcePath, "/"))
-	if resource == "" {
-		resource = "root"
-	}
-	resource = strings.ReplaceAll(resource, "/", ".")
-	return "scim." + strings.ToLower(method) + "." + resource
-}
-
-func scimResponse(c *fiber.Ctx, event store.WebhookEvent, resourcePath string, payload map[string]any) error {
-	resourceType := scimResourceType(resourcePath)
-	switch c.Method() {
-	case fiber.MethodGet:
-		return c.JSON(fiber.Map{
-			"schemas":      []string{"urn:ietf:params:scim:api:messages:2.0:ListResponse"},
-			"totalResults": 0,
-			"startIndex":   1,
-			"itemsPerPage": 0,
-			"Resources":    []fiber.Map{},
-		})
-	case fiber.MethodDelete:
-		return c.SendStatus(fiber.StatusNoContent)
-	case fiber.MethodPost:
-		return c.Status(fiber.StatusCreated).JSON(scimResource(event, resourceType, payload))
-	default:
-		return c.JSON(scimResource(event, resourceType, payload))
-	}
-}
-
-func scimResource(event store.WebhookEvent, resourceType string, payload map[string]any) fiber.Map {
-	return fiber.Map{
-		"schemas":    []string{"urn:ietf:params:scim:schemas:core:2.0:" + resourceType},
-		"id":         firstNonEmpty(stringFromAny(payload["id"]), stringFromAny(payload["externalId"]), event.ID),
-		"externalId": stringFromAny(payload["externalId"]),
-		"userName":   stringFromAny(payload["userName"]),
-		"active":     payload["active"],
-		"meta": fiber.Map{
-			"resourceType": resourceType,
-			"created":      event.ReceivedAt,
-			"lastModified": event.ReceivedAt,
-		},
-	}
-}
-
-func scimResourceType(resourcePath string) string {
-	switch {
-	case strings.HasPrefix(strings.ToLower(resourcePath), "groups"):
-		return "Group"
-	default:
-		return "User"
-	}
-}
-
 func scimError(c *fiber.Ctx, status int, scimType, detail string) error {
-	return c.Status(status).JSON(fiber.Map{
-		"schemas":  []string{"urn:ietf:params:scim:api:messages:2.0:Error"},
-		"scimType": scimType,
-		"detail":   detail,
-		"status":   status,
-	})
+	body := fiber.Map{
+		"schemas": []string{"urn:ietf:params:scim:api:messages:2.0:Error"},
+		"detail":  detail,
+		"status":  strconv.Itoa(status),
+	}
+	if scimType != "" {
+		body["scimType"] = scimType
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	c.Set(fiber.HeaderContentType, "application/scim+json")
+	return c.Status(status).Send(payload)
 }
 
 func recordTokenLease(ctx context.Context, cfg ServerConfig, token oauth.AccessTokenResult, consumer string) error {
@@ -2978,6 +2902,10 @@ func runGDPRDelete(ctx context.Context, cfg ServerConfig, body gdprRequestBody) 
 				return deleteErr
 			}
 			deletedIDs = append(deletedIDs, deleted.ID)
+			// The removed connection's live acknowledgements end in this same transaction (audited).
+			if _, err := store.RevokeAcknowledgementsOnRemoval(ctx, tx, deleted.ID, now); err != nil {
+				return err
+			}
 			if err := persist(store.AuditEvent{
 				ID:             "audit:integration:gdpr-connection-deleted:" + deleted.ID,
 				OrganizationID: deleted.OrganizationID,
@@ -2989,6 +2917,26 @@ func runGDPRDelete(ctx context.Context, cfg ServerConfig, body gdprRequestBody) 
 					"reason":          strings.TrimSpace(body.Reason),
 					"tokenPolicy":     "encrypted_tokens_cleared",
 					"consentsRevoked": len(consents),
+				},
+				CreatedAt: now,
+			}); err != nil {
+				return err
+			}
+		}
+		if userID == "" {
+			// An organisation-wide delete is the organisation purge: its ZDR records and acknowledgements
+			// are erased. A user-level delete keeps the revoked rows for the audit window instead.
+			purged, purgeErr := tx.PurgeOrganizationConnectionZDR(ctx, organizationID)
+			if purgeErr != nil {
+				return purgeErr
+			}
+			if err := persist(store.AuditEvent{
+				ID:             auditMutationID(ctx, "gdpr-zdr-purged", organizationID),
+				OrganizationID: organizationID,
+				EventType:      "gdpr.integration.zdr_purged",
+				Metadata: map[string]any{
+					"records":          purged.Records,
+					"acknowledgements": purged.Acknowledgements,
 				},
 				CreatedAt: now,
 			}); err != nil {
@@ -3468,6 +3416,10 @@ func requiredCapabilityForOperation(providerKey, operation string) (string, bool
 			return "drive.read", false
 		case "drive.file.content", "google.drive.file.content":
 			return "drive.read", false
+		case "gsc.sites.list", "google.gsc.sites.list", "gsc.search_analytics.query", "google.gsc.search_analytics.query":
+			return "search_console.read", true
+		case "ga4.account_summaries.list", "ga4.data_streams.list", "ga4.report.run", "ga4.reporting_host.resolve":
+			return "analytics.read", true
 		}
 	case "github":
 		switch normalized {
@@ -3745,6 +3697,20 @@ func actionError(c *fiber.Ctx, err error) error {
 	}
 }
 
+func readinessError(c *fiber.Ctx, err error) error {
+	switch {
+	case errors.Is(err, readiness.ErrUnsupportedProvider):
+		return apiError(c, fiber.StatusBadRequest, "readiness_not_supported", "This connection does not support a marketing readiness check.")
+	case errors.Is(err, readiness.ErrUnavailable):
+		return apiError(c, fiber.StatusServiceUnavailable, "readiness_unavailable", "Marketing readiness is not configured.")
+	default:
+		// Provider responses can contain account and configuration details. Do
+		// not reflect them through this endpoint; the caller receives a
+		// normalized failure and can reconnect or retry later.
+		return apiError(c, fiber.StatusBadGateway, "readiness_probe_failed", "The provider readiness check could not be completed.")
+	}
+}
+
 func authAwareError(c *fiber.Ctx, err error) error {
 	var authErr auth.Error
 	if errors.As(err, &authErr) {
@@ -3943,6 +3909,10 @@ func callbackHTML(result oauth.CallbackResult) string {
 	if result.Success {
 		status = "success"
 	}
+	messageText := result.Message
+	if result.ReturnURLRejected && messageText == "" {
+		messageText = "Connection completed. The return destination is no longer approved; return to the application and refresh integrations."
+	}
 	payload, _ := json.Marshal(map[string]string{
 		"type":         "verevon.integration.connected",
 		"status":       status,
@@ -3950,26 +3920,27 @@ func callbackHTML(result oauth.CallbackResult) string {
 		"connectionId": result.ConnectionID,
 		"provider":     result.ProviderKey,
 		"errorCode":    result.ErrorCode,
-		"message":      result.Message,
+		"message":      messageText,
 	})
 	payloadScript := strings.ReplaceAll(string(payload), "<", "\\u003c")
-	message := html.EscapeString(result.Message)
-	returnURL := html.EscapeString(result.ReturnURL)
+	message := html.EscapeString(messageText)
+	returnURLJSON, _ := json.Marshal(result.ReturnURL)
+	returnOriginJSON, _ := json.Marshal(result.ReturnOrigin)
 	heading := "Tilkoblingen feilet"
 	if result.Success {
 		heading = "Tilkoblet"
 	}
-	// Auto-close ONLY on success. Providers with Cross-Origin-Opener-Policy
+	// Auto-close only on ordinary success. Providers with Cross-Origin-Opener-Policy
 	// (X, LinkedIn, Microsoft) sever window.opener, so the postMessage below is
 	// best-effort — the SPA's authoritative signal is the connect-session
-	// status endpoint. On error the window stays open so the user can actually
-	// read what went wrong (it used to close itself after 250ms).
+	// status endpoint. Errors and revoked in-flight return destinations leave the
+	// window readable so the user can return to the application themselves.
 	autoClose := ""
-	if result.Success {
+	if result.Success && !result.ReturnURLRejected {
 		autoClose = `
   window.setTimeout(function () {
     try { window.close(); } catch (_) {}
-    if ("` + returnURL + `") window.location.href = "` + returnURL + `";
+    if (returnURL) window.location.href = returnURL;
   }, 900);`
 	}
 	return `<!doctype html>
@@ -3979,8 +3950,10 @@ func callbackHTML(result oauth.CallbackResult) string {
 <script>
 (function () {
   var payload = ` + payloadScript + `;
+  var returnURL = ` + string(returnURLJSON) + `;
+  var returnOrigin = ` + string(returnOriginJSON) + `;
   try {
-    if (window.opener) window.opener.postMessage(payload, "*");
+    if (window.opener && returnOrigin) window.opener.postMessage(payload, returnOrigin);
   } catch (_) {}` + autoClose + `
 })();
 </script>

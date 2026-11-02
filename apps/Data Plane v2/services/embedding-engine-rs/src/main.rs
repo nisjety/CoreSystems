@@ -402,7 +402,7 @@ async fn main() -> anyhow::Result<()> {
     // `tokio::select!` below) so a shared-broker outage never takes down the
     // admin HTTP server or the embedding consumers: it binds a
     // pre-provisioned pull consumer on the SHARED cross-plane broker
-    // (control-shared-nats, stream AQENCIA_CONTROLPLANE) under its own
+    // (control-shared-nats, stream CONTROLPLANE) under its own
     // dedicated `embedding-engine-gdpr` identity
     // (EMBEDDING_ENGINE_GDPR_NATS_URL/_USER/_PASSWORD) — never this
     // service's own Data-Plane-local `cfg.nats_url` connection, which does

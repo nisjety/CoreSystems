@@ -10,6 +10,7 @@
 //! lives (capability-core).
 
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 /// JSON-RPC protocol version string.
 pub const JSONRPC_VERSION: &str = "2.0";
@@ -96,6 +97,21 @@ pub enum McpSideEffect {
     Undeclared,
 }
 
+impl McpSideEffect {
+    /// The wire label capability-core stores as `declared_side_effect`. Rust
+    /// interprets the MCP spec's hint defaults once, here; Go only decides how
+    /// far to believe the result.
+    #[must_use]
+    pub const fn as_wire(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read_only",
+            Self::Destructive => "destructive",
+            Self::NonDestructiveWrite => "non_destructive_write",
+            Self::Undeclared => "undeclared",
+        }
+    }
+}
+
 impl McpToolAnnotations {
     /// Collapse the hints into a single classification, applying the MCP
     /// spec's interpretation rules: `destructiveHint` matters only when the
@@ -146,6 +162,112 @@ pub struct McpToolDef {
     pub input_schema_json: String,
     /// The server's own side-effect hints. Empty when it supplied none.
     pub annotations: McpToolAnnotations,
+}
+
+/// Version of the canonical form [`McpToolDef::digest`] hashes. A change to the
+/// set of fields or to how they are rendered must bump it, so a digest produced
+/// under one form is never compared with one produced under another.
+const TOOL_DIGEST_VERSION: u32 = 1;
+
+impl McpToolDef {
+    /// The tool's `inputSchema` as a JSON value. A schema the server sent that
+    /// does not parse still takes part in the digest, as the raw string, so a
+    /// server cannot change it unnoticed by making it unparseable.
+    fn input_schema_value(&self) -> Value {
+        serde_json::from_str(&self.input_schema_json)
+            .unwrap_or_else(|_| Value::String(self.input_schema_json.clone()))
+    }
+
+    /// Lowercase hex SHA-256 over the canonical form of everything the server
+    /// said about this tool that a caller could act on: name, description,
+    /// input schema and the five annotation hints (`null` when absent, so a
+    /// hint going from silent to `false` is a change).
+    ///
+    /// The canonical form is rendered by [`canonical_json`], which sorts every
+    /// object's keys itself instead of relying on `serde_json`'s map order: the
+    /// `preserve_order` feature can be switched on by any crate in the build,
+    /// and a digest that depends on it would flip with an unrelated dependency.
+    #[must_use]
+    pub fn digest(&self) -> String {
+        let annotations = &self.annotations;
+        let document = json!({
+            "v": TOOL_DIGEST_VERSION,
+            "name": self.name,
+            "description": self.description,
+            "inputSchema": self.input_schema_value(),
+            "annotations": {
+                "title": annotations.title,
+                "readOnlyHint": annotations.read_only_hint,
+                "destructiveHint": annotations.destructive_hint,
+                "idempotentHint": annotations.idempotent_hint,
+                "openWorldHint": annotations.open_world_hint,
+            },
+        });
+        sha256_hex(canonical_json(&document).as_bytes())
+    }
+
+    /// Lowercase hex SHA-256 of the description text. Lets a reviewer tell a
+    /// description edit from a schema edit without the registry ever storing
+    /// either.
+    #[must_use]
+    pub fn description_sha256(&self) -> String {
+        sha256_hex(self.description.as_bytes())
+    }
+
+    /// Lowercase hex SHA-256 of the canonical `inputSchema`.
+    #[must_use]
+    pub fn schema_sha256(&self) -> String {
+        sha256_hex(canonical_json(&self.input_schema_value()).as_bytes())
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        hex.push(char::from_digit(u32::from(byte >> 4), 16).expect("nibble is < 16"));
+        hex.push(char::from_digit(u32::from(byte & 0x0f), 16).expect("nibble is < 16"));
+    }
+    hex
+}
+
+/// Render `value` as JSON with no whitespace and every object's keys in sorted
+/// order, recursively. Arrays keep their order (it is meaningful), strings and
+/// numbers use `serde_json`'s own rendering.
+fn canonical_json(value: &Value) -> String {
+    let mut out = String::new();
+    write_canonical(value, &mut out);
+    out
+}
+
+fn write_canonical(value: &Value, out: &mut String) {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort_unstable();
+            out.push('{');
+            for (index, key) in keys.into_iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                out.push_str(&Value::String(key.clone()).to_string());
+                out.push(':');
+                write_canonical(&map[key], out);
+            }
+            out.push('}');
+        }
+        Value::Array(items) => {
+            out.push('[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                write_canonical(item, out);
+            }
+            out.push(']');
+        }
+        scalar => out.push_str(&scalar.to_string()),
+    }
 }
 
 /// Build a `tools/list` request — discovers the tools an MCP server exposes,
@@ -533,6 +655,125 @@ mod tests {
             McpSideEffect::Undeclared
         );
         assert!(page.tools[1].annotations.is_empty());
+    }
+
+    /// The tool the digest vectors below are computed over. Mirrored by the
+    /// registry's own tests, which feed the same digest string through the
+    /// observation route.
+    fn echo_read() -> McpToolDef {
+        McpToolDef {
+            name: "echo_read".to_owned(),
+            description: "Echo the text back.".to_owned(),
+            input_schema_json:
+                r#"{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}"#
+                    .to_owned(),
+            annotations: McpToolAnnotations {
+                read_only_hint: Some(true),
+                ..McpToolAnnotations::default()
+            },
+        }
+    }
+
+    // CROSS-LANGUAGE KNOWN-ANSWER VECTOR. The same digest is accepted by
+    // capability-core's observation route in
+    // go/services/capability-core/internal/api/mcp_tools_test.go
+    // (knownAnswerToolDigest); the value was also reproduced independently by
+    // hashing the canonical form below with another implementation.
+    // canonical form:
+    // {"annotations":{"destructiveHint":null,"idempotentHint":null,"openWorldHint":null,"readOnlyHint":true,"title":null},"description":"Echo the text back.","inputSchema":{"properties":{"text":{"type":"string"}},"required":["text"],"type":"object"},"name":"echo_read","v":1}
+    const ECHO_READ_DIGEST: &str =
+        "aad57097d17d7540d459e94756b10a2b703a9281b3988441933a3ac682bc8f95";
+    const ECHO_READ_DESCRIPTION_SHA256: &str =
+        "154d65d3a5b2b5e71b01b1e62a7417b232c56cc2261e14bd1cdd4b8861ac43ac";
+    const ECHO_READ_SCHEMA_SHA256: &str =
+        "e3dce8d1afb8d03604af3bc6729219a5cd7df05558807b6e44e391d56fdf75d9";
+
+    #[test]
+    fn tool_digest_matches_the_known_answer_vector() {
+        let tool = echo_read();
+        assert_eq!(tool.digest(), ECHO_READ_DIGEST);
+        assert_eq!(tool.description_sha256(), ECHO_READ_DESCRIPTION_SHA256);
+        assert_eq!(tool.schema_sha256(), ECHO_READ_SCHEMA_SHA256);
+    }
+
+    #[test]
+    fn tool_digest_is_stable_under_schema_key_order() {
+        // The same schema with every object's keys in another order is the same
+        // definition, so it must not read as drift.
+        let mut reordered = echo_read();
+        reordered.input_schema_json =
+            r#"{"required":["text"],"properties":{"text":{"type":"string"}},"type":"object"}"#
+                .to_owned();
+        assert_eq!(reordered.digest(), ECHO_READ_DIGEST);
+        assert_eq!(reordered.schema_sha256(), ECHO_READ_SCHEMA_SHA256);
+    }
+
+    #[test]
+    fn a_description_only_change_changes_the_digest() {
+        let mut changed = echo_read();
+        changed.description = "Echo the text back, then email it.".to_owned();
+        assert_ne!(changed.digest(), ECHO_READ_DIGEST);
+        assert_ne!(changed.description_sha256(), ECHO_READ_DESCRIPTION_SHA256);
+        // The schema did not move, so a reviewer can see which half changed.
+        assert_eq!(changed.schema_sha256(), ECHO_READ_SCHEMA_SHA256);
+    }
+
+    #[test]
+    fn a_schema_change_changes_the_digest() {
+        let mut changed = echo_read();
+        changed.input_schema_json =
+            r#"{"type":"object","properties":{"text":{"type":"string"},"to":{"type":"string"}},"required":["text"]}"#
+                .to_owned();
+        assert_ne!(changed.digest(), ECHO_READ_DIGEST);
+        assert_ne!(changed.schema_sha256(), ECHO_READ_SCHEMA_SHA256);
+        assert_eq!(changed.description_sha256(), ECHO_READ_DESCRIPTION_SHA256);
+    }
+
+    #[test]
+    fn an_array_order_change_changes_the_digest() {
+        // Unlike object keys, array order is meaningful (`required`, `enum`).
+        let mut changed = echo_read();
+        changed.input_schema_json =
+            r#"{"type":"object","properties":{"text":{"type":"string"}},"required":["text","to"]}"#
+                .to_owned();
+        let mut swapped = changed.clone();
+        swapped.input_schema_json =
+            r#"{"type":"object","properties":{"text":{"type":"string"}},"required":["to","text"]}"#
+                .to_owned();
+        assert_ne!(changed.digest(), swapped.digest());
+    }
+
+    #[test]
+    fn an_annotation_change_changes_the_digest_and_silence_differs_from_false() {
+        let mut flipped = echo_read();
+        flipped.annotations.read_only_hint = Some(false);
+        assert_ne!(flipped.digest(), ECHO_READ_DIGEST);
+
+        let mut silent = echo_read();
+        silent.annotations.read_only_hint = None;
+        assert_ne!(silent.digest(), ECHO_READ_DIGEST);
+        assert_ne!(silent.digest(), flipped.digest());
+    }
+
+    #[test]
+    fn an_unparseable_schema_still_takes_part_in_the_digest() {
+        let mut broken = echo_read();
+        broken.input_schema_json = "{not json".to_owned();
+        let mut other = echo_read();
+        other.input_schema_json = "{also not json".to_owned();
+        assert_ne!(broken.digest(), ECHO_READ_DIGEST);
+        assert_ne!(broken.digest(), other.digest());
+    }
+
+    #[test]
+    fn side_effect_wire_labels_are_the_registry_vocabulary() {
+        assert_eq!(McpSideEffect::ReadOnly.as_wire(), "read_only");
+        assert_eq!(McpSideEffect::Destructive.as_wire(), "destructive");
+        assert_eq!(
+            McpSideEffect::NonDestructiveWrite.as_wire(),
+            "non_destructive_write"
+        );
+        assert_eq!(McpSideEffect::Undeclared.as_wire(), "undeclared");
     }
 
     #[test]

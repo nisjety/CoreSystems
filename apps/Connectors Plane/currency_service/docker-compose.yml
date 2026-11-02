@@ -1,0 +1,35 @@
+services:
+  currency_service:
+    build: .
+    container_name: currency_service
+    env_file:
+      - .env.production
+    ports:
+      - "${CURRENCY_PORT:-5004}:${CURRENCY_PORT:-5004}"
+    environment:
+      - CURRENCY_CACHE_DIR=/app/cache/rates
+      - FLASK_ENV=production
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./cache:/app/cache
+      - ./app/gcp-credentials.json:/app/gcp-credentials.json:ro
+    networks:
+      - aquatiq-backend
+      - aquatiq-public
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:${CURRENCY_PORT:-5004}/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  aquatiq-backend:
+    external: true
+  aquatiq-public:
+    external: true
+    name: aquatiq-integrations_aquatiq-network

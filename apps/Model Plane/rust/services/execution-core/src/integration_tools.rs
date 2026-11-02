@@ -15,11 +15,13 @@
 //!     connections (from GET /api/v1/connections) crossed with the static
 //!     operations catalog below. Not in `permission::is_risky_tool`, so it
 //!     runs under `ask` posture without a gate.
-//!   * `execute_provider_action` — runs one operation. Listed in
-//!     `permission::is_risky_tool`, so under `ask` posture the run pauses for
-//!     explicit human approval first (same spine as `book_shipment`); the
-//!     approval reference is then forwarded as `approvalId` in the body to
-//!     satisfy integration-corev2's own write-approval check.
+//!   * `execute_provider_action` — runs one operation. Under `ask` posture
+//!     `permission::is_risky_call` classifies it by its `operation`: a
+//!     catalogued read runs without a gate, while a write or an uncatalogued
+//!     operation pauses for explicit human approval first (same spine as
+//!     `book_shipment`). The approval reference is then forwarded as
+//!     `approvalId` in the body to satisfy integration-corev2's own
+//!     write-approval check.
 //!
 //! Transport (Auth Core `ingestion` audience service token):
 //!   GET  {INTEGRATION_COREV2_URL}/api/v1/connections?organizationId=<org>
@@ -37,6 +39,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
+use mp_contracts::provider_reads::READ_OPERATIONS;
 use serde_json::Value;
 
 use crate::attestation;
@@ -99,18 +102,26 @@ const CATALOG: &[(&str, &[CatalogOp])] = &[
         "google",
         &[
             CatalogOp { operation: "gmail.send", is_write: true, summary: "Send an email via Gmail. body.{to,subject,bodyText}." },
-            CatalogOp { operation: "gmail.messages", is_write: false, summary: "Read-only: list Gmail message ids in the mailbox (Gmail users.messages.list — id + threadId only, no subject/snippet). params.maxResults (default 10, max 100). No server-side query/search filter is implemented yet." },
-            CatalogOp { operation: "calendar.events", is_write: false, summary: "List upcoming Google Calendar events." },
-            CatalogOp { operation: "drive.files", is_write: false, summary: "List Google Drive files." },
+            CatalogOp { operation: "gmail.messages", is_write: false, summary: "Read-only: list Gmail messages (ids and threadIds; with headers=true also subject, from, to, cc, date, snippet, labelIds). params.query (Gmail search syntax), from, since and until (YYYY-MM-DD), folder (inbox | sent | drafts | archive | deleted), unread, headers, maxResults (default 10, max 100), pageToken." },
+            CatalogOp { operation: "gmail.messages.get", is_write: false, summary: "Read-only: read one Gmail message (headers and body text). params.id, the message id from gmail.messages." },
+            CatalogOp { operation: "calendar.events", is_write: false, summary: "Read-only: list Google Calendar events. params.since and until (YYYY-MM-DD, or a local date-time in Europe/Oslo), query, maxResults (default 10, max 100), pageToken." },
+            CatalogOp { operation: "drive.files", is_write: false, summary: "Read-only: list Google Drive files. params.query, match (name | text, default name), folderId, driveId (one shared drive), maxResults (default 10, max 100), pageToken." },
+            CatalogOp { operation: "drive.file.content", is_write: false, summary: "Read-only: read one Drive file as base64. Docs, Sheets and Slides export as text with exportAs=text. params.fileId (from drive.files), mimeType, exportAs." },
+            CatalogOp { operation: "profile", is_write: false, summary: "Read-only: the connected Google account profile (OpenID userinfo)." },
         ],
     ),
     (
         "microsoft",
         &[
             CatalogOp { operation: "mail.send", is_write: true, summary: "Send an Outlook email. body.{to,subject,bodyText}." },
-            CatalogOp { operation: "mail.messages", is_write: false, summary: "Read-only: list recent Outlook messages (Microsoft Graph /me/messages — id, subject, from, receivedDateTime, webLink). params.maxResults (default 10, max 100). No server-side query/search filter is implemented yet." },
-            CatalogOp { operation: "drive.files", is_write: false, summary: "Read-only: list files in the connected OneDrive root folder (Microsoft Graph /me/drive/root/children — id, name, webUrl, file/folder metadata, lastModifiedDateTime). params.maxResults (default 10, max 100)." },
-            CatalogOp { operation: "calendar.events", is_write: false, summary: "List Outlook calendar events." },
+            CatalogOp { operation: "mail.messages", is_write: false, summary: "Read-only: list recent Outlook messages (id, subject, from, receivedDateTime, webLink, bodyPreview). params.query, from, since and until (YYYY-MM-DD), folder (inbox | sent | drafts | archive | deleted), unread, maxResults (default 10, max 100), pageToken." },
+            CatalogOp { operation: "mail.messages.get", is_write: false, summary: "Read-only: read one Outlook message (headers, body and attachment metadata). params.messageId, the id from mail.messages." },
+            CatalogOp { operation: "drive.files", is_write: false, summary: "Read-only: list files in the connected OneDrive, or in one SharePoint library when driveId is given. params.query, folderId, driveId, maxResults (default 10, max 100), pageToken." },
+            CatalogOp { operation: "drive.file.content", is_write: false, summary: "Read-only: read one OneDrive or SharePoint file as base64. params.itemId (from drive.files), driveId." },
+            CatalogOp { operation: "sharepoint.sites", is_write: false, summary: "Read-only: list the SharePoint sites the user can see. params.query (default all sites), pageToken." },
+            CatalogOp { operation: "sharepoint.drives", is_write: false, summary: "Read-only: list the document libraries of one SharePoint site. params.siteId (from sharepoint.sites), pageToken." },
+            CatalogOp { operation: "profile", is_write: false, summary: "Read-only: the connected Microsoft account profile (id, displayName, mail)." },
+            CatalogOp { operation: "calendar.events", is_write: false, summary: "Read-only: list Outlook calendar events. params.since and until (YYYY-MM-DD, or a local date-time in Europe/Oslo), query, maxResults (default 10, max 100), pageToken." },
         ],
     ),
     (
@@ -192,11 +203,11 @@ struct ConnectionSummary {
 
 impl IntegrationActionsClient {
     /// Build from the environment: `INTEGRATION_COREV2_URL` overrides the
-    /// host-published compose default; `INTEGRATION_COREV2_INTERNAL_KEY`
-    /// supplies the `x-internal-api-key` header (integration-corev2 gates
-    /// /api/v1/* on it). Returns `None` only when the reqwest client cannot be
-    /// built — a missing key still yields a client (the gateway will answer
-    /// 401, which surfaces as an honest tool error rather than a silent skip).
+    /// host-published compose default; `INGESTION_SERVICE_API_KEY` is sent as
+    /// the `x-service-api-key` header with `INGESTION_SERVICE_ID` (default
+    /// `model-execution`) as `x-service-id`. Returns `None` when the key is
+    /// unset or the reqwest client cannot be built, so the caller has no
+    /// provider-action client at all.
     #[must_use]
     pub fn from_env() -> Option<Self> {
         let base_url = std::env::var("INTEGRATION_COREV2_URL")
@@ -361,6 +372,12 @@ impl IntegrationActionsClient {
         if operation.trim().is_empty() {
             return Err("execute_provider_action requires operation".to_owned());
         }
+        // A write is attested to the person who approved it, so an approved write with no acting
+        // user has no one to bind to and goes nowhere (WS23-S8).
+        let is_write = approval_ref.is_some_and(|approval| !approval.trim().is_empty());
+        if is_write && actor_id.trim().is_empty() {
+            return Err("execute_provider_action requires the acting user for a write".to_owned());
+        }
         if let Some(approval) = approval_ref {
             if !approval.trim().is_empty() {
                 if !body.is_object() {
@@ -499,8 +516,8 @@ impl IntegrationActionsClient {
         params: Value,
         session_bearer: Option<&str>,
     ) -> Result<Value, String> {
-        if connection_id.trim().is_empty() {
-            return Err("read_action_json requires connection_id".to_owned());
+        if !is_connection_id(connection_id) {
+            return Err("read_action_json requires a valid connection_id".to_owned());
         }
         if operation.trim().is_empty() {
             return Err("read_action_json requires operation".to_owned());
@@ -510,6 +527,28 @@ impl IntegrationActionsClient {
             "params": params,
             "body": serde_json::json!({}),
         });
+        let (status, value) = self
+            .send_read(org_id, connection_id, request, session_bearer)
+            .await?;
+        if !status.is_success() {
+            return Err(format!(
+                "integration-corev2 read returned {status}: {}",
+                truncate(&value.to_string())
+            ));
+        }
+        Ok(value)
+    }
+
+    /// POST one read request with an `integration:read` token and return the gateway's status
+    /// and body. Shared by [`Self::read_action_json`] and [`Self::read_action`], so both reads
+    /// name the same credential and endpoint.
+    async fn send_read(
+        &self,
+        org_id: &str,
+        connection_id: &str,
+        request: Value,
+        session_bearer: Option<&str>,
+    ) -> Result<(reqwest::StatusCode, Value), String> {
         let token = self
             .resolve_ingestion_token(org_id, "integration:read", session_bearer)
             .await?;
@@ -530,13 +569,72 @@ impl IntegrationActionsClient {
             .json()
             .await
             .map_err(|e| format!("integration-corev2 read decode failed: {e}"))?;
-        if !status.is_success() {
-            return Err(format!(
-                "integration-corev2 read returned {status}: {}",
-                truncate(&value.to_string())
+        Ok((status, value))
+    }
+
+    /// One connected-app read for the model (WS23-S3). The operation must be one the contract
+    /// lists as a read, so a write cannot reach the executor from here. The parameters are cut
+    /// to that operation's own list (a body is never sent), `maxResults` is clamped, and the
+    /// answer is shaped to the fields the model needs. The token is `integration:read` only.
+    ///
+    /// # Errors
+    ///
+    /// [`ReadError::UnknownOperation`] for any operation the contract does not list as a read,
+    /// [`ReadError::Refused`] for a missing connection, and [`ReadError::Upstream`] for a
+    /// transport or provider failure. A connection that needs reconnecting or a missing
+    /// capability is an answer, not an error: it comes back as a typed status.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn read_action(
+        &self,
+        org_id: &str,
+        connection_id: &str,
+        operation: &str,
+        params: &Value,
+        max_results: Option<u64>,
+        page_token: Option<&str>,
+        session_bearer: Option<&str>,
+    ) -> Result<ProviderRead, ReadError> {
+        let Some(allowed) = read_operation_params(operation) else {
+            return Err(ReadError::UnknownOperation(operation.trim().to_owned()));
+        };
+        if !is_connection_id(connection_id) {
+            return Err(ReadError::Refused(
+                "read_provider_action requires a valid connection_id".to_owned(),
             ));
         }
-        Ok(value)
+        let mut request_params = serde_json::Map::new();
+        if let Value::Object(given) = params {
+            for (key, value) in given {
+                if allowed.contains(&key.as_str()) {
+                    request_params.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        if allowed.contains(&"maxResults") {
+            let limit = max_results
+                .unwrap_or(READ_MAX_RESULTS)
+                .clamp(1, READ_MAX_RESULTS);
+            request_params.insert("maxResults".to_owned(), Value::from(limit));
+        }
+        if let Some(token) = page_token.map(str::trim).filter(|token| !token.is_empty()) {
+            if allowed.contains(&"pageToken") {
+                request_params.insert("pageToken".to_owned(), Value::from(token));
+            }
+        }
+        let request = serde_json::json!({
+            "operation": operation,
+            "params": request_params,
+            "body": serde_json::json!({}),
+        });
+        let (status, value) = self
+            .send_read(org_id, connection_id, request, session_bearer)
+            .await
+            .map_err(ReadError::Upstream)?;
+        if !status.is_success() {
+            return read_failure(&value);
+        }
+        let result = value.pointer("/data/action/result").unwrap_or(&Value::Null);
+        Ok(shape_read(operation, &request_params, result))
     }
 
     async fn mint_ingestion_token(&self, org_id: &str, scope: &str) -> Result<String, String> {
@@ -689,6 +787,347 @@ impl IntegrationActionsClient {
 /// surfaced to a tool caller directly.
 const DELEGATION_NOT_CONFIGURED: &str = "__delegation_not_configured__";
 
+/// Largest text the model reads back from one connected-app read, in characters. The render
+/// drops items that do not fit and says how many, so a read is never silently cut.
+pub const READ_RESULT_CHAR_CAP: usize = 12_000;
+/// Most items one read asks the provider for; a larger request is clamped to it.
+pub const READ_MAX_RESULTS: u64 = 25;
+/// Largest mail body or file text kept on one item.
+const BODY_CHAR_CAP: usize = 8_000;
+/// Keys a provider list response carries its rows under (Graph, Gmail, Drive and Sites).
+const LIST_KEYS: &[&str] = &["value", "messages", "events", "files", "sites", "drives", "items"];
+
+/// The environment switch for the read tool. Only the literal `true` enables it, and it is
+/// read on every offer, so a restart is not needed to turn it off.
+pub const PROVIDER_READ_TOOL_ENV: &str = "PROVIDER_READ_TOOL_ENABLED";
+
+/// Whether the deployment has switched the connected-app read tool on.
+#[must_use]
+pub fn provider_read_tool_enabled() -> bool {
+    parse_provider_read_tool_enabled(std::env::var(PROVIDER_READ_TOOL_ENV).ok().as_deref())
+}
+
+#[must_use]
+pub fn parse_provider_read_tool_enabled(raw: Option<&str>) -> bool {
+    raw == Some("true")
+}
+
+/// Whether a run is offered `read_provider_action` (WS23-S3, K3-15). It needs the switch, a run
+/// that is neither zero-retention nor Space-scoped, and at least one connection the user selected
+/// for the run. Nothing else selects a connection, so a run with no selection never gets the tool.
+#[must_use]
+pub fn read_provider_action_offered(
+    switched_on: bool,
+    zdr: bool,
+    space_scoped: bool,
+    connector_scope: &[String],
+) -> bool {
+    switched_on && !zdr && !space_scoped && !connector_scope.is_empty()
+}
+
+/// A connection id is spliced into the gateway path, so only the characters an id is made of may
+/// reach it: anything else (a `/`, `?` or `#`) could retarget the authenticated read.
+fn is_connection_id(connection_id: &str) -> bool {
+    !connection_id.is_empty()
+        && connection_id.len() <= 128
+        && connection_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+/// The read operations the tool may name, once each and sorted, for its closed `operation` enum.
+#[must_use]
+pub fn read_operation_names() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = READ_OPERATIONS.iter().map(|read| read.operation).collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
+/// The parameter names an operation's reads take, across the providers that serve it, or `None`
+/// when the contract lists no read by that name (a write, or an operation not yet catalogued).
+fn read_operation_params(operation: &str) -> Option<Vec<&'static str>> {
+    let mut names: Vec<&'static str> = Vec::new();
+    let mut found = false;
+    for read in READ_OPERATIONS
+        .iter()
+        .filter(|read| read.operation == operation)
+    {
+        found = true;
+        for name in read.params {
+            if !names.contains(name) {
+                names.push(name);
+            }
+        }
+    }
+    found.then_some(names)
+}
+
+/// The typed status of one read, as the model is told it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadStatus {
+    Ok,
+    NoResults,
+    ReconnectRequired,
+    CapabilityMissing,
+    TooLarge,
+    UnsupportedContent,
+}
+
+impl ReadStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::NoResults => "no_results",
+            Self::ReconnectRequired => "reconnect_required",
+            Self::CapabilityMissing => "capability_missing",
+            Self::TooLarge => "too_large",
+            Self::UnsupportedContent => "unsupported_content",
+        }
+    }
+}
+
+/// One connected-app read, shaped for the model. Built by [`IntegrationActionsClient::read_action`]
+/// and rendered once by [`render_provider_read`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProviderRead {
+    pub status: ReadStatus,
+    pub items: Vec<Value>,
+    pub next_page_token: Option<String>,
+    pub more_available: bool,
+}
+
+impl ProviderRead {
+    fn bare(status: ReadStatus) -> Self {
+        Self {
+            status,
+            items: Vec::new(),
+            next_page_token: None,
+            more_available: false,
+        }
+    }
+}
+
+/// Why a read did not run. A refusal the model should see as a tool error, not a status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadError {
+    UnknownOperation(String),
+    Refused(String),
+    Upstream(String),
+}
+
+impl ReadError {
+    #[must_use]
+    pub fn message(&self) -> String {
+        match self {
+            Self::UnknownOperation(operation) => format!(
+                "unknown_operation: '{operation}' is not a read operation; read_provider_action only reads"
+            ),
+            Self::Refused(message) | Self::Upstream(message) => message.clone(),
+        }
+    }
+}
+
+/// The gateway's refusal of a read. A connection that needs reconnecting and a missing capability
+/// are answers the model reports; anything else is a provider error.
+fn read_failure(value: &Value) -> Result<ProviderRead, ReadError> {
+    let status = match value.pointer("/error/code").and_then(Value::as_str) {
+        Some("reconnect_required") => ReadStatus::ReconnectRequired,
+        Some("capability_not_granted" | "capability_required") => ReadStatus::CapabilityMissing,
+        _ => {
+            let message = value
+                .pointer("/error/message")
+                .and_then(Value::as_str)
+                .map_or_else(|| truncate(&value.to_string()), str::to_owned);
+            return Err(ReadError::Upstream(message));
+        }
+    };
+    Ok(ProviderRead::bare(status))
+}
+
+/// Shape a successful read's provider payload to the fields its operation lists. Fields outside
+/// the list are dropped, a mail body is capped, and file content is returned only as text.
+fn shape_read(
+    operation: &str,
+    request: &serde_json::Map<String, Value>,
+    result: &Value,
+) -> ProviderRead {
+    if operation == "drive.file.content" {
+        return shape_file_content(request, result);
+    }
+    let fields = read_fields(operation);
+    let rows: Vec<&Value> = if operation.ends_with(".get") || operation == "profile" {
+        vec![result]
+    } else {
+        LIST_KEYS
+            .iter()
+            .find_map(|key| result.get(*key).and_then(Value::as_array))
+            .map(|rows| rows.iter().collect())
+            .unwrap_or_default()
+    };
+    let items: Vec<Value> = rows
+        .into_iter()
+        .filter(|row| row.is_object())
+        .map(|row| shape_item(row, fields))
+        .collect();
+    let next_page_token = result
+        .get("nextPageToken")
+        .or_else(|| result.get("next_page_token"))
+        .and_then(Value::as_str)
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned);
+    let status = if items.is_empty() {
+        ReadStatus::NoResults
+    } else {
+        ReadStatus::Ok
+    };
+    ProviderRead {
+        status,
+        items,
+        more_available: next_page_token.is_some(),
+        next_page_token,
+    }
+}
+
+/// File content is text or nothing: a binary file is `unsupported_content`, not a blob the model
+/// is handed. The text is capped and says so when it was cut.
+fn shape_file_content(request: &serde_json::Map<String, Value>, result: &Value) -> ProviderRead {
+    let mime = result
+        .get("mimeType")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let exported_as_text = request.get("exportAs").and_then(Value::as_str) == Some("text");
+    let Some(content) = result
+        .get("content")
+        .and_then(Value::as_str)
+        .filter(|_| exported_as_text || mime.starts_with("text/"))
+    else {
+        return ProviderRead::bare(ReadStatus::UnsupportedContent);
+    };
+    let (text, cut) = cap_chars(content, BODY_CHAR_CAP);
+    ProviderRead {
+        status: if cut {
+            ReadStatus::TooLarge
+        } else {
+            ReadStatus::Ok
+        },
+        items: vec![serde_json::json!({ "mimeType": mime, "text": text })],
+        next_page_token: None,
+        more_available: false,
+    }
+}
+
+fn shape_item(row: &Value, fields: &[&str]) -> Value {
+    let mut out = serde_json::Map::new();
+    for field in fields.iter().filter(|field| **field != "bodyText") {
+        if let Some(value) = row.get(*field) {
+            out.insert((*field).to_owned(), value.clone());
+        }
+    }
+    // Graph nests a sender's address; the model needs the address and name themselves.
+    if let Some(address) = out
+        .get("from")
+        .and_then(|from| from.pointer("/emailAddress"))
+        .cloned()
+    {
+        out.insert("from".to_owned(), address);
+    }
+    if fields.contains(&"bodyText") {
+        let body = row
+            .get("bodyText")
+            .or_else(|| row.pointer("/body/content"))
+            .and_then(Value::as_str);
+        if let Some(body) = body {
+            let (text, _) = cap_chars(body, BODY_CHAR_CAP);
+            out.insert("bodyText".to_owned(), Value::from(text));
+        }
+    }
+    Value::Object(out)
+}
+
+/// The fields an operation's rows keep. A field not named here never reaches the model.
+fn read_fields(operation: &str) -> &'static [&'static str] {
+    match operation {
+        "mail.messages" | "gmail.messages" => &[
+            "id",
+            "subject",
+            "from",
+            "receivedDateTime",
+            "snippet",
+            "webLink",
+        ],
+        "mail.messages.get" | "gmail.messages.get" => &[
+            "id",
+            "subject",
+            "from",
+            "receivedDateTime",
+            "snippet",
+            "webLink",
+            "bodyText",
+        ],
+        "calendar.events" => &[
+            "subject",
+            "start",
+            "end",
+            "location",
+            "organizer",
+            "webLink",
+        ],
+        "drive.files" | "sharepoint.drives" => &[
+            "id",
+            "name",
+            "mimeType",
+            "size",
+            "modifiedTime",
+            "lastModifiedDateTime",
+            "webUrl",
+            "webViewLink",
+        ],
+        "sharepoint.sites" => &["id", "name", "webUrl"],
+        "profile" => &["displayName", "mail", "userPrincipalName", "email"],
+        _ => &[],
+    }
+}
+
+/// The first `max` characters of `text`, and whether anything was cut.
+fn cap_chars(text: &str, max: usize) -> (String, bool) {
+    match text.char_indices().nth(max) {
+        Some((cut, _)) => (text[..cut].to_owned(), true),
+        None => (text.to_owned(), false),
+    }
+}
+
+/// The model's copy of one connected-app read: a JSON object with the typed status, the items,
+/// paging and how many items did not fit. It is capped at [`READ_RESULT_CHAR_CAP`] characters.
+/// Items that do not fit are dropped from the end and counted in `omitted`, and a read that
+/// dropped any reports `too_large`, so a partial answer is reported as partial.
+#[must_use]
+pub fn render_provider_read(read: &ProviderRead) -> String {
+    let mut items = read.items.clone();
+    let mut omitted = 0usize;
+    loop {
+        let status = if omitted > 0 {
+            ReadStatus::TooLarge
+        } else {
+            read.status
+        };
+        let rendered = serde_json::json!({
+            "status": status.as_str(),
+            "items": items,
+            "next_page_token": read.next_page_token,
+            "more_available": read.more_available,
+            "omitted": omitted,
+        })
+        .to_string();
+        if rendered.chars().count() <= READ_RESULT_CHAR_CAP || items.is_empty() {
+            return rendered;
+        }
+        items.pop();
+        omitted += 1;
+    }
+}
+
 fn parse_connections(value: &Value) -> Vec<ConnectionSummary> {
     // Envelope tolerance: {data:{connections:[…]}}, {connections:[…]}, or a
     // bare array — the Go handler's exact shape has moved before.
@@ -758,6 +1197,120 @@ pub fn operation_is_write(operation: &str) -> Option<bool> {
         }
     }
     None
+}
+
+/// Most recipients an approval names before it says how many more there are.
+const SUMMARY_RECIPIENTS: usize = 10;
+/// Most characters of a mail's subject an approval shows.
+const SUMMARY_SUBJECT_CHARS: usize = 200;
+/// Most characters of a mail's opening an approval shows.
+const SUMMARY_OPENING_CHARS: usize = 120;
+
+/// What a provider write would do, in words that follow "The agent would" (WS23-S8). Defined for a
+/// mail send only, and read the way integration-corev2 reads the send: the recipients in `body.to`
+/// (a comma-separated string or a list), the subject, and the first 120 characters of the
+/// plain-text body. `None` for every other operation and for an input that does not parse.
+///
+/// The caller keeps these words in the approval's reason and nowhere else. That reason is scrubbed,
+/// and no audit row, outbox event or log line repeats it.
+#[must_use]
+pub fn provider_effect_summary(tool_input: &str) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Input {
+        operation: String,
+        #[serde(default)]
+        body: Value,
+    }
+    let input: Input = serde_json::from_str(tool_input).ok()?;
+    if !is_mail_send(&input.operation) {
+        return None;
+    }
+    let recipients = mail_recipients(input.body.get("to"));
+    let mut summary = String::from("send an email to ");
+    if recipients.is_empty() {
+        summary.push_str("no one");
+    } else {
+        let shown: Vec<&str> = recipients
+            .iter()
+            .take(SUMMARY_RECIPIENTS)
+            .map(String::as_str)
+            .collect();
+        summary.push_str(&shown.join(", "));
+        if recipients.len() > SUMMARY_RECIPIENTS {
+            let _ = write!(
+                summary,
+                " and {} more",
+                recipients.len() - SUMMARY_RECIPIENTS
+            );
+        }
+    }
+    match input
+        .body
+        .get("subject")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|subject| !subject.is_empty())
+    {
+        Some(subject) => {
+            let _ = write!(
+                summary,
+                " with the subject '{}'",
+                one_line(subject, SUMMARY_SUBJECT_CHARS)
+            );
+        }
+        None => summary.push_str(" with no subject"),
+    }
+    if let Some(text) = input
+        .body
+        .get("bodyText")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        let _ = write!(
+            summary,
+            "; it opens '{}'",
+            one_line(text, SUMMARY_OPENING_CHARS)
+        );
+    }
+    Some(summary)
+}
+
+/// Whether an operation sends a mail, under the names integration-corev2 gates for approval.
+fn is_mail_send(operation: &str) -> bool {
+    matches!(
+        operation.trim().to_ascii_lowercase().as_str(),
+        "gmail.send" | "google.gmail.send" | "mail.send" | "microsoft.mail.send"
+    )
+}
+
+/// The recipients a mail send reaches, split as integration-corev2 splits them: a string on commas,
+/// or each string item of a list.
+fn mail_recipients(to: Option<&Value>) -> Vec<String> {
+    let raw: Vec<&str> = match to {
+        Some(Value::String(list)) => list.split(',').collect(),
+        Some(Value::Array(items)) => items.iter().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    };
+    raw.into_iter()
+        .map(str::trim)
+        .filter(|recipient| !recipient.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The first `max` characters of `text` on one line, marked when cut. A line break becomes a
+/// space, so a summary never spans lines in an approval.
+fn one_line(text: &str, max: usize) -> String {
+    let mut line: String = text
+        .chars()
+        .take(max)
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    if text.chars().count() > max {
+        line.push('…');
+    }
+    line
 }
 
 fn render_provider_actions(connections: &[ConnectionSummary]) -> String {
@@ -1054,6 +1607,426 @@ mod tests {
         assert_eq!(operation_is_write("totally.made.up"), None);
         assert_eq!(operation_is_write(""), None);
         assert_eq!(operation_is_write("   "), None);
+    }
+
+    /// Pins today's gating table end to end (classification here, the ask-mode
+    /// decision in `permission::is_risky_call`), so a catalogue edit is a
+    /// deliberate change and not a silent widening. Catalogued reads run
+    /// ungated; uncatalogued operations are `None` and therefore gated, because
+    /// integration-corev2 leaves them ungated and exec-core must not guess they
+    /// are reads.
+    #[test]
+    fn current_gating_table_is_pinned() {
+        use crate::permission::is_risky_call;
+
+        let input = |operation: &str| serde_json::json!({ "operation": operation }).to_string();
+
+        for read in [
+            "pages.list",
+            "ads.insights",
+            "mail.messages",
+            "microsoft.mail.messages",
+            "gmail.messages",
+            "google.gmail.messages",
+            "drive.files",
+            "calendar.events",
+            "mail.messages.get",
+            "microsoft.mail.messages.get",
+            "gmail.messages.get",
+            "google.gmail.messages.get",
+            "drive.file.content",
+            "microsoft.drive.file.content",
+            "sharepoint.sites",
+            "sharepoint.drives",
+            "profile",
+            "microsoft.profile",
+            "google.profile",
+        ] {
+            assert_eq!(operation_is_write(read), Some(false), "{read} must stay a read");
+            assert!(
+                !is_risky_call("execute_provider_action", &input(read)),
+                "{read} must stay ungated under ask"
+            );
+        }
+
+        for uncatalogued in [
+            "drive.file.delete",
+            "sharepoint.sites.create",
+            "profile.update",
+        ] {
+            assert_eq!(
+                operation_is_write(uncatalogued),
+                None,
+                "{uncatalogued} is not catalogued yet"
+            );
+            assert!(
+                is_risky_call("execute_provider_action", &input(uncatalogued)),
+                "{uncatalogued} must stay gated under ask until it is catalogued"
+            );
+        }
+
+        assert_eq!(operation_is_write("mail.send"), Some(true));
+        assert!(is_risky_call("execute_provider_action", &input("mail.send")));
+    }
+
+    /// The golden in integration-corev2 (copied into mp-contracts) names the Microsoft and
+    /// Google reads the executor serves. The catalogue must offer exactly those for those
+    /// providers: a golden read left out would be gated as a write, and a catalogued read the
+    /// golden does not name would be ungated without the executor having been checked for it.
+    #[test]
+    fn catalog_reads_match_contract_table() {
+        use mp_contracts::provider_reads::READ_OPERATIONS;
+        use std::collections::BTreeSet;
+
+        let covered: BTreeSet<&str> = READ_OPERATIONS.iter().map(|read| read.provider).collect();
+        let contract: BTreeSet<(&str, &str)> = READ_OPERATIONS
+            .iter()
+            .map(|read| (read.provider, read.operation))
+            .collect();
+        let catalogued: BTreeSet<(&str, &str)> = CATALOG
+            .iter()
+            .filter(|(provider, _)| covered.contains(provider))
+            .flat_map(|(provider, ops)| {
+                ops.iter()
+                    .filter(|op| !op.is_write)
+                    .map(move |op| (*provider, op.operation))
+            })
+            .collect();
+
+        assert_eq!(catalogued, contract);
+        assert_eq!(contract.len(), READ_OPERATIONS.len(), "golden rows are unique");
+    }
+
+    // -------------------------------------------------------------------
+    // Connected-app reads (WS23-S3).
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn a_write_operation_is_not_a_read_and_reads_list_their_own_params() {
+        assert!(read_operation_params("mail.send").is_none());
+        assert!(read_operation_params("drive.file.delete").is_none());
+        let gmail = read_operation_params("gmail.messages").expect("a read");
+        assert!(gmail.contains(&"query") && gmail.contains(&"maxResults"));
+        assert!(!gmail.contains(&"body"));
+    }
+
+    #[test]
+    fn the_operation_enum_names_only_reads() {
+        let names = read_operation_names();
+        assert!(names.contains(&"calendar.events") && names.contains(&"gmail.messages.get"));
+        for name in names {
+            for verb in ["send", "create", "delete", "update", "post", "publish", "upload"] {
+                assert!(!name.contains(verb), "{name} reads nothing");
+            }
+        }
+    }
+
+    #[test]
+    fn the_switch_is_on_only_for_the_literal_true() {
+        for raw in [None, Some(""), Some("1"), Some("TRUE"), Some("yes"), Some("false")] {
+            assert!(!parse_provider_read_tool_enabled(raw), "{raw:?}");
+        }
+        assert!(parse_provider_read_tool_enabled(Some("true")));
+    }
+
+    #[test]
+    fn the_tool_is_offered_only_to_a_selected_connection_outside_zdr_and_space() {
+        let scope = vec!["conn_1".to_owned()];
+        assert!(read_provider_action_offered(true, false, false, &scope));
+        assert!(!read_provider_action_offered(false, false, false, &scope));
+        assert!(!read_provider_action_offered(true, true, false, &scope));
+        assert!(!read_provider_action_offered(true, false, true, &scope));
+        assert!(!read_provider_action_offered(true, false, false, &[]));
+    }
+
+    #[test]
+    fn a_rendered_read_is_capped_and_says_what_it_dropped() {
+        let row = serde_json::json!({ "id": "m", "subject": "x".repeat(1000) });
+        let read = ProviderRead {
+            status: ReadStatus::Ok,
+            items: vec![row; 40],
+            next_page_token: Some("next".to_owned()),
+            more_available: true,
+        };
+        let rendered = render_provider_read(&read);
+        let parsed: Value = serde_json::from_str(&rendered).expect("valid json");
+        assert!(rendered.chars().count() <= READ_RESULT_CHAR_CAP);
+        assert_eq!(parsed["status"], "too_large");
+        let kept = parsed["items"].as_array().expect("items").len() as u64;
+        assert!(kept < 40);
+        assert_eq!(parsed["omitted"].as_u64(), Some(40 - kept));
+        assert_eq!(parsed["next_page_token"], "next");
+    }
+
+    #[test]
+    fn a_mail_body_is_capped_and_no_other_field_passes_through() {
+        let row = serde_json::json!({
+            "id": "m1",
+            "bodyText": "b".repeat(9_000),
+            "internetMessageHeaders": [{"name": "Authorization"}],
+        });
+        let shaped = shape_item(&row, read_fields("mail.messages.get"));
+        assert_eq!(shaped["bodyText"].as_str().map(str::len), Some(8_000));
+        assert!(shaped.get("internetMessageHeaders").is_none());
+        assert_eq!(shaped["id"], "m1");
+    }
+
+    #[test]
+    fn binary_file_content_is_unsupported_and_text_is_returned() {
+        let request = serde_json::Map::new();
+        let pdf = serde_json::json!({ "mimeType": "application/pdf", "content": "%PDF" });
+        assert_eq!(
+            shape_read("drive.file.content", &request, &pdf).status,
+            ReadStatus::UnsupportedContent
+        );
+        let mut exported = serde_json::Map::new();
+        exported.insert("exportAs".to_owned(), Value::from("text"));
+        let doc = serde_json::json!({ "mimeType": "application/pdf", "content": "hello" });
+        assert_eq!(
+            shape_read("drive.file.content", &exported, &doc).status,
+            ReadStatus::Ok
+        );
+    }
+
+    fn mail_input(operation: &str, body: &Value) -> String {
+        serde_json::json!({
+            "connection_id": "conn-1",
+            "operation": operation,
+            "body": body,
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn a_mail_send_summary_names_its_recipients_subject_and_a_120_char_opening() {
+        let text = "x".repeat(200);
+        let body = serde_json::json!({
+            "to": ["alice@example.com", "bob@example.com"],
+            "subject": "Status",
+            "bodyText": text,
+        });
+        let summary = provider_effect_summary(&mail_input("gmail.send", &body))
+            .expect("a mail send has a summary");
+        assert_eq!(
+            summary,
+            format!(
+                "send an email to alice@example.com, bob@example.com with the subject 'Status'; it opens '{}…'",
+                "x".repeat(120)
+            )
+        );
+    }
+
+    #[test]
+    fn a_recipient_string_is_split_on_commas_as_the_gateway_splits_it() {
+        let body = serde_json::json!({
+            "to": " a@x.example ,b@y.example, ",
+            "subject": "Hi",
+            "bodyText": "Hei",
+        });
+        assert_eq!(
+            provider_effect_summary(&mail_input("mail.send", &body)).as_deref(),
+            Some("send an email to a@x.example, b@y.example with the subject 'Hi'; it opens 'Hei'")
+        );
+    }
+
+    #[test]
+    fn a_summary_says_what_is_missing_and_how_many_recipients_it_leaves_out() {
+        let many: Vec<String> = (0..12).map(|n| format!("p{n}@x.example")).collect();
+        let body = serde_json::json!({ "to": many, "bodyText": "line one\nline two" });
+        let summary = provider_effect_summary(&mail_input("microsoft.mail.send", &body))
+            .expect("a mail send has a summary");
+        assert!(summary.starts_with("send an email to p0@x.example, p1@x.example"));
+        assert!(summary.contains("p9@x.example and 2 more with no subject"));
+        assert!(
+            summary.ends_with("; it opens 'line one line two'"),
+            "a line break is shown as a space: {summary}"
+        );
+        let nobody = serde_json::json!({ "subject": "s" });
+        assert_eq!(
+            provider_effect_summary(&mail_input("gmail.send", &nobody)).as_deref(),
+            Some("send an email to no one with the subject 's'")
+        );
+    }
+
+    #[test]
+    fn only_a_mail_send_has_an_effect_summary() {
+        let body = serde_json::json!({ "to": "a@x.example", "subject": "s", "bodyText": "t" });
+        for operation in [
+            "message.send",
+            "pages.post",
+            "posts.create",
+            "gmail.messages",
+            "mail.messages",
+            "drive.file.content",
+        ] {
+            assert_eq!(
+                provider_effect_summary(&mail_input(operation, &body)),
+                None,
+                "{operation} is not a mail send"
+            );
+        }
+        assert_eq!(provider_effect_summary("not json"), None);
+    }
+
+    async fn mount_org_token(auth_core: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/api/ingestion/internal-token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"token": "org-scoped-token"})),
+            )
+            .mount(auth_core)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn read_action_sends_only_the_listed_params_and_clamps_max_results() {
+        let auth_core = MockServer::start().await;
+        let integration = MockServer::start().await;
+        mount_org_token(&auth_core).await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/connections/conn_1/actions"))
+            .and(header("authorization", "Bearer org-scoped-token"))
+            .and(body_json(serde_json::json!({
+                "operation": "gmail.messages",
+                "params": {"query": "invoice", "maxResults": 25},
+                "body": {},
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"success": true, "data": {"action": {"result": {"messages": []}}}}),
+            ))
+            .expect(1)
+            .mount(&integration)
+            .await;
+        let client = test_client(&auth_core.uri(), &integration.uri());
+        let params = serde_json::json!({"query": "invoice", "body": {"raw": "x"}, "evil": 1});
+        let read = client
+            .read_action("org-1", "conn_1", "gmail.messages", &params, Some(100), None, None)
+            .await
+            .expect("the read runs");
+        assert_eq!(read.status, ReadStatus::NoResults);
+    }
+
+    #[tokio::test]
+    async fn read_action_shapes_mail_and_returns_the_page_token() {
+        let auth_core = MockServer::start().await;
+        let integration = MockServer::start().await;
+        mount_org_token(&auth_core).await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/connections/conn_1/actions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "success": true,
+                "data": {"action": {"result": {
+                    "value": [{
+                        "id": "m1",
+                        "subject": "Invoice",
+                        "from": {"emailAddress": {"address": "a@example.no", "name": "A"}},
+                        "receivedDateTime": "2026-10-20T08:00:00Z",
+                        "snippet": "hi",
+                        "webLink": "https://outlook.example/m1",
+                        "secretHeader": "drop me",
+                    }],
+                    "nextPageToken": "page-2",
+                }}},
+            })))
+            .mount(&integration)
+            .await;
+        let client = test_client(&auth_core.uri(), &integration.uri());
+        let read = client
+            .read_action(
+                "org-1",
+                "conn_1",
+                "mail.messages",
+                &serde_json::json!({}),
+                None,
+                Some("page-1"),
+                None,
+            )
+            .await
+            .expect("the read runs");
+        assert_eq!(read.status, ReadStatus::Ok);
+        assert_eq!(read.items[0]["from"]["address"], "a@example.no");
+        assert!(read.items[0].get("secretHeader").is_none());
+        assert_eq!(read.next_page_token.as_deref(), Some("page-2"));
+        assert!(read.more_available);
+    }
+
+    #[tokio::test]
+    async fn read_action_reports_a_reconnect_and_a_missing_capability_as_statuses() {
+        let auth_core = MockServer::start().await;
+        let integration = MockServer::start().await;
+        mount_org_token(&auth_core).await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/connections/conn_stale/actions"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                "error": {"code": "reconnect_required", "message": "reconnect"}
+            })))
+            .mount(&integration)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/connections/conn_nocap/actions"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": {"code": "capability_not_granted", "message": "no calendar"}
+            })))
+            .mount(&integration)
+            .await;
+        let client = test_client(&auth_core.uri(), &integration.uri());
+        let empty = serde_json::json!({});
+        let stale = client
+            .read_action("org-1", "conn_stale", "calendar.events", &empty, None, None, None)
+            .await
+            .expect("a status, not an error");
+        assert_eq!(stale.status, ReadStatus::ReconnectRequired);
+        let nocap = client
+            .read_action("org-1", "conn_nocap", "calendar.events", &empty, None, None, None)
+            .await
+            .expect("a status, not an error");
+        assert_eq!(nocap.status, ReadStatus::CapabilityMissing);
+    }
+
+    #[tokio::test]
+    async fn read_action_refuses_a_write_before_any_call_is_made() {
+        let client = test_client("http://unused.invalid", "http://unused.invalid");
+        let refused = client
+            .read_action("org-1", "conn_1", "mail.send", &serde_json::json!({}), None, None, None)
+            .await;
+        assert!(matches!(refused, Err(ReadError::UnknownOperation(_))));
+        assert!(refused
+            .expect_err("a write is refused")
+            .message()
+            .starts_with("unknown_operation:"));
+    }
+
+    #[tokio::test]
+    async fn a_connection_id_that_could_leave_the_connection_path_makes_no_call() {
+        let integration = MockServer::start().await;
+        let client = test_client("http://unused.invalid", &integration.uri());
+        for hostile in ["conn/../x#", "conn_1?x=1", "..", " ", ""] {
+            let refused = client
+                .read_action(
+                    "org-1",
+                    hostile,
+                    "mail.messages",
+                    &serde_json::json!({}),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+            assert!(
+                matches!(refused, Err(ReadError::Refused(_))),
+                "{hostile:?} is refused"
+            );
+            assert!(client
+                .read_action_json("org-1", hostile, "mail.messages", serde_json::json!({}), None)
+                .await
+                .is_err());
+        }
+        assert!(integration
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty());
     }
 
     // -------------------------------------------------------------------

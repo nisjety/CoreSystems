@@ -1,0 +1,80 @@
+{
+  "contract": "org-agent-policy-schema",
+  "version": 1,
+  "description": "The closed key schema of the org agent policy registry (WS25-S7, DEC-14). Read by mp-contracts org_agent_policy and by capability-core internal/api org_agent_policy; each consumer tests its own table against this file. A key with status reserved accepts only its default; a write of anything else is refused not_enforced. Values run from the strictest to the loosest; a write looser than the platform ceiling is refused exceeds_platform_ceiling.",
+  "settings": [
+    {
+      "key": "mode_cap",
+      "kind": "enum",
+      "strictness_order": ["lockdown", "read_only", "ask_first", "auto"],
+      "default": "auto",
+      "fail_closed_value": "lockdown",
+      "status": "enforced"
+    },
+    {
+      "key": "rung_cap",
+      "kind": "enum",
+      "strictness_order": ["read_only", "workspace_write", "danger_full_access"],
+      "default": "danger_full_access",
+      "fail_closed_value": "read_only",
+      "status": "enforced"
+    },
+    {
+      "key": "lockdown",
+      "kind": "bool",
+      "strictness_order": ["true", "false"],
+      "default": "false",
+      "fail_closed_value": "true",
+      "status": "enforced"
+    },
+    {
+      "key": "ext.mcp_servers",
+      "kind": "allow_list",
+      "strictness_order": ["none", "approved_only", "any"],
+      "default": "any",
+      "fail_closed_value": "none",
+      "status": "enforced"
+    },
+    {
+      "key": "ext.skills",
+      "kind": "allow_list",
+      "strictness_order": ["none", "approved_only", "any"],
+      "default": "any",
+      "fail_closed_value": "none",
+      "status": "reserved"
+    },
+    {
+      "key": "ext.plugins",
+      "kind": "allow_list",
+      "strictness_order": ["none", "approved_only", "any"],
+      "default": "any",
+      "fail_closed_value": "none",
+      "status": "reserved"
+    },
+    {
+      "key": "mcp_tool_approval",
+      "kind": "enum",
+      "strictness_order": ["approved_only", "trust_annotations"],
+      "default": "trust_annotations",
+      "fail_closed_value": "approved_only",
+      "status": "enforced"
+    },
+    {
+      "key": "user_hooks",
+      "kind": "enum",
+      "strictness_order": ["denied", "allowed"],
+      "default": "allowed",
+      "fail_closed_value": "denied",
+      "status": "reserved"
+    },
+    {
+      "key": "reference_uploads",
+      "kind": "enum",
+      "strictness_order": ["off", "on"],
+      "default": "off",
+      "fail_closed_value": "off",
+      "status": "reserved"
+    }
+  ],
+  "refusals": ["unknown_key", "invalid_value", "not_enforced", "exceeds_platform_ceiling"]
+}

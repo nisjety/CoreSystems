@@ -684,21 +684,21 @@ export function PromptSection() {
 			<div className="relative z-[2] mx-auto grid min-h-[100svh] w-full max-w-[1760px] grid-cols-[minmax(0,0.78fr)_minmax(420px,1fr)] items-center gap-[clamp(42px,5.6vw,112px)] px-[clamp(56px,5.55vw,208px)] py-[clamp(84px,9vh,136px)] max-[1023px]:grid-cols-1 max-[1023px]:px-[clamp(24px,4vw,56px)]">
 				<div className="min-w-0">
 					<p
-						className="fade-out-top m-0 font-geist text-[0.72rem] font-medium uppercase leading-none tracking-[0.32em] text-verevon-j-text/38"
+						className="fade-out-top m-0 font-geist text-[0.7rem] font-medium uppercase leading-none tracking-[0.08em] text-verevon-j-text/38"
 						data-fade-out-top
 					>
 						Skriv målet
 					</p>
 
 					<h2
-						className="fade-out-top m-0 mt-5 max-w-[720px] font-manrope text-[clamp(3rem,5vw,7.15rem)] font-light leading-[0.92] tracking-[-0.072em] text-verevon-j-text"
+						className="fade-out-top m-0 mt-5 max-w-[720px] font-manrope text-[clamp(2.35rem,3.4vw,3.5rem)] font-light leading-[0.94] tracking-[-0.045em] text-verevon-j-text"
 						data-fade-out-top
 					>
 						Verevon bygger arbeidet.
 					</h2>
 
 					<p
-						className="fade-out-top m-0 mt-[clamp(24px,2.6vw,38px)] max-w-[640px] font-geist text-[clamp(1.02rem,1vw,1.18rem)] font-light leading-[1.5] text-verevon-text-muted"
+						className="fade-out-top m-0 mt-[clamp(24px,2.6vw,38px)] max-w-[640px] font-manrope text-[clamp(1rem,1.05vw,1.125rem)] font-light leading-[1.5] tracking-[-0.015em] text-verevon-text-muted"
 						data-fade-out-top
 					>
 						Skriv hva som skal løses. Verevon finner kilder, lager forslag og
@@ -717,7 +717,7 @@ export function PromptSection() {
 							>
 								{promptFeed.completed.map((line, index) => (
 									<p
-										className="m-0 grid grid-cols-[42px_minmax(0,1fr)] gap-4 border-t border-verevon-j-text/10 pt-4 font-geist text-[clamp(1.06rem,1.18vw,1.42rem)] font-light leading-[1.38] text-verevon-j-text"
+									className="m-0 grid grid-cols-[42px_minmax(0,1fr)] gap-4 border-t border-verevon-j-text/10 pt-4 font-manrope text-[clamp(1rem,1.05vw,1.125rem)] font-light leading-[1.5] tracking-[-0.015em] text-verevon-j-text"
 										data-promt-line
 										key={`${line}-${index}`}
 									>
@@ -731,7 +731,7 @@ export function PromptSection() {
 								{promptFeed.activeText ||
 								promptFeed.isTyping ? (
 									<p
-										className="m-0 grid grid-cols-[42px_minmax(0,1fr)] gap-4 border-t border-verevon-j-text/10 pt-4 font-geist text-[clamp(1.06rem,1.18vw,1.42rem)] font-light leading-[1.38] text-verevon-j-text"
+									className="m-0 grid grid-cols-[42px_minmax(0,1fr)] gap-4 border-t border-verevon-j-text/10 pt-4 font-manrope text-[clamp(1rem,1.05vw,1.125rem)] font-light leading-[1.5] tracking-[-0.015em] text-verevon-j-text"
 										data-promt-line
 									>
 										<span className="pt-[0.18em] text-[0.68em] leading-none tracking-[0.18em] text-verevon-j-text/32">
@@ -761,7 +761,7 @@ export function PromptSection() {
 					</ul>
 
 					<p
-						className="fade-out-top m-0 mt-5 font-geist text-[clamp(0.92rem,0.92vw,1.02rem)] font-light leading-none text-verevon-j-text/52"
+						className="fade-out-top m-0 mt-5 font-geist text-[0.75rem] font-medium uppercase leading-none tracking-[0.08em] text-verevon-j-text/52"
 						data-fade-out-top
 					>
 						<span>Åpen instruks.</span>{" "}

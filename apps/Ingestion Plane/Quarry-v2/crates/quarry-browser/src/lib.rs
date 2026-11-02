@@ -931,6 +931,15 @@ pub trait BrowserDriver: Send + Sync {
         Err(QuarryError::unsupported_action("configure_egress_policy"))
     }
     async fn goto(&self, session: &BrowserSession, url: &str) -> QuarryResult<()>;
+
+    /// Give a session that has no page yet one to observe (SC4 D1): a tab on
+    /// `about:blank`, navigated nowhere, which the session's next `goto` uses. A session
+    /// that has a page keeps it; a lost session and a pinned handle whose tab is gone keep
+    /// their errors. Observation paths call it before reading a page they did not
+    /// navigate to. Default: nothing (a driver whose session always has a page).
+    async fn ensure_page(&self, _session: &BrowserSession) -> QuarryResult<()> {
+        Ok(())
+    }
     async fn content(&self, session: &BrowserSession) -> QuarryResult<bytes::Bytes>;
 
     /// Verify a uniquely-selected target and perform the operation as one

@@ -21,6 +21,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+use super::effort::Level;
 use super::routing_policy::RoutingPolicy;
 use super::{ChatMessage, ToolDefinition};
 
@@ -217,6 +218,16 @@ pub fn choose(
     policy.cell(effective, complexity)
 }
 
+/// The strongest effort level a posture allows, or `None` for no limit. An
+/// exhausted budget forces the cheap fallback model, and a deep reasoning
+/// allowance on top of it would spend the money the fallback exists to save, so
+/// effort is held to Low. Only the exhausted posture clamps: a constrained org
+/// still gets a tier-cheaper model but keeps the effort it asked for.
+#[must_use]
+pub fn effort_cap(posture: BudgetPosture) -> Option<Level> {
+    (posture == BudgetPosture::Exhausted).then_some(Level::Low)
+}
+
 /// The outcome of resolving a Verevon request — the concrete model plus the
 /// signals that produced it, for structured logging.
 #[derive(Debug, Clone)]
@@ -225,6 +236,9 @@ pub struct Decision {
     pub mode: VerevonMode,
     pub complexity: Complexity,
     pub posture: BudgetPosture,
+    /// The strongest effort level the posture allows, see [`effort_cap`]. The
+    /// decision only reports it; applying it is gated by the caller's switch.
+    pub effort_cap: Option<Level>,
 }
 
 /// Resolve a Verevon request to a concrete [`Decision`], or `None` when the
@@ -266,6 +280,7 @@ pub async fn resolve(
         mode,
         complexity,
         posture,
+        effort_cap: effort_cap(posture),
     })
 }
 
@@ -869,6 +884,23 @@ mod tests {
     }
 
     #[test]
+    fn exhausted_budget_clamps_effort_to_low() {
+        use super::super::effort::clamp_to_cap;
+        let cap = effort_cap(BudgetPosture::Exhausted);
+        assert_eq!(cap, Some(Level::Low));
+        for level in [Level::Low, Level::Medium, Level::High, Level::Max] {
+            assert_eq!(clamp_to_cap(level, cap), Level::Low.min(level));
+        }
+        for posture in [
+            BudgetPosture::Healthy,
+            BudgetPosture::Constrained,
+            BudgetPosture::Unknown,
+        ] {
+            assert_eq!(effort_cap(posture), None, "{posture:?} must not clamp");
+        }
+    }
+
+    #[test]
     fn constrained_budget_downgrades_one_tier() {
         let p = policy();
         // Genius+Complex normally → opus; constrained → behaves as Balance+Complex → sonnet.
@@ -982,6 +1014,27 @@ mod tests {
         assert!(d.is_none());
     }
 
+    /// A pinned model never reaches a `Decision`, so there is no cap to apply:
+    /// the user chose that model and the effort that goes with it.
+    #[tokio::test]
+    async fn pinned_model_is_not_clamped() {
+        for model in ["gpt-4o-mini", "claude-opus-4-8", "default", ""] {
+            let d = resolve(
+                &policy(),
+                model,
+                &[user("hi")],
+                &[],
+                "auto",
+                "org1",
+                "u1",
+                "bearer-1",
+                None,
+            )
+            .await;
+            assert!(d.is_none(), "{model:?} bypasses the intent layer");
+        }
+    }
+
     #[tokio::test]
     async fn resolve_verevon_balance_without_budget_is_unknown_posture() {
         let d = resolve(
@@ -997,6 +1050,8 @@ mod tests {
         )
         .await
         .expect("verevon mode resolves");
+        // An unknown posture is not a reason to hold effort back.
+        assert_eq!(d.effort_cap, None);
         assert_eq!(d.mode, VerevonMode::Balance);
         assert_eq!(d.complexity, Complexity::Simple);
         assert_eq!(d.posture, BudgetPosture::Unknown);

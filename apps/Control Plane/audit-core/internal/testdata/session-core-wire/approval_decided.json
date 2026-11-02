@@ -1,0 +1,25 @@
+{
+  "body": {
+    "details": {
+      "cause_code": "provider_write",
+      "decision_source": "user",
+      "effect_class": "external_write",
+      "kind": "tool_call",
+      "rule_id": "",
+      "scope": "once",
+      "step_up_verified": false,
+      "tool": "execute_provider_action"
+    },
+    "event": "approval_decided",
+    "event_id": "approval:session-core:6f32e0c2c5f98e3ea1f899306e713b53b660963e80c890866494673e6b48df73",
+    "occurred_at": "2026-10-03T12:00:00+00:00",
+    "org_id": "org_fixture",
+    "outcome": "granted",
+    "plane": "model",
+    "producer": "session-core",
+    "resource_id": "appr_fixture",
+    "subject": "run_fixture",
+    "user_id": "user_fixture"
+  },
+  "subject": "verevon.audit.v2.model.session-core.approval_decided"
+}

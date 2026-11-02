@@ -39,6 +39,9 @@ pub const EVENT_TOOL_ACTION: &str = "tool_action";
 /// Audit event name of the reservation that precedes an inline tool call.
 pub const EVENT_TOOL_ACTION_RESERVED: &str = "tool_action_reserved";
 
+/// Audit event name of a recorded approval decision (build plan WS13 S3).
+pub const EVENT_APPROVAL_DECIDED: &str = "approval_decided";
+
 /// Subject family carrying Session Core's flat audit-core bodies.
 const AUDIT_SUBJECT_PREFIX: &str = "verevon.audit.v2.model.session-core.";
 
@@ -47,11 +50,16 @@ const AUDIT_SUBJECT_PREFIX: &str = "verevon.audit.v2.model.session-core.";
 const RUN_EVENT_SUBJECT_PREFIX: &str = "mp.v1.run.";
 const RUN_EVENT_SUBJECT_SUFFIX: &str = ".event";
 
+/// Subject family carrying Space attention `Envelope`s (build plan WS11-S5):
+/// `mp.v1.space.<space_ref>.event`, captured by the `MODEL_PLANE_SPACE_EVENTS` stream.
+const SPACE_EVENT_SUBJECT_PREFIX: &str = "mp.v1.space.";
+const SPACE_EVENT_SUBJECT_SUFFIX: &str = ".event";
+
 /// Delivery route for one outbox row, derived from the row's own `subject`.
 ///
-/// Session Core may publish inside exactly these two subject families; a row
-/// naming anything else is refused before it reaches NATS. The two families
-/// carry DIFFERENT wire shapes (a flat audit body vs. a canonical `Envelope`),
+/// Session Core may publish inside exactly these three subject families; a row
+/// naming anything else is refused before it reaches NATS. The audit family
+/// carries a DIFFERENT wire shape from the two envelope families (a flat audit body vs. a canonical `Envelope`),
 /// so the authority check is per-route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutboxRoute<'a> {
@@ -61,6 +69,11 @@ pub enum OutboxRoute<'a> {
     /// capability-core's session review (the skill-learning trigger) over core
     /// NATS, and captured by the `MODEL_PLANE_RUN_EVENTS` stream for insight-core.
     RunEvent { run_id: &'a str },
+    /// `mp.v1.space.<space_ref>.event` — content-free Space attention `Envelope`
+    /// (ids and closed words only), written by migration 0080's trigger in the same
+    /// transaction as the Space event log row. Consumed by the Application Plane's
+    /// attention projection through the `convex-space-attention` durable.
+    SpaceEvent { space_ref: &'a str },
 }
 
 /// Classify an outbox subject, or `None` when it is outside Session Core's
@@ -69,6 +82,9 @@ pub enum OutboxRoute<'a> {
 pub fn classify_outbox_subject(subject: &str) -> Option<OutboxRoute<'_>> {
     if subject.starts_with(AUDIT_SUBJECT_PREFIX) {
         return Some(OutboxRoute::Audit);
+    }
+    if subject.starts_with(SPACE_EVENT_SUBJECT_PREFIX) {
+        return classify_space_event_subject(subject);
     }
     let run_id = subject
         .strip_prefix(RUN_EVENT_SUBJECT_PREFIX)?
@@ -80,6 +96,23 @@ pub fn classify_outbox_subject(subject: &str) -> Option<OutboxRoute<'_>> {
         return None;
     }
     Some(OutboxRoute::RunEvent { run_id })
+}
+
+/// Classify a `mp.v1.space.<space_ref>.event` subject. The ref must stay ONE subject
+/// token under the single-token grant `mp.v1.space.*.event`, so a ref holding a dot,
+/// a wildcard or whitespace is refused rather than allowed to widen its own authority.
+fn classify_space_event_subject(subject: &str) -> Option<OutboxRoute<'_>> {
+    let space_ref = subject
+        .strip_prefix(SPACE_EVENT_SUBJECT_PREFIX)?
+        .strip_suffix(SPACE_EVENT_SUBJECT_SUFFIX)?;
+    if space_ref.is_empty()
+        || space_ref
+            .chars()
+            .any(|c| c == '.' || c == '*' || c == '>' || c.is_whitespace())
+    {
+        return None;
+    }
+    Some(OutboxRoute::SpaceEvent { space_ref })
 }
 
 /// Verify a claimed row's payload really belongs to that row and to Session Core
@@ -116,6 +149,28 @@ fn check_outbox_authority(
                 || payload["org_id"].as_str().unwrap_or_default().is_empty()
             {
                 return Err("run event envelope is missing event_type or org_id".to_owned());
+            }
+        }
+        OutboxRoute::SpaceEvent { space_ref } => {
+            // The subject names the room, so the envelope and its payload must name the
+            // same room: one room's row cannot be published under another room's subject.
+            if payload["resource_ref"].as_str() != Some(format!("space:{space_ref}").as_str())
+                || payload["payload"]["space_ref"].as_str() != Some(space_ref)
+            {
+                return Err("space event payload does not match its subject room".to_owned());
+            }
+            if !payload["event_type"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("SPACE_")
+                || payload["org_id"].as_str().unwrap_or_default().is_empty()
+            {
+                return Err("space event envelope is missing event_type or org_id".to_owned());
+            }
+            // The projection admits persistent events only; a zero-retention envelope
+            // must never leave through this route.
+            if payload["zdr"].as_bool() != Some(false) {
+                return Err("space event envelope is not marked persistent".to_owned());
             }
         }
     }
@@ -174,7 +229,7 @@ fn resolve_wire_subject(
             .ok_or_else(|| {
                 "audit payload event is not a single lowercase subject token".to_owned()
             }),
-        OutboxRoute::RunEvent { .. } => Ok(row_subject.to_owned()),
+        OutboxRoute::RunEvent { .. } | OutboxRoute::SpaceEvent { .. } => Ok(row_subject.to_owned()),
     }
 }
 
@@ -328,6 +383,70 @@ pub fn build_tool_action_body_for_phase(
     })
 }
 
+/// What one approval decision tells the audit trail: who decided what, under which closed
+/// cause and provenance. It never carries the decision reason, the call's arguments or the
+/// approval's context, so the row stays content-free for every retention class.
+#[derive(Debug, Clone, Copy)]
+pub struct ApprovalDecisionAudit<'a> {
+    pub org_id: &'a str,
+    pub user_id: &'a str,
+    pub run_id: &'a str,
+    pub approval_id: &'a str,
+    pub kind: &'a str,
+    /// The decided state: `granted`, `denied` or `timed_out`.
+    pub outcome: &'a str,
+    pub cause_code: &'a str,
+    pub tool: &'a str,
+    pub effect_class: &'a str,
+    pub rule_id: &'a str,
+    pub scope: &'a str,
+    pub decision_source: &'a str,
+    pub step_up_verified: bool,
+    pub occurred_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Subject of a recorded approval decision.
+#[must_use]
+pub fn approval_decision_subject() -> String {
+    format!("{AUDIT_SUBJECT_PREFIX}{EVENT_APPROVAL_DECIDED}")
+}
+
+/// The audit event id of one decision. The same decision replayed yields the same id, so
+/// the outbox row for it is written once.
+#[must_use]
+pub fn approval_decision_event_id(approval_id: &str, outcome: &str) -> String {
+    let digest = blake3::hash(format!("{approval_id}\0{outcome}").as_bytes());
+    format!("approval:session-core:{digest}")
+}
+
+/// Build the FLAT audit body of one approval decision (see [`build_tool_action_body`] for
+/// the shape audit-core decodes).
+#[must_use]
+pub fn build_approval_decision_body(audit: &ApprovalDecisionAudit<'_>) -> serde_json::Value {
+    serde_json::json!({
+        "event_id": approval_decision_event_id(audit.approval_id, audit.outcome),
+        "occurred_at": audit.occurred_at.to_rfc3339(),
+        "org_id": audit.org_id,
+        "user_id": if audit.user_id.is_empty() { "agent" } else { audit.user_id },
+        "plane": "model",
+        "producer": "session-core",
+        "event": EVENT_APPROVAL_DECIDED,
+        "subject": audit.run_id,
+        "resource_id": audit.approval_id,
+        "outcome": audit.outcome,
+        "details": {
+            "cause_code": audit.cause_code,
+            "tool": audit.tool,
+            "effect_class": audit.effect_class,
+            "rule_id": audit.rule_id,
+            "scope": audit.scope,
+            "decision_source": audit.decision_source,
+            "step_up_verified": audit.step_up_verified,
+            "kind": audit.kind,
+        },
+    })
+}
+
 /// Publish one model tool-action audit event and require the transport's
 /// acknowledgement. The outbox owns retry/error handling. The subject is the one
 /// the body's own `event` names (see [`resolve_wire_subject`]).
@@ -455,7 +574,10 @@ impl AuditOutbox {
         if terminal > 0 {
             let by_subject = sqlx::query_as::<_, (String, i64)>(
                 "SELECT CASE WHEN subject LIKE 'mp.v1.run.%.event'
-                             THEN 'mp.v1.run.<run>.event' ELSE subject END,
+                             THEN 'mp.v1.run.<run>.event'
+                             WHEN subject LIKE 'mp.v1.space.%.event'
+                             THEN 'mp.v1.space.<space>.event'
+                             ELSE subject END,
                         count(*)
                  FROM session_audit_outbox
                  WHERE terminal_at IS NOT NULL AND published_at IS NULL
@@ -589,7 +711,9 @@ impl AuditOutbox {
         let publisher = publisher.as_ref().expect("publisher initialized");
         match route {
             OutboxRoute::Audit => publish_tool_action(publisher, payload).await,
-            OutboxRoute::RunEvent { .. } => publisher.publish_audit(subject, payload).await,
+            OutboxRoute::RunEvent { .. } | OutboxRoute::SpaceEvent { .. } => {
+                publisher.publish_audit(subject, payload).await
+            }
         }
     }
 }
@@ -605,11 +729,12 @@ fn audit_retry_delay(attempt: i32) -> Duration {
 /// Every value [`outbox_subject_class`] can return. The per-class gauge is set
 /// for all of them on every tick, so a class with nothing stuck reads 0 instead
 /// of being absent (an absent series cannot be told from a stopped reporter).
-const SUBJECT_CLASSES: [&str; 5] = [
+const SUBJECT_CLASSES: [&str; 6] = [
     "audit_tool_action",
     "audit_tool_action_reserved",
     "audit_other",
     "run_event",
+    "space_event",
     "unclassified",
 ];
 
@@ -624,6 +749,7 @@ const TOPOLOGY_REASONS: [&str; 2] = ["stream_not_found", "permission_denied"];
 pub fn outbox_subject_class(subject: &str) -> &'static str {
     match classify_outbox_subject(subject) {
         Some(OutboxRoute::RunEvent { .. }) => "run_event",
+        Some(OutboxRoute::SpaceEvent { .. }) => "space_event",
         Some(OutboxRoute::Audit) => match subject.strip_prefix(AUDIT_SUBJECT_PREFIX) {
             Some(EVENT_TOOL_ACTION) => "audit_tool_action",
             Some(EVENT_TOOL_ACTION_RESERVED) => "audit_tool_action_reserved",
@@ -1092,6 +1218,96 @@ mod tests {
             assert_eq!(fixture["subject"], subject, "{name}: wire subject");
             assert_eq!(fixture["body"], body, "{name}: wire body");
         }
+    }
+
+    fn approval_decision_fixture(outcome: &str, decision_source: &str) -> serde_json::Value {
+        let at = chrono::DateTime::parse_from_rfc3339("2026-10-03T12:00:00Z")
+            .expect("fixed instant")
+            .with_timezone(&chrono::Utc);
+        build_approval_decision_body(&ApprovalDecisionAudit {
+            org_id: "org_fixture",
+            user_id: "user_fixture",
+            run_id: "run_fixture",
+            approval_id: "appr_fixture",
+            kind: "tool_call",
+            outcome,
+            cause_code: "provider_write",
+            tool: "execute_provider_action",
+            effect_class: "external_write",
+            rule_id: "",
+            scope: "once",
+            decision_source,
+            step_up_verified: false,
+            occurred_at: at,
+        })
+    }
+
+    #[test]
+    fn approval_decided_wire_fixture_matches_the_builder() {
+        let body = approval_decision_fixture("granted", "user");
+        let subject = resolve_wire_subject(OutboxRoute::Audit, &approval_decision_subject(), &body)
+            .expect("wire subject");
+        let expected = serde_json::json!({ "subject": subject, "body": body });
+        // `UPDATE_AUDIT_CORE_FIXTURES=1 cargo test ... approval_decided_wire_fixture`
+        // rewrites the fixture; audit-core's vendored copy is then refreshed from it.
+        if std::env::var_os("UPDATE_AUDIT_CORE_FIXTURES").is_some() {
+            let path = format!(
+                "{}/tests/fixtures/audit-core-wire/approval_decided.json",
+                env!("CARGO_MANIFEST_DIR")
+            );
+            let rendered = serde_json::to_string_pretty(&expected).expect("render fixture");
+            std::fs::write(path, rendered + "\n").expect("write fixture");
+            return;
+        }
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/audit-core-wire/approval_decided.json"
+        ))
+        .expect("fixture is valid JSON");
+        assert_eq!(fixture, expected, "approval_decided: wire body and subject");
+    }
+
+    #[test]
+    fn an_approval_decision_audit_row_names_no_reason_text_or_arguments() {
+        let body = approval_decision_fixture("denied", "user");
+        let mut keys: Vec<&str> = body["details"]
+            .as_object()
+            .expect("details is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "cause_code",
+                "decision_source",
+                "effect_class",
+                "kind",
+                "rule_id",
+                "scope",
+                "step_up_verified",
+                "tool",
+            ]
+        );
+        assert!(body.get("decision_reason").is_none());
+        assert!(body.get("context").is_none());
+    }
+
+    #[test]
+    fn a_replayed_approval_decision_has_one_event_id_and_a_different_decision_has_another() {
+        let granted = approval_decision_event_id("appr_fixture", "granted");
+        assert_eq!(
+            granted,
+            approval_decision_event_id("appr_fixture", "granted")
+        );
+        assert_ne!(
+            granted,
+            approval_decision_event_id("appr_fixture", "denied")
+        );
+        assert!(
+            granted.len() <= 128,
+            "outbox event ids are at most 128 bytes"
+        );
     }
 
     #[test]

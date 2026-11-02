@@ -32,7 +32,7 @@ func codexEnabledConfig(t *testing.T) Config {
 	cfg.OrgCoreServiceToken = "org-service-token-at-least-32-bytes"
 	cfg.BillingCoreServiceToken = "billing-service-token-at-least-32-bytes"
 	cfg.AuditCoreServiceToken = "audit-service-token-at-least-32-bytes"
-	cfg.PublicBaseURL = "http://integration-corev2:3026"
+	cfg.PublicBaseURL = "https://integration-corev2.example"
 	cfg.DatabaseURL = "postgres://integration"
 	cfg.ProviderWriteAttestationKeysJSON = string(rawKeys)
 	cfg.CodexSubscriptionEnabled = true
@@ -205,5 +205,19 @@ func TestCodexAppServerThreadEffortParsing(t *testing.T) {
 	}
 	if !slices.Contains(cfg.ProviderReadiness()["openai-codex-subscription"], "CODEX_APP_SERVER_THREAD_EFFORT") {
 		t.Fatal("readiness does not name the unparseable CODEX_APP_SERVER_THREAD_EFFORT")
+	}
+}
+
+// The wide-effort switch (WS11-S9) is on only for the literal "true": ParseBool
+// spellings such as "1" or "TRUE" leave the broker at low and high.
+func TestCodexSubscriptionWideReasoningEffortIsTheLiteralTrueOnly(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{{"", false}, {"1", false}, {"TRUE", false}, {"yes", false}, {"false", false}, {"true", true}, {" true ", true}} {
+		t.Setenv("CODEX_SUBSCRIPTION_WIDE_REASONING_EFFORT", tc.value)
+		if got := codexEnabledConfig(t).CodexSubscriptionWideReasoningEffort; got != tc.want {
+			t.Fatalf("CODEX_SUBSCRIPTION_WIDE_REASONING_EFFORT=%q: wide = %v, want %v", tc.value, got, tc.want)
+		}
 	}
 }

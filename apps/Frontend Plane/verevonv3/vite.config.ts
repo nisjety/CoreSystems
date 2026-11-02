@@ -2,6 +2,7 @@ import { fileURLToPath, URL } from 'node:url'
 import { configDefaults, defineConfig } from 'vitest/config'
 import { ViteMcp } from 'vite-plugin-mcp'
 import solid from '@solidjs/vite-plugin'
+import type { Plugin } from 'vite'
 
 // Server-only proxy target (NOT VITE_-prefixed, so it never leaks to the client
 // bundle). VITE_VEREVON_GATEWAY_URL is kept as a fallback for backward compat.
@@ -10,6 +11,7 @@ const gatewayProxyTarget =
   process.env.VITE_VEREVON_GATEWAY_URL ||
   'http://127.0.0.1:3185'
 const isVitest = Boolean(process.env.VITEST)
+const sceneCaptureMode = process.env.VITE_SCENE_MODE === '1'
 // vite-plugin-mcp 0.3.x attaches a single MCP Server instance to the Vite
 // process. A second SSE client tries to connect that same instance again and
 // crashes the dev server, taking the local Support workspace down with it.
@@ -17,9 +19,63 @@ const isVitest = Boolean(process.env.VITEST)
 // explicitly so normal local Docker/browser work stays reliable.
 const enableViteMcp = process.env.VEREVON_VITE_MCP_ENABLED === 'true'
 
+// Build id (WS07-S2). The Docker `build` stage passes SOURCE_REVISION (the git
+// sha) and BUILD_DATE; outside an image build neither is set and the id is
+// `dev`, which the stale-tab check never treats as a new version. At most 12
+// characters, so the same value fits the diagnostics beacon's `build` field.
+const rawRevision = (process.env.SOURCE_REVISION ?? '').trim()
+const buildId =
+  rawRevision === '' || rawRevision === 'unverified' || rawRevision === 'unknown'
+    ? 'dev'
+    : rawRevision.slice(0, 12)
+const builtAt = (process.env.BUILD_DATE ?? '').trim() || new Date().toISOString()
+// The SPA's client contract version, written to version.json. WS07-S3 owns the
+// constant pair (gateway + SPA) and its parity test; keep this number equal to it.
+const clientContract = 1
+
+// Emits dist/version.json and stamps <meta name="verevon-build"> into index.html.
+// nginx serves /version.json no-store; the SPA and the boot watchdog compare it
+// with the meta value / the compiled-in id to detect a newer deploy.
+function verevonBuildInfo(): Plugin {
+  return {
+    name: 'verevon-build-info',
+    transformIndexHtml() {
+      return [
+        { tag: 'meta', attrs: { name: 'verevon-build', content: buildId }, injectTo: 'head-prepend' },
+      ]
+    },
+    generateBundle() {
+      this.emitFile({
+        type: 'asset',
+        fileName: 'version.json',
+        source: JSON.stringify({ build_id: buildId, built_at: builtAt, client_contract: clientContract }),
+      })
+    },
+  }
+}
+
 export default defineConfig({
+  define: {
+    __VEREVON_BUILD_ID__: JSON.stringify(buildId),
+  },
   plugins: [
     solid(),
+    sceneCaptureMode && {
+      name: 'scene-capture-block-gateway',
+      configureServer(server) {
+        server.middlewares.use((request, response, next) => {
+          const pathname = new URL(request.url ?? '/', 'http://scene.local').pathname
+          if (pathname === '/api' || pathname.startsWith('/api/') || pathname === '/health' || pathname.startsWith('/health/')) {
+            response.statusCode = 503
+            response.setHeader('Content-Type', 'text/plain; charset=utf-8')
+            response.end('Gateway access is disabled in scene capture mode.')
+            return
+          }
+          next()
+        })
+      },
+    },
+    verevonBuildInfo(),
     // Exposes Vite's dev-time MCP endpoint at /__mcp/sse only when an
     // operator deliberately starts a single-client MCP debugging session.
     !isVitest && enableViteMcp && ViteMcp({
@@ -62,7 +118,7 @@ export default defineConfig({
         '**/test-results/**',
       ],
     },
-    proxy: {
+    proxy: sceneCaptureMode ? {} : {
       '/api': {
         target: gatewayProxyTarget,
         changeOrigin: true,
@@ -78,6 +134,13 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     setupFiles: ['./src/test/setup.ts'],
+    // Solid's lazy() also raises a rejected loader on a derived promise the boundary cannot see. This one
+    // sentinel is the stale-deploy case in RegionBoundary.test.tsx, which the boundary does handle (the
+    // test asserts it); every other unhandled error still fails the run.
+    onUnhandledError(error) {
+      // Duck-typed: the error comes from jsdom's realm, where `instanceof Error` is false.
+      if (String((error as { message?: unknown } | null)?.message ?? '').includes('/assets/Page-x.js')) return false
+    },
     // Playwright specs live under tests/e2e and import @playwright/test — they
     // must never be collected by vitest (they run via `pnpm test:e2e`).
     exclude: [
@@ -86,6 +149,9 @@ export default defineConfig({
       // This gateway coverage gate intentionally uses Node's native test runner
       // and is executed explicitly by `pnpm test` before the Vitest suite.
       'apps/gateway/scripts/**/*.test.mjs',
+      // node:test files run outside Vitest: the Frontend Plane deploy-contract tests
+      // (see `pnpm test`) and the bundle-budget gate (`node --test` in CI).
+      'scripts/**/*.test.mjs',
       // `.claude/worktrees/**` holds nested full-repo checkouts (git worktrees for
       // other sessions), e.g. a copy of verevonv2 (React) — never collect their
       // tests against this SolidJS-oriented config, regardless of what

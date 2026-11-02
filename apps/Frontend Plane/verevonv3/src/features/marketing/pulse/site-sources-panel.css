@@ -1,0 +1,20 @@
+.site-source { margin-top: 24px; padding: 30px; border: 1px solid var(--border-color, #e8e8e8); border-radius: 24px; color: var(--text-primary, #242527); background: var(--surface-color, #fff); }
+.site-source header { display: flex; justify-content: space-between; gap: 20px; align-items: flex-start; }
+.site-source header span { font-size: 10px; letter-spacing: .14em; text-transform: uppercase; font-weight: 650; color: #7b7d83; }
+.site-source h2 { margin: 8px 0; font-size: 22px; letter-spacing: -.04em; }
+.site-source h3 { margin: 0 0 10px; font-size: 15px; }
+.site-source p, .site-source footer { font-size: 12px; line-height: 1.65; color: #7b7d83; }
+.site-source__controls { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.site-source button { border: 1px solid #e8e8e8; border-radius: 9px; padding: 10px 12px; background: transparent; color: inherit; font: inherit; font-size: 12px; }
+.site-source button:disabled { opacity: .5; cursor: default; }
+.site-source section { border-top: 1px solid #efefef; padding-top: 22px; margin-top: 22px; }
+.site-source dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 16px; margin: 22px 0; }
+.site-source dt { font-size: 11px; color: #7b7d83; }
+.site-source dd { margin: 10px 0; font-size: 24px; letter-spacing: -.04em; }
+.site-source footer { border-top: 1px solid #efefef; padding-top: 18px; margin-top: 22px; }
+.site-source code { overflow-wrap: anywhere; }
+@media (max-width: 1050px) { .site-source header { flex-direction: column; } .site-source__controls { justify-content: flex-start; } }
+@media (max-width: 700px) { .site-source { padding: 20px; } }
+.site-source__terms { overflow-x: auto; }
+.site-source__terms table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 12px; }
+.site-source__terms th, .site-source__terms td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #eee; overflow-wrap: anywhere; }

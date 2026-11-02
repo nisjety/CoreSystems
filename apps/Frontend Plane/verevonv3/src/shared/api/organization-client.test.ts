@@ -1,11 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   getOrganizationAISettings,
+  recordOrganizationWebsite,
+  getOrganizationAgentLearningPolicy,
   getOrganizationZdr,
   getOrganizationSupportAIMode,
   getOrganizationZdrEntitled,
   listOrganizations,
   switchActiveOrganization,
+  updateOrganizationAgentLearningPolicy,
   updateOrganizationZdr,
   updateOrganizationSupportAIMode,
 } from './organization-client'
@@ -88,6 +91,40 @@ describe('organization client', () => {
     expect(JSON.parse(String(init.body))).toEqual({ supportAiMode: 'assist' })
   })
 
+  it('reads the memory and learning policy with org-core\'s defaults and strictness', async () => {
+    const policyFor = async (agentLearning: unknown) => {
+      vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ id: 'org_1', metadata: { agentLearning } })))
+      return getOrganizationAgentLearningPolicy('org_1')
+    }
+    // Nothing stored: memory allowed, learning review is opt-in and off.
+    await expect(policyFor(undefined)).resolves.toEqual({ memory: 'allow', learningReview: 'disabled' })
+    await expect(policyFor({ memory: 'disabled', learningReview: 'proposals' })).resolves.toEqual({
+      memory: 'disabled',
+      learningReview: 'proposals',
+    })
+    // A value this client does not know never reads as allowed or opted in.
+    await expect(policyFor({ memory: 'maybe', learningReview: 'auto' })).resolves.toEqual({
+      memory: 'disabled',
+      learningReview: 'disabled',
+    })
+    await expect(policyFor('nonsense')).resolves.toEqual({ memory: 'allow', learningReview: 'disabled' })
+  })
+
+  it('persists the memory and learning policy through the org-admin settings route', async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ id: 'org_1', metadata: { agentLearning: { memory: 'disabled', learningReview: 'disabled' } } }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const stored = await updateOrganizationAgentLearningPolicy('org_1', { memory: 'disabled' })
+
+    const [path, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(path).toBe('/api/v1/orgs/org_1/settings')
+    expect(init.method).toBe('PATCH')
+    expect(JSON.parse(String(init.body))).toEqual({ agentLearningPolicy: { memory: 'disabled' } })
+    expect(stored).toEqual({ memory: 'disabled', learningReview: 'disabled' })
+  })
+
   it('reads the combined AI operating settings in one canonical org request', async () => {
     const fetchMock = vi.fn(async () => jsonResponse({
       id: 'org_1',
@@ -135,5 +172,36 @@ describe('organization client', () => {
     )
 
     await expect(getOrganizationZdrEntitled('org_1')).resolves.toBe(false)
+  })
+})
+
+describe('recordOrganizationWebsite', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('sends the website to the organisation and returns the address as the record kept it', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(
+      JSON.stringify({ id: 'org_1', website_url: 'https://firma.no/' }),
+      { headers: { 'Content-Type': 'application/json' } },
+    ))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const kept = await recordOrganizationWebsite('org_1', 'https://firma.no/')
+
+    const [url, init] = fetchMock.mock.calls[0]!
+    expect(String(url)).toContain('/api/v1/orgs/org_1/website')
+    expect(init?.method).toBe('PATCH')
+    expect(JSON.parse(String(init?.body))).toEqual({ website_url: 'https://firma.no/' })
+    expect(kept).toBe('https://firma.no/')
+  })
+
+  it('reports a refused address as the error the gateway sent, not as a recorded website', async () => {
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => new Response(
+      JSON.stringify({ error: { code: 'invalid_url', message: 'Private or loopback URLs are not allowed.' } }),
+      { status: 400, headers: { 'Content-Type': 'application/json' } },
+    )))
+
+    await expect(recordOrganizationWebsite('org_1', 'http://127.0.0.1/')).rejects.toThrow()
   })
 })

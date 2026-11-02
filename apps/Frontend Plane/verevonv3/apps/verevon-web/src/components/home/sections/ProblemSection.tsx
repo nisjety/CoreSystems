@@ -97,12 +97,12 @@ const particles: ParticleDefinition[] = Array.from(
 );
 
 const problemLines = [
-  "Kunnskapen finnes.".split(" "),
+  "Arbeidslogikken er deres.".split(" "),
   "Men den er spredt.".split(" "),
 ];
 const problemCopy = problemLines.map((line) => line.join(" ")).join(" ");
 const supportingCopy =
-  "Verevon samler kildene, forstår sammenhengen og gjør neste steg klart — med dere i kontroll.";
+  "Regler, kunnskap og ansvar er spredt på tvers av systemer, avdelinger og mennesker. Når ingen ser hele sammenhengen, stopper arbeidet.";
 
 function clamp01(value: number) {
   return Math.min(1, Math.max(0, value));
@@ -428,7 +428,7 @@ export function ProblemSection() {
   return (
     <section
       aria-labelledby="problem-title"
-      className="relative isolate flex h-[75svh] min-h-[630px] w-full items-center overflow-hidden bg-background text-verevon-j-text"
+		className="relative isolate flex h-[75svh] min-h-[630px] w-full items-center overflow-hidden bg-background text-verevon-j-text"
       id="problemet"
       ref={sectionRef}
     >
@@ -455,10 +455,10 @@ export function ProblemSection() {
         className="pointer-events-none absolute left-[-10%] top-0 z-[2] h-40 w-[120%] bg-gradient-to-b from-background to-transparent"
       />
 
-      <div className="relative z-10 flex w-full flex-col items-center justify-center gap-[clamp(1.6rem,2vw,2rem)] px-[var(--verevon-edge)] max-[760px]:px-[var(--verevon-page-pad)]">
+      <div className="verevon-problem-copy relative z-10 flex w-full flex-col items-center justify-center gap-[clamp(1.6rem,2vw,2rem)] px-[var(--verevon-edge)] max-[760px]:px-[var(--verevon-page-pad)]">
         <h2
           aria-label={problemCopy}
-          className="verevon-home-heading verevon-problem-text-shadow m-0 mx-auto max-w-[16ch] text-center max-[760px]:mx-0 max-[760px]:max-w-none max-[760px]:text-left"
+          className="verevon-home-heading verevon-problem-heading verevon-problem-text-shadow m-0 mx-auto max-w-[27ch] text-center max-[760px]:mx-0 max-[760px]:max-w-none max-[760px]:text-left"
           data-problem-heading=""
           id="problem-title"
         >
@@ -472,10 +472,10 @@ export function ProblemSection() {
         </h2>
 
         <div className="flex max-w-[512px] flex-col items-center text-center max-[760px]:items-start max-[760px]:self-start max-[760px]:text-left">
-          <p className="verevon-body-lg text-pretty text-verevon-text-muted">
+          <p className="verevon-body-lg verevon-problem-body text-pretty text-verevon-text-muted">
             {supportingCopy}
           </p>
-          <ArrowButton className="mt-7" href="#produkt" variant="dark">
+		  <ArrowButton className="verevon-cta-drop mt-7" href="#flyt" variant="dark">
             Se hvordan Verevon virker
           </ArrowButton>
         </div>

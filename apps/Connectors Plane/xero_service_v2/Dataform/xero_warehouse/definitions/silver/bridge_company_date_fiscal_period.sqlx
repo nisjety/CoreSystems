@@ -1,0 +1,113 @@
+config {
+  type: "incremental",
+  schema: "dw_1_silver_xero",
+  protected: true,
+  onSchemaChange: "EXTEND",
+  description: "Append-only tenant-date bridge to the derived Xero fiscal calendar. Existing date classifications are immutable; a changed fiscal configuration requires an approved migration policy before new dates are mapped.",
+  bigquery: {
+    partitionBy: "DATE_TRUNC(calendar_date, MONTH)",
+    clusterBy: ["tenant_id", "financial_period_id"]
+  },
+  assertions: {
+    nonNull: ["fiscal_calendar_date_key", "tenant_id", "calendar_date", "financial_period_key"],
+    uniqueKey: ["fiscal_calendar_date_key"]
+  }
+}
+
+WITH configuration_history AS (
+  SELECT
+    tenant_id,
+    fiscal_configuration_version_id,
+    fiscal_configuration_observed_at,
+    financial_year_end_day,
+    financial_year_end_month,
+    CONCAT(
+      tenant_id, '|', CAST(financial_year_end_day AS STRING), '|',
+      CAST(financial_year_end_month AS STRING)
+    ) AS fiscal_configuration_state_key
+  FROM ${ref("dw_1_silver_xero", "dim_company_fiscal_configuration_history")}
+), configuration_state_counts AS (
+  SELECT tenant_id, COUNT(DISTINCT fiscal_configuration_state_key) AS configuration_state_count
+  FROM configuration_history
+  GROUP BY tenant_id
+), stable_configuration AS (
+  SELECT history.*
+  FROM configuration_history AS history
+  INNER JOIN configuration_state_counts AS state_counts USING (tenant_id)
+  WHERE state_counts.configuration_state_count = 1
+    AND history.financial_year_end_day BETWEEN 1 AND 31
+    AND history.financial_year_end_month BETWEEN 1 AND 12
+    AND history.financial_year_end_day = EXTRACT(DAY FROM LAST_DAY(
+      DATE(2001, history.financial_year_end_month, 1)
+    ))
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY history.tenant_id
+    ORDER BY history.fiscal_configuration_observed_at ASC,
+             history.fiscal_configuration_version_id ASC
+  ) = 1
+), observed_dates AS (
+  SELECT tenant_id, invoice_date_local AS date_day FROM ${ref("dw_1_silver_xero", "fact_invoice")}
+  UNION ALL SELECT tenant_id, due_date_local FROM ${ref("dw_1_silver_xero", "fact_invoice")}
+  UNION ALL SELECT tenant_id, credit_note_date_local FROM ${ref("dw_1_silver_xero", "fact_credit_note")}
+  UNION ALL SELECT tenant_id, DATE(payment_date) FROM ${ref("dw_1_silver_xero", "fact_payment")}
+  UNION ALL SELECT tenant_id, transaction_date_local FROM ${ref("dw_1_silver_xero", "fact_bank_transaction")}
+  UNION ALL SELECT tenant_id, DATE(transfer_date) FROM ${ref("dw_1_silver_xero", "fact_bank_transfer")}
+  UNION ALL SELECT tenant_id, transaction_date FROM ${ref("dw_1_silver_xero", "fact_general_ledger")}
+  UNION ALL SELECT tenant_id, order_date_local FROM ${ref("dw_1_silver_xero", "fact_purchase_order")}
+  UNION ALL SELECT tenant_id, quote_date_local FROM ${ref("dw_1_silver_xero", "fact_quote")}
+  UNION ALL SELECT tenant_id, expiry_date_local FROM ${ref("dw_1_silver_xero", "fact_quote")}
+  UNION ALL SELECT tenant_id, DATE(overpayment_date) FROM ${ref("dw_1_silver_xero", "fact_overpayment")}
+  UNION ALL SELECT tenant_id, payment_date_local FROM ${ref("dw_1_silver_xero", "fact_batch_payment")}
+  UNION ALL SELECT tenant_id, DATE(allocation_date) FROM ${ref("dw_1_silver_xero", "fact_credit_note_allocation")}
+  UNION ALL SELECT tenant_id, report_to FROM ${ref("dw_1_silver_xero", "fact_financial_report_snapshot")}
+  UNION ALL SELECT tenant_id, SAFE_CAST(report_date AS DATE) FROM ${ref("dw_1_silver_xero", "fact_financial_report_snapshot")}
+  UNION ALL SELECT tenant_id, report_to FROM ${ref("dw_1_silver_xero", "fact_financial_report_cell")}
+  UNION ALL SELECT tenant_id, SAFE_CAST(report_date AS DATE) FROM ${ref("dw_1_silver_xero", "fact_financial_report_cell")}
+), bounds AS (
+  SELECT
+    configuration.*,
+    COALESCE(DATE_SUB(MIN(observed.date_day), INTERVAL 1 YEAR), DATE_SUB(CURRENT_DATE(), INTERVAL 1 YEAR)) AS first_date,
+    COALESCE(DATE_ADD(MAX(observed.date_day), INTERVAL 1 YEAR), DATE_ADD(CURRENT_DATE(), INTERVAL 1 YEAR)) AS last_date
+  FROM stable_configuration AS configuration
+  LEFT JOIN observed_dates AS observed USING (tenant_id)
+  GROUP BY 1, 2, 3, 4, 5, 6
+), candidates AS (
+  SELECT
+    CONCAT(bounds.tenant_id, '|', CAST(calendar_date AS STRING)) AS fiscal_calendar_date_key,
+    bounds.tenant_id,
+    calendar_date,
+    bounds.fiscal_configuration_state_key,
+    bounds.fiscal_configuration_version_id,
+    bounds.fiscal_configuration_observed_at,
+    bounds.financial_year_end_day,
+    bounds.financial_year_end_month,
+    CONCAT(
+      bounds.tenant_id, '|', bounds.fiscal_configuration_state_key, '|',
+      FORMAT_DATE('%Y%m', calendar_date)
+    ) AS financial_period_key,
+    FORMAT_DATE('%Y%m', calendar_date) AS financial_period_id,
+    DATE_TRUNC(calendar_date, MONTH) AS period_start,
+    LAST_DAY(calendar_date) AS period_end,
+    EXTRACT(YEAR FROM calendar_date) + IF(
+      EXTRACT(MONTH FROM calendar_date) > bounds.financial_year_end_month,
+      1,
+      0
+    ) AS fiscal_year,
+    MOD(EXTRACT(MONTH FROM calendar_date) - bounds.financial_year_end_month + 11, 12) + 1 AS fiscal_month,
+    'calendar_month_from_organisation_financial_year_end' AS financial_period_basis,
+    TRUE AS is_derived,
+    'xero' AS source_system
+  FROM bounds,
+  UNNEST(GENERATE_DATE_ARRAY(first_date, last_date)) AS calendar_date
+)
+
+SELECT *
+FROM candidates
+${when(incremental(), `
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM ${self()} AS prior
+    WHERE prior.tenant_id = candidates.tenant_id
+      AND prior.calendar_date = candidates.calendar_date
+  )
+`)}

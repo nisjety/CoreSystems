@@ -42,7 +42,8 @@ class TestApproval(unittest.TestCase):
                 state = 'UNSPECIFIED',
                 requested_of = '',
                 decided_by = '',
-                decision_reason = ''
+                decision_reason = '',
+                cause = None
             )
         else:
             return Approval(

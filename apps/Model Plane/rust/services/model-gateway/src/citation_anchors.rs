@@ -237,4 +237,22 @@ mod tests {
         assert!(anchor_citations("", "turn-1", &[recorded("c1", 1)]).is_empty());
         assert!(anchor_citations("Something [1].", "turn-1", &[]).is_empty());
     }
+
+    /// A connected-account source is unnumbered, so no bracketed marker resolves to it, even one that a web
+    /// or knowledge source of the same turn would otherwise answer (WS23-S5).
+    #[test]
+    fn a_connector_citation_is_never_anchored_by_number() {
+        let connector = RecordedCitation {
+            id: "conn-0123456789abcdef".to_owned(),
+            title: "Invoice 42".to_owned(),
+            url: "https://outlook.office.com/mail/id/m1".to_owned(),
+            snippet: "Ada · 2026-10-28".to_owned(),
+            source_group_id: "connector:microsoft".to_owned(),
+            source_group_label: Some("Microsoft 365".to_owned()),
+            number: None,
+            origin: "connector".to_owned(),
+        };
+        let events = anchor_citations("The invoice came on Tuesday [1].", "turn-1", &[connector]);
+        assert!(events.is_empty());
+    }
 }

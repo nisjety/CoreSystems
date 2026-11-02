@@ -44,9 +44,22 @@ A browser operation that did not finish inside its deadline (`crates/quarry-brow
 | field | values | meaning |
 |---|---|---|
 | `op` | `launch`, `tab_attach`, `navigate`, `content`, `ax_snapshot`, `screenshot`, `pdf`, `evaluate`, `input`, `native_action`, `wait_for_poll`, `wait_for`, `page_close`, `context_close`, `profile_capture`, `download_begin`, `download_complete` | what timed out. `health_probe` is also an `Op` (`deadlines.rs`) but only the background prober runs under it, so it is not a value a client sees (see the paragraph above the table) |
-| `deadline_ms` | number | the bound that expired, after `QUARRY_BROWSER_DEADLINE_SCALE` |
+| `deadline_ms` | number | the bound that expired, after `QUARRY_BROWSER_DEADLINE_SCALE`. chromiumoxide's own 30 s per-command timer can expire first (a scale above 1.2 for `navigate` and `pdf`); then it is 30000 |
 | `effect` | `none` | the operation cannot have changed the page: a read or a teardown. `retryable` is true |
 | `effect` | `unknown` | the operation may have changed the page (`navigate`, `evaluate`, `input`, `native_action`): look at the page before repeating it. `retryable` is false |
+
+After a `navigate` timeout the load is stopped and the page can be read at once: the tab is on the slow page if its document had arrived, and still on the page it had before if not (SC4); after a timeout on a run's first `navigate` the tab is kept the same way, on `about:blank` if the document had not arrived (SC4 T4b). The next step observes that blank tab (200, `url` `about:blank`): the check of the page a step landed on accepts exactly `about:blank` as a tab with no page yet, never as a navigation target (T4b-1). A step that lands outside the run's (or the attachment's) allowed domains is a 403 `SECURITY_BLOCKED` on every step path (the REST step said `BAD_REQUEST` before 2026-10-29) and leaves a `failed` receipt with no observation. A new tab opened with a URL is still closed when its navigation times out, so as a run's first action it leaves no current page (open follow-up); an observing step after it gets a blank tab, as does the first wait of a run that never navigated or was resumed from a checkpoint with no URL (SC4 D1), and only an acting step still answers `no_current_page`. On an agent step the timeout can also come from the observation read after the action (`evaluate`, `content`, `ax_snapshot`); its `effect` is then the step's: `unknown` (`retryable` false) after an action that can change the page, `none` (`retryable` true) after a wait or a read-only action.
+
+## 403 `SECURITY_BLOCKED`: a navigation the browser's network guard refused (SC4 D3)
+
+The tab's Fetch guard refused the navigation's own document request, or a redirect hop of it. The navigation ends at once with `details {reason, op: "navigate"}` and no URL or host; `retryable` is false. Before 2026-10-29 it waited out the navigate deadline (25 s live) and answered 504 `TIMEOUT` with `effect: "unknown"`. It covers every navigation that goes through the chromium driver's `goto`: an agent `navigate` (REST step, browser socket, delegate step; a run's first one too), a resume's recovery navigation, and a scrape rendered in the browser; and a new tab opened with a URL (whose tab is then closed, as on any failure of that navigation).
+
+| reason | message | meaning |
+|---|---|---|
+| `domain_grant_blocked` | `browser navigation is outside the run's allowed domains` | the host is outside the run's (or the tab's) egress policy, or on its deny list. The message is the edge's own for an off-list target, so the gateway answers it as `browser_navigation_outside_scope` |
+| `url_or_dns_blocked` | `browser navigation target is blocked by security policy` | the URL or its DNS answer is blocked (a private or unresolvable address) |
+
+The tab keeps the page it had (`about:blank` on a run's first step) and answers reads at once; the refusal is an egress receipt (with the same `policy`), which the next observation carries; the next navigate first clears the refused navigation from chromiumoxide's queue (about 0.1 s), as after a navigate `TIMEOUT`. The step's receipt is `failed` with `SECURITY_BLOCKED` and the flat cost of a failed action. A refused image, frame or other subresource never fails a navigation: it shows only as an egress receipt.
 
 ## 415 `UNSUPPORTED_MEDIA` on `POST /v1/scrape`
 
@@ -86,7 +99,7 @@ All of these are `retryable: false`: repeating the call cannot help, the caller 
 |---|---|
 | `session_reaped` | the driver's idle reaper closed the session (idle past `max(2 x lease ttl, QUARRY_BROWSER_SESSION_IDLE_S)` or older than `max(2 x ttl, QUARRY_BROWSER_SESSION_MAX_AGE_S)`); remembered for 10 minutes |
 | `browser_process_lost` | the Chromium process the session lived in exited or crashed; the next `acquire` launches a new one. Remembered for 10 minutes |
-| `no_current_page` | the session is open but has no page yet (call `goto` or open a tab first) |
+| `no_current_page` | the session is open but has no page yet (call `goto` or open a tab first). An agent step that only reads the page (`wait`, `wait_for`, `screenshot`, `pdf`, `get_content`) no longer gets it: it observes a blank placeholder tab (200, `url` `about:blank`; SC4 D1). An acting step (click, type, ...) still does |
 | `session_not_open` | the driver does not hold this session (released, or never acquired) |
 
 ## 503 on `GET /ready`: `browser_unhealthy` (WS3.F)

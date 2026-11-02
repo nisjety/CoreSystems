@@ -1,0 +1,336 @@
+config {
+  type: "table",
+  schema: "visma_gold_finance",
+  name: "fact_project_portfolio_line",
+  description: "Project portfolio reporting fact at project transaction line grain. Uses project transactions as the canonical source for project P&L and balance-side project activity, enriched with the conformed project and account dimensions.",
+  tags: ["gold", "finance", "project", "fact"]
+}
+
+WITH account_dim AS (
+  SELECT
+    tenant_id,
+    account_cd,
+    account_description,
+    account_type,
+    account_code_1,
+    account_code_2,
+    account_code_3,
+    bs_pl,
+    fsli_1,
+    fsli_2,
+    fsli_3,
+    is_ebitda,
+    is_net_income
+  FROM ${ref("visma_gold_finance", "dim_account")}
+),
+
+project_dim AS (
+  SELECT * EXCEPT (rn)
+  FROM (
+    SELECT
+      p.*,
+      ROW_NUMBER() OVER (
+        PARTITION BY p.tenant_id, p.project_id
+        ORDER BY p.last_modified_at DESC, p.business_unit_id, p.project_name
+      ) AS rn
+    FROM ${ref("visma_gold_common", "dim_project")} AS p
+  )
+  WHERE rn = 1
+),
+
+company_dim AS (
+  SELECT
+    tenant_id,
+    company_key,
+    entity_code,
+    entity_name,
+    group_name,
+    base_currency
+  FROM ${ref("visma_gold_common", "dim_company")}
+),
+
+-- Department resolution: project transaction lines carry the GL subaccount
+-- (debit_subaccount_id); department_code on dim_subaccount is the department segment of the
+-- tenant (segment 3 on the new structure, segment 2 on the old one), the same rule
+-- fact_general_ledger uses. department_name comes from the conformed dim_department, joined
+-- on that code.
+subaccount_department AS (
+  SELECT
+    s.tenant_id,
+    s.subaccount_id,
+    s.subaccount_number,
+    s.department_code                             AS department_id,
+    d.department_name
+  FROM ${ref("visma_gold_common", "dim_subaccount")} AS s
+  LEFT JOIN ${ref("visma_gold_common", "dim_department")} AS d
+    ON  d.tenant_id    = s.tenant_id
+    AND d.department_id = s.department_code
+),
+
+base AS (
+  SELECT
+    f.tenant_id,
+    f.synced_at,
+    f.organization_name,
+    f.reference_number,
+    f.module,
+    f.status,
+    f.header_description,
+    f.line_number,
+    f.tran_id,
+    f.transaction_date,
+    f.financial_period,
+    f.batch_number,
+    f.inventory_id,
+    f.inventory_description,
+    f.line_description,
+    f.unit_of_measure,
+    f.quantity,
+    f.unit_rate,
+    f.amount,
+    f.is_billable,
+    f.is_released,
+    f.is_allocated,
+    f.billable_quantity,
+    f.start_date,
+    f.end_date,
+    f.line_last_modified_at,
+    f.overtime_multiplier,
+    f.project_id,
+    f.project_name AS source_project_name,
+    f.project_task_id,
+    f.project_task_name,
+    f.business_unit_id,
+    f.business_unit_name,
+    f.business_unit_match_rule,
+    f.is_historical_project_migration,
+    f.historical_migration_rule,
+    f.source_business_unit_id,
+    f.source_business_unit_name,
+    f.source_segment_2_value,
+    f.debit_account_type AS source_debit_account_type,
+    f.debit_account_cd,
+    f.debit_account_description,
+    f.debit_subaccount_id,
+    f.branch_id,
+    f.customer_vendor_id,
+    f.customer_vendor_name,
+    f.account_group_number,
+    f.account_group_name,
+    f.debit_account_group_number,
+    f.debit_account_group_name
+  FROM ${ref("visma_silver", "fact_project_transaction_line")} AS f
+  WHERE f.project_id IS NOT NULL
+),
+
+enriched AS (
+  SELECT
+    b.*,
+    c.company_key,
+    c.entity_code,
+    c.entity_name,
+    c.group_name,
+    c.base_currency,
+    a.account_description,
+    COALESCE(a.account_type, b.source_debit_account_type) AS reporting_account_type,
+    a.account_code_1,
+    a.account_code_2,
+    a.account_code_3,
+    a.bs_pl,
+    a.fsli_1,
+    a.fsli_2,
+    a.fsli_3,
+    a.is_ebitda,
+    a.is_net_income,
+    p.project_key,
+    p.project_name AS dim_project_name,
+    p.status AS project_status,
+    p.customer_id,
+    p.customer_name,
+    p.project_manager_name,
+    p.start_date AS project_start_date,
+    p.end_date AS project_end_date,
+    dept.department_id,
+    dept.department_name
+  FROM base AS b
+  LEFT JOIN company_dim AS c
+    ON c.tenant_id = b.tenant_id
+  LEFT JOIN account_dim AS a
+    ON a.tenant_id = b.tenant_id
+   AND a.account_cd = b.debit_account_cd
+  LEFT JOIN project_dim AS p
+    ON p.tenant_id = b.tenant_id
+   AND p.project_id = b.project_id
+  LEFT JOIN subaccount_department AS dept
+    ON  dept.tenant_id = b.tenant_id
+   AND (b.debit_subaccount_id = dept.subaccount_id
+        OR b.debit_subaccount_id = dept.subaccount_number)
+)
+
+SELECT
+  FARM_FINGERPRINT(CONCAT(
+    CAST(tenant_id AS STRING), '|',
+    CAST(module AS STRING), '|',
+    CAST(reference_number AS STRING), '|',
+    CAST(COALESCE(CAST(tran_id AS STRING), line_number) AS STRING)
+  ))                                                    AS project_portfolio_line_key,
+  company_key,
+  FARM_FINGERPRINT(CAST(transaction_date AS STRING))    AS date_key,
+  project_key,
+  CASE
+    WHEN business_unit_id IS NOT NULL THEN FARM_FINGERPRINT(CONCAT(
+      CAST(tenant_id AS STRING), '|',
+      CAST(business_unit_id AS STRING)
+    ))
+  END                                                   AS business_unit_key,
+  CONCAT(
+    CAST(tenant_id AS STRING), '|',
+    CAST(debit_account_cd AS STRING)
+  )                                                     AS account_key,
+
+  tenant_id,
+  organization_name,
+  entity_code,
+  entity_name,
+  group_name,
+  base_currency,
+
+  project_id,
+  COALESCE(dim_project_name, source_project_name)       AS project_name,
+  project_status,
+  customer_id,
+  customer_name,
+  project_manager_name,
+  project_start_date,
+  project_end_date,
+  project_task_id,
+  project_task_name,
+
+  business_unit_id,
+  business_unit_name,
+  business_unit_match_rule,
+  source_business_unit_id,
+  source_business_unit_name,
+  source_segment_2_value,
+  is_historical_project_migration,
+  historical_migration_rule,
+
+  transaction_date,
+  financial_period,
+  batch_number,
+  reference_number,
+  module,
+  status,
+  line_number,
+  tran_id,
+  header_description,
+  line_description,
+  inventory_id,
+  inventory_description,
+  unit_of_measure,
+  quantity,
+  unit_rate,
+  amount                                               AS source_amount,
+  is_billable,
+  is_released,
+  is_allocated,
+  billable_quantity,
+  start_date,
+  end_date,
+  line_last_modified_at,
+  overtime_multiplier,
+
+  debit_account_cd                                     AS account_cd,
+  COALESCE(account_description, debit_account_description)
+                                                        AS account_description,
+  reporting_account_type                               AS account_type,
+  account_code_1,
+  account_code_2,
+  account_code_3,
+  bs_pl,
+  fsli_1,
+  fsli_2,
+  fsli_3,
+  is_ebitda,
+  is_net_income,
+  debit_subaccount_id                                  AS subaccount_id,
+  branch_id,
+  department_id,
+  department_id                                        AS department_code_id,
+  CASE
+    WHEN department_id IS NOT NULL THEN
+      FARM_FINGERPRINT(CONCAT(
+        CAST(tenant_id AS STRING), '|',
+        CAST(department_id AS STRING)
+      ))
+    ELSE NULL
+  END                                                   AS department_key,
+  department_name,
+  COALESCE(
+    CONCAT(department_id, ' - ', department_name),
+    department_id,
+    department_name
+  )                                                     AS department_code,
+  customer_vendor_id,
+  customer_vendor_name,
+  account_group_number,
+  account_group_name,
+  debit_account_group_number,
+  debit_account_group_name,
+
+  CASE
+    WHEN reporting_account_type = 'Income' THEN 'I'
+    WHEN reporting_account_type = 'Expense' THEN 'E'
+    WHEN reporting_account_type = 'Liability' THEN 'L'
+    WHEN reporting_account_type = 'Asset' THEN 'A'
+    ELSE 'O'
+  END                                                   AS project_reporting_type_code,
+  CASE
+    WHEN reporting_account_type = 'Income' THEN 'Income'
+    WHEN reporting_account_type = 'Expense' THEN 'Expense'
+    WHEN reporting_account_type = 'Liability' THEN 'Liability'
+    WHEN reporting_account_type = 'Asset' THEN 'Asset'
+    ELSE 'Other'
+  END                                                   AS project_reporting_type,
+
+  CASE
+    WHEN reporting_account_type = 'Income' THEN -COALESCE(amount, 0)
+    ELSE 0
+  END                                                   AS income_amount,
+  CASE
+    WHEN reporting_account_type = 'Expense' THEN COALESCE(amount, 0)
+    ELSE 0
+  END                                                   AS expense_amount,
+  CASE
+    WHEN reporting_account_type = 'Liability' THEN COALESCE(amount, 0)
+    ELSE 0
+  END                                                   AS liability_amount_raw,
+  CASE
+    WHEN reporting_account_type = 'Liability' THEN ABS(COALESCE(amount, 0))
+    ELSE 0
+  END                                                   AS liability_amount_abs,
+  CASE
+    WHEN reporting_account_type = 'Asset' THEN COALESCE(amount, 0)
+    ELSE 0
+  END                                                   AS asset_amount_raw,
+  CASE
+    WHEN reporting_account_type = 'Asset' THEN ABS(COALESCE(amount, 0))
+    ELSE 0
+  END                                                   AS asset_amount_abs,
+  CASE
+    WHEN reporting_account_type = 'Income' THEN -COALESCE(amount, 0)
+    WHEN reporting_account_type = 'Expense' THEN -COALESCE(amount, 0)
+    ELSE 0
+  END                                                   AS result_contribution_amount,
+  CASE
+    WHEN reporting_account_type IN ('Asset', 'Liability') THEN ABS(COALESCE(amount, 0))
+    ELSE 0
+  END                                                   AS balance_contribution_amount,
+  -- Only the accounts 3999/4999 ("Historisk inntekt/utgift prosjekt"). is_historical_project_migration
+  -- (above) is the full rule, which also takes the opening balances booked on ordinary accounts.
+  (
+    debit_account_cd IN ('3999', '4999')
+  )                                                     AS is_historical_project_migration_account,
+
+  'visma_project_transactions'                         AS source_system
+FROM enriched

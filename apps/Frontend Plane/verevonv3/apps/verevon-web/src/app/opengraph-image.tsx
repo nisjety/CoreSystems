@@ -1,6 +1,6 @@
 import { ImageResponse } from "next/og";
 
-export const alt = "Verevon — Én arbeidsflate for mennesker og AI";
+export const alt = "Verevon — Én styrt arbeidsflate for mennesker og AI";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 
@@ -50,7 +50,7 @@ export default function OpenGraphImage() {
 							lineHeight: 0.94,
 						}}
 					>
-						Én arbeidsflate for mennesker og AI.
+						Én styrt arbeidsflate der mennesker og AI jobber sammen.
 					</div>
 				</div>
 				<div

@@ -23,16 +23,26 @@ on:
       - "apps/**/infer-statuses.json*"
       - "apps/**/inference-service-tokens.golden.json*"
       - "apps/**/zdr-refusals.json*"
+      - "apps/**/model-entitlement-refusals.json*"
+      - "apps/**/model-entitlement-matrix.json"
       - "apps/**/cross-plane-token-requests.json*"
       - "apps/**/zdr-feature-matrix.json*"
       - "apps/**/secret-shapes.v1.json*"
+      - "apps/**/space-sidebar-limits.json*"
       - "apps/**/web-policy-catalogue.v1.json*"
+      - "apps/**/sse-event-payloads.json*"
+      - "apps/**/space-denial-codes.golden.json*"
+      - "apps/**/space-events.json*"
+      - "apps/**/space-room-run-frames*"
       - "scripts/tests/zdr-contract-sync.test.sh"
       - "scripts/tests/zdr-contract-schema.mjs"
       - "scripts/tests/zdr-contract-schema.test.mjs"
+      - "scripts/tests/model-entitlement-contract-sync.test.sh"
+      - "scripts/tests/model-entitlement-contract-schema.mjs"
+      - "scripts/tests/model-entitlement-contract-schema.test.mjs"
       - ".github/workflows/contract-goldens.yml"
   push:
-    branches: [main]
+    branches: [main, fix/ui-premium-restore]
     paths:
       - "apps/Model Plane/api/contracts/**"
       - "apps/**/zdr-posture-matrix.json*"
@@ -40,13 +50,23 @@ on:
       - "apps/**/infer-statuses.json*"
       - "apps/**/inference-service-tokens.golden.json*"
       - "apps/**/zdr-refusals.json*"
+      - "apps/**/model-entitlement-refusals.json*"
+      - "apps/**/model-entitlement-matrix.json"
       - "apps/**/cross-plane-token-requests.json*"
       - "apps/**/zdr-feature-matrix.json*"
       - "apps/**/secret-shapes.v1.json*"
+      - "apps/**/space-sidebar-limits.json*"
       - "apps/**/web-policy-catalogue.v1.json*"
+      - "apps/**/sse-event-payloads.json*"
+      - "apps/**/space-denial-codes.golden.json*"
+      - "apps/**/space-events.json*"
+      - "apps/**/space-room-run-frames*"
       - "scripts/tests/zdr-contract-sync.test.sh"
       - "scripts/tests/zdr-contract-schema.mjs"
       - "scripts/tests/zdr-contract-schema.test.mjs"
+      - "scripts/tests/model-entitlement-contract-sync.test.sh"
+      - "scripts/tests/model-entitlement-contract-schema.mjs"
+      - "scripts/tests/model-entitlement-contract-schema.test.mjs"
       - ".github/workflows/contract-goldens.yml"
 
 # The job reads the checkout and runs local scripts; nothing here writes to the repository.
@@ -78,3 +98,21 @@ jobs:
 
       - name: Loader tests for the ZDR goldens
         run: node --test scripts/tests/zdr-contract-schema.test.mjs
+
+      # The model entitlement refusal golden (WS10): the same pin-and-strict-loader check, apart from
+      # the ZDR one because the two vocabularies share no file.
+      - name: Drift check for the model entitlement refusal golden
+        run: bash scripts/tests/model-entitlement-contract-sync.test.sh
+
+      - name: Prove the entitlement drift check can fail
+        run: bash scripts/tests/model-entitlement-contract-sync.test.sh --self-test
+
+      - name: Loader tests for the model entitlement golden
+        run: node --test scripts/tests/model-entitlement-contract-schema.test.mjs
+
+      # The Space room run frame golden (WS09-S3): its pin and the SPA copy must match.
+      - name: Drift check for the Space room run frame golden
+        run: bash "apps/Model Plane/scripts/tests/room-run-frames-contract.test.sh"
+
+      - name: Prove the room run frame check can fail
+        run: bash "apps/Model Plane/scripts/tests/room-run-frames-contract.test.sh" --self-test

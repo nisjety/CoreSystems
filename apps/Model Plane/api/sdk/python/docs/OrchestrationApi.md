@@ -254,6 +254,7 @@ Name | Type | Description  | Notes
 **200** | Approval decided |  -  |
 **400** | Invalid request |  -  |
 **404** | Resource not found |  -  |
+**422** | The scope is not available (error code scope_not_enabled) |  -  |
 
 [[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
 

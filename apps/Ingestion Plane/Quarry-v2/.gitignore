@@ -61,3 +61,12 @@ sdks/typescript/.gitignore
 sdks/typescript/.npmignore
 sdks/typescript/.openapi-generator-ignore
 sdks/typescript/README.md
+
+# Keep the recovered client source and build manifests so the frontend's
+# workspace dependency can be rebuilt on a fresh checkout. Output stays ignored.
+!sdks/typescript/src/
+!sdks/typescript/src/**
+!sdks/typescript/package.json
+!sdks/typescript/tsconfig.json
+!sdks/typescript/tsconfig.esm.json
+!sdks/typescript/README.md

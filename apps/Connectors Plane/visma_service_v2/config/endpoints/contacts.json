@@ -1,0 +1,31 @@
+{
+  "endpoint_name": "contacts",
+  "bigquery_table": "visma_contacts",
+  "primary_key": "contactId",
+  "source": "erp_rest",
+  "api_method": "get_contacts",
+  "api_endpoint": "/v1/contact",
+  "pagination_profile": "numbertoread_skip",
+  "modified_field": "lastModifiedDateTime",
+  "merge_type": "upsert",
+  "sync_pattern": "incremental_upsert",
+  "validation_fields": [
+    "contactId",
+    "lastModifiedDateTime"
+  ],
+  "notes": "DataMart normalizer parity vs ERP (scripts/normalizer_parity.py, 2026-09-29, after correcting wrong-domain values): 10 of 25 fields equal on 11,727 shared keys, zero wrong values. DataMart lists 36,782 contacts against 11,727 from the ERP (25,055 DataMart-only): the ERP endpoint returns only a subset, cause not established.",
+  "datamart": {
+    "ready": false,
+    "tenant_overrides": {
+      "33f319b9-4d57-11ee-960c-025417856183": false
+    },
+    "query_file": "config/queries/contact.graphql",
+    "type_name": "Contact",
+    "cursor_field": "updatedInDataMartDateTime",
+    "id_field": "id",
+    "company_filter": true,
+    "join_normalizer": "normalize_contact",
+    "fallback_source": "erp_rest",
+    "root_field": "contacts"
+  }
+}

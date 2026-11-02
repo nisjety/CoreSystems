@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use mp_contracts::approval_cause::{self, CauseCode};
 use mp_contracts::model_plane::v1::{
     self as pb,
     browser_broker_client::BrowserBrokerClient,
@@ -31,6 +32,12 @@ use crate::scheduled_step_decision::ScheduledStepDecisionVerifier;
 use crate::session_terminal_auth::{ManagedRunTokenProvider, SessionTerminalTokenProvider};
 use crate::state::{RunSnapshot, RunStatus, StateStore};
 use crate::workspace_cas::CasClient;
+
+/// Floor of the largest request tonic decodes: the 4 MiB default would refuse
+/// a run request carrying attachment bytes (WS08-S5/S6).
+const MAX_REQUEST_DECODING_BYTES: usize = 16 * 1024 * 1024;
+/// Room for the rest of a request around its attachment bytes.
+const REQUEST_DECODING_HEADROOM_BYTES: usize = 8 * 1024 * 1024;
 
 pub(crate) struct ExecutionService {
     state: StateStore,
@@ -69,6 +76,9 @@ pub(crate) struct ExecutionService {
     /// lease-release path, which stops a lease's children before the
     /// workspace is uploaded; the tools that start one arrive in step 5.
     process_host: Option<Arc<crate::process_host::ProcessHost>>,
+    /// Bundle reads for `code_interpreter` skill mounts (WS19-S8). Absent when their
+    /// configuration is, and a step that names mounts then fails closed.
+    skill_bundles: Option<Arc<crate::skill_mounts::GrpcSkillBundleSource>>,
 }
 
 #[tonic::async_trait]
@@ -108,6 +118,11 @@ impl RunOwnershipResolver for SessionCoreRunOwnershipResolver {
             .await
             .map(|response| response.into_inner().authorized)
             .map_err(|error| {
+                // A typed refusal from Session Core (owner decision 17) is the answer and passes through,
+                // so the caller sees the reason rather than a retryable outage.
+                if mp_contracts::zdr_refusal::Refusal::from_status(&error).is_some() {
+                    return error;
+                }
                 warn!(code = ?error.code(), "Session Core run ownership lookup unavailable");
                 Status::unavailable("run ownership unavailable")
             })
@@ -131,6 +146,7 @@ impl ExecutionService {
         cas_client: Option<CasClient>,
         backend_id: String,
         sandbox_tokens: Arc<crate::sandbox_lease::SandboxManagerTokenProvider>,
+        skill_bundles: Option<Arc<crate::skill_mounts::GrpcSkillBundleSource>>,
     ) -> Self {
         let ownership = Arc::new(SessionCoreRunOwnershipResolver {
             channel: session_channel.clone(),
@@ -163,6 +179,7 @@ impl ExecutionService {
             backend_id,
             sandbox_tokens,
             process_host,
+            skill_bundles,
         }
     }
 
@@ -221,6 +238,12 @@ impl ExecutionService {
         run_id: &str,
         session_bearer: &DelegatedSessionBearer,
     ) -> Result<(), Status> {
+        // Every user bearer of a run carries the caller's own retention posture
+        // (Z-18, matrix rule 1). Nothing else on this path judges the session
+        // bearer, so it is judged here, before the run's authority is used.
+        self.auth
+            .bind_session_bearer(session_bearer, caller)
+            .await?;
         authorize_durable_run_owner(
             &self.state,
             self.ownership.as_ref(),
@@ -305,6 +328,7 @@ impl ExecutionService {
                 output: String::new(),
                 error: String::new(),
                 unknown_outcome: claim.status == "unknown_outcome",
+                ..Default::default()
             }));
         }
 
@@ -363,6 +387,7 @@ impl ExecutionService {
                 output: String::new(),
                 error: error_code.to_owned(),
                 unknown_outcome: false,
+                ..Default::default()
             }));
         }
         if run.goal.trim().is_empty() {
@@ -384,7 +409,23 @@ impl ExecutionService {
                 output: String::new(),
                 error: "missing_scheduled_goal".to_owned(),
                 unknown_outcome: false,
+                ..Default::default()
             }));
+        }
+
+        // A step whose schedule stored a consent contract takes the bounded agent lane when
+        // its switch is on (WS20 S6). Without a contract, or with the switch off, the
+        // single-inference lane below runs byte-for-byte as before.
+        if !run.contract_json.is_empty() && runtime_loop::scheduled_agent::enabled() {
+            return self
+                .execute_scheduled_agent_step(
+                    &req,
+                    &run,
+                    &session_bearer,
+                    &inference_bearer,
+                    &claim.receipt_id,
+                )
+                .await;
         }
 
         let inference_request = scheduled_inference_request(&req, &run.goal);
@@ -404,25 +445,37 @@ impl ExecutionService {
         match inference_result {
             Ok(response) => {
                 let output = response.into_inner().content;
-                let output_digest = format!("sha256:{:x}", Sha256::digest(output.as_bytes()));
-                let receipt = self
-                    .record_scheduled_step_receipt(
-                        &req,
-                        &session_bearer,
-                        &claim.receipt_id,
-                        "completed",
-                        &output_digest,
-                        "",
-                        false,
-                    )
-                    .await?;
+                // With the result switch on, the answer is persisted into the thread
+                // and the fire records the run (build plan WS20 S1). Off keeps the
+                // receipt-only path byte-for-byte.
+                let (receipt_id, status) = if scheduled_result_persist_enabled() {
+                    let receipt = self
+                        .record_scheduled_run_result(&req, &session_bearer, &claim.receipt_id, &output)
+                        .await?;
+                    (receipt.receipt_id, receipt.status)
+                } else {
+                    let output_digest = format!("sha256:{:x}", Sha256::digest(output.as_bytes()));
+                    let receipt = self
+                        .record_scheduled_step_receipt(
+                            &req,
+                            &session_bearer,
+                            &claim.receipt_id,
+                            "completed",
+                            &output_digest,
+                            "",
+                            false,
+                        )
+                        .await?;
+                    (receipt.receipt_id, receipt.status)
+                };
                 Ok(Response::new(pb::ExecuteScheduledStepResponse {
                     step_id: req.step_id,
-                    status: receipt.status,
-                    receipt_id: receipt.receipt_id,
+                    status,
+                    receipt_id,
                     output,
                     error: String::new(),
                     unknown_outcome: false,
+                    ..Default::default()
                 }))
             }
             Err(error) => {
@@ -445,9 +498,208 @@ impl ExecutionService {
                     output: String::new(),
                     error: error_code.to_owned(),
                     unknown_outcome: unknown,
+                    ..Default::default()
                 }))
             }
         }
+    }
+
+    /// Complete a claimed step with its answer through Session Core's result RPC
+    /// (build plan WS20 S1). The answer is content, and it travels only on this
+    /// direct hop.
+    async fn record_scheduled_run_result(
+        &self,
+        req: &pb::ExecuteScheduledStepRequest,
+        bearer: &str,
+        receipt_id: &str,
+        output: &str,
+    ) -> Result<pb::RecordScheduledRunResultResponse, Status> {
+        self.session_client()
+            .record_scheduled_run_result(authenticated_session_request(
+                scheduled_run_result_request(req, receipt_id, output),
+                bearer,
+            )?)
+            .await
+            .map(|response| response.into_inner())
+            .map_err(|error| {
+                warn!(code = ?error.code(), "scheduled-step result persistence failed");
+                Status::unavailable("scheduled-step result persistence unavailable")
+            })
+    }
+
+    /// Run one scheduled Do step in the bounded agent loop (WS20 S6). The stored contract is
+    /// verified again here, then the loop runs under the service identity, unattended: a gated
+    /// effect is withheld and counted, never paused for. A transport loss or the wall clock is
+    /// an unknown outcome, reconciled from the receipt and never retried.
+    async fn execute_scheduled_agent_step(
+        &self,
+        req: &pb::ExecuteScheduledStepRequest,
+        run: &pb::ScheduledStepContext,
+        session_bearer: &str,
+        inference_bearer: &str,
+        receipt_id: &str,
+    ) -> Result<Response<pb::ExecuteScheduledStepResponse>, Status> {
+        // Zero retention and waivers are refused before any work: the lane keeps no durable
+        // state for an unattended run (WS20 S6, ZDR clause). The caller is the lane's own
+        // identity, which carries no retention until the step context does.
+        let caller = AuthenticatedUser {
+            org_id: req.org_id.clone(),
+            user_id: req.subject_id.clone(),
+            zdr: false,
+            org_zdr: None,
+            zdr_waiver: None,
+        };
+        if let Some(code) = runtime_loop::scheduled_agent::refuses_retention(
+            caller.zdr,
+            caller.zdr_waiver.is_some(),
+        ) {
+            return self
+                .finish_scheduled_agent_step(
+                    req,
+                    session_bearer,
+                    receipt_id,
+                    &AgentStepOutcome::failed(code),
+                )
+                .await;
+        }
+        let now = chrono::Utc::now();
+        let contract = match runtime_loop::scheduled_agent::admit(
+            &run.contract_json,
+            &run.contract_digest,
+            &run.contract_expires_at,
+            now,
+        ) {
+            Ok(contract) => contract,
+            Err(code) => {
+                return self
+                    .finish_scheduled_agent_step(
+                        req,
+                        session_bearer,
+                        receipt_id,
+                        &AgentStepOutcome::failed(code),
+                    )
+                    .await;
+            }
+        };
+        let tools = runtime_loop::agent::OfferedTools {
+            defs: runtime_loop::scheduled_agent::offered_defs(
+                &contract,
+                runtime_loop::agent::base_tool_defs(!req.space_id.is_empty()),
+            ),
+            derivable: false,
+        };
+        let run_req = runtime_loop::scheduled_agent::run_request(req, &run.goal, &contract);
+        self.state.begin_unattended(&req.run_id);
+        let driven = tokio::time::timeout(
+            runtime_loop::scheduled_agent::wall_clock(&contract, now),
+            runtime_loop::agent::run_agent_with_offered(
+                &self.state,
+                self.session_channel.clone(),
+                self.inference_channel(),
+                &caller,
+                run_req,
+                tools,
+                None,
+                Some(session_bearer.to_owned()),
+                inference_bearer.to_owned(),
+                self.capability_policy.as_ref(),
+                self.terminal_tokens.as_ref(),
+                None,
+                // A scheduled run never carries a browser bearer (WS20).
+                None,
+                self.capability_client.as_ref(),
+                &self.sandbox_manager_client,
+                &self.backend_id,
+                self.cas_client.as_ref(),
+                &self.sandbox_tokens,
+                self.process_host.as_deref(),
+                None,
+                Some(runtime_loop::scheduled_agent::loop_scope(&contract)),
+            ),
+        )
+        .await;
+        let withheld = self.state.take_withheld(&req.run_id);
+        let outcome = match driven {
+            Ok(Ok(response)) => {
+                let usage = response.usage.unwrap_or_default();
+                AgentStepOutcome {
+                    status: if response.status == "completed" {
+                        "completed"
+                    } else {
+                        "failed"
+                    },
+                    output: runtime_loop::scheduled_agent::transcript_text(
+                        &response.final_output,
+                        &withheld,
+                    ),
+                    error_code: if response.status == "completed" {
+                        ""
+                    } else {
+                        "scheduled_run_incomplete"
+                    },
+                    unknown: false,
+                    rounds_executed: response.rounds_executed,
+                    withheld_effects: u32::try_from(withheld.len()).unwrap_or(u32::MAX),
+                    input_tokens: u32::try_from(usage.input_tokens).unwrap_or(u32::MAX),
+                    output_tokens: u32::try_from(usage.output_tokens).unwrap_or(u32::MAX),
+                }
+            }
+            Ok(Err(error)) => {
+                warn!(code = ?error.code(), "scheduled agent run failed");
+                let (status, error_code, unknown) = scheduled_step_failure_status(error.code());
+                AgentStepOutcome {
+                    status,
+                    error_code,
+                    unknown,
+                    ..AgentStepOutcome::failed("")
+                }
+            }
+            Err(_elapsed) => AgentStepOutcome {
+                status: "unknown_outcome",
+                error_code: "scheduled_run_deadline",
+                unknown: true,
+                ..AgentStepOutcome::failed("")
+            },
+        };
+        self.finish_scheduled_agent_step(req, session_bearer, receipt_id, &outcome)
+            .await
+    }
+
+    /// Complete a claimed agent-lane step through Session Core, which appends the transcript and
+    /// records the counts. The answer is content and travels only on this direct hop; the
+    /// response to the orchestrator carries counts and no output.
+    async fn finish_scheduled_agent_step(
+        &self,
+        req: &pb::ExecuteScheduledStepRequest,
+        bearer: &str,
+        receipt_id: &str,
+        outcome: &AgentStepOutcome,
+    ) -> Result<Response<pb::ExecuteScheduledStepResponse>, Status> {
+        let receipt = self
+            .session_client()
+            .record_scheduled_run_result(authenticated_session_request(
+                scheduled_agent_result_request(req, receipt_id, outcome),
+                bearer,
+            )?)
+            .await
+            .map(|response| response.into_inner())
+            .map_err(|error| {
+                warn!(code = ?error.code(), "scheduled agent result persistence failed");
+                Status::unavailable("scheduled-step result persistence unavailable")
+            })?;
+        Ok(Response::new(pb::ExecuteScheduledStepResponse {
+            step_id: req.step_id.clone(),
+            status: receipt.status,
+            receipt_id: receipt.receipt_id,
+            output: String::new(),
+            error: outcome.error_code.to_owned(),
+            unknown_outcome: outcome.unknown,
+            rounds_executed: outcome.rounds_executed,
+            withheld_effects: outcome.withheld_effects,
+            tool_calls: 0,
+            input_tokens: outcome.input_tokens,
+            output_tokens: outcome.output_tokens,
+        }))
     }
 
     async fn record_scheduled_step_receipt(
@@ -481,6 +733,90 @@ impl ExecutionService {
                 warn!(code = ?error.code(), "scheduled-step receipt persistence failed");
                 Status::unavailable("scheduled-step receipt persistence unavailable")
             })
+    }
+}
+
+/// Whether a completed scheduled step's answer is persisted through
+/// `RecordScheduledRunResult` (build plan WS20 S1). It reads the name Session Core
+/// reads, so one deploy setting drives both sides. Only the literal `true` enables.
+fn scheduled_result_persist_enabled() -> bool {
+    mp_contracts::loop_fold::switch_from(
+        std::env::var(SCHEDULED_RESULT_PERSIST_ENV).ok().as_deref(),
+    )
+}
+
+const SCHEDULED_RESULT_PERSIST_ENV: &str = "SESSION_CORE_SCHEDULED_RESULT_PERSIST";
+
+/// The one completed-step result this lane sends. It carries the run's identity,
+/// the receipt it completes and the answer, and no counts: the scheduled Do lane
+/// that reports them is a later slice.
+fn scheduled_run_result_request(
+    req: &pb::ExecuteScheduledStepRequest,
+    receipt_id: &str,
+    output: &str,
+) -> pb::RecordScheduledRunResultRequest {
+    pb::RecordScheduledRunResultRequest {
+        run_id: req.run_id.clone(),
+        step_id: req.step_id.clone(),
+        org_id: req.org_id.clone(),
+        idempotency_key: req.idempotency_key.clone(),
+        receipt_id: receipt_id.to_owned(),
+        status: "completed".to_owned(),
+        output: output.to_owned(),
+        ..Default::default()
+    }
+}
+
+/// What one agent-lane step reports to Session Core (WS20 S6). The counts carry no content;
+/// `output` is the transcript text and travels only on the direct hop.
+struct AgentStepOutcome {
+    status: &'static str,
+    output: String,
+    error_code: &'static str,
+    unknown: bool,
+    rounds_executed: u32,
+    withheld_effects: u32,
+    input_tokens: u32,
+    output_tokens: u32,
+}
+
+impl AgentStepOutcome {
+    fn failed(error_code: &'static str) -> Self {
+        Self {
+            status: "failed",
+            output: String::new(),
+            error_code,
+            unknown: false,
+            rounds_executed: 0,
+            withheld_effects: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+        }
+    }
+}
+
+/// The Session Core result for an agent-lane step. `tool_calls` is not reported by the
+/// driver yet, so it stays zero.
+fn scheduled_agent_result_request(
+    req: &pb::ExecuteScheduledStepRequest,
+    receipt_id: &str,
+    outcome: &AgentStepOutcome,
+) -> pb::RecordScheduledRunResultRequest {
+    pb::RecordScheduledRunResultRequest {
+        run_id: req.run_id.clone(),
+        step_id: req.step_id.clone(),
+        org_id: req.org_id.clone(),
+        idempotency_key: req.idempotency_key.clone(),
+        receipt_id: receipt_id.to_owned(),
+        status: outcome.status.to_owned(),
+        output: outcome.output.clone(),
+        error_code: outcome.error_code.to_owned(),
+        unknown_outcome: outcome.unknown,
+        rounds_executed: outcome.rounds_executed,
+        withheld_effects: outcome.withheld_effects,
+        tool_calls: 0,
+        input_tokens: outcome.input_tokens,
+        output_tokens: outcome.output_tokens,
     }
 }
 
@@ -646,16 +982,177 @@ async fn create_durable_approval(
         })
 }
 
+/// Refuses a durable execution path (a tool, an agent run, a run control) for a
+/// caller whose token says ZDR, or whose request does. `feature` is the catalogue
+/// key of what is refused, so the status names it.
 #[allow(clippy::result_large_err)]
+/// The run context is judged at the run_agent boundary: a context that breaks
+/// its bounds, or that carries conversation content on a zero-retention run, is
+/// refused with the closed token only (build plan WS02 S4).
+fn enforce_run_context(req: &pb::RunAgentRequest) -> Result<(), Status> {
+    mp_contracts::run_context::validate(req.run_context.as_ref(), req.zdr)
+        .map_err(|refusal| Status::invalid_argument(refusal.token()))
+}
+
+/// A continuation (`RunAgentRequest.resume`, build plan WS03 S3) is judged at the
+/// boundary: refused while the durable-loop switch is off, and refused when it
+/// does not name the exact approved call. The resumed segment authenticates with
+/// the request's own bearers; nothing here widens authority.
+///
+/// A park resume (WS03 S8-6, mode `park`) names no approval: it carries a claim token and
+/// nothing an approval stage reads (no approval, step, tool, fingerprint or brief), and a
+/// park that names one is incomplete. Neither the client's segment number nor the parking
+/// switch is read here: with parking off an existing park stays resumable.
+fn enforce_resume(req: &pb::RunAgentRequest, enabled: bool) -> Result<(), Status> {
+    let Some(resume) = req.resume.as_ref() else {
+        return Ok(());
+    };
+    if !enabled {
+        return Err(Status::failed_precondition("continue_disabled"));
+    }
+    if !matches!(resume.mode.as_str(), "segment" | "loop" | "park") {
+        return Err(Status::invalid_argument("resume_incomplete"));
+    }
+    if resume.mode == "park" {
+        let names_an_approval = !resume.approval_id.is_empty()
+            || !resume.step_id.is_empty()
+            || !resume.tool_name.is_empty()
+            || !resume.action_fingerprint.is_empty()
+            || !resume.brief.is_empty();
+        if names_an_approval || resume.claim_token.is_empty() {
+            return Err(Status::invalid_argument("resume_incomplete"));
+        }
+        return Ok(());
+    }
+    if resume.approval_id.is_empty() || resume.claim_token.is_empty() {
+        return Err(Status::invalid_argument("resume_incomplete"));
+    }
+    Ok(())
+}
+
+/// Judges the attachments of an `ExecuteStep` request and holds them for the
+/// call. `None` when the request carries none, which is every request today.
+///
+/// Only `code_interpreter` reads them, so a list on any other tool is refused
+/// instead of being held for nothing. A zero-retention or waived caller never
+/// carries one.
+#[allow(clippy::result_large_err)]
+fn register_step_attachments(
+    req: &pb::ExecuteStepRequest,
+    zdr_or_waived: bool,
+) -> Result<Option<crate::run_inputs::RunInputsGuard>, Status> {
+    if req.attachments.is_empty() {
+        return Ok(None);
+    }
+    if req.tool_name != "code_interpreter" {
+        return Err(Status::invalid_argument("attachments_unsupported_tool"));
+    }
+    mp_contracts::attachments::validate(&req.attachments, zdr_or_waived)
+        .map_err(attachment_refusal_status)?;
+    crate::run_inputs::global()
+        .register(&req.org_id, &req.run_id, &req.attachments)
+        .map_err(|refusal| {
+            Status::resource_exhausted(match refusal {
+                crate::run_inputs::RegisterError::EntryCap => "run_inputs_entry_cap",
+                crate::run_inputs::RegisterError::ByteCap => "run_inputs_byte_cap",
+            })
+        })
+}
+
+/// The status a refused attachment list answers with: the zero-retention catalogue
+/// refusal for a ZDR or waived caller, the closed token for everything else.
+fn attachment_refusal_status(refusal: mp_contracts::attachments::AttachmentRefusal) -> Status {
+    if refusal == mp_contracts::attachments::AttachmentRefusal::Zdr {
+        mp_contracts::zdr_refusal::Refusal::feature_not_supported("attachments")
+            .grpc_status(tonic::Code::FailedPrecondition)
+    } else {
+        Status::invalid_argument(refusal.token())
+    }
+}
+
+/// Most images one run may carry: what inference-core accepts on a request.
+const MAX_RUN_IMAGES: usize = 4;
+/// The image types inference-core allows as parts of a message.
+const RUN_IMAGE_MIMES: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+
+/// Judges the attachments of a `RunAgent` request at the boundary (WS08-S6). Files
+/// meet the contract the `ExecuteStep` path applies; images, which the sandbox
+/// never receives, meet the bounds inference-core will apply to them. A zero-retention
+/// or waived caller never carries either. The list is partitioned by moving the
+/// entries, so no attachment byte is copied, and put back with files first.
+#[allow(clippy::result_large_err)]
+fn enforce_run_attachments(
+    req: &mut pb::RunAgentRequest,
+    zdr_or_waived: bool,
+) -> Result<(), Status> {
+    if req.attachments.is_empty() {
+        return Ok(());
+    }
+    let (images, files): (Vec<pb::RunAttachment>, Vec<pb::RunAttachment>) =
+        std::mem::take(&mut req.attachments)
+            .into_iter()
+            .partition(|attachment| attachment.kind == pb::RunAttachmentKind::Image as i32);
+    let judged = judge_run_attachments(&files, &images, zdr_or_waived);
+    req.attachments = files;
+    req.attachments.extend(images);
+    judged
+}
+
+#[allow(clippy::result_large_err)]
+fn judge_run_attachments(
+    files: &[pb::RunAttachment],
+    images: &[pb::RunAttachment],
+    zdr_or_waived: bool,
+) -> Result<(), Status> {
+    use mp_contracts::attachments::{
+        sha256_hex, validate, AttachmentRefusal as Refusal, MAX_ATTACHMENT_BYTES, MAX_TOTAL_BYTES,
+    };
+    validate(files, zdr_or_waived).map_err(attachment_refusal_status)?;
+    if images.is_empty() {
+        return Ok(());
+    }
+    if zdr_or_waived {
+        return Err(attachment_refusal_status(Refusal::Zdr));
+    }
+    if images.len() > MAX_RUN_IMAGES {
+        return Err(attachment_refusal_status(Refusal::TooMany));
+    }
+    let mut total: usize = files.iter().map(|file| file.content.len()).sum();
+    for image in images {
+        if !RUN_IMAGE_MIMES.contains(&image.mime.as_str()) {
+            return Err(attachment_refusal_status(Refusal::KindUnsupported));
+        }
+        let size = image.content.len();
+        if size == 0 {
+            return Err(attachment_refusal_status(Refusal::Empty));
+        }
+        if size > MAX_ATTACHMENT_BYTES {
+            return Err(attachment_refusal_status(Refusal::TooLarge));
+        }
+        if image.size_bytes != size as u64 {
+            return Err(attachment_refusal_status(Refusal::SizeMismatch));
+        }
+        if image.sha256 != sha256_hex(&image.content) {
+            return Err(attachment_refusal_status(Refusal::HashMismatch));
+        }
+        total = total.saturating_add(size);
+    }
+    if total > MAX_TOTAL_BYTES {
+        return Err(attachment_refusal_status(Refusal::TotalTooLarge));
+    }
+    Ok(())
+}
+
 fn enforce_persistence_free_execution(
     caller: &AuthenticatedUser,
     request_zdr: bool,
-    operation: &'static str,
+    feature: &'static str,
 ) -> Result<(), Status> {
     if caller.zdr || request_zdr {
-        return Err(Status::failed_precondition(format!(
-            "ZDR {operation} is disabled until its lifecycle is persistence-free"
-        )));
+        return Err(
+            mp_contracts::zdr_refusal::Refusal::feature_not_supported(feature)
+                .grpc_status(tonic::Code::FailedPrecondition),
+        );
     }
     Ok(())
 }
@@ -702,9 +1199,18 @@ fn resume_durable_approval_continuation(
 /// after a run-bound server-resolved catalog decision, and a future delivery
 /// worker will need a distinct, durable continuation capability to execute an
 /// approved descriptor. Keeping them out of this RPC prevents a caller from
-/// naming a tool directly to bypass either control.
-fn reject_direct_owner_action(tool_name: &str) -> Result<(), Status> {
-    if crate::permission::requires_durable_owner_approval(tool_name) {
+/// naming a tool directly to bypass either control. A tool the run declares
+/// `durable_owner` is held the same way under `TOOL_CLASS_GATE`.
+fn reject_direct_owner_action(
+    gate: crate::permission::RunGate<'_>,
+    tool_name: &str,
+) -> Result<(), Status> {
+    // OR-ed with the name, never substituted for it: this site only refuses, so a
+    // declared view may add the marker but cannot lift one the name reserves. The view
+    // is read by the trimmed name, as the name predicate trims at every ingress.
+    if crate::permission::requires_durable_owner_approval(tool_name)
+        || gate.requires_durable_owner_approval(tool_name.trim())
+    {
         return Err(Status::permission_denied(
             "reserved owner actions cannot be invoked through ExecuteStep",
         ));
@@ -731,7 +1237,8 @@ fn validate_direct_permission_mode(permission_mode: &str) -> Result<(), Status> 
 /// `subscription_connection_id` of every run that predates the fields) passes
 /// untouched. One that names the ChatGPT subscription route passes only when
 /// `crate::agent_route::validate_run_route` says so (kill switch on, canonical
-/// provider, a connection, a concrete model, read-only, not ZDR).
+/// provider, a connection, a concrete model, read-only, and a retention the
+/// caller's claims allow: a waiver for this connection, or an ordinary turn).
 ///
 /// The refusals are `PermissionDenied` or `InvalidArgument`, which model-gateway
 /// terminalizes as a confirmed dispatch rejection: nothing ran, so the prepared
@@ -745,8 +1252,9 @@ fn validate_direct_permission_mode(permission_mode: &str) -> Result<(), Status> 
 fn enforce_agent_route(
     req: &pb::RunAgentRequest,
     switches: mp_contracts::agentic_subscription::Switches,
+    caller: &AuthenticatedUser,
 ) -> Result<(), Status> {
-    crate::agent_route::validate_run_route(req, switches).inspect_err(|status| {
+    crate::agent_route::validate_run_route(req, switches, caller).inspect_err(|status| {
         warn!(
             run_id = %req.run_id,
             code = ?status.code(),
@@ -814,9 +1322,10 @@ fn authorize_scheduled_step_service(
         ));
     }
     if caller.zdr {
-        return Err(Status::failed_precondition(
-            "scheduled-step execution requires persistent service retention",
-        ));
+        return Err(
+            mp_contracts::zdr_refusal::Refusal::feature_not_supported("scheduled_step")
+                .grpc_status(tonic::Code::FailedPrecondition),
+        );
     }
     Ok(())
 }
@@ -855,13 +1364,15 @@ impl ExecutionCore for ExecutionService {
         } else {
             None
         };
-        // Demanded only for a Space-scoped code_interpreter step — every
-        // other step, and a non-Space code_interpreter step, is unaffected.
+        // Demanded only for a Space-scoped code_interpreter, shell (WS06-S9) or workspace read (WS24-S3) step —
+        // every other step, and a non-Space one, is unaffected.
         // sandbox-manager's own AcquireLease binds a Space capability
         // decision to the CALLING principal, so a service-level credential
         // could never pass it; this is the one delegated bearer that must be
         // user-bound (S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md §3.5 B.2).
-        let sandbox_bearer = if request.get_ref().tool_name == "code_interpreter"
+        let sandbox_bearer = if (request.get_ref().tool_name == "code_interpreter"
+            || request.get_ref().tool_name == "shell"
+            || crate::workspace_tools::is_workspace_tool(&request.get_ref().tool_name))
             && !request.get_ref().space_id.is_empty()
         {
             Some(
@@ -876,9 +1387,33 @@ impl ExecutionCore for ExecutionService {
         caller.authorize(&req.org_id, Some(&req.user_id))?;
         self.authorize_run(&caller, &req.run_id, &session_bearer)
             .await?;
-        reject_direct_owner_action(&req.tool_name)?;
+        reject_direct_owner_action(
+            crate::permission::RunGate::for_run(&req.org_id, &req.run_id),
+            &req.tool_name,
+        )?;
         validate_direct_permission_mode(&req.permission_mode)?;
-        enforce_persistence_free_execution(&caller, req.zdr, "tool execution")?;
+        enforce_persistence_free_execution(&caller, req.zdr, "tool_execution")?;
+        // The attached files are judged after the caller and the run owner are
+        // authorized and held only for this call: the guard drops, and zeroes the
+        // bytes, when the handler returns on any path.
+        let _run_inputs = register_step_attachments(
+            &req,
+            req.zdr || caller.zdr || caller.zdr_waiver.is_some(),
+        )?;
+        // Holds the run's skill tree for the length of this call, so the code_interpreter arm
+        // can bind it. A step that names no mounts, as every step does while
+        // SKILL_BUNDLE_MOUNT_ENABLED is off, reads nothing and holds nothing.
+        let _skill_mounts = crate::skill_mounts::stage_for_step(
+            &req.org_id,
+            &req.run_id,
+            &req.tool_name,
+            &req.skill_mounts,
+            req.zdr || caller.zdr || caller.zdr_waiver.is_some(),
+            self.skill_bundles
+                .as_deref()
+                .map(|source| source as &dyn crate::skill_mounts::SkillBundleSource),
+        )
+        .await?;
         // Resolve the opaque JSON grant id with BrowserBroker only after the
         // signed caller and durable run owner are authorized. The resulting
         // immutable policy is passed to the runtime; raw tool JSON cannot
@@ -940,6 +1475,10 @@ impl ExecutionCore for ExecutionService {
             Some(&browser_sink),
             Some(&self.state),
             req.zdr,
+            // The caller's own waiver (Z-18): a waived caller's retrieval is
+            // filtered, whichever step it runs. A step names no model route, so
+            // nothing else is judged here.
+            caller.zdr_waiver.is_some(),
             req.min_privacy_tier,
             Some(data_plane_bearer.as_str()),
             Some(session_bearer.as_str()),
@@ -957,6 +1496,7 @@ impl ExecutionCore for ExecutionService {
             create_durable_approval(
                 &self.session_channel,
                 pb::CreateApprovalRequest {
+                    continuation_mode: String::new(),
                     run_id: run_id.clone(),
                     step_id: step_id.clone(),
                     kind: pb::ApprovalKind::Destructive as i32,
@@ -973,6 +1513,22 @@ impl ExecutionCore for ExecutionService {
                     // (org_id, idempotency_key) ON CONFLICT guard.
                     idempotency_key: format!("{run_id}:{step_id}"),
                     continuation_descriptor_json: String::new(),
+                    tool_key: String::new(),
+                    action_digest: String::new(),
+                    turn_origin: String::new(),
+                    grant_use_token: String::new(),
+                    context_json: crate::space_gate::card_context_json(
+                        &req.tool_name,
+                        &req.tool_input,
+                        crate::space_gate::RESUME_NONE,
+                    ),
+                    cause: Some(approval_cause::for_call(
+                        outcome.cause.unwrap_or(CauseCode::UnclassifiedGate),
+                        &run_id,
+                        &req.tool_name,
+                        &req.tool_input,
+                    )),
+                    ..Default::default()
                 },
                 session_bearer.as_str(),
             )
@@ -1074,7 +1630,7 @@ impl ExecutionCore for ExecutionService {
         // A resumed retained run can emit session events and perform external
         // browser actions. Do not rely on Model Gateway alone: Execution Core
         // is the authoritative execution-dispatch boundary.
-        enforce_persistence_free_execution(&caller, false, "run control")?;
+        enforce_persistence_free_execution(&caller, false, "run_control")?;
         let req = request.into_inner();
         caller.authorize(&req.org_id, None)?;
         self.authorize_run(&caller, &req.run_id, &session_bearer)
@@ -1088,6 +1644,7 @@ impl ExecutionCore for ExecutionService {
                     pb::GetApprovalRequest {
                         approval_id: req.approval_id.clone(),
                         org_id: req.org_id.clone(),
+                        ..Default::default()
                     },
                     session_bearer.as_str(),
                 )?)
@@ -1137,7 +1694,7 @@ impl ExecutionCore for ExecutionService {
     ) -> Result<Response<pb::CancelRunResponse>, Status> {
         let session_bearer = delegated_session_bearer(&request)?;
         let caller = self.auth.authenticate(&request).await?;
-        enforce_persistence_free_execution(&caller, false, "run control")?;
+        enforce_persistence_free_execution(&caller, false, "run_control")?;
         let req = request.into_inner();
         self.authorize_run(&caller, &req.run_id, &session_bearer)
             .await?;
@@ -1177,7 +1734,7 @@ impl ExecutionCore for ExecutionService {
     ) -> Result<Response<pb::PauseRunResponse>, Status> {
         let session_bearer = delegated_session_bearer(&request)?;
         let caller = self.auth.authenticate(&request).await?;
-        enforce_persistence_free_execution(&caller, false, "run control")?;
+        enforce_persistence_free_execution(&caller, false, "run_control")?;
         let req = request.into_inner();
         caller.authorize(&req.org_id, None)?;
         self.authorize_run(&caller, &req.run_id, &session_bearer)
@@ -1230,16 +1787,37 @@ impl ExecutionCore for ExecutionService {
                     .await?,
             )
         };
-        let req = request.into_inner();
+        // The browser bearer names the user's broker grants, so it is read only while the Do
+        // loop's browser tools are switched on (WS21-S2). With the switch off the header is never
+        // verified and the run is the one it was before.
+        let browser_bearer = if runtime_loop::agent::do_browser_enabled() {
+            self.auth.authenticate_run_browser(&request, &caller).await?
+        } else {
+            None
+        };
+        let mut req = request.into_inner();
         caller.authorize(&req.org_id, Some(&req.user_id))?;
         self.authorize_run(&caller, &req.run_id, &session_bearer)
             .await?;
-        enforce_persistence_free_execution(&caller, req.zdr, "agent run")?;
+        enforce_persistence_free_execution(&caller, req.zdr, "agent_run")?;
+        // The attachments are judged right after the zero-retention gate and before
+        // any run work: a waived caller passes that gate yet never carries one.
+        let persistence_free = req.zdr || caller.zdr || caller.zdr_waiver.is_some();
+        enforce_run_attachments(&mut req, persistence_free)?;
+        // The run context is judged at the boundary like the route below: a
+        // context that breaks its bounds, or that carries conversation content
+        // on a zero-retention run, is refused with the closed token only.
+        enforce_run_context(&req)?;
+        enforce_resume(&req, mp_contracts::loop_fold::continue_after_approval_enabled())?;
         // The inference route the request names (`provider_hint` and
         // `subscription_connection_id`) is judged here, at the boundary and
         // before any of the run's work: a route this process may not honour is
         // refused, never replaced by the default one.
-        enforce_agent_route(&req, mp_contracts::agentic_subscription::Switches::from_env())?;
+        enforce_agent_route(
+            &req,
+            mp_contracts::agentic_subscription::Switches::from_env(),
+            &caller,
+        )?;
         info!(
             run_id = %req.run_id,
             thread_id = %req.thread_id,
@@ -1250,6 +1828,7 @@ impl ExecutionCore for ExecutionService {
             &self.state,
             self.session_channel.clone(),
             self.inference_channel(),
+            &caller,
             req,
             Some(data_plane_bearer.as_str().to_owned()),
             Some(session_bearer.as_str().to_owned()),
@@ -1257,6 +1836,9 @@ impl ExecutionCore for ExecutionService {
             self.capability_policy.as_ref(),
             self.terminal_tokens.as_ref(),
             sandbox_bearer
+                .as_ref()
+                .map(|bearer| bearer.as_str().to_owned()),
+            browser_bearer
                 .as_ref()
                 .map(|bearer| bearer.as_str().to_owned()),
             self.capability_client.as_ref(),
@@ -1336,6 +1918,14 @@ pub async fn serve(
     let capability_url = std::env::var("CAPABILITY_CORE_ADDR")
         .unwrap_or_else(|_| "http://capability-core:9097".to_owned());
     let capability_channel = lazy_bounded_channel(capability_url)?;
+    let skill_bundles =
+        match crate::skill_mounts::GrpcSkillBundleSource::from_env(capability_channel.clone()) {
+            Ok(source) => Some(Arc::new(source)),
+            Err(error) => {
+                warn!(%error, "skill bundle source unavailable; skill mounts fail closed");
+                None
+            }
+        };
     let capability_policy = Arc::new(crate::capability_policy::GrpcCapabilityPolicy::from_env(
         capability_channel,
     )?);
@@ -1399,6 +1989,7 @@ pub async fn serve(
         cas_client,
         backend_id,
         sandbox_tokens,
+        skill_bundles,
     )
     .await
 }
@@ -1421,6 +2012,7 @@ async fn serve_with_listener(
     cas_client: Option<CasClient>,
     backend_id: String,
     sandbox_tokens: Arc<crate::sandbox_lease::SandboxManagerTokenProvider>,
+    skill_bundles: Option<Arc<crate::skill_mounts::GrpcSkillBundleSource>>,
 ) -> anyhow::Result<()> {
     let session_channel = lazy_bounded_channel(session_url)?;
     let inference_channel = lazy_bounded_channel(inference_url)?;
@@ -1431,8 +2023,8 @@ async fn serve_with_listener(
     info!("gRPC listening on :9093");
 
     tonic::transport::Server::builder()
-        .add_service(ExecutionCoreServer::new(
-            ExecutionService::new_with_scheduled_step_runtime(
+        .add_service(
+            ExecutionCoreServer::new(ExecutionService::new_with_scheduled_step_runtime(
                 state,
                 auth,
                 session_channel,
@@ -1447,12 +2039,59 @@ async fn serve_with_listener(
                 cas_client,
                 backend_id,
                 sandbox_tokens,
-            ),
-        ))
+                skill_bundles,
+            ))
+            .max_decoding_message_size(request_decoding_limit_bytes()),
+        )
         .serve_with_incoming(TcpListenerStream::new(listener))
         .await?;
 
     Ok(())
+}
+
+/// Largest request tonic decodes. A request carrying attachments holds their
+/// bytes raw (gRPC has no base64), so the floor is raised to the declared
+/// attachment total (`CHAT_ATTACHMENT_MAX_TOTAL_BYTES`, the number model-gateway
+/// and the BFF derive their body limits from) plus room for the rest of the
+/// request. Unset, it is the floor: nothing changes until the cap is raised.
+fn request_decoding_limit_bytes() -> usize {
+    decoding_limit_with(&|key| std::env::var(key).ok())
+}
+
+fn decoding_limit_with(get: &dyn Fn(&str) -> Option<String>) -> usize {
+    get("CHAT_ATTACHMENT_MAX_TOTAL_BYTES")
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|total| *total > 0)
+        .map_or(MAX_REQUEST_DECODING_BYTES, |total| {
+            MAX_REQUEST_DECODING_BYTES.max(total.saturating_add(REQUEST_DECODING_HEADROOM_BYTES))
+        })
+}
+
+#[cfg(test)]
+mod decoding_limit_tests {
+    use super::{decoding_limit_with, MAX_REQUEST_DECODING_BYTES, REQUEST_DECODING_HEADROOM_BYTES};
+
+    fn limit(total: Option<&str>) -> usize {
+        decoding_limit_with(&|_| total.map(str::to_owned))
+    }
+
+    #[test]
+    fn unset_or_unreadable_totals_keep_the_floor() {
+        assert_eq!(limit(None), MAX_REQUEST_DECODING_BYTES);
+        assert_eq!(limit(Some("0")), MAX_REQUEST_DECODING_BYTES);
+        assert_eq!(limit(Some("lots")), MAX_REQUEST_DECODING_BYTES);
+        // Today's declared total (3 MiB) fits under the floor.
+        assert_eq!(limit(Some("3145728")), MAX_REQUEST_DECODING_BYTES);
+    }
+
+    #[test]
+    fn a_raised_total_raises_the_limit_to_hold_it() {
+        let total = 64 * 1024 * 1024;
+        assert_eq!(
+            limit(Some(&total.to_string())),
+            total + REQUEST_DECODING_HEADROOM_BYTES
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1676,16 +2315,17 @@ mod auth_tests {
 
     #[test]
     fn direct_execute_step_refuses_reserved_owner_actions_and_ambiguous_modes() {
-        let error = reject_direct_owner_action(crate::ticket_tools::TOOL_NAME)
+        let gate = crate::permission::RunGate::for_run("org-direct", "run-direct");
+        let error = reject_direct_owner_action(gate, crate::ticket_tools::TOOL_NAME)
             .expect_err("a public direct-step RPC cannot execute an owner action");
         assert_eq!(error.code(), tonic::Code::PermissionDenied);
         assert_eq!(
-            reject_direct_owner_action("  tickets.create  ")
+            reject_direct_owner_action(gate, "  tickets.create  ")
                 .expect_err("whitespace does not turn a reserved action into a direct tool")
                 .code(),
             tonic::Code::PermissionDenied
         );
-        reject_direct_owner_action("shell").expect("ordinary tools keep the direct API");
+        reject_direct_owner_action(gate, "shell").expect("ordinary tools keep the direct API");
 
         for mode in ["", "execute", "unknown"] {
             assert_eq!(
@@ -1698,6 +2338,82 @@ mod auth_tests {
         for mode in ["auto", "ask", "deny"] {
             validate_direct_permission_mode(mode).expect("recognized permission mode");
         }
+    }
+
+    /// Under `enforce` the run's declared `durable_owner` floor makes a tool an owner
+    /// action here though its name is not reserved. The gate off reads no view, and a
+    /// reserved name stays refused whatever the view says.
+    #[test]
+    fn direct_execute_step_refuses_a_tool_the_run_declares_durable_owner_under_enforce() {
+        use crate::capability_policy::ToolClassGate;
+        use crate::permission::{record_run_views, RunGate, ToolClassView};
+        let (org, run) = ("org-direct-owner", "run-direct-owner");
+        record_run_views(
+            org,
+            run,
+            [
+                (
+                    "mcp__srv__pay".to_owned(),
+                    ToolClassView::from_registry(
+                        "mcp__srv__pay",
+                        "external_write",
+                        "durable_owner",
+                        "d",
+                    ),
+                ),
+                (
+                    "tickets.create".to_owned(),
+                    ToolClassView::from_registry("tickets.create", "read", "none", "d"),
+                ),
+            ],
+        );
+        let enforce = RunGate::with_gate(ToolClassGate::Enforce, org, run);
+        let off = RunGate::with_gate(ToolClassGate::Off, org, run);
+        assert_eq!(
+            reject_direct_owner_action(enforce, "mcp__srv__pay")
+                .expect_err("a declared durable_owner tool is not a direct tool")
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        reject_direct_owner_action(off, "mcp__srv__pay")
+            .expect("with the gate off the declared floor is never read");
+        assert_eq!(
+            reject_direct_owner_action(enforce, "tickets.create")
+                .expect_err("a reserved name is refused whatever the view says")
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn scheduled_result_request_carries_identity_and_answer_only() {
+        let req = pb::ExecuteScheduledStepRequest {
+            run_id: "run_01".to_owned(),
+            org_id: "org_01".to_owned(),
+            step_id: "step_01".to_owned(),
+            idempotency_key: "fire_01:step:0".to_owned(),
+            ..Default::default()
+        };
+        let result = scheduled_run_result_request(&req, "scheduled_step_01", "the answer");
+        assert_eq!(result.run_id, "run_01");
+        assert_eq!(result.org_id, "org_01");
+        assert_eq!(result.step_id, "step_01");
+        assert_eq!(result.idempotency_key, "fire_01:step:0");
+        assert_eq!(result.receipt_id, "scheduled_step_01");
+        assert_eq!(result.status, "completed");
+        assert_eq!(result.output, "the answer");
+        assert!(!result.unknown_outcome);
+        assert!(result.error_code.is_empty());
+        assert_eq!(result.withheld_effects, 0);
+    }
+
+    #[test]
+    fn scheduled_result_persist_is_off_unless_the_literal_switch_is_true() {
+        if std::env::var_os(SCHEDULED_RESULT_PERSIST_ENV).is_none() {
+            assert!(!scheduled_result_persist_enabled(), "off by default");
+        }
+        assert!(mp_contracts::loop_fold::switch_from(Some("true")));
+        assert!(!mp_contracts::loop_fold::switch_from(Some("on")));
     }
 
     #[test]
@@ -1793,7 +2509,7 @@ mod auth_tests {
     #[test]
     fn signed_zdr_blocks_execution_dispatch_and_durable_run_control() {
         let caller = AuthenticatedUser::for_test_with_zdr("org-owner", "user-owner", true);
-        for operation in ["tool execution", "run control"] {
+        for operation in ["tool_execution", "run_control"] {
             let error = enforce_persistence_free_execution(&caller, false, operation)
                 .expect_err("signed ZDR must dominate a caller-controlled request flag");
             assert_eq!(error.code(), tonic::Code::FailedPrecondition);
@@ -1888,11 +2604,17 @@ mod auth_tests {
             allow_effects: false,
         };
 
+    /// The verified caller of a run that is not ZDR and holds no waiver.
+    fn route_caller() -> AuthenticatedUser {
+        AuthenticatedUser::for_test("org-1", "user-1")
+    }
+
     #[test]
     fn a_subscription_run_is_refused_when_the_switch_is_off() {
         let error = enforce_agent_route(
             &subscription_run(),
             mp_contracts::agentic_subscription::Switches::OFF,
+            &route_caller(),
         )
         .expect_err("a disabled route must not start");
         assert_eq!(error.code(), tonic::Code::PermissionDenied);
@@ -1904,23 +2626,43 @@ mod auth_tests {
             error.message()
         );
         // The only difference from a run that is accepted is the switch.
-        enforce_agent_route(&subscription_run(), ROUTE_ON).expect("switch on admits the run");
+        enforce_agent_route(&subscription_run(), ROUTE_ON, &route_caller())
+            .expect("switch on admits the run");
     }
 
     #[test]
     fn a_subscription_run_is_refused_with_zdr_or_a_pseudo_model() {
         let mut zdr = subscription_run();
         zdr.zdr = true;
-        let error = enforce_agent_route(&zdr, ROUTE_ON).expect_err("the seat has no ZDR commitment");
+        let error = enforce_agent_route(&zdr, ROUTE_ON, &route_caller())
+            .expect_err("the seat has no ZDR commitment");
         assert_eq!(error.code(), tonic::Code::PermissionDenied);
 
         for pseudo in ["verevon-balance", "verevon-auto", "Verevon-Genius", ""] {
             let mut request = subscription_run();
             request.model = pseudo.to_owned();
-            let error =
-                enforce_agent_route(&request, ROUTE_ON).expect_err("a pseudo model names no model");
+            let error = enforce_agent_route(&request, ROUTE_ON, &route_caller())
+                .expect_err("a pseudo model names no model");
             assert_eq!(error.code(), tonic::Code::InvalidArgument, "{pseudo:?}");
         }
+    }
+
+    /// The gateway boundary admits a waived run on its own connection only (Z-18):
+    /// the same request, with the caller's waiver for another connection, is refused.
+    #[test]
+    fn a_waived_subscription_run_is_admitted_only_on_its_own_connection() {
+        let waived = AuthenticatedUser::for_test_with_waiver("org-1", "user-1", "conn_1", "ack-1");
+        enforce_agent_route(&subscription_run(), ROUTE_ON, &waived)
+            .expect("the waiver binds this connection");
+
+        let other = AuthenticatedUser::for_test_with_waiver("org-1", "user-1", "conn_2", "ack-1");
+        let error = enforce_agent_route(&subscription_run(), ROUTE_ON, &other)
+            .expect_err("a waiver for another connection is refused");
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+        assert_eq!(
+            mp_contracts::zdr_refusal::Refusal::from_status(&error).map(|refusal| refusal.code()),
+            Some(mp_contracts::zdr_refusal::code::WAIVER_ROUTE_MISMATCH)
+        );
     }
 
     #[test]
@@ -1940,7 +2682,7 @@ mod auth_tests {
             ("alias provider", alias, ROUTE_ON),
             ("not read-only", acting, ROUTE_ON),
         ] {
-            let error = enforce_agent_route(&request, switches).expect_err(label);
+            let error = enforce_agent_route(&request, switches, &route_caller()).expect_err(label);
             assert!(
                 matches!(
                     error.code(),
@@ -1962,7 +2704,8 @@ mod auth_tests {
             ..Default::default()
         };
         for switches in [mp_contracts::agentic_subscription::Switches::OFF, ROUTE_ON] {
-            enforce_agent_route(&plain, switches).expect("a route-less run is unchanged");
+            enforce_agent_route(&plain, switches, &route_caller())
+                .expect("a route-less run is unchanged");
         }
     }
 
@@ -1998,6 +2741,7 @@ mod auth_tests {
                     "test-service-secret-at-least-32-bytes",
                 ),
             ),
+            None,
         ));
 
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -2063,5 +2807,345 @@ mod auth_tests {
         })
         .await
         .expect("test verifier")
+    }
+}
+
+#[cfg(test)]
+mod run_context_boundary_tests {
+    use super::*;
+
+    fn request_with(context: Option<pb::RunContext>, zdr: bool) -> pb::RunAgentRequest {
+        pb::RunAgentRequest {
+            run_id: "run".to_owned(),
+            zdr,
+            run_context: context,
+            ..Default::default()
+        }
+    }
+
+    fn history() -> pb::RunContext {
+        pb::RunContext {
+            history: vec![pb::ChatMessage {
+                role: "user".to_owned(),
+                content: "an earlier question".to_owned(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_zdr_run_with_history_is_refused_at_the_boundary() {
+        let refused = enforce_run_context(&request_with(Some(history()), true))
+            .expect_err("history on a ZDR run must be refused");
+        assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+        // Only the closed token leaves the service, never the content.
+        assert_eq!(refused.message(), "run_context_zdr_history");
+    }
+
+    fn resume(mode: &str) -> pb::AgentResume {
+        pb::AgentResume {
+            mode: mode.to_owned(),
+            approval_id: "appr_1".to_owned(),
+            claim_token: "claim".to_owned(),
+            ..Default::default()
+        }
+    }
+
+    fn with_resume(r: Option<pb::AgentResume>) -> pb::RunAgentRequest {
+        pb::RunAgentRequest {
+            run_id: "run".to_owned(),
+            resume: r,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_continuation_is_refused_while_the_switch_is_off_and_when_incomplete() {
+        let refused = enforce_resume(&with_resume(Some(resume("segment"))), false)
+            .expect_err("switch off");
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(refused.message(), "continue_disabled");
+
+        assert!(enforce_resume(&with_resume(Some(resume("segment"))), true).is_ok());
+        assert!(enforce_resume(&with_resume(Some(resume("loop"))), true).is_ok());
+        assert!(enforce_resume(&with_resume(None), false).is_ok(), "no resume = today");
+
+        let mut bad_mode = resume("segment");
+        bad_mode.mode = "other".to_owned();
+        let mut no_claim = resume("segment");
+        no_claim.claim_token.clear();
+        let mut no_approval = resume("segment");
+        no_approval.approval_id.clear();
+        for incomplete in [bad_mode, no_claim, no_approval] {
+            let e = enforce_resume(&with_resume(Some(incomplete)), true).expect_err("incomplete");
+            assert_eq!(e.code(), tonic::Code::InvalidArgument);
+            assert_eq!(e.message(), "resume_incomplete");
+        }
+    }
+
+    /// A park resume (WS03 S8-6): the `park` mode with a claim token and nothing an approval
+    /// names. The switch is judged first, as for every resume; a park that names an approval, a
+    /// step, a tool, a fingerprint or a brief, or carries no token, is incomplete. The committed
+    /// rows of the other two modes are unchanged, and the validator never reads `segment_no`
+    /// or the parking switch (a park stays resumable with parking off).
+    #[test]
+    fn enforce_resume_park_shape() {
+        let park = || pb::AgentResume {
+            mode: "park".to_owned(),
+            claim_token: "claim".to_owned(),
+            ..Default::default()
+        };
+        // The switch first, whatever the shape.
+        for shape in [park(), pb::AgentResume { approval_id: "appr_1".to_owned(), ..park() }] {
+            let refused = enforce_resume(&with_resume(Some(shape)), false).expect_err("switch off");
+            assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+            assert_eq!(refused.message(), "continue_disabled");
+        }
+        assert!(enforce_resume(&with_resume(Some(park())), true).is_ok());
+        // A client-sent segment number is not read (the executor derives it from the fold).
+        assert!(enforce_resume(
+            &with_resume(Some(pb::AgentResume { segment_no: 7, ..park() })),
+            true
+        )
+        .is_ok());
+        let incomplete = [
+            pb::AgentResume { approval_id: "appr_1".to_owned(), ..park() },
+            pb::AgentResume { step_id: "tool_1_x".to_owned(), ..park() },
+            pb::AgentResume { tool_name: "delete_records".to_owned(), ..park() },
+            pb::AgentResume { action_fingerprint: "fp".to_owned(), ..park() },
+            pb::AgentResume { brief: "recorded results".to_owned(), ..park() },
+            pb::AgentResume { claim_token: String::new(), ..park() },
+            pb::AgentResume { mode: "PARK".to_owned(), ..park() },
+        ];
+        for shape in incomplete {
+            let e = enforce_resume(&with_resume(Some(shape)), true).expect_err("incomplete park");
+            assert_eq!(e.code(), tonic::Code::InvalidArgument);
+            assert_eq!(e.message(), "resume_incomplete");
+        }
+        // The committed truth table of the approval stages: both ids are still required.
+        for mode in ["segment", "loop"] {
+            assert!(enforce_resume(&with_resume(Some(resume(mode))), true).is_ok(), "{mode}");
+            let mut no_approval = resume(mode);
+            no_approval.approval_id.clear();
+            let mut no_claim = resume(mode);
+            no_claim.claim_token.clear();
+            for shape in [no_approval, no_claim] {
+                let e = enforce_resume(&with_resume(Some(shape)), true).expect_err(mode);
+                assert_eq!(e.message(), "resume_incomplete");
+            }
+        }
+    }
+
+    #[test]
+    fn the_same_context_on_a_persistent_run_and_an_absent_context_pass() {
+        assert!(enforce_run_context(&request_with(Some(history()), false)).is_ok());
+        assert!(enforce_run_context(&request_with(None, true)).is_ok());
+        assert!(enforce_run_context(&request_with(None, false)).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod step_attachment_tests {
+    use super::*;
+    use mp_contracts::attachments::sha256_hex;
+
+    // The registry behind register_step_attachments is process-global and the
+    // tests run in parallel, so each test owns a run id: sharing one key makes
+    // the "nothing held" assertions race the test that holds a list.
+    const ORG: &str = "org-attachment-test";
+
+    fn step(
+        tool: &str,
+        run: &str,
+        attachments: Vec<pb::RunAttachment>,
+    ) -> pb::ExecuteStepRequest {
+        pb::ExecuteStepRequest {
+            run_id: run.to_owned(),
+            org_id: ORG.to_owned(),
+            tool_name: tool.to_owned(),
+            attachments,
+            ..Default::default()
+        }
+    }
+
+    fn file(name: &str, content: &[u8]) -> pb::RunAttachment {
+        pb::RunAttachment {
+            id: name.to_owned(),
+            name: name.to_owned(),
+            mime: "text/csv".to_owned(),
+            size_bytes: content.len() as u64,
+            sha256: sha256_hex(content),
+            content: content.to_vec(),
+            kind: pb::RunAttachmentKind::File as i32,
+        }
+    }
+
+    #[test]
+    fn a_step_without_attachments_registers_nothing() {
+        for zdr in [false, true] {
+            let held = register_step_attachments(&step("code_interpreter", "run-none", Vec::new()), zdr)
+                .expect("no list, no refusal");
+            assert!(held.is_none());
+        }
+    }
+
+    #[test]
+    fn a_zero_retention_or_waived_step_refuses_the_files_at_the_boundary() {
+        let request = step("code_interpreter", "run-refused", vec![file("a.csv", b"1,2")]);
+        let refused = register_step_attachments(&request, true).expect_err("ZDR refuses");
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+        assert!(
+            crate::run_inputs::global()
+                .get(ORG, "run-refused")
+                .is_none(),
+            "nothing may be held after a refusal"
+        );
+    }
+
+    #[test]
+    fn only_code_interpreter_takes_files() {
+        let request = step("web_search", "run-wrong-tool", vec![file("a.csv", b"1,2")]);
+        let refused = register_step_attachments(&request, false).expect_err("wrong tool");
+        assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+        assert_eq!(refused.message(), "attachments_unsupported_tool");
+    }
+
+    #[test]
+    fn a_list_the_contract_refuses_is_never_held() {
+        let mut tampered = file("a.csv", b"1,2");
+        tampered.content = b"9,9".to_vec();
+        let refused = register_step_attachments(
+            &step("code_interpreter", "run-tampered", vec![tampered]),
+            false,
+        )
+        .expect_err("a hash mismatch");
+        assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+        assert_eq!(refused.message(), "attachments_hash_mismatch");
+        let unsafe_name = file("../a.csv", b"1,2");
+        let refused =
+            register_step_attachments(
+                &step("code_interpreter", "run-unsafe-name", vec![unsafe_name]),
+                false,
+            )
+            .expect_err("an unsafe name");
+        assert_eq!(refused.message(), "attachments_name_invalid");
+    }
+
+    #[test]
+    fn a_valid_list_is_held_for_the_call_and_released_with_the_guard() {
+        let request = step("code_interpreter", "run-held", vec![file("a.csv", b"1,2")]);
+        let held = register_step_attachments(&request, false)
+            .expect("registers")
+            .expect("a guard");
+        assert!(crate::run_inputs::global().get(ORG, "run-held").is_some());
+        drop(held);
+        assert!(crate::run_inputs::global().get(ORG, "run-held").is_none());
+    }
+}
+
+#[cfg(test)]
+mod run_attachment_tests {
+    use super::*;
+    use mp_contracts::attachments::sha256_hex;
+
+    fn attachment(name: &str, content: &[u8], kind: pb::RunAttachmentKind, mime: &str) -> pb::RunAttachment {
+        pb::RunAttachment {
+            id: name.to_owned(),
+            name: name.to_owned(),
+            mime: mime.to_owned(),
+            size_bytes: content.len() as u64,
+            sha256: sha256_hex(content),
+            content: content.to_vec(),
+            kind: kind as i32,
+        }
+    }
+
+    fn file(name: &str, content: &[u8]) -> pb::RunAttachment {
+        attachment(name, content, pb::RunAttachmentKind::File, "text/csv")
+    }
+
+    fn image(name: &str, content: &[u8]) -> pb::RunAttachment {
+        attachment(name, content, pb::RunAttachmentKind::Image, "image/png")
+    }
+
+    fn run_with(attachments: Vec<pb::RunAttachment>) -> pb::RunAgentRequest {
+        pb::RunAgentRequest {
+            run_id: "run-attachments".to_owned(),
+            attachments,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_run_without_attachments_passes_even_when_persistence_free() {
+        for zdr in [false, true] {
+            let mut req = run_with(Vec::new());
+            assert!(enforce_run_attachments(&mut req, zdr).is_ok());
+            assert!(req.attachments.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_do_run_with_attachments_under_zdr_is_refused_at_the_boundary() {
+        for list in [
+            vec![file("sales.csv", b"a,b")],
+            vec![image("shot.png", b"png")],
+            vec![image("shot.png", b"png"), file("sales.csv", b"a,b")],
+        ] {
+            let mut req = run_with(list);
+            let refused = enforce_run_attachments(&mut req, true).expect_err("zero retention");
+            assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+            assert!(
+                !refused.message().contains("sales") && !refused.message().contains("shot"),
+                "the refusal carries no client text: {}",
+                refused.message()
+            );
+        }
+    }
+
+    #[test]
+    fn files_and_images_pass_and_files_come_first() {
+        let mut req = run_with(vec![
+            image("one.png", b"1"),
+            file("sales.csv", b"a,b"),
+            image("two.png", b"2"),
+        ]);
+        enforce_run_attachments(&mut req, false).expect("a good list");
+        let order: Vec<&str> = req.attachments.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(order, ["sales.csv", "one.png", "two.png"]);
+    }
+
+    #[test]
+    fn a_bad_file_or_image_refuses_the_whole_list_with_its_closed_token() {
+        let mut tampered = image("shot.png", b"png");
+        tampered.content = b"gnp".to_vec();
+        let mut wrong_size = image("shot.png", b"png");
+        wrong_size.size_bytes = 1;
+        let mut svg = image("shot.svg", b"<svg/>");
+        svg.mime = "image/svg+xml".to_owned();
+        let cases = [
+            (vec![tampered], "attachments_hash_mismatch"),
+            (vec![wrong_size], "attachments_size_mismatch"),
+            (vec![svg], "attachments_kind_unsupported"),
+            (vec![image("empty.png", b"")], "attachments_empty"),
+            (
+                (0..=MAX_RUN_IMAGES)
+                    .map(|index| image(&format!("{index}.png"), b"x"))
+                    .collect(),
+                "attachments_too_many",
+            ),
+            (vec![file("../a.csv", b"1,2")], "attachments_name_invalid"),
+            (
+                vec![attachment("a", b"x", pb::RunAttachmentKind::Unspecified, "text/csv")],
+                "attachments_kind_unsupported",
+            ),
+        ];
+        for (list, token) in cases {
+            let mut req = run_with(list);
+            let refused = enforce_run_attachments(&mut req, false).expect_err(token);
+            assert_eq!(refused.code(), tonic::Code::InvalidArgument, "{token}");
+            assert_eq!(refused.message(), token);
+        }
     }
 }

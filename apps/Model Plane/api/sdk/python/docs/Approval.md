@@ -13,6 +13,7 @@ Name | Type | Description | Notes
 **requested_of** | **str** |  | [optional] 
 **decided_by** | **str** |  | [optional] 
 **decision_reason** | **str** |  | [optional] 
+**cause** | [**ApprovalCause**](ApprovalCause.md) | Why the approval was asked for. Null when the creator stated no cause. | [optional] 
 
 ## Example
 

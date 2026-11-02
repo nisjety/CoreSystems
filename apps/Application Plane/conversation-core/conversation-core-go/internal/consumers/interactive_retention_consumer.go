@@ -15,7 +15,7 @@ const interactiveRetentionDurable = "conversation-core-interactive-retention"
 // organization newly enables interactive Zero Data Retention. It is separate
 // from the irreversible GDPR erasure subject: this consumer has authority to
 // remove personal drafts only, never durable support records.
-const interactiveRetentionSubject = "aqencia.controlplane.org.interactive_retention.enabled"
+const interactiveRetentionSubject = "controlplane.org.interactive_retention.enabled"
 
 type interactiveRetentionEvent struct {
 	OrgID string `json:"org_id"`

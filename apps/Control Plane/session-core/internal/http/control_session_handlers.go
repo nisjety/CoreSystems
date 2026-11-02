@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog/log"
 
+	"github.com/I-Dacosta/CoreSystem/apps/session-core/internal/clients"
 	"github.com/I-Dacosta/CoreSystem/apps/session-core/internal/service"
 )
 
@@ -25,7 +26,7 @@ func (s *Server) getControlSessionCurrent(c *gin.Context) {
 		return
 	}
 
-	snap, err := s.controlSessionService.Get(c.Request.Context(), userID)
+	snap, err := s.controlSessionService.Get(clients.WithActiveOrganization(c.Request.Context(), c.GetString("org_id")), userID)
 	if err != nil {
 		if errors.Is(err, service.ErrUserCoreUnavailable) {
 			log.Warn().Err(err).Str("user_id", userID).Msg("control-session: upstream unavailable")
@@ -57,7 +58,7 @@ func (s *Server) postControlSessionRefresh(c *gin.Context) {
 		return
 	}
 
-	snap, err := s.controlSessionService.Refresh(c.Request.Context(), userID)
+	snap, err := s.controlSessionService.Refresh(clients.WithActiveOrganization(c.Request.Context(), c.GetString("org_id")), userID)
 	if err != nil {
 		if errors.Is(err, service.ErrUserCoreUnavailable) {
 			c.JSON(http.StatusBadGateway, gin.H{"error": "upstream session source unavailable"})

@@ -13,7 +13,7 @@ This describes behaviour. It does not change it. A **gap** is a place where ZDR 
 | refused | the request is refused with a message naming ZDR |
 | inert | ZDR does not apply: nothing of the caller's content is stored, or the route is not reachable with ZDR |
 
-6 of 36 rows are gaps.
+6 of 37 rows are gaps.
 
 | Feature | Routes | Treatment | Status | Log |
 |---|---|---|---|---|
@@ -28,6 +28,7 @@ This describes behaviour. It does not change it. A **gap** is a place where ZDR 
 | `answer` | `/v1/answer`<br>`/v1/answer/stream` | honored | enforced | log-unverified |
 | `extract` | `/v1/extract` | honored | enforced | log-unverified |
 | `map` | `/v1/map` | inert: reads robots and sitemaps and returns links; nothing is stored | enforced | log-unverified |
+| `audit_page` | `/v1/audit/page` | inert: fetches robots and one page and returns bounded evidence; nothing is stored | enforced | log-unverified |
 | `audio` | `/v1/audio` | honored | enforced | log-unverified |
 | `artifacts` | `/v1/artifacts`<br>`/v1/artifacts/{id}` | inert: reads artifacts that already exist; a ZDR run writes none | enforced | log-unverified |
 | `control_records` | `/v1/sources`<br>`/v1/sources/{id}`<br>`/v1/snapshots`<br>`/v1/{kind}/jobs`<br>`/v1/request-queues`<br>`/v1/benchmarks`<br>`/v1/team/credit-usage`<br>`/v1/team/token-usage`<br>`/v1/team/concurrency`<br>`/v1/team/queue-status`<br>`/v1/team/activity`<br>`/v1/runs/{id}/events`<br>`/v1/jobs/{id}/events`<br>`/v1/crawl/{id}/events`<br>`/v1/batch/{id}/events` | inert: reads or proxies Control Plane records; Quarry stores nothing for the caller | enforced | log-unverified |
@@ -67,6 +68,7 @@ This describes behaviour. It does not change it. A **gap** is a place where ZDR 
 - `answer`: the answer pipeline runs with the effective ZDR posture: no paid providers, no durable search event Tests: `zdr_claim_floor::answer_runs_as_zdr_for_a_zdr_org_user_and_as_before_otherwise`, `zdr_claim_floor::answer_stream_runs_as_zdr_for_a_zdr_org_user_and_as_before_otherwise`.
 - `extract`: the page runs carry the effective ZDR posture, so no artifact or durable page event is written Tests: `zdr_claim_floor::extract_runs_as_zdr_for_a_zdr_org_user_and_not_for_a_registry_zdr_service`.
 - `map`: map_routes::map touches no cache, artifact store, index or event sink
+- `audit_page`: audit_page::capture touches no cache, artifact store, index or event sink
 - `audio`: audio_routes::raise_to_zdr_floor forwards the posture to the Model Plane, which owns retention for audio Tests: `zdr_claim_floor::audio_forwards_the_floored_posture_to_the_model_plane`, `zdr_claim_floor::audio_transcription_forwards_the_floored_posture_to_the_model_plane`.
 - `artifacts`: resource_routes list and get are tenant-bound reads of the artifact store
 - `control_records`: resource_routes forwards to Control Plane with the verified identity and keeps no copy (the crawl and batch event tails are the same handler as the job event tail, scoped to one kind; a ZDR organization can only hold jobs that pre-date its ZDR, and reads them as before); EXCEPT POST /v1/sources with monitor:true, which registers a recurring change-monitor schedule in Control Plane and is classified by the schedules row (it is refused or observed under the same flag and stamps the posture on the schedule)

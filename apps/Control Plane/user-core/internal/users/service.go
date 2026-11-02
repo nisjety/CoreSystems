@@ -665,6 +665,29 @@ func (s *Service) GetSettings(ctx context.Context, userID, category string, defa
 	return merged, nil
 }
 
+// GetSettingsExplicit is GetSettings plus the stored row on its own: the
+// first map is defaults merged with the stored row (same as GetSettings), the
+// second holds only the keys present in the stored row (nil when no row
+// exists). Callers use it to tell an explicit choice from a default.
+func (s *Service) GetSettingsExplicit(ctx context.Context, userID, category string, defaults map[string]any) (merged map[string]any, stored map[string]any, err error) {
+	if userID == "" {
+		return nil, nil, fmt.Errorf("user ID is required")
+	}
+	row, err := s.repo.GetSettings(ctx, userID, category)
+	if err != nil {
+		return nil, nil, err
+	}
+	merged = make(map[string]any, len(defaults))
+	maps.Copy(merged, defaults)
+	if row == nil {
+		return merged, nil, nil
+	}
+	maps.Copy(merged, row.Settings)
+	stored = make(map[string]any, len(row.Settings))
+	maps.Copy(stored, row.Settings)
+	return merged, stored, nil
+}
+
 // UpsertSettings saves a partial or full settings map for a user + category.
 func (s *Service) UpsertSettings(ctx context.Context, userID, category string, settings map[string]any) (map[string]any, error) {
 	if userID == "" {
@@ -948,7 +971,7 @@ func (s *Service) RemoveMembership(ctx context.Context, userID, orgID string) er
 // EVENT PUBLISHING METHODS
 // ============================================
 
-// publishUserRegistered publishes aqencia.controlplane.user.registered.
+// publishUserRegistered publishes controlplane.user.registered.
 // Ingestion Plane subscribes to set up M365 and other provider integrations.
 func (s *Service) publishUserRegistered(ctx context.Context, userID, email, name, provider string) {
 	if s.sharedPublisher == nil {
@@ -957,7 +980,7 @@ func (s *Service) publishUserRegistered(ctx context.Context, userID, email, name
 	s.sharedPublisher.PublishUserRegistered(ctx, userID, email, name, provider)
 }
 
-// publishUserUpdated publishes aqencia.controlplane.user.updated.
+// publishUserUpdated publishes controlplane.user.updated.
 func (s *Service) publishUserUpdated(ctx context.Context, userID, email string, changes map[string]any) {
 	if s.sharedPublisher == nil {
 		return
@@ -965,7 +988,7 @@ func (s *Service) publishUserUpdated(ctx context.Context, userID, email string, 
 	s.sharedPublisher.PublishUserUpdated(ctx, userID, email, changes)
 }
 
-// publishUserDeleted publishes aqencia.controlplane.user.deleted.
+// publishUserDeleted publishes controlplane.user.deleted.
 func (s *Service) publishUserDeleted(ctx context.Context, userID, email string) {
 	if s.sharedPublisher == nil {
 		return
@@ -973,7 +996,7 @@ func (s *Service) publishUserDeleted(ctx context.Context, userID, email string) 
 	s.sharedPublisher.PublishUserDeleted(ctx, userID, email)
 }
 
-// publishProviderLinked publishes aqencia.controlplane.user.provider_linked.
+// publishProviderLinked publishes controlplane.user.provider_linked.
 // Ingestion Plane subscribes to set up M365, Google, and other cloud integrations.
 func (s *Service) publishProviderLinked(ctx context.Context, userID, email, provider, tenantID string) {
 	if s.sharedPublisher == nil {

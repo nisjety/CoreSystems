@@ -1,0 +1,249 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "One row per Xero tenant proving functional-currency FX-to-NOK policy, historical rate coverage, and feed freshness separately. It never derives financial amounts from Xero CurrencyRate.",
+  assertions: {
+    nonNull: ["tenant_id", "nok_conversion_readiness_state"],
+    uniqueKey: ["tenant_id"]
+  }
+}
+
+WITH source_rate_coverage AS (
+  SELECT
+    tenant_id,
+    COUNT(*) AS source_exchange_rate_observation_count,
+    COUNTIF(is_cross_currency) AS cross_currency_observation_count,
+    COUNTIF(is_cross_currency AND is_source_rate_present)
+      AS cross_currency_observation_with_source_rate_count,
+    COUNTIF(amount_nok IS NOT NULL) AS source_observation_with_amount_nok_count,
+    MAX(synced_at) AS latest_source_rate_observed_at
+  FROM ${ref("xero_gold_finance", "fact_source_exchange_rate_observation")}
+  GROUP BY tenant_id
+), valid_market_rate_observations AS (
+  SELECT *
+  FROM ${ref("dw_1_silver_xero", "dim_currency_market_rate")}
+  WHERE to_currency_code = 'NOK'
+    AND rate_date <= CURRENT_DATE()
+    AND market_exchange_rate_to_currency IS NOT NULL
+    AND market_exchange_rate_to_currency > 0
+), canonical_market_rate_observations AS (
+  SELECT * EXCEPT(rate_rank)
+  FROM (
+    SELECT
+      rate.*,
+      ROW_NUMBER() OVER (
+        PARTITION BY from_currency_code, to_currency_code, rate_date
+        ORDER BY is_inverse_rate ASC, source_timestamp DESC, currency_market_rate_key DESC
+      ) AS rate_rank
+    FROM valid_market_rate_observations AS rate
+  )
+  WHERE rate_rank = 1
+), latest_market_rate_observation AS (
+  SELECT * EXCEPT(rate_rank)
+  FROM (
+    SELECT
+      rate.*,
+      ROW_NUMBER() OVER (
+        PARTITION BY from_currency_code
+        ORDER BY rate_date DESC, source_timestamp DESC, currency_market_rate_key DESC
+      ) AS rate_rank
+    FROM canonical_market_rate_observations AS rate
+  )
+  WHERE rate_rank = 1
+), market_rate_coverage AS (
+  SELECT
+    from_currency_code,
+    rate_date AS latest_market_rate_date,
+    source_timestamp AS latest_market_rate_source_timestamp
+  FROM latest_market_rate_observation
+), active_functional_currency_policies AS (
+  SELECT
+    policy_id,
+    tenant_id,
+    valid_from,
+    valid_to,
+    policy_source,
+    policy_version,
+    allow_filled_forward_rate,
+    approved_at
+  FROM ${ref("xero_reference", "xero_nok_conversion_policy")}
+  WHERE is_active IS TRUE
+    AND conversion_scope = 'FUNCTIONAL_CURRENCY'
+    AND NULLIF(TRIM(policy_id), '') IS NOT NULL
+    AND NULLIF(TRIM(policy_source), '') IS NOT NULL
+    AND NULLIF(TRIM(policy_version), '') IS NOT NULL
+    AND valid_from IS NOT NULL
+    AND approved_at IS NOT NULL
+    AND allow_filled_forward_rate IS NOT NULL
+    AND (valid_to IS NULL OR valid_to > valid_from)
+), functional_currency_requirements AS (
+  SELECT
+    ledger.tenant_id,
+    company.base_currency AS from_currency_code,
+    ledger.transaction_date AS calendar_date
+  FROM ${ref("xero_gold_finance", "fact_general_ledger")} AS ledger
+  INNER JOIN ${ref("xero_gold_common", "dim_company")} AS company
+    USING (tenant_id)
+  WHERE ledger.transaction_date IS NOT NULL
+    AND company.base_currency IS NOT NULL
+    AND company.base_currency != 'NOK'
+  GROUP BY ledger.tenant_id, from_currency_code, calendar_date
+), policy_candidates AS (
+  SELECT
+    requirement.tenant_id,
+    requirement.from_currency_code,
+    requirement.calendar_date,
+    rate.currency_market_rate_daily_key,
+    rate.has_market_rate,
+    rate.is_rate_filled_forward,
+    policy.policy_id,
+    policy.allow_filled_forward_rate,
+    COUNT(policy.policy_id) OVER (
+      PARTITION BY requirement.tenant_id, requirement.from_currency_code, requirement.calendar_date
+    ) AS policy_match_count,
+    ROW_NUMBER() OVER (
+      PARTITION BY requirement.tenant_id, requirement.from_currency_code, requirement.calendar_date
+      ORDER BY policy.valid_from DESC, policy.approved_at DESC, policy.policy_version DESC,
+               policy.policy_id DESC
+    ) AS policy_rank
+  FROM functional_currency_requirements AS requirement
+  LEFT JOIN ${ref("xero_gold_common", "dim_currency_market_rate_to_nok_daily")} AS rate
+    ON rate.from_currency_code = requirement.from_currency_code
+   AND rate.to_currency_code = 'NOK'
+   AND rate.calendar_date = requirement.calendar_date
+  LEFT JOIN active_functional_currency_policies AS policy
+    ON requirement.tenant_id = policy.tenant_id
+   AND requirement.calendar_date >= policy.valid_from
+   AND (policy.valid_to IS NULL OR requirement.calendar_date < policy.valid_to)
+), assessed_functional_currency_requirements AS (
+  SELECT
+    tenant_id,
+    from_currency_code,
+    calendar_date,
+    currency_market_rate_daily_key,
+    has_market_rate,
+    is_rate_filled_forward,
+    CASE WHEN policy_match_count = 1 THEN policy_id END AS policy_id,
+    CASE WHEN policy_match_count = 1 THEN allow_filled_forward_rate END
+      AS allow_filled_forward_rate,
+    policy_match_count
+  FROM policy_candidates
+  WHERE policy_rank = 1
+), functional_currency_coverage AS (
+  SELECT
+    tenant_id,
+    COUNT(*) AS functional_currency_required_day_count,
+    COUNTIF(policy_match_count = 0) AS functional_currency_day_without_policy_count,
+    COUNTIF(policy_match_count > 1) AS functional_currency_day_with_ambiguous_policy_count,
+    COUNTIF(has_market_rate IS NOT TRUE) AS functional_currency_day_without_market_rate_count,
+    COUNTIF(policy_id IS NOT NULL AND is_rate_filled_forward
+      AND allow_filled_forward_rate IS NOT TRUE)
+      AS functional_currency_day_with_disallowed_fill_forward_count
+  FROM assessed_functional_currency_requirements
+  GROUP BY tenant_id
+)
+
+SELECT
+  company.company_key,
+  company.tenant_id,
+  company.organisation_name,
+  company.base_currency,
+  COALESCE(source.source_exchange_rate_observation_count, 0)
+    AS source_exchange_rate_observation_count,
+  COALESCE(source.cross_currency_observation_count, 0)
+    AS cross_currency_observation_count,
+  COALESCE(source.cross_currency_observation_with_source_rate_count, 0)
+    AS cross_currency_observation_with_source_rate_count,
+  COALESCE(source.source_observation_with_amount_nok_count, 0)
+    AS source_observation_with_amount_nok_count,
+  COALESCE(requirements.functional_currency_required_day_count, 0)
+    AS functional_currency_required_day_count,
+  COALESCE(requirements.functional_currency_day_without_policy_count, 0)
+    AS functional_currency_day_without_policy_count,
+  COALESCE(requirements.functional_currency_day_with_ambiguous_policy_count, 0)
+    AS functional_currency_day_with_ambiguous_policy_count,
+  COALESCE(requirements.functional_currency_day_without_market_rate_count, 0)
+    AS functional_currency_day_without_market_rate_count,
+  COALESCE(requirements.functional_currency_day_with_disallowed_fill_forward_count, 0)
+    AS functional_currency_day_with_disallowed_fill_forward_count,
+  company.base_currency = 'NOK' AS is_functional_currency_nok,
+  market.latest_market_rate_date IS NOT NULL AS is_external_fx_feed_available,
+  company.base_currency = 'NOK'
+    OR (
+      COALESCE(requirements.functional_currency_required_day_count, 0) > 0
+      AND COALESCE(requirements.functional_currency_day_without_market_rate_count, 0) = 0
+    ) AS is_market_rate_available_for_functional_currency,
+  market.latest_market_rate_date,
+  market.latest_market_rate_source_timestamp,
+  IF(
+    market.latest_market_rate_date IS NULL,
+    NULL,
+    DATE_DIFF(CURRENT_DATE(), market.latest_market_rate_date, DAY)
+  ) AS external_fx_feed_age_days,
+  COALESCE(
+    market.latest_market_rate_date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 3 DAY) AND CURRENT_DATE(),
+    FALSE
+  )
+    AND COALESCE(
+      DATE(market.latest_market_rate_source_timestamp)
+        BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 3 DAY) AND CURRENT_DATE(),
+      FALSE
+    )
+    AND COALESCE(market.latest_market_rate_source_timestamp <= CURRENT_TIMESTAMP(), FALSE)
+    AS is_external_fx_feed_fresh_within_default_3_calendar_days,
+  company.base_currency = 'NOK'
+    OR (
+      COALESCE(
+        market.latest_market_rate_date
+          BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 3 DAY) AND CURRENT_DATE(),
+        FALSE
+      )
+      AND COALESCE(
+        DATE(market.latest_market_rate_source_timestamp)
+          BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 3 DAY) AND CURRENT_DATE(),
+        FALSE
+      )
+      AND COALESCE(market.latest_market_rate_source_timestamp <= CURRENT_TIMESTAMP(), FALSE)
+      AND COALESCE(requirements.functional_currency_required_day_count, 0) > 0
+      AND COALESCE(requirements.functional_currency_day_without_policy_count, 0) = 0
+      AND COALESCE(requirements.functional_currency_day_with_ambiguous_policy_count, 0) = 0
+      AND COALESCE(requirements.functional_currency_day_without_market_rate_count, 0) = 0
+      AND COALESCE(requirements.functional_currency_day_with_disallowed_fill_forward_count, 0) = 0
+    ) AS is_nok_conversion_ready,
+  CASE
+    WHEN company.base_currency IS NULL THEN 'missing_functional_currency'
+    WHEN company.base_currency = 'NOK' THEN 'functional_currency_is_nok'
+    WHEN market.latest_market_rate_date IS NULL THEN 'external_fx_rate_not_available_for_functional_currency'
+    WHEN NOT (
+      COALESCE(
+        market.latest_market_rate_date
+          BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 3 DAY) AND CURRENT_DATE(),
+        FALSE
+      )
+      AND COALESCE(
+        DATE(market.latest_market_rate_source_timestamp)
+          BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 3 DAY) AND CURRENT_DATE(),
+        FALSE
+      )
+      AND COALESCE(market.latest_market_rate_source_timestamp <= CURRENT_TIMESTAMP(), FALSE)
+    )
+      THEN 'external_fx_rate_stale_for_default_policy'
+    WHEN COALESCE(requirements.functional_currency_required_day_count, 0) = 0
+      THEN 'no_functional_currency_requirements'
+    WHEN COALESCE(requirements.functional_currency_day_without_policy_count, 0) > 0
+      THEN 'functional_currency_conversion_policy_incomplete'
+    WHEN COALESCE(requirements.functional_currency_day_with_ambiguous_policy_count, 0) > 0
+      THEN 'functional_currency_conversion_policy_ambiguous'
+    WHEN COALESCE(requirements.functional_currency_day_without_market_rate_count, 0) > 0
+      THEN 'functional_currency_market_rate_coverage_incomplete'
+    WHEN COALESCE(requirements.functional_currency_day_with_disallowed_fill_forward_count, 0) > 0
+      THEN 'functional_currency_fill_forward_policy_incomplete'
+    ELSE 'ready'
+  END AS nok_conversion_readiness_state,
+  source.latest_source_rate_observed_at,
+  'xero' AS source_system
+FROM ${ref("xero_gold_common", "dim_company")} AS company
+LEFT JOIN source_rate_coverage AS source USING (tenant_id)
+LEFT JOIN market_rate_coverage AS market
+  ON company.base_currency = market.from_currency_code
+LEFT JOIN functional_currency_coverage AS requirements USING (tenant_id)

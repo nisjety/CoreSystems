@@ -10,8 +10,9 @@ type MenuModalProps = {
 const menuItems = [
 	{ href: "/produkt/arbeidsflyten", label: "Produkt", number: "001" },
 	{ href: "/plattform/felles-kontekst", label: "Plattform", number: "002" },
-	{ href: "/trust", label: "Tillit", number: "003" },
-	{ href: "#kontakt", label: "Kontakt", number: "004" },
+	{ href: "/integrasjoner", label: "Integrasjoner", number: "003" },
+	{ href: "/trust", label: "Tillit", number: "004" },
+	{ href: "#kontakt", label: "Kontakt", number: "005" },
 ];
 
 const contactLinks = [
@@ -93,16 +94,16 @@ export function MenuModal({ onClose, open }: MenuModalProps) {
 			<div className="flex items-start justify-between">
 				<a
 					aria-label="Verevon hjem"
-					className="grid size-[76px] place-items-start text-current transition-opacity hover:opacity-75 max-[760px]:size-[60px]"
+					className="grid size-[76px] place-items-start text-current transition-[color,opacity,transform] hover:text-[var(--verevon-coral-deep)] hover:opacity-100 max-[760px]:size-[60px]"
 					href="#top"
 					onClick={onClose}
 				>
-					<VerevonMarkFilled className="size-full scale-170" />
+					<VerevonMarkFilled className="size-full scale-170 animate-[verevon-menu-mark-enter_620ms_cubic-bezier(0.16,1,0.3,1)_both]" />
 				</a>
 
 				<button
 					aria-label="Lukk meny"
-					className="grid h-[58px] w-[58px] cursor-pointer place-items-center border-0 bg-transparent p-0 text-current transition-opacity hover:opacity-70"
+					className="grid h-[58px] w-[58px] cursor-pointer place-items-center border-0 bg-transparent p-0 text-current transition-[color,opacity] hover:text-[var(--verevon-coral-deep)] hover:opacity-100 focus-visible:text-[var(--verevon-coral-deep)]"
 					onClick={onClose}
 					ref={closeButtonRef}
 					type="button"
@@ -124,18 +125,18 @@ export function MenuModal({ onClose, open }: MenuModalProps) {
 				{menuItems.map((item, index) => {
 					const itemContent = (
 						<>
-							<span className="font-manrope text-[0.98rem] text-[color-mix(in_srgb,var(--verevon-j-text)_72%,transparent)]">
+							<span className="font-manrope text-[0.98rem] text-[color-mix(in_srgb,var(--verevon-j-text)_72%,transparent)] transition-colors group-hover:text-[var(--verevon-coral-deep)] group-focus-visible:text-[var(--verevon-coral-deep)]">
 								{item.number}
 							</span>
 
-							<strong className="font-manrope text-[2.2rem] font-normal leading-none text-[color-mix(in_srgb,var(--verevon-j-text)_78%,transparent)] max-[760px]:text-[1.72rem]">
+							<strong className="origin-left font-manrope text-[2.2rem] font-normal leading-none text-[color-mix(in_srgb,var(--verevon-j-text)_78%,transparent)] transition-[color,transform] duration-200 group-hover:scale-[1.045] group-hover:text-[var(--verevon-coral-deep)] group-focus-visible:scale-[1.045] group-focus-visible:text-[var(--verevon-coral-deep)] max-[760px]:text-[1.72rem]">
 								{item.label}
 							</strong>
 						</>
 					);
 					const itemProps = {
-						className:
-							"grid translate-y-[26px] gap-[38px] border-t border-black/15 pt-2 opacity-0 animate-[verevon-menu-item-enter_560ms_ease_forwards] [animation-delay:var(--delay)] transition-colors hover:text-black max-[760px]:gap-[18px]",
+								className:
+									"group grid translate-y-[26px] gap-[38px] border-t border-black/15 pt-2 opacity-0 animate-[verevon-menu-item-enter_560ms_ease_forwards] [animation-delay:var(--delay)] transition-colors hover:text-[var(--verevon-coral-deep)] focus-visible:text-[var(--verevon-coral-deep)] max-[760px]:gap-[18px]",
 						href: item.href,
 						onClick: onClose,
 						style: { "--delay": `${index * 80}ms` } as CSSProperties,
@@ -161,7 +162,7 @@ export function MenuModal({ onClose, open }: MenuModalProps) {
 
 				{contactLinks.map((link) => (
 					<a
-						className="transition-colors hover:text-verevon-j-text"
+						className="transition-colors hover:text-[var(--verevon-coral-deep)]"
 						href={link.href}
 						key={link.href}
 						onClick={onClose}

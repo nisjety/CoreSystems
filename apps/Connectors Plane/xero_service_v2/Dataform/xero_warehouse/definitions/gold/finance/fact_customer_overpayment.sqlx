@@ -1,0 +1,43 @@
+config {
+  type: "table",
+  schema: "xero_gold_finance",
+  description: "RECEIVE-OVERPAYMENT customer credits; source values remain visible while only reconciled line sets expose additive measures.",
+  assertions: { nonNull: ["tenant_id", "overpayment_id", "overpayment_key"], uniqueKey: ["overpayment_key"] }
+}
+
+WITH line_sets AS (
+  SELECT tenant_id, overpayment_id, COUNT(*) AS observed_line_count,
+         MAX(observed_net_subtotal) AS observed_net_subtotal,
+         LOGICAL_OR(is_line_set_ambiguous) AS has_ambiguous_lines
+  FROM ${ref("dw_1_silver_xero", "fact_overpayment_line")}
+  GROUP BY tenant_id, overpayment_id
+), overpayments AS (
+  SELECT o.*, COALESCE(l.observed_line_count, 0) AS observed_line_count,
+         (o.line_item_count IS DISTINCT FROM COALESCE(l.observed_line_count, 0)
+          OR o.sub_total IS NULL
+          OR ABS(COALESCE(l.observed_net_subtotal, 0) - o.sub_total) > 0.02
+          OR COALESCE(l.has_ambiguous_lines, FALSE)) AS is_line_set_ambiguous
+  FROM ${ref("dw_1_silver_xero", "fact_overpayment")} AS o
+  LEFT JOIN line_sets AS l
+    ON o.tenant_id = l.tenant_id AND o.overpayment_id = l.overpayment_id
+)
+SELECT FARM_FINGERPRINT(o.tenant_id) AS company_key,
+       FARM_FINGERPRINT(CAST(DATE(o.overpayment_date) AS STRING)) AS date_key,
+       FARM_FINGERPRINT(CONCAT(o.tenant_id, '|', o.currency_code)) AS currency_key,
+       IF(o.contact_id IS NULL, NULL, FARM_FINGERPRINT(CONCAT(o.tenant_id, '|', o.contact_id))) AS customer_key,
+       o.overpayment_key, o.tenant_id, o.overpayment_id, o.reference,
+       o.overpayment_type AS document_type, o.status, o.is_deleted, o.is_voided,
+       o.is_line_set_ambiguous, o.contact_id AS customer_id, o.contact_name AS customer_name,
+       DATE(o.overpayment_date) AS document_date, o.currency_code, c.base_currency,
+       o.currency_rate AS source_exchange_rate,
+       o.status IN ('AUTHORISED', 'PAID') AND NOT o.is_line_set_ambiguous AS is_reportable,
+       o.total AS source_amount_in_currency,
+       IF(o.status IN ('AUTHORISED', 'PAID') AND NOT o.is_line_set_ambiguous, o.total, NULL) AS amount_in_currency,
+       IF(o.status IN ('AUTHORISED', 'PAID') AND NOT o.is_line_set_ambiguous, o.remaining_credit, NULL) AS balance_in_currency,
+       IF(o.status IN ('AUTHORISED', 'PAID') AND NOT o.is_line_set_ambiguous, o.sub_total, NULL) AS detail_total_in_currency,
+       IF(o.status IN ('AUTHORISED', 'PAID') AND NOT o.is_line_set_ambiguous, o.total_tax, NULL) AS vat_total_in_currency,
+       CAST(NULL AS NUMERIC) AS amount, CAST(NULL AS NUMERIC) AS amount_nok,
+       o.line_item_count, o.observed_line_count, o.synced_at, 'xero' AS source_system
+FROM overpayments AS o
+LEFT JOIN ${ref("xero_gold_common", "dim_company")} AS c USING (tenant_id)
+WHERE o.overpayment_type = 'RECEIVE-OVERPAYMENT'

@@ -1,0 +1,352 @@
+/**
+ * Space identity and lifecycle, agent bindings, lifecycle outbox, member grants, read markers and room presence.
+ *
+ * Table definitions only; composed by `../schema.ts` (P-CX1). Add new
+ * tables for a feature to that feature's file, not to `schema.ts`.
+ */
+
+import { defineTable } from "convex/server";
+import { v } from "convex/values";
+
+/**
+ * WS16-S7: the personal sidebar document (see `convex/spaceSidebarRules.ts` for
+ * every cap and rule; the shape here is only the storage type). Refs only: a
+ * `spaceRef` list, section ids and labels the person typed. No room names, no
+ * thread ids, no content, and nothing in authorization ever reads it.
+ */
+export const spaceSidebarDocValidator = v.object({
+  v: v.literal(1),
+  starred: v.array(v.string()),
+  hidden: v.array(v.string()),
+  sections: v.array(
+    v.object({
+      id: v.string(),
+      name: v.string(),
+      collapsed: v.boolean(),
+      sort: v.union(v.literal("manual"), v.literal("name"), v.literal("activity")),
+      refs: v.array(v.string()),
+    }),
+  ),
+  groups: v.array(
+    v.object({
+      id: v.string(),
+      collapsed: v.optional(v.boolean()),
+      sort: v.optional(v.union(v.literal("name"), v.literal("activity"))),
+    }),
+  ),
+  computed: v.object({
+    needsYou: v.boolean(),
+    unread: v.boolean(),
+    working: v.boolean(),
+    muted: v.boolean(),
+  }),
+});
+
+export const spaceTables = {
+  // Application is the canonical owner of a Space's immutable identity, kind,
+  // display metadata, and lifecycle. Control registers this reference and is
+  // the separate owner of membership and authorization decisions.
+  spaces: defineTable({
+    spaceRef: v.string(),
+    externalOrgId: v.string(),
+    kind: v.union(
+      v.literal("personal"),
+      v.literal("room"),
+      v.literal("project"),
+      v.literal("case"),
+      // WS12-S2: a direct message (2 people) or group DM (3 to 9). The roster is
+      // fixed at registration and identified by `participantHash`.
+      v.literal("dm"),
+      v.literal("group_dm"),
+    ),
+    name: v.string(),
+    // WS12-S2: DM kinds only. Sorted (byte order) Better Auth ids of the fixed
+    // roster, creator included, and the "sha256:" hash of that set
+    // (`convex/spaceParticipants.ts`, equal to Control's ParticipantSetHash).
+    // Identity facts for open-or-return and the registration payload, never an
+    // authorization input: Control's membership ledger decides access.
+    participantHash: v.optional(v.string()),
+    participantExternalAuthIds: v.optional(v.array(v.string())),
+    // WS04-S2: a short label shown under the room name. Never composed into a
+    // prompt, event or notification (D-WS04-6); optional so existing rooms
+    // need no backfill.
+    topic: v.optional(v.string()),
+    ownerExternalAuthId: v.optional(v.string()),
+    createdByExternalAuthId: v.string(),
+    // Marks THE organization room — the one durable `room` every active member
+    // of an organization belongs to. Explicit rather than derived from
+    // `(externalOrgId, kind)`, because team and external Spaces are also
+    // `room`: keying idempotency on kind alone would make the first team room
+    // collide with the organization room, and the collision would look like a
+    // successful reuse rather than an error.
+    //
+    // Optional and `true`-only, so an ordinary room simply omits it and no
+    // backfill is needed for rooms that already exist.
+    isOrganizationRoom: v.optional(v.literal(true)),
+    lifecycle: v.union(
+      v.literal("pending_registration"),
+      v.literal("active"),
+      v.literal("suspended"),
+      v.literal("deleting"),
+      v.literal("deleted"),
+      v.literal("failed_registration"),
+    ),
+    lifecycleRevision: v.number(),
+    controlResourceRef: v.optional(v.string()),
+    // ADR-0003: Space owner/manager-authored instructions, composed into
+    // every turn in this Space alongside the platform and org layers. Same
+    // "presence, not authority" status as `organizations.instructions` --
+    // authored content, never an authorization primitive.
+    instructions: v.optional(v.string()),
+    updatedByExternalAuthId: v.optional(v.string()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_space_ref", ["spaceRef"])
+    .index("by_external_org", ["externalOrgId"])
+    .index("by_personal_owner", ["externalOrgId", "kind", "ownerExternalAuthId"])
+    .index("by_org_participant_hash", ["externalOrgId", "participantHash"]),
+
+  // An agent definition bound to ONE Space, per
+  // `docs/SPACE_AGENT_SCOPE_PLAN_2026-08-14.md` §3.2. The plan's central rule is
+  // that a definition is not a membership: `agents` says what an agent *is*,
+  // this table says where it is allowed to appear as a room participant. A
+  // second Space needs a second row, and a page/system install is a different
+  // binding entirely — never this one.
+  //
+  // # This table is presentation and policy, NOT authority
+  //
+  // Control owns whether an agent may actually reach a Space: it already models
+  // that as a `space_memberships` row with `subject_type='service'`. Duplicating
+  // that decision here would create two answers to one question, and the stale
+  // one would eventually win. So the gateway intersects: Control decides who is
+  // bound, this projection supplies the identity to render. A row here whose
+  // Control membership is gone must never appear as an active participant.
+  spaceAgentBindings: defineTable({
+    bindingRef: v.string(),
+    spaceRef: v.string(),
+    externalOrgId: v.string(),
+    // The definition this binding points at. Kept as a real reference so a
+    // deleted definition cannot leave a binding rendering a ghost name.
+    agentId: v.id("agents"),
+    // The Control-side subject this binding corresponds to, so the gateway can
+    // match a binding to the authoritative roster row without guessing by name.
+    subjectId: v.string(),
+    // Space-local presentation override. Absent means "use the definition's own
+    // name/description", which is the common case.
+    displayName: v.optional(v.string()),
+    title: v.optional(v.string()),
+    // Binding policy (space-defenition.md "Binding model"). These are human
+    // decisions about how the agent may be invoked here, enforced at the
+    // gateway's invocation path. ABSENT means the pre-policy legacy behavior
+    // (mention allowed, confirmation required, legacy tool surface) so old
+    // bindings keep working exactly as they did. The doc's remaining policy
+    // fields (knowledge_scope, default_thread_policy, audit_visibility) are
+    // deliberately NOT stored yet: nothing enforces them, and a stored-but-
+    // unenforced policy is a false promise.
+    // WS08-S5: `group` is retired. It stays in the validator only so rows that already
+    // carry it remain readable; no writer accepts it and nothing acts on it.
+    triggerModes: v.optional(v.array(v.union(v.literal("mention"), v.literal("group")))),
+    allowedTools: v.optional(v.array(v.string())),
+    approvalMode: v.optional(
+      v.union(v.literal("auto"), v.literal("require_confirmation"), v.literal("blocked")),
+    ),
+    // WS08-S5: who may wake this agent in this room. ABSENT reads as `members`
+    // (any editor, manager or owner: SD-26). A human decision written only by
+    // `spaceAgents:setSpaceAgentWakePolicyForGateway`, enforced at the gateway
+    // on the mention path. `allowlist` names Control subject ids in
+    // `respondToSubjects` (at most 50). Never an authorization input on its own:
+    // Control still decides who may post or wake at all.
+    respondTo: v.optional(
+      v.union(v.literal("members"), v.literal("managers"), v.literal("allowlist")),
+    ),
+    respondToSubjects: v.optional(v.array(v.string())),
+    // WS10-S5b: projection of Control's per-tool policy for this agent: the agent layer's
+    // revision and the digest of the merged (Space ceiling + agent) view as of the last write
+    // through `spaceAgents:setSpaceAgentBindingPolicyForGateway`. Control is the store and the
+    // only authority; these two fields are for the editor and the legacy gateway filter, never
+    // an authorization input. ABSENT means no policy was written through the editor.
+    toolPolicyRevision: v.optional(v.number()),
+    toolPolicyDigest: v.optional(v.string()),
+    status: v.union(
+      v.literal("pending"),
+      v.literal("active"),
+      v.literal("paused"),
+      v.literal("revoked"),
+      v.literal("failed"),
+    ),
+    // Where this agent's work can be delivered besides the room itself. These
+    // are the surfaces the operator has actually configured — an empty list
+    // means no channel is published, and the UI must say exactly that rather
+    // than implying the agent is reachable somewhere it is not.
+    deliveryTargets: v.optional(
+      v.array(
+        v.object({
+          channel: v.union(
+            v.literal("teams"),
+            v.literal("messenger"),
+            v.literal("embed"),
+          ),
+          // Operator-facing label for the specific destination (a Teams channel
+          // name, a Messenger page). Never a token or a secret.
+          label: v.string(),
+          status: v.union(
+            v.literal("active"),
+            v.literal("pending"),
+            v.literal("failed"),
+          ),
+        }),
+      ),
+    ),
+    projectionVersion: v.number(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_binding_ref", ["bindingRef"])
+    .index("by_space_ref", ["spaceRef"])
+    .index("by_space_and_subject", ["spaceRef", "subjectId"])
+    // ADR-0002 (apps/CROSS_SPACE_AGENT_REGISTRY_ADR_2026-08-19.md): the
+    // org-wide registry (`spaceAgents:agentInstallationsForOrgForGateway`)
+    // needs every binding for an org in one indexed read, the same shape
+    // `spaces.by_external_org` already gives `spacesForOrgForGateway`.
+    // Additive and backward-compatible: computed from the `externalOrgId`
+    // every row already carries, no data migration required.
+    .index("by_external_org", ["externalOrgId"]),
+
+  // WS08-S5: append-only record of every change to a binding's wake policy (who widened or
+  // narrowed `respondTo`, and when). Ids and enum values only, never content, so it is not
+  // ZDR-sensitive. Written in the same mutation as the binding patch, never edited or deleted
+  // by a policy writer.
+  spaceAgentPolicyEvents: defineTable({
+    bindingRef: v.string(),
+    spaceRef: v.string(),
+    externalOrgId: v.string(),
+    subjectId: v.string(),
+    actorExternalAuthId: v.string(),
+    previousRespondTo: v.optional(v.string()),
+    previousRespondToSubjects: v.optional(v.array(v.string())),
+    respondTo: v.string(),
+    respondToSubjects: v.optional(v.array(v.string())),
+    projectionVersion: v.number(),
+    createdAt: v.number(),
+  })
+    .index("by_binding_ref", ["bindingRef", "createdAt"])
+    .index("by_space_ref", ["spaceRef", "createdAt"]),
+
+  // Transactional outbox for Space lifecycle notifications. Consumers dedupe
+  // by the immutable event ID and never infer authorization from this event.
+  spaceLifecycleEvents: defineTable({
+    eventId: v.string(),
+    spaceRef: v.string(),
+    externalOrgId: v.string(),
+    lifecycle: v.union(
+      v.literal("pending_registration"),
+      v.literal("active"),
+      v.literal("suspended"),
+      v.literal("deleting"),
+      v.literal("deleted"),
+      v.literal("failed_registration"),
+    ),
+    revision: v.number(),
+    // Delivery is an at-least-once outbox. The Control endpoint deduplicates
+    // stable event IDs; a claim lease prevents concurrent workers from
+    // delivering the same row in the ordinary case.
+    deliveryState: v.optional(v.union(
+      v.literal("pending"),
+      v.literal("claimed"),
+      v.literal("acknowledged"),
+      v.literal("failed"),
+      v.literal("rejected"),
+    )),
+    deliveryAttempts: v.optional(v.number()),
+    leaseOwner: v.optional(v.string()),
+    leaseExpiresAt: v.optional(v.number()),
+    nextAttemptAt: v.optional(v.number()),
+    deliveredAt: v.optional(v.number()),
+    lastDeliveryError: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index("by_event_id", ["eventId"])
+    .index("by_space_and_revision", ["spaceRef", "revision"])
+    .index("by_delivery_state_and_next_attempt", ["deliveryState", "nextAttemptAt"]),
+
+  // WS04-S12: `spaceMemberGrants` (Application's hand-kept list of a named room's
+  // people) is retired. Control's membership ledger is the only roster; the
+  // organization room is still derived from org-core by `spaceMembershipSync`.
+  // Retirement runbook: docs/space-member-grants-retirement.md.
+
+  // Where a member last caught up with a room (item 4b, "unread per thread").
+  // One row per member per Space: opening the room is reading it, and "new"
+  // means "since you last had it open" — Slack's channel model. Stores a
+  // timestamp against identifiers only, never a thread list and never content,
+  // so it records WHEN someone caught up and nothing about WHAT they read.
+  // Threads live in Model Plane and membership in Control; what a person has
+  // seen is a workspace projection, which is this plane's to own.
+  spaceReadMarkers: defineTable({
+    spaceRef: v.string(),
+    externalOrgId: v.string(),
+    externalAuthId: v.string(),
+    lastReadAt: v.number(),
+    // WS11-S3: a manual "mark unread" floor. While set, the effective marker is
+    // this value (always <= lastReadAt) and a `while_open` poll never moves it;
+    // entering the room clears it. Still a timestamp, never a thread list.
+    unreadFloor: v.optional(v.number()),
+  })
+    .index("by_space_and_subject", ["spaceRef", "externalAuthId"])
+    .index("by_org_and_subject", ["externalOrgId", "externalAuthId"]),
+
+  // WS16-S7: one row per (organization, member) holding that person's sidebar
+  // layout for Spaces (stars, custom sections, hidden rooms, per-group sort).
+  // Own-row, like `spaceReadMarkers`: a per-user per-org workspace projection,
+  // refs only. `revision` is 1 on the first write and +1 per accepted write; it
+  // is the compare-and-set token for `spaceSidebar:putForGateway`.
+  spaceSidebarPreferences: defineTable({
+    externalOrgId: v.string(),
+    externalAuthId: v.string(),
+    revision: v.number(),
+    doc: spaceSidebarDocValidator,
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_subject", ["externalOrgId", "externalAuthId"]),
+
+  /**
+   * Who is in a room right now (see `convex/spacePresence.ts`). Separate from
+   * the dormant `conversationPresence` below, which is keyed per conversation:
+   * a room's presence is a fact about the room, not about one of its threads.
+   * Stores a status and a timestamp against identifiers — never content.
+   */
+  spacePresence: defineTable({
+    spaceRef: v.string(),
+    externalOrgId: v.string(),
+    externalAuthId: v.string(),
+    status: v.union(v.literal("online"), v.literal("typing"), v.literal("offline")),
+    updatedAt: v.number(),
+  })
+    .index("by_space", ["spaceRef"])
+    .index("by_space_and_subject", ["spaceRef", "externalAuthId"]),
+
+  // WS12-S2: a person's per-viewer hide of a direct message (see
+  // `convex/spaceDmHides.ts`). Ids and a timestamp only. Presentation state like
+  // a read marker: it never touches Control membership, and any accepted post in
+  // the DM clears every viewer's row so the DM resurfaces.
+  spaceDmHides: defineTable({
+    externalOrgId: v.string(),
+    spaceRef: v.string(),
+    externalAuthId: v.string(),
+    hiddenAt: v.number(),
+  })
+    .index("by_viewer", ["externalOrgId", "externalAuthId"])
+    .index("by_space", ["spaceRef"])
+    .index("by_space_and_viewer", ["spaceRef", "externalAuthId"]),
+
+  // WS04-S1: one row per organization with a debounced room-roster sync queued
+  // or running (see `convex/spaceMembershipSync.ts`). Holds an org id and a
+  // timestamp only; the row is deleted when the run finishes.
+  spaceOrgRoomSyncRequests: defineTable({
+    externalOrgId: v.string(),
+    dueAt: v.number(),
+    state: v.union(v.literal("scheduled"), v.literal("running")),
+  })
+    .index("by_external_org", ["externalOrgId"]),
+};

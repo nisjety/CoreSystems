@@ -13,6 +13,18 @@ struct ApiError {
 }
 
 #[derive(Debug, Serialize)]
+struct ApiErrorWithDetailsEnvelope {
+    error: ApiErrorWithDetails,
+}
+
+#[derive(Debug, Serialize)]
+struct ApiErrorWithDetails {
+    code: &'static str,
+    message: String,
+    details: Value,
+}
+
+#[derive(Debug, Serialize)]
 struct ApiSuccessEnvelope<T> {
     data: T,
 }
@@ -35,6 +47,20 @@ pub(crate) fn ok_with_source<T: Serialize>(data: T, source: &str) -> Value {
     })
 }
 
+/// Success envelope carrying a keyset cursor in `meta.next_cursor`. `null`
+/// means the page was the last one, so the client stops asking for more.
+pub(crate) fn ok_with_cursor<T: Serialize>(data: T, next_cursor: &str) -> Value {
+    let next_cursor = if next_cursor.is_empty() {
+        Value::Null
+    } else {
+        json!(next_cursor)
+    };
+    json!({
+        "data": serde_json::to_value(data).unwrap_or(Value::Null),
+        "meta": { "next_cursor": next_cursor },
+    })
+}
+
 pub(crate) fn error(code: &'static str, message: impl Into<String>) -> Value {
     serde_json::to_value(ApiErrorEnvelope {
         error: ApiError {
@@ -43,6 +69,24 @@ pub(crate) fn error(code: &'static str, message: impl Into<String>) -> Value {
         },
     })
     .unwrap_or_else(|_| json!({ "error": { "code": code, "message": "Unknown error." } }))
+}
+
+/// Typed error envelope with a `details` object: `{ error: { code, message, details } }`.
+/// `details` must already be safe for the browser (no upstream URLs, tokens or internal ids).
+#[allow(dead_code, reason = "first consumer is the next Space slice (WS01-S5, WS03-S4)")]
+pub(crate) fn error_with_details(
+    code: &'static str,
+    message: impl Into<String>,
+    details: Value,
+) -> Value {
+    serde_json::to_value(ApiErrorWithDetailsEnvelope {
+        error: ApiErrorWithDetails {
+            code,
+            message: message.into(),
+            details,
+        },
+    })
+    .unwrap_or_else(|_| json!({ "error": { "code": code, "message": "Unknown error.", "details": {} } }))
 }
 
 /// Public response for transport failures. `reqwest::Error` display strings can
@@ -57,7 +101,17 @@ pub(crate) fn upstream_unavailable() -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::upstream_unavailable;
+    use super::{ok_with_cursor, upstream_unavailable};
+    use serde_json::{json, Value};
+
+    #[test]
+    fn cursor_envelope_reports_null_on_the_last_page() {
+        let last = ok_with_cursor(json!({ "sessions": [] }), "");
+        assert_eq!(last["meta"]["next_cursor"], Value::Null);
+        let more = ok_with_cursor(json!({ "sessions": [] }), "abc-_123");
+        assert_eq!(more["meta"]["next_cursor"], "abc-_123");
+        assert_eq!(more["data"]["sessions"], json!([]));
+    }
 
     #[test]
     fn upstream_transport_failures_use_a_bounded_public_message() {
@@ -69,5 +123,22 @@ mod tests {
         );
         assert!(!body.to_string().contains("http://"));
         assert!(!body.to_string().contains("https://"));
+    }
+
+    #[test]
+    fn error_with_details_carries_the_given_details_object() {
+        let body = super::error_with_details(
+            "invalid_post",
+            "The post is not valid.",
+            json!({ "field": "content", "max_chars": 8000 }),
+        );
+        assert_eq!(body["error"]["code"], "invalid_post");
+        assert_eq!(body["error"]["message"], "The post is not valid.");
+        assert_eq!(
+            body["error"]["details"],
+            json!({ "field": "content", "max_chars": 8000 })
+        );
+        assert_eq!(body.as_object().map(|o| o.len()), Some(1));
+        assert_eq!(body["error"].as_object().map(|o| o.len()), Some(3));
     }
 }

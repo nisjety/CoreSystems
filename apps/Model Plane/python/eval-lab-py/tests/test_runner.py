@@ -28,8 +28,10 @@ from eval_lab.types import (
 
 def test_baseline_suite_loads_and_validates() -> None:
     cases = load_cases(CASES_DIR)
-    assert len(cases) == 14, f"suite must hold 14 cases (12 baseline + 2 compaction), got {len(cases)}"
-    assert len({case.id for case in cases}) == 14
+    assert len(cases) == 17, (
+        f"suite must hold 17 cases (12 baseline + 2 compaction + 3 run-context), got {len(cases)}"
+    )
+    assert len({case.id for case in cases}) == 17
 
 
 def test_deployed_agent_cases_request_the_agentic_feature() -> None:
@@ -67,12 +69,30 @@ def test_compaction_cases_seed_enough_history_to_actually_force_it() -> None:
     # the class of bug `test_deployed_agent_cases_request_the_agentic_feature`
     # already guards against for a different feature.
     for case in load_cases(CASES_DIR):
-        if not case.seed_turns:
+        if "compaction" not in case.tags:
             continue
         assert len(case.seed_turns) >= 12, (
             f"{case.id}: only {len(case.seed_turns)} seed turns — too few to "
             "clear model-gateway's 24-message compaction threshold"
         )
+
+
+def test_run_context_cases_drive_an_agentic_run_after_a_short_thread() -> None:
+    # WS02-S6: a Do run is handed the thread's earlier turns and the authored
+    # instructions an Ask turn carries. These cases only mean anything when the
+    # scored turn is an agentic run (the execution-core loop), and the history
+    # case needs at least one earlier turn in the same session to remember.
+    cases = {case.id: case for case in load_cases(CASES_DIR)}
+    thread_fact = cases["15-do-run-remembers-a-thread-fact"]
+    assert "agentic" in thread_fact.features
+    assert thread_fact.seed_turns, "no earlier turn, nothing to remember"
+    assert "compaction" not in thread_fact.tags, "this is not a compaction case"
+    instruction = cases["16-do-run-follows-an-authored-instruction"]
+    assert "agentic" in instruction.features
+    # The harness talks to model-gateway directly, so the only authored layer it
+    # can exercise is the deployment's: the case names the fixture it needs and
+    # skips honestly when the stack does not have it.
+    assert "authored-instruction-fixture" in instruction.requires
 
 
 # ── multi-turn (compaction eval) runner mechanism ───────────────────────────

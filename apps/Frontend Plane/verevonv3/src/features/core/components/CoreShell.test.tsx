@@ -490,9 +490,11 @@ describe('v2 dashboard shell port', () => {
     expect(screen.getByRole('navigation', { name: 'Romnavigasjon' })).toBeTruthy()
     expect(await screen.findByRole('link', { name: 'Personlig rom' })).toBeTruthy()
     expect(screen.getByRole('textbox', { name: /search rooms and conversations|søk i rom og samtaler/i })).toBeTruthy()
-    // A Space conversation opens in its room; the shared record never routes
-    // out to /chat from the sidebar.
-    expect(screen.getByRole('link', { name: /(?:Open|Åpne) Planning/ }).getAttribute('href')).toBe('/spaces/space%20personal')
+    // A Space conversation opens in its room, on that thread (`spaceThreadHref`); the shared record
+    // never routes out to /chat from the sidebar.
+    expect(screen.getByRole('link', { name: /(?:Open|Åpne) Planning/ }).getAttribute('href')).toBe(
+      '/spaces/space%20personal?thread_id=thread%20%2F%20planning#chat',
+    )
     expect(screen.queryByRole('link', { name: /Åpne rommet|open room/i })).toBeNull()
   })
 

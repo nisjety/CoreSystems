@@ -90,7 +90,8 @@ describe('BrowserBlockedNotice in the browser chrome', () => {
     fireEvent.click(button(view.container, /Ta over/)!)
 
     expect(onBrowserControlMode).toHaveBeenCalledTimes(1)
-    expect(onBrowserControlMode).toHaveBeenCalledWith('human_takeover')
+    // Same call as the toolbar chip: the mode plus the control epoch the view last saw (none here), so a stale view is refused.
+    expect(onBrowserControlMode).toHaveBeenCalledWith('human_takeover', null)
   })
 
   it('"Prøv en annen kilde" asks the owner to leave the site', () => {

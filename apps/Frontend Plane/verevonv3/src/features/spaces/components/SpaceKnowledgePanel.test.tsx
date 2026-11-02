@@ -92,6 +92,35 @@ describe('SpaceKnowledgePanel', () => {
 
   // A build that does not know a code must still state the gap, in the
   // server's words, rather than dropping it or inventing a translation.
+  // WS03-S7: a typed denial says why; its words win over the section's code switch.
+  it('names the switched-off entitlement when a gap carries a typed reason, over its code', async () => {
+    spacesClient.getSpaceKnowledge.mockResolvedValue(
+      answer({
+        unavailable: [{
+          section: 'knowledge',
+          code: 'knowledge_read_not_authorized',
+          reason: 'Reading this Space’s knowledge is not authorized.',
+          details: { reason: 'space_entitlement_off', entitlement: 'retrieval_read', resolvable_by: 'org_admin' },
+        }],
+      }),
+    )
+    render(() => <SpaceKnowledgePanel spaceRef="space_1" />)
+
+    expect(await screen.findByText(/slått av «Bruke kunnskap i rom» for rom/)).toBeTruthy()
+    expect(screen.queryByText(/gis separat fra samtale/)).toBeNull()
+  })
+
+  it('keeps the code switch for a gap without details', async () => {
+    spacesClient.getSpaceKnowledge.mockResolvedValue(
+      answer({
+        unavailable: [{ section: 'knowledge', code: 'knowledge_read_not_authorized', reason: 'x' }],
+      }),
+    )
+    render(() => <SpaceKnowledgePanel spaceRef="space_1" />)
+
+    expect(await screen.findByText(/gis separat fra samtale/)).toBeTruthy()
+  })
+
   it('falls back to the server sentence for an unrecognised code', async () => {
     spacesClient.getSpaceKnowledge.mockResolvedValue(
       answer({

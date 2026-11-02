@@ -266,7 +266,6 @@ func TestInstagramInboxBundleRequestsOnlyInstagramInboxPermissions(t *testing.T)
 func TestProviderReadinessMarksMissingCredentials(t *testing.T) {
 	catalog := WithReadiness(Catalog(), map[string][]string{
 		"stripe": {"STRIPE_CLIENT_ID"},
-		"scim":   {"SCIM_BEARER_TOKEN"},
 	})
 	stripe, ok := findProvider(catalog, "stripe")
 	if !ok {
@@ -275,12 +274,34 @@ func TestProviderReadinessMarksMissingCredentials(t *testing.T) {
 	if stripe.Configured || stripe.Status != "missing_config" {
 		t.Fatalf("stripe readiness = configured:%v status:%s, want missing_config", stripe.Configured, stripe.Status)
 	}
-	scim, ok := findProvider(catalog, "scim")
-	if !ok {
-		t.Fatalf("scim missing from readiness catalog")
+}
+
+// WS05-S2: SCIM provisioning is not implemented, so the catalog never reports it as
+// ready, configured, or missing configuration, whatever the readiness map says.
+func TestProviderReadinessReportsSCIMAsUnavailable(t *testing.T) {
+	for name, readiness := range map[string]map[string][]string{
+		"no readiness entry":     {},
+		"legacy token requested": {"scim": {"SCIM_BEARER_TOKEN"}},
+		"nil readiness":          nil,
+	} {
+		scim, ok := findProvider(WithReadiness(Catalog(), readiness), "scim")
+		if !ok {
+			t.Fatalf("%s: scim missing from readiness catalog", name)
+		}
+		if scim.Status != "unavailable" || scim.Configured {
+			t.Fatalf("%s: scim readiness = configured:%v status:%s, want unavailable and not configured", name, scim.Configured, scim.Status)
+		}
+		if scim.MissingConfig == nil || len(scim.MissingConfig) != 0 {
+			t.Fatalf("%s: scim MissingConfig = %#v, want an empty list", name, scim.MissingConfig)
+		}
 	}
-	if scim.Configured || scim.Status != "missing_config" {
-		t.Fatalf("scim readiness = configured:%v status:%s, want missing_config", scim.Configured, scim.Status)
+
+	// Other providers keep their readiness; only inbound SCIM is special-cased.
+	catalog := WithReadiness(Catalog(), map[string][]string{"stripe": {"STRIPE_CLIENT_ID"}})
+	for _, provider := range catalog {
+		if provider.AuthType != "inbound_scim" && provider.Status == "unavailable" {
+			t.Fatalf("%s was marked unavailable; only the SCIM provider is", provider.Key)
+		}
 	}
 }
 
@@ -382,5 +403,21 @@ func TestMetaInboxScopesIncludeInstagramMessaging(t *testing.T) {
 				t.Errorf("Meta %s bundle scopes = %v, want %q", bundle, scopes, want)
 			}
 		}
+	}
+}
+
+func TestGoogleSearchConsoleBundleUsesReadOnlyScope(t *testing.T) {
+	provider := GoogleWorkspace()
+	capabilities := ResolveCapabilities(provider, nil, []string{"search_console"})
+	scopes := ResolveScopes(provider, capabilities)
+
+	if !slices.Contains(capabilities, "search_console.read") {
+		t.Fatalf("capabilities = %#v, want search_console.read", capabilities)
+	}
+	if !slices.Contains(scopes, "https://www.googleapis.com/auth/webmasters.readonly") {
+		t.Fatalf("scopes = %#v, want webmasters.readonly", scopes)
+	}
+	if slices.Contains(scopes, "https://www.googleapis.com/auth/adwords") {
+		t.Fatalf("search console scopes = %#v, must not include ads management", scopes)
 	}
 }

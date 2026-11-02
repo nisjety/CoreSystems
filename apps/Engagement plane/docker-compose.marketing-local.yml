@@ -1,0 +1,74 @@
+name: marketing-local
+
+x-service-hardening: &service-hardening
+  init: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  read_only: true
+  tmpfs:
+    - /tmp
+
+services:
+  integration-core:
+    <<: *service-hardening
+    build:
+      context: ../Ingestion Plane/integration-corev2
+      dockerfile: Dockerfile
+      target: api
+    environment:
+      PORT: "3026"
+      SERVICE_NAME: integration-corev2
+      ENVIRONMENT: local
+      DATABASE_URL: ""
+      INTEGRATION_ALLOW_IN_MEMORY_STORE: "true"
+      NATS_ENABLED: "false"
+      INTERNAL_API_KEY: ${MARKETING_LOCAL_INTEGRATION_API_KEY:?set in the shell or marketing-local.env}
+      AUTH_CORE_URL: http://control-placeholder:3011
+      AUTH_CORE_INTERNAL_API_KEY: ${MARKETING_LOCAL_CONTROL_API_KEY:?set in the shell or marketing-local.env}
+      ORG_CORE_URL: http://control-placeholder:8080
+      ORG_CORE_SERVICE_TOKEN: ${MARKETING_LOCAL_ORG_TOKEN:?set in the shell or marketing-local.env}
+      BILLING_CORE_URL: http://control-placeholder:3014
+      BILLING_CORE_SERVICE_TOKEN: ${MARKETING_LOCAL_BILLING_TOKEN:?set in the shell or marketing-local.env}
+      AUDIT_CORE_URL: http://control-placeholder:8187
+      AUDIT_CORE_SERVICE_TOKEN: ${MARKETING_LOCAL_AUDIT_TOKEN:?set in the shell or marketing-local.env}
+      INTEGRATION_PUBLIC_BASE_URL: http://localhost:${INTEGRATION_CORE_HOST_PORT:-3026}
+      # The Verevon Vite development server. Keep this as an exact origin: the
+      # OAuth callback will only postMessage or redirect to this allowlisted UI.
+      INTEGRATION_ALLOWED_RETURN_ORIGINS: ${MARKETING_LOCAL_ALLOWED_RETURN_ORIGIN:-http://localhost:5173}
+      INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: ${MARKETING_LOCAL_ENCRYPTION_KEY:?set in the shell or marketing-local.env}
+      INTEGRATION_PROVIDER_WRITE_ATTESTATION_KEYS_JSON: ${MARKETING_LOCAL_ATTESTATION_KEYS_JSON:?set in the shell or marketing-local.env}
+    ports:
+      - "127.0.0.1:${INTEGRATION_CORE_HOST_PORT:-3026}:3026"
+    networks:
+      - marketing-local-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3026/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  marketing-core:
+    <<: *service-hardening
+    build:
+      context: ./visibility-core
+      dockerfile: Dockerfile
+    environment:
+      PORT: "3165"
+      INTERNAL_API_KEY: ${MARKETING_LOCAL_MARKETING_API_KEY:?set in the shell or marketing-local.env}
+    ports:
+      - "127.0.0.1:${MARKETING_CORE_HOST_PORT:-3165}:3165"
+    networks:
+      - marketing-local-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3165/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+networks:
+  marketing-local-net:
+    driver: bridge

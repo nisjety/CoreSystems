@@ -34,13 +34,30 @@ pub trait VisibilityClient: Send + Sync {
         verified_bearer: Option<&str>,
     ) -> Vec<String>;
 
+    /// WS14-S5: the documents attached to ONE Space that the subject may see
+    /// through it right now (Control's `space-visible` join: current member AND
+    /// current audience AND the owner's `subject_type='space'` view grant).
+    /// Only ever called with a verified Space decision for `space_ref`; the
+    /// caller unions the result into the viewer's grants for that one read.
+    /// Default (and every failure) is empty: fail CLOSED, so a lookup problem
+    /// hides room files and never reveals one.
+    async fn visible_space_documents(
+        &self,
+        _org_id: &str,
+        _user_id: &str,
+        _space_ref: &str,
+        _verified_bearer: Option<&str>,
+    ) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Evict a cached entry on revoke (called by the grant invalidator below).
     /// Default no-op.
     async fn invalidate(&self, _org_id: &str, _user_id: &str) {}
 }
 
 /// Subject published by user-core when a grant is created/revoked.
-const SUBJECT_RESOURCE_GRANTS_CHANGED: &str = "aqencia.controlplane.acl.resource_grants.changed";
+const SUBJECT_RESOURCE_GRANTS_CHANGED: &str = "controlplane.acl.resource_grants.changed";
 
 #[derive(Deserialize)]
 struct GrantChangedEvent {
@@ -113,6 +130,10 @@ pub struct HttpVisibilityClient {
     http: reqwest::Client,
     user_core_url: String,
     service_token: Option<String>,
+    /// `RETRIEVAL_SPACE_GRANTS` (strict literal `true`). Off: no Space-subject
+    /// grant is ever requested, so a room file stays visible to its uploader
+    /// only. A rollout control, never an authorization input.
+    space_grants_enabled: bool,
 }
 
 struct DelegationHeaders {
@@ -122,12 +143,42 @@ struct DelegationHeaders {
     signature: String,
 }
 
+#[cfg(test)]
 fn delegation_headers(
     token: &str,
     method: &str,
     uri: &str,
     org_id: &str,
     user_id: &str,
+    timestamp: &str,
+    nonce: &str,
+) -> DelegationHeaders {
+    delegation_headers_for(
+        token,
+        method,
+        uri,
+        org_id,
+        user_id,
+        "authz:visible",
+        "",
+        "resolve explicit document grants",
+        timestamp,
+        nonce,
+    )
+}
+
+/// The v2 delegation for one named operation. `resource_id` binds the signature
+/// to a specific resource (the Space reference for `authz:space-visible`).
+#[allow(clippy::too_many_arguments)]
+fn delegation_headers_for(
+    token: &str,
+    method: &str,
+    uri: &str,
+    org_id: &str,
+    user_id: &str,
+    operation: &str,
+    resource_id: &str,
+    reason: &str,
     timestamp: &str,
     nonce: &str,
 ) -> DelegationHeaders {
@@ -141,10 +192,10 @@ fn delegation_headers(
         uri,
         user_id,
         org_id,
-        "authz:visible",
+        operation,
         "document",
-        "",
-        "resolve explicit document grants",
+        resource_id,
+        reason,
         "true",
         nonce,
         &body_sha256,
@@ -171,7 +222,14 @@ impl HttpVisibilityClient {
             http,
             user_core_url: user_core_url.into(),
             service_token,
+            space_grants_enabled: false,
         }
+    }
+
+    /// Turn the Space-subject grant lookup on (`RETRIEVAL_SPACE_GRANTS=true`).
+    pub fn with_space_grants(mut self, enabled: bool) -> Self {
+        self.space_grants_enabled = enabled;
+        self
     }
 
     async fn fetch(
@@ -180,20 +238,70 @@ impl HttpVisibilityClient {
         user_id: &str,
         verified_bearer: Option<&str>,
     ) -> Result<Vec<String>, ()> {
+        self.fetch_ids(
+            "/api/v1/internal/authz/visible",
+            &[
+                ("org_id", org_id),
+                ("subject_id", user_id),
+                ("resource_type", "document"),
+            ],
+            org_id,
+            user_id,
+            verified_bearer,
+            "authz:visible",
+            "",
+            "resolve explicit document grants",
+        )
+        .await
+    }
+
+    /// WS14-S5: `GET /authz/space-visible`. The delegation names the operation
+    /// and binds the Space reference as its resource id, which Control requires
+    /// to match the `space_ref` query.
+    async fn fetch_space(
+        &self,
+        org_id: &str,
+        user_id: &str,
+        space_ref: &str,
+        verified_bearer: Option<&str>,
+    ) -> Result<Vec<String>, ()> {
+        self.fetch_ids(
+            "/api/v1/internal/authz/space-visible",
+            &[
+                ("org_id", org_id),
+                ("subject_id", user_id),
+                ("resource_type", "document"),
+                ("space_ref", space_ref),
+            ],
+            org_id,
+            user_id,
+            verified_bearer,
+            "authz:space-visible",
+            space_ref,
+            "resolve room files visible through a Space",
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn fetch_ids(
+        &self,
+        path: &str,
+        query: &[(&str, &str)],
+        org_id: &str,
+        user_id: &str,
+        verified_bearer: Option<&str>,
+        operation: &str,
+        resource_id: &str,
+        reason: &str,
+    ) -> Result<Vec<String>, ()> {
         let verified_bearer = verified_bearer
             .filter(|token| !token.is_empty() && !token.contains(char::is_whitespace))
             .ok_or_else(|| {
                 tracing::warn!("verified user proof unavailable; explicit grants fail closed");
             })?;
-        let url = format!(
-            "{}/api/v1/internal/authz/visible",
-            self.user_core_url.trim_end_matches('/')
-        );
-        let rb = self.http.get(&url).query(&[
-            ("org_id", org_id),
-            ("subject_id", user_id),
-            ("resource_type", "document"),
-        ]);
+        let url = format!("{}{}", self.user_core_url.trim_end_matches('/'), path);
+        let rb = self.http.get(&url).query(query);
         let mut request = rb.build().map_err(|e| {
             tracing::warn!(error = %e, "user-core authz facade request build failed");
         })?;
@@ -204,12 +312,15 @@ impl HttpVisibilityClient {
             };
             let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
             let nonce = uuid::Uuid::new_v4().to_string();
-            let delegation = delegation_headers(
+            let delegation = delegation_headers_for(
                 token,
                 request.method().as_str(),
                 &request_uri,
                 org_id,
                 user_id,
+                operation,
+                resource_id,
+                reason,
                 &timestamp,
                 &nonce,
             );
@@ -223,10 +334,10 @@ impl HttpVisibilityClient {
                 ("X-Delegation-Version", "v2"),
                 ("X-Delegation-Nonce", &delegation.nonce),
                 ("X-Delegation-Timestamp", &delegation.timestamp),
-                ("X-Delegation-Operation", "authz:visible"),
+                ("X-Delegation-Operation", operation),
                 ("X-Delegation-Resource-Type", "document"),
-                ("X-Delegation-Resource-Id", ""),
-                ("X-Delegation-Reason", "resolve explicit document grants"),
+                ("X-Delegation-Resource-Id", resource_id),
+                ("X-Delegation-Reason", reason),
                 ("X-Delegation-ZDR", "true"),
                 ("X-Delegation-Body-SHA256", &delegation.body_sha256),
                 ("X-Delegation-Signature", &delegation.signature),
@@ -266,6 +377,22 @@ impl VisibilityClient for HttpVisibilityClient {
         // Fail closed for grant-only documents. Owner and org-visible access are
         // independently evaluated by the canonical SQL visibility predicate.
         self.fetch(org_id, user_id, verified_bearer)
+            .await
+            .unwrap_or_default()
+    }
+
+    async fn visible_space_documents(
+        &self,
+        org_id: &str,
+        user_id: &str,
+        space_ref: &str,
+        verified_bearer: Option<&str>,
+    ) -> Vec<String> {
+        if !self.space_grants_enabled || space_ref.trim().is_empty() {
+            return Vec::new();
+        }
+        // Fail closed: any error is "no room files", never "all of them".
+        self.fetch_space(org_id, user_id, space_ref, verified_bearer)
             .await
             .unwrap_or_default()
     }

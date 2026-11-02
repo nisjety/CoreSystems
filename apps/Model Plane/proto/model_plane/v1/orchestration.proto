@@ -64,6 +64,37 @@ service OrchestrationCoreService {
   // Record a decision (granted, denied, or timed_out) on an approval.
   rpc DecideApproval(DecideApprovalRequest) returns (DecideApprovalResponse);
 
+  // Move a pending approval to another addressee (build plan WS10 S6). Caller is a Space
+  // member holding a Control-signed `model.approval.reroute` decision; Control has already
+  // checked that the caller is the requester or a manager. Refused for a zero-retention caller
+  // and while SESSION_CORE_APPROVAL_MEMBER_DECIDE is off.
+  rpc RerouteApproval(RerouteApprovalRequest) returns (RerouteApprovalResponse);
+
+  // Consume a granted loop-mode approval exactly once (build plan WS03 S2). The
+  // durable Do loop that paused for the approval calls this when it re-enters, so
+  // a granted approval is executed by the loop once and never also by the cold
+  // delivery worker. Caller-scoped (user bearer), not service-only.
+  rpc ConsumeApproval(ConsumeApprovalRequest) returns (ConsumeApprovalResponse);
+
+  // Claim the granted once-approval for one exact action, so the agent's retry of a
+  // non-resumable call passes the Space gate exactly once (build plan WS10 S3). The
+  // caller is the run owner's session; the claim is one atomic update, so two
+  // concurrent claims have one winner. Refused for a zero-retention caller.
+  rpc ClaimOnceApproval(ClaimOnceApprovalRequest) returns (ClaimOnceApprovalResponse);
+
+  // Keep flagged tool output, encrypted, against an UNTRUSTED_CONTENT approval so the model
+  // is handed a placeholder instead (build plan WS10 S8). Caller is the run owner's session.
+  // Refused for a zero-retention caller and for a run that is not in a Space.
+  rpc HoldQuarantinedOutput(HoldQuarantinedOutputRequest) returns (HoldQuarantinedOutputResponse);
+
+  // Hand the held content of a granted UNTRUSTED_CONTENT approval to the retry of the exact
+  // call, once (build plan WS10 S8). One atomic update, so two concurrent retries have one winner.
+  rpc ClaimQuarantineRelease(ClaimQuarantineReleaseRequest) returns (ClaimQuarantineReleaseResponse);
+
+  // A plain-text preview (at most 1 KiB) of held content, for the person deciding the
+  // approval and no one else (build plan WS10 S8).
+  rpc GetQuarantinePreview(GetQuarantinePreviewRequest) returns (GetQuarantinePreviewResponse);
+
   // Claim due durable approval deliveries for an authenticated internal
   // worker. Claims are tenant-scoped, leased, and opaque; the caller identity
   // is derived from its verified service credential, never from this request.
@@ -92,6 +123,20 @@ service OrchestrationCoreService {
   // continuation receipt proving that the paused work actually restarted.
   rpc AcknowledgeApprovalDelivery(AcknowledgeApprovalDeliveryRequest)
       returns (AcknowledgeApprovalDeliveryResponse);
+
+  // Ask the run's owner a question (build plan WS14 S3). A question is a pause
+  // kind with its own store, never an approval: an answer is information, not an
+  // authority grant, so it lives in `run_questions` and never reads as a grant.
+  // Refused for a zero-retention or waived run, and for a ZDR or waived caller.
+  rpc CreateRunQuestion(CreateRunQuestionRequest) returns (CreateRunQuestionResponse);
+
+  // List the caller's own questions for a run. Owner-only; an overdue
+  // question is reported EXPIRED.
+  rpc ListRunQuestions(ListRunQuestionsRequest) returns (ListRunQuestionsResponse);
+
+  // Answer (or skip) a requested question once. An identical retry is an
+  // idempotent replay; a different second answer is refused.
+  rpc AnswerRunQuestion(AnswerRunQuestionRequest) returns (AnswerRunQuestionResponse);
 
   // Fetch the subagent lineage for a thread.
   rpc GetSubagentLineage(GetSubagentLineageRequest) returns (GetSubagentLineageResponse);
@@ -204,6 +249,10 @@ enum ApprovalKind {
   APPROVAL_KIND_DESTRUCTIVE = 4;
   // Approval for a high-cost operation.
   APPROVAL_KIND_COST = 5;
+  // 6 is reserved for HUMAN_ASSIST (build plan 4.6.C, WS20-S7).
+  // Review of tool output held as untrusted content (build plan WS10 S8). Granting it runs
+  // nothing: the agent's retry of the exact call hands the held content over once.
+  APPROVAL_KIND_UNTRUSTED_CONTENT = 7;
 }
 
 // Lifecycle state of an approval request.
@@ -336,6 +385,62 @@ message Plan {
   google.protobuf.Timestamp updated_at = 11;
 }
 
+// Where an approved action stands (build plan WS10 S1). Derived by Session Core
+// from the approval's delivery outbox, continuation receipt and outcome rows;
+// never stored on the approval and never claimed by a client. UNSPECIFIED
+// means the approval is not granted yet (or the state cannot be told).
+enum ContinuationState {
+  CONTINUATION_STATE_UNSPECIFIED = 0;
+  // Granted, and the action is not one a worker can run: the approval only lets
+  // the agent retry this exact action once. The run does not continue by itself.
+  CONTINUATION_STATE_NOT_RESUMABLE = 1;
+  // Granted; the delivery worker has not started the action yet.
+  CONTINUATION_STATE_QUEUED = 2;
+  // The worker started the action and has not recorded an outcome.
+  CONTINUATION_STATE_RUNNING = 3;
+  // The action ran and the worker recorded a completed outcome.
+  CONTINUATION_STATE_COMPLETED = 4;
+  // The action did not run to completion; see `failure_code`.
+  CONTINUATION_STATE_FAILED = 5;
+  // A live in-loop approval (a browser action): the running loop polls it, no
+  // worker is involved.
+  CONTINUATION_STATE_LIVE = 6;
+  // A loop-owned approval: the durable Do loop consumes it when the run is
+  // continued.
+  CONTINUATION_STATE_AWAITING_CONTINUE = 7;
+}
+
+// Read projection of an approval's continuation (build plan WS10 S1).
+message ApprovalContinuation {
+  ContinuationState state = 1;
+  // Closed failure code when `state` is FAILED; empty otherwise.
+  string failure_code = 2;
+  // Independent read-back of the outcome; UNSPECIFIED until one exists.
+  VerificationStatus verification = 3;
+  // Provider receipt id of a completed action; empty otherwise.
+  string provider_receipt_id = 4;
+}
+
+// Who is asked to decide an approval (build plan WS10; used from S6).
+enum AddresseeKind {
+  ADDRESSEE_KIND_UNSPECIFIED = 0;
+  // The member whose request raised the approval.
+  ADDRESSEE_KIND_REQUESTER = 1;
+  // One named member.
+  ADDRESSEE_KIND_NAMED = 2;
+  // Any member who may edit the Space.
+  ADDRESSEE_KIND_ANY_EDITOR = 3;
+  // Any member who may manage the Space.
+  ADDRESSEE_KIND_ANY_MANAGER = 4;
+}
+
+// An approval addressee (build plan WS10; used from S6).
+message Addressee {
+  AddresseeKind kind = 1;
+  // Subject id when `kind` is NAMED; empty otherwise.
+  string subject_id = 2;
+}
+
 // A durable approval record.
 message Approval {
   // Approval identifier (ULID, prefix `appr_`).
@@ -378,6 +483,112 @@ message Approval {
   // (ListPendingApprovals with empty org_id) can re-scope each entry to its
   // tenant in the consumer's cache (D-1, IDOR-safe).
   string org_id = 13;
+
+  // When the loop consumed the granted approval (build plan WS03 S2). Unset
+  // until consumed; a consumed approval is not pending activity.
+  google.protobuf.Timestamp consumed_at = 14;
+
+  // Who resumes this approval once granted: empty = the cold delivery worker
+  // (the default, unchanged), "segment" or "loop" = the durable Do loop, which
+  // consumes it once via ConsumeApproval. Loop modes create no delivery row.
+  string continuation_mode = 15;
+
+  // Why this approval was asked for, as a closed code (build plan WS13 S1).
+  // Read back from `approvals.metadata.cause`; unset on an approval created
+  // before the cause existed and on one whose creator states none.
+  ApprovalCause cause = 16;
+
+  // Tag 17 is reserved by the Model Plane chat build (decision record).
+
+  // Stable key of the gated tool, from the creator's validated context (build
+  // plan WS10 S1). Empty when the creator stated none.
+  string tool_key = 18;
+
+  // Short human label of the gated action, built by the creator from an
+  // allowlist and never from raw arguments (build plan WS10 S1). Empty when none.
+  string action_label = 19;
+
+  // Where the approved action stands (build plan WS10 S1). Unset until the
+  // approval is granted.
+  ApprovalContinuation continuation = 24;
+
+  // Who is asked to decide it (build plan WS10 S6). Unset on an approval raised before the
+  // addressee existed, which reads as REQUESTER.
+  Addressee addressee = 20;
+
+  // The member whose request raised the approval (the run owner). An approver decides on the
+  // requester's behalf: the action still runs as this subject (build plan WS10 S6, SD-21).
+  string requester_subject_id = 21;
+
+  // Control standing-rule id when a rule, not a person, passed the prompt (WS10 S3).
+  string grant_ref = 22;
+
+  // Where the turn came from (`direct`, `ambient`, `automation`); empty reads as `direct`.
+  string turn_origin = 23;
+}
+
+// Who recorded an approval decision (build plan WS13 S3). Stored as
+// `metadata.decision.source`. UNSPECIFIED is recorded as `unattributed` and
+// counted, never guessed from the caller.
+enum ApprovalDecisionSource {
+  APPROVAL_DECISION_SOURCE_UNSPECIFIED = 0;
+  // A person decided it.
+  APPROVAL_DECISION_SOURCE_USER = 1;
+  // The chat posture recorded the interactive user's decision for them.
+  APPROVAL_DECISION_SOURCE_POSTURE_AUTO = 2;
+  // A standing grant released the call without a new decision (WS13 S6).
+  APPROVAL_DECISION_SOURCE_STANDING_GRANT = 3;
+  // The wait budget ran out before anyone decided.
+  APPROVAL_DECISION_SOURCE_TIMEOUT = 4;
+  // The system ended the wait, for example because the run was cancelled.
+  APPROVAL_DECISION_SOURCE_SYSTEM = 5;
+}
+
+// How far an approval decision reaches (build plan WS13 S3). Space's
+// "conversation" is THREAD. UNSPECIFIED is read as ONCE.
+enum ApprovalScope {
+  APPROVAL_SCOPE_UNSPECIFIED = 0;
+  // This one call only.
+  APPROVAL_SCOPE_ONCE = 1;
+  // Identical calls later in this thread (WS13 S6).
+  APPROVAL_SCOPE_THREAD = 2;
+  // Identical calls later in this run (WS13 S6).
+  APPROVAL_SCOPE_RUN = 3;
+}
+
+// Why an approval was asked for (build plan WS13 S1). The code is a closed
+// vocabulary (`mp-contracts` approval_cause, `api/contracts/approval-causes.json`);
+// an unknown code is stored as `unclassified_gate`. Never carries argument
+// values: `call_digest` is a run-salted digest, `action_key` names the tool and
+// operation only.
+message ApprovalCause {
+  // Closed cause code, e.g. `owner_effect_reserved`.
+  string code = 1;
+
+  // Tool the pause is on. Empty for a gate that is not a tool call.
+  string tool = 2;
+
+  // Declared side-effect class of the call (`mp-contracts` tool_class). Empty
+  // until the gate reads a declared class.
+  string effect_class = 3;
+
+  // Standing rule that raised the pause. Empty until rules exist (WS13 S7).
+  string rule_id = 4;
+
+  // Browser risk category the Model proposed an action under (`browser_action_risk`).
+  string risk_category = 5;
+
+  // Scopes the decider may grant: `once`, `thread`, `run`. Stubbed to `once`.
+  repeated string scope_options = 6;
+
+  // True when granting needs a recent re-authentication (WS13 S5).
+  bool step_up_required = 7;
+
+  // Tool plus operation, never argument values: the key a standing grant matches.
+  string action_key = 8;
+
+  // Run-salted blake3 digest of the exact (tool, arguments) call.
+  string call_digest = 9;
 }
 
 // A durable todo record.
@@ -673,6 +884,222 @@ message CreateApprovalRequest {
   // retained continuation descriptors are intentionally incompatible with
   // zero-data-retention execution.
   string continuation_descriptor_json = 11;
+
+  // Who resumes the approval once granted (see Approval.continuation_mode).
+  // Empty = the cold delivery worker, exactly as before. Refused for a
+  // zero-retention caller: a loop continuation retains a fold.
+  string continuation_mode = 12;
+
+  // Why the approval is asked for (build plan WS13 S1). Stored in the approval's
+  // `metadata.cause`; an unknown code degrades to `unclassified_gate`. Unset keeps
+  // the approval exactly as before.
+  ApprovalCause cause = 13;
+
+  // Typed card context (build plan WS10 S1): a JSON object of at most 4 KiB
+  // with the allowlisted keys `tool_key`, `action_label` and `resume_class`,
+  // string values of at most 128 characters. Unknown keys or credential-like
+  // keys are refused. Never raw tool arguments.
+  string context_json = 14;
+
+  // Who is asked to decide this approval (build plan WS10 S6). Unset or UNSPECIFIED means the
+  // requester, exactly as before. NAMED needs `subject_id`; any other kind must not carry one.
+  // Stored only while SESSION_CORE_APPROVAL_MEMBER_DECIDE is on; otherwise the approval stays
+  // requester-addressed.
+  Addressee addressee = 15;
+
+  // Stable key of the gated tool (build plan WS10 S3). Stored on the approval so a
+  // once-approval can be matched to the retried call. Plain identifier only.
+  string tool_key = 16;
+
+  // Hex sha256 of the canonical JSON of the gated call (`{tool, input}`, keys
+  // sorted), computed by the creator. The once-token matches on it; the call itself
+  // is never stored. Ignored (stored NULL) for a zero-retention caller.
+  string action_digest = 17;
+
+  // Where the turn came from (`direct`, `ambient`, `automation`); empty is read as
+  // `direct`. Consumed by WS10 S7; stored only.
+  string turn_origin = 18;
+
+  // A Control-signed `approval-grant-use-v1` token proving a standing rule covers this
+  // call (build plan WS10 S3). When valid, the approval is recorded already granted
+  // with `decided_by` `grant:<rule id>`. Refused for a zero-retention caller; a token
+  // that does not verify is refused, never ignored.
+  string grant_use_token = 19;
+}
+
+// ClaimOnceApproval spends the once-approval for one exact action.
+message ClaimOnceApprovalRequest {
+  // Server-authoritative org scope; must match the caller.
+  string org_id = 1;
+  // The run asking to retry the action; its thread bounds the claim.
+  string run_id = 2;
+  // Stable key of the tool being retried.
+  string tool_key = 3;
+  // Hex sha256 of the canonical `{tool, input}` of the retried call.
+  string action_digest = 4;
+}
+
+// The outcome of a ClaimOnceApproval.
+message ClaimOnceApprovalResponse {
+  // True when a granted, unspent, unexpired once-approval matched and was spent now.
+  bool claimed = 1;
+  // The spent approval; empty when nothing was claimed.
+  string approval_id = 2;
+}
+
+// HoldQuarantinedOutput keeps one flagged tool output against its approval.
+message HoldQuarantinedOutputRequest {
+  // Server-authoritative org scope; must match the caller.
+  string org_id = 1;
+  // The run whose tool call produced the output.
+  string run_id = 2;
+  // The UNTRUSTED_CONTENT approval raised for this output.
+  string approval_id = 3;
+  // Stable key of the tool that produced it.
+  string tool_key = 4;
+  // Hex sha256 of the canonical `{tool, input}` of the call, so only its exact retry can release.
+  string action_digest = 5;
+  // Trust class label of the source (`external-web`, `browser-scraped`, `third-party-mcp`).
+  string trust_class = 6;
+  // BLAKE3 hex digest of the content, kept next to the ciphertext.
+  string content_hash = 7;
+  // The content to hold. At most 1 MiB; encrypted before it is stored.
+  string content = 8;
+}
+
+// The outcome of a HoldQuarantinedOutput.
+message HoldQuarantinedOutputResponse {
+  // True when the content is held (also true for an idempotent repeat).
+  bool held = 1;
+}
+
+// ClaimQuarantineRelease asks for the content a person released for one exact call.
+message ClaimQuarantineReleaseRequest {
+  // Server-authoritative org scope; must match the caller.
+  string org_id = 1;
+  // The run retrying the call; its thread bounds the claim.
+  string run_id = 2;
+  // Stable key of the tool being retried.
+  string tool_key = 3;
+  // Hex sha256 of the canonical `{tool, input}` of the retried call.
+  string action_digest = 4;
+}
+
+// The outcome of a ClaimQuarantineRelease.
+message ClaimQuarantineReleaseResponse {
+  // True when a granted, unspent, unexpired hold matched and was spent now.
+  bool released = 1;
+  // The spent approval; empty when nothing was released.
+  string approval_id = 2;
+  // The released content, to be framed as untrusted data. Empty unless released.
+  string content = 3;
+  // BLAKE3 hex digest of the content as it was held.
+  string content_hash = 4;
+}
+
+// GetQuarantinePreview asks for the inert preview of a held output.
+message GetQuarantinePreviewRequest {
+  // Server-authoritative org scope; must match the caller.
+  string org_id = 1;
+  // The UNTRUSTED_CONTENT approval being decided.
+  string approval_id = 2;
+}
+
+// The inert preview of a held output.
+message GetQuarantinePreviewResponse {
+  // Plain text, at most 1 KiB, control characters removed. Never markup; show it as text.
+  string preview = 1;
+  // True when the held content is longer than the preview.
+  bool truncated = 2;
+  // Stable key of the tool that produced the content.
+  string tool_key = 3;
+  // Trust class label of the source.
+  string trust_class = 4;
+}
+
+// ConsumeApproval claims one granted loop-mode approval for the loop that is
+// re-entering. Scope comes from the verified caller; the ids only select.
+message ConsumeApprovalRequest {
+  // The approval to consume.
+  string approval_id = 1;
+  // Server-authoritative org scope.
+  string org_id = 2;
+  // The run the approval gates; must match the approval.
+  string run_id = 3;
+  // The step the approval gates; must match when the approval names one.
+  string step_id = 4;
+  // The digest of the exact call, compared with the retained descriptor when one
+  // exists. A mismatch is refused: the loop may not run a different call.
+  string action_fingerprint = 5;
+  // An opaque token the resuming segment generates. The same token consuming
+  // twice is a safe replay; another token is refused as already consumed.
+  string claim_token = 6;
+  // The caller consumes for the spend only (the model-gateway, ahead of the
+  // executor). The server neither decrypts nor returns the approved call: the
+  // response carries consumed, already_consumed and same_claim only. A winning
+  // spend-only consume also renews the run's managed terminalization deadline in
+  // the same transaction, so a spent click is not recovered before the executor
+  // that will run it has heartbeated. The default (false) is the full consume
+  // the executor makes, unchanged.
+  bool omit_call = 7;
+}
+
+// The outcome of a ConsumeApproval.
+message ConsumeApprovalResponse {
+  // True when this call consumed the approval.
+  bool consumed = 1;
+  // True when the approval had already been consumed.
+  bool already_consumed = 2;
+  // With already_consumed: whether the earlier claim used the same token (a
+  // replay by the same segment) rather than another.
+  bool same_claim = 3;
+  // The approved call, read from the retained descriptor. Present when the claim
+  // is the caller's (consumed now, or the same claim replaying). The descriptor
+  // is the only source of what an approval authorised.
+  string tool_name = 4;
+  // The approved call's JSON arguments.
+  string tool_input_json = 5;
+  // The step the approval gated.
+  string step_id = 6;
+  // The tools and the authority the approval was raised under (build plan WS03
+  // S3). A continuation runs under this snapshot only: nothing a client sends
+  // replaces it. Absent for an approval raised cold (no snapshot was taken).
+  ApprovedAuthority authority = 7;
+}
+
+// The authority an approval was raised under, snapshotted at pause time.
+message ApprovedAuthority {
+  // The permission mode the run was offered under (`ask`, `auto`, ...).
+  string mode = 1;
+  // Whether the run was in plan mode.
+  bool plan_mode = 2;
+  // The autonomy rung, as its wire label.
+  string autonomy_rung = 3;
+  // The Space the run belongs to, or empty.
+  string space_id = 4;
+  // The privacy floor as the wire number.
+  int32 min_privacy_tier = 5;
+  // The pinned inference route, or empty.
+  string provider_hint = 6;
+  // The round budget the run started with.
+  uint32 max_rounds = 7;
+  // The names of the offered tools, sorted.
+  repeated string tool_names = 8;
+  // The offered tools, with the definitions the model was given.
+  repeated ApprovedTool tools = 9;
+  // A digest of the authority fields (mp_contracts::loop_fold::Authority::digest).
+  // A continuation recomputes it and refuses a snapshot that does not match.
+  string digest = 10;
+}
+
+// One offered tool, with the definition the model was given.
+message ApprovedTool {
+  // The tool name.
+  string name = 1;
+  // The tool description shown to the model.
+  string description = 2;
+  // The JSON Schema of the tool's arguments.
+  string parameters_json = 3;
 }
 
 message CreateApprovalResponse {
@@ -693,6 +1120,18 @@ message ListApprovalsRequest {
   // callers). Non-empty → only approvals owned by this org are returned,
   // regardless of what org the run itself belongs to.
   string org_id = 3;
+
+  // Room read (build plan WS10 S6). With `space_id` and the Control `model.thread.read`
+  // decision pair, a Space member who does not own the run reads its approvals as a redacted
+  // room view (no context, no decision reason). With no `run_id`, lists the Space's approvals
+  // (newest first, at most 100). A partial triple is refused.
+  string space_id = 4;
+  string space_read_decision_ref = 5;
+  string space_read_decision_token = 6;
+
+  // Space-wide list only: keep one state (REQUESTED, GRANTED, DENIED, TIMED_OUT). Unspecified
+  // keeps all.
+  ApprovalState state = 7;
 }
 
 message ListApprovalsResponse {
@@ -726,6 +1165,12 @@ message GetApprovalRequest {
   // not-found (never a distinguishable "forbidden") so existence is not
   // leaked across tenants.
   string org_id = 2;
+
+  // Room read (build plan WS10 S6): as on ListApprovalsRequest, the redacted room view of one
+  // approval of a run in this Space.
+  string space_id = 3;
+  string space_read_decision_ref = 4;
+  string space_read_decision_token = 5;
 }
 
 message GetApprovalResponse {
@@ -754,9 +1199,48 @@ message DecideApprovalRequest {
   // decision is only applied when the approval belongs to this org; a
   // mismatch is treated as not-found, never a distinguishable "forbidden".
   string org_id = 5;
+
+  // Who recorded the decision (build plan WS13 S3). The gateway sends USER and
+  // never forwards a client-supplied value.
+  ApprovalDecisionSource decision_source = 6;
+
+  // How far the decision reaches (build plan WS13 S3).
+  ApprovalScope scope = 7;
+
+  // Member decide (build plan WS10 S6): a Space member other than the run owner decides with a
+  // Control-signed `model.approval.decide` decision for this approval, this decision and this
+  // scope. All three or none; a partial set is refused. The decision's subject must be the
+  // caller. Refused while SESSION_CORE_APPROVAL_MEMBER_DECIDE is off.
+  string space_id = 8;
+  string space_decision_ref = 9;
+  string space_decision_token = 10;
+
+  // Reserved for a Control standing-rule proof on a decision (WS10 S4); not read by S6.
+  string grant_use_token = 11;
 }
 
 message DecideApprovalResponse {
+  // Updated approval record.
+  Approval approval = 1;
+}
+
+message RerouteApprovalRequest {
+  // Approval to move.
+  string approval_id = 1;
+
+  // Tenant; must match the caller.
+  string org_id = 2;
+
+  // New addressee. Never UNSPECIFIED; NAMED needs `subject_id`.
+  Addressee addressee = 3;
+
+  // Control `model.approval.reroute` decision for this approval and this addressee.
+  string space_id = 4;
+  string space_decision_ref = 5;
+  string space_decision_token = 6;
+}
+
+message RerouteApprovalResponse {
   // Updated approval record.
   Approval approval = 1;
 }
@@ -1049,6 +1533,22 @@ message OrchestrationEvent {
     // verification result — an older worker's outcome (no `verification`
     // field) never fires this event.
     ApprovalContinuationVerified approval_continuation_verified = 23;
+
+    // Durable loop (build plan WS03 S8, tag 24 — additive). A run's loop
+    // parked at a round boundary: the run stays non-terminal and resumable.
+    // Ids only: the park reason is never broadcast.
+    RunParked run_parked = 24;
+    // Durable loop (build plan WS03 S8, tag 25 — additive). A parked run's
+    // loop resumed through the one continue route. Ids and the resumed segment
+    // number only.
+    RunResumed run_resumed = 25;
+
+    // Human-in-the-loop questions (build plan WS14 S3, tags 27 and 28 — additive;
+    // 26 is WS15's ToolRetryScheduled). Ids only: the question text and the
+    // answer are owner-only and are read through ListRunQuestions.
+    QuestionAsked question_asked = 27;
+    // A requested question was answered or skipped.
+    QuestionAnswered question_answered = 28;
   }
 
   message PlanTransitioned {
@@ -1071,6 +1571,19 @@ message OrchestrationEvent {
     ApprovalKind approval_kind = 3;
     ApprovalState to = 4;
     string decided_by = 5;
+
+    // Why the approval was asked for, from `approvals.metadata.cause.code` (WS13 S3).
+    string cause_code = 6;
+
+    // Standing rule that decided it (WS13 S7). Empty until rules exist.
+    string rule_id = 7;
+
+    ApprovalScope scope = 8;
+
+    ApprovalDecisionSource decision_source = 9;
+
+    // True when a recent re-authentication was verified for the decision (WS13 S5).
+    bool step_up_verified = 10;
   }
 
   message SubagentAttached {
@@ -1227,6 +1740,40 @@ message OrchestrationEvent {
     string receipt_id = 4;
     VerificationResult verification = 5;
   }
+
+  // The run's loop saved a durable park fold at a round boundary and returned
+  // without finalizing. The run stays non-terminal until it is resumed, cancelled
+  // or its park TTL lapses. Carries the run id only (the reason is owner-only).
+  message RunParked {
+    string run_id = 1;
+  }
+
+  // A parked run's loop resumed from its park fold and is running again.
+  message RunResumed {
+    string run_id = 1;
+    // The segment the resumed loop runs as.
+    uint32 resumed_segment = 2;
+  }
+
+  // A question was put to the run's owner and now awaits an answer.
+  message QuestionAsked {
+    string run_id = 1;
+    // The question to read through ListRunQuestions.
+    string question_id = 2;
+    // `next_turn` or `resume`.
+    string delivery = 3;
+    // After this instant the question reads as EXPIRED.
+    google.protobuf.Timestamp expires_at = 4;
+  }
+
+  // A requested question was answered or skipped by its owner.
+  message QuestionAnswered {
+    string run_id = 1;
+    // The question that was answered or skipped.
+    string question_id = 2;
+    // The state it reached: ANSWERED or SKIPPED.
+    QuestionState state = 3;
+  }
 }
 
 // --- RecordOrchestrationEvent ---
@@ -1286,4 +1833,149 @@ message StartWorkflowResponse {
 
   // Canonical workflow type that was started, echoed from the allowlist.
   string workflow_type = 3;
+}
+
+// --- Run questions (build plan WS14 S3) ---
+
+// Lifecycle state of a run question.
+enum QuestionState {
+  // Not set.
+  QUESTION_STATE_UNSPECIFIED = 0;
+  // Put to the owner and awaiting an answer.
+  QUESTION_STATE_REQUESTED = 1;
+  // Answered by its owner.
+  QUESTION_STATE_ANSWERED = 2;
+  // Dismissed by its owner without an answer.
+  QUESTION_STATE_SKIPPED = 3;
+  // Not answered before `expires_at`.
+  QUESTION_STATE_EXPIRED = 4;
+  // Withdrawn because its run ended or was cancelled.
+  QUESTION_STATE_CANCELLED = 5;
+}
+
+// One choice of a single- or multi-select item.
+message QuestionOption {
+  // Stable within its item; `[a-z0-9_-]`, at most 64 characters.
+  string id = 1;
+  // Short text shown for the option.
+  string label = 2;
+  // Optional longer explanation of the option.
+  string description = 3;
+}
+
+// One thing asked. The bounds and the closed kind set are the shared
+// `mp_contracts::user_question` contract.
+message QuestionItem {
+  // Stable within its question; `[a-z0-9_-]`, at most 64 characters.
+  string id = 1;
+  // `single`, `multi` or `text`. A secret or credential kind does not exist.
+  string kind = 2;
+  // The question text shown to the owner.
+  string prompt = 3;
+  // Required (2 to 6) for `single` and `multi`; empty for `text`.
+  repeated QuestionOption options = 4;
+  // A `single` or `multi` item also accepts a free-text answer.
+  bool allow_other = 5;
+}
+
+// The owner's answer to one item.
+message QuestionAnswerItem {
+  // The `QuestionItem.id` this answers.
+  string item_id = 1;
+  // Chosen option ids: exactly one for `single`, one or more for `multi`
+  // (unless `text` carries the answer), none for `text`.
+  repeated string option_ids = 2;
+  // The free-text answer: the whole answer of a `text` item, or the "other"
+  // answer of an item that allows one.
+  string text = 3;
+}
+
+// A durable question put to a run's owner. Own table (`run_questions`), not an
+// approval: an answer is information and never an authority grant.
+message RunQuestion {
+  // Question identifier (ULID, prefix `q_`).
+  string id = 1;
+  string run_id = 2;
+  string thread_id = 3;
+  // The plan step or tool step that asked. Empty when none.
+  string step_id = 4;
+  string org_id = 5;
+  // The owner: the only principal who may list or answer it.
+  string user_id = 6;
+  // Where the question is in its lifecycle.
+  QuestionState state = 7;
+  // `next_turn` (the answer is the next user message) or `resume` (the answer
+  // continues the same run; not offered until the resume slice).
+  string delivery = 8;
+  // What was asked, in order.
+  repeated QuestionItem items = 9;
+  // When the question was put to the owner.
+  google.protobuf.Timestamp requested_at = 10;
+  // After this instant an unanswered question reads as EXPIRED.
+  google.protobuf.Timestamp expires_at = 11;
+  // Unset until answered or skipped.
+  google.protobuf.Timestamp answered_at = 12;
+  // The owner's answers, one per item. Empty until answered.
+  repeated QuestionAnswerItem answers = 13;
+  // The user message that carried the answer, when one did.
+  string answered_message_id = 14;
+}
+
+// Put a question to the run's owner. See `CreateRunQuestion`.
+message CreateRunQuestionRequest {
+  string run_id = 1;
+  // The step that asked. Empty for none.
+  string step_id = 2;
+  // Must equal the caller's verified org.
+  string org_id = 3;
+  // `next_turn`; empty means `next_turn`. `resume` is refused until it ships.
+  string delivery = 4;
+  // What to ask: the bounds are the `user_question` contract.
+  repeated QuestionItem items = 5;
+  // Requested lifetime in seconds. Clamped to the delivery's ceiling (24 h for
+  // `next_turn`); zero takes the ceiling.
+  uint32 expires_in_seconds = 6;
+  // A retry with the same key (per org) returns the stored question. Callers
+  // use `{run_id}:{step_id}`.
+  string idempotency_key = 7;
+}
+
+// The stored question (a retry with the same idempotency key returns it).
+message CreateRunQuestionResponse {
+  // The created or already stored question.
+  RunQuestion question = 1;
+}
+
+// List a run's questions for its owner. See `ListRunQuestions`.
+message ListRunQuestionsRequest {
+  string run_id = 1;
+  // Must equal the caller's verified org.
+  string org_id = 2;
+}
+
+// The run's questions for the calling owner.
+message ListRunQuestionsResponse {
+  // Oldest first.
+  repeated RunQuestion questions = 1;
+}
+
+// Answer or skip a requested question. See `AnswerRunQuestion`.
+message AnswerRunQuestionRequest {
+  // The question being answered (`RunQuestion.id`).
+  string question_id = 1;
+  // Must equal the caller's verified org.
+  string org_id = 2;
+  // One entry per item. Empty when `skip` is set.
+  repeated QuestionAnswerItem answers = 3;
+  // Dismiss the question without answering it.
+  bool skip = 4;
+  // The user message that carries the answer. Empty when the answer arrives on
+  // its own.
+  string answered_message_id = 5;
+}
+
+// The question after the answer was recorded (or replayed).
+message AnswerRunQuestionResponse {
+  // The answered or skipped question.
+  RunQuestion question = 1;
 }

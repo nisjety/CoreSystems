@@ -17,3 +17,21 @@ describe('onboarding shared UI CSS', () => {
     expect(css).toContain('.verevon-switch__control')
   })
 })
+
+describe('chat turn containment CSS', () => {
+  it('contains non-latest chat turns only when the switch attribute is set', () => {
+    expect(css).toMatch(
+      /\.verevon-chat-thread\[data-chat-containment="on"\] > \.verevon-chat-message:not\(\[data-latest\]\) \{\s*content-visibility: auto;\s*contain-intrinsic-size: auto 480px;\s*\}/,
+    )
+  })
+
+  it('declares content-visibility only in rules gated by the switch attribute', () => {
+    const declaring = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter(([, , body]) =>
+      /content-visibility\s*:/.test(body),
+    )
+    expect(declaring.length).toBeGreaterThan(0)
+    for (const [, selector] of declaring) {
+      expect(selector).toContain('[data-chat-containment="on"]')
+    }
+  })
+})

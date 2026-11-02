@@ -172,3 +172,65 @@ func (r *MemoryRepository) RevokeConnectionZDRAcknowledgements(_ context.Context
 	}
 	return revoked, nil
 }
+
+func (r *MemoryRepository) PurgeOrganizationConnectionZDR(_ context.Context, organizationID string) (ConnectionZDRPurgeResult, error) {
+	organizationID = strings.TrimSpace(organizationID)
+	if organizationID == "" {
+		return ConnectionZDRPurgeResult{}, invalidZDR("organization id is required")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var result ConnectionZDRPurgeResult
+	for connectionID := range r.zdrRecords {
+		if connection, ok := r.connections[connectionID]; ok && connection.OrganizationID == organizationID {
+			delete(r.zdrRecords, connectionID)
+			result.Records++
+		}
+	}
+	kept := make([]ConnectionZDRAcknowledgement, 0, len(r.zdrAcks))
+	for _, ack := range r.zdrAcks {
+		if ack.OrganizationID == organizationID {
+			result.Acknowledgements++
+			continue
+		}
+		kept = append(kept, ack)
+	}
+	r.zdrAcks = kept
+	return result, nil
+}
+
+func (r *MemoryRepository) ListOrganizationConnectionZDRAcknowledgements(_ context.Context, organizationID string, limit int) (ConnectionZDRAcknowledgementList, error) {
+	organizationID = strings.TrimSpace(organizationID)
+	if organizationID == "" {
+		return ConnectionZDRAcknowledgementList{}, invalidZDR("organization id is required")
+	}
+	if limit < 1 {
+		return ConnectionZDRAcknowledgementList{}, invalidZDR("limit must be at least 1")
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var list ConnectionZDRAcknowledgementList
+	all := []ConnectionZDRAcknowledgement{}
+	for _, ack := range r.zdrAcks {
+		if ack.OrganizationID != organizationID {
+			continue
+		}
+		all = append(all, cloneZDRAcknowledgement(ack))
+		if ack.RevokedAt == nil {
+			list.Active++
+		} else {
+			list.Revoked++
+		}
+	}
+	sort.SliceStable(all, func(i, j int) bool {
+		if !all[i].AcknowledgedAt.Equal(all[j].AcknowledgedAt) {
+			return all[i].AcknowledgedAt.After(all[j].AcknowledgedAt)
+		}
+		return all[i].ID < all[j].ID
+	})
+	if len(all) > limit {
+		all = all[:limit]
+	}
+	list.Items = all
+	return list, nil
+}

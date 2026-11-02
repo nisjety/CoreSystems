@@ -105,6 +105,13 @@ pub struct RetrievalRequest {
     /// grants facade for one (`authz::resolve_explicit_grants`).
     #[serde(default, skip_deserializing)]
     pub service_principal: bool,
+    /// The verified service principal's id (`service:<name>`), set only by the
+    /// auth boundary alongside `service_principal`. The engine confines a
+    /// service's retrieval to the corpus granted to that id (see
+    /// `authz::service_routes::confine_request`). `skip` keeps it out of both
+    /// directions of the wire: a body can never name a service.
+    #[serde(skip)]
+    pub service_id: Option<String>,
     /// Control-verified Space authority and its Data-owned target mapping. This
     /// is intentionally boundary-injected, never accepted from request JSON.
     #[serde(skip)]
@@ -254,6 +261,39 @@ pub struct ScoredCandidate {
     pub metadata: HashMap<String, QdrantValue>,
 }
 
+/// The metadata key a candidate's chunk context travels under (CR-T15). It sits in `metadata`,
+/// which is `serde(skip)`, so it reaches no response, cache entry or trace that serializes candidates.
+pub const CHUNK_CONTEXT_KEY: &str = "chunk_context";
+
+impl ScoredCandidate {
+    /// The chunk's context in force, when the rerank input join attached one. `None` for every
+    /// candidate unless `RERANK_INPUT_INCLUDE_CONTEXT` is on.
+    #[must_use]
+    pub fn chunk_context(&self) -> Option<&str> {
+        match self.metadata.get(CHUNK_CONTEXT_KEY)?.kind.as_ref()? {
+            qdrant_client::qdrant::value::Kind::StringValue(text) => Some(text.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Attaches the chunk's context in force, or clears it with `None`.
+    pub fn attach_chunk_context(&mut self, context: Option<String>) {
+        match context {
+            Some(text) => {
+                self.metadata.insert(
+                    CHUNK_CONTEXT_KEY.to_owned(),
+                    QdrantValue {
+                        kind: Some(qdrant_client::qdrant::value::Kind::StringValue(text)),
+                    },
+                );
+            }
+            None => {
+                self.metadata.remove(CHUNK_CONTEXT_KEY);
+            }
+        }
+    }
+}
+
 /// One citation in `RetrievalResponse.sources` (HTTP wire contract `retrieve-v1`,
 /// pinned by `tests/retrieve_contract.rs`). The gRPC `Source` message is a
 /// separate, older shape and deliberately has no `url`.
@@ -292,8 +332,10 @@ impl SourceRef {
     ///   keep their own metadata (SharePoint, for one, stores site and web URLs
     ///   there); that is tenant metadata nobody reviewed for this response, and
     ///   it would also be copied into the Dragonfly retrieval cache;
-    /// * the SHAPE gate: a plain `http(s)` URL with a host, no whitespace or
-    ///   control characters, no credentials (`user:secret@host`), at most
+    /// * the SHAPE gate: a plain `http(s)` URL with a host, no whitespace,
+    ///   control characters or backslash (a browser reads `\` as `/`, so the
+    ///   host a reader opens could differ from the one checked here), no
+    ///   credentials (`user:secret@host`), at most
     ///   [`Self::MAX_URL_LEN`] bytes. Anything else (`javascript:`, `data:`,
     ///   `file:`, a relative path, a URL a crawler stored with embedded
     ///   credentials) is dropped rather than repaired.
@@ -306,7 +348,8 @@ impl SourceRef {
             return None;
         }
         let url = metadata_url?;
-        if url.len() > Self::MAX_URL_LEN || url.chars().any(|c| c.is_control() || c.is_whitespace())
+        if url.len() > Self::MAX_URL_LEN
+            || url.chars().any(|c| c.is_control() || c.is_whitespace() || c == '\\')
         {
             return None;
         }
@@ -348,6 +391,19 @@ pub struct RetrievalResponse {
     /// not synthesized — empty array when nothing useful to recommend.
     #[serde(default)]
     pub suggested_next_tools: Vec<String>,
+    /// Set when the answer was produced in a reduced form the caller must be told about: a ZDR
+    /// retrieval with no attested query embedding route answers from lexical search only (Z-41).
+    /// Absent otherwise, so the wire form of an ordinary answer is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<RetrievalNotice>,
+}
+
+/// An explicit, typed statement that a retrieval answered in a reduced form. The gateway shows
+/// `message` to the user and keys its own handling on `code`, which is stable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetrievalNotice {
+    pub code: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -539,5 +595,64 @@ mod tests {
         );
         // 0.5 raw share out of (0.45+0.2+0.2+0.1+0.05+0.5)=1.5 total.
         assert!((resolved.w_keyword - (0.5 / 1.5)).abs() < 1e-6);
+    }
+
+    fn bare_candidate() -> ScoredCandidate {
+        ScoredCandidate {
+            knowledge_id: "k1".to_string(),
+            document_id: "d1".to_string(),
+            text: "Margin: 31%.".to_string(),
+            dense_score: 0.5,
+            sparse_score: 0.0,
+            rerank_score: 0.5,
+            final_score: 0.5,
+            chunk_index: 0,
+            metadata: HashMap::new(),
+        }
+    }
+
+    /// CR-T15: the context in force rides on the candidate, is read back exactly, and is cleared by
+    /// `None`. A candidate that never had one reads as none.
+    #[test]
+    fn a_chunk_context_round_trips_through_the_candidate_and_clears() {
+        let mut candidate = bare_candidate();
+        assert_eq!(candidate.chunk_context(), None);
+        candidate.attach_chunk_context(Some("Fra ACMEs Q2-rapport.".to_string()));
+        assert_eq!(candidate.chunk_context(), Some("Fra ACMEs Q2-rapport."));
+        candidate.attach_chunk_context(None);
+        assert_eq!(candidate.chunk_context(), None);
+    }
+
+    /// CR-T15: the context is never serialized, so it cannot reach a response, a cache entry or a
+    /// trace that serializes candidates. Checked on the candidate and on the whole wire response.
+    #[test]
+    fn a_chunk_context_never_reaches_the_wire() {
+        const MARKER: &str = "CONTEXT-MARKER-7f3a";
+        let mut candidate = bare_candidate();
+        candidate.attach_chunk_context(Some(format!("{MARKER} Fra ACMEs Q2-rapport.")));
+
+        let candidate_json = serde_json::to_string(&candidate).expect("candidate serializes");
+        assert!(!candidate_json.contains(MARKER), "{candidate_json}");
+        assert!(
+            !candidate_json.contains("chunk_context"),
+            "{candidate_json}"
+        );
+
+        let response = RetrievalResponse {
+            candidates: vec![candidate],
+            sources: Vec::new(),
+            query: "marginer".to_string(),
+            org_id: "org-a".to_string(),
+            trace_id: "trace-1".to_string(),
+            index_version: "v2-current".to_string(),
+            zdr_mode: "disabled".to_string(),
+            zdr_actions_applied: Vec::new(),
+            low_confidence: false,
+            context_pack: None,
+            suggested_next_tools: Vec::new(),
+            notice: None,
+        };
+        let body = serde_json::to_string(&response).expect("response serializes");
+        assert!(!body.contains(MARKER), "{body}");
     }
 }

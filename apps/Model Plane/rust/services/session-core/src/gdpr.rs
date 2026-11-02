@@ -155,9 +155,12 @@ pub struct PurgeSummary {
     pub threads: u64,
     pub hook_configs: u64,
     pub agent_skills: u64,
+    pub skill_revisions: u64,
     pub agent_memory: u64,
     pub user_memory_controls: u64,
     pub forgotten_memory_ids: u64,
+    pub memory_control_events: u64,
+    pub org_learning_policy_mirror: u64,
     pub finetune_jobs: u64,
     pub dream_runs: u64,
     pub session_audit_outbox: u64,
@@ -196,9 +199,12 @@ impl PurgeSummary {
             + self.threads
             + self.hook_configs
             + self.agent_skills
+            + self.skill_revisions
             + self.agent_memory
             + self.user_memory_controls
             + self.forgotten_memory_ids
+            + self.memory_control_events
+            + self.org_learning_policy_mirror
             + self.finetune_jobs
             + self.dream_runs
             + self.session_audit_outbox
@@ -230,6 +236,19 @@ pub async fn purge_organization_data(
 ) -> anyhow::Result<PurgeSummary> {
     let mut tx: Transaction<'_, Postgres> = pool.begin().await?;
     let mut summary = PurgeSummary::default();
+
+    // Space event log: switch the deferred event triggers off for this transaction FIRST.
+    // They fire at commit, and without this the thread/run deletes below would write new
+    // `thread.deleted` rows for an org that was just erased.
+    crate::space::events::suppress(&mut tx).await?;
+
+    // The loop's sealed folds are erased with the org's runs, before them.
+    sqlx::query(
+        "DELETE FROM run_loop_checkpoints WHERE run_id IN (SELECT id FROM runs WHERE org_id = $1)",
+    )
+    .bind(org_id)
+    .execute(&mut *tx)
+    .await?;
 
     // `runs` children with no cascade — must go before `runs`.
     summary.checkpoints = sqlx::query(
@@ -357,6 +376,17 @@ pub async fn purge_organization_data(
     .await?
     .rows_affected();
 
+    // Space event log (ids and kinds only): the org's rows and per-Space heads go with its
+    // events. Not counted in the summary (the erasure proof counts content tables).
+    sqlx::query("DELETE FROM space_event_log WHERE org_id = $1")
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM space_event_heads WHERE org_id = $1")
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?;
+
     // `runs` — cascades `session_tool_audit_intents` and
     // `managed_run_terminalization_outbox` (ON DELETE CASCADE).
     summary.runs = sqlx::query("DELETE FROM runs WHERE org_id = $1")
@@ -380,6 +410,15 @@ pub async fn purge_organization_data(
         .rows_affected();
 
     summary.agent_skills = sqlx::query("DELETE FROM agent_skills WHERE org_id = $1")
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+    // After the skills, not before: deleting a skill row writes a `deleted`
+    // revision holding its text (agent_skills_revision_trg), and that revision
+    // must be erased with the rest.
+    summary.skill_revisions = sqlx::query("DELETE FROM skill_revisions WHERE org_id = $1")
         .bind(org_id)
         .execute(&mut *tx)
         .await?
@@ -412,6 +451,10 @@ pub async fn purge_organization_data(
     summary.forgotten_memory_ids = sqlx::query("DELETE FROM forgotten_memory_ids WHERE org_id = $1")
         .bind(org_id).execute(&mut *tx).await?.rows_affected();
     summary.user_memory_controls = sqlx::query("DELETE FROM user_memory_controls WHERE org_id = $1")
+        .bind(org_id).execute(&mut *tx).await?.rows_affected();
+    summary.memory_control_events = sqlx::query("DELETE FROM memory_control_events WHERE org_id = $1")
+        .bind(org_id).execute(&mut *tx).await?.rows_affected();
+    summary.org_learning_policy_mirror = sqlx::query("DELETE FROM org_learning_policy_mirror WHERE org_id = $1")
         .bind(org_id).execute(&mut *tx).await?.rows_affected();
 
     summary.finetune_jobs = sqlx::query("DELETE FROM finetune_jobs WHERE org_id = $1")
@@ -620,9 +663,12 @@ mod tests {
             threads: 1,
             hook_configs: 1,
             agent_skills: 1,
+            skill_revisions: 1,
             agent_memory: 1,
             user_memory_controls: 1,
             forgotten_memory_ids: 1,
+            memory_control_events: 1,
+            org_learning_policy_mirror: 1,
             finetune_jobs: 1,
             dream_runs: 1,
             session_audit_outbox: 1,
@@ -638,7 +684,7 @@ mod tests {
         };
         assert_eq!(
             summary.total(),
-            25,
+            28,
             "total() must count only Postgres rows; semantic-tier counts belong \
              to erasure_is_complete(), not to this sum"
         );
@@ -672,6 +718,7 @@ mod tests {
         };
 
         let checkpoints = pos("DELETE FROM checkpoints");
+        let loop_checkpoints = pos("DELETE FROM run_loop_checkpoints");
         let subagent_edges = pos("DELETE FROM subagent_edges");
         let todos = pos("DELETE FROM todos");
         let plan_steps = pos("DELETE FROM plan_steps");
@@ -688,6 +735,7 @@ mod tests {
         let runs = pos("DELETE FROM runs WHERE org_id = $1");
         let threads = pos("DELETE FROM threads WHERE org_id = $1");
 
+        assert!(loop_checkpoints < runs, "loop folds must be purged before runs");
         assert!(checkpoints < runs, "checkpoints must be purged before runs");
         assert!(
             subagent_edges < runs,
@@ -737,5 +785,42 @@ mod tests {
             "events' run_id sweep must run while runs still exist"
         );
         assert!(runs < threads, "runs must be purged before threads");
+        assert!(
+            pos("DELETE FROM agent_skills WHERE org_id = $1")
+                < pos("DELETE FROM skill_revisions WHERE org_id = $1"),
+            "deleting a skill writes a revision holding its text, so the revisions are purged after the skills"
+        );
+    }
+
+    /// WS02-S1: the org erasure switches the Space event triggers off before any delete that
+    /// could fire them, and purges the Space log beside the org's events, before runs and
+    /// threads. Without the suppression the deferred delete triggers would write fresh
+    /// tombstones for an org that was just erased.
+    #[test]
+    fn purge_suppresses_space_events_before_deletes_and_purges_the_log() {
+        let source = include_str!("gdpr.rs");
+        let pos = |needle: &str| {
+            source
+                .find(needle)
+                .unwrap_or_else(|| panic!("expected to find {needle:?} in gdpr.rs"))
+        };
+        let suppress = pos("space::events::suppress(");
+        let first_delete = pos("DELETE FROM run_loop_checkpoints");
+        let events = pos("DELETE FROM events");
+        let log = pos("DELETE FROM space_event_log WHERE org_id = $1");
+        let heads = pos("DELETE FROM space_event_heads WHERE org_id = $1");
+        let runs = pos("DELETE FROM runs WHERE org_id = $1");
+        let messages = pos("DELETE FROM messages");
+        let threads = pos("DELETE FROM threads WHERE org_id = $1");
+        assert!(
+            suppress < first_delete,
+            "suppress must precede the first DELETE of the transaction"
+        );
+        assert!(suppress < messages && suppress < runs && suppress < threads);
+        assert!(
+            events < log && log < heads && heads < runs,
+            "the Space log is purged beside the org's events, and its heads after it"
+        );
+        assert!(log < threads, "the log is purged before the threads whose delete triggers fire");
     }
 }

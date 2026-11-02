@@ -91,6 +91,13 @@ pub struct AgentRunCheckpoint {
     /// (read as `allowlist`). A resume whose grant disagrees is refused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_mode: Option<String>,
+    /// The step key the run hands out next: one past the highest key it reserved, for a
+    /// completed, failed or refused-landing step alike (`step` counts completed steps
+    /// only, and stays what the step cap and the projection read). A resume starts its
+    /// keys at the highest of this, `step` and one past the run's last receipt, so no step
+    /// key repeats in a run. 0 on a checkpoint written before it existed (D2).
+    #[serde(default)]
+    pub next_step: u32,
 }
 
 /// The budget ledger of a run, stored with its checkpoint so a resume restores
@@ -527,6 +534,19 @@ pub trait StepReceiptStore: Send + Sync {
             ));
         }
         Ok(receipts)
+    }
+
+    /// D2: the highest `step` among one tenant's receipts of a run, `None` when it has none.
+    /// A resume reads only this, so it does not decode (or depend on decoding) every
+    /// historical receipt payload. The default folds `list_for_org`; durable stores
+    /// override it with an aggregate.
+    async fn last_step_for_org(&self, org_id: &str, run_id: &RunKind) -> QuarryResult<Option<u32>> {
+        Ok(self
+            .list_for_org(org_id, run_id)
+            .await?
+            .iter()
+            .map(|receipt| receipt.step)
+            .max())
     }
 
     /// User/service-actor-aware receipt listing. Do not fall back to
@@ -1131,6 +1151,7 @@ mod tests {
             control_epoch: 0,
             budget: None,
             policy_mode: None,
+            next_step: 3,
         };
         store.save_run_checkpoint(checkpoint).await.unwrap();
         assert!(store
@@ -1144,6 +1165,7 @@ mod tests {
             .unwrap()
             .expect("checkpoint should be present");
         assert_eq!(loaded.step, 2);
+        assert_eq!(loaded.next_step, 3, "the step key high-water mark is kept");
         assert_eq!(loaded.actor_id, "user_a");
         assert_eq!(loaded.lease_id, "lease_01ARZ3NDEKTSV4RRFFQ69G5FAV");
         store.close_run_checkpoint("org_a", &run_id).await.unwrap();
@@ -1155,6 +1177,55 @@ mod tests {
                 .unwrap()
                 .status,
             AgentRunStatus::Closed
+        );
+    }
+
+    /// D2: a checkpoint written before `next_step` existed loads with 0, so a resume falls
+    /// back to `step` and the run's receipts for its first key.
+    #[test]
+    fn legacy_checkpoint_without_next_step_reads_zero() {
+        let legacy = serde_json::json!({
+            "org_id": "org_a",
+            "run_id": "run_a",
+            "profile_id": "prof_a",
+            "step": 1,
+            "current_url": "",
+            "constraints": { "max_steps": 5, "allowed_domains": ["example.com"] },
+            "zdr": "off",
+        });
+        let checkpoint: AgentRunCheckpoint =
+            serde_json::from_value(legacy).expect("a checkpoint without next_step loads");
+        assert_eq!((checkpoint.step, checkpoint.next_step), (1, 0));
+        let written = serde_json::to_value(AgentRunCheckpoint {
+            next_step: 4,
+            ..checkpoint
+        })
+        .unwrap();
+        assert_eq!(written["next_step"], 4, "the field is always written");
+    }
+
+    /// D2: the last receipt step of one tenant's run, for a resume's first key.
+    #[tokio::test]
+    async fn last_step_for_org_is_the_highest_step_or_none() {
+        let store = InMemoryStepReceiptStore::new();
+        let run_id: RunKind = Id::new();
+        assert_eq!(
+            store.last_step_for_org("org_a", &run_id).await.unwrap(),
+            None
+        );
+        for step in [0, 3, 1] {
+            let receipt = ReceiptBuilder::start(run_id.to_string(), step)
+                .org_id("org_a")
+                .complete(sample_action(), None, 0.0);
+            store.append(receipt).await.unwrap();
+        }
+        assert_eq!(
+            store.last_step_for_org("org_a", &run_id).await.unwrap(),
+            Some(3)
+        );
+        assert!(
+            store.last_step_for_org("org_b", &run_id).await.is_err(),
+            "another org's run is refused, as its listing is"
         );
     }
 
@@ -1494,6 +1565,7 @@ mod tests {
             status: AgentRunStatus::Active,
             control_mode: BrowserControlMode::AgentControl,
             control_epoch: 0,
+            next_step: 2,
             budget: Some(BudgetCheckpoint {
                 class: "agent".into(),
                 steps: 2,

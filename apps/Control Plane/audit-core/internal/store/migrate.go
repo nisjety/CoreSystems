@@ -27,6 +27,18 @@ var usageSourceIdentitySQL string
 //go:embed migrations/006_v2_producer_authority.sql
 var v2ProducerAuthoritySQL string
 
+//go:embed migrations/007_audit_chain.sql
+var auditChainSQL string
+
+//go:embed migrations/008_audit_chain_checkpoints.sql
+var auditChainCheckpointsSQL string
+
+//go:embed migrations/010_audit_export_cursors.sql
+var auditExportCursorsSQL string
+
+//go:embed migrations/011_audit_read_indexes.sql
+var auditReadIndexesSQL string
+
 type migration struct {
 	version string
 	name    string
@@ -40,6 +52,11 @@ var migrations = []migration{
 	{version: "004_logical_usage_idempotency", name: "logical usage idempotency", sql: logicalUsageIdempotencySQL},
 	{version: "005_usage_source_identity", name: "usage producer identity", sql: usageSourceIdentitySQL},
 	{version: "006_v2_producer_authority", name: "v2 producer authority identity", sql: v2ProducerAuthoritySQL},
+	{version: "007_audit_chain", name: "per-org audit hash chain", sql: auditChainSQL},
+	{version: "008_audit_chain_checkpoints", name: "signed audit chain checkpoints and attestations", sql: auditChainCheckpointsSQL},
+	{version: "009_audit_chain_verification_state", name: "audit chain verifier state", sql: auditChainVerificationStateSQL},
+	{version: "010_audit_export_cursors", name: "SIEM export cursors", sql: auditExportCursorsSQL},
+	{version: "011_audit_read_indexes", name: "keyset audit list read indexes", sql: auditReadIndexesSQL},
 }
 
 // Migrate applies the bundled SQL schema exactly once, tracking it in a

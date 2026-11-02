@@ -65,6 +65,7 @@ import {
   resolveCanonicalTokenContext,
 } from './plane-token-membership';
 import { modelGatewayScopesForRole } from './plane-token-scopes';
+import { readFreshStepUp } from './step-up.controller';
 
 /**
  * Convert Express's `IncomingHttpHeaders` (plain object) into a Web API
@@ -101,7 +102,7 @@ interface ModelPlaneInternalTokenBody {
 
 interface AuthSessionSnapshot {
   user?: { id?: string; email?: string | null };
-  session?: { activeOrganizationId?: string };
+  session?: { id?: string; activeOrganizationId?: string };
 }
 
 const typedSessionAuth = auth as unknown as {
@@ -186,12 +187,16 @@ export class ModelPlaneTokenController {
       sessionContext.orgId,
     );
 
+    // A recent password re-check for this session, if there is one, travels in the token as the
+    // `step_up` claim the gateway reads for high-risk approvals (build plan WS13 S5).
+    const stepUp = await readFreshStepUp(session.session?.id);
     const bundle = this.convexTokenService.issueModelPlaneToken({
       userId: session.user.id,
       orgId: sessionContext.orgId,
       email: session.user.email ?? undefined,
       scopes: scopes.length > 0 ? scopes : undefined,
       retentionPosture,
+      ...(stepUp ? { stepUp } : {}),
     });
 
     return {

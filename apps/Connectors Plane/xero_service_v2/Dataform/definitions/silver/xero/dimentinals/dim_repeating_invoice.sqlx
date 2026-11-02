@@ -1,0 +1,51 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  name: "dim_repeating_invoice",
+  description: "Silver: current Xero repeating-invoice templates. Grain: one row per tenant and template.",
+  tags: ["silver", "xero", "dimension"]
+}
+
+WITH current_templates AS (
+  SELECT *
+  FROM ${ref("dw_staging_xero", "repeating_invoices")}
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY tenant_id, record_id
+    ORDER BY synced_at DESC
+  ) = 1
+)
+
+SELECT
+  tenant_id,
+  synced_at,
+  first_seen_at,
+  repeating_invoice_id,
+  record_id AS repeating_invoice_internal_id,
+  invoice_type,
+  status,
+  reference,
+  line_amount_types,
+  currency_code,
+  branding_theme_id,
+  contact_id,
+  contact_name,
+  SAFE_CAST(sub_total AS FLOAT64) AS sub_total,
+  SAFE_CAST(total_tax AS FLOAT64) AS total_tax,
+  SAFE_CAST(total AS FLOAT64) AS total,
+  schedule_unit,
+  schedule_period,
+  schedule_due_date_type,
+  schedule_due_date_offset,
+  schedule_start_date,
+  schedule_end_date,
+  next_scheduled_date,
+  next_scheduled_date_local,
+  updated_at,
+  has_attachments,
+  approved_for_sending,
+  include_pdf,
+  send_copy,
+  mark_as_sent,
+  line_item_count,
+  'xero' AS _source
+FROM current_templates

@@ -133,28 +133,30 @@ describe('switches and copy for the batch 2 contracts (INNH-4, INNH-6, INNH-7, I
 
 describe('extract refusals and webhook copy (INNH-3, INNH-5)', () => {
   const fallback = { no: 'x', en: 'x' }
-  const quarry501 = (message: string) => new ApiError(message, 501, 'UNSUPPORTED')
+  const refusal = (code: string) => new ApiError('the extract route refused', 501, code)
 
-  it('explains each of the four extract refusals and names the next step', () => {
-    const texts = [
-      'structured extraction needs the Model Plane, and QUARRY_EDGE__MODEL_PLANE_URL is not set on this deployment',
-      'structured extraction needs a granted Model Plane lane, and this deployment holds no model credential',
-      'structured extraction needs a granted Model Plane lane, and the Model Plane refused this service',
-      'structured extraction is not available on this edge: QUARRY_EDGE__AI_FORMATS is off',
+  it('explains each of the four extract refusals by its typed code, and names the next step', () => {
+    const codes = [
+      'extract_model_plane_not_configured',
+      'extract_model_lane_not_granted',
+      'extract_model_plane_refused',
+      'extract_ai_formats_off',
     ]
-    const copies = texts.map((text) => playgroundErrorMessage(quarry501(text), tr, fallback, { endpoint: 'extract' }))
-    expect(new Set(copies).size).toBe(texts.length)
+    const copies = codes.map((code) => playgroundErrorMessage(refusal(code), tr, fallback, { endpoint: 'extract' }))
+    expect(new Set(copies).size).toBe(codes.length)
     for (const copy of copies) expect(copy).toContain('Fjern JSON-skjemaet')
     expect(copies[0]).toContain('QUARRY_EDGE__MODEL_PLANE_URL')
     expect(copies[3]).toContain('QUARRY_EDGE__AI_FORMATS')
   })
 
-  it('shows the edge text for a refusal it does not know, rather than a guess', () => {
-    expect(playgroundErrorMessage(quarry501('a new refusal'), tr, fallback, { endpoint: 'extract' })).toContain('a new refusal')
+  it('gives a refusal without a typed code the generic sentence, never the edge text', () => {
+    const copy = playgroundErrorMessage(refusal('UNSUPPORTED'), tr, fallback, { endpoint: 'extract' })
+    expect(copy).toContain('Strukturert uttrekk er ikke tilgjengelig')
+    expect(copy).not.toContain('the extract route refused')
   })
 
   it('names the webhook switch, the ZDR limit and the subscription cap', () => {
-    expect(webhookErrorMessage(quarry501('off'), tr, fallback)).toContain('QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS')
+    expect(webhookErrorMessage(new ApiError('off', 501, 'UNSUPPORTED'), tr, fallback)).toContain('QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS')
     expect(
       webhookErrorMessage(new ApiError('x', 403, 'FORBIDDEN', { details: { reason: 'webhook_off_process' } }), tr, fallback),
     ).toContain('ZDR')

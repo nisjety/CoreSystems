@@ -39,13 +39,32 @@ describe('pendingApprovals', () => {
 })
 
 describe('describeApproval', () => {
-  it('prefers the server detail, then the kind, then an honest generic line', () => {
+  it('prefers the cause, then the server detail, then an honest generic line', () => {
+    expect(
+      describeApproval(
+        { id: 'a', cause: { code: 'provider_write', scopeOptions: ['once'], stepUpRequired: false } },
+        tr,
+      ),
+    ).toBe('The agent wants to change something in a connected service. It may be hard to undo.')
     expect(describeApproval({ id: 'a', detail: 'Delete 3 files' }, tr)).toBe('Delete 3 files')
-    expect(describeApproval({ id: 'a', kind: 'shell' }, tr)).toContain('shell')
-    // Nothing recorded: say that something is waiting, do not invent what.
+    // Nothing recorded: say that something is waiting, do not invent what. The kind is a wire
+    // token, so it is not dressed up as a description either.
+    expect(describeApproval({ id: 'a', kind: 'APPROVAL_KIND_TOOL_CALL' }, tr)).toBe(
+      'The agent is waiting for approval before it continues.',
+    )
     expect(describeApproval({ id: 'a' }, tr)).toBe(
       'The agent is waiting for approval before it continues.',
     )
+  })
+
+  it('words the cause in Norwegian under no', () => {
+    const no = (norwegian: string) => norwegian
+    expect(
+      describeApproval(
+        { id: 'a', cause: { code: 'owner_effect_reserved', scopeOptions: ['once'], stepUpRequired: false } },
+        no,
+      ),
+    ).toBe('Dette verktøyet endrer data du eier, så det krever alltid en godkjenning fra deg.')
   })
 })
 

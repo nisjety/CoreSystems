@@ -1,5 +1,33 @@
 import { orchestrationDecideApprovalInput } from '@/shared/actions/action-registry'
+import { causeCodeOf, type ApprovalCause } from '../approvals/approval-copy'
 import { ApiError, requestJson } from './http'
+import { readSseStream, type SseEvent } from './sse'
+
+export type { ApprovalCause, CauseCode } from '../approvals/approval-copy'
+
+// The closed refusal vocabulary of `continueRun` lives in the action contract; the
+// client re-exports its guards so a caller reads a failure from one place.
+export {
+  CHAT_RUN_CONTINUE_FRAME_REFUSALS,
+  CHAT_RUN_CONTINUE_HTTP_REFUSALS,
+  chatRunContinueFrameRefusalOf,
+  chatRunContinueHttpRefusalOf,
+  chatRunContinueParkFailureOf,
+  chatRunContinueSpentConnected,
+  chatRunContinueTransportFailureOf,
+  chatRunContinueUnflaggedRefusalOf,
+} from '../actions/chat-run-continue-contract'
+export type {
+  ChatRunContinueEffect,
+  ChatRunContinueFrameRefusal,
+  ChatRunContinueFrameRefusalCode,
+  ChatRunContinueHttpRefusal,
+  ChatRunContinueHttpRefusalCode,
+  ChatRunContinueParkFailure,
+  ChatRunContinueRunStaysParked,
+  ChatRunContinueTransportFailure,
+  ChatRunContinueTransportReason,
+} from '../actions/chat-run-continue-contract'
 
 // Human-in-the-loop run control for agentic chat runs. These call the gateway
 // `/api/v1/orchestration/*` proxy (→ model-gateway → session-core/execution-core).
@@ -10,14 +38,48 @@ import { ApiError, requestJson } from './http'
 
 export type ApprovalDecision = 'approve' | 'reject'
 
+/** What approving does with the paused work (build plan WS10 S1). Server-stated, never guessed. */
+export type ApprovalResumeClass = 'action_continuation' | 'live_poll' | 'none'
+
+/** Where an approved action stands. Derived server-side from the delivery rows. */
+export type ApprovalContinuationState =
+  | 'queued'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'not_resumable'
+  | 'live'
+  | 'awaiting_continue'
+
+export type ApprovalContinuation = {
+  state: ApprovalContinuationState
+  failureCode?: string
+  /** Independent read-back of the outcome, when one exists. */
+  verification?: string
+  providerReceiptId?: string
+}
+
 /** A pending/decided approval as reported by model-gateway's orchestration API. */
 export type Approval = {
   id: string
   runId?: string
   planId?: string
   stepId?: string
-  /** Approval kind, e.g. tool/plan/command — provider string, rendered as-is. */
+  /**
+   * Approval kind as the provider names it (`APPROVAL_KIND_*`). A token for code, never for a
+   * reader: `shared/approvals/approval-copy` words every surface from `cause` instead.
+   */
   kind?: string
+  /** Why the pause was raised, when the creator stated it. Absent on an older approval. */
+  cause?: ApprovalCause
+  /** Stable key of the gated tool, when the creator stated it. */
+  toolKey?: string
+  /** Short allowlisted label of the gated action. Never raw arguments. */
+  actionLabel?: string
+  /** What approving does. Absent on an approval created before the card context existed. */
+  resumeClass?: ApprovalResumeClass
+  /** Where the approved action stands. Absent until the approval is granted. */
+  continuation?: ApprovalContinuation
   /** PENDING | GRANTED | DENIED | EXPIRED (uppercased provider enum name). */
   status?: string
   requestedBy?: string
@@ -58,8 +120,54 @@ function canonicalApprovalStatus(raw: string | undefined): string | undefined {
   return upper
 }
 
+/**
+ * The cause object model-gateway projects on an approval. An absent or malformed cause is
+ * `undefined` (the surfaces then say the generic waiting line); a stated one is read through the
+ * closed vocabulary, so a code this build does not know arrives as `unclassified_gate`.
+ */
+export function normalizeApprovalCause(raw: unknown): ApprovalCause | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
+  const cause = raw as Record<string, unknown>
+  return {
+    code: causeCodeOf(cause.code),
+    tool: str(cause.tool),
+    effectClass: str(cause.effect_class),
+    riskCategory: str(cause.risk_category),
+    ruleId: str(cause.rule_id),
+    scopeOptions: Array.isArray(cause.scope_options)
+      ? cause.scope_options.filter((scope): scope is string => typeof scope === 'string')
+      : [],
+    stepUpRequired: cause.step_up_required === true,
+  }
+}
+
+const RESUME_CLASSES: readonly ApprovalResumeClass[] = ['action_continuation', 'live_poll', 'none']
+const CONTINUATION_STATES: readonly ApprovalContinuationState[] = [
+  'queued',
+  'running',
+  'completed',
+  'failed',
+  'not_resumable',
+  'live',
+  'awaiting_continue',
+]
+
+/** The typed continuation, read through the closed vocabulary; an unknown state is no claim. */
+export function normalizeApprovalContinuation(raw: unknown): ApprovalContinuation | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
+  const value = raw as Record<string, unknown>
+  const state = CONTINUATION_STATES.find((candidate) => candidate === value.state)
+  if (!state) return undefined
+  return {
+    state,
+    failureCode: str(value.failure_code),
+    verification: str(value.verification),
+    providerReceiptId: str(value.provider_receipt_id),
+  }
+}
+
 /** Normalize a model-gateway approval object (snake_case) to our camelCase shape. */
-function normalizeApproval(raw: RawApproval): Approval | null {
+export function normalizeApproval(raw: RawApproval): Approval | null {
   const id = str(raw.id) ?? str(raw.approval_id)
   if (!id) return null
   return {
@@ -68,6 +176,11 @@ function normalizeApproval(raw: RawApproval): Approval | null {
     planId: str(raw.plan_id) ?? str(raw.planId),
     stepId: str(raw.step_id) ?? str(raw.stepId),
     kind: str(raw.kind) ?? str(raw.approval_kind),
+    cause: normalizeApprovalCause(raw.cause),
+    toolKey: str(raw.tool_key),
+    actionLabel: str(raw.action_label),
+    resumeClass: RESUME_CLASSES.find((candidate) => candidate === raw.resume_class),
+    continuation: normalizeApprovalContinuation(raw.continuation),
     status: canonicalApprovalStatus(str(raw.status) ?? str(raw.state)),
     requestedBy: str(raw.requested_by) ?? str(raw.requestedBy),
     detail: str(raw.detail) ?? str(raw.summary) ?? str(raw.reason) ?? str(raw.tool),
@@ -113,6 +226,40 @@ export async function decideApproval(
   return payload.approval ? normalizeApproval(payload.approval) : null
 }
 
+/** The kind token of an approval that holds tool output back for review (build plan WS10 S8). */
+export const UNTRUSTED_CONTENT_KIND = 'APPROVAL_KIND_UNTRUSTED_CONTENT'
+
+/** The inert preview of held tool output. Plain text only: render it as text, never as markup. */
+export type QuarantinePreview = {
+  text: string
+  truncated: boolean
+  toolKey?: string
+  trustClass?: string
+}
+
+/**
+ * Read the plain-text preview (at most 1 KiB) of output held for review. Answered only to the
+ * person the approval is addressed to while it is pending or granted and unspent; any other case
+ * is a 404, which a caller shows as "no preview available".
+ */
+export async function readQuarantinePreview(
+  approvalId: string,
+  signal?: AbortSignal,
+): Promise<QuarantinePreview | null> {
+  const payload = await requestJson<{ preview?: Record<string, unknown> }>(
+    `/api/v1/orchestration/approvals/${encodeURIComponent(approvalId)}/quarantine-preview`,
+    { signal },
+  )
+  const raw = payload.preview
+  if (!raw || typeof raw.text !== 'string') return null
+  return {
+    text: raw.text,
+    truncated: raw.truncated === true,
+    toolKey: str(raw.tool_key),
+    trustClass: str(raw.trust_class),
+  }
+}
+
 /** Resume a run that paused for approval, after the decision is recorded. */
 export async function resumeRun(runId: string, signal?: AbortSignal): Promise<void> {
   await requestJson<unknown>(`/api/v1/orchestration/runs/${encodeURIComponent(runId)}/resume`, {
@@ -120,6 +267,96 @@ export async function resumeRun(runId: string, signal?: AbortSignal): Promise<vo
     body: '{}',
     signal,
   })
+}
+
+/**
+ * Continue a run that paused for a granted loop approval (build plan WS03 S3).
+ * The gateway relays the continuation as SSE: the approved call runs once, then
+ * the same run finishes. Only the approval id and its claim token go on the wire;
+ * the tools and authority come from the pause's snapshot upstream, never here.
+ *
+ * Rejects when the connection or the gateway refuses the continuation, so the
+ * caller sees the typed `ApiError` code rather than a stalled stream. Read that
+ * rejection with `chatRunContinueHttpRefusalOf` (the eight listed refusals) and
+ * then `chatRunContinueTransportFailureOf` (everything else: a 502
+ * `upstream_unavailable`, a 504, a dropped connection, an unlisted body), and the
+ * frames with `chatRunContinueSpentConnected`, `chatRunContinueFrameRefusalOf` and
+ * `chatRunContinueUnflaggedRefusalOf`.
+ *
+ * After an ambiguous failure (an effect whose `approvalSpent` is `unknown`) do not
+ * assume either way: follow the run by its id with the existing run read; the run
+ * read is the arbiter. Sending the request again with the same claim token is
+ * answered either with the continuation or with a refusal. Only 409
+ * `continuation_already_consumed` means the click was spent; `not_resumable`,
+ * `approval_not_found` and `continue_disabled` leave the spend unknown, because a
+ * spent approval whose run has ended gets them too. Following the run does not promise
+ * that it is live: after `continue_unavailable` the run may still be recovered
+ * inside the recovery window, about 15 minutes from the consume.
+ */
+export async function continueRun(
+  runId: string,
+  approvalId: string,
+  claimToken: string,
+  onEvent: (event: SseEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  let connError: unknown
+
+  await readSseStream(
+    `/api/v1/orchestration/runs/${encodeURIComponent(runId)}/continue`,
+    {
+      method: 'POST',
+      // Snake_case on the wire: the BFF body rejects unknown fields outright.
+      body: JSON.stringify({ approval_id: approvalId, claim_token: claimToken }),
+      signal,
+    },
+    onEvent,
+    (err) => {
+      connError = err
+    },
+  )
+
+  if (connError) throw connError
+}
+
+/**
+ * Resume a run the executor PARKED (WS03 S8-A): there is no approval to spend, so the body is
+ * the park form `{ approval_id: '', claim_token }`, the id present and exactly empty. The
+ * gateway relays the resume as SSE, and a failure is a frame marked `park_continue: true` (or
+ * the bare `agent_dispatch_unavailable` of the stream). It has no caller: there is no button,
+ * no flow and no controller that resumes a parked run yet, so it exists only so the contract
+ * and the wire shape are pinned before one is wired.
+ *
+ * Rejects as `continueRun` does when the gateway refuses before a stream opens (for example
+ * 409 `not_resumable`). Read the frames with `chatRunContinueParkFailureOf` (pass
+ * `{ parkStream: true }` for the bare frame): a failed park continue spends nothing, so the
+ * reader says to follow the run by its id, and whether the run stays parked (`runStaysParked`);
+ * the run read is the arbiter.
+ */
+export async function continueParkedRun(
+  runId: string,
+  claimToken: string,
+  onEvent: (event: SseEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  let connError: unknown
+
+  await readSseStream(
+    `/api/v1/orchestration/runs/${encodeURIComponent(runId)}/continue`,
+    {
+      method: 'POST',
+      // Snake_case on the wire, and the approval id is present and exactly empty: the BFF body
+      // has no absent-key form.
+      body: JSON.stringify({ approval_id: '', claim_token: claimToken }),
+      signal,
+    },
+    onEvent,
+    (err) => {
+      connError = err
+    },
+  )
+
+  if (connError) throw connError
 }
 
 /** Durable result of an authorized run cancellation. */
@@ -333,4 +570,199 @@ export async function getLineage(threadId: string, signal?: AbortSignal): Promis
     `/api/v1/orchestration/threads/${encodeURIComponent(threadId)}/lineage`,
     { signal },
   )
+}
+
+// ── Run questions (build plan WS14 S3) ───────────────────────────────────────
+// A question a run put to the person. It is its own store (`run_questions`), never an
+// approval: an answer is information and grants nothing. Dark until a later slice creates
+// questions, so nothing calls these yet.
+
+export type RunQuestionState = 'requested' | 'answered' | 'skipped' | 'expired' | 'cancelled'
+
+/** The closed item kinds. There is no kind for a secret or a credential. */
+export type QuestionItemKind = 'single' | 'multi' | 'text'
+
+export type QuestionOption = { id: string; label: string; description?: string }
+
+export type QuestionItem = {
+  id: string
+  kind: QuestionItemKind
+  prompt: string
+  /** Two to six for `single` and `multi`; empty for `text`. */
+  options: QuestionOption[]
+  /** A `single` or `multi` item also accepts a free-text answer. */
+  allowOther: boolean
+}
+
+/** The person's answer to one item. */
+export type QuestionAnswer = { itemId: string; optionIds: string[]; text: string }
+
+export type RunQuestion = {
+  id: string
+  runId: string
+  threadId: string
+  stepId?: string
+  state: RunQuestionState
+  /** `next_turn`: the answer is the next message. `resume`: it continues the same run. */
+  delivery: 'next_turn' | 'resume'
+  items: QuestionItem[]
+  requestedAt?: string
+  expiresAt?: string
+  answeredAt?: string
+  answers: QuestionAnswer[]
+  answeredMessageId?: string
+}
+
+const RUN_QUESTION_STATES: readonly RunQuestionState[] = [
+  'requested',
+  'answered',
+  'skipped',
+  'expired',
+  'cancelled',
+]
+const QUESTION_ITEM_KINDS: readonly QuestionItemKind[] = ['single', 'multi', 'text']
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string' && item.length > 0)
+    : []
+}
+
+function normalizeQuestionItem(raw: unknown): QuestionItem | null {
+  if (!isRecord(raw)) return null
+  const id = str(raw.id)
+  const prompt = str(raw.prompt)
+  const kind = QUESTION_ITEM_KINDS.find((candidate) => candidate === raw.kind)
+  if (!id || !prompt || !kind) return null
+  const options: QuestionOption[] = []
+  for (const rawOption of Array.isArray(raw.options) ? raw.options : []) {
+    if (!isRecord(rawOption)) return null
+    const optionId = str(rawOption.id)
+    const label = str(rawOption.label)
+    if (!optionId || !label) return null
+    const description = str(rawOption.description)
+    options.push(description ? { id: optionId, label, description } : { id: optionId, label })
+  }
+  return { id, kind, prompt, options, allowOther: raw.allow_other === true }
+}
+
+/**
+ * Normalize a model-gateway question (snake_case) to our camelCase shape. A question this
+ * client cannot render whole (an unknown state, an item kind it does not know, a malformed
+ * option) is dropped rather than shown half: the person is never asked something the card
+ * cannot present.
+ */
+export function normalizeRunQuestion(raw: unknown): RunQuestion | null {
+  if (!isRecord(raw)) return null
+  const id = str(raw.id)
+  const runId = str(raw.run_id)
+  const threadId = str(raw.thread_id)
+  const state = RUN_QUESTION_STATES.find((candidate) => candidate === raw.state)
+  const delivery = raw.delivery === 'next_turn' || raw.delivery === 'resume' ? raw.delivery : null
+  if (!id || !runId || !threadId || !state || !delivery || !Array.isArray(raw.items)) return null
+  const items: QuestionItem[] = []
+  for (const rawItem of raw.items) {
+    const item = normalizeQuestionItem(rawItem)
+    if (!item) return null
+    items.push(item)
+  }
+  if (items.length === 0) return null
+  const answers: QuestionAnswer[] = []
+  for (const rawAnswer of Array.isArray(raw.answers) ? raw.answers : []) {
+    if (!isRecord(rawAnswer)) return null
+    const itemId = str(rawAnswer.item_id)
+    if (!itemId) return null
+    answers.push({
+      itemId,
+      optionIds: stringList(rawAnswer.option_ids),
+      text: typeof rawAnswer.text === 'string' ? rawAnswer.text : '',
+    })
+  }
+  const question: RunQuestion = { id, runId, threadId, state, delivery, items, answers }
+  const stepId = str(raw.step_id)
+  if (stepId) question.stepId = stepId
+  const requestedAt = str(raw.requested_at)
+  if (requestedAt) question.requestedAt = requestedAt
+  const expiresAt = str(raw.expires_at)
+  if (expiresAt) question.expiresAt = expiresAt
+  const answeredAt = str(raw.answered_at)
+  if (answeredAt) question.answeredAt = answeredAt
+  const answeredMessageId = str(raw.answered_message_id)
+  if (answeredMessageId) question.answeredMessageId = answeredMessageId
+  return question
+}
+
+/**
+ * List the signed-in person's own questions for a run, oldest first. Another person's
+ * questions are never returned. Rejects with the typed `ApiError`: a zero-retention or waived
+ * credential is refused (`zdr_durable_mutation_forbidden`, `zdr_waiver_route_mismatch`).
+ */
+export async function listRunQuestions(runId: string, signal?: AbortSignal): Promise<RunQuestion[]> {
+  const payload = await requestJson<{ questions?: unknown[] }>(
+    `/api/v1/orchestration/runs/${encodeURIComponent(runId)}/questions`,
+    { signal },
+  )
+  const list = Array.isArray(payload.questions) ? payload.questions : []
+  return list.map(normalizeRunQuestion).filter((question): question is RunQuestion => question !== null)
+}
+
+/** What the person gave: an answer for every item, or a skip. */
+export type RunQuestionResponse = { answers: QuestionAnswer[] } | { skip: true }
+
+/**
+ * The closed set of codes an answer can be refused with, each under its own status: 404
+ * `question_not_found` (another person's question answers the same), 410 `question_expired`,
+ * 409 `question_already_answered`, 422 `invalid_answer`. The transport error carries the code
+ * and message only, so the refused field and reason stay in the response body. A zero-retention
+ * refusal is read with the existing ZDR refusal guards.
+ */
+export const RUN_QUESTION_ERRORS = {
+  question_not_found: 404,
+  question_expired: 410,
+  question_already_answered: 409,
+  invalid_answer: 422,
+} as const
+
+export type RunQuestionErrorCode = keyof typeof RUN_QUESTION_ERRORS
+
+/** The typed question error a rejection carries, or null for any other failure. */
+export function runQuestionErrorCodeOf(error: unknown): RunQuestionErrorCode | null {
+  if (!(error instanceof ApiError)) return null
+  const { code, status } = error
+  if (code === null || !Object.hasOwn(RUN_QUESTION_ERRORS, code)) return null
+  const known = code as RunQuestionErrorCode
+  return RUN_QUESTION_ERRORS[known] === status ? known : null
+}
+
+/**
+ * Answer, or skip, one question. An identical retry is accepted again and returns the stored
+ * question; a different second answer is refused (see `RUN_QUESTION_ERRORS`). Only the answers
+ * or the skip go on the wire: the org, the owner and the message that carries the answer are
+ * the server's.
+ */
+export async function answerQuestion(
+  questionId: string,
+  response: RunQuestionResponse,
+  signal?: AbortSignal,
+): Promise<RunQuestion | null> {
+  const body =
+    'skip' in response
+      ? { answers: [], skip: true }
+      : {
+          answers: response.answers.map((answer) => ({
+            item_id: answer.itemId,
+            option_ids: answer.optionIds,
+            text: answer.text,
+          })),
+          skip: false,
+        }
+  const payload = await requestJson<{ question?: unknown }>(
+    `/api/v1/orchestration/questions/${encodeURIComponent(questionId)}/answer`,
+    { method: 'POST', body: JSON.stringify(body), signal },
+  )
+  return normalizeRunQuestion(payload.question)
 }

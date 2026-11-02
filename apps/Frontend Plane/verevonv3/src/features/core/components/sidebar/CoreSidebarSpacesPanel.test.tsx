@@ -76,9 +76,13 @@ describe('SpacesExpandedSidebarPanel', () => {
     expect(screen.getByRole('link', { name: 'Launch room' }).getAttribute('href')).toBe('/spaces/space_shared')
     expect(screen.getByText(/all conversations|alle samtaler/i)).toBeTruthy()
     // A Space conversation opens in its ROOM, never in /chat — the room's
-    // inline timeline is the shared record's one reader.
+    // inline timeline is the shared record's one reader. WS01-S7a: the link now names the
+    // thread, so the room opens it in the side pane.
     expect(screen.getByRole('link', { name: /(?:Open|Åpne) Launch plan.*Prepare the release.*(?:Working|Jobber)/ }).getAttribute('href')).toBe(
-      '/spaces/space%20personal',
+      '/spaces/space%20personal?thread_id=thread%20%2F%20launch#chat',
+    )
+    expect(screen.getByRole('link', { name: /(?:Open|Åpne) Retro notes/ }).getAttribute('href')).toBe(
+      '/spaces/space%20personal?thread_id=thread-retro#chat',
     )
     expect(screen.queryByRole('link', { name: /Åpne rommet|open room/i })).toBeNull()
   })
@@ -122,6 +126,23 @@ describe('SpacesExpandedSidebarPanel', () => {
     renderSpacesSidebar()
 
     expect(await screen.findByRole('link', { name: /Åpne samtale uten tittel/i })).toBeTruthy()
+  })
+
+  it('keeps an archived room listed last with a quiet Arkivert tag', async () => {
+    spacesClient.listSpaces.mockResolvedValue([
+      personalSpace,
+      { space_ref: 'space_old', name: 'Old room', kind: 'room', lifecycle: 'active', archived: true },
+      { space_ref: 'space_shared', name: 'Launch room', kind: 'room', lifecycle: 'active', archived: false },
+    ])
+    renderSpacesSidebar()
+
+    const archived = await screen.findByRole('link', { name: /Old room/ })
+    expect(archived.getAttribute('data-archived')).toBe('true')
+    expect(archived.textContent).toContain('Arkivert')
+    const live = screen.getByRole('link', { name: 'Launch room' })
+    expect(live.getAttribute('data-archived')).toBeNull()
+    // Archived sinks below the live room, whatever the server order.
+    expect(live.compareDocumentPosition(archived) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
   // Item 1b: Slack's channel dot, for agent work. The sidebar fetches nothing

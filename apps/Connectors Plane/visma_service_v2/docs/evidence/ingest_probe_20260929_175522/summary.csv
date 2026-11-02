@@ -1,0 +1,12 @@
+endpoint,window_days,pass,exit,status,records_in,written,bronze,pages,non_200,last_page,min_rate_remaining,max_page_ms,watermark
+countries,,1,0,succeeded,260,260,260,1,0,260,,532,2026-09-29 11:04:29.173+00
+countries,,2,0,succeeded,1,1,260,1,0,1,,547,2026-09-29 11:04:29.173+00
+states,,1,0,succeeded,806,806,806,2,0,306,,490,2026-02-15 00:42:08.923+00
+states,,2,0,succeeded,806,806,806,2,0,306,,548,2026-02-15 00:42:08.923+00
+addresses,,1,0,succeeded,37699,37699,37699,76,0,199,,651,2026-09-29 17:06:20.711+00
+addresses,,2,0,succeeded,603,603,37699,2,0,103,,699,2026-09-29 17:06:20.711+00
+vat_zones,,1,0,succeeded,15,15,15,1,0,15,14573,543,
+vat_zones,,2,0,succeeded,15,15,15,1,0,15,14572,464,
+vat_categories,,1,0,succeeded,48,48,48,1,0,48,14571,1157,2026-09-29 18:59:40.39+00
+vat_categories,,2,0,succeeded,47,47,48,1,0,47,14570,1031,2026-09-29 18:59:40.39+00
+supplier_payments,,1,1,failed,9132,0,0,92,0,32,14478,8278,

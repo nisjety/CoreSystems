@@ -306,6 +306,35 @@ async fn create_batch(
     }))
 }
 
+/// The typed code for a structured-extraction refusal, read from the `error` text that
+/// quarry-edge sets. Quarry gives these refusals no `details.reason`, so the text is the only
+/// signal it sends. A text that matches none of the four keeps Quarry's own `UNSUPPORTED`.
+fn extract_refusal_code(text: &str) -> Option<&'static str> {
+    if text.contains("QUARRY_EDGE__AI_FORMATS is off") {
+        Some("extract_ai_formats_off")
+    } else if text.contains("QUARRY_EDGE__MODEL_PLANE_URL is not set") {
+        Some("extract_model_plane_not_configured")
+    } else if text.contains("holds no model credential") {
+        Some("extract_model_lane_not_granted")
+    } else if text.contains("refused this service") {
+        Some("extract_model_plane_refused")
+    } else {
+        None
+    }
+}
+
+/// The 501 body with the typed code at its top level, where the SPA reads it.
+fn with_extract_refusal_code(status: StatusCode, mut body: Value) -> Value {
+    if status != StatusCode::NOT_IMPLEMENTED {
+        return body;
+    }
+    let text = body.get("error").and_then(Value::as_str).unwrap_or_default();
+    if let Some(code) = extract_refusal_code(text) {
+        body["code"] = json!(code);
+    }
+    body
+}
+
 async fn create_extract(
     state: &AppState,
     body: &Value,
@@ -345,7 +374,7 @@ async fn create_extract(
     )
     .await;
     if !status.is_success() {
-        return forward(status, resp);
+        return forward(status, with_extract_refusal_code(status, resp));
     }
 
     let data = unwrap_data(&resp);
@@ -554,5 +583,47 @@ mod tests {
         let item = to_run_item(&job);
         assert_eq!(item["target"], "crawl target");
         assert_eq!(item["progress"]["pages"], 5);
+    }
+
+    #[test]
+    fn each_of_the_four_extract_refusals_gets_its_own_code() {
+        let texts = [
+            (
+                "structured extraction needs the Model Plane, and QUARRY_EDGE__MODEL_PLANE_URL is not set on this deployment",
+                "extract_model_plane_not_configured",
+            ),
+            (
+                "structured extraction needs a granted Model Plane lane, and this deployment holds no model credential",
+                "extract_model_lane_not_granted",
+            ),
+            (
+                "structured extraction needs a granted Model Plane lane, and the Model Plane refused this service",
+                "extract_model_plane_refused",
+            ),
+            (
+                "structured extraction is not available on this edge: QUARRY_EDGE__AI_FORMATS is off",
+                "extract_ai_formats_off",
+            ),
+        ];
+        for (text, code) in texts {
+            assert_eq!(extract_refusal_code(text), Some(code), "{text}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_extract_refusal_keeps_quarry_s_own_code() {
+        assert_eq!(extract_refusal_code("a refusal this gateway has not seen"), None);
+        let body = json!({ "error": "a refusal this gateway has not seen", "code": "UNSUPPORTED" });
+        let kept = with_extract_refusal_code(StatusCode::NOT_IMPLEMENTED, body);
+        assert_eq!(kept["code"], "UNSUPPORTED");
+    }
+
+    #[test]
+    fn the_code_is_set_only_on_a_501_refusal() {
+        let body = json!({ "error": "QUARRY_EDGE__AI_FORMATS is off", "code": "UNSUPPORTED" });
+        let other_status = with_extract_refusal_code(StatusCode::BAD_REQUEST, body.clone());
+        assert_eq!(other_status["code"], "UNSUPPORTED");
+        let refused = with_extract_refusal_code(StatusCode::NOT_IMPLEMENTED, body);
+        assert_eq!(refused["code"], "extract_ai_formats_off");
     }
 }

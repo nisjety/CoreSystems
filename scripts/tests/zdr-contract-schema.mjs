@@ -29,20 +29,20 @@ export const MATRIX_PATH = 'apps/Model Plane/api/contracts/zdr-posture-matrix.js
 export const CAPABILITIES_PATH = 'apps/Model Plane/api/contracts/connection-zdr-capabilities.json';
 
 /**
- * The Z-05a refusal catalogue as the build manifest fixes it (task Z-05a, corrections), plus the
- * three kind strings CR-T3 froze. The matrix may only expect codes from here. Z-05a replaces this
- * constant with a read of its own zdr-refusals.json by listing that file in the sync script
- * (validateRefusalCoverage); until then this is the authority.
+ * The Z-05a refusal catalogue: the codes of apps/Model Plane/api/contracts/zdr-refusals.json (the
+ * mp-contracts catalogue, generated), plus the two posture kinds CR-T3 froze in infer-statuses.json,
+ * which are not ZDR refusals but may be expected by the matrix. The matrix may only expect codes
+ * from here. Read at load time: a missing catalogue throws, so the check never runs against nothing.
+ * The catalogue sits next to this script's checkout by default; the sync script sets
+ * ZDR_REFUSALS_CATALOGUE to the catalogue of the tree it checks, because its self-test runs this
+ * loader from a scratch copy whose location says nothing about where the tree is.
  */
+const REFUSALS_PATH = process.env.ZDR_REFUSALS_CATALOGUE
+  ? resolve(process.env.ZDR_REFUSALS_CATALOGUE)
+  : resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'apps/Model Plane/api/contracts/zdr-refusals.json');
+const REFUSAL_CATALOGUE = JSON.parse(readFileSync(REFUSALS_PATH, 'utf8'));
 export const Z05A_REFUSAL_CODES = [
-  'zdr_unavailable',
-  'zdr_feature_not_supported',
-  'zdr_connection_not_supported',
-  'zdr_connection_not_acknowledged',
-  'zdr_explicit_request_not_supported_by_connection',
-  'zdr_decision_unavailable',
-  'zdr_waiver_route_mismatch',
-  'zdr_posture_mismatch',
+  ...REFUSAL_CATALOGUE.codes.map((entry) => entry.code),
   'residency_unavailable',
   'tier_unavailable',
 ];

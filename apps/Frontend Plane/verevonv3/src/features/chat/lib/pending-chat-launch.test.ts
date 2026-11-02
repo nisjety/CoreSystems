@@ -9,12 +9,58 @@ vi.mock('@/shared/lib/blob-data', () => ({
 import { objectUrlToDataUrl } from '@/shared/lib/blob-data'
 import { consumePendingChatLaunch, writePendingChatLaunch, MAX_PENDING_LAUNCH_CHARS } from './pending-chat-launch'
 
-afterEach(() => { vi.restoreAllMocks(); consumePendingChatLaunch() })
+// The smallest IndexedDB the launch store uses: put, get and clear in one
+// transaction, completing on the next task. `data` outlives a module reload.
+function fakeIndexedDb(data: Map<string, unknown>, opts: { blocked?: boolean } = {}) {
+  const open = vi.fn(() => {
+    const request: { result?: unknown; error?: unknown; onsuccess?: () => void; onerror?: () => void; onupgradeneeded?: () => void } = {}
+    const db = {
+      close: vi.fn(),
+      createObjectStore: () => undefined,
+      transaction: () => {
+        const tx: { oncomplete?: () => void } = {}
+        setTimeout(() => tx.oncomplete?.(), 0)
+        return {
+          get oncomplete() { return tx.oncomplete },
+          set oncomplete(handler) { tx.oncomplete = handler },
+          objectStore: () => ({
+            clear: () => { data.clear() },
+            put: (value: unknown, key: string) => { data.set(key, value) },
+            get: (key: string) => {
+              const read: { result?: unknown; onsuccess?: () => void } = {}
+              setTimeout(() => { read.result = data.get(key); read.onsuccess?.() }, 0)
+              return read
+            },
+          }),
+        }
+      },
+    }
+    setTimeout(() => {
+      if (opts.blocked) { request.error = new Error('blocked'); request.onerror?.(); return }
+      request.result = db
+      request.onupgradeneeded?.()
+      request.onsuccess?.()
+    }, 0)
+    return request
+  })
+  return { open }
+}
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 5))
+const bigFile = (id: string) => ({
+  id, name: `${id}.xlsx`, size: 3_000_000, type: 'application/octet-stream',
+  url: `data:application/octet-stream;base64,${'A'.repeat(4_000_000)}`,
+})
+let idbData: Map<string, unknown>
+
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); consumePendingChatLaunch() })
 
 beforeEach(() => {
   window.localStorage.clear()
   window.sessionStorage.clear()
   vi.mocked(objectUrlToDataUrl).mockClear()
+  idbData = new Map()
+  vi.stubGlobal('indexedDB', fakeIndexedDb(idbData))
 })
 
 describe('pending chat launch routing', () => {
@@ -38,6 +84,17 @@ describe('pending chat launch routing', () => {
       effort: 'deep',
       tone: 'concise',
     })
+  })
+
+  it('carries a canonical effort level through the launch and drops an unknown one', async () => {
+    await writePendingChatLaunch({ text: 'think hard', effort: 'xhigh' })
+    expect(consumePendingChatLaunch()).toMatchObject({ effort: 'xhigh' })
+
+    window.sessionStorage.setItem(
+      'verevon.chat.pendingLaunch',
+      JSON.stringify({ text: 'stale client', effort: 'ultra' }),
+    )
+    expect(consumePendingChatLaunch()).toBeNull()
   })
 
   // DashboardComposer revokes every attachment's blob: URL right after this
@@ -112,5 +169,73 @@ describe('pending chat launch routing', () => {
     expect(write).not.toHaveBeenCalled()
     expect(consumePendingChatLaunch()).toMatchObject({ text: 'private draft', zdr: true })
     expect(consumePendingChatLaunch()).toBeNull()
+  })
+})
+
+describe('pending chat launch attachments beyond the sessionStorage envelope', () => {
+  it('carries two 3 MB files through the handoff without putting their bytes in sessionStorage', async () => {
+    await writePendingChatLaunch({ text: 'two big files', attachments: [bigFile('a'), bigFile('b')] })
+
+    const envelope = window.sessionStorage.getItem('verevon.chat.pendingLaunch') ?? ''
+    expect(envelope.length).toBeLessThan(MAX_PENDING_LAUNCH_CHARS)
+    expect(envelope).not.toContain('AAAA')
+    expect(idbData.size).toBe(2)
+
+    const launch = consumePendingChatLaunch()
+    expect(launch?.attachments?.map((attachment) => attachment.url.length)).toEqual([4_000_000 + 37, 4_000_000 + 37])
+    await settle()
+    expect(idbData.size).toBe(0)
+    expect(window.sessionStorage.length).toBe(0)
+  })
+
+  it('restores the bytes from IndexedDB after a reload, and the sync consume leaves them for it', async () => {
+    await writePendingChatLaunch({ text: 'survive a reload', attachments: [bigFile('a')] })
+    vi.resetModules()
+    const reloaded = await import('./pending-chat-launch')
+
+    expect(reloaded.consumePendingChatLaunch()).toBeNull()
+    expect(window.sessionStorage.length).toBe(1)
+
+    const launch = await reloaded.consumePendingChatLaunchAsync()
+    expect(launch?.text).toBe('survive a reload')
+    expect(launch?.attachments?.[0]?.url).toBe(bigFile('a').url)
+    await settle()
+    expect(idbData.size).toBe(0)
+    expect(window.sessionStorage.length).toBe(0)
+  })
+
+  it('drops a reloaded launch whose attachment bytes are gone instead of sending it without the file', async () => {
+    await writePendingChatLaunch({ text: 'lost file', attachments: [bigFile('a')] })
+    vi.resetModules()
+    const reloaded = await import('./pending-chat-launch')
+    idbData.clear()
+
+    expect(await reloaded.consumePendingChatLaunchAsync()).toBeNull()
+    expect(window.sessionStorage.length).toBe(0)
+  })
+
+  it('refuses when IndexedDB is blocked and leaves no half-written launch', async () => {
+    vi.stubGlobal('indexedDB', fakeIndexedDb(idbData, { blocked: true }))
+    await expect(writePendingChatLaunch({ text: 'private window', attachments: [bigFile('a')] }))
+      .rejects.toMatchObject({ reason: 'storage' })
+    expect(window.sessionStorage.length).toBe(0)
+    expect(consumePendingChatLaunch()).toBeNull()
+  })
+
+  it('never opens IndexedDB for a temporary launch with attachments', async () => {
+    const indexedDb = fakeIndexedDb(idbData)
+    vi.stubGlobal('indexedDB', indexedDb)
+    await writePendingChatLaunch({ text: 'private files', zdr: true, attachments: [bigFile('a')] })
+    expect(indexedDb.open).not.toHaveBeenCalled()
+    expect(window.sessionStorage.length).toBe(0)
+    expect(consumePendingChatLaunch()?.attachments?.[0]?.url).toBe(bigFile('a').url)
+    await settle()
+    expect(indexedDb.open).not.toHaveBeenCalled()
+  })
+
+  it('still bounds the text envelope when attachments ride IndexedDB', async () => {
+    await expect(writePendingChatLaunch({ text: 'x'.repeat(MAX_PENDING_LAUNCH_CHARS), attachments: [bigFile('a')] }))
+      .rejects.toMatchObject({ reason: 'too_large' })
+    expect(idbData.size).toBe(0)
   })
 })

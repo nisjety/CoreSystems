@@ -52,9 +52,10 @@ fn document_zdr_requested(zdr_classification: &str) -> bool {
 /// a ZDR-shaped retention posture.
 fn reject_zdr_durable_mutation(caller_zdr: bool, zdr_classification: &str) -> Result<(), Status> {
     if caller_zdr || document_zdr_requested(zdr_classification) {
-        return Err(Status::failed_precondition(
-            "Data Plane document promotion is unavailable under ZDR",
-        ));
+        return Err(
+            mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+                .grpc_status(tonic::Code::FailedPrecondition),
+        );
     }
     Ok(())
 }

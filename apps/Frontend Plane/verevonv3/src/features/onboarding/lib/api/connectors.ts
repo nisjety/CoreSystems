@@ -16,6 +16,7 @@ export async function startConnectSession(input: {
   orgId: string
   provider: string
   selectedSources: string[]
+  bundles?: string[]
 }): Promise<{ connectUrl: string; authMode?: string; sessionToken?: string }> {
   const endpoint = '/api/v1/onboarding/actions/start-connect-session'
   return parseOnboardingResponse(connectSessionSchema, await requestJson<unknown>(endpoint, {
@@ -24,7 +25,7 @@ export async function startConnectSession(input: {
       orgId: input.orgId,
       provider: input.provider,
       selectedSources: input.selectedSources,
-      bundles: connectBundlesForSources(input.provider, input.selectedSources),
+      bundles: input.bundles ?? connectBundlesForSources(input.provider, input.selectedSources),
     }, input.actor)),
   }), endpoint)
 }

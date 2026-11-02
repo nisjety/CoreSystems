@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -31,6 +32,7 @@ import (
 	"github.com/triodelab/model-plane/services/capability-core/internal/authz"
 	"github.com/triodelab/model-plane/services/capability-core/internal/crypto"
 	"github.com/triodelab/model-plane/services/capability-core/internal/reconcile"
+	"github.com/triodelab/model-plane/services/capability-core/internal/skillbundle"
 )
 
 type registryDatabase interface {
@@ -91,15 +93,83 @@ type skillRow struct {
 	// Ownership/sharing (SKILL-1): "org" (default, visible to the whole org)
 	// or "user" (private to OwnerUserID until explicitly shared). Mirrors
 	// mcp_servers' scope + owner + explicit-share shape.
-	Scope       string    `json:"scope"`
-	OwnerUserID string    `json:"owner_user_id,omitempty"`
-	SharedWith  []string  `json:"shared_with,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	Scope       string   `json:"scope"`
+	OwnerUserID string   `json:"owner_user_id,omitempty"`
+	SharedWith  []string `json:"shared_with,omitempty"`
+	// Provenance and review (WS07 S7): who wrote the skill ("user" or
+	// "background_review"), whether its owner has decided on it ("proposed",
+	// "accepted" or "rejected"), and what a proposal was distilled from. Read
+	// only: a create ignores whatever a client sends for them.
+	Origin         string    `json:"origin"`
+	ReviewState    string    `json:"review_state"`
+	SourceRunID    string    `json:"source_run_id,omitempty"`
+	ProposalReason string    `json:"proposal_reason,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+	// PromotedFrom is read on create only: the id of the shared, accepted user
+	// skill an admin is copying into an org skill. The copy is a new row; the
+	// source is untouched, and the revision log records where it came from.
+	PromotedFrom string `json:"promoted_from,omitempty"`
 }
 
 func validSkillScope(value string) bool {
 	return value == "org" || value == "user"
+}
+
+// skillActorSQL names the actor of the skill change the transaction is about to
+// make. Skill revisions are written by a trigger on agent_skills (session-core
+// migration 0064), which reads these transaction-local settings; the names are
+// pinned to the migration by TestSkillActorSettingsMatchTheMigration. run_id and
+// thread_id are session-core's (a learned proposal's source); the registry has none.
+const skillActorSQL = `SELECT set_config('mp.actor_kind', $1, true), set_config('mp.actor_id', $2, true),
+	set_config('mp.run_id', '', true), set_config('mp.thread_id', '', true),
+	set_config('mp.reason', $3, true), set_config('mp.skill_action', $4, true)`
+
+// skillTxBeginner is the pool's transaction entry point. The registry's own
+// interface stays Exec/Query/QueryRow so fakes need not implement it; a skill
+// mutation needs it, and a database without it cannot mutate a skill at all.
+type skillTxBeginner interface {
+	Begin(context.Context) (pgx.Tx, error)
+}
+
+var errSkillTransactionUnavailable = errors.New("skill mutations need a transactional database")
+
+// skillActor is the verified caller as the revision log names it: "user" or
+// "service" and the principal id, never anything the request body claims.
+func skillActor(r *http.Request) (kind, id string) {
+	principal, ok := authctx.PrincipalFromContext(r.Context())
+	if !ok {
+		return "", ""
+	}
+	if principal.PrincipalType == "user" || principal.PrincipalType == "service" {
+		kind = principal.PrincipalType
+	}
+	return kind, principal.ActorID
+}
+
+// mutateSkill runs fn in one transaction that has first named the caller as the
+// actor, so the revision the trigger writes for every row fn changes carries who
+// did it. action is "" unless the change is a decision the trigger cannot derive
+// ("promoted").
+func (h *SkillsHandler) mutateSkill(r *http.Request, action, reason string, fn func(tx registryDatabase) error) error {
+	beginner, ok := h.pool.(skillTxBeginner)
+	if !ok {
+		return errSkillTransactionUnavailable
+	}
+	ctx := r.Context()
+	tx, err := beginner.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	kind, id := skillActor(r)
+	if _, err := tx.Exec(ctx, skillActorSQL, kind, id, reason, action); err != nil {
+		return err
+	}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // normalizeSkillShares validates and cleans a caller-supplied grantee list:
@@ -131,6 +201,38 @@ func normalizeSkillShares(ownerUserID string, grantees []string) ([]string, erro
 	return clean, nil
 }
 
+// errSkillNotCallersToChange answers a change to a user-scoped skill by a caller who neither
+// owns it nor is an org admin. It is a 403 because the sharing check in update already answers
+// 403 to the same caller about the same skill.
+var errSkillNotCallersToChange = errors.New("only the skill owner or an org admin may change or delete this skill")
+
+// ensureSkillCallerMayChange runs inside the mutation's transaction, before its statement. It
+// locks the skill's row and reads its scope and owner, so the statement that follows cannot
+// race a change to either. An org-scoped skill stays open to every member, as it always was.
+// A skill that is not there passes: the statement then changes nothing and the caller gets 404.
+func ensureSkillCallerMayChange(ctx context.Context, tx registryDatabase, id, orgID, callerID string, isAdmin bool) error {
+	rows, err := tx.Query(ctx, `
+		SELECT scope, owner_user_id FROM agent_skills
+		WHERE id=$1 AND org_id=$2 FOR UPDATE
+	`, id, orgID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return rows.Err()
+	}
+	var scope, ownerUserID string
+	if err := rows.Scan(&scope, &ownerUserID); err != nil {
+		return err
+	}
+	isOwner := ownerUserID != "" && ownerUserID == callerID
+	if scope == "org" || isAdmin || isOwner {
+		return nil
+	}
+	return errSkillNotCallersToChange
+}
+
 func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -139,15 +241,19 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 		isAdmin := verifiedIsAdmin(r)
 		// Visibility (SKILL-1): org-scoped skills, the caller's own, ones
 		// explicitly shared with the caller, and — for governance — any
-		// shared (never private) skill an admin didn't create themselves.
+		// shared (never private) skill an admin didn't create themselves. A
+		// proposal is its owner's alone until it is accepted: a share written
+		// onto it shows it to no one else.
 		rows, err := h.pool.Query(r.Context(), `
 			SELECT id, org_id, name, description, content,
 			       trigger_keywords, trigger_file_patterns, tool_restrictions,
-			       enabled, scope, owner_user_id, shared_with, created_at, updated_at
+			       enabled, scope, owner_user_id, shared_with,
+			       origin, review_state, source_run_id, proposal_reason, created_at, updated_at
 			FROM agent_skills
 			WHERE org_id = $1
-			  AND (scope = 'org' OR owner_user_id = $2 OR shared_with ? $2
-			       OR ($3 AND jsonb_array_length(shared_with) > 0))
+			  AND (scope = 'org' OR owner_user_id = $2
+			       OR (review_state = 'accepted' AND (shared_with ? $2
+			           OR ($3 AND jsonb_array_length(shared_with) > 0))))
 			ORDER BY name
 		`, orgID, callerID, isAdmin)
 		if err != nil {
@@ -162,6 +268,7 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			if err := rows.Scan(&s.ID, &s.OrgID, &s.Name, &s.Description, &s.Content,
 				&s.TriggerKeywords, &s.TriggerFilePatterns, &s.ToolRestrictions,
 				&s.Enabled, &s.Scope, &s.OwnerUserID, &s.SharedWith,
+				&s.Origin, &s.ReviewState, &s.SourceRunID, &s.ProposalReason,
 				&s.CreatedAt, &s.UpdatedAt); err != nil {
 				jsonErr(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -211,13 +318,47 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 		fp, _ := json.Marshal(s.TriggerFilePatterns)
 		tr, _ := json.Marshal(s.ToolRestrictions)
 		sw, _ := json.Marshal(s.SharedWith)
-		_, err := h.pool.Exec(r.Context(), `
-			INSERT INTO agent_skills (id, org_id, name, description, content,
-			    trigger_keywords, trigger_file_patterns, tool_restrictions,
-			    enabled, scope, owner_user_id, shared_with, created_at, updated_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-		`, s.ID, s.OrgID, s.Name, s.Description, s.Content, kw, fp, tr, s.Enabled,
-			s.Scope, s.OwnerUserID, sw, now, now)
+		// A promotion copies a skill that was shared with the admin into an org
+		// skill. It is never a way to reach a private one: the source must be a
+		// user skill its owner accepted and shared, by the same rule the list uses.
+		action, reason := "", ""
+		promotedFrom := strings.TrimSpace(s.PromotedFrom)
+		if promotedFrom != "" {
+			if !mcpIdentifier.MatchString(promotedFrom) || s.Scope != "org" {
+				jsonErr(w, "promoted_from must name a skill and create an org skill", http.StatusUnprocessableEntity)
+				return
+			}
+			action, reason = "promoted", "promoted_from:"+promotedFrom
+		}
+		var sourceMissing bool
+		err := h.mutateSkill(r, action, reason, func(tx registryDatabase) error {
+			if promotedFrom != "" {
+				var visible bool
+				if err := tx.QueryRow(r.Context(), `
+					SELECT EXISTS (SELECT 1 FROM agent_skills
+					WHERE id = $1 AND org_id = $2 AND scope = 'user' AND review_state = 'accepted'
+					  AND (shared_with ? $3 OR ($4 AND jsonb_array_length(shared_with) > 0)))
+				`, promotedFrom, s.OrgID, verifiedActorID(r), verifiedIsAdmin(r)).Scan(&visible); err != nil {
+					return err
+				}
+				if !visible {
+					sourceMissing = true
+					return nil
+				}
+			}
+			_, err := tx.Exec(r.Context(), `
+				INSERT INTO agent_skills (id, org_id, name, description, content,
+				    trigger_keywords, trigger_file_patterns, tool_restrictions,
+				    enabled, scope, owner_user_id, shared_with, created_at, updated_at)
+				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+			`, s.ID, s.OrgID, s.Name, s.Description, s.Content, kw, fp, tr, s.Enabled,
+				s.Scope, s.OwnerUserID, sw, now, now)
+			return err
+		})
+		if sourceMissing {
+			jsonErr(w, "promotion source not found", http.StatusNotFound)
+			return
+		}
 		if err != nil {
 			jsonErr(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -240,14 +381,17 @@ func (h *SkillsHandler) get(w http.ResponseWriter, r *http.Request, id string) {
 	err := h.pool.QueryRow(r.Context(), `
 		SELECT id, org_id, name, description, content,
 		       trigger_keywords, trigger_file_patterns, tool_restrictions,
-		       enabled, scope, owner_user_id, shared_with, created_at, updated_at
+		       enabled, scope, owner_user_id, shared_with,
+		       origin, review_state, source_run_id, proposal_reason, created_at, updated_at
 		FROM agent_skills
 		WHERE id = $1 AND org_id = $2
-		  AND (scope = 'org' OR owner_user_id = $3 OR shared_with ? $3
-		       OR ($4 AND jsonb_array_length(shared_with) > 0))
+		  AND (scope = 'org' OR owner_user_id = $3
+		       OR (review_state = 'accepted' AND (shared_with ? $3
+		           OR ($4 AND jsonb_array_length(shared_with) > 0))))
 	`, id, verifiedOrganizationID(r), callerID, isAdmin).Scan(&s.ID, &s.OrgID, &s.Name, &s.Description, &s.Content,
 		&s.TriggerKeywords, &s.TriggerFilePatterns, &s.ToolRestrictions,
-		&s.Enabled, &s.Scope, &s.OwnerUserID, &s.SharedWith, &s.CreatedAt, &s.UpdatedAt)
+		&s.Enabled, &s.Scope, &s.OwnerUserID, &s.SharedWith,
+		&s.Origin, &s.ReviewState, &s.SourceRunID, &s.ProposalReason, &s.CreatedAt, &s.UpdatedAt)
 	if err != nil {
 		jsonErr(w, "not found", http.StatusNotFound)
 		return
@@ -272,6 +416,8 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
 	}
 	now := time.Now().UTC()
 	orgID := verifiedOrganizationID(r)
+	callerID := verifiedActorID(r)
+	isAdmin := verifiedIsAdmin(r)
 	var sharedJSON any
 	if update.SharedWith != nil {
 		var scope, ownerUserID string
@@ -291,7 +437,6 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
 			return
 		}
 		// A user-owned resource may only be shared by its durable owner.
-		callerID := verifiedActorID(r)
 		if ownerUserID == "" || callerID != ownerUserID {
 			jsonErr(w, "only the skill owner may change sharing", http.StatusForbidden)
 			return
@@ -312,13 +457,44 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
 	if update.Enabled != nil {
 		enabled = *update.Enabled
 	}
-	result, err := h.pool.Exec(r.Context(), `
-		UPDATE agent_skills
-		SET enabled=COALESCE($1, enabled), description=COALESCE(NULLIF($2, ''), description),
-			content=COALESCE(NULLIF($3, ''), content), shared_with=COALESCE($4, shared_with),
-			updated_at=$5
-		WHERE id=$6 AND org_id=$7
-	`, enabled, update.Description, update.Content, sharedJSON, now, id, orgID)
+	// A learned skill becomes active by its owner's decision, never by a switch:
+	// enabling is refused for anything not accepted, in the statement itself so
+	// no write can race the check. The change runs in a transaction that names
+	// the caller, so its revision carries the actor.
+	var result pgconn.CommandTag
+	proposalUndecided := false
+	err := h.mutateSkill(r, "", "", func(tx registryDatabase) error {
+		// A user-owned skill changes only for its owner or an admin. The check takes the row
+		// lock before the statement below, so the check and the write see the same skill.
+		if err := ensureSkillCallerMayChange(r.Context(), tx, id, orgID, callerID, isAdmin); err != nil {
+			return err
+		}
+		var err error
+		result, err = tx.Exec(r.Context(), `
+			UPDATE agent_skills
+			SET enabled=COALESCE($1, enabled), description=COALESCE(NULLIF($2, ''), description),
+				content=COALESCE(NULLIF($3, ''), content), shared_with=COALESCE($4, shared_with),
+				updated_at=$5
+			WHERE id=$6 AND org_id=$7 AND ($1::boolean IS NOT TRUE OR review_state = 'accepted')
+		`, enabled, update.Description, update.Content, sharedJSON, now, id, orgID)
+		if err == nil && result.RowsAffected() == 0 && update.Enabled != nil && *update.Enabled {
+			var reviewState string
+			if tx.QueryRow(r.Context(), `
+				SELECT review_state FROM agent_skills WHERE id=$1 AND org_id=$2
+			`, id, orgID).Scan(&reviewState) == nil && reviewState != "accepted" {
+				proposalUndecided = true
+			}
+		}
+		return err
+	})
+	if errors.Is(err, errSkillNotCallersToChange) {
+		jsonErr(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	if proposalUndecided {
+		jsonErr(w, "proposal_requires_decision", http.StatusConflict)
+		return
+	}
 	if !writeSingleScopedMutation(w, "agent skill", result, err) {
 		return
 	}
@@ -326,8 +502,212 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
 }
 
 func (h *SkillsHandler) delete(w http.ResponseWriter, r *http.Request, id string) {
-	result, err := h.pool.Exec(r.Context(), `DELETE FROM agent_skills WHERE id=$1 AND org_id=$2`, id, verifiedOrganizationID(r))
+	orgID := verifiedOrganizationID(r)
+	var result pgconn.CommandTag
+	err := h.mutateSkill(r, "", "", func(tx registryDatabase) error {
+		if err := ensureSkillCallerMayChange(r.Context(), tx, id, orgID, verifiedActorID(r), verifiedIsAdmin(r)); err != nil {
+			return err
+		}
+		var err error
+		result, err = tx.Exec(r.Context(), `DELETE FROM agent_skills WHERE id=$1 AND org_id=$2`, id, orgID)
+		return err
+	})
+	if errors.Is(err, errSkillNotCallersToChange) {
+		jsonErr(w, err.Error(), http.StatusForbidden)
+		return
+	}
 	if !writeSingleScopedMutation(w, "agent skill", result, err) {
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---------------------------------------------------------------------------
+// SkillBundlesHandler  /api/v1/skills/{id}/bundle (WS19-S6)
+// ---------------------------------------------------------------------------
+
+const skillBundlesAPIEnv = "SKILL_BUNDLES_ENABLED"
+
+// maxSkillBundleBodyBytes bounds an upload before it is read: the caps on the unpacked files
+// and room for the zip headers of the most entries a bundle may hold.
+const maxSkillBundleBodyBytes = skillbundle.MaxTotalBytes + 256<<10
+
+// SkillBundlesAPIFromLookup reads SKILL_BUNDLES_ENABLED strictly: only the literal "true"
+// turns the surface on, so a typo or a stray "1" leaves it dark.
+func SkillBundlesAPIFromLookup(lookup func(string) string) bool {
+	return lookup(skillBundlesAPIEnv) == "true"
+}
+
+// SkillBundlesHandler serves PUT, GET and DELETE on /api/v1/skills/{id}/bundle. Every route is
+// an org admin's: uploading a bundle puts executable scripts in front of the agent, so the
+// surface is org configuration, never a member's. While the switch is off every route is a 404
+// before anything is read or written.
+type SkillBundlesHandler struct {
+	store   *skillbundle.Store
+	enabled bool
+}
+
+// NewSkillBundlesHandler constructs the handler; enabled comes from SkillBundlesAPIFromLookup.
+func NewSkillBundlesHandler(db skillbundle.DB, enabled bool) *SkillBundlesHandler {
+	return &SkillBundlesHandler{store: skillbundle.NewStore(db), enabled: enabled}
+}
+
+// Register mounts the bundle route. Its more specific pattern takes precedence over the
+// /api/v1/skills/ subtree that SkillsHandler serves.
+func (h *SkillBundlesHandler) Register(mux *http.ServeMux) {
+	mux.HandleFunc("/api/v1/skills/{id}/bundle", h.serve)
+}
+
+type skillBundleFileView struct {
+	Path       string `json:"path"`
+	SHA256     string `json:"sha256"`
+	SizeBytes  int64  `json:"size_bytes"`
+	Executable bool   `json:"executable"`
+	Binary     bool   `json:"binary"`
+}
+
+type skillBundleManifestView struct {
+	SkillID        string                `json:"skill_id"`
+	ManifestSHA256 string                `json:"manifest_sha256"`
+	Files          []skillBundleFileView `json:"files"`
+}
+
+type skillBundleSummaryView struct {
+	SkillID        string    `json:"skill_id"`
+	ManifestSHA256 string    `json:"manifest_sha256"`
+	FileCount      int       `json:"file_count"`
+	TotalBytes     int64     `json:"total_bytes"`
+	CreatedBy      string    `json:"created_by"`
+	CreatedAt      time.Time `json:"created_at"`
+	Replaced       bool      `json:"replaced"`
+}
+
+func (h *SkillBundlesHandler) serve(w http.ResponseWriter, r *http.Request) {
+	if !h.enabled {
+		http.NotFound(w, r)
+		return
+	}
+	principal, ok := authctx.PrincipalFromContext(r.Context())
+	if !ok || principal.OrganizationID == "" || principal.ActorID == "" {
+		jsonErr(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
+	if !verifiedIsAdmin(r) {
+		jsonErr(w, "only an admin may manage skill bundles", http.StatusForbidden)
+		return
+	}
+	skillID := r.PathValue("id")
+	if !mcpIdentifier.MatchString(skillID) {
+		jsonErr(w, "invalid skill id", http.StatusBadRequest)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		h.get(w, r, principal.OrganizationID, skillID)
+	case http.MethodPut:
+		if !skillBundleWriter(w, principal) {
+			return
+		}
+		h.put(w, r, principal, skillID)
+	case http.MethodDelete:
+		if !skillBundleWriter(w, principal) {
+			return
+		}
+		h.delete(w, r, principal, skillID)
+	default:
+		jsonErr(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// skillBundleWriter answers the refusals a write needs: a person holding the capability write
+// scope. A workload identity, even one with admin scopes, may not put a bundle in place.
+func skillBundleWriter(w http.ResponseWriter, principal authctx.Principal) bool {
+	if principal.PrincipalType != "user" {
+		jsonErr(w, "only a person may change a skill bundle", http.StatusForbidden)
+		return false
+	}
+	if !principal.HasScope(authz.WriteScope) {
+		jsonErr(w, "capability write scope required", http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
+// get is GET /api/v1/skills/{id}/bundle: the manifest of the org's bundle for the skill. The
+// bytes are read by digest through the RPC, so the manifest carries no file body.
+func (h *SkillBundlesHandler) get(w http.ResponseWriter, r *http.Request, orgID, skillID string) {
+	manifest, err := h.store.Manifest(r.Context(), orgID, skillID)
+	if errors.Is(err, skillbundle.ErrNotFound) {
+		jsonErr(w, "skill bundle not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		slog.Error("read skill bundle manifest failed", "error", err)
+		jsonErr(w, "database unavailable", http.StatusInternalServerError)
+		return
+	}
+	files := make([]skillBundleFileView, 0, len(manifest.Files))
+	for _, file := range manifest.Files {
+		files = append(files, skillBundleFileView{Path: file.Path, SHA256: file.SHA256, SizeBytes: file.Size, Executable: file.Executable, Binary: file.Binary})
+	}
+	writeJSON(w, skillBundleManifestView{SkillID: skillID, ManifestSHA256: manifest.ManifestSHA256, Files: files})
+}
+
+// put is PUT /api/v1/skills/{id}/bundle: the body is the bundle zip. A bundle that fails any
+// check is refused with its closed code and nothing is stored. A new upload replaces the
+// skill's bundle, and answers 201 for a first upload and 200 for a replacement.
+func (h *SkillBundlesHandler) put(w http.ResponseWriter, r *http.Request, principal authctx.Principal, skillID string) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxSkillBundleBodyBytes)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			jsonErr(w, "bundle_too_large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		jsonErr(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	bundle, err := skillbundle.Parse(body)
+	if err != nil {
+		var refusal *skillbundle.RefusalError
+		if errors.As(err, &refusal) {
+			jsonErr(w, refusal.Code, http.StatusUnprocessableEntity)
+			return
+		}
+		jsonErr(w, "invalid skill bundle", http.StatusUnprocessableEntity)
+		return
+	}
+	result, err := h.store.Put(r.Context(), principal.OrganizationID, skillID, principal.ActorID, bundle)
+	if err != nil {
+		slog.Error("write skill bundle failed", "error", err)
+		jsonErr(w, "database unavailable", http.StatusInternalServerError)
+		return
+	}
+	status := http.StatusCreated
+	if result.Replaced {
+		status = http.StatusOK
+	}
+	summary := result.Summary
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(skillBundleSummaryView{
+		SkillID: summary.SkillID, ManifestSHA256: summary.ManifestSHA256, FileCount: summary.FileCount,
+		TotalBytes: summary.TotalBytes, CreatedBy: summary.CreatedBy, CreatedAt: summary.CreatedAt, Replaced: result.Replaced,
+	})
+}
+
+// delete is DELETE /api/v1/skills/{id}/bundle: removes the org's bundle; its files cascade and
+// blobs no other bundle names are dropped.
+func (h *SkillBundlesHandler) delete(w http.ResponseWriter, r *http.Request, principal authctx.Principal, skillID string) {
+	err := h.store.Delete(r.Context(), principal.OrganizationID, skillID, principal.ActorID)
+	if errors.Is(err, skillbundle.ErrNotFound) {
+		jsonErr(w, "skill bundle not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		slog.Error("delete skill bundle failed", "error", err)
+		jsonErr(w, "database unavailable", http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -446,8 +826,11 @@ type mcpServerRow struct {
 	Enabled             bool      `json:"enabled"`
 	RolloutState        string    `json:"rollout_state"`
 	RiskLevel           string    `json:"risk_level"`
-	CreatedAt           time.Time `json:"created_at"`
-	UpdatedAt           time.Time `json:"updated_at"`
+	// AnnotationTrusted reports whether the registrant chose to believe this
+	// server's read-only annotations (see mcpServerConfig.AnnotationTrust).
+	AnnotationTrusted bool      `json:"annotation_trusted"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 type mcpServerRegistration struct {
@@ -473,6 +856,27 @@ type mcpServerConfig struct {
 	SecretRef     string   `json:"secret_ref,omitempty"`
 	OwnerUserID   string   `json:"owner_user_id,omitempty"`
 	SharedWith    []string `json:"shared_with,omitempty"`
+	// AnnotationTrust says whether the server's own `readOnlyHint` is believed
+	// when a class is derived for its tools (WS05-S2). A server's annotations are
+	// claims by a third party, so the default, and the meaning of absent, is
+	// untrusted: a read-only claim then derives as an external write. Nil is
+	// "not stated" and keeps what is stored; only an explicit true trusts the
+	// server, and for a server shared beyond one user that takes an admin.
+	AnnotationTrust *bool `json:"annotation_trust,omitempty"`
+}
+
+// annotationsTrusted is the one reading of the tri-state: only an explicit true
+// is trust.
+func (c mcpServerConfig) annotationsTrusted() bool {
+	return c.AnnotationTrust != nil && *c.AnnotationTrust
+}
+
+// mcpServerShared reports whether anyone besides the owner can use a server: a
+// server of any scope but `user` is shared, and a user-scoped one is shared as
+// soon as shared_with names someone. Trusting a server's annotations is an
+// admin's call for a shared server and the owner's own risk otherwise.
+func mcpServerShared(scope string, config mcpServerConfig) bool {
+	return scope != "user" || len(config.SharedWith) > 0
 }
 
 func mcpVerifiedOrganization(request *http.Request, requireWrite bool) (string, bool) {
@@ -598,7 +1002,11 @@ func (h *MCPHandler) normalizeMCPRegistration(
 	if input.RiskLevel == "" {
 		input.RiskLevel = "medium"
 	}
-	if !mcpIdentifier.MatchString(input.ID) || !validMCPDisplayName(input.Name) || len(input.Description) > 2_000 {
+	// mcpIdentifier allows `__`, but a tool is addressed as mcp__<server>__<tool>
+	// and anything that parses that name splits on the first `__`: a server id
+	// holding one makes two different (server, tool) pairs share a name.
+	if !mcpIdentifier.MatchString(input.ID) || strings.Contains(input.ID, "__") ||
+		!validMCPDisplayName(input.Name) || len(input.Description) > 2_000 {
 		return mcpServerRow{}, mcpServerConfig{}, errors.New("invalid identity fields")
 	}
 	if input.Transport != "http" {
@@ -875,6 +1283,7 @@ func hydrateMCPServerView(server *mcpServerRow) {
 	}
 	server.ToolAllowlist = append([]string(nil), config.ToolAllowlist...)
 	server.SecretConfigured = config.SecretRef != ""
+	server.AnnotationTrusted = config.annotationsTrusted()
 	server.ConfigurationState = "valid"
 	server.ConfigurationReason = ""
 }
@@ -947,6 +1356,26 @@ func (h *MCPHandler) Register(mux *http.ServeMux) {
 			}
 			return
 		}
+		// Per-tool registry rows (WS05-S2): the list, and a person's approval of
+		// a tool whose definition changed.
+		if id, tool, ok := parseMCPToolApprovePath(rest); ok {
+			switch r.Method {
+			case http.MethodPost:
+				h.approveTool(w, r, id, tool)
+			default:
+				http.NotFound(w, r)
+			}
+			return
+		}
+		if id := strings.TrimSuffix(rest, "/tools"); id != rest {
+			switch r.Method {
+			case http.MethodGet:
+				h.listTools(w, r, id)
+			default:
+				http.NotFound(w, r)
+			}
+			return
+		}
 		id := rest
 		switch r.Method {
 		case http.MethodGet:
@@ -973,6 +1402,9 @@ func (h *MCPHandler) Register(mux *http.ServeMux) {
 func (h *MCPHandler) RegisterInternal(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/internal/mcp/oauth-token", h.oauthTokenResolveInternal)
 	mux.HandleFunc("/api/v1/internal/mcp/oauth-tokens", h.oauthTokensUpsertInternal)
+	// Tool observation: the gateway reports what it discovered. It can create or
+	// refresh an observation and nothing else (see observeToolsInternal).
+	mux.HandleFunc("/api/v1/internal/mcp/tools/observe", h.observeToolsInternal)
 }
 
 // mcpOAuthTokensUpsertBody is what model-gateway POSTs right after a
@@ -1253,12 +1685,30 @@ func (h *MCPHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, "invalid MCP registration", http.StatusUnprocessableEntity)
 			return
 		}
+		// Trusting a server's read-only claims lowers the class its tools derive
+		// to, so for a server others use it is an admin's call, taken from the
+		// signed scopes. A server only its owner uses is the owner's own risk; a
+		// user-scoped server that names someone in shared_with is not that.
+		if config.annotationsTrusted() && mcpServerShared(s.Scope, config) && !verifiedIsAdmin(r) {
+			jsonErr(w, "only an admin can trust the annotations of a server shared beyond one user", http.StatusForbidden)
+			return
+		}
 		now := time.Now().UTC()
 		cfgJSON, err := json.Marshal(config)
 		if err != nil {
 			jsonErr(w, "invalid MCP registration", http.StatusBadRequest)
 			return
 		}
+		// A registration that does not mention annotation_trust (the gateway's
+		// write-through never does) keeps the stored choice, but only while the scope
+		// and the endpoint are the ones it was made for: pointing the record at
+		// another server, or widening a user-scoped server to a shared scope (which
+		// needs an admin to trust), drops the trust instead of carrying it over.
+		// Sharing a user-scoped server with other users is that same widening: a
+		// non-admin whose registration names someone in shared_with on a server that
+		// had no one in it does not carry the owner's trust along ($15).
+		nonAdminWidening := s.Scope == "user" && len(config.SharedWith) > 0 && !verifiedIsAdmin(r)
+		//
 		// ON CONFLICT (org_id, name) intentionally never touches `id` — a
 		// second registration under the same name (e.g. reconnecting after
 		// model-gateway's ephemeral cache was wiped by a restart, so it
@@ -1272,16 +1722,42 @@ func (h *MCPHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 		// that never existed under that id and 404.
 		var persistedID string
 		err = h.pool.QueryRow(r.Context(), `
+			WITH registered AS (
 			INSERT INTO mcp_servers (id, org_id, name, description, endpoint_url, transport, auth_kind,
 			    config_json, scope, enabled, rollout_state, risk_level, created_at, updated_at)
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 			ON CONFLICT (org_id, name) WHERE deleted_at IS NULL DO UPDATE SET
 			    description=$4, endpoint_url=$5, transport=$6, auth_kind=$7,
-			    config_json=$8, scope=$9, enabled=$10, rollout_state=$11,
+			    config_json=CASE
+			        WHEN $8::jsonb ? 'annotation_trust' THEN $8::jsonb
+			        WHEN mcp_servers.endpoint_url = $5 AND mcp_servers.scope = $9 AND mcp_servers.config_json ? 'annotation_trust'
+			             AND (NOT $15::boolean OR CASE WHEN jsonb_typeof(mcp_servers.config_json->'shared_with') = 'array'
+			                  THEN jsonb_array_length(mcp_servers.config_json->'shared_with') ELSE 0 END > 0)
+			            THEN $8::jsonb || jsonb_build_object('annotation_trust', mcp_servers.config_json->'annotation_trust')
+			        ELSE $8::jsonb
+			    END,
+			    scope=$9, enabled=$10, rollout_state=$11,
 			    risk_level=$12, updated_at=$14
 			RETURNING id
+			), cascade AS (
+			    -- A registration switches a tool off, in the same statement, when it
+			    -- leaves the server disabled or outside stable/canary rollout, or when
+			    -- the tool is no longer on the allowlist it registers ($16). A tool
+			    -- comes back through the next observation, which checks the same three.
+			    UPDATE capabilities SET enabled=false, availability_state='unavailable',
+			        availability_reason_code='capability_disabled',
+			        availability_reason='The MCP server is disabled or was removed.',
+			        execution_mode='unavailable', updated_at=now()
+			    WHERE kind='mcp_tool' AND org_id=$2 AND deleted_at IS NULL
+			      AND id IN (SELECT ct.capability_id FROM capability_tools ct
+			                 WHERE ct.org_id=$2 AND ct.server_id=(SELECT id FROM registered)
+			                   AND (NOT $10::boolean OR $11::text NOT IN ('stable', 'canary')
+			                        OR NOT (ct.tool_name = ANY($16::text[]))))
+			)
+			SELECT id FROM registered
 		`, s.ID, s.OrgID, s.Name, s.Description, s.EndpointURL, s.Transport, s.AuthKind,
-			cfgJSON, s.Scope, s.Enabled, s.RolloutState, s.RiskLevel, now, now).Scan(&persistedID)
+			cfgJSON, s.Scope, s.Enabled, s.RolloutState, s.RiskLevel, now, now,
+			nonAdminWidening, config.ToolAllowlist).Scan(&persistedID)
 		if err != nil {
 			slog.Error("persist MCP server failed", "error", err)
 			jsonErr(w, "database unavailable", http.StatusInternalServerError)
@@ -1384,7 +1860,14 @@ func (h *MCPHandler) patch(w http.ResponseWriter, r *http.Request, id string) {
 			jsonErr(w, "only the MCP owner may change sharing", http.StatusForbidden)
 			return
 		}
+		wasShared := mcpServerShared(scope, config)
 		config.SharedWith = append([]string(nil), (*update.SharedWith)...)
+		// A trust choice made while the server was only its owner's does not follow
+		// it to other users unless an admin is the one sharing it: a non-admin who
+		// widens shared_with from empty to non-empty leaves it untrusted.
+		if config.annotationsTrusted() && !wasShared && mcpServerShared(scope, config) && !verifiedIsAdmin(r) {
+			config.AnnotationTrust = nil
+		}
 		config, err = normalizeMCPConfig(config, authKind, scope)
 		if err != nil {
 			jsonErr(w, "invalid MCP sharing configuration", http.StatusUnprocessableEntity)
@@ -1401,12 +1884,18 @@ func (h *MCPHandler) patch(w http.ResponseWriter, r *http.Request, id string) {
 	if update.Enabled != nil {
 		enabled = *update.Enabled
 	}
-	result, err := h.pool.Exec(r.Context(), `
+	query := `
 		UPDATE mcp_servers
 		SET enabled=COALESCE($1, enabled), rollout_state=COALESCE(NULLIF($2, ''), rollout_state),
 		    config_json=COALESCE($3, config_json), updated_at=$4
 		WHERE id=$5 AND org_id=$6 AND deleted_at IS NULL
-	`, enabled, update.RolloutState, configJSON, now, id, orgID)
+	`
+	// Taking the server out of service takes its tools out with it, in the same
+	// statement, so no tool row outlives the switch that turned its server off.
+	if (update.Enabled != nil && !*update.Enabled) || update.RolloutState == "quarantine" || update.RolloutState == "deprecated" {
+		query = withMCPToolCascade(query, "$6", "$5")
+	}
+	result, err := h.pool.Exec(r.Context(), query, enabled, update.RolloutState, configJSON, now, id, orgID)
 	if !writeSingleScopedMutation(w, "MCP server", result, err) {
 		return
 	}
@@ -1420,7 +1909,10 @@ func (h *MCPHandler) delete(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	now := time.Now().UTC()
-	result, err := h.pool.Exec(r.Context(), `UPDATE mcp_servers SET deleted_at=$1, updated_at=$1 WHERE id=$2 AND org_id=$3 AND deleted_at IS NULL`, now, id, orgID)
+	result, err := h.pool.Exec(r.Context(), withMCPToolCascade(
+		`UPDATE mcp_servers SET deleted_at=$1, updated_at=$1 WHERE id=$2 AND org_id=$3 AND deleted_at IS NULL`,
+		"$3", "$2",
+	), now, id, orgID)
 	if !writeSingleScopedMutation(w, "MCP server", result, err) {
 		return
 	}

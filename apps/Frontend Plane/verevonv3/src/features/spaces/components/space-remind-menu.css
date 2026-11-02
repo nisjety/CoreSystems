@@ -1,0 +1,84 @@
+/* The "Remind me" menu of one post (WS11-S11). Lives beside the component rather than in global.css. */
+
+.verevon-space-remind-menu {
+  position: relative;
+  display: inline-block;
+}
+
+.verevon-space-remind-menu__trigger,
+.verevon-space-remind-menu__preset {
+  border: 1px solid var(--verevon-border, rgba(127, 127, 127, 0.35));
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+
+.verevon-space-remind-menu__trigger:focus-visible,
+.verevon-space-remind-menu__preset:focus-visible {
+  outline: 2px solid var(--verevon-focus, currentColor);
+  outline-offset: 2px;
+}
+
+.verevon-space-remind-menu__preset:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.verevon-space-remind-menu__panel {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  inset-inline-start: 0;
+  display: grid;
+  gap: 8px;
+  width: min(300px, 88vw);
+  padding: 10px;
+  border: 1px solid var(--verevon-border, rgba(127, 127, 127, 0.35));
+  border-radius: 8px;
+  background: var(--verevon-surface, Canvas);
+  color: var(--verevon-text, CanvasText);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+  font-size: 13px;
+}
+
+.verevon-space-remind-menu__presets,
+.verevon-space-remind-menu__pending {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-space-remind-menu__pending {
+  flex-direction: column;
+  flex-wrap: nowrap;
+}
+
+.verevon-space-remind-menu__pending li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.verevon-space-remind-menu__custom {
+  display: grid;
+  gap: 4px;
+}
+
+.verevon-space-remind-menu__hint,
+.verevon-space-remind-menu__error {
+  margin: 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-space-remind-menu__error {
+  color: var(--verevon-danger, #b3372f);
+}

@@ -1,0 +1,33 @@
+config {
+  type: "table",
+  schema: "xero_gold_common",
+  description: "Conformed Xero fiscal periods, derived from the fiscal year-end configured on each tenant organisation. Period closure is not exposed by Xero and is intentionally omitted.",
+  assertions: {
+    nonNull: ["financial_period_key", "company_key", "tenant_id", "financial_period_id", "period_start", "period_end"],
+    uniqueKey: ["financial_period_key"]
+  }
+}
+
+SELECT
+  FARM_FINGERPRINT(CONCAT(
+    tenant_id, '|', fiscal_configuration_state_key, '|', financial_period_id
+  )) AS financial_period_key,
+  FARM_FINGERPRINT(tenant_id) AS company_key,
+  tenant_id,
+  fiscal_configuration_state_key,
+  financial_period_id,
+  period_description,
+  period_start,
+  period_end,
+  fiscal_year,
+  fiscal_month,
+  fiscal_quarter,
+  financial_year_end_day,
+  financial_year_end_month,
+  fiscal_configuration_version_id,
+  fiscal_configuration_observed_at,
+  financial_period_basis,
+  is_current,
+  is_derived,
+  'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "dim_financial_period")}

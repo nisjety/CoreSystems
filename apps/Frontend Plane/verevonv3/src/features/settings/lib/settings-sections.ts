@@ -7,6 +7,7 @@ export const workspaceSettingsSectionIds = [
   'org-security',
   'integrations',
   'trust',
+  'audit-log',
   'router-policy',
   'finetune',
   'mcp',
@@ -16,7 +17,10 @@ export const workspaceSettingsSectionIds = [
   'plugins',
   'cron',
   'quotas',
+  'model-access',
+  'space-policy',
   'memory',
+  'learning',
 ] as const
 
 export type WorkspaceSettingsSectionId = (typeof workspaceSettingsSectionIds)[number]
@@ -88,6 +92,13 @@ export const workspaceSettingsSections: SectionDetail[] = [
     saveLabel: 'Save trust settings',
   },
   {
+    id: 'audit-log',
+    label: 'Audit log',
+    title: 'Audit log',
+    description: 'Browse the organization audit trail: who did what, when, and with what outcome. Owners and admins only; content-free by design.',
+    saveLabel: 'Save audit log',
+  },
+  {
     id: 'router-policy',
     label: 'Router policy',
     title: 'Router policy',
@@ -151,10 +162,31 @@ export const workspaceSettingsSections: SectionDetail[] = [
     saveLabel: 'Lagre tak',
   },
   {
+    id: 'model-access',
+    label: 'Modelltilgang',
+    title: 'Modelltilgang',
+    description: 'Hvilke AI-modeller medlemmene kan bruke, og hvor mye resonnering de kan be om. Håndheves av Model Plane; en modell som ikke er tillatt vises ikke i modellvelgeren.',
+    saveLabel: 'Lagre modelltilgang',
+  },
+  {
+    id: 'space-policy',
+    label: 'Rom-policy',
+    title: 'Rom-policy',
+    description: 'Hva organisasjonen tillater i rom: samtale, kunnskap og agenter. Gjelder alle rom; en administrator endrer, Control Plane håndhever og logger.',
+    saveLabel: 'Lagre rom-policy',
+  },
+  {
     id: 'memory',
     label: 'Minne',
     title: 'Minne',
     description: 'Se hva Verevon har lagret om deg på tvers av alle samtaler, og slett det du ikke vil at agenten skal huske.',
+    saveLabel: 'Lagre',
+  },
+  {
+    id: 'learning',
+    label: 'Læring',
+    title: 'Læring',
+    description: 'Forslag Verevon har laget fra samtalene dine, og alt Verevon har lært. Et forslag brukes ikke før du godtar det.',
     saveLabel: 'Lagre',
   },
 ]

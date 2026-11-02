@@ -1,0 +1,69 @@
+.search-intelligence {
+  width: min(1280px, 100%);
+  margin: 24px auto;
+  border: 1px solid var(--pulse-line, #e9e9e9);
+  border-radius: 20px;
+  background: #fff;
+  color: var(--pulse-ink, #1b1c1f);
+  overflow: hidden;
+}
+
+.search-intelligence__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 28px 30px 24px;
+}
+
+.search-intelligence__eyebrow {
+  color: var(--pulse-muted, #7c7d81);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.search-intelligence h2 { margin: 8px 0; font-size: 22px; font-weight: 580; letter-spacing: -0.04em; }
+.search-intelligence__header p, .search-intelligence__readonly { color: var(--pulse-muted, #7c7d81); font-size: 11px; line-height: 1.5; }
+.search-intelligence__readonly { border: 1px solid var(--pulse-line, #e9e9e9); border-radius: 999px; padding: 4px 10px; white-space: nowrap; }
+.search-intelligence__toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 0 30px 16px; }
+.search-intelligence__toolbar [role="tablist"] { display: flex; flex-wrap: wrap; gap: 4px; }
+.search-intelligence button { border: 1px solid transparent; background: none; color: inherit; font: inherit; font-size: 11px; cursor: pointer; }
+.search-intelligence button:focus-visible, .search-intelligence input:focus-visible { outline: 2px solid #6c6c70; outline-offset: 3px; }
+.search-intelligence [role="tab"] { display: flex; align-items: center; gap: 7px; padding: 8px 11px; border-radius: 8px; color: var(--pulse-muted, #7c7d81); }
+.search-intelligence [role="tab"][aria-selected="true"] { background: #f2f2f0; color: var(--pulse-ink, #1b1c1f); font-weight: 600; }
+.search-intelligence [role="tab"] span { color: #919196; font-size: 10px; }
+.search-intelligence__filter { display: flex; align-items: center; gap: 8px; border: 1px solid var(--pulse-line, #e9e9e9); border-radius: 9px; padding: 7px 10px; color: var(--pulse-muted, #7c7d81); }
+.search-intelligence input { min-width: 0; width: 150px; border: 0; background: transparent; color: inherit; font: inherit; font-size: 11px; }
+.search-intelligence__table-scroll { max-width: 100%; overflow-x: auto; }
+.search-intelligence table { width: 100%; border-collapse: collapse; font-size: 11px; font-variant-numeric: tabular-nums; }
+.search-intelligence th { color: var(--pulse-muted, #7c7d81); font-weight: 500; white-space: nowrap; background: #fbfbfa; }
+.search-intelligence td, .search-intelligence th { padding: 13px 16px; border-top: 1px solid var(--pulse-line, #e9e9e9); text-align: right; }
+.search-intelligence td:first-child, .search-intelligence th:first-child { padding-left: 30px; text-align: left; }
+.search-intelligence td:last-child, .search-intelligence th:last-child { padding-right: 30px; }
+.search-intelligence .search-intelligence__key { min-width: 190px; max-width: 440px; overflow-wrap: anywhere; line-height: 1.5; }
+.search-intelligence .search-intelligence__suggestion { min-width: 180px; text-align: left; color: #6e6658; line-height: 1.5; }
+.search-intelligence .search-intelligence__work-action { text-align: center; white-space: nowrap; }
+.search-intelligence__work-action button { border: 1px solid var(--pulse-line, #e9e9e9); border-radius: 7px; padding: 6px 9px; color: var(--pulse-ink, #1b1c1f); background: #fff; font-size: 10px; }
+.search-intelligence__work-action button:disabled { opacity: .55; cursor: default; }
+.search-intelligence__state { padding: 30px; color: var(--pulse-muted, #7c7d81); font-size: 12px; line-height: 1.6; }
+.search-intelligence__state button { margin-top: 12px; border-color: var(--pulse-line, #e9e9e9); border-radius: 8px; padding: 7px 12px; }
+.search-intelligence__note { padding: 0 30px 18px; color: var(--pulse-muted, #7c7d81); font-size: 11px; line-height: 1.7; }
+.search-intelligence__caveat { border-top: 1px solid var(--pulse-line, #e9e9e9); padding-top: 16px; }
+.search-intelligence__pagination { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 30px; color: var(--pulse-muted, #7c7d81); font-size: 10px; }
+.search-intelligence__pagination > div { display: flex; gap: 6px; }
+.search-intelligence__pagination button { display: grid; place-items: center; width: 28px; height: 28px; border-color: var(--pulse-line, #e9e9e9); border-radius: 7px; }
+.search-intelligence button:disabled { opacity: 0.35; cursor: default; }
+.search-intelligence__sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+
+@media (max-width: 640px) {
+  .search-intelligence__header { padding: 22px 18px; }
+  .search-intelligence__toolbar { padding-inline: 18px; }
+  .search-intelligence__filter { width: 100%; }
+  .search-intelligence input { width: 100%; }
+  .search-intelligence__note, .search-intelligence__state { padding-inline: 18px; }
+  .search-intelligence__pagination { padding-inline: 18px; }
+  .search-intelligence td:first-child, .search-intelligence th:first-child { padding-left: 18px; }
+  .search-intelligence td:last-child, .search-intelligence th:last-child { padding-right: 18px; }
+}

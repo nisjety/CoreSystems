@@ -9,6 +9,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/triodelab/model-plane/services/orchestrator-core/cmd/activities"
 	"github.com/triodelab/model-plane/services/orchestrator-core/cmd/workflows"
@@ -272,20 +273,27 @@ func buildScheduledRunInput(raw json.RawMessage, t Tenancy) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("orchestration: scheduled run template is not bound to its execution input: %w", err)
 	}
+	contract, err := scheduledTemplateContract(req.TaskTemplateJSON, req.TemplateDigest, time.Now())
+	if err != nil {
+		return nil, fmt.Errorf("orchestration: scheduled run contract is not bound to its execution input: %w", err)
+	}
 	return workflows.ScheduledRunInput{
-		RunID:          t.RunID,
-		ThreadID:       strings.TrimSpace(req.ThreadID),
-		Goal:           goal,
-		Policy:         policy,
-		OrgID:          t.OrgID,
-		SpaceRef:       strings.TrimSpace(req.SpaceRef),
-		SubjectID:      strings.TrimSpace(req.SubjectID),
-		ScheduleID:     strings.TrimSpace(req.ScheduleID),
-		FireKey:        strings.TrimSpace(req.FireKey),
-		TemplateDigest: strings.TrimSpace(req.TemplateDigest),
-		PolicyDigest:   fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(policy))),
-		IdempotencyKey: strings.TrimSpace(req.IdempotencyKey),
-		Retention:      t.Retention(),
+		RunID:             t.RunID,
+		ThreadID:          strings.TrimSpace(req.ThreadID),
+		Goal:              goal,
+		Policy:            policy,
+		OrgID:             t.OrgID,
+		SpaceRef:          strings.TrimSpace(req.SpaceRef),
+		SubjectID:         strings.TrimSpace(req.SubjectID),
+		ScheduleID:        strings.TrimSpace(req.ScheduleID),
+		FireKey:           strings.TrimSpace(req.FireKey),
+		TemplateDigest:    strings.TrimSpace(req.TemplateDigest),
+		PolicyDigest:      fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(policy))),
+		IdempotencyKey:    strings.TrimSpace(req.IdempotencyKey),
+		ContractJSON:      contract.JSON,
+		ContractDigest:    contract.Digest,
+		ContractExpiresAt: contract.ExpiresAt,
+		Retention:         t.Retention(),
 	}, nil
 }
 
@@ -295,20 +303,9 @@ func buildScheduledRunInput(raw json.RawMessage, t Tenancy) (any, error) {
 // independent Temporal input: they are the workload Control authorized by way
 // of the template commitment.
 func scheduledTemplateGoalAndPolicy(templateJSON, expectedDigest string) (string, string, error) {
-	templateJSON = strings.TrimSpace(templateJSON)
-	expectedDigest = strings.TrimSpace(expectedDigest)
-	if templateJSON == "" || expectedDigest == "" || len(templateJSON) > 64<<10 {
-		return "", "", errors.New("template binding is invalid")
-	}
-	var rawTemplate map[string]json.RawMessage
-	decoder := json.NewDecoder(strings.NewReader(templateJSON))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&rawTemplate); err != nil || rawTemplate == nil || decoder.Decode(&struct{}{}) != io.EOF {
-		return "", "", errors.New("template is not a JSON object")
-	}
-	canonical, err := json.Marshal(rawTemplate)
-	if err != nil || fmt.Sprintf("sha256:%x", sha256.Sum256(canonical)) != expectedDigest {
-		return "", "", errors.New("template digest mismatch")
+	_, canonical, err := verifyScheduledTemplate(templateJSON, expectedDigest)
+	if err != nil {
+		return "", "", err
 	}
 	var template struct {
 		Title         string          `json:"title"`
@@ -345,6 +342,78 @@ func scheduledTemplateGoalAndPolicy(templateJSON, expectedDigest string) (string
 		return "", "", errors.New("template has no goal")
 	}
 	return goal, strings.TrimSpace(template.Policy), nil
+}
+
+// verifyScheduledTemplate checks the immutable task template against the
+// Control-bound digest and returns its top-level fields with the canonical
+// bytes that digest covers.
+func verifyScheduledTemplate(templateJSON, expectedDigest string) (map[string]json.RawMessage, []byte, error) {
+	templateJSON = strings.TrimSpace(templateJSON)
+	expectedDigest = strings.TrimSpace(expectedDigest)
+	if templateJSON == "" || expectedDigest == "" || len(templateJSON) > 64<<10 {
+		return nil, nil, errors.New("template binding is invalid")
+	}
+	var rawTemplate map[string]json.RawMessage
+	decoder := json.NewDecoder(strings.NewReader(templateJSON))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&rawTemplate); err != nil || rawTemplate == nil || decoder.Decode(&struct{}{}) != io.EOF {
+		return nil, nil, errors.New("template is not a JSON object")
+	}
+	canonical, err := json.Marshal(rawTemplate)
+	if err != nil || fmt.Sprintf("sha256:%x", sha256.Sum256(canonical)) != expectedDigest {
+		return nil, nil, errors.New("template digest mismatch")
+	}
+	return rawTemplate, canonical, nil
+}
+
+// scheduledContract is the stored-consent contract a digest-verified template
+// commits to. The digest covers the exact compact bytes of the contract, so
+// Session Core can re-hash the body it receives against the digest Control
+// signed.
+type scheduledContract struct {
+	JSON      string
+	Digest    string
+	ExpiresAt string
+}
+
+// scheduledTemplateContract returns the contract committed by the verified
+// template, or the zero value for a schedule without one. An expired contract
+// is refused here so a fire never reaches Control carrying dead authority.
+func scheduledTemplateContract(templateJSON, expectedDigest string, now time.Time) (scheduledContract, error) {
+	rawTemplate, _, err := verifyScheduledTemplate(templateJSON, expectedDigest)
+	if err != nil {
+		return scheduledContract{}, err
+	}
+	raw, present := rawTemplate["approval_contract"]
+	if !present {
+		return scheduledContract{}, nil
+	}
+	// The contract is stored in the template as JSON TEXT (capability-core's
+	// schedule create takes it as a string and hashes that text). The digest is
+	// over the exact bytes of the text, never over a re-encoding of it.
+	var contractText string
+	if err := json.Unmarshal(raw, &contractText); err != nil || strings.TrimSpace(contractText) == "" {
+		return scheduledContract{}, errors.New("approval contract is not text")
+	}
+	contractJSON := []byte(contractText)
+	var contract struct {
+		ExpiresAt string `json:"expires_at"`
+	}
+	if err := json.Unmarshal(contractJSON, &contract); err != nil {
+		return scheduledContract{}, errors.New("approval contract is not an object")
+	}
+	expiresAt, err := time.Parse(time.RFC3339, contract.ExpiresAt)
+	if err != nil {
+		return scheduledContract{}, errors.New("approval contract expiry is invalid")
+	}
+	if !now.Before(expiresAt) {
+		return scheduledContract{}, errors.New("approval contract has expired")
+	}
+	return scheduledContract{
+		JSON:      string(contractJSON),
+		Digest:    fmt.Sprintf("sha256:%x", sha256.Sum256(contractJSON)),
+		ExpiresAt: expiresAt.UTC().Format(time.RFC3339),
+	}, nil
 }
 
 func buildDeepTaskInput(raw json.RawMessage, t Tenancy) (any, error) {

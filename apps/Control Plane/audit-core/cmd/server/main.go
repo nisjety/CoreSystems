@@ -23,9 +23,11 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/triodelab/controlplane/audit-core/internal/api"
+	"github.com/triodelab/controlplane/audit-core/internal/chain"
 	metricsserver "github.com/triodelab/controlplane/audit-core/internal/metrics"
 	"github.com/triodelab/controlplane/audit-core/internal/store"
 	"github.com/triodelab/controlplane/audit-core/internal/subscriber"
+	"github.com/triodelab/controlplane/audit-core/internal/verifier"
 )
 
 func main() {
@@ -54,7 +56,27 @@ func main() {
 	}
 	log.Info().Msg("schema migrated (idempotent CREATE IF NOT EXISTS)")
 
-	st := store.New(pool)
+	var storeOpts []store.Option
+	if cfg.ChainEnabled {
+		storeOpts = append(storeOpts, store.WithChain())
+	}
+	if cfg.KeyRing != nil {
+		storeOpts = append(storeOpts, store.WithChainKeys(cfg.KeyRing), store.WithChainPrune(cfg.PruneMode))
+	}
+	st := store.New(pool, storeOpts...)
+	if cfg.ChainEnabled {
+		// Before the subscriber starts, so rows that landed unchained while the
+		// chain was off are chained ahead of new traffic. A failure leaves them
+		// for the next boot; live appends chain correctly either way.
+		catchUpCtx, catchUpCancel := context.WithTimeout(ctx, 5*time.Minute)
+		chained, err := st.CatchUp(catchUpCtx)
+		catchUpCancel()
+		if err != nil {
+			log.Error().Err(err).Int64("chained", chained).Msg("audit chain catch-up failed")
+		} else {
+			log.Info().Int64("chained", chained).Msg("audit chain catch-up complete")
+		}
+	}
 
 	natsOpts := []nats.Option{
 		nats.Name("audit-core"),
@@ -94,6 +116,14 @@ func main() {
 	// UI advertises ("Audit retention 365 days"). The goroutine purges once at
 	// startup, then daily, and exits when ctx is cancelled on shutdown.
 	go runRetention(ctx, st, cfg.RetentionDays)
+	if cfg.ChainEnabled && cfg.KeyRing.CanSign() {
+		go runAttestor(ctx, st, cfg.AttestInterval)
+	}
+
+	// The verifier follows the chain switch unless AUDIT_CHAIN_VERIFY_ENABLED says 0.
+	if verifier.Enabled(os.Getenv("AUDIT_CHAIN_VERIFY_ENABLED"), cfg.ChainEnabled) {
+		go verifier.Run(ctx, st, verifier.Config{Interval: verifier.ParseInterval(os.Getenv("AUDIT_CHAIN_VERIFY_INTERVAL"))})
+	}
 
 	r := chi.NewRouter()
 	auditAPI, err := api.New(st, cfg.ServiceCredentials, func(requestContext context.Context) api.Readiness {
@@ -161,13 +191,17 @@ func runRetention(ctx context.Context, st *store.Store, retentionDays int) {
 		defer cancel()
 		res, err := st.Purge(sweepCtx, retentionDays)
 		if err != nil {
-			log.Error().Err(err).Int("retention_days", retentionDays).Msg("retention purge failed")
+			log.Error().Err(err).Int("retention_days", retentionDays).
+				Int64("audit_deleted", res.AuditDeleted).Msg("retention purge failed")
 			return
 		}
 		log.Info().
 			Int("retention_days", retentionDays).
 			Int64("audit_deleted", res.AuditDeleted).
 			Int64("usage_deleted", res.UsageDeleted).
+			Int("checkpoints_written", res.CheckpointsWritten).
+			Int("orgs_blocked", res.OrgsBlocked).
+			Int64("chained_planned", res.ChainedPlanned).
 			Msg("retention purge complete")
 	}
 
@@ -186,6 +220,35 @@ func runRetention(ctx context.Context, st *store.Store, retentionDays int) {
 	}
 }
 
+// runAttestor signs the head of every org chain each interval, so the newest
+// attested sequence trails the live head by at most one interval. It returns
+// when ctx is cancelled.
+func runAttestor(ctx context.Context, st *store.Store, interval time.Duration) {
+	attest := func() {
+		attestCtx, cancel := context.WithTimeout(ctx, interval)
+		defer cancel()
+		written, err := st.Attest(attestCtx)
+		if err != nil {
+			log.Error().Err(err).Int("attested", written).Msg("audit chain head attestation failed")
+		} else if written > 0 {
+			log.Info().Int("attested", written).Msg("audit chain heads attested")
+		}
+	}
+
+	attest()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			log.Info().Msg("attestor stopping")
+			return
+		case <-ticker.C:
+			attest()
+		}
+	}
+}
+
 type config struct {
 	DatabaseURL        string
 	NATSURL            string
@@ -196,7 +259,72 @@ type config struct {
 	MetricsPort        int
 	ServiceCredentials string
 	RetentionDays      int
-	ExtraNATSBuses     []extraNATSBus
+	ChainEnabled       bool
+	// KeyRing is nil unless the chain, chained pruning or its dry run is on.
+	KeyRing        *chain.KeyRing
+	PruneMode      store.PruneMode
+	AttestInterval time.Duration
+	ExtraNATSBuses []extraNATSBus
+}
+
+// parseChainEnabled is strict: only the literal "1" turns the audit hash chain
+// on, so an unset, empty or misspelled value leaves it off.
+func parseChainEnabled(raw string) bool {
+	return parseStrictSwitch(raw)
+}
+
+// parseStrictSwitch is the one switch parser of this service: only the literal
+// "1" enables, so an unset, empty or misspelled value leaves the feature off.
+func parseStrictSwitch(raw string) bool {
+	return raw == "1"
+}
+
+// defaultAttestInterval is how often chain heads are signed when
+// AUDIT_CHAIN_ATTEST_INTERVAL is unset or invalid.
+const defaultAttestInterval = 60 * time.Second
+
+// loadChainKeys builds the signing key ring, but only when something needs it:
+// with the chain, pruning and the dry run all off the key variables are not
+// read at all, so a deployment that has not opted in behaves exactly as before.
+// Once something needs it, an undecodable key fails boot, and so does a missing
+// private key where it cannot be skipped: chained pruning always signs, and a
+// production chain must be attestable.
+func loadChainKeys(chainEnabled bool, prune store.PruneMode, production bool) (*chain.KeyRing, error) {
+	if !chainEnabled && prune == store.PruneOff {
+		return nil, nil
+	}
+	ring, err := chain.NewKeyRing(chain.KeyConfig{
+		KeyID:      os.Getenv("AUDIT_CHAIN_KEY_ID"),
+		Private:    os.Getenv("AUDIT_CHAIN_PRIVATE_KEY_BASE64"),
+		Public:     os.Getenv("AUDIT_CHAIN_PUBLIC_KEY_BASE64"),
+		VerifyKeys: os.Getenv("AUDIT_CHAIN_VERIFY_KEYS"),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("audit chain key: %w", err)
+	}
+	if prune == store.PruneOn && !ring.CanSign() {
+		return nil, fmt.Errorf("AUDIT_CHAIN_PRUNE_ENABLED=1 needs AUDIT_CHAIN_KEY_ID and AUDIT_CHAIN_PRIVATE_KEY_BASE64: every purge batch signs a checkpoint")
+	}
+	if chainEnabled && production && !ring.CanSign() {
+		return nil, fmt.Errorf("AUDIT_CHAIN_ENABLED=1 in production needs AUDIT_CHAIN_KEY_ID and AUDIT_CHAIN_PRIVATE_KEY_BASE64: unsigned chain heads cannot be attested")
+	}
+	if chainEnabled && !ring.CanSign() {
+		log.Warn().Msg("audit chain is on without a signing key: heads are not attested and chained rows cannot be pruned")
+	}
+	return ring, nil
+}
+
+// parsePruneMode maps the two switches to one mode. The dry run wins over the
+// enable switch, so setting it can never delete.
+func parsePruneMode(enabled, dryRun string) store.PruneMode {
+	switch {
+	case parseStrictSwitch(dryRun):
+		return store.PruneDryRun
+	case parseStrictSwitch(enabled):
+		return store.PruneOn
+	default:
+		return store.PruneOff
+	}
 }
 
 func loadConfig() (*config, error) {
@@ -254,6 +382,22 @@ func loadConfig() (*config, error) {
 		}
 	}
 
+	chainEnabled := parseChainEnabled(os.Getenv("AUDIT_CHAIN_ENABLED"))
+	pruneMode := parsePruneMode(os.Getenv("AUDIT_CHAIN_PRUNE_ENABLED"), os.Getenv("AUDIT_CHAIN_PRUNE_DRYRUN"))
+	keyRing, err := loadChainKeys(chainEnabled, pruneMode, os.Getenv("ENVIRONMENT") == "production")
+	if err != nil {
+		return nil, err
+	}
+	attestInterval := defaultAttestInterval
+	if v := os.Getenv("AUDIT_CHAIN_ATTEST_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d >= time.Second {
+			attestInterval = d
+		} else {
+			log.Warn().Str("AUDIT_CHAIN_ATTEST_INTERVAL", v).Dur("default", attestInterval).
+				Msg("invalid AUDIT_CHAIN_ATTEST_INTERVAL; using default")
+		}
+	}
+
 	if os.Getenv("EXTRA_NATS_URLS") != "" {
 		return nil, fmt.Errorf("EXTRA_NATS_URLS is unsupported; configure named AUDIT_EXTRA_NATS_BUSES")
 	}
@@ -272,6 +416,10 @@ func loadConfig() (*config, error) {
 		MetricsPort:        metricsPort,
 		ServiceCredentials: serviceCredentials,
 		RetentionDays:      retentionDays,
+		ChainEnabled:       chainEnabled,
+		KeyRing:            keyRing,
+		PruneMode:          pruneMode,
+		AttestInterval:     attestInterval,
 		ExtraNATSBuses:     extraNATSBuses,
 	}, nil
 }

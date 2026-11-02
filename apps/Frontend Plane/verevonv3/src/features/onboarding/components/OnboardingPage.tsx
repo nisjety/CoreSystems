@@ -617,9 +617,8 @@ export default function OnboardingPage() {
         },
         onDone: (payload) => {
           flush(() => {
-            setState((s) => { s.website.status = payload.status === 'failed' ? 'failed' : 'completed' })
-            setState((s) => { s.website.pages = payload.pages || state.website.pages })
-            setState((s) => { s.website.elements = payload.elements || state.website.elements })
+            const measured = payload.status === 'completed' && (payload.pages ?? 0) > 0 && state.website.snippets.length > 0
+            setState((s) => { s.website.status = measured ? 'completed' : 'failed'; s.website.pages = payload.pages ?? s.website.pages; s.website.elements = payload.elements ?? s.website.elements })
           })
         },
       },
@@ -670,7 +669,7 @@ export default function OnboardingPage() {
 
     try {
       const websiteUrl = state.website.url.trim()
-      const created = await actions.createOrganization({
+      const created = state.organization.id ? { id: state.organization.id, name: state.organization.name } : await actions.createOrganization({
         name: state.organization.name,
         plan: 'trial',
         orgNumber: state.organization.orgNumber,
@@ -697,6 +696,8 @@ export default function OnboardingPage() {
       setState((s) => { s.organization.name = created.name || state.organization.name })
 
       if (websiteUrl) {
+        await actions.recordOrganizationWebsite(created.id, websiteUrl)
+        await actions.registerMarketingWebsite(websiteUrl)
         await actions.startWebsiteIngest({
           orgId: created.id,
           url: websiteUrl,
@@ -712,7 +713,7 @@ export default function OnboardingPage() {
     }
   }
 
-  async function connectSource(option: Pick<ConnectorOption, 'id' | 'label' | 'provider' | 'sources'>) {
+  async function connectSource(option: Pick<ConnectorOption, 'id' | 'label' | 'provider' | 'sources' | 'bundles'>) {
     if (!state.organization.id) {
       setError(i18n.tr('Opprett organisasjonen før du kobler til kilder.', 'Create the organization before connecting sources.'))
       return
@@ -753,6 +754,7 @@ export default function OnboardingPage() {
         orgId,
         provider: option.provider,
         selectedSources: option.sources,
+        bundles: option.bundles,
       })
 
       await runDirectOauthWindow({
@@ -1030,6 +1032,13 @@ export default function OnboardingPage() {
           orgId = createdOrg.id
         }
 
+        // Also covers a resumed onboarding whose workspace was created before
+        // website preparation was wired in. Add is idempotent for the site.
+        if (completionSnapshot.website.url && !completionSnapshot.websiteSkipped) {
+          await actions.recordOrganizationWebsite(orgId, completionSnapshot.website.url)
+          await actions.registerMarketingWebsite(completionSnapshot.website.url)
+        }
+
         const result = await actions.completeOnboarding({
           orgId,
           plan: selectedPlan,
@@ -1134,7 +1143,9 @@ export default function OnboardingPage() {
         return (
           <WebsiteStepContent
             website={state.website}
-            onUrlInput={(value) => setState((s) => { s.website.url = value })}
+            onUrlInput={(value) => flush(() => {
+              setState((s) => { s.website.url = value; s.website.status = 'idle'; s.website.snippets = []; s.website.pages = 0; s.website.elements = 0; s.website.branding = undefined; s.website.crawlJobId = undefined; s.website.warning = undefined })
+            })}
             onBriefInput={(value) => setState((s) => { s.website.brief = value })}
             onRunPreview={runWebsitePreview}
             onContinue={() => setState((s) => { s.step = 'organization' })}

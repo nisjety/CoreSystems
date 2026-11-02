@@ -24,6 +24,10 @@ type DocumentHandler struct {
 	// authz resolves a viewer's explicit document grants from user-core. May be
 	// nil (grant resolution disabled — owner + org/shared visibility still apply).
 	authz *userauthz.Client
+	// spaceFiles carries the WS14-S3 room-file rules (zero value: off).
+	spaceFiles SpaceFilesConfig
+	// shares carries the WS14-S4 share routes (zero value: off).
+	shares SharesConfig
 }
 
 func NewDocumentHandler(r *repo.DocumentRepo, authz *userauthz.Client) *DocumentHandler {
@@ -272,6 +276,13 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "Space import authority does not match document source type")
 		return
 	}
+	// WS14-S3: a room file exists only under a space_upload decision. Without
+	// one the type is refused, so no caller can mint a room-file row by name.
+	spaceFile := spaceImportAuthority != nil && spaceImportAuthority.isSpaceUpload()
+	if !spaceFile && strings.TrimSpace(input.Type) == spaceUploadDocumentType {
+		writeCodedError(w, http.StatusForbidden, "space_files_not_authorized", "room files need a Space import decision", nil)
+		return
+	}
 	// Record the Space the authority was actually issued for. Until this line
 	// existed, the decision was verified and then discarded, so the row could
 	// not say which room it belonged to and no Space-filtered listing was
@@ -281,7 +292,22 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if spaceImportAuthority != nil {
 		input.SpaceRef = strings.TrimSpace(spaceImportAuthority.SpaceRef)
 	}
-	if pinDocumentOwner(&input, principalID(r)) {
+	if spaceFile && !h.prepareSpaceFile(w, &input, spaceImportAuthority) {
+		return
+	}
+	if h.spaceFiles.Enabled && spaceImportAuthority != nil {
+		// WS14-S3 (D-3): under a verified Space import decision the SIGNED
+		// SUBJECT owns the document, not the imports-core service principal
+		// that carried it. The only case where the owner differs from the
+		// verified principal; a body owner_id naming anyone else is refused.
+		subject := spaceImportAuthority.signedSubject()
+		if subject == "" || (input.OwnerID != "" && input.OwnerID != subject) {
+			writeError(w, http.StatusForbidden, "owner_id must match the Space import decision subject")
+			return
+		}
+		input.OwnerID = subject
+		input.CreatedBy = subject
+	} else if pinDocumentOwner(&input, principalID(r)) {
 		writeError(w, http.StatusForbidden, "owner_id must match the verified principal")
 		return
 	}
@@ -292,6 +318,12 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden,
 			"only an admin can create org-visible documents; create as 'private' or 'shared' and share via grants")
 		return
+	}
+	if spaceFile {
+		// Room files are always "shared": owner-only outside a Space read; the
+		// Space audience comes from Control's Space grant, never this field.
+		input.Visibility = "shared"
+		input.VisibilityFromSource = false
 	}
 
 	if err := validate.OrgID(orgID); err != nil {
@@ -317,7 +349,16 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "idempotency key is unavailable")
 			return
 		}
+		if spaceFile && writeSpaceFileRepoError(w, err) {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to create document")
+		return
+	}
+
+	// WS14-S3: attach the Space grant BEFORE the accepted header. A retry of
+	// the same item reuses the row (idempotency key) and re-attempts the grant.
+	if spaceFile && !h.attachSpaceFile(w, r, result.Document.DocumentID) {
 		return
 	}
 
@@ -369,6 +410,9 @@ func (h *DocumentHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "document not found")
 		return
 	}
+	// WS14-S3: a deleted room file drops its Space grant (best effort; inert
+	// without the document).
+	h.revokeSpaceFile(r, document, orgID)
 
 	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
 }
@@ -411,6 +455,12 @@ func (h *DocumentHandler) BulkIngest(w http.ResponseWriter, r *http.Request) {
 	var updated int
 	for i, input := range req.Documents {
 		input.OrgID = orgID
+		if strings.TrimSpace(input.Type) == spaceUploadDocumentType {
+			// Room files need a per-item Space import decision; bulk has none.
+			rejected++
+			rejectionReasons = append(rejectionReasons, fmt.Sprintf("doc[%d]: room files need a Space import decision", i))
+			continue
+		}
 		if reason := persistentZDRReason(bulkClaims, &input); reason != "" {
 			rejected++
 			rejectionReasons = append(rejectionReasons, fmt.Sprintf("doc[%d]: %s", i, reason))

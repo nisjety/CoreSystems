@@ -1200,6 +1200,11 @@ async fn audio_forwards_the_floored_posture_to_the_model_plane() {
     let harness = Harness::start_with(move |state| AppState {
         model_plane_url: Some(model_plane_url),
         model_plane_token: Some("model-plane-test-token".into()),
+        // QB-T17: /v1/audio is off unless its switch is on; this test is about the posture it forwards.
+        model_plane: quarry_edge::model_plane_gate::ModelPlaneFeatures {
+            model_audio: true,
+            ..Default::default()
+        },
         ..state
     })
     .await;
@@ -1255,6 +1260,11 @@ async fn audio_transcription_forwards_the_floored_posture_to_the_model_plane() {
     let harness = Harness::start_with(move |state| AppState {
         model_plane_url: Some(model_plane_url),
         model_plane_token: Some("model-plane-test-token".into()),
+        // QB-T17: /v1/audio is off unless its switch is on; this test is about the posture it forwards.
+        model_plane: quarry_edge::model_plane_gate::ModelPlaneFeatures {
+            model_audio: true,
+            ..Default::default()
+        },
         ..state
     })
     .await;

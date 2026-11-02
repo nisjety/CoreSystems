@@ -834,16 +834,16 @@ func (s *Server) getPreferences(c *gin.Context) {
 
 	// Aggregate preferences from the existing settings categories
 	appearanceDefaults := map[string]any{"theme": "light", "colorScheme": "blue", "fontSize": "medium", "compactMode": false}
-	langDefaults := map[string]any{"language": "en-US", "region": "US", "dateFormat": "MM/DD/YYYY", "timeFormat": "12h"}
+	langDefaults := map[string]any{"language": "en-US", "dateFormat": "MM/DD/YYYY", "timeFormat": "12h"}
 	notifDefaults := map[string]any{"emailNotifications": true, "pushNotifications": true, "teamsNotifications": true, "calendarReminders": true, "quietHours": map[string]any{"enabled": false, "start": "22:00", "end": "08:00"}}
 
-	appearance, err := s.userService.GetSettings(c.Request.Context(), userIDStr, "appearance", appearanceDefaults)
+	appearance, rawAppearance, err := s.userService.GetSettingsExplicit(c.Request.Context(), userIDStr, "appearance", appearanceDefaults)
 	if err != nil {
 		log.Error().Err(err).Str("user_id", userIDStr).Msg("Failed to get appearance settings")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve preferences"})
 		return
 	}
-	langSettings, err := s.userService.GetSettings(c.Request.Context(), userIDStr, "language", langDefaults)
+	langSettings, rawLang, err := s.userService.GetSettingsExplicit(c.Request.Context(), userIDStr, "language", langDefaults)
 	if err != nil {
 		log.Error().Err(err).Str("user_id", userIDStr).Msg("Failed to get language settings")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve preferences"})
@@ -875,17 +875,11 @@ func (s *Server) getPreferences(c *gin.Context) {
 	notifEmail, _ := notifSettings["emailNotifications"].(bool)
 	notifPush, _ := notifSettings["pushNotifications"].(bool)
 
+	// Contract v2 (WS16-S2): timezone only when a valid IANA zone (key
+	// "timezone", else a valid legacy "region"); never the country default.
+	// "explicit" says which fields were stored as a real choice.
 	c.JSON(http.StatusOK, gin.H{
-		"preferences": map[string]any{
-			"theme":           appearance["theme"],
-			"language":        langSettings["language"],
-			"timezone":        langSettings["region"],
-			"crawlIngestMode": knowledgeSettings["crawlIngestMode"],
-			"notifications": map[string]bool{
-				"email": notifEmail,
-				"push":  notifPush,
-			},
-		},
+		"preferences": users.BuildPreferenceView(appearance, langSettings, rawAppearance, rawLang, knowledgeSettings["crawlIngestMode"], notifEmail, notifPush),
 	})
 }
 
@@ -894,6 +888,10 @@ type UpdatePreferencesRequest struct {
 	Theme         *string         `json:"theme,omitempty"`
 	Language      *string         `json:"language,omitempty"`
 	Timezone      *string         `json:"timezone,omitempty"`
+	// DateFormat / TimeFormat accept their closed sets or "auto" (follow the locale).
+	DateFormat  *string `json:"dateFormat,omitempty"`
+	TimeFormat  *string `json:"timeFormat,omitempty"`
+	CompactMode *bool   `json:"compactMode,omitempty"`
 	Notifications map[string]bool `json:"notifications,omitempty"`
 	// CrawlIngestMode (Phase 6 selective ingest): auto | never | prompt. Controls
 	// whether crawl/scrape results are persisted+embedded into the knowledge base.
@@ -914,21 +912,55 @@ func (s *Server) updatePreferences(c *gin.Context) {
 		return
 	}
 
+	// Validate before any write so a bad field leaves nothing half-saved.
+	if req.Language != nil {
+		if _, ok := users.NormalizeLanguage(*req.Language); !ok {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "language must look like en or en-US"})
+			return
+		}
+	}
+	if req.Timezone != nil && !users.IsValidTimezone(*req.Timezone) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "timezone must be an IANA zone name"})
+		return
+	}
+	if req.DateFormat != nil && *req.DateFormat != users.PreferenceAuto && !users.ValidDateFormats[*req.DateFormat] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "dateFormat must be one of: MM/DD/YYYY, DD/MM/YYYY, YYYY-MM-DD, auto"})
+		return
+	}
+	if req.TimeFormat != nil && *req.TimeFormat != users.PreferenceAuto && !users.ValidTimeFormats[*req.TimeFormat] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "timeFormat must be one of: 12h, 24h, auto"})
+		return
+	}
+
 	// Route each field to the appropriate settings category
-	if req.Theme != nil {
-		if _, err := s.userService.UpsertSettings(c.Request.Context(), userIDStr, "appearance", map[string]any{"theme": *req.Theme}); err != nil {
+	if req.Theme != nil || req.CompactMode != nil {
+		appearancePatch := map[string]any{}
+		if req.Theme != nil {
+			appearancePatch["theme"] = *req.Theme
+		}
+		if req.CompactMode != nil {
+			appearancePatch["compactMode"] = *req.CompactMode
+		}
+		if _, err := s.userService.UpsertSettings(c.Request.Context(), userIDStr, "appearance", appearancePatch); err != nil {
 			log.Error().Err(err).Str("user_id", userIDStr).Msg("Failed to update appearance preference")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save preferences"})
 			return
 		}
 	}
-	if req.Language != nil || req.Timezone != nil {
+	if req.Language != nil || req.Timezone != nil || req.DateFormat != nil || req.TimeFormat != nil {
 		langPatch := map[string]any{}
 		if req.Language != nil {
 			langPatch["language"] = *req.Language
 		}
 		if req.Timezone != nil {
-			langPatch["region"] = *req.Timezone
+			// Key "timezone"; the legacy "region" key is no longer written.
+			langPatch["timezone"] = *req.Timezone
+		}
+		if req.DateFormat != nil {
+			langPatch["dateFormat"] = *req.DateFormat
+		}
+		if req.TimeFormat != nil {
+			langPatch["timeFormat"] = *req.TimeFormat
 		}
 		if _, err := s.userService.UpsertSettings(c.Request.Context(), userIDStr, "language", langPatch); err != nil {
 			log.Error().Err(err).Str("user_id", userIDStr).Msg("Failed to update language preference")
@@ -1407,7 +1439,6 @@ type AISettings struct {
 	ModelPreference        string `json:"modelPreference"` // "auto"|"gpt-4"|"gpt-4o"|"claude"
 	DataCollectionEnabled  bool   `json:"dataCollectionEnabled"`
 	PersonalizationEnabled bool   `json:"personalizationEnabled"`
-	MemoryEnabled          bool   `json:"memoryEnabled"`
 }
 
 // GET /api/v1/settings/ai
@@ -1418,7 +1449,7 @@ func (s *Server) getAISettings(c *gin.Context) {
 	}
 	defaults := map[string]any{
 		"aiEnabled": true, "modelPreference": "auto",
-		"dataCollectionEnabled": true, "personalizationEnabled": true, "memoryEnabled": false,
+		"dataCollectionEnabled": true, "personalizationEnabled": true,
 	}
 	settings, err := s.userService.GetSettings(c.Request.Context(), userID, "ai", defaults)
 	if err != nil {

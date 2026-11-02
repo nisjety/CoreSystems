@@ -18,6 +18,7 @@
 //! would invite someone to write `5` meaning five dollars and get five
 //! micro-dollars.
 
+use chrono::{DateTime, Datelike, Utc};
 use serde::Deserialize;
 
 /// Quota key for the per-run USD ceiling, in micro-dollars (1 USD = 1e6).
@@ -41,12 +42,48 @@ pub fn micros_to_usd(micros: i64) -> f64 {
     micros as f64 / MICROS_PER_USD
 }
 
+/// How often an org-core quota row's spend restarts (`reset_period`). An
+/// unrecognised value reads as `None`, the lifetime total, which is what
+/// cost-core already checks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ResetPeriod {
+    Daily,
+    Monthly,
+    #[default]
+    None,
+}
+
+impl ResetPeriod {
+    fn parse(raw: &str) -> Self {
+        match raw.trim() {
+            "daily" => Self::Daily,
+            "monthly" => Self::Monthly,
+            _ => Self::None,
+        }
+    }
+
+    /// The period whose window reaches further back, so a shared window never
+    /// counts less spend than either cap's own period. Lifetime covers monthly,
+    /// monthly covers daily.
+    fn widest(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::None, _) | (_, Self::None) => Self::None,
+            (Self::Monthly, _) | (_, Self::Monthly) => Self::Monthly,
+            _ => Self::Daily,
+        }
+    }
+}
+
 /// The ceilings an org has configured. `None` means "no ceiling set", which is
 /// different from a ceiling of zero — zero would forbid everything.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct OrgQuotaLimits {
     pub max_cost_usd: Option<f64>,
     pub max_tokens: Option<i64>,
+    /// The widest reset period among the ceilings that are set. Both caps are
+    /// checked against one window, so the window must reach back far enough
+    /// that neither cap is measured over less spend than its own period names.
+    pub reset_period: ResetPeriod,
 }
 
 impl OrgQuotaLimits {
@@ -60,6 +97,8 @@ impl OrgQuotaLimits {
 struct QuotaRow {
     key: String,
     limit: i64,
+    #[serde(default)]
+    reset_period: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,13 +124,33 @@ pub fn limits_from_rows(body: &str) -> OrgQuotaLimits {
             .quotas
             .iter()
             .find(|row| row.key == key)
-            .map(|row| row.limit)
-            .filter(|limit| *limit > 0)
+            .filter(|row| row.limit > 0)
     };
+    let cost = find(MAX_COST_PER_RUN_USD_MICROS);
+    let tokens = find(MAX_TOKENS_PER_RUN);
     OrgQuotaLimits {
-        max_cost_usd: find(MAX_COST_PER_RUN_USD_MICROS).map(micros_to_usd),
-        max_tokens: find(MAX_TOKENS_PER_RUN),
+        max_cost_usd: cost.map(|row| micros_to_usd(row.limit)),
+        max_tokens: tokens.map(|row| row.limit),
+        reset_period: match (cost, tokens) {
+            (Some(cost), Some(tokens)) => ResetPeriod::parse(&cost.reset_period)
+                .widest(ResetPeriod::parse(&tokens.reset_period)),
+            (Some(row), None) | (None, Some(row)) => ResetPeriod::parse(&row.reset_period),
+            (None, None) => ResetPeriod::None,
+        },
     }
+}
+
+/// Start of the calendar window `period` names, in UTC, or `None` for a
+/// lifetime total. Daily starts at midnight UTC today, monthly at midnight UTC
+/// on the first of the month.
+#[must_use]
+pub fn window_since(period: ResetPeriod, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    let day = match period {
+        ResetPeriod::None => return None,
+        ResetPeriod::Daily => now.date_naive(),
+        ResetPeriod::Monthly => now.date_naive().with_day(1)?,
+    };
+    Some(day.and_hms_opt(0, 0, 0)?.and_utc())
 }
 
 /// Read an org's configured ceilings from org-core.
@@ -159,6 +218,7 @@ pub async fn fetch_org_limits(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     #[test]
     fn micro_dollars_round_trip_without_truncation() {
@@ -203,5 +263,53 @@ mod tests {
             r#"{"quotas":[{"org_id":"o","key":"seats","value":0,"limit":9}]}"#
         )
         .is_empty());
+    }
+
+    #[test]
+    fn the_cost_rows_reset_period_governs_the_window_else_the_token_rows() {
+        let both = r#"{"quotas":[
+            {"org_id":"o","key":"max_cost_per_run_usd_micros","value":0,"limit":5000000,"reset_period":"monthly"},
+            {"org_id":"o","key":"max_tokens_per_run","value":0,"limit":1000,"reset_period":"daily"}
+        ]}"#;
+        assert_eq!(limits_from_rows(both).reset_period, ResetPeriod::Monthly);
+
+        // A shared window must not shorten either cap: the widest period wins,
+        // so the monthly token ceiling is never counted from the start of a day.
+        let cost_daily_tokens_monthly = r#"{"quotas":[
+            {"org_id":"o","key":"max_cost_per_run_usd_micros","value":0,"limit":5000000,"reset_period":"daily"},
+            {"org_id":"o","key":"max_tokens_per_run","value":0,"limit":1000,"reset_period":"monthly"}
+        ]}"#;
+        assert_eq!(
+            limits_from_rows(cost_daily_tokens_monthly).reset_period,
+            ResetPeriod::Monthly
+        );
+
+        let cost_none_tokens_daily = r#"{"quotas":[
+            {"org_id":"o","key":"max_cost_per_run_usd_micros","value":0,"limit":5000000,"reset_period":"none"},
+            {"org_id":"o","key":"max_tokens_per_run","value":0,"limit":1000,"reset_period":"daily"}
+        ]}"#;
+        assert_eq!(
+            limits_from_rows(cost_none_tokens_daily).reset_period,
+            ResetPeriod::None
+        );
+
+        let tokens_only = r#"{"quotas":[
+            {"org_id":"o","key":"max_tokens_per_run","value":0,"limit":1000,"reset_period":"daily"}
+        ]}"#;
+        assert_eq!(
+            limits_from_rows(tokens_only).reset_period,
+            ResetPeriod::Daily
+        );
+        assert_eq!(limits_from_rows("{}").reset_period, ResetPeriod::None);
+    }
+
+    #[test]
+    fn a_none_period_has_no_window_and_monthly_starts_on_the_first() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 23, 15, 42, 10).unwrap();
+        assert_eq!(window_since(ResetPeriod::None, now), None);
+        assert_eq!(
+            window_since(ResetPeriod::Monthly, now),
+            Some(Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap())
+        );
     }
 }

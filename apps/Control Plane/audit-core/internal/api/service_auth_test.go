@@ -175,3 +175,122 @@ func signAuditReadRequestAtTimestamp(request *http.Request, timestampValue, nonc
 	_, _ = mac.Write([]byte(canonical))
 	request.Header.Set("X-Delegation-Signature", base64.RawURLEncoding.EncodeToString(mac.Sum(nil)))
 }
+
+func TestComplianceScopeIsGrantedToTheGatewayPrincipalOnly(t *testing.T) {
+	granted := `[{"principal":"verevon-gateway","audience":"audit-core","token":"` + testGatewayToken + `","scopes":["audit:read:self","audit:compliance:read:self"]}]`
+	if _, err := parseServiceCredentialRegistry(granted); err != nil {
+		t.Fatalf("gateway with the compliance scope rejected: %v", err)
+	}
+	for _, principal := range []string{"integration-corev2", "model-gateway", "verevon-gateway-2", "other-service"} {
+		raw := `[{"principal":"` + principal + `","audience":"audit-core","token":"` + testGatewayToken + `","scopes":["audit:compliance:read:self"]}]`
+		if _, err := parseServiceCredentialRegistry(raw); err == nil {
+			t.Fatalf("principal %q was allowed to hold the compliance scope", principal)
+		}
+	}
+}
+
+func TestComplianceRoutesRequireTheComplianceScopeNotJustAuditRead(t *testing.T) {
+	now := time.Now().UTC()
+	readOnly, err := parseServiceCredentialRegistry(testCredentialRegistry())
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/v1/compliance/audit/events?org_id=org-a", nil)
+	signAuditReadRequest(request, now, "nonce-compliance-scope-1", "org-a")
+	if _, failure := authorizeServiceRequest(request, readOnly, newDelegationNonceCache(100), now); failure == nil || failure.Status != http.StatusForbidden {
+		t.Fatalf("a gateway without audit:compliance:read:self reached the compliance API: %+v", failure)
+	}
+
+	withScope, err := parseServiceCredentialRegistry(complianceTestRegistry())
+	if err != nil {
+		t.Fatal(err)
+	}
+	request = httptest.NewRequest(http.MethodGet, "/v1/compliance/audit/events?org_id=org-a", nil)
+	signAuditReadRequest(request, now, "nonce-compliance-scope-2", "org-a")
+	authorization, failure := authorizeServiceRequest(request, withScope, newDelegationNonceCache(100), now)
+	if failure != nil {
+		t.Fatalf("compliance request rejected: %v", failure)
+	}
+	if authorization.Scope != "audit:compliance:read:self" || authorization.UserRole != "member" || authorization.OrgID != "org-a" {
+		t.Fatalf("authorization = %+v; the role must come through for the handler's own check", authorization)
+	}
+
+	// A writer credential never reaches the compliance routes, and the
+	// compliance scope does not unlock the older audit read route by itself.
+	writer := httptest.NewRequest(http.MethodGet, "/v1/compliance/audit/events?org_id=org-a", nil)
+	writer.Header.Set("X-Service-Id", "integration-corev2")
+	writer.Header.Set("X-Service-Token", testWriterToken)
+	if _, failure := authorizeServiceRequest(writer, withScope, newDelegationNonceCache(100), now); failure == nil || failure.Status != http.StatusForbidden {
+		t.Fatalf("writer on a compliance route: %+v", failure)
+	}
+	complianceOnly, err := parseServiceCredentialRegistry(`[{"principal":"verevon-gateway","audience":"audit-core","token":"` + testGatewayToken + `","scopes":["audit:compliance:read:self"]}]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyRead := httptest.NewRequest(http.MethodGet, "/v1/audit?org_id=org-a", nil)
+	signAuditReadRequest(legacyRead, now, "nonce-compliance-scope-3", "org-a")
+	if _, failure := authorizeServiceRequest(legacyRead, complianceOnly, newDelegationNonceCache(100), now); failure == nil || failure.Status != http.StatusForbidden {
+		t.Fatalf("compliance scope unlocked GET /v1/audit: %+v", failure)
+	}
+
+	for method, path := range map[string]string{
+		http.MethodGet:  "/v1/compliance/audit/unknown",
+		http.MethodPost: "/v1/compliance/audit/events",
+	} {
+		if isComplianceRoute(method, path) {
+			t.Fatalf("%s %s is not a compliance route", method, path)
+		}
+	}
+}
+
+// WS05-S1: the org role the read scope depends on comes only from the signed
+// delegation. A forged role header without a valid signature never gets that far.
+func TestForgedRoleHeaderWithUnsignedDelegationIsRefused(t *testing.T) {
+	credentials, err := parseServiceCredentialRegistry(testCredentialRegistry())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+
+	// No delegation headers at all, only a forged admin role.
+	forged := httptest.NewRequest(http.MethodGet, "/v1/audit?org_id=org-a", nil)
+	forged.Header.Set("X-Service-Id", "verevon-gateway")
+	forged.Header.Set("X-Service-Token", testGatewayToken)
+	forged.Header.Set("X-User-Id", "user-a")
+	forged.Header.Set("X-Org-Id", "org-a")
+	forged.Header.Set("X-User-Role", "admin")
+	_, failure := authorizeServiceRequest(forged, credentials, newDelegationNonceCache(100), now)
+	if failure == nil || failure.Status != http.StatusForbidden || failure.Message != "signed service delegation required" {
+		t.Fatalf("forged role without a delegation: %+v", failure)
+	}
+
+	// A member's signed delegation whose role header is swapped to admin after
+	// signing no longer verifies, so the role cannot be escalated in transit.
+	swapped := httptest.NewRequest(http.MethodGet, "/v1/audit?org_id=org-a", nil)
+	signAuditReadRequest(swapped, now, "nonce-role-swap-0123456", "org-a")
+	swapped.Header.Set("X-User-Role", "admin")
+	_, failure = authorizeServiceRequest(swapped, credentials, newDelegationNonceCache(100), now)
+	if failure == nil || failure.Status != http.StatusForbidden || failure.Message != "signed service delegation required" {
+		t.Fatalf("role swapped after signing: %+v", failure)
+	}
+
+	// The honestly signed member delegation reaches the handler as a non-admin.
+	honest := httptest.NewRequest(http.MethodGet, "/v1/audit?org_id=org-a", nil)
+	signAuditReadRequest(honest, now, "nonce-role-honest-01234", "org-a")
+	authorization, failure := authorizeServiceRequest(honest, credentials, newDelegationNonceCache(100), now)
+	if failure != nil || authorization.UserRole != "member" || authorization.IsOrgAdmin() {
+		t.Fatalf("signed member delegation: %+v %+v", authorization, failure)
+	}
+}
+
+func TestIsOrgAdminMatrix(t *testing.T) {
+	for role, want := range map[string]bool{
+		"owner": true, "admin": true, "Owner": true, "ADMIN": true, " admin ": true,
+		"member": false, "viewer": false, "": false, "   ": false, "guest": false,
+		"superadmin": false, "administrator": false, "owner,member": false, "admin;member": false,
+	} {
+		if got := (serviceAuthorization{UserRole: role}).IsOrgAdmin(); got != want {
+			t.Fatalf("IsOrgAdmin(%q) = %t, want %t", role, got, want)
+		}
+	}
+}

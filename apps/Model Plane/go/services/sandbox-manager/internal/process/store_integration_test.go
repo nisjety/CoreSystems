@@ -499,7 +499,7 @@ func TestProcessStore_SurvivesAFreshPoolAgainstTheSameDatabase(t *testing.T) {
 	}
 
 	after := newPoolStore(t, dsn)
-	page, err := after.ReadOutput(context.Background(), "org-a", "proc-001", 0, 0)
+	page, err := after.ReadOutput(context.Background(), "org-a", "proc-001", 0, 0, nil)
 	if err != nil {
 		t.Fatalf("ReadOutput from a fresh pool: %v", err)
 	}
@@ -702,7 +702,7 @@ func TestProcessStore_ConcurrentReadersAgreeOnOneStream(t *testing.T) {
 			var out []byte
 			for {
 				// A small budget forces several pages per reader.
-				page, err := store.ReadOutput(context.Background(), "org-a", "proc-001", cursor, 32)
+				page, err := store.ReadOutput(context.Background(), "org-a", "proc-001", cursor, 32, nil)
 				if err != nil {
 					errs[i] = err
 					return

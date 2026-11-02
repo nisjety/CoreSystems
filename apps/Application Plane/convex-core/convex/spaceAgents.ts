@@ -2,6 +2,26 @@ import { v } from "convex/values";
 import { action, internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { assertServiceKey, requireGatewayMember } from "./authz";
+import { isDmKind } from "./spaceParticipants";
+import { noticeKindForBindingStatus, recordRoomNotice } from "./spaceRoomNotices";
+
+/**
+ * WS12-S2 legacy-path guard: agents are not bound inside a direct message. A DM
+ * is humans only with a roster fixed at registration (`agent_scope: none` in
+ * Control), and an agent subject is a membership Control would refuse anyway;
+ * refusing here keeps a binding row from existing at all. An unknown Space is
+ * left to the callers' existing behavior (this guard only refuses a DM).
+ * Throws `dm_agent_bind_refused`, which the gateway maps to 409.
+ */
+async function refuseDirectMessageSpace(ctx: any, spaceRef: string, externalOrgId: string) {
+  const space = await ctx.db
+    .query("spaces")
+    .withIndex("by_space_ref", (q: any) => q.eq("spaceRef", spaceRef))
+    .first();
+  if (space && space.externalOrgId === externalOrgId && isDmKind(space.kind)) {
+    throw new Error("dm_agent_bind_refused");
+  }
+}
 
 /**
  * Space agent bindings — the Application half of
@@ -98,6 +118,13 @@ export const spaceAgentBindingsForGateway = query({
         triggerModes: binding.triggerModes,
         allowedTools: binding.allowedTools,
         approvalMode: binding.approvalMode,
+        // WS08-S5: who may wake this agent. Absent means `members`; projection only, the
+        // gateway enforces it on the mention path.
+        respondTo: binding.respondTo,
+        respondToSubjects: binding.respondToSubjects,
+        // WS10-S5b: projection of Control's tool policy for this agent (editor only).
+        toolPolicyRevision: binding.toolPolicyRevision,
+        toolPolicyDigest: binding.toolPolicyDigest,
         projectionVersion: binding.projectionVersion,
         updatedAt: binding.updatedAt,
       });
@@ -341,6 +368,12 @@ export const upsertSpaceAgentBinding = internalMutation({
   handler: async (ctx, args) => {
     const subjectId = args.subjectId.trim();
     if (!subjectId) throw new Error("A Control subject id is required");
+    await refuseDirectMessageSpace(ctx, args.spaceRef, args.externalOrgId);
+    // WS08-S5: the `group` trigger is retired. Rows that already carry it stay readable,
+    // but no writer accepts it any more and nothing acts on it.
+    if (args.triggerModes?.includes("group")) {
+      throw new Error("The group trigger mode is retired; use mention");
+    }
     if ((args.deliveryTargets?.length ?? 0) > MAX_DELIVERY_TARGETS) {
       throw new Error("Too many delivery targets");
     }
@@ -396,6 +429,8 @@ export const upsertSpaceAgentBinding = internalMutation({
 
 const MAX_AGENT_NAME_LENGTH = 60;
 const MAX_AGENT_INSTRUCTIONS_LENGTH = 4000;
+// WS07-S7: presentation-only avatar colour, stored only as #rrggbb.
+const AVATAR_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
 
 /**
  * The in-room create flow (`SPACE_AGENT_SCOPE_PLAN` §UI-3b), step 1 of 2.
@@ -426,6 +461,7 @@ export const createSpaceAgentForGateway = mutation({
     const name = args.name.trim();
     const spaceRef = args.spaceRef.trim();
     if (!spaceRef) throw new Error("A Space reference is required");
+    await refuseDirectMessageSpace(ctx, spaceRef, args.externalOrgId);
     if (name.length < 2 || name.length > MAX_AGENT_NAME_LENGTH) {
       throw new Error("Agent name must be between 2 and 60 characters");
     }
@@ -438,7 +474,10 @@ export const createSpaceAgentForGateway = mutation({
     const agentId = await ctx.db.insert("agents", {
       orgId: organization._id,
       name,
-      avatarColor: args.avatarColor?.trim() || undefined,
+      avatarColor: (() => {
+        const colour = args.avatarColor?.trim();
+        return colour && AVATAR_COLOR_PATTERN.test(colour) ? colour : undefined;
+      })(),
       useCase: "other",
       status: "active",
       // Room agents answer through the room's own stream; the definition's
@@ -469,6 +508,14 @@ export const createSpaceAgentForGateway = mutation({
       projectionVersion: 1,
       createdAt: now,
       updatedAt: now,
+    });
+    // WS15-S12: the room timeline's "agent added" row, in the same transaction.
+    await recordRoomNotice(ctx, {
+      spaceRef,
+      externalOrgId: args.externalOrgId,
+      kind: "agent_bound",
+      actorExternalAuthId: args.externalAuthId,
+      subjectId,
     });
 
     return { agentRef: agentId, subjectId, bindingRef };
@@ -540,6 +587,7 @@ export const bindExistingSpaceAgentForGateway = mutation({
 
     const spaceRef = args.spaceRef.trim();
     if (!spaceRef) throw new Error("A Space reference is required");
+    await refuseDirectMessageSpace(ctx, spaceRef, args.externalOrgId);
     const definition = await ctx.db.get(args.agentId);
     if (!definition || (definition as any).orgId !== organization._id) {
       throw new Error("Agent definition not found");
@@ -563,6 +611,14 @@ export const bindExistingSpaceAgentForGateway = mutation({
         approvalMode: "require_confirmation",
       },
     );
+    // WS15-S12: the room timeline's "agent added" row, in the same transaction.
+    await recordRoomNotice(ctx, {
+      spaceRef,
+      externalOrgId: args.externalOrgId,
+      kind: "agent_bound",
+      actorExternalAuthId: args.externalAuthId,
+      subjectId,
+    });
     return { subjectId, bindingRef: result.bindingRef };
   },
 });
@@ -651,10 +707,248 @@ export const setSpaceAgentBindingStateForGateway = mutation({
       projectionVersion: ((binding as any).projectionVersion as number) + 1,
       updatedAt: Date.now(),
     });
+    // WS15-S12: the room timeline's paused / resumed / revoked row, in the same transaction.
+    const noticeKind = noticeKindForBindingStatus(args.status);
+    if (noticeKind) {
+      await recordRoomNotice(ctx, {
+        spaceRef,
+        externalOrgId: args.externalOrgId,
+        kind: noticeKind,
+        actorExternalAuthId: args.externalAuthId,
+        subjectId: (binding as any).subjectId as string,
+      });
+    }
     return {
       bindingRef,
       subjectId: (binding as any).subjectId as string,
       status: args.status,
+      changed: true,
+    };
+  },
+});
+
+const MAX_RESPOND_TO_SUBJECTS = 50;
+const MAX_SUBJECT_ID_LENGTH = 128;
+
+/**
+ * WS08-S5: set who may wake one bound agent in this room (`respondTo`).
+ *
+ * A human policy decision, written only here. The gateway has already checked that the
+ * caller is the Space's owner or a manager (`require_space_agent_grant_role`); this
+ * mutation re-checks that the binding belongs to that Space and org, compares
+ * `expectedUpdatedAt` so two managers cannot silently overwrite each other, bumps
+ * `projectionVersion` and appends one `spaceAgentPolicyEvents` row in the same
+ * transaction. The policy narrows or widens who the gateway lets mention-wake the agent;
+ * it never grants anything: Control still decides who may post or wake at all.
+ *
+ * Errors are stable strings the gateway maps to typed envelopes:
+ * `invalid_policy`, `agent_binding_not_found`, `policy_conflict`.
+ */
+export const setSpaceAgentWakePolicyForGateway = mutation({
+  args: {
+    serviceKey: v.string(),
+    externalAuthId: v.string(),
+    externalOrgId: v.string(),
+    spaceRef: v.string(),
+    bindingRef: v.string(),
+    respondTo: v.union(v.literal("members"), v.literal("managers"), v.literal("allowlist")),
+    respondToSubjects: v.optional(v.array(v.string())),
+    expectedUpdatedAt: v.number(),
+  },
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{
+    bindingRef: string;
+    subjectId: string;
+    respondTo: string;
+    respondToSubjects: string[];
+    projectionVersion: number;
+    updatedAt: number;
+    changed: boolean;
+  }> => {
+    assertServiceKey(args.serviceKey);
+    await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
+
+    const spaceRef = args.spaceRef.trim();
+    const bindingRef = args.bindingRef.trim();
+    if (!spaceRef || !bindingRef) throw new Error("invalid_policy");
+
+    // Normalize the allowlist: trimmed, non-empty, unique, bounded. It is only meaningful
+    // for `allowlist`; the other two modes store none so a stale list can never linger.
+    const rawSubjects = args.respondToSubjects ?? [];
+    const subjects: string[] = [];
+    for (const raw of rawSubjects) {
+      const id = raw.trim();
+      if (!id || id.length > MAX_SUBJECT_ID_LENGTH) throw new Error("invalid_policy");
+      if (!subjects.includes(id)) subjects.push(id);
+    }
+    if (subjects.length > MAX_RESPOND_TO_SUBJECTS) throw new Error("invalid_policy");
+    if (args.respondTo === "allowlist" && subjects.length === 0) throw new Error("invalid_policy");
+    if (args.respondTo !== "allowlist" && subjects.length > 0) throw new Error("invalid_policy");
+
+    const binding = await ctx.db
+      .query("spaceAgentBindings")
+      .withIndex("by_binding_ref", (q: any) => q.eq("bindingRef", bindingRef))
+      .unique();
+    if (
+      !binding ||
+      (binding as any).spaceRef !== spaceRef ||
+      (binding as any).externalOrgId !== args.externalOrgId ||
+      ((binding as any).status !== "active" && (binding as any).status !== "paused")
+    ) {
+      throw new Error("agent_binding_not_found");
+    }
+    if ((binding as any).updatedAt !== args.expectedUpdatedAt) {
+      throw new Error("policy_conflict");
+    }
+
+    const previousRespondTo = ((binding as any).respondTo as string | undefined) ?? undefined;
+    const previousSubjects = ((binding as any).respondToSubjects as string[] | undefined) ?? undefined;
+    const effectivePrevious = previousRespondTo ?? "members";
+    const sameSubjects =
+      (previousSubjects ?? []).length === subjects.length &&
+      (previousSubjects ?? []).every((id) => subjects.includes(id));
+    if (effectivePrevious === args.respondTo && sameSubjects) {
+      return {
+        bindingRef,
+        subjectId: (binding as any).subjectId as string,
+        respondTo: effectivePrevious,
+        respondToSubjects: previousSubjects ?? [],
+        projectionVersion: (binding as any).projectionVersion as number,
+        updatedAt: (binding as any).updatedAt as number,
+        changed: false,
+      };
+    }
+
+    const now = Date.now();
+    const projectionVersion = ((binding as any).projectionVersion as number) + 1;
+    await ctx.db.patch(binding._id, {
+      respondTo: args.respondTo,
+      respondToSubjects: args.respondTo === "allowlist" ? subjects : undefined,
+      projectionVersion,
+      updatedAt: now,
+    });
+    await ctx.db.insert("spaceAgentPolicyEvents", {
+      bindingRef,
+      spaceRef,
+      externalOrgId: args.externalOrgId,
+      subjectId: (binding as any).subjectId as string,
+      actorExternalAuthId: args.externalAuthId,
+      previousRespondTo,
+      previousRespondToSubjects: previousSubjects,
+      respondTo: args.respondTo,
+      respondToSubjects: args.respondTo === "allowlist" ? subjects : undefined,
+      projectionVersion,
+      createdAt: now,
+    });
+    return {
+      bindingRef,
+      subjectId: (binding as any).subjectId as string,
+      respondTo: args.respondTo,
+      respondToSubjects: args.respondTo === "allowlist" ? subjects : [],
+      projectionVersion,
+      updatedAt: now,
+      changed: true,
+    };
+  },
+});
+
+/**
+ * WS10-S5b: record the projection of Control's per-tool policy on one binding.
+ *
+ * Control (`space_tool_policies`) is the store and the only authority; the gateway has already
+ * written the layer there under Control's role check and revision compare-and-set, and calls this
+ * only with the revision and merged digest Control returned. This mutation re-checks that the
+ * binding belongs to that Space and organization and is still bound, never lowers a stored
+ * revision (a late retry of an older write is a no-op), and does NOT touch `updatedAt`
+ * (`setSpaceAgentWakePolicyForGateway` compares it, so a policy sync must not make a second
+ * manager's wake-policy change look stale). It changes neither `approvalMode` nor `allowedTools`.
+ *
+ * Errors are stable strings the gateway maps: `invalid_policy`, `agent_binding_not_found`.
+ */
+export const setSpaceAgentBindingPolicyForGateway = mutation({
+  args: {
+    serviceKey: v.string(),
+    externalAuthId: v.string(),
+    externalOrgId: v.string(),
+    spaceRef: v.string(),
+    bindingRef: v.string(),
+    toolPolicyRevision: v.number(),
+    toolPolicyDigest: v.string(),
+  },
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{
+    bindingRef: string;
+    toolPolicyRevision: number;
+    toolPolicyDigest: string;
+    projectionVersion: number;
+    changed: boolean;
+  }> => {
+    assertServiceKey(args.serviceKey);
+    await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
+
+    const spaceRef = args.spaceRef.trim();
+    const bindingRef = args.bindingRef.trim();
+    const digest = args.toolPolicyDigest.trim();
+    if (
+      !spaceRef ||
+      !bindingRef ||
+      !digest ||
+      digest.length > 128 ||
+      !Number.isInteger(args.toolPolicyRevision) ||
+      args.toolPolicyRevision < 0
+    ) {
+      throw new Error("invalid_policy");
+    }
+
+    const binding = await ctx.db
+      .query("spaceAgentBindings")
+      .withIndex("by_binding_ref", (q: any) => q.eq("bindingRef", bindingRef))
+      .unique();
+    if (
+      !binding ||
+      (binding as any).spaceRef !== spaceRef ||
+      (binding as any).externalOrgId !== args.externalOrgId ||
+      ((binding as any).status !== "active" && (binding as any).status !== "paused")
+    ) {
+      throw new Error("agent_binding_not_found");
+    }
+
+    const storedRevision = (binding as any).toolPolicyRevision as number | undefined;
+    const storedDigest = (binding as any).toolPolicyDigest as string | undefined;
+    const projectionVersion = (binding as any).projectionVersion as number;
+    if (storedRevision !== undefined && args.toolPolicyRevision < storedRevision) {
+      return {
+        bindingRef,
+        toolPolicyRevision: storedRevision,
+        toolPolicyDigest: storedDigest ?? "",
+        projectionVersion,
+        changed: false,
+      };
+    }
+    if (storedRevision === args.toolPolicyRevision && storedDigest === digest) {
+      return {
+        bindingRef,
+        toolPolicyRevision: storedRevision,
+        toolPolicyDigest: digest,
+        projectionVersion,
+        changed: false,
+      };
+    }
+    const nextVersion = projectionVersion + 1;
+    await ctx.db.patch(binding._id, {
+      toolPolicyRevision: args.toolPolicyRevision,
+      toolPolicyDigest: digest,
+      projectionVersion: nextVersion,
+    });
+    return {
+      bindingRef,
+      toolPolicyRevision: args.toolPolicyRevision,
+      toolPolicyDigest: digest,
+      projectionVersion: nextVersion,
       changed: true,
     };
   },

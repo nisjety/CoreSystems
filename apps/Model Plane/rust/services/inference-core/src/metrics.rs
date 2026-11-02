@@ -50,6 +50,13 @@ pub const TOKENS_TOTAL: &str = "inference_tokens_total";
 /// scrape non-empty from the first second, before any request has arrived.
 pub const BUILD_INFO: &str = "inference_core_build_info";
 
+/// Gauge: the review-by date of each ZDR attestation, as Unix seconds at the
+/// start of that day (UTC), labelled by provider surface. The attestation stops
+/// granting ZDR after that day, so `time() - gauge > 86400` means lapsed. Absent
+/// for a surface that makes no ZDR claim.
+pub const ZDR_ATTESTATION_REVIEW_BY: &str =
+    "mp_inference_zdr_attestation_review_by_timestamp_seconds";
+
 /// Label value for "the call failed before a provider answered, so no model or
 /// provider is known".
 pub const UNKNOWN: &str = "unknown";
@@ -107,6 +114,10 @@ pub fn describe() {
         "Tokens reported by the serving provider, by calling service, model, provider and direction (input already includes prompt-cache tokens)."
     );
     describe_gauge!(BUILD_INFO, "Version of the running inference-core binary.");
+    describe_gauge!(
+        ZDR_ATTESTATION_REVIEW_BY,
+        "Review-by date of the ZDR attestation per provider surface, in Unix seconds at the start of that UTC day. The attestation stops granting ZDR after that day."
+    );
 }
 
 /// A bounded set of label values: the first `cap` distinct plain identifiers
@@ -225,6 +236,22 @@ fn code_name(code: Code) -> &'static str {
         Code::DataLoss => "data_loss",
         Code::Unauthenticated => "unauthenticated",
     }
+}
+
+/// Report the review-by date of one surface's ZDR attestation, in force or not.
+///
+/// Set once at boot from the evidence-verified attestation; a lapse is then a
+/// plain comparison against `time()` in the alert rule, with no process-side
+/// timer that could itself stop. `surface` is a fixed provider-surface name,
+/// never caller data.
+pub fn record_zdr_attestation_review_by(surface: &'static str, review_by: chrono::NaiveDate) {
+    let seconds = review_by
+        .and_time(chrono::NaiveTime::MIN)
+        .and_utc()
+        .timestamp();
+    // Unix seconds for any plausible review-by date are far below 2^53.
+    #[allow(clippy::cast_precision_loss)]
+    gauge!(ZDR_ATTESTATION_REVIEW_BY, "surface" => surface).set(seconds as f64);
 }
 
 /// Count one finished call.
@@ -437,6 +464,24 @@ mod tests {
         );
         assert!(line(TOKENS_TOTAL, &["direction=\"output\""], "5"), "{text}");
         assert!(!text.contains("org"), "no org label: {text}");
+    }
+
+    #[test]
+    fn the_zdr_review_by_gauge_reports_the_start_of_the_review_by_day_per_surface() {
+        let text = render(|| {
+            record_zdr_attestation_review_by(
+                "azure_openai",
+                chrono::NaiveDate::from_ymd_opt(2027, 6, 1).expect("static date"),
+            );
+        });
+        // 2027-06-01T00:00:00Z.
+        assert!(
+            text.lines()
+                .any(|line| line.starts_with(ZDR_ATTESTATION_REVIEW_BY)
+                    && line.contains("surface=\"azure_openai\"")
+                    && line.ends_with(" 1811808000")),
+            "{text}"
+        );
     }
 
     #[test]

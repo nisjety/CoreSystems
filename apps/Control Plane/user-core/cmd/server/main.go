@@ -13,10 +13,12 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	_ "time/tzdata" // embed the IANA zone database so preference timezone validation works in minimal images
 
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/clients"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/config"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/database"
+	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/directory"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/grpc"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/handlers"
 	httpserver "github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/http"
@@ -379,7 +381,42 @@ func main() {
 	// Plane services (documents-api, retrieval) can resolve grants cross-plane.
 	aclRepo := users.NewAclRepository(db)
 	httpServer := httpserver.NewServer(userService, aclRepo, sharedPublisher, redisClient, httpPort)
-	httpServer.SetSpaceRepository(spaces.NewRepository(db))
+	spaceRepo := spaces.NewRepository(db)
+	// WS03-S1: effect-policy changes insert their audit outbox row on the
+	// change's own transaction; unwired, policy writes fail closed.
+	spaceRepo.SetPolicyAuditOutbox(users.NewSpaceAuditEnqueuer(userRepo))
+	// WS12-S1: direct-message registration and the dm-eligibility route. Strict
+	// literal true; off by default; a rollout control, never an authorization
+	// input (the dm_create_entitled bit and membership checks still decide).
+	spaceRepo.SetDMRegistrationEnabled(os.Getenv("SPACE_DM_REGISTRATION") == "true")
+	// WS04-S11: sign a history floor on shared thread-read decisions for
+	// since_join rooms. Strict literal true; off by default; a presentation
+	// rollout control, never an authorization input.
+	spaceRepo.SetHistoryWindowClaim(os.Getenv("SPACE_HISTORY_WINDOW_CLAIM") == "true")
+	httpServer.SetSpaceRepository(spaceRepo)
+	// WS05-S5: Space decision denied/issued audit events. Strict literal true;
+	// off by default; a rollout control, never an authorization input.
+	httpServer.SetSpaceDecisionAudit(spaces.LoadDecisionAuditConfig(os.Getenv), users.NewSpaceAuditEnqueuer(userRepo))
+	// WS20-S4: stored-consent schedule contracts. Strict literal true; off by default.
+	httpServer.SetScheduleContractsEnabled(os.Getenv("SCHEDULE_CONTRACT_ENABLED") == "true")
+	// WS14-S2: owner-asserted grant writes and Space-subject grants. Strict
+	// literal true; off by default; rollout controls, never authorization inputs.
+	httpServer.SetOwnerAssertedGrants(os.Getenv("CONTROL_OWNER_ASSERTED_GRANTS") == "true")
+	httpServer.SetSpaceSubjectGrants(os.Getenv("CONTROL_SPACE_SUBJECT_GRANTS") == "true")
+	// WS14-S1: shared-Space import decisions (room uploads). Strict literal true;
+	// off by default; a rollout control, never an authorization input.
+	httpServer.SetSharedImportDecisions(os.Getenv("CONTROL_SPACE_SHARED_IMPORT") == "true")
+	// WS03-S3: org-admin Space policy writes. Strict literal true; off by default.
+	httpServer.SetSpacePolicyAdminWrites(os.Getenv("SPACE_POLICY_ADMIN_WRITES") == "true")
+	// WS04-S10: durable membership events (ledger as outbox, PubAck publish,
+	// 10-minute re-announce). Strict literal true; off by default. Handlers
+	// keep their inline publish whichever way this is set.
+	if os.Getenv("SPACE_MEMBERSHIP_EVENTS_SWEEPER") == "true" && sharedPublisher != nil {
+		go spaceRepo.RunMembershipEventsOutbox(ctx, sharedPublisher, spaces.MembershipEventsOutboxConfig{})
+		log.Println("Space membership events sweeper enabled")
+	}
+	// WS04-S3: people search for the Space member picker (one SQL join in user-core).
+	httpServer.SetPeopleDirectory(directory.NewStore(db))
 	httpServer.SetAuthInternalCredential(serviceCredential)
 	// Personal inbound-mail alias (chat-wave2 mail-task spec). The service is
 	// always wired; every route stays 503 on its own until

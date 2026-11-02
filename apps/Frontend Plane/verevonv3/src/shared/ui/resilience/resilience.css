@@ -1,0 +1,69 @@
+/* Failure card (WS07-S1). Own stylesheet: global.css carries uncommitted lines. */
+.failure-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 520px;
+  margin: 32px auto;
+  padding: 20px 22px;
+  border: 1px solid var(--verevon-border, #e7e7e5);
+  border-radius: 12px;
+  background: var(--verevon-surface, #ffffff);
+  color: var(--verevon-text, #1a1a1a);
+}
+
+.failure-card--compact {
+  margin: 8px;
+  padding: 12px 14px;
+  gap: 6px;
+}
+
+.failure-card--root {
+  margin-top: 18vh;
+}
+
+.failure-card__title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.failure-card__body {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--verevon-text-muted, #66615b);
+}
+
+.failure-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+/* New-version banner (WS07-S2). Top centre so it never covers the stale-build notice at the bottom. */
+.new-version-banner {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: calc(100vw - 32px);
+  padding: 8px 12px;
+  border: 1px solid var(--verevon-border, #e7e7e5);
+  border-radius: 12px;
+  background: var(--verevon-surface, #ffffff);
+  color: var(--verevon-text, #1a1a1a);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.18);
+  font-size: 13px;
+}
+
+/* Both notices at once (WS07-S3): stack the second under the first. */
+.new-version-banner + .new-version-banner {
+  top: 60px;
+}

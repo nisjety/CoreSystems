@@ -161,8 +161,8 @@ describe('the action contract browser.blocked.try_other_source', () => {
     expect(parsed.success && parsed.data).toEqual({ sessionId: 'run-1' })
   })
 
-  it('is for the person: a model may not run it', () => {
-    const entry = buildActionCatalogManifest().actions.find((candidate) => candidate.id === 'browser.blocked.try_other_source')
+  it('is for the person: a model may not run it', async () => {
+    const entry = (await buildActionCatalogManifest()).actions.find((candidate) => candidate.id === 'browser.blocked.try_other_source')
     expect(entry?.allowedActorTypes).toEqual(['human'])
   })
 })

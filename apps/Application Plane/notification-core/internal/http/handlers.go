@@ -167,6 +167,18 @@ func (h *Handler) CreateNotificationRequest(c *gin.Context) {
 		}
 	case "support-worker":
 	case "capability-core":
+	case "space-attention":
+		// WS11-S9: Convex's out-of-app courier. It may notify any org member
+		// (resolveRecipient checks membership), but only a user, only a
+		// refs-only standard-retention request: a ZDR event never reaches it.
+		if request.Recipient.Kind != notification.RecipientKindUser {
+			c.JSON(http.StatusForbidden, gin.H{"error": "space attention may notify only a user"})
+			return
+		}
+		if strings.ToLower(strings.TrimSpace(request.RetentionMode)) != notification.RetentionModeStandard {
+			c.JSON(http.StatusForbidden, gin.H{"error": "space attention notifications require standard retention mode"})
+			return
+		}
 	default:
 		c.JSON(http.StatusForbidden, gin.H{"error": "caller is not authorized to create notifications"})
 		return
@@ -211,6 +223,18 @@ func isNotificationTypeAuthorized(serviceID, notificationType string) bool {
 		"capability-core": {
 			"modelplane.run_completed": {},
 			"modelplane.run_failed":    {},
+		},
+		// WS11-S9: refs-only Space attention, issued by Convex only. The
+		// in-app copy is the Convex inbox, so these types carry no title or text.
+		"space-attention": {
+			"space.mention":         {},
+			"space.reply":           {},
+			"space.invite":          {},
+			"space.agent_done":      {},
+			"space.agent_failed":    {},
+			"space.approval_needed": {},
+			"space.agent_awaiting":  {},
+			"space.reminder":        {},
 		},
 	}
 	_, ok := allowed[serviceID][notificationType]

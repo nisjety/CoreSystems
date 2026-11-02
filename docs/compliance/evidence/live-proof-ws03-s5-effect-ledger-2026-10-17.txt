@@ -1,0 +1,36 @@
+Live proof: WS03 S4 (fold store) and S5 (effect ledger) - reserve, kill mid-call, sweep to unknown_outcome
+Date: 2026-10-17 (UTC). Stack: the local Model Plane compose project `model-plane`, session-core and execution-core rebuilt from branch `model-plane` at commit b8792341.
+Verification level: LIVE-VERIFIED on a developer stack. Not production. No secrets, tokens or payload content below; run and action ids are test data.
+
+DEPLOY
+  session-core and execution-core rebuilt and recreated with the carry-over script (compose-referenced variables missing from deploy/.env were copied from the running containers in-process; only names were printed). Image revision label = b8792341 on both. Both healthy.
+  Migrations applied on the live database: 0047 (run_loop_checkpoints) and 0048 (effect ledger columns, statuses not_run and unknown_outcome). _sqlx_migrations 45..48 success = t.
+  Switches at deploy: SESSION_CORE_LOOP_CHECKPOINT_ENABLED=false, SESSION_CORE_TOOL_LEDGER_SWEEP_ENABLED=false, EXECUTION_EFFECT_LEDGER_ENABLED=false, AGENT_CONTINUE_AFTER_APPROVAL_ENABLED=false.
+  Sweep candidates before enabling anything: 0 (no historical reservation was eligible).
+
+PROOF (EXECUTION_EFFECT_LEDGER_ENABLED=true on execution-core; sweep enabled only for the final step)
+  1. Normal call. Run 01M56246YSJRY3BB49JGP73D0X, tool save_memory, class write.
+       reserved_at 23:11:08.300  finalized_at 23:11:08.434  (134 ms)
+       status completed, closed_by executor, args_digest 8c6c10ec... (digest only; the arguments are not stored)
+  2. Kill mid-call. A temporary trigger delayed ONLY save_memory finalizes by 8 s so the call could be caught open
+     (the call itself takes ~130 ms, shorter than the watcher's polling interval). Run 01M5626P8DNZKBX0HAQMJM5CA5.
+       23:12:29.181  reserved
+       watcher: "KILLED execution-core while reserved" (docker pause session-core + docker kill execution-core)
+       10 s later, after the 8 s window: status reserved, closed_by NULL, finalized_at NULL  -> the finalize never committed
+       the stream ended with agent_dispatch_unavailable "The agent dispatch outcome is unknown; the run remains retriable."
+  3. Recovery. The run stayed queued; the recovery worker ended it as failed (outcome_unknown) at 23:27:45.
+  4. Sweep (SESSION_CORE_TOOL_LEDGER_SWEEP_ENABLED=true). 23:28:25.086 status unknown_outcome, closed_by sweep.
+       session_audit_outbox holds the content-free events: tool_action_reserved (outcome reserved) then tool_action (outcome unknown_outcome, phase final).
+
+WHAT THE PROOF DOES AND DOES NOT SHOW
+  Shows: the ledger records the reservation before the call, a kill between reservation and finalize leaves an honest open row, and the sweep closes it as unknown_outcome with an audit event. The call was never replayed.
+  Does not show: in-place resume or closers acting on the row (S7), the fold writer (S6), or parking (S8). Those are not built yet. The closers table is unit-tested only.
+  The kill window was widened with a temporary test trigger on the live ledger table (created and dropped by this proof; 0 triggers remain). Without it the watcher reported "missed window (already completed)".
+
+FINDING: no chat-UI path reaches an effectful tool
+  The SPA adds the "agentic" feature only in plan mode (chat-client.ts buildChatWireBody), and model-gateway holds a plan-mode run to READ_ONLY. Approving a plan card writes a per-thread in-memory grant, but the SPA then switches to Ask, which is the plain gateway loop, so the grant is never used. The proof therefore replayed the app's own captured request with plan_mode=false from the signed-in page. This is the unfinished plan-continue work (WS14) and is tracked in the build plan.
+
+FINAL STATE
+  EXECUTION_EFFECT_LEDGER_ENABLED=false, SESSION_CORE_TOOL_LEDGER_SWEEP_ENABLED=false, SESSION_CORE_LOOP_CHECKPOINT_ENABLED=false, AGENT_CONTINUE_AFTER_APPROVAL_ENABLED=false. Both services recreated and healthy.
+  Test data left in the user's memory store: save_memory notes "My favourite colour for the ledger test is blue." Not removed (user data).
+  Infrastructure incidents during the proof (Docker Desktop VM wedged twice, stale AF_UNIX socket files blocking restart) are described in apps/Model Plane/docs/runbooks/docker-desktop-recovery.md once that runbook lands.

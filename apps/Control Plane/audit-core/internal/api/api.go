@@ -6,6 +6,7 @@ package api
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/triodelab/controlplane/audit-core/internal/events"
 	"github.com/triodelab/controlplane/audit-core/internal/store"
+	"github.com/triodelab/controlplane/audit-core/internal/verifier"
 )
 
 type API struct {
@@ -25,6 +27,7 @@ type API struct {
 	credentials []serviceCredential
 	nonces      *delegationNonceCache
 	readiness   func(context.Context) Readiness
+	readMode    string
 }
 
 type eventStore interface {
@@ -33,6 +36,10 @@ type eventStore interface {
 	SummariseUsage(context.Context, string, time.Time, time.Time) ([]store.UsageSummary, error)
 	InsertAuditFromSource(context.Context, *events.AuditEvent, string) (bool, error)
 	InsertUsageFromSource(context.Context, *events.UsageEvent, string) (bool, error)
+	ComplianceEvents(context.Context, store.ComplianceFilter) (store.CompliancePage, error)
+	ComplianceManifest(context.Context, string, time.Time, time.Time) (store.ComplianceManifest, error)
+	ComplianceKeys(context.Context, string) ([]store.ComplianceKey, error)
+	VerifyOrg(context.Context, string, verifier.Options) (verifier.Report, error)
 }
 
 type ConsumerReadiness struct {
@@ -90,6 +97,10 @@ func New(s eventStore, rawCredentials string, readiness ...func(context.Context)
 	if err != nil {
 		return nil, err
 	}
+	readMode, err := auditReadModeFromEnv()
+	if err != nil {
+		return nil, err
+	}
 	provider := func(context.Context) Readiness { return Readiness{} }
 	if len(readiness) > 0 && readiness[0] != nil {
 		provider = readiness[0]
@@ -99,6 +110,7 @@ func New(s eventStore, rawCredentials string, readiness ...func(context.Context)
 		credentials: credentials,
 		nonces:      newDelegationNonceCache(100_000),
 		readiness:   provider,
+		readMode:    readMode,
 	}, nil
 }
 
@@ -113,6 +125,7 @@ func (a *API) Mount(r chi.Router) {
 		r.Get("/usage", a.listUsage)
 		r.Post("/usage", a.ingestUsage)
 		r.Get("/usage/summary", a.summariseUsage)
+		a.mountCompliance(r)
 	})
 }
 
@@ -201,27 +214,110 @@ func (a *API) listAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filter := store.AuditFilter{
-		OrgID:  orgID,
-		Since:  parseTime(r.URL.Query().Get("since")),
-		Until:  parseTime(r.URL.Query().Get("until")),
-		Event:  r.URL.Query().Get("event"),
-		UserID: r.URL.Query().Get("user_id"),
-		Limit:  parseInt(r.URL.Query().Get("limit"), 100),
+	q := r.URL.Query()
+	limit := parseInt(q.Get("limit"), 100)
+	if limit > store.MaxAuditListLimit {
+		limit = store.MaxAuditListLimit
 	}
+	filter := store.AuditFilter{
+		OrgID:      orgID,
+		Since:      parseTime(q.Get("since")),
+		Until:      parseTime(q.Get("until")),
+		Event:      q.Get("event"),
+		UserID:     q.Get("user_id"),
+		Plane:      q.Get("plane"),
+		Outcome:    q.Get("outcome"),
+		Subject:    q.Get("subject"),
+		ResourceID: q.Get("resource_id"),
+	}
+	if raw := q.Get("cursor"); raw != "" {
+		cursor, err := decodeAuditCursor(raw)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{
+				"code":    "invalid_cursor",
+				"message": "cursor is not a cursor this API issued",
+				"details": map[string]any{},
+			}})
+			return
+		}
+		filter.HasCursor = true
+		filter.CursorIngestedAt = cursor.IngestedAt
+		filter.CursorID = cursor.ID
+	}
+	scope, filter, ok := a.resolveAuditScope(w, r, filter)
+	if !ok {
+		return
+	}
+	// One extra row tells us whether another page exists.
+	filter.Limit = limit + 1
 	rows, err := a.store.ListAudit(r.Context(), filter)
 	if err != nil {
 		log.Error().Err(err).Str("org_id", orgID).Msg("listAudit failed")
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "query failed"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": rows, "meta": map[string]any{
-		"count": len(rows),
-		"limit": filter.Limit,
-	}, "error": nil})
+	nextCursor := ""
+	if len(rows) > limit {
+		rows = rows[:limit]
+		last := rows[len(rows)-1]
+		nextCursor = encodeAuditCursor(auditCursor{IngestedAt: last.IngestedAt, ID: last.ID})
+	}
+	var data any = rows
+	count := len(rows)
+	if scope == scopeOrgRedacted {
+		redacted := redactToolActionRows(rows)
+		data, count = redacted, len(redacted)
+	}
+	meta := map[string]any{
+		"count": count,
+		"limit": limit,
+		"scope": scope,
+	}
+	if nextCursor != "" {
+		meta["next_cursor"] = nextCursor
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": data, "meta": meta, "error": nil})
+}
+
+// auditCursor is the keyset position after the last row of a page. It is opaque
+// to clients (base64url JSON {t,id}) and carries no authority: the role scope
+// is applied on top of it on every request, so a forged cursor can only move
+// the window inside what the caller may already read.
+type auditCursor struct {
+	IngestedAt time.Time
+	ID         int64
+}
+
+type auditCursorWire struct {
+	T  string `json:"t"`
+	ID int64  `json:"id"`
+}
+
+func encodeAuditCursor(c auditCursor) string {
+	raw, _ := json.Marshal(auditCursorWire{T: c.IngestedAt.UTC().Format(time.RFC3339Nano), ID: c.ID})
+	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+func decodeAuditCursor(s string) (auditCursor, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(s)
+	if err != nil {
+		return auditCursor{}, err
+	}
+	var wire auditCursorWire
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		return auditCursor{}, err
+	}
+	t, err := time.Parse(time.RFC3339Nano, wire.T)
+	if err != nil || wire.ID <= 0 {
+		return auditCursor{}, errors.New("invalid cursor")
+	}
+	return auditCursor{IngestedAt: t, ID: wire.ID}, nil
 }
 
 func (a *API) listUsage(w http.ResponseWriter, r *http.Request) {
+	if !a.requireOrgAdminRead(w, r, "/v1/usage") {
+		return
+	}
 	orgID := r.URL.Query().Get("org_id")
 	if orgID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "org_id required"})
@@ -248,6 +344,9 @@ func (a *API) listUsage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) summariseUsage(w http.ResponseWriter, r *http.Request) {
+	if !a.requireOrgAdminRead(w, r, "/v1/usage/summary") {
+		return
+	}
 	orgID := r.URL.Query().Get("org_id")
 	if orgID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "org_id required"})

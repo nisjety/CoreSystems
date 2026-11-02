@@ -98,6 +98,38 @@ describe('streamRunEvents dispatch', () => {
     expect(onDone).toHaveBeenCalledTimes(1)
   })
 
+  it('reads a park and the resume of a park as display-only events (WS03 S8): ids and a segment number, never a reason', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      sseResponse([
+        sseFrame('run_parked', { run_id: 'run_1', at: '2026-10-19T10:00:00Z', park_reason: 'usage_limit' }),
+        sseFrame('run_resumed', { run_id: 'run_1', resumed_segment: 2, at: '2026-10-19T10:05:00Z' }),
+        // A segment number that is not a non-negative integer is not invented.
+        sseFrame('run_resumed', { run_id: 'run_1', resumed_segment: '2' }),
+        sseFrame('run_resumed', { run_id: 'run_1', resumed_segment: -1 }),
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const onRunParked = vi.fn()
+    const onRunResumedFromPark = vi.fn()
+    // The approval-resume handler is a different event and must not fire for a park resume.
+    const onRunResumed = vi.fn()
+
+    await streamRunEvents('run_1', { onRunParked, onRunResumedFromPark, onRunResumed })
+
+    expect(onRunParked).toHaveBeenCalledTimes(1)
+    expect(onRunParked).toHaveBeenCalledWith({ runId: 'run_1', at: '2026-10-19T10:00:00Z' })
+    expect(onRunResumedFromPark).toHaveBeenCalledTimes(3)
+    expect(onRunResumedFromPark).toHaveBeenNthCalledWith(1, {
+      runId: 'run_1',
+      resumedSegment: 2,
+      at: '2026-10-19T10:05:00Z',
+    })
+    expect(onRunResumedFromPark).toHaveBeenNthCalledWith(2, { runId: 'run_1', resumedSegment: undefined, at: undefined })
+    expect(onRunResumedFromPark).toHaveBeenNthCalledWith(3, { runId: 'run_1', resumedSegment: undefined, at: undefined })
+    expect(onRunResumed).not.toHaveBeenCalled()
+  })
+
   it('parses goal_summary/batch_id (wide-research fan-out) into goalSummary/batchId', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       sseResponse([

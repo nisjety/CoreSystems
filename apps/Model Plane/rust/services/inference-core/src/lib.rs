@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod cache;
 pub mod config;
+pub mod entitlement;
 pub mod grpc;
 pub mod http_health;
 pub mod metered;

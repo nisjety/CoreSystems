@@ -1,0 +1,44 @@
+config {
+  type: "table",
+  schema: "xero_gold_common",
+  description: "Xero contact-group dimension. It is retained as Xero source segmentation and is never interpreted as a business unit.",
+  assertions: { nonNull: ["tenant_id", "contact_group_key", "contact_group_natural_key"], uniqueKey: ["contact_group_key"] }
+}
+
+WITH direct_detail AS (
+  SELECT
+    tenant_id,
+    contact_group_id,
+    direct_detail_observed_at,
+    direct_detail_source_run_id,
+    direct_detail_source_version_id,
+    is_direct_detail_reconciled,
+    has_member_count_match
+  FROM ${ref("dw_1_silver_xero", "audit_contact_group_direct_detail_reconciliation")}
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY tenant_id, contact_group_id
+    ORDER BY direct_detail_observed_at DESC, direct_detail_source_run_id DESC,
+             direct_detail_source_version_id DESC
+  ) = 1
+)
+SELECT
+  FARM_FINGERPRINT(s.contact_group_key) AS contact_group_key,
+  s.contact_group_key AS contact_group_natural_key,
+  s.tenant_id,
+  s.contact_group_id,
+  s.contact_group_name,
+  s.status,
+  s.is_active,
+  s.source_member_count,
+  s.first_seen_at,
+  s.synced_at,
+  direct_detail.contact_group_id IS NOT NULL AS has_direct_detail_evidence,
+  direct_detail.is_direct_detail_reconciled,
+  direct_detail.has_member_count_match AS is_direct_member_count_reconciled,
+  direct_detail.direct_detail_observed_at,
+  direct_detail.direct_detail_source_run_id,
+  'xero' AS source_system
+FROM ${ref("dw_1_silver_xero", "dim_contact_group")} AS s
+LEFT JOIN direct_detail
+  ON s.tenant_id = direct_detail.tenant_id
+ AND s.contact_group_id = direct_detail.contact_group_id

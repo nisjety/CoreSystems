@@ -156,6 +156,139 @@ pub fn scrub_string(s: &str) -> String {
     out
 }
 
+/// What replaces a saved-state field that still looks like a credential after
+/// [`scrub_string`]. Fixed words, so nothing of the original survives.
+const FOLD_WITHHELD: &str = "[content withheld from the saved state: it looked like a credential]";
+
+/// Scrub one text field of a fold: the known secret patterns first, then, if the
+/// result still has a credential's shape, the whole field is replaced by a stub (the
+/// caller counts it; the fold is then never saved as resumable). Returns whether the
+/// field was replaced.
+fn scrub_fold_text(text: &mut String) -> bool {
+    let scrubbed = scrub_string(text);
+    if mp_contracts::loop_fold::contains_credential_shape(&scrubbed) {
+        FOLD_WITHHELD.clone_into(text);
+        true
+    } else {
+        if scrubbed != *text {
+            *text = scrubbed;
+        }
+        false
+    }
+}
+
+/// What [`scrub_fold`] had to withhold, so the writer can tell a fold that merely lost a
+/// call's arguments from one whose conversation was damaged.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+pub struct FoldScrub {
+    /// Fields of the conversation replaced by a fixed stub: a message's content, name or
+    /// summary, the open round's assistant text, a call's id or name, a completed
+    /// outcome's output, error or call id.
+    pub withheld_conversation: usize,
+    /// Retrieval signatures replaced by a stub. They only feed the duplicate-search gate,
+    /// so a stub there damages nothing a resume reads.
+    pub withheld_retrievals: usize,
+    /// Calls whose arguments were cleared (never rewritten). An empty-argument call is
+    /// never redispatched, so the fold stays resumable.
+    pub withheld_arguments: usize,
+}
+
+impl FoldScrub {
+    /// Part of the conversation was replaced by a stub: the fold must not be resumable.
+    #[must_use]
+    pub const fn conversation_withheld(&self) -> bool {
+        self.withheld_conversation > 0
+    }
+}
+
+/// A call's arguments are never rewritten: a resume must see exactly what the
+/// model asked for, or an empty string. They are cleared when any scrubbing pass
+/// would have changed them (a sensitive key, a secret value, a secret in text that
+/// is not JSON) or when they carry a credential's shape. A call saved with empty
+/// arguments is not one a resume may dispatch.
+fn withhold_arguments_if_sensitive(arguments_json: &mut String) -> bool {
+    let changed = match serde_json::from_str::<Value>(arguments_json) {
+        Ok(original) => {
+            let mut scrubbed = original.clone();
+            scrub_json_value(&mut scrubbed);
+            scrubbed != original
+        }
+        Err(_) => scrub_string(arguments_json) != *arguments_json,
+    };
+    if changed || mp_contracts::loop_fold::contains_credential_shape(arguments_json) {
+        arguments_json.clear();
+        true
+    } else {
+        false
+    }
+}
+
+/// Scrub a durable-loop fold in place, before it is serialized and saved.
+///
+/// **Per field, never over the serialized JSON.** [`scrub_json_value`] redacts a
+/// whole object whose key matches `auth`, and the fold's `authority` is exactly
+/// such a key: scrubbing the serialized fold would replace the authority a resume
+/// must read intact with `"[REDACTED]"` (pinned by a test).
+///
+/// Every free-text field (message content, name and compaction summary, the
+/// assistant text of the open round, completed outputs and errors, the retrievals
+/// already attempted, and a call's id and name) goes through [`scrub_string`]. A
+/// field that still looks like a credential is then replaced whole by a fixed stub
+/// and counted: the fold's final gate, `LoopFoldV1::to_bytes`, refuses the
+/// **entire** fold for one benign "Authorization:" or certificate header. A stubbed
+/// piece of the conversation makes the fold unfit to resume from (see below): the
+/// writer drops it and saves a tombstone. Only call arguments are withheld in place,
+/// by [`withhold_arguments_if_sensitive`]: byte-exact or empty.
+///
+/// Structural fields (ids, counters, the authority, the pause descriptor) are the
+/// code's own and are not touched. `to_bytes` stays the last gate.
+///
+/// The result says what was withheld. A stub in a piece of the conversation (the goal, a
+/// tool result, a system message, a call's identity) is invisible to a resume, which
+/// would continue on a damaged history, so the writer saves a tombstone instead of that
+/// fold ([`FoldScrub::conversation_withheld`]); the fold that was scrubbed here must then
+/// be dropped, not saved. Cleared call arguments are by design and keep the fold
+/// resumable.
+pub fn scrub_fold(fold: &mut mp_contracts::loop_fold::LoopFoldV1) -> FoldScrub {
+    let mut report = FoldScrub::default();
+    let mut text = |field: &mut String| {
+        if scrub_fold_text(field) {
+            report.withheld_conversation += 1;
+        }
+    };
+    for message in &mut fold.messages {
+        text(&mut message.content);
+        text(&mut message.name);
+        text(&mut message.compaction_summary);
+    }
+    let mut withheld_retrievals = 0;
+    for retrieval in &mut fold.attempted_retrievals {
+        if scrub_fold_text(retrieval) {
+            withheld_retrievals += 1;
+        }
+    }
+    let mut withheld_arguments = 0;
+    if let Some(round) = fold.round_in_flight.as_mut() {
+        text(&mut round.assistant_content);
+        for call in &mut round.calls {
+            text(&mut call.id);
+            text(&mut call.name);
+            if withhold_arguments_if_sensitive(&mut call.arguments_json) {
+                withheld_arguments += 1;
+            }
+        }
+        for done in &mut round.completed {
+            text(&mut done.output);
+            text(&mut done.error);
+            text(&mut done.call_id);
+        }
+    }
+    report.withheld_retrievals = withheld_retrievals;
+    report.withheld_arguments = withheld_arguments;
+    report
+}
+
 /// Flag names whose NEXT argv element is the secret.
 ///
 /// Every pattern in this module keys on a `:` or `=` separator, so a

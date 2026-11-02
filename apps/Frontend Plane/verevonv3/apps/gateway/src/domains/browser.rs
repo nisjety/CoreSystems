@@ -1633,6 +1633,7 @@ impl BrowserSessionRunState for BrowserRunMetadata {
 fn build_ai_run_request<S: BrowserSessionRunState>(
     goal: &str,
     grant_id: &str,
+    allowed_domains: Option<&[String]>,
     metadata: &S,
     body: &StartAiRunBody,
     start_url: Option<&str>,
@@ -1653,12 +1654,13 @@ fn build_ai_run_request<S: BrowserSessionRunState>(
         .flatten();
     json!({
         "goal": goal,
-        // The session's BrowserBroker grant. Model Gateway derives the run's
-        // own grant from it; `allowed_domains` below can only narrow it.
+        // The session's BrowserBroker grant (or, behind `BROWSER_AI_RUN_REAL_GRANT`,
+        // one issued for this run). Model Gateway derives the run's own grant
+        // from it; `allowed_domains` below can only narrow it.
         "grant_id": grant_id,
         "profile_id": persistent_profile_id,
         "start_url": start_url,
-        "allowed_domains": body.allowed_domains,
+        "allowed_domains": allowed_domains,
         "max_steps": body.max_steps,
         "max_runtime_s": body.max_runtime_s,
         "stop_criteria": body.stop_criteria,
@@ -1686,6 +1688,13 @@ fn build_ai_run_request<S: BrowserSessionRunState>(
 /// grant that has expired or been revoked since the session opened is 409
 /// `browser_session_grant_inactive` (see `session_grant_inactive`).
 ///
+/// Behind `BROWSER_AI_RUN_REAL_GRANT` (WS21-S7), and never for a zero-retention
+/// session, a session that has no grant of its own is not refused: model-gateway
+/// issues a session grant over the run's hosts (`POST /v1/browser/grants`), and
+/// the run derives from that grant under the browser bearer minted for this
+/// request. With the switch off, or on a zero-retention session, such a session
+/// gets the 409 above; no session string is ever sent as a grant.
+///
 /// An optional `Idempotency-Key` header makes a retry of this start safe: it
 /// goes to Model Gateway, which answers a repeat with the same run and the same
 /// derived grant (see `client_idempotency_key` and `idempotency_refusal`).
@@ -1697,6 +1706,27 @@ pub(crate) async fn start_ai_run(
     headers: HeaderMap,
     Path(session_id): Path<String>,
     Json(body): Json<StartAiRunBody>,
+) -> Response {
+    start_ai_run_with_switch(
+        state,
+        user,
+        headers,
+        session_id,
+        body,
+        browser_ai_run_real_grant_enabled(),
+    )
+    .await
+}
+
+/// `start_ai_run` with the `BROWSER_AI_RUN_REAL_GRANT` switch passed in, so the
+/// real-grant path runs in tests without touching the process environment.
+async fn start_ai_run_with_switch(
+    state: AppState,
+    user: AuthenticatedUser,
+    headers: HeaderMap,
+    session_id: String,
+    body: StartAiRunBody,
+    real_grant_switch: bool,
 ) -> Response {
     if !is_valid_path_segment(&session_id) {
         return (
@@ -1749,10 +1779,26 @@ pub(crate) async fn start_ai_run(
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
 
-    let grant_id = match projection_grant_id(&projection) {
-        Some(grant_id) => grant_id,
-        // No grant means no run in every mode: the broker refuses anything
-        // that is not a grant it issued, so there is no placeholder to send.
+    let grant_source = match projection_grant_id(&projection) {
+        Some(grant_id) => AiRunGrantSource::Session(grant_id),
+        // Behind `BROWSER_AI_RUN_REAL_GRANT` (WS21-S7) a session without a grant
+        // asks the broker for one over the run's hosts. A zero-retention session
+        // never does: it gets no browser bearer and no grant here.
+        None if real_grant_switch && !metadata.zdr() => {
+            let Some(domains) = ai_run_requested_domains(&body, start_url.as_deref()) else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(error(
+                        "invalid_allowed_domains",
+                        "Name the hosts the run may use, or open a page first.",
+                    )),
+                )
+                    .into_response();
+            };
+            AiRunGrantSource::Issue(domains)
+        }
+        // No grant means no run otherwise: the broker refuses anything that is
+        // not a grant it issued, so there is no placeholder to send.
         None => {
             return (
                 StatusCode::CONFLICT,
@@ -1764,8 +1810,6 @@ pub(crate) async fn start_ai_run(
                 .into_response()
         }
     };
-    let request_body =
-        build_ai_run_request(goal, &grant_id, &metadata, &body, start_url.as_deref());
     let names_hosts = body
         .allowed_domains
         .as_ref()
@@ -1805,6 +1849,25 @@ pub(crate) async fn start_ai_run(
         Ok(token) => token,
         Err(error) => return delegated_auth_unavailable(error).into_response(),
     };
+
+    let (grant_id, allowed_domains) = match grant_source {
+        AiRunGrantSource::Session(grant_id) => (grant_id, body.allowed_domains.clone()),
+        AiRunGrantSource::Issue(requested) => {
+            match issue_ai_run_grant(&state, &user, token.as_deref(), &browser, &requested).await {
+                Ok(issued) => (issued.grant_id, Some(issued.allowed_domains)),
+                Err(response) => return response,
+            }
+        }
+    };
+    let request_body = build_ai_run_request(
+        goal,
+        &grant_id,
+        allowed_domains.as_deref(),
+        &metadata,
+        &body,
+        start_url.as_deref(),
+    );
+
     let url = format!("{}/v1/browser/runs", state.model_gateway_url);
     // A retry of this start carries the client's key to Model Gateway, which
     // scopes it to the user and this session's grant and answers a repeat with
@@ -1862,6 +1925,96 @@ pub(crate) async fn start_ai_run(
             .into_response();
     };
     (StatusCode::OK, Json(ok(response_body))).into_response()
+}
+
+/// The hosts a workspace AI run asks the broker to grant (WS21-S7): the hosts
+/// the request names, else the host of the page the user is looking at, which is
+/// where the run starts. `None` when neither names a host.
+fn ai_run_requested_domains(body: &StartAiRunBody, start_url: Option<&str>) -> Option<Vec<String>> {
+    match body.allowed_domains.as_deref() {
+        Some(domains) if !domains.is_empty() => Some(domains.to_vec()),
+        _ => start_url.and_then(hostname).map(|host| vec![host]),
+    }
+}
+
+/// Whether a workspace AI run starts under a real broker grant (WS21-S7). Read
+/// per request and exact, like the other switches here: only the word `true`
+/// enables it.
+fn browser_ai_run_real_grant_enabled() -> bool {
+    browser_ai_run_real_grant_from(std::env::var("BROWSER_AI_RUN_REAL_GRANT").ok().as_deref())
+}
+
+fn browser_ai_run_real_grant_from(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+/// Where a workspace AI run's grant comes from.
+enum AiRunGrantSource {
+    /// The session's own BrowserBroker grant, from Quarry's owner projection (WS1.B).
+    Session(String),
+    /// None on the session: ask the broker for one over these hosts (WS21-S7).
+    Issue(Vec<String>),
+}
+
+/// A session grant model-gateway issued for one workspace AI run (WS21-S7).
+struct IssuedAiRunGrant {
+    grant_id: String,
+    /// The hosts the broker granted. The site policy can grant fewer than were
+    /// requested, so the run starts under this list and never under the request.
+    allowed_domains: Vec<String>,
+}
+
+/// Asks model-gateway's `POST /v1/browser/grants` for a session grant over
+/// `requested` (WS21-S7). The grant is the broker's; the gateway only carries the
+/// caller's own browser bearer to it.
+async fn issue_ai_run_grant(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    token: Option<&str>,
+    browser_bearer: &str,
+    requested: &[String],
+) -> Result<IssuedAiRunGrant, Response> {
+    let url = format!("{}/v1/browser/grants", state.model_gateway_url);
+    let (status, Json(response_body)) = proxy_model_json_with_delegated(
+        state,
+        Method::POST,
+        &url,
+        Some(json!({ "allowed_domains": requested })),
+        token,
+        &[("x-browser-authorization", browser_bearer)],
+        user,
+    )
+    .await;
+    if !status.is_success() {
+        return Err(forward_quarry_failure(status, response_body));
+    }
+
+    let granted = unwrap_data(&response_body);
+    let invalid_grant = |message: &'static str| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(error("browser_grant_invalid", message)),
+        )
+            .into_response()
+    };
+    let Some(grant_id) = str_field(&granted, "grant_id") else {
+        return Err(invalid_grant(
+            "Model Gateway did not return a browser grant id.",
+        ));
+    };
+    // A zero-retention grant names no hosts, and the run it starts is refused by
+    // model-gateway, so the requested hosts only stand in for a grant that names
+    // none.
+    let allowed_domains = match granted.get("allowed_domains") {
+        None => requested.to_vec(),
+        Some(hosts) => serde_json::from_value::<Vec<String>>(hosts.clone()).map_err(|_| {
+            invalid_grant("Model Gateway returned an unreadable browser grant policy.")
+        })?,
+    };
+    Ok(IssuedAiRunGrant {
+        grant_id,
+        allowed_domains,
+    })
 }
 
 /// `POST /api/v1/browser/runs/:run_id/control` — pause / resume / stop a
@@ -7957,6 +8110,12 @@ pub(crate) mod tests {
             audit_core_service_token: "audit-test-secret-at-least-32-bytes".into(),
             insight_core_url: "http://127.0.0.1:1".into(),
             leads_core_url: "http://127.0.0.1:1".into(),
+            anbud_core_url: "http://127.0.0.1:1".into(),
+            anbud_api_key: String::new(),
+            anbud_api_key_header: "X-API-Key".into(),
+            marketing_core_url: "http://127.0.0.1:1".into(),
+            marketing_core_service_key: String::new(),
+            marketing_core_organization_id: String::new(),
             shipping_core_url: "http://127.0.0.1:1".into(),
             user_core_url: "http://127.0.0.1:1".into(),
             application_convex_url: String::new(),
@@ -8004,7 +8163,10 @@ pub(crate) mod tests {
             mail_task_nats_url: String::new(),
             mail_task_nats_user: String::new(),
             mail_task_nats_password: String::new(),
+            continue_park_form: false,
+            model_entitlement_admin_enabled: false,
             mail_task_pipeline: None,
+            space_features: Default::default(),
         }
     }
 
@@ -8491,7 +8653,14 @@ pub(crate) mod tests {
             max_cost_usd: None,
         };
 
-        let request = build_ai_run_request("check out the cart", "sess_1", &metadata, &body, None);
+        let request = build_ai_run_request(
+            "check out the cart",
+            "sess_1",
+            None,
+            &metadata,
+            &body,
+            None,
+        );
 
         assert_eq!(request["require_approval"], json!(false));
         // Sanity: everything else still forwards as expected.
@@ -8531,6 +8700,7 @@ pub(crate) mod tests {
         let request = build_ai_run_request(
             "find the price",
             "sess_2",
+            None,
             &metadata,
             &body,
             Some("https://example.com"),
@@ -8574,7 +8744,14 @@ pub(crate) mod tests {
             max_cost_usd: None,
         };
 
-        let request = build_ai_run_request("browse around", "sess_3", &metadata, &body, None);
+        let request = build_ai_run_request(
+            "browse around",
+            "sess_3",
+            None,
+            &metadata,
+            &body,
+            None,
+        );
 
         assert_eq!(request["profile_id"], json!(null));
     }
@@ -8610,7 +8787,14 @@ pub(crate) mod tests {
                 max_cost_usd: None,
             };
 
-            let request = build_ai_run_request("resume shopping", "sess_4", &metadata, &body, None);
+            let request = build_ai_run_request(
+                "resume shopping",
+                "sess_4",
+                None,
+                &metadata,
+                &body,
+                None,
+            );
 
             assert_eq!(
                 request["profile_id"],
@@ -8618,6 +8802,405 @@ pub(crate) mod tests {
                 "scope {scope:?} should forward a genuinely persistent profile id"
             );
         }
+    }
+
+    fn ai_run_body(allowed_domains: Option<Vec<String>>) -> StartAiRunBody {
+        StartAiRunBody {
+            goal: "buy the shoes".to_owned(),
+            allowed_domains,
+            max_steps: None,
+            max_runtime_s: None,
+            stop_criteria: None,
+            require_approval: None,
+            max_cost_usd: None,
+        }
+    }
+
+    fn ai_run_metadata(zdr: bool) -> BrowserRunMetadata {
+        BrowserRunMetadata {
+            owner: BrowserRunOwner::default(),
+            lease_id: Some("lease-1".to_owned()),
+            profile_id: None,
+            profile_scope: BrowserProfileScope::Ephemeral,
+            last_observation: None,
+            observation_history: Vec::new(),
+            devtools_events: Vec::new(),
+            replay_events: Vec::new(),
+            tabs: Vec::new(),
+            viewport: DEFAULT_VIEWPORT,
+            control_mode: BrowserControlMode::AgentControl,
+            zdr,
+        }
+    }
+
+    #[test]
+    fn browser_ai_run_real_grant_switch_is_on_only_for_the_exact_word_true() {
+        assert!(browser_ai_run_real_grant_from(Some("true")));
+        for value in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("TRUE"),
+            Some(" true"),
+            Some("true "),
+            Some("yes"),
+        ] {
+            assert!(
+                !browser_ai_run_real_grant_from(value),
+                "{value:?} must not enable the switch"
+            );
+        }
+    }
+
+    #[test]
+    fn ai_run_requested_domains_prefers_the_named_hosts_then_the_current_page() {
+        let page = Some("https://shop.example.test/cart");
+
+        assert_eq!(
+            ai_run_requested_domains(
+                &ai_run_body(Some(vec!["other.example.test".to_owned()])),
+                page
+            ),
+            Some(vec!["other.example.test".to_owned()])
+        );
+        assert_eq!(
+            ai_run_requested_domains(&ai_run_body(Some(Vec::new())), page),
+            Some(vec!["shop.example.test".to_owned()])
+        );
+        assert_eq!(
+            ai_run_requested_domains(&ai_run_body(None), page),
+            Some(vec!["shop.example.test".to_owned()])
+        );
+        assert_eq!(ai_run_requested_domains(&ai_run_body(None), None), None);
+        assert_eq!(
+            ai_run_requested_domains(&ai_run_body(None), Some("about:blank")),
+            None
+        );
+    }
+
+    #[test]
+    fn build_ai_run_request_starts_under_the_issued_grant_and_its_policy() {
+        let issued = vec!["shop.example.test".to_owned()];
+
+        let request = build_ai_run_request(
+            "buy the shoes",
+            "grant-issued",
+            Some(issued.as_slice()),
+            &ai_run_metadata(false),
+            &ai_run_body(None),
+            Some("https://shop.example.test/cart"),
+        );
+
+        assert_eq!(request["grant_id"], json!("grant-issued"));
+        assert_eq!(request["allowed_domains"], json!(["shop.example.test"]));
+        assert_eq!(
+            request["start_url"],
+            json!("https://shop.example.test/cart")
+        );
+    }
+
+    /// The upstreams one `start_ai_run` call reaches: Quarry (the session
+    /// projection), auth-core (the plane tokens) and model-gateway, whose grant
+    /// and run routes each test mounts. The servers must outlive the call.
+    async fn ai_run_upstreams(
+        session_id: &str,
+        current_url: &str,
+        zdr: bool,
+    ) -> (
+        wiremock::MockServer,
+        wiremock::MockServer,
+        wiremock::MockServer,
+        AppState,
+    ) {
+        use wiremock::{
+            matchers::{method as wm_method, path as wm_path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let quarry = MockServer::start().await;
+        let auth_core = MockServer::start().await;
+        let model_gateway = MockServer::start().await;
+        for audience in [
+            "quarry",
+            "model-plane",
+            "browser-broker",
+            "data-plane",
+            "inference-core",
+            "execution-core",
+            "session-core",
+        ] {
+            Mock::given(wm_method("GET"))
+                .and(wm_path(format!("/api/{audience}/token").as_str()))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({ "token": format!("{audience}-token") })),
+                )
+                .mount(&auth_core)
+                .await;
+        }
+        let session_path = format!("/v1/agent/runs/{session_id}/browser-session");
+        Mock::given(wm_method("GET"))
+            .and(wm_path(session_path.as_str()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "runId": session_id,
+                    "status": "active",
+                    "currentUrl": current_url,
+                    "zdr": zdr,
+                    "profileScope": "ephemeral",
+                }
+            })))
+            .mount(&quarry)
+            .await;
+
+        let mut state = test_app_state();
+        state.quarry_edge_url = quarry.uri();
+        state.auth_core_url = auth_core.uri();
+        state.model_gateway_url = model_gateway.uri();
+        (quarry, auth_core, model_gateway, state)
+    }
+
+    fn request_header<'a>(request: &'a wiremock::Request, name: &str) -> Option<&'a str> {
+        request
+            .headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+    }
+
+    fn request_json(request: &wiremock::Request) -> Value {
+        serde_json::from_slice(&request.body).expect("a JSON request body")
+    }
+
+    async fn browser_bearer_minted(auth_core: &wiremock::MockServer) -> bool {
+        auth_core
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .any(|request| request.url.path() == "/api/browser-broker/token")
+    }
+
+    #[tokio::test]
+    async fn a_real_grant_run_starts_under_the_issued_grant_with_the_browser_bearer() {
+        use axum::body::to_bytes;
+        use wiremock::{
+            matchers::{method as wm_method, path as wm_path},
+            Mock, ResponseTemplate,
+        };
+
+        let (_quarry, _auth_core, model_gateway, state) =
+            ai_run_upstreams("sess_real", "https://shop.example.test/cart", false).await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/browser/grants"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "grant_id": "grant-issued",
+                "kind": "session",
+                "zdr": false,
+                "allowed_domains": ["shop.example.test"],
+            })))
+            .mount(&model_gateway)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/browser/runs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "run_id": "run-real",
+                "thread_id": "thread-real",
+                "plan_id": "plan-real",
+            })))
+            .mount(&model_gateway)
+            .await;
+
+        let response = start_ai_run_with_switch(
+            state,
+            test_user("user-real", "org-real"),
+            HeaderMap::new(),
+            "sess_real".to_owned(),
+            ai_run_body(None),
+            true,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("response body");
+        let body: Value = serde_json::from_slice(&bytes).expect("JSON response");
+        assert_eq!(body["data"]["run_id"], json!("run-real"));
+
+        let received = model_gateway
+            .received_requests()
+            .await
+            .expect("recorded model-gateway requests");
+        let [grant, run] = received.as_slice() else {
+            panic!(
+                "expected a grant request then a run request, got {}",
+                received.len()
+            );
+        };
+        assert_eq!(grant.url.path(), "/v1/browser/grants");
+        assert_eq!(
+            request_header(grant, "authorization"),
+            Some("Bearer model-plane-token")
+        );
+        assert_eq!(
+            request_header(grant, "x-browser-authorization"),
+            Some("Bearer browser-broker-token")
+        );
+        assert_eq!(
+            request_json(grant)["allowed_domains"],
+            json!(["shop.example.test"])
+        );
+        assert_eq!(run.url.path(), "/v1/browser/runs");
+        assert_eq!(
+            request_header(run, "x-browser-authorization"),
+            Some("Bearer browser-broker-token")
+        );
+        let run_body = request_json(run);
+        assert_eq!(run_body["grant_id"], json!("grant-issued"));
+        assert_eq!(run_body["allowed_domains"], json!(["shop.example.test"]));
+        assert_eq!(
+            run_body["start_url"],
+            json!("https://shop.example.test/cart")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_zero_retention_session_never_mints_a_browser_bearer_or_asks_for_a_grant() {
+        use axum::body::to_bytes;
+
+        // The session has no grant of its own; with the switch on, a
+        // zero-retention session still gets no issued grant and no bearer.
+        let (_quarry, auth_core, model_gateway, state) =
+            ai_run_upstreams("sess_zdr", "https://shop.example.test/cart", true).await;
+
+        let response = start_ai_run_with_switch(
+            state,
+            test_user("user-zdr", "org-zdr"),
+            HeaderMap::new(),
+            "sess_zdr".to_owned(),
+            ai_run_body(Some(vec!["shop.example.test".to_owned()])),
+            true,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let bytes = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("response body");
+        let body: Value = serde_json::from_slice(&bytes).expect("JSON response");
+        assert_eq!(body["error"]["code"], json!("browser_session_grant_missing"));
+        assert!(model_gateway
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty());
+        assert!(!browser_bearer_minted(&auth_core).await);
+    }
+
+    #[tokio::test]
+    async fn a_grantless_session_with_the_switch_off_is_refused_and_sends_no_session_string() {
+        use axum::body::to_bytes;
+
+        let (_quarry, auth_core, model_gateway, state) =
+            ai_run_upstreams("sess_off", "https://shop.example.test/cart", false).await;
+
+        let response = start_ai_run_with_switch(
+            state,
+            test_user("user-off", "org-off"),
+            HeaderMap::new(),
+            "sess_off".to_owned(),
+            ai_run_body(Some(vec!["shop.example.test".to_owned()])),
+            false,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let bytes = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("response body");
+        let body: Value = serde_json::from_slice(&bytes).expect("JSON response");
+        assert_eq!(body["error"]["code"], json!("browser_session_grant_missing"));
+        assert!(model_gateway
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty());
+        assert!(!browser_bearer_minted(&auth_core).await);
+    }
+
+    #[tokio::test]
+    async fn a_real_grant_run_with_no_host_to_grant_is_refused_before_any_browser_mint() {
+        use axum::body::to_bytes;
+
+        let (_quarry, auth_core, model_gateway, state) =
+            ai_run_upstreams("sess_blank", "about:blank", false).await;
+
+        let response = start_ai_run_with_switch(
+            state,
+            test_user("user-blank", "org-blank"),
+            HeaderMap::new(),
+            "sess_blank".to_owned(),
+            ai_run_body(None),
+            true,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("response body");
+        let body: Value = serde_json::from_slice(&bytes).expect("JSON response");
+        assert_eq!(body["error"]["code"], json!("invalid_allowed_domains"));
+        assert!(model_gateway
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty());
+        assert!(!browser_bearer_minted(&auth_core).await);
+    }
+
+    #[tokio::test]
+    async fn a_refused_grant_is_answered_as_is_and_no_run_starts() {
+        use axum::body::to_bytes;
+        use wiremock::{
+            matchers::{method as wm_method, path as wm_path},
+            Mock, ResponseTemplate,
+        };
+
+        let (_quarry, _auth_core, model_gateway, state) =
+            ai_run_upstreams("sess_denied", "https://shop.example.test/cart", false).await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/browser/grants"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+                "error": "browser_grant_forbidden",
+            })))
+            .mount(&model_gateway)
+            .await;
+
+        let response = start_ai_run_with_switch(
+            state,
+            test_user("user-denied", "org-denied"),
+            HeaderMap::new(),
+            "sess_denied".to_owned(),
+            ai_run_body(None),
+            true,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let bytes = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("response body");
+        let body: Value = serde_json::from_slice(&bytes).expect("JSON response");
+        assert_eq!(body["error"], json!("browser_grant_forbidden"));
+        let received = model_gateway
+            .received_requests()
+            .await
+            .expect("recorded model-gateway requests");
+        let [grant] = received.as_slice() else {
+            panic!("expected only the grant request, got {}", received.len());
+        };
+        assert_eq!(grant.url.path(), "/v1/browser/grants");
     }
 
     #[test]

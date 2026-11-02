@@ -1,0 +1,12 @@
+query AggregatedSales(
+  $inventoryItemId: Int!,
+  $siteId: Int!
+) {
+  aggregatedSales(
+    inventoryItemId: $inventoryItemId,
+    siteId: $siteId
+  ) {
+    date
+    totalSales
+  }
+}

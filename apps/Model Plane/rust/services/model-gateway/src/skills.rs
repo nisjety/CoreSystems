@@ -9,7 +9,8 @@
 // tonic::Status is the unavoidable large Err for gRPC handlers; boxing breaks the service-trait contract.
 #![allow(clippy::result_large_err)]
 
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use dashmap::DashMap;
 use mp_ids::new_ulid;
@@ -20,12 +21,19 @@ use mp_contracts::model_plane::v1::{
     MatchSkillsRequest, MatchSkillsResponse, Skill, SkillMatch,
 };
 
+// The first-party Office skills live in their own file (WS19-S9). lib.rs does not
+// declare it yet, so it is declared here; drop this attribute when lib.rs does.
+#[path = "builtin_skills.rs"]
+pub mod builtin_skills;
+
 const DEFAULT_MATCH_LIMIT: i32 = 5;
 const MAX_MATCH_LIMIT: i32 = 20;
 
 /// Provenance prefix stamped on skills pulled from session-core, so a refresh
 /// can replace exactly those without disturbing disk/operator-pushed skills.
-/// Single source of truth for the two places that need to agree.
+/// Single source of truth for the places that need to agree. Org-wide skills
+/// carry `session-core:org:<origin>` and a user's own or shared ones
+/// `session-core:user:<owner>:<origin>`, so a cached entry says whose it is.
 const LEARNED_SOURCE_PREFIX: &str = "session-core:";
 
 /// How long an org's learned-skill pull stays fresh.
@@ -47,21 +55,82 @@ fn skill_cache_ttl() -> std::time::Duration {
     })
 }
 
+/// Which pull a learned skill came in with. A pull is made with one caller's
+/// bearer, and session-core answers it with the org's skills plus that caller's
+/// own and shared ones; the two halves are cached apart so one caller's pull can
+/// never replace, or wipe, what another caller's pull brought.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Bucket {
+    Org,
+    User(String),
+}
+
+/// Which buckets hold which learned skills. A skill can be held by two (a skill
+/// its owner shared appears in the owner's pull and in the grantee's), and it
+/// leaves the cache only when the last bucket holding it lets go.
+#[derive(Default, Debug)]
+struct BucketBook {
+    // (org_id, bucket) -> the skill ids that bucket's latest pull held.
+    members: BTreeMap<(String, Bucket), BTreeSet<String>>,
+    // (org_id, skill_id) -> the buckets holding it.
+    holders: BTreeMap<(String, String), BTreeSet<Bucket>>,
+}
+
+impl BucketBook {
+    /// Make `bucket`'s members exactly `fresh`, and return the skills no bucket
+    /// holds any more.
+    fn replace(&mut self, org_id: &str, bucket: &Bucket, fresh: BTreeSet<String>) -> Vec<String> {
+        for id in &fresh {
+            self.holders
+                .entry((org_id.to_owned(), id.clone()))
+                .or_default()
+                .insert(bucket.clone());
+        }
+        let previous = self
+            .members
+            .insert((org_id.to_owned(), bucket.clone()), fresh.clone())
+            .unwrap_or_default();
+        let mut orphaned = Vec::new();
+        for id in previous.difference(&fresh) {
+            let key = (org_id.to_owned(), id.clone());
+            let Some(holding) = self.holders.get_mut(&key) else {
+                continue;
+            };
+            holding.remove(bucket);
+            if holding.is_empty() {
+                self.holders.remove(&key);
+                orphaned.push(id.clone());
+            }
+        }
+        orphaned
+    }
+}
+
 #[derive(Clone, Default, Debug)]
 pub struct SkillStore {
     // Keyed by (org_id, skill_id) so multi-tenant skill sets don't
     // bleed. Cheap clone (Arc<DashMap>).
     inner: Arc<DashMap<(String, String), Skill>>,
-    // When each org's LEARNED skills (session-core agent_skills) were last
-    // pulled via the §G7 lazy-load, so the pull is re-done on a TTL rather than
-    // exactly once per process lifetime.
-    loaded: Arc<DashMap<String, std::time::Instant>>,
+    // When each (org, caller)'s LEARNED skills (session-core agent_skills) were
+    // last pulled via the §G7 lazy-load, so the pull is re-done on a TTL rather
+    // than exactly once per process lifetime, and per caller because a pull
+    // only brings what that caller may see.
+    loaded: Arc<DashMap<(String, String), std::time::Instant>>,
+    // Bookkeeping for the learned skills in `inner`; taken for the length of one
+    // refresh, never across an await.
+    book: Arc<Mutex<BucketBook>>,
+    // Whether the first-party Office skills are listed for every org (WS19-S9). Read
+    // once, when the store is built, so a running process never changes its answers.
+    builtin_office: bool,
 }
 
 impl SkillStore {
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            builtin_office: builtin_skills::enabled(),
+            ..Self::default()
+        }
     }
 
     /// Insert or replace a skill. Generates an id when empty.
@@ -74,51 +143,75 @@ impl SkillStore {
         s
     }
 
-    /// Whether this org's learned skills were pulled from session-core (G7 read
-    /// path) recently enough to reuse. Goes stale on a TTL so an operator's edit
-    /// or deletion takes effect without a gateway restart.
+    /// Whether `caller_user_id`'s pull of this org's learned skills from
+    /// session-core (G7 read path) is recent enough to reuse. Goes stale on a TTL
+    /// so an operator's edit or deletion takes effect without a gateway restart.
     #[must_use]
-    pub fn is_org_loaded(&self, org_id: &str) -> bool {
+    pub fn is_loaded(&self, org_id: &str, caller_user_id: &str) -> bool {
         self.loaded
-            .get(org_id)
+            .get(&(org_id.to_owned(), caller_user_id.to_owned()))
             .is_some_and(|at| at.elapsed() < skill_cache_ttl())
     }
 
-    /// Mark this org's learned skills as loaded (call after a successful pull).
-    pub fn mark_org_loaded(&self, org_id: &str) {
-        self.loaded
-            .insert(org_id.to_owned(), std::time::Instant::now());
-    }
-
-    /// Make the cache match a fresh session-core pull exactly, then mark it
-    /// loaded.
+    /// Make the cache match a fresh session-core pull made for `caller_user_id`,
+    /// then mark that pull loaded.
+    ///
+    /// Only skills their owner has accepted are cached at all: a proposal, or a
+    /// rejected skill, never reaches a matcher. The pull splits into the org's
+    /// skills and the caller's own and shared ones, and each half replaces only
+    /// its own bucket: another caller's skills, and the org's skills a different
+    /// caller brought, are left as they were. Ownership (SKILL-1) is recorded
+    /// from the same pull, and a learned skill with no ownership record is not
+    /// usable by anyone.
     ///
     /// Upserts first and prunes second, deliberately: evicting up front would
     /// leave a window where a concurrent turn matches against an org with no
-    /// learned skills at all. Pruning by id is also what makes DELETION take
-    /// effect — re-upserting alone would leave a removed skill steering answers
-    /// forever. Only `session-core:`-sourced entries are touched, so
-    /// disk/operator-pushed skills survive a refresh.
-    pub fn replace_learned(&self, org_id: &str, skills: Vec<Skill>) {
-        let mut fresh_ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        for skill in skills {
-            fresh_ids.insert(self.upsert(org_id, skill).id);
+    /// learned skills at all. Pruning is also what makes DELETION take effect —
+    /// re-upserting alone would leave a removed skill steering answers forever —
+    /// and a skill held by two buckets survives until both let go. Only
+    /// `session-core:`-sourced entries are ever pruned, so disk/operator-pushed
+    /// skills survive a refresh.
+    pub fn refresh_learned(
+        &self,
+        ownership: &crate::ownership::OwnershipStore,
+        org_id: &str,
+        caller_user_id: &str,
+        pulled: Vec<AgentSkill>,
+    ) {
+        let mut org_ids = BTreeSet::new();
+        let mut user_ids = BTreeSet::new();
+        for agent in pulled.into_iter().filter(owner_accepted) {
+            let ids = match crate::ownership::Scope::from_wire(&agent.scope) {
+                crate::ownership::Scope::Org => &mut org_ids,
+                crate::ownership::Scope::User => &mut user_ids,
+            };
+            ids.insert(agent.id.clone());
+            ownership.set(
+                org_id,
+                crate::ownership::KIND_SKILL,
+                &agent.id,
+                skill_ownership(&agent),
+            );
+            self.upsert(org_id, agent_skill_to_skill(agent));
         }
-        let stale: Vec<(String, String)> = self
-            .inner
-            .iter()
-            .filter(|entry| {
-                let (entry_org, skill_id) = entry.key();
-                entry_org == org_id
-                    && entry.value().source_path.starts_with(LEARNED_SOURCE_PREFIX)
-                    && !fresh_ids.contains(skill_id)
-            })
-            .map(|entry| entry.key().clone())
-            .collect();
-        for key in stale {
-            self.inner.remove(&key);
+        let orphaned: Vec<String> = {
+            let mut book = self.book.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut orphaned = book.replace(org_id, &Bucket::Org, org_ids);
+            orphaned.extend(book.replace(
+                org_id,
+                &Bucket::User(caller_user_id.to_owned()),
+                user_ids,
+            ));
+            orphaned
+        };
+        for id in orphaned {
+            self.inner.remove(&(org_id.to_owned(), id.clone()));
+            ownership.remove(org_id, crate::ownership::KIND_SKILL, &id);
         }
-        self.mark_org_loaded(org_id);
+        self.loaded.insert(
+            (org_id.to_owned(), caller_user_id.to_owned()),
+            std::time::Instant::now(),
+        );
     }
 
     fn list(&self, org_id: &str) -> Vec<Skill> {
@@ -128,14 +221,57 @@ impl SkillStore {
             .filter(|e| e.key().0 == org_id)
             .map(|e| e.value().clone())
             .collect();
+        if self.builtin_office {
+            let builtins: Vec<Skill> = builtin_skills::skills()
+                .into_iter()
+                .filter(|builtin| !out.iter().any(|stored| stored.id == builtin.id))
+                .collect();
+            out.extend(builtins);
+        }
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out
     }
 
     fn get(&self, org_id: &str, skill_id: &str) -> Option<Skill> {
-        self.inner
+        let stored = self
+            .inner
             .get(&(org_id.to_string(), skill_id.to_string()))
-            .map(|s| s.value().clone())
+            .map(|s| s.value().clone());
+        stored.or_else(|| {
+            if self.builtin_office {
+                builtin_skills::skill(skill_id)
+            } else {
+                None
+            }
+        })
+    }
+}
+
+/// Whether `caller_user_id` may use this cached skill. A disk or
+/// operator-pushed skill has no ownership record and stays usable by everyone;
+/// a learned one (source `session-core:`) is usable only with an ownership
+/// record that allows the caller. Its absence fails closed: a learned skill
+/// whose owner the cache does not know is nobody's.
+fn skill_usable(
+    ownership: &crate::ownership::OwnershipStore,
+    org_id: &str,
+    skill: &Skill,
+    caller_user_id: &str,
+) -> bool {
+    if skill.source_path.starts_with(LEARNED_SOURCE_PREFIX) {
+        ownership.usable(
+            org_id,
+            crate::ownership::KIND_SKILL,
+            &skill.id,
+            caller_user_id,
+        )
+    } else {
+        ownership.usable_or_untracked(
+            org_id,
+            crate::ownership::KIND_SKILL,
+            &skill.id,
+            caller_user_id,
+        )
     }
 }
 
@@ -159,14 +295,7 @@ pub fn handle_list_skills(
     let skills = store
         .list(&req.org_id)
         .into_iter()
-        .filter(|s| {
-            ownership.usable_or_untracked(
-                &req.org_id,
-                crate::ownership::KIND_SKILL,
-                &s.id,
-                caller_user_id,
-            )
-        })
+        .filter(|s| skill_usable(ownership, &req.org_id, s, caller_user_id))
         .collect();
     Ok(ListSkillsResponse {
         request_id: req.request_id,
@@ -191,12 +320,7 @@ pub fn handle_get_skill(
     let s = store
         .get(&req.org_id, &req.skill_id)
         .ok_or_else(|| Status::not_found(format!("skill not found: {}", req.skill_id)))?;
-    if !ownership.usable_or_untracked(
-        &req.org_id,
-        crate::ownership::KIND_SKILL,
-        &s.id,
-        caller_user_id,
-    ) {
+    if !skill_usable(ownership, &req.org_id, &s, caller_user_id) {
         return Err(Status::not_found(format!(
             "skill not found: {}",
             req.skill_id
@@ -216,39 +340,45 @@ pub fn handle_get_skill(
 /// holds the substance used for matching).
 #[must_use]
 pub fn agent_skill_to_skill(a: AgentSkill) -> Skill {
+    let source_path = match crate::ownership::Scope::from_wire(&a.scope) {
+        crate::ownership::Scope::Org => format!("{LEARNED_SOURCE_PREFIX}org:{}", a.origin),
+        crate::ownership::Scope::User => {
+            format!(
+                "{LEARNED_SOURCE_PREFIX}user:{}:{}",
+                a.owner_user_id, a.origin
+            )
+        }
+    };
     Skill {
         id: a.id,
         name: a.name,
         body: a.content,
         tags: a.trigger_keywords,
-        source_path: format!("{LEARNED_SOURCE_PREFIX}{}", a.origin),
+        source_path,
         min_score: 0.0,
     }
 }
 
+/// Whether a session-core skill may reach a matcher: its owner has accepted it.
+/// A row from a session-core that predates review carries no state and is an
+/// ordinary accepted skill.
+#[must_use]
+pub fn owner_accepted(a: &AgentSkill) -> bool {
+    a.review_state.is_empty() || a.review_state == "accepted"
+}
+
 /// Derive an [`Ownership`](crate::ownership::Ownership) record from a
 /// session-core [`AgentSkill`]'s `scope`/`owner_user_id`/`shared_with`
-/// fields (SKILL-1), keyed by skill id — the shape
-/// [`OwnershipStore::replace_org_kind`](crate::ownership::OwnershipStore::replace_org_kind)
-/// expects on every G7 refresh.
-#[must_use]
-pub fn skill_ownership_entries(
-    skills: &[AgentSkill],
-) -> Vec<(String, crate::ownership::Ownership)> {
-    skills
-        .iter()
-        .map(|a| {
-            let ownership = match crate::ownership::Scope::from_wire(&a.scope) {
-                crate::ownership::Scope::Org => crate::ownership::Ownership::org(),
-                crate::ownership::Scope::User => crate::ownership::Ownership {
-                    scope: crate::ownership::Scope::User,
-                    owner_user_id: a.owner_user_id.clone(),
-                    shared_with: a.shared_with.clone(),
-                },
-            };
-            (a.id.clone(), ownership)
-        })
-        .collect()
+/// fields (SKILL-1).
+fn skill_ownership(a: &AgentSkill) -> crate::ownership::Ownership {
+    match crate::ownership::Scope::from_wire(&a.scope) {
+        crate::ownership::Scope::Org => crate::ownership::Ownership::org(),
+        crate::ownership::Scope::User => crate::ownership::Ownership {
+            scope: crate::ownership::Scope::User,
+            owner_user_id: a.owner_user_id.clone(),
+            shared_with: a.shared_with.clone(),
+        },
+    }
 }
 
 /// Format a matched skill as a system-context block for live prompt injection.
@@ -293,7 +423,7 @@ pub fn resolve_requested_skills(
             tracing::warn!(%org_id, skill_id = %id, "requested skill is not in this org's catalogue; ignored");
             continue;
         };
-        if !ownership.usable_or_untracked(org_id, crate::ownership::KIND_SKILL, id, caller_user_id) {
+        if !skill_usable(ownership, org_id, &skill, caller_user_id) {
             tracing::warn!(%org_id, skill_id = %id, "requested skill is not usable by the caller; ignored");
             continue;
         }
@@ -302,9 +432,39 @@ pub fn resolve_requested_skills(
     out
 }
 
+/// The skill a `skill_file` call names, resolved the way the injection path
+/// resolves a skill (WS19-S7): this org's catalogue, under the same visibility
+/// rule. A skill the turn could not have been given cannot have its bundle read.
+/// Matched like `reattach_skill`: case-insensitive and whitespace-trimmed, first
+/// usable match.
+#[must_use]
+pub fn usable_skill_named(
+    store: &SkillStore,
+    org_id: &str,
+    ownership: &crate::ownership::OwnershipStore,
+    caller_user_id: &str,
+    name: &str,
+) -> Option<Skill> {
+    let wanted = name.trim().to_lowercase();
+    store.list(org_id).into_iter().find(|skill| {
+        skill.name.trim().to_lowercase() == wanted
+            && skill_usable(ownership, org_id, skill, caller_user_id)
+    })
+}
+
 #[must_use]
 pub fn format_skill_block(s: &Skill) -> String {
     format!("## Skill: {}\n{}", s.name, s.body)
+}
+
+/// The footer that tells the model a skill's bundle exists and how to read it
+/// (WS19-S7). The bundle's files stay out of the prompt: the model asks for the
+/// ones it needs, through `skill_file`.
+#[must_use]
+pub fn bundle_footer(name: &str, file_count: i32, total_bytes: i64) -> String {
+    format!(
+        "\n[Bundle: {file_count} files, {total_bytes} bytes. Read them with skill_file, naming \"{name}\": without a path it lists the files; with a path it reads that file.]"
+    )
 }
 
 /// Keyword overlap score. Lowercases everything and counts how many
@@ -315,7 +475,15 @@ fn score(query_terms: &[String], s: &Skill) -> f32 {
     if query_terms.is_empty() {
         return 0.0;
     }
-    let haystack = format!("{} {} {}", s.name, s.tags.join(" "), s.body).to_lowercase();
+    // A first-party skill is found by its name and trigger keywords alone. Its body is
+    // instruction prose that shares words with almost every request, and matching on it
+    // would put all four Office skills into every answer's budget.
+    let haystack = if builtin_skills::is_builtin(s) {
+        format!("{} {}", s.name, s.tags.join(" "))
+    } else {
+        format!("{} {} {}", s.name, s.tags.join(" "), s.body)
+    }
+    .to_lowercase();
     let hits = query_terms
         .iter()
         .filter(|t| haystack.contains(t.as_str()))
@@ -331,6 +499,10 @@ fn score(query_terms: &[String], s: &Skill) -> f32 {
 /// [`handle_list_skills`]) — filtered before scoring/truncation so a
 /// caller's `limit` matches are chosen from skills they're actually allowed
 /// to see, not backfilled short by ones filtered out afterward.
+///
+/// A user's own skill and an org skill may share a name (the store's key allows
+/// it). The caller's own one wins: the other is left out of their results, so
+/// the model is never given two versions of one rule.
 ///
 /// # Errors
 ///
@@ -359,17 +531,26 @@ pub fn handle_match_skills(
     })
     .unwrap_or(0);
 
-    let mut scored: Vec<SkillMatch> = store
+    let usable: Vec<Skill> = store
         .list(&req.org_id)
         .into_iter()
-        .filter(|s| {
-            ownership.usable_or_untracked(
-                &req.org_id,
-                crate::ownership::KIND_SKILL,
-                &s.id,
-                caller_user_id,
-            )
-        })
+        .filter(|s| skill_usable(ownership, &req.org_id, s, caller_user_id))
+        .collect();
+    let owns = |s: &Skill| {
+        ownership
+            .get(&req.org_id, crate::ownership::KIND_SKILL, &s.id)
+            .is_some_and(|o| {
+                o.scope == crate::ownership::Scope::User && o.owner_user_id == caller_user_id
+            })
+    };
+    let owned_names: BTreeSet<String> = usable
+        .iter()
+        .filter(|s| owns(s))
+        .map(|s| s.name.trim().to_lowercase())
+        .collect();
+    let mut scored: Vec<SkillMatch> = usable
+        .into_iter()
+        .filter(|s| owns(s) || !owned_names.contains(&s.name.trim().to_lowercase()))
         .map(|s| {
             let match_score = score(&query_terms, &s);
             SkillMatch {
@@ -424,23 +605,60 @@ mod tests {
     #[test]
     fn org_loaded_tracking() {
         let store = SkillStore::new();
-        assert!(!store.is_org_loaded("o"));
-        store.mark_org_loaded("o");
-        assert!(store.is_org_loaded("o"));
-        assert!(!store.is_org_loaded("other"), "tracking is per-org");
+        let ownership = crate::ownership::OwnershipStore::new();
+        assert!(!store.is_loaded("o", "alice"));
+        store.refresh_learned(&ownership, "o", "alice", vec![]);
+        assert!(store.is_loaded("o", "alice"));
+        assert!(!store.is_loaded("other", "alice"), "tracking is per-org");
+        assert!(
+            !store.is_loaded("o", "bob"),
+            "a pull only brings what its caller may see, so each caller pulls for themselves"
+        );
     }
 
-    /// A learned skill as it arrives from session-core, with the provenance
-    /// prefix that makes it eligible for refresh-pruning.
-    fn learned(id: &str, name: &str) -> Skill {
-        Skill {
+    /// A skill as session-core lists it: accepted, org-wide unless `owner` is
+    /// given, in which case it is that user's own.
+    fn agent(id: &str, name: &str, owner: &str) -> AgentSkill {
+        AgentSkill {
             id: id.into(),
             name: name.into(),
-            body: format!("body of {name}"),
-            tags: vec![],
-            source_path: format!("{LEARNED_SOURCE_PREFIX}learned"),
-            min_score: 0.0,
+            content: format!("body of {name}"),
+            enabled: true,
+            origin: "background_review".into(),
+            scope: if owner.is_empty() { "org" } else { "user" }.into(),
+            owner_user_id: owner.into(),
+            review_state: "accepted".into(),
+            ..Default::default()
         }
+    }
+
+    fn names(store: &SkillStore, org: &str) -> Vec<String> {
+        store.list(org).into_iter().map(|s| s.name).collect()
+    }
+
+    fn matches_for(
+        store: &SkillStore,
+        ownership: &crate::ownership::OwnershipStore,
+        caller: &str,
+        query: &str,
+    ) -> Vec<String> {
+        handle_match_skills(
+            store,
+            MatchSkillsRequest {
+                request_id: "t".into(),
+                org_id: "o".into(),
+                query: query.into(),
+                limit: 0,
+                min_score: 0.0,
+            },
+            ownership,
+            caller,
+        )
+        .unwrap()
+        .matches
+        .into_iter()
+        .filter_map(|m| m.skill.map(|s| s.id))
+        .collect()
     }
 
     #[test]
@@ -449,25 +667,33 @@ mod tests {
         // exactly once per process and later edits were invisible until restart.
         let store = SkillStore::new();
         store.loaded.insert(
-            "o".to_owned(),
+            ("o".to_owned(), "alice".to_owned()),
             std::time::Instant::now() - skill_cache_ttl(),
         );
 
         assert!(
-            !store.is_org_loaded("o"),
+            !store.is_loaded("o", "alice"),
             "a cache entry older than the TTL must read as stale"
         );
     }
 
     #[test]
-    fn replace_learned_reflects_an_edited_skill_body() {
+    fn refresh_learned_reflects_an_edited_skill_body() {
         let store = SkillStore::new();
-        store.replace_learned("o", vec![learned("s1", "invoice-policy")]);
-        store.replace_learned(
+        let ownership = crate::ownership::OwnershipStore::new();
+        store.refresh_learned(
+            &ownership,
             "o",
-            vec![Skill {
-                body: "EDITED body".into(),
-                ..learned("s1", "invoice-policy")
+            "alice",
+            vec![agent("s1", "invoice-policy", "")],
+        );
+        store.refresh_learned(
+            &ownership,
+            "o",
+            "alice",
+            vec![AgentSkill {
+                content: "EDITED body".into(),
+                ..agent("s1", "invoice-policy", "")
             }],
         );
 
@@ -477,47 +703,258 @@ mod tests {
     }
 
     #[test]
-    fn replace_learned_forgets_a_deleted_skill() {
+    fn refresh_learned_forgets_a_deleted_skill() {
         // Re-upserting alone would leave a deleted skill steering answers forever.
         let store = SkillStore::new();
-        store.replace_learned(
+        let ownership = crate::ownership::OwnershipStore::new();
+        store.refresh_learned(
+            &ownership,
             "o",
-            vec![learned("s1", "keep-me"), learned("s2", "delete-me")],
+            "alice",
+            vec![agent("s1", "keep-me", ""), agent("s2", "delete-me", "")],
         );
-        store.replace_learned("o", vec![learned("s1", "keep-me")]);
+        store.refresh_learned(&ownership, "o", "alice", vec![agent("s1", "keep-me", "")]);
 
-        let names: Vec<String> = store.list("o").into_iter().map(|s| s.name).collect();
-        assert_eq!(names, vec!["keep-me".to_owned()], "deleted skill lingered");
+        assert_eq!(
+            names(&store, "o"),
+            vec!["keep-me".to_owned()],
+            "deleted skill lingered"
+        );
+        assert!(
+            ownership
+                .get("o", crate::ownership::KIND_SKILL, "s2")
+                .is_none(),
+            "a forgotten skill keeps no ownership record"
+        );
     }
 
     #[test]
-    fn replace_learned_leaves_operator_pushed_skills_alone() {
+    fn refresh_learned_leaves_operator_pushed_skills_alone() {
         // Disk/operator-pushed skills have no session-core provenance and must
         // survive a learned-skill refresh.
         let store = SkillStore::new();
+        let ownership = crate::ownership::OwnershipStore::new();
         let pushed = store.upsert("o", s("operator-skill", &["ops"], "pushed body"));
-        store.replace_learned("o", vec![learned("s1", "learned-skill")]);
-        store.replace_learned("o", vec![]);
+        store.refresh_learned(
+            &ownership,
+            "o",
+            "alice",
+            vec![agent("s1", "learned-skill", "")],
+        );
+        store.refresh_learned(&ownership, "o", "alice", vec![]);
 
-        let names: Vec<String> = store.list("o").into_iter().map(|s| s.name).collect();
         assert!(
-            names.contains(&"operator-skill".to_owned()),
-            "refresh clobbered a non-learned skill: {names:?}"
+            names(&store, "o").contains(&"operator-skill".to_owned()),
+            "refresh clobbered a non-learned skill: {:?}",
+            names(&store, "o")
         );
         assert!(store.get("o", &pushed.id).is_some());
     }
 
     #[test]
-    fn replace_learned_does_not_touch_another_org() {
+    fn refresh_learned_does_not_touch_another_org() {
         let store = SkillStore::new();
-        store.replace_learned("o", vec![learned("s1", "mine")]);
-        store.replace_learned("other", vec![learned("s9", "theirs")]);
-        store.replace_learned("other", vec![]);
+        let ownership = crate::ownership::OwnershipStore::new();
+        store.refresh_learned(&ownership, "o", "alice", vec![agent("s1", "mine", "")]);
+        store.refresh_learned(
+            &ownership,
+            "other",
+            "alice",
+            vec![agent("s9", "theirs", "")],
+        );
+        store.refresh_learned(&ownership, "other", "alice", vec![]);
 
         assert_eq!(
             store.list("o").len(),
             1,
             "sibling org's refresh bled across"
+        );
+    }
+
+    #[test]
+    fn user_scope_skill_does_not_flap_between_callers() {
+        // The regression: every pull replaced the whole org's learned skills with
+        // what the triggering caller could see, so alice's private skill vanished
+        // from the cache the moment bob's pull landed, and came back only when
+        // alice's own cache entry expired.
+        let store = SkillStore::new();
+        let ownership = crate::ownership::OwnershipStore::new();
+        let org_wide = agent("org-1", "house style", "");
+        store.refresh_learned(
+            &ownership,
+            "o",
+            "alice",
+            vec![org_wide.clone(), agent("alice-1", "alice runbook", "alice")],
+        );
+        store.refresh_learned(&ownership, "o", "bob", vec![org_wide.clone()]);
+
+        assert!(
+            store.is_loaded("o", "alice"),
+            "bob's pull did not expire alice's"
+        );
+        assert_eq!(
+            matches_for(&store, &ownership, "alice", "alice runbook house style"),
+            vec!["alice-1".to_owned(), "org-1".to_owned()],
+            "alice still has her skill after bob's pull"
+        );
+        assert_eq!(
+            matches_for(&store, &ownership, "bob", "alice runbook house style"),
+            vec!["org-1".to_owned()],
+            "bob never sees alice's skill"
+        );
+
+        // And alice's pull in turn leaves what bob's brought alone.
+        store.refresh_learned(
+            &ownership,
+            "o",
+            "bob",
+            vec![org_wide, agent("bob-1", "bob notes", "bob")],
+        );
+        store.refresh_learned(
+            &ownership,
+            "o",
+            "alice",
+            vec![agent("org-1", "house style", "")],
+        );
+        assert_eq!(
+            matches_for(&store, &ownership, "bob", "bob notes"),
+            vec!["bob-1".to_owned()],
+            "alice's refresh wiped bob's skill"
+        );
+    }
+
+    #[test]
+    fn learned_skill_without_ownership_is_not_usable() {
+        // A learned skill the cache cannot say whose it is belongs to no one:
+        // the untracked rule that keeps disk skills visible must not cover it.
+        let store = SkillStore::new();
+        let ownership = crate::ownership::OwnershipStore::new();
+        let orphan = store.upsert(
+            "o",
+            Skill {
+                source_path: format!("{LEARNED_SOURCE_PREFIX}org:background_review"),
+                ..s("orphan", &["orphan"], "orphan body")
+            },
+        );
+        let disk = store.upsert("o", s("disk", &["orphan"], "disk body"));
+
+        assert_eq!(
+            matches_for(&store, &ownership, "alice", "orphan"),
+            vec![disk.id.clone()],
+            "only the disk skill matches"
+        );
+        let listed = handle_list_skills(
+            &store,
+            ListSkillsRequest {
+                request_id: "t".into(),
+                org_id: "o".into(),
+            },
+            &ownership,
+            "alice",
+        )
+        .unwrap();
+        assert_eq!(listed.skills.len(), 1);
+        assert!(handle_get_skill(
+            &store,
+            GetSkillRequest {
+                request_id: "t".into(),
+                org_id: "o".into(),
+                skill_id: orphan.id.clone(),
+            },
+            &ownership,
+            "alice",
+        )
+        .is_err());
+        assert!(
+            resolve_requested_skills(&store, "o", &ownership, "alice", &[orphan.id], 4).is_empty(),
+            "an explicit pick cannot pull it in either"
+        );
+    }
+
+    #[test]
+    fn shared_skill_survives_other_bucket_prune() {
+        // A skill its owner shared sits in the owner's bucket and in the
+        // grantee's. Either bucket letting go of it is not the skill being gone.
+        let store = SkillStore::new();
+        let ownership = crate::ownership::OwnershipStore::new();
+        let shared = AgentSkill {
+            shared_with: vec!["bob".into()],
+            ..agent("shared-1", "shared notes", "alice")
+        };
+        store.refresh_learned(&ownership, "o", "alice", vec![shared.clone()]);
+        store.refresh_learned(&ownership, "o", "bob", vec![shared]);
+
+        // alice stops listing it (she unshared it, or deleted it); bob's cache
+        // entry still holds it until his own pull says otherwise.
+        store.refresh_learned(&ownership, "o", "alice", vec![]);
+        assert_eq!(
+            matches_for(&store, &ownership, "bob", "shared notes"),
+            vec!["shared-1".to_owned()]
+        );
+
+        store.refresh_learned(&ownership, "o", "bob", vec![]);
+        assert!(store.list("o").is_empty(), "the last holder let go");
+        assert!(ownership
+            .get("o", crate::ownership::KIND_SKILL, "shared-1")
+            .is_none());
+    }
+
+    #[test]
+    fn owner_skill_wins_name_tie() {
+        // The unique key is (org, scope, owner, name): an org skill and alice's
+        // own may share a name. Alice gets hers; everyone else gets the org's.
+        let store = SkillStore::new();
+        let ownership = crate::ownership::OwnershipStore::new();
+        let org_wide = agent("org-deploy", "deploy", "");
+        let alices = agent("alice-deploy", "deploy", "alice");
+        store.refresh_learned(&ownership, "o", "alice", vec![org_wide.clone(), alices]);
+        store.refresh_learned(&ownership, "o", "bob", vec![org_wide]);
+
+        assert_eq!(
+            matches_for(&store, &ownership, "alice", "deploy"),
+            vec!["alice-deploy".to_owned()],
+            "alice's own skill wins the tie and the org's is left out"
+        );
+        assert_eq!(
+            matches_for(&store, &ownership, "bob", "deploy"),
+            vec!["org-deploy".to_owned()]
+        );
+    }
+
+    #[test]
+    fn proposals_and_rejected_skills_never_reach_the_cache() {
+        let store = SkillStore::new();
+        let ownership = crate::ownership::OwnershipStore::new();
+        let proposal = AgentSkill {
+            review_state: "proposed".into(),
+            ..agent("p-1", "proposal", "alice")
+        };
+        let rejected = AgentSkill {
+            review_state: "rejected".into(),
+            ..agent("r-1", "rejected", "alice")
+        };
+        // An older session-core sends no state: an ordinary accepted skill.
+        let legacy = AgentSkill {
+            review_state: String::new(),
+            ..agent("l-1", "legacy", "")
+        };
+        store.refresh_learned(&ownership, "o", "alice", vec![proposal, rejected, legacy]);
+
+        assert_eq!(names(&store, "o"), vec!["legacy".to_owned()]);
+        assert!(ownership
+            .get("o", crate::ownership::KIND_SKILL, "p-1")
+            .is_none());
+    }
+
+    #[test]
+    fn learned_source_path_says_whose_skill_it_is() {
+        assert_eq!(
+            agent_skill_to_skill(agent("s1", "a", "")).source_path,
+            "session-core:org:background_review"
+        );
+        assert_eq!(
+            agent_skill_to_skill(agent("s2", "b", "alice")).source_path,
+            "session-core:user:alice:background_review"
         );
     }
 
@@ -529,24 +966,22 @@ mod tests {
             description: "ignored by the gateway Skill shape".into(),
             content: "use the cache".into(),
             trigger_keywords: vec!["cache".into(), "perf".into()],
-            trigger_file_patterns: vec![],
-            tool_restrictions: vec![],
             enabled: true,
             origin: "background_review".into(),
             scope: "org".into(),
-            owner_user_id: String::new(),
-            shared_with: vec![],
+            review_state: "accepted".into(),
+            ..Default::default()
         };
-        let sk = agent_skill_to_skill(a);
+        let sk = agent_skill_to_skill(a.clone());
         assert_eq!(sk.id, "sk-1");
         assert_eq!(sk.name, "Cache Tips");
         assert_eq!(sk.body, "use the cache"); // content -> body
         assert_eq!(sk.tags, vec!["cache".to_owned(), "perf".to_owned()]); // keywords -> tags
-        assert_eq!(sk.source_path, "session-core:background_review"); // provenance marker
-                                                                      // A learned skill, once mapped, is matchable by its keywords.
+        assert_eq!(sk.source_path, "session-core:org:background_review"); // provenance marker
+                                                                          // A learned skill, once refreshed in, is matchable by its keywords.
         let store = SkillStore::new();
-        store.upsert("o", sk);
         let ownership = crate::ownership::OwnershipStore::new();
+        store.refresh_learned(&ownership, "o", "caller", vec![a]);
         let resp = handle_match_skills(
             &store,
             MatchSkillsRequest {
@@ -564,7 +999,7 @@ mod tests {
             resp.matches
                 .iter()
                 .any(|m| m.skill.as_ref().is_some_and(|s| s.name == "Cache Tips")),
-            "learned skill should be matchable after mapping+upsert"
+            "learned skill should be matchable after mapping+refresh"
         );
     }
 
@@ -754,6 +1189,103 @@ pub fn render_recovered_skill(recovered: &mp_contracts::skill_recovery::Recovere
     }
 }
 
+/// What `skill_file` says when it cannot read a bundle: no such skill for this
+/// caller, no bundle, or no file at the path asked for. Each is a fact, and says
+/// which one it is.
+#[must_use]
+pub fn render_bundle_status(status: &str, skill: &str, detail: &str) -> String {
+    serde_json::json!({
+        "status": status,
+        "skill": skill,
+        "detail": detail,
+    })
+    .to_string()
+}
+
+/// The files a bundle holds, for a read that names no path. Packed into one
+/// read's cap, so a bundle of the largest allowed shape still answers in one
+/// result; `truncated` says when the listing could not hold every file.
+#[must_use]
+pub fn render_bundle_listing(
+    skill: &str,
+    files: &[mp_contracts::model_plane::v1::SkillBundleFile],
+) -> String {
+    let mut listed = Vec::new();
+    let mut used = 0usize;
+    for file in files {
+        let entry = serde_json::json!({
+            "path": file.path,
+            "size_bytes": file.size_bytes,
+            "binary": file.binary,
+            "executable": file.executable,
+        });
+        let size = entry.to_string().len();
+        if used + size > mp_contracts::skill_bundle::MAX_READ_BYTES {
+            break;
+        }
+        used += size;
+        listed.push(entry);
+    }
+    serde_json::json!({
+        "status": "listing",
+        "skill": skill,
+        "total_files": files.len(),
+        "truncated": listed.len() < files.len(),
+        "files": listed,
+        "detail": "read one file by passing its path",
+    })
+    .to_string()
+}
+
+/// One read of a file (WS19-S7). A read that stops short says where the next one
+/// starts, so a long file is reachable in full and a partial read is never taken
+/// for a whole one.
+#[must_use]
+pub fn render_bundle_text(
+    skill: &str,
+    path: &str,
+    offset: usize,
+    text: &str,
+    next_offset: Option<usize>,
+    total_bytes: usize,
+) -> String {
+    let detail = match next_offset {
+        Some(next) => format!(
+            "the file goes on; call skill_file again with this path and offset {next} for the rest, before relying on it"
+        ),
+        None => "end of the file".to_owned(),
+    };
+    serde_json::json!({
+        "status": "ok",
+        "skill": skill,
+        "path": path,
+        "offset": offset,
+        "total_bytes": total_bytes,
+        "content": text,
+        "truncated": next_offset.is_some(),
+        "next_offset": next_offset,
+        "detail": detail,
+    })
+    .to_string()
+}
+
+/// A file that is not text: its path, size and digest, never its bytes (WS19-S7).
+#[must_use]
+pub fn render_bundle_binary(
+    skill: &str,
+    file: &mp_contracts::model_plane::v1::SkillBundleFile,
+) -> String {
+    serde_json::json!({
+        "status": "binary",
+        "skill": skill,
+        "path": file.path,
+        "size_bytes": file.size_bytes,
+        "sha256": file.sha256,
+        "detail": "this file is not text, so its content is not returned; describe it from its path and size",
+    })
+    .to_string()
+}
+
 pub const TRUNCATION_MARKER: &str =
     "\n[… skill truncated to fit the context budget. Call reattach_skill with this \
      skill's name to read the rest before acting on it.]";
@@ -773,28 +1305,44 @@ pub struct FittedSkills {
 /// to back, so ordering decides what survives.
 #[must_use]
 pub fn fit_skill_blocks(blocks: Vec<String>) -> FittedSkills {
+    fit_skill_blocks_with_footers(
+        blocks
+            .into_iter()
+            .map(|block| (block, String::new()))
+            .collect(),
+    )
+}
+
+/// [`fit_skill_blocks`] for blocks that end in a footer (WS19-S7). The footer
+/// counts against the budget like the rest of its block, but it is never cut: a
+/// truncated block keeps its footer after the truncation marker, so the model
+/// still learns that the bundle exists. With empty footers the result is exactly
+/// what `fit_skill_blocks` returns.
+#[must_use]
+pub fn fit_skill_blocks_with_footers(blocks: Vec<(String, String)>) -> FittedSkills {
     let mut kept = Vec::new();
     let mut truncated = 0usize;
     let mut dropped = 0usize;
     let mut remaining = SKILL_CONTEXT_BUDGET_CHARS;
     let marker_len = TRUNCATION_MARKER.chars().count();
 
-    for block in blocks {
-        let len = block.chars().count();
+    for (block, footer) in blocks {
+        let footer_len = footer.chars().count();
+        let len = block.chars().count() + footer_len;
         if len <= remaining {
             remaining -= len;
-            kept.push(block);
+            kept.push(format!("{block}{footer}"));
             continue;
         }
-        if remaining <= marker_len + MIN_SKILL_CHARS {
+        if remaining <= marker_len + footer_len + MIN_SKILL_CHARS {
             dropped += 1;
             continue;
         }
-        let keep = remaining - marker_len;
+        let keep = remaining - marker_len - footer_len;
         let head: String = block.chars().take(keep).collect();
         remaining = 0;
         truncated += 1;
-        kept.push(format!("{head}{TRUNCATION_MARKER}"));
+        kept.push(format!("{head}{TRUNCATION_MARKER}{footer}"));
     }
 
     FittedSkills {
@@ -874,7 +1422,11 @@ mod skill_budget_tests {
             4,
         );
         let ids: Vec<&str> = got.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(ids, vec!["sk-b", "sk-a"], "named order, duplicates collapsed");
+        assert_eq!(
+            ids,
+            vec!["sk-b", "sk-a"],
+            "named order, duplicates collapsed"
+        );
     }
 
     #[test]
@@ -937,5 +1489,123 @@ mod skill_budget_tests {
         let requested: Vec<String> = (0..6).map(|i| format!("sk-{i}")).collect();
         let got = resolve_requested_skills(&store, "org", &ownership, "user-1", &requested, 4);
         assert_eq!(got.len(), 4);
+    }
+}
+
+#[cfg(test)]
+mod skill_file_tests {
+    use super::{
+        bundle_footer, render_bundle_binary, render_bundle_listing, render_bundle_text,
+        usable_skill_named, SkillStore,
+    };
+    use crate::ownership::OwnershipStore;
+    use mp_contracts::model_plane::v1::{Skill, SkillBundleFile};
+
+    fn skill(id: &str, name: &str) -> Skill {
+        Skill {
+            id: id.into(),
+            name: name.into(),
+            body: format!("Instructions for {name}."),
+            tags: Vec::new(),
+            source_path: String::new(),
+            min_score: 0.0,
+        }
+    }
+
+    fn file(path: &str, size_bytes: i64, binary: bool) -> SkillBundleFile {
+        SkillBundleFile {
+            path: path.into(),
+            sha256: "ab".repeat(32),
+            size_bytes,
+            executable: false,
+            binary,
+        }
+    }
+
+    #[test]
+    fn skill_file_reads_only_this_orgs_bundle() {
+        let store = SkillStore::new();
+        store.upsert("org-a", skill("sk-1", "Deploy Runbook"));
+        let ownership = OwnershipStore::new();
+        assert_eq!(
+            usable_skill_named(&store, "org-a", &ownership, "alice", "  deploy runbook ")
+                .map(|found| found.id),
+            Some("sk-1".to_owned())
+        );
+        assert!(
+            usable_skill_named(&store, "org-b", &ownership, "alice", "Deploy Runbook").is_none(),
+            "another org's skill must not resolve, so its bundle is never asked for"
+        );
+    }
+
+    #[test]
+    fn a_bundle_footer_names_the_skill_and_the_way_in() {
+        let footer = bundle_footer("Deploy Runbook", 12, 84_000);
+        assert!(footer.contains("12 files, 84000 bytes"), "{footer}");
+        assert!(
+            footer.contains("skill_file, naming \"Deploy Runbook\""),
+            "{footer}"
+        );
+    }
+
+    #[test]
+    fn skill_file_refuses_binary_content_by_describing_it() {
+        let rendered: serde_json::Value = serde_json::from_str(&render_bundle_binary(
+            "Brand",
+            &file("templates/logo.png", 2_048, true),
+        ))
+        .expect("valid JSON");
+        assert_eq!(rendered["status"], "binary");
+        assert_eq!(rendered["size_bytes"], 2_048);
+        assert!(rendered.get("content").is_none(), "{rendered}");
+    }
+
+    #[test]
+    fn skill_file_pages_at_the_cap_with_a_marker() {
+        let partial: serde_json::Value = serde_json::from_str(&render_bundle_text(
+            "Deploy Runbook",
+            "references/long.md",
+            0,
+            "first piece",
+            Some(32_768),
+            80_000,
+        ))
+        .expect("valid JSON");
+        assert_eq!(partial["truncated"], true);
+        assert_eq!(partial["next_offset"], 32_768);
+        assert!(
+            partial["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("offset 32768"),
+            "{partial}"
+        );
+
+        let whole: serde_json::Value = serde_json::from_str(&render_bundle_text(
+            "Deploy Runbook",
+            "SKILL.md",
+            0,
+            "all of it",
+            None,
+            10,
+        ))
+        .expect("valid JSON");
+        assert_eq!(whole["truncated"], false);
+        assert!(whole["next_offset"].is_null());
+    }
+
+    #[test]
+    fn a_listing_names_every_file_that_fits_one_read() {
+        let listing: serde_json::Value = serde_json::from_str(&render_bundle_listing(
+            "Deploy Runbook",
+            &[
+                file("SKILL.md", 120, false),
+                file("scripts/run.py", 900, false),
+            ],
+        ))
+        .expect("valid JSON");
+        assert_eq!(listing["total_files"], 2);
+        assert_eq!(listing["truncated"], false);
+        assert_eq!(listing["files"].as_array().map(Vec::len), Some(2));
     }
 }

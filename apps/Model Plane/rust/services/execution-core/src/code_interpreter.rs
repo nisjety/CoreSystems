@@ -28,6 +28,13 @@
 //! `{"language":"python"|"sh","code":"…","files_in":[{"name":"data.csv","content_b64":"…"}]}`
 //! (`files_in` optional, `language` defaults to `python`).
 //!
+//! Files the person attached to the turn are NOT part of this input: the model
+//! cannot add or change them. They arrive from the request that carries the step
+//! ([`crate::run_inputs`]) and appear read-only under `attachments/`.
+//!
+//! Skill bundles the turn's matched skills carry are bound read-only at `/skills` when the
+//! call holds them ([`crate::skill_mounts`]); the model names none of them.
+//!
 //! Output JSON:
 //! `{"stdout":"…","stderr":"…","exit_code":0,"files":[{"name","mime","bytes","content_b64"}]}`
 //! where an over-cap file is still listed, with `"truncated":true` and an empty
@@ -36,16 +43,24 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::alphabet;
 use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig, STANDARD};
 use base64::engine::DecodePaddingMode;
 use base64::Engine;
+use mp_contracts::attachments::{validate_name, ATTACHMENTS_DIR};
 use sha2::{Digest, Sha256};
 
 use crate::executor;
 use crate::policy::{MpNetworkPolicy, MpSandboxPolicy};
+use crate::run_inputs::InputSet;
+
+/// Structural checks of the Office files this module returns. Its own file so the
+/// verifier's sandboxed second workspace stays separate from the program's.
+#[path = "office_verify.rs"]
+mod office_verify;
 
 /// Directory-name prefix for per-call workspaces. Also the marker cleanup and
 /// tests match on.
@@ -80,6 +95,13 @@ const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Ceiling on the total content returned by one call (16 `MiB`).
 const MAX_TOTAL_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Where a turn's skill bundles are bound read-only inside the sandbox (WS19-S8). The image
+/// creates this directory as an empty mount point (WS19-S4), so the bind never has to create
+/// one on the read-only root.
+pub const SKILLS_MOUNT: &str = "/skills";
+/// The same name without the leading slash. A `files_in` entry may not take it.
+pub const SKILLS_DIR: &str = "skills";
 
 /// Padding-tolerant decoder for `content_b64`. Model- and gateway-produced
 /// base64 is routinely line-wrapped and occasionally unpadded; both are still
@@ -143,6 +165,9 @@ pub struct CodeRequest {
     pub language: Language,
     pub code: String,
     pub files_in: Vec<InputFile>,
+    /// The turn's attached files, staged read-only under `attachments/`. Never
+    /// parsed from the tool input: the caller sets it from the request.
+    pub ro_inputs: Option<Arc<InputSet>>,
 }
 
 /// One file produced by the program, as returned to the model.
@@ -166,6 +191,31 @@ struct CodeResult {
     stderr: String,
     exit_code: i32,
     files: Vec<OutputFile>,
+    /// Advisory structural checks of the returned Office files. Absent unless
+    /// `CODE_INTERPRETER_OFFICE_VERIFY` is on, so the result is unchanged by default.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    verification: Vec<mp_contracts::office_verification::OfficeVerification>,
+    /// Office files the verifier did not check, so the model can say so.
+    #[serde(skip_serializing_if = "is_zero")]
+    verification_unchecked: usize,
+    /// How the program was confined and whether it was stopped for a limit
+    /// (WS06-S8). Additive: callers that do not know it ignore it.
+    execution: ExecutionInfo,
+}
+
+/// The `execution` object of a code result: `{sandboxed, limits, limit_hit}`.
+#[derive(Debug, serde::Serialize)]
+struct ExecutionInfo {
+    sandboxed: bool,
+    /// `enforced` | `unlimited`.
+    limits: &'static str,
+    /// Present only when the program was stopped for a resource limit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    limit_hit: Option<executor::LimitHit>,
+}
+
+fn is_zero(count: &usize) -> bool {
+    *count == 0
 }
 
 /// Parse and validate a `code_interpreter` tool input.
@@ -217,6 +267,7 @@ pub fn parse_request(tool_input: &str) -> Result<CodeRequest, String> {
         language,
         code: raw.code,
         files_in,
+        ro_inputs: None,
     })
 }
 
@@ -255,7 +306,12 @@ fn validate_input_name(raw: &str, language: Language) -> Result<String, String> 
     // The generated program and the runtime's scratch directories already occupy
     // these names; staging over them would fail with a confusing IO error, so say
     // what is wrong instead.
-    if name == language.program_file() || name == TEMP_SUBDIR || name == MPL_CONFIG_SUBDIR {
+    if name == language.program_file()
+        || name == TEMP_SUBDIR
+        || name == MPL_CONFIG_SUBDIR
+        || name.eq_ignore_ascii_case(ATTACHMENTS_DIR)
+        || name.eq_ignore_ascii_case(SKILLS_DIR)
+    {
         return Err(format!(
             "files_in name '{name}' is reserved by the sandbox workspace; rename the input file"
         ));
@@ -451,6 +507,12 @@ fn child_env(workspace: &Path) -> Vec<(String, String)> {
     env
 }
 
+/// The ENTIRE environment of a `shell` call (WS06-S9): `PATH` and nothing else, so
+/// no service credential execution-core holds reaches a model-authored command.
+pub(crate) fn shell_env() -> Vec<(String, String)> {
+    vec![("PATH".to_owned(), inherited_or("PATH", FALLBACK_PATH))]
+}
+
 fn path_value(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
@@ -485,19 +547,55 @@ pub async fn run(
     run_id: &str,
     step_id: &str,
     workspace_root: Option<&Path>,
+    ro_inputs: Option<Arc<InputSet>>,
 ) -> Result<String, String> {
-    run_with_timeout(
+    run_staged(
         tool_input,
         run_id,
         step_id,
         workspace_root,
+        ro_inputs,
         executor::code_exec_timeout(),
+    )
+    .await
+}
+
+/// [`run`] with the turn's skill bundles: `skills`, when present, is the host directory a
+/// `crate::skill_mounts` tree was written to, bound read-only at [`SKILLS_MOUNT`] for the
+/// call. `None` is exactly [`run`].
+///
+/// `lease_id` is the sandbox lease the caller holds for a Space-scoped run
+/// (`workspace_root` is `Some` exactly then); the spawn is refused without it
+/// (WS06-S9 `SpawnAdmission`).
+pub async fn run_with_skills(
+    tool_input: &str,
+    run_id: &str,
+    step_id: &str,
+    workspace_root: Option<&Path>,
+    ro_inputs: Option<Arc<InputSet>>,
+    skills: Option<&Path>,
+    lease_id: Option<&str>,
+) -> Result<String, String> {
+    let admission = executor::SpawnAdmission {
+        space_scoped: workspace_root.is_some(),
+        lease_id,
+    };
+    run_admitted(
+        tool_input,
+        run_id,
+        step_id,
+        workspace_root,
+        ro_inputs,
+        skills,
+        executor::code_exec_timeout(),
+        &admission,
     )
     .await
 }
 
 /// [`run`] with an injected deadline — the testable seam (env mutation is
 /// forbidden in this crate, so tests pass the timeout instead of setting it).
+#[cfg(test)]
 async fn run_with_timeout(
     tool_input: &str,
     run_id: &str,
@@ -505,15 +603,75 @@ async fn run_with_timeout(
     workspace_root: Option<&Path>,
     timeout: Duration,
 ) -> Result<String, String> {
-    let request = parse_request(tool_input)?;
+    run_staged(tool_input, run_id, step_id, workspace_root, None, timeout).await
+}
+
+/// [`run_with_timeout`] with the turn's attached files.
+async fn run_staged(
+    tool_input: &str,
+    run_id: &str,
+    step_id: &str,
+    workspace_root: Option<&Path>,
+    ro_inputs: Option<Arc<InputSet>>,
+    timeout: Duration,
+) -> Result<String, String> {
+    run_staged_with_skills(
+        tool_input,
+        run_id,
+        step_id,
+        workspace_root,
+        ro_inputs,
+        None,
+        timeout,
+    )
+    .await
+}
+
+/// [`run_staged`] with the turn's skill bundles (WS19-S8), bound read-only at [`SKILLS_MOUNT`].
+async fn run_staged_with_skills(
+    tool_input: &str,
+    run_id: &str,
+    step_id: &str,
+    workspace_root: Option<&Path>,
+    ro_inputs: Option<Arc<InputSet>>,
+    skills: Option<&Path>,
+    timeout: Duration,
+) -> Result<String, String> {
+    run_admitted(
+        tool_input,
+        run_id,
+        step_id,
+        workspace_root,
+        ro_inputs,
+        skills,
+        timeout,
+        &executor::SpawnAdmission::NOT_SPACE,
+    )
+    .await
+}
+
+/// [`run_staged_with_skills`] with the Space facts the spawn is admitted on (WS06-S9).
+#[allow(clippy::too_many_arguments)]
+async fn run_admitted(
+    tool_input: &str,
+    run_id: &str,
+    step_id: &str,
+    workspace_root: Option<&Path>,
+    ro_inputs: Option<Arc<InputSet>>,
+    skills: Option<&Path>,
+    timeout: Duration,
+    admission: &executor::SpawnAdmission<'_>,
+) -> Result<String, String> {
+    let mut request = parse_request(tool_input)?;
+    request.ro_inputs = ro_inputs;
 
     if let Some(root) = workspace_root {
-        return run_in_root(&request, root, timeout, true).await;
+        return run_in_root(&request, root, timeout, true, skills, admission).await;
     }
 
     let workspace = Workspace::create(run_id, step_id)
         .map_err(|error| format!("code_interpreter could not create its workspace: {error}"))?;
-    run_in_root(&request, workspace.path(), timeout, false).await
+    run_in_root(&request, workspace.path(), timeout, false, skills, admission).await
     // `workspace` drops here — and on every `?` above — removing the directory.
 }
 
@@ -532,6 +690,8 @@ async fn run_in_root(
     root: &Path,
     timeout: Duration,
     persistent: bool,
+    skills: Option<&Path>,
+    admission: &executor::SpawnAdmission<'_>,
 ) -> Result<String, String> {
     let pre_call_baseline = if persistent {
         snapshot_file_hashes(root)
@@ -572,21 +732,42 @@ async fn run_in_root(
         })?;
     }
 
-    // WorkspaceWrite over exactly one root, network off. The writable bind is
-    // the LAST filesystem op in the bwrap argv, so it wins over the read-only
-    // rootfs bound underneath it — which is what makes `open("out.xlsx","wb")`
-    // work while the rest of the container stays untouchable.
+    // The attached files, as a read-only directory inside the writable root. It
+    // lives until this function returns, so the output collection below still
+    // sees a workspace the program could not have changed them in.
+    let staged_inputs = match &request.ro_inputs {
+        Some(set) => StagedInputs::stage(root, set)?,
+        None => None,
+    };
+    let mut ro_binds: Vec<(PathBuf, PathBuf)> = staged_inputs
+        .iter()
+        .map(|inputs| (inputs.dir.clone(), inputs.dir.clone()))
+        .collect();
+    // The turn's skill bundles, read-only at `/skills` (WS19-S8). Like the attached files they
+    // are bound after the writable root, so a writable root can never shadow them.
+    if let Some(skills) = skills {
+        ro_binds.push((skills.to_path_buf(), PathBuf::from(SKILLS_MOUNT)));
+    }
+
+    // WorkspaceWrite over exactly one root, network off. The writable bind comes
+    // before the read-only binds in the bwrap argv and after the read-only
+    // rootfs, so it wins over the rootfs — which is what makes
+    // `open("out.xlsx","wb")` work while the rest of the container stays
+    // untouchable — and the `attachments/` bind then makes that one directory
+    // read-only again.
     let policy = MpSandboxPolicy::WorkspaceWrite {
         writable_roots: vec![root.to_path_buf()],
         network: MpNetworkPolicy::Disabled,
     };
-    let outcome = executor::execute_sandboxed_in_dir(
+    let outcome = executor::execute_sandboxed_in_dir_with_ro_binds(
         &policy,
         request.language.program(),
         &[program_file.to_owned()],
         root,
         &child_env(root),
+        &ro_binds,
         timeout,
+        admission,
     )
     .await
     .map_err(|error| format!("code_interpreter execution failed: {error}"))?;
@@ -595,14 +776,128 @@ async fn run_in_root(
     staged.push(program_file);
     staged.extend(request.files_in.iter().map(|file| file.name.as_str()));
     let files = collect_output_files(root, &staged, &pre_call_baseline);
+    let office = office_verify::verify_outputs(&files).await;
 
     serde_json::to_string(&CodeResult {
         stdout: outcome.stdout,
         stderr: outcome.stderr,
         exit_code: outcome.exit_code,
         files,
+        verification: office.reports,
+        verification_unchecked: office.unchecked,
+        execution: ExecutionInfo {
+            sandboxed: outcome.sandboxed,
+            limits: outcome.limits,
+            limit_hit: outcome.limit_hit,
+        },
     })
     .map_err(|error| format!("code_interpreter could not encode its result: {error}"))
+}
+
+/// The turn's attached files, written into `<root>/attachments/` as read-only
+/// files in a read-only directory. The directory is bind-mounted read-only by the
+/// sandbox too, so the permission bits are the second lock, not the only one.
+///
+/// `Drop` makes the directory writable again and removes it. That has to happen
+/// before the workspace itself is removed, or `remove_dir_all` fails on a
+/// directory it may not write to and the customer's files outlive the call.
+struct StagedInputs {
+    dir: PathBuf,
+}
+
+impl StagedInputs {
+    /// `None` when the set holds no files (nothing is created).
+    fn stage(root: &Path, set: &InputSet) -> Result<Option<Self>, String> {
+        if set.with_files(<[_]>::is_empty) {
+            return Ok(None);
+        }
+        // The registry is not trusted with a path: every name is judged again
+        // here, and refused, never sanitized, before anything is written.
+        if !set.with_files(|files| files.iter().all(|file| validate_name(&file.name))) {
+            return Err("an attached file has an unsafe name and was not staged".to_owned());
+        }
+        // The files could not be kept read-only on a host that runs the program
+        // as a plain process, so they are not even written there.
+        if !crate::sandbox::is_supported() {
+            return Err(
+                "attached files need the OS sandbox, which is unavailable; refusing to stage them"
+                    .to_owned(),
+            );
+        }
+        let dir = root.join(ATTACHMENTS_DIR);
+        // Whatever a call killed mid-way, or a program in a persistent root, left at
+        // the reserved name goes first: a stale entry would fail the create below.
+        // A link there is unlinked, not followed (see `remove_staged_dir`).
+        remove_staged_dir(&dir);
+        std::fs::create_dir(&dir)
+            .map_err(|error| format!("code_interpreter could not stage attached files: {error}"))?;
+        // Created before the files are written so a failure part-way still cleans up.
+        let staged = Self { dir };
+        set.with_files(|files| {
+            for file in files {
+                let path = staged.dir.join(&file.name);
+                std::fs::write(&path, &file.bytes)
+                    .and_then(|()| set_mode(&path, 0o444))
+                    .map_err(|error| {
+                        format!("code_interpreter could not stage attached files: {error}")
+                    })?;
+            }
+            Ok::<(), String>(())
+        })?;
+        set_mode(&staged.dir, 0o555)
+            .map_err(|error| format!("code_interpreter could not stage attached files: {error}"))?;
+        Ok(Some(staged))
+    }
+}
+
+impl Drop for StagedInputs {
+    fn drop(&mut self) {
+        remove_staged_dir(&self.dir);
+    }
+}
+
+/// Removes whatever sits at a staged-directory name, in whatever mode it was left
+/// in. A missing entry is the normal case and is not an error.
+///
+/// The entry is looked at WITHOUT following links first. In a persistent Space
+/// root, a program from an earlier call of the same run can plant `attachments`
+/// as a symlink to a host directory, and `set_mode` is a chmod, which follows
+/// links: chmod-ing by path would change the mode of that host directory as the
+/// execution-core user. A link, or a file planted at the name, is unlinked and its
+/// target is never touched. This is not race-free: a process running in the same
+/// root can still swap the entry between the two calls below. Closing that needs
+/// the directory opened with O_NOFOLLOW and chmod-ed through that handle, which
+/// this crate does not do yet.
+fn remove_staged_dir(dir: &Path) {
+    let result = match std::fs::symlink_metadata(dir) {
+        Err(error) => Err(error),
+        Ok(metadata) if !metadata.is_dir() => std::fs::remove_file(dir),
+        Ok(_) => {
+            // A real directory this module staged: its entries are read-only, so the
+            // directory itself must be writable before they can be removed. Best
+            // effort: a chmod failure surfaces as the removal failure that follows.
+            let _ = set_mode(dir, 0o755);
+            std::fs::remove_dir_all(dir)
+        }
+    };
+    if let Err(error) = result {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(%error, dir = %dir.display(), "attached files cleanup failed");
+        }
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+}
+
+/// There are no unix permission bits to set; staging is refused on such a host
+/// before anything is written (see [`StagedInputs::stage`]).
+#[cfg(not(unix))]
+pub(crate) fn set_mode(_path: &Path, _mode: u32) -> std::io::Result<()> {
+    Ok(())
 }
 
 fn content_hash(bytes: &[u8]) -> String {
@@ -782,6 +1077,13 @@ mod tests {
                     truncated: Some(true),
                 },
             ],
+            verification: Vec::new(),
+            verification_unchecked: 0,
+            execution: ExecutionInfo {
+                sandboxed: true,
+                limits: "enforced",
+                limit_hit: None,
+            },
         };
         assert_eq!(
             serde_json::to_string(&result).expect("serializes"),
@@ -1343,5 +1645,385 @@ mod tests {
             "a genuinely changed file must be reported: {files:?}"
         );
         assert_eq!(files[0]["name"], "out.csv");
+    }
+
+    /// The attachments a turn carries, registered the way the gRPC handler does.
+    /// The guard keeps the registration alive for the test.
+    fn registered(
+        files: &[(&str, &[u8])],
+    ) -> (crate::run_inputs::RunInputsGuard, Arc<InputSet>) {
+        use mp_contracts::attachments::sha256_hex;
+        use mp_contracts::model_plane::v1::{RunAttachment, RunAttachmentKind};
+        let attachments: Vec<RunAttachment> = files
+            .iter()
+            .map(|(name, content)| RunAttachment {
+                id: (*name).to_owned(),
+                name: (*name).to_owned(),
+                mime: "application/octet-stream".to_owned(),
+                size_bytes: content.len() as u64,
+                sha256: sha256_hex(content),
+                content: content.to_vec(),
+                kind: RunAttachmentKind::File as i32,
+            })
+            .collect();
+        let registry = crate::run_inputs::RunInputs::with_limits(4, 1 << 20, Duration::from_secs(60));
+        let guard = registry
+            .register("org", "run", &attachments)
+            .expect("registers")
+            .expect("guard");
+        let set = registry.get("org", "run").expect("registered");
+        (guard, set)
+    }
+
+    fn workspaces_of(run_id: &str) -> Vec<String> {
+        let prefix = format!("{WORKSPACE_PREFIX}-{}-", path_slug(run_id));
+        std::fs::read_dir(std::env::temp_dir())
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter_map(|entry| entry.file_name().into_string().ok())
+                    .filter(|name| name.starts_with(&prefix))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn an_attachment_is_readable_by_the_code() {
+        if !python3_available() {
+            eprintln!("skipping: python3 or the OS sandbox is unavailable");
+            return;
+        }
+        let (_guard, set) = registered(&[("data.csv", b"month,revenue\njan,10\n")]);
+        let output = run_staged(
+            &serde_json::json!({"code": "print(open('attachments/data.csv').read())"}).to_string(),
+            "run-attach-read",
+            "step-1",
+            None,
+            Some(set),
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("code_interpreter call");
+        let result: serde_json::Value = serde_json::from_str(&output).expect("result is JSON");
+        assert!(
+            result["stdout"].as_str().unwrap_or_default().contains("jan,10"),
+            "the program must read the attached file: {result}"
+        );
+        // The attachment is an input, not an output of the program.
+        assert_eq!(result["files"].as_array().map(Vec::len), Some(0), "{result}");
+    }
+
+    #[tokio::test]
+    async fn writing_into_the_attachments_directory_fails_read_only() {
+        if !python3_available() {
+            eprintln!("skipping: python3 or the OS sandbox is unavailable");
+            return;
+        }
+        let (_guard, set) = registered(&[("data.csv", b"a,b\n")]);
+        let code = [
+            "import errno",
+            "for target in ('attachments/data.csv', 'attachments/new.txt'):",
+            "    try:",
+            "        open(target, 'w').write('x')",
+            "        print('WROTE', target)",
+            "    except OSError as error:",
+            "        print('ERRNO', error.errno == errno.EROFS, target)",
+        ]
+        .join("
+");
+        let output = run_staged(
+            &serde_json::json!({"code": code}).to_string(),
+            "run-attach-write",
+            "step-1",
+            None,
+            Some(set),
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("code_interpreter call");
+        let result: serde_json::Value = serde_json::from_str(&output).expect("result is JSON");
+        let stdout = result["stdout"].as_str().unwrap_or_default();
+        assert!(!stdout.contains("WROTE"), "a write got through: {stdout}");
+        assert_eq!(stdout.matches("ERRNO True").count(), 2, "EROFS for both: {stdout}");
+    }
+
+    /// A skill bundle is readable at `/skills` and not writable there. The file is left
+    /// writable on purpose, so the refusal can only come from the read-only bind. Needs the
+    /// `/skills` mount point the image creates.
+    #[tokio::test]
+    async fn a_skill_bundle_is_readable_at_skills_and_not_writable() {
+        if !python3_available() || !Path::new(SKILLS_MOUNT).is_dir() {
+            eprintln!("skipping: python3, the OS sandbox or the /skills mount point is unavailable");
+            return;
+        }
+        let tree = std::env::temp_dir().join(format!("skills-test-{}", mp_ids::new_ulid()));
+        let file = tree.join("docs").join("SKILL.md");
+        std::fs::create_dir_all(file.parent().expect("parent")).expect("tree");
+        std::fs::write(&file, b"bundle text").expect("bundle file");
+        set_mode(&file, 0o644).expect("writable for the test");
+        let code = [
+            "import errno",
+            "print(open('/skills/docs/SKILL.md').read())",
+            "try:",
+            "    open('/skills/docs/SKILL.md', 'w').write('x')",
+            "    print('WROTE')",
+            "except OSError as error:",
+            "    print('ERRNO', error.errno == errno.EROFS)",
+        ]
+        .join("\n");
+        let output = run_staged_with_skills(
+            &serde_json::json!({"code": code}).to_string(),
+            "run-skills-read",
+            "step-1",
+            None,
+            None,
+            Some(tree.as_path()),
+            Duration::from_secs(60),
+        )
+        .await;
+        let _ = std::fs::remove_dir_all(&tree);
+        let output = output.expect("code_interpreter call");
+        let result: serde_json::Value = serde_json::from_str(&output).expect("result is JSON");
+        let stdout = result["stdout"].as_str().unwrap_or_default();
+        assert!(stdout.contains("bundle text"), "the bundle is readable: {stdout}");
+        assert!(!stdout.contains("WROTE"), "a write got through: {stdout}");
+        assert!(stdout.contains("ERRNO True"), "EROFS at /skills: {stdout}");
+    }
+
+    #[test]
+    fn attachments_name_is_reserved_for_files_in() {
+        for name in ["attachments", "Attachments", "skills", "SKILLS"] {
+            let input = serde_json::json!({
+                "code": "print(1)",
+                "files_in": [{ "name": name, "content_b64": "" }],
+            })
+            .to_string();
+            let error = parse_request(&input).expect_err("the directory name is reserved");
+            assert!(error.contains("reserved"), "error: {error}");
+        }
+        // The model cannot add staged files through its own input.
+        let request = parse_request(
+            r#"{"code":"print(1)","attachments":[{"name":"x","content":"eA=="}],"ro_inputs":[]}"#,
+        )
+        .expect("unknown keys are ignored");
+        assert!(request.ro_inputs.is_none());
+    }
+
+    #[tokio::test]
+    async fn unsafe_attachment_names_are_rejected_never_sanitized() {
+        let escape = std::env::temp_dir().join("escape-from-attachments.csv");
+        let _ = std::fs::remove_file(&escape);
+        for name in ["../escape-from-attachments.csv", "/etc/passwd", "a/b.csv", ".hidden"] {
+            let (_guard, set) = registered(&[(name, b"x")]);
+            let error = run_staged(
+                &serde_json::json!({"code": "print(1)"}).to_string(),
+                "run-attach-unsafe",
+                "step-1",
+                None,
+                Some(set),
+                Duration::from_secs(30),
+            )
+            .await
+            .expect_err("an unsafe name must refuse the call");
+            assert!(error.contains("unsafe name"), "'{name}': {error}");
+        }
+        assert!(!escape.exists(), "a traversal name must never be written");
+        assert!(workspaces_of("run-attach-unsafe").is_empty());
+    }
+
+    #[tokio::test]
+    async fn workspace_is_removed_after_the_call() {
+        // Passes on every host: where the sandbox is unavailable the call is
+        // refused, and the workspace and the read-only directory must be gone
+        // all the same.
+        let (_guard, set) = registered(&[("data.csv", b"a,b\n")]);
+        let _ = run_staged(
+            &serde_json::json!({"code": "print(open('attachments/data.csv').read())"}).to_string(),
+            "run-attach-cleanup",
+            "step-1",
+            None,
+            Some(set),
+            Duration::from_secs(60),
+        )
+        .await;
+        assert_eq!(
+            workspaces_of("run-attach-cleanup"),
+            Vec::<String>::new(),
+            "no verevon-code workspace may remain after the call"
+        );
+    }
+
+    /// Puts owner write access back on a directory a test locked down, so the
+    /// tempdir cleanup still works when an assertion fails part-way.
+    #[cfg(unix)]
+    struct OwnerWritable(PathBuf);
+
+    #[cfg(unix)]
+    impl Drop for OwnerWritable {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    /// A host directory a program must not reach through the persistent root:
+    /// read-only, holding one file that has to survive.
+    #[cfg(unix)]
+    fn locked_host_dir(label: &str) -> PersistentTestDir {
+        use std::os::unix::fs::PermissionsExt;
+        let host = PersistentTestDir::new(&format!("{label}-{}", std::process::id()));
+        std::fs::write(host.0.join("keep.txt"), b"host data").expect("host file");
+        std::fs::set_permissions(&host.0, std::fs::Permissions::from_mode(0o500))
+            .expect("lock the host directory");
+        host
+    }
+
+    /// True only when nothing at all, not even a dangling link, sits at `path`.
+    #[cfg(unix)]
+    fn is_absent(path: &Path) -> bool {
+        matches!(
+            std::fs::symlink_metadata(path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        )
+    }
+
+    /// A symlink planted at the reserved name is unlinked. The directory it points
+    /// at keeps its mode and its contents: the chmod that used to run first
+    /// followed the link and changed the host directory's mode.
+    #[cfg(unix)]
+    #[test]
+    fn a_planted_symlink_is_unlinked_and_its_target_is_never_chmodded() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = PersistentTestDir::new(&format!("planted-link-{}", std::process::id()));
+        let host = locked_host_dir("planted-link-host");
+        let _restore = OwnerWritable(host.0.clone());
+        let link = root.0.join(ATTACHMENTS_DIR);
+        std::os::unix::fs::symlink(&host.0, &link).expect("plant the link");
+
+        remove_staged_dir(&link);
+
+        assert!(is_absent(&link), "the planted link must be removed");
+        let metadata = std::fs::metadata(&host.0).expect("host directory");
+        let mode = metadata.permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o500,
+            "the link target's mode must not change"
+        );
+        assert!(
+            host.0.join("keep.txt").is_file(),
+            "the link target's contents must survive"
+        );
+    }
+
+    /// A regular file at the reserved name is not a staged directory. Left in
+    /// place it would make every later staging fail with a create error.
+    #[cfg(unix)]
+    #[test]
+    fn a_regular_file_planted_at_the_reserved_name_is_removed() {
+        let root = PersistentTestDir::new(&format!("planted-file-{}", std::process::id()));
+        let planted = root.0.join(ATTACHMENTS_DIR);
+        std::fs::write(&planted, b"not a directory").expect("plant the file");
+
+        remove_staged_dir(&planted);
+
+        assert!(is_absent(&planted), "a planted file must be removed");
+    }
+
+    /// A staged directory is read-only and so is the file in it. Removing the
+    /// pair has to make the directory writable first, as it always has.
+    #[cfg(unix)]
+    #[test]
+    fn a_staged_read_only_directory_is_removed() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = PersistentTestDir::new(&format!("staged-ro-{}", std::process::id()));
+        let staged = root.0.join(ATTACHMENTS_DIR);
+        std::fs::create_dir(&staged).expect("staged directory");
+        let file = staged.join("data.csv");
+        std::fs::write(&file, b"a,b\n").expect("staged file");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444)).expect("file mode");
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o555))
+            .expect("directory mode");
+        let _restore = OwnerWritable(staged.clone());
+
+        remove_staged_dir(&staged);
+
+        assert!(
+            is_absent(&staged),
+            "a staged read-only directory must be removed"
+        );
+    }
+
+    /// A persistent root keeps its directory when a call is killed mid-way, so the
+    /// next call finds it there and must restage over it.
+    #[cfg(unix)]
+    #[test]
+    fn a_persistent_root_restages_over_a_leftover_attachments_directory() {
+        if !crate::sandbox::is_supported() {
+            eprintln!("skipping: the OS sandbox is unavailable");
+            return;
+        }
+        let root = PersistentTestDir::new(&format!("restage-{}", std::process::id()));
+        let (_first_guard, first) = registered(&[("data.csv", b"first call")]);
+        let leftover = StagedInputs::stage(&root.0, &first)
+            .expect("first staging")
+            .expect("the first call has a file");
+        // A killed call never runs Drop, so its directory stays behind.
+        std::mem::forget(leftover);
+
+        let (_second_guard, second) = registered(&[("data.csv", b"second call")]);
+        let restaged = StagedInputs::stage(&root.0, &second)
+            .expect("the second staging must not fail over the leftover")
+            .expect("the second call has a file");
+        assert_eq!(
+            std::fs::read(root.0.join(ATTACHMENTS_DIR).join("data.csv")).expect("restaged file"),
+            b"second call",
+            "this call's files must replace the leftover"
+        );
+        drop(restaged);
+        assert!(
+            is_absent(&root.0.join(ATTACHMENTS_DIR)),
+            "the restaged directory is removed on drop"
+        );
+    }
+
+    /// The attack a persistent root allows: an earlier call plants `attachments` as
+    /// a symlink to a host directory. Staging must replace the link with its own
+    /// directory and leave the host directory exactly as it was.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_planted_in_a_persistent_root_is_replaced_and_never_followed() {
+        use std::os::unix::fs::PermissionsExt;
+        if !crate::sandbox::is_supported() {
+            eprintln!("skipping: the OS sandbox is unavailable");
+            return;
+        }
+        let root = PersistentTestDir::new(&format!("planted-stage-{}", std::process::id()));
+        let host = locked_host_dir("planted-stage-host");
+        let _restore = OwnerWritable(host.0.clone());
+        std::os::unix::fs::symlink(&host.0, root.0.join(ATTACHMENTS_DIR)).expect("plant the link");
+        let (_guard, set) = registered(&[("data.csv", b"fresh")]);
+
+        let _staged = StagedInputs::stage(&root.0, &set)
+            .expect("staging must replace the planted link")
+            .expect("the call has a file");
+
+        let metadata = std::fs::metadata(&host.0).expect("host directory");
+        let mode = metadata.permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o500,
+            "the host directory's mode must not change"
+        );
+        assert!(
+            host.0.join("keep.txt").is_file(),
+            "the host directory's contents must survive"
+        );
+        let entry = std::fs::symlink_metadata(root.0.join(ATTACHMENTS_DIR)).expect("staged entry");
+        assert!(
+            entry.is_dir() && !entry.file_type().is_symlink(),
+            "staging must leave a real directory in the root"
+        );
     }
 }

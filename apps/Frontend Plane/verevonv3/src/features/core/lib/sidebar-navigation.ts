@@ -3,6 +3,7 @@ import {
   BarChart3,
   BookOpen,
   Bot,
+  BrainCircuit,
   CalendarDays,
   CheckCheck,
   CircleUserRound,
@@ -11,6 +12,7 @@ import {
   Fingerprint,
   Flame,
   Gauge,
+  Gavel,
   Home,
   Inbox,
   HatGlasses,
@@ -69,6 +71,8 @@ export type SidebarPanelItem = {
   aliases?: string[]
   /** Do not mark this base route active when another Support view is selected. */
   exactPathMatch?: boolean
+  /** WS11-S4: draw the server's cross-room attention total beside the label. Display only; unknown draws nothing. */
+  badge?: 'attention'
   tabId?: string
   subItems?: Array<{
     id: string
@@ -94,6 +98,9 @@ export type SidebarSection = {
   icon: SidebarIcon
   description: string
   pinnedBottom?: boolean
+  /** Context-only sidebar; its parent remains selected in the main rail. */
+  parentSectionId?: string
+  aliases?: string[]
   skipActiveMatch?: boolean
   panelTabs?: SidebarPanelTab[]
   panelGroups: SidebarPanelGroup[]
@@ -119,7 +126,8 @@ export const sidebarSections: SidebarSection[] = [
           // Points at the /spaces resolver, not /spaces/:spaceId — the sidebar
           // has no Space ref to build a direct link from. `aliases` keeps the
           // item highlighted once the resolver has forwarded to a real room.
-          { id: 'overview-spaces', label: 'Rom', href: '/spaces', icon: Users, description: 'Delt rom for samtaler, arbeid, kunnskap og medlemmer.', tabId: 'my-account', aliases: ['/spaces'] },
+          { id: 'overview-spaces', label: 'Rom', href: '/spaces', icon: Users, description: 'Delt rom for samtaler, arbeid, kunnskap og medlemmer.', tabId: 'my-account', aliases: ['/spaces'], badge: 'attention' },
+          { id: 'overview-attention', label: 'Trenger deg', href: '/attention', icon: Inbox, description: 'Omtaler, svar, agenter og godkjenninger som venter på deg, på tvers av rom.', tabId: 'my-account' },
           { id: 'overview-studio', label: 'Studio', href: '/studio/canvas', icon: PanelsTopLeft, description: 'Bygg kampanjer, pakker og visuelle planer på canvas.', tabId: 'my-account' },
           { id: 'overview-inbox', label: 'Support', href: '/support', icon: Inbox, description: 'Samtaler, saker, AI-gjennomgang og SLA i én arbeidsflyt.', tabId: 'my-account' },
           { id: 'overview-social', label: 'Social', href: '/social/calendar', icon: CalendarDays, description: 'Planlegg postkalender, godkjenninger og kanaler.', tabId: 'shared' },
@@ -186,23 +194,42 @@ export const sidebarSections: SidebarSection[] = [
     ],
   },
   {
-    id: 'marketing',
-    label: 'Marketing',
-    href: '/studio/campaigns',
+    id: 'engagement',
+    label: 'Engasjement',
+    href: '/engagement',
     icon: Presentation,
-    description: 'Kampanjer, innholdspakker og publiseringsklare arbeidsflyter.',
+    description: 'Synlighet, søkeoptimalisering og anbudsoppfølging.',
     panelGroups: [
       {
-        id: 'marketing-core',
-        label: 'Marketing',
+        id: 'engagement-visibility',
+        label: 'Søk',
         defaultExpanded: true,
         items: [
-          { id: 'marketing-campaigns', label: 'Campaigns', href: '/studio/campaigns', icon: Presentation, description: 'Planlegg kampanjepakker og lanseringsløp.' },
-          { id: 'marketing-social-campaigns', label: 'Social campaigns', href: '/social/campaigns', icon: Megaphone, description: 'Samle og følge opp sosiale kampanjer.' },
-          { id: 'marketing-drafts', label: 'Drafts', href: '/social/drafts', icon: PenLine, description: 'Utkast, varianter og kanaltilpasning.' },
+          { id: 'engagement-visibility', label: 'Synlighet', href: '/engagement/visibility', icon: Gauge, description: 'Organisk og betalt søkesynlighet, SEO, SEM og markedsinnsikt.' },
+        ],
+      },
+      {
+        id: 'anbud-core',
+        label: 'Oppfølging',
+        items: [
+          { id: 'anbud-matches', label: 'Anbud', href: '/anbud', icon: Gavel, description: 'Anbud som passer selskapets profil, og hvorfor de passer.', exactPathMatch: true },
         ],
       },
     ],
+  },
+  {
+    id: 'visibility', label: 'Synlighet', href: '/engagement/visibility', parentSectionId: 'engagement', icon: Gauge,
+    description: 'Søkeanalyse og nettstedskvalitet.', panelGroups: [],
+  },
+  {
+    id: 'anbud',
+    label: 'Anbud',
+    href: '/anbud',
+    parentSectionId: 'engagement',
+    icon: Gavel,
+    description: 'Anbudsoppfølging med egne filtre, kundeprofil og arbeidsflyt.',
+    // The existing AnbudExpandedSidebarPanel owns its contextual navigation.
+    panelGroups: [],
   },
   {
     id: 'agents',
@@ -380,6 +407,7 @@ export const sidebarSections: SidebarSection[] = [
           { id: 'settings-router-policy', label: 'Router policy', href: '/settings/router-policy', icon: Route, description: 'Intent-laget: kompleksitet, budsjett og modellrute.' },
           { id: 'settings-finetune', label: 'Fine-tune jobs', href: '/settings/finetune', icon: TestTubeDiagonal, description: 'Azure-finjustering: opplasting, jobber og status.' },
           { id: 'settings-mcp', label: 'MCP-servere', href: '/settings/mcp', icon: ServerCog, description: 'Eksterne MCP-tjenere og tillatte verktøy for agenten.' },
+          { id: 'settings-model-access', label: 'Modelltilgang', href: '/settings/model-access', icon: BrainCircuit, description: 'Hvilke AI-modeller og hvilken resonneringsinnsats medlemmene kan bruke.' },
         ],
       },
     ],
@@ -407,17 +435,35 @@ const DEMO_MODE_HIDDEN_ITEM_IDS = new Set<string>([
   'insights-experiments',
 ])
 
-export function applyDemoModeNavGate(sections: SidebarSection[]): SidebarSection[] {
-  if (!DEMO_MODE_HIDE_UNFINISHED_NAV) return sections
+/**
+ * The Model access tab exists only while the gateway reports the admin switch on
+ * (`GET /api/v1/orgs/:id/model-entitlement` answers `enabled`). It is never a
+ * build-time flag: a deploy that has not switched it on must not show a tab that
+ * leads to a policy nothing enforces.
+ */
+export const MODEL_ACCESS_NAV_ITEM_ID = 'settings-model-access'
+
+export type NavGateOptions = {
+  /** What the BFF reported for the model-entitlement admin switch. Absent means off. */
+  modelAccessEnabled?: boolean
+}
+
+export function applyDemoModeNavGate(
+  sections: SidebarSection[],
+  options: NavGateOptions = {},
+): SidebarSection[] {
+  const hiddenItemIds = new Set<string>(DEMO_MODE_HIDE_UNFINISHED_NAV ? DEMO_MODE_HIDDEN_ITEM_IDS : [])
+  if (options.modelAccessEnabled !== true) hiddenItemIds.add(MODEL_ACCESS_NAV_ITEM_ID)
+  const hiddenSectionIds = DEMO_MODE_HIDE_UNFINISHED_NAV ? DEMO_MODE_HIDDEN_SECTION_IDS : new Set<string>()
 
   return sections
-    .filter((section) => !DEMO_MODE_HIDDEN_SECTION_IDS.has(section.id))
+    .filter((section) => !hiddenSectionIds.has(section.id))
     .map((section) => ({
       ...section,
       panelGroups: section.panelGroups
         .map((group) => ({
           ...group,
-          items: group.items.filter((item) => !DEMO_MODE_HIDDEN_ITEM_IDS.has(item.id)),
+          items: group.items.filter((item) => !hiddenItemIds.has(item.id)),
         }))
         .filter((group) => group.items.length > 0),
     }))
@@ -431,7 +477,7 @@ export function isSidebarPathActive(pathname: string, href: SidebarHref, aliases
     if (path.includes('?')) return normalizedPathname === path
     if (exactPathMatch && normalizedPathname.includes('?')) return false
     const pathnameWithoutSearch = normalizedPathname.split('?')[0]!
-    return pathnameWithoutSearch === path || pathnameWithoutSearch.startsWith(`${path}/`)
+    return pathnameWithoutSearch === path || (!exactPathMatch && pathnameWithoutSearch.startsWith(`${path}/`))
   })
 }
 
@@ -443,7 +489,7 @@ export function getSidebarSectionForPath(
   const normalizedPathname = normalizePath(pathname)
 
   return (
-    sections.find((section) => !section.skipActiveMatch && isSidebarPathActive(normalizedPathname, section.href)) ??
+    sections.filter((section) => !section.skipActiveMatch && isSidebarPathActive(normalizedPathname, section.href, section.aliases)).sort((a,b) => b.href.length - a.href.length)[0] ??
     sections.find((section) => section.href === fallbackRoute) ??
     sections[0]!
   )

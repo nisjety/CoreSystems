@@ -151,6 +151,35 @@ services:
             # the credential that registers Spaces.
             APPLICATION_ORG_CORE_SERVICE_TOKEN: ${APPLICATION_ORG_CORE_SERVICE_TOKEN:-}
             CONTROL_SPACE_MEMBERSHIP_BASE_URL: ${CONTROL_SPACE_MEMBERSHIP_BASE_URL:-http://user-core:3012/api/v1/internal/spaces}
+            # WS04-S1 flag space_org_room_reconcile_sync: 10-minute org-room
+            # roster cron plus debounced org-core event hook. On in this dev
+            # compose; a production deployment sets it to 0 until enabled.
+            SPACE_ORG_ROOM_RECONCILE: ${SPACE_ORG_ROOM_RECONCILE:-1}
+            # WS04-S5 flag space_audience_reconcile_sync: recipient audience
+            # follows the roster. The audience token defaults to the lifecycle
+            # token (Control's principal entry has one token). On in this dev
+            # compose; a production deployment sets it to 0 until enabled.
+            CONTROL_SPACE_AUDIENCE_URL: ${CONTROL_SPACE_AUDIENCE_URL:-http://user-core:3012/api/v1/internal/spaces/recipient-audiences}
+            APPLICATION_SPACE_AUDIENCE_TOKEN: ${APPLICATION_SPACE_AUDIENCE_TOKEN:-${APPLICATION_SPACE_LIFECYCLE_TOKEN:-}}
+            SPACE_AUDIENCE_RECONCILE: ${SPACE_AUDIENCE_RECONCILE:-1}
+            # WS12-S2 flag SPACE_DM_OPEN: open-or-return a direct message. Off
+            # by default everywhere; needs SPACE_AUDIENCE_RECONCILE on and
+            # Control's SPACE_DM_REGISTRATION + dm_create_entitled first.
+            SPACE_DM_OPEN: ${SPACE_DM_OPEN:-0}
+            # WS12-S8 flag SPACE_REACTIONS: message reactions (ids, one emoji, a time).
+            # Off by default everywhere; never an authorization input.
+            SPACE_REACTIONS: ${SPACE_REACTIONS:-0}
+            # WS11-S6 flag SPACE_ATTENTION_INGEST: apply Space attention events from the
+            # MODEL_PLANE_SPACE_EVENTS durable. Off by default everywhere (never an
+            # authorization input); set empty to acknowledge and drop events.
+            SPACE_ATTENTION_INGEST: ${SPACE_ATTENTION_INGEST:-0}
+            # WS11-S9 flag SPACE_ATTENTION_OUT_OF_APP: refs-only email through
+            # notification-core as service id space-attention. Off by default
+            # (never an authorization input); also needs the delegation token and
+            # NOTIFICATION_DELIVERY_MODE=novu with the space.* workflows.
+            SPACE_ATTENTION_OUT_OF_APP: ${SPACE_ATTENTION_OUT_OF_APP:-0}
+            NOTIFICATION_CORE_URL: ${NOTIFICATION_CORE_URL:-http://notification-core:3140}
+            NOTIFICATION_SPACE_ATTENTION_SERVICE_TOKEN: ${NOTIFICATION_SPACE_ATTENTION_SERVICE_TOKEN:-}
         volumes:
             # `npx convex dev` (startup.sh) only pushes what it can see. Without this
             # mount /app/convex is the snapshot baked at image-build time, so every
@@ -635,70 +664,6 @@ services:
             retries: 3
             start_period: 20s
 
-    social-core:
-        env_file:
-            - ./social-core/.env
-        <<: *service-hardening
-        build:
-            context: ./social-core
-            dockerfile: Dockerfile
-            args: *build-metadata
-        container_name: social-core
-        restart: unless-stopped
-        environment:
-            PORT: "3162"
-            SERVICE_NAME: social-core
-            DATABASE_URL: postgresql://${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${APPLICATION_PLANE_DB_PASSWORD:?APPLICATION_PLANE_DB_PASSWORD must be set}@application-postgres:5432/${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
-            INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no change-me default)}
-            INTEGRATION_CORE_URL: ${INTEGRATION_CORE_URL:-http://integration-api:3026}
-            VEREVON_NATS_URL: nats://application-nats:4222
-            NATS_USER: application-social
-            NATS_PASSWORD: ${APPLICATION_SOCIAL_NATS_PASSWORD:?APPLICATION_SOCIAL_NATS_PASSWORD must be set}
-            SOCIAL_PUBLISH_WORKER_ENABLED: ${SOCIAL_PUBLISH_WORKER_ENABLED:-true}
-            SOCIAL_PUBLISH_WORKER_POLL_INTERVAL: ${SOCIAL_PUBLISH_WORKER_POLL_INTERVAL:-5s}
-            SOCIAL_PUBLISH_WORKER_BATCH_SIZE: ${SOCIAL_PUBLISH_WORKER_BATCH_SIZE:-10}
-            LINKEDIN_API_BASE_URL: ${LINKEDIN_API_BASE_URL:-https://api.linkedin.com}
-            LINKEDIN_API_VERSION: ${LINKEDIN_API_VERSION:-202606}
-            X_API_BASE_URL: ${X_API_BASE_URL:-https://api.x.com}
-            INSTAGRAM_GRAPH_API_BASE_URL: ${INSTAGRAM_GRAPH_API_BASE_URL:-https://graph.facebook.com/v23.0}
-            FACEBOOK_GRAPH_API_BASE_URL: ${FACEBOOK_GRAPH_API_BASE_URL:-https://graph.facebook.com/v23.0}
-            TIKTOK_API_BASE_URL: ${TIKTOK_API_BASE_URL:-https://open.tiktokapis.com}
-            SNAPCHAT_API_BASE_URL: ${SNAPCHAT_API_BASE_URL:-https://adsapi.snapchat.com/v1}
-        depends_on:
-            jetstream-provisioner:
-                condition: service_completed_successfully
-            nats:
-                condition: service_healthy
-            application-postgres:
-                condition: service_healthy
-        ports:
-            - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:${SOCIAL_CORE_HOST_PORT:-3162}:3162"
-        networks:
-            - app-net
-            - inter-plane-bus
-        deploy:
-            resources:
-                limits:
-                    memory: 128M
-                    cpus: "0.5"
-                reservations:
-                    memory: 64M
-        logging:
-            driver: json-file
-            options:
-                max-size: "20m"
-                max-file: "3"
-        healthcheck:
-            test:
-                [
-                    "CMD-SHELL",
-                    "wget -qO- http://localhost:3162/health >/dev/null || exit 1",
-                ]
-            interval: 30s
-            timeout: 10s
-            retries: 3
-            start_period: 20s
-
     insight-core:
         env_file:
             - ./insight-core/.env
@@ -784,71 +749,6 @@ services:
             retries: 3
             start_period: 20s
 
-    leads-core:
-        env_file:
-            - ./leads-core/.env
-        <<: *service-hardening
-        build:
-            context: ./leads-core
-            dockerfile: Dockerfile
-            args: *build-metadata
-        container_name: leads-core
-        restart: unless-stopped
-        # W1 lead-builder: filtered Enhetsregisteret company search + saved org-scoped
-        # lists (Postgres) + metered CSV export. Emits a best-effort per-export audit
-        # event on the plane-local broker consumed by audit-core under the pinned
-        # `application` authority.
-        #
-        # Provider lead sync: LinkedIn Lead Gen form responses via integration-corev2's
-        # actions gateway (integration-api on the inter-plane bus, same route as
-        # social-core/insight-core). PERSON DATA is confined to the provider_leads
-        # table — see leads-core/README.md "PII posture" before extending.
-        environment:
-            PORT: "3164"
-            SERVICE_NAME: leads-core
-            DATABASE_URL: postgresql://${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${APPLICATION_PLANE_DB_PASSWORD:?APPLICATION_PLANE_DB_PASSWORD must be set}@application-postgres:5432/${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
-            INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no change-me default)}
-            NATS_URL: nats://application-nats:4222
-            NATS_USER: application-leads
-            NATS_PASSWORD: ${APPLICATION_LEADS_NATS_PASSWORD:?APPLICATION_LEADS_NATS_PASSWORD must be set}
-            INTEGRATION_CORE_URL: ${INTEGRATION_CORE_URL:-http://integration-api:3026}
-            PROVIDER_LEAD_SYNC_ENABLED: ${PROVIDER_LEAD_SYNC_ENABLED:-true}
-            PROVIDER_LEAD_SYNC_INTERVAL: ${PROVIDER_LEAD_SYNC_INTERVAL:-1h}
-        ports:
-            - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:${LEADS_CORE_HOST_PORT:-3164}:3164"
-        depends_on:
-            jetstream-provisioner:
-                condition: service_completed_successfully
-            nats:
-                condition: service_healthy
-            application-postgres:
-                condition: service_healthy
-        networks:
-            - app-net
-            - inter-plane-bus
-        deploy:
-            resources:
-                limits:
-                    memory: 128M
-                    cpus: "0.5"
-                reservations:
-                    memory: 32M
-        logging:
-            driver: json-file
-            options:
-                max-size: "20m"
-                max-file: "3"
-        healthcheck:
-            test:
-                [
-                    "CMD-SHELL",
-                    "wget -qO- http://localhost:3164/health >/dev/null || exit 1",
-                ]
-            interval: 30s
-            timeout: 10s
-            retries: 3
-            start_period: 20s
-
     information-core:
         env_file:
             - ./information-core/.env
@@ -924,6 +824,9 @@ services:
             # for run-watch notifications (AUTO-2). Empty disables this
             # principal entirely, matching support-worker's optional pattern.
             NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN: ${NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN:-}
+            # Optional fourth caller: Convex's Space attention courier (WS11-S9),
+            # service id space-attention. Empty disables the principal.
+            NOTIFICATION_SPACE_ATTENTION_SERVICE_TOKEN: ${NOTIFICATION_SPACE_ATTENTION_SERVICE_TOKEN:-}
             # Cross-plane org-deletion subscriber: a SECOND, narrowly-scoped NATS
             # identity (notification-core-gdpr) on the shared Control-Plane broker,
             # kept distinct from NATS_URL/NATS_SHARED_URL/VEREVON_NATS_URL above,

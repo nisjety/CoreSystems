@@ -337,6 +337,12 @@ async fn gap_rows_currently_violate_search_suggest() {
     let model_plane_url = model_plane.uri();
     let harness = Harness::start_with(move |state| AppState {
         model_plane_url: Some(model_plane_url),
+        // QB-T17: /v1/search/suggest is off unless its switch is on; this test pins the gap that
+        // remains once it is on (the invoke body carries no ZDR posture).
+        model_plane: quarry_edge::model_plane_gate::ModelPlaneFeatures {
+            search_suggest: true,
+            ..Default::default()
+        },
         ..state
     })
     .await;

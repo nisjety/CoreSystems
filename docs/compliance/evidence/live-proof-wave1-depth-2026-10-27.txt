@@ -1,0 +1,381 @@
+Live proof: Wave 1 depth fixes on the developer stack (migrations 024 and 0025, the redeploy of the Wave 1 services)
+Date: 2026-10-27 (UTC, from about 00:40). Branch `model-plane`, every image built from d67c5a43f.
+Verification level: LIVE-VERIFIED on a developer stack. Not production. No secrets, tokens or payload content below.
+Status: COMPLETE. Part 1 (deploy, migrations 024 and 0025) and part 2 (transcript paging, audit chain-on), the
+latter through the owner's signed-in session in the Browser pane.
+Part 5 (2026-10-27/28): the Wave 1 blockers: code rounds M, N, O and P and the live proofs listed there.
+
+SAFETY NET (before anything changed)
+  pg_dump of the affected dev databases to C:/dev/backups/live-proof-2026-10-27 (outside both checkouts):
+    session_core (model-plane-postgres-1, shared by session-core and capability-core) 22 MB,
+    org_core (controlplane-postgres) 84 KB, controlplane (audit-core's database) 12 MB.
+  Every image that was replaced is tagged :rollback-20261027 (session-core, model-gateway, capability-core,
+  inference-core, execution-core, control-plane-org-core, control-plane-audit-core, the BFF gateway).
+  The swapped containers keep their predecessors as <name>-rollback-20261027 (org-core, audit-core, BFF).
+
+WHAT WAS DEPLOYED, AND HOW
+  The stack ran images from 2026-10-01 (audit-core), 2026-10-06 (org-core) and 2026-10-21/22 (Model Plane).
+  A read-only research workflow (four topics, each checked by a skeptic agent) first established the coupling
+  and the migration risks; the pre-checks then confirmed: all 49 applied session-core migrations' sqlx checksums
+  equal the worktree files' bytes (no CRLF trap), no idle-in-transaction session on session_core (0055 is a
+  CREATE INDEX CONCURRENTLY), org-core's credential registry carries org:retention:read:any and none of the
+  scopes HEAD restricts.
+  - session-core, model-gateway: built with compose.sh from the worktree and recreated with
+    recreate-with-live-env.sh (the live env files read-only, NATS passwords carried from the running NATS server).
+    Both healthy at d67c5a43f. session-core applied migrations 0049 0050 0051 0052 0055 0056 0057 0058 0064 0067 0068
+    at boot ("migrations applied").
+  - org-core and audit-core: built with docker build from the worktree and swapped onto their running containers
+    with a replay of each container's own resolved config (read-only root, tmpfs, cap_drop ALL,
+    no-new-privileges, memory/CPU limits, networks and aliases, env); the swap reported no config difference and
+    no missing env name. The Control Plane runner was not used: the worktree has none of its per-service .env
+    files, and running the live checkout's runner could write its secrets ledger.
+  - BFF gateway (verevon-gateway-rs): built from the worktree (it carries WS09-S8) and swapped the same way.
+  - capability-core: NOT replaced. capability-core HEAD mints its session-core token with the scope
+    session:memory-controls:read in one request, and auth-core's live principal registry does not hold that
+    scope (it occurs 0 times), so the new service could not call session-core at all (learning review, skill
+    upserts, schedule-prepare for scheduled runs). Its HEAD migrations were applied instead by a one-off
+    container from the HEAD image that runs only the image's own migration loop (docker-entrypoint.sh, command
+    `true`) against the live database: exit 0. The running capability-core stayed healthy on its old image.
+  - inference-core and execution-core stay on their running images (built, not deployed): the proofs do not
+    need them, and model-gateway HEAD against the older inference-core only logs a WARN.
+
+PROOF: org-core migration 024 (D1-751), live database org_core
+  Applied at boot: 021_org_model_entitlements, 022_siem_destinations, 023_org_browser_sites,
+  024_org_core_app_least_privilege. Effective privileges of org_core_app (SELECT INSERT UPDATE DELETE):
+    org_browser_site_history        t t f f   (append-only)
+    org_browser_site_policy         t t t f
+    org_browser_site_rules          t t f t
+    org_model_policies              t t f t
+    org_model_policy_history        t t f f   (append-only)
+    org_model_policy_revisions      t t t f
+    organization_siem_audit_outbox  t t f f
+    siem_destinations               t t t t
+    user_browser_site_prefs         t t t t
+  Behaviour, in a transaction rolled back, as SET LOCAL ROLE org_core_app:
+    UPDATE org_model_policy_history ...  -> ERROR: permission denied for table org_model_policy_history
+    DELETE FROM org_browser_site_history ... -> ERROR: permission denied for table org_browser_site_history
+
+PROOF: capability-core migrations 0017-0025, live database session_core (D1-754, D1-757)
+  Before: tool_policies, skill_bundles*, agent_action_admissions and org_agent_policy* did not exist (the
+  running image predates WS05-S5). After the one-off run all seven tables exist.
+  0021 (D1-754): skill_bundle_files has the column is_binary (the reserved word binary would not parse).
+  0025 (D1-757): tool_policies_allow_digest_present_check
+    CHECK ((decision <> 'allow') OR (pinned_digest IS NOT NULL) OR (revoked_at IS NOT NULL)), validated.
+  Behaviour, in a transaction rolled back:
+    an active allow with no digest -> ERROR: new row for relation "tool_policies" violates check constraint
+      "tool_policies_allow_digest_present_check"
+    an allow with a 64-hex digest -> accepted; nothing is left after the rollback.
+
+OBSERVATIONS (not caused by these changes unless stated)
+  - session-core logged "nats: authorization violation" three times at boot; every consumer then reported
+    ready (tools.completions consumer, orchestration bridge, GDPR erasure consumer, Space membership consumer).
+    Not traced to a component; re-check in part 2 that tool_action audit events reach audit-core.
+  - session_audit_outbox holds 4992 terminal rows from 2026-09-04..2026-10-01 with "no stream found for given
+    subject" (from before the stream existed); later rows were published.
+  - audit-core: the application extra bus loops on "stream not found"; the old image did the same. The primary
+    and model buses are connected and ready. Chain switch AUDIT_CHAIN_ENABLED is unset (off) in part 1;
+    migrations 007-010 applied at boot (append-only guard trigger on audit_events, chain heads, checkpoints,
+    verifier state, export cursors). 109624 audit rows, none older than 365 days, so a rollback to the old
+    image would not trip the guard trigger in its retention sweep.
+  - session-core HEAD polls org-core's agent-policy route and gets 403 (its org-core credential lacks
+    org:agent-policy:read:any): a WARN per org; ORG_POLICY_FAIL_CLOSED is off, so memory behaviour is unchanged.
+  - Rollback is not image-only any more: session-core's old image cannot boot over migrations 0049-0068 (strict
+    migrator; 0058 drops the (org_id, name) unique index the old upsert uses). Rolling back means restoring the
+    session_core dump and the :rollback-20261027 image.
+
+PART 2 (2026-10-27 06:00-06:12 UTC, through the owner's signed-in session at localhost:5173)
+
+PROOF: tail-first transcript paging through the BFF (WS09-S8; transcript-paging-proof.sh's checks, run as a page fetch)
+  Session: GET /api/v1/session/current 200, the owner of org FUEk9LuqykPUnW2n7dhrbEeNKwRsV5uf (cross-checked: the
+  user's 116 chat threads in session_core carry the same org).
+  Seed (session_core, prefix ws09s8-20261027t022522z): two threads with origin 'system' (kept out of the chat list),
+  400 turns in -thread and one in -other, plus one completed dream_runs row per seeded message, so session-core's
+  Dreaming worker never mines the synthetic turns into the user's memory.
+  Result (GET /api/v1/chat/threads/{thread}/messages from the page, the BFF proxying model-gateway and session-core):
+    ok true, no failure; 4 pages, sizes 100 100 100 100, has_more true true true false; 400 turns, 400 unique,
+    turn 0 .. turn 399 in conversation order; the unpaged read unchanged (200, 400 turns, no has_more key, first
+    turn 0); refused with 400: limit=0, limit=201, limit=fifty, before without a limit, before=a%26limit%3D1
+    (invalid_request each), and a real message id from another thread (invalid_thread_request).
+  Tail query plan: Index Scan Backward using idx_messages_thread_id (Index Cond thread_id = ... AND sequence < $1),
+    101 rows, execution 0.462 ms.
+  Cleanup in one transaction: no runs, memory_index, plans, todos or scheduled_step_receipts rows referenced the
+    threads; DELETE 401 dream_runs, DELETE 401 messages, DELETE 2 threads; 0 left. No memory was written.
+
+PROOF: the audit hash chain switched on and off on live data (WS06-S2, D1-297; D1-296 fixed in the same commit)
+  Baseline: 0 chained rows, 0 heads, 110159 audit rows.
+  On: audit-core swapped with AUDIT_CHAIN_ENABLED=1 and AUDIT_CHAIN_VERIFY_INTERVAL=30s (no signing key: the boot
+  WARN "audit chain is on without a signing key" is expected in development). Boot: "audit chain catch-up
+  complete", durable and extra-plane consumers ready.
+  One governed tool action: the owner's chat turn "Søk i dokumentene mine etter «Verevon» med dokumentsøket" ran
+  Knowledge search; session-core published tool_action_reserved and tool_action on verevon.audit.v2.model.*, and
+  audit-core chained them for the org as seq 6 and 7, between auth-core control events (plane_service_token_issued).
+  Checks: per org (5 orgs) gaps 0, link breaks 0 (prev_hash = previous row_hash), genesis
+    sha256('VAC1/genesis/'||org) ok; every head equals its last row (seq and hash), state ok.
+  Restart mid-stream: audit-core stopped at 06:04:55Z; a second tool-using turn ("... etter «rapport»") ran while it
+    was down; started at 06:06:37Z: the queued tool_action_reserved and tool_action arrived from JetStream at
+    06:06:37 and were chained as seq 9 and 11 (an auth-core event took 10); the org's chain 1..11 still had gaps 0,
+    link breaks 0, head = last row, state ok.
+  Verifier (in-process, every 30 s): recomputed every chained row through seq 12 for the owner's org with no broken
+    row; status partial / no_attestation in every org (no signing key in development).
+  Metrics after the restart: audit_core_chain_appends_total{result="appended"} 7, audit_core_chain_broken_total 0,
+    audit_core_chain_head_lock_wait_seconds count 11, sum 0.19 s (before the restart: 3 appends, count 3, sum
+    0.0077 s; the counters reset on restart).
+  Off: audit-core swapped again with AUDIT_CHAIN_ENABLED and AUDIT_CHAIN_VERIFY_INTERVAL removed: the switch is
+    unset, no catch-up at boot, the 20 chained rows and 5 heads kept (as the runbook says), and the 7 audit rows that
+    arrived afterwards are unchained. No revert SQL was run.
+
+FINAL STATE (2026-10-27 06:12 UTC)
+  Running from d67c5a43f: session-core, model-gateway, org-core, audit-core (chain off), the BFF gateway.
+  Unchanged images: capability-core (D1-789), inference-core, execution-core and the rest of the stack.
+  Rollback containers kept: org-core-service-, audit-core-service- and verevon-gateway-rs-rollback-20261027 (their
+  old images); the intermediate audit-core chain-on/off rollback containers were removed. Backups and
+  :rollback-20261027 tags as in part 1. Test data left: the two chat turns in the owner's chat list (a new
+  conversation with two document searches) and their audit rows; the synthetic paging rows were deleted.
+
+PART 3 - CLAUDE 5.5 ON THE OWNER'S ANTHROPIC KEY, D1-789/D1-790 CHECKED (2026-10-27 15:13-15:23 UTC)
+  Order: live tests use the owner's Anthropic API key with claude-sonnet-5-5 only (never a Verevon route or a
+  ChatGPT/Codex subscription). The key lives in one env file outside both checkouts, passed to
+  recreate-with-live-env.sh as EXTRA_ENV_FILE (last, so it wins); it is not in this file or any repo file.
+  Images: inference-core from 058c36753 and model-gateway from e7cb5c0fb, both built from a clean git archive of
+  HEAD (not the working tree, which held another round's uncommitted proto field and broke the model-gateway build
+  with E0063). Revision labels checked on the running containers. Both healthy. inference-core logs one provider
+  in its chain: anthropic. ANTHROPIC_NATIVE_CONTEXT_MANAGEMENT=true, INFERENCE_ANTHROPIC_TIERED_SYSTEM=false,
+  INFERENCE_CORE_ANTHROPIC_ADAPTIVE_THINKING=false (the last has no say for 5.5 models). DEFAULT_MODEL is set on
+  model-gateway from the same env file.
+  Rollback: the earlier containers' image ids were already gone from the image store when tagging was tried, so
+  the fallback is the :rollback-20261027 tags or a rebuild of d67c5a43f.
+
+  D1-791, retired id: the thread whose turn had failed with 404 (picker still on claude-sonnet-4-20250514) was
+  retried from the SPA. inference-core: DEBUG "retired Claude model id answered by its successor" from
+  claude-sonnet-4-20250514 to claude-sonnet-5-5; infer succeeded, provider anthropic, model_used and
+  provider_reported_model claude-sonnet-5-5; effort_resolved wire AnthropicAdaptive requested high applied high
+  clamped false; DEBUG "forced tool_choice is not accepted by this model; sending auto"; prompt-cache breakpoints
+  3 with min_cacheable_tokens 512; the second call read 12357 tokens from the cache. The answer rendered with one
+  Knowledge search tool step and the provenance line "Behandlet: global (Anthropic)".
+  D1-791, fresh thread: the picker's manual list shows CLAUDE claude-sonnet-5-5, claude-opus-5-5,
+  claude-haiku-5-5 (the retired ids are gone). New thread on claude-sonnet-5-5 with one knowledge-search prompt:
+  three effort_resolved lines (AnthropicAdaptive, high, applied high), cache reads 7761 and 12502 tokens,
+  infer_stream started on claude-sonnet-5-5, the answer with one tool step, and "Hentet 5 minner fra tidligere
+  samtaler". No 400 from the API in the window, with the context-management beta header on.
+  D1-789: GET /api/v1/memory from the signed-in page through the BFF to capability-core answered 200, 20
+  memories, degraded false, degradation_reason empty; session-core ran the memory-controls query.
+  D1-790: session-core's last "org agent policy refresh failed ... agent-policy answered 403 Forbidden" is at
+  13:26:48 UTC (six in the 4 h window, all before the org-core registry swap); none from then to 15:20.
+  New finding D1-792: model-gateway's finetune poller is refused by auth-core (403) on every tick.
+  New finding D1-793: verify-replica-run-control.sh sends one bearer where stream, queue and rating need the
+  session and inference bearers too; the WS04-S9 proof is not run until that is fixed.
+  Test data left: one retried turn in the existing thread and one new two-message thread in the owner's chat list.
+
+
+PART 4 - WS04-S9 TWO-REPLICA PROOF, FLIP, WS08-S8 OCR IN THE IMAGE, STACK STATE (2026-10-27 15:26-17:40 UTC)
+  NATS: the running server mounted the main checkout's nats.conf, which lacks the WS04 run-control grants. It was
+  recreated from its own replayed config with only that bind mount pointed at the worktree's deploy/nats.conf
+  (validated first with nats-server -t inside the running server; same passwords, same JetStream volume). No
+  authorization violations after the swap; every Model Plane service reconnected. Rollback container:
+  model-plane-nats-1-rollback-runctl-acl. A compose recreate of NATS from the main checkout would drop the grants;
+  the gateway's boot self-test then degrades the bus to off (it does not take the gateway down).
+  Proof user: the project's own local e2e fixture account (seed-verified-test-user.sh), org "Verevon E2E Test",
+  non-ZDR; its auth-core session kept in a umask-077 cookie jar outside the repo; bearers minted per case and never
+  printed or written.
+  Runs of scripts/verify-replica-run-control.sh, in order, each one finding something:
+    run 1: preflight and case 1 Stop-via-peer pass; A's gateway_active_streams stays at 1 -> D1-795 (gauge counted
+      by hand, every stopped stream leaked one). Fixed by a drop guard (75c19bc6f).
+    diagnostic runs: case 2 had no tool round (the proof sent no `tools` feature); case 3 refused with
+      data_plane_auth_required (the proof sent three of the BFF's eight delegated bearers); then agent_run_failed
+      twice: execution-core runs agent turns on EXECUTION_AGENT_MODEL=model-router, which the Anthropic-only chain
+      cannot serve (set to claude-sonnet-5-5 in the test env file for this stack), and then Anthropic 400
+      "tools.15.custom.name ... ^[a-zA-Z0-9_-]{1,128}$" for the dotted agent tool names -> D1-797, retried three
+      times -> D1-798. Fixed in 9e01bbae8 (per-request reversible wire-name map, a rejected 4xx is not retried).
+    run 3: cases 1, 2 pass; case 3 approval, Do run on B and the thread grant pass, but the script looked for a
+      RUN_PLAN_MODE_EXITED row in session-core's events table, which no service writes (bus-only event) -> D1-801;
+      the check now reads runs.mode.
+    run 4: PASS, all six cases (evidence file live-proof-ws04-replica-run-control-2026-10-27.txt).
+  Flip committed in 08ae0b374: RUN_CONTROL_BUS, DURABLE_PLAN_GRANT, SHARED_TURN_RECORD, SEND_RECEIPTS default true;
+  SHARED_IDEMPOTENCY false. Replica B was then stopped and removed; the stack runs one gateway replica again.
+  WS08-S8: imports-core built from a clean snapshot of HEAD 98b302b0c and run as a throwaway container (no network,
+  no secrets) on a two-page image-only PDF: with CHAT_EXTRACT_OCR_ENABLED=true the extract returned the scanned
+  text (HACCP, hygiene, rengjoring found); with it false the same call refused 422 "No readable text found", as
+  today. The deployed imports-api was not changed (the switch is default off).
+  FINAL STATE: model-gateway and execution-core on 08ae0b374, inference-core on 9e01bbae8, the rest as in part 3;
+  MODEL_GATEWAY_EFFORT_LADDER and EXECUTION_CORE_RUN_EFFORT off (WS11-S8 is built, inert); EXECUTION_AGENT_MODEL
+  and DEFAULT_MODEL claude-sonnet-5-5 from the test env file outside the repos. A browser smoke turn after the
+  flip answered on claude-sonnet-5-5. Test data left: the proof user's threads and runs in session-core, the owner's
+  three test threads.
+
+
+PART 5 - WAVE 1 BLOCKERS: CODE FIXES AND LIVE PROOFS (2026-10-27 23:00 - 2026-10-28 UTC)
+  All on the dev stack or on disposable Postgres containers; tree at model-plane HEAD 20440a2fb plus this part's edits.
+  Disk: four stale agent cargo targets under C:/dev (mp-target-*-verify, mp-target-s9test, ~11.6 GB) removed first.
+
+  D1-134, D1-125 (WS10-S2) PASS: run-isolated-control-lifecycle-e2e.sh gained step 5/8 (org model entitlement
+    repository under RLS). The full script stops at step 1/8 on pre-existing auth-core Postgres spec failures (new row
+    D1-805), so step 5 was run alone the same way (disposable postgres:16-alpine, lifecycle fixture marker org_lifecycle):
+    TestControlLifecycleModelEntitlementRepositoryUnderRLS PASS (1.98 s) after org-core migrations 001-024 applied,
+    incl. 021_org_model_entitlements; the test covers RLS, the FOR UPDATE compare-and-set, append-only history and the
+    gdpr_hard_delete_organization cascade.
+  D1-115 (WS01-S4) DONE: Control Plane compose: the application bus entry of audit-extra-nats-provisioner is no
+    longer optional; regression assertion in audit-core cmd/server/main_test.go (mutation-checked: it fails with the old
+    line). Model bus stays optional (Model Plane's own provisioner converges that stream).
+  D1-379 (WS01-S14) PASS: promtool (prom/prometheus:v2.54.1) check rules: audit-core 11, audit-delivery 5,
+    zdr-attestation 3 rules SUCCESS; test rules: all three test files SUCCESS.
+  D1-261, D1-001 (+ duplicates D1-255/256/258) PASS: the running controlplane-prometheus mounted the main checkout's
+    prometheus.yml with no rule_files and evaluated no rules. Replayed (swap-mount, same image, volume, networks) with
+    the worktree prometheus.yml and the rules directory read-only: /api/v1/rules lists control-audit-core (11),
+    model-audit-delivery (5), model-zdr-attestation (3); all targets up except audit-siem-exporter (profile siem, as
+    documented). One forged-subject audit event published on the Control bus with org-core's own principal (subject
+    verevon.audit.v2.control.org-core.ws06_s0_forged_subject_proof, payload producer user-core, synthetic org
+    org_ws06_s0_alert_proof; JetStream seq 94347): audit-core logged "event authority mismatch" and dead-lettered it;
+    /api/v1/alerts: ControlAuditCoreAuthorityMismatch FIRING (critical, activeAt 23:04:18Z). Also visible:
+    ControlAuditCoreNATSDisconnected pending for bus application (fixed below), ModelAuditOutboxTerminalRows pending
+    with value 4992 (the 4,992 terminal tool_action rows of owner decision D1-042). Rollback container:
+    controlplane-prometheus-rollback-rules-20261027.
+  Session Core DB harness (D1-018 DB part, D1-073, D1-075, D1-223, D1-532, D1-622, D1-646) PASS: full run at HEAD
+    20440a2fb, disposable Postgres: 867 passed, 0 failed (equals the recorded count). Named tests all ok:
+    older_migrator_boots_only_with_ignore_missing; the six WS07-S1 tests and forgotten_memory/delete_memory; the six
+    WS07-S7 tests; the four WS07-S8 tests (trigger_records_every_mutation_even_from_capability_core_sql,
+    revision_cap_keeps_50, undo_restores_before_snapshot, non_owner_cannot_decide_or_undo); migration 0050's
+    against_real_pg grant tests; zdr_receipt 17 ok; retention_receipt 20; learning_events 20.
+  D1-325 (WS02-S2) PASS: cost-core go test -tags integration ./internal/postgres/ on a disposable Postgres: all 9
+    tests PASS incl. TestPostgresLedger_CacheMissReasonRoundTrip.
+  D1-113, D1-118 (WS01-S4) PASS; D1-117 PARTIAL. Before: audit-core /readyz degraded, bus application connected
+    false ("nats: stream not found" every second); the audit-extra-nats-provisioner container had never run on this
+    stack. Ran the worktree's Application Plane entrypoint provisioner with the pinned nats-box image (one-shot
+    compose in the scratchpad, password interpolated by compose from the Control Plane secrets file, never printed):
+    VEREVON_AUDIT narrowed to verevon.audit.retired.>, VEREVON_CONTROL_OBSERVABILITY created, durables
+    audit-core-application-v3-audit and -usage created (max_deliver 5, ack_wait 30 s): the pinned CLI accepts stream
+    edit --force, comma-separated --subjects, --max-deliver and --wait. audit-core /readyz: status ready, bus
+    application connected, subscriber ready, 0 pending. Then the Control audit-extra provisioner for the application
+    bus (non-optional now) FAILED loudly: "consumer conversation-core-ai-action-executor exists with incompatible
+    configuration" (new row D1-803: the two provisioners disagree, max_deliver 5 vs -1, runtime streams 14 d/1M vs
+    72 h/unlimited; its partial run had already converged VEREVON_APPLICATION/MODEL/INGESTION to 14 d/1M; 145
+    messages, nothing lost). D1-117: leads-core's audit outbox held 24 provider_lead_sync events marked published on
+    2026-10-23 that had gone into the old VEREVON_AUDIT (no consumer) and expired there (D1-112 realised). Replayed
+    them (published_at reset): all 24 reached audit-core over the new stream and were refused "missing required field:
+    org_id" (new row D1-802: the whole-run failure audit of the scheduled all-org sync has no org). A lead export to
+    produce an org-scoped event returned 503 entitlement_check_unavailable: leads-core on this stack has no Billing
+    Core entitlement client configured (new row D1-804). Test list created and deleted again. So: the application
+    audit path works end to end up to audit-core's validation; no plane=application row exists yet.
+  D1-073 PASS: cargo test -q -p session-core --all-targets (no DATABASE_URL): 637 passed, 232 ignored (the DB tests,
+    run by the harness above), integration targets 4 + 9 + 4 + 4 passed, 0 failed.
+  D1-341 (DB part), D1-386 PASS: audit-core go test ./internal/store/ on a disposable Postgres: 64 tests PASS, 0 FAIL,
+    0 SKIP: the seven new compliance DB tests (window resolution, non-ordered ingest window, keyset paging, filters,
+    org isolation, manifest ends, keys for one org) and the purge/checkpoint/attest tests incl.
+    TestPurgeDryRunVerifiesAndPlansButChangesNothing. The dev-stack dry-run sweep of D1-341 is not done.
+  D1-373 ANSWERED: the running Model Plane session-core image is d67c5a43 (built 2026-10-27 00:20); _sqlx_migrations
+    max(version) 68, 60 rows, all success (the row's expectation 43 predates later slices).
+  D1-324 PASS: cost-core (image e603fde7) runs with migration 0011 applied (cost_entries.cache_miss_reason exists;
+    11 recent Anthropic rows carry no_baseline/prefix_changed).
+  D1-318 PARTIAL: GET /api/v1/cost/analytics?scope=organization (owner's signed-in session) returns cache_breakdown
+    {advisory:true, miss_reasons:[{day 2026-10-27, model claude-sonnet-5-5, provider anthropic, reason no_baseline}]}.
+    Six turns in two threads on claude-sonnet-5-5 (owner's thread 01M5ZTZQ..., proof user's thread 01M5ZV3D...):
+    cache_read_tokens 0 on EVERY turn, cache_write_tokens = input - 4 on every turn (4560, 5285, 7491; 2417, 2815,
+    3673), cost-core reason prefix_changed on every follow-up turn 8-15 s after the previous one. So the ttl window
+    cannot be compared: the prefix never survives a turn on the Anthropic route (new row D1-808). The pinned-openai
+    thread of the row is not run (Anthropic-only test policy).
+  D1-059, D1-104 PARTIAL: three BFF turns (proof user's cookie session to verevon-gateway-rs :3185, raw SSE saved)
+    checked with node scripts/verify-sse-frames.mjs: 103 + 40 + 8 frames, 0 violations; frame types seen and checked
+    against the golden: memory_recall, reasoning_delta, verification, tool_call, tool_result (count_words), usage,
+    turn_timing. Not produced on this stack: citation, grounding, step_update, artifact, title, follow_ups (title and
+    follow-ups fail: their model is hardcoded gpt-4o-mini, new row D1-807). ZDR refusal frame not run. SPA rendering
+    not checked.
+  D1-612 (script part) PASS: scripts/verify-sandbox-isolation.sh in its privileged debian container: read-only root
+    blocks writes, --unshare-net blocks egress, the bound root accepts writes, the converter profile is writable only
+    under the bound root; background-process signal checks pass.
+  D1-018 PASS: scripts/verify-durable-layer.sh on a throwaway Postgres: every check ok incl. WS04 S4 0050 durable
+    plan grant (write, org scope, 24 h lapse, rung CHECK, reversal, re-apply twice, boot check), PASS.
+  D1-612 PASS: the two Linux-gated execution-core tests in rust:1 (privileged, bubblewrap 0.12.0, apps/Model Plane
+    mounted so mp-contracts finds proto/): code_interpreter::tests::writing_into_the_attachments_directory_fails_read_only
+    ok, code_interpreter::tests::an_attachment_is_readable_by_the_code ok (2 passed, 1451 filtered); verevon-code-*
+    directories left in /tmp afterwards: 0.
+  D1-169 RUN, FAILS -> new row D1-809 (real defect): remote-core built (tsc), vite build (AuthPage-Btjeux6E.js is a lazy
+    chunk loaded through the preload helper), vite preview :5176, playwright --project=chunk-recovery: 3 of 3 FAIL
+    (stale-build-notice never visible). Probe in headless Chromium with AuthPage-*.js answered 404: the first load
+    reloads once and sets verevon.chunk-reload.v1 as designed; on the second load the listener sets the notice
+    signal and lets the error rethrow, the lazy route rejects with no error boundary, Solid logs [REACTIVITY_HALTED]
+    and the whole tree unmounts (#root 0 children, empty body): a stale tab gets a blank page, not the notice.
+  D1-803, D1-115 PASS (live, after commit 1ab34907d): the round N Application Plane entrypoint provisioner converged
+    the four shared runtime consumers in place ("~ ... (max-deliver 5, ack-wait 30s)": conversation-core-webhook-received,
+    conversation-core-model-action-proposed, conversation-core-ai-action-executor, insight-core-metric-subscriber),
+    left the streams and the audit durables as they were ("="); then the Control audit-extra provisioner for the
+    application bus, now required, exited 0; a rerun of the Application Plane provisioner printed no "~" or "+".
+    audit-core /readyz: ready, all three buses connected, 0 pending; conversation-core and insight-core healthy.
+  D1-809, D1-169 PASS after the fix (commit aee912338): rebuilt production bundle (AuthPage-BXLPE-cR.js) on vite preview
+    :5177; headless probe with the chunk answered 404: two document loads (visit + one reload), #root keeps content,
+    body shows the notice ("En ny versjon er tilgjengelig. Last siden på nytt for å fortsette." with Last på nytt /
+    Lukk). playwright --project=chunk-recovery: 3 passed, after the spec's counter was changed to count main-frame
+    document requests (it had counted the router's same-document replace on boot as a navigation).
+  D1-229 PASS (live): model-gateway built from a clean snapshot of HEAD 1ab34907d (rollback tag
+    model-plane-model-gateway:rollback-20261028-pre-d1229), A recreated with the live env, B started on the same image
+    (MODEL_PLANE_REPLICAS=2), the four WS04 switches on both. verify-replica-run-control.sh PROOF_CASES=7 (new case 7):
+    preflight served by anthropic on A and B; a plan approved on A (200), then a Do run on A (run 01M5ZXHME8N0RVS5Z6EJQ2K17Z,
+    request 01M5ZXHMDD37ZS5E6HZJFK858B) with a five-step tool task; 8 s in, POST B /v1/invoke/{request}/cancel -> 202
+    {"cancelled":true,"via":"peer"}; A received mp.v1.runctl.req.<request>.cancel at 00:11:31.893 and logged "the client
+    stopped an agentic run; its dispatch was aborted" at 00:11:31.992; the Do stream ended 4 s after Stop with
+    connected, step_update, stopped (one stopped frame); runs.status cancelled (00:11:31.99); A's gateway_active_streams
+    back to 0; B's run_control_requests_total{op="cancel",outcome="peer"} 1. Execution Core logged the run's start and
+    one inference round (00:11:18-24) and nothing after the abort. Evidence file
+    docs/compliance/evidence/live-proof-d1-229-do-run-stop-2026-10-28.txt. Replica B removed afterwards.
+    Nit: the follow's own info line says outcome "resolved" for the stopped run (added to D1-810).
+  D1-024 PASS (live, then switched off again): inference-core recreated with INFERENCE_CORE_ANTHROPIC_ADAPTIVE_THINKING=true,
+    then model-gateway (1ab34907d) with MODEL_GATEWAY_EFFORT_LADDER=true. Two BFF turns, same question, effort quick then
+    deep, in fresh threads: inference-core effort_resolved on the answer call: quick -> requested low, applied low,
+    max_tokens 5120; deep -> requested high, applied high, max_tokens 8192 (wire AnthropicAdaptive, clamped false; the
+    tool-decision call asks high on both, by design or not: noted). response_cache_hit false on every phase of the
+    deep turn (no reuse of the quick turn's answer). /api/v1/models: claude-sonnet-5-5 effort_levels [low, medium,
+    high, xhigh, max]. Both switches restored to off (default) afterwards. Side observation for D1-808: the deep turn,
+    a fresh thread with the same question, read 2399 cached tokens; the prefix caches when it is identical.
+  D1-637 PASS on the Anthropic leg (then switched off again): model-gateway (1ab34907d) recreated with
+    CHAT_VISION_AS_PARTS_ENABLED=true; /api/v1/models attachment_policy.modes.vision_as_parts true. BFF turns as the proof
+    user, two synthetic PNGs (red "HACCP 42", blue with a yellow circle "7"): Ask on claude-sonnet-5-5 -> chunk, usage,
+    done; answer "Første bilde: «HACCP 42». Andre bilde: tallet 7."; session-core stored the user message as text only
+    (98 chars, no image bytes), run 01M5ZXQWMF7QK6CWRXNTHB5Q6Q completed with retention_class persistent. Tool follow-up
+    in the same thread: tool_call/tool_result count_words, answer. An agentic (plan-mode) turn with an image: error
+    attachment_do_unsupported. A Temporary chat (zdr:true) with an image: zdr_feature_not_supported, feature
+    attachments, "refused before any model call". Not run: the verevon-balance leg (Anthropic-only test policy), the
+    SPA with VITE_CHAT_VISION_AS_PARTS_ENABLED. Compose default NOT flipped (owner decision, see the decisions file);
+    the gateway runs with the switch unset again.
+  D1-564, D1-568 PARTIAL: as the proof user through the BFF: PUT /api/v1/memory/controls {"state":"paused"} -> 200
+    (reason user_paused, use_allowed false); POST /api/v1/memory while paused -> 409 {"code":"memory_not_enabled",
+    "details":{"reason":"user_paused"}} (the row expected 403; the typed code matches, the status is 409); nothing
+    stored (agent_memory rows with the proof text: 0); PUT {"state":"on"} -> back to state on. Not proven: the
+    user-core half: GET /api/v1/settings/ai still returns memoryEnabled (user-core on the dev stack runs the main
+    checkout's image, WS07-S5's user-core change is not deployed); migration 030 twice at boot (covered only by the
+    DB harness); org_disabled read 403.
+  D1-561, D1-567 RESOLVED by D1-789 (part 3): auth-core's principal registry was refreshed with
+    session:memory-controls:read before capability-core HEAD was deployed; capability-core's session-core calls answer
+    (GET /api/v1/memory 200).
+  D1-388 PASS, D1-391 PARTIAL: the deployed audit-core (d67c5a43, contains WS06-S5/S6) answered the BFF's compliance
+    calls 403 "service scope denied": its live AUDIT_CORE_SERVICE_CREDENTIALS (from the main checkout's compose) gave
+    verevon-gateway only audit:read:self, where the worktree compose gives audit:read:self + audit:compliance:read:self.
+    audit-core-service replayed with that one value changed (transformed from the container's own value by a script,
+    written to a 0600 temp file and deleted; no token seen; rollback container
+    audit-core-service-rollback-compliance-scope-20261028). As the proof user (owner of its org): GET
+    /api/v1/audit/compliance/events 200, manifest 200 (first_seq, head_seq, head_hash, attestation, checkpoint), keys
+    200, export-status 200, POST verify 200 (status partial, reason no_attestation: no signing key in development);
+    self-audit rows compliance_audit_read x4 and compliance_audit_verify x1 in audit_events. Not run: admin and
+    member (no such accounts on the stack). A compose recreate of audit-core from the main checkout drops the scope
+    again until the main checkout carries the worktree's compose.
+  D1-805 PARTIAL (commit 2490f358d): membership-audit-outbox.postgres.spec.ts now applies gdpr_hard_delete.sql and
+    014-027 like production; the lifecycle harness step 1 on a disposable Postgres: 57 passed, 6 failed (was 55 / 8);
+    the 6 are gdpr-outbox-erasure.postgres.spec.ts, still without a base schema (new row D1-812: the entrypoint lists
+    the deleted init_better_auth.sql, and gdpr_hard_delete.sql deletes from team_member, which drizzle 0005 drops;
+    the live auth_service database still has team_member and its deployed function does not reference it).
+  D1-807 PASS (live): model-gateway built from a clean snapshot of 8098b802b, recreated with MODEL_GATEWAY_AUX_MODEL=
+    claude-haiku-5-5 from the test env file. One BFF turn (proof user): title frame "Rengjøring av transportbånd i
+    fiskeindustrien", follow_ups frame with three suggestions, turn_timing phases title ok and follow_ups ok (both
+    were error on every turn before); the transcript (title, follow_ups, tool_call x2, tool_result x2, memory_recall,
+    usage, turn_timing) checks clean against the SSE golden (verify-sse-frames.mjs, 0 violations).
+  FINAL STATE (2026-10-28 ~00:45 UTC)
+    model-gateway: one replica on 8098b802b (built from a clean snapshot of HEAD); WS04 switches on as committed;
+      MODEL_GATEWAY_EFFORT_LADDER off; CHAT_VISION_AS_PARTS_ENABLED unset; MODEL_GATEWAY_AUX_MODEL=claude-haiku-5-5
+      and the Anthropic key from the test env file outside the repos. Rollback tag rollback-20261028-pre-d1229.
+    inference-core 9e01bbae8 with INFERENCE_CORE_ANTHROPIC_ADAPTIVE_THINKING off; the rest of the Model Plane as in part 4.
+    controlplane-prometheus: the worktree's prometheus.yml and rules (rollback container
+      controlplane-prometheus-rollback-rules-20261027). audit-core-service: the gateway credential carries
+      audit:compliance:read:self (rollback container audit-core-service-rollback-compliance-scope-20261028).
+    app-nats: VEREVON_AUDIT narrowed to verevon.audit.retired.>, VEREVON_CONTROL_OBSERVABILITY with its two audit-core
+      durables, the four shared runtime consumers at max_deliver 5 / ack_wait 30 s, the three runtime streams at
+      336 h / 1,000,000. audit-core /readyz ready on all three buses.
+    Test data left: the proof user's threads and runs (incl. the stopped Do run and its plan), the owner's thread
+      01M5ZTZQ1KK6W0TH6GFK66YM8Q (three turns), one forged audit event and 24 org-less leads events in audit-core's
+      dead letters; the WS01-S4 test lead list was deleted; the proof user's memory was paused and resumed.

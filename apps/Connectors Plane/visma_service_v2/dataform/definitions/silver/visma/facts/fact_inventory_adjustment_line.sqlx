@@ -1,0 +1,11 @@
+config {
+  type: "view",
+  schema: "visma_silver",
+  name: "fact_inventory_adjustment_line",
+  description: "Inventory adjustment lines filtered from the unified inventory movement line fact.",
+  tags: ["silver", "visma", "fact", "inventory", "adjustment"]
+}
+
+SELECT *
+FROM ${ref("visma_silver", "fact_inventory_movement_line")}
+WHERE movement_type = 'ADJUSTMENT'

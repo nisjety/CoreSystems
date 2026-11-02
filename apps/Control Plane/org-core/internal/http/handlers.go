@@ -335,8 +335,9 @@ func (s *Server) updatePlan(c *gin.Context) {
 	c.JSON(http.StatusOK, orgData)
 }
 
-// updateOrgSettings persists org-admin-owned organization settings. Today it
-// carries the interactive Zero-Data-Retention posture. Authorization is
+// updateOrgSettings persists org-admin-owned organization settings: the
+// interactive Zero-Data-Retention posture, the support AI mode and the memory
+// and learning-review policy, one per request. Authorization is
 // enforced upstream (gateway require_org_admin) and by the membership guard;
 // the persisted value is org intent, never a per-request enforcement override.
 func (s *Server) updateOrgSettings(c *gin.Context) {
@@ -344,15 +345,29 @@ func (s *Server) updateOrgSettings(c *gin.Context) {
 	var req struct {
 		ZeroDataRetention *bool   `json:"zeroDataRetention"`
 		SupportAIMode     *string `json:"supportAiMode"`
+		AgentLearning     *struct {
+			Memory         *string `json:"memory"`
+			LearningReview *string `json:"learningReview"`
+		} `json:"agentLearningPolicy"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil || (req.ZeroDataRetention == nil && req.SupportAIMode == nil) || (req.ZeroDataRetention != nil && req.SupportAIMode != nil) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "provide exactly one of zeroDataRetention (boolean) or supportAiMode"})
+	provided := 0
+	if err := c.ShouldBindJSON(&req); err == nil {
+		for _, present := range []bool{req.ZeroDataRetention != nil, req.SupportAIMode != nil, req.AgentLearning != nil} {
+			if present {
+				provided++
+			}
+		}
+	}
+	if provided != 1 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "provide exactly one of zeroDataRetention (boolean), supportAiMode or agentLearningPolicy"})
 		return
 	}
 	changedBy := c.GetHeader("x-user-id")
 	var orgData *org.Organization
 	var err error
-	if req.SupportAIMode != nil {
+	if req.AgentLearning != nil {
+		orgData, err = s.orgService.SetAgentLearningPolicy(c.Request.Context(), orgID, req.AgentLearning.Memory, req.AgentLearning.LearningReview, changedBy)
+	} else if req.SupportAIMode != nil {
 		orgData, err = s.orgService.SetSupportAIMode(c.Request.Context(), orgID, *req.SupportAIMode, changedBy)
 	} else {
 		orgData, err = s.orgService.SetInteractiveRetention(c.Request.Context(), orgID, *req.ZeroDataRetention, changedBy)
@@ -366,6 +381,8 @@ func (s *Server) updateOrgSettings(c *gin.Context) {
 				"error":   "plan_upgrade_required",
 				"message": "Zero Data Retention is available on a higher plan.",
 			})
+		case errors.Is(err, org.ErrInvalidAgentLearningPolicy):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid agentLearningPolicy: memory is allow or disabled, learningReview is disabled or proposals"})
 		default:
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update organization settings"})
 		}
@@ -1061,4 +1078,46 @@ func (s *Server) searchMembers(c *gin.Context) {
 		"query":   query,
 		"count":   len(suggestions),
 	})
+}
+
+// updateOrgWebsite records the organisation's own website.
+// PATCH /api/v1/organizations/:id/website, body: { "website_url": "https://..." }
+func (s *Server) updateOrgWebsite(c *gin.Context) {
+	orgID := c.Param("id")
+	var req struct {
+		WebsiteURL string `json:"website_url" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "website_url is required"})
+		return
+	}
+	orgData, err := s.orgService.SetWebsite(c.Request.Context(), orgID, req.WebsiteURL, c.GetHeader("x-user-id"))
+	if err != nil {
+		switch err {
+		case org.ErrInvalidWebsite:
+			c.JSON(http.StatusBadRequest, gin.H{"error": "website_url must be an http or https address with a host name"})
+		case org.ErrNotFound:
+			c.JSON(http.StatusNotFound, gin.H{"error": "organization not found"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update organization website"})
+		}
+		return
+	}
+	c.JSON(http.StatusOK, orgData)
+}
+
+// getOrgWebsite returns the organisation's own website as org-core holds it. A service that holds the
+// org:website:read scope reads it, visibility-core among them, to mark the organisation's primary site.
+// GET /api/v1/organizations/:id/website
+func (s *Server) getOrgWebsite(c *gin.Context) {
+	orgData, err := s.orgService.GetOrganization(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		if err == org.ErrNotFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "organization not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get organization website"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"website_url": orgData.WebsiteURL, "website_updated_at": orgData.WebsiteUpdatedAt})
 }

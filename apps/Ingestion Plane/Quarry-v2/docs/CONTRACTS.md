@@ -80,7 +80,7 @@ The id is a support-lookup key only. It is not unique across tenants, so it is n
 - `driver.planned`, `driver.fallback`, `transport.probed`
 - `action.started`, `action.completed`, `action.failed`
 - `preview.screenshot`, `preview.markdown`, `preview.artifact`
-- `agent.started`, `agent.delta`, `agent.completed`, `agent.failed`, `agent.expired`
+- `agent.started`, `agent.delta`, `agent.completed`, `agent.failed`, `agent.expired`, `agent.budget_exhausted`
 - `artifact.written`, `snapshot.created`, `store.record.written`
 - `lease.acquired`, `lease.released`, `profile.restored`, `profile.captured`
 - `change.detected`, `change.unchanged`
@@ -425,6 +425,63 @@ This is inspired by Firecrawl's engine waterfall but must be exposed as an inspe
 }
 ```
 
+### Implemented bounded public discovery and audit evidence (2026-10-22)
+
+The richer map example above is a design contract, not the current bounded
+implementation. The current `POST /v1/map` accepts only `url`, optional `search`,
+`limit`, and `include_subdomains`; it returns the plain object
+`{url,links:[{url,title?,score?}],count,ranked}`. The `url` is the requested URL;
+each returned link retains the URL actually discovered. Canonical apex/`www`
+redirects can therefore produce `www` links for an apex request.
+
+Both map and `POST /v1/audit/page` use static credentialless single-hop requests:
+public HTTPS only, no cookies or proxy, public-address DNS resolution pinned
+into the connection, 1 MiB decoded response limit, maximum three redirects,
+and fresh URL/security preflight on each hop. Redirects stay on the original
+origin or its exact apex/`www` pair with the same port. Sensitive paths,
+credentials, queries, encoded paths, fragments, redirect loops, nested `www`
+expansion and arbitrary subdomains are rejected. A redirect destination's own
+robots rules are fetched before its document; unavailable/forbidden/rate-limited
+robots cannot be silently treated as permission. Generic `/v1/scrape` and
+`fetch_bounded` do not gain redirect permission.
+
+`POST /v1/audit/page` requires authenticated `scrape:read` for service actors.
+It permits at most eight in-flight captures per process and rejects excess
+requests with 429 without queueing. This is a local transport capacity guard,
+not durable per-organization billing or scheduled-job quota management.
+It accepts exactly `{"url":"https://example.com/"}`. Its fixed 10 second deadline
+includes robots and redirect requests. Successful transport returns a plain
+`bounded_page_v1` object:
+
+```json
+{
+  "version": "bounded_page_v1",
+  "url": "https://example.com/",
+  "final_url": "https://www.example.com/",
+  "status": 200,
+  "fetched_at": "2026-10-22T19:00:00Z",
+  "run_id": "run_...",
+  "fingerprint": "blake3:<64 hexadecimal characters>",
+  "metadata": {"title": null, "description": null, "content_type": "text/html"},
+  "canonical": null,
+  "links": [],
+  "headings": [],
+  "partial": false,
+  "limits": {"body_bytes": 1048576, "timeout_ms": 10000, "max_links": 100}
+}
+```
+
+`metadata.title` and `description` describe the actual HTML title and standard
+description tag, not Open Graph fallbacks. Oversized metadata fails rather than
+becoming a fabricated missing-field finding. Links contain `{url,text?}` and
+headings `{level,text}`; these lists are capped at 100 and 200 respectively,
+with `partial=true` when the source exceeds a list cap. Capture requires HTML
+for successful 2xx sources. An upstream 404/500 is evidence in `status`, not a
+successful page; transport denial, size overflow and timeout remain non-200 API
+failures. No raw HTML, artifacts, browser fallback, ingest, or durable storage
+is produced by this route. Marketing Core owns interpretation, snapshots,
+comparisons, prioritized findings and the work lifecycle.
+
 ### Real-time preview event payloads
 
 Preview events are SSE-only by default and may be stored when `trace` or audit mode is enabled.
@@ -459,7 +516,7 @@ Gemma 4 local is the default model provider. OpenAI and Anthropic are additive p
 }
 ```
 
-Agent events use `agent.started`, `agent.delta`, `agent.completed`, `agent.failed`, and `agent.expired` (the run sweeper released an idle or over-age run; payload `{reason: idle|ttl|takeover_idle|max_age, idle_s, age_s}`, no URL; a non-ZDR run stays resumable); the owner timeline's `lifecycle` item for that expiry carries `initiatedBy: "system"` (a start and an owner's close carry none). Agent tool calls must go through the same action/runtime policy path as user-supplied `actions[]`.
+Agent events use `agent.started`, `agent.delta`, `agent.completed`, `agent.failed`, and `agent.expired` (the run sweeper released an idle or over-age run; payload `{reason: idle|ttl|takeover_idle|max_age, idle_s, age_s}`, no URL; a non-ZDR run stays resumable); the owner timeline's `lifecycle` item for that expiry carries `initiatedBy: "system"` (a start and an owner's close carry none). `agent.budget_exhausted` is sent once per segment of a run when budget enforcement `on` refuses a call (see "Agent run budgets" at the end). Agent tool calls must go through the same action/runtime policy path as user-supplied `actions[]`.
 
 ### Crawl denial reason schema
 
@@ -774,7 +831,7 @@ An agent-class run (a service principal, or `initiated_by: "agent"`) is bounded 
 - **`meta.budget`** on a REST step response (`POST /v1/agent/runs/{id}/step`) of an agent-class run: `{class, steps, attempts, max_steps?, max_attempts?, elapsed_s, max_runtime_s?, spent_usd, max_cost_usd?, estimated: true, cost_source, exhausted?}`. The `max_*` bounds and `exhausted` are absent for a person. `cost_source` is `flat_table` (the flat action table) or `provider_billed` (the driver reported the figure). Absent when enforcement is `off`. The WebSocket reply carries no `meta.budget` yet (not done in W2-U21).
 - **Receipts** carry `cost_source` (`flat_table` | `provider_billed`; the column `quarry_step_receipts.cost_source`, migration `0012`). A failed attempt is charged the flat cost and its receipt now carries that cost too (it used to record 0); a skipped receipt has no cost and no source. A receipt written before migration `0012` has no `cost_source`.
 - **`DELETE /v1/agent/runs/{id}`** returns `data.usage` for an agent-class run: `{class, spent_usd, steps, attempts, active_s, exhausted?}`. A person's session returns `{closed: true}` without `usage`.
-- **`agent.budget_exhausted`** (`EventType::AgentBudgetExhausted`, durable type token `agent_budget_exhausted`): emitted once per segment of a run, when `on` refuses. Payload `{dimension, limit, spent, unit, estimated, limit_source}`; a ZDR run emits it through `emit_for_zdr` (nothing persisted). It is not in the App Shell SSE allow-list (`is_user_facing_event`); its path to the run trace is a WS10 projection row, not built here. The refusal also writes a checkpoint with the exhaustion latch, so a resume refuses at once and cannot refill.
+- **`agent.budget_exhausted`** (`EventType::AgentBudgetExhausted`, durable type token `agent_budget_exhausted`): emitted once per segment of a run, when `on` refuses. Payload `{dimension, limit, spent, unit, estimated, limit_source}`; a ZDR run emits it through `emit_for_zdr` (nothing persisted). It is user-facing (X-12): the run's SSE stream (`GET /v1/agent/runs/{run_id}/events/stream`, `is_user_facing_event`) sends it under the name `agent.budget_exhausted`, once per segment however many calls are refused; the payload carries the refusal's figures only (no URL, no page content, no prompt). Its path to the run trace is a WS10 projection row, not built here. The refusal also writes a checkpoint with the exhaustion latch, so a resume refuses at once and cannot refill.
 - **Legacy request cap.** `constraints.max_steps` still refuses with `429 RATE_LIMITED` ("agent step budget exhausted") where the gate does not own the bound: when enforcement is `off` (for everyone), and for an agent run while enforcement is `shadow`. In `on` the typed `402 BUDGET_EXHAUSTED` replaces it for agent runs, and a person's session is never refused for its own step count (a UI session that sends `max_steps: 12` is no longer refused at the 13th action when enforcement is `on` or `shadow`).
 
 **Error reasons.** `BUDGET_EXHAUSTED` (402, not retryable) is unchanged from the WS6.B gate; its `details` are `{dimension, limit, spent, unit, estimated, limit_source, resumable: false}`.

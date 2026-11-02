@@ -25,6 +25,7 @@ import {
   Image as ImageIcon,
   Presentation,
 } from '@/shared/icons'
+import { Dynamic } from '@solidjs/web'
 import {
   For,
   Match,
@@ -35,6 +36,7 @@ import {
   createSignal,
   onCleanup,
 } from 'solid-js'
+import { extraArtifactRenderers } from './artifact-renderers'
 import {
   ChatMarkdown,
   DiffView,
@@ -73,6 +75,14 @@ import {
 } from './chat-types'
 import { sandboxHtmlDocument } from '@/shared/lib/sandbox-html'
 import { useI18n } from '@/shared/i18n'
+import { type ViewerSurface, viewerActivationKey, viewerFor } from '@/shared/artifacts/viewer-registry'
+
+/**
+ * Room HTML previews the reader has explicitly started, for this page session
+ * only (memory, never storage). Keyed on id + version + content hash, so consent
+ * covers exactly the markup that was shown.
+ */
+const [activatedPreviews, setActivatedPreviews] = createSignal<ReadonlySet<string>>(new Set())
 
 const KIND_ICONS: Record<ArtifactRenderKind, IconComponent> = {
   binary: FileSpreadsheet,
@@ -85,7 +95,7 @@ const KIND_ICONS: Record<ArtifactRenderKind, IconComponent> = {
   text: FileCode2,
 }
 
-export function ArtifactsPanel(props: { items: ArtifactPanelItem[] }) {
+export function ArtifactsPanel(props: { items: ArtifactPanelItem[]; surface?: ViewerSurface }) {
   const i18n = useI18n()
   const [requestedId, setRequestedId] = createSignal<string | null>(null)
 
@@ -123,7 +133,7 @@ export function ArtifactsPanel(props: { items: ArtifactPanelItem[] }) {
           </For>
         </div>
         <Show when={selected()}>
-          {(item) => <ArtifactViewer item={item()} />}
+          {(item) => <ArtifactViewer item={item()} surface={props.surface} />}
         </Show>
       </div>
     </Show>
@@ -161,8 +171,9 @@ function ArtifactListEntry(props: { item: ArtifactPanelItem; selected: boolean; 
   )
 }
 
-export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
+export function ArtifactViewer(props: { item: ArtifactPanelItem; surface?: ViewerSurface }) {
   const i18n = useI18n()
+  const surface = (): ViewerSurface => props.surface ?? 'chat'
   const [versionCursor, setVersionCursor] = createSignal<number | null>(null)
   const [copyState, setCopyState] = createSignal<'copied' | 'failed' | 'idle'>('idle')
   const [showSource, setShowSource] = createSignal(false)
@@ -205,6 +216,13 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
     return diffText(previous.content, revision().content)
   })
   const renderKind = createMemo(() => artifactRenderKind(displayed()))
+  /** A registered extra viewer, if one claims this revision. It takes the body; the header stays on the built-in kind. */
+  const extraRenderer = createMemo(() => (surface() === 'chat' ? extraArtifactRenderers.resolve(displayed()) : undefined))
+  /** The registry's verdict for this kind on this surface; `undefined` means the surface may not draw it. */
+  const viewer = createMemo(() => viewerFor(renderKind(), surface()))
+  const previewGated = createMemo(
+    () => viewer()?.requiresActivation === true && !activatedPreviews().has(viewerActivationKey(displayed())),
+  )
   const missing = createMemo(() => artifactContentMissing(displayed().content))
   const fileMeta = createMemo(() => artifactFileMeta(displayed(), renderKind(), props.item.file))
   const title = createMemo(() => artifactDisplayTitle({ ...props.item, artifact: displayed() }, renderKind(), i18n.tr))
@@ -339,8 +357,11 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
               >
                 <GitCompare size={14} />
                 {showDiff()
-                  ? 'Vis versjonen'
-                  : `Vis endringer (+${diff().stat.added} −${diff().stat.removed})`}
+                  ? i18n.tr('Vis versjonen', 'Show version')
+                  : i18n.tr(
+                    `Vis endringer (+${diff().stat.added} −${diff().stat.removed})`,
+                    `Show changes (+${diff().stat.added} −${diff().stat.removed})`,
+                  )}
               </button>
             )}
           </Show>
@@ -351,7 +372,7 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
               onClick={() => setShowSource((value) => !value)}
             >
               {showSource() ? <Eye size={14} /> : <Code2 size={14} />}
-              {showSource() ? 'Vis forhåndsvisning' : 'Vis kode'}
+              {showSource() ? i18n.tr('Vis forhåndsvisning', 'Show preview') : i18n.tr('Vis kode', 'Show code')}
             </button>
           </Show>
           <Show when={isCopyableRenderKind(renderKind()) && !missing()}>
@@ -367,9 +388,9 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
                 <Match when={copyState() === 'copied'}><Check size={14} /></Match>
                 <Match when={copyState() === 'failed'}><AlertCircle size={14} /></Match>
               </Switch>
-              <Switch fallback="Kopier">
-                <Match when={copyState() === 'copied'}>Kopiert</Match>
-                <Match when={copyState() === 'failed'}>Kunne ikke kopiere</Match>
+              <Switch fallback={i18n.tr('Kopier', 'Copy')}>
+                <Match when={copyState() === 'copied'}>{i18n.tr('Kopiert', 'Copied')}</Match>
+                <Match when={copyState() === 'failed'}>{i18n.tr('Kunne ikke kopiere', 'Could not copy')}</Match>
               </Switch>
             </button>
           </Show>
@@ -386,7 +407,7 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
               items={exportItems()}
             />
           </Show>
-          <Show when={fileMeta()}>
+          <Show when={viewer() ? fileMeta() : null}>
             {(meta) => (
               <a
                 class="verevon-chat-artifact-action verevon-chat-artifact-action--primary"
@@ -394,7 +415,7 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
                 download={meta().downloadName}
               >
                 <Download size={14} />
-                Last ned
+                {i18n.tr('Last ned', 'Download')}
               </a>
             )}
           </Show>
@@ -407,12 +428,16 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
       </Show>
 
       <div class="verevon-chat-artifact-view__body">
+        <Show when={viewer()} fallback={<ArtifactSurfaceRefusal />}>
         <Show when={!missing()} fallback={<ArtifactLoadFailure kind={artifact().kind} />}>
           <Show
             when={!(showDiff() && revisionDiff())}
             fallback={<DiffView result={revisionDiff()!} />}
           >
           <Switch fallback={<ArtifactPlainText content={displayed().content} />}>
+            <Match when={extraRenderer()?.component}>
+              {(component) => <Dynamic component={component()} artifact={displayed()} />}
+            </Match>
             <Match when={renderKind() === 'code'}>
               <ArtifactCodeView content={displayed().content} language={artifactLanguage(displayed())} />
             </Match>
@@ -426,7 +451,19 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
                 when={!showSource()}
                 fallback={<ArtifactCodeView content={displayed().content} language="html" />}
               >
-                <ArtifactHtmlPreview html={displayed().content} title={title()} />
+                <Show
+                  when={!previewGated()}
+                  fallback={(
+                    <ArtifactRunPreviewGate
+                      onRun={() => {
+                        const key = viewerActivationKey(displayed())
+                        setActivatedPreviews((current) => new Set(current).add(key))
+                      }}
+                    />
+                  )}
+                >
+                  <ArtifactHtmlPreview html={displayed().content} title={title()} />
+                </Show>
               </Show>
             </Match>
             <Match when={renderKind() === 'image'}>
@@ -461,6 +498,7 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
             </Match>
           </Switch>
           </Show>
+        </Show>
         </Show>
       </div>
     </section>
@@ -560,6 +598,7 @@ export function ArtifactFileCard(props: {
   meta: { bytes: number; downloadName: string; href: string; mime: string; mimeLabel: string }
   title: string
 }) {
+  const i18n = useI18n()
   return (
     <div class="verevon-chat-artifact-file">
       <span class="verevon-chat-artifact-file__icon"><FileSpreadsheet size={22} /></span>
@@ -578,7 +617,7 @@ export function ArtifactFileCard(props: {
           download={props.meta.downloadName}
         >
           <Download size={14} />
-          Last ned
+          {i18n.tr('Last ned', 'Download')}
         </a>
       </div>
     </div>
@@ -604,8 +643,61 @@ export function ArtifactLoadFailure(props: { kind: string }) {
       <AlertCircle size={18} />
       <div>
         <strong>{i18n.tr('Artefaktet kunne ikke lastes', 'The artifact could not be loaded')}</strong>
-        <p>Verevon meldte om et artefakt av typen «{props.kind}», men innholdet kom aldri fram. Prøv å generere det på nytt.</p>
+        <p>
+          {i18n.tr(
+            `Verevon meldte om et artefakt av typen «${props.kind}», men innholdet kom aldri fram. Prøv å generere det på nytt.`,
+            `Verevon reported an artifact of type «${props.kind}», but its content never arrived. Try generating it again.`,
+          )}
+        </p>
       </div>
+    </div>
+  )
+}
+
+/**
+ * The surface has no viewer for this kind (a room never draws PDF, image,
+ * binary or unknown kinds). Deliberately no download link and no content.
+ */
+function ArtifactSurfaceRefusal() {
+  const i18n = useI18n()
+  return (
+    <div class="verevon-chat-artifact-failure verevon-chat-artifact-failure--neutral" role="status">
+      <AlertCircle size={18} />
+      <div>
+        <strong>{i18n.tr('Forhåndsvisning er ikke tilgjengelig i rommet', 'Preview not available in the room')}</strong>
+        <p>
+          {i18n.tr(
+            'Denne typen artefakt vises ikke i rommet.',
+            'This kind of artifact is not shown in the room.',
+          )}
+        </p>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Room HTML is untrusted markup: nothing runs until the reader asks for it. The
+ * "Show code" toggle in the header stays available without running anything.
+ */
+function ArtifactRunPreviewGate(props: { onRun: () => void }) {
+  const i18n = useI18n()
+  return (
+    <div class="verevon-chat-artifact-gate">
+      <Globe size={20} />
+      <div>
+        <strong>{i18n.tr('Forhåndsvisningen er ikke startet', 'Preview not started')}</strong>
+        <p>
+          {i18n.tr(
+            'Dette er HTML skrevet av en agent. Den kjører isolert, men først når du starter den.',
+            'This is HTML written by an agent. It runs in isolation, but only once you start it.',
+          )}
+        </p>
+      </div>
+      <button type="button" class="verevon-chat-artifact-action verevon-chat-artifact-action--primary" onClick={() => props.onRun()}>
+        <Eye size={14} />
+        {i18n.tr('Kjør forhåndsvisning', 'Run preview')}
+      </button>
     </div>
   )
 }

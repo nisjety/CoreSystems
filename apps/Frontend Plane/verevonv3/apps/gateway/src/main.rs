@@ -25,6 +25,7 @@ mod audience_tokens;
 mod auth;
 mod cache;
 mod cache_admission;
+mod client_contract;
 mod config;
 mod contracts;
 mod domains;
@@ -99,12 +100,15 @@ fn build_router(state: config::AppState) -> Router {
         .merge(domains::ag_ui::router(state.clone()))
         .merge(domains::ai::router(state.clone()))
         .merge(domains::audit::router(state.clone()))
+        .merge(domains::audit_compliance::router(state.clone()))
+        .merge(domains::org_identity::router(state.clone()))
         .merge(domains::auth::router(state.clone()))
         .merge(domains::browser::router(state.clone()))
         .merge(domains::browser_evidence::router(state.clone()))
         .merge(domains::billing::router(state.clone()))
         .merge(domains::briefs::router(state.clone()))
         .merge(domains::chat::router(state.clone()))
+        .merge(domains::client_config::router())
         .merge(domains::cost::router(state.clone()))
         .merge(domains::eval::router(state.clone()))
         .merge(domains::finetune::router(state.clone()))
@@ -115,7 +119,10 @@ fn build_router(state: config::AppState) -> Router {
         .merge(domains::integrations::router(state.clone()))
         .merge(domains::knowledge::router(state.clone()))
         .merge(domains::leads::router(state.clone()))
+        .merge(domains::learning::router(state.clone()))
         .merge(domains::mail_task::router(state.clone()))
+        .merge(domains::anbud::router(state.clone()))
+        .merge(domains::marketing::router(state.clone()))
         .merge(domains::mcp::router(state.clone()))
         .merge(domains::memory::router(state.clone()))
         .merge(domains::monitoring::router(state.clone()))
@@ -130,6 +137,7 @@ fn build_router(state: config::AppState) -> Router {
         .merge(domains::remote_support::router(state.clone()))
         .merge(domains::router_policy::router(state.clone()))
         .merge(domains::run_watchers::router(state.clone()))
+        .merge(domains::scim::router(state.clone()))
         .merge(domains::search::router(state.clone()))
         .merge(domains::settings::router(state.clone()))
         .merge(domains::shares::router(state.clone()))
@@ -359,6 +367,12 @@ mod tests {
             audit_core_service_token: "audit-test-secret-at-least-32-bytes".into(),
             insight_core_url: "http://127.0.0.1:1".into(),
             leads_core_url: "http://127.0.0.1:1".into(),
+            anbud_core_url: "http://127.0.0.1:1".into(),
+            anbud_api_key: String::new(),
+            anbud_api_key_header: "X-API-Key".into(),
+            marketing_core_url: "http://127.0.0.1:1".into(),
+            marketing_core_service_key: String::new(),
+            marketing_core_organization_id: String::new(),
             shipping_core_url: "http://127.0.0.1:1".into(),
             user_core_url: "http://127.0.0.1:1".into(),
             application_convex_url: String::new(),
@@ -408,7 +422,10 @@ mod tests {
             mail_task_nats_url: String::new(),
             mail_task_nats_user: String::new(),
             mail_task_nats_password: String::new(),
+            continue_park_form: false,
+            model_entitlement_admin_enabled: false,
             mail_task_pipeline: None,
+            space_features: Default::default(),
         }
     }
 
@@ -792,6 +809,18 @@ mod tests {
             .mount(&user_core)
             .await;
 
+        let session_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/sessions/current"))
+            .and(wiremock::matchers::header("x-user-id", "removed-user"))
+            .and(wiremock::matchers::header("x-delegation-version", "v2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": { "id": "removed-user" }, "onboardingStatus": "COMPLETED"
+            })))
+            .expect(1)
+            .mount(&session_core)
+            .await;
+
         let sensitive_upstream = MockServer::start().await;
         Mock::given(wm_method("GET"))
             .and(wm_path("/internal/v1/router-policy"))
@@ -802,6 +831,7 @@ mod tests {
         let mut state = test_state(false);
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
+        state.session_core_url = session_core.uri();
         state.inference_core_url = sensitive_upstream.uri();
         let app = crate::build_router(state);
 

@@ -61,6 +61,35 @@ service SessionCore {
   // Persist a checkpoint snapshot for a run.
   rpc SaveCheckpoint(SaveCheckpointRequest) returns (SaveCheckpointResponse);
 
+  // Save the durable loop's fold for a run (build plan WS03 S4). Latest wins,
+  // compare-and-set on expected_seq. Refused for a zero-retention or waived run.
+  rpc SaveLoopCheckpoint(SaveLoopCheckpointRequest) returns (SaveLoopCheckpointResponse);
+
+  // Claim a paused or parked run's fold for one continuation. Exactly one claim wins.
+  rpc ClaimLoopCheckpoint(ClaimLoopCheckpointRequest) returns (ClaimLoopCheckpointResponse);
+
+  // Close a run's fold once its loop has finished. Idempotent for a closed row.
+  rpc CloseLoopCheckpoint(CloseLoopCheckpointRequest) returns (CloseLoopCheckpointResponse);
+
+  // Read the effect ledger's rows for named tool calls of one run (build plan WS03
+  // S7a). Digest-only: the status, class and argument digest of each action, never
+  // its arguments or output. The loop that resumes a run reads it to close a call
+  // honestly instead of running it again.
+  //
+  // Answers only while the loop checkpoint store is switched on (otherwise the same
+  // closed "loop_checkpoint_disabled" refusal the checkpoint RPCs give), and only for a
+  // run that persists: a zero-retention or waived run never keeps a fold, so it gets the
+  // durable-mutation refusal. The caller must be allowed to read the run under the same
+  // rule as GetRun, which includes refusing a run whose owner was removed from its
+  // Space. Rows written under zero retention are never returned.
+  //
+  // ABSENCE IS NOT PROOF. An action id missing from the answer is UNKNOWN. It may never
+  // have been reserved, may be reserved by a concurrent writer that has not committed
+  // yet, or may be a row this read hides. Never read absence as "the call did not run".
+  // For an effectful call, only a row with status "not_run" (or a "completed" row with
+  // its output) licenses a re-dispatch decision.
+  rpc ListToolActions(ListToolActionsRequest) returns (ListToolActionsResponse);
+
   // Replay the thread event log as a stream of Events.
   // Ordering: (ts, event_id) with event_id as deterministic tiebreaker.
   rpc ReplayThread(ReplayThreadRequest) returns (stream Event);
@@ -150,6 +179,18 @@ service SessionCore {
   // `unknown_outcome` is explicit: a lost transport response is not converted
   // into success or an immediate blind retry.
   rpc RecordScheduledStepReceipt(RecordScheduledStepReceiptRequest) returns (RecordScheduledStepReceiptResponse);
+
+  // Stamp how a run's context was assembled onto the run record
+  // (`runs.metadata.run_context`). Counts and closed tokens only; refused for
+  // zero-retention and waived credentials like every durable run mutation.
+  rpc RecordRunContext(RecordRunContextRequest) returns (RecordRunContextResponse);
+
+  // Persist the answer of a claimed scheduled step into the scheduled thread
+  // and complete its receipt in one transaction. Idempotent on (run_id,
+  // step_id). Refused for zero-retention and waived runs. Off unless
+  // SESSION_CORE_SCHEDULED_RESULT_PERSIST is `true`; off keeps the receipt-only
+  // path. `output` is content and is accepted only on this direct hop.
+  rpc RecordScheduledRunResult(RecordScheduledRunResultRequest) returns (RecordScheduledRunResultResponse);
 }
 
 // ManagedRunLifecycle owns the additive, durable terminalization protocol for
@@ -191,6 +232,92 @@ service ManagedRunLifecycle {
   // writes nothing. It is refused for a zero-retention run, whose turns have
   // no durable transcript.
   rpc CompleteDirectRunWithMessage(CompleteDirectRunWithMessageRequest) returns (CompleteDirectRunWithMessageResponse);
+}
+
+// SessionRetentionService: read-only retention receipt counts for the org
+// admin view. It is a separate service, as ManagedRunLifecycle is, so that
+// SessionCore and every mock of it stay source-compatible. The answer carries
+// counts and dates only, never run, message or goal content.
+service SessionRetentionService {
+  // Count an org's waived runs per (connection, user), with the start time of
+  // the most recent one. Refused to user credentials and to any service that
+  // lacks session:retention:read, and never answers for another org.
+  rpc CountWaivedRuns(CountWaivedRunsRequest) returns (CountWaivedRunsResponse);
+}
+
+// ThreadAutonomy: the autonomy grant a plan approval made, read back by the
+// run that is about to start. A separate service, as SessionRetentionService
+// is, so that SessionCore and every mock of it stay source-compatible. The
+// grant is WRITTEN by SessionCore.SetRunMode (with `approved_plan_id` set), in
+// the same transaction as the run update.
+service ThreadAutonomy {
+  // The live grant of one thread: the rung, the reason it was granted, the plan
+  // it was approved with and when it lapses. A thread with no grant, or one
+  // that has lapsed, answers a response whose `granted_rung` is UNSPECIFIED:
+  // "no grant" is an answer, not an error. Read-only; it spends nothing. Refused
+  // for a caller that does not own the thread, and never answers for another org.
+  rpc GetThreadGrant(GetThreadGrantRequest) returns (GetThreadGrantResponse);
+}
+
+// MessageSearch: full-text search over the durable conversation record. A
+// separate service, as ThreadAutonomy and SessionRetentionService are, so that
+// SessionCore and every mock of it stay source-compatible. Read-only.
+service MessageSearch {
+  // Search the messages of threads the caller may list, with the same owner and
+  // Space-audience rules as ListThreads. Refused with unavailable
+  // `message_search_disabled` while SESSION_CORE_MESSAGE_SEARCH_ENABLED is not
+  // `true`. A query that holds no searchable word answers an empty page.
+  rpc SearchMessages(SearchMessagesRequest) returns (SearchMessagesResponse);
+}
+
+// MessageTreeService: moves a thread's active leaf between the branches of its message
+// tree (WS17 S8). A separate service, as MessageSearch is, so that SessionCore and
+// every mock of it stay source-compatible.
+service MessageTreeService {
+  // Make a branch of the thread the active one. A target on the active path is a
+  // rewind: the leaf becomes the target and nothing is deleted. Any other target is
+  // a version switch: the leaf becomes the newest turn beneath it, so the chosen
+  // branch shows its own continuation. Owner only, with `session:write`. Refused
+  // for a Space thread, a thread that holds a waived run and a thread with a queued
+  // or running run. Refused with unavailable `message_versions_disabled` while
+  // SESSION_CORE_MESSAGE_VERSIONS_ENABLED is not `true`.
+  rpc SetActiveLeaf(SetActiveLeafRequest) returns (SetActiveLeafResponse);
+}
+
+// LearningGovernanceService: the owner's decisions on what Verevon learned from their
+// conversations (WS07 S8). A separate service, as MessageSearch is, so that
+// SessionCore and every mock of it stay source-compatible. Every RPC is the
+// owner's own: a service credential is refused, and a person never reaches
+// another person's skill proposals or ledger.
+service LearningGovernanceService {
+  // Accept or reject one learned-skill proposal. Only the person the proposal
+  // belongs to may decide, and only while it is still proposed.
+  rpc DecideSkillProposal(DecideSkillProposalRequest) returns (DecideSkillProposalResponse);
+
+  // Undo one ledger entry of a skill by restoring the snapshot taken before it.
+  // Only the latest entry of a skill can be undone, and only by its owner. A
+  // learned memory is not undone here: it is erased by DeleteMemory.
+  rpc UndoLearningEntry(UndoLearningEntryRequest) returns (UndoLearningEntryResponse);
+
+  // The owner's ledger of what was learned and changed: skill revisions and the
+  // memories the extractor wrote, newest first.
+  rpc ListLearningLedger(ListLearningLedgerRequest) returns (ListLearningLedgerResponse);
+}
+
+// MessageRevisionService: edit or delete ONE message of a Space thread (build plan WS12-S4).
+// A separate service, as MessageSearch and LearningGovernanceService are, so that SessionCore
+// and every mock of it stay source-compatible. Both RPCs are the caller's own: a service
+// credential is refused, and the caller carries a Control decision for the Space.
+service MessageRevisionService {
+  // The caller carries a Control `model.thread.revise` decision; Session Core verifies it,
+  // records an append-only revision and folds it into every read. Refused for a
+  // zero-retention credential and when SPACE_MESSAGE_REVISE_CORE is off.
+  rpc ReviseMessage(ReviseMessageRequest) returns (ReviseMessageResponse);
+
+  // Resolve what a caller may need to know about a message before asking Control
+  // to authorize a revision: its role and revision state, never its content or
+  // author. Read class: authorized like ListConversation (a Space read decision).
+  rpc ResolveMessageTarget(ResolveMessageTargetRequest) returns (ResolveMessageTargetResponse);
 }
 
 // --- CreateThread ---
@@ -273,6 +400,65 @@ message CreateThreadResponse {
 
 // --- AppendMessage ---
 
+// One mentioned subject of a human post (WS08-S2). Ids only, never text. Session Core
+// accepts mentions only on a role "user" row with post_kind "post" from a human caller.
+message MentionInput {
+  // The mentioned person's or agent's subject id (^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$).
+  string subject_id = 1;
+  // "user" or "agent".
+  string kind = 2;
+  // "typed" (the author wrote @name) or "locked" (the composer's address lock). Empty = typed.
+  string source = 3;
+  // Agents only: "expected" (a wake may start one run) or "refused". Empty for a person.
+  string wake_expectation = 4;
+  // Set only with wake_expectation "refused": respond_to_denied, mention_not_enabled,
+  // invocation_blocked or owner_only_thread.
+  string refusal_code = 5;
+  // Wake order among the agents of this post (0-based). Persons carry 0.
+  uint32 ordinal = 6;
+}
+
+// One recorded mention as a read or an append reports it. `wake_state` is derived at read:
+// refused, expected, running, awaiting_approval, completed, failed or cancelled; empty for a
+// person.
+message MentionRef {
+  string subject_id = 1;
+  string kind = 2;
+  string wake_state = 3;
+  // The refusal code when wake_state is refused.
+  string reason = 4;
+  string source = 5;
+  uint32 ordinal = 6;
+}
+
+// The Control-signed authority and the stored post a wake starts a run from (WS08-S2). The
+// decision fields are the twelve of AppendMessageRequest 5 to 16, in that order, for the
+// action "model.run.wake" (schema sha256:run-wake-v1, permission run:wake); the four wake
+// fields follow. Session Core recomputes the payload digest from these fields and the verified
+// caller, and never takes turn_origin from anywhere but the verified decision.
+message RunWakeContext {
+  string space_id = 1;
+  string space_decision_ref = 2;
+  string recipient_audience_ref = 3;
+  uint64 recipient_audience_revision = 4;
+  string recipient_audience_hash = 5;
+  string privacy_policy_ref = 6;
+  uint64 authority_revision = 7;
+  string resource_authorization_ref = 8;
+  string space_decision_token = 9;
+  string action_schema_hash = 10;
+  string payload_digest = 11;
+  string idempotency_key = 12;
+  // The caller's own stored post this run answers.
+  string trigger_message_id = 13;
+  // sha256:<hex> of that post's stored text; must equal the digest the decision bound.
+  string trigger_content_digest = 14;
+  // The bound agent to run (must be an `expected` mention on the trigger post).
+  string agent_subject_id = 15;
+  // "direct" today; Control refuses the others until their slices exist.
+  string turn_origin = 16;
+}
+
 message AppendMessageRequest {
   // Thread to append to.
   string thread_id = 1;
@@ -308,11 +494,52 @@ message AppendMessageRequest {
   // ∩ binding), and a later rename must not rewrite what the room saw. Empty
   // for user/system/tool messages and for un-personified assistant turns.
   string agent_name = 17;
+
+  // The caller's id for this message, so a repeat of the same send (a retry
+  // after a lost reply, a queued message the run never took and the client
+  // then sends as a new turn) lands as ONE transcript row. Unique within the
+  // thread: a repeat with the same role and content answers with the first
+  // row's sequence and message id and `deduplicated = true` (no second event,
+  // no second memory extraction); the same id with different content is
+  // ALREADY_EXISTS. Opaque: matches ^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$, never
+  // derived from content, and never sent for a zero-retention turn (such a
+  // credential cannot append at all). Empty = no receipt, today's behaviour.
+  string client_message_id = 18;
+
+  // What kind of row this is in the room: "" and "turn" are today's
+  // conversation turn (the owner's prompt, the agent's answer); "post" is a
+  // human message written to the room and never sent to the agent. Posts are
+  // kept out of model context, agent memory and Dreaming (see
+  // ListConversationRequest.include_human_posts). Any other value is refused.
+  string post_kind = 19;
+
+  // Mentions of a human post (WS08-S2): at most 20 people and 3 agents, no duplicates. Honoured
+  // only for role "user", post_kind "post", a human caller and SPACE_MENTION_RECORDS_CORE on;
+  // otherwise ignored. Never written for a zero-retention caller. An agent mention on a
+  // thread the caller does not own is recorded as refused/owner_only_thread.
+  repeated MentionInput mentions = 20;
+
+  // Typed room entry of a human post (WS15-S9): kind "link_previews", version 1, one to three
+  // text-only previews. Honoured only with post_kind "post"; on any other append it is refused
+  // (invalid_argument), and a failed validation refuses the append. Stored under
+  // messages.metadata.entry; never part of model context. Unset = no entry.
+  MessageEntry entry = 21;
 }
 
 message AppendMessageResponse {
   // Assigned message sequence number within the thread.
   uint64 sequence = 1;
+
+  // Durable id of the stored message: the new row's, or, when `deduplicated`,
+  // the earlier row's the caller's id already named.
+  string message_id = 2;
+
+  // True when the append found the caller's `client_message_id` already stored
+  // and wrote nothing.
+  bool deduplicated = 3;
+
+  // The mentions as stored (effective wake states after Session Core's own downgrade).
+  repeated MentionRef mentions = 4;
 }
 
 // --- StartRun ---
@@ -393,6 +620,13 @@ message StartScheduledRunRequest {
   // Canonical digest of the Control policy snapshot used for each scheduled
   // step. The policy body never enters this request or durable workflow input.
   string policy_digest = 13;
+
+  // Stored-consent contract of the schedule (WS20 S5), absent for a schedule
+  // without one. contract_digest and contract_expires_at are the values Control
+  // signed; Session Core re-checks them on the direct hop before binding.
+  string contract_json = 14;
+  string contract_digest = 15;
+  string contract_expires_at = 16;
 }
 
 message PrepareScheduledRunThreadRequest {
@@ -495,6 +729,9 @@ message StartManagedRunRequest {
   string start_key = 8;
   // The server validates this source and stores the matching canonical step.
   ManagedRunSource terminal_source = 9;
+  // Wake mode (WS08-S2): start this run from a stored human post for one addressed agent.
+  // Absent keeps every existing start unchanged. Refused for a zero-retention caller.
+  RunWakeContext wake = 10;
 }
 
 message StartManagedRunResponse {
@@ -662,6 +899,13 @@ message ReserveToolActionRequest {
   string data_category = 5;
   // Effective Zero Data Retention posture for the action.
   bool zdr = 6;
+  // Digest of the call's arguments: 64 lowercase hex characters (blake3 over the
+  // canonical JSON). Empty when the caller does not supply one. The arguments
+  // themselves are never sent or stored.
+  string args_digest = 7;
+  // What the call may change: "none", "read", "write" or "external". Empty when
+  // the caller does not classify the call.
+  string effect_class = 8;
 }
 
 // ReserveToolActionResponse reports whether a new reservation was created.
@@ -676,8 +920,13 @@ message FinalizeToolActionRequest {
   string run_id = 1;
   // Stable action identifier supplied during reservation.
   string action_id = 2;
-  // "completed" or "failed".
+  // "completed", "failed", "not_run" (closed without running) or
+  // "unknown_outcome" (reserved, then the loop went away; the effect may or may
+  // not have happened and the call is never retried).
   string outcome = 3;
+  // The provider's own receipt for a completed call. Empty when there is none;
+  // refused for any other outcome.
+  string receipt_id = 4;
 }
 
 // FinalizeToolActionResponse reports whether the reservation changed state.
@@ -840,6 +1089,20 @@ message UpsertAgentSkillRequest {
   // Provenance: "user" or "background_review". A background_review upsert
   // must never overwrite a user-authored skill (enforced server-side).
   string origin = 9;
+  // Ownership and review (WS07 S7). For origin "background_review" session-core
+  // ignores `scope`, `owner_user_id`, `review_state` and `enabled` and writes a
+  // disabled, user-scoped, "proposed" row owned by the caller's `owner_user_id`
+  // (required: a learned skill without an owner is refused). For origin "user"
+  // an empty `scope` is "org" and `review_state` is ignored (a human write is
+  // "accepted").
+  string scope = 10;
+  string owner_user_id = 11;
+  string review_state = 12;
+  // The run and thread the proposal was distilled from, and the reviewer's
+  // reason for proposing it (at most 300 characters). Provenance only.
+  string source_run_id = 13;
+  string source_thread_id = 14;
+  string proposal_reason = 15;
 }
 
 message UpsertAgentSkillResponse {
@@ -850,6 +1113,14 @@ message UpsertAgentSkillResponse {
   // True if the write was suppressed because the target is a protected
   // user-authored skill (no error — the loop simply yields to the human).
   bool skipped_protected = 3;
+  // Why nothing was written, as a closed token: "memory_state",
+  // "org_policy", "zdr", "protected", "accepted_exists", "rejected_exists",
+  // "owner_required", or "skill_policy:<rule>" when the content policy refused
+  // the text (WS26 S5). Empty when the write happened.
+  string skip_reason = 4;
+  // The row's revision number after the write, from the revision log; 0 when
+  // nothing was written.
+  int64 revision = 5;
 }
 
 // --- ListAgentSkills (G7 read path: learned skills -> gateway MatchSkills) ---
@@ -860,6 +1131,10 @@ message ListAgentSkillsRequest {
   // When true, only enabled skills are returned (the gateway match-cache wants
   // active skills only); when false, all of the org's skills are returned.
   bool enabled_only = 2;
+  // List as this user instead of as the caller. Honoured only for a service
+  // caller (a user caller is always listed as itself), so the learning review
+  // can see the existing skills of the user whose run it is reviewing.
+  string for_user_id = 3;
 }
 
 message AgentSkill {
@@ -879,6 +1154,17 @@ message AgentSkill {
   string scope = 10;
   string owner_user_id = 11;
   repeated string shared_with = 12;
+  // Review (WS07 S7): "proposed" (a learned skill awaiting its owner's
+  // decision), "accepted" or "rejected". Only an accepted skill is ever
+  // injected or matched.
+  string review_state = 13;
+  string source_run_id = 14;
+  string source_thread_id = 15;
+  string proposal_reason = 16;
+  // RFC 3339, UTC.
+  string updated_at = 17;
+  // The skill's newest revision number in the revision log.
+  int64 revision = 18;
 }
 
 message ListAgentSkillsResponse {
@@ -904,6 +1190,38 @@ message ListConversationRequest {
   string space_id = 3;
   string space_read_decision_ref = 4;
   string space_read_decision_token = 5;
+
+  // Tail-first paging. Zero keeps the unpaged read that every existing caller
+  // gets: all messages in sequence order, nothing else changes. A positive
+  // value returns the newest `limit` messages, clamped to 1..=200 and still in
+  // sequence order.
+  uint32 limit = 6;
+  // Message id of the oldest message the caller already holds. Only read when
+  // `limit` is positive: the page is the messages strictly older than it. It
+  // must name a message in this thread that the caller may read; a foreign,
+  // hidden or unknown id is refused the same way.
+  string before_message_id = 7;
+  // Also return the turns of the branches the thread's leaf is not on, each with
+  // `on_active_path = false` (WS17 S8). Off, the read is the active path only, and
+  // every prompt, learning and Dreaming reader leaves it off.
+  bool include_inactive = 8;
+
+  // Human posts (post_kind "post") are filtered out of every read unless the
+  // caller sets this. False is the default so every caller, the model-callable
+  // reattach_context included, is contained without doing anything; only the
+  // UI transcript route opts in.
+  bool include_human_posts = 9;
+
+  // With include_human_posts, keep only the newest N human posts in the returned page (0 = no
+  // cap). Used by a wake that opts in to fenced room-post context (WS08-S3).
+  uint32 post_context_cap = 10;
+
+  // Space timeline tail transcript (WS15-S6). With a positive `limit` and no
+  // `before_message_id`, also return the thread's first readable turn ahead of
+  // the newest page (unless the page already holds it) and report in
+  // `omitted_before` how many readable turns lie between the two. Only read
+  // while SPACE_TIMELINE_CORE is on; otherwise the read is the plain page.
+  bool include_first = 11;
 }
 
 // One conversation turn. Named SessionMessage (not ThreadMessage, which the
@@ -935,11 +1253,150 @@ message SessionMessage {
   // agent_name) and on rows written before authorship was recorded. A reader
   // must render an empty value as an unnamed author, never as itself.
   string author_subject_id = 6;
+
+  // The message tree (WS17 S8). Set only when the thread is versioned or the read
+  // asked for inactive turns, so every other read is unchanged. `parent_message_id`
+  // is empty for the first turn of a thread. `sibling_ordinal` is this turn's
+  // 1-based place among the turns that share its parent, and `sibling_count` is how
+  // many share it.
+  string parent_message_id = 7;
+  // This turn's 1-based place among the turns that share its parent.
+  uint32 sibling_ordinal = 8;
+  // How many turns share its parent, this one included.
+  uint32 sibling_count = 9;
+  // True when the turn is on the active path: the chain from the first turn to the
+  // thread's active leaf. Only inactive turns are read with `include_inactive`.
+  bool on_active_path = 10;
+  // "turn" or "post" (see AppendMessageRequest.post_kind). Rows written before
+  // the column existed read as "turn".
+  string post_kind = 11;
+  // When this turn was stored (messages.created_at). A room shows a time beside
+  // each message and this is the only source for it; absent only when a caller
+  // built the message without reading it from the store.
+  google.protobuf.Timestamp created_at = 12;
+  // The mentions recorded on this post (WS08-S2), with the wake state derived from the newest
+  // run per (post, agent). Empty on turns and on posts without mentions.
+  repeated MentionRef mentions = 13;
+  // Typed room entry of a human post (WS15-S6 declares it, WS15-S9 validates and fills it). Unset
+  // on every turn and on a post without one; a reader renders an unset or unknown kind neutrally.
+  MessageEntry entry = 14;
+
+  // The latest revision applied to this message (WS12-S4): "" (never revised),
+  // "edited" or "deleted". A deleted message arrives with empty `content` and no
+  // `metadata`; an edited one arrives with its effective (edited) content.
+  string revision_state = 15;
+  // When the latest applied revision was made; absent when never revised.
+  google.protobuf.Timestamp revised_at = 16;
+  // Who made the latest applied revision (the author, the thread owner for an
+  // agent answer, or a moderator).
+  string revised_by_subject_id = 17;
+  // 1-based number of the latest applied revision; 0 when never revised.
+  uint32 revision_no = 18;
+  // Set only on a deleted user message: an agent answer to it already exists, and
+  // that answer is not retracted by the deletion.
+  bool agent_followed_up = 19;
 }
 
 message ListConversationResponse {
   // Messages in conversation order (by sequence).
   repeated SessionMessage messages = 1;
+  // True when messages older than this page exist. Always false for an
+  // unpaged read.
+  bool has_more = 2;
+  // Readable turns between the first turn (ListConversationRequest.include_first) and the
+  // returned page; 0 when the request did not ask for the first turn or nothing is omitted
+  // (WS15-S6).
+  uint32 omitted_before = 3;
+}
+
+// A typed room entry carried by a human post (WS15). `kind` is a closed word; a reader that
+// does not know a kind shows `{kind, version}` neutrally. Today's only kind is "link_previews".
+message MessageEntry {
+  string kind = 1;
+  uint32 version = 2;
+  repeated LinkPreview link_previews = 3;
+}
+
+// One captured link preview, text only (no image), snapshotted when the post was sent.
+message LinkPreview {
+  string url = 1;
+  string final_url = 2;
+  string host = 3;
+  string title = 4;
+  string description = 5;
+  string site_name = 6;
+  google.protobuf.Timestamp fetched_at = 7;
+}
+
+// --- ReviseMessage / ResolveMessageTarget (WS12-S4) ---
+
+message ReviseMessageRequest {
+  // Required. The owning org; must equal the caller's org and the thread's org.
+  string org_id = 1;
+  // Required. The thread holding the message; it must belong to `space_id`.
+  string thread_id = 2;
+  // Required. The message to revise.
+  string message_id = 3;
+  // Required. "edit" or "delete".
+  string action = 4;
+  // The new text of an edit (1 to 32768 bytes). Must be empty for a delete.
+  string content = 5;
+  // Optional closed set, honoured only for a moderator delete: policy_violation,
+  // spam, harassment, privacy or other. Ignored (stored empty) for any other class.
+  string moderation_reason = 6;
+
+  // The complete Control `model.thread.revise` decision envelope, the same fields
+  // as AppendMessageRequest 5 to 16. `action_schema_hash` is
+  // "sha256:thread-revise-v1" and `payload_digest` binds the org, caller, thread,
+  // message, action, new-content digest and idempotency key. A v1/v2 append
+  // decision is refused. The token is verified and never persisted.
+  string space_id = 7;
+  string space_decision_ref = 8;
+  string recipient_audience_ref = 9;
+  uint64 recipient_audience_revision = 10;
+  string recipient_audience_hash = 11;
+  string privacy_policy_ref = 12;
+  uint64 authority_revision = 13;
+  string resource_authorization_ref = 14;
+  string space_decision_token = 15;
+  string action_schema_hash = 16;
+  string payload_digest = 17;
+  string idempotency_key = 18;
+}
+
+message ReviseMessageResponse {
+  // The message that was revised.
+  string message_id = 1;
+  // 1-based number of the revision that was recorded (or replayed).
+  uint32 revision_no = 2;
+  // "edited" or "deleted".
+  string revision_state = 3;
+  google.protobuf.Timestamp revised_at = 4;
+  // True when the idempotency key had already recorded this exact revision.
+  bool deduplicated = 5;
+  // "author", "agent_owner" or "moderator": the class the caller was revised under.
+  string actor_class = 6;
+}
+
+message ResolveMessageTargetRequest {
+  // Required. The owning org.
+  string org_id = 1;
+  // Required. The thread holding the message.
+  string thread_id = 2;
+  // Required. The message to resolve.
+  string message_id = 3;
+  // Required Space read decision (same envelope as ListConversationRequest 3 to 5):
+  // an absent decision is refused, there is no owner-bound fallback.
+  string space_id = 4;
+  string space_read_decision_ref = 5;
+  string space_read_decision_token = 6;
+}
+
+message ResolveMessageTargetResponse {
+  // "user" | "assistant" | "system" | "tool".
+  string role = 1;
+  // "" (never revised), "edited" or "deleted".
+  string revision_state = 2;
 }
 
 // --- ListThreads (durable cross-device chat history) ---
@@ -971,6 +1428,33 @@ message ListThreadsRequest {
   // in that Space are visible.
   string space_read_decision_ref = 6;
   string space_read_decision_token = 7;
+
+  // Keyset cursor from the previous page's ListThreadsResponse.next_cursor.
+  // Empty starts at the first page. Opaque to callers; a malformed cursor is
+  // invalid_argument.
+  string cursor = 8;
+  // Optional by-id read: returns at most this thread, and only when the caller
+  // could list it. Empty means no id filter.
+  string thread_id = 9;
+  // Which archive state to list. Unspecified lists the active threads, the
+  // listing as it was before archiving existed.
+  ArchiveFilter archived = 10;
+  // Optional. When true, only the owner's starred threads are listed. The filter
+  // stays inside the owner-bound query and pages on the same cursor as the
+  // ordinary listing, so a starred page never skips a starred thread beyond the
+  // first page.
+  bool starred_only = 11;
+}
+
+// Which archive state a ListThreads call returns. Values are prefixed because
+// proto enum values share the package scope with sandboxes.proto's ACTIVE.
+enum ArchiveFilter {
+  // Active threads only. The zero value, so an older caller lists as before.
+  ARCHIVE_FILTER_UNSPECIFIED = 0;
+  // Archived threads only.
+  ARCHIVE_FILTER_ARCHIVED = 1;
+  // Active and archived threads together.
+  ARCHIVE_FILTER_ALL = 2;
 }
 
 message ThreadSummary {
@@ -1013,10 +1497,45 @@ message ThreadSummary {
   // no "caller said nothing" state to distinguish here the way the
   // read/write RPCs above must.
   bool persona_enabled = 14;
+
+  // Set when the owner archived the thread; absent for an active thread.
+  google.protobuf.Timestamp archived_at = 15;
+
+  // Whether the owner starred the thread. Presentation state, like `pinned`.
+  bool starred = 20;
+
+  // Whether the thread has an assistant message later than the owner's last read
+  // of it. This is the one unread definition (build plan DEC-11); WS16 consumes
+  // it and must not derive a second one.
+  bool unread = 21;
+
+  // The owner's last read of the thread. Mark-read sets it to now; mark-unread
+  // moves it to one microsecond before the newest assistant message.
+  google.protobuf.Timestamp last_read_at = 22;
+  // Human replies in the thread: user rows after the first, counted under the
+  // same audience ceiling as the rest of the read so a count never reveals a
+  // row the reader could not open. Presentation only.
+  uint32 reply_count = 23;
+  // Author subject of the latest human row the reader may see; empty when
+  // there is none. Presentation only, never a grant.
+  string last_author_subject_id = 24;
+
+  // Thread activity summary (WS15-S5 columns, read by ListSpaceTimeline, WS15-S6). Ids, counts and
+  // a role word only; set by ListSpaceTimeline and left at the defaults by ListThreads.
+  // Sequence of the thread's newest message: the timeline's keyset position.
+  uint64 last_message_seq = 25;
+  // Up to five most recent human authors, newest first. Presentation only, never a grant.
+  repeated string recent_author_subject_ids = 26;
+  // Role of the newest message ("user", "assistant", ...).
+  string last_role = 27;
+  // Messages with role user or assistant in the thread.
+  uint32 turn_count = 28;
 }
 
 message ListThreadsResponse {
   repeated ThreadSummary threads = 1;
+  // Keyset cursor for the next page; empty when this page is the last.
+  string next_cursor = 2;
 }
 
 // User-facing presentation state for a thread, written only by Session Core.
@@ -1042,6 +1561,27 @@ message UpdateThreadPresentationRequest {
   // column, only the persona TEXT (a different, unconditional layer) fires
   // on a ZDR turn by default.
   optional bool persona_enabled = 6;
+  // Optional star state. Omission leaves it unchanged, the same tri-state
+  // contract as `pinned` above. Starring writes no conversation text, so a ZDR
+  // caller may set it.
+  optional bool starred = 7;
+  // Optional unread state. false marks the thread read now; true marks it unread
+  // by moving the read marker to one microsecond before the newest assistant
+  // message, and changes nothing when the thread has no assistant message.
+  // Omission leaves it unchanged. A ZDR caller may set it for the same reason as
+  // `starred`.
+  optional bool unread = 8;
+  // Optional archive state. Only `false` is honoured here: it restores an
+  // archived thread to ordinary history. Archiving goes through ArchiveThread,
+  // which writes the THREAD_ARCHIVED evidence event. Omission leaves it
+  // unchanged, the same tri-state contract as `pinned` above.
+  optional bool archived = 9;
+  // Per-thread memory mode (build plan WS07 S6): "inherit" (the thread follows the
+  // user's memory state) or "off" (this thread neither recalls nor learns). Any
+  // other value is rejected. Omission leaves it unchanged, the same tri-state
+  // contract as `pinned` above. Rejected for a ZDR caller: memory is already off
+  // for it and the column is not written under that posture.
+  optional string memory_mode = 10;
 }
 
 // Receipt for a durable presentation update.
@@ -1157,6 +1697,26 @@ message SetRunModeRequest {
   // Required whenever `granted_rung` is set. An approval with no reason, or a
   // reason granting nothing, is a malformed ask and is refused.
   string justification = 5;
+
+  // The plan-gate plan this grant was approved together with, or empty. Whenever
+  // a grant is stated (`granted_rung` set), Session Core also records it on the
+  // run's THREAD (rung, justification, this plan id if any, an expiry), in the
+  // same transaction as the run update, so a run started by another gateway
+  // replica reads it back through `ThreadAutonomy.GetThreadGrant`. A plan id
+  // with no grant is refused: a plan alone authorizes nothing. A grant is a
+  // durable record, so a call that states one is refused for zero-retention
+  // credentials (the whole call is, by the session:write gate) and for waived
+  // credentials (FAILED_PRECONDITION, durable_mutation_forbidden, before any
+  // lookup or write). A waived credential's mode change that states no grant is
+  // not refused by this rule.
+  //
+  // The thread's copy of the grant needs the thread grant columns (migration
+  // 0050). Session Core checks that they exist ONCE, when it starts: with them
+  // absent (0050 reverted) a stated grant is skipped with a warning, the run
+  // update still proceeds, and GetThreadGrant answers "no grant". So the
+  // revert is: turn MODEL_GATEWAY_DURABLE_PLAN_GRANT off on every gateway
+  // replica, drop the columns, and RESTART Session Core.
+  string approved_plan_id = 6;
 }
 
 message SetRunModeResponse {
@@ -1204,4 +1764,438 @@ message RecordScheduledStepReceiptResponse {
   string receipt_id = 1;
   string status = 2;
   bool recorded = 3;
+}
+
+// RecordScheduledRunResultRequest completes a claimed scheduled step with its
+// result. Only `output` is content; every other field is an identifier, a
+// closed token or a count. The counts after `withheld_effects` are carried for
+// the scheduled Do lane and are not persisted by the receipt-only path.
+message RecordScheduledRunResultRequest {
+  string run_id = 1;
+  string step_id = 2;
+  string org_id = 3;
+  string idempotency_key = 4;
+  string receipt_id = 5;
+  string status = 6;
+  string output = 7;
+  string error_code = 8;
+  bool unknown_outcome = 9;
+  uint32 rounds_executed = 10;
+  uint32 withheld_effects = 11;
+  uint32 tool_calls = 12;
+  uint32 input_tokens = 13;
+  uint32 output_tokens = 14;
+}
+
+// message_id is empty when no answer was appended (a failed or unknown step,
+// or an empty answer). A replay returns the message the first call appended.
+message RecordScheduledRunResultResponse {
+  string receipt_id = 1;
+  string status = 2;
+  string message_id = 3;
+}
+
+// --- SessionRetentionService.CountWaivedRuns (Z-21a) ---
+
+// The org whose waived-run counts are wanted.
+message CountWaivedRunsRequest {
+  // Required. The org whose waived runs are counted. It must be the caller's
+  // own org: the count never crosses an org boundary.
+  string org_id = 1;
+}
+
+// Waived-run counts of one org, one row per (connection, user).
+message CountWaivedRunsResponse {
+  // One row per (connection, user) with at least one waived run in the org.
+  // Empty when the org has none.
+  repeated WaivedRunCount counts = 1;
+}
+
+// One (connection, user) group of waived runs and when it was last used.
+message WaivedRunCount {
+  // The connection the waived runs were bound to, from each run's receipt.
+  string connection_id = 1;
+
+  // The verified session user who ran them.
+  string user_id = 2;
+
+  // How many of this user's runs on this connection carry the waived receipt.
+  int64 run_count = 3;
+
+  // When the most recent of those runs started.
+  google.protobuf.Timestamp last_used_at = 4;
+}
+
+// --- ThreadAutonomy.GetThreadGrant (build plan WS04 S4) ---
+
+message GetThreadGrantRequest {
+  string thread_id = 1;
+  // Server-authoritative org scope, forwarded from the gateway's authenticated
+  // claims; it must be the caller's own org.
+  string org_id = 2;
+}
+
+message GetThreadGrantResponse {
+  // The rung the thread's approved plan granted. UNSPECIFIED when the thread
+  // holds no live grant (none made, or it has lapsed).
+  AutonomyRung granted_rung = 1;
+  // The reason the approval stated; empty when there is no live grant.
+  string justification = 2;
+  // The plan-gate plan the grant was approved with; empty when the approval
+  // had none. It is not consumed by this read: the plan's own state is the
+  // single-use guard (APPROVED -> EXECUTING is a compare-and-set).
+  string approved_plan_id = 3;
+  // When the grant lapses; unset when there is no live grant.
+  google.protobuf.Timestamp expires_at = 4;
+}
+
+// --- RecordRunContext (build plan WS02 S4) ---
+
+// Stamps the assembly status of a run's context onto the run record.
+message RecordRunContextRequest {
+  string run_id = 1;
+  // Server-authoritative org scope, forwarded from the gateway's authenticated claims.
+  string org_id = 2;
+  RunContextStatus status = 3;
+}
+
+// Empty acknowledgement of RecordRunContext.
+message RecordRunContextResponse {}
+
+// --- Durable loop fold (build plan WS03 S4) ---
+
+// Save the fold of a run's loop. The fold is encrypted before it is stored.
+message SaveLoopCheckpointRequest {
+  // Run the fold belongs to.
+  string run_id = 1;
+
+  // The seq the writer last saw: 0 for the first save. A different value is refused.
+  uint64 expected_seq = 2;
+
+  // Why the fold was written: "round", "pre_effect", "pause" or "park".
+  string kind = 3;
+
+  // The fold, as LoopFoldV1 JSON bytes. Its run_id must match run_id.
+  bytes fold = 4;
+
+  // Digest of the authority the fold was written under.
+  string authority_digest = 5;
+
+  // The approval (pause) or park reference the fold resumes from. Set for pause and park.
+  string pause_ref = 6;
+
+  // Why the run parked, for a park. Set for park only.
+  string park_reason = 7;
+
+  // When a park may be resumed, for a park. Set for park only.
+  google.protobuf.Timestamp park_until = 8;
+}
+
+// The seq the fold was stored under.
+message SaveLoopCheckpointResponse {
+  // Seq of the stored fold; the next save must expect this value.
+  uint64 seq = 1;
+
+  // True only when a park-aware store durably accepted a kind "park" save under
+  // its park rules (park recovery on). False for every other save, and for a
+  // store that predates the field (an absent field reads as false): the caller
+  // must then treat its park as not taken and take the committed outcome.
+  bool park_accepted = 2;
+}
+
+// Claim a paused or parked run's fold for one continuation.
+message ClaimLoopCheckpointRequest {
+  // Run whose fold to claim.
+  string run_id = 1;
+
+  // The pause or park reference the fold must be waiting on. An EMPTY value
+  // names the run's current parked fold (kind "park") once it is due, and never
+  // a pause fold. A park-aware store refuses it with failed_precondition
+  // "park_not_due" before park_until, and with aborted "loop_checkpoint_claim_held"
+  // while another claim's lease is live; a store without park recovery answers
+  // an empty reference as not claimable.
+  string pause_ref = 2;
+
+  // Caller-minted token. Only its hash is stored, so the claim cannot be replayed by a reader of the table.
+  string claim_token = 3;
+}
+
+// The claimed fold, ready for the continuation to resume from.
+message ClaimLoopCheckpointResponse {
+  // Seq of the claimed fold.
+  uint64 seq = 1;
+
+  // The fold, as LoopFoldV1 JSON bytes.
+  bytes fold = 2;
+
+  // Segment that wrote the fold.
+  uint32 segment_no = 3;
+
+  // Digest of the authority the fold was written under.
+  string authority_digest = 4;
+
+  // Kind of the stored fold: "pause" or "park" for a claimable row.
+  string kind = 5;
+}
+
+// Close a run's fold once its loop has finished.
+message CloseLoopCheckpointRequest {
+  // Run whose fold to close.
+  string run_id = 1;
+
+  // The seq the closer last saw.
+  uint64 seq = 2;
+
+  // Why the loop closed, for the record.
+  string reason = 3;
+}
+
+// Empty acknowledgement of CloseLoopCheckpoint.
+message CloseLoopCheckpointResponse {}
+
+// --- Effect ledger read (build plan WS03 S7a) ---
+
+// Read the ledger rows of the named tool calls of one run.
+message ListToolActionsRequest {
+  // Run whose ledger to read. The caller must be allowed to read the run.
+  string run_id = 1;
+
+  // The ledger's action ids to read: at most 64, each a well-formed action id.
+  // An id the run has no row for (or whose row the read hides) is absent from the
+  // answer. Absence is NOT evidence that the call never ran: treat it as unknown.
+  repeated string action_ids = 2;
+}
+
+// One ledger row, digest-only. No argument, output or provider receipt is carried.
+message ToolActionState {
+  // The ledger's action id for the call.
+  string action_id = 1;
+
+  // Canonical tool name the call was reserved under.
+  string tool = 2;
+
+  // "reserved", "completed", "failed", "not_run" or "unknown_outcome".
+  string status = 3;
+
+  // What the call may change: "none", "read", "write" or "external". Empty when the
+  // writer did not classify the call.
+  string effect_class = 4;
+
+  // Digest of the call's arguments: 64 lowercase hex characters. Empty when none was recorded.
+  string args_digest = 5;
+
+  // Who closed the row: "executor" or "sweep". Empty while the row is still open.
+  string closed_by = 6;
+}
+
+// The rows found, in reservation order (ties by action id). A run that keeps no ledger
+// rows answers an empty list. An asked action id with no row here is UNKNOWN, never
+// "not run": it may be unreserved, uncommitted or hidden, and the read cannot say which.
+message ListToolActionsResponse {
+  // One entry per ledger row found for the asked ids, in reservation order.
+  repeated ToolActionState actions = 1;
+}
+
+// --- SearchMessages (conversation search) ---
+
+// Which caller a search serves. UI is the person at the keyboard and lists every
+// thread they own. RECALL feeds the read-only recall tool, which runs on a prompt the
+// model writes and so reads only the caller's own unscoped threads, never a thread
+// that holds a zero-retention or waived run.
+enum SearchPurpose {
+  // The person at the keyboard. The zero value, so a caller that sets nothing searches as UI.
+  SEARCH_PURPOSE_UI = 0;
+  // The read-only recall tool. Excludes zero-retention and waived threads.
+  SEARCH_PURPOSE_RECALL = 1;
+}
+
+// The parameters of one SearchMessages page.
+message SearchMessagesRequest {
+  // Required. Only this org's messages are searched.
+  string org_id = 1;
+  // Required. The owner, or the caller's own identity for a Space read.
+  string user_id = 2;
+  // The words the person typed. Non-alphanumeric characters split words; a word is
+  // matched as a prefix. Empty answers an empty page.
+  string query = 3;
+  // Optional. 0 means server default; clamped to a maximum.
+  uint32 limit = 4;
+  // Keyset cursor from the previous page's SearchMessagesResponse.next_cursor.
+  // Opaque; a malformed cursor is invalid_argument.
+  string cursor = 5;
+  // Optional canonical Space filter, with the same decision contract as
+  // ListThreadsRequest. Empty searches the owner's unscoped threads only.
+  string space_id = 6;
+  // Control-issued Space read decision and its token, as ListThreadsRequest carries them.
+  string space_read_decision_ref = 7;
+  // The token that proves the decision, carried in the request body only.
+  string space_read_decision_token = 8;
+  // Optional origin filter (see ListThreadsRequest.origin). The chat page passes "chat".
+  string origin = 9;
+  // Optional. Only hits in this thread, one per message and not one per thread.
+  string thread_id = 10;
+  // Optional. Hits in every other thread are left out; the current thread of a recall.
+  string exclude_thread_id = 11;
+  // Which caller this search serves. Set by the caller, never by the browser.
+  SearchPurpose purpose = 12;
+  // Which archive state to search. Unspecified searches the active threads.
+  ArchiveFilter archived = 13;
+}
+
+// One matching message, with the thread it belongs to.
+message SearchHit {
+  // The thread the message belongs to.
+  string thread_id = 1;
+  // The matching message.
+  string message_id = 2;
+  // "user" or "assistant".
+  string role = 3;
+  // The matching text, with each matched word wrapped in U+E000 and U+E001. The
+  // markers are the only control characters a snippet carries; a client renders
+  // the highlight from them and never parses the text as markup.
+  string snippet = 4;
+  // When the matching message was written.
+  google.protobuf.Timestamp created_at = 5;
+  // The thread's title, as ListThreads shows it.
+  string thread_title = 6;
+  // The Space the thread is in, empty for an owner's own thread.
+  string space_id = 7;
+  // Whether the thread is archived.
+  bool archived = 8;
+}
+
+// One page of SearchMessages hits.
+message SearchMessagesResponse {
+  // Newest first. At most one hit per thread unless the request names a thread.
+  repeated SearchHit hits = 1;
+  // Empty when there is no further page.
+  string next_cursor = 2;
+}
+
+// --- LearningGovernance (WS07 S8) ---
+
+// The owner's decision on a proposal. Values are prefixed because proto enum
+// values share the package scope.
+enum SkillDecision {
+  SKILL_DECISION_UNSPECIFIED = 0;
+  SKILL_DECISION_ACCEPT = 1;
+  SKILL_DECISION_REJECT = 2;
+}
+
+// The owner's decision on one learned-skill proposal.
+message DecideSkillProposalRequest {
+  // Tenant. Must equal the verified caller's organization.
+  string org_id = 1;
+  // The proposal, by id.
+  string skill_id = 2;
+  SkillDecision decision = 3;
+}
+
+// The skill as the decision left it.
+message DecideSkillProposalResponse {
+  // The skill's review state after the call: "accepted" or "rejected".
+  string review_state = 1;
+  // Whether the skill is injected now. An accepted skill is; a rejected one is not.
+  bool enabled = 2;
+  // The skill's revision after the decision.
+  int64 revision = 3;
+}
+
+// The ledger entry to undo.
+message UndoLearningEntryRequest {
+  // Tenant. Must equal the verified caller's organization.
+  string org_id = 1;
+  // The ledger entry to undo (`LearningLedgerEntry.entry_id`).
+  string entry_id = 2;
+}
+
+// What the undo did to the skill.
+message UndoLearningEntryResponse {
+  // What the undo did to the skill: "restored" (its before-snapshot is back) or
+  // "deleted" (the entry had created the skill).
+  string action = 1;
+  string skill_id = 2;
+  // The skill's revision after the undo.
+  int64 revision = 3;
+}
+
+// One page of the owner's ledger.
+message ListLearningLedgerRequest {
+  // Tenant. Must equal the verified caller's organization.
+  string org_id = 1;
+  // Whose ledger. Must equal the verified caller.
+  string user_id = 2;
+  // Keyset cursor from the previous page's `next_cursor`. Opaque; a malformed
+  // cursor is invalid_argument.
+  string cursor = 3;
+  // Optional. 0 means server default; clamped to a maximum.
+  uint32 limit = 4;
+  // Optional filter: "skill", "memory". Empty lists both.
+  repeated string kinds = 5;
+}
+
+// One thing that was learned or changed, with who did it and the snapshots around it.
+message LearningLedgerEntry {
+  // A skill revision id, or an agent_memory id for a memory.
+  string entry_id = 1;
+  // "skill" or "memory".
+  string kind = 2;
+  // Skill: created, proposed, updated, accepted, rejected, enabled, disabled,
+  // edited, deleted, restored or promoted. Memory: learned.
+  string action = 3;
+  string skill_id = 4;
+  string skill_name = 5;
+  // The skill's revision number; 0 for a memory.
+  int64 revision = 6;
+  // Who made the change: user, service, system or unattributed.
+  string actor_kind = 7;
+  string actor_id = 8;
+  string run_id = 9;
+  string thread_id = 10;
+  string reason = 11;
+  // The skill snapshots before and after the change, as JSON; empty on the side
+  // that does not exist. For a memory, `after_json` is {"content": ...}.
+  string before_json = 12;
+  string after_json = 13;
+  // Whether the entry has been undone by a later entry.
+  bool undone = 14;
+  // Whether UndoLearningEntry would be accepted now.
+  bool undoable = 15;
+  google.protobuf.Timestamp created_at = 16;
+}
+
+// One page of the owner's ledger.
+message ListLearningLedgerResponse {
+  // Newest first.
+  repeated LearningLedgerEntry entries = 1;
+  // Empty when there is no further page.
+  string next_cursor = 2;
+  // Why the memory entries were left out, as MemoryControls.reason spells it;
+  // empty when they were not.
+  string memory_skip_reason = 3;
+}
+
+// --- MessageTreeService (WS17 S8) ---
+
+// A move of a thread's active leaf: the turn the caller picked, and the leaf it last saw.
+message SetActiveLeafRequest {
+  // Required. The owning org.
+  string org_id = 1;
+  // Required. The thread whose active branch moves.
+  string thread_id = 2;
+  // Required. The turn the caller selected: on the active path it is a rewind,
+  // anywhere else a version switch (see MessageTreeService.SetActiveLeaf).
+  string target_message_id = 3;
+  // The active leaf the caller last saw. The move lands only while it is still the
+  // leaf, and is otherwise refused with aborted `active_leaf_stale`. Empty names a
+  // thread with no turns.
+  string expected_leaf_message_id = 4;
+}
+
+// Where the active leaf landed, and the active path up to it.
+message SetActiveLeafResponse {
+  // The active leaf after the move: the target, or the newest turn beneath it.
+  string active_leaf_message_id = 1;
+  // The turns of the active path, oldest first.
+  repeated string active_path = 2;
 }

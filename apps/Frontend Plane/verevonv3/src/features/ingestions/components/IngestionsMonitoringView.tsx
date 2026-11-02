@@ -71,7 +71,7 @@ export function IngestionsMonitoringView(props: {
     () => listNotifications().catch(() => []),
   )
   const changeNotes = createMemo(() =>
-    ((notifications() ?? []) as AppNotification[]).filter((note) => note.type === CHANGE_NOTIFICATION),
+    ((notifications() ?? []) as AppNotification[]).filter((note) => note.event_type === CHANGE_NOTIFICATION),
   )
 
   async function check() {
@@ -312,7 +312,7 @@ export function IngestionsMonitoringView(props: {
                 <article class={cn('ingestions-list-card', !note.read && 'ingestions-list-card--unread')}>
                   <div class="ingestions-title-row ingestions-title-row--spread">
                     <h3 class="ingestions-truncate">{note.title}</h3>
-                    <span class="ingestions-muted-cell">{relativeTime(note.createdAt, i18n)}</span>
+                    <span class="ingestions-muted-cell">{relativeTime(note.submitted_at, i18n)}</span>
                   </div>
                   <Show when={note.body}>{(body) => <p>{body()}</p>}</Show>
                 </article>

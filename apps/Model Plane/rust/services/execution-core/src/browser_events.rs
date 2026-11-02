@@ -12,6 +12,7 @@
 //! Everything here is best-effort: a failure to publish never surfaces to the
 //! loop (the trait methods return `()` and errors are logged, not propagated).
 
+use mp_contracts::approval_cause::{self, CauseCode};
 use mp_contracts::model_plane::v1::{
     self as pb, orchestration_core_service_client::OrchestrationCoreServiceClient,
     orchestration_event,
@@ -25,6 +26,9 @@ use crate::browser_agent::{
     BrowserEventSink, BrowserObservation, PlanConfig, RiskyActionDetail,
 };
 use crate::state::{RunStatus, StateStore};
+
+/// The tool whose actions the in-loop gate holds, named on the approval's cause.
+const BROWSER_AGENT_TOOL: &str = "browser_agent";
 
 /// Publishes browser-agent events to session-core's orchestration broadcast.
 ///
@@ -224,6 +228,27 @@ impl BrowserEventSink for OrchestrationEventSink {
         self.publish(&config.run_id, event).await;
     }
 
+    /// The run-level gate's decision, on the same event the in-loop gates use.
+    /// `start_run` is the synthetic action slug for a run-level browser gate, and
+    /// `approval_id` stays empty because no durable Approval row exists: the
+    /// user's run grant was the approval.
+    async fn run_start_authorized(&self, run_id: &str, plan_id: &str, decided_by: &str) {
+        if run_id.is_empty() {
+            return;
+        }
+        let event = orchestration_event::Event::BrowserActionDecided(
+            orchestration_event::BrowserActionDecided {
+                run_id: run_id.to_owned(),
+                plan_id: plan_id.to_owned(),
+                action_id: "start_run".to_owned(),
+                approval_id: String::new(),
+                decision: "granted".to_owned(),
+                decided_by: decided_by.to_owned(),
+            },
+        );
+        self.publish(run_id, event).await;
+    }
+
     /// Phase 5 in-loop HITL gate: create a durable approval via the SAME
     /// general `CreateApproval` RPC the outer whole-tool `ask` gate uses
     /// (`kind = DESTRUCTIVE`, matching `grpc.rs`'s own call), publish the
@@ -269,6 +294,7 @@ impl BrowserEventSink for OrchestrationEventSink {
         let mut orchestration = self.client();
         let expires_in = approval_timeout_seconds();
         let created = match self.request(pb::CreateApprovalRequest {
+            continuation_mode: String::new(),
             run_id: config.run_id.clone(),
             step_id: detail.action_id.clone(),
             kind: pb::ApprovalKind::Destructive as i32,
@@ -293,6 +319,26 @@ impl BrowserEventSink for OrchestrationEventSink {
                 detail.risk_category.as_str()
             ),
             continuation_descriptor_json: String::new(),
+            // A live approval: the running browser loop polls it, no worker resumes it, and
+            // the card must say so (build plan WS10 S1).
+            tool_key: String::new(),
+            action_digest: String::new(),
+            turn_origin: String::new(),
+            grant_use_token: String::new(),
+            context_json: crate::space_gate::card_context_json(
+                BROWSER_AGENT_TOOL,
+                "",
+                crate::space_gate::RESUME_LIVE_POLL,
+            ),
+            // The in-loop gate has no tool call to key on, only the category the
+            // risk classifier assigned the Model's proposed action.
+            cause: Some(pb::ApprovalCause {
+                tool: BROWSER_AGENT_TOOL.to_owned(),
+                action_key: BROWSER_AGENT_TOOL.to_owned(),
+                risk_category: detail.risk_category.as_str().to_owned(),
+                ..approval_cause::for_code(CauseCode::BrowserActionRisk)
+            }),
+            ..Default::default()
         }) {
             Ok(request) => orchestration.create_approval(request).await,
             Err(error) => Err(error),
@@ -345,6 +391,8 @@ impl BrowserEventSink for OrchestrationEventSink {
                     decided_by: "system:user-cancelled".to_owned(),
                     decision_reason: "run cancelled by user while awaiting approval".to_owned(),
                     org_id: config.org_id.clone(),
+                    decision_source: pb::ApprovalDecisionSource::System as i32,
+                    ..Default::default()
                 }) {
                     let _ = orchestration.decide_approval(request).await;
                 }
@@ -365,6 +413,7 @@ impl BrowserEventSink for OrchestrationEventSink {
                 // created with this same org_id above, so asserting it
                 // here is a real ownership check, not a no-op.
                 org_id: config.org_id.clone(),
+                ..Default::default()
             });
             let approval_result = match approval_request {
                 Ok(request) => orchestration.get_approval(request).await,
@@ -426,6 +475,8 @@ impl BrowserEventSink for OrchestrationEventSink {
                     decided_by: "system:approval-timeout".to_owned(),
                     decision_reason: "browser action approval wait budget exceeded".to_owned(),
                     org_id: config.org_id.clone(),
+                    decision_source: pb::ApprovalDecisionSource::Timeout as i32,
+                    ..Default::default()
                 }) {
                     let _ = orchestration.decide_approval(request).await;
                 }
@@ -466,6 +517,7 @@ mod tests {
         AcknowledgeApprovalDeliveryRequest, AcknowledgeApprovalDeliveryResponse,
         AttachSubagentRequest, AttachSubagentResponse, ClaimApprovalDeliveriesRequest,
         ClaimApprovalDeliveriesResponse, CreateApprovalRequest, CreateApprovalResponse,
+        ConsumeApprovalRequest, ConsumeApprovalResponse,
         DecideApprovalRequest, DecideApprovalResponse, GetApprovalContinuationRequest,
         GetApprovalContinuationResponse, GetApprovalRequest, GetApprovalResponse, GetPlanRequest,
         GetPlanResponse, GetSubagentLineageRequest, GetSubagentLineageResponse, GetTodoRequest,
@@ -498,6 +550,10 @@ mod tests {
     #[derive(Clone, Default)]
     struct NeverResolvingOrchestration {
         decide_calls: DecideCapture,
+        /// Every `CreateApproval` the gate sent, in order.
+        created: Arc<Mutex<Vec<CreateApprovalRequest>>>,
+        /// Every `RecordOrchestrationEvent` the sink sent, in order.
+        recorded: Arc<Mutex<Vec<RecordOrchestrationEventRequest>>>,
     }
 
     #[tonic::async_trait]
@@ -563,8 +619,14 @@ mod tests {
             request: TonicRequest<CreateApprovalRequest>,
         ) -> Result<Response<CreateApprovalResponse>, Status> {
             let request = request.into_inner();
+            self.created.lock().unwrap().push(request.clone());
             Ok(Response::new(CreateApprovalResponse {
                 approval: Some(pb::Approval {
+                    consumed_at: None,
+                    tool_key: String::new(),
+                    action_label: String::new(),
+                    continuation: None,
+                    continuation_mode: String::new(),
                     id: "appr-test-1".into(),
                     run_id: request.run_id,
                     step_id: request.step_id,
@@ -578,6 +640,7 @@ mod tests {
                     decided_at: None,
                     expires_at: None,
                     org_id: request.org_id,
+                    cause: request.cause,
                 }),
             }))
         }
@@ -603,6 +666,11 @@ mod tests {
             // cancel check or the (short, cfg!(test)) timeout.
             Ok(Response::new(GetApprovalResponse {
                 approval: Some(pb::Approval {
+                    consumed_at: None,
+                    tool_key: String::new(),
+                    action_label: String::new(),
+                    continuation: None,
+                    continuation_mode: String::new(),
                     id: approval_id,
                     run_id: "run_001".into(),
                     step_id: "act_1".into(),
@@ -616,9 +684,45 @@ mod tests {
                     decided_at: None,
                     expires_at: None,
                     org_id: "org_test".into(),
+                    cause: None,
                 }),
             }))
         }
+        async fn consume_approval(
+            &self,
+            _: TonicRequest<ConsumeApprovalRequest>,
+        ) -> Result<Response<ConsumeApprovalResponse>, Status> {
+            Err(Status::unimplemented("consume_approval not needed in test"))
+        }
+
+        async fn create_run_question(
+            &self,
+            _: TonicRequest<mp_contracts::model_plane::v1::CreateRunQuestionRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::CreateRunQuestionResponse>, Status>
+        {
+            Err(Status::unimplemented(
+                "create_run_question not needed in test",
+            ))
+        }
+
+        async fn list_run_questions(
+            &self,
+            _: TonicRequest<mp_contracts::model_plane::v1::ListRunQuestionsRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::ListRunQuestionsResponse>, Status>
+        {
+            Err(Status::unimplemented("list_run_questions not needed in test"))
+        }
+
+        async fn answer_run_question(
+            &self,
+            _: TonicRequest<mp_contracts::model_plane::v1::AnswerRunQuestionRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::AnswerRunQuestionResponse>, Status>
+        {
+            Err(Status::unimplemented(
+                "answer_run_question not needed in test",
+            ))
+        }
+
         async fn decide_approval(
             &self,
             request: TonicRequest<DecideApprovalRequest>,
@@ -631,6 +735,11 @@ mod tests {
             ));
             Ok(Response::new(DecideApprovalResponse {
                 approval: Some(pb::Approval {
+                    consumed_at: None,
+                    tool_key: String::new(),
+                    action_label: String::new(),
+                    continuation: None,
+                    continuation_mode: String::new(),
                     id: request.approval_id,
                     run_id: "run_001".into(),
                     step_id: "act_1".into(),
@@ -644,6 +753,7 @@ mod tests {
                     decided_at: None,
                     expires_at: None,
                     org_id: "org_test".into(),
+                    cause: None,
                 }),
             }))
         }
@@ -698,8 +808,9 @@ mod tests {
         }
         async fn record_orchestration_event(
             &self,
-            _: TonicRequest<RecordOrchestrationEventRequest>,
+            request: TonicRequest<RecordOrchestrationEventRequest>,
         ) -> Result<Response<RecordOrchestrationEventResponse>, Status> {
+            self.recorded.lock().unwrap().push(request.into_inner());
             Ok(Response::new(RecordOrchestrationEventResponse {
                 event_id: "evt-test".into(),
             }))
@@ -759,6 +870,7 @@ mod tests {
         let decide_calls: DecideCapture = Arc::default();
         let channel = spawn_mock(NeverResolvingOrchestration {
             decide_calls: decide_calls.clone(),
+            ..Default::default()
         })
         .await;
 
@@ -805,6 +917,7 @@ mod tests {
         let decide_calls: DecideCapture = Arc::default();
         let channel = spawn_mock(NeverResolvingOrchestration {
             decide_calls: decide_calls.clone(),
+            ..Default::default()
         })
         .await;
 
@@ -832,6 +945,7 @@ mod tests {
         let decide_calls: DecideCapture = Arc::default();
         let channel = spawn_mock(NeverResolvingOrchestration {
             decide_calls: decide_calls.clone(),
+            ..Default::default()
         })
         .await;
 
@@ -853,5 +967,69 @@ mod tests {
             .expect("decide_approval was called");
         assert_eq!(decision, pb::ApprovalState::TimedOut as i32);
         assert_eq!(decided_by, "system:approval-timeout");
+    }
+
+    #[tokio::test]
+    async fn a_run_start_authorized_by_its_grant_is_recorded_as_a_granted_start_run() {
+        let recorded = Arc::default();
+        let channel = spawn_mock(NeverResolvingOrchestration {
+            recorded: Arc::clone(&recorded),
+            ..Default::default()
+        })
+        .await;
+        let sink = OrchestrationEventSink::new(channel, None).with_verified_bearer("test-bearer");
+
+        sink.run_start_authorized("run_001", "plan_001", "user_001")
+            .await;
+        // No run, no run-scoped event.
+        sink.run_start_authorized("", "plan_001", "user_001").await;
+
+        let sent = recorded.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        let event = sent[0]
+            .event
+            .as_ref()
+            .and_then(|event| event.event.as_ref())
+            .expect("an event body");
+        let orchestration_event::Event::BrowserActionDecided(decided) = event else {
+            panic!("expected BrowserActionDecided, got {event:?}");
+        };
+        assert_eq!(
+            decided,
+            &orchestration_event::BrowserActionDecided {
+                run_id: "run_001".to_owned(),
+                plan_id: "plan_001".to_owned(),
+                action_id: "start_run".to_owned(),
+                approval_id: String::new(),
+                decision: "granted".to_owned(),
+                decided_by: "user_001".to_owned(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_browser_gate_carries_the_typed_risk_category() {
+        let created = Arc::default();
+        let channel = spawn_mock(NeverResolvingOrchestration {
+            created: Arc::clone(&created),
+            ..Default::default()
+        })
+        .await;
+        let sink = OrchestrationEventSink::new(channel, None).with_verified_bearer("test-bearer");
+
+        let outcome = sink.require_approval(&test_config(), &test_detail()).await;
+
+        assert_eq!(outcome, ApprovalOutcome::TimedOut);
+        let sent = created.lock().unwrap();
+        assert_eq!(sent.len(), 1, "one durable approval per gated action");
+        let cause = sent[0].cause.as_ref().expect("the gate states its cause");
+        assert_eq!(cause.code, "browser_action_risk");
+        assert_eq!(cause.risk_category, "login");
+        assert_eq!(cause.tool, "browser_agent");
+        assert_eq!(cause.scope_options, vec!["once".to_owned()]);
+        assert!(
+            cause.call_digest.is_empty() && !cause.action_key.contains("example.com"),
+            "no URL or selector reaches the cause: {cause:?}"
+        );
     }
 }

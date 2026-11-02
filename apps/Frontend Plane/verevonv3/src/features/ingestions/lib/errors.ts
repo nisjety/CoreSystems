@@ -1,4 +1,4 @@
-import { ApiError } from '@/shared/api/http'
+import { ApiError, hasErrorCode } from '@/shared/api/http'
 import { translateApiError } from '@/shared/i18n'
 import { isAiFormat, type ScrapeFormat } from '@/features/ingestions/lib/playground'
 
@@ -114,39 +114,30 @@ function aiRefusalMessage(error: unknown, tr: Tr): string | null {
   return null
 }
 
+/** The four typed refusals of `POST /v1/extract` with 501. The gateway names them; the copy is in the shared table. */
+const EXTRACT_REFUSAL_CODES = [
+  'extract_ai_formats_off',
+  'extract_model_plane_not_configured',
+  'extract_model_lane_not_granted',
+  'extract_model_plane_refused',
+] as const
+
+/** The sentence for a refusal of the extract route that has no typed code of its own. */
+const EXTRACT_GENERIC = {
+  no: 'Strukturert uttrekk er ikke tilgjengelig på denne installasjonen.',
+  en: 'Structured extraction is not available on this installation.',
+}
+
 /**
- * Why `POST /v1/extract` refused a schema or a prompt with 501. Quarry gives these no
- * `details.reason`, so the cause is read from the `error` text the edge sets. The next step
- * is the one Quarry's `next_actions` gives: the same request without the schema and prompt.
+ * Why `POST /v1/extract` refused a schema or a prompt with 501. The gateway sets a typed code
+ * for each of the four causes; any other refusal gets the generic sentence, never the edge's
+ * raw text. The next step is the one Quarry's `next_actions` gives: the same request without
+ * the schema and prompt.
  */
 function extractRefusalMessage(error: unknown, tr: Tr): string {
-  const text = error instanceof ApiError ? error.message : ''
-  let reason: string
-  if (text.includes('QUARRY_EDGE__AI_FORMATS is off')) {
-    reason = tr(
-      'Strukturert uttrekk er slått av på Quarry-edge (QUARRY_EDGE__AI_FORMATS).',
-      'Structured extraction is switched off in Quarry-edge (QUARRY_EDGE__AI_FORMATS).',
-    )
-  } else if (text.includes('QUARRY_EDGE__MODEL_PLANE_URL is not set')) {
-    reason = tr(
-      'Modellplanen er ikke koblet til Quarry-edge (QUARRY_EDGE__MODEL_PLANE_URL mangler).',
-      'The model plane is not connected to Quarry-edge (QUARRY_EDGE__MODEL_PLANE_URL is not set).',
-    )
-  } else if (text.includes('holds no model credential')) {
-    reason = tr(
-      'Denne installasjonen har ingen modellnøkkel for strukturert uttrekk.',
-      'This installation has no model credential for structured extraction.',
-    )
-  } else if (text.includes('refused this service')) {
-    reason = tr(
-      'Modellplanen avviste Quarry-edge ved første modellkall. Det ble ikke belastet noe.',
-      'The model plane refused Quarry-edge on the first model call. Nothing was metered.',
-    )
-  } else {
-    reason =
-      text ||
-      tr('Strukturert uttrekk er ikke tilgjengelig på denne installasjonen.', 'Structured extraction is not available on this installation.')
-  }
+  const reason = hasErrorCode(error, ...EXTRACT_REFUSAL_CODES)
+    ? translateApiError(error, tr, EXTRACT_GENERIC)
+    : tr(EXTRACT_GENERIC.no, EXTRACT_GENERIC.en)
   const next = tr(
     'Fjern JSON-skjemaet og prompten, og kjør på nytt, for å få Markdown.',
     'Remove the JSON schema and the prompt, and run again, to get Markdown.',

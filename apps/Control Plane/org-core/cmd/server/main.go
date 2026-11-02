@@ -21,6 +21,8 @@ import (
 	grpcserver "github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/grpc"
 	httpserver "github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/http"
 	metricsserver "github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/metrics"
+	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/browsersites"
+	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/modelentitlement"
 	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/nats"
 	orgcore "github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/org"
 	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/rbac"
@@ -32,6 +34,10 @@ func main() {
 		log.Fatalf("[org-core startup] service credential registry validation failed: %v", err)
 	}
 	log.Printf("[org-core startup] scoped service credential registry OK")
+
+	if err := httpserver.ValidateSIEMDestinationsConfig(os.Getenv); err != nil {
+		log.Fatalf("[org-core startup] SIEM destinations validation failed: %v", err)
+	}
 
 	// pprof debug server — enable with PPROF_ENABLED=true; default addr :6061
 	if os.Getenv("PPROF_ENABLED") == "true" {
@@ -117,6 +123,8 @@ func main() {
 	if natsClient != nil {
 		orgService.SetAuditPublisher(natsClient)
 		go runGDPRAuditOutbox(ctx, orgService, 5*time.Second)
+		go runSIEMAuditOutbox(ctx, orgService, 5*time.Second)
+		go runIdentityAuditOutbox(ctx, orgService, 5*time.Second)
 	}
 
 	// Wire shared cross-plane publisher (verevon-nats)
@@ -165,6 +173,12 @@ func main() {
 	go runOrgDeletionReminderSweep(ctx, orgService, orgDeletionReminderInterval)
 
 	server := httpserver.NewServer(cfg.HTTPPort, orgService, rbacRepo, cfg.AuthServiceURL, cfg.UserServiceURL)
+	// Chat model policy (WS10-S2, ADR-0005). Roles come from the membership
+	// table through orgService, never from a request header.
+	server.SetModelEntitlements(modelentitlement.NewService(modelentitlement.NewRepository(db), orgService))
+	// Agent-browser site policy (WS21-S3). Read by the browser broker at grant mint;
+	// administered and chosen through the /api/v1 browser-sites routes.
+	server.SetBrowserSites(browsersites.NewService(browsersites.NewRepository(db), time.Now))
 	grpcServer := grpcserver.NewServer(cfg.GRPCPort)
 	metricsServer := metricsserver.NewServer(cfg.MetricsPort)
 
@@ -265,6 +279,63 @@ func runGDPRAuditOutbox(ctx context.Context, service *orgcore.Service, interval 
 		if result.Published > 0 || result.DeadLettered > 0 {
 			log.Printf(
 				"org-core GDPR audit outbox published=%d dead_lettered=%d",
+				result.Published, result.DeadLettered,
+			)
+		}
+	}
+	flush()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			flush()
+		}
+	}
+}
+
+// runSIEMAuditOutbox publishes the audit rows of SIEM destination changes. It runs whatever
+// ORG_SIEM_DESTINATIONS_ENABLED says, so rows still pending when the switch is turned off drain.
+func runSIEMAuditOutbox(ctx context.Context, service *orgcore.Service, interval time.Duration) {
+	flush := func() {
+		result, err := service.FlushSIEMAuditOutbox(ctx, 100)
+		if err != nil {
+			log.Printf("org-core SIEM audit outbox retry failed: %v", err)
+		}
+		if result.Published > 0 || result.DeadLettered > 0 {
+			log.Printf(
+				"org-core SIEM audit outbox published=%d dead_lettered=%d",
+				result.Published, result.DeadLettered,
+			)
+		}
+	}
+	flush()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			flush()
+		}
+	}
+}
+
+// runIdentityAuditOutbox publishes the audit rows of identity changes (domain added, verified,
+// revoked; WS05-S6). It runs whatever ORG_DOMAIN_VERIFICATION_ENABLED says, so rows still
+// pending when the switch is turned off drain.
+func runIdentityAuditOutbox(ctx context.Context, service *orgcore.Service, interval time.Duration) {
+	flush := func() {
+		result, err := service.FlushIdentityAuditOutbox(ctx, 100)
+		if err != nil {
+			log.Printf("org-core identity audit outbox retry failed: %v", err)
+		}
+		if result.Published > 0 || result.DeadLettered > 0 {
+			log.Printf(
+				"org-core identity audit outbox published=%d dead_lettered=%d",
 				result.Published, result.DeadLettered,
 			)
 		}

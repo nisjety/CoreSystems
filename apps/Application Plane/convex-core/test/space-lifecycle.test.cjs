@@ -225,3 +225,27 @@ test('only a pending Application deletion receipt can become the local purge suc
   assert.throws(() => assertReceiptTransition('blocked_legal_hold', 'succeeded'), /invalid/i);
   assert.throws(() => assertReceiptTransition('succeeded', 'partial'), /invalid/i);
 });
+
+// WS04-S5 cross-language golden vector. The ids mix case, `_` and `-`, where
+// `localeCompare` disagrees with Control's `sort.Strings` over UTF-8 bytes. The
+// hashes below were produced by running Control's RecipientAudienceHash
+// (apps/Control Plane/user-core/internal/spaces/personal_thread_decision.go)
+// on the same ids; if either side changes, Control rejects Application's
+// snapshot for a hash mismatch.
+test('recipient audience canonical order and hash equal Control for mixed-case ids with _ and -', async () => {
+  const ids = ['a-b', 'a', '_a', 'B'];
+  assert.deepEqual(canonicalRecipientSubjectIds(ids), ['B', '_a', 'a', 'a-b']);
+  assert.equal(
+    await recipientAudienceHash(ids),
+    'sha256:83b3c0bb650ad003bc93fc04e8f82e7e049b658662157cdfeeef7d4aa4cec7dd',
+  );
+  // Input order never changes the hash.
+  assert.equal(await recipientAudienceHash([...ids].reverse()), await recipientAudienceHash(ids));
+
+  const wider = ['Zed', 'alice', 'Alice', '_x', 'user_1', 'user-1', 'u\u00e9'];
+  assert.deepEqual(canonicalRecipientSubjectIds(wider), ['Alice', 'Zed', '_x', 'alice', 'user-1', 'user_1', 'u\u00e9']);
+  assert.equal(
+    await recipientAudienceHash(wider),
+    'sha256:b39434808ad98560fd1a2ea27abfaf0a2ddee12c8ae75917f455c2a30d802401',
+  );
+});

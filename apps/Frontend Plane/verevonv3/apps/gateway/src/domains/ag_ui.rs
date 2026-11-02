@@ -90,13 +90,15 @@ async fn stream_agent_ui(
         return shared::invalid_chat_request(message).into_response();
     }
     let org_id = crate::upstream::authorized_org_id(&state, &user).await;
-    if let Err((status, body)) = crate::domains::spaces::inject_mentioned_space_agent_persona(
+    // WS08-S4: same wake handling as native chat (the injector chain is shared).
+    let wake_intent = match crate::domains::spaces::inject_mentioned_space_agent(
         &state, &user, &org_id, &mut body,
     )
     .await
     {
-        return (status, body).into_response();
-    }
+        Ok(intent) => intent,
+        Err((status, body)) => return (status, body).into_response(),
+    };
     if let Err((status, body)) =
         crate::domains::spaces::inject_authored_instructions(&state, &user, &org_id, &mut body)
             .await
@@ -109,18 +111,28 @@ async fn stream_agent_ui(
     {
         return (status, body).into_response();
     }
-    if let Err((status, body)) =
-        crate::domains::spaces::inject_personal_thread_context(&state, &user, &org_id, &mut body)
-            .await
+    if let Err((status, body)) = crate::domains::spaces::inject_personal_thread_context_for_wake(
+        &state,
+        &user,
+        &org_id,
+        &mut body,
+        wake_intent.as_ref(),
+    )
+    .await
     {
         return (status, body).into_response();
     }
     let org_name = crate::domains::auth::resolve_org_name(&state, &user, &org_id).await;
-    let mut body = shared::with_identity_context(body, &user.user_name, &org_name);
+    let body = shared::with_identity_context(body, &user.user_name, &org_name);
+    let mut body = shared::with_viewer_locale(body, state.space_features.chat_locale_hint);
     shared::apply_org_zdr_posture(&state, &user, &mut body).await;
     // After `inject_personal_thread_context`: only minted once Control has
     // actually scoped this turn to a Space (same rule as native chat).
     let sandbox_token = shared::sandbox_token(&state, &user, &headers, &body).await;
+    // The same rule as the sandbox credential, and never on a zero-retention turn (WS21-S2).
+    // `turn_requests_zdr` also marks the request's span ZDR (`crate::zdr_log`).
+    let zdr = turn_requests_zdr(&headers, &body);
+    let browser_token = shared::browser_token(&state, &user, &headers, &body, zdr).await;
 
     let token = shared::model_token(&state, &user, &headers).await;
     let data_plane_token = shared::data_plane_token(&state, &user, &headers).await;
@@ -171,11 +183,14 @@ async fn stream_agent_ui(
     if let Some(token) = sandbox_token {
         req = req.header("x-sandbox-authorization", format!("Bearer {token}"));
     }
+    if let Some(token) = browser_token {
+        req = req.header("x-browser-authorization", format!("Bearer {token}"));
+    }
     if let Some(last_event_id) = headers.get("last-event-id").and_then(|v| v.to_str().ok()) {
         req = req.header("last-event-id", last_event_id);
     }
 
-    if turn_requests_zdr(&headers, &body) {
+    if zdr {
         req = req.header("x-zdr", "true");
     }
 
@@ -881,6 +896,8 @@ fn map_upstream_frame(run: &mut AgUiRunState, frame: SseFrame) -> Vec<Event> {
         | "attachment"
         | "reasoning_delta"
         | "usage"
+        // WS27 S3: a running total during a turn, counts only, shown as it arrives.
+        | "usage_progress"
         | "citation"
         | "grounding"
         | "step_update"
@@ -896,7 +913,17 @@ fn map_upstream_frame(run: &mut AgUiRunState, frame: SseFrame) -> Vec<Event> {
         | "browser_action_decided"
         | "approval_continuation_verified"
         | "browser_run_paused"
-        | "browser_run_resumed" => {
+        | "browser_run_resumed"
+        // A run the executor parked at a round boundary stays open and resumable
+        // (WS03 S8-A): `run_parked` on the owner's turn stream, `run_resumed` when a
+        // continue resumes it. Display only, like the rest of this family; the park
+        // reason is the closed token the gateway chose to say, never free text.
+        | "run_parked"
+        | "run_resumed"
+        // WS15 lifecycle notices: counts and closed tokens only, shown as they arrive.
+        | "retry_scheduled"
+        | "compaction"
+        | "context_change" => {
             vec![ag_ui_event(json!({
                 "type": "CUSTOM",
                 "name": event,
@@ -1296,5 +1323,122 @@ mod tests {
             },
         );
         assert_eq!(grounding.len(), 1);
+    }
+
+    /// WS03 S8-A: a parked run's `run_parked` frame and the `run_resumed` of its resume are
+    /// carried as non-executable CUSTOM payloads, like the other governance events, with the
+    /// upstream frame's fields intact and its SSE cursor kept. They are not opaque RAW.
+    #[test]
+    fn a_parked_runs_frames_are_carried_as_custom_events_with_their_cursor() {
+        for (name, data, marker) in [
+            (
+                "run_parked",
+                r#"{"run_id":"run_1","request_id":"req_1","status":"parked","reason":"provider_exhausted","resume_after":"2026-10-20T12:00:00Z"}"#,
+                "provider_exhausted",
+            ),
+            (
+                "run_resumed",
+                r#"{"run_id":"run_1","resumed_segment":2}"#,
+                "resumed_segment",
+            ),
+        ] {
+            let mut run = AgUiRunState::default();
+            let events = map_upstream_frame(
+                &mut run,
+                SseFrame {
+                    event: Some(name.into()),
+                    id: Some("17".into()),
+                    data: data.into(),
+                },
+            );
+            assert_eq!(events.len(), 1, "{name}");
+            let rendered = format!("{:?}", events[0]);
+            assert!(rendered.contains("CUSTOM"), "{name}: {rendered}");
+            assert!(rendered.contains(name), "{name}: {rendered}");
+            assert!(rendered.contains(marker), "{name}: {rendered}");
+            assert!(rendered.contains("id: 17"), "{name} keeps its cursor: {rendered}");
+            assert!(!rendered.contains("RAW"), "{name} is not opaque: {rendered}");
+        }
+    }
+
+    /// WS15 S1: the three lifecycle notices ride the same CUSTOM envelope as the other display-only
+    /// events, with their upstream fields and SSE cursor intact.
+    #[test]
+    fn lifecycle_notices_are_carried_as_custom_events_with_their_cursor() {
+        for (name, data, marker) in [
+            (
+                "retry_scheduled",
+                r#"{"scope":"tool","tool":"knowledge_search","attempt":2,"max_attempts":3,"wait_ms":250,"reason":"rate_limited","request_id":"req_1"}"#,
+                "rate_limited",
+            ),
+            (
+                "compaction",
+                r#"{"scope":"history","outcome":"truncated","request_id":"req_1"}"#,
+                "truncated",
+            ),
+            (
+                "context_change",
+                r#"{"change":"history_shed","messages_dropped":4,"request_id":"req_1"}"#,
+                "history_shed",
+            ),
+        ] {
+            let mut run = AgUiRunState::default();
+            let events = map_upstream_frame(
+                &mut run,
+                SseFrame {
+                    event: Some(name.into()),
+                    id: Some("9".into()),
+                    data: data.into(),
+                },
+            );
+            assert_eq!(events.len(), 1, "{name}");
+            let rendered = format!("{:?}", events[0]);
+            assert!(rendered.contains("CUSTOM"), "{name}: {rendered}");
+            assert!(rendered.contains(name), "{name}: {rendered}");
+            assert!(rendered.contains(marker), "{name}: {rendered}");
+            assert!(rendered.contains("id: 9"), "{name} keeps its cursor: {rendered}");
+            assert!(!rendered.contains("RAW"), "{name} is not opaque: {rendered}");
+        }
+    }
+
+    /// WS27 S3: a progress frame is a display-only CUSTOM payload with its counts and its SSE cursor
+    /// intact, like the usage frame it precedes, and never an opaque RAW.
+    #[test]
+    fn a_usage_progress_frame_is_carried_as_a_custom_event_with_its_cursor() {
+        let mut run = AgUiRunState::default();
+        let events = map_upstream_frame(
+            &mut run,
+            SseFrame {
+                event: Some("usage_progress".into()),
+                id: Some("12".into()),
+                data: r#"{"calls":2,"phase":"tool_round","input_tokens":1200,"output_tokens":90,"cache_read_tokens":0,"cache_write_tokens":0,"cost_usd":0.0041,"cost_basis":"metered"}"#.into(),
+            },
+        );
+        assert_eq!(events.len(), 1);
+        let rendered = format!("{:?}", events[0]);
+        assert!(rendered.contains("CUSTOM"), "{rendered}");
+        assert!(rendered.contains("usage_progress"), "{rendered}");
+        assert!(rendered.contains("tool_round"), "{rendered}");
+        assert!(rendered.contains("id: 12"), "usage_progress keeps its cursor: {rendered}");
+        assert!(!rendered.contains("RAW"), "{rendered}");
+    }
+
+    /// The CUSTOM allowlist stays closed: the two new names are in it, and a name that merely
+    /// resembles them is still passed through as RAW.
+    #[test]
+    fn a_name_that_only_resembles_a_park_frame_stays_raw() {
+        let mut run = AgUiRunState::default();
+        let events = map_upstream_frame(
+            &mut run,
+            SseFrame {
+                event: Some("run_parked_later".into()),
+                id: None,
+                data: r#"{"run_id":"run_1"}"#.into(),
+            },
+        );
+        assert_eq!(events.len(), 1);
+        let rendered = format!("{:?}", events[0]);
+        assert!(rendered.contains("RAW"), "{rendered}");
+        assert!(!rendered.contains("CUSTOM"), "{rendered}");
     }
 }

@@ -13,6 +13,8 @@
 import { fireEvent, render, screen } from '@solidjs/testing-library'
 import { flush } from 'solid-js'
 import { describe, expect, it } from 'vitest'
+import { I18nProvider } from '@/shared/i18n'
+import { localeStorageKey } from '@/shared/i18n/locales'
 import { readChatThreadTranscript, upsertChatThreadTranscript } from '@/features/chat/lib/chat-thread-history'
 import { ReasoningPopover } from './ChatMessages'
 import { transcriptTurnToChatTurn, turnsToTranscript } from './chat-normalizers'
@@ -82,5 +84,25 @@ describe('ReasoningPopover metrics', () => {
     expect(text).toContain('220 ms')
     expect(text).toMatch(/Inkludert i abonnementet|Included in the subscription/)
     expect(text).not.toContain('$')
+  })
+})
+
+describe('ReasoningPopover tabs in English', () => {
+  it('names the tabs in English under en', () => {
+    window.localStorage.setItem(localeStorageKey, 'en')
+    try {
+      render(() => (
+        <I18nProvider>
+          <ReasoningPopover message={turn({ reasoning: 'Vurderer valgene.' })} />
+        </I18nProvider>
+      ))
+      fireEvent.click(screen.getByRole('button', { name: 'Details' }))
+      flush()
+
+      expect(screen.getByRole('button', { name: 'Overview' })).toBeTruthy()
+      expect(screen.getByRole('button', { name: 'Insight' })).toBeTruthy()
+    } finally {
+      window.localStorage.removeItem(localeStorageKey)
+    }
   })
 })

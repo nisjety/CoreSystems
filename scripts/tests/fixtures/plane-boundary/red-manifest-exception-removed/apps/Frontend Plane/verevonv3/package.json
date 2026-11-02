@@ -1,0 +1,6 @@
+{
+  "name": "fixture",
+  "dependencies": {
+    "@cp/lib": "file:../../Control Plane/lib"
+  }
+}

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  AttachmentsNotSentError,
   approvePlan,
   buildChatWireBody,
   groupChatModels,
@@ -7,14 +8,21 @@ import {
   rejectPlan,
   shouldRequestSupportContext,
   describeFeedbackFailure,
+  getChatThread,
   getChatThreadTranscript,
   getThreadContext,
+  getThreadMessages,
   listChatThreads,
+  listChatThreadsPage,
+  modelEffortLevels,
   modelSupportsAgentic,
+  pagedTranscriptEnabled,
+  parallelThreadLoadEnabled,
   parseTurnTiming,
   queueInvocationInput,
   resumeStream,
   saveChatThreadSnapshot,
+  searchChatThreads,
   streamChat,
   subscriptionModelDisplayName,
   submitFeedback,
@@ -324,6 +332,28 @@ describe('mid-run queued input', () => {
     expect(onQueuedInput).toHaveBeenCalledWith({ messages: ['bruk EUR'] })
   })
 
+  it('routes retrieval_notice to its handler by code and wording key, and ignores a notice with neither', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          `event: retrieval_notice\ndata: ${JSON.stringify({ code: 'zdr_dense_unavailable', wording_key: 'retrieval.zdr_dense_unavailable', request_id: 'req-1' })}\n\n`,
+          // A reduction with no reason or wording key cannot be shown as one.
+          `event: retrieval_notice\ndata: ${JSON.stringify({ code: 'zdr_dense_unavailable' })}\n\n`,
+        ]),
+      ),
+    )
+    const onRetrievalNotice = vi.fn()
+    await streamChat({ content: 'hi' }, { onRetrievalNotice })
+
+    expect(onRetrievalNotice).toHaveBeenCalledTimes(1)
+    expect(onRetrievalNotice).toHaveBeenCalledWith({
+      code: 'zdr_dense_unavailable',
+      wordingKey: 'retrieval.zdr_dense_unavailable',
+      requestId: 'req-1',
+    })
+  })
+
   it('reports acceptance, including a delivery that was not durably recorded', async () => {
     vi.stubGlobal(
       'fetch',
@@ -465,6 +495,133 @@ describe('mid-run queued input', () => {
     // it looking for a decision that cannot exist.
     expect(JSON.parse(bodies[0] ?? '')).toEqual({ content: 'bruk EUR' })
   })
+
+  describe('send receipts', () => {
+    it('names the message to the gateway, and only when it has an id', async () => {
+      const bodies: string[] = []
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockImplementation((_url: unknown, init?: RequestInit) => {
+          bodies.push(String(init?.body ?? ''))
+          return Promise.resolve(jsonResponse(202, { queued: true, pending: 1, persisted: true }))
+        }),
+      )
+      await queueInvocationInput('req-1', 'bruk EUR', { clientMessageId: 'msg-1' })
+      await queueInvocationInput('req-1', 'bruk EUR')
+      expect(JSON.parse(bodies[0] ?? '')).toEqual({ content: 'bruk EUR', client_message_id: 'msg-1' })
+      expect(JSON.parse(bodies[1] ?? '')).toEqual({ content: 'bruk EUR' })
+    })
+
+    it('reports the stored message the gateway names', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(
+          jsonResponse(202, {
+            request_id: 'req-1',
+            queued: true,
+            pending: 1,
+            persisted: true,
+            client_message_id: 'msg-1',
+            message_id: '01J00000000000000000000000',
+            deduplicated: false,
+          }),
+        ),
+      )
+      await expect(queueInvocationInput('req-1', 'bruk EUR', { clientMessageId: 'msg-1' })).resolves.toEqual({
+        outcome: 'queued',
+        pending: 1,
+        persisted: true,
+        clientMessageId: 'msg-1',
+        messageId: '01J00000000000000000000000',
+      })
+    })
+
+    /**
+     * The run ended after the message was stored: the caller still sends it as a new turn,
+     * under the same id, and the transcript holds it once.
+     */
+    it('says the run ended and whether the message was already stored', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(
+          jsonResponse(200, {
+            request_id: 'req-1',
+            queued: false,
+            error: 'no active stream',
+            resend_as_new_turn: true,
+            persisted: true,
+            client_message_id: 'msg-1',
+            message_id: '01J00000000000000000000000',
+          }),
+        ),
+      )
+      await expect(queueInvocationInput('req-1', 'bruk EUR', { clientMessageId: 'msg-1' })).resolves.toEqual({
+        outcome: 'run_ended',
+        persisted: true,
+        clientMessageId: 'msg-1',
+      })
+    })
+
+    it('tells a gateway that could not say apart from a refusal', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(
+          jsonResponse(503, {
+            error: { code: 'run_control_unavailable', message: 'run control unavailable' },
+          }),
+        ),
+      )
+      await expect(queueInvocationInput('req-1', 'a', { clientMessageId: 'msg-1' })).resolves.toMatchObject({
+        outcome: 'refused',
+        reason: 'unavailable',
+      })
+    })
+
+    it('reads the ids of a delivery in step with its messages', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(
+          sseResponse([
+            // The unreadable message goes with its id, and the ids after it keep their messages.
+            `event: queued_input\ndata: ${JSON.stringify({ messages: ['one', '  ', 'two'], ids: ['msg-1', 'msg-x', ''] })}\n\n`,
+            // No ids at all: the frame is exactly what it was before ids existed.
+            `event: queued_input\ndata: ${JSON.stringify({ messages: ['three'] })}\n\n`,
+            `event: queued_input\ndata: ${JSON.stringify({ messages: ['four'], ids: [''] })}\n\n`,
+          ]),
+        ),
+      )
+      const onQueuedInput = vi.fn()
+      await streamChat({ content: 'hi' }, { onQueuedInput })
+
+      expect(onQueuedInput.mock.calls.map(([event]) => event)).toEqual([
+        { messages: ['one', 'two'], ids: ['msg-1', ''] },
+        { messages: ['three'] },
+        { messages: ['four'] },
+      ])
+    })
+
+    it('puts the send id on the wire as the idempotency key, never for zero retention', () => {
+      expect(buildChatWireBody({ content: 'hi', clientMessageId: 'msg-1' }).idempotency_key).toBe('msg-1')
+      // Byte-identical to before when the turn names no id, and never for a zero-retention turn.
+      expect('idempotency_key' in buildChatWireBody({ content: 'hi' })).toBe(false)
+      expect('idempotency_key' in buildChatWireBody({ content: 'hi', clientMessageId: 'msg-1', zdr: true })).toBe(false)
+      expect('idempotency_key' in buildChatWireBody({ content: 'hi', clientMessageId: '' })).toBe(false)
+    })
+
+    // WS01-S8: a send that opens a new Space thread names its session key from the send id, so a
+    // repeat resolves to the thread the first one created. A reply keeps the thread id as before.
+    it('puts the session key on the wire for a new-thread send, and falls back to the thread id for a reply', () => {
+      const sendId = 'a'.repeat(32)
+      const fresh = buildChatWireBody({ content: 'hi', clientMessageId: sendId, sessionKey: `space-post-${sendId}` })
+      expect(fresh.idempotency_key).toBe(sendId)
+      expect(fresh.session_key).toBe(`space-post-${sendId}`)
+      const reply = buildChatWireBody({ content: 'hi', clientMessageId: sendId, threadId: 'thr_7' })
+      expect(reply.session_key).toBe('thr_7')
+      expect(reply.thread_id).toBe('thr_7')
+      // A blank key is no key.
+      expect(buildChatWireBody({ content: 'hi', sessionKey: '   ', threadId: 'thr_7' }).session_key).toBe('thr_7')
+    })
+  })
 })
 
 describe('chat-client tool wiring', () => {
@@ -510,7 +667,6 @@ describe('chat-client tool wiring', () => {
       browseWeb: true,
       generateImage: true,
       deepResearch: true,
-      attachments: [{ kind: 'image', data_base64: 'abc' }],
     })
 
     expect(body).toMatchObject({
@@ -533,6 +689,51 @@ describe('chat-client tool wiring', () => {
     expect(body.features).not.toContain('agentic')
   })
 
+  // WS08-S1: the subscription wire has no attachments, so an image used to be
+  // dropped (`attachments: []`) while the transcript said it was added. The
+  // client now refuses to build the body, with a typed local error.
+  it('throws attachments_not_sent instead of dropping an image on a subscription turn', () => {
+    const build = () =>
+      buildChatWireBody({
+        content: 'what is in this picture',
+        model: 'gpt-5.6-luna',
+        provider: 'openai-codex-subscription',
+        subscriptionConnectionId: 'conn-subscription-1',
+        attachments: [{ kind: 'image', data_base64: 'abc', mime_type: 'image/png' }],
+      })
+
+    expect(build).toThrow(AttachmentsNotSentError)
+    expect(build).toThrow(expect.objectContaining({ code: 'attachments_not_sent' }))
+  })
+
+  it('keeps an image on every other route byte for byte', () => {
+    const body = buildChatWireBody({
+      content: 'what is in this picture',
+      attachments: [{ kind: 'image', data_base64: 'abc', mime_type: 'image/png' }],
+    })
+
+    expect(body.attachments).toEqual([{ kind: 'image', data_base64: 'abc', mime_type: 'image/png' }])
+  })
+
+  it('reports the refusal to the stream handlers and sends no request', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+    const onError = vi.fn()
+
+    await streamChat(
+      {
+        content: 'what is in this picture',
+        provider: 'openai-codex-subscription',
+        subscriptionConnectionId: 'conn-subscription-1',
+        attachments: [{ kind: 'image', data_base64: 'abc', mime_type: 'image/png' }],
+      },
+      { onError } as unknown as ChatStreamHandlers,
+    )
+
+    expect(onError).toHaveBeenCalledWith({ code: 'attachments_not_sent', message: 'attachments_not_sent' })
+    expect(fetchSpy).not.toHaveBeenCalled()
+    fetchSpy.mockRestore()
+  })
+
   // A5: Do on the ChatGPT subscription. The composer offers it only when the
   // server advertises the `agentic` capability; what reaches the wire is the
   // agentic feature and plan_mode, and nothing else the route cannot do.
@@ -548,7 +749,6 @@ describe('chat-client tool wiring', () => {
       browseWeb: true,
       generateImage: true,
       deepResearch: true,
-      attachments: [{ kind: 'image', data_base64: 'abc' }],
       actions: [{ id: 'skill-1', name: 'Quality report', kind: 'skill' }],
     })
 
@@ -918,6 +1118,164 @@ describe('approvePlan / rejectPlan (plan-gate §2.3)', () => {
       edited_steps: [],
     })
     expect(result.plan?.state).toBe('PLAN_STATE_REJECTED')
+  })
+
+  it('reads the grant expiry the gateway returns, in seconds, as milliseconds', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          granted_rung: 'workspace_write',
+          was_in_plan_mode: true,
+          persisted: true,
+          grant_expires_at_unix: 1_900_000_000,
+        }),
+      ),
+    )
+
+    const result = await approvePlan('run_1', 'workspace_write', 'writes its report')
+
+    expect(result.grantExpiresAtMs).toBe(1_900_000_000_000)
+  })
+
+  it('leaves grantExpiresAtMs undefined for an older gateway, a null, or a value that is not a positive finite number', async () => {
+    for (const grant of [undefined, null, 0, -5, 'soon', Number.NaN]) {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(
+          jsonResponse({
+            granted_rung: 'workspace_write',
+            was_in_plan_mode: true,
+            persisted: true,
+            grant_expires_at_unix: grant,
+          }),
+        ),
+      )
+      const result = await approvePlan('run_1', 'workspace_write', 'writes its report')
+      expect(result.grantExpiresAtMs).toBeUndefined()
+    }
+  })
+})
+
+// WS14 S2a: the turn after a plan approval is an EXECUTE turn. It is agentic with
+// plan_mode false and says so with `execute_granted`; the rung is never on the
+// wire, the gateway reads it from the grant it holds for the thread.
+describe('chat-client execute turn (WS14 S2a)', () => {
+  afterEach(() => {
+    clearSupportChatThreads()
+  })
+
+  const execute = { content: 'Kjør den godkjente planen', threadId: 'thread_1', executeGranted: true }
+
+  it('puts execute_granted with agentic and tools on the wire, plan_mode false and no rung', () => {
+    const body = buildChatWireBody(execute)
+
+    expect(body.execute_granted).toBe(true)
+    expect(body.plan_mode).toBe(false)
+    expect(body.thread_id).toBe('thread_1')
+    expect(body.features).toEqual(expect.arrayContaining(['agentic', 'tools']))
+    expect(body).not.toHaveProperty('granted_rung')
+    expect(body).not.toHaveProperty('autonomy_rung')
+    expect(body).not.toHaveProperty('execute_granted_rung')
+  })
+
+  it('never carries the key on an ordinary, plan, regenerate, edit-resubmit or filtered turn, and the rest of the body is unchanged', () => {
+    const ordinary = [
+      { content: 'hi' },
+      { content: 'hi', threadId: 'thread_1' },
+      { content: 'hi', threadId: 'thread_1', executeGranted: false },
+      { content: 'plan it', threadId: 'thread_1', planMode: true },
+      { content: 'again', threadId: 'thread_1', regenerated: true },
+      { content: 'edited', threadId: 'thread_1', editResubmit: true },
+      { content: 'hi', threadId: 'thread_1', retrievalScope: 'web_only' as const },
+    ]
+    for (const request of ordinary) {
+      const body = buildChatWireBody(request)
+      expect(Object.keys(body)).not.toContain('execute_granted')
+    }
+
+    // An explicit false is the same body, key for key, as the field being absent.
+    expect(buildChatWireBody({ content: 'hi', threadId: 'thread_1', executeGranted: false })).toEqual(
+      buildChatWireBody({ content: 'hi', threadId: 'thread_1' }),
+    )
+    // And an execute turn differs from the same turn without it by exactly the
+    // key and the agentic feature, nothing else.
+    const withoutIt = buildChatWireBody({ content: 'Kjør den godkjente planen', threadId: 'thread_1' })
+    const withIt = buildChatWireBody(execute)
+    const strip = (body: Record<string, unknown>) => ({
+      ...body,
+      execute_granted: undefined,
+      features: (body.features as string[]).filter((feature) => feature !== 'agentic'),
+    })
+    expect(strip(withIt)).toEqual(strip(withoutIt))
+  })
+
+  it('lets plan mode win: a plan turn is a plan turn, not an execute turn', () => {
+    const body = buildChatWireBody({ ...execute, planMode: true })
+
+    expect(body).not.toHaveProperty('execute_granted')
+    expect(body.plan_mode).toBe(true)
+    expect(body.features).toContain('agentic')
+  })
+
+  it('drops executeGranted when there is no thread to hold the grant', () => {
+    for (const threadId of [undefined, '', '   ']) {
+      const body = buildChatWireBody({ ...execute, threadId })
+
+      expect(body).not.toHaveProperty('execute_granted')
+      expect(body.features).not.toContain('agentic')
+      expect(body.plan_mode).toBe(false)
+    }
+  })
+
+  it('drops executeGranted on a conversation-only turn', () => {
+    const body = buildChatWireBody({ ...execute, sourceScope: 'conversation' })
+
+    expect(body).not.toHaveProperty('execute_granted')
+    expect(body.features).not.toContain('agentic')
+    expect(body.plan_mode).toBe(false)
+  })
+
+  it('drops executeGranted on a Support-derived thread', () => {
+    bindSupportChatThread({ userId: 'user-1', orgId: 'org-1', conversationId: 'conversation-1' }, 'support_thread')
+
+    const body = buildChatWireBody({ ...execute, threadId: 'support_thread' })
+
+    expect(body).not.toHaveProperty('execute_granted')
+    expect(body.features).not.toContain('agentic')
+    expect(body.plan_mode).toBe(false)
+    expect(body.tools).toEqual([])
+  })
+
+  it('drops executeGranted under zero data retention, where no plan or grant exists', () => {
+    const body = buildChatWireBody({ ...execute, zdr: true })
+
+    expect(body).not.toHaveProperty('execute_granted')
+    expect(body.features).not.toContain('agentic')
+    expect(body.plan_mode).toBe(false)
+    expect(body.zdr).toBe(true)
+  })
+
+  it('drops executeGranted on the ChatGPT-subscription route', () => {
+    const body = buildChatWireBody({
+      ...execute,
+      model: 'gpt-5.6-terra',
+      provider: 'openai-codex-subscription',
+      subscriptionConnectionId: 'conn-subscription-1',
+    })
+
+    expect(body).not.toHaveProperty('execute_granted')
+    expect(body.features).not.toContain('agentic')
+    expect(body.plan_mode).toBe(false)
+  })
+
+  it('sends no retrieval_scope on an execute turn, since the gateway refuses agentic with a filtered scope', () => {
+    for (const retrievalScope of ['web_only', 'knowledge_only'] as const) {
+      const body = buildChatWireBody({ ...execute, retrievalScope })
+
+      expect(body.execute_granted).toBe(true)
+      expect(body).not.toHaveProperty('retrieval_scope')
+    }
   })
 })
 
@@ -1299,6 +1657,31 @@ describe('extended-thinking effort', () => {
       })
       expect(body.effort).toBe(effort)
     }
+  })
+
+  it('sends a canonical level as given, and still omits an absent or standard one', () => {
+    expect(buildChatWireBody({ content: 'hei', threadId: 't1', effort: 'xhigh' }).effort).toBe('xhigh')
+    expect(buildChatWireBody({ content: 'hei', threadId: 't1', effort: 'standard' })).not.toHaveProperty('effort')
+  })
+
+  it('reads effort_levels from the catalogue and drops names it cannot place', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ models: [
+      { id: 'm-ladder', name: 'Ladder', effort_levels: ['low', 'medium', 'high', 'xhigh', 'ultra'] },
+      { id: 'm-camel', name: 'Camel', effortLevels: ['low', 'high'] },
+      { id: 'm-none', name: 'None' },
+      { id: 'm-empty', name: 'Empty', effort_levels: [] },
+      { id: 'm-bad', name: 'Bad', effort_levels: 'high' },
+    ] }), { status: 200, headers: { 'Content-Type': 'application/json' } })))
+
+    const models = await listModels()
+    const byId = (id: string) => models.find((model) => model.id === id)
+
+    expect(modelEffortLevels(byId('m-ladder'))).toEqual(['low', 'medium', 'high', 'xhigh'])
+    expect(modelEffortLevels(byId('m-camel'))).toEqual(['low', 'high'])
+    // No list, an empty list and a malformed list all mean "no effort control".
+    for (const id of ['m-none', 'm-empty', 'm-bad']) expect(modelEffortLevels(byId(id))).toEqual([])
+    expect(modelEffortLevels(undefined)).toEqual([])
+    vi.unstubAllGlobals()
   })
 
   it('keeps the reasoning family so the deltas can actually arrive', () => {
@@ -1715,5 +2098,580 @@ describe('turn_timing, cost_basis and result_receipt', () => {
     expect(onUsage.mock.calls[0]?.[0]).toMatchObject({ costUsd: 0.0031, costBasis: undefined })
     expect(onTurnTiming).not.toHaveBeenCalled()
     expect(onDone).toHaveBeenCalledTimes(1)
+  })
+
+  it('passes the turn totals of a usage frame through, and states none for an older frame', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(sseResponse([
+      frame('usage', {
+        input_tokens: 2042,
+        output_tokens: 207,
+        cost_usd: 0.002456,
+        cost_basis: 'metered',
+        latency_ms: 900,
+        calls: 3,
+        unpriced_calls: 0,
+        cost_by_category: { input_usd: 0.002, cache_read_usd: 0, cache_write_usd: 0, output_usd: 0.000456 },
+      }),
+      frame('usage', { cost_usd: null, calls: 2, unpriced_calls: 1 }),
+      frame('usage', { cost_usd: 0.0031, cost_by_category: { input_usd: 0.001 } }),
+      frame('done', {}),
+    ])))
+    const onUsage = vi.fn()
+    await streamChat({ content: 'hi' }, { onUsage })
+    expect(onUsage.mock.calls[0]?.[0]).toMatchObject({
+      calls: 3,
+      unpricedCalls: 0,
+      costByCategory: { inputUsd: 0.002, cacheReadUsd: 0, cacheWriteUsd: 0, outputUsd: 0.000456 },
+    })
+    expect(onUsage.mock.calls[1]?.[0]).toMatchObject({ calls: 2, unpricedCalls: 1 })
+    expect(onUsage.mock.calls[1]?.[0].costByCategory).toBeUndefined()
+    // A breakdown with a missing part is no breakdown, and a frame without the keys has none.
+    expect(onUsage.mock.calls[2]?.[0].costByCategory).toBeUndefined()
+    expect(onUsage.mock.calls[2]?.[0].calls).toBeUndefined()
+  })
+})
+
+describe('usage_progress (WS27 S3)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const frame = (event: string, data: unknown) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
+
+  it('reads a progress frame by its closed keys, native and in an AG-UI CUSTOM envelope', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(sseResponse([
+      frame('usage_progress', {
+        calls: 2,
+        phase: 'tool_round',
+        input_tokens: 1200,
+        output_tokens: 90,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        cost_usd: 0.0041,
+        cost_basis: 'metered',
+      }),
+      frame('usage_progress', {
+        calls: 3,
+        phase: 'overhead',
+        input_tokens: 10,
+        output_tokens: 1,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        cost_usd: null,
+        unpriced_calls: 1,
+        future_key: true,
+      }),
+      frame('usage_progress', { calls: 4, phase: 'a_phase_this_build_does_not_know' }),
+      frame('CUSTOM', {
+        type: 'CUSTOM',
+        name: 'usage_progress',
+        value: {
+          calls: 5,
+          phase: 'answer',
+          input_tokens: 50,
+          output_tokens: 5,
+          cache_read_tokens: 0,
+          cache_write_tokens: 0,
+          cost_usd: 0.0002,
+          cost_basis: 'subscription',
+        },
+        runId: 'run-9',
+      }),
+      frame('done', {}),
+    ])))
+    const onUsageProgress = vi.fn()
+    const onUsage = vi.fn()
+    const onUnknownEvent = vi.fn()
+    await streamChat({ content: 'hi' }, { onUsageProgress, onUsage, onUnknownEvent })
+
+    expect(onUsageProgress.mock.calls.map(([event]) => event)).toEqual([
+      { calls: 2, phase: 'tool_round', inputTokens: 1200, outputTokens: 90, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0.0041, costBasis: 'metered' },
+      { calls: 3, phase: 'overhead', inputTokens: 10, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, unpricedCalls: 1 },
+      { calls: 4 },
+      { calls: 5, phase: 'answer', inputTokens: 50, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0.0002, costBasis: 'subscription' },
+    ])
+    // The second frame's null cost is no cost at all, and an unknown phase is no phase.
+    expect(onUsageProgress.mock.calls[1]?.[0].costUsd).toBeUndefined()
+    expect(onUsageProgress.mock.calls[2]?.[0].phase).toBeUndefined()
+    // A progress frame never stands in for the turn's usage frame, which this stream did not send.
+    expect(onUsage).not.toHaveBeenCalled()
+    expect(onUnknownEvent).not.toHaveBeenCalled()
+  })
+})
+
+describe('run_parked (WS03 S8-A, display only)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const frame = (event: string, data: unknown) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
+  const parked = (overrides: Record<string, unknown> = {}) => ({
+    run_id: 'run-42',
+    request_id: 'req-1',
+    status: 'parked',
+    reason: 'provider_exhausted',
+    resume_after: '2026-10-20T12:00:00Z',
+    ...overrides,
+  })
+
+  it('routes a run_parked frame with a known reason to onRunParked, not to onUnknownEvent', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(sseResponse([frame('run_parked', parked())])))
+    const onRunParked = vi.fn()
+    const onUnknownEvent = vi.fn()
+    await streamChat({ content: 'hi' }, { onRunParked, onUnknownEvent })
+
+    expect(onRunParked).toHaveBeenCalledTimes(1)
+    expect(onRunParked).toHaveBeenCalledWith({
+      runId: 'run-42',
+      requestId: 'req-1',
+      reason: 'provider_exhausted',
+      resumeAfter: '2026-10-20T12:00:00Z',
+    })
+    expect(onUnknownEvent).not.toHaveBeenCalled()
+  })
+
+  it('reads every closed reason, and gives a null time for a resume_after it cannot read', async () => {
+    const reasons = ['credential_window', 'provider_exhausted', 'upstream_unavailable', 'reauth_required']
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse(reasons.map((reason) => frame('run_parked', parked({ reason, resume_after: null })))),
+      ),
+    )
+    const onRunParked = vi.fn()
+    await streamChat({ content: 'hi' }, { onRunParked })
+
+    expect(onRunParked.mock.calls.map(([parkedFrame]) => parkedFrame.reason)).toEqual(reasons)
+    for (const [parkedFrame] of onRunParked.mock.calls) expect(parkedFrame.resumeAfter).toBeNull()
+  })
+
+  it('sends a run_parked frame with a reason it does not know, or none, to onUnknownEvent', async () => {
+    const unknownReason = parked({ reason: 'crash_interrupted' })
+    const noReason = { run_id: 'run-42' }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([frame('run_parked', unknownReason), frame('run_parked', noReason)]),
+      ),
+    )
+    const onRunParked = vi.fn()
+    const onUnknownEvent = vi.fn()
+    await streamChat({ content: 'hi' }, { onRunParked, onUnknownEvent })
+
+    expect(onRunParked).not.toHaveBeenCalled()
+    expect(onUnknownEvent.mock.calls).toEqual([
+      [{ name: 'run_parked', payload: unknownReason }],
+      [{ name: 'run_parked', payload: noReason }],
+    ])
+  })
+
+  it('does nothing, and does not report an unknown event, for a known frame when no handler is set', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(sseResponse([frame('run_parked', parked()), frame('done', {})])))
+    const onUnknownEvent = vi.fn()
+    const onDone = vi.fn()
+    await streamChat({ content: 'hi' }, { onUnknownEvent, onDone })
+
+    expect(onUnknownEvent).not.toHaveBeenCalled()
+    expect(onDone).toHaveBeenCalledTimes(1)
+  })
+
+  it('reads the same frame in an AG-UI CUSTOM envelope', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          frame('CUSTOM', { type: 'CUSTOM', name: 'run_parked', value: parked(), runId: 'run-42' }),
+          frame('CUSTOM', { type: 'CUSTOM', name: 'run_parked', value: parked({ reason: 'x' }), runId: 'run-42' }),
+        ]),
+      ),
+    )
+    const onRunParked = vi.fn()
+    const onUnknownEvent = vi.fn()
+    await streamChat({ content: 'hi' }, { onRunParked, onUnknownEvent })
+
+    expect(onRunParked).toHaveBeenCalledTimes(1)
+    expect(onRunParked.mock.calls[0]?.[0]).toMatchObject({ runId: 'run-42', reason: 'provider_exhausted' })
+    expect(onUnknownEvent.mock.calls).toEqual([
+      [{ name: 'run_parked', payload: parked({ reason: 'x' }) }],
+    ])
+  })
+})
+
+describe('lifecycle notices (WS15 S1)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const frame = (event: string, data: unknown) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
+
+  it('routes a retry notice with its counts and token to onRetryScheduled', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          frame('retry_scheduled', {
+            scope: 'tool',
+            tool: 'knowledge_search',
+            attempt: 2,
+            max_attempts: 3,
+            wait_ms: 250,
+            reason: 'rate_limited',
+            request_id: 'req-1',
+          }),
+        ]),
+      ),
+    )
+    const onRetryScheduled = vi.fn()
+    const onUnknownEvent = vi.fn()
+    await streamChat({ content: 'hi' }, { onRetryScheduled, onUnknownEvent })
+
+    expect(onRetryScheduled).toHaveBeenCalledWith({
+      scope: 'tool',
+      tool: 'knowledge_search',
+      attempt: 2,
+      maxAttempts: 3,
+      waitMs: 250,
+      reason: 'rate_limited',
+      requestId: 'req-1',
+    })
+    expect(onUnknownEvent).not.toHaveBeenCalled()
+  })
+
+  it('drops a retry notice with no reason or counts, and passes an unknown reason through as a string', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          frame('retry_scheduled', { scope: 'tool', attempt: 2, max_attempts: 3 }),
+          frame('retry_scheduled', { scope: 'tool', attempt: 2, max_attempts: 3, reason: 'a_new_token' }),
+        ]),
+      ),
+    )
+    const onRetryScheduled = vi.fn()
+    await streamChat({ content: 'hi' }, { onRetryScheduled })
+
+    expect(onRetryScheduled).toHaveBeenCalledTimes(1)
+    expect(onRetryScheduled.mock.calls[0]?.[0]).toMatchObject({ reason: 'a_new_token', waitMs: undefined })
+  })
+
+  it('reports compaction and context_change ungated, with unmeasured counts left out', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          frame('compaction', { scope: 'history', outcome: 'truncated', request_id: 'req-1' }),
+          frame('context_change', { change: 'history_shed', messages_dropped: 4, request_id: 'req-1' }),
+        ]),
+      ),
+    )
+    const onCompaction = vi.fn()
+    const onContextChange = vi.fn()
+    await streamChat({ content: 'hi' }, { onCompaction, onContextChange })
+
+    expect(onCompaction).toHaveBeenCalledWith({ scope: 'history', outcome: 'truncated', requestId: 'req-1' })
+    expect(onContextChange).toHaveBeenCalledWith({ change: 'history_shed', messagesDropped: 4, requestId: 'req-1' })
+  })
+})
+
+describe('WS09 S9 paged thread messages', () => {
+  const json = { headers: { 'Content-Type': 'application/json' }, status: 200 }
+
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    vi.unstubAllGlobals()
+  })
+
+  it('sends the page size and the cursor, and reads has_more from the page the BFF returns', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: {
+        thread_id: 't1',
+        messages: [
+          { message_id: '01M', role: 'user', content: 'Older question' },
+          { message_id: '01N', role: 'assistant', content: 'Older answer' },
+        ],
+        has_more: true,
+      },
+    }), json))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const page = await getThreadMessages('t1', { limit: 100, beforeMessageId: '01P' })
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain('/api/v1/chat/threads/t1/messages?limit=100&before=01P')
+    expect(page.hasMore).toBe(true)
+    expect(page.messages.map((message) => [message.id, message.content])).toEqual([
+      ['01M', 'Older question'],
+      ['01N', 'Older answer'],
+    ])
+  })
+
+  it('reports no older page when the oldest message has no id to continue from', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: { messages: [{ role: 'user', content: 'Written before ids were returned' }], has_more: true },
+    }), json)))
+
+    const page = await getThreadMessages('t1', { limit: 100 })
+
+    expect(page.hasMore).toBe(false)
+    expect(page.messages).toHaveLength(1)
+  })
+
+  it('reads the whole thread as a plain list, with no query, when no page is asked for', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: { thread_id: 't1', messages: [{ message_id: '01M', role: 'user', content: 'Only' }] },
+    }), json))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const messages = await getThreadMessages('t1')
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toMatch(/\/api\/v1\/chat\/threads\/t1\/messages$/)
+    expect(Array.isArray(messages)).toBe(true)
+    expect(messages.map((message) => message.id)).toEqual(['01M'])
+  })
+
+  it('turns paging on only for the exact value true', () => {
+    expect(pagedTranscriptEnabled()).toBe(false)
+    vi.stubEnv('VITE_CHAT_PAGED_TRANSCRIPT', 'TRUE')
+    expect(pagedTranscriptEnabled()).toBe(false)
+    vi.stubEnv('VITE_CHAT_PAGED_TRANSCRIPT', '1')
+    expect(pagedTranscriptEnabled()).toBe(false)
+    vi.stubEnv('VITE_CHAT_PAGED_TRANSCRIPT', 'true')
+    expect(pagedTranscriptEnabled()).toBe(true)
+  })
+})
+
+describe('paged thread listing', () => {
+  const json = { headers: { 'Content-Type': 'application/json' }, status: 200 }
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    __resetRetentionForTests()
+  })
+
+  it('sends the cursor and reads the next cursor the BFF repeats in data', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: {
+        sessions: [{ threadId: 't51', title: 'Fifty-first', updatedAt: '2026-06-17T10:00:00.000Z' }],
+        nextCursor: 'cursor_2',
+      },
+      meta: { next_cursor: 'cursor_2' },
+    }), json))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const page = await listChatThreadsPage({ cursor: 'cursor_1' })
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain('/api/v1/chat/threads?cursor=cursor_1')
+    expect(page.nextCursor).toBe('cursor_2')
+    expect(page.sessions.map((session) => session.threadId)).toEqual(['t51'])
+  })
+
+  it('reads a null next cursor as the last page', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: { sessions: [], nextCursor: null },
+    }), json)))
+
+    await expect(listChatThreadsPage()).resolves.toEqual({ sessions: [], nextCursor: null })
+  })
+
+  it('reads one thread by id and reports a thread the server no longer has as null', async () => {
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: { session: { threadId: 'thread_81', title: 'Beyond the first page', updatedAt: '2026-06-17T10:00:00.000Z' } },
+      }), json))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: { code: 'thread_not_found', message: 'The chat thread no longer exists.' },
+      }), { headers: { 'Content-Type': 'application/json' }, status: 404 })))
+
+    await expect(getChatThread('thread_81')).resolves.toMatchObject({
+      threadId: 'thread_81',
+      title: 'Beyond the first page',
+    })
+    await expect(getChatThread('thread_gone')).resolves.toBeNull()
+  })
+
+  it('walks every page before reconciling, so a thread on a later page keeps its local copy', async () => {
+    upsertChatThreadHistory({
+      threadId: 'thread_page_two',
+      title: 'Second page',
+      preview: '',
+      updatedAt: '2020-01-01T00:00:00.000Z',
+    })
+    upsertChatThreadHistory({
+      threadId: 'thread_erased',
+      title: 'Erased upstream',
+      preview: '',
+      updatedAt: '2020-01-01T00:00:00.000Z',
+    })
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: {
+          sessions: [{ threadId: 'thread_page_one', title: 'First page', updatedAt: '2026-06-17T10:00:00.000Z' }],
+          nextCursor: 'cursor_2',
+        },
+      }), json))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: {
+          sessions: [{ threadId: 'thread_page_two', title: 'Second page', updatedAt: '2026-06-16T10:00:00.000Z' }],
+          nextCursor: null,
+        },
+      }), json))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const sessions = await listChatThreads()
+
+    expect(sessions.map((session) => session.threadId)).toEqual(['thread_page_one', 'thread_page_two'])
+    expect(String(fetchMock.mock.calls[1]?.[0])).toContain('/api/v1/chat/threads?cursor=cursor_2')
+    const local = readChatThreadHistory().map((item) => item.threadId)
+    expect(local).toContain('thread_page_two')
+    expect(local).not.toContain('thread_erased')
+  })
+
+  it('keeps a local copy a partial listing does not show, and reconciles a complete one', async () => {
+    upsertChatThreadHistory({
+      threadId: 'thread_beyond_page',
+      title: 'Older chat',
+      preview: '',
+      updatedAt: '2020-01-01T00:00:00.000Z',
+    })
+    // A cursor that repeats ends the walk without reaching the last page.
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => new Response(JSON.stringify({
+      data: { sessions: [], nextCursor: 'cursor_2' },
+    }), json)))
+
+    await listChatThreads()
+    expect(readChatThreadHistory().map((item) => item.threadId)).toContain('thread_beyond_page')
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: { sessions: [], nextCursor: null },
+    }), json)))
+
+    await listChatThreads()
+    expect(readChatThreadHistory().map((item) => item.threadId)).not.toContain('thread_beyond_page')
+  })
+})
+
+describe('chat-client thread search (WS17 S4)', () => {
+  const json = { headers: { 'Content-Type': 'application/json' }, status: 200 }
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('sends the trimmed query and a limit, and maps each hit with its match markers intact', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: {
+        hits: [{
+          threadId: 'thread_old',
+          messageId: 'message_4',
+          role: 'assistant',
+          snippet: 'the receipt is filed',
+          createdAt: '2026-08-02T09:00:00.000Z',
+          threadTitle: 'Billing',
+          archived: true,
+        }],
+      },
+      meta: { next_cursor: null },
+    }), json))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(searchChatThreads('  receipt  ', { limit: 20.7 })).resolves.toEqual({
+      status: 'ok',
+      hits: [{
+        threadId: 'thread_old',
+        messageId: 'message_4',
+        role: 'assistant',
+        snippet: 'the receipt is filed',
+        createdAt: '2026-08-02T09:00:00.000Z',
+        threadTitle: 'Billing',
+        archived: true,
+      }],
+    })
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain('/api/v1/chat/threads/search?q=receipt&limit=20')
+  })
+
+  it('encodes the query so nothing in it can add a parameter', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: { hits: [] } }), json))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await searchChatThreads('a&threadId=other')
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain('q=a%26threadId%3Dother')
+    expect(String(fetchMock.mock.calls[0]?.[0])).not.toContain('&threadId=')
+  })
+
+  it('reads the typed unavailable answers as a result, not an error', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      error: { code: 'history_search_disabled', message: 'off' },
+    }), { headers: { 'Content-Type': 'application/json' }, status: 503 })))
+    await expect(searchChatThreads('receipt')).resolves.toEqual({ status: 'unavailable', reason: 'disabled' })
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      error: { code: 'history_search_timeout', message: 'slow' },
+    }), { headers: { 'Content-Type': 'application/json' }, status: 503 })))
+    await expect(searchChatThreads('receipt')).resolves.toEqual({ status: 'unavailable', reason: 'timeout' })
+  })
+
+  it('rejects other failures so the caller can tell a broken request from a disabled search', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      error: { code: 'upstream_unavailable', message: 'down' },
+    }), { headers: { 'Content-Type': 'application/json' }, status: 502 })))
+
+    await expect(searchChatThreads('receipt')).rejects.toBeInstanceOf(ApiError)
+  })
+
+  it('drops a hit without a thread or message id, and never sends a request for an empty query', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: { hits: [{ threadId: 'thread_only' }, { threadId: 'thread_ok', messageId: 'message_ok' }] },
+    }), json))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await searchChatThreads('receipt')
+    expect(result.status === 'ok' ? result.hits.map((hit) => hit.threadId) : []).toEqual(['thread_ok'])
+
+    await expect(searchChatThreads('   ')).rejects.toThrow()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('chat-client thread listing under WS09 S6', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.unstubAllEnvs()
+  })
+
+  const listing = () => new Response(JSON.stringify({
+    data: { sessions: [{ threadId: 'thread_1', title: 'One', preview: '', updatedAt: '2026-06-17T10:00:00.000Z' }] },
+  }), { headers: { 'Content-Type': 'application/json' }, status: 200 })
+
+  it('reads the flag only as the exact literal true', () => {
+    vi.stubEnv('VITE_CHAT_PARALLEL_THREAD_LOAD', 'true')
+    expect(parallelThreadLoadEnabled()).toBe(true)
+    vi.stubEnv('VITE_CHAT_PARALLEL_THREAD_LOAD', 'TRUE')
+    expect(parallelThreadLoadEnabled()).toBe(false)
+    vi.stubEnv('VITE_CHAT_PARALLEL_THREAD_LOAD', '1')
+    expect(parallelThreadLoadEnabled()).toBe(false)
+  })
+
+  it('shares one walk between concurrent callers, and gives each its own array', async () => {
+    vi.stubEnv('VITE_CHAT_PARALLEL_THREAD_LOAD', 'true')
+    const fetchMock = vi.fn(async () => listing())
+    vi.stubGlobal('fetch', fetchMock)
+
+    const [first, second] = await Promise.all([listChatThreads(), listChatThreads()])
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(second).toEqual(first)
+    expect(second).not.toBe(first)
+    // Once that walk has settled, the next call lists again rather than reusing it.
+    await listChatThreads()
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('walks the listing for every concurrent call while the flag is off', async () => {
+    const fetchMock = vi.fn(async () => listing())
+    vi.stubGlobal('fetch', fetchMock)
+
+    await Promise.all([listChatThreads(), listChatThreads()])
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 })

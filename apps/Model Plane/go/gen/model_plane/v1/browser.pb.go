@@ -70,7 +70,17 @@ type AcquireGrantRequest struct {
 	// asks for an open-web grant for a person's own browsing. Eligibility is
 	// server-decided: a human_browse request needs a user principal, carries no
 	// allowed_domains, and is refused when the broker's policy has it off.
-	GrantKind     string `protobuf:"bytes,50,opt,name=grant_kind,json=grantKind,proto3" json:"grant_kind,omitempty"`
+	GrantKind string `protobuf:"bytes,50,opt,name=grant_kind,json=grantKind,proto3" json:"grant_kind,omitempty"`
+	// The Space the run belongs to (WS21-S8). The site policy reads the Space
+	// floor from it; empty outside a Space. Tag 11 (R-6 allocates 10 to zdr).
+	SpaceId string `protobuf:"bytes,11,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	// Ask for a read-only grant (WS21-S4): the broker narrows the grant to the
+	// read level and reports read_only. Until the durable store persists the
+	// flag, a read-only request is refused unless the grant is Zero Data Retention.
+	ReadOnly bool `protobuf:"varint,12,opt,name=read_only,json=readOnly,proto3" json:"read_only,omitempty"`
+	// Requested lifetime in seconds (WS21-S4). Zero uses the broker default; the
+	// broker's maximum (BROWSER_GRANT_MAX_TTL) caps it.
+	TtlSeconds    int32 `protobuf:"varint,13,opt,name=ttl_seconds,json=ttlSeconds,proto3" json:"ttl_seconds,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -217,6 +227,27 @@ func (x *AcquireGrantRequest) GetGrantKind() string {
 	return ""
 }
 
+func (x *AcquireGrantRequest) GetSpaceId() string {
+	if x != nil {
+		return x.SpaceId
+	}
+	return ""
+}
+
+func (x *AcquireGrantRequest) GetReadOnly() bool {
+	if x != nil {
+		return x.ReadOnly
+	}
+	return false
+}
+
+func (x *AcquireGrantRequest) GetTtlSeconds() int32 {
+	if x != nil {
+		return x.TtlSeconds
+	}
+	return 0
+}
+
 type AcquireGrantResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Grant identifier (ULID).
@@ -258,14 +289,19 @@ type AcquireGrantResponse struct {
 	// policy) or "open_web" (a human_browse grant: every public host except
 	// denied_domains). Never an empty value from a WS8.C broker.
 	PolicyMode string `protobuf:"bytes,50,opt,name=policy_mode,json=policyMode,proto3" json:"policy_mode,omitempty"`
-	// Host suffixes an open_web grant may never reach (internal namespaces and
-	// metadata names). Empty for an allowlist grant.
+	// Hosts this grant may never reach. For an open_web grant: the host suffixes
+	// it is fenced off (internal namespaces and metadata names). For an allowlist
+	// grant: the requested hosts the site policy dropped (WS21-S4), at most nine;
+	// empty when the policy is off or nothing was dropped.
 	DeniedDomains []string `protobuf:"bytes,51,rep,name=denied_domains,json=deniedDomains,proto3" json:"denied_domains,omitempty"`
 	// The hard backstop a renewal can never pass. Equals expires_at for a kind
 	// that is not renewable.
 	AbsoluteExpiresAt *timestamppb.Timestamp `protobuf:"bytes,52,opt,name=absolute_expires_at,json=absoluteExpiresAt,proto3" json:"absolute_expires_at,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// True when the grant is read-only (WS21-S4). Quarry must refuse a mutating
+	// action on it.
+	ReadOnly      bool `protobuf:"varint,12,opt,name=read_only,json=readOnly,proto3" json:"read_only,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *AcquireGrantResponse) Reset() {
@@ -429,6 +465,13 @@ func (x *AcquireGrantResponse) GetAbsoluteExpiresAt() *timestamppb.Timestamp {
 		return x.AbsoluteExpiresAt
 	}
 	return nil
+}
+
+func (x *AcquireGrantResponse) GetReadOnly() bool {
+	if x != nil {
+		return x.ReadOnly
+	}
+	return false
 }
 
 type RevokeGrantRequest struct {
@@ -709,7 +752,10 @@ type ValidateGrantResponse struct {
 	// a presented run grant to that run: a run grant must not back a different
 	// run. Empty for a grant issued without one. Field 13 with the grant's base
 	// fields: 54-59 stay reserved for the WS8.C follow-ons of the R-6 ledger.
-	SessionKey    string `protobuf:"bytes,13,opt,name=session_key,json=sessionKey,proto3" json:"session_key,omitempty"`
+	SessionKey string `protobuf:"bytes,13,opt,name=session_key,json=sessionKey,proto3" json:"session_key,omitempty"`
+	// True when the grant is read-only (WS21-S4). Consumers must refuse a
+	// mutating action on it. Field 14: 13 is session_key.
+	ReadOnly      bool `protobuf:"varint,14,opt,name=read_only,json=readOnly,proto3" json:"read_only,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -896,6 +942,13 @@ func (x *ValidateGrantResponse) GetSessionKey() string {
 		return x.SessionKey
 	}
 	return ""
+}
+
+func (x *ValidateGrantResponse) GetReadOnly() bool {
+	if x != nil {
+		return x.ReadOnly
+	}
+	return false
 }
 
 type DeriveRunGrantRequest struct {
@@ -1324,7 +1377,7 @@ var File_model_plane_v1_browser_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\n" +
-	"\x1cmodel_plane/v1/browser.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xf5\x04\n" +
+	"\x1cmodel_plane/v1/browser.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xce\x05\n" +
 	"\x13AcquireGrantRequest\x12\x1f\n" +
 	"\vsession_key\x18\x01 \x01(\tR\n" +
 	"sessionKey\x12\x12\n" +
@@ -1344,7 +1397,11 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\rbudget_source\x18+ \x01(\tR\fbudgetSource\x121\n" +
 	"\x15budget_minted_at_unix\x18, \x01(\x03R\x12budgetMintedAtUnix\x12\x1d\n" +
 	"\n" +
-	"grant_kind\x182 \x01(\tR\tgrantKind\"\xa5\x06\n" +
+	"grant_kind\x182 \x01(\tR\tgrantKind\x12\x19\n" +
+	"\bspace_id\x18\v \x01(\tR\aspaceId\x12\x1b\n" +
+	"\tread_only\x18\f \x01(\bR\breadOnly\x12\x1f\n" +
+	"\vttl_seconds\x18\r \x01(\x05R\n" +
+	"ttlSeconds\"\xc8\x06\n" +
 	"\x14AcquireGrantResponse\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12\x1a\n" +
 	"\bendpoint\x18\x02 \x01(\tR\bendpoint\x129\n" +
@@ -1367,7 +1424,8 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\vpolicy_mode\x182 \x01(\tR\n" +
 	"policyMode\x12%\n" +
 	"\x0edenied_domains\x183 \x03(\tR\rdeniedDomains\x12J\n" +
-	"\x13absolute_expires_at\x184 \x01(\v2\x1a.google.protobuf.TimestampR\x11absoluteExpiresAt\"G\n" +
+	"\x13absolute_expires_at\x184 \x01(\v2\x1a.google.protobuf.TimestampR\x11absoluteExpiresAt\x12\x1b\n" +
+	"\tread_only\x18\f \x01(\bR\breadOnlyJ\x04\b\r\x10\x0e\"G\n" +
 	"\x12RevokeGrantRequest\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\"/\n" +
@@ -1377,7 +1435,7 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\x15BrowserHealthResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\"1\n" +
 	"\x14ValidateGrantRequest\x12\x19\n" +
-	"\bgrant_id\x18\x01 \x01(\tR\agrantId\"\xff\x06\n" +
+	"\bgrant_id\x18\x01 \x01(\tR\agrantId\"\x9c\a\n" +
 	"\x15ValidateGrantResponse\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12\x16\n" +
 	"\x06active\x18\x02 \x01(\bR\x06active\x129\n" +
@@ -1405,7 +1463,8 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\vresource_id\x185 \x01(\tR\n" +
 	"resourceId\x12\x1f\n" +
 	"\vsession_key\x18\r \x01(\tR\n" +
-	"sessionKey\"\xd9\x03\n" +
+	"sessionKey\x12\x1b\n" +
+	"\tread_only\x18\x0e \x01(\bR\breadOnly\"\xd9\x03\n" +
 	"\x15DeriveRunGrantRequest\x12&\n" +
 	"\x0fparent_grant_id\x18\x01 \x01(\tR\rparentGrantId\x12\x1f\n" +
 	"\vsession_key\x18\x02 \x01(\tR\n" +

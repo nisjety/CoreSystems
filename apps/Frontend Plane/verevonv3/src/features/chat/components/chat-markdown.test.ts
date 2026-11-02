@@ -399,6 +399,71 @@ describe('parseInline — bare URL autolinking', () => {
   })
 })
 
+// A `[text](target)` target is model-authored: only http, https and mailto become a link.
+describe('parseInline — markdown link targets', () => {
+  it('keeps a safe markdown link as a real link', () => {
+    const nodes = renderInline('[Kilde](https://example.com/a)')
+    const link = nodes.find((node): node is Element => node instanceof Element && node.tagName === 'A')
+    expect(link?.getAttribute('href')).toBe('https://example.com/a')
+    expect(link?.textContent).toBe('Kilde')
+  })
+
+  it.each([
+    '[klikk](javascript:alert)',
+    '[klikk](JaVaScRiPt:alert)',
+    '[klikk](java\tscript:alert)',
+    '[klikk](data:text/html,hei)',
+    '[klikk](file:///etc/passwd)',
+    '[klikk](blob:https://example.com/x)',
+    '[klikk](vbscript:msgbox)',
+    '[klikk](//evil.example.com)',
+    '[klikk](/innstillinger)',
+  ])('renders an unsafe target %s as inert text, never an anchor', (markdown) => {
+    const nodes = renderInline(markdown)
+    expect(nodes.some((node) => node instanceof Element && node.tagName === 'A')).toBe(false)
+    const blocked = nodes.find((node): node is Element => node instanceof Element && node.classList.contains('verevon-chat-link-blocked'))
+    expect(blocked?.tagName).toBe('SPAN')
+    expect(blocked?.textContent).toBe('klikk')
+    expect(blocked?.getAttribute('title')).toBeTruthy()
+  })
+})
+
+describe('parseInline — link safety (WS07-S5)', () => {
+  it.each([
+    '[klikk](javascript:alert(1))',
+    '[klikk](JAVASCRIPT:alert(1))',
+    '[klikk](data:text/html;base64,aGk=)',
+    '[klikk](vbscript:msgbox)',
+    '[klikk](file:///etc/passwd)',
+    '[klikk](example.com/a)',
+    '[klikk](www.example.com)',
+  ])('renders %s as text, never an anchor', (markdown) => {
+    const nodes = renderInline(markdown)
+    expect(nodes.some((node) => node instanceof Element && node.tagName === 'A')).toBe(false)
+  })
+
+  it('carries the real target as the title of a safe anchor, markdown or bare', () => {
+    const markdown = renderInline('[Kilde](https://example.com/a)')
+    const link = markdown.find((node): node is Element => node instanceof Element && node.tagName === 'A')
+    expect(link?.getAttribute('title')).toBe('https://example.com/a')
+    const bare = renderInline('se https://example.com/b her')
+    const bareLink = bare.find((node): node is Element => node instanceof Element && node.tagName === 'A')
+    expect(bareLink?.getAttribute('title')).toBe('https://example.com/b')
+  })
+
+  it('shows the real host after a label that reads as a different site', () => {
+    const nodes = renderInline('[example.com](https://other.test/login)')
+    expect(nodes.some((node) => typeof node === 'string' && node.includes('other.test'))).toBe(true)
+  })
+
+  it('adds no host suffix when the label matches the target or is plain text', () => {
+    for (const markdown of ['[example.com](https://example.com/x)', '[www.example.com](https://example.com)', '[Kilde](https://other.test)']) {
+      const nodes = renderInline(markdown)
+      expect(nodes.filter((node) => typeof node === 'string')).toHaveLength(0)
+    }
+  })
+})
+
 // §3.2: "- [ ]" / "- [x]" rendered as plain bullets, with no way to tell a
 // task list from an ordinary one.
 describe('parseMarkdownBlocks — task lists', () => {

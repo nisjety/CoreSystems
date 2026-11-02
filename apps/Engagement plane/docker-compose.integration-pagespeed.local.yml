@@ -1,0 +1,12 @@
+# Optional project-quota credential. Only Integration Core receives the key;
+# Marketing and the browser consume compact, organization-scoped audit results.
+services:
+  integration-api:
+    environment:
+      PAGESPEED_API_KEY_FILE: /run/secrets/pagespeed_api_key
+    secrets:
+      - pagespeed_api_key
+
+secrets:
+  pagespeed_api_key:
+    file: ${INTEGRATION_LOCAL_PAGESPEED_KEY_FILE:?set a protected PageSpeed API key file}

@@ -288,6 +288,12 @@ Collect a week of the `browser_op_duration_ms` debug lines (fields `op`, `ms`) b
 
 A tab attach does not hold the driver's browser lock while it runs (WS3.F; see "Browser capacity, crashes, the idle reaper and `/ready`"); the `tab_attach` deadline bounds the attach itself.
 
+**SC4 (2026-10-28), supersedes the numbers and the request-timeout sentence above.** Navigate and pdf are now 25 s. chromiumoxide 0.9.1 ignores the 40 s `request_timeout`: every CDP command and every navigation has its own fixed 30 s timer (`handler::REQUEST_TIMEOUT`), so the driver keeps every single-call operation below 30 s, and the library's `Request timed out.` is turned into the operation's typed `504 TIMEOUT` at any `QUARRY_BROWSER_DEADLINE_SCALE`, with `deadline_ms` the bound that actually expired (at most 30000). After a navigate `TIMEOUT` the driver stops the load before it answers, so the page can be read at once: the tab keeps the slow page if its document had arrived (only an image, a frame or the load event hung) and the page it had before if not. The same holds for a run's first navigate (T4b, 2026-10-29): the tab is opened on `about:blank` before it navigates, so a timeout keeps it (on `about:blank` if the document had not arrived) and the next step reads it instead of answering `no_current_page`. The edge's check of the page a step landed on (REST step, browser socket, delegate step; `check_landed_page`) accepts exactly `about:blank` as a tab with no page yet (T4b-1, 2026-10-29): it was a 403 "outside the run's allowed domains". It runs before the receipt and the checkpoint, so a refused step is a `failed` receipt (`SECURITY_BLOCKED`, no observation, the driver's cost since the action ran) and its page never reaches the checkpoint; its egress receipts go out with the next observation, and its `ObservationReady` event and screenshot artifact are already written. `about:blank` stays refused as a navigation target by the edge only (gate 11, tabs, attach, delegate navigate); the browser's `guard_navigation_target` admits it, as it loads nothing. A run resumed from a checkpoint with no URL has, on chromium, no tab, as a run that never navigated; its next observing step opens a blank one (SC4 D1, below). A checkpoint keeps `""` for a blank tab, and a resume treats a stored `about:blank` the same (no recovery navigation). This covers `navigate` only: a new tab opened with a URL (the new-tab and attach routes) still closes when its navigation fails, so a run whose first action is such a tab and times out still has no tab (open follow-up; an observing step after it now gets a blank one, SC4 D1). A `goto` dropped mid-navigation (client gone, outer deadline) marks its tab the same way, and the next navigate stops and clears it. chromiumoxide still holds the stopped navigation and would queue the next one behind it for up to 30 s, so the tab's next navigate first moves it to `about:blank` to clear that (about 0.1 s). Both steps run under op `navigate_recovery` (3 s, scaled); a failure is only logged as `chromiumoxide navigation recovery failed`. An agent step whose observation read (page state, content, accessibility tree) times out now fails at that first read; after an action that can change the page its `effect` is `unknown` and `retryable` false, after a wait or a read-only action `none` and true.
+
+**SC4 D3 (2026-10-29): a navigation the browser's network guard refuses is refused at once.** The tab's Fetch guard refuses a request with `Fetch.failRequest(Aborted)`; for a main-frame document that commits nothing and raises no error, so a navigate to a host outside the run's list, or one redirected there (live R3-SC4: `slow.crawl.test/redir` 302 to fixture-b), waited out the whole navigate deadline (25 s) and answered 504 `TIMEOUT`, `effect: "unknown"`; the block showed only in the next observation's egress receipts. The driver now watches the navigation each `goto` waits on (its own first main-frame document request, for the `goto`'s URL less its fragment or the `https` form of an `http` one, and every redirect hop of it, matched by `redirectedRequestId` or, when Chromium leaves that out, the chain's network id) and ends it as soon as the guard refuses one: 403 `SECURITY_BLOCKED`, `details {reason: domain_grant_blocked | url_or_dns_blocked, op: navigate}`, no URL or host, the message for `domain_grant_blocked` being the edge's own "browser navigation is outside the run's allowed domains" (`docs/ERROR_REASONS.md`). The guard records the egress receipt before it ends the `goto`. The refused navigation still holds chromiumoxide's queue, so it gets the TIMEOUT bookkeeping: the tab is marked, the load stopped and its metadata refreshed, and the next navigate drains it first; the tab keeps the page it had (`about:blank` on a run's first step). Every navigation through the chromium `goto` has it (agent navigate on every step path, a run's first step, the resume's recovery navigation, a browser-rendered scrape), and so does the attach navigation of a new tab opened with a URL (that tab is then closed, as on any failure there). `reload`, `back` and `forward` do not wait for a navigation, so they never had the wait. A document request the page makes itself (a script or meta redirect after the document committed, a navigation the old page starts for another URL while the `goto` waits, a frame) and any subresource never end a `goto`: a refused image is only a receipt. A `goto` whose own request goes unrecognised (a URL Chromium rewrites beyond that) only loses the early end and runs to its deadline as before (review of `3bc6823ca`). For a scrape the browser is the last driver of its plan, so a refused redirect ends the fetch at once with the same code instead of after 25 s (a static shell already held is still returned).
+
+**SC4 D1 (2026-10-29): an observing step on a session with no page answers the blank tab.** A chromium session has no tab until something opens one: a run that never navigated, a run resumed from a checkpoint with no URL (the resume makes no recovery navigation; live R3-SC4 RS), a run whose first new-tab-with-URL failed. Its first wait answered 502 `DRIVER_FAILED` `no_current_page` (`retryable: false`), while a navigate worked. An agent step whose action only reads the page (`wait`, `wait_for`, `screenshot`, `pdf`, `get_content`) now first asks the driver for a page (`BrowserDriver::ensure_page`, called by the shared observation runner, so the REST step, the browser socket and the delegate step all have it): a session with no tab gets a placeholder tab on `about:blank`, active, navigated nowhere (opened, like any page, only with the pinned egress proxy and the session's installed egress policy), and the step answers 200 with the blank observation (`url` `about:blank`, a `completed` receipt, the checkpoint keeps `""`), exactly as after a first-step navigate TIMEOUT (T4b-1). This is also the answer to a fresh run whose first step is a wait: no navigation first is needed. A `wait_for` waits on that blank tab as on any page (`body` is there at once; a selector a blank page lacks times out as it would anywhere); its snapshot forms need an observed snapshot, so a page, first. `about:blank` stays refused as a navigation target at the edge. An acting step (click, type, select, ...) on a session with no page still answers `no_current_page`; a lost or released session and a pinned handle whose tab is gone keep their errors, and a session that has a tab keeps it. The session's next `goto` navigates the placeholder tab (no second tab). WS17.C2 profiles: the placeholder has no URL to plan the restore for, so it neither loads nor restores the saved profile; the session's first `goto` does it on that tab before its navigation (load, locale/timezone emulation, cookies and web storage planned for the `goto`'s target, once per context), the same as a first `goto` that opens its own tab, including the 503 `profile_key_unavailable` refusal. A session that only observed never restored its profile and its release does not save over it (`profile_save_skipped_not_restored`).
+
 ## Document parser isolation
 
 With `QUARRY_EDGE__DOC_ROUTING=on` a PDF or DOCX is parsed for its text. `lopdf` inflates a compressed stream with no output cap, so a few megabytes of PDF can ask for gigabytes; a permit and a deadline cannot stop an allocation. `QUARRY_EDGE__DOC_PARSE_ISOLATION` chooses where the parser runs:
@@ -1111,7 +1117,7 @@ Each scrape fetch through the local Chromium driver now gets its own browser ses
 
 ## Agent run budgets: meta.budget, cost_source, usage and agent.budget_exhausted (WS6.B remainder, W2-U21, built, NOT run, 2026-10-23)
 
-What changed on top of the 77374adc gate: a step response of an agent run carries `meta.budget`; every receipt carries `cost_source` (migration `0012_step_receipt_cost_source.sql`, nullable, no backfill); a failed attempt's receipt carries the flat cost it was charged; `DELETE /v1/agent/runs/{id}` returns `usage`; the first refusal per segment emits `agent_budget_exhausted` (durable history; not in the App Shell SSE) and checkpoints the latch. Contract: CONTRACTS.md, "Agent run budgets" (end of file).
+What changed on top of the 77374adc gate: a step response of an agent run carries `meta.budget`; every receipt carries `cost_source` (migration `0012_step_receipt_cost_source.sql`, nullable, no backfill); a failed attempt's receipt carries the flat cost it was charged; `DELETE /v1/agent/runs/{id}` returns `usage`; the first refusal per segment emits `agent_budget_exhausted` (durable history, and on the run's SSE stream as `agent.budget_exhausted`) and checkpoints the latch. Contract: CONTRACTS.md, "Agent run budgets" (end of file).
 
 - Flag: `QUARRY_EDGE__BUDGET_ENFORCEMENT` = `off` | `shadow` (default) | `on`. Limits are unchanged (`QUARRY_EDGE__AGENT_DEFAULT_*`, `QUARRY_EDGE__AGENT_CEILING_*`, `QUARRY_EDGE__BUDGET_ATTEMPT_FACTOR`, `QUARRY_EDGE__BUDGET_BROWSER_SECOND_USD`); the numbers are placeholders until X-12.
 - Migration: `0012_step_receipt_cost_source.sql` is applied by `run_migrations` on boot (the runner embeds the whole directory). It is additive and idempotent (`ADD COLUMN IF NOT EXISTS`). Old binaries ignore the column.
@@ -1897,6 +1903,7 @@ Not done (open, see `.plan-work/quarry-w1w2/depth/W2-U67.md`): the list-tabs vie
 - A live run has two lanes: the person's (`RunEntry.human_lane`) and each attachment's (`AttachState.lane`). A lane owns its observation context and its last observation. The run summary (current URL, page hash, successful step count, last observation) sits on the run entry.
 - A step takes its lane, then the run entry. The entry is released while the browser call runs. So a person's action does not wait for a delegate step, the reverse holds too, and a projection reads the entry without waiting for a lane. Lock order: a lane, then the entry, never the reverse.
 - The step key is reserved after admission from one run-wide counter, so event and receipt keys are unique across lanes. A refused action reserves no key. A failed browser call now uses up its key (before, a retry reused the number). The projection, the checkpoint and the legacy step cap still count successful steps only.
+- Step keys stay unique across a resume (D2, R3-SC4 depth 2, 2026-10-29). A resume used to start the keys at the checkpoint's `step`, the count of successful steps, so a run with a failed step reused a key after a resume (live: receipts with step 1 twice, a completed wait before the resume and a failed wait after it; the same key in the `action.started` / `observation.ready` idempotency keys, the proof id and the SPA's replay entry id). Every checkpoint save now stores `next_step`, the run-wide counter (a JSON field in `state`, no migration), and a resume starts at the highest of `next_step`, `step` and one past the run's last receipt (`resume_next_step`). A failed step saves a checkpoint too (best effort, logged as `could not checkpoint a failed step`; not for a ZDR or closed run), because its receipt may not be kept (a person's step under `HUMAN_RECEIPT_MODE=none`, a failed receipt write); that save also keeps the failed step's budget charge. The receipt step covers a failed step whose checkpoint save failed and a run checkpointed before the field existed (it reads as 0). A resume reads only the run's highest receipt step (`last_step_for_org`, `SELECT MAX(step)` in Postgres, no payload decoded); if that read fails the resume fails, as a failed checkpoint read does. Left open: a failed step whose receipt write and checkpoint save both fail can still have its key handed out again after a resume. Keys may skip numbers after a resume (they already did for failed steps); `step`, the step cap, the projection's `step` and the key of a takeover's `skipped` receipt are unchanged.
 - A close (explicit, expiry, drain) waits up to 5 s in total for a lane that is still running an action, then releases the browser session. A lane still held at that point is logged (`close: an action still holds a lane; releasing anyway`) and released anyway.
 - No flag and no route change. A run without an attachment has one lane; its behaviour is the same apart from the key note above.
 - Not built or not run: the browser-backed evidence (a delegate `wait` of 8 s with a person's `click` returning in under one second, measured), the sweeper release of an idle attachment and the `SessionEnded` end item at close (W2-U67 depth). Test phase: `cargo test -p quarry-edge agent_ lane` (the seven lane tests in `agent_routes/tests.rs`; they check the locks, not a real slow step).
@@ -1955,3 +1962,93 @@ This section corrects and extends "Profile owner and ACL check (WS17.P2, unit W2
 - Rollout, in order, none of it done: rebuild the edge so the stamp is live; run the count and note the time; observe a week (`quarry_profile_owner_decisions_total`, the stamp counter); choose between a manual, org-confirmed rescue (`UPDATE quarry_profiles SET owner_user_id = '<actor id>' WHERE org_id = '<org id>' AND profile_id = '<profile id>' AND owner_user_id IS NULL;`) and a backfill from run records (user actors only); then set `QUARRY_EDGE__PROFILE_OWNER_ENFORCE=enforce` and restart; then run the two-user evidence below.
 - Tests (run in the build, Linux container): `cargo test -p quarry-edge --lib profile_guard` (16), `--test profile_owner` (8), `--test profile_guard` (8), `--test profile_attach` (10, run-path tests: person stamped under observe and enforce, org_shared scope, no persistent profile, service principal not stamped, off, ZDR refused with no row, existing row untouched), `cargo test -p quarry-browser --lib session` (52), `cargo test -p quarry-runtime --lib profile` (48). The Postgres store tests (default scope, stamp insert-only and tombstone) compile under `--features postgres-queue` and skip without `DATABASE_URL`: not run against a database. The Redis-gated `metadata_methods_pass_through_to_inner_uncached` was corrected and did not run (no `REDIS_URL`).
 - Evidence owed (stack session): with two users A and B in one org, A starts a run with `persist_profile: true`; `GET /v1/profiles` as A lists it with `owner_is_caller: true`; as B it does not appear under enforce, and `GET /v1/profiles/<id>` as B is a 404 (served under observe, with a `profile.owner.would_deny` line). The S3 profile backend has no tombstones, so its stamp is not ordered against a delete.
+
+## Semantic rerank (Data Plane `/v1/rerank`)
+
+Quarry reorders the top search results with the Data Plane's rerank (`rerank-v1`, profile
+`web-v1`, a paid Azure cross-encoder). No Model Plane is involved and no general model is prompted.
+
+Switches on quarry-edge (each: default, boot check, effect):
+
+- `QUARRY_EDGE__SEMANTIC_RERANK`: off in the binary, and off in the Ingestion compose
+  (`QUARRY_EDGE_SEMANTIC_RERANK` defaults to `0`). Set it to `1` only after the ship check passes (see
+  Deploy order). On needs `QUARRY_EDGE__DATA_PLANE_URL` and the cross-plane tokens. Boot logs
+  `semantic rerank: enabled (Data Plane /v1/rerank)`; if an input is missing it logs one ERROR naming
+  it and rerank stays off.
+- `QUARRY_EDGE__SEMANTIC_RERANK_TOP_N`: default 10, clamped to 1..100 (the Data Plane's limit).
+- `QUARRY_EDGE__RERANK_DEADLINE_MS`: the budget of one call in milliseconds, default 2000 (the compose
+  sets it from `QUARRY_EDGE_RERANK_DEADLINE_MS`). It is sent as the Data Plane's `deadline_ms`, clamped to
+  100 to 8000, the range the Data Plane accepts. Quarry stops waiting at the budget plus 0.5 s, and a miss
+  degrades the search to its input order (`degraded`, reason `timeout`). Boot logs `deadline_ms` on the
+  `semantic rerank: enabled` line.
+- `QUARRY_EDGE__RERANK_SHADOW`: off in the binary. The Ingestion compose sets it to `1`
+  (`QUARRY_EDGE_RERANK_SHADOW`) for the first deploy's smoke run, and the orchestrator sets that default to
+  `0` after the live proof. In shadow mode the Data Plane is asked and its answer measured, but the results
+  keep their input order and carry no score (`status: shadow`). Boot logs a WARN if it is set while
+  `SEMANTIC_RERANK` is off.
+- `QUARRY_EDGE__ZERO_SAAS_SEARCH`: on a sovereign deployment the reranker is never called
+  (`skipped sovereign`, no call).
+
+Data Plane switches (on `retrieval-engine`, default safe): `WEB_RERANK_ENABLED` and
+`WEB_RERANK_PROCESSOR_APPROVED` are off until set, so the route answers `skipped disabled` or
+`skipped processor_unapproved` and makes no provider call. `WEB_RERANK_ALLOWED_SERVICES` defaults to
+`service:quarry-edge`.
+
+Reading an outcome: each search response carries `rerank.status` (`applied`, `skipped`, `degraded`,
+`shadow`, or `rerank-not-configured`) and `rerank.reason`. Every such response writes one
+`search.rerank` log line with `outcome`, `reason`, `profile`, `score_kind`, `cache_hit`, `zdr` and
+`hits`. The query text is never logged. In shadow mode `rerank.reason` is `would_apply` when the Data Plane's order would have reordered the head. Scores reach a caller only when it sends
+`score_kinds: ["cross_encoder.v1"]`; the response then names `score_kind`.
+
+What never reaches the Data Plane: a ZDR run (from the body or the user's token), and an org that is
+not a tenant (`onboarding` or `global`, reason `input_not_tenant`). A service caller that omits `zdr` is refused
+with `ZDR_REQUIRED`. Degraded and skipped answers are never cached.
+
+Deploy order (owner ruling 2026-10-12). Do not ship the rerank client before the Data Plane gate and the
+Control Plane grant are live: until they are, every non-ZDR search skips or degrades its rerank, the
+outcome is never cached, and each search pays the search providers again. The order, the sign-off marker the
+check accepts and the rollback order are in `apps/Data Plane v2/docs/web-rerank-v1.md` (deploy order for
+quarry-edge). The check is `bash "apps/Data Plane v2/scripts/qb-preflight.sh" --live --ship-qb-t09`. The compose default is `0`, so a deploy is dark until `QUARRY_EDGE_SEMANTIC_RERANK=1` is set after the
+check passes (exit 0). Do not set it on a deploy whose check fails.
+
+The two Data Plane switches are `WEB_RERANK_ENABLED` and `WEB_RERANK_PROCESSOR_APPROVED`. The processor
+switch is `true` only after counsel's Article 28 sign-off (OD-LEGAL), and the check accepts it only with
+`DPV2_PREFLIGHT_ART28_CONFIRMED=yes` recorded. The Control Plane grant is `data:rerank` for `quarry-edge` on
+`data-plane`, which is in the committed registry and live in auth-service (read-only check, 2026-10-13). Model Gateway sends no `score_kinds`
+until QB-T12 ships its `score_kind` calibration in `relevance.rs`, so QB-T12 ships before or with any change
+that makes Model Gateway ask for `cross_encoder.v1`.
+
+Failures and what to do:
+
+- `degraded`, reason `refused`: the Data Plane answered 401, 403, 404 or 422 to the rerank call, and the
+  results keep their input order. One ERROR line is written a minute. That window is shared with the token
+  refusals below, so a misconfigured principal writes one line a minute, not one per search. A 401 or 403
+  means the quarry-edge principal lacks `data:rerank` or its audience: check the registry row. A 404 can mean the route is not deployed on the Data Plane (the live check of 2026-10-13 found an image
+  without `/v1/rerank`), and a 422 means the `rerank-v1` contract has drifted: check the goldens.
+- `degraded`, reason `token_unavailable`: Auth Core refused the `web-rerank` token (an ERROR line in that
+  shared window when Auth Core answers 401 or 403) or could not be reached (a warning). The token log line
+  says which.
+- `degraded`, reason `contract`: the answer did not match `rerank-v1`. That is a 400, a 413 or another status
+  other than 200, 429 or 5xx, an answer that does not decode, or an answer for another request or profile.
+  Check the goldens and the Data Plane's version.
+- `degraded`, reason `rate_limited`: the Data Plane's rate gate answered 429. The provider was not called,
+  so the breaker does not count it.
+- `degraded`, reason `provider_error` (a 5xx from the Data Plane) or `unreachable` (no answer, or a body cut
+  off): both count against the breaker.
+- `skipped`, reason `circuit_open`: five consecutive failed calls opened the breaker for 30 s. It then admits
+  one probe, and a success closes it.
+- `degraded`, reason `provider_rate_limited`: the Data Plane answered `degraded` because its rerank provider
+  reported a rate limit. The breaker counts it.
+- `degraded`, reason `no_scores`: the Data Plane answered `ok` with no usable scores for the head. The breaker
+  counts it.
+- `skipped`, reason `processor_unapproved`, `misconfigured` or `metering_unavailable`: the Data Plane's own gate
+  declined before any provider call (see the Data Plane switches above). That is not a failure of the route.
+- `degraded`, reason `timeout`: the Data Plane did not answer inside the budget (`QUARRY_EDGE__RERANK_DEADLINE_MS`,
+  2 s by default).
+
+Known gap: the candidates go to the processor for every non-ZDR tenant org, and they are not all public web
+pages. The org's own indexed pages (the local index, always registered) are candidates whether or not the
+vector leg is on, and with the vector leg on (`QUARRY_EDGE__VECTOR_RETRIEVAL`) its vector hits are too, so
+their titles and snippets reach the processor. Quarry's per-request `allow_third_party_processing` privacy
+flag is not carried on the search path. The processor gate that applies today is the Data Plane's deployment switch
+`WEB_RERANK_PROCESSOR_APPROVED`, which the owner's legal confirmation (O2) decides before production.

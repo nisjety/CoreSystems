@@ -25,10 +25,59 @@ export interface ScheduleFromChatInput {
   /** The exact request to rerun — the composer draft, or a resolved past user turn. */
   goalText: string
   threadOriginHint: 'composer' | 'message-action'
+  /** Read tools the owner approved for unattended use. Absent or empty means draft only. */
+  contract?: ScheduleContractInput
+}
+
+/** A tool the owner may approve for unattended read-only use (DEC-16). */
+export interface ScheduleContractTool {
+  readonly tool: string
+  readonly capability: string
+}
+
+export interface ScheduleContractInput {
+  readonly tools: readonly ScheduleContractTool[]
+  /** Canonical UTC instant, `YYYY-MM-DDTHH:MM:SSZ`. */
+  readonly expiresAt: string
+}
+
+export const SCHEDULE_CONTRACT_DEFAULT_DAYS = 30
+export const SCHEDULE_CONTRACT_MAX_DAYS = 90
+
+/**
+ * The read tools the consent card offers. Empty until the registry-backed list
+ * endpoint lands, so the card states that the plan stays draft only.
+ */
+export const DELEGABLE_SCHEDULE_TOOLS: readonly ScheduleContractTool[] = []
+
+/** The canonical expiry for a contract that runs `days` from `now`. */
+export function scheduleContractExpiry(days: number, now: Date = new Date()): string {
+  const bounded = Math.min(Math.max(Math.trunc(days), 1), SCHEDULE_CONTRACT_MAX_DAYS)
+  return new Date(now.getTime() + bounded * 86_400_000).toISOString().replace(/\.\d{3}Z$/, 'Z')
+}
+
+/**
+ * The stored `approval_contract` text. It is JSON text, not an object, because the
+ * template digest refuses nested objects that storage would re-order.
+ */
+export function buildScheduleContractText(input: ScheduleContractInput, approvedAt: string): string {
+  return JSON.stringify({
+    v: 1,
+    tools: input.tools.map((tool) => ({
+      tool: tool.tool,
+      capability: tool.capability,
+      class: 'read',
+      approved_at: approvedAt,
+    })),
+    expires_at: input.expiresAt,
+    max_rounds: 6,
+    max_tokens_per_round: 2048,
+  })
 }
 
 export function createScheduleFromChat(input: ScheduleFromChatInput): Promise<{ id: string }> {
   const name = input.name.trim()
+  const contract = input.contract && input.contract.tools.length > 0 ? input.contract : undefined
   return createCronSchedule(input.orgId, {
     name,
     schedule_expr: input.scheduleExpr.trim(),
@@ -39,6 +88,9 @@ export function createScheduleFromChat(input: ScheduleFromChatInput): Promise<{ 
       // taskGoal() (capability-core) renders title + "\n\n" + description as
       // the derived goal when workflow_input is absent — see the module doc.
       description: input.goalText,
+      ...(contract
+        ? { approval_contract: buildScheduleContractText(contract, new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')) }
+        : {}),
     },
     enabled: true,
     // space_ref omitted — resolves to the caller's personal Space server-side

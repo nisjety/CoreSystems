@@ -1,0 +1,9 @@
+OUT_DIR=docs/evidence/validation_2pass_5day_20260505_164959
+WINDOW=from 2026-04-29T00:00:00Z to 2026-05-03T23:59:59Z
+TENANT=33f319b9-4d57-11ee-960c-025417856183
+ENDPOINTS total=73 enabled=70 disabled=3
+MAIN_TABLE=vsv2.local_bronze_record
+RUN1 pass=69 fail=1
+RUN2 pass=69 fail=1
+DELTA_FLAGS duplicate_risk=0 deletion_risk=0 zero_increment=70
+FILES: endpoints_status.csv table_candidates.tsv baseline_counts.csv run1_results.csv after_first_counts.csv run2_results.csv after_second_counts.csv endpoint_deltas.csv tier2_summary.csv summary.txt report.md logs/

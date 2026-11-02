@@ -1,0 +1,34 @@
+config {
+  type: "assertion",
+  schema: "visma_assertions",
+  name: "assert_journal_batch_header_unique",
+  description: "Each posted journal batch header must be unique on (tenant_id, module, batch_number). Returns each key that has more than one posted, non-deleted header.",
+  tags: ["assertion", "bronze", "general_ledger", "integrity"]
+}
+
+-- Same filter as assert_journal_batch_control_totals (posted, not deleted, module with the
+-- "Module" prefix removed). assert_journal_batch_control_totals keeps one header per key, so this
+-- check is what shows a duplicate. Any row returned here is a real duplicate in bronze.
+WITH headers AS (
+  SELECT
+    tenantId AS tenant_id,
+    REGEXP_REPLACE(module, '^Module', '') AS module,
+    batchNumber AS batch_number,
+    financialPeriod AS financial_period,
+    syncedAt AS synced_at
+  FROM ${ref("visma_bronze", "visma_journal_transactions")}
+  WHERE isDeleted IS DISTINCT FROM TRUE
+    AND status = 'Posted'
+)
+
+SELECT
+  tenant_id,
+  module,
+  batch_number,
+  COUNT(*) AS header_rows,
+  COUNT(DISTINCT financial_period) AS distinct_financial_periods,
+  MIN(synced_at) AS first_synced_at,
+  MAX(synced_at) AS last_synced_at
+FROM headers
+GROUP BY tenant_id, module, batch_number
+HAVING COUNT(*) > 1

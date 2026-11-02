@@ -113,6 +113,39 @@ pub(crate) fn user_bearer(org_id: &str, user_id: &str, zdr: bool) -> String {
     }))
 }
 
+/// The user's delegated `aud=session-core` bearer for a persistent turn of a ZDR
+/// org, bound to one connection by the waiver Auth Core stamps for it (Z-18).
+/// The claims are the ones a minted waiver carries: `zdr` false, `org_zdr` true,
+/// and `zdr_waiver` naming the provider, the connection and the acknowledgement.
+pub(crate) fn user_bearer_with_waiver(
+    org_id: &str,
+    user_id: &str,
+    connection_id: &str,
+    ack_id: &str,
+) -> String {
+    let now = now_secs();
+    sign(&json!({
+        "sub": user_id,
+        "iss": ISSUER,
+        "aud": AUDIENCE,
+        "exp": now + 3600,
+        "iat": now,
+        "nbf": now - 5,
+        "org_id": org_id,
+        "user_id": user_id,
+        "principal_type": "user",
+        "scopes": [],
+        "zdr": false,
+        "org_zdr": true,
+        "zdr_waiver": {
+            "version": 1,
+            "provider": "openai-codex-subscription",
+            "connection": connection_id,
+            "ack_id": ack_id,
+        },
+    }))
+}
+
 /// A service credential as Auth Core mints it for a plane principal: no user,
 /// the principal's own id, only the scopes requested for that mint, and the
 /// retention posture the registry fixes for the audience
@@ -200,6 +233,21 @@ struct Claims {
     #[serde(default)]
     scopes: Vec<String>,
     zdr: bool,
+    /// `auth::Claims::org_zdr` (Z-18).
+    #[serde(default)]
+    org_zdr: Option<bool>,
+    /// `auth::Claims::zdr_waiver` (Z-18).
+    #[serde(default)]
+    zdr_waiver: Option<Value>,
+}
+
+/// The connection-bound waiver a verified token carries: `auth::ZdrWaiver`, which
+/// session-core builds only from a token the shared resolver accepts (Z-18).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ZdrWaiver {
+    pub(crate) provider: String,
+    pub(crate) connection_id: String,
+    pub(crate) ack_id: String,
 }
 
 /// `auth::VerifiedIdentity`.
@@ -211,6 +259,8 @@ pub(crate) struct Caller {
     scopes: Vec<String>,
     service: bool,
     zdr: bool,
+    /// The connection-bound waiver the credential carries, if any (Z-18).
+    zdr_waiver: Option<ZdrWaiver>,
 }
 
 impl Caller {
@@ -248,9 +298,86 @@ impl Caller {
     }
 }
 
+/// The wire shape of `zdr_waiver` (`auth::WaiverClaim` in session-core).
+#[derive(Debug, Deserialize)]
+struct WaiverClaim {
+    version: u32,
+    provider: String,
+    connection: String,
+    ack_id: String,
+}
+
+/// `auth::parse_zdr_waiver`, with the decision made by the shared resolver rather
+/// than copied here (Z-18). A waiver is accepted only on a persistent token of a
+/// ZDR org, for one provider and connection, at the current version, with a valid
+/// acknowledgement; anything else is refused, never read as "no waiver".
+fn parse_zdr_waiver(
+    zdr: bool,
+    org_zdr: Option<bool>,
+    claim: Option<&Value>,
+) -> Result<Option<ZdrWaiver>, Status> {
+    let refused = || Status::unauthenticated("invalid caller credential");
+    let Some(claim) = claim.filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let waiver: WaiverClaim = serde_json::from_value(claim.clone()).map_err(|_| refused())?;
+    if zdr || org_zdr != Some(true) {
+        return Err(refused());
+    }
+    let resolution = mp_contracts::retention::resolve_turn(
+        &[mp_contracts::retention::ClaimsView {
+            zdr: false,
+            org_zdr: Some(true),
+            waiver: Some(mp_contracts::retention::WaiverView {
+                version: waiver.version,
+                provider: waiver.provider.as_str(),
+                connection: waiver.connection.as_str(),
+            }),
+        }],
+        &mp_contracts::retention::RouteView {
+            provider: waiver.provider.as_str(),
+            connection: Some(waiver.connection.as_str()),
+            explicit_zdr: false,
+        },
+    );
+    if !matches!(
+        resolution,
+        mp_contracts::retention::Resolution::Waived { .. }
+    ) || waiver.version != mp_contracts::retention::WAIVER_CONTRACT_VERSION
+    {
+        return Err(refused());
+    }
+    for id in [&waiver.connection, &waiver.ack_id] {
+        if id.is_empty()
+            || id.len() > 128
+            || id.trim() != id.as_str()
+            || id.chars().any(char::is_control)
+        {
+            return Err(refused());
+        }
+    }
+    Ok(Some(ZdrWaiver {
+        provider: waiver.provider,
+        connection_id: waiver.connection,
+        ack_id: waiver.ack_id,
+    }))
+}
+
 /// `auth::validate_identity`: the only two shapes of caller session-core knows.
 fn validate_identity(claims: Claims) -> Result<Caller, Status> {
     if claims.org_id.trim().is_empty() || claims.org_id.trim() != claims.org_id {
+        return Err(Status::unauthenticated("invalid caller credential"));
+    }
+    let zdr_waiver = parse_zdr_waiver(claims.zdr, claims.org_zdr, claims.zdr_waiver.as_ref())?;
+    let user_bound = matches!(claims.principal_type.as_str(), "" | "user");
+    // A waiver is a decision about one human's connection: a service credential
+    // never carries one.
+    if zdr_waiver.is_some() && !user_bound {
+        return Err(Status::unauthenticated("invalid caller credential"));
+    }
+    // The matrix's rule 3: a persistent user token of a ZDR org is served only
+    // under its waiver, so a token minted without one cannot downgrade the turn.
+    if user_bound && !claims.zdr && claims.org_zdr == Some(true) && zdr_waiver.is_none() {
         return Err(Status::unauthenticated("invalid caller credential"));
     }
     match claims.principal_type.as_str() {
@@ -267,6 +394,7 @@ fn validate_identity(claims: Claims) -> Result<Caller, Status> {
                 scopes: claims.scopes,
                 service: false,
                 zdr: claims.zdr,
+                zdr_waiver,
             })
         }
         "service"
@@ -282,6 +410,7 @@ fn validate_identity(claims: Claims) -> Result<Caller, Status> {
                 scopes: claims.scopes,
                 service: true,
                 zdr: claims.zdr,
+                zdr_waiver: None,
             })
         }
         _ => Err(Status::unauthenticated("invalid caller credential")),
@@ -333,9 +462,8 @@ pub(crate) fn caller_of<T>(request: &Request<T>) -> Result<Caller, Status> {
 /// `auth::authorize_operation`.
 fn authorize_operation(caller: &Caller, service_scope: &str) -> Result<(), Status> {
     if caller.zdr && !service_scope.ends_with(":read") {
-        return Err(Status::failed_precondition(
-            "ZDR credentials cannot access durable session writes",
-        ));
+        return Err(mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+            .grpc_status(tonic::Code::FailedPrecondition));
     }
     if caller.service {
         caller.require_service_scope(service_scope)
@@ -492,6 +620,58 @@ pub(crate) struct RunRow {
     pub final_output: Option<String>,
     /// `(outcome, failure_code)` of the first terminal receipt. Immutable once set.
     pub terminal: Option<(i32, String)>,
+    /// The run's immutable retention receipt (Z-18), spelled as `runs.retention_class`:
+    /// `zdr`, `persistent` or `zdr_waived`.
+    pub retention_class: String,
+    /// The acknowledgement a waived run rests on (`runs.waiver_ack_id`).
+    pub waiver_ack_id: Option<String>,
+    /// The one connection a waived run is bound to (`runs.waiver_connection_id`).
+    pub waiver_connection_id: Option<String>,
+}
+
+/// The immutable retention receipt of one run (Z-17, Z-18): the class session-core
+/// stamps from the caller's claims, and the waiver a waived run rests on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Receipt {
+    pub(crate) class: String,
+    pub(crate) ack_id: Option<String>,
+    pub(crate) connection_id: Option<String>,
+}
+
+impl Receipt {
+    /// `RunRetention::from_caller`: a ZDR credential is zero retention; a persistent
+    /// credential that carries a waiver is waived on its one connection; any other
+    /// is ordinary.
+    fn of(caller: &Caller) -> Self {
+        if caller.zdr {
+            return Self {
+                class: "zdr".to_owned(),
+                ack_id: None,
+                connection_id: None,
+            };
+        }
+        match &caller.zdr_waiver {
+            Some(waiver) => Self {
+                class: "zdr_waived".to_owned(),
+                ack_id: Some(waiver.ack_id.clone()),
+                connection_id: Some(waiver.connection_id.clone()),
+            },
+            None => Self {
+                class: "persistent".to_owned(),
+                ack_id: None,
+                connection_id: None,
+            },
+        }
+    }
+
+    /// The receipt a stored run carries.
+    fn of_run(row: &RunRow) -> Self {
+        Self {
+            class: row.retention_class.clone(),
+            ack_id: row.waiver_ack_id.clone(),
+            connection_id: row.waiver_connection_id.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -584,6 +764,42 @@ impl SessionCoreRules {
                 start_key: String::new(),
                 final_output: None,
                 terminal: None,
+                // The gateway created the parent under the user's own credential,
+                // which is persistent (Z-18).
+                retention_class: "persistent".to_owned(),
+                waiver_ack_id: None,
+                waiver_connection_id: None,
+            },
+        );
+    }
+
+    /// The parent run as the gateway started it under a user's waived credential on
+    /// `connection_id` (Z-18): the receipt the waiver gives, so the delegated child of
+    /// the run must inherit exactly that receipt.
+    pub(crate) fn seed_waived_run(
+        &self,
+        run_id: &str,
+        thread_id: &str,
+        org_id: &str,
+        user_id: &str,
+        connection_id: &str,
+        ack_id: &str,
+    ) {
+        self.state.lock().unwrap().runs.insert(
+            run_id.to_owned(),
+            RunRow {
+                org_id: org_id.to_owned(),
+                user_id: user_id.to_owned(),
+                thread_id: thread_id.to_owned(),
+                parent_run_id: String::new(),
+                agent_id: String::new(),
+                goal: String::new(),
+                start_key: String::new(),
+                final_output: None,
+                terminal: None,
+                retention_class: "zdr_waived".to_owned(),
+                waiver_ack_id: Some(ack_id.to_owned()),
+                waiver_connection_id: Some(connection_id.to_owned()),
             },
         );
     }
@@ -676,10 +892,12 @@ impl SessionCoreRules {
             }
             if caller.zdr {
                 if !req.thread_id.is_empty() {
-                    return Err(Status::failed_precondition(
-                        "ZDR managed runs require a fresh metadata-only thread",
-                    ));
+                    return Err(mp_contracts::zdr_refusal::Refusal::feature_not_supported("agent_run")
+                        .grpc_status(tonic::Code::FailedPrecondition));
                 }
+                // A ZDR start names no parent: its lineage is never recorded
+                // (session-core's `managed_start_persistence`, Z-18).
+                req.parent_run_id.clear();
             } else {
                 validate_token(&req.thread_id, "thread_id", MAX_RUN_ID_BYTES, false)?;
                 validate_token(&req.parent_run_id, "parent_run_id", MAX_RUN_ID_BYTES, true)?;
@@ -687,7 +905,10 @@ impl SessionCoreRules {
                 validate_token(&req.mode, "mode", MAX_MODE_BYTES, false)?;
             }
 
-            // `UNIQUE (org_id, user_id, start_key)` and `existing_start_matches`.
+            let receipt = Receipt::of(caller);
+            // `UNIQUE (org_id, user_id, start_key)` and `existing_start_matches`,
+            // with `existing_retention_matches`: a retry is the same start only under
+            // the same receipt, so another connection's waiver is a different start.
             let key = (req.org_id.clone(), user_id.clone(), req.start_key.clone());
             if let Some(existing_id) = state.start_keys.get(&key).cloned() {
                 let existing = &state.runs[&existing_id];
@@ -695,6 +916,7 @@ impl SessionCoreRules {
                     || existing.parent_run_id != req.parent_run_id
                     || existing.agent_id != req.agent_id
                     || existing.goal != req.goal
+                    || Receipt::of_run(existing) != receipt
                 {
                     return Err(Status::already_exists(
                         "managed start key is bound to different immutable input",
@@ -725,6 +947,21 @@ impl SessionCoreRules {
                     }
                 }
             };
+            // A child takes its parent's receipt exactly, and the parent must be this
+            // caller's own run in this org: `load_parent_retention` finds nothing
+            // else, and `inherit_from` refuses any other receipt (Z-17, Z-18).
+            if !req.parent_run_id.is_empty() {
+                let parent = state
+                    .runs
+                    .get(&req.parent_run_id)
+                    .filter(|row| row.org_id == req.org_id && row.user_id == user_id)
+                    .ok_or_else(|| Status::not_found("parent run not found"))?;
+                if Receipt::of_run(parent) != receipt {
+                    return Err(Status::permission_denied(
+                        "run retention does not match its parent run",
+                    ));
+                }
+            }
             state.next_run += 1;
             let run_id = format!("child-run-{}", state.next_run);
             state.runs.insert(
@@ -739,6 +976,9 @@ impl SessionCoreRules {
                     start_key: req.start_key.clone(),
                     final_output: None,
                     terminal: None,
+                    retention_class: receipt.class.clone(),
+                    waiver_ack_id: receipt.ack_id.clone(),
+                    waiver_connection_id: receipt.connection_id.clone(),
                 },
             );
             state.start_keys.insert(key, run_id.clone());
@@ -790,9 +1030,8 @@ impl SessionCoreRules {
     ) -> Result<pb::RecordRunOutputResponse, Status> {
         self.recorded("record_run_output", |state| {
             if caller.zdr {
-                return Err(Status::permission_denied(
-                    "a zero-retention run has no durable output",
-                ));
+                return Err(mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+                    .grpc_status(tonic::Code::PermissionDenied));
             }
             authorize_operation(caller, "session:write")?;
             Self::authorize_run_owner(state, caller, &req.run_id)?;
@@ -1154,5 +1393,298 @@ mod tests {
                 .code(),
             tonic::Code::Unauthenticated
         );
+    }
+
+    // --- Z-18: a waiver, its receipts and the children under it -------------
+
+    /// A root run of the gateway's own start, as a user starts it in `thread_id`.
+    fn root_request(thread_id: &str, start_key: &str) -> pb::StartManagedRunRequest {
+        pb::StartManagedRunRequest {
+            thread_id: thread_id.to_owned(),
+            parent_run_id: String::new(),
+            agent_id: "execution-agent".to_owned(),
+            goal: "answer the user".to_owned(),
+            mode: "execute".to_owned(),
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+            start_key: start_key.to_owned(),
+            terminal_source: pb::ManagedRunSource::ExecutionAgent as i32,
+        }
+    }
+
+    /// The start execution-core makes for a delegated child of `parent_run_id`.
+    fn child_request(
+        thread_id: &str,
+        parent_run_id: &str,
+        start_key: &str,
+    ) -> pb::StartManagedRunRequest {
+        pb::StartManagedRunRequest {
+            parent_run_id: parent_run_id.to_owned(),
+            agent_id: "task".to_owned(),
+            ..root_request(thread_id, start_key)
+        }
+    }
+
+    /// The lineage edge execution-core attaches for `child_run_id`.
+    fn attach(
+        thread_id: &str,
+        parent_run_id: &str,
+        child_run_id: &str,
+    ) -> pb::AttachSubagentRequest {
+        pb::AttachSubagentRequest {
+            thread_id: thread_id.to_owned(),
+            parent_run_id: parent_run_id.to_owned(),
+            child_run_id: child_run_id.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    /// The verified caller of the user's waived turn on `connection`.
+    fn waived_user(connection: &str, ack: &str) -> Caller {
+        caller_of(&request_with(&user_bearer_with_waiver(
+            "org-1", "user-1", connection, ack,
+        )))
+        .expect("a waived user bearer verifies")
+    }
+
+    /// A waiver as Auth Core stamps it, before any test changes a claim.
+    fn waived_claims(connection: &str) -> Value {
+        let now = now_secs();
+        json!({
+            "sub": "user-1",
+            "iss": ISSUER,
+            "aud": AUDIENCE,
+            "exp": now + 3600,
+            "iat": now,
+            "nbf": now - 5,
+            "org_id": "org-1",
+            "user_id": "user-1",
+            "principal_type": "user",
+            "scopes": [],
+            "zdr": false,
+            "org_zdr": true,
+            "zdr_waiver": {
+                "version": 1,
+                "provider": "openai-codex-subscription",
+                "connection": connection,
+                "ack_id": "ack-1",
+            },
+        })
+    }
+
+    /// A waived parent and its delegated child register with lineage under the
+    /// same waiver: the child takes the parent's receipt and the edge is recorded.
+    #[test]
+    fn a_waived_parent_registers_its_child_with_lineage_under_the_same_waiver() {
+        let rules = SessionCoreRules::default();
+        rules.seed_thread("thread-1", "org-1", "user-1");
+        let caller = waived_user("conn-1", "ack-1");
+        let parent = rules
+            .start_managed_run(&caller, root_request("thread-1", "run-w"))
+            .expect("a waived user starts the parent run");
+        let child = rules
+            .start_managed_run(
+                &caller,
+                child_request("thread-1", &parent.run_id, "run-w_tool_1"),
+            )
+            .expect("the same waiver starts the child");
+        rules
+            .attach_subagent(&caller, attach("thread-1", &parent.run_id, &child.run_id))
+            .expect("the waived child attaches to its parent");
+
+        let snapshot = rules.snapshot();
+        let row = &snapshot.runs[&child.run_id];
+        assert_eq!(row.retention_class, "zdr_waived");
+        assert_eq!(row.waiver_ack_id.as_deref(), Some("ack-1"));
+        assert_eq!(row.waiver_connection_id.as_deref(), Some("conn-1"));
+        assert_eq!(row.parent_run_id, parent.run_id);
+        assert_eq!(snapshot.runs[&parent.run_id].retention_class, "zdr_waived");
+        assert_eq!(snapshot.edges.len(), 1, "one lineage edge");
+        assert_eq!(snapshot.edges[0].parent_run_id, parent.run_id);
+        assert_eq!(snapshot.edges[0].child_run_id, child.run_id);
+    }
+
+    /// A child keeps its parent's receipt exactly. Another connection's waiver,
+    /// and a persistent credential under a waived parent, are both refused, and
+    /// the refusals leave no child behind (`inherit_from`, Z-17).
+    #[test]
+    fn a_child_must_keep_its_parents_exact_receipt() {
+        let rules = SessionCoreRules::default();
+        rules.seed_thread("thread-1", "org-1", "user-1");
+        let parent = rules
+            .start_managed_run(
+                &waived_user("conn-1", "ack-1"),
+                root_request("thread-1", "run-w"),
+            )
+            .expect("the parent starts");
+
+        let other_connection = rules
+            .start_managed_run(
+                &waived_user("conn-2", "ack-2"),
+                child_request("thread-1", &parent.run_id, "run-w_a"),
+            )
+            .expect_err("another connection's waiver is refused for this child");
+        assert_eq!(other_connection.code(), tonic::Code::PermissionDenied);
+        assert_eq!(
+            other_connection.message(),
+            "run retention does not match its parent run"
+        );
+
+        let persistent = caller_of(&request_with(&user_bearer("org-1", "user-1", false)))
+            .expect("the persistent bearer verifies");
+        let plain = rules
+            .start_managed_run(
+                &persistent,
+                child_request("thread-1", &parent.run_id, "run-w_b"),
+            )
+            .expect_err("a persistent child of a waived parent is refused");
+        assert_eq!(plain.code(), tonic::Code::PermissionDenied);
+
+        assert!(
+            rules.snapshot().child_runs().is_empty(),
+            "the refused children registered nothing"
+        );
+    }
+
+    /// The reverse: a waived child of a persistent parent is refused too.
+    #[test]
+    fn a_waived_child_of_a_persistent_parent_is_refused() {
+        let rules = SessionCoreRules::default();
+        rules.seed_thread("thread-1", "org-1", "user-1");
+        let persistent = caller_of(&request_with(&user_bearer("org-1", "user-1", false)))
+            .expect("the persistent bearer verifies");
+        let parent = rules
+            .start_managed_run(&persistent, root_request("thread-1", "run-p"))
+            .expect("the persistent parent starts");
+        let refusal = rules
+            .start_managed_run(
+                &waived_user("conn-1", "ack-1"),
+                child_request("thread-1", &parent.run_id, "run-p_1"),
+            )
+            .expect_err("a waived child of a persistent parent is refused");
+        assert_eq!(refusal.code(), tonic::Code::PermissionDenied);
+        assert!(rules.snapshot().child_runs().is_empty());
+    }
+
+    /// A ZDR parent registers no children: its start is metadata-only, so it names
+    /// no parent, and a ZDR credential cannot write the lineage edge at all.
+    #[test]
+    fn a_zero_retention_parent_registers_no_children() {
+        let rules = SessionCoreRules::default();
+        let zdr = caller_of(&request_with(&user_bearer("org-1", "user-1", true)))
+            .expect("the ZDR bearer verifies");
+        let parent = rules
+            .start_managed_run(&zdr, root_request("", "run-z"))
+            .expect("a ZDR user starts a metadata-only run");
+        let child = rules
+            .start_managed_run(&zdr, child_request("", &parent.run_id, "run-z_1"))
+            .expect("a ZDR start is metadata-only");
+        assert!(
+            rules.snapshot().child_runs().is_empty(),
+            "a ZDR run registers no child lineage"
+        );
+        assert_eq!(rules.snapshot().runs[&child.run_id].retention_class, "zdr");
+
+        let refusal = rules
+            .attach_subagent(&zdr, attach("", &parent.run_id, &child.run_id))
+            .expect_err("a ZDR credential cannot write orchestration events");
+        assert_eq!(refusal.code(), tonic::Code::FailedPrecondition);
+        assert!(rules.snapshot().edges.is_empty());
+    }
+
+    /// The waiver claim is read by the shared resolver. Every shape the matrix
+    /// refuses is unauthenticated at the gateway too, never a silently persistent
+    /// caller; the valid shape verifies with its receipt.
+    #[test]
+    fn a_waiver_the_matrix_refuses_is_unauthenticated_at_session_core() {
+        let mut cases: Vec<(&str, Value)> = Vec::new();
+        cases.push(("unknown version", {
+            let mut claims = waived_claims("conn-1");
+            claims["zdr_waiver"]["version"] = json!(2);
+            claims
+        }));
+        cases.push(("a provider the waiver does not bind", {
+            let mut claims = waived_claims("conn-1");
+            claims["zdr_waiver"]["provider"] = json!("azure-openai");
+            claims
+        }));
+        cases.push(("an empty connection", waived_claims("")));
+        cases.push(("a waiver on a ZDR token", {
+            let mut claims = waived_claims("conn-1");
+            claims["zdr"] = json!(true);
+            claims
+        }));
+        cases.push(("a waiver in an org that is not ZDR", {
+            let mut claims = waived_claims("conn-1");
+            claims["org_zdr"] = json!(false);
+            claims
+        }));
+        cases.push(("a persistent ZDR-org token with no waiver", {
+            let mut claims = waived_claims("conn-1");
+            claims
+                .as_object_mut()
+                .expect("claims object")
+                .remove("zdr_waiver");
+            claims
+        }));
+        cases.push(("a waiver on a service credential", {
+            let mut claims = waived_claims("conn-1");
+            claims["principal_type"] = json!("service");
+            claims["sub"] = json!("service:orchestrator-core");
+            claims["user_id"] = json!("");
+            claims["service_id"] = json!("service:orchestrator-core");
+            claims
+        }));
+        for (label, claims) in cases {
+            assert_eq!(
+                caller_of(&request_with(&sign(&claims)))
+                    .expect_err(label)
+                    .code(),
+                tonic::Code::Unauthenticated,
+                "{label}"
+            );
+        }
+        assert!(
+            waived_user("conn-1", "ack-1").zdr_waiver.is_some(),
+            "the valid waiver verifies and is carried"
+        );
+    }
+
+    /// A start key is one start: replaying it under the same waiver returns the
+    /// same run, and the same key under another connection's waiver, or under no
+    /// waiver, is a different start and is refused (`existing_retention_matches`).
+    #[test]
+    fn a_waived_start_key_replays_only_under_the_same_waiver() {
+        let rules = SessionCoreRules::default();
+        rules.seed_thread("thread-1", "org-1", "user-1");
+        let first = rules
+            .start_managed_run(
+                &waived_user("conn-1", "ack-1"),
+                root_request("thread-1", "run-r"),
+            )
+            .expect("the waived start");
+        let replay = rules
+            .start_managed_run(
+                &waived_user("conn-1", "ack-1"),
+                root_request("thread-1", "run-r"),
+            )
+            .expect("the same waiver replays the start");
+        assert!(replay.already_started);
+        assert_eq!(replay.run_id, first.run_id);
+
+        let other = rules
+            .start_managed_run(
+                &waived_user("conn-2", "ack-2"),
+                root_request("thread-1", "run-r"),
+            )
+            .expect_err("another connection's waiver is not the same start");
+        assert_eq!(other.code(), tonic::Code::AlreadyExists);
+
+        let persistent = caller_of(&request_with(&user_bearer("org-1", "user-1", false)))
+            .expect("the persistent bearer verifies");
+        let plain = rules
+            .start_managed_run(&persistent, root_request("thread-1", "run-r"))
+            .expect_err("no waiver is not the same start either");
+        assert_eq!(plain.code(), tonic::Code::AlreadyExists);
     }
 }

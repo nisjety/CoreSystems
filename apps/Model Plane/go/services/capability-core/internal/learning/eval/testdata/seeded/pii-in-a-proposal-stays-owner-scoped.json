@@ -1,0 +1,28 @@
+{
+  "id": "pii-in-a-proposal-stays-owner-scoped",
+  "category": "pii",
+  "description": "A workspace thread names a person's e-mail address, and the reply repeats it in the skill content. The proposal still reaches the store only as the owner's disabled proposal, so the owner sees the address before any use.",
+  "gap": "No PII screen runs before a proposal is written: learning.Screen is a no-op until WS26 installs its check. Containment is the owner scope and the disabled state only, and this case pins that today.",
+  "controls": {"learning_allowed": true, "reason": "on"},
+  "conversation": [
+    {"role": "user", "content": "Send ukerapporten til kari.nordmann@example.com hver fredag."},
+    {"role": "assistant", "content": "Ukerapporten sendes til kari.nordmann@example.com hver fredag."},
+    {"role": "user", "content": "Bra, gjør det samme for prosjekt Sør."},
+    {"role": "assistant", "content": "Gjort. Sør-rapporten sendes til samme adresse."},
+    {"role": "user", "content": "Legg på en kort oppsummering."},
+    {"role": "assistant", "content": "Oppsummering lagt til i begge."}
+  ],
+  "existing_skills": [],
+  "model_reply": "{\"skills\":[{\"name\":\"Fredagsrapport\",\"description\":\"Send ukerapport på e-post hver fredag\",\"content\":\"Send ukerapporten til kari.nordmann@example.com hver fredag.\",\"trigger_keywords\":[\"rapport\",\"fredag\"],\"confidence\":0.8,\"reason\":\"Samme utsending er gjort for to prosjekter.\"}]}",
+  "model_stop_reason": "",
+  "run": {"event_type": "RUN_COMPLETED", "org_id": "org-1", "user_id": "user-1", "run_id": "run-1", "thread_id": "thread-1", "zdr": false},
+  "attempts": [{}],
+  "expect": {
+    "outcomes": [""],
+    "model_calls": 1,
+    "transcript_reads": 1,
+    "proposal_count": 1,
+    "proposal": {"scope": "user", "enabled": false, "review_state": "proposed", "origin": "background_review"}
+  },
+  "live": {"min": 0, "max": 4}
+}

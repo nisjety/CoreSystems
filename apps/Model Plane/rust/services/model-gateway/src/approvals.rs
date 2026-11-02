@@ -29,7 +29,7 @@ use tracing::{info, warn};
 use mp_contracts::model_plane::v1::{
     orchestration_core_service_client::OrchestrationCoreServiceClient, Approval, ApprovalKind,
     ApprovalState, ApproveApprovalRequest, ApproveApprovalResponse, CreateApprovalRequest,
-    DecideApprovalRequest, DenyApprovalRequest, DenyApprovalResponse, GatewayApproval,
+    ApprovalDecisionSource, DecideApprovalRequest, DenyApprovalRequest, DenyApprovalResponse, GatewayApproval,
     GetApprovalRequest, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
     OrgPendingApprovalsRequest, RequestApprovalRequest, RequestApprovalResponse,
 };
@@ -57,6 +57,7 @@ pub fn to_create_approval_request(a: &GatewayApproval) -> CreateApprovalRequest 
         _ => ApprovalKind::Unspecified,
     };
     CreateApprovalRequest {
+        continuation_mode: String::new(),
         run_id: a.run_id.clone(),
         step_id: String::new(),
         kind: kind as i32,
@@ -70,6 +71,16 @@ pub fn to_create_approval_request(a: &GatewayApproval) -> CreateApprovalRequest 
         // existing durable row instead of duplicating it (D-1 idempotency).
         idempotency_key: idempotency_key(&a.run_id, &a.action_id),
         continuation_descriptor_json: String::new(),
+        // The cache knows a kind and a free-text reason, not which rule held the call, so
+        // it states no cause rather than guessing one (build plan WS13 S1).
+        cause: None,
+        // Nor does it know the tool, so it states no card context (build plan WS10 S1).
+        tool_key: String::new(),
+        action_digest: String::new(),
+        turn_origin: String::new(),
+        grant_use_token: String::new(),
+        context_json: String::new(),
+        ..Default::default()
     }
 }
 
@@ -93,6 +104,7 @@ pub fn gateway_approval_from_proto(a: &Approval) -> GatewayApproval {
         ApprovalKind::Plan => "plan",
         ApprovalKind::Permission => "permission",
         ApprovalKind::Destructive => "destructive_action",
+        ApprovalKind::UntrustedContent => "untrusted_content",
         _ => "custom",
     };
     let status = match ApprovalState::try_from(a.state).unwrap_or(ApprovalState::Unspecified) {
@@ -138,6 +150,9 @@ pub fn to_decide_approval_request(a: &GatewayApproval) -> DecideApprovalRequest 
         // function is ever reached, so asserting it here is a real,
         // already-verified ownership check, not a no-op.
         org_id: a.org_id.clone(),
+        // A gateway decision is a person's click; the server records the source, never the client.
+        decision_source: ApprovalDecisionSource::User as i32,
+        ..Default::default()
     }
 }
 
@@ -911,6 +926,7 @@ pub(crate) async fn read_through_approval_for_owner_authenticated(
             GetApprovalRequest {
                 approval_id: approval_id.to_owned(),
                 org_id: org_id.to_owned(),
+                ..Default::default()
             },
             bearer,
         )?)
@@ -1454,6 +1470,10 @@ mod tests {
         assert_eq!(req.org_id, "org1");
         assert_eq!(req.kind, ApprovalKind::ToolCall as i32);
         assert_eq!(req.reason, "rm -rf /");
+        assert!(
+            req.cause.is_none(),
+            "the cache cannot say which rule held the call, so it states no cause"
+        );
     }
 
     #[test]
@@ -1508,6 +1528,11 @@ mod tests {
 
     fn durable_pending(id: &str, org: &str, run: &str) -> Approval {
         Approval {
+            consumed_at: None,
+            tool_key: String::new(),
+            action_label: String::new(),
+            continuation: None,
+            continuation_mode: String::new(),
             id: id.into(),
             run_id: run.into(),
             step_id: String::new(),
@@ -1524,6 +1549,7 @@ mod tests {
             decided_at: None,
             expires_at: None,
             org_id: org.into(),
+            cause: None,
         }
     }
 

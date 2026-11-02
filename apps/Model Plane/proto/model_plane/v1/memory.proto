@@ -28,6 +28,19 @@ service MemoryService {
 
   // Health check.
   rpc Health(MemoryHealthRequest) returns (MemoryHealthResponse);
+
+  // The user's memory state and what it currently allows. Readable by a ZDR
+  // caller (it answers reason "zdr"), which writes nothing.
+  rpc GetMemoryControls(GetMemoryControlsRequest) returns (GetMemoryControlsResponse);
+
+  // Set the user's own memory state (on, paused, off). User callers only, for
+  // themselves; refused for a ZDR or waived credential.
+  rpc SetMemoryControls(SetMemoryControlsRequest) returns (SetMemoryControlsResponse);
+
+  // Erase every durable memory the caller owns, with its supersession lineage
+  // and semantic copies, in one confirmed step. Org-owned memory is left alone.
+  // Open to a ZDR caller too: erasure only removes, and pre-ZDR rows may exist.
+  rpc ResetMemory(ResetMemoryRequest) returns (ResetMemoryResponse);
 }
 
 message SearchMemoryRequest {
@@ -73,6 +86,13 @@ message SearchMemoryResponse {
 
   // Stable machine-readable reason, empty when semantic recall is ready.
   string degradation_reason = 3;
+
+  // Why the caller's own memory was not used for this search, one of the
+  // closed MemoryControls.reason tokens: "user_paused", "user_off",
+  // "org_disabled", "policy_unavailable". Empty when it was used. A paused or
+  // off user still receives org-owned entries, so an empty `entries` with this
+  // set means "memory is switched off", never "nothing to recall".
+  string skip_reason = 4;
 }
 
 message MemoryEntry {
@@ -108,6 +128,16 @@ message MemoryEntry {
   // model's reading of a conversation; "unknown" is an older row written before
   // provenance was recorded, and must not be presented as either.
   MemoryProvenance provenance = 8;
+
+  // Space this row was learned in, set only when the row is withheld (see
+  // withheld_reason). Ids only, never content. Empty for every ordinary row.
+  string origin_space_ref = 9;
+
+  // Why this row is listed but never recalled. Closed vocabulary shared with
+  // the personal-chat hidden_reason: "room_origin_unverified" is a row learned
+  // in a shared room before containment existed. The owner may keep or delete
+  // it; no conversation recalls it. Empty for an ordinary row.
+  string withheld_reason = 10;
 }
 
 // MemoryProvenance — who decided a memory was worth keeping.
@@ -145,6 +175,13 @@ message IndexMemoryRequest {
   // semantic backend so a later DeleteMemory(memory_id) removes both. When
   // empty the backend assigns its own id.
   string memory_id = 6;
+
+  // Who asked for this write, for the content policy (WS26-S4): "user" (the
+  // person, through the app), "model_tool" (save_memory), "delegation" (a
+  // subagent's outcome) or "workflow" (an orchestrator write). Empty, and any
+  // other value, is read as "model_tool", so only "user" may write org-wide
+  // memory.
+  string origin = 7;
 }
 
 message IndexMemoryResponse {
@@ -193,6 +230,11 @@ message ListMemoryResponse {
 
   // Stable machine-readable reason, empty when nothing is degraded.
   string degradation_reason = 3;
+
+  // Why the user's rows were left out of this list: "user_off" or
+  // "org_disabled". Empty when they are listed. Paused is not a reason: a
+  // paused user's rows stay visible and deletable.
+  string hidden_reason = 4;
 }
 
 message DeleteMemoryRequest {
@@ -217,4 +259,108 @@ message DeleteMemoryResponse {
 
   // Stable machine-readable reason, empty when nothing is degraded.
   string degradation_reason = 3;
+}
+
+// MemoryState — the user's own choice about their memory (build plan WS07 S1).
+enum MemoryState {
+  MEMORY_STATE_UNSPECIFIED = 0;
+
+  // The default. Memory is used and learned from.
+  MEMORY_STATE_ON = 1;
+
+  // Rows stay visible and deletable but are not recalled, and nothing new is
+  // learned. What is said while paused is never mined after a resume.
+  MEMORY_STATE_PAUSED = 2;
+
+  // As paused, and the user's rows are also hidden from the list.
+  MEMORY_STATE_OFF = 3;
+}
+
+message GetMemoryControlsRequest {
+  // Tenant context.
+  string org_id = 1;
+
+  // The user whose controls are read. A user caller may only read their own.
+  string user_id = 2;
+}
+
+message SetMemoryControlsRequest {
+  // Tenant context.
+  string org_id = 1;
+
+  // The user whose state is set. Must be the caller.
+  string user_id = 2;
+
+  // The new state. UNSPECIFIED is refused.
+  MemoryState state = 3;
+}
+
+// MemoryControls — the user's state and the one decision every memory reader
+// and writer in session-core takes from it. Content-free.
+message MemoryControls {
+  // The user's stored choice. Always reported, even when the decision below is
+  // dominated by org policy or zero data retention.
+  MemoryState state = 1;
+
+  // The organization's memory policy: "allow", "disabled" or "unavailable".
+  string org_memory_policy = 2;
+
+  // The organization's learning-review policy. Empty until the org policy
+  // mirror exists (build plan WS07 S4).
+  string org_learning_policy = 3;
+
+  // Whether memory is recalled for this user's turns.
+  bool use_allowed = 4;
+
+  // Whether new memory is written for this user.
+  bool generation_allowed = 5;
+
+  // Whether this user's completed runs are announced to the learning loop.
+  bool learning_allowed = 6;
+
+  // Closed token for what decided the above: "on", "user_paused", "user_off",
+  // "org_disabled", "zdr", "policy_unavailable".
+  string reason = 7;
+
+  // How many of the user's rows the list hides under this decision (a count,
+  // never a row). Zero unless the state is off or the org disabled memory.
+  uint32 hidden_rows = 8;
+
+  // When the state last changed; unset for a user who never set it.
+  google.protobuf.Timestamp updated_at = 9;
+}
+
+message GetMemoryControlsResponse {
+  MemoryControls controls = 1;
+}
+
+message SetMemoryControlsResponse {
+  MemoryControls controls = 1;
+}
+
+message ResetMemoryRequest {
+  // Tenant context.
+  string org_id = 1;
+
+  // The user whose memory is erased. Must be the caller.
+  string user_id = 2;
+
+  // Must be true. A reset cannot be undone, so an unset field is a refusal,
+  // never a default.
+  bool confirm = 3;
+}
+
+message ResetMemoryResponse {
+  // How many durable rows were erased (current rows and retired ancestors).
+  uint32 durable_deleted = 1;
+
+  // Durable rows whose semantic copy could not be confirmed erased. Their reads
+  // stay suppressed, because every erased id is recorded as forgotten.
+  uint32 semantic_unconfirmed = 2;
+
+  // True when semantic_unconfirmed is not zero.
+  bool degraded = 3;
+
+  // Stable machine-readable reason, empty when nothing is degraded.
+  string degradation_reason = 4;
 }

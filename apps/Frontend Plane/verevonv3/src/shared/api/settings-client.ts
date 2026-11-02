@@ -42,10 +42,28 @@ export interface UserSettings {
 
 export type CrawlIngestMode = 'auto' | 'never' | 'prompt'
 
+export type DateFormatPreference = 'MM/DD/YYYY' | 'DD/MM/YYYY' | 'YYYY-MM-DD'
+export type TimeFormatPreference = '12h' | '24h'
+
+/** Which preference fields the user set explicitly (server contract v2). */
+export interface PreferenceExplicit {
+  language: boolean
+  timezone: boolean
+  dateFormat: boolean
+  timeFormat: boolean
+  compactMode: boolean
+}
+
 export interface UserPreferences {
   theme?: string
   language?: string
+  /** Valid IANA zone only; omitted when the user never chose one. */
   timezone?: string
+  /** Writable with 'auto' (follow the locale); reads never return 'auto'. */
+  dateFormat?: DateFormatPreference | 'auto'
+  timeFormat?: TimeFormatPreference | 'auto'
+  compactMode?: boolean
+  explicit?: PreferenceExplicit
   notifications?: Record<string, boolean>
   // Phase 6 selective ingest: whether crawl/scrape results are saved to the
   // knowledge base. Unset defaults to 'auto' (always save) — an explicit
@@ -178,12 +196,33 @@ function normalizePreferences(payload: unknown): UserPreferences {
   const preferences = innerRecord(payload, 'preferences')
   const notifications = asRecord(preferences.notifications)
   const rawMode = stringField(preferences, 'crawlIngestMode')
+  const explicit = asRecord(preferences.explicit)
+  const rawDateFormatText = stringField(preferences, 'dateFormat')
+  const rawDateFormat: DateFormatPreference | undefined =
+    rawDateFormatText === 'MM/DD/YYYY' || rawDateFormatText === 'DD/MM/YYYY' || rawDateFormatText === 'YYYY-MM-DD'
+      ? rawDateFormatText
+      : undefined
+  const rawTimeFormatText = stringField(preferences, 'timeFormat')
+  const rawTimeFormat: TimeFormatPreference | undefined =
+    rawTimeFormatText === '12h' || rawTimeFormatText === '24h' ? rawTimeFormatText : undefined
   const crawlIngestMode: CrawlIngestMode | undefined =
     rawMode === 'auto' || rawMode === 'never' || rawMode === 'prompt' ? rawMode : undefined
   return {
     theme: stringField(preferences, 'theme') || undefined,
     language: stringField(preferences, 'language') || undefined,
     timezone: stringField(preferences, 'timezone') || undefined,
+    dateFormat: rawDateFormat,
+    timeFormat: rawTimeFormat,
+    compactMode: typeof preferences.compactMode === 'boolean' ? preferences.compactMode : undefined,
+    explicit: explicit
+      ? {
+          language: explicit.language === true,
+          timezone: explicit.timezone === true,
+          dateFormat: explicit.dateFormat === true,
+          timeFormat: explicit.timeFormat === true,
+          compactMode: explicit.compactMode === true,
+        }
+      : undefined,
     crawlIngestMode,
     notifications: notifications
       ? Object.fromEntries(
@@ -193,8 +232,8 @@ function normalizePreferences(payload: unknown): UserPreferences {
   }
 }
 
-export function getMe(): Promise<UserProfile> {
-  return requestJson<unknown>('/api/v1/me').then(normalizeUserProfile)
+export function getMe(signal?: AbortSignal): Promise<UserProfile> {
+  return requestJson<unknown>('/api/v1/me', { signal }).then(normalizeUserProfile)
 }
 
 export function updateMe(patch: UpdateUserProfileRequest): Promise<UserProfile> {

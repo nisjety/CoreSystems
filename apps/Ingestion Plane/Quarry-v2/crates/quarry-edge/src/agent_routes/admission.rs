@@ -448,7 +448,7 @@ pub(super) async fn admit_action(
                 .map_err(|message| QuarryError::new(ErrorCode::RateLimited, message))?;
         }
         if let Err(error) = budget_gate(entry, action) {
-            announce_budget_refusal(state, entry).await;
+            announce_budget_refusal(state, entry, &handle.live).await;
             return Err(error);
         }
     }

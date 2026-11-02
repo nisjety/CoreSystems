@@ -21,14 +21,22 @@ asserted, not just reported.
 | `artifact` | `artifacts` | `ChatEvent::Artifact` | ✅ |
 | `attachment` | `artifacts` | `ChatEvent::Attachment` | ✅ |
 | `citation` | `citations` | `ChatEvent::Citation` | ✅ |
+| `compaction` | — (control) | `ChatEvent::Compaction` | ✅ |
+| `context_change` | — (control) | `ChatEvent::ContextChange` | ✅ |
 | `error` | — (control) | `ChatEvent::Error` | ✅ |
 | `error` | — (control) | `ChatEvent::SubscriptionError` | ✅ |
+| `error` | — (control) | `ChatEvent::ZdrError` | ✅ |
 | `follow_ups` | — (control) | `ChatEvent::FollowUps` | ✅ |
 | `grounding` | `citations` | `ChatEvent::Grounding` | ✅ |
 | `memory_recall` | `memory` | `ChatEvent::MemoryRecall` | ✅ |
+| `plan_proposed` | — (control) | `ChatEvent::PlanProposed` | ✅ |
 | `queued_input` | — (control) | `ChatEvent::QueuedInput` | ✅ |
+| `queued_input` | — (control) | `ChatEvent::QueuedInputReceipted` | ✅ |
 | `reasoning_delta` | `reasoning` | `ChatEvent::ReasoningDelta` | ✅ |
 | `result_receipt` | `usage` | `ChatEvent::ResultReceipt` | ✅ |
+| `retrieval_notice` | — (control) | `ChatEvent::RetrievalNotice` | ✅ |
+| `retry_scheduled` | `steps` | `ChatEvent::RetryScheduled` | ✅ |
+| `source_scope_applied` | `citations` | `ChatEvent::SourceScopeApplied` | ✅ |
 | `step_update` | `steps` | `ChatEvent::StepUpdate` | ✅ |
 | `stopped` | — (control) | `ChatEvent::Stopped` | ✅ |
 | `title` | — (control) | `ChatEvent::Title` | ✅ |
@@ -36,6 +44,7 @@ asserted, not just reported.
 | `tool_result` | `tools` | `ChatEvent::ToolResult` | ✅ |
 | `turn_timing` | `usage` | `ChatEvent::TurnTiming` | ✅ |
 | `usage` | `usage` | `ChatEvent::Usage` | ✅ |
+| `usage_progress` | `usage` | `ChatEvent::UsageProgress` | ✅ |
 | `verification` | `citations` | `ChatEvent::Verification` | ✅ |
 
 ## Handled by the SPA but not defined by `ChatEvent`
@@ -50,3 +59,44 @@ asserted, not just reported.
 
 Anything the SPA does not recognise reaches `onUnknownEvent`, which logs
 rather than discarding silently — the runtime counterpart to this file.
+
+## Other producers
+
+Frames model-gateway writes that `ChatEvent` does not name, read from source: a
+literal `.event("...")` in production code (test modules are skipped), and the
+`OrchestrationEvent` oneof, whose wire name is its proto field name.
+
+| Event | Why |
+|---|---|
+| `awaiting_approval` | agentic run paused for approval at the run boundary, before a derived `step_update` exists |
+| `chunk` | transport: assistant text delta |
+| `connected` | transport: stream opened, emitted by the SSE layer |
+| `done` | transport: terminal success frame |
+| `error` | shared with `ChatEvent::Error`; the run-events stream writes it directly when it cannot authorise or open the orchestration stream |
+| `run_parked` | parked agentic run on the owner's turn stream; the orchestration `RunParked` event shares the name |
+
+The run-events stream (`/v1/runs/:run_id/events`) carries the orchestration
+events. Tags are the proto field numbers. `run-console-client.ts` reads them;
+this gate checks only the producer side. A member with no arm is declared on
+the wire but not written yet.
+
+| Event | Tag | Written |
+|---|---|---|
+| `plan_transitioned` | 10 | ✅ |
+| `todo_transitioned` | 11 | ✅ |
+| `approval_state_changed` | 12 | ✅ |
+| `subagent_attached` | 13 | ✅ |
+| `subagent_stopped` | 14 | ✅ |
+| `run_paused_for_approval` | 15 | ✅ |
+| `run_resumed_after_approval` | 16 | ✅ |
+| `browser_action_dispatched` | 17 | ✅ |
+| `browser_observation_received` | 18 | ✅ |
+| `browser_run_paused` | 19 | ✅ |
+| `browser_run_resumed` | 20 | ✅ |
+| `browser_action_approval_required` | 21 | ✅ |
+| `browser_action_decided` | 22 | ✅ |
+| `approval_continuation_verified` | 23 | ✅ |
+| `run_parked` | 24 | ✅ |
+| `run_resumed` | 25 | ✅ |
+| `question_asked` | 27 | not yet |
+| `question_answered` | 28 | not yet |

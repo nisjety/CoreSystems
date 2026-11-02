@@ -116,6 +116,8 @@ func Catalog() []Provider {
 		Okta(),
 		SCIM(),
 		OpenAICodexSubscription(),
+		Cookiebot(),
+		Algolia(),
 	})
 }
 
@@ -150,6 +152,15 @@ func OpenAICodexSubscription() Provider {
 func WithReadiness(catalog []Provider, readiness map[string][]string) []Provider {
 	out := make([]Provider, 0, len(catalog))
 	for _, provider := range catalog {
+		if provider.AuthType == "inbound_scim" {
+			// SCIM provisioning is not implemented in this service (WS05-S2):
+			// never report it as ready or as missing configuration.
+			provider.MissingConfig = []string{}
+			provider.Configured = false
+			provider.Status = "unavailable"
+			out = append(out, provider)
+			continue
+		}
 		missing := append([]string{}, readiness[provider.Key]...)
 		provider.MissingConfig = missing
 		if len(missing) == 0 {
@@ -159,7 +170,7 @@ func WithReadiness(catalog []Provider, readiness map[string][]string) []Provider
 			provider.Configured = false
 			provider.Status = "missing_config"
 		}
-		if len(missing) == 0 && !provider.DirectOAuthReady && provider.AuthType != "inbound_scim" {
+		if len(missing) == 0 && !provider.DirectOAuthReady {
 			provider.Status = "manual_or_admin_config"
 		}
 		out = append(out, provider)
@@ -169,6 +180,7 @@ func WithReadiness(catalog []Provider, readiness map[string][]string) []Provider
 
 func OAuthCatalog() []Provider {
 	return withCapabilityDirections([]Provider{
+		Algolia(),
 		Microsoft(),
 		Slack(),
 		Discord(),
@@ -278,6 +290,11 @@ func Microsoft() Provider {
 				Label:        "Safe onboarding preview",
 				Description:  "Identity plus bounded Microsoft 365 metadata.",
 				Capabilities: []string{"profile.read", "sharepoint.read", "teams.read"},
+			},
+			{
+				Key: "workspace_readonly", Label: "Microsoft 365 read-only",
+				Description:  "Read workspace knowledge, Teams messages, mail and calendars. Does not authorize Clarity exports or sending messages.",
+				Capabilities: []string{"profile.read", "sharepoint.read", "teams.read", "teams.messages.read", "mail.read", "calendar.read"},
 			},
 			{
 				Key:          "knowledge",
@@ -459,6 +476,18 @@ func GoogleWorkspace() Provider {
 				Scopes:      []string{"https://www.googleapis.com/auth/adwords"},
 				Sensitive:   true,
 			},
+			{
+				Key:         "search_console.read",
+				Label:       "Google Search Console reporting",
+				Description: "Read verified Search Console properties and bounded organic-search performance reports.",
+				Scopes:      []string{"https://www.googleapis.com/auth/webmasters.readonly"},
+				Sensitive:   true,
+			},
+			{
+				Key: "analytics.read", Label: "Google Analytics read-only",
+				Description: "Discover authorized GA4 properties and web streams without creating or changing properties.",
+				Scopes:      []string{"https://www.googleapis.com/auth/analytics.readonly"}, Sensitive: true,
+			},
 		},
 		Bundles: []Bundle{
 			{
@@ -468,10 +497,26 @@ func GoogleWorkspace() Provider {
 				Capabilities: []string{"profile.read", "drive.metadata"},
 			},
 			{
+				Key: "workspace_readonly", Label: "Google Workspace and marketing read-only",
+				Description:  "Read Drive, Gmail, calendars, Search Console and GA4 using one approved connection. No email sending, ad management or property edits.",
+				Capabilities: []string{"profile.read", "drive.metadata", "drive.read", "gmail.read", "calendar.read", "search_console.read", "analytics.read"},
+			},
+			{
 				Key:          "ads",
 				Label:        "Google advertising",
 				Description:  "Google Ads campaign management and reporting.",
 				Capabilities: []string{"profile.read", "ads.manage"},
+			},
+			{
+				Key:          "search_console",
+				Label:        "Search Console reporting",
+				Description:  "Read verified properties and organic-search performance without mutation access.",
+				Capabilities: []string{"profile.read", "search_console.read"},
+			},
+			{
+				Key: "analytics_readonly", Label: "Google Analytics discovery",
+				Description:  "Read authorized GA4 accounts, properties, and web streams.",
+				Capabilities: []string{"profile.read", "analytics.read"},
 			},
 			{
 				Key:          "knowledge",

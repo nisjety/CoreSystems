@@ -36,6 +36,7 @@ export function SkillsSection() {
   const session = getSession()
   const orgId = createMemo(() => session.activeOrg?.id ?? '')
   const isAdmin = createMemo(() => hasWorkspaceAdminAccess(session))
+  const viewerId = session.user?.id ?? ''
 
   const [skills, { refetch }] = createResource(
     () => orgId() || undefined,
@@ -52,7 +53,12 @@ export function SkillsSection() {
   const [formError, setFormError] = createSignal<string | null>(null)
   const [actionError, setActionError] = createSignal<string | null>(null)
 
-  const list = createMemo(() => skills() ?? [])
+  // Proposals and declined learned skills are decided in the Læring inbox, never here.
+  const list = createMemo(() =>
+    (skills() ?? []).filter(
+      (skill) => skill.review_state !== 'proposed' && skill.review_state !== 'rejected',
+    ),
+  )
 
   const resetForm = () => {
     setName('')
@@ -91,6 +97,43 @@ export function SkillsSection() {
       )
     } finally {
       setSubmitting(false)
+    }
+  }
+
+  // A member's accepted skill that they shared with others; the server checks the share itself.
+  const canPromote = (skill: Skill): boolean =>
+    isAdmin() &&
+    skill.scope === 'user' &&
+    skill.review_state === 'accepted' &&
+    skill.owner_user_id !== viewerId &&
+    (skill.shared_with?.length ?? 0) > 0
+
+  const handlePromote = async (skill: Skill) => {
+    const id = orgId()
+    if (!id || busySkillId()) return
+    setBusySkillId(skill.id)
+    setActionError(null)
+    try {
+      // The copy starts disabled: an admin turns it on once they have read it.
+      await createSkill(id, {
+        name: skill.name,
+        description: skill.description,
+        content: skill.content,
+        trigger_keywords: skill.trigger_keywords,
+        enabled: false,
+        scope: 'org',
+        promoted_from: skill.id,
+      })
+      await refetch()
+    } catch (err) {
+      setActionError(
+        translateApiError(err, i18n.tr, {
+          no: 'Kunne ikke kopiere ferdigheten til organisasjonen.',
+          en: 'Could not copy the skill to the organization.',
+        }),
+      )
+    } finally {
+      setBusySkillId(null)
     }
   }
 
@@ -183,6 +226,10 @@ export function SkillsSection() {
                       <span class="verevon-trust-chip" aria-label={`Status: ${skill.enabled ? 'aktiv' : 'deaktivert'}`}>
                         {skill.enabled ? 'aktiv' : 'deaktivert'}
                       </span>
+                      <Show when={skill.origin === 'background_review'}>
+                        {' '}
+                        <span class="verevon-trust-chip">{i18n.tr('Lært av Verevon', 'Learned by Verevon')}</span>
+                      </Show>
                     </p>
                     <Show when={skill.description.trim().length > 0}>
                       <span>{skill.description}</span>
@@ -197,6 +244,19 @@ export function SkillsSection() {
                   </div>
                   <Show when={isAdmin()}>
                     <div>
+                      <Show when={canPromote(skill)}>
+                        <SettingsButton
+                          settingsSize="sm"
+                          disabled={busySkillId() === skill.id}
+                          onClick={() => void handlePromote(skill)}
+                          aria-label={i18n.tr(
+                            `Kopier ${skill.name} til organisasjonen`,
+                            `Copy ${skill.name} to the organization`,
+                          )}
+                        >
+                          {i18n.tr('Kopier til organisasjonen', 'Copy to the organization')}
+                        </SettingsButton>{' '}
+                      </Show>
                       <SettingsButton
                         settingsSize="sm"
                         disabled={busySkillId() === skill.id}

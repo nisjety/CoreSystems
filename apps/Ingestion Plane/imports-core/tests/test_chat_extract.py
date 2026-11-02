@@ -1196,3 +1196,76 @@ def test_the_import_pipeline_still_reads_every_row_of_a_big_sheet():
     assert 'avkortet' not in text
     assert text.endswith('Rad 05999\t12345')
     assert 'truncated' not in metadata
+
+
+@pytest.fixture
+def raised_cap(monkeypatch):
+    """The module re-read with a 4 MB cap; the default is restored afterwards."""
+    import importlib
+    import app.chat_extract as module
+
+    monkeypatch.setenv('CHAT_EXTRACT_MAX_BYTES', '4000000')
+    importlib.reload(module)
+    yield module
+    monkeypatch.delenv('CHAT_EXTRACT_MAX_BYTES')
+    importlib.reload(module)
+
+
+def _plain(module, size):
+    return module.ChatExtractRequest(
+        filename='big.md', content_base64=base64.b64encode(b'x' * size).decode(),
+    )
+
+
+def test_the_default_cap_is_still_one_megabyte():
+    import app.chat_extract as module
+
+    assert module._MAX_BYTES == 1_000_000
+    assert module._MAX_BASE64_CHARS == 1_400_000
+    with pytest.raises(HTTPException) as exc:
+        extract_chat_document(request('big.md', b'x' * 1_000_001))
+    assert exc.value.status_code == 413
+    assert '1 MB' in exc.value.detail
+
+
+@pytest.mark.parametrize('value', ['', '0', '-5', 'many', '1.5', '4 MB'])
+def test_an_unreadable_cap_keeps_the_default(monkeypatch, value):
+    from app.chat_extract import _max_attachment_bytes
+
+    monkeypatch.setenv('CHAT_EXTRACT_MAX_BYTES', value)
+    assert _max_attachment_bytes() == 1_000_000
+
+
+def test_a_raised_cap_takes_a_file_between_the_old_and_the_new_limit(raised_cap):
+    assert raised_cap._MAX_BYTES == 4_000_000
+    # 2 MB would have been refused at the schema before; the text limit still applies.
+    with pytest.raises(HTTPException) as exc:
+        raised_cap.extract_chat_document(_plain(raised_cap, 2_000_000))
+    assert exc.value.status_code == 413
+    assert 'too long' in exc.value.detail
+
+
+def test_a_raised_cap_still_refuses_a_file_over_it(raised_cap):
+    with pytest.raises(HTTPException) as exc:
+        raised_cap.extract_chat_document(_plain(raised_cap, 4_000_001))
+    assert exc.value.status_code == 413
+    assert '4 MB' in exc.value.detail
+
+
+def test_a_raised_cap_keeps_the_sixty_thousand_character_limit(raised_cap):
+    result = raised_cap.extract_chat_document(_plain(raised_cap, 60_000))
+    assert len(result['data']['content']) == 60_000
+    with pytest.raises(HTTPException) as exc:
+        raised_cap.extract_chat_document(_plain(raised_cap, 60_001))
+    assert exc.value.status_code == 413
+
+
+def test_the_zip_guard_does_not_widen_with_the_raised_cap(raised_cap):
+    # Declared at 200 MB and a few KB on the wire: well under a 4 MB cap, still refused.
+    payload = _zeros_zip({'xl/worksheets/sheet1.xml': 200 * (1 << 20)}, _MINI_WORKBOOK)
+    assert len(payload) < 4_000_000
+    status, peak = _peak_bytes_of(lambda: raised_cap.extract_chat_document(
+        raised_cap.ChatExtractRequest(filename='bomb.xlsx', content_base64=base64.b64encode(payload).decode()),
+    ))
+    assert status == 413
+    assert peak < 16 * (1 << 20)

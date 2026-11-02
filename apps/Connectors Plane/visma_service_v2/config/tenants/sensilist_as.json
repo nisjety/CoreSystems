@@ -1,0 +1,7 @@
+{
+  "tenant_id": "eda0dd16-fa25-11ed-a0e0-0693d8a7c3dd",
+  "tenant_name": "Sensilist AS",
+  "datamart_company_id": "4734974",
+  "status": "active",
+  "notes": "Registered in v1 scripts/add_tenants.py; DataMart company discovered with `vsv2 dm-companies` on 2026-10-01."
+}

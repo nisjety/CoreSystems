@@ -58,6 +58,14 @@ func (d *DatabaseChecker) CheckPostgreSQL(ctx context.Context) PostgreSQLHealth 
 		Status: "unhealthy",
 	}
 
+	// No DSN is configured (DATABASE_POSTGRESURL unset). Return before sql.Open:
+	// lib/pq treats an empty DSN as localhost:5432 plus the PG* environment.
+	if d.postgresURL == "" {
+		health.Status = "not_configured"
+		health.ResponseTime = time.Since(start)
+		return health
+	}
+
 	// Connect to database
 	db, err := sql.Open("postgres", d.postgresURL)
 	if err != nil {

@@ -9,7 +9,7 @@ vi.mock('./http', async (importOriginal) => {
 })
 
 import { requestJson } from './http'
-import { listCronSchedules } from './cron-client'
+import { listCronSchedules, listScheduleFires } from './cron-client'
 
 const mockedRequest = vi.mocked(requestJson)
 
@@ -28,5 +28,16 @@ describe('listCronSchedules', () => {
     mockedRequest.mockResolvedValue({ schedules: [schedule] })
     await expect(listCronSchedules('org-1')).resolves.toEqual({ schedules: [schedule] })
     expect(mockedRequest).toHaveBeenCalledWith('/api/v1/cron', { headers: { 'x-verevon-org-id': 'org-1' } })
+  })
+})
+
+describe('listScheduleFires', () => {
+  it('asks for the last five fires of one schedule and unwraps the data envelope', async () => {
+    const fire = { id: 'fire_1', status: 'completed', withheld_effects: 0 }
+    mockedRequest.mockResolvedValue({ data: [fire] })
+    await expect(listScheduleFires('org-1', 'cron 1')).resolves.toEqual([fire])
+    expect(mockedRequest).toHaveBeenCalledWith('/api/v1/cron/cron%201/fires?limit=5', {
+      headers: { 'x-verevon-org-id': 'org-1' },
+    })
   })
 })

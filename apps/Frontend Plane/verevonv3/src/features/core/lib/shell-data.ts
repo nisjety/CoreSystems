@@ -8,8 +8,13 @@ export type VerevonRoute =
   // navigation target because it needs a ref the sidebar does not have — so
   // `/spaces` picks one and forwards. Only this form belongs in SidebarHref.
   | '/spaces'
+  // The cross-room attention inbox (WS11-S7).
+  | '/attention'
   | '/studio'
   | '/studio/canvas'
+  | '/engagement'
+  | '/engagement/visibility'
+  | '/studio/pulse'
   | '/studio/campaigns'
   | '/studio/templates'
   | '/inbox'
@@ -35,6 +40,8 @@ export type VerevonRoute =
   | '/ingestions'
   | '/knowledge'
   | '/leads'
+  | '/anbud'
+  | '/anbud/radar'
   | '/agents'
   | '/agents/runs'
   | '/agents/cost'
@@ -51,6 +58,7 @@ export type VerevonRoute =
   | '/settings/router-policy'
   | '/settings/finetune'
   | '/settings/mcp'
+  | '/settings/model-access'
 
 export type WorkspaceIdentity = {
   accentColor?: string | null
@@ -141,11 +149,17 @@ export function getNavbarLabels(activeRoute: VerevonRoute, locale: Locale = 'no'
       return only('Chat', 'Chat')
     case '/spaces':
       return labels('Rom', 'Space', 'Oversikt', 'Overview')
+    case '/attention':
+      return only('Trenger deg', 'Needs you')
     case '/studio':
     case '/studio/canvas':
       return { moduleLabel: 'Studio', tabLabel: 'Canvas' }
     case '/studio/campaigns':
       return labels('Studio', 'Studio', 'Kampanjer', 'Campaigns')
+    case '/engagement': return labels('Engasjement', 'Engagement', 'Arbeidsområder', 'Workspaces')
+    case '/engagement/visibility':
+    case '/studio/pulse':
+      return labels('Engasjement', 'Engagement', 'Synlighet', 'Visibility')
     case '/studio/templates':
       return labels('Studio', 'Studio', 'Maler', 'Templates')
     case '/inbox':
@@ -192,6 +206,10 @@ export function getNavbarLabels(activeRoute: VerevonRoute, locale: Locale = 'no'
       return labels('Kunnskap', 'Knowledge', 'Kilder', 'Sources')
     case '/leads':
       return labels('Leads', 'Leads', 'Søk', 'Search')
+    case '/anbud':
+      return labels('Engasjement', 'Engagement', 'Anbud', 'Tenders')
+    case '/anbud/radar':
+      return labels('Engasjement', 'Engagement', 'Anbudsradar', 'Tender radar')
     case '/account':
       return labels('Konto', 'Account', 'Profil', 'Profile')
     case '/settings':
@@ -217,6 +235,9 @@ export function routeFromPath(pathname: string): VerevonRoute {
   // Without this the path fell through to the `/dashboard` default and a Space
   // read as "Hjem".
   if (path.startsWith('/spaces')) return '/spaces'
+  if (path.startsWith('/attention')) return '/attention'
+  if (path === '/engagement') return '/engagement'
+  if (path.startsWith('/engagement/visibility') || path === '/studio/pulse') return '/engagement/visibility'
   if (path.startsWith('/studio/campaigns')) return '/studio/campaigns'
   if (path.startsWith('/studio/templates')) return '/studio/templates'
   if (path.startsWith('/studio')) return '/studio/canvas'
@@ -244,6 +265,9 @@ export function routeFromPath(pathname: string): VerevonRoute {
   // Routed and linked from the sidebar, but missing here — so /leads collapsed
   // onto the /dashboard default and its own sidebar item never highlighted.
   if (path.startsWith('/leads')) return '/leads'
+  // The radar is matched before the bare /anbud prefix, so it keeps its own sidebar highlight.
+  if (path.startsWith('/anbud/radar')) return '/anbud/radar'
+  if (path.startsWith('/anbud')) return '/anbud'
   // The Run Console is a full-bleed surface — keep it out of the /agents config
   // sub-sidebar by routing it to its own value (matched before the /agents catch).
   if (path.startsWith('/agents/runs')) return '/agents/runs'
@@ -252,6 +276,7 @@ export function routeFromPath(pathname: string): VerevonRoute {
   if (path.startsWith('/settings/router-policy')) return '/settings/router-policy'
   if (path.startsWith('/settings/finetune')) return '/settings/finetune'
   if (path.startsWith('/settings/mcp')) return '/settings/mcp'
+  if (path.startsWith('/settings/model-access')) return '/settings/model-access'
   if (path.startsWith('/settings/integrations')) return '/settings/integrations'
   if (path.startsWith('/settings/trust')) return '/settings/trust'
   if (path.startsWith('/settings/org-security')) return '/settings/org-security'

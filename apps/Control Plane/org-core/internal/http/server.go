@@ -21,11 +21,38 @@ type Server struct {
 	orgService       *orgcore.Service
 	rbacRepo         *rbac.Repository // U6-3 (ui-ux-verevon-gap.md §10)
 	retentionPosture retentionPostureReader
+	agentPolicy      agentPolicyReader
 	authService      string
 	userService      string
 	userServiceToken string
 	httpClient       *http.Client
 	brregClient      *brreg.Client
+
+	// modelEntitlements is set by SetModelEntitlements (WS10-S2); callerRoles is
+	// how its admin routes learn the caller's role from the membership table.
+	modelEntitlements modelEntitlementService
+	callerRoles       callerRoleReader
+
+	// browserSites is set by SetBrowserSites (WS21-S3): the agent-browser site
+	// policy of record, read by the broker and administered through these routes.
+	browserSites browserSiteService
+
+	// siemEnabled mounts the SIEM destination routes (WS06-S7,
+	// ORG_SIEM_DESTINATIONS_ENABLED); siem is the service behind them.
+	siemEnabled bool
+	siem        siemDestinationService
+
+	// identityEnabled mounts the domain verification routes (WS05-S6,
+	// ORG_DOMAIN_VERIFICATION_ENABLED); identity is the service behind them.
+	identityEnabled bool
+	identity        identityDomainService
+	sso             identitySSOService // SSO policy and providers (WS05-S7), same gate
+
+	// scimOn mounts the SCIM routes (WS05-S8, ORG_SCIM_ENABLED); scim is the
+	// service behind them and scimLimiter the per-token rate limit.
+	scimOn      bool
+	scim        scimService
+	scimLimiter *scimRateLimiter
 }
 
 func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository, authServiceURL, userServiceURL string) *Server {
@@ -36,6 +63,9 @@ func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository,
 	if credentialErr != nil {
 		log.Printf("org-core service authentication unavailable: %v", credentialErr)
 		serviceCredentials = nil
+	}
+	if scimEnabled(os.Getenv) && len(serviceCredentials) > 0 {
+		serviceCredentials = withSCIMEdgeCredential(serviceCredentials, os.Getenv(scimEdgeTokenEnv))
 	}
 	router.Use(serviceAuthMiddleware(serviceCredentials, time.Now))
 
@@ -53,6 +83,52 @@ func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository,
 		// Assigned only when present: a typed-nil *Service in the interface
 		// would defeat the handler's nil check.
 		s.retentionPosture = orgService
+		s.agentPolicy = orgService
+		s.callerRoles = orgService
+	}
+	if siemDestinationsEnabled(os.Getenv) {
+		s.siemEnabled = true
+		if orgService != nil {
+			// Without a usable seal key the routes stay mounted and answer 503: a
+			// destination secret is never stored unsealed.
+			if sealer, err := orgcore.NewSIEMSealerFromEnv(os.Getenv); err != nil {
+				log.Printf("org-core SIEM destinations unavailable: %v", err)
+			} else {
+				orgService.EnableSIEMDestinations(sealer)
+				s.siem = orgService
+			}
+		}
+	}
+	if domainVerificationEnabled(os.Getenv) {
+		s.identityEnabled = true
+		if orgService != nil {
+			orgService.EnableDomainVerification(orgcore.NewDomainTXTResolver(domainDNSResolvers(os.Getenv)))
+			s.identity = orgService
+			s.sso = orgService
+			// auth-core owns providers, sign-in evidence and the two-factor flag.
+			// Without ORG_CORE_IDENTITY_SERVICE_TOKEN the SSO administration
+			// answers 503 and enforce cannot be set.
+			if client := orgcore.NewAuthCoreIdentityClient(authCoreIdentityURL(os.Getenv), os.Getenv(authCoreIdentityTokenEnv)); client != nil {
+				orgService.SetIdentityProviderAdmin(client)
+			} else {
+				log.Printf("org-core sso administration: %s is not set; provider administration and enforce are unavailable", authCoreIdentityTokenEnv)
+			}
+		}
+	}
+	if scimEnabled(os.Getenv) {
+		s.scimOn = true
+		s.scimLimiter = newSCIMRateLimiter(scimRatePerMinute, time.Now)
+		if orgService != nil {
+			// SCIM needs auth-core for every membership change. Without the
+			// credential the routes stay mounted and answer 503: a SCIM request
+			// never half-applies.
+			if client := orgcore.NewAuthCoreIdentityClient(authCoreIdentityURL(os.Getenv), os.Getenv(authCoreIdentityTokenEnv)); client != nil {
+				orgService.SetScimProvisioner(client)
+				s.scim = orgService
+			} else {
+				log.Printf("org-core scim: %s is not set; SCIM is unavailable", authCoreIdentityTokenEnv)
+			}
+		}
 	}
 	s.setupRoutes()
 	s.httpServer = &http.Server{
@@ -96,6 +172,22 @@ func (s *Server) setupRoutes() {
 	v1.GET("/organizations/:id/quotas", s.getQuotas)
 	v1.PUT("/organizations/:id/quotas/:key", guard, s.putQuota)
 	v1.GET("/organizations/:id/members/search", s.searchMembers)
+	// Chat model policy (WS10-S2, ADR-0005). The handlers check the caller's
+	// role against the membership table themselves; the guard is the same
+	// second layer the other mutations use.
+	v1.GET("/organizations/:id/model-entitlement", s.getModelEntitlement)
+	v1.PUT("/organizations/:id/model-entitlement", guard, s.putModelEntitlement)
+	v1.GET("/organizations/:id/model-entitlement/explain", s.explainModelEntitlement)
+	// Agent-browser site policy (WS21-S3). An admin reads and writes the policy
+	// (owner or admin only); a member reads and writes only their own choices. The
+	// handlers check the role against the membership table; the guard is the same
+	// second layer the other mutations use.
+	v1.GET("/organizations/:id/browser-sites", s.getBrowserSites)
+	v1.PUT("/organizations/:id/browser-sites", guard, s.putBrowserSites)
+	v1.GET("/organizations/:id/browser-sites/explain", s.explainBrowserSite)
+	v1.GET("/organizations/:id/browser-sites/me", s.listBrowserSitePrefs)
+	v1.PUT("/organizations/:id/browser-sites/me/:host", guard, s.putBrowserSitePref)
+	v1.DELETE("/organizations/:id/browser-sites/me/:host", guard, s.deleteBrowserSitePref)
 	// createOrganization is intentionally NOT guarded: there is no :id to check
 	// membership against yet (the org is being created and the caller becomes
 	// its first owner). It still requires x-user-id in the handler.
@@ -103,6 +195,8 @@ func (s *Server) setupRoutes() {
 	v1.POST("/organizations/:id/plan", guard, s.updatePlan)
 	v1.PATCH("/organizations/:id/settings", guard, s.updateOrgSettings)
 	v1.PATCH("/organizations/:id/brreg", guard, s.verifyOrgBrreg)
+	v1.PATCH("/organizations/:id/website", guard, s.updateOrgWebsite)
+	v1.GET("/organizations/:id/website", s.getOrgWebsite)
 	v1.GET("/brreg/search", s.searchBrreg)
 	v1.GET("/brreg/:orgnr", s.lookupBrreg)
 
@@ -118,6 +212,43 @@ func (s *Server) setupRoutes() {
 	s.router.PATCH("/orgs/:id/capabilities", guard, s.updateCapabilities)
 	s.router.GET("/orgs/:id/members", s.listMembers)
 	s.router.GET("/orgs/:id/members/search", s.searchMembers)
+	s.router.GET("/orgs/:id/model-entitlement", s.getModelEntitlement)
+	s.router.PUT("/orgs/:id/model-entitlement", guard, s.putModelEntitlement)
+	s.router.GET("/orgs/:id/model-entitlement/explain", s.explainModelEntitlement)
+
+	// SIEM destination config (WS06-S7): owner/admin CRUD. Every path answers 404
+	// until ORG_SIEM_DESTINATIONS_ENABLED is on. The handlers check the caller's
+	// role against the membership table; the guard is the second layer the other
+	// mutations use.
+	siemGate := s.requireSIEMEnabled()
+	s.router.GET("/orgs/:id/siem-destinations", siemGate, s.listSIEMDestinations)
+	s.router.POST("/orgs/:id/siem-destinations", siemGate, guard, s.createSIEMDestination)
+	s.router.PATCH("/orgs/:id/siem-destinations/:destinationId", siemGate, guard, s.updateSIEMDestination)
+	s.router.DELETE("/orgs/:id/siem-destinations/:destinationId", siemGate, guard, s.deleteSIEMDestination)
+
+	// Domain verification (WS05-S6): owner/admin DNS proof of a company domain. Every
+	// path answers 404 until ORG_DOMAIN_VERIFICATION_ENABLED is on. The handlers check
+	// the caller's role against the membership table (a platform role is not enough);
+	// the guard is the second layer the other mutations use.
+	identityGate := s.requireIdentityEnabled()
+	s.router.GET("/orgs/:id/domains", identityGate, s.listIdentityDomains)
+	s.router.POST("/orgs/:id/domains", identityGate, guard, s.addIdentityDomain)
+	s.router.POST("/orgs/:id/domains/:domain/verify", identityGate, guard, s.verifyIdentityDomain)
+	s.router.DELETE("/orgs/:id/domains/:domain", identityGate, guard, s.revokeIdentityDomain)
+
+	// SSO policy and provider administration (WS05-S7), same gate and authority.
+	s.router.GET("/orgs/:id/sso/policy", identityGate, s.getSSOPolicy)
+	s.router.PUT("/orgs/:id/sso/policy", identityGate, guard, s.putSSOPolicy)
+	s.router.POST("/orgs/:id/sso/providers", identityGate, guard, s.addSSOProvider)
+	s.router.DELETE("/orgs/:id/sso/providers/:providerId", identityGate, guard, s.removeSSOProvider)
+
+	// SCIM token management (WS05-S8): owner/admin, same authority as the domain
+	// routes. Every path answers 404 until ORG_SCIM_ENABLED is on.
+	scimGate := s.requireSCIMEnabled()
+	s.router.GET("/orgs/:id/scim/tokens", scimGate, s.listSCIMTokens)
+	s.router.POST("/orgs/:id/scim/tokens", scimGate, guard, s.createSCIMToken)
+	s.router.DELETE("/orgs/:id/scim/tokens/:tokenId", scimGate, guard, s.revokeSCIMToken)
+	s.router.GET("/orgs/:id/scim/status", scimGate, s.getSCIMStatus)
 
 	// Read-only projection/RBAC catalog. Membership, role assignment, and custom
 	// policy mutations are intentionally not mounted for the secure MVP: Auth
@@ -166,7 +297,44 @@ func (s *Server) setupRoutes() {
 	// (not org:read:any, which returns the whole organization record). Computed
 	// from the database on every call; see getRetentionPostureInternal.
 	internal.GET("/orgs/:orgId/retention-posture", s.getRetentionPostureInternal)
+	// The org's memory and learning-review policy for session-core's mirror
+	// (WS07-S4), behind its own scope org:agent-policy:read:any; no-store.
+	internal.GET("/orgs/:orgId/agent-policy", s.getAgentPolicyInternal)
+	// The resolved chat model policy for one org and user, for inference-core's
+	// pull (WS10-S2). Own scope org:model-entitlement:read:any; no-store.
+	internal.GET("/orgs/:orgId/model-entitlement", s.getModelEntitlementInternal)
+	// The resolved agent-browser site decision for the broker's grant mint
+	// (WS21-S3). Own scope org:browser-site:read:any, held by browser-broker alone;
+	// no-store.
+	internal.GET("/orgs/:orgId/browser-sites/resolve", s.getBrowserSitesInternal)
+	// The exporter's read of every enabled SIEM destination, secret unsealed
+	// (WS06-S7). Own scope org:siem:read:any, held by audit-core only; no-store.
+	// Registered even while the feature is off so the path cannot fall through to
+	// /orgs/:orgId and be read as an organisation id.
+	internal.GET("/orgs/siem-destinations", siemGate, s.listSIEMDestinationsInternal)
+	// Which organisation holds a verified domain (WS05-S6). Own scope
+	// org:domain:read:any, held by auth-core alone; no-store.
+	internal.GET("/orgs/by-domain/:domain", identityGate, s.getVerifiedDomainOwnerInternal)
+	// The SSO policy covering an email domain, for auth-core's enforcement hook
+	// (WS05-S7). Same scope; no-store.
+	internal.GET("/orgs/by-domain/:domain/sso-policy", identityGate, s.getSSOPolicyByDomainInternal)
 	internal.GET("/orgs/:orgId/roles/:roleName/capabilities", s.getEffectiveCapabilities)
+
+	// The SCIM surface (WS05-S8), reached only by the gateway edge under the
+	// verevon-scim-edge principal (scope org:scim:any). The IdP bearer token in
+	// Authorization names the organisation; Groups are not supported.
+	scim := internal.Group("/scim/v2", scimGate, s.scimAuthenticate())
+	scim.GET("/ServiceProviderConfig", scimServiceProviderConfig)
+	scim.GET("/ResourceTypes", scimResourceTypes)
+	scim.GET("/Schemas", scimSchemas)
+	scim.GET("/Users", s.scimListUsers)
+	scim.POST("/Users", s.scimCreateUser)
+	scim.GET("/Users/:id", s.scimGetUser)
+	scim.PUT("/Users/:id", s.scimReplaceUser)
+	scim.PATCH("/Users/:id", s.scimPatchUser)
+	scim.DELETE("/Users/:id", s.scimDeleteUser)
+	scim.Any("/Groups", scimNotImplemented)
+	scim.Any("/Groups/:id", scimNotImplemented)
 	internal.GET("/orgs/by-tenant", s.getOrganizationByTenant)
 	internal.POST("/orgs/ensure-from-tenant", s.ensureOrganizationFromTenant)
 	internal.POST("/orgs/:orgId/onboarding/state", s.updateOnboardingState)

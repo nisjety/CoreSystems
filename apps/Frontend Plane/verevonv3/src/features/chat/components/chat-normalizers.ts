@@ -1,3 +1,4 @@
+import { ATTACHMENT_MAX_TOTAL_BYTES } from '@/features/chat/lib/attachment-policy'
 import {
   type ChatThreadTranscriptStep,
   type ChatThreadTranscriptTurn,
@@ -8,8 +9,20 @@ import {
 import {
   type ChatAction,
   type ChatMessage,
+  getAttachmentPolicy,
   type RecalledMemory,
 } from '@/shared/api/chat-client'
+import {
+  isModelEntitlementCode,
+  type ModelEntitlementCode,
+  modelEntitlementPresentation,
+} from '@/shared/api/model-entitlement-refusals'
+import {
+  isZdrCode,
+  type Translate,
+  type ZdrRefusalAction,
+  zdrRefusalPresentation,
+} from '@/shared/api/zdr-refusals'
 import {
   blobToDataUrl,
   parseDataUrl,
@@ -19,7 +32,9 @@ import {
   writeClientValue,
 } from '@/shared/session/client-storage'
 import { supportQuestionFromPrompt } from '@/shared/chat/support-context-envelope'
+import { en as enStrings } from '@/shared/i18n/en'
 import { localeIntl, type Locale } from '@/shared/i18n/locales'
+import { no as noStrings } from '@/shared/i18n/no'
 import type { RunDetail } from '@/shared/api/runs-client'
 import {
   isChatArtifactVersion,
@@ -51,6 +66,7 @@ import {
   type ComposerAttachment,
   type ComposerToolId,
   type GeneratedFile,
+  type QueuedInput,
   type StreamAttachment,
   type StreamFailureAction,
   TOOL_LABELS,
@@ -172,6 +188,8 @@ export type StreamFailureDetails = {
   now?: number
   /** The zone to read the reset time in. Defaults to the viewer's own. */
   timeZone?: string
+  /** For a zero-retention refusal that names a feature: the feature's key. */
+  feature?: string
 }
 
 /**
@@ -349,6 +367,94 @@ function rateLimitedPresentation(
 }
 
 /**
+ * The control a zero-retention refusal's action gives the reader. Retry is the
+ * button; open the connection gives a link and then the button. Choosing another
+ * model or turning a feature off changes the turn, so sending it again as it
+ * was cannot help: no button, and the words say what to change.
+ */
+function zdrStreamAction(action: ZdrRefusalAction): StreamFailureAction {
+  if (action === 'retry') return 'retry'
+  if (action === 'open_integrations') return 'open_integrations'
+  return 'none'
+}
+
+/**
+ * A zero-retention refusal in a turn. Nothing was saved (the refusal is made
+ * before a model runs, or the request stored nothing), so what streamed is not
+ * the answer, and it is a refusal rather than an outage. The words are the
+ * catalogue's, in the reader's language; the server's own text is never shown.
+ */
+function zdrStreamPresentation(code: string, tr: Translate, feature: string | undefined): StreamFailurePresentation {
+  const shown = zdrRefusalPresentation(code, feature, tr)
+  return {
+    message: shown.next === null ? shown.message : `${shown.message} ${shown.next}`,
+    unsaved: true,
+    unavailable: false,
+    action: zdrStreamAction(shown.action),
+  }
+}
+
+/**
+ * A model the organisation does not allow this reader, or an answer about that
+ * which could not be read. Both are refused before a model runs, so nothing was
+ * saved and what streamed is not the answer. A refusal, not an outage. The words
+ * are the catalogue's, in the reader's language; the server's own text is never
+ * shown. Retry is the button for the unavailable answer; for a model that is not
+ * available the same turn would be refused again, so the words say what to change.
+ */
+function modelEntitlementStreamPresentation(
+  code: ModelEntitlementCode,
+  tr: Translate,
+): StreamFailurePresentation {
+  const shown = modelEntitlementPresentation(code, tr)
+  return {
+    message: shown.next === null ? shown.message : `${shown.message} ${shown.next}`,
+    unsaved: true,
+    unavailable: false,
+    action: shown.action === 'retry' ? 'retry' : 'none',
+  }
+}
+
+/**
+ * The words for a refusal by the server's attachment contract. Nothing was sent
+ * to a model, so each says what to change, not to retry.
+ */
+function attachmentRefusalMessage(code: string, tr: Translate): string {
+  switch (code) {
+    case 'attachment_media_unsupported':
+      return tr(
+        'Vedlegget ble ikke sendt: filtypen støttes ikke. Bruk PNG, JPEG, WebP eller GIF for bilder. Ingenting ble sendt.',
+        'The attachment was not sent: its type is not supported. Use PNG, JPEG, WebP or GIF for images. Nothing was sent.',
+      )
+    case 'attachment_too_large':
+      return tr(
+        'Vedlegget ble ikke sendt: det er for stort. Bruk en mindre fil eller færre vedlegg. Ingenting ble sendt.',
+        'The attachment was not sent: it is too large. Use a smaller file or fewer attachments. Nothing was sent.',
+      )
+    case 'attachment_count_exceeded':
+      return tr(
+        'Vedleggene ble ikke sendt: det er for mange i én melding. Fjern noen og prøv igjen. Ingenting ble sendt.',
+        'The attachments were not sent: there are too many in one message. Remove some and try again. Nothing was sent.',
+      )
+    case 'attachment_route_unsupported':
+      return tr(
+        'Vedleggene ble ikke sendt: ChatGPT-abonnementet leser ikke vedlegg. Fjern dem eller velg en annen modell. Ingenting ble sendt.',
+        'The attachments were not sent: the ChatGPT subscription does not read attachments. Remove them or pick another model. Nothing was sent.',
+      )
+    case 'attachment_do_unsupported':
+      return tr(
+        'Bildet ble ikke sendt: Utfør kan ikke bruke bilder ennå. Send meldingen i Spør-modus. Ingenting ble sendt.',
+        'The image was not sent: Do cannot use images yet. Send the message in Ask mode. Nothing was sent.',
+      )
+    default:
+      return tr(
+        'Vedlegget ble ikke sendt: filen kunne ikke leses. Legg det ved på nytt. Ingenting ble sendt.',
+        'The attachment was not sent: the file could not be read. Attach it again. Nothing was sent.',
+      )
+  }
+}
+
+/**
  * Presentation for a server-reported stream failure, by its code.
  *
  * Only the codes that change what the reader must be told are named; every
@@ -377,9 +483,15 @@ function rateLimitedPresentation(
  * languages and an `action`: wait for a known reset, reconnect, retry, or
  * nothing. None of them ever retries by itself, and each says no other model
  * was used, because the subscription route never swaps.
+ * `attachments_not_sent` is the client's own refusal to send an image on the
+ * subscription route: nothing left the browser, and no retry is offered.
  * `agentic_subscription_disabled` is the server saying Do is off for the
  * subscription route: the reader is told to choose Ask or another model, and
- * no retry is offered. `prompt_too_long`,
+ * no retry is offered. `plan_grant_unavailable` and `plan_execute_disabled` are
+ * the refusals of the turn that runs an approved plan (WS14 S2a): the server holds
+ * no live grant for the thread, or the capability is switched off on this
+ * deployment. Nothing ran, a retry cannot help, so each says so in words and
+ * offers none. `prompt_too_long`,
  * `inference_stream_error` and `model_plane_unavailable` are translated too;
  * the last one's server text is raw transport detail and is never shown.
  */
@@ -389,6 +501,10 @@ export function streamFailurePresentation(
   tr: (noText: string, enText: string) => string,
   details: StreamFailureDetails = {},
 ): StreamFailurePresentation {
+  // Every zero-retention code, the ones this SPA does not know included: the
+  // server's text for them is English operator wording, never shown.
+  if (code !== undefined && isZdrCode(code)) return zdrStreamPresentation(code, tr, details.feature)
+  if (isModelEntitlementCode(code)) return modelEntitlementStreamPresentation(code, tr)
   const server = serverMessage.trim()
   const now = details.now ?? Date.now()
   switch (code) {
@@ -441,6 +557,32 @@ export function streamFailurePresentation(
         unavailable: false,
         action: 'none',
       }
+    case 'attachments_not_sent':
+      // Raised by the client itself before anything was sent: the ChatGPT
+      // subscription route carries no images. Sending the same turn again would
+      // be refused the same way, so there is no retry.
+      return {
+        message: tr(noStrings.attachments.notSent, enStrings.attachments.notSent),
+        unsaved: true,
+        unavailable: false,
+        action: 'none',
+      }
+    case 'attachment_media_unsupported':
+    case 'attachment_too_large':
+    case 'attachment_count_exceeded':
+    case 'attachment_route_unsupported':
+    case 'attachment_encoding_invalid':
+    case 'attachment_do_unsupported':
+      // The server's attachment contract (WS08 S2, S4) refused the turn before any
+      // model ran. The same turn would be refused the same way, so there is no
+      // retry; each code says what to change. The server's text names a file and
+      // a limit in English and is never shown.
+      return {
+        message: attachmentRefusalMessage(code, tr),
+        unsaved: true,
+        unavailable: false,
+        action: 'none',
+      }
     case 'agentic_subscription_disabled':
       // The server refused Do on the ChatGPT subscription because its switch is
       // off, before any model ran. Sending the same turn again would be refused
@@ -450,6 +592,33 @@ export function streamFailurePresentation(
         message: tr(
           'Utfør er ikke slått på for ChatGPT-abonnementet. Velg Spør, eller velg en annen modell for å bruke Utfør. Ingen modell ble brukt.',
           'Do is not switched on for the ChatGPT subscription. Choose Ask, or pick another model to use Do. No model was used.',
+        ),
+        unsaved: true,
+        unavailable: false,
+        action: 'none',
+      }
+    case 'plan_grant_unavailable':
+      // The turn that runs the approved plan was refused before anything ran:
+      // the gateway holds no live grant for the thread (it restarted, or the
+      // 24 h grant lapsed). Sending it again would be refused the same way, so
+      // there is no retry; the words say what does help. The server's text is
+      // English operator wording and is never shown.
+      return {
+        message: tr(
+          'Fullmakten er ikke lenger aktiv (utløpt eller tjenesten ble startet på nytt). Velg Utfør, be agenten lage planen på nytt, og godkjenn den. Ingenting ble kjørt.',
+          'The authority is no longer active (it expired or the service restarted). Choose Do, ask the agent to make the plan again, and approve it. Nothing was run.',
+        ),
+        unsaved: true,
+        unavailable: false,
+        action: 'none',
+      }
+    case 'plan_execute_disabled':
+      // Running an approved plan is switched off on this deployment. Nothing
+      // the reader does here changes that, so there is no retry either.
+      return {
+        message: tr(
+          'Kjøring av godkjent plan er slått av i denne installasjonen. Ingenting ble kjørt.',
+          'Running an approved plan is switched off on this deployment. Nothing was run.',
         ),
         unsaved: true,
         unavailable: false,
@@ -584,13 +753,22 @@ export function unsettledRunTurn(threadId: string, latestRunId: string, message:
  * of questions, and the server's last question must be the one this turn
  * answered. Any doubt returns `null`, which leaves the turn as the browser
  * settled it; adopting the wrong answer would be worse than not adopting one.
+ *
+ * `partial` is for a window of the newest messages (WS09 S9). Its question count
+ * cannot match the whole local thread, so only the trailing question is compared.
  */
-export function savedAnswerForTrailingTurn(localTurns: ChatTurn[], turnId: string, serverTurns: ChatTurn[]): ChatTurn | null {
+export function savedAnswerForTrailingTurn(
+  localTurns: ChatTurn[],
+  turnId: string,
+  serverTurns: ChatTurn[],
+  options: { partial?: boolean } = {},
+): ChatTurn | null {
   const index = localTurns.findIndex((turn) => turn.id === turnId)
   if (index < 0 || index !== localTurns.length - 1 || localTurns[index]?.role !== 'assistant') return null
   const localQuestions = localTurns.slice(0, index).filter((turn) => turn.role === 'user')
   const serverQuestionIndexes = serverTurns.flatMap((turn, at) => (turn.role === 'user' ? [at] : []))
-  if (localQuestions.length === 0 || serverQuestionIndexes.length !== localQuestions.length) return null
+  if (localQuestions.length === 0) return null
+  if (options.partial ? serverQuestionIndexes.length === 0 : serverQuestionIndexes.length !== localQuestions.length) return null
   const lastQuestionAt = serverQuestionIndexes.at(-1) as number
   const normalize = (value: string) => value.trim().replace(/\s+/g, ' ')
   const asked = normalize(localQuestions.at(-1)?.content ?? '')
@@ -799,7 +977,16 @@ export function timestampsAreClose(left: string, right: string): boolean {
   return Math.abs(leftTime - rightTime) < 60_000
 }
 
-export function mergeServerTurnsWithCachedMetadata(serverTurns: ChatTurn[], cachedTurns: ChatTurn[]): ChatTurn[] {
+/**
+ * `partial` marks `serverTurns` as a window of the thread (WS09 S9). A position
+ * in a window says nothing about the cached turn at the same place in the whole
+ * thread, so a turn in a window is matched by its id or its words only.
+ */
+export function mergeServerTurnsWithCachedMetadata(
+  serverTurns: ChatTurn[],
+  cachedTurns: ChatTurn[],
+  options: { partial?: boolean } = {},
+): ChatTurn[] {
   if (cachedTurns.length === 0) return serverTurns
   const usedCachedIds = new Set<string>()
   const roleOffsets: Record<ChatTurn['role'], number> = { assistant: 0, user: 0 }
@@ -807,7 +994,9 @@ export function mergeServerTurnsWithCachedMetadata(serverTurns: ChatTurn[], cach
   const merged = serverTurns.map((serverTurn) => {
     const roleIndex = roleOffsets[serverTurn.role]
     roleOffsets[serverTurn.role] += 1
-    const cachedTurn = selectCachedTurnForServerTurn(serverTurn, cachedTurns, usedCachedIds, roleIndex)
+    const cachedTurn = options.partial
+      ? selectCachedTurnByIdOrWords(serverTurn, cachedTurns, usedCachedIds)
+      : selectCachedTurnForServerTurn(serverTurn, cachedTurns, usedCachedIds, roleIndex)
     if (!cachedTurn) return serverTurn
     usedCachedIds.add(cachedTurn.id)
     return {
@@ -911,6 +1100,33 @@ export function selectCachedTurnForServerTurn(
     ?? unusedSameRole.find((turn) => turnsProbablyMatch(serverTurn, turn))
     ?? unusedSameRole[roleIndex]
     ?? (serverTurn.role === 'assistant' ? [...unusedSameRole].reverse().find(hasCachedTurnMetadata) : undefined)
+}
+
+function selectCachedTurnByIdOrWords(
+  serverTurn: ChatTurn,
+  cachedTurns: ChatTurn[],
+  usedCachedIds: Set<string>,
+): ChatTurn | undefined {
+  const unusedSameRole = cachedTurns.filter((turn) => turn.role === serverTurn.role && !usedCachedIds.has(turn.id))
+  return unusedSameRole.find((turn) => turn.id === serverTurn.id)
+    ?? unusedSameRole.find((turn) => turnsProbablyMatch(serverTurn, turn))
+}
+
+/** Whether two turns are one message: the same id, or the same role and words. */
+export function isSameTurn(left: ChatTurn, right: ChatTurn): boolean {
+  return left.role === right.role && (left.id === right.id || turnsProbablyMatch(left, right))
+}
+
+/**
+ * The cached turns that lie before a window of the thread (WS09 S9). A window
+ * read leaves them out, but the local snapshot still holds them, so they stay
+ * until "load earlier" reaches the same messages. A snapshot that does not reach
+ * the window at all is older than it: keeping it would put a gap in the middle
+ * of the transcript and pass that gap off as continuous, so nothing is kept.
+ */
+export function cachedTurnsBeforeWindow(serverTurns: ChatTurn[], cachedTurns: ChatTurn[]): ChatTurn[] {
+  const firstShared = cachedTurns.findIndex((cached) => serverTurns.some((server) => isSameTurn(server, cached)))
+  return firstShared > 0 ? cachedTurns.slice(0, firstShared) : []
 }
 
 export function turnsProbablyMatch(left: ChatTurn, right: ChatTurn): boolean {
@@ -1085,24 +1301,6 @@ export function isComposerAttachment(value: unknown): value is ComposerAttachmen
   )
 }
 
-/**
- * Names the attachments the model will NOT receive.
- *
- * The composer accepts nine document types and renders a chip for each, and
- * the transcript then says "1 attachment added" — but only `image/*` survives
- * `toStreamAttachments`, so a PDF was silently discarded while every visible
- * signal told the user it had been sent. Callers use this to say so out loud.
- * Documents have their own working route: the per-file "Add to knowledge base"
- * button, which ingests them into the knowledge base for retrieval.
- */
-export function unsentAttachmentNames(
-  attachments: DashboardComposerSubmitPayload['attachments'],
-): string[] {
-  return attachments
-    .filter((attachment) => !attachment.url || !attachment.type.startsWith('image/'))
-    .map((attachment) => attachment.name?.trim() || 'uten navn')
-}
-
 /** Text files plus PDF/DOCX/XLSX/PPTX prepared by the ephemeral reader. */
 const TEXT_INGEST_EXTENSIONS = ['.txt', '.md', '.markdown', '.csv', '.json', '.html', '.htm']
 
@@ -1189,13 +1387,40 @@ export function contentWithPreparedSources(text: string, attachments: ComposerAt
   return sources.length ? appendInlinedAttachments(text, sources) : text
 }
 
+/** The document kinds a program can usefully read as bytes (the spreadsheet or PDF behind the inlined text). */
+const SANDBOX_FILE_EXTENSIONS = /\.(xlsx|csv|pdf|json|docx|pptx)$/i
+
+/** The decoded size of base64 text, without decoding it. */
+function base64ByteLength(base64: string): number {
+  const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0
+  return Math.floor((base64.length * 3) / 4) - padding
+}
+
 export async function toStreamAttachments(
   attachments: DashboardComposerSubmitPayload['attachments'],
 ): Promise<StreamAttachment[]> {
   const out: StreamAttachment[] = []
+  // Every image rides the wire, so the turn's bytes are bounded here as the server bounds
+  // them: the declared total, or today's constant before the catalogue has answered.
+  const budget = getAttachmentPolicy()?.maxTotalBytes ?? ATTACHMENT_MAX_TOTAL_BYTES
+  let used = 0
+  const spend = (base64: string, name: string) => {
+    used += base64ByteLength(base64)
+    if (used > budget) {
+      throw new Error(`Vedleggene er for store til å sendes i én melding («${name}» passerte grensen). Fjern noen og prøv igjen.`)
+    }
+  }
   for (const attachment of attachments) {
-    // Documents are included by inlineTextAttachments before inference.
-    if (!attachment.type.startsWith('image/')) continue
+    if (!attachment.type.startsWith('image/')) {
+      // Documents are included as text by inlineTextAttachments before inference.
+      // Their bytes ride along only where the server says it will stage them for
+      // the code sandbox, so a server without that switch gets what it always got.
+      if (SANDBOX_FILE_EXTENSIONS.test(attachment.name) && getAttachmentPolicy()?.modes.sandboxFiles) {
+        out.push(await toStreamFile(attachment))
+      }
+      continue
+    }
+    let parsed: ReturnType<typeof parseDataUrl>
     try {
       if (!attachment.url) throw new Error('missing image')
       let dataUrl = attachment.url
@@ -1204,14 +1429,39 @@ export async function toStreamAttachments(
         if (!response.ok) throw new Error('unreadable image')
         dataUrl = await blobToDataUrl(await response.blob())
       }
-      const parsed = parseDataUrl(dataUrl)
+      parsed = parseDataUrl(dataUrl)
       if (!parsed || !parsed.base64) throw new Error('invalid image encoding')
-      out.push({ kind: 'image', data_base64: parsed.base64, mime_type: parsed.mime || attachment.type })
     } catch {
       throw new Error(`Kunne ikke lese bildet «${attachment.name}». Prøv igjen eller fjern bildet.`)
     }
+    spend(parsed.base64, attachment.name)
+    out.push({ kind: 'image', data_base64: parsed.base64, mime_type: parsed.mime || attachment.type })
   }
   return out
+}
+
+async function toStreamFile(
+  attachment: DashboardComposerSubmitPayload['attachments'][number],
+): Promise<StreamAttachment> {
+  try {
+    if (!attachment.url) throw new Error('missing file')
+    let dataUrl = attachment.url
+    if (!dataUrl.startsWith('data:')) {
+      const response = await fetch(dataUrl)
+      if (!response.ok) throw new Error('unreadable file')
+      dataUrl = await blobToDataUrl(await response.blob())
+    }
+    const parsed = parseDataUrl(dataUrl)
+    if (!parsed || !parsed.base64) throw new Error('invalid file encoding')
+    return {
+      kind: 'file',
+      name: attachment.name,
+      data_base64: parsed.base64,
+      mime_type: attachment.type || parsed.mime || 'application/octet-stream',
+    }
+  } catch {
+    throw new Error(`Kunne ikke lese «${attachment.name}». Prøv igjen eller fjern filen.`)
+  }
 }
 
 export function createId(prefix: string) {
@@ -1219,6 +1469,91 @@ export function createId(prefix: string) {
     return `${prefix}-${crypto.randomUUID()}`
   }
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+/**
+ * The id an ordinary send is named with, or `undefined` for none.
+ *
+ * The gateway stores the user's message under it, so a repeat of the same send (a retry after
+ * a lost reply, a queued message the run never took and `sendContent` then sends as a new turn)
+ * lands as ONE transcript row. Sent regardless of the gateway's `MODEL_GATEWAY_SEND_RECEIPTS`
+ * switch (which only decides whether it is honoured). Never for a zero-retention turn (nothing
+ * of it is stored, and an id would be a stored fact), a regenerate or an edited resubmit (both
+ * state the previous question again on purpose, as a new message), or a send that appends no
+ * user turn (continue generation). A send that repeats an earlier one passes its id in.
+ */
+export function sendClientMessageId(
+  options: {
+    zdr?: boolean
+    regenerated?: boolean
+    editResubmit?: boolean
+    appendUser?: boolean
+    clientMessageId?: string
+  },
+  mint: () => string,
+): string | undefined {
+  if (options.zdr || options.regenerated || options.editResubmit || options.appendUser === false) {
+    return undefined
+  }
+  return options.clientMessageId ?? mint()
+}
+
+/**
+ * Promote the mid-run messages a `queued_input` delivery names to delivered.
+ *
+ * By id when the delivery carries ids and the message has one: the id is ours, so this stays
+ * right when two messages say the same words. By text otherwise (a gateway that sends no ids,
+ * or a message queued before ids existed), which is also what keeps a message queued by
+ * another tab on the same run correct.
+ */
+export function markQueuedInputsDelivered(
+  entries: readonly QueuedInput[],
+  messages: readonly string[],
+  ids: readonly string[] = [],
+): QueuedInput[] {
+  const deliveredIds = new Set(ids.filter((id) => id.length > 0))
+  const deliveredTexts = new Set(messages.map((message) => message.trim()))
+  return entries.map((entry) => {
+    if (entry.state !== 'pending') return entry
+    const named = deliveredIds.size > 0 && Boolean(entry.clientMessageId)
+    const delivered = named
+      ? deliveredIds.has(entry.clientMessageId as string)
+      : deliveredTexts.has(entry.content.trim())
+    return delivered ? { ...entry, state: 'delivered', note: undefined } : entry
+  })
+}
+
+/**
+ * The run ended on its own. A message the gateway accepted that the run never took (it ended
+ * between two tool-round boundaries) is told apart from every other entry: it is returned in
+ * `resend`, to go out again as an ordinary turn under the same id, and marked `resent` in the
+ * strip. A refused message, one already delivered, and one that never reached the gateway
+ * (already waiting to go out) are left as they are.
+ */
+export function settleQueuedInputsAtRunEnd(entries: readonly QueuedInput[]): {
+  entries: QueuedInput[]
+  resend: QueuedInput[]
+} {
+  const resend: QueuedInput[] = []
+  const settled = entries.map((entry): QueuedInput => {
+    if (entry.state !== 'pending' || !entry.accepted) return entry
+    resend.push(entry)
+    return { ...entry, state: 'resent', accepted: false, note: undefined }
+  })
+  return { entries: settled, resend }
+}
+
+/**
+ * The mid-run strip a new turn starts with. A new turn owns the strip, so the previous run's
+ * entries go (they landed in the transcript or were reported refused); a turn that is itself a
+ * queued message going out again keeps the entries that say so, or "resent" would be gone the
+ * moment it appeared.
+ */
+export function queuedInputsForNewTurn(
+  entries: readonly QueuedInput[],
+  resendOfQueued: boolean,
+): QueuedInput[] {
+  return resendOfQueued ? entries.filter((entry) => entry.state === 'resent') : []
 }
 
 export function buildTaskSteps(
@@ -1311,8 +1646,16 @@ export function normalizeGeneratedFile(event: {
   }
 }
 
+/** The citation origins this SPA renders. Any other value from a gateway is dropped, never trusted verbatim. */
+const CITATION_ORIGINS: readonly NonNullable<Citation['origin']>[] = ['web', 'knowledge', 'connector']
+
+function citationOrigin(value: unknown): Citation['origin'] {
+  return CITATION_ORIGINS.find((origin) => origin === value)
+}
+
 export function normalizeCitation(event: { id?: string; title?: string; url?: string; snippet?: string; claimId?: string; sourceGroupId?: string; sourceGroupLabel?: string; start?: number; end?: number; origin?: string }): Citation | null {
   if (!event.url) return null
+  const origin = citationOrigin(event.origin)
   return {
     id: event.id ?? event.url,
     title: event.title ?? hostname(event.url),
@@ -1323,7 +1666,7 @@ export function normalizeCitation(event: { id?: string; title?: string; url?: st
     ...(event.sourceGroupLabel ? { sourceGroupLabel: event.sourceGroupLabel } : {}),
     ...(event.start !== undefined ? { start: event.start } : {}),
     ...(event.end !== undefined ? { end: event.end } : {}),
-    ...(event.origin === 'web' || event.origin === 'knowledge' ? { origin: event.origin } : {}),
+    ...(origin ? { origin } : {}),
   }
 }
 
@@ -1578,6 +1921,7 @@ export function citationFromUnknown(value: unknown, index: number): Citation | n
   const sourceGroupId = stringValue(item.source_group_id) ?? stringValue(item.sourceGroupId)
   const start = numberValue(item.start) ?? numberValue(item.start_offset) ?? numberValue(item.startOffset)
   const end = numberValue(item.end) ?? numberValue(item.end_offset) ?? numberValue(item.endOffset)
+  const origin = citationOrigin(item.origin)
   return {
     id: stringValue(item.id) ?? `web-${index + 1}-${url}`,
     title,
@@ -1587,6 +1931,7 @@ export function citationFromUnknown(value: unknown, index: number): Citation | n
     ...(sourceGroupId ? { sourceGroupId } : {}),
     ...(start !== undefined ? { start } : {}),
     ...(end !== undefined ? { end } : {}),
+    ...(origin ? { origin } : {}),
   }
 }
 

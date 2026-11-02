@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/I-Dacosta/AquatiqCMS/apps/insight-core/internal/config"
@@ -63,7 +64,7 @@ func TestOverviewRequiresOrganizationScope(t *testing.T) {
 	}
 }
 
-func TestConnectorsReturnGoogleSlots(t *testing.T) {
+func TestConnectorsReturnMarketingRegistryWithoutCredentialMaterial(t *testing.T) {
 	router := testRouter()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/insights/connectors", nil)
 	req.Header.Set("x-internal-api-key", "test-key")
@@ -81,17 +82,27 @@ func TestConnectorsReturnGoogleSlots(t *testing.T) {
 	if err := json.Unmarshal(resp.Body.Bytes(), &decoded); err != nil {
 		t.Fatalf("Unmarshal connectors: %v", err)
 	}
-	foundGA4 := false
+	want := map[string]struct{}{
+		"google_search_console": {},
+		"google_analytics_4":    {},
+		"google_ads":            {},
+		"meta_ads":              {},
+		"semrush":               {},
+		"first_party_seo":       {},
+	}
 	for _, connector := range decoded.Data {
-		if connector.Type == "google_analytics_4" {
-			foundGA4 = true
-			if connector.Status != insights.ConnectorStatusRequiresTokenLease {
-				t.Fatalf("ga4 status = %s", connector.Status)
-			}
+		if _, required := want[connector.Type]; required {
+			delete(want, connector.Type)
 		}
 	}
-	if !foundGA4 {
-		t.Fatal("google_analytics_4 connector not returned")
+	if len(want) != 0 {
+		t.Fatalf("marketing registry missing connectors: %#v", want)
+	}
+	body := strings.ToLower(resp.Body.String())
+	for _, forbidden := range []string{"\"access_token\"", "\"refresh_token\"", "\"client_secret\"", "\"api_key\"", "\"password\""} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("connector response exposed credential field %q: %s", forbidden, resp.Body.String())
+		}
 	}
 }
 

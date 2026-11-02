@@ -37,13 +37,14 @@ export function FeedbackWidget() {
   // send control on narrower viewports, so keep feedback available everywhere
   // else without layering two composers on top of one another.
   const isSupportInbox = createMemo(() => location.pathname.startsWith('/support'))
-  // Chat opens feedback from its actions menu so the persistent trigger
-  // cannot cover document copy or the composer on narrow viewports.
-  const isDocked = createMemo(() => location.pathname.startsWith('/chat'))
+  // Chat and the Space room open feedback from a menu so the persistent trigger
+  // cannot cover document copy or a composer (the room has a composer in every
+  // corner, and on a phone the trigger covered the Send button).
+  const isDocked = createMemo(() => location.pathname.startsWith('/chat') || location.pathname.startsWith('/spaces'))
   let returnFocus: HTMLElement | null = null
   const openFromMenu = () => {
-    if (!orgId() || !isDocked()) return
-    returnFocus = document.querySelector('.verevon-chat-header-button[aria-haspopup="menu"]')
+    if (!orgId()) return
+    returnFocus = document.querySelector('.verevon-chat-header-button[aria-haspopup="menu"], .core-navbar-more > summary')
     setOpen(true)
   }
   const closeOnEscape = (event: KeyboardEvent) => {

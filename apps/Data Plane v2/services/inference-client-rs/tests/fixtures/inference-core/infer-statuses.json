@@ -7,6 +7,8 @@
     "retry_after_ms": "x-mp-retry-after-ms"
   },
   "kinds": [
+    "model_entitlement_unavailable",
+    "model_not_entitled",
     "rate_limited",
     "residency_unavailable",
     "subscription_bad_request",
@@ -104,6 +106,25 @@
       "grpc_code_number": 9,
       "trailers": {
         "x-mp-provider-error": "tier_unavailable"
+      }
+    },
+    {
+      "id": "provider_model_not_entitled",
+      "source": "ProviderError::ModelNotEntitled",
+      "grpc_code": "PERMISSION_DENIED",
+      "grpc_code_number": 7,
+      "trailers": {
+        "x-mp-entitlement-reason": "explicitly_denied",
+        "x-mp-provider-error": "model_not_entitled"
+      }
+    },
+    {
+      "id": "provider_entitlement_unavailable",
+      "source": "ProviderError::EntitlementUnavailable",
+      "grpc_code": "UNAVAILABLE",
+      "grpc_code_number": 14,
+      "trailers": {
+        "x-mp-provider-error": "model_entitlement_unavailable"
       }
     },
     {

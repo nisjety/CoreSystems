@@ -5,13 +5,19 @@
 
 use axum::http::StatusCode;
 use axum::Json;
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::normalize::NormalizedRequest;
+use crate::org_quota::{self, ResetPeriod};
 
 const COST_CORE_BASE_URL_VAR: &str = "COST_CORE_URL";
 const DEFAULT_COST_CORE_URL: &str = "http://localhost:8089";
+/// Switch for the windowed org budget (WS27-S8). Only the literal `true`
+/// enables it, and it is read per request, so a restart is not needed to turn
+/// it off. Off, the check counts lifetime spend, as it did before.
+const BUDGET_WINDOW_ENV: &str = "MODEL_GATEWAY_BUDGET_WINDOW";
 
 #[derive(Debug, Serialize)]
 struct BudgetCheckRequest {
@@ -19,6 +25,10 @@ struct BudgetCheckRequest {
     user_id: String,
     max_cost_usd: Option<f64>,
     max_tokens: Option<u32>,
+    /// Start of the org's current reset window (RFC 3339, UTC). Absent counts
+    /// lifetime spend, so the field is not sent when the window is off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    since: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,6 +77,11 @@ pub async fn check_budget(
 
     let base_url =
         std::env::var(COST_CORE_BASE_URL_VAR).unwrap_or_else(|_| DEFAULT_COST_CORE_URL.to_owned());
+    let since = budget_window_since(
+        budget_window_enabled(&|key| std::env::var(key).ok()),
+        org_limits.reset_period,
+        Utc::now(),
+    );
     check_budget_at(
         http_client,
         &base_url,
@@ -75,10 +90,27 @@ pub async fn check_budget(
         verified_bearer,
         effective_cost,
         effective_tokens,
+        since,
     )
     .await
 }
 
+fn budget_window_enabled(lookup: &dyn Fn(&str) -> Option<String>) -> bool {
+    lookup(BUDGET_WINDOW_ENV).as_deref() == Some("true")
+}
+
+/// The `since` to send with a check: the start of the org's current reset
+/// window in UTC. `None` when the switch is off or the period is a lifetime
+/// total, so the check then counts lifetime spend.
+fn budget_window_since(enabled: bool, period: ResetPeriod, now: DateTime<Utc>) -> Option<String> {
+    if !enabled {
+        return None;
+    }
+    org_quota::window_since(period, now)
+        .map(|start| start.to_rfc3339_opts(SecondsFormat::Secs, true))
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn check_budget_at(
     http_client: &reqwest::Client,
     base_url: &str,
@@ -87,6 +119,7 @@ async fn check_budget_at(
     verified_bearer: &str,
     max_cost_usd: Option<f64>,
     max_tokens: Option<u32>,
+    since: Option<String>,
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
     let bearer = verified_bearer.trim();
     if org_id.trim().is_empty()
@@ -105,6 +138,7 @@ async fn check_budget_at(
         user_id: user_id.to_owned(),
         max_cost_usd,
         max_tokens,
+        since,
     };
 
     let resp = http_client
@@ -167,6 +201,7 @@ fn dependency_unavailable(message: &str) -> (StatusCode, Json<serde_json::Value>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use wiremock::{
         matchers::{body_json, header, method, path},
         Mock, MockServer, ResponseTemplate,
@@ -219,6 +254,7 @@ mod tests {
             "verified-cost-token",
             Some(10.0),
             Some(1_000),
+            None,
         )
         .await
         .expect("within budget");
@@ -240,6 +276,7 @@ mod tests {
             "rejected-token",
             Some(10.0),
             Some(1_000),
+            None,
         )
         .await
         .expect_err("auth failure must block inference");
@@ -253,6 +290,7 @@ mod tests {
             "verified-cost-token",
             Some(10.0),
             Some(1_000),
+            None,
         )
         .await
         .expect_err("transport failure must block inference");
@@ -289,6 +327,7 @@ mod tests {
             // What check_budget would resolve: request None, org 2.5.
             uncapped.max_cost_usd.or(Some(2.5)),
             None,
+            None,
         )
         .await
         .expect_err("the org ceiling must block this");
@@ -300,6 +339,7 @@ mod tests {
         let org = crate::org_quota::OrgQuotaLimits {
             max_cost_usd: Some(2.5),
             max_tokens: Some(500),
+            ..Default::default()
         };
         let request = normalized(); // cost 10.0, tokens 1_000
 
@@ -312,5 +352,64 @@ mod tests {
             ..normalized()
         };
         assert_eq!(partial.max_cost_usd.or(org.max_cost_usd), Some(2.5));
+    }
+
+    #[tokio::test]
+    async fn reset_period_daily_sends_start_of_utc_day() {
+        let now = Utc
+            .with_ymd_and_hms(2026, 10, 23, 15, 42, 10)
+            .single()
+            .expect("a valid instant");
+        let since = budget_window_since(true, ResetPeriod::Daily, now);
+        assert_eq!(since.as_deref(), Some("2026-10-23T00:00:00Z"));
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/budget/check"))
+            .and(body_json(serde_json::json!({
+                "org_id": "org-a",
+                "user_id": "user-a",
+                "max_cost_usd": 10.0,
+                "max_tokens": 1000,
+                "since": "2026-10-23T00:00:00Z",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "allowed": true,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        check_budget_at(
+            &reqwest::Client::new(),
+            &server.uri(),
+            "org-a",
+            "user-a",
+            "verified-cost-token",
+            Some(10.0),
+            Some(1_000),
+            since,
+        )
+        .await
+        .expect("within the window");
+    }
+
+    #[test]
+    fn the_window_is_sent_only_when_switched_on_and_the_period_is_not_lifetime() {
+        let now = Utc
+            .with_ymd_and_hms(2026, 10, 23, 15, 42, 10)
+            .single()
+            .expect("a valid instant");
+        assert_eq!(budget_window_since(false, ResetPeriod::Daily, now), None);
+        assert_eq!(budget_window_since(true, ResetPeriod::None, now), None);
+        assert_eq!(
+            budget_window_since(true, ResetPeriod::Monthly, now).as_deref(),
+            Some("2026-10-01T00:00:00Z")
+        );
+
+        // Only the literal `true` enables it: a misspelling is off, never half-on.
+        assert!(budget_window_enabled(&|_| Some("true".to_owned())));
+        assert!(!budget_window_enabled(&|_| Some("True".to_owned())));
+        assert!(!budget_window_enabled(&|_| None));
     }
 }

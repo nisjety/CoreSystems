@@ -86,11 +86,25 @@ type Decision struct {
 	DeletionScope             string   `json:"deletion_scope"`
 	// ImportSourceType is present only for the import action family. It binds a
 	// durable connector intent without turning Control into a connector owner.
-	ImportSourceType  string    `json:"import_source_type,omitempty"`
-	ZeroDataRetention bool      `json:"zero_data_retention"`
-	IssuedAt          time.Time `json:"issued_at"`
-	ExpiresAt         time.Time `json:"expires_at"`
-	Nonce             string    `json:"nonce"`
+	ImportSourceType string `json:"import_source_type,omitempty"`
+	// HistoryFloorRevision (WS04-S11) is present only on a shared thread-read
+	// decision for a since_join room while SPACE_HISTORY_WINDOW_CLAIM is on:
+	// the first recipient-audience revision the reader may see. It is signed
+	// with the rest of the decision and is in no payload digest. A consumer that
+	// does not know it shows full history (presentation rule, never authority).
+	HistoryFloorRevision int64 `json:"history_floor_revision,omitempty"`
+	// ContractDigest and ContractExpiresAt bind a scheduled step to its stored
+	// consent contract. Both are omitted on every decision issued without one.
+	ContractDigest    string     `json:"contract_digest,omitempty"`
+	ContractExpiresAt *time.Time `json:"contract_expires_at,omitempty"`
+	ZeroDataRetention bool       `json:"zero_data_retention"`
+	IssuedAt          time.Time  `json:"issued_at"`
+	ExpiresAt         time.Time  `json:"expires_at"`
+	Nonce             string     `json:"nonce"`
+	// SpaceKind is the kind of the Space the decision was issued for (personal, room, ...).
+	// Model Plane stamps it on the thread so memory containment can tell a personal Space
+	// from a shared room. Additive and in no payload digest; omitted when empty.
+	SpaceKind string `json:"space_kind,omitempty"`
 }
 
 type DecisionExpectation struct {
@@ -179,6 +193,23 @@ func (d Decision) matchesExpectation(expected DecisionExpectation) bool {
 }
 
 func VerifyDecision(key VerificationKey, token string, expected DecisionExpectation) (*Decision, error) {
+	decision, err := parseVerifiedDecision(key, token)
+	if err != nil {
+		return nil, err
+	}
+	if !decision.matchesExpectation(expected) {
+		return nil, fmt.Errorf("space decision target does not match expected authority")
+	}
+	if err := checkDecisionWindow(decision, expected.Now); err != nil {
+		return nil, err
+	}
+	return decision, nil
+}
+
+// parseVerifiedDecision checks the envelope, key id, signature and payload
+// validity of a decision token. It binds no caller intent and no time window;
+// VerifyDecision and VerifyIssuedDecision add those.
+func parseVerifiedDecision(key VerificationKey, token string) (*Decision, error) {
 	if strings.TrimSpace(key.ID) == "" || len(key.PublicKey) != ed25519.PublicKeySize {
 		return nil, fmt.Errorf("valid Space decision verification key is required")
 	}
@@ -209,18 +240,19 @@ func VerifyDecision(key VerificationKey, token string, expected DecisionExpectat
 	if err := decision.Validate(); err != nil {
 		return nil, err
 	}
-	if !decision.matchesExpectation(expected) {
-		return nil, fmt.Errorf("space decision target does not match expected authority")
-	}
-	now := expected.Now
+	return &decision, nil
+}
+
+// checkDecisionWindow refuses an expired decision or one issued in the future.
+func checkDecisionWindow(decision *Decision, now time.Time) error {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
 	if !now.Before(decision.ExpiresAt) {
-		return nil, fmt.Errorf("space decision expired")
+		return fmt.Errorf("space decision expired")
 	}
 	if decision.IssuedAt.After(now.Add(time.Minute)) {
-		return nil, fmt.Errorf("space decision issued in the future")
+		return fmt.Errorf("space decision issued in the future")
 	}
-	return &decision, nil
+	return nil
 }

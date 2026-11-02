@@ -14,6 +14,7 @@ Name | Type
 `requestedOf` | string
 `decidedBy` | string
 `decisionReason` | string
+`cause` | [ApprovalCause](ApprovalCause.md)
 
 ## Example
 
@@ -30,6 +31,7 @@ const example = {
   "requestedOf": null,
   "decidedBy": null,
   "decisionReason": null,
+  "cause": null,
 } satisfies Approval
 
 console.log(example)

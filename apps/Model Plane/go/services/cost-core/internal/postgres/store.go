@@ -150,8 +150,10 @@ func (s *Store) RecordEntry(ctx context.Context, e ledger.Entry) error {
 		INSERT INTO cost_entries
 			(id, org_id, user_id, producer_id, run_id, request_id, model,
 			 input_tokens, output_tokens, cost_usd, idempotency_key, created_at,
-			 cache_read_input_tokens, cache_creation_input_tokens, cost_basis, provider_used)
-		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $14, $15, NULLIF($16::text, ''), $17
+			 cache_read_input_tokens, cache_creation_input_tokens, cost_basis, provider_used,
+			 cache_miss_reason)
+		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $14, $15, NULLIF($16::text, ''), $17,
+			NULLIF($18::text, '')
 		WHERE $13 = '' OR NOT EXISTS (
 			SELECT 1 FROM cost_entries
 			WHERE org_id = $2 AND idempotency_key IN ($11, $13)
@@ -179,6 +181,7 @@ func (s *Store) RecordEntry(ctx context.Context, e ledger.Entry) error {
 		id, e.OrgID, e.UserID, e.ProducerID, e.RunID, e.RequestID, e.Model,
 		e.InputTokens, e.OutputTokens, e.CostUSD, scopedKey, createdAt, e.IdempotencyKey,
 		e.CacheReadInputTokens, e.CacheCreationInputTokens, e.CostBasis, e.ProviderUsed,
+		e.CacheMissReason,
 	)
 	if err != nil {
 		return fmt.Errorf("postgres ledger: insert entry: %w", err)
@@ -297,7 +300,7 @@ func (s *Store) ListEntries(ctx context.Context, f ledger.AggregateFilter, limit
 			input_tokens, output_tokens, cost_usd::double precision,
 			idempotency_key, created_at,
 			cache_read_input_tokens, cache_creation_input_tokens,
-			COALESCE(cost_basis, ''), provider_used
+			COALESCE(cost_basis, ''), provider_used, COALESCE(cache_miss_reason, '')
 		FROM cost_entries` + where + `
 		ORDER BY created_at DESC
 		LIMIT $` + itoa(len(args))
@@ -315,6 +318,7 @@ func (s *Store) ListEntries(ctx context.Context, f ledger.AggregateFilter, limit
 			&e.OrgID, &e.UserID, &e.ProducerID, &e.RunID, &e.RequestID, &e.Model,
 			&e.InputTokens, &e.OutputTokens, &e.CostUSD, &e.IdempotencyKey, &e.CreatedAt,
 			&e.CacheReadInputTokens, &e.CacheCreationInputTokens, &e.CostBasis, &e.ProviderUsed,
+			&e.CacheMissReason,
 		); err != nil {
 			return nil, fmt.Errorf("postgres ledger: scan entry: %w", err)
 		}

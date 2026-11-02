@@ -23,12 +23,22 @@ if (!CONVEX_CONTROL_PROJECTION_KEY) {
 }
 
 const CONTROL_PLANE_SUBJECTS = Object.freeze({
-  organizationChanged: "aqencia.controlplane.org.changed",
-  memberChanged: "aqencia.controlplane.org.member_changed",
+  organizationChanged: "controlplane.org.changed",
+  memberChanged: "controlplane.org.member_changed",
 });
 const CONTROL_PLANE_DLQ_SUBJECT = "verevon.application.dlq.convex.controlplane";
-const CONTROL_PLANE_STREAM = "AQENCIA_CONTROLPLANE";
+const CONTROL_PLANE_STREAM = "CONTROLPLANE";
 const DEAD_LETTER_AFTER = 5;
+
+// WS11-S6: Space attention events. Session Core's outbox publishes one
+// content-free event per persistent Space log row on `mp.v1.space.<ref>.event`
+// into this stream; the durable is provisioned by nats-provisioner (explicit
+// ack, AckWait 30s, MaxDeliver 8).
+const SPACE_EVENTS_SUBJECT = "mp.v1.space.*.event";
+const SPACE_EVENTS_STREAM = "MODEL_PLANE_SPACE_EVENTS";
+const SPACE_EVENTS_DURABLE = "convex-space-attention";
+const SPACE_EVENT_MAX_BYTES = 16 * 1024;
+const SPACE_EVENT_MAX_DELIVERIES = 8;
 
 function controlPlaneConnectionOptions({ url, user, password }) {
   const normalizedUser = String(user ?? "").trim();
@@ -97,6 +107,40 @@ async function processJetStreamMessage(message, handler, publishDeadLetter) {
       }
     }
     message.nak(1000);
+    return "retrying";
+  }
+}
+
+/**
+ * Ack-after-success handling for a Space attention event. The handler throwing
+ * means "not applied": the message is nak'd with a growing delay and the server
+ * redelivers (the Convex ingest dedupes by event id, so a replay is safe). A
+ * message that can never succeed (oversized, not JSON) or has used its last
+ * delivery is terminated so it does not loop. Nothing from the payload is logged.
+ */
+async function processSpaceEventMessage(message, handler) {
+  const redeliveryCount = message.info?.redeliveryCount ?? 1;
+  if (message.data.length > SPACE_EVENT_MAX_BYTES) {
+    message.term();
+    return "terminated_oversized";
+  }
+  let payload;
+  try {
+    payload = JSON.parse(new TextDecoder().decode(message.data));
+  } catch {
+    message.term();
+    return "terminated_unparseable";
+  }
+  try {
+    await handler(payload);
+    message.ack();
+    return "applied";
+  } catch {
+    if (redeliveryCount >= SPACE_EVENT_MAX_DELIVERIES) {
+      message.term();
+      return "terminated_exhausted";
+    }
+    message.nak(Math.min(30000, 1000 * 2 ** (redeliveryCount - 1)));
     return "retrying";
   }
 }
@@ -342,6 +386,15 @@ class ConvexNatsSubscriber {
           this.handleAgentRunEvent.bind(this),
           "model-plane-nats",
         );
+        // WS11-S6: Space attention events, a durable push consumer on the
+        // Model Plane bus. Ack only after the Convex mutation succeeded.
+        await this.subscribeToDurableOn(
+          this.ncModelPlane,
+          SPACE_EVENTS_STREAM,
+          SPACE_EVENTS_DURABLE,
+          SPACE_EVENTS_SUBJECT,
+          this.handleSpaceEvent.bind(this),
+        );
       } else {
         console.warn(
           "[Convex NATS] scoped Model mirror is disabled; no fallback to the Control principal",
@@ -388,6 +441,44 @@ class ConvexNatsSubscriber {
         if (result !== "applied") {
           console.error(
             `[Convex NATS] Projection ${result}: subject=${topic} redelivery=${message.info?.redeliveryCount ?? 1}`,
+          );
+        }
+      }
+    })();
+  }
+
+  /**
+   * WS11-S6: bind an existing durable push consumer on an arbitrary connection
+   * (the Control helper above is pinned to the Control stream and DLQ). The
+   * consumer is provisioned, never created here: a missing durable is logged and
+   * the subscriber keeps running without it.
+   */
+  async subscribeToDurableOn(connection, stream, durableName, subject, handler) {
+    if (!connection) {
+      console.warn(`[Convex NATS] Skipping durable ${durableName} — connection is null`);
+      return;
+    }
+    let subscription;
+    try {
+      const options = nats.consumerOpts();
+      options.bind(stream, durableName);
+      options.queue(durableName);
+      options.manualAck();
+      subscription = await connection.jetstream().subscribe(subject, options);
+    } catch (error) {
+      console.warn(
+        `[Convex NATS] Durable ${durableName} on ${stream} unavailable:`,
+        error?.message ?? error,
+      );
+      return;
+    }
+    console.log(`[Convex NATS] Durable subscription: ${stream}/${durableName}`);
+    (async () => {
+      for await (const message of subscription) {
+        const result = await processSpaceEventMessage(message, handler);
+        if (result !== "applied") {
+          console.error(
+            `[Convex NATS] Space event ${result}: redelivery=${message.info?.redeliveryCount ?? 1}`,
           );
         }
       }
@@ -614,6 +705,15 @@ class ConvexNatsSubscriber {
     }
   }
 
+  /**
+   * WS11-S6: a Space attention event. The whole envelope goes to Convex, which
+   * validates it strictly; a thrown error here (Convex unreachable, 5xx) makes
+   * the caller nak so the server redelivers.
+   */
+  async handleSpaceEvent(payload) {
+    await this.callConvexMutation("nats:onSpaceEvent", payload);
+  }
+
   async handleConversationEvent(payload) {
     const conversationId = payload?.conversation_id || payload?.data?.conversation?.id || "";
     console.log("[Convex NATS] Processing conversation event:", payload?.type, conversationId);
@@ -710,4 +810,5 @@ module.exports = {
   modelPlaneConnectionOptions,
   normalizeControlPlaneEvent,
   processJetStreamMessage,
+  processSpaceEventMessage,
 };

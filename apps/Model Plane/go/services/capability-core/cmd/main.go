@@ -24,10 +24,12 @@ import (
 	"github.com/triodelab/model-plane/pkg/publisher"
 	"github.com/triodelab/model-plane/pkg/servicetoken"
 	"github.com/triodelab/model-plane/services/capability-core/internal/api"
+	"github.com/triodelab/model-plane/services/capability-core/internal/skillbundle"
 	"github.com/triodelab/model-plane/services/capability-core/internal/authz"
 	"github.com/triodelab/model-plane/services/capability-core/internal/commands"
 	"github.com/triodelab/model-plane/services/capability-core/internal/cron"
 	"github.com/triodelab/model-plane/services/capability-core/internal/crypto"
+	"github.com/triodelab/model-plane/services/capability-core/internal/decisionkey"
 	"github.com/triodelab/model-plane/services/capability-core/internal/lettatools"
 	"github.com/triodelab/model-plane/services/capability-core/internal/notifyclient"
 	"github.com/triodelab/model-plane/services/capability-core/internal/policy"
@@ -66,6 +68,14 @@ func main() {
 			os.Exit(1)
 		}
 		return
+	}
+
+	// F11: a configured-but-unusable Control decision key is a boot error, not a
+	// lane that quietly stays disabled. Unset is allowed (warned) so a plane without
+	// Space keeps starting.
+	if err := decisionkey.BootCheck(logger, "capability-core", os.Getenv("CONTROL_SPACE_DECISION_KEY_ID"), os.Getenv("CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64")); err != nil {
+		slog.Error("Control decision key configuration is unusable; refusing to start", "error", err)
+		os.Exit(1)
 	}
 
 	authConfig, err := authConfigFromEnv()
@@ -162,7 +172,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	pol := policy.New(reg).WithScopeResolver(scopeStore)
+	// WS05-S5: the engine reads stored per-tool policies only when
+	// TOOL_POLICY_ENFORCED is the literal "true"; off, they are stored and ignored.
+	// The handler is built here because the engine takes it; its routes are mounted
+	// with the other policy APIs below.
+	toolPolicies := api.NewToolPoliciesHandler(pool)
+	toolPolicyEnforced := policy.ToolPolicyEnforcedFromLookup(os.Getenv)
+	slog.Info("tool policies", "enforced", toolPolicyEnforced)
+	pol := policy.New(reg).WithScopeResolver(scopeStore).WithToolPolicies(toolPolicies, toolPolicyEnforced)
 
 	// Letta's /v1/tools/search searches tool definitions, not memories. When
 	// explicitly configured it is only a discovery ranker; the server
@@ -188,7 +205,7 @@ func main() {
 	// ListModels, /compact → session CompactNow) and the G7 learning consumer —
 	// one dial site, no duplication. Nil when addrs are unset → both consumers
 	// degrade gracefully.
-	sessionClient, inferenceClient, runClient := dialBackends()
+	sessionClient, inferenceClient, runClient, memoryClient := dialBackendsWithMemory()
 
 	// --- §4.3 reconcile event publisher -------------------------------------
 	// capability-core is the registry system-of-record; on a create/update it
@@ -214,7 +231,13 @@ func main() {
 			// still runs). The decode→review→persist core is unit-tested
 			// (sessionreview.HandleRunCompleted); this wiring is e2e-verified
 			// only against the running stack.
-			startLearningConsumer(ctx, nc, sessionClient, inferenceClient)
+			// The consumer skips a user whose memory is paused or off (WS07-S7): it reads the controls
+			// through the memory client when one was dialed.
+			var learningOpts []sessionreview.Option
+			if memoryClient != nil {
+				learningOpts = append(learningOpts, sessionreview.WithMemoryControls(memoryClient))
+			}
+			startLearningConsumer(ctx, nc, sessionClient, inferenceClient, learningOpts...)
 
 			// Task lifecycle closer: a task the executor started stays in
 			// `running` until its run reaches a terminal state. Without this the
@@ -260,6 +283,10 @@ func main() {
 		if modelActionViewVerifier, viewVerifierErr := modelActionViewVerifierFromEnv(os.Getenv); viewVerifierErr != nil {
 			slog.Warn("run-bound Model owner-action view unavailable; Control public key is required", "error", viewVerifierErr)
 		} else {
+			// The admission table can only be on when its store is available and the lookup says so (WS24-S6).
+			if admissionStore, storeErr := registry.NewAgentActionAdmissionsStore(pool); storeErr == nil {
+				modelActionViewVerifier.WithAgentActionAdmissions(admissionStore, api.ModelActionAdmissionTableFromLookup(os.Getenv))
+			}
 			ch = ch.WithModelActionViewVerifier(modelActionViewVerifier)
 		}
 		ch.Register(protectedMux)
@@ -267,7 +294,13 @@ func main() {
 	// The four reconcile-emitting registries get the publisher (nil-safe: a nil
 	// recPub makes reconcile.Emit a no-op).
 	api.NewSkillsHandler(pool).WithPublisher(recPub).Register(protectedMux)
+	api.NewSkillBundlesHandler(pool, api.SkillBundlesAPIFromLookup(os.Getenv)).Register(protectedMux)
 	api.NewPluginsHandler(pool).WithPublisher(recPub).Register(protectedMux)
+	// Behind ORG_AGENT_POLICY_API (off by default): the handler answers 404 while it is off.
+	api.NewOrgAgentPolicyHandler(pool, api.OrgAgentPolicyAPIFromLookup(os.Getenv)).Register(protectedMux)
+	// WS05-S5: writes need a person and capability:write; reads are the org's
+	// and the caller's own. Enforcement is the engine's, behind TOOL_POLICY_ENFORCED.
+	toolPolicies.Register(protectedMux)
 	mcpHandler := api.NewMCPHandler(pool).WithPublisher(recPub).WithVault(mcpVault).WithMCPServiceToken(mcpServiceToken)
 	mcpHandler.Register(protectedMux)
 	// Deliberately on publicMux, not protectedMux: see RegisterInternal's doc
@@ -298,13 +331,15 @@ func main() {
 	}
 	api.NewRoutingHandler(pool).WithPublisher(recPub).Register(protectedMux)
 	api.NewSafetyHandler(pool).WithPublisher(recPub).Register(protectedMux)
-	api.NewMemoryHandler(pool, runClient).Register(protectedMux)
+	api.NewMemoryHandler(pool, runClient).WithMemoryControls(memoryClient).Register(protectedMux)
 	api.NewTasksHandler(pool).Register(protectedMux)
 	// AUTO-2: lets a user register/inspect/cancel a watch on one run. The
 	// consumer that actually fires the notification is wired below,
 	// independently, once NATS is available (see startRunWatchConsumer).
 	api.NewRunWatchersHandler(pool).Register(protectedMux)
 	cronHandler := api.NewCronHandler(pool)
+	// WS20-S4: stored-consent schedule contracts. Strict literal true; off by default.
+	cronHandler.WithScheduleContract(os.Getenv("SCHEDULE_CONTRACT_ENABLED") == "true")
 	if cronVerifier, cronVerifierErr := cronDecisionVerifierFromEnv(os.Getenv); cronVerifierErr != nil {
 		slog.Warn("Space-scoped cron creation unavailable; Control decision verifier is required", "error", cronVerifierErr)
 	} else {
@@ -428,7 +463,8 @@ func main() {
 	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(verifier.UnaryServerInterceptor(authz.AuthorizeGRPC)))
 	// Attach the durable store so ListCapabilities returns score-ranked results
 	// (nil-safe: WithStore(nil) keeps the in-memory registry ordering).
-	capSrv := capserver.NewServer(reg, modelsCache, pol).WithStore(capStore)
+	capSrv := capserver.NewServer(reg, modelsCache, pol).WithStore(capStore).
+		WithSkillBundles(skillbundle.NewStore(pool), api.SkillBundlesAPIFromLookup(os.Getenv))
 	if lettaToolSearcher != nil {
 		capSrv.WithLettaToolSearcher(lettaToolSearcher)
 	}
@@ -783,7 +819,7 @@ func learningReviewEnabled() bool {
 // runs without the learning loop rather than failing to start. The
 // decode→review→persist core is unit-tested; this subscribe wiring is
 // e2e-verified only against the stack.
-func startLearningConsumer(ctx context.Context, nc *nats.Conn, sc mpv1.SessionCoreClient, ic mpv1.InferenceCoreClient) {
+func startLearningConsumer(ctx context.Context, nc *nats.Conn, sc mpv1.SessionCoreClient, ic mpv1.InferenceCoreClient, opts ...sessionreview.Option) {
 	if !learningReviewEnabled() {
 		// Checked before anything touches nc: a disabled review must neither bind
 		// the durable consumer nor read a single transcript.
@@ -794,6 +830,17 @@ func startLearningConsumer(ctx context.Context, nc *nats.Conn, sc mpv1.SessionCo
 		slog.Info("learning-review consumer disabled (session-core/inference-core not dialed)")
 		return
 	}
+	// Cost controls (WS07-S10) are off unless the switch is exactly true. A
+	// malformed bound keeps the consumer down: a review it cannot bound must
+	// not run unbounded.
+	costControls, costOn, costErr := sessionreview.CostControlsFromLookup(os.Getenv)
+	if costErr != nil {
+		slog.Error("learning-review consumer not started: cost controls misconfigured", "error", costErr)
+		return
+	}
+	if costOn {
+		opts = append(opts, sessionreview.WithCostControls(costControls))
+	}
 	js, err := nc.JetStream()
 	if err != nil {
 		slog.Error("JetStream context unavailable; learning-review consumer disabled", "error", err)
@@ -801,7 +848,7 @@ func startLearningConsumer(ctx context.Context, nc *nats.Conn, sc mpv1.SessionCo
 	}
 	model := os.Getenv("LEARNING_REVIEW_MODEL") // empty -> llmreviewer.DefaultModel
 	go func() {
-		if rerr := sessionreview.RunConsumer(ctx, js, sc, ic, model); rerr != nil {
+		if rerr := sessionreview.RunConsumer(ctx, js, sc, ic, model, opts...); rerr != nil {
 			slog.Warn("learning-review consumer stopped (is it pre-provisioned on "+sessionreview.RunEventsStream+"?)", "error", rerr)
 		}
 	}()
@@ -819,11 +866,19 @@ func startLearningConsumer(ctx context.Context, nc *nats.Conn, sc mpv1.SessionCo
 // multiplexed server (see grpc.rs's single Server::builder()...add_service
 // chain), so it needs no separate dial, env var, or credential.
 func dialBackends() (mpv1.SessionCoreClient, mpv1.InferenceCoreClient, mpv1.RunServiceClient) {
+	session, inference, runs, _ := dialBackendsWithMemory()
+	return session, inference, runs
+}
+
+// dialBackendsWithMemory is dialBackends plus the MemoryServiceClient the
+// /api/v1/memory proxy asks for Session Core's memory decision, on the same
+// sessConn (MemoryService is served by the same tonic server).
+func dialBackendsWithMemory() (mpv1.SessionCoreClient, mpv1.InferenceCoreClient, mpv1.RunServiceClient, mpv1.MemoryServiceClient) {
 	sessAddr := os.Getenv("SESSION_CORE_ADDR")
 	infAddr := os.Getenv("INFERENCE_CORE_ADDR")
 	if sessAddr == "" || infAddr == "" {
 		slog.Info("backend clients disabled (SESSION_CORE_ADDR/INFERENCE_CORE_ADDR unset)")
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	creds := grpc.WithTransportCredentials(insecure.NewCredentials())
 
@@ -842,7 +897,7 @@ func dialBackends() (mpv1.SessionCoreClient, mpv1.InferenceCoreClient, mpv1.RunS
 		).dialOption())
 	if err != nil {
 		slog.Warn("dial session-core failed", "error", err)
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	infConn, err := grpc.NewClient(infAddr, creds,
 		newBackendCredential(
@@ -854,9 +909,9 @@ func dialBackends() (mpv1.SessionCoreClient, mpv1.InferenceCoreClient, mpv1.RunS
 	if err != nil {
 		slog.Warn("dial inference-core failed", "error", err)
 		_ = sessConn.Close()
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
-	return mpv1.NewSessionCoreClient(sessConn), mpv1.NewInferenceCoreClient(infConn), mpv1.NewRunServiceClient(sessConn)
+	return mpv1.NewSessionCoreClient(sessConn), mpv1.NewInferenceCoreClient(infConn), mpv1.NewRunServiceClient(sessConn), mpv1.NewMemoryServiceClient(sessConn)
 }
 
 // Auth Core service-principal configuration for capability-core's OWN identity.
@@ -883,8 +938,9 @@ const (
 var (
 	// sessionCoreScopes covers the learning review's transcript read
 	// (ListConversation, ListAgentSkills → session:read) and its skill upsert
-	// (UpsertAgentSkill → session:skills:write).
-	sessionCoreScopes = []string{"session:read", "session:skills:write", "session:schedule-prepare"}
+	// (UpsertAgentSkill → session:skills:write) and, narrowly, the memory
+	// proxy's decision lookup (GetMemoryControls → session:memory-controls:read).
+	sessionCoreScopes = []string{"session:memory-controls:read", "session:read", "session:skills:write", "session:schedule-prepare"}
 	// inferenceCoreScopes covers the review's model call (Infer).
 	inferenceCoreScopes = []string{"inference:invoke"}
 )

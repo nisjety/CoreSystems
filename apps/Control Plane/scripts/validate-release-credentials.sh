@@ -40,6 +40,7 @@ credential_names=(
   BILLING_ORG_CORE_SERVICE_TOKEN SESSION_ORG_CORE_SERVICE_TOKEN
   SESSION_BILLING_CORE_SERVICE_TOKEN INTEGRATION_ORG_CORE_SERVICE_TOKEN
   INTEGRATION_BILLING_CORE_SERVICE_TOKEN INTEGRATION_AUDIT_CORE_SERVICE_TOKEN
+  AUDIT_ORG_CORE_SERVICE_TOKEN
   USER_CORE_GATEWAY_TOKEN USER_CORE_SESSION_TOKEN USER_CORE_ORG_TOKEN
   USER_CORE_AUTH_TOKEN USER_CORE_MEMBERSHIP_SERVICE_TOKEN
   APPLICATION_RECONCILER_AUTH_TOKEN USER_CORE_DOCUMENTS_TOKEN
@@ -53,9 +54,31 @@ if [[ "${REQUIRE_LEGACY_BRIDGE:-0}" == "1" ]]; then
   credential_names+=(VEREVON_NATS_TOKEN)
 fi
 
+# The SIEM destination seal key is only needed once destinations are switched
+# on (org-core refuses to store a secret it cannot seal). Standard base64 of 32
+# bytes is 44 characters, so it passes the length floor below.
+if [[ "${ORG_SIEM_DESTINATIONS_ENABLED:-0}" == "1" || "${ORG_SIEM_DESTINATIONS_ENABLED:-0}" == "true" ]]; then
+  credential_names+=(ORG_CORE_SIEM_SEAL_KEY)
+fi
+
+# The audit-chain signing keypair is only needed once the chain, or pruning of
+# chained rows, is switched on (audit-core refuses to sign without it). Both
+# halves are base64 of 32 bytes, so they pass the length floor below. Only the
+# literal 1 enables, like audit-core's own switches.
+audit_chain_keys_required=0
+if [[ "${AUDIT_CHAIN_ENABLED:-0}" == "1" || "${AUDIT_CHAIN_PRUNE_ENABLED:-0}" == "1" ]]; then
+  audit_chain_keys_required=1
+  credential_names+=(AUDIT_CHAIN_PRIVATE_KEY_BASE64 AUDIT_CHAIN_PUBLIC_KEY_BASE64)
+fi
+
 fingerprints=()
 fingerprint_owners=()
 failed=0
+
+if [[ "$audit_chain_keys_required" == "1" && -z "${AUDIT_CHAIN_KEY_ID:-}" ]]; then
+  printf 'credential preflight: AUDIT_CHAIN_KEY_ID is missing\n' >&2
+  failed=1
+fi
 
 for name in "${credential_names[@]}"; do
   value="${!name-}"

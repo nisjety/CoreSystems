@@ -10,6 +10,12 @@ global:
   external_labels:
     plane: control
 
+# Alert rules. Evaluated here, shown in the Prometheus UI; no Alertmanager or
+# pager is wired yet (build plan WS01 decision D1), so an alert is visible only
+# to someone looking. Mounted read-only from ./observability/rules.
+rule_files:
+  - /etc/prometheus/rules/*.rules.yml
+
 scrape_configs:
   - job_name: prometheus
     static_configs:
@@ -39,6 +45,36 @@ scrape_configs:
     static_configs:
       - targets: ['audit-core-service:9091']
         labels: { service: audit-core }
+
+  # SIEM exporter (WS06-S8). Only runs under the compose profile `siem`; the
+  # target reads as down on a stack without it, and no rule alerts on `up`.
+  - job_name: audit-siem-exporter
+    static_configs:
+      - targets: ['audit-siem-exporter:9091']
+        labels: { service: audit-siem-exporter }
+
+  # Model Plane services, reached on inter-plane-bus by their plane-unique
+  # aliases (the bare name `session-core` is also a Control Plane service).
+  # model-session-core serves /metrics on its health port 8081 (audit outbox
+  # gauges); model-gateway serves /metrics on its main port.
+  - job_name: model-session-core
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['model-session-core:8081']
+        labels: { service: session-core, plane: model }
+
+  - job_name: model-gateway
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['model-gateway:8080']
+        labels: { service: model-gateway, plane: model }
+
+  # inference-core serves /metrics on its health port 8082 (ZDR attestation review-by gauge).
+  - job_name: model-inference-core
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['model-plane-inference-core-1:8082']
+        labels: { service: inference-core, plane: model }
 
   - job_name: verevon-gateway
     metrics_path: /metrics

@@ -1,4 +1,4 @@
-import { useNavigate, useSearchParams } from '@solidjs/router'
+import { useLocation, useNavigate, useSearchParams } from '@solidjs/router'
 import {
   Bell,
   Building2,
@@ -46,6 +46,12 @@ import { ChatAppearancePreview } from '@/features/chat/components/ChatAppearance
 import { chatAppearanceActive } from '@/features/chat/lib/chat-appearance-preview'
 import { CoreNavbarMore } from './CoreNavbarMore'
 import { homeOverviewLabel, parseHomeOverview } from '@/shared/actions/home-overview'
+import { CommandPalette } from '@/features/command/CommandPalette'
+import { ShortcutSheet } from '@/features/command/ShortcutSheet'
+import { commandPaletteEnabled, registerCommands, type CommandContext } from '@/features/command/command-registry'
+import { createDefaultCommands } from '@/features/command/default-commands'
+import { installHotkeys } from '@/features/command/hotkeys'
+import { spaceRefFromPathname } from '@/features/command/palette-providers'
 
 type OpenPanel = 'assistant' | 'messages' | 'notifications' | 'calendar' | 'profile' | 'workspace' | null
 
@@ -56,6 +62,16 @@ export function shouldDeferGlobalSlashSearch(): boolean {
 
 export function CoreNavbar(props: {
   activeRoute: VerevonRoute
+  /** Presentation-only breadcrumb for an isolated local surface. */
+  breadcrumbOverride?: {
+    href: string
+    moduleLabel: string
+    tabLabel: string
+  }
+  /** Keeps shared product chrome safe for local, backend-free demo surfaces. */
+  offline?: boolean
+  /** Overrides the normal authenticated dashboard destination for the logo. */
+  homeHref?: string
   navbarData?: NavbarPayload | null
   onNavbarRefresh?: () => void
   onSearchOpenChange?: (open: boolean) => void
@@ -67,11 +83,13 @@ export function CoreNavbar(props: {
   let headerRef: HTMLElement | undefined
   const i18n = useI18n()
   const navigate = useNavigate()
+  const location = useLocation()
   const [searchParams] = useSearchParams()
   const session = getSession()
   const [openPanel, setOpenPanel] = createSignal<OpenPanel>(null)
   const [theme, setTheme] = createSignal<ThemePayload['theme']>('system')
   const [localSearchOpen, setLocalSearchOpen] = createSignal(false)
+  const offline = () => props.offline === true
   const refinedNavigation = () => chatAppearanceActive('navigation') && Boolean(props.onSidebarToggle)
   const changeTheme = (nextTheme: ThemePayload['theme']) => {
     setTheme(nextTheme)
@@ -81,7 +99,9 @@ export function CoreNavbar(props: {
       .catch(() => undefined)
   }
   const homeOverview = () => props.activeRoute === '/dashboard' && chatAppearanceActive('dashboard') ? parseHomeOverview(searchParams.overview) : 'home'
-  const labels = createMemo(() => ({ ...getNavbarLabels(props.activeRoute, i18n.locale()), ...(homeOverview() !== 'home' ? { tabLabel: homeOverviewLabel(homeOverview(), i18n.tr) } : {}) }))
+  const breadcrumbHref = () => props.breadcrumbOverride?.href ?? props.activeRoute
+  const labels = createMemo(() => props.breadcrumbOverride ?? ({ ...getNavbarLabels(props.activeRoute, i18n.locale()), ...(homeOverview() !== 'home' ? { tabLabel: homeOverviewLabel(homeOverview(), i18n.tr) } : {}) }))
+  const moduleHref = () => !props.breadcrumbOverride && (props.activeRoute.startsWith('/engagement') || props.activeRoute === '/anbud') ? '/engagement' : breadcrumbHref()
   const profileInitial = () => (props.workspace.userName ?? props.workspace.userEmail ?? props.workspace.name).trim().charAt(0).toUpperCase() || props.workspace.initial
   const messageUnreadCount = () => props.navbarData?.notifications.messages.filter((message) => !message.read).length ?? 0
   const notificationUnreadCount = () =>
@@ -98,10 +118,39 @@ export function CoreNavbar(props: {
     return panel && panel !== 'workspace' ? panel as CoreNavbarPanelKind : null
   }
 
+  // WS13-S6: with `space_command_palette_ui` on, the palette and shortcut sheet
+  // replace the knowledge-only dialog and the hotkey layer owns Cmd/Ctrl+K and `/`.
+  const [sheetOpen, setSheetOpen] = createSignal(false)
+  const [paletteQuery, setPaletteQuery] = createSignal<string | undefined>(undefined)
+  const commandContext = (): CommandContext => ({
+    spaceRef: spaceRefFromPathname(location.pathname),
+    offline: offline(),
+    navigate: (href) => navigate(href),
+    openPalette: (query) => {
+      setPaletteQuery(query)
+      setSearchOpen(true)
+    },
+    openShortcutSheet: () => setSheetOpen(true),
+  })
+
   const closeShellOverlays = () => {
     setOpenPanel(null)
     setSearchOpen(false)
+    setSheetOpen(false)
   }
+
+  createEffect(
+    () => undefined,
+    () => {
+      if (!commandPaletteEnabled()) return undefined
+      const dispose = registerCommands(createDefaultCommands({ deferSlash: shouldDeferGlobalSlashSearch }))
+      const removeHotkeys = installHotkeys(commandContext)
+      return () => {
+        removeHotkeys()
+        dispose()
+      }
+    },
+  )
 
   createEffect(
     () => props.navbarData?.theme,
@@ -119,12 +168,15 @@ export function CoreNavbar(props: {
         const target = event.target as HTMLElement | null
         const isTyping = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable
 
-        if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        // Flag on: the hotkey layer (features/command/hotkeys) owns these two keys.
+        const legacyKeys = !commandPaletteEnabled()
+
+        if (legacyKeys && !offline() && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
           event.preventDefault()
           setSearchOpen(true)
         }
 
-        if (!isTyping && event.key === '/' && !shouldDeferGlobalSlashSearch()) {
+        if (legacyKeys && !offline() && !isTyping && event.key === '/' && !shouldDeferGlobalSlashSearch()) {
           event.preventDefault()
           setSearchOpen(true)
         }
@@ -172,14 +224,14 @@ export function CoreNavbar(props: {
           <div class="core-navbar__left">
             <Show when={!refinedNavigation()}>
             <a
-              href="/dashboard"
+              href={props.homeHref ?? '/dashboard'}
               link
               aria-label={i18n.tr('Gå til hjem', 'Go to home')}
               title={i18n.tr('Gå til hjem', 'Go to home')}
               class="core-navbar__home-mark"
             >
               <img
-                src="/verevon-mark.svg"
+                src={`${import.meta.env.BASE_URL}verevon-mark.svg`}
                 alt=""
                 aria-hidden="true"
                 class="core-navbar__home-logo"
@@ -204,30 +256,33 @@ export function CoreNavbar(props: {
 
             <Breadcrumb
               moduleLabel={labels().moduleLabel}
-              moduleHref={props.activeRoute}
-              onWorkspaceClick={() => openExclusivePanel('workspace')}
+              moduleHref={moduleHref()}
+              onWorkspaceClick={offline() ? undefined : () => openExclusivePanel('workspace')}
               tabLabel={labels().tabLabel}
-              tabHref={homeOverview() !== 'home' ? `/dashboard?overview=${homeOverview()}` : props.activeRoute}
+              tabHref={homeOverview() !== 'home' && !props.breadcrumbOverride ? `/dashboard?overview=${homeOverview()}` : breadcrumbHref()}
               workspace={props.workspace}
               workspaceActive={openPanel() === 'workspace'}
+              workspaceClickable={!offline()}
             />
           </div>
 
           <div class="core-navbar__search">
-            <SearchTrigger onOpen={() => setSearchOpen(true)} />
+            <SearchTrigger disabled={offline()} onOpen={() => setSearchOpen(true)} />
           </div>
 
           <div class="core-navbar__actions">
             <Show when={import.meta.env.DEV && !refinedNavigation()}>
               <ChatAppearancePreview />
             </Show>
-            <NavbarActionButton
-              label={i18n.tr('Åpne kunnskapssøk', 'Open knowledge search')}
-              onClick={() => setSearchOpen(true)}
-              class="core-navbar__mobile-search"
-            >
-              <Search class="size-4" strokeWidth={1.9} />
-            </NavbarActionButton>
+            <Show when={!offline()}>
+              <NavbarActionButton
+                label={i18n.tr('Åpne kunnskapssøk', 'Open knowledge search')}
+                onClick={() => setSearchOpen(true)}
+                class="core-navbar__mobile-search"
+              >
+                <Search class="size-4" strokeWidth={1.9} />
+              </NavbarActionButton>
+            </Show>
 
             <Show when={refinedNavigation()} fallback={<div class="core-navbar__action-group">
               <NavDivider />
@@ -240,9 +295,11 @@ export function CoreNavbar(props: {
                   const refreshNavbar = props.onNavbarRefresh
                   setTheme(nextTheme)
                   applyThemePreference(nextTheme)
-                  void saveNavbarTheme(nextTheme, props.workspace.accentColor)
-                    .then(() => refreshNavbar?.())
-                    .catch(() => undefined)
+                  if (!offline()) {
+                    void saveNavbarTheme(nextTheme, props.workspace.accentColor)
+                      .then(() => refreshNavbar?.())
+                      .catch(() => undefined)
+                  }
                 }}
               >
                 <span class="core-navbar__icon-stack">
@@ -264,63 +321,72 @@ export function CoreNavbar(props: {
                 </span>
               </NavbarActionButton>
 
-              <NavDivider />
-
-              <NavbarActionButton
-                label={i18n.tr('Åpne AI-assistent', 'Open AI assistant')}
-                tooltip={i18n.tr('AI-assistent for gjeldende side', 'AI assistant for current page')}
-                active={openPanel() === 'assistant'}
-                onClick={() => openExclusivePanel('assistant')}
+              <Show
+                when={!offline()}
+                fallback={<span class="core-navbar__offline-badge">{i18n.tr('Lokal demo', 'Local demo')}</span>}
               >
-                <Sparkles class="size-[18px]" strokeWidth={1.85} />
-              </NavbarActionButton>
+                <NavDivider />
 
-              <BadgeButton count={messageUnreadCount()} label={i18n.tr('Hurtigmeldinger', 'Quick messages')} i18n={i18n}>
                 <NavbarActionButton
-                  label={i18n.tr(`${messageUnreadCount()} uleste meldinger`, `${messageUnreadCount()} unread messages`)}
-                  active={openPanel() === 'messages'}
-                  onClick={() => openExclusivePanel('messages')}
+                  label={i18n.tr('Åpne AI-assistent', 'Open AI assistant')}
+                  tooltip={i18n.tr('AI-assistent for gjeldende side', 'AI assistant for current page')}
+                  active={openPanel() === 'assistant'}
+                  onClick={() => openExclusivePanel('assistant')}
                 >
-                  <MessageSquareMore class="size-[18px]" strokeWidth={1.85} />
+                  <Sparkles class="size-[18px]" strokeWidth={1.85} />
                 </NavbarActionButton>
-              </BadgeButton>
 
-              <BadgeButton count={notificationUnreadCount()} label={i18n.tr('Varsler', 'Notifications')} i18n={i18n}>
+                <BadgeButton count={messageUnreadCount()} label={i18n.tr('Hurtigmeldinger', 'Quick messages')} i18n={i18n}>
+                  <NavbarActionButton
+                    label={i18n.tr(`${messageUnreadCount()} uleste meldinger`, `${messageUnreadCount()} unread messages`)}
+                    active={openPanel() === 'messages'}
+                    onClick={() => openExclusivePanel('messages')}
+                  >
+                    <MessageSquareMore class="size-[18px]" strokeWidth={1.85} />
+                  </NavbarActionButton>
+                </BadgeButton>
+
+                <BadgeButton count={notificationUnreadCount()} label={i18n.tr('Varsler', 'Notifications')} i18n={i18n}>
+                  <NavbarActionButton
+                    label={i18n.tr(`${notificationUnreadCount()} uleste varsler`, `${notificationUnreadCount()} unread notifications`)}
+                    active={openPanel() === 'notifications'}
+                    onClick={() => openExclusivePanel('notifications')}
+                  >
+                    <Bell class="size-[18px]" strokeWidth={1.85} />
+                  </NavbarActionButton>
+                </BadgeButton>
+
                 <NavbarActionButton
-                  label={i18n.tr(`${notificationUnreadCount()} uleste varsler`, `${notificationUnreadCount()} unread notifications`)}
-                  active={openPanel() === 'notifications'}
-                  onClick={() => openExclusivePanel('notifications')}
+                  label={i18n.tr('Kalender', 'Calendar')}
+                  active={openPanel() === 'calendar'}
+                  onClick={() => openExclusivePanel('calendar')}
                 >
-                  <Bell class="size-[18px]" strokeWidth={1.85} />
+                  <CalendarDays class="size-[18px]" strokeWidth={1.85} />
                 </NavbarActionButton>
-              </BadgeButton>
 
-              <NavbarActionButton
-                label={i18n.tr('Kalender', 'Calendar')}
-                active={openPanel() === 'calendar'}
-                onClick={() => openExclusivePanel('calendar')}
-              >
-                <CalendarDays class="size-[18px]" strokeWidth={1.85} />
-              </NavbarActionButton>
+                <NavDivider />
 
-              <NavDivider />
-
-              <button
-                type="button"
-                aria-label={i18n.tr('Åpne profilmeny', 'Open profile menu')}
-                title={i18n.tr('Åpne profilmeny', 'Open profile menu')}
-                onClick={() => openExclusivePanel('profile')}
-                class="core-navbar__profile"
-              >
-                <span aria-hidden="true" class="core-navbar__profile-ring" />
-                <span class="core-navbar__profile-avatar">
-                  <Show when={props.workspace.userAvatar} fallback={profileInitial()}>
-                    {(src) => <img class="core-navbar__profile-avatar-img" src={src()} alt="" />}
-                  </Show>
-                </span>
-              </button>
+                <button
+                  type="button"
+                  aria-label={i18n.tr('Åpne profilmeny', 'Open profile menu')}
+                  title={i18n.tr('Åpne profilmeny', 'Open profile menu')}
+                  onClick={() => openExclusivePanel('profile')}
+                  class="core-navbar__profile"
+                >
+                  <span aria-hidden="true" class="core-navbar__profile-ring" />
+                  <span class="core-navbar__profile-avatar">
+                    <Show when={props.workspace.userAvatar} fallback={profileInitial()}>
+                      {(src) => <img class="core-navbar__profile-avatar-img" src={src()} alt="" />}
+                    </Show>
+                  </span>
+                </button>
+              </Show>
             </div>}>
               <div class="core-navbar__action-group core-navbar__action-group--refined">
+                <Show
+                  when={!offline()}
+                  fallback={<span class="core-navbar__offline-badge">{i18n.tr('Lokal demo', 'Local demo')}</span>}
+                >
                 <button type="button" aria-label={i18n.tr('Åpne profilmeny', 'Open profile menu')} title={i18n.tr('Åpne profilmeny', 'Open profile menu')}
                   onClick={() => openExclusivePanel('profile')} class="core-navbar__profile">
                   <span aria-hidden="true" class="core-navbar__profile-ring" />
@@ -335,10 +401,11 @@ export function CoreNavbar(props: {
                 </BadgeButton>
                 <NavDivider />
                 <CoreNavbarMore theme={theme()} onThemeChange={changeTheme} onAssistant={() => openExclusivePanel('assistant')} />
+                </Show>
               </div>
             </Show>
 
-            <Show when={visibleNavbarPanel()}>
+            <Show when={!offline() && visibleNavbarPanel()}>
               {(panel) => (
                 <CoreNavbarPanel
                   navbarData={props.navbarData}
@@ -357,7 +424,7 @@ export function CoreNavbar(props: {
           </div>
         </div>
 
-        <Show when={openPanel() === 'workspace'}>
+        <Show when={!offline() && openPanel() === 'workspace'}>
           <WorkspaceSwitcher
             canManageWorkspace={shouldShowWorkspaceAdminNavigation(session)}
             workspace={props.workspace}
@@ -368,13 +435,27 @@ export function CoreNavbar(props: {
       </header>
 
       <Show when={searchOpen()}>
-        <GlobalSearchDialog
-          onClose={() => setSearchOpen(false)}
-          onNavigate={(href) => {
-            setSearchOpen(false)
-            navigate(href)
-          }}
-        />
+        <Show
+          when={commandPaletteEnabled()}
+          fallback={
+            <GlobalSearchDialog
+              onClose={() => setSearchOpen(false)}
+              onNavigate={(href) => {
+                setSearchOpen(false)
+                navigate(href)
+              }}
+            />
+          }
+        >
+          <CommandPalette
+            context={commandContext()}
+            initialQuery={paletteQuery()}
+            onClose={() => setSearchOpen(false)}
+          />
+        </Show>
+      </Show>
+      <Show when={sheetOpen() && commandPaletteEnabled()}>
+        <ShortcutSheet onClose={() => setSheetOpen(false)} />
       </Show>
     </>
   )
@@ -548,12 +629,13 @@ function applyThemePreference(theme: ThemePayload['theme']) {
   document.documentElement.classList.toggle('dark', theme === 'dark' || (theme === 'system' && prefersDark))
 }
 
-function SearchTrigger(props: { onOpen: () => void }) {
+function SearchTrigger(props: { disabled?: boolean; onOpen: () => void }) {
   const i18n = useI18n()
   return (
     <button
       type="button"
       onClick={() => props.onOpen()}
+      disabled={props.disabled}
       title={i18n.tr('Åpne kunnskapssøk', 'Open knowledge search')}
       class="verevon-navbar-search-trigger"
       aria-label={i18n.tr('Åpne kunnskapssøk', 'Open knowledge search')}
@@ -568,12 +650,13 @@ function SearchTrigger(props: { onOpen: () => void }) {
 
 function Breadcrumb(props: {
   moduleLabel: string
-  moduleHref: VerevonRoute
+  moduleHref: string
   onWorkspaceClick?: () => void
   tabLabel: string
   tabHref: string
   workspace: WorkspaceIdentity
   workspaceActive?: boolean
+  workspaceClickable?: boolean
 }) {
   const i18n = useI18n()
   // billing-core elevates a trialing org to the paid tier name ("Expert"), so
@@ -586,6 +669,7 @@ function Breadcrumb(props: {
         type="button"
         onClick={() => props.onWorkspaceClick?.()}
         aria-expanded={props.workspaceActive ? 'true' : 'false'}
+        disabled={props.workspaceClickable === false}
         class="core-breadcrumb__workspace"
       >
         <span>{props.workspace.name}</span>

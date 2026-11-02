@@ -1,0 +1,21 @@
+config {
+  type: "assertion",
+  name: "xero_contact_group_direct_detail_reconciliation",
+  schema: "dw_1_silver_xero_assertions",
+  description: "Every retained Xero getContactGroup direct response must prove the singleton envelope, parent identity, and same-run shared-field agreement with getContactGroups. Membership cardinality remains audit-only because only the list route controls lifecycle."
+}
+
+SELECT
+  tenant_id,
+  contact_group_id,
+  direct_detail_source_run_id,
+  direct_detail_source_version_id,
+  payload_contact_group_id,
+  payload_contact_group_count,
+  has_singleton_direct_contact_group_payload,
+  has_parent_scoped_payload_identity,
+  has_same_run_collection_counterpart,
+  has_collection_shared_fingerprint,
+  has_direct_detail_shared_fingerprint
+FROM ${ref("dw_1_silver_xero", "audit_contact_group_direct_detail_reconciliation")}
+WHERE is_direct_detail_reconciled IS NOT TRUE

@@ -95,7 +95,7 @@ func TestPurge_DeletesOnlyExpiredRows(t *testing.T) {
 
 	// Clean slate for this org so reruns are deterministic.
 	cleanup := func() {
-		_, _ = pool.Exec(ctx, `DELETE FROM audit_events WHERE org_id = $1`, orgID)
+		_ = execMaintenance(ctx, pool, `DELETE FROM audit_events WHERE org_id = $1`, orgID)
 		_, _ = pool.Exec(ctx, `DELETE FROM usage_events WHERE org_id = $1`, orgID)
 	}
 	cleanup()
@@ -115,7 +115,8 @@ func TestPurge_DeletesOnlyExpiredRows(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("insert expired audit: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `
+	// audit_events rejects UPDATE outside a maintenance transaction.
+	if err := execMaintenance(ctx, pool, `
 		UPDATE audit_events SET ingested_at = NOW() - INTERVAL '400 days'
 		WHERE org_id = $1 AND event = 'expired'`, orgID); err != nil {
 		t.Fatalf("backdate audit: %v", err)
@@ -188,7 +189,7 @@ func TestJetStreamInboxDeduplicatesRedelivery(t *testing.T) {
 	st := store.New(pool)
 	const orgID = "org-jetstream-inbox-test"
 	cleanup := func() {
-		_, _ = pool.Exec(ctx, `DELETE FROM audit_events WHERE org_id = $1`, orgID)
+		_ = execMaintenance(ctx, pool, `DELETE FROM audit_events WHERE org_id = $1`, orgID)
 		_, _ = pool.Exec(ctx, `DELETE FROM usage_events WHERE org_id = $1`, orgID)
 	}
 	cleanup()
@@ -264,7 +265,7 @@ func TestLogicalAuditIdentityIsBoundToProducerAndRejectsConflictingReuse(t *test
 	sourceBus := fmt.Sprintf("logical-audit-%d", now)
 	firstSequence := uint64(now)
 	cleanup := func() {
-		_, _ = pool.Exec(ctx, `DELETE FROM audit_events WHERE org_id = $1`, orgID)
+		_ = execMaintenance(ctx, pool, `DELETE FROM audit_events WHERE org_id = $1`, orgID)
 	}
 	cleanup()
 	t.Cleanup(cleanup)

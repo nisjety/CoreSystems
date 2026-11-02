@@ -49,21 +49,41 @@ func (s *SessionCoreTranscriptSource) Fetch(
 	if err != nil {
 		return Transcript{}, fmt.Errorf("sessionreview: list conversation for thread %s: %w", ref.ThreadID, err)
 	}
-	if conversationScoped(convo.GetMessages()) {
+	turns := activePath(convo.GetMessages())
+	if conversationScoped(turns) {
 		return Transcript{Skip: learning.SkipConversationScope}, nil
 	}
-	transcript := RenderTranscript(convo.GetMessages())
+	transcript := RenderTranscript(turns)
 	if transcript == "" {
 		return Transcript{Skip: learning.SkipEmptyTranscript}, nil
 	}
+	// As the run's owner: the baseline is the skills that person can already
+	// see, their own proposals included, and no one else's private skills.
 	skills, err := s.client.ListAgentSkills(ctx, &mpv1.ListAgentSkillsRequest{
 		OrgId:       ref.OrgID,
 		EnabledOnly: false,
+		ForUserId:   ref.UserID,
 	})
 	if err != nil {
 		return Transcript{}, fmt.Errorf("sessionreview: list agent skills for org %s: %w", ref.OrgID, err)
 	}
 	return Transcript{Text: transcript, Existing: toExistingSkills(skills.GetSkills())}, nil
+}
+
+// activePath drops the turns of a branch the thread's leaf is not on. Session Core
+// answers only the active path to a default read, so this is a second guard: the
+// reviewer never reads a turn it did not ask for. A turn is on another branch when it
+// has siblings and is not on the path. A thread that was never versioned has no
+// siblings, so the proto3 default of on_active_path (false) never drops its turns.
+func activePath(msgs []*mpv1.SessionMessage) []*mpv1.SessionMessage {
+	out := make([]*mpv1.SessionMessage, 0, len(msgs))
+	for _, m := range msgs {
+		if m.GetSiblingCount() > 0 && !m.GetOnActivePath() {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 // conversationScoped reports whether any turn was written in conversation-only
@@ -88,6 +108,11 @@ func RenderTranscript(msgs []*mpv1.SessionMessage) string {
 	}
 	var b strings.Builder
 	for _, m := range msgs {
+		// A deleted message (WS12-S4) has no content left and must not teach the reviewer
+		// anything; its tombstone is not part of the conversation either.
+		if m.GetRevisionState() == "deleted" {
+			continue
+		}
 		b.WriteString(strings.ToUpper(m.GetRole()))
 		b.WriteString(": ")
 		b.WriteString(m.GetContent())

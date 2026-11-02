@@ -81,6 +81,38 @@ pub fn text_rerank_requested(
     text_rerank_allowed(zdr_mode, mode_mix_rerank.unwrap_or(true)) && !sovereign_required
 }
 
+/// [`text_rerank_requested`] for a whole request. The pipeline's call site
+/// (`RetrievalPipeline::retrieve`) goes through this, so the one place that
+/// reads `mode_mix.rerank` off the request is also the place a test drives
+/// (`tests/retrieve_contract.rs`, against the vendored request golden).
+#[must_use]
+pub fn rerank_requested_for_request(
+    req: &RetrievalRequest,
+    zdr_mode: ZdrMode,
+    sovereign_required: bool,
+) -> bool {
+    text_rerank_requested(
+        zdr_mode,
+        req.mode_mix.as_ref().and_then(|m| m.rerank),
+        sovereign_required,
+    )
+}
+
+/// The retrieval-cache key part for an answer reranked with chunk context (CR-T15). Appended only when
+/// the reranker sends context, so an answer reranked on raw text and one reranked on context are never
+/// served for each other. With the switch off no key changes, so nothing is orphaned at deploy.
+const RERANK_CONTEXT_CACHE_PART: &str = "rerank-input=chunk-context";
+
+/// `key`, partitioned by the rerank input when the reranker sends chunk context (CR-T15).
+#[must_use]
+fn key_for_rerank_input(key: String, includes_chunk_context: bool) -> String {
+    if includes_chunk_context {
+        crate::cache::compose_cache_key(&[key.as_str(), RERANK_CONTEXT_CACHE_PART])
+    } else {
+        key
+    }
+}
+
 /// The sovereignty posture of a request. ABSENT means STRICT (`true`): the caller
 /// needs sovereign infrastructure, which the Azure-hosted query embedding cannot
 /// give, so cloud egress is restricted like a restrictive ZDR posture and a
@@ -91,6 +123,48 @@ pub const fn sovereign_required_or_strict(requested: Option<bool>) -> bool {
     match requested {
         Some(required) => required,
         None => true,
+    }
+}
+
+/// The audit token for a ZDR retrieval whose dense arm the egress guard refused (Z-41). It goes on
+/// the trace's `zdr_actions_applied` next to the other enforcement actions.
+const ZDR_DENSE_SKIPPED_ACTION: &str = "zdr_dense_skipped_unattested";
+
+/// The stable code of the notice a lexical-only ZDR answer carries (Z-41).
+pub const ZDR_DENSE_UNAVAILABLE_CODE: &str = "zdr_dense_unavailable";
+
+/// The refusal for a sovereign dense request. The reason is the sovereign one, never the ZDR one.
+const SOVEREIGN_DENSE_REFUSAL: &str = "sovereign_required: the query embedding route is Azure-hosted and cannot satisfy sovereignty; send sovereign_required=false to keep the dense arm";
+
+/// How a query's dense arm may egress, decided before any provider call (Z-41).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DenseEgress {
+    /// The query may be embedded. `zdr` tells the embedder the content is ZDR content. The egress
+    /// guard then refuses unless an attestation covers the route.
+    Embed { zdr: bool },
+    /// Sovereignty is required, and the Azure-hosted embedders cannot satisfy it. Refused before any
+    /// call, whatever the retention posture: an attestation covers retention, never jurisdiction.
+    RefuseSovereign,
+}
+
+/// The dense arm's egress decision for one request. Sovereignty is checked first, so no attestation
+/// can lift it.
+#[must_use]
+pub const fn dense_egress(embed_zdr: bool, sovereign_required: bool) -> DenseEgress {
+    if sovereign_required {
+        DenseEgress::RefuseSovereign
+    } else {
+        DenseEgress::Embed { zdr: embed_zdr }
+    }
+}
+
+/// The notice a ZDR answer carries when its dense arm degraded to lexical search (Z-41).
+fn zdr_dense_unavailable_notice() -> RetrievalNotice {
+    RetrievalNotice {
+        code: ZDR_DENSE_UNAVAILABLE_CODE.to_owned(),
+        message: "Semantic search was not used for this answer: zero data retention is on, and no \
+                  ZDR-approved embedding route is configured. The answer uses text search only."
+            .to_owned(),
     }
 }
 
@@ -432,6 +506,40 @@ impl RetrievalPipeline {
             );
         }
         Ok(vec)
+    }
+
+    /// The dense route's query vector: the query, blended with a caller-supplied expansion when one
+    /// is given (P2-7). `zdr` is the egress posture of the embedding (Z-41). A refusal of that
+    /// posture surfaces as the typed error [`crate::embed::is_zdr_refusal`] recognises, unchanged.
+    async fn embed_dense_query(
+        &self,
+        req: &RetrievalRequest,
+        zdr: bool,
+    ) -> anyhow::Result<Vec<f32>> {
+        let vec = self.embed_text_cached(&req.org_id, &req.query, zdr).await?;
+
+        // P2-7 — HyDE / query-expansion blend. `query_expansion` is dead
+        // plumbing until a caller actually populates it (see the config
+        // field's doc comment for why DPv2 does not generate this text
+        // itself); a populated field is itself the opt-in, so this runs
+        // unconditionally on that presence check, no separate flag.
+        match req
+            .query_expansion
+            .as_deref()
+            .map(str::trim)
+            .filter(|e| !e.is_empty())
+        {
+            Some(expansion) => {
+                let expansion_vec = self.embed_text_cached(&req.org_id, expansion, zdr).await?;
+                let weight = self.config.query_expansion_blend_weight.clamp(0.0, 1.0);
+                tracing::debug!(
+                    blend_weight = weight,
+                    "blending query embedding with caller-supplied expansion"
+                );
+                Ok(blend_vectors(&vec, &expansion_vec, weight))
+            }
+            None => Ok(vec),
+        }
     }
 
     /// Dense arm — main-collection ANN over the query embedding. Gated on the
@@ -865,10 +973,11 @@ impl RetrievalPipeline {
             low_confidence: cached.low_confidence,
             context_pack: cached.context_pack,
             suggested_next_tools: cached.suggested_next_tools,
+            notice: None,
         })
     }
 
-    pub async fn retrieve(&self, req: RetrievalRequest) -> anyhow::Result<RetrievalResponse> {
+    pub async fn retrieve(&self, mut req: RetrievalRequest) -> anyhow::Result<RetrievalResponse> {
         // Input bounds: refuse pathological inputs at the door rather than
         // letting them propagate into Qdrant filters and Postgres ANY($1)
         // queries (where they cause memory/CPU spikes).
@@ -890,6 +999,11 @@ impl RetrievalPipeline {
         if req.filters.document_ids.len() > MAX_FILTER_IDS {
             anyhow::bail!("filters.document_ids exceeds max of {MAX_FILTER_IDS}");
         }
+        // QB-M1a: a service principal's corpus and blend are the engine's, not the
+        // caller's. This runs before anything reads the request (the cache key, the
+        // arms, the overfetch trim, the persisted trace), so all of them see the
+        // confined request. A refusal fails the request closed.
+        crate::authz::service_routes::confine_request(&mut req)?;
 
         let pipeline_start = Instant::now();
         let top_k = req.top_k.unwrap_or(self.config.retrieval_top_k);
@@ -929,12 +1043,15 @@ impl RetrievalPipeline {
         // conservative-by-default config declaration — see
         // `Config::media_embedder_sovereign`.
         let media_sovereign_ok = !sovereign_required || self.config.media_embedder_sovereign;
-        let effective_w_audio = if media_sovereign_ok {
+        // The media arms carry no corpus filter. A service principal is confined to
+        // one corpus (`service_routes::confine_request`), so they never run for it.
+        let media_allowed = media_sovereign_ok && !req.service_principal;
+        let effective_w_audio = if media_allowed {
             self.config.w_audio
         } else {
             0.0
         };
-        let effective_w_video = if media_sovereign_ok {
+        let effective_w_video = if media_allowed {
             self.config.w_video
         } else {
             0.0
@@ -996,7 +1113,7 @@ impl RetrievalPipeline {
         // A purely lexical blend (w_dense≈0) skips the embedding call + Qdrant
         // entirely; a purely semantic blend skips the sparse scan. Reuses the
         // existing dense/sparse backends — no parallel retrieval path.
-        let route = EngineRoute::from_weights(&mix_for_scoring, self.config.hybrid_enabled);
+        let mut route = EngineRoute::from_weights(&mix_for_scoring, self.config.hybrid_enabled);
 
         // Per-user document grants. Resolved HERE, before any retrieval work,
         // rather than just before the visibility gate where it used to sit: the
@@ -1027,7 +1144,7 @@ impl RetrievalPipeline {
             // the user-core facade (it would refuse the service bearer and fail
             // open to empty after paying the call's latency); it sees
             // organization-shared documents only. Users resolve as before.
-            let granted = crate::authz::resolve_explicit_grants(
+            let mut granted = crate::authz::resolve_explicit_grants(
                 self.visibility.as_ref(),
                 &req.org_id,
                 req.user_id.as_deref(),
@@ -1035,6 +1152,31 @@ impl RetrievalPipeline {
                 req.verified_bearer.as_deref(),
             )
             .await;
+            // WS14-S5: under a verified Space decision, a document attached to
+            // that room is also visible to a current member through the owner's
+            // Space grant. Resolved per request and uncached, so it is part of
+            // the cache partition below like any other grant; a service
+            // principal never gets one.
+            if let (Some(scope), Some(user_id), false) = (
+                req.space_scope.as_ref(),
+                req.user_id.as_deref(),
+                req.service_principal,
+            ) {
+                let attached = self
+                    .visibility
+                    .visible_space_documents(
+                        &req.org_id,
+                        user_id,
+                        &scope.authority.space_ref,
+                        req.verified_bearer.as_deref(),
+                    )
+                    .await;
+                for id in attached {
+                    if !granted.contains(&id) {
+                        granted.push(id);
+                    }
+                }
+            }
             (req.user_id.as_deref(), granted)
         };
 
@@ -1069,6 +1211,23 @@ impl RetrievalPipeline {
             &serde_json::to_string(&mix_for_scoring).unwrap_or_default(),
             &serde_json::to_string(&req.filters).unwrap_or_default(),
         ]);
+        // A confined service's key is further partitioned by its scope. The filters
+        // and blend above are the confined ones, so one forced request keys one
+        // entry, and it never shares an entry with a user.
+        let cache_key = match crate::authz::service_routes::cache_partition(&req) {
+            Some(partition) => {
+                crate::cache::compose_cache_key(&[cache_key.as_str(), partition.as_str()])
+            }
+            None => cache_key,
+        };
+        // CR-T15: an answer reranked with chunk context is its own partition, never shared with one
+        // reranked on the raw text.
+        let cache_key = key_for_rerank_input(
+            cache_key,
+            self.reranker
+                .as_ref()
+                .is_some_and(RerankClient::includes_chunk_context),
+        );
         let cache_readable = retrieval_cache_allowed(zdr_mode);
         let org_version = if cache_readable && self.cache.is_some() {
             crate::cache::org_version::current(&self.pool, &req.org_id).await
@@ -1102,9 +1261,14 @@ impl RetrievalPipeline {
         }
 
         // §16.4.7 PII redaction — strip email/phone/cardlike before emitting.
+        // Under a restrictive posture (`cloud_egress_restricted`: ZDR reject or
+        // ephemeral, or sovereignty required) the text is withheld instead: a regex
+        // scrub cannot make free text safe to keep in operator logs, so the line
+        // keeps only its byte length and a keyed hash (`redact::query_for_log`).
+        let query_in_log = crate::redact::query_for_log(&req.query, 60, cloud_egress_restricted);
         tracing::info!(
             org_id = %req.org_id,
-            query = %crate::redact::redact_query(&req.query, 60),
+            query = %query_in_log,
             top_k,
             top_n,
             hybrid = self.config.hybrid_enabled,
@@ -1126,36 +1290,37 @@ impl RetrievalPipeline {
         // key namespaced by embedding route/model so a model rotation doesn't
         // serve stale vectors for the remaining TTL (§16.2.8).
         let embed_start = Instant::now();
+        // The dense arm's egress decision comes before any provider call (Z-41). A sovereign request
+        // is refused here whatever the retention posture. A ZDR request with no attested route
+        // degrades to lexical search, with an explicit notice on the answer. Only that typed refusal
+        // degrades: any other embedding error stays fatal, as it always was.
+        let mut dense_degraded = false;
         let query_vector = if route.dense {
-            let vec = self
-                .embed_text_cached(&req.org_id, &req.query, cloud_egress_restricted)
-                .await?;
-
-            // P2-7 — HyDE / query-expansion blend. `query_expansion` is dead
-            // plumbing until a caller actually populates it (see the config
-            // field's doc comment for why DPv2 does not generate this text
-            // itself); a populated field is itself the opt-in, so this runs
-            // unconditionally on that presence check, no separate flag.
-            let vec = match req
-                .query_expansion
-                .as_deref()
-                .map(str::trim)
-                .filter(|e| !e.is_empty())
-            {
-                Some(expansion) => {
-                    let expansion_vec = self
-                        .embed_text_cached(&req.org_id, expansion, cloud_egress_restricted)
-                        .await?;
-                    let weight = self.config.query_expansion_blend_weight.clamp(0.0, 1.0);
-                    tracing::debug!(
-                        blend_weight = weight,
-                        "blending query embedding with caller-supplied expansion"
-                    );
-                    blend_vectors(&vec, &expansion_vec, weight)
-                }
-                None => vec,
-            };
-            Some(vec)
+            match dense_egress(embed_zdr, sovereign_required) {
+                DenseEgress::RefuseSovereign => anyhow::bail!(SOVEREIGN_DENSE_REFUSAL),
+                DenseEgress::Embed { zdr } => match self.embed_dense_query(&req, zdr).await {
+                    Ok(vec) => Some(vec),
+                    // Lexical search is the only answer the degrade gives. With hybrid search switched
+                    // off there is none, so the refusal stays an error rather than an empty answer.
+                    Err(error)
+                        if embed_zdr
+                            && self.config.hybrid_enabled
+                            && crate::embed::is_zdr_refusal(&error) =>
+                    {
+                        tracing::warn!(
+                            org_id = %req.org_id,
+                            "ZDR retrieval: no attested query embedding route; answering from text search only"
+                        );
+                        dense_degraded = true;
+                        route = EngineRoute {
+                            dense: false,
+                            sparse: self.config.hybrid_enabled,
+                        };
+                        None
+                    }
+                    Err(error) => return Err(error),
+                },
+            }
         } else {
             tracing::debug!("dense retrieval disabled by mode_mix; skipping embed + vector search");
             None
@@ -1341,11 +1506,7 @@ impl RetrievalPipeline {
         // unchanged). Reranker *failure* is handled inside the stage and is
         // non-fatal by design — reranking refines ordering and must never
         // sink a successful retrieval.
-        let rerank_requested = text_rerank_requested(
-            zdr_mode,
-            req.mode_mix.as_ref().and_then(|m| m.rerank),
-            sovereign_required,
-        );
+        let rerank_requested = rerank_requested_for_request(&req, zdr_mode, sovereign_required);
         // Chain input: resolve the viewer's explicit grants for the visibility
         // 5-7. The post-fusion postprocessor chain. The ORDER below is the
         // policy, not a convenience: see `pipeline::postprocess` for why the
@@ -1383,11 +1544,19 @@ impl RetrievalPipeline {
             half_life_days: self.config.recency_decay_half_life_days,
             now: chrono::Utc::now(),
         };
+        // A service principal's candidates must also be documents of its confined
+        // corpus. After confinement `req.filters.sources` is exactly that corpus.
+        let corpus_sources = if req.service_principal {
+            Some(req.filters.sources.as_slice())
+        } else {
+            None
+        };
         let visibility_stage = postprocess::VisibilityGate {
             pool: &self.pool,
             org_id: &req.org_id,
             viewer: effective_viewer,
             granted: &granted_docs,
+            sources: corpus_sources,
         };
         let top_n_trim = postprocess::Truncate {
             limit: top_n,
@@ -1407,7 +1576,25 @@ impl RetrievalPipeline {
             &zdr_stage,
         ];
 
+        // CR-T15: a reranker that sends chunk context needs each candidate's context in force before the
+        // chain runs. A failure is fatal, not a fall back to the raw text: the answer's cache key says the
+        // reranker judged the chunks with their context, so it must never quietly judge the raw text
+        // (the same database and the same org-scoped transaction as the source join, which is fatal too).
+        if rerank_requested
+            && self
+                .reranker
+                .as_ref()
+                .is_some_and(RerankClient::includes_chunk_context)
+        {
+            attach_chunk_contexts(&self.pool, &req.org_id, &mut fused_candidates)
+                .await
+                .map_err(|error| error.context("chunk context join for the reranker"))?;
+        }
+
         let mut pp_ctx = postprocess::PostprocessCtx::new(&req.query, zdr_mode, embed_zdr);
+        if dense_degraded {
+            pp_ctx.zdr_actions_applied.push(ZDR_DENSE_SKIPPED_ACTION);
+        }
         let (reranked, stage_timings) =
             postprocess::run_chain(&chain, fused_candidates, &mut pp_ctx).await?;
         let rerank_used_count = pp_ctx.rerank_used_count;
@@ -1540,17 +1727,23 @@ impl RetrievalPipeline {
                 .context_format
                 .clone()
                 .unwrap_or_else(|| "json".to_string());
-            let pins = match crate::context_pins::list_pins(
-                &self.pool,
-                &req.org_id,
-                crate::context_pins::MAX_PINS,
-            )
-            .await
-            {
-                Ok(pins) => pins,
-                Err(e) => {
-                    tracing::warn!(error = %e, "context pins lookup failed; packing retrieval-only");
-                    Vec::new()
+            // Pins are org memory, not corpus documents. A service confined to its
+            // corpus gets the retrieval-only pack and never the org's pinned facts.
+            let pins = if req.service_principal {
+                Vec::new()
+            } else {
+                match crate::context_pins::list_pins(
+                    &self.pool,
+                    &req.org_id,
+                    crate::context_pins::MAX_PINS,
+                )
+                .await
+                {
+                    Ok(pins) => pins,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "context pins lookup failed; packing retrieval-only");
+                        Vec::new()
+                    }
                 }
             };
             Some(pack_context_with_pins(
@@ -1696,6 +1889,7 @@ impl RetrievalPipeline {
             low_confidence,
             context_pack,
             suggested_next_tools,
+            notice: dense_degraded.then(zdr_dense_unavailable_notice),
         })
     }
 
@@ -1807,6 +2001,64 @@ pub async fn fetch_source_refs(
         .collect())
 }
 
+/// Fills each candidate's chunk context from Postgres, for the reranker's input (CR-T15). Only a unit
+/// whose context is in force carries one: `ready` or `legacy`, with a context that is not blank. Every
+/// other candidate keeps none and reranks on its raw text. Org-scoped, as the source join is, so the
+/// database never returns another organisation's unit.
+#[tracing::instrument(
+    name = "postgres.attach_chunk_contexts",
+    skip_all,
+    fields(otel.kind = "client", db.system = "postgresql", candidate_count = candidates.len()),
+)]
+pub async fn attach_chunk_contexts(
+    pool: &PgPool,
+    org_id: &str,
+    candidates: &mut [ScoredCandidate],
+) -> anyhow::Result<()> {
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    let knowledge_ids: Vec<String> = candidates
+        .iter()
+        .map(|candidate| candidate.knowledge_id.clone())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    let mut tx = pg_org_scope::begin_org_scoped(pool, org_id).await?;
+    let rows = sqlx::query_as::<_, ChunkContextRow>(
+        r#"
+            SELECT knowledge_id, chunk_context
+            FROM knowledge_units
+            WHERE org_id = $1
+              AND knowledge_id = ANY($2)
+              AND context_status IN ('ready', 'legacy')
+              AND btrim(chunk_context) <> ''
+            "#,
+    )
+    .bind(org_id)
+    .bind(knowledge_ids.as_slice())
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    let contexts: std::collections::HashMap<String, String> = rows
+        .into_iter()
+        .map(|row| (row.knowledge_id, row.chunk_context))
+        .collect();
+    for candidate in candidates.iter_mut() {
+        let context = contexts.get(&candidate.knowledge_id).cloned();
+        candidate.attach_chunk_context(context);
+    }
+    Ok(())
+}
+
+#[derive(sqlx::FromRow)]
+struct ChunkContextRow {
+    knowledge_id: String,
+    chunk_context: String,
+}
+
 #[derive(sqlx::FromRow)]
 struct SourceRow {
     document_id: String,
@@ -1820,8 +2072,8 @@ struct SourceRow {
 mod tests {
     use super::{
         embed_zdr_for_mode, embedding_cache_allowed, encode_cost_event, fuse_arms,
-        reciprocal_rank_fusion, retrieval_cache_allowed, text_rerank_allowed, ResolvedWeights,
-        ScoredCandidate, ZdrMode,
+        key_for_rerank_input, reciprocal_rank_fusion, retrieval_cache_allowed, text_rerank_allowed,
+        ResolvedWeights, ScoredCandidate, ZdrMode,
     };
     // P2-5: tests bind to the same constant the config defaults to, so a change
     // to the default is caught here rather than silently reordering results.
@@ -1832,6 +2084,20 @@ mod tests {
         rand_core::OsRng,
         RsaPrivateKey, RsaPublicKey,
     };
+
+    /// Z-41: sovereignty is decided first, so no retention posture or attestation can lift it.
+    /// Retention only decides whether the embedder must refuse without an attestation.
+    #[test]
+    fn the_dense_egress_decision_checks_sovereignty_before_retention() {
+        use super::{dense_egress, DenseEgress};
+        assert_eq!(
+            dense_egress(false, false),
+            DenseEgress::Embed { zdr: false }
+        );
+        assert_eq!(dense_egress(true, false), DenseEgress::Embed { zdr: true });
+        assert_eq!(dense_egress(false, true), DenseEgress::RefuseSovereign);
+        assert_eq!(dense_egress(true, true), DenseEgress::RefuseSovereign);
+    }
 
     #[test]
     fn ephemeral_mode_drives_embed_zdr_true() {
@@ -1877,6 +2143,26 @@ mod tests {
     fn ephemeral_queries_bypass_embedding_cache_reads_and_writes() {
         assert!(!embedding_cache_allowed(true));
         assert!(embedding_cache_allowed(false));
+    }
+
+    /// CR-T15: a retrieval answer reranked with its chunk context must never be served to a request
+    /// that reranked the raw text, or the reverse. With the flag off the key is the key it always was,
+    /// so no entry is orphaned at deploy; with it on the key is its own, and stable.
+    #[test]
+    fn the_rerank_input_mode_partitions_the_retrieval_cache_only_when_context_is_sent() {
+        let key = crate::cache::compose_cache_key(&["margin", "5", "10"]);
+        assert_eq!(
+            key_for_rerank_input(key.clone(), false),
+            key,
+            "flag off: the key is unchanged"
+        );
+        let with_context = key_for_rerank_input(key.clone(), true);
+        assert_ne!(with_context, key, "flag on: a separate partition");
+        assert_eq!(
+            with_context,
+            key_for_rerank_input(key.clone(), true),
+            "the flag-on key is stable"
+        );
     }
 
     #[test]

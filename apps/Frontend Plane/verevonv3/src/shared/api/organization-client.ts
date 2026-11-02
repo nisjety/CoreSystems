@@ -9,6 +9,15 @@ export type OrganizationSummary = {
 export type SupportAIMode = 'off' | 'assist' | 'review'
 export type OrganizationAISettings = { zdr: boolean; supportAiMode: SupportAIMode }
 
+/**
+ * The organization's memory and learning-review policy (org-core
+ * `metadata.agentLearning`). Memory is allowed unless an admin disables it; learning
+ * review is opt-in because it sends conversation transcripts to a paid review model.
+ */
+export type OrgMemoryPolicy = 'allow' | 'disabled'
+export type OrgLearningReviewPolicy = 'disabled' | 'proposals'
+export type AgentLearningPolicy = { memory: OrgMemoryPolicy; learningReview: OrgLearningReviewPolicy }
+
 function record(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -192,6 +201,40 @@ export async function updateOrganizationSupportAIMode(organizationId: string, su
 }
 
 /**
+ * Read the policy off an organization record the way org-core's own reader does:
+ * absent is the defaults, and a stored memory value that is not exactly `allow`
+ * reads as disabled, so a value this client does not know never shows as allowed.
+ */
+function agentLearningPolicyFrom(payload: unknown): AgentLearningPolicy {
+  const stored = record(record(record(payload)?.metadata)?.agentLearning)
+  const memory = stored?.memory
+  return {
+    memory: memory === undefined || memory === null || memory === 'allow' ? 'allow' : 'disabled',
+    learningReview: stored?.learningReview === 'proposals' ? 'proposals' : 'disabled',
+  }
+}
+
+export async function getOrganizationAgentLearningPolicy(organizationId: string): Promise<AgentLearningPolicy> {
+  const payload = await requestJson<unknown>(`/api/v1/orgs/${encodeURIComponent(organizationId)}`)
+  return agentLearningPolicyFrom(payload)
+}
+
+/**
+ * Change one or both rows of the organization's memory and learning-review policy.
+ * Org-admin gated at the gateway. Returns the stored policy after the write.
+ */
+export async function updateOrganizationAgentLearningPolicy(
+  organizationId: string,
+  change: Partial<AgentLearningPolicy>,
+): Promise<AgentLearningPolicy> {
+  const payload = await requestJson<unknown>(`/api/v1/orgs/${encodeURIComponent(organizationId)}/settings`, {
+    method: 'PATCH',
+    body: JSON.stringify({ agentLearningPolicy: change }),
+  })
+  return agentLearningPolicyFrom(payload)
+}
+
+/**
  * ADR-0003's org layer of the authored-instruction hierarchy. Any active org
  * member may read it (it shapes every member's chat turns); writing is
  * org-admin gated at the gateway (`orgs/instructions.rs`). Storage is Convex
@@ -220,4 +263,20 @@ export async function updateOrganizationInstructions(
   )
   const saved = record(payload)?.instructions
   return typeof saved === 'string' ? saved : instructions
+}
+
+/**
+ * Records the organisation's own website in org-core, the owner of the company's facts. The gateway checks the
+ * address first; org-core keeps it only as a public http or https address. Returns the website as it was kept.
+ */
+export async function recordOrganizationWebsite(organizationId: string, websiteUrl: string): Promise<string> {
+  const payload = await requestJson<unknown>(
+    `/api/v1/orgs/${encodeURIComponent(organizationId)}/website`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({ website_url: websiteUrl }),
+    },
+  )
+  const kept = record(payload)?.website_url
+  return typeof kept === 'string' ? kept : websiteUrl
 }

@@ -22,7 +22,7 @@ provided_compose=$(cd "$(dirname "$BROKER_COMPOSE_FILE")" && pwd)/$(basename "$B
 }
 
 compose=(docker compose --project-name "$BROKER_COMPOSE_PROJECT" -f "$BROKER_COMPOSE_FILE" --profile gdpr)
-stream="AQENCIA_CONTROLPLANE"
+stream="CONTROLPLANE"
 consumer="documents-api-gdpr-erasure-v1"
 subject="verevon.gdpr.erasure.requested"
 
@@ -114,7 +114,7 @@ fi
 if scoped_nats stream add UNAUTHORIZED --subjects=unauthorized.fixture --defaults >/dev/null 2>&1; then
   fail "documents principal gained stream administration"
 fi
-if scoped_nats pub '$JS.ACK.AQENCIA_CONTROLPLANE.other-consumer.1.1.1.1.1' '' >/dev/null 2>&1; then
+if scoped_nats pub '$JS.ACK.CONTROLPLANE.other-consumer.1.1.1.1.1' '' >/dev/null 2>&1; then
   fail "documents principal ACKed a different durable"
 fi
 

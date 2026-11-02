@@ -1,0 +1,2 @@
+tier2_source,tier2_endpoint_count,baseline_total,after_first_total,after_second_total,delta1_total,delta2_total,duplicate_risk_endpoints,deletion_risk_endpoints,zero_increment_endpoints
+enabled_endpoints_from_config,1,0,0,0,0,0,0,0,1

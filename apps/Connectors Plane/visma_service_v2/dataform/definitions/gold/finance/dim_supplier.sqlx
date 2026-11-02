@@ -1,0 +1,111 @@
+config {
+  type: "table",
+  schema: "visma_gold_finance",
+  name: "dim_supplier",
+  description: "Supplier dimension at tenant, business unit and supplier grain, including historical transaction references.",
+  tags: ["gold", "finance", "dimension"]
+}
+
+WITH master AS (
+  SELECT *
+  FROM ${ref("visma_silver", "dim_supplier")}
+  WHERE tenant_id IS NOT NULL AND supplier_id IS NOT NULL
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY tenant_id, supplier_id
+    ORDER BY last_modified_at DESC, supplier_name DESC
+  ) = 1
+),
+
+supplier_keys AS (
+  SELECT tenant_id, business_unit_id, supplier_id FROM master
+  UNION DISTINCT
+  SELECT tenant_id, business_unit_id, supplier_id
+  FROM ${ref("visma_silver", "fact_purchase_order_line")}
+  UNION DISTINCT
+  SELECT tenant_id, business_unit_id, supplier_id
+  FROM ${ref("visma_silver", "fact_supplier_invoice")}
+  UNION DISTINCT
+  SELECT tenant_id, business_unit_id, supplier_id
+  FROM ${ref("visma_silver", "fact_supplier_payment")}
+),
+
+document_names AS (
+  SELECT
+    tenant_id,
+    supplier_id,
+    supplier_name,
+    modified_at
+  FROM (
+    SELECT
+      tenantId AS tenant_id,
+      COALESCE(
+        JSON_VALUE(supplier, '$.number'),
+        JSON_VALUE(supplier, '$.id'),
+        JSON_VALUE(supplier, '$.internalId')
+      ) AS supplier_id,
+      JSON_VALUE(supplier, '$.name') AS supplier_name,
+      SAFE_CAST(lastModifiedDateTime AS TIMESTAMP) AS modified_at
+    FROM ${ref("visma_bronze", "visma_supplier_invoices")}
+    WHERE isDeleted IS DISTINCT FROM TRUE
+
+    UNION ALL
+
+    SELECT
+      tenantId,
+      COALESCE(
+        JSON_VALUE(supplier, '$.number'),
+        JSON_VALUE(supplier, '$.id'),
+        JSON_VALUE(supplier, '$.internalId')
+      ),
+      JSON_VALUE(supplier, '$.name'),
+      SAFE_CAST(lastModifiedDateTime AS TIMESTAMP)
+    FROM ${ref("visma_bronze", "visma_supplier_payments")}
+    WHERE isDeleted IS DISTINCT FROM TRUE
+  )
+  WHERE supplier_id IS NOT NULL AND NULLIF(TRIM(supplier_name), '') IS NOT NULL
+),
+
+latest_document_name AS (
+  SELECT
+    tenant_id,
+    supplier_id,
+    ARRAY_AGG(supplier_name ORDER BY modified_at DESC, supplier_name LIMIT 1)[OFFSET(0)] AS supplier_name
+  FROM document_names
+  GROUP BY tenant_id, supplier_id
+),
+
+purchase_order_name AS (
+  SELECT
+    tenant_id,
+    supplier_id,
+    ARRAY_AGG(supplier_name ORDER BY order_date DESC, supplier_name LIMIT 1)[OFFSET(0)] AS supplier_name
+  FROM ${ref("visma_silver", "fact_purchase_order_line")}
+  WHERE supplier_id IS NOT NULL AND NULLIF(TRIM(supplier_name), '') IS NOT NULL
+  GROUP BY tenant_id, supplier_id
+)
+
+SELECT
+  FARM_FINGERPRINT(CONCAT(k.tenant_id, '|', k.business_unit_id, '|', k.supplier_id)) AS supplier_key,
+  k.tenant_id,
+  k.business_unit_id,
+  k.supplier_id,
+  COALESCE(m.supplier_name, d.supplier_name, p.supplier_name, CONCAT('Supplier ', k.supplier_id)) AS supplier_name,
+  m.status,
+  m.supplier_class,
+  m.currency_id,
+  m.credit_terms,
+  m.vat_zone,
+  m.vat_registration_id,
+  m.corporate_id,
+  m.last_modified_at,
+  'visma' AS source_system
+FROM supplier_keys AS k
+LEFT JOIN master AS m
+  ON k.tenant_id = m.tenant_id AND k.supplier_id = m.supplier_id
+LEFT JOIN latest_document_name AS d
+  ON k.tenant_id = d.tenant_id AND k.supplier_id = d.supplier_id
+LEFT JOIN purchase_order_name AS p
+  ON k.tenant_id = p.tenant_id AND k.supplier_id = p.supplier_id
+WHERE k.tenant_id IS NOT NULL
+  AND k.business_unit_id IS NOT NULL
+  AND k.supplier_id IS NOT NULL

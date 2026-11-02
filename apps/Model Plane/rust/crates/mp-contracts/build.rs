@@ -22,7 +22,9 @@ fn strip_extended_prefix(path: std::path::PathBuf) -> std::path::PathBuf {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Contract revision: plan-gate (orchestration.proto ProposePlan,
+    // Contract revision: sandboxes.proto AcquireLeaseRequest.zdr and the WS22-S1
+    // thread workspace RPCs (GetThreadWorkspace, ApplyThreadWorkspaceChanges,
+    // DeleteThreadWorkspace), then plan-gate (orchestration.proto ProposePlan,
     // TransitionPlanRequest.edited_steps, ListPlansRequest.thread_id), after
     // atomic direct-run completion (sessions.proto
     // ManagedRunLifecycle.CompleteDirectRunWithMessage), after speech ZDR.
@@ -55,6 +57,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "model_plane/v1/proof_bundle.proto",
         "model_plane/v1/finetune.proto",
         "model_plane/v1/routing_policy.proto",
+        "model_plane/v1/space_room.proto",
+        "model_plane/v1/space_events.proto",
+        "model_plane/v1/space_history.proto",
+        "model_plane/v1/space_attention.proto",
     ];
 
     let dp_protos = &[

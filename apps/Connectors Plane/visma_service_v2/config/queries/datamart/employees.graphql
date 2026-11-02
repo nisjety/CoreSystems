@@ -1,0 +1,39 @@
+query Employees(
+  $lastId: String,
+  $updatedInDataMart: DateTime,
+  $updatedInDataMartTo: DateTime,
+  $pageSize: Int! = 5000,
+  $includeDeleted: Boolean! = false
+) {
+  employees(
+    lastId: $lastId,
+    updatedInDataMart: $updatedInDataMart,
+    updatedInDataMartTo: $updatedInDataMartTo,
+    pageSize: $pageSize,
+    includeDeleted: $includeDeleted
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    employeeId
+    employeeNumber
+    employeeName
+    status
+    lastModifiedDateTime
+    parentBAccountId
+    mainContactId
+    mainAddressId
+    employeeUserId
+    noteId
+    department
+    calendarId
+    employeeLogin
+    workGroupDescription
+    timeStamp
+    deletedDatabaseRecord
+    createdInDataMartDateTime
+    employeeClass {
+      id
+    }
+  }
+}

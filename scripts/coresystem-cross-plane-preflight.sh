@@ -29,6 +29,13 @@ if [[ $# -ne 0 ]]; then
   exit 64
 fi
 
+# The release-evidence scans below need rg. Without it they cannot run, so block
+# before any probe instead of reading a skipped scan as "recorded".
+command -v rg >/dev/null 2>&1 || {
+  echo "BLOCKED rg: command is unavailable"
+  exit 2
+}
+
 command -v docker >/dev/null 2>&1 || {
   echo "BLOCKED docker: command is unavailable"
   exit 2
@@ -154,7 +161,7 @@ check_principal_scope() {
 }
 
 check_evidence_open() {
-  local label="$1" pattern="$2"
+  local label="$1" pattern="$2" rc
   if [[ ! -f "$MODEL_EVIDENCE" ]]; then
     printf 'EVIDENCE %-16s state=missing\n' "$label"
     blockers+=("${label}_evidence_missing")
@@ -162,7 +169,16 @@ check_evidence_open() {
     printf 'EVIDENCE %-16s state=open\n' "$label"
     blockers+=("${label}_evidence_open")
   else
-    printf 'EVIDENCE %-16s state=recorded\n' "$label"
+    # rg exits 1 only when the pattern is absent. Any other status (2 for a read
+    # or pattern error) means the scan did not complete, so it is not proof that
+    # the item is recorded.
+    rc=$?
+    if [[ "$rc" -eq 1 ]]; then
+      printf 'EVIDENCE %-16s state=recorded\n' "$label"
+    else
+      printf 'EVIDENCE %-16s state=unreadable\n' "$label"
+      blockers+=("${label}_evidence_unreadable")
+    fi
   fi
 }
 
@@ -248,6 +264,11 @@ check_principal_scope control-user "$control_user" USER_CORE_SERVICE_CREDENTIALS
 check_principal_scope control-user "$control_user" USER_CORE_SERVICE_CREDENTIALS execution-core user-core spaces:agent-action:view
 check_principal_scope control-user "$control_user" USER_CORE_SERVICE_CREDENTIALS conversation-core user-core spaces:agent-action:current-authority
 check_principal_scope control-user "$control_user" USER_CORE_SERVICE_CREDENTIALS conversation-core user-core spaces:agent-action:reservation
+# WS14-S2: documents-api is the one registered owner service of documents. It
+# writes owner-asserted grants (authz:write, user-delegated) and room-file
+# grants (spaces:file-grant:write, decision-proved); no other principal holds them.
+check_principal_scope control-user "$control_user" USER_CORE_SERVICE_CREDENTIALS documents-api user-core authz:write
+check_principal_scope control-user "$control_user" USER_CORE_SERVICE_CREDENTIALS documents-api user-core spaces:file-grant:write
 check_principal_scope control-auth "$control_auth" PLANE_SERVICE_PRINCIPALS_JSON execution-core capability-core capability:health:global:write
 check_principal_scope control-auth "$control_auth" PLANE_SERVICE_PRINCIPALS_JSON conversation-core capability-core capability:read
 check_principal_scope control-auth "$control_auth" PLANE_SERVICE_PRINCIPALS_JSON conversation-core capability-core capability:owner-action:health:write

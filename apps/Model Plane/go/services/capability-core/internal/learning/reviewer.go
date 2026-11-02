@@ -120,6 +120,7 @@ func ParseReviewJSON(js string) ([]SkillCandidate, error) {
 			Content         string   `json:"content"`
 			TriggerKeywords []string `json:"trigger_keywords"`
 			Confidence      *float64 `json:"confidence"`
+			Reason          string   `json:"reason"`
 		}
 		if err := json.Unmarshal(item, &s); err != nil {
 			return nil, &ParseError{Reason: ReasonCandidateInvalid}
@@ -138,6 +139,7 @@ func ParseReviewJSON(js string) ([]SkillCandidate, error) {
 			Content:         s.Content,
 			TriggerKeywords: s.TriggerKeywords,
 			Confidence:      *s.Confidence,
+			Reason:          strings.TrimSpace(s.Reason),
 			Origin:          OriginBackgroundReview,
 		})
 	}

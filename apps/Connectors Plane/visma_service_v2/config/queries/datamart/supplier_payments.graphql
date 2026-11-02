@@ -1,0 +1,41 @@
+query SupplierPayments(
+  $lastId: String,
+  $updatedInDataMart: DateTime,
+  $updatedInDataMartTo: DateTime,
+  $pageSize: Int! = 5000,
+  $includeDeleted: Boolean! = false
+) {
+  supplierPayments(
+    lastId: $lastId,
+    updatedInDataMart: $updatedInDataMart,
+    updatedInDataMartTo: $updatedInDataMartTo,
+    pageSize: $pageSize,
+    includeDeleted: $includeDeleted
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    documentType
+    refNbr
+    status
+    hold
+    applicationPeriod
+    applicationDate
+    paymentRef
+    paymentMethod
+    released
+    cashAccountId
+    lastModifiedDateTime
+    currencyId
+    description
+    supplierId
+    locationId
+    paymentAmount
+    financeCharges
+    unappliedBalance
+    appliedAmount
+    postedDateTime
+    deletedDatabaseRecord
+    createdInDataMartDateTime
+  }
+}

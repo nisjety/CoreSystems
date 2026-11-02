@@ -28,6 +28,13 @@ from app.progress import progress_hub
 from app.schemas import JobDetailResponse, JobItemResponse, JobResponse, SourceImportRequest
 from app.space_import_authority import SpaceImportIngressDenied, verify_space_import_ingress_decision
 from app.space_deletion_auth import is_space_deletion_principal
+from app.space_upload import (
+    SPACE_UPLOAD_SOURCE_TYPE,
+    SpaceUploadRefusal,
+    prepare_space_upload,
+    refusal_response,
+    space_upload_enabled,
+)
 from app.service import (
     QuotaCheckUnavailable,
     close_http_client,
@@ -124,6 +131,18 @@ async def quota_dependency_unavailable(
             }
         },
     )
+
+
+@app.exception_handler(SpaceUploadRefusal)
+async def space_upload_refused(_request: Request, exc: SpaceUploadRefusal) -> JSONResponse:
+    return refusal_response(exc)
+
+
+def _job_readable_by(job, auth: AuthContext) -> bool:
+    """Room-upload jobs are the uploader's alone; other jobs stay org-scoped."""
+    if job.source_type != SPACE_UPLOAD_SOURCE_TYPE:
+        return True
+    return auth.principal_type == "user" and bool(auth.user_id) and job.user_id == auth.user_id
 
 
 def _job_to_response(job) -> JobResponse:
@@ -266,6 +285,101 @@ async def create_upload_job(
     if not job:
         raise HTTPException(status_code=500, detail="Failed to create import job")
     return _job_to_response(job)
+
+
+@app.post("/api/v1/import/jobs/space-upload")
+async def create_space_upload_job(
+    files: list[UploadFile] = File(default=[]),
+    zdr: bool = Form(False),
+    auth: AuthContext = Depends(require_internal_auth),
+    space_import_ingress_decision: str | None = Header(
+        default=None, alias="X-Space-Import-Ingress-Decision"
+    ),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    zdr_header: bool = Header(False, alias="X-ZDR"),
+) -> JSONResponse:
+    """Durable room-file upload (WS14-S6).
+
+    Order is deliberate: flag, ZDR, Control decision (nothing is read or parsed
+    without one), idempotent replay, validation and extraction, quota, job.
+    Only extracted text is kept; Data enforces owner, quota and dedupe.
+    """
+    if not space_upload_enabled(settings):
+        raise SpaceUploadRefusal(404, "room_files_disabled")
+    if zdr or zdr_header:
+        raise SpaceUploadRefusal(412, "zdr_durable_mutation_forbidden", {"surface": "room_files"})
+    if not space_import_ingress_decision:
+        raise SpaceUploadRefusal(403, "space_files_not_authorized", {"reason_code": "decision_required"})
+    try:
+        intent = verify_space_import_ingress_decision(space_import_ingress_decision, auth)
+    except SpaceImportIngressDenied as exc:
+        raise SpaceUploadRefusal(
+            403, "space_files_not_authorized", {"reason_code": "decision_invalid"}
+        ) from exc
+    if intent.source_type != SPACE_UPLOAD_SOURCE_TYPE:
+        raise SpaceUploadRefusal(
+            403, "space_files_not_authorized", {"reason_code": "source_type_not_allowed"}
+        )
+    if idempotency_key is not None and idempotency_key.strip() != intent.idempotency_key:
+        raise SpaceUploadRefusal(
+            403, "space_files_not_authorized", {"reason_code": "idempotency_mismatch"}
+        )
+
+    org_id = auth.org_id
+    user_id = auth.user_id
+
+    async def replay(job_id: UUID) -> JSONResponse:
+        job, items = await import_service.get_job_with_items(job_id, org_id=org_id)
+        if not job:
+            raise HTTPException(status_code=500, detail="Failed to read import job")
+        return JSONResponse(
+            status_code=200,
+            content={
+                "data": {
+                    "upload_id": str(job.id),
+                    "deduplicated": True,
+                    "status": job.status,
+                    "files": [{"file_name": item.source_name, "status": item.status} for item in items],
+                }
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
+    existing = await import_service.find_space_upload_job(
+        org_id, user_id, intent.space_ref, intent.idempotency_key
+    )
+    if existing is not None:
+        return await replay(existing)
+
+    documents = await prepare_space_upload(files, settings)
+
+    allowed = await import_service.check_quota(org_id=org_id, items=len(documents))
+    if not allowed:
+        raise SpaceUploadRefusal(409, "room_files_quota_exceeded")
+
+    job_id, created = await import_service.create_space_upload_job(
+        org_id=org_id,
+        user_id=user_id,
+        documents=documents,
+        metadata={"upload_count": len(documents)},
+        space_import_intent=intent,
+    )
+    if not created:
+        return await replay(job_id)
+
+    await orchestrator.dispatch(job_id, import_service.run_job)
+    return JSONResponse(
+        status_code=202,
+        content={
+            "data": {
+                "upload_id": str(job_id),
+                "deduplicated": False,
+                "status": "queued",
+                "files": [{"file_name": doc.source_name, "status": "queued"} for doc in documents],
+            }
+        },
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.post("/api/v1/import/jobs/source", response_model=JobResponse)
@@ -428,7 +542,7 @@ async def get_job(
     auth: AuthContext = Depends(require_internal_auth),
 ) -> JobDetailResponse:
     job, items = await import_service.get_job_with_items(job_id, org_id=auth.org_id)
-    if not job:
+    if not job or not _job_readable_by(job, auth):
         raise HTTPException(status_code=404, detail="Job not found")
     return JobDetailResponse(
         **_job_to_response(job).model_dump(),
@@ -442,7 +556,7 @@ async def stream_job_events(
     auth: AuthContext = Depends(require_internal_auth),
 ) -> EventSourceResponse:
     job = await import_service.get_job(job_id, org_id=auth.org_id)
-    if not job:
+    if not job or not _job_readable_by(job, auth):
         raise HTTPException(status_code=404, detail="Job not found")
 
     async def stream() -> AsyncGenerator[dict[str, str], None]:
@@ -473,6 +587,7 @@ async def root() -> JSONResponse:
             "version": "1.0.0",
             "endpoints": [
                 "/api/v1/import/jobs/upload",
+                "/api/v1/import/jobs/space-upload",
                 "/api/v1/import/jobs/source",
                 "/api/v1/import/jobs/{job_id}",
                 "/api/v1/import/jobs/{job_id}/events",

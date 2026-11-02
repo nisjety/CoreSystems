@@ -43,6 +43,66 @@ func TestProvidersCatalogIsPublic(t *testing.T) {
 	}
 }
 
+func TestIntegrationLandingPageIsPublicStaticHTML(t *testing.T) {
+	app := testServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != fiber.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, "text/html; charset=utf-8") {
+		t.Fatalf("Content-Type = %q, want HTML", got)
+	}
+	for header, want := range map[string]string{
+		"Content-Security-Policy": "default-src 'none'",
+		"X-Content-Type-Options":  "nosniff",
+		"X-Frame-Options":         "DENY",
+	} {
+		if got := resp.Header.Get(header); !strings.Contains(got, want) {
+			t.Errorf("%s = %q, want %q", header, got, want)
+		}
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	page := string(body)
+	for _, expected := range []string{"<title>Integration Core</title>", "<main>", "<h1>Integration Core</h1>"} {
+		if !strings.Contains(page, expected) {
+			t.Errorf("landing page missing %q: %s", expected, page)
+		}
+	}
+	for _, forbidden := range []string{"<script", "<form", "access_token", "refresh_token", "client_secret", "api_key", "connectionId", "dev-key"} {
+		if strings.Contains(strings.ToLower(page), strings.ToLower(forbidden)) {
+			t.Errorf("landing page leaked or enabled %q: %s", forbidden, page)
+		}
+	}
+}
+
+func TestCallbackHTMLPostsOnlyToTrustedReturnOrigin(t *testing.T) {
+	trusted := callbackHTML(oauth.CallbackResult{Success: true, ReturnURL: "https://app.example/integrations?provider=google", ReturnOrigin: "https://app.example"})
+	if !strings.Contains(trusted, `var returnOrigin = "https://app.example"`) || !strings.Contains(trusted, `postMessage(payload, returnOrigin)`) {
+		t.Fatalf("trusted callback did not use exact return origin: %s", trusted)
+	}
+	if strings.Contains(trusted, `postMessage(payload, "*")`) {
+		t.Fatalf("trusted callback used wildcard target origin: %s", trusted)
+	}
+
+	untrusted := callbackHTML(oauth.CallbackResult{Success: true})
+	if strings.Contains(untrusted, "evil.example") || !strings.Contains(untrusted, `var returnURL = ""`) || !strings.Contains(untrusted, `var returnOrigin = ""`) {
+		t.Fatalf("untrusted return URL reached callback HTML: %s", untrusted)
+	}
+
+	revoked := callbackHTML(oauth.CallbackResult{Success: true, ReturnURLRejected: true})
+	if strings.Contains(revoked, "window.setTimeout") || !strings.Contains(revoked, "return to the application and refresh") {
+		t.Fatalf("revoked callback did not remain readable: %s", revoked)
+	}
+}
+
 func TestProvidersCatalogIncludesMetaSDKConfig(t *testing.T) {
 	cfg, repo, service := testOAuthStack(t)
 	cfg.MetaJSSDKAppID = "meta-app-id"
@@ -268,6 +328,51 @@ func TestCreateConnectSessionReturnsDirectOAuthURL(t *testing.T) {
 	}
 	if resp.StatusCode != 200 {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestCreateConnectSessionRejectsUntrustedReturnURLWithoutReflection(t *testing.T) {
+	cfg, repo, service := testOAuthStack(t)
+	app := NewServer(ServerConfig{
+		Config: cfg,
+		Repo:   repo,
+		OAuth:  service,
+		Auth: fakeVerifier{principal: auth.Principal{
+			UserID: "user-1", OrganizationID: "org-1", WorkspaceID: "workspace-1", Email: "user@example.com",
+		}},
+		Org: fakeOrgClient{plan: "pro"},
+	})
+
+	const untrustedReturnURL = "https://untrusted.example/after-connect"
+	body := `{"bundles":["inbox"],"returnUrl":"` + untrustedReturnURL + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/providers/microsoft/connect-session", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer valid-token")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != fiber.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	var envelope struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(responseBody, &envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if envelope.Error.Code != "invalid_return_url" {
+		t.Fatalf("error code = %q, want invalid_return_url", envelope.Error.Code)
+	}
+	if strings.Contains(string(responseBody), untrustedReturnURL) || strings.Contains(string(responseBody), "untrusted.example") {
+		t.Fatalf("response reflected rejected return URL: %s", responseBody)
 	}
 }
 
@@ -2564,145 +2669,6 @@ func TestRecordTokenLeaseFailsClosedOnMissingConnectionOrAuditIntent(t *testing.
 	}
 }
 
-func TestSCIMProvisioningRequiresBearerToken(t *testing.T) {
-	cfg, repo, service := testOAuthStack(t)
-	cfg.SCIMBearerToken = "scim-secret"
-	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service})
-
-	req := httptest.NewRequest("POST", "/api/v1/scim/v2/Users", strings.NewReader(`{"userName":"ada@example.com"}`))
-	req.Header.Set("Content-Type", "application/scim+json")
-	resp, err := app.Test(req)
-	if err != nil {
-		t.Fatalf("app.Test error: %v", err)
-	}
-	if resp.StatusCode != 401 {
-		t.Fatalf("status = %d, want 401", resp.StatusCode)
-	}
-}
-
-func TestSCIMProvisioningStoresInboundEvent(t *testing.T) {
-	cfg, repo, service := testOAuthStack(t)
-	cfg.SCIMBearerToken = "scim-secret"
-	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service})
-
-	req := httptest.NewRequest("POST", "/api/v1/scim/v2/Users", strings.NewReader(`{"externalId":"u-1","userName":"ada@example.com","active":true}`))
-	req.Header.Set("Content-Type", "application/scim+json")
-	req.Header.Set("Authorization", "Bearer scim-secret")
-	req.Header.Set("X-Org-ID", "org-1")
-	resp, err := app.Test(req)
-	if err != nil {
-		t.Fatalf("app.Test error: %v", err)
-	}
-	if resp.StatusCode != 201 {
-		t.Fatalf("status = %d, want 201", resp.StatusCode)
-	}
-	var decoded struct {
-		ID       string `json:"id"`
-		UserName string `json:"userName"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
-		t.Fatalf("Decode error: %v", err)
-	}
-	if decoded.UserName != "ada@example.com" {
-		t.Fatalf("userName = %q, want ada@example.com", decoded.UserName)
-	}
-}
-
-func TestSCIMTokenCRUDAndInboundAuth(t *testing.T) {
-	cfg, repo, service := testOAuthStack(t)
-	cfg.SCIMBearerToken = ""
-	cfg.SCIMBearerTokens = map[string]string{}
-	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service})
-
-	req := httptest.NewRequest("POST", "/api/v1/scim/tokens", strings.NewReader(`{"organizationId":"org-1","name":"Okta SCIM"}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Internal-API-Key", "dev-key")
-	resp, err := app.Test(req)
-	if err != nil {
-		t.Fatalf("app.Test create token error: %v", err)
-	}
-	if resp.StatusCode != 201 {
-		t.Fatalf("create token status = %d, want 201", resp.StatusCode)
-	}
-	var created struct {
-		Data struct {
-			Token       store.SCIMToken `json:"token"`
-			BearerToken string          `json:"bearerToken"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
-		t.Fatalf("Decode create token error: %v", err)
-	}
-	if !strings.HasPrefix(created.Data.BearerToken, "scim_") {
-		t.Fatalf("bearer token = %q, want scim_ prefix", created.Data.BearerToken)
-	}
-	if created.Data.Token.TokenPrefix == "" || len(created.Data.Token.TokenPrefix) >= len(created.Data.BearerToken) {
-		t.Fatalf("token prefix = %q, want short non-empty prefix", created.Data.Token.TokenPrefix)
-	}
-
-	req = httptest.NewRequest("GET", "/api/v1/scim/tokens?organizationId=org-1", nil)
-	req.Header.Set("X-Internal-API-Key", "dev-key")
-	resp, err = app.Test(req)
-	if err != nil {
-		t.Fatalf("app.Test list token error: %v", err)
-	}
-	if resp.StatusCode != 200 {
-		t.Fatalf("list token status = %d, want 200", resp.StatusCode)
-	}
-	var listed struct {
-		Data struct {
-			Tokens []store.SCIMToken `json:"tokens"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&listed); err != nil {
-		t.Fatalf("Decode list token error: %v", err)
-	}
-	if len(listed.Data.Tokens) != 1 || listed.Data.Tokens[0].ID != created.Data.Token.ID {
-		t.Fatalf("tokens = %#v, want created token", listed.Data.Tokens)
-	}
-
-	req = httptest.NewRequest("POST", "/api/v1/scim/v2/Users", strings.NewReader(`{"externalId":"u-1","userName":"ada@example.com","active":true}`))
-	req.Header.Set("Content-Type", "application/scim+json")
-	req.Header.Set("Authorization", "Bearer "+created.Data.BearerToken)
-	req.Header.Set("X-Org-ID", "org-1")
-	resp, err = app.Test(req)
-	if err != nil {
-		t.Fatalf("app.Test scim inbound error: %v", err)
-	}
-	if resp.StatusCode != 201 {
-		t.Fatalf("scim inbound status = %d, want 201", resp.StatusCode)
-	}
-	tokenAfterUse, err := repo.FindActiveSCIMTokenByHash(t.Context(), "org-1", scimTokenHash(created.Data.BearerToken))
-	if err != nil {
-		t.Fatalf("FindActiveSCIMTokenByHash error: %v", err)
-	}
-	if tokenAfterUse.LastUsedAt == nil {
-		t.Fatal("LastUsedAt was not updated after inbound SCIM auth")
-	}
-
-	req = httptest.NewRequest("DELETE", "/api/v1/scim/tokens/"+created.Data.Token.ID+"?organizationId=org-1", nil)
-	req.Header.Set("X-Internal-API-Key", "dev-key")
-	resp, err = app.Test(req)
-	if err != nil {
-		t.Fatalf("app.Test revoke token error: %v", err)
-	}
-	if resp.StatusCode != 200 {
-		t.Fatalf("revoke status = %d, want 200", resp.StatusCode)
-	}
-
-	req = httptest.NewRequest("POST", "/api/v1/scim/v2/Users", strings.NewReader(`{"externalId":"u-2","userName":"grace@example.com","active":true}`))
-	req.Header.Set("Content-Type", "application/scim+json")
-	req.Header.Set("Authorization", "Bearer "+created.Data.BearerToken)
-	req.Header.Set("X-Org-ID", "org-1")
-	resp, err = app.Test(req)
-	if err != nil {
-		t.Fatalf("app.Test revoked scim inbound error: %v", err)
-	}
-	if resp.StatusCode != 401 {
-		t.Fatalf("revoked scim status = %d, want 401", resp.StatusCode)
-	}
-}
-
 type auditInsertFailureTransaction struct {
 	store.AuditTransaction
 }
@@ -2725,86 +2691,226 @@ func (r auditInsertFailureRepository) WithAuditTransaction(ctx context.Context, 
 	})
 }
 
-func TestSCIMTokenCreateRollsBackWhenAuditIntentCannotPersist(t *testing.T) {
-	cfg, repo, service := testOAuthStack(t)
-	cfg.SCIMBearerToken = ""
-	cfg.SCIMBearerTokens = map[string]string{}
-	app := NewServer(ServerConfig{
-		Config: cfg,
-		Repo:   auditInsertFailureRepository{Repository: repo},
-		OAuth:  service,
-	})
+// WS05-S2: SCIM provisioning is not implemented in this service. Every
+// /api/v1/scim/v2/* request is an honest 501 with a SCIM error body, and nothing
+// about the request (payload, token, org) is stored or published.
 
-	req := httptest.NewRequest("POST", "/api/v1/scim/tokens", strings.NewReader(`{"organizationId":"org-1","name":"must rollback"}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Internal-API-Key", "dev-key")
-	resp, err := app.Test(req)
-	if err != nil {
-		t.Fatalf("app.Test error: %v", err)
+// webhookCountingRepository counts the inbound-event writes the former SCIM stub made.
+type webhookCountingRepository struct {
+	store.Repository
+	webhookInserts int
+}
+
+func (r *webhookCountingRepository) InsertWebhookEvent(ctx context.Context, event store.WebhookEvent) error {
+	r.webhookInserts++
+	return r.Repository.InsertWebhookEvent(ctx, event)
+}
+
+func scimStubServer(t *testing.T) (*fiber.App, *webhookCountingRepository, *fakeEventsPublisher, *store.MemoryRepository) {
+	t.Helper()
+	cfg, repo, service := testOAuthStack(t)
+	counting := &webhookCountingRepository{Repository: repo}
+	publisher := &fakeEventsPublisher{}
+	app := NewServer(ServerConfig{Config: cfg, Repo: counting, OAuth: service, Events: publisher})
+	return app, counting, publisher, repo
+}
+
+func TestSCIMV2AnswersHonest501ForEveryMethodPathAndCredential(t *testing.T) {
+	app, repo, publisher, _ := scimStubServer(t)
+	paths := []string{
+		"/api/v1/scim/v2/Users",
+		"/api/v1/scim/v2/Users/u-1",
+		"/api/v1/scim/v2/Groups",
+		"/api/v1/scim/v2/Groups/g-1",
+		"/api/v1/scim/v2/ServiceProviderConfig",
+		"/api/v1/scim/v2/Schemas",
+		"/api/v1/scim/v2/anything/else",
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != fiber.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500", resp.StatusCode)
+	authorizations := map[string]string{
+		"no credential":        "",
+		"unknown bearer":       "Bearer scim-secret",
+		"scim prefixed bearer": "Bearer scim_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"basic credential":     "Basic YTpi",
+		"empty bearer":         "Bearer ",
 	}
-	tokens, err := repo.ListSCIMTokens(t.Context(), "org-1")
-	if err != nil {
-		t.Fatalf("ListSCIMTokens: %v", err)
+	bodies := map[string]string{
+		"valid":        `{"externalId":"u-1","userName":"ada@example.com","active":true}`,
+		"invalid json": `{"userName": `,
+		"empty":        ``,
 	}
-	if len(tokens) != 0 {
-		t.Fatalf("SCIM token committed without audit intent: %#v", tokens)
+	calls := 0
+	for _, method := range []string{"GET", "POST", "PUT", "PATCH", "DELETE"} {
+		for _, path := range paths {
+			for authName, authorization := range authorizations {
+				for bodyName, body := range bodies {
+					req := httptest.NewRequest(method, path, strings.NewReader(body))
+					req.Header.Set("Content-Type", "application/scim+json")
+					req.Header.Set("X-Org-ID", "org-1")
+					if authorization != "" {
+						req.Header.Set("Authorization", authorization)
+					}
+					resp, err := app.Test(req)
+					if err != nil {
+						t.Fatalf("%s %s (%s, %s): app.Test error: %v", method, path, authName, bodyName, err)
+					}
+					raw, _ := io.ReadAll(resp.Body)
+					_ = resp.Body.Close()
+					calls++
+					if resp.StatusCode != fiber.StatusNotImplemented {
+						t.Fatalf("%s %s (%s, %s): status = %d, want 501: %s", method, path, authName, bodyName, resp.StatusCode, raw)
+					}
+					if contentType := resp.Header.Get("Content-Type"); !strings.HasPrefix(contentType, "application/scim+json") {
+						t.Fatalf("%s %s: Content-Type = %q, want application/scim+json", method, path, contentType)
+					}
+					var decoded struct {
+						Schemas []string `json:"schemas"`
+						Detail  string   `json:"detail"`
+						Status  string   `json:"status"`
+					}
+					if err := json.Unmarshal(raw, &decoded); err != nil {
+						t.Fatalf("%s %s: body is not JSON: %v: %s", method, path, err, raw)
+					}
+					if len(decoded.Schemas) != 1 || decoded.Schemas[0] != "urn:ietf:params:scim:api:messages:2.0:Error" {
+						t.Fatalf("%s %s: schemas = %v, want the SCIM Error schema", method, path, decoded.Schemas)
+					}
+					if decoded.Status != "501" || decoded.Detail == "" {
+						t.Fatalf("%s %s: status/detail = %q/%q", method, path, decoded.Status, decoded.Detail)
+					}
+				}
+			}
+		}
+	}
+	if calls == 0 {
+		t.Fatal("no SCIM request was made")
+	}
+	if repo.webhookInserts != 0 {
+		t.Fatalf("InsertWebhookEvent calls = %d, want 0: the stub must persist nothing", repo.webhookInserts)
+	}
+	if len(publisher.events) != 0 {
+		t.Fatalf("published events = %d, want 0: %#v", len(publisher.events), publisher.events)
 	}
 }
 
-func TestSCIMProvisioningUsesOrgScopedBearerToken(t *testing.T) {
-	cfg, repo, service := testOAuthStack(t)
-	cfg.SCIMBearerTokens = map[string]string{"org-1": "org-scim-secret"}
-	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service})
+func TestSCIMV2IgnoresAnIssuedTokenAndStillWritesNothing(t *testing.T) {
+	app, repo, publisher, memory := scimStubServer(t)
+	hash := strings.Repeat("a", 64)
+	if _, err := memory.CreateSCIMToken(t.Context(), store.SCIMToken{
+		ID: "tok-legacy", OrganizationID: "org-1", Name: "legacy", TokenPrefix: "scim_aaaa",
+	}, hash); err != nil {
+		t.Fatalf("seed legacy token: %v", err)
+	}
 
 	req := httptest.NewRequest("POST", "/api/v1/scim/v2/Users", strings.NewReader(`{"userName":"ada@example.com"}`))
 	req.Header.Set("Content-Type", "application/scim+json")
-	req.Header.Set("Authorization", "Bearer org-scim-secret")
+	req.Header.Set("Authorization", "Bearer scim_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	req.Header.Set("X-Org-ID", "org-1")
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("app.Test error: %v", err)
 	}
-	if resp.StatusCode != 201 {
-		t.Fatalf("status = %d, want 201", resp.StatusCode)
+	_ = resp.Body.Close()
+	if resp.StatusCode != fiber.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501", resp.StatusCode)
+	}
+	if repo.webhookInserts != 0 || len(publisher.events) != 0 {
+		t.Fatalf("webhook inserts = %d, published = %d, want none", repo.webhookInserts, len(publisher.events))
+	}
+	tokens, err := memory.ListSCIMTokens(t.Context(), "org-1")
+	if err != nil || len(tokens) != 1 || tokens[0].LastUsedAt != nil {
+		t.Fatalf("an inbound call must not authenticate or touch a token: %#v err=%v", tokens, err)
 	}
 }
 
-func TestSCIMProvisioningRejectsWrongOrgScopedBearerToken(t *testing.T) {
-	cfg, repo, service := testOAuthStack(t)
-	cfg.SCIMBearerTokens = map[string]string{"org-1": "org-scim-secret"}
-	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service})
+func TestSCIMTokenCreateIs501AndMintsNothing(t *testing.T) {
+	app, _, _, memory := scimStubServer(t)
 
-	req := httptest.NewRequest("POST", "/api/v1/scim/v2/Users", strings.NewReader(`{"userName":"ada@example.com"}`))
-	req.Header.Set("Content-Type", "application/scim+json")
-	req.Header.Set("Authorization", "Bearer org-scim-secret")
-	req.Header.Set("X-Org-ID", "org-2")
+	req := httptest.NewRequest("POST", "/api/v1/scim/tokens", strings.NewReader(`{"organizationId":"org-1","name":"Okta SCIM"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-API-Key", "dev-key")
 	resp, err := app.Test(req)
 	if err != nil {
-		t.Fatalf("app.Test error: %v", err)
+		t.Fatalf("app.Test create token error: %v", err)
 	}
-	if resp.StatusCode != 401 {
-		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	raw, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != fiber.StatusNotImplemented {
+		t.Fatalf("create token status = %d, want 501: %s", resp.StatusCode, raw)
+	}
+	if !strings.Contains(string(raw), "scim_not_implemented") {
+		t.Fatalf("create token body = %s, want code scim_not_implemented", raw)
+	}
+	if strings.Contains(string(raw), "bearerToken") {
+		t.Fatalf("create token body leaks a bearer token: %s", raw)
+	}
+	tokens, err := memory.ListSCIMTokens(t.Context(), "org-1")
+	if err != nil || len(tokens) != 0 {
+		t.Fatalf("a refused create must mint no token: %#v err=%v", tokens, err)
 	}
 }
 
-func TestSCIMProvisioningRequiresOrganizationForOrgScopedBearerToken(t *testing.T) {
-	cfg, repo, service := testOAuthStack(t)
-	cfg.SCIMBearerTokens = map[string]string{"org-1": "org-scim-secret"}
-	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service})
+func TestSCIMTokenListAndRevokeStillWork(t *testing.T) {
+	app, _, _, memory := scimStubServer(t)
+	if _, err := memory.CreateSCIMToken(t.Context(), store.SCIMToken{
+		ID: "tok-legacy", OrganizationID: "org-1", Name: "legacy", TokenPrefix: "scim_aaaa",
+	}, strings.Repeat("a", 64)); err != nil {
+		t.Fatalf("seed legacy token: %v", err)
+	}
 
-	req := httptest.NewRequest("POST", "/api/v1/scim/v2/Users", strings.NewReader(`{"userName":"ada@example.com"}`))
-	req.Header.Set("Content-Type", "application/scim+json")
-	req.Header.Set("Authorization", "Bearer org-scim-secret")
+	req := httptest.NewRequest("GET", "/api/v1/scim/tokens?organizationId=org-1", nil)
+	req.Header.Set("X-Internal-API-Key", "dev-key")
 	resp, err := app.Test(req)
 	if err != nil {
-		t.Fatalf("app.Test error: %v", err)
+		t.Fatalf("app.Test list token error: %v", err)
 	}
-	if resp.StatusCode != 400 {
-		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	if resp.StatusCode != 200 {
+		t.Fatalf("list token status = %d, want 200", resp.StatusCode)
+	}
+	var listed struct {
+		Data struct {
+			Tokens []store.SCIMToken `json:"tokens"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&listed); err != nil {
+		t.Fatalf("Decode list token error: %v", err)
+	}
+	_ = resp.Body.Close()
+	if len(listed.Data.Tokens) != 1 || listed.Data.Tokens[0].ID != "tok-legacy" {
+		t.Fatalf("tokens = %#v, want the legacy token", listed.Data.Tokens)
+	}
+
+	req = httptest.NewRequest("DELETE", "/api/v1/scim/tokens/tok-legacy?organizationId=org-1", nil)
+	req.Header.Set("X-Internal-API-Key", "dev-key")
+	resp, err = app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test revoke token error: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("revoke status = %d, want 200", resp.StatusCode)
+	}
+	tokens, err := memory.ListSCIMTokens(t.Context(), "org-1")
+	if err != nil || len(tokens) != 1 || tokens[0].RevokedAt == nil {
+		t.Fatalf("token was not revoked: %#v err=%v", tokens, err)
+	}
+}
+
+func TestSCIMTokenRoutesStillRequireInternalAuth(t *testing.T) {
+	app, _, _, _ := scimStubServer(t)
+	for _, tt := range []struct{ method, path string }{
+		{"GET", "/api/v1/scim/tokens?organizationId=org-1"},
+		{"POST", "/api/v1/scim/tokens"},
+		{"DELETE", "/api/v1/scim/tokens/tok-1?organizationId=org-1"},
+	} {
+		req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(`{"organizationId":"org-1"}`))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatalf("%s %s: app.Test error: %v", tt.method, tt.path, err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != fiber.StatusUnauthorized {
+			t.Fatalf("%s %s without credentials: status = %d, want 401", tt.method, tt.path, resp.StatusCode)
+		}
 	}
 }
 
@@ -3200,6 +3306,135 @@ func TestGDPRDeleteRollsBackAllLocalMutationsWhenAuditIntentFails(t *testing.T) 
 	}
 }
 
+func TestGoogleSearchConsoleActionsRequireReadCapability(t *testing.T) {
+	for _, operation := range []string{"gsc.sites.list", "google.gsc.sites.list", "gsc.search_analytics.query", "google.gsc.search_analytics.query"} {
+		capability, sensitive := requiredCapabilityForOperation("google", operation)
+		if capability != "search_console.read" {
+			t.Errorf("required capability for %q = %q, want search_console.read", operation, capability)
+		}
+		if !sensitive {
+			t.Errorf("GSC operation %q must be marked sensitive", operation)
+		}
+	}
+}
+
+func TestMarketingReadinessEndpointUsesFixedReadOnlyGoogleAndMetaEndpoints(t *testing.T) {
+	providerCalls := map[string]int{}
+	providerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer marketing-access-token" {
+			t.Fatalf("Authorization = %q, want readiness bearer token", got)
+		}
+		if r.Method != http.MethodGet {
+			t.Fatalf("method = %s, want GET", r.Method)
+		}
+		switch r.URL.Path {
+		case "/webmasters/v3/sites":
+			providerCalls["google"]++
+			_ = json.NewEncoder(w).Encode(map[string]any{"siteEntry": []any{map[string]any{"siteUrl": "sc-domain:private.example"}}})
+		case "/me/adaccounts":
+			providerCalls["meta"]++
+			if got := r.URL.Query().Get("limit"); got != "1" {
+				t.Fatalf("Meta readiness limit = %q, want 1", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"id": "act_123", "name": "Private Meta account"}}})
+		default:
+			t.Fatalf("unexpected provider request path %q", r.URL.Path)
+		}
+	}))
+	defer providerServer.Close()
+
+	cfg, repo, service := testOAuthStack(t)
+	cfg.GoogleAPIBaseURL = providerServer.URL
+	cfg.FacebookAPIBaseURL = providerServer.URL
+	vault, err := secretcrypto.NewVault(cfg.EncryptionKey)
+	if err != nil {
+		t.Fatalf("NewVault error: %v", err)
+	}
+	for _, connection := range []store.Connection{
+		{
+			ID: "google-readiness", ProviderKey: "google", ConnectorType: "google", OrganizationID: "org-1", UserID: "user-1",
+			Status: "active", Capabilities: []string{"search_console.read"},
+			AccessTokenExpiresAt: time.Now().Add(time.Hour),
+		},
+		{
+			ID: "meta-readiness", ProviderKey: "meta", ConnectorType: "meta", OrganizationID: "org-1", UserID: "user-1",
+			Status: "active", Capabilities: []string{"social.ads.manage", "social.analytics.read"},
+			AccessTokenExpiresAt: time.Now().Add(time.Hour),
+		},
+	} {
+		encryptedToken, err := vault.Encrypt("marketing-access-token", []byte(connection.ID))
+		if err != nil {
+			t.Fatalf("Encrypt token for %s: %v", connection.ID, err)
+		}
+		connection.EncryptedAccessToken = encryptedToken
+		if _, err := repo.UpsertConnection(t.Context(), connection); err != nil {
+			t.Fatalf("UpsertConnection(%s): %v", connection.ID, err)
+		}
+	}
+	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service, Actions: actions.NewService(cfg, providerServer.Client()),
+		// Google is a personal provider: the caller must be the connecting user.
+		Auth: fakeVerifier{principal: auth.Principal{UserID: "user-1", OrganizationID: "org-1", PrincipalType: "user"}}})
+
+	for _, connectionID := range []string{"google-readiness", "meta-readiness"} {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/connections/"+connectionID+"/readiness", nil)
+		req.Header.Set("Authorization", "Bearer synthetic-user-token")
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatalf("app.Test(%s): %v", connectionID, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != fiber.StatusOK {
+			t.Fatalf("%s status = %d, want 200 body=%s", connectionID, resp.StatusCode, body)
+		}
+		for _, forbidden := range []string{"marketing-access-token", "private.example", "act_123", "Private Meta account", "siteEntry"} {
+			if strings.Contains(string(body), forbidden) {
+				t.Fatalf("%s readiness response leaked %q: %s", connectionID, forbidden, body)
+			}
+		}
+	}
+	if providerCalls["google"] != 1 || providerCalls["meta"] != 1 {
+		t.Fatalf("provider calls = %#v, want one fixed call per provider", providerCalls)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/connections/google-readiness/readiness?operation=gsc.search_analytics.query", nil)
+	req.Header.Set("Authorization", "Bearer synthetic-user-token")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("query-override app.Test: %v", err)
+	}
+	if resp.StatusCode != fiber.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		t.Fatalf("query-override status = %d, want 400 body=%s", resp.StatusCode, body)
+	}
+	if code := readAPIErrorCode(t, resp); code != "readiness_request_not_allowed" {
+		t.Fatalf("query-override error code = %q, want readiness_request_not_allowed", code)
+	}
+	if providerCalls["google"] != 1 {
+		t.Fatalf("query-override triggered provider request: %#v", providerCalls)
+	}
+
+	bodyOverride := httptest.NewRequest(http.MethodPost, "/api/v1/connections/meta-readiness/readiness", strings.NewReader(`{"operation":"ads.insights"}`))
+	bodyOverride.Header.Set("Content-Type", "application/json")
+	bodyOverride.Header.Set("Authorization", "Bearer synthetic-user-token")
+	resp, err = app.Test(bodyOverride)
+	if err != nil {
+		t.Fatalf("body-override app.Test: %v", err)
+	}
+	if resp.StatusCode != fiber.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		t.Fatalf("body-override status = %d, want 400 body=%s", resp.StatusCode, body)
+	}
+	if code := readAPIErrorCode(t, resp); code != "readiness_request_not_allowed" {
+		t.Fatalf("body-override error code = %q, want readiness_request_not_allowed", code)
+	}
+	if providerCalls["meta"] != 1 {
+		t.Fatalf("body-override triggered provider request: %#v", providerCalls)
+	}
+}
+
 func testServer(t *testing.T) *fiber.App {
 	t.Helper()
 	cfg, repo, service := testOAuthStack(t)
@@ -3226,20 +3461,20 @@ func testOAuthStack(t *testing.T) (config.Config, *store.MemoryRepository, *oaut
 
 func testConfig() config.Config {
 	return config.Config{
-		ServiceName:               "integration-corev2",
-		InternalAPIKey:            "dev-key",
-		InternalAPIKeyHeader:      "X-Internal-API-Key",
+		ServiceName:                       "integration-corev2",
+		InternalAPIKey:                    "dev-key",
+		InternalAPIKeyHeader:              "X-Internal-API-Key",
 		CodexSubscriptionModelPlaneAPIKey: "codex-subscription-test-key",
-		AllowLegacyTenantKey:      true,
-		PublicBaseURL:             "http://localhost:3026",
-		MicrosoftClientID:         "client",
-		MicrosoftClientSecret:     "secret",
-		MicrosoftAuthorizationURL: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
-		MicrosoftTokenURL:         "https://login.microsoftonline.com/common/oauth2/v2.0/token",
-		MicrosoftGraphBaseURL:     "https://graph.microsoft.com",
-		SessionTTL:                10 * time.Minute,
-		TokenRefreshSkew:          2 * time.Minute,
-		EncryptionKey:             []byte("12345678901234567890123456789012"),
+		AllowLegacyTenantKey:              true,
+		PublicBaseURL:                     "http://localhost:3026",
+		MicrosoftClientID:                 "client",
+		MicrosoftClientSecret:             "secret",
+		MicrosoftAuthorizationURL:         "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+		MicrosoftTokenURL:                 "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+		MicrosoftGraphBaseURL:             "https://graph.microsoft.com",
+		SessionTTL:                        10 * time.Minute,
+		TokenRefreshSkew:                  2 * time.Minute,
+		EncryptionKey:                     []byte("12345678901234567890123456789012"),
 	}
 }
 

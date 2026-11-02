@@ -37,6 +37,23 @@ type Config struct {
 	// UserCoreURL is the user-core base URL used to resolve a viewer's explicit
 	// resource grants (the per-user authz facade). Per-user ownership filtering.
 	UserCoreURL string
+	// SpaceFilesEnabled is WS14-S3's DOCUMENTS_SPACE_FILES rollout switch
+	// (strict literal "true", off by default). On, a verified Control Space
+	// import decision makes the signed subject the document owner, room files
+	// (type space_upload) are accepted under quota and dedupe, and Control
+	// attaches the Space grant. Off, room files are refused and Space imports
+	// keep the previous owner rule. It is never an authorization input.
+	SpaceFilesEnabled bool
+	// SpaceFilesMaxPerRoom and SpaceFilesMaxTextBytesPerRoom bound one Space's
+	// live room files (count and extracted-text bytes).
+	SpaceFilesMaxPerRoom          int
+	SpaceFilesMaxTextBytesPerRoom int64
+	// ShareWritesEnabled is WS14-S4's DOCUMENTS_SHARE_WRITES rollout switch
+	// (strict literal "true", off by default). On, the document owner can list,
+	// add and remove user shares through documents-api, which proves ownership
+	// and asks Control (owner-asserted mode) to write the grant. Off, the share
+	// routes answer 404. It is never an authorization input.
+	ShareWritesEnabled bool
 }
 
 func Load() (*Config, error) {
@@ -58,6 +75,10 @@ func Load() (*Config, error) {
 		UserCoreGrantsRequired:             envOr("USER_CORE_GRANTS_REQUIRED", "1") != "0",
 		EventSigningPrivateKeyPath:         envOr("EVENT_SIGNING_PRIVATE_KEY_PATH", ""),
 		UserCoreURL:                        envOr("USER_CORE_URL", "http://user-core:8080"),
+		SpaceFilesEnabled:                  strings.TrimSpace(os.Getenv("DOCUMENTS_SPACE_FILES")) == "true",
+		ShareWritesEnabled:                 strings.TrimSpace(os.Getenv("DOCUMENTS_SHARE_WRITES")) == "true",
+		SpaceFilesMaxPerRoom:               envIntOr("SPACE_FILES_MAX_PER_ROOM", 500),
+		SpaceFilesMaxTextBytesPerRoom:      int64(envIntOr("SPACE_FILES_MAX_TEXT_BYTES_PER_ROOM", 209715200)),
 	}
 	if cfg.DatabaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL required")

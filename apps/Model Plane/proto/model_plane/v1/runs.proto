@@ -84,6 +84,13 @@ service RunService {
   // it is not a general run-inspection or user-impersonation API.
   rpc ResolveRunActionAuthority(ResolveRunActionAuthorityRequest) returns (ResolveRunActionAuthorityResponse);
 
+  // ResolveApprovalAuthority returns the content-free bindings Control needs before it signs a
+  // `model.approval.decide` decision for a Space member (build plan WS10 S6): who raised the
+  // approval, who it is addressed to, and the run's Space bindings. Same restriction as
+  // ResolveRunActionAuthority (Control's action-authorizer identity); it returns no approval
+  // context, tool input, reason or card text.
+  rpc ResolveApprovalAuthority(ResolveApprovalAuthorityRequest) returns (ResolveApprovalAuthorityResponse);
+
   // ResolveScheduledStepAuthority returns the exact active prepared scheduled
   // run binding for Control's per-step decision. It is narrower than ordinary
   // run inspection: the caller supplies only immutable identifiers/digests,
@@ -91,6 +98,75 @@ service RunService {
   // scheduled-run record. No goal, transcript, tool, credential, or decision
   // bearer crosses this boundary.
   rpc ResolveScheduledStepAuthority(ResolveScheduledStepAuthorityRequest) returns (ResolveScheduledStepAuthorityResponse);
+
+  // AuthorizeRoomRunAttach answers whether the calling room member may watch one run live
+  // (build plan WS09-S4). The caller presents the Control `model.thread.read` decision for the
+  // Space; Session Core verifies it, the viewer's membership, that the run is a root run of a
+  // thread inside the decision's audience ceiling, and that nothing about the run or the
+  // decision is zero-retention. NotFound for any run outside the audience (no oracle). Returns
+  // ids, the honest run phase and a validity window; never run content. Called at subscribe and
+  // again every 15 seconds for as long as the stream lives.
+  rpc AuthorizeRoomRunAttach(AuthorizeRoomRunAttachRequest) returns (AuthorizeRoomRunAttachResponse);
+
+  // CancelRunAsRoomManager cancels one live room run on behalf of a room manager or owner who is
+  // NOT the run's owner (build plan WS09-S8). The caller presents the Control `model.run.control`
+  // decision (action model.run.control, permissions exactly [run:cancel], audience model-plane,
+  // payload digest bound to run_id and operation "cancel"). Session Core verifies it, the
+  // caller's membership, that the run is a root run of a thread of the decision's Space inside
+  // its audience ceiling, and that nothing about the run or the decision is zero-retention, then
+  // cancels through the same transaction as CancelRun and records `acting_as` and the decision
+  // reference on the RUN_CANCELLED receipt. NotFound for a run outside the audience (no oracle).
+  // Returns the run owner's identity so the caller can stop that owner's live producer.
+  rpc CancelRunAsRoomManager(CancelRunAsRoomManagerRequest) returns (CancelRunAsRoomManagerResponse);
+}
+
+message CancelRunAsRoomManagerRequest {
+  // The run to stop.
+  string run_id = 1;
+  // The Space the run's thread belongs to.
+  string space_id = 2;
+  // Control `model.run.control` decision reference and token (audience model-plane).
+  string space_control_decision_ref = 3;
+  string space_control_decision_token = 4;
+  // Must equal the idempotency key the decision was issued for.
+  string idempotency_key = 5;
+  // Closed words only; recorded on the receipt. Empty means `room_manager_stop`.
+  string reason = 6;
+}
+
+message CancelRunAsRoomManagerResponse {
+  // True if this call cancelled the run; false if it was already terminal (idempotent).
+  bool cancelled = 1;
+  // The durable RUN_CANCELLED event id (the existing one when already terminal).
+  string receipt_id = 2;
+  // The run owner's org and user, for stopping that owner's live producer. Never shown to members.
+  string owner_org_id = 3;
+  string owner_user_id = 4;
+}
+
+message AuthorizeRoomRunAttachRequest {
+  // The run the member wants to watch.
+  string run_id = 1;
+  // The Space the run's thread belongs to.
+  string space_id = 2;
+  // Control `model.thread.read` decision reference and token (audience model-plane).
+  string space_read_decision_ref = 3;
+  string space_read_decision_token = 4;
+}
+
+message AuthorizeRoomRunAttachResponse {
+  string run_id = 1;
+  string thread_id = 2;
+  string org_id = 3;
+  // The run owner (the person whose turn this is). Shown to members as "started by".
+  string owner_subject_id = 4;
+  // The honest run phase (`queued`, `running`, or a terminal status).
+  string run_phase = 5;
+  // When the run was created, Unix seconds.
+  int64 started_at_unix = 6;
+  // The verdict holds until here (Unix seconds): the lesser of the decision's expiry and ten
+  // minutes from now. The caller asks again before this and closes the stream at it.
+  int64 valid_until_unix = 7;
 }
 
 message GetRunRequest {
@@ -110,6 +186,11 @@ message ScheduledStepContext {
   string org_id = 3;
   string goal = 4;
   string status = 5;
+  // Stored-consent contract for this scheduled step (WS20 S5). Empty when the
+  // schedule has no contract; the digest and expiry are re-verified per step.
+  string contract_json = 6;
+  string contract_digest = 7;
+  string contract_expires_at = 8;
 }
 
 message ListRunsRequest {
@@ -235,6 +316,44 @@ message ResolveRunActionAuthorityResponse {
   string run_status = 13;
 }
 
+// ResolveApprovalAuthorityRequest names the approval and tenant only; everything else is read
+// from the durable rows.
+message ResolveApprovalAuthorityRequest {
+  string approval_id = 1;
+  string org_id = 2;
+}
+
+// ResolveApprovalAuthorityResponse carries identifiers, kinds and revisions only. `resolved=false`
+// has no authority and every other field is empty/default. A zero-retention run never resolves.
+message ResolveApprovalAuthorityResponse {
+  bool resolved = 1;
+  string approval_id = 2;
+  string run_id = 3;
+  string org_id = 4;
+  // The run owner: the subject the approved action runs as.
+  string requester_subject_id = 5;
+  string thread_id = 6;
+  string space_id = 7;
+  // `requested`, `granted`, `denied` or `timed_out`.
+  string approval_status = 8;
+  // `tool_call`, `plan`, ... as stored.
+  string approval_kind = 9;
+  // `requester`, `named`, `any_editor` or `any_manager`.
+  string addressee_kind = 10;
+  // Set when addressee_kind is `named`.
+  string addressee_subject_id = 11;
+  // `direct`, `ambient` or `automation`; empty reads as `direct`.
+  string turn_origin = 12;
+  // Approval expiry; empty when none.
+  string expires_at = 13;
+  string recipient_audience_ref = 14;
+  uint64 recipient_audience_revision = 15;
+  string recipient_audience_hash = 16;
+  string privacy_policy_ref = 17;
+  string thread_resource_authorization_ref = 18;
+  uint64 authority_revision = 19;
+}
+
 message ResolveScheduledStepAuthorityRequest {
   string run_id = 1;
   string thread_id = 2;
@@ -263,6 +382,10 @@ message ResolveScheduledStepAuthorityResponse {
   uint32 step_index = 12;
   string idempotency_key = 13;
   string run_status = 14;
+  // Control-signed contract digest and expiry for this scheduled step (WS20 S5).
+  // Empty for a schedule without a contract.
+  string contract_digest = 15;
+  string contract_expires_at = 16;
 }
 
 // RunDetail — full run metadata.
@@ -310,4 +433,66 @@ message RunDetail {
 
   // Arbitrary metadata.
   google.protobuf.Struct metadata = 16;
+
+  // True when a continuation can claim this run's durable loop fold now: the
+  // loop is paused for an approval or parked, the fold store is on, and the run
+  // is persistent and not ended. A flag only; the fold never appears on this
+  // message. Owner: WS03 durable loop.
+  bool resumable = 17;
+
+  // Why the run is parked. Set only while resumable and parked; one closed
+  // token: credential_window, provider_exhausted, upstream_unavailable,
+  // crash_interrupted or reauth_required (mp_contracts::loop_fold::ParkReason).
+  // Owner: WS03 durable loop.
+  string park_reason = 18;
+
+  // The run owner's subject id. Set ONLY when the run was read through a Space read decision
+  // (ListRuns with a Space branch), so a room member can say who started it; empty everywhere
+  // else. Owner: WS09 room live view.
+  string owner_subject_id = 19;
+}
+
+// --- Run context (build plan WS02 S4) ---
+//
+// What a Do/Plan/scheduled run was actually started with. The gateway composes
+// the run context (authored instructions, bounded prior turns, memory block)
+// and stamps this status on the run record so a reviewer can see, per part,
+// whether it was included. Counts and closed tokens only: never content.
+
+// How one part of a run's context was assembled.
+enum RunContextState {
+  // Not stated (an older gateway).
+  RUN_CONTEXT_STATE_UNSPECIFIED = 0;
+  // Included in full.
+  RUN_CONTEXT_STATE_INCLUDED = 1;
+  // Included, but cut to a cap; see `omitted`.
+  RUN_CONTEXT_STATE_TRUNCATED = 2;
+  // Nothing to include (no instructions authored, no prior turns, no memory).
+  RUN_CONTEXT_STATE_EMPTY = 3;
+  // Withheld by policy (zero data retention, memory paused or off, Space scope).
+  RUN_CONTEXT_STATE_SKIPPED_BY_POLICY = 4;
+  // Could not be assembled (the loader failed or timed out); the run proceeds without it.
+  RUN_CONTEXT_STATE_UNAVAILABLE = 5;
+}
+
+// The assembly outcome of one part of the run context.
+message RunContextPart {
+  // How the part was assembled.
+  RunContextState state = 1;
+  // Items included (the unit is part specific: messages for history).
+  uint32 included = 2;
+  // Items left out by a cap.
+  uint32 omitted = 3;
+  // A closed token (for example "zdr", "memory_off", "cap"); never content.
+  string reason = 4;
+}
+
+// How a run's context was assembled, per part. Counts and closed tokens only.
+message RunContextStatus {
+  // The composed authored instructions (platform, org, Space, persona).
+  RunContextPart instructions = 1;
+  // The bounded prior turns of the thread.
+  RunContextPart history = 2;
+  // The prefetched memory block.
+  RunContextPart memory = 3;
 }

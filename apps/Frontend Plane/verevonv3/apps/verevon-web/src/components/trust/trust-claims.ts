@@ -196,7 +196,7 @@ export const trustClaims: TrustClaim[] = [
 		],
 		mustNotSay: ["Default-deny tredjeparts", "styrer lagring, indeksering og deling", "styres riktig"],
 		evidence: [
-			{ path: "apps/Model Plane/rust/services/session-core/src/grpc.rs", anchor: "_privacy_processing_flags" },
+			{ path: "apps/Model Plane/rust/services/session-core/src/grpc.rs", anchor: "_third_party_processing_allowed" },
 			{ path: "apps/Data Plane v2/services/embedding-engine-rs/src/provider/mod.rs", anchor: "ZDR content must not egress to the Cohere Embed v4 text path" },
 			{ path: "apps/Data Plane v2/services/retrieval-engine-rs/src/pipeline/orchestrator.rs", anchor: "cloud_egress_restricted" },
 		],

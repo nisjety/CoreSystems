@@ -1,0 +1,7 @@
+{
+  "viewport": { "width": 1024, "height": 640 },
+  "scenes": {
+    "02-plan": { "viewport": { "width": 1024, "height": 640 } },
+    "03-undersok": { "viewport": { "width": 1024, "height": 640 } }
+  }
+}

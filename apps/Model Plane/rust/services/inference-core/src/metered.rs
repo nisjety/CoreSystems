@@ -180,6 +180,7 @@ impl Served for pb::InferResponse {
 
 serves_no_model!(
     pb::ListModelsResponse,
+    pb::GetModelAccessResponse,
     pb::ListSpeechVoicesResponse,
     pb::ListTranslationLanguagesResponse,
 );
@@ -431,6 +432,14 @@ impl<S: InferenceCore> InferenceCore for MeteredCore<S> {
     ) -> Result<Response<pb::ListModelsResponse>, Status> {
         let (call, request) = Call::begin("list_models", request);
         call.finish(self.inner.list_models(request).await)
+    }
+
+    async fn get_model_access(
+        &self,
+        request: Request<pb::GetModelAccessRequest>,
+    ) -> Result<Response<pb::GetModelAccessResponse>, Status> {
+        let (call, request) = Call::begin("get_model_access", request);
+        call.finish(self.inner.get_model_access(request).await)
     }
 
     async fn synthesize_speech(

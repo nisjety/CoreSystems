@@ -658,6 +658,7 @@ class OrchestrationApi:
             '200': "GetApproval200Response",
             '400': "Error",
             '404': "Error",
+            '422': None,
         }
         response_data = self.api_client.call_api(
             *_param,
@@ -730,6 +731,7 @@ class OrchestrationApi:
             '200': "GetApproval200Response",
             '400': "Error",
             '404': "Error",
+            '422': None,
         }
         response_data = self.api_client.call_api(
             *_param,
@@ -802,6 +804,7 @@ class OrchestrationApi:
             '200': "GetApproval200Response",
             '400': "Error",
             '404': "Error",
+            '422': None,
         }
         response_data = self.api_client.call_api(
             *_param,

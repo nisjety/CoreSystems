@@ -621,6 +621,7 @@ impl LettaMemoryAdapter {
                 org_id: org_id.to_owned(),
                 user_id: user_id.unwrap_or_default().to_owned(),
                 memory_id: memory_id.unwrap_or_default().to_owned(),
+                origin: String::new(),
             },
             &token,
         ) {

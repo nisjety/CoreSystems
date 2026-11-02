@@ -15,8 +15,21 @@
 # unprivileged userns, or hold the needed capabilities.
 #
 # Usage:   ./scripts/verify-sandbox-isolation.sh
+#          ./scripts/verify-sandbox-isolation.sh --production-profile [--image REF | --container NAME]
 # Requires: docker (will pull debian:bookworm-slim, run --privileged).
+#
+# --production-profile (WS06-S10) does not use --privileged: it runs the execution-core
+# image under the production container profile (cap_drop ALL, read-only root, scoped
+# seccomp, mem/cpu/pids limits read from the compose files) and checks the per-spawn
+# prlimit ceilings against a fork bomb, memory bomb, CPU spin, file flood and output
+# flood, with /healthz as the liveness canary. See verify-sandbox-production-profile.sh.
 set -euo pipefail
+
+for arg in "$@"; do
+  if [ "$arg" = "--production-profile" ]; then
+    exec bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/verify-sandbox-production-profile.sh" "$@"
+  fi
+done
 
 # The shared base argv from build_bwrap_argv (assemble_argv), pre `-- <prog>`.
 #
@@ -51,6 +64,15 @@ mkdir -p /work
 out=\$(bwrap $BASE --bind /work /work --unshare-net -- sh -c "echo ok > /work/f && cat /work/f")
 [ "\$out" = "ok" ] || { echo "FAIL: workspace-write bound root rejected a write (got '\$out')"; exit 1; }
 echo "ok: WorkspaceWrite bound root accepts writes"
+
+# LibreOffice (the render layer) runs under the same argv as the code it renders:
+# its profile is written under the bound root and nothing outside it.
+out=\$(bwrap $BASE --bind /work /work --unshare-net -- sh -c "mkdir -p /work/lo-profile && echo ok > /work/lo-profile/x && cat /work/lo-profile/x")
+[ "\$out" = "ok" ] || { echo "FAIL: converter profile under the bound root was not writable (got '\$out')"; exit 1; }
+if bwrap $BASE --bind /work /work --unshare-net -- sh -c "echo x > /usr/lo-profile-escape" 2>/dev/null; then
+  echo "FAIL: the converter's argv wrote outside the bound root"; exit 1
+fi
+echo "ok: converter profile is writable only under the bound root"
 
 echo "PASS — bwrap argv from sandbox.rs isolates correctly on Linux."
 SCRIPT

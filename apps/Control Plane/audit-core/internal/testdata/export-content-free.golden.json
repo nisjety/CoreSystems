@@ -1,0 +1,14 @@
+{
+  "description": "Content-free golden for the chained export of session-core audit rows (WS06-S2). A fixture is hashed as the first row of its org's chain with chain_seq 1, ingested_at 2026-10-03T12:00:01Z, source bus model and prev = the genesis hash. details may carry only allowed_details_keys; a change that lets other content into a hashed column changes this file.",
+  "allowed_details_keys": ["data_category", "phase", "tool", "zdr"],
+  "fixtures": {
+    "tool_action_final.json": {
+      "details_canonical": "{\"data_category\":\"customer_private\",\"phase\":\"final\",\"tool\":\"knowledge_search\",\"zdr\":false}",
+      "genesis_row_hash": "80f951aeee8189fa180671087d56370a915933148413d65b01cca0219bdbcae4"
+    },
+    "tool_action_reserved.json": {
+      "details_canonical": "{\"data_category\":\"customer_private\",\"phase\":\"reserved\",\"tool\":\"knowledge_search\",\"zdr\":false}",
+      "genesis_row_hash": "e462aec04bccd16194c95f208c0334cd82751835e71f63e5bd5e9fec70d4466d"
+    }
+  }
+}

@@ -1,0 +1,77 @@
+{
+  "codes": [
+    {
+      "action": "choose_another_model",
+      "code": "model_not_entitled",
+      "grpc_code": "permission_denied",
+      "http_status": 403,
+      "message_en": "This model is not available to you. The request was not sent to a model.",
+      "retryable": false,
+      "takes_reason": true
+    },
+    {
+      "action": "retry",
+      "code": "model_entitlement_unavailable",
+      "grpc_code": "unavailable",
+      "http_status": 503,
+      "message_en": "Which models you may use cannot be confirmed right now. The request was not sent to a model. Try again shortly.",
+      "retryable": true,
+      "takes_reason": false
+    }
+  ],
+  "contract": "model-plane.model-entitlement-refusals",
+  "generated_by": "mp-contracts model_entitlement_catalogue tests (MP_UPDATE_GOLDEN=1)",
+  "reasons": [
+    {
+      "message_en": "The model {model} is not on the list your organisation allows for you. The request was not sent to a model.",
+      "names_model": true,
+      "reason": "not_in_allow_list"
+    },
+    {
+      "message_en": "Your organisation has turned off the model {model}. The request was not sent to a model.",
+      "names_model": true,
+      "reason": "explicitly_denied"
+    },
+    {
+      "message_en": "No model your organisation allows can serve this request. The request was not sent to a model.",
+      "names_model": false,
+      "reason": "no_entitled_route"
+    },
+    {
+      "message_en": "You are not a member of this organisation, so no model is available to you. The request was not sent to a model.",
+      "names_model": false,
+      "reason": "member_not_found"
+    },
+    {
+      "message_en": "The model {model} is not enabled on this deployment. The request was not sent to a model.",
+      "names_model": true,
+      "reason": "deployment_allowlist"
+    }
+  ],
+  "version": 1,
+  "wire": {
+    "details": [
+      "model",
+      "reason"
+    ],
+    "details_when": "takes_reason",
+    "grpc_kind_trailer": "x-mp-provider-error",
+    "grpc_reason_trailer": "x-mp-entitlement-reason",
+    "json_body": {
+      "error": [
+        "code",
+        "message",
+        "retryable",
+        "action",
+        "details"
+      ]
+    },
+    "max_model_id_bytes": 128,
+    "sse_event": "error",
+    "sse_fields": [
+      "code",
+      "message",
+      "retryable"
+    ]
+  }
+}

@@ -1,0 +1,29 @@
+query ArHistoricalData(
+  $lastId: String,
+  $updatedInDataMart: DateTime,
+  $updatedInDataMartTo: DateTime,
+  $pageSize: Int! = 5000
+) {
+  arHistoricalData(
+    lastId: $lastId,
+    updatedInDataMart: $updatedInDataMart,
+    updatedInDataMartTo: $updatedInDataMartTo,
+    pageSize: $pageSize
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    branchId
+    accountId
+    subaccountId
+    currencyId
+    customerId
+    finPeriodId
+    beginningBalance
+    endingBalance
+    beginningBalanceInCurrency
+    endingBalanceInCurrency
+    detailDeleted
+    createdInDataMartDateTime
+  }
+}

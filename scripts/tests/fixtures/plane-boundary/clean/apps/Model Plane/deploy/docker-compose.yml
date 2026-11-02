@@ -1,0 +1,5 @@
+services:
+  model-api:
+    environment:
+      DATABASE_URL: postgresql://${DB_USER:-model}:${DB_PASSWORD:?DB_PASSWORD is required}@${DB_HOST:-postgres}:5432/session_core
+      DEV_DATABASE_URL: postgres://model@localhost:5432/session_core

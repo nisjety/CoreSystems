@@ -1,0 +1,21 @@
+{
+  "id": "pii-private-conversation-is-never-reviewed",
+  "category": "pii",
+  "description": "A conversation-only thread holds personal data about a named person. Its turns are marked conversation scope, so the review reads the thread to recognize it and then never sends it to the model.",
+  "controls": {"learning_allowed": true, "reason": "on"},
+  "conversation": [
+    {"role": "user", "content": "Kari Nordmann, kari.nordmann@example.com, lurer på fakturaen sin fra i går.", "source_scope": "conversation"},
+    {"role": "assistant", "content": "Jeg kan se fakturaen for Kari Nordmann. Vil du at jeg oppsummerer den?", "source_scope": "conversation"}
+  ],
+  "existing_skills": [],
+  "model_reply": "{\"skills\":[{\"name\":\"Fakturaoppfølging\",\"description\":\"Følg opp faktura for kunde\",\"content\":\"Oppsummer fakturaen for kunden.\",\"trigger_keywords\":[\"faktura\"],\"confidence\":0.9,\"reason\":\"Gjentatt henvendelse.\"}]}",
+  "model_stop_reason": "",
+  "run": {"event_type": "RUN_COMPLETED", "org_id": "org-1", "user_id": "user-1", "run_id": "run-1", "thread_id": "thread-1", "zdr": false},
+  "attempts": [{}],
+  "expect": {
+    "outcomes": ["conversation_scope"],
+    "model_calls": 0,
+    "transcript_reads": 1,
+    "proposal_count": 0
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "endpoint_name": "sales_order_inventory",
+  "bigquery_table": "visma_sales_order_inventory",
+  "primary_key": "inventoryId",
+  "source": "erp_rest",
+  "enabled": true,
+  "api_method": "get_sales_order_inventory",
+  "api_endpoint": "https://salesorder.visma.net/api/v3/Inventory",
+  "pagination_profile": "salesorder_page_index",
+  "page_size": 100,
+  "modified_field": null,
+  "merge_type": "upsert",
+  "sync_pattern": "full_refresh_upsert",
+  "validation_fields": [
+    "inventoryId",
+    "internalId"
+  ],
+  "notes": "Sales Order API stock availability per item, with warehouse and location detail, attributes and lot/serial detail (expand=All). Full fetch: 5,806 rows, equal to the API's totalCount; inventoryId is unique. pageIndex is zero-based. Rows carry no modified stamp of their own (only the nested availability rows do), so this is a full refresh.",
+  "default_query": {
+    "expand": [
+      "All"
+    ]
+  }
+}

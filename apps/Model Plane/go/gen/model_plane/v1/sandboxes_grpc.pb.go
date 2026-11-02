@@ -19,20 +19,23 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	SandboxManager_AcquireLease_FullMethodName         = "/model_plane.v1.SandboxManager/AcquireLease"
-	SandboxManager_ReleaseLease_FullMethodName         = "/model_plane.v1.SandboxManager/ReleaseLease"
-	SandboxManager_SnapshotSandbox_FullMethodName      = "/model_plane.v1.SandboxManager/SnapshotSandbox"
-	SandboxManager_ActivateLease_FullMethodName        = "/model_plane.v1.SandboxManager/ActivateLease"
-	SandboxManager_GetWorkspaceManifest_FullMethodName = "/model_plane.v1.SandboxManager/GetWorkspaceManifest"
-	SandboxManager_PromoteWorkspace_FullMethodName     = "/model_plane.v1.SandboxManager/PromoteWorkspace"
-	SandboxManager_RegisterProcess_FullMethodName      = "/model_plane.v1.SandboxManager/RegisterProcess"
-	SandboxManager_UpdateProcessState_FullMethodName   = "/model_plane.v1.SandboxManager/UpdateProcessState"
-	SandboxManager_AppendProcessOutput_FullMethodName  = "/model_plane.v1.SandboxManager/AppendProcessOutput"
-	SandboxManager_ReconcileProcesses_FullMethodName   = "/model_plane.v1.SandboxManager/ReconcileProcesses"
-	SandboxManager_GetProcess_FullMethodName           = "/model_plane.v1.SandboxManager/GetProcess"
-	SandboxManager_ListProcesses_FullMethodName        = "/model_plane.v1.SandboxManager/ListProcesses"
-	SandboxManager_ReadProcessOutput_FullMethodName    = "/model_plane.v1.SandboxManager/ReadProcessOutput"
-	SandboxManager_Health_FullMethodName               = "/model_plane.v1.SandboxManager/Health"
+	SandboxManager_AcquireLease_FullMethodName                = "/model_plane.v1.SandboxManager/AcquireLease"
+	SandboxManager_ReleaseLease_FullMethodName                = "/model_plane.v1.SandboxManager/ReleaseLease"
+	SandboxManager_SnapshotSandbox_FullMethodName             = "/model_plane.v1.SandboxManager/SnapshotSandbox"
+	SandboxManager_ActivateLease_FullMethodName               = "/model_plane.v1.SandboxManager/ActivateLease"
+	SandboxManager_GetWorkspaceManifest_FullMethodName        = "/model_plane.v1.SandboxManager/GetWorkspaceManifest"
+	SandboxManager_PromoteWorkspace_FullMethodName            = "/model_plane.v1.SandboxManager/PromoteWorkspace"
+	SandboxManager_RegisterProcess_FullMethodName             = "/model_plane.v1.SandboxManager/RegisterProcess"
+	SandboxManager_UpdateProcessState_FullMethodName          = "/model_plane.v1.SandboxManager/UpdateProcessState"
+	SandboxManager_AppendProcessOutput_FullMethodName         = "/model_plane.v1.SandboxManager/AppendProcessOutput"
+	SandboxManager_ReconcileProcesses_FullMethodName          = "/model_plane.v1.SandboxManager/ReconcileProcesses"
+	SandboxManager_GetProcess_FullMethodName                  = "/model_plane.v1.SandboxManager/GetProcess"
+	SandboxManager_ListProcesses_FullMethodName               = "/model_plane.v1.SandboxManager/ListProcesses"
+	SandboxManager_ReadProcessOutput_FullMethodName           = "/model_plane.v1.SandboxManager/ReadProcessOutput"
+	SandboxManager_Health_FullMethodName                      = "/model_plane.v1.SandboxManager/Health"
+	SandboxManager_GetThreadWorkspace_FullMethodName          = "/model_plane.v1.SandboxManager/GetThreadWorkspace"
+	SandboxManager_ApplyThreadWorkspaceChanges_FullMethodName = "/model_plane.v1.SandboxManager/ApplyThreadWorkspaceChanges"
+	SandboxManager_DeleteThreadWorkspace_FullMethodName       = "/model_plane.v1.SandboxManager/DeleteThreadWorkspace"
 )
 
 // SandboxManagerClient is the client API for SandboxManager service.
@@ -94,6 +97,14 @@ type SandboxManagerClient interface {
 	ReadProcessOutput(ctx context.Context, in *ReadProcessOutputRequest, opts ...grpc.CallOption) (*ReadProcessOutputResponse, error)
 	// Health check.
 	Health(ctx context.Context, in *SandboxHealthRequest, opts ...grpc.CallOption) (*SandboxHealthResponse, error)
+	// Read every file a thread's lease can see, with the current revision.
+	GetThreadWorkspace(ctx context.Context, in *GetThreadWorkspaceRequest, opts ...grpc.CallOption) (*GetThreadWorkspaceResponse, error)
+	// Apply per-path changes and deletes, each compare-and-swapped on its
+	// base_hash. A conflicting path is reported and never overwritten.
+	ApplyThreadWorkspaceChanges(ctx context.Context, in *ApplyThreadWorkspaceChangesRequest, opts ...grpc.CallOption) (*ApplyThreadWorkspaceChangesResponse, error)
+	// Erase a thread's rows and its object-store prefix. Declared here, implemented
+	// with the retention sweeper (WS22-S5); until then it refuses every caller.
+	DeleteThreadWorkspace(ctx context.Context, in *DeleteThreadWorkspaceRequest, opts ...grpc.CallOption) (*DeleteThreadWorkspaceResponse, error)
 }
 
 type sandboxManagerClient struct {
@@ -244,6 +255,36 @@ func (c *sandboxManagerClient) Health(ctx context.Context, in *SandboxHealthRequ
 	return out, nil
 }
 
+func (c *sandboxManagerClient) GetThreadWorkspace(ctx context.Context, in *GetThreadWorkspaceRequest, opts ...grpc.CallOption) (*GetThreadWorkspaceResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetThreadWorkspaceResponse)
+	err := c.cc.Invoke(ctx, SandboxManager_GetThreadWorkspace_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sandboxManagerClient) ApplyThreadWorkspaceChanges(ctx context.Context, in *ApplyThreadWorkspaceChangesRequest, opts ...grpc.CallOption) (*ApplyThreadWorkspaceChangesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ApplyThreadWorkspaceChangesResponse)
+	err := c.cc.Invoke(ctx, SandboxManager_ApplyThreadWorkspaceChanges_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sandboxManagerClient) DeleteThreadWorkspace(ctx context.Context, in *DeleteThreadWorkspaceRequest, opts ...grpc.CallOption) (*DeleteThreadWorkspaceResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteThreadWorkspaceResponse)
+	err := c.cc.Invoke(ctx, SandboxManager_DeleteThreadWorkspace_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SandboxManagerServer is the server API for SandboxManager service.
 // All implementations must embed UnimplementedSandboxManagerServer
 // for forward compatibility.
@@ -303,6 +344,14 @@ type SandboxManagerServer interface {
 	ReadProcessOutput(context.Context, *ReadProcessOutputRequest) (*ReadProcessOutputResponse, error)
 	// Health check.
 	Health(context.Context, *SandboxHealthRequest) (*SandboxHealthResponse, error)
+	// Read every file a thread's lease can see, with the current revision.
+	GetThreadWorkspace(context.Context, *GetThreadWorkspaceRequest) (*GetThreadWorkspaceResponse, error)
+	// Apply per-path changes and deletes, each compare-and-swapped on its
+	// base_hash. A conflicting path is reported and never overwritten.
+	ApplyThreadWorkspaceChanges(context.Context, *ApplyThreadWorkspaceChangesRequest) (*ApplyThreadWorkspaceChangesResponse, error)
+	// Erase a thread's rows and its object-store prefix. Declared here, implemented
+	// with the retention sweeper (WS22-S5); until then it refuses every caller.
+	DeleteThreadWorkspace(context.Context, *DeleteThreadWorkspaceRequest) (*DeleteThreadWorkspaceResponse, error)
 	mustEmbedUnimplementedSandboxManagerServer()
 }
 
@@ -354,6 +403,15 @@ func (UnimplementedSandboxManagerServer) ReadProcessOutput(context.Context, *Rea
 }
 func (UnimplementedSandboxManagerServer) Health(context.Context, *SandboxHealthRequest) (*SandboxHealthResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Health not implemented")
+}
+func (UnimplementedSandboxManagerServer) GetThreadWorkspace(context.Context, *GetThreadWorkspaceRequest) (*GetThreadWorkspaceResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetThreadWorkspace not implemented")
+}
+func (UnimplementedSandboxManagerServer) ApplyThreadWorkspaceChanges(context.Context, *ApplyThreadWorkspaceChangesRequest) (*ApplyThreadWorkspaceChangesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ApplyThreadWorkspaceChanges not implemented")
+}
+func (UnimplementedSandboxManagerServer) DeleteThreadWorkspace(context.Context, *DeleteThreadWorkspaceRequest) (*DeleteThreadWorkspaceResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteThreadWorkspace not implemented")
 }
 func (UnimplementedSandboxManagerServer) mustEmbedUnimplementedSandboxManagerServer() {}
 func (UnimplementedSandboxManagerServer) testEmbeddedByValue()                        {}
@@ -628,6 +686,60 @@ func _SandboxManager_Health_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SandboxManager_GetThreadWorkspace_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetThreadWorkspaceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxManagerServer).GetThreadWorkspace(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxManager_GetThreadWorkspace_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxManagerServer).GetThreadWorkspace(ctx, req.(*GetThreadWorkspaceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SandboxManager_ApplyThreadWorkspaceChanges_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ApplyThreadWorkspaceChangesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxManagerServer).ApplyThreadWorkspaceChanges(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxManager_ApplyThreadWorkspaceChanges_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxManagerServer).ApplyThreadWorkspaceChanges(ctx, req.(*ApplyThreadWorkspaceChangesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SandboxManager_DeleteThreadWorkspace_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteThreadWorkspaceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxManagerServer).DeleteThreadWorkspace(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxManager_DeleteThreadWorkspace_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxManagerServer).DeleteThreadWorkspace(ctx, req.(*DeleteThreadWorkspaceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // SandboxManager_ServiceDesc is the grpc.ServiceDesc for SandboxManager service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -690,6 +802,18 @@ var SandboxManager_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Health",
 			Handler:    _SandboxManager_Health_Handler,
+		},
+		{
+			MethodName: "GetThreadWorkspace",
+			Handler:    _SandboxManager_GetThreadWorkspace_Handler,
+		},
+		{
+			MethodName: "ApplyThreadWorkspaceChanges",
+			Handler:    _SandboxManager_ApplyThreadWorkspaceChanges_Handler,
+		},
+		{
+			MethodName: "DeleteThreadWorkspace",
+			Handler:    _SandboxManager_DeleteThreadWorkspace_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

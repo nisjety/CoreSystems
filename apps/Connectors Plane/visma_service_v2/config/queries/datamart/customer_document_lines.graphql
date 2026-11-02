@@ -1,0 +1,62 @@
+query CustomerDocumentLines(
+  $lastId: String,
+  $updatedInDataMart: DateTime,
+  $updatedInDataMartTo: DateTime,
+  $pageSize: Int! = 5000,
+  $includeDeleted: Boolean! = false
+) {
+  customerDocumentLines(
+    lastId: $lastId,
+    updatedInDataMart: $updatedInDataMart,
+    updatedInDataMartTo: $updatedInDataMartTo,
+    pageSize: $pageSize,
+    includeDeleted: $includeDeleted
+  ) {
+    id
+    companyId
+    updatedInDataMartDateTime
+    lineNumber
+    referenceNumber
+    tranType
+    termStartDate
+    termEndDate
+    isRotRutDeductible
+    rotRutItemType
+    rotRutType
+    rotRutTypeOfWorkDescription
+    rotRutXmlTag
+    rotRutDeductibleAmount
+    inventoryId
+    description
+    lineType
+    quantity
+    unitPrice
+    unitPriceInCurrency
+    manualAmount
+    manualAmountInCurrency
+    amount
+    amountInCurrency
+    cost
+    accountId
+    vatCodeId
+    uom
+    discountPercent
+    discountAmount
+    discountAmountInCurrency
+    manualDiscount
+    subAccountId
+    salesPersonId
+    deferralScheduleId
+    deferralCode
+    discountCodeId
+    note
+    soShipmentNumber
+    soOrderType
+    soOrderNumber
+    lastModifiedDateTime
+    projectTaskId
+    deletedDatabaseRecord
+    customerId
+    createdInDataMartDateTime
+  }
+}

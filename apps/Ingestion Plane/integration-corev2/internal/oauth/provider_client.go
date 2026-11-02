@@ -990,13 +990,16 @@ func doTokenRequest(client *http.Client, req *http.Request, providerKey string) 
 	if expiresIn > 0 {
 		expiresAt = time.Now().UTC().Add(time.Duration(expiresIn) * time.Second)
 	}
+	_, scopePresent := raw["scope"]
+	_, scopesPresent := raw["scopes"]
 	return TokenResult{
-		AccessToken:  accessToken,
-		RefreshToken: refreshToken,
-		TokenType:    firstNonEmpty(stringValue(raw["token_type"]), "Bearer"),
-		Scope:        splitReturnedScopes(scopeValue),
-		ExpiresAt:    expiresAt,
-		Raw:          raw,
+		AccessToken:    accessToken,
+		RefreshToken:   refreshToken,
+		TokenType:      firstNonEmpty(stringValue(raw["token_type"]), "Bearer"),
+		Scope:          splitReturnedScopes(scopeValue),
+		ScopesVerified: providerKey == "google" && (scopePresent || scopesPresent),
+		ExpiresAt:      expiresAt,
+		Raw:            raw,
 	}, nil
 }
 

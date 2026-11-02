@@ -1,0 +1,32 @@
+{
+  "local_hosts": ["localhost", "127.0.0.1"],
+  "planes": {
+    "Application Plane": {
+      "db_hosts": ["affine-postgres", "application-postgres"]
+    },
+    "Control Plane": {
+      "db_hosts": ["controlplane-postgres"]
+    },
+    "Data Plane v2": {
+      "db_hosts": ["dpv2-postgres", "postgres"]
+    },
+    "Ingestion Plane": {
+      "db_hosts": ["connector-runtime-db", "ingestion-postgres", "postgres"]
+    },
+    "Model Plane": {
+      "db_hosts": ["mp-postgres", "postgres"]
+    }
+  },
+  "shared_hosts": {
+    "coresystem-postgres-local": "legacy monolith database host: the root docker-compose.yml uses it as a default DB_HOST and no compose file defines it; no plane owns it",
+    "nango-postgres": "root docker-compose.external-services.yml; no plane owns it"
+  },
+  "db_exceptions": [],
+  "manifest_exceptions": [
+    {
+      "file": "apps/Frontend Plane/verevonv3/package.json",
+      "target": "apps/Ingestion Plane/Quarry-v2/sdks/typescript",
+      "reason": "generated @quarry/client SDK, the one documented cross-plane manifest dependency (WS12 S9)"
+    }
+  ]
+}

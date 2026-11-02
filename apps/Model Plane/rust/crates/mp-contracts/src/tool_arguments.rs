@@ -813,6 +813,7 @@ mod grounding_tests {
             "yr_weather",
             "code_interpreter",
             "execute_provider_action",
+            "read_provider_action",
             "read_subagent_result",
         ] {
             assert!(

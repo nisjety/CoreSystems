@@ -3,6 +3,9 @@
 # This is an operator contract, not a credential/config file. Values are
 # source-derived proposals until Release/Infra and the owning plane approve
 # them. A conformance run must remain blocked while status is `proposed`.
+# A target of `unset` is allowed only while status is `proposed`: the value comes from
+# the 7-day baseline of the running stack and is not asserted before it exists.
+# Units: seconds, milliseconds, bytes, days, rows, per_mille. Operators: <=, ==, >=.
 # Columns: id<TAB>unit<TAB>target<TAB>operator<TAB>owner<TAB>source<TAB>stop_rule<TAB>status
 decision_ttl_seconds	seconds	120	<=	Control + owner planes	user-core/internal/spaces/personal_thread_decision.go:19; user-core/internal/spaces/scheduled_step_decision.go:208	Any decision lifetime above target blocks candidate promotion	proposed
 decision_future_skew_seconds	seconds	60	<=	Control + owner planes	user-core/internal/spaces/run_action_decision.go:318; conversation-core/internal/http/run_action_decision.go:142	Any issued-at future skew above target blocks effect execution	proposed
@@ -13,3 +16,11 @@ unknown_reconciliation_stale_after_seconds	seconds	900	<=	Application conversati
 provider_receipt_deadline_seconds	seconds	900	<=	Application + provider adapter	Release evidence requirement; no provider-specific value is assumed	Missing provider receipt by deadline is unknown, never success	proposed
 ha_recovery_window_seconds	seconds	60	<=	Release/Infra + plane owners	Release evidence requirement; must be measured with two workers and restart	Recovery above target blocks candidate promotion	proposed
 zdr_residual_content_bytes	bytes	0	==	All owner planes	Release evidence requirement; inspect durable rows, queues, snapshots, and logs	Any residual content when ZDR is enabled blocks the run	proposed
+gateway_error_ratio_per_mille	per_mille	unset	<=	Model Plane + Release/Infra	model-gateway request outcome metrics (:8080); value from the 7-day baseline	Error ratio above target during the canary window blocks candidate promotion	proposed
+gateway_p95_latency_ms	milliseconds	unset	<=	Model Plane + Release/Infra	model-gateway request latency histogram (:8080); value from the 7-day baseline	p95 above target during the canary window blocks candidate promotion	proposed
+canary_observation_window_seconds	seconds	unset	>=	Release/Infra	Release evidence requirement; the canary runs at least this long before promotion	A canary observed for less than target does not count as evidence	proposed
+audit_outbox_terminal_rows	rows	0	==	Model Plane session-core	session-core audit publisher terminal-row gauge (audit_publisher.rs); postmortem 0002	Any terminal audit outbox row blocks candidate promotion until it is replayed or accounted for	proposed
+audit_delivery_lag_seconds	seconds	unset	<=	Model Plane session-core + Control audit-core	session-core audit publisher backlog age (audit_publisher.rs); value from the 7-day baseline	Delivery lag above target blocks candidate promotion	proposed
+zdr_attestation_days_to_review	days	unset	>=	Model Plane inference-core	Signed runtime public policy ZDR review-by date (release-artifact.sh check-zdr-attestation)	Fewer days left than target to a ZDR review-by date blocks promotion until the attestation is renewed	proposed
+rollback_rehearsal_age_days	days	unset	<=	Release/Infra	docs/compliance/evidence/rollback-rehearsal-<date>.txt written by rollback-rehearsal.sh	A rehearsal older than target, or one that did not pass, blocks candidate promotion	proposed
+rollback_rto_seconds	seconds	unset	<=	Release/Infra	Measured by the rollback rehearsal; value from the first rehearsal on the target host	A rollback slower than target blocks candidate promotion	proposed

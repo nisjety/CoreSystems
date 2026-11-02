@@ -166,4 +166,19 @@ mod tests {
         };
         assert_eq!(filters.to_qdrant_conditions().len(), 3);
     }
+
+    // QB-M1a: a confined service's corpus reaches the dense arm only through this
+    // payload key. No other test in the crate would notice if the `source` axis
+    // were dropped from the Qdrant conditions, so the mapping is pinned here.
+    #[test]
+    fn a_source_axis_is_an_exact_keyword_on_the_source_payload_key() {
+        let filters = RetrievalFilters {
+            sources: vec!["quarry".into()],
+            ..empty()
+        };
+        assert!(matches!(
+            field_matches(&filters, "source"),
+            Some(MatchValue::Keyword(value)) if value == "quarry"
+        ));
+    }
 }

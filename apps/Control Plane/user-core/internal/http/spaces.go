@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
@@ -245,6 +246,14 @@ func (s *Server) registerSpace(c *gin.Context) {
 	}
 	registered, err := s.spaceRepo.Register(c.Request.Context(), registration)
 	if err != nil {
+		// WS12-S1: a refused direct message is a terminal 409 for Application
+		// (the gateway pre-checks through dm-eligibility so a user normally
+		// sees the typed error there). The code names the refusal; nothing
+		// else about the participants is echoed.
+		if code, ok := dmRegistrationRefusalCode(err); ok {
+			c.JSON(http.StatusConflict, gin.H{"error": "Direct message registration refused", "code": code})
+			return
+		}
 		if strings.Contains(err.Error(), "different organization, kind, or owner") || errors.Is(err, spaces.ErrInactiveOwnerMembership) {
 			c.JSON(http.StatusConflict, gin.H{"error": "Space reference conflicts with registered authority"})
 			return
@@ -311,7 +320,7 @@ func (s *Server) replaceSpaceMemberships(c *gin.Context) {
 		return
 	}
 	replacement.SpaceRef = strings.TrimSpace(c.Param("space_ref"))
-	revisions, revokedUserSubjects, reactivatedUserSubjects, orgID, err := s.spaceRepo.ReplaceMemberships(c.Request.Context(), replacement)
+	detail, err := s.spaceRepo.ReplaceMembershipsDetailed(c.Request.Context(), replacement)
 	if errors.Is(err, spaces.ErrNoCurrentMembership) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "registered Space not found"})
 		return
@@ -335,16 +344,20 @@ func (s *Server) replaceSpaceMemberships(c *gin.Context) {
 	// ReplaceMemberships just resolved, not the caller's own identity: this
 	// endpoint's principal (application-space-lifecycle) syncs rosters
 	// across every org, not one verified-delegation org at a time.
-	for _, subjectID := range revokedUserSubjects {
-		s.publisher.PublishSpaceMembershipChanged(c.Request.Context(), replacement.SpaceRef, orgID, subjectID, false)
-	}
-	for _, subjectID := range reactivatedUserSubjects {
-		s.publisher.PublishSpaceMembershipChanged(c.Request.Context(), replacement.SpaceRef, orgID, subjectID, true)
+	//
+	// WS04-S4: the event now also names the ledger row (event_id, space_seq,
+	// action, role, actor_kind) and is published for every user row that
+	// became active (new or reactivated) or inactive, never for a role-only
+	// change. `active` stays the current-fact statement.
+	for _, event := range detail.Events {
+		s.publisher.PublishSpaceMembershipEvent(c.Request.Context(), event.SpaceRef, event.OrgID, event.SubjectID,
+			event.Active, event.EventID, event.SpaceSeq, event.Action, event.Role, event.ActorKind)
 	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{
-		"space_ref": replacement.SpaceRef,
-		"members":   len(replacement.Members),
-		"revisions": revisions,
+		"space_ref":             replacement.SpaceRef,
+		"members":               len(replacement.Members),
+		"revisions":             detail.Revisions,
+		"skipped_control_owned": detail.SkippedControlOwned,
 	}})
 }
 
@@ -449,11 +462,17 @@ func (s *Server) resolveCurrentSpaceMembership(c *gin.Context) {
 	if !s.spaceRepoAvailable(c) {
 		return
 	}
-	membership, err := s.spaceRepo.ResolveCurrentUserMembership(
+	resolveMembership := s.spaceRepo.ResolveCurrentUserMembership
+	if c.Query("readable") == "1" {
+		// Read surfaces only (WS04-S7): also resolves an archived room and
+		// reports its state. Write decisions never take this path.
+		resolveMembership = s.spaceRepo.ResolveReadableUserMembership
+	}
+	membership, err := resolveMembership(
 		c.Request.Context(), c.Param("space_ref"), c.GetString("org_id"), c.GetString("user_id"),
 	)
 	if errors.Is(err, spaces.ErrNoCurrentMembership) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "current Space membership required"})
+		s.writeSpaceDenial(c, err, c.Param("space_ref"), spaces.ExpectMembershipOnly, "current Space membership required", http.StatusInternalServerError, "Space membership resolution failed")
 		return
 	}
 	if err != nil {
@@ -478,6 +497,9 @@ type threadAppendDecisionRequest struct {
 	ThreadID       string `json:"thread_id"`
 	ContentDigest  string `json:"content_digest"`
 	IdempotencyKey string `json:"idempotency_key"`
+	// PostKind is optional: "" or "turn" keeps the v1 decision, "post" issues
+	// the v2 decision a human post needs. Any other value is a 400.
+	PostKind string `json:"post_kind"`
 }
 
 // issuePersonalThreadDecision is a gateway-only, delegated issuance surface.
@@ -493,7 +515,7 @@ func (s *Server) issuePersonalThreadDecision(c *gin.Context) {
 	if !bindSpaceDecisionBody(c, &request, "space_ref and idempotency_key are required", &request.SpaceRef, &request.IdempotencyKey) {
 		return
 	}
-	evidence, ok := s.resolvePersonalThreadEvidence(c, request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"), "personal Space authority unavailable")
+	evidence, ok := s.resolvePersonalThreadEvidenceTyped(c, request.SpaceRef, "personal Space authority unavailable")
 	if !ok {
 		return
 	}
@@ -505,7 +527,7 @@ func (s *Server) issuePersonalThreadDecision(c *gin.Context) {
 		DecisionRef: decisionRef, SessionKey: request.SessionKey, IdempotencyKey: request.IdempotencyKey, Nonce: nonce,
 	}, time.Now().UTC())
 	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": "personal Space thread creation is not authorized"})
+		writeSpaceIssuerDenial(c, err, "personal Space thread creation is not authorized")
 		return
 	}
 	token, ok := signSpaceDecision(c, key, decision)
@@ -528,7 +550,7 @@ func (s *Server) issueThreadDecision(c *gin.Context) {
 	if !bindSpaceDecisionBody(c, &request, "space_ref and idempotency_key are required", &request.SpaceRef, &request.IdempotencyKey) {
 		return
 	}
-	evidence, membership, ok := s.resolveKindEvidence(c, request.SpaceRef,
+	evidence, membership, ok := s.resolveThreadWriteEvidence(c, request.SpaceRef,
 		s.spaceRepo.ResolvePersonalThreadDecisionEvidence, s.spaceRepo.ResolveSharedThreadDecisionEvidence,
 		"current recipient audience authority required")
 	if !ok {
@@ -547,7 +569,7 @@ func (s *Server) issueThreadDecision(c *gin.Context) {
 		decision, err = spaces.IssueSharedThreadCreateDecision(evidence, issuerRequest, time.Now().UTC())
 	}
 	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Space thread creation is not authorized"})
+		writeSpaceIssuerDenial(c, err, "Space thread creation is not authorized")
 		return
 	}
 	token, ok := signSpaceDecision(c, key, decision)
@@ -577,7 +599,11 @@ func (s *Server) issueThreadAppendDecision(c *gin.Context) {
 		&request.SpaceRef, &request.ThreadID, &request.ContentDigest, &request.IdempotencyKey) {
 		return
 	}
-	evidence, _, ok := s.resolveKindEvidence(c, request.SpaceRef,
+	if !spaces.ValidThreadAppendPostKind(request.PostKind) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "post_kind must be turn or post"})
+		return
+	}
+	evidence, _, ok := s.resolveThreadWriteEvidence(c, request.SpaceRef,
 		s.spaceRepo.ResolvePersonalThreadDecisionEvidence, s.spaceRepo.ResolveSharedThreadDecisionEvidence,
 		"current recipient audience authority required")
 	if !ok {
@@ -589,10 +615,10 @@ func (s *Server) issueThreadAppendDecision(c *gin.Context) {
 	}
 	decision, err := spaces.IssueThreadAppendDecision(evidence, spaces.ThreadAppendDecisionRequest{
 		DecisionRef: decisionRef, ThreadID: request.ThreadID, ContentDigest: request.ContentDigest,
-		IdempotencyKey: request.IdempotencyKey, Nonce: nonce,
+		IdempotencyKey: request.IdempotencyKey, Nonce: nonce, PostKind: request.PostKind,
 	}, time.Now().UTC())
 	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Space thread append is not authorized"})
+		writeSpaceIssuerDenial(c, err, "Space thread append is not authorized")
 		return
 	}
 	token, ok := signSpaceDecision(c, key, decision)
@@ -607,10 +633,41 @@ type sharedThreadReadDecisionRequest struct {
 	IdempotencyKey string `json:"idempotency_key"`
 	// Optional; empty means Session Core, which is what every caller before
 	// S4.2 asked for implicitly. `model-plane-sandbox-manager` targets the
-	// background-process registry instead. Validated against a closed set in
+	// background-process registry instead, and `model-plane-space-stream`
+	// targets Session Core's SpaceEvents realtime stream (WS02). Validated against a closed set in
 	// spaces.SharedThreadReadDecisionRequest.Validate, so an unknown value is
 	// refused here rather than signed into a token nothing accepts.
 	ServiceAudience string `json:"service_audience"`
+}
+
+// threadReadIssuer is the issuer matching the evidence kind resolveThreadReadEvidence found.
+type threadReadIssuer func(spaces.PersonalThreadDecisionEvidence, spaces.SharedThreadReadDecisionRequest, time.Time) (spaces.Decision, error)
+
+// resolveThreadReadEvidence resolves the evidence for one thread-read decision
+// (shared-room path first, then the narrow own-scheduled personal fallback) and
+// the issuer that goes with it. It is the single resolution both the single
+// route and the WS11-S1 bulk route call. On failure it returns the ORIGINAL
+// shared-path error; ownDenial is non-nil only when the shared path found no
+// membership and the own-scheduled fallback produced a typed refusal (the
+// single route reports that one under the unchanged membership message).
+func (s *Server) resolveThreadReadEvidence(ctx context.Context, spaceRef, orgID, userID string) (spaces.PersonalThreadDecisionEvidence, threadReadIssuer, error, *spaces.Denial) {
+	evidence, err := s.spaceRepo.ResolveSharedThreadReadDecisionEvidence(ctx, spaceRef, orgID, userID)
+	if err == nil {
+		return evidence, spaces.IssueSharedThreadReadDecision, nil, nil
+	}
+	ownEvidence, ownErr := s.spaceRepo.ResolveOwnScheduledThreadReadDecisionEvidence(ctx, spaceRef, orgID, userID)
+	if ownErr == nil {
+		return ownEvidence, spaces.IssueOwnScheduledThreadReadDecision, nil, nil
+	}
+	// The own-scheduled resolver only ever finds a personal Space the caller
+	// belongs to, so a typed refusal from it is the true reason for a personal
+	// Space (its entitlement, say).
+	if errors.Is(err, spaces.ErrNoCurrentMembership) {
+		if denial, typed := spaces.AsDenial(ownErr); typed {
+			return spaces.PersonalThreadDecisionEvidence{}, nil, err, denial
+		}
+	}
+	return spaces.PersonalThreadDecisionEvidence{}, nil, err, nil
 }
 
 // issueThreadReadDecision authorizes one short-lived read of a SHARED Space's
@@ -646,19 +703,14 @@ func (s *Server) issueThreadReadDecision(c *gin.Context) {
 		return
 	}
 	orgID, userID := c.GetString("org_id"), c.GetString("user_id")
-	issue := spaces.IssueSharedThreadReadDecision
-	evidence, err := s.spaceRepo.ResolveSharedThreadReadDecisionEvidence(c.Request.Context(), request.SpaceRef, orgID, userID)
+	evidence, issue, err, ownDenial := s.resolveThreadReadEvidence(c.Request.Context(), request.SpaceRef, orgID, userID)
 	if err != nil {
-		ownEvidence, ownErr := s.spaceRepo.ResolveOwnScheduledThreadReadDecisionEvidence(c.Request.Context(), request.SpaceRef, orgID, userID)
-		if ownErr != nil {
-			// Report the ORIGINAL shared-path error, which is the one whose
-			// message ("current shared Space authority required") matches
-			// what most callers of this endpoint are actually asking for; the
-			// own-scheduled fallback is the exception, not the norm.
-			writeSpaceEvidenceError(c, err, "current shared Space authority required", http.StatusForbidden, "shared Space read authority is not available")
+		if ownDenial != nil {
+			c.JSON(http.StatusForbidden, spaceDenialBody("current shared Space authority required", ownDenial))
 			return
 		}
-		evidence, issue = ownEvidence, spaces.IssueOwnScheduledThreadReadDecision
+		s.writeSpaceDenial(c, err, request.SpaceRef, spaces.ExpectAny, "current shared Space authority required", http.StatusForbidden, "shared Space read authority is not available")
+		return
 	}
 	key, decisionRef, nonce, ok := spaceDecisionMaterial(c)
 	if !ok {
@@ -669,7 +721,7 @@ func (s *Server) issueThreadReadDecision(c *gin.Context) {
 		ServiceAudience: request.ServiceAudience,
 	}, time.Now().UTC())
 	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Space thread read is not authorized"})
+		writeSpaceIssuerDenial(c, err, "Space thread read is not authorized")
 		return
 	}
 	token, ok := signSpaceDecision(c, key, decision)
@@ -699,7 +751,7 @@ func (s *Server) issuePersonalRetrievalDecision(c *gin.Context) {
 	evidence, err := s.spaceRepo.ResolvePersonalRetrievalDecisionEvidence(
 		c.Request.Context(), request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"),
 	)
-	if writeSpaceEvidenceError(c, err, "current personal Space authority required", http.StatusServiceUnavailable, "personal Space retrieval authority unavailable") {
+	if s.writeSpaceDenial(c, err, request.SpaceRef, spaces.ExpectPersonal, "current personal Space authority required", http.StatusServiceUnavailable, "personal Space retrieval authority unavailable") {
 		return
 	}
 	key, decisionRef, nonce, ok := spaceDecisionMaterial(c)
@@ -710,7 +762,7 @@ func (s *Server) issuePersonalRetrievalDecision(c *gin.Context) {
 		DecisionRef: decisionRef, IdempotencyKey: request.IdempotencyKey, Nonce: nonce,
 	}, time.Now().UTC())
 	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": "personal Space retrieval is not authorized"})
+		writeSpaceIssuerDenial(c, err, "personal Space retrieval is not authorized")
 		return
 	}
 	token, ok := signSpaceDecision(c, key, decision)
@@ -734,7 +786,7 @@ func (s *Server) issueRetrievalDecision(c *gin.Context) {
 	if !bindSpaceDecisionBody(c, &request, "space_ref and idempotency_key are required", &request.SpaceRef, &request.IdempotencyKey) {
 		return
 	}
-	evidence, membership, ok := s.resolveKindEvidence(c, request.SpaceRef,
+	evidence, membership, ok := s.resolveReadKindEvidence(c, request.SpaceRef,
 		s.spaceRepo.ResolvePersonalRetrievalDecisionEvidence, s.spaceRepo.ResolveSharedRetrievalDecisionEvidence,
 		"current retrieval authority required")
 	if !ok {
@@ -753,7 +805,7 @@ func (s *Server) issueRetrievalDecision(c *gin.Context) {
 		decision, err = spaces.IssueSharedRetrievalDecision(evidence, issuerRequest, time.Now().UTC())
 	}
 	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Space retrieval is not authorized"})
+		writeSpaceIssuerDenial(c, err, "Space retrieval is not authorized")
 		return
 	}
 	token, ok := signSpaceDecision(c, key, decision)
@@ -770,10 +822,12 @@ type personalImportDecisionRequest struct {
 }
 
 type scheduleCreateDecisionRequest struct {
-	SpaceRef       string `json:"space_ref"`
-	ScheduleID     string `json:"schedule_id"`
-	TemplateDigest string `json:"template_digest"`
-	IdempotencyKey string `json:"idempotency_key"`
+	SpaceRef          string `json:"space_ref"`
+	ScheduleID        string `json:"schedule_id"`
+	TemplateDigest    string `json:"template_digest"`
+	IdempotencyKey    string `json:"idempotency_key"`
+	ContractDigest    string `json:"contract_digest"`
+	ContractExpiresAt string `json:"contract_expires_at"`
 }
 
 type watchCreateDecisionRequest struct {
@@ -803,7 +857,7 @@ func (s *Server) issueWatchCreateDecision(c *gin.Context) {
 		&request.PredicateDigest, &request.IdempotencyKey) {
 		return
 	}
-	evidence, ok := s.resolvePersonalThreadEvidence(c, request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"), "Space watch authority unavailable")
+	evidence, ok := s.resolvePersonalThreadEvidenceTyped(c, request.SpaceRef, "Space watch authority unavailable")
 	if !ok {
 		return
 	}
@@ -818,7 +872,7 @@ func (s *Server) issueWatchCreateDecision(c *gin.Context) {
 		IdempotencyKey:  request.IdempotencyKey, Nonce: nonce,
 	}, time.Now().UTC())
 	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Space watch creation is not authorized"})
+		writeSpaceIssuerDenial(c, err, "Space watch creation is not authorized")
 		return
 	}
 	token, ok := signSpaceDecision(c, key, decision)
@@ -900,7 +954,7 @@ func (s *Server) issueScheduleCreateDecision(c *gin.Context) {
 		&request.SpaceRef, &request.ScheduleID, &request.TemplateDigest, &request.IdempotencyKey) {
 		return
 	}
-	evidence, ok := s.resolvePersonalThreadEvidence(c, request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"), "personal Space schedule authority unavailable")
+	evidence, ok := s.resolvePersonalThreadEvidenceTyped(c, request.SpaceRef, "personal Space schedule authority unavailable")
 	if !ok {
 		return
 	}
@@ -911,9 +965,11 @@ func (s *Server) issueScheduleCreateDecision(c *gin.Context) {
 	decision, err := spaces.IssueScheduleCreateDecision(evidence, spaces.ScheduleCreateRequest{
 		DecisionRef: decisionRef, ScheduleID: request.ScheduleID, TemplateDigest: request.TemplateDigest,
 		IdempotencyKey: request.IdempotencyKey, Nonce: nonce,
+		ContractDigest: request.ContractDigest, ContractExpiresAt: request.ContractExpiresAt,
+		ContractsEnabled: s.scheduleContractsEnabled,
 	}, time.Now().UTC())
 	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Space schedule creation is not authorized"})
+		writeSpaceIssuerDenial(c, err, "Space schedule creation is not authorized")
 		return
 	}
 	token, ok := signSpaceDecision(c, key, decision)
@@ -936,10 +992,17 @@ func (s *Server) issuePersonalImportDecision(c *gin.Context) {
 		&request.SpaceRef, &request.IdempotencyKey, &request.SourceType) {
 		return
 	}
+	s.issuePersonalImportDecisionFor(c, request)
+}
+
+// issuePersonalImportDecisionFor is the personal-Space half of the import
+// decision, shared by personal-import-decision and the unified import-decision
+// route (WS14-S1) so both issue exactly the same decision.
+func (s *Server) issuePersonalImportDecisionFor(c *gin.Context, request personalImportDecisionRequest) {
 	evidence, err := s.spaceRepo.ResolvePersonalImportDecisionEvidence(
 		c.Request.Context(), request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"),
 	)
-	if writeSpaceEvidenceError(c, err, "current personal Space authority required", http.StatusServiceUnavailable, "personal Space import authority unavailable") {
+	if s.writeSpaceDenial(c, err, request.SpaceRef, spaces.ExpectPersonal, "current personal Space authority required", http.StatusServiceUnavailable, "personal Space import authority unavailable") {
 		return
 	}
 	key, decisionRef, nonce, ok := spaceDecisionMaterial(c)
@@ -950,7 +1013,7 @@ func (s *Server) issuePersonalImportDecision(c *gin.Context) {
 		DecisionRef: decisionRef, IdempotencyKey: request.IdempotencyKey, SourceType: request.SourceType, Nonce: nonce,
 	}, time.Now().UTC())
 	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": "personal Space import is not authorized"})
+		writeSpaceIssuerDenial(c, err, "personal Space import is not authorized")
 		return
 	}
 	token, ok := signSpaceDecision(c, key, decision)
@@ -989,6 +1052,10 @@ type scheduledRunExecutionDecisionRequest struct {
 	Intent struct {
 		scheduledRunIntent
 		ThreadID string `json:"thread_id"`
+		// The stored-consent contract of the digest-bound template, when the schedule has one
+		// (WS20-S5). Both stay empty for a legacy schedule, which keeps the v1 binding.
+		ContractDigest    string `json:"contract_digest"`
+		ContractExpiresAt string `json:"contract_expires_at"`
 	} `json:"intent"`
 }
 
@@ -1206,6 +1273,15 @@ func (s *Server) issueScheduledRunExecutionDecision(c *gin.Context) {
 		ScheduleID: request.Intent.ScheduleID, FireKey: request.Intent.FireKey, TaskID: request.Intent.TaskID,
 		TemplateDigest: request.Intent.TemplateDigest, IdempotencyKey: request.Intent.IdempotencyKey,
 	}
+	if request.Intent.ContractDigest != "" || request.Intent.ContractExpiresAt != "" {
+		expiresAt, parseErr := time.Parse(time.RFC3339, request.Intent.ContractExpiresAt)
+		if parseErr != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "valid scheduled run execution intent is required"})
+			return
+		}
+		intent.ContractDigest = request.Intent.ContractDigest
+		intent.ContractExpiresAt = expiresAt.UTC()
+	}
 	if err := intent.Validate(); err != nil || strings.TrimSpace(request.Intent.ThreadID) == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "valid scheduled run execution intent is required"})
 		return
@@ -1334,6 +1410,16 @@ func (s *Server) issuePersonalImportExecutionDecision(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "valid import execution intent is required"})
 		return
 	}
+	// WS14-S1: an intent for a shared Space is re-authorized against shared
+	// evidence (flag-gated). Anything else keeps the personal path unchanged.
+	if s.sharedImportDecisions {
+		if membership, mErr := s.spaceRepo.ResolveCurrentUserMembership(
+			c.Request.Context(), intent.SpaceRef, intent.OrgID, intent.SubjectID,
+		); mErr == nil && membership != nil && membership.Kind != spaces.KindPersonal {
+			s.issueSharedImportExecutionDecision(c, intent)
+			return
+		}
+	}
 	evidence, err := s.spaceRepo.ResolvePersonalImportDecisionEvidence(
 		c.Request.Context(), intent.SpaceRef, intent.OrgID, intent.SubjectID,
 	)
@@ -1360,12 +1446,32 @@ func (s *Server) upsertSpaceEffectPolicy(c *gin.Context) {
 	if !s.spaceRepoAvailable(c) {
 		return
 	}
-	var policy spaces.EffectPolicy
-	if err := c.ShouldBindJSON(&policy); err != nil {
+	raw, err := c.GetRawData()
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid Space effect policy"})
 		return
 	}
-	updated, err := s.spaceRepo.UpsertEffectPolicy(c.Request.Context(), policy)
+	var policy spaces.EffectPolicy
+	if err := json.Unmarshal(raw, &policy); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid Space effect policy"})
+		return
+	}
+	// An entitlement the caller did not send (or sent as null) keeps its
+	// stored value instead of being reset to false: a re-run of the operator
+	// script can never clear a bit it never mentioned.
+	var stated map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &stated); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid Space effect policy"})
+		return
+	}
+	provided := make(map[string]bool, len(spaces.EntitlementCatalog()))
+	for _, spec := range spaces.EntitlementCatalog() {
+		if value, ok := stated[spec.Column]; ok && strings.TrimSpace(string(value)) != "null" {
+			provided[spec.Key] = true
+		}
+	}
+	actor := spaces.EffectPolicyActor{Type: "service", ID: controlSpacePolicyPrincipal}
+	updated, err := s.spaceRepo.UpsertEffectPolicyPartial(c.Request.Context(), policy, actor, provided)
 	if err != nil {
 		if strings.Contains(err.Error(), "is required") {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "incomplete Space effect policy"})
@@ -1450,14 +1556,29 @@ func signSpaceDecision(c *gin.Context, key spaces.SigningKey, decision spaces.De
 	return token, true
 }
 
-// writeSpaceEvidenceError maps an evidence-resolution failure to its
-// fail-closed response, returning true when the handler must stop.
+// writeSpaceEvidenceError maps an evidence-resolution failure of a
+// service-to-service route to its fail-closed response, returning true when the
+// handler must stop.
+//
+// A typed refusal found in the chain (entitlement off, role floor, kind
+// unsupported, ...) answers the status the denial vocabulary assigns it (403)
+// with the same typed body the gateway-called routes send, so a caller that
+// retries a 5xx does not retry a refusal. Only space_authority_unavailable and
+// untyped failures stay a 503, and an untyped failure keeps the plain body.
 func writeSpaceEvidenceError(c *gin.Context, err error, membershipMsg string, otherStatus int, otherMsg string) bool {
 	if errors.Is(err, spaces.ErrNoCurrentMembership) {
 		c.JSON(http.StatusForbidden, gin.H{"error": membershipMsg})
 		return true
 	}
 	if err != nil {
+		if denial, ok := spaces.AsDenial(err); ok {
+			status := otherStatus
+			if status == http.StatusServiceUnavailable {
+				status = denial.Status()
+			}
+			c.JSON(status, spaceDenialBody(otherMsg, denial))
+			return true
+		}
 		c.JSON(otherStatus, gin.H{"error": otherMsg})
 		return true
 	}
@@ -1483,8 +1604,25 @@ func (s *Server) resolveKindEvidence(
 	personal, shared func(ctx context.Context, spaceRef, orgID, subjectID string) (spaces.PersonalThreadDecisionEvidence, error),
 	audienceMsg string,
 ) (spaces.PersonalThreadDecisionEvidence, *spaces.CurrentMembership, bool) {
-	membership, err := s.spaceRepo.ResolveCurrentUserMembership(c.Request.Context(), spaceRef, c.GetString("org_id"), c.GetString("user_id"))
-	if writeSpaceEvidenceError(c, err, "current Space authority required", http.StatusServiceUnavailable, "Space authority unavailable") {
+	return s.resolveKindEvidenceFor(c, spaceRef, s.spaceRepo.ResolveCurrentUserMembership, false, personal, shared, audienceMsg)
+}
+
+// resolveKindEvidenceFor is resolveKindEvidence with the membership resolver
+// chosen by the caller (WS04-S7: a read decision uses the readable resolver) and
+// an optional typed 409 room_archived for the write decisions.
+func (s *Server) resolveKindEvidenceFor(
+	c *gin.Context,
+	spaceRef string,
+	resolveMembership func(ctx context.Context, spaceRef, orgID, subjectID string) (*spaces.CurrentMembership, error),
+	archivedIs409 bool,
+	personal, shared func(ctx context.Context, spaceRef, orgID, subjectID string) (spaces.PersonalThreadDecisionEvidence, error),
+	audienceMsg string,
+) (spaces.PersonalThreadDecisionEvidence, *spaces.CurrentMembership, bool) {
+	membership, err := resolveMembership(c.Request.Context(), spaceRef, c.GetString("org_id"), c.GetString("user_id"))
+	if archivedIs409 && s.refuseArchivedWrite(c, err, spaceRef) {
+		return spaces.PersonalThreadDecisionEvidence{}, nil, false
+	}
+	if s.writeSpaceDenial(c, err, spaceRef, spaces.ExpectMembershipOnly, "current Space authority required", http.StatusServiceUnavailable, "Space authority unavailable") {
 		return spaces.PersonalThreadDecisionEvidence{}, nil, false
 	}
 	resolver := shared
@@ -1493,8 +1631,84 @@ func (s *Server) resolveKindEvidence(
 	}
 	evidence, err := resolver(c.Request.Context(), spaceRef, c.GetString("org_id"), c.GetString("user_id"))
 	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": audienceMsg})
+		s.writeSpaceDenial(c, err, spaceRef, spaces.ExpectAny, audienceMsg, http.StatusForbidden, audienceMsg)
 		return spaces.PersonalThreadDecisionEvidence{}, nil, false
 	}
 	return evidence, membership, true
+}
+
+// spaceDenialBody is the typed refusal body: the unchanged `error` string plus
+// the additive `code`, `resolvable_by` and allowlisted `details` (never
+// attestation values, resource ids or tokens).
+func spaceDenialBody(message string, denial *spaces.Denial) gin.H {
+	return gin.H{
+		"error":         message,
+		"code":          string(denial.Code),
+		"resolvable_by": denial.ResolvableBy(),
+		"details":       denial.Details(),
+	}
+}
+
+// writeSpaceIssuerDenial answers a refused issuer call. Status (403) and the
+// `error` string are the ones the route always used; a typed refusal adds its
+// code. An untyped error (an invalid request, say) keeps the plain body.
+func writeSpaceIssuerDenial(c *gin.Context, err error, message string) {
+	if denial, ok := spaces.AsDenial(err); ok {
+		c.JSON(http.StatusForbidden, spaceDenialBody(message, denial))
+		return
+	}
+	c.JSON(http.StatusForbidden, gin.H{"error": message})
+}
+
+// writeSpaceDenial maps an evidence-resolution failure of a gateway-called
+// route (the caller is the delegated user) to its fail-closed response,
+// returning true when the handler must stop. Statuses and `error` strings are
+// those of writeSpaceEvidenceError; a refusal gains a typed code:
+//   - ErrNoCurrentMembership is labelled by DiagnoseDenial (non-member, unknown
+//     Space and non-active org member are one code on purpose). If the diagnosis
+//     itself fails the plain 403 stays, which is still a refusal.
+//   - a typed *Denial found in the chain (evidence validators) keeps otherStatus,
+//     except on a 503 path: there a refusal answers the status the denial
+//     vocabulary assigns it (403, like the Space room routes' typed refusals) and
+//     only space_authority_unavailable stays a 503. The body code never changes.
+//   - any other failure on a 503 path is space_authority_unavailable.
+func (s *Server) writeSpaceDenial(c *gin.Context, err error, spaceRef string, expect spaces.ExpectKind, membershipMsg string, otherStatus int, otherMsg string) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, spaces.ErrNoCurrentMembership) {
+		denial, diagnoseErr := s.spaceRepo.DiagnoseDenial(c.Request.Context(), spaceRef, c.GetString("org_id"), c.GetString("user_id"), expect)
+		if diagnoseErr != nil || denial == nil {
+			c.JSON(http.StatusForbidden, gin.H{"error": membershipMsg})
+			return true
+		}
+		c.JSON(http.StatusForbidden, spaceDenialBody(membershipMsg, denial))
+		return true
+	}
+	if denial, ok := spaces.AsDenial(err); ok {
+		status := otherStatus
+		if status == http.StatusServiceUnavailable {
+			status = denial.Status()
+		}
+		c.JSON(status, spaceDenialBody(otherMsg, denial))
+		return true
+	}
+	if otherStatus == http.StatusServiceUnavailable {
+		c.JSON(otherStatus, spaceDenialBody(otherMsg, spaces.AuthorityUnavailableDenial(otherMsg)))
+		return true
+	}
+	c.JSON(otherStatus, gin.H{"error": otherMsg})
+	return true
+}
+
+// resolvePersonalThreadEvidenceTyped is resolvePersonalThreadEvidence for the
+// gateway-called personal-Space routes: same statuses and strings, typed codes.
+// Service-to-service routes use resolvePersonalThreadEvidence, which types a
+// refusal too but keeps a membership miss and an untyped failure plain.
+func (s *Server) resolvePersonalThreadEvidenceTyped(c *gin.Context, spaceRef, unavailableMsg string) (spaces.PersonalThreadDecisionEvidence, bool) {
+	evidence, err := s.spaceRepo.ResolvePersonalThreadDecisionEvidence(c.Request.Context(), spaceRef, c.GetString("org_id"), c.GetString("user_id"))
+	if s.writeSpaceDenial(c, err, spaceRef, spaces.ExpectPersonal, "current personal Space authority required", http.StatusServiceUnavailable, unavailableMsg) {
+		return spaces.PersonalThreadDecisionEvidence{}, false
+	}
+	return evidence, true
 }

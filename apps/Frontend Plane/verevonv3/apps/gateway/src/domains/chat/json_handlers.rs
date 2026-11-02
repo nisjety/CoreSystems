@@ -1,14 +1,21 @@
 use axum::{
     extract::{Extension, Path, Query, State},
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     Json,
 };
 use reqwest::Method;
 use serde_json::{json, Value};
 use std::time::Duration;
 
-use crate::{config::AppState, domains::chat::shared, middleware::AuthenticatedUser};
+use crate::{
+    config::AppState,
+    domains::chat::{
+        history::{bad_request, thread_messages_url, ThreadMessagesPageQuery},
+        shared,
+    },
+    middleware::AuthenticatedUser,
+};
 
 // Integration Core permits subscription-backed Codex requests to run for up
 // to 90 seconds. Leave a small proxy/response margin so a successful provider
@@ -123,8 +130,10 @@ async fn invoke_chat_json(
     {
         return (status, body);
     }
-    let mut outbound_body =
+    let outbound_body =
         shared::with_identity_context(outbound_body, &user.user_name, &org_name);
+    let mut outbound_body =
+        shared::with_viewer_locale(outbound_body, state.space_features.chat_locale_hint);
     shared::apply_org_zdr_posture(&state, &user, &mut outbound_body).await;
     let request_timeout = chat_invoke_timeout(&outbound_body);
     // After `inject_personal_thread_context`, not with the other bearers above:
@@ -236,19 +245,111 @@ fn normalize_queue_response(response: (StatusCode, Json<Value>)) -> (StatusCode,
     }
 }
 
+/// The body of a branch move from the version switcher (WS17 S9): the turn the user picked and the leaf
+/// the client last displayed. A rewind also carries `confirm`.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct BranchThreadBody {
+    target_message_id: String,
+    #[serde(default)]
+    expected_leaf_message_id: String,
+    #[serde(default)]
+    confirm: bool,
+}
+
+/// A version switch: the thread's active branch moves to the turn the user picked. Model Gateway and Session
+/// Core decide whether it may move; this route forwards the caller's own credentials.
+pub(super) async fn branch_thread(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(thread_id): Path<String>,
+    Json(body): Json<BranchThreadBody>,
+) -> Response {
+    move_thread_branch(&state, &user, &headers, &thread_id, &body, false).await
+}
+
+/// A rewind: the same move to an earlier turn of the active path. The client asks the user to confirm it, and
+/// this route refuses it until the body says so. Nothing is deleted; the turns beneath stay on their branch.
+pub(super) async fn rewind_thread(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(thread_id): Path<String>,
+    Json(body): Json<BranchThreadBody>,
+) -> Response {
+    move_thread_branch(&state, &user, &headers, &thread_id, &body, true).await
+}
+
+async fn move_thread_branch(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    thread_id: &str,
+    body: &BranchThreadBody,
+    rewind: bool,
+) -> Response {
+    let thread_id = thread_id.trim();
+    if thread_id.is_empty() {
+        return bad_request("thread_id is required.");
+    }
+    let payload = match branch_move_body(body, rewind) {
+        Ok(payload) => payload,
+        Err(message) => return bad_request(message),
+    };
+    let url = format!(
+        "{}/v1/threads/{}/branch",
+        state.model_gateway_url,
+        urlencoding::encode(thread_id),
+    );
+    let token = shared::model_token(state, user, headers).await;
+    let session_token = match shared::required_session_token(state, user, headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error).into_response(),
+    };
+    let (status, Json(payload)) = shared::proxy_model_json_with_session(
+        state,
+        Method::POST,
+        &url,
+        Some(payload),
+        token.as_deref(),
+        Some(&session_token),
+        user,
+    )
+    .await;
+    (status, Json(payload)).into_response()
+}
+
+/// The body Model Gateway receives for a branch move, or the reason the route refuses before any call: a move
+/// names its target, and a rewind must be confirmed.
+fn branch_move_body(body: &BranchThreadBody, rewind: bool) -> Result<Value, &'static str> {
+    let target = body.target_message_id.trim();
+    if target.is_empty() {
+        return Err("target_message_id is required.");
+    }
+    if rewind && !body.confirm {
+        return Err("a rewind must be confirmed.");
+    }
+    Ok(json!({
+        "targetMessageId": target,
+        "expectedLeafMessageId": body.expected_leaf_message_id.trim(),
+    }))
+}
+
 pub(super) async fn get_thread_messages(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Path(thread_id): Path<String>,
-) -> impl IntoResponse {
+    Query(query): Query<ThreadMessagesPageQuery>,
+) -> Response {
+    let page = match query.page() {
+        Ok(page) => page,
+        Err(message) => return bad_request(message),
+    };
     let token = shared::model_token(&state, &user, &headers).await;
     let session_token = shared::session_token(&state, &user, &headers).await;
-    let url = format!(
-        "{}/v1/threads/{}/messages",
-        state.model_gateway_url,
-        urlencoding::encode(&thread_id),
-    );
+    let url = thread_messages_url(&state.model_gateway_url, &thread_id, page.as_ref());
     shared::proxy_model_json_with_session(
         &state,
         Method::GET,
@@ -259,6 +360,7 @@ pub(super) async fn get_thread_messages(
         &user,
     )
     .await
+    .into_response()
 }
 
 /// Read-only proxy for the canonical Session Core event replay. The BFF does
@@ -505,6 +607,53 @@ pub(crate) async fn submit_feedback(
 }
 
 #[cfg(test)]
+mod branch_move_tests {
+    use super::*;
+
+    fn body(json_body: &str) -> BranchThreadBody {
+        serde_json::from_str(json_body).expect("a branch body parses")
+    }
+
+    #[test]
+    fn a_version_switch_forwards_the_target_and_the_leaf_the_client_saw() {
+        let payload = branch_move_body(
+            &body(r#"{"targetMessageId":" m2 ","expectedLeafMessageId":"m4"}"#),
+            false,
+        )
+        .expect("a switch with a target is valid");
+        assert_eq!(
+            payload,
+            json!({"targetMessageId": "m2", "expectedLeafMessageId": "m4"})
+        );
+    }
+
+    #[test]
+    fn a_rewind_is_refused_until_the_user_confirms_it() {
+        let unconfirmed = body(r#"{"targetMessageId":"m2","expectedLeafMessageId":"m4"}"#);
+        assert_eq!(
+            branch_move_body(&unconfirmed, true),
+            Err("a rewind must be confirmed.")
+        );
+        let confirmed = body(
+            r#"{"targetMessageId":"m2","expectedLeafMessageId":"m4","confirm":true}"#,
+        );
+        assert!(branch_move_body(&confirmed, true).is_ok());
+    }
+
+    #[test]
+    fn a_move_without_a_target_is_refused_and_unknown_fields_are_rejected() {
+        assert_eq!(
+            branch_move_body(&body(r#"{"targetMessageId":"  ","expectedLeafMessageId":"m4"}"#), false),
+            Err("target_message_id is required.")
+        );
+        assert!(serde_json::from_str::<BranchThreadBody>(
+            r#"{"targetMessageId":"m2","expectedLeafMessageId":"m4","threadId":"other"}"#
+        )
+        .is_err());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -598,6 +747,55 @@ mod tests {
         assert_eq!(persona_segment_token_estimate(""), 0);
         // 3 words * 4 / 3 = 4.
         assert_eq!(persona_segment_token_estimate("Always be terse."), 4);
+    }
+
+    /// With send receipts on, the ended race still names the message: the 200 body keeps the
+    /// receipt fields, so the browser resends under the same id and the transcript holds one row.
+    #[test]
+    fn ended_queue_race_keeps_the_receipt_of_a_message_that_was_already_stored() {
+        let (status, Json(body)) = normalize_queue_response((
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "queued": false,
+                "error": "no active stream",
+                "resend_as_new_turn": true,
+                "persisted": true,
+                "client_message_id": "msg-1",
+                "message_id": "01J00000000000000000000000",
+            })),
+        ));
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["resend_as_new_turn"], true);
+        assert_eq!(body["persisted"], true);
+        assert_eq!(body["client_message_id"], "msg-1");
+        assert_eq!(body["message_id"], "01J00000000000000000000000");
+    }
+
+    /// Only the run-ended race is rewritten: a conflict on the message id, a message the owner
+    /// could not record and a bus that could not answer keep their own status, so the browser
+    /// never reads a refusal as a delivery.
+    #[test]
+    fn queue_refusals_with_a_receipt_keep_their_status() {
+        for (status, error) in [
+            (StatusCode::CONFLICT, "client_message_id_conflict"),
+            (StatusCode::SERVICE_UNAVAILABLE, "message_not_recorded"),
+            (StatusCode::SERVICE_UNAVAILABLE, "run_control_unavailable"),
+            (StatusCode::TOO_MANY_REQUESTS, "too many messages already waiting for this run"),
+        ] {
+            let (out_status, Json(body)) = normalize_queue_response((
+                status,
+                Json(json!({
+                    "queued": false,
+                    "error": error,
+                    "persisted": false,
+                    "client_message_id": "msg-1",
+                })),
+            ));
+            assert_eq!(out_status, status, "{error}");
+            assert_eq!(body["error"], error);
+            assert_eq!(body["client_message_id"], "msg-1");
+        }
     }
 
     #[test]

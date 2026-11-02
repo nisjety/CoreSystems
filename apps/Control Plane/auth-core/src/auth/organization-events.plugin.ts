@@ -727,6 +727,15 @@ export async function recoverPendingMembershipAuditActors(): Promise<MembershipA
   };
 }
 
+// A driver or pool that returns timestamptz as a string or number would make a
+// bare `.toISOString()` throw, and the row would then fail on every cycle.
+export function auditTimestampIso(
+  value: Date | string | number | null | undefined,
+): string | undefined {
+  if (value instanceof Date) return value.toISOString();
+  return value ? new Date(value).toISOString() : undefined;
+}
+
 export async function flushOrganizationMembershipAuditOutbox(): Promise<number> {
   const claimToken = randomUUID();
   const rows = await sqlClient<MembershipAuditOutboxRow[]>`
@@ -741,6 +750,12 @@ export async function flushOrganizationMembershipAuditOutbox(): Promise<number> 
         )
         AND candidate.invitation_causality_pending = FALSE
         AND (candidate.processing_at IS NULL OR candidate.processing_at < NOW() - INTERVAL '5 minutes')
+        AND (
+          -- the exponent is clamped: power(2, attempts) overflows for the huge
+          -- attempt counts that old rows carry
+          candidate.attempts = 0 OR
+          candidate.updated_at < NOW() - LEAST(power(2, LEAST(candidate.attempts, 12)), 3600) * INTERVAL '1 second'
+        )
         AND NOT EXISTS (
           SELECT 1 FROM organization_membership_audit_outbox prior
           WHERE prior.organization_id = candidate.organization_id
@@ -825,8 +840,9 @@ export async function flushOrganizationMembershipAuditOutbox(): Promise<number> 
             actor_classification: audit.actor_classification,
             actor_resolution_attempts: audit.actor_resolution_attempts,
             actor_resolution_last_error: audit.actor_resolution_last_error,
-            actor_resolution_dead_lettered_at:
-              audit.actor_resolution_dead_lettered_at?.toISOString(),
+            actor_resolution_dead_lettered_at: auditTimestampIso(
+              audit.actor_resolution_dead_lettered_at,
+            ),
             revision,
             action: audit.action,
           },

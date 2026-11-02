@@ -2,11 +2,14 @@ pub(crate) mod deletion;
 mod info;
 pub(crate) mod instructions;
 pub(crate) mod members;
+pub(crate) mod model_entitlement;
 pub(crate) mod quotas;
 mod roles;
 pub(crate) mod settings;
 mod shared;
+pub(crate) mod space_policy;
 pub(crate) mod switch;
+mod website;
 
 use axum::{
     routing::{delete, get, patch, post, put},
@@ -38,6 +41,11 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/orgs/{id}/settings",
             patch(settings::update_org_settings),
         )
+        // The organisation's own website, recorded in org-core (the company facts owner)
+        .route(
+            "/api/v1/orgs/{id}/website",
+            patch(website::update_org_website),
+        )
         // ADR-0003 — org layer of the authored-instruction hierarchy (Convex,
         // not org-core, hence a separate route from `/settings` above).
         .route(
@@ -50,6 +58,32 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         // could not set a ceiling the Model Plane was already enforcing.
         .route("/api/v1/orgs/{id}/quotas", get(quotas::list_quotas))
         .route("/api/v1/orgs/{id}/quotas/{key}", put(quotas::set_quota))
+        // Org model entitlement (WS10-S5, ADR-0005): which chat models the org and
+        // each role may use. org-core stores and explains it; inference-core
+        // enforces it. Behind `AppState::model_entitlement_admin_enabled`.
+        .route(
+            "/api/v1/orgs/{id}/model-entitlement",
+            get(model_entitlement::get_model_entitlement)
+                .put(model_entitlement::put_model_entitlement),
+        )
+        .route(
+            "/api/v1/orgs/{id}/model-entitlement/explain",
+            get(model_entitlement::explain_model_entitlement),
+        )
+        // WS03-S4: org-admin Space effect-policy console routes (Control owns the row).
+        // Behind `SpaceFeatureFlags::policy_admin_api`; off answers 404.
+        .route(
+            "/api/v1/orgs/{id}/space-policy",
+            get(space_policy::get_space_policy),
+        )
+        .route(
+            "/api/v1/orgs/{id}/space-policy/entitlements",
+            put(space_policy::put_space_policy_entitlements),
+        )
+        .route(
+            "/api/v1/orgs/{id}/space-policy/events",
+            get(space_policy::list_space_policy_events),
+        )
         // Members
         .route("/api/v1/orgs/{id}/members", get(members::list_members))
         .route(

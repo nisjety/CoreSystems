@@ -1,0 +1,6 @@
+config {
+  type: "declaration",
+  schema: "dw_staging_xero",
+  name: "batch_payment_line_snapshots",
+  description: "Xero batch-payment lines keyed by batch, line position, and sync snapshot."
+}

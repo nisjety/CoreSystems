@@ -1,0 +1,88 @@
+config {
+  type: "table",
+  schema: "dw_1_silver_xero",
+  description: "Xero invoice-line grain; rows removed from the current raw source are retained and flagged, never deleted.",
+  assertions: { nonNull: ["tenant_id", "line_item_id", "invoice_line_key"], uniqueKey: ["invoice_line_key"] }
+}
+
+WITH source_parents AS (
+  SELECT tenant_id, record_id AS invoice_id, observed_at, source_updated_at,
+         JSON_TYPE(JSON_QUERY(SAFE.PARSE_JSON(payload_json), '$.LineItems')) = 'array'
+           AS has_line_items_array,
+         ARRAY_LENGTH(JSON_QUERY_ARRAY(payload_json, '$.LineItems')) AS raw_line_count
+  FROM ${ref("dw_bronze_xero", "xero_raw_record_current")}
+  WHERE endpoint = 'invoices'
+    AND record_id = JSON_VALUE(payload_json, '$.InvoiceID')
+), matched AS (
+  SELECT l.*, h.invoice_key, h.invoice_type, h.invoice_number, h.status,
+         h.is_deleted, h.is_voided, h.invoice_date_local, h.currency_code,
+         h.line_amount_types, h.line_item_count, h.sub_total,
+         source.observed_at AS raw_parent_observed_at,
+         source.has_line_items_array, source.raw_line_count,
+         source.observed_at = h.synced_at AS is_parent_observation_aligned,
+         source.source_updated_at IS NOT DISTINCT FROM h.updated_at
+           AS is_parent_update_aligned,
+         current_line.line_item_id AS raw_line_item_id,
+         current_line.raw_line_amount, current_line.raw_tax_amount,
+         current_line.raw_quantity, current_line.raw_unit_amount,
+         current_line.raw_account_code, current_line.raw_tax_type,
+         current_line.raw_item_code, current_line.raw_description
+  FROM ${ref("dw_bronze_xero", "xero_invoice_lines")} AS l
+  LEFT JOIN ${ref("fact_invoice")} AS h
+    ON l.tenant_id = h.tenant_id AND l.invoice_id = h.invoice_id
+  LEFT JOIN source_parents AS source
+    ON l.tenant_id = source.tenant_id AND l.invoice_id = source.invoice_id
+  LEFT JOIN ${ref("dw_bronze_xero", "xero_invoice_current_line_keys")} AS current_line
+    ON l.tenant_id = current_line.tenant_id
+   AND l.invoice_id = current_line.invoice_id
+   AND l.line_item_id = current_line.line_item_id
+), evidence AS (
+  SELECT *,
+         COALESCE(has_line_items_array
+           AND is_parent_observation_aligned AND is_parent_update_aligned
+           AND raw_line_count = line_item_count, FALSE)
+           AS is_current_line_set_observed
+  FROM matched
+), classified AS (
+  SELECT *,
+         is_current_line_set_observed AND raw_line_item_id IS NULL
+           AS is_removed_from_source,
+         is_current_line_set_observed AND raw_line_item_id IS NOT NULL
+           AND raw_line_amount IS NOT DISTINCT FROM line_amount
+           AND raw_tax_amount IS NOT DISTINCT FROM tax_amount
+           AND raw_quantity IS NOT DISTINCT FROM quantity
+           AND raw_unit_amount IS NOT DISTINCT FROM unit_amount
+           AND raw_account_code IS NOT DISTINCT FROM account_code
+           AND raw_tax_type IS NOT DISTINCT FROM tax_type
+           AND raw_item_code IS NOT DISTINCT FROM item_code
+           AND raw_description IS NOT DISTINCT FROM description
+           AS is_raw_line_aligned
+  FROM evidence
+), lines AS (
+  SELECT l.*,
+         COUNTIF(NOT l.is_removed_from_source) OVER
+           (PARTITION BY l.tenant_id, l.invoice_id) AS observed_line_count,
+         COUNTIF(NOT l.is_removed_from_source AND NOT l.is_raw_line_aligned) OVER
+           (PARTITION BY l.tenant_id, l.invoice_id) AS unaligned_current_line_count,
+         SUM(IF(l.is_removed_from_source, 0,
+                IF(l.line_amount_types = 'Inclusive',
+                   COALESCE(l.line_amount, 0) - COALESCE(l.tax_amount, 0),
+                   COALESCE(l.line_amount, 0)))) OVER
+           (PARTITION BY l.tenant_id, l.invoice_id) AS observed_line_net
+  FROM classified AS l
+)
+SELECT CONCAT(tenant_id, '|', line_item_id) AS invoice_line_key,
+       tenant_id, invoice_id, invoice_key, line_item_id, invoice_type, invoice_number,
+       status, is_deleted, is_voided, invoice_date_local, currency_code, line_amount_types,
+       account_id, account_code, item_code, description, quantity, unit_amount,
+       line_amount AS line_amount_raw, tax_amount, tax_type, discount_rate, discount_amount,
+       IF(line_amount_types = 'Inclusive', line_amount - COALESCE(tax_amount, 0), line_amount) AS net_amount_in_currency,
+       tracking_category_1_id, tracking_option_1_id, tracking_category_2_id, tracking_option_2_id,
+       line_item_count, observed_line_count, sub_total, observed_line_net,
+       is_current_line_set_observed, is_removed_from_source, is_raw_line_aligned,
+       (NOT is_current_line_set_observed OR invoice_key IS NULL
+        OR line_item_count IS DISTINCT FROM observed_line_count
+        OR sub_total IS NULL OR unaligned_current_line_count > 0 OR
+        ABS(COALESCE(sub_total, 0) - COALESCE(observed_line_net, 0)) > 0.02) AS is_line_set_ambiguous,
+       synced_at, version_id
+FROM lines

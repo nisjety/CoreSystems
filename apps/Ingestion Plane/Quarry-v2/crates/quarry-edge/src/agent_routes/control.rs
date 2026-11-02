@@ -1,6 +1,8 @@
 use super::*;
 
-pub(super) fn checkpoint_for_entry(entry: &RunEntry) -> AgentRunCheckpoint {
+/// The run's durable continuation. `live` gives the step key the run hands out next (D2):
+/// every save carries it, so a resume never reuses a key an earlier segment used.
+pub(super) fn checkpoint_for_entry(entry: &RunEntry, live: &RunLive) -> AgentRunCheckpoint {
     AgentRunCheckpoint {
         org_id: entry.org_id.clone(),
         actor_id: entry.actor_id.clone(),
@@ -31,6 +33,30 @@ pub(super) fn checkpoint_for_entry(entry: &RunEntry) -> AgentRunCheckpoint {
             .budget
             .as_ref()
             .map(|budget| budget.snapshot(std::time::Instant::now())),
+        next_step: live.next_step(),
+    }
+}
+
+/// D2: the checkpoint a failed step leaves, with the caller holding the run entry. The step's
+/// key is spent (its events and proof id used it) even when its receipt is not kept (a
+/// person's step under `HUMAN_RECEIPT_MODE=none`, or a failed receipt write), so the next
+/// key is saved here, with the failed charge in the budget snapshot. Nothing else changes: a
+/// failed step records no observation. Not for a ZDR run (it keeps no checkpoint) or a
+/// closed one (an `active` save would reopen it). Errors are logged, never returned: the
+/// caller returns the step's own error.
+pub(super) async fn checkpoint_failed_step(state: &AppState, entry: &RunEntry, live: &RunLive) {
+    if entry.zdr.is_active() || entry.closed {
+        return;
+    }
+    if let Err(error) = state
+        .receipts
+        .save_run_checkpoint(checkpoint_for_entry(entry, live))
+        .await
+    {
+        tracing::warn!(
+            error_class = crate::zdr_log::class(&error),
+            "could not checkpoint a failed step"
+        );
     }
 }
 
@@ -51,6 +77,7 @@ pub(super) fn caller_owns_live_run(entry: &RunEntry, claims: &crate::auth::Claim
 pub(super) async fn record_browser_timeline_event(
     state: &AppState,
     entry: &RunEntry,
+    live: &RunLive,
     event: BrowserTimelineEventKind,
 ) -> QuarryResult<()> {
     if entry.zdr.is_active() {
@@ -67,7 +94,7 @@ pub(super) async fn record_browser_timeline_event(
         .await?;
     state
         .receipts
-        .save_run_checkpoint(checkpoint_for_entry(entry))
+        .save_run_checkpoint(checkpoint_for_entry(entry, live))
         .await
 }
 
@@ -135,6 +162,7 @@ pub async fn set_browser_session_control(
         record_browser_timeline_event(
             &state,
             &entry,
+            &handle.live,
             BrowserTimelineEventKind::Control {
                 mode: body.mode,
                 initiated_by: BrowserTimelineInitiator::Human,

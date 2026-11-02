@@ -84,6 +84,19 @@ Do not remove either image until the observation window and rollback window clos
 
 Base infrastructure (`application-postgres`, Dragonfly, NATS, Prometheus, Grafana, Convex storage) is not replaced by this runbook. Use separate owner-approved backup/restore procedures.
 
+## Convex gateway and subscriber: rebuild the image when the baked files change (F10)
+
+`convex-gateway` and `convex-subscriber` run the same image, built from `convex-core/Dockerfile`. Only `convex-core/convex/` is bind-mounted, so edits there reach the backend on a container restart. `convex-core/startup.sh` and `convex-core/nats-subscriber.js` are copied into the image at build time. After either changes, a stale image keeps running the old start-up and the old subscriber: none of the new Space settings are pushed, and rooms stay at `pending_registration` with nothing in the logs that says why.
+
+Checklist for any rollout that touches `startup.sh`, `nats-subscriber.js`, `Dockerfile` or `package*.json` under `convex-core/`:
+
+- [ ] Rebuild both services from the intended revision: `scripts/run-application-plane.sh build convex-gateway convex-subscriber`.
+- [ ] Recreate both: `scripts/run-application-plane.sh up -d --force-recreate convex-gateway convex-subscriber`.
+- [ ] Wait for the gateway log line `Convex functions ready!` before running any Space proof.
+- [ ] Record the new image ID of both containers (`docker inspect --format '{{.Name}} {{.Image}}' convex-gateway convex-subscriber`) in the evidence record below, next to the source revision.
+
+`scripts/run-application-plane.sh` warns on `up`, `start` and `restart` when the image of either container (or, with no container, the image Compose would reuse) was built before the newest modification time of `startup.sh` or `nats-subscriber.js`. The check is a heuristic on timestamps, it only warns and never fails the command, and it stays silent when `docker` or the images cannot be inspected. A command that builds (`build`, `--build`) skips it. A clean warning-free run is not proof the image is current; the recorded image IDs are.
+
 ## Coordinated conversation/Integration cutover
 
 The new contract is intentionally not rolling-compatible: old Integration requires an opaque `approvalId`, while new Integration requires the signed `writeAttestation`; new Conversation no longer sends the opaque fallback. Do not replace either workload independently while provider writes are enabled.

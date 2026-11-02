@@ -178,6 +178,17 @@ describe('artifactRenderKind', () => {
     expect(artifactRenderKind(artifact({ kind: 'wat', content: 'bare tekst' }))).toBe('text')
     expect(artifactRenderKind(artifact({ kind: '', content: 'https://cdn.test/a.png' }))).toBe('image')
   })
+
+  it('keeps the order of the built-in claims when several could apply', () => {
+    // A binary or pdf kind stays binary even when its bytes look like an image,
+    // and a html kind stays html; only a kind with no claim of its own is read
+    // from the content.
+    const pngBytes = 'data:image/png;base64,iVBOR'
+    expect(artifactRenderKind(artifact({ kind: 'xlsx', content: pngBytes }))).toBe('binary')
+    expect(artifactRenderKind(artifact({ kind: 'pdf', content: pngBytes }))).toBe('binary')
+    expect(artifactRenderKind(artifact({ kind: 'html', content: 'https://cdn.test/a.png' }))).toBe('html')
+    expect(artifactRenderKind(artifact({ kind: 'wat', content: pngBytes }))).toBe('image')
+  })
 })
 
 describe('artifactLanguage', () => {

@@ -1,4 +1,8 @@
 import { requestJson } from './http'
+import {
+  integrationsBrowseConnectionInput,
+  integrationsFetchConnectionContentInput,
+} from '@/shared/actions/action-registry'
 
 export interface IntegrationProvider {
   id: string
@@ -373,17 +377,21 @@ export async function listConnectorPickerTabs(orgId: string): Promise<ConnectorP
     }))
 }
 
+// Both calls validate against their registry contract (`integrations.browse_connection`,
+// `integrations.fetch_connection_content`) before a request leaves the browser, so the closed
+// operation enums are one list, not two. A call the contract refuses sends nothing.
 export async function browseConnection(
   orgId: string,
   connectionId: string,
   operation: ConnectorBrowseOperation,
   params: Record<string, unknown> = {},
 ): Promise<ConnectorActionResult> {
+  const input = integrationsBrowseConnectionInput.parse({ connectionId, operation, params })
   const payload = await requestJson<{ action: ConnectorActionResult }>(
-    `/api/v1/integrations/connections/${encodeURIComponent(connectionId)}/browse`,
+    `/api/v1/integrations/connections/${encodeURIComponent(input.connectionId)}/browse`,
     {
       method: 'POST',
-      body: JSON.stringify({ operation, params }),
+      body: JSON.stringify({ operation: input.operation, params: input.params ?? {} }),
       headers: { 'x-verevon-org-id': orgId },
     },
   )
@@ -396,11 +404,12 @@ export async function fetchConnectionContent(
   operation: ConnectorContentOperation,
   params: Record<string, unknown>,
 ): Promise<ConnectorActionResult> {
+  const input = integrationsFetchConnectionContentInput.parse({ connectionId, operation, params })
   const payload = await requestJson<{ action: ConnectorActionResult }>(
-    `/api/v1/integrations/connections/${encodeURIComponent(connectionId)}/content`,
+    `/api/v1/integrations/connections/${encodeURIComponent(input.connectionId)}/content`,
     {
       method: 'POST',
-      body: JSON.stringify({ operation, params }),
+      body: JSON.stringify({ operation: input.operation, params: input.params }),
       headers: { 'x-verevon-org-id': orgId },
     },
   )

@@ -17,6 +17,12 @@ export function TrustHeader() {
 					aria-label="Trust Center-navigasjon"
 					className="flex items-center gap-[clamp(20px,3vw,42px)] font-geist text-[0.78rem] font-medium uppercase tracking-[0.06em] text-verevon-j-text/60"
 				>
+					<a
+						className="transition-colors hover:text-verevon-j-text max-[650px]:hidden"
+						href="#bevis"
+					>
+						Bevis
+					</a>
 					<a className="transition-colors hover:text-verevon-j-text" href="#kontroller">
 						Kontroller
 					</a>

@@ -1,12 +1,17 @@
-import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
+import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 import { Folder, FolderPlus, MessageSquarePlus, MoreHorizontal, Pin, Search, SlidersHorizontal, X } from '@/shared/icons'
 import { useI18n, translateApiError, LocalizedError } from '@/shared/i18n'
 import { getSession } from '@/shared/session/session-store'
 import type { ChatOrganizationAction } from '@/shared/actions/chat-organization'
+import { searchChatThreads, type ChatSearchHit } from '@/shared/api/chat-client'
 import { applyChatOrganizationAction, chatDateGroup, chatOrganizationStorageKey, emptyChatOrganization, readChatOrganization, saveChatOrganization, selectOrganizedChats } from '@/features/chat/lib/chat-organization'
 import type { ChatThreadHistoryItem } from '@/features/chat/lib/chat-thread-history'
+import { ChatWorkLinks } from './ChatWorkLinks'
+import { ChatSearchResults, nextSearchIndex, SEARCH_DEBOUNCE_MS, SEARCH_MIN_CHARS, searchListboxId, searchOptionId, type ChatSearchStatus } from './ChatSearchResults'
 import './chat-sidebar-organizer.css'
+
+const SEARCH_ID_PREFIX = 'chat-organizer-search'
 
 type DialogMode = { kind: 'create' } | { kind: 'project'; id: string } | { kind: 'move'; thread: ChatThreadHistoryItem }
 type ChatGroup = { id: string; label: string; project: boolean; pinned?: boolean; items: ChatThreadHistoryItem[] }
@@ -17,13 +22,26 @@ export function ChatSidebarOrganizer(props: {
   loading: boolean
   onNewChat: () => void
   renderRow: (item: ChatThreadHistoryItem, onMove?: () => void) => JSX.Element
+  /** More chats can be shown; the caller reveals the next page when asked. */
+  hasMore?: boolean
+  onLoadMore?: () => void
+  /** Opens a server search hit's thread, which may sit beyond the loaded page. */
+  onOpenSearchHit?: (threadId: string) => void
+  /** Threads the owner starred. The Starred filter narrows the loaded chats to these. */
+  starredThreadIds?: ReadonlySet<string>
+  /** Threads holding a reply the owner has not read; each one shows an unread dot. */
+  unreadThreadIds?: ReadonlySet<string>
 }) {
   const i18n = useI18n()
   const session = getSession()
   const scope = createMemo(() => chatOrganizationStorageKey(session.user?.id, session.activeOrg?.id))
   const [organization, setOrganization] = createSignal(emptyChatOrganization())
   const [query, setQuery] = createSignal('')
+  const [starredOnly, setStarredOnly] = createSignal(false)
   const [searchOpen, setSearchOpen] = createSignal(false)
+  const [serverHits, setServerHits] = createSignal<ChatSearchHit[]>([])
+  const [serverStatus, setServerStatus] = createSignal<ChatSearchStatus>('idle')
+  const [activeHit, setActiveHit] = createSignal(-1)
   const [mode, setMode] = createSignal<DialogMode | null>(null)
   const [draftName, setDraftName] = createSignal('')
   const [destination, setDestination] = createSignal('')
@@ -38,6 +56,61 @@ export function ChatSidebarOrganizer(props: {
   let nameInput: HTMLInputElement | undefined
   let searchInput: HTMLInputElement | undefined
   let viewMenu: HTMLDetailsElement | undefined
+  // The server search is debounced, and every answer carries the generation of
+  // the query that asked for it, so a slow answer for an old query cannot
+  // replace a newer one. The local filter runs on every keystroke regardless.
+  let searchTimer: ReturnType<typeof setTimeout> | undefined
+  let searchGeneration = 0
+  const cancelSearch = () => {
+    clearTimeout(searchTimer)
+    searchTimer = undefined
+    searchGeneration += 1
+  }
+  onCleanup(cancelSearch)
+  const setSearchText = (text: string) => {
+    setQuery(text)
+    cancelSearch()
+    const term = text.trim()
+    if (term.length < SEARCH_MIN_CHARS) {
+      setServerStatus('idle')
+      setServerHits([])
+      setActiveHit(-1)
+      return
+    }
+    setServerStatus('loading')
+    const generation = searchGeneration
+    searchTimer = setTimeout(() => {
+      searchTimer = undefined
+      void searchChatThreads(term).then(
+        (result) => {
+          if (generation !== searchGeneration) return
+          setServerHits(result.status === 'ok' ? result.hits : [])
+          setServerStatus(result.status === 'ok' ? 'ready' : 'unavailable')
+          setActiveHit(-1)
+        },
+        () => {
+          if (generation !== searchGeneration) return
+          setServerHits([])
+          setServerStatus('unavailable')
+          setActiveHit(-1)
+        },
+      )
+    }, SEARCH_DEBOUNCE_MS)
+  }
+  const openSearchHit = (hit: ChatSearchHit) => props.onOpenSearchHit?.(hit.threadId)
+  const onSearchKeyDown = (event: KeyboardEvent) => {
+    const next = nextSearchIndex(activeHit(), event.key, serverHits().length)
+    if (next !== null) {
+      event.preventDefault()
+      setActiveHit(next)
+      return
+    }
+    const hit = serverHits()[activeHit()]
+    if (event.key === 'Enter' && hit) {
+      event.preventDefault()
+      openSearchHit(hit)
+    }
+  }
 
   createEffect(scope, (key) => {
     activeDrag = null
@@ -137,7 +210,12 @@ export function ChatSidebarOrganizer(props: {
     if (key) saveChatOrganization(key, next)
     setOrganization(next)
   }
-  const matches = createMemo(() => selectOrganizedChats(props.sessions, organization(), query()))
+  const matches = createMemo(() => {
+    const source = starredOnly()
+      ? props.sessions.filter((item) => props.starredThreadIds?.has(item.threadId))
+      : props.sessions
+    return selectOrganizedChats(source, organization(), query())
+  })
   const groups = createMemo<ChatGroup[]>(() => {
     const staticState = organization()
     const rows = matches()
@@ -183,7 +261,7 @@ export function ChatSidebarOrganizer(props: {
           { type: 'project.create', id: crypto.randomUUID(), name: draftName() },
           { type: 'view.update', view: { ...organization().view, group: 'project', filter: 'all' } },
         )
-        setQuery('')
+        setSearchText('')
       }
       setMode(null)
     } catch (reason) { setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke lagre.', en: 'Could not save.' })) }
@@ -205,10 +283,18 @@ export function ChatSidebarOrganizer(props: {
         <button type="button" aria-label={i18n.tr('Nytt prosjekt', 'New project')} title={i18n.tr('Nytt prosjekt', 'New project')} disabled={!scope()} onClick={() => beginProject()}><FolderPlus size={18} /></button>
       </div>
       <Show when={searchOpen()}>
-        <div class="chat-organizer__search"><Search size={15} /><input ref={searchInput} type="search" aria-label={i18n.tr('Søk i samtaler', 'Search chats')} placeholder={i18n.tr('Søk i samtaler …', 'Search chats…')} value={query()} onInput={(event) => setQuery(event.currentTarget.value)} /><button type="button" aria-label={i18n.tr('Lukk samtalesøk', 'Close chat search')} onClick={() => { setQuery(''); setSearchOpen(false) }}><X size={14} /></button></div>
+        <div class="chat-organizer__search"><Search size={15} /><input ref={searchInput} type="search" role="combobox" maxlength="200" aria-expanded={serverHits().length ? 'true' : 'false'} aria-autocomplete="list" aria-controls={serverHits().length ? searchListboxId(SEARCH_ID_PREFIX) : undefined} aria-activedescendant={serverHits().length && activeHit() >= 0 ? searchOptionId(SEARCH_ID_PREFIX, activeHit()) : undefined} aria-label={i18n.tr('Søk i samtaler', 'Search chats')} placeholder={i18n.tr('Søk i samtaler …', 'Search chats…')} value={query()} onInput={(event) => setSearchText(event.currentTarget.value)} onKeyDown={onSearchKeyDown} /><button type="button" aria-label={i18n.tr('Lukk samtalesøk', 'Close chat search')} onClick={() => { setSearchText(''); setSearchOpen(false) }}><X size={14} /></button></div>
       </Show>
       <a href="/chat" link class="core-chat-sidebar__new" onClick={() => props.onNewChat()}><MessageSquarePlus size={17} />{i18n.tr('Ny samtale', 'New chat')}</a>
-      <Show when={organization().view.filter !== 'all' || query().trim()}><button type="button" class="chat-organizer__clear-filter" onClick={() => { setQuery(''); updateView({ filter: 'all' }) }}>{i18n.tr('Fjern filtre', 'Clear filters')} · {matches().length}<X size={12} /></button></Show>
+      <ChatWorkLinks />
+      {/* Shown only once the caller passes the starred set; without it the filter would empty the list. */}
+      <Show when={props.starredThreadIds}>
+        <button type="button" class="chat-organizer__starred-toggle" aria-pressed={starredOnly() ? 'true' : 'false'} onClick={() => setStarredOnly((on) => !on)}>{i18n.tr('Stjernemerkede', 'Starred')}</button>
+      </Show>
+      <Show when={organization().view.filter !== 'all' || query().trim() || starredOnly()}><button type="button" class="chat-organizer__clear-filter" onClick={() => { setSearchText(''); setStarredOnly(false); updateView({ filter: 'all' }) }}>{i18n.tr('Fjern filtre', 'Clear filters')} · {matches().length}<X size={12} /></button></Show>
+      <Show when={searchOpen() && query().trim().length >= SEARCH_MIN_CHARS}>
+        <ChatSearchResults idPrefix={SEARCH_ID_PREFIX} hits={serverHits()} status={serverStatus()} activeIndex={activeHit()} onOpen={openSearchHit} onActiveChange={(index) => setActiveHit(index)} />
+      </Show>
       <nav class="chat-organizer__list core-chat-sidebar__sessions" aria-label={i18n.tr('Chat-samtaler', 'Chat conversations')}>
         <Show when={!props.loading} fallback={<p class="chat-organizer__empty">{i18n.tr('Laster samtaler …', 'Loading chats…')}</p>}>
           <Show when={groups().length} fallback={<p class="chat-organizer__empty">{i18n.tr('Ingen samtaler passer dette utvalget.', 'No chats match this view.')}</p>}>
@@ -229,6 +315,9 @@ export function ChatSidebarOrganizer(props: {
                     data-dragged={draggedThreadId() === item.threadId ? 'true' : undefined}
                     title={canDrag() ? i18n.tr('Dra til et prosjekt eller Nylige. Du kan også bruke Flytt til prosjekt i menyen.', 'Drag to a project or Recent. You can also use Move to project in the menu.') : undefined}
                     onDragStart={(event) => startDrag(event, item)} onDragEnd={endDrag}>
+                    <Show when={props.unreadThreadIds?.has(item.threadId)}>
+                      <span class="chat-organizer__unread" role="img" aria-label={i18n.tr('Ulest svar', 'Unread reply')} title={i18n.tr('Et svar du ikke har lest', 'A reply you have not read')} style={{ display: 'inline-block', width: '0.5rem', height: '0.5rem', 'border-radius': '999px', background: 'currentColor', 'flex-shrink': '0' }} />
+                    </Show>
                     {props.renderRow(item, () => beginMove(item))}
                   </div>
                 )}</For>
@@ -238,6 +327,9 @@ export function ChatSidebarOrganizer(props: {
           </Show>
         </Show>
       </nav>
+      <Show when={props.hasMore}>
+        <button type="button" class="chat-organizer__load-more" onClick={() => props.onLoadMore?.()}>{i18n.tr('Last flere samtaler', 'Load more chats')}</button>
+      </Show>
       <p class="chat-organizer__move-notice" role="status" aria-live="polite">{moveNotice()}</p>
       <p class="chat-organizer__local-note">{i18n.tr('Prosjekter lagres i denne nettleseren.', 'Projects are saved in this browser.')}</p>
 

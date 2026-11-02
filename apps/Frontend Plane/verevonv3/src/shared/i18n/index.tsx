@@ -1,4 +1,4 @@
-import { createContext, createEffect, createSignal, useContext, type Accessor } from 'solid-js'
+import { createContext, createEffect, createSignal, untrack, useContext, type Accessor } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 import {
   defaultLocale,
@@ -19,6 +19,8 @@ type I18nContextValue = {
   nextLocaleName: Accessor<string>
   setLocale: (locale: Locale) => void
   toggleLocale: () => void
+  /** Adopts the server's language. Unlike `setLocale`, it is never written back. */
+  applyServerLocale: (locale: Locale) => void
   tr: (noText: string, enText: string) => string
 }
 
@@ -29,7 +31,30 @@ const fallbackI18n: I18nContextValue = {
   nextLocaleName: () => 'English',
   setLocale: () => undefined,
   toggleLocale: () => undefined,
+  applyServerLocale: () => undefined,
   tr: (noText, enText) => pickLocaleText(defaultLocale, noText, enText),
+}
+
+export type LocaleChangeEvent = { locale: Locale; source: 'user' | 'server' }
+
+const localeListeners = new Set<(event: LocaleChangeEvent) => void>()
+
+/** Observes locale changes. `source: 'user'` is a toggle or Settings choice, `'server'` an adopted server value. */
+export function subscribeLocaleChange(listener: (event: LocaleChangeEvent) => void): () => void {
+  localeListeners.add(listener)
+  return () => {
+    localeListeners.delete(listener)
+  }
+}
+
+function emitLocaleChange(event: LocaleChangeEvent): void {
+  for (const listener of [...localeListeners]) {
+    try {
+      listener(event)
+    } catch {
+      // One failing observer must not break the others or the toggle.
+    }
+  }
 }
 
 const I18nContext = createContext<I18nContextValue>(fallbackI18n)
@@ -37,7 +62,14 @@ const I18nContext = createContext<I18nContextValue>(fallbackI18n)
 export function I18nProvider(props: { children: JSX.Element }) {
   const [locale, setLocaleSignal] = createSignal<Locale>(readInitialLocale())
   const setLocale = (nextLocale: Locale) => {
+    const changed = untrack(locale) !== nextLocale
     setLocaleSignal(nextLocale)
+    if (changed) emitLocaleChange({ locale: nextLocale, source: 'user' })
+  }
+  const applyServerLocale = (nextLocale: Locale) => {
+    if (untrack(locale) === nextLocale) return
+    setLocaleSignal(nextLocale)
+    emitLocaleChange({ locale: nextLocale, source: 'server' })
   }
 
   createEffect(
@@ -59,6 +91,7 @@ export function I18nProvider(props: { children: JSX.Element }) {
     nextLocaleName: () => oppositeLocale(locale()) === 'no' ? 'Norsk' : 'English',
     setLocale,
     toggleLocale: () => setLocale(oppositeLocale(locale())),
+    applyServerLocale,
     tr: (noText, enText) => pickLocaleText(locale(), noText, enText),
   }
 
