@@ -632,6 +632,36 @@ type sharedThreadReadDecisionRequest struct {
 	ServiceAudience string `json:"service_audience"`
 }
 
+// threadReadIssuer is the issuer matching the evidence kind resolveThreadReadEvidence found.
+type threadReadIssuer func(spaces.PersonalThreadDecisionEvidence, spaces.SharedThreadReadDecisionRequest, time.Time) (spaces.Decision, error)
+
+// resolveThreadReadEvidence resolves the evidence for one thread-read decision
+// (shared-room path first, then the narrow own-scheduled personal fallback) and
+// the issuer that goes with it. It is the single resolution both the single
+// route and the WS11-S1 bulk route call. On failure it returns the ORIGINAL
+// shared-path error; ownDenial is non-nil only when the shared path found no
+// membership and the own-scheduled fallback produced a typed refusal (the
+// single route reports that one under the unchanged membership message).
+func (s *Server) resolveThreadReadEvidence(ctx context.Context, spaceRef, orgID, userID string) (spaces.PersonalThreadDecisionEvidence, threadReadIssuer, error, *spaces.Denial) {
+	evidence, err := s.spaceRepo.ResolveSharedThreadReadDecisionEvidence(ctx, spaceRef, orgID, userID)
+	if err == nil {
+		return evidence, spaces.IssueSharedThreadReadDecision, nil, nil
+	}
+	ownEvidence, ownErr := s.spaceRepo.ResolveOwnScheduledThreadReadDecisionEvidence(ctx, spaceRef, orgID, userID)
+	if ownErr == nil {
+		return ownEvidence, spaces.IssueOwnScheduledThreadReadDecision, nil, nil
+	}
+	// The own-scheduled resolver only ever finds a personal Space the caller
+	// belongs to, so a typed refusal from it is the true reason for a personal
+	// Space (its entitlement, say).
+	if errors.Is(err, spaces.ErrNoCurrentMembership) {
+		if denial, typed := spaces.AsDenial(ownErr); typed {
+			return spaces.PersonalThreadDecisionEvidence{}, nil, err, denial
+		}
+	}
+	return spaces.PersonalThreadDecisionEvidence{}, nil, err, nil
+}
+
 // issueThreadReadDecision authorizes one short-lived read of a SHARED Space's
 // conversation record.
 //
@@ -665,30 +695,14 @@ func (s *Server) issueThreadReadDecision(c *gin.Context) {
 		return
 	}
 	orgID, userID := c.GetString("org_id"), c.GetString("user_id")
-	issue := spaces.IssueSharedThreadReadDecision
-	evidence, err := s.spaceRepo.ResolveSharedThreadReadDecisionEvidence(c.Request.Context(), request.SpaceRef, orgID, userID)
+	evidence, issue, err, ownDenial := s.resolveThreadReadEvidence(c.Request.Context(), request.SpaceRef, orgID, userID)
 	if err != nil {
-		ownEvidence, ownErr := s.spaceRepo.ResolveOwnScheduledThreadReadDecisionEvidence(c.Request.Context(), request.SpaceRef, orgID, userID)
-		if ownErr != nil {
-			// Report the ORIGINAL shared-path error, which is the one whose
-			// message ("current shared Space authority required") matches
-			// what most callers of this endpoint are actually asking for; the
-			// own-scheduled fallback is the exception, not the norm.
-			//
-			// The own-scheduled resolver only ever finds a personal Space the
-			// caller belongs to, so a typed refusal from it is the true reason
-			// for a personal Space (its entitlement, say). It is reported
-			// under the unchanged membership message and status.
-			if errors.Is(err, spaces.ErrNoCurrentMembership) {
-				if denial, typed := spaces.AsDenial(ownErr); typed {
-					c.JSON(http.StatusForbidden, spaceDenialBody("current shared Space authority required", denial))
-					return
-				}
-			}
-			s.writeSpaceDenial(c, err, request.SpaceRef, spaces.ExpectAny, "current shared Space authority required", http.StatusForbidden, "shared Space read authority is not available")
+		if ownDenial != nil {
+			c.JSON(http.StatusForbidden, spaceDenialBody("current shared Space authority required", ownDenial))
 			return
 		}
-		evidence, issue = ownEvidence, spaces.IssueOwnScheduledThreadReadDecision
+		s.writeSpaceDenial(c, err, request.SpaceRef, spaces.ExpectAny, "current shared Space authority required", http.StatusForbidden, "shared Space read authority is not available")
+		return
 	}
 	key, decisionRef, nonce, ok := spaceDecisionMaterial(c)
 	if !ok {
