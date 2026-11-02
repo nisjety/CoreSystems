@@ -5,7 +5,8 @@ const test = require('node:test');
 
 const schema = require('../convex/schema.ts').default;
 
-// The 38 tables that existed in convex/schema.ts before the P-CX1 split. The
+// The tables that existed in convex/schema.ts before the P-CX1 split (38 of them;
+// `spaceMemberGrants` was retired on purpose by WS04-S12, which leaves 37). The
 // composed schema must keep every one of them; later slices may add tables, so
 // this is a subset check, not an equality check.
 const PRE_SPLIT_TABLES = [
@@ -59,9 +60,46 @@ function tableRecordsOf(file) {
   return Object.entries(exported).filter(([name]) => name.endsWith('Tables'));
 }
 
-test('the pre-split list really has 38 distinct tables', () => {
-  assert.equal(PRE_SPLIT_TABLES.length, 38);
-  assert.equal(new Set(PRE_SPLIT_TABLES).size, 38);
+test('the pre-split list has 37 distinct tables (38 minus the retired spaceMemberGrants)', () => {
+  assert.equal(PRE_SPLIT_TABLES.length, 37);
+  assert.equal(new Set(PRE_SPLIT_TABLES).size, 37);
+});
+
+test('WS04-S12: the composed schema no longer has spaceMemberGrants', () => {
+  assert.equal(Object.keys(schema.tables).includes('spaceMemberGrants'), false);
+});
+
+test('WS12-S2: the composed schema carries spaceDmHides beside the pre-split tables', () => {
+  const composed = Object.keys(schema.tables);
+  assert.ok(composed.includes('spaceDmHides'));
+  assert.equal(PRE_SPLIT_TABLES.includes('spaceDmHides'), false);
+});
+
+const ATTENTION_TABLES = [
+  'spaceRoomNotifyPrefs',
+  'spaceNotifyUserSettings',
+  'spaceThreadFollows',
+  'spaceAttentionItems',
+  'spaceAttentionEvents',
+  'spaceAttentionBudget',
+  'spaceMemberStatus',
+  'spaceAgentActivity',
+  'spaceReminders',
+];
+
+test('WS11-S3: the composed schema lists the 9 attention tables', () => {
+  assert.equal(new Set(ATTENTION_TABLES).size, 9);
+  const composed = Object.keys(schema.tables);
+  assert.deepEqual(ATTENTION_TABLES.filter((name) => !composed.includes(name)), []);
+});
+
+test('WS11-S3: spaceReadMarkers has by_org_and_subject beside by_space_and_subject', () => {
+  const indexes = schema.tables.spaceReadMarkers.indexes.map((index) => [index.indexDescriptor, index.fields]);
+  assert.deepEqual(indexes.find(([name]) => name === 'by_org_and_subject'), [
+    'by_org_and_subject',
+    ['externalOrgId', 'externalAuthId'],
+  ]);
+  assert.ok(indexes.some(([name]) => name === 'by_space_and_subject'));
 });
 
 test('the composed schema still exports every pre-split table name', () => {
