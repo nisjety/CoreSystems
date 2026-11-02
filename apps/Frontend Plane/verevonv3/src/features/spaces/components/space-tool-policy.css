@@ -1,0 +1,139 @@
+/*
+ * The per-tool policy editor in the Agent tab (WS10-S5b). Its own sheet on purpose: global.css is a
+ * shared monolith. Quiet like the agent card around it: a policy is a setting, not an alert.
+ */
+
+.verevon-tool-policy {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  margin-top: 10px;
+}
+
+.verevon-tool-policy__toggle {
+  justify-self: start;
+  border: 1px solid var(--verevon-border);
+  border-radius: 8px;
+  background: var(--verevon-surface);
+  padding: 4px 12px;
+  color: var(--verevon-text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.verevon-tool-policy__toggle:focus-visible,
+.verevon-tool-policy__button:focus-visible {
+  outline: 2px solid var(--verevon-accent-ink);
+  outline-offset: 2px;
+}
+
+.verevon-tool-policy__panel {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 10px;
+  background: var(--verevon-surface-muted);
+  padding: 12px;
+}
+
+.verevon-tool-policy__heading {
+  margin: 0;
+  color: var(--verevon-text);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.verevon-tool-policy__note {
+  margin: 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-tool-policy__merged,
+.verevon-tool-policy__rows {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-tool-policy__merged li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  font-size: 12px;
+  color: var(--verevon-text);
+}
+
+.verevon-tool-policy__key {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-wrap: anywhere;
+}
+
+.verevon-tool-policy__source {
+  color: var(--verevon-text-muted);
+}
+
+.verevon-tool-policy__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.verevon-tool-policy__row-note {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--verevon-text-muted);
+  font-size: 11px;
+}
+
+.verevon-tool-policy__input,
+.verevon-tool-policy__select {
+  min-width: 0;
+  border: 1px solid var(--verevon-border);
+  border-radius: 8px;
+  background: var(--verevon-surface);
+  padding: 4px 8px;
+  color: var(--verevon-text);
+  font-size: 12px;
+}
+
+.verevon-tool-policy__input {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.verevon-tool-policy__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.verevon-tool-policy__button {
+  border: 1px solid var(--verevon-border);
+  border-radius: 8px;
+  background: var(--verevon-surface);
+  padding: 4px 12px;
+  color: var(--verevon-text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.verevon-tool-policy__button[disabled] {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.verevon-tool-policy__error {
+  margin: 0;
+  color: color-mix(in srgb, var(--danger) 80%, var(--verevon-text));
+  font-size: 12px;
+}
+
+.verevon-tool-policy__status {
+  margin: 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}

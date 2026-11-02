@@ -45,6 +45,8 @@ import { agentCardModel } from '../lib/agent-activity'
 import { SpaceBindAgentDialog } from './SpaceBindAgentDialog'
 import { SpaceCockpit } from './SpaceCockpit'
 import { SpaceConfirmButton } from './SpaceConfirmButton'
+import { SpaceAgentPolicyEditor } from './SpaceAgentPolicyEditor'
+import { toolPolicyEditorEnabled } from '../lib/space-tool-policy'
 import {
   SpaceLeaveRoomButton,
   SpaceMemberControls,
@@ -1253,6 +1255,11 @@ function SpaceAgentPanel(props: {
         </div>
       </div>
 
+      {/* WS10-S5b: the room ceiling for tool calls, applying to every agent here. */}
+      <Show when={props.canGovern && toolPolicyEditorEnabled()}>
+        <SpaceAgentPolicyEditor spaceRef={props.spaceRef} layer="ceiling" />
+      </Show>
+
       <Show when={agents.loading}>
         <p class="verevon-space-inline-status" role="status">{i18n.tr('Henter agenter …', 'Loading agents…')}</p>
       </Show>
@@ -1437,6 +1444,12 @@ function SpaceAgentCard(props: {
               )}
             </Show>
           </ul>
+        </Show>
+
+        {/* WS10-S5b: the per-tool rules for this agent. Behind `features.tool_policy_editor`; the
+            server (Control) decides who may write, so this is presentation. */}
+        <Show when={props.canGovern && governable() && bindingRef() && agent().subject_id && toolPolicyEditorEnabled()}>
+          <SpaceAgentPolicyEditor spaceRef={props.spaceRef} layer="agent" agent={agent()} />
         </Show>
 
         {/* Control granted the access, but no plane has described the agent.

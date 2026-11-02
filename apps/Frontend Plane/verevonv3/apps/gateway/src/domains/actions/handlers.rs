@@ -83,6 +83,7 @@ use super::dispatchers_spaces::ws08::dispatch_spaces_set_agent_wake_policy;
 use super::dispatchers_spaces::ws10::{
     dispatch_spaces_decide_approval, dispatch_spaces_revoke_approval_grant,
 };
+use super::dispatchers_spaces::ws10b::dispatch_spaces_set_tool_policy;
 use super::dispatchers_spaces::ws12::{dispatch_spaces_hide_space, dispatch_spaces_open_dm};
 use super::dispatchers_spaces::ws16::dispatch_spaces_update_sidebar;
 use super::dispatchers_spaces::ws03::{
@@ -586,6 +587,9 @@ pub(super) async fn execute_action(
         }
         "spaces.revoke_approval_grant" => {
             dispatch_spaces_revoke_approval_grant(&state, &user, &body.input).await
+        }
+        "spaces.set_tool_policy" => {
+            dispatch_spaces_set_tool_policy(&state, &user, &body.input).await
         }
         "spaces.update_room_details" => {
             dispatch_spaces_update_room_details(&state, &user, &body.input).await

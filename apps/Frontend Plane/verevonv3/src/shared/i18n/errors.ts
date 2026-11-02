@@ -1055,6 +1055,15 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   // WS05 org security
 
   // WS07 resilience and content hardening
+
+  // WS10 tool policy editor (S5b)
+  tool_policy_role_required: { no: 'Bare en eier eller leder kan endre verktøyreglene.', en: 'Only an owner or manager can change the tool rules.' },
+  tool_policy_invalid: { no: 'Verktøyreglene er ikke gyldige. Ingenting er endret.', en: 'The tool rules are not valid. Nothing was changed.' },
+  unsupported_policy_field: { no: 'Forespørselen inneholdt noe som ikke kan settes her. Ingenting er endret.', en: 'The request contained something that cannot be set here. Nothing was changed.' },
+  tool_policy_revision_conflict: { no: 'Reglene ble endret av noen andre. De nyeste er lastet inn; se over og lagre på nytt.', en: 'Someone else changed the rules. The latest are loaded; review them and save again.' },
+  tool_policy_unavailable: { no: 'Verktøyreglene er utilgjengelige akkurat nå. Ingenting er endret. Prøv igjen om litt.', en: 'The tool rules are unavailable right now. Nothing was changed. Try again shortly.' },
+  approval_agent_not_in_space: { no: 'Agenten deltar ikke lenger i rommet, så den kan ikke få egne verktøyregler.', en: 'The agent is no longer part of the room, so it cannot have rules of its own.' },
+  space_kind_unsupported: { no: 'Et personlig rom har ingen delte agenter og dermed ingen verktøyregler.', en: 'A personal Space has no shared agents, so it has no tool rules.' },
 }
 
 /**

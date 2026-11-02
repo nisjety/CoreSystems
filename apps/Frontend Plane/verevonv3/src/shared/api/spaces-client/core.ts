@@ -69,6 +69,8 @@ export type SpaceContext = {
     people_search?: boolean
     /** WS12-S3: direct messages are offered. */
     dm?: boolean
+    /** WS10-S5b: the Agent tab shows the per-tool policy editor. */
+    tool_policy_editor?: boolean
   }
   /** Server-stated bounds (WS01-S5). Absent on an older gateway: use the documented defaults. */
   limits?: {
@@ -940,6 +942,9 @@ export type SpaceAgent = {
   trigger_modes?: readonly ('mention' | 'group')[]
   allowed_tools?: readonly string[]
   approval_mode?: 'auto' | 'require_confirmation' | 'blocked'
+  /** WS10-S5b: Application's projection of Control's tool policy for this agent (display only). */
+  tool_policy_revision?: number
+  tool_policy_digest?: string
   /** Presentation-only `#rrggbb`; the gateway drops anything else. Never an authorization input. */
   avatar_color?: string
   delivery_targets: readonly SpaceAgentDeliveryTarget[]

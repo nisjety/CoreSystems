@@ -31,6 +31,7 @@ mod denial;
 pub(crate) mod approvals;
 use denial::{typed_response, with_gap_details, Decision, SpaceDenial};
 pub(crate) mod agent_policy;
+pub(crate) mod tool_policy;
 pub(crate) mod directory;
 pub(crate) mod dm;
 pub(crate) mod human_posts;
@@ -926,6 +927,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
 fn module_routes() -> Router<AppState> {
     Router::new()
         .merge(approvals::routes())
+        .merge(tool_policy::routes())
         .merge(dm::routes())
         .merge(human_posts::routes())
         .merge(pins::routes())
@@ -4359,6 +4361,9 @@ async fn compose_space_agents(
                         // WS08-S5: who may wake it. Absent means `members`.
                         ("respondTo", "respond_to"),
                         ("respondToSubjects", "respond_to_subjects"),
+                        // WS10-S5b: projection of Control's tool policy (editor display only).
+                        ("toolPolicyRevision", "tool_policy_revision"),
+                        ("toolPolicyDigest", "tool_policy_digest"),
                         ("allowedTools", "allowed_tools"),
                         ("approvalMode", "approval_mode"),
                         ("avatarColor", "avatar_color"),
@@ -5159,6 +5164,7 @@ async fn space_context(
                     "room_artifacts": state.space_features.room_artifacts,
                     "room_pins": state.space_features.room_pins,
                     "dm": state.space_features.dm_api,
+                    "tool_policy_editor": state.space_features.tool_policy_editor,
                 },
                 "limits": { "post_max_chars": human_posts::POST_MAX_CHARS },
             }}),

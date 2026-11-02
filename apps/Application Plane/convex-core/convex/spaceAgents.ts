@@ -121,6 +121,9 @@ export const spaceAgentBindingsForGateway = query({
         // gateway enforces it on the mention path.
         respondTo: binding.respondTo,
         respondToSubjects: binding.respondToSubjects,
+        // WS10-S5b: projection of Control's tool policy for this agent (editor only).
+        toolPolicyRevision: binding.toolPolicyRevision,
+        toolPolicyDigest: binding.toolPolicyDigest,
         projectionVersion: binding.projectionVersion,
         updatedAt: binding.updatedAt,
       });
@@ -818,6 +821,106 @@ export const setSpaceAgentWakePolicyForGateway = mutation({
       respondToSubjects: args.respondTo === "allowlist" ? subjects : [],
       projectionVersion,
       updatedAt: now,
+      changed: true,
+    };
+  },
+});
+
+/**
+ * WS10-S5b: record the projection of Control's per-tool policy on one binding.
+ *
+ * Control (`space_tool_policies`) is the store and the only authority; the gateway has already
+ * written the layer there under Control's role check and revision compare-and-set, and calls this
+ * only with the revision and merged digest Control returned. This mutation re-checks that the
+ * binding belongs to that Space and organization and is still bound, never lowers a stored
+ * revision (a late retry of an older write is a no-op), and does NOT touch `updatedAt`
+ * (`setSpaceAgentWakePolicyForGateway` compares it, so a policy sync must not make a second
+ * manager's wake-policy change look stale). It changes neither `approvalMode` nor `allowedTools`.
+ *
+ * Errors are stable strings the gateway maps: `invalid_policy`, `agent_binding_not_found`.
+ */
+export const setSpaceAgentBindingPolicyForGateway = mutation({
+  args: {
+    serviceKey: v.string(),
+    externalAuthId: v.string(),
+    externalOrgId: v.string(),
+    spaceRef: v.string(),
+    bindingRef: v.string(),
+    toolPolicyRevision: v.number(),
+    toolPolicyDigest: v.string(),
+  },
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{
+    bindingRef: string;
+    toolPolicyRevision: number;
+    toolPolicyDigest: string;
+    projectionVersion: number;
+    changed: boolean;
+  }> => {
+    assertServiceKey(args.serviceKey);
+    await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
+
+    const spaceRef = args.spaceRef.trim();
+    const bindingRef = args.bindingRef.trim();
+    const digest = args.toolPolicyDigest.trim();
+    if (
+      !spaceRef ||
+      !bindingRef ||
+      !digest ||
+      digest.length > 128 ||
+      !Number.isInteger(args.toolPolicyRevision) ||
+      args.toolPolicyRevision < 0
+    ) {
+      throw new Error("invalid_policy");
+    }
+
+    const binding = await ctx.db
+      .query("spaceAgentBindings")
+      .withIndex("by_binding_ref", (q: any) => q.eq("bindingRef", bindingRef))
+      .unique();
+    if (
+      !binding ||
+      (binding as any).spaceRef !== spaceRef ||
+      (binding as any).externalOrgId !== args.externalOrgId ||
+      ((binding as any).status !== "active" && (binding as any).status !== "paused")
+    ) {
+      throw new Error("agent_binding_not_found");
+    }
+
+    const storedRevision = (binding as any).toolPolicyRevision as number | undefined;
+    const storedDigest = (binding as any).toolPolicyDigest as string | undefined;
+    const projectionVersion = (binding as any).projectionVersion as number;
+    if (storedRevision !== undefined && args.toolPolicyRevision < storedRevision) {
+      return {
+        bindingRef,
+        toolPolicyRevision: storedRevision,
+        toolPolicyDigest: storedDigest ?? "",
+        projectionVersion,
+        changed: false,
+      };
+    }
+    if (storedRevision === args.toolPolicyRevision && storedDigest === digest) {
+      return {
+        bindingRef,
+        toolPolicyRevision: storedRevision,
+        toolPolicyDigest: digest,
+        projectionVersion,
+        changed: false,
+      };
+    }
+    const nextVersion = projectionVersion + 1;
+    await ctx.db.patch(binding._id, {
+      toolPolicyRevision: args.toolPolicyRevision,
+      toolPolicyDigest: digest,
+      projectionVersion: nextVersion,
+    });
+    return {
+      bindingRef,
+      toolPolicyRevision: args.toolPolicyRevision,
+      toolPolicyDigest: digest,
+      projectionVersion: nextVersion,
       changed: true,
     };
   },

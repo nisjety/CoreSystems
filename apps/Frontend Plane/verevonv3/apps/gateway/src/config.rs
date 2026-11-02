@@ -277,6 +277,13 @@ pub(crate) struct SpaceFeatureFlags {
     /// `SPACE_THREAD_PANE_UI` (WS01-S5): reported to the SPA as `features.thread_pane` (the right-hand
     /// thread pane and `?thread_id=` deep link). A rollout control, never an authorization input.
     pub(crate) thread_pane_ui: bool,
+    /// `SPACE_TOOL_POLICY_EDITOR_ENABLED` (WS10-S5b): the per-tool policy editor routes
+    /// (`GET|PUT /api/v1/spaces/{space_ref}/tool-policy`, `PUT .../agents/{binding_ref}/tool-policy`)
+    /// and the Agent tab editor, reported to the SPA as `features.tool_policy_editor`. Off answers
+    /// 404 `feature_disabled` and hides the editor; enforcement is governed by Execution Core's own
+    /// gate, not by this flag. A rollout control, never an authorization input: Control's live
+    /// manager or owner role decides who may write, and a policy only tightens.
+    pub(crate) tool_policy_editor: bool,
     /// `ORG_IDENTITY_ADMIN_API` (WS05-S6): the owner/admin domain verification routes
     /// (`/api/v1/orgs/{id}/domains`), proxied to org-core. Off answers 404 `feature_disabled`.
     /// A rollout control, never an authorization input: the live owner/admin membership decides.
@@ -371,6 +378,7 @@ impl SpaceFeatureFlags {
             room_pins: space_flag("SPACE_ROOM_PINS_API"),
             send_idempotency_api: space_flag("SPACE_SEND_IDEMPOTENCY_API"),
             thread_pane_ui: space_flag("SPACE_THREAD_PANE_UI"),
+            tool_policy_editor: space_flag("SPACE_TOOL_POLICY_EDITOR_ENABLED"),
             org_identity_admin_api: space_flag("ORG_IDENTITY_ADMIN_API"),
             run_live_text: space_flag("SPACE_RUN_LIVE_TEXT"),
             run_live_view: space_flag("SPACE_RUN_LIVE_VIEW"),

@@ -161,6 +161,13 @@ export const spaceTables = {
       v.union(v.literal("members"), v.literal("managers"), v.literal("allowlist")),
     ),
     respondToSubjects: v.optional(v.array(v.string())),
+    // WS10-S5b: projection of Control's per-tool policy for this agent: the agent layer's
+    // revision and the digest of the merged (Space ceiling + agent) view as of the last write
+    // through `spaceAgents:setSpaceAgentBindingPolicyForGateway`. Control is the store and the
+    // only authority; these two fields are for the editor and the legacy gateway filter, never
+    // an authorization input. ABSENT means no policy was written through the editor.
+    toolPolicyRevision: v.optional(v.number()),
+    toolPolicyDigest: v.optional(v.string()),
     status: v.union(
       v.literal("pending"),
       v.literal("active"),
