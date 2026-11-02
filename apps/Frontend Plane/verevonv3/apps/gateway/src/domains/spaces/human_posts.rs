@@ -539,7 +539,7 @@ fn attach_mentions(mut reply: Reply, planned: Option<&PlannedMentions>, recorded
 /// the scalar entries of `details` only, so nothing else an upstream puts in a body (extra keys,
 /// nested values, text of another service) reaches the browser. A ZDR catalogue code is rebuilt
 /// from the catalogue itself. `None` when the body has no well-formed code.
-fn filter_model_error(response: &Value) -> Option<Value> {
+pub(super) fn filter_model_error(response: &Value) -> Option<Value> {
     let error = response.get("error").and_then(Value::as_object)?;
     let code = error
         .get("code")

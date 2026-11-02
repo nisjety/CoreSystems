@@ -310,6 +310,10 @@ services:
       SPACE_DM_API: ${SPACE_DM_API:-true}
       SPACE_RUN_LIVE_VIEW: ${SPACE_RUN_LIVE_VIEW:-true}
       SPACE_RUN_LIVE_TEXT: ${SPACE_RUN_LIVE_TEXT:-true}
+      # WS12-S7: edit and delete a message (PATCH/DELETE .../threads/{id}/messages/{message_id}; 404
+      # space_message_revise_disabled when off). Rollout control only; Control's model.thread.revise decision
+      # and Session Core decide, ZDR orgs get the typed 412. Needs model-gateway SPACE_MESSAGE_REVISE_API.
+      SPACE_MESSAGE_REVISE_API: ${SPACE_MESSAGE_REVISE_API:-true}
       SPACE_RUN_MANAGER_STOP: ${SPACE_RUN_MANAGER_STOP:-true}
     ports:
       - "${VEREVON_BIND_ADDRESS:-127.0.0.1}:3185:3185"

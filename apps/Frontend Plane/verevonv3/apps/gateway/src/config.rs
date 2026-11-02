@@ -216,6 +216,12 @@ pub(crate) struct SpaceFeatureFlags {
     /// Control's `dm-eligibility` and the fixed roster decide, and a Zero Data Retention org is refused
     /// with the typed 412 whatever this says. Production default off; DMs also need WS04-S5 audience registration.
     pub(crate) dm_api: bool,
+    /// `SPACE_MESSAGE_REVISE_API` (WS12-S7): `PATCH`/`DELETE /api/v1/spaces/{space_ref}/threads/{thread_id}/messages/{message_id}`,
+    /// `features.message_revise` and `data.message_policy` of the Space context. Off answers 404
+    /// `space_message_revise_disabled`. A rollout control, never an authorization input: Control's
+    /// `model.thread.revise` decision and Session Core's author/owner/moderator check decide, and a Zero
+    /// Data Retention org is refused with the typed 412 whatever this says. Production default off.
+    pub(crate) message_revise_api: bool,
     /// `CLIENT_VERSION_POLICY` / `CLIENT_MIN_CONTRACT` (WS07-S3): the stale-client contract the
     /// public `/api/v1/client-config` route reports. Unlike the booleans its default is `banner`,
     /// never off. Carried here (not as an `AppState` field) so no test literal needs an edit.
@@ -450,6 +456,7 @@ impl SpaceFeatureFlags {
             room_artifacts: space_flag("SPACE_ROOM_ARTIFACTS_API"),
             room_pins: space_flag("SPACE_ROOM_PINS_API"),
             room_files_api: space_flag("SPACE_ROOM_FILES_API"),
+            message_revise_api: space_flag("SPACE_MESSAGE_REVISE_API"),
             room_files_ui: space_flag("SPACE_ROOM_FILES_UI"),
             turn_attachments_ui: space_flag("SPACE_TURN_ATTACHMENTS_UI"),
             message_search_api: space_flag("SPACE_MESSAGE_SEARCH_API"),

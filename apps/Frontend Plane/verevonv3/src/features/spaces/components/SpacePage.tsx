@@ -27,6 +27,7 @@ import {
   type SpaceRosterMember,
   type SpaceSearchHit,
   type SpaceAgentWork,
+  type SpaceMessagePolicyHints,
   type SpaceThread,
 } from '@/shared/api/spaces-client'
 import { translateApiError, useI18n } from '@/shared/i18n'
@@ -792,6 +793,8 @@ export default function SpacePage() {
                         unreadThreadIds={unreadIds}
                         journal={sendJournal}
                         humanPostsEnabled={() => current().features?.human_posts === true}
+                        messageReviseEnabled={() => current().features?.message_revise === true}
+                        messagePolicy={() => current().message_policy}
                         agentWork={agentWork}
                         onOpenRun={openRun}
                         archived={() => roomIsArchived(current())}
@@ -914,6 +917,14 @@ export default function SpacePage() {
                         threadId={threadId()}
                         thread={thread}
                         messageId={selectedMessageId}
+                        messageReviseEnabled={() => current().features?.message_revise === true}
+                        messagePolicy={() => current().message_policy}
+                        viewerRole={() => current().membership.role}
+                        archived={() => roomIsArchived(current())}
+                        postMaxChars={() => current().limits?.post_max_chars}
+                        onMessageChanged={() => {
+                          void refetchThreadsFull()
+                        }}
                         roster={() => (roster.error ? [] : roster() ?? [])}
                         viewerSubjectId={() => current().membership.subject_id}
                         agentName={roomAgentName(agents.error ? [] : agents() ?? [])}
@@ -994,6 +1005,9 @@ function SpaceConversationPanel(props: {
   readonly journal?: SpaceSendJournal
   /** The room's `features.human_posts`. Off, the composer is the single ask-the-agent box it was. */
   readonly humanPostsEnabled?: () => boolean
+  /** The room's `features.message_revise` and `data.message_policy` (WS12-S7). */
+  readonly messageReviseEnabled?: () => boolean
+  readonly messagePolicy?: () => SpaceMessagePolicyHints | null | undefined
   /** The listing's `data.agent_work` (WS09-S2): what the room's runs offer this caller. Absent means off. */
   readonly agentWork?: () => SpaceAgentWork | undefined
   /** Click-through from the composer's activity strip (WS09-S6). */
@@ -1066,6 +1080,10 @@ function SpaceConversationPanel(props: {
             spaceName={props.spaceName}
             viewerSubjectId={props.viewerSubjectId}
             viewerRole={props.viewerRole}
+            messageReviseEnabled={props.messageReviseEnabled}
+            messagePolicy={props.messagePolicy}
+            postMaxChars={props.postMaxChars}
+            archived={props.archived}
             threads={props.threads}
             timeline={props.timeline}
             sharedReadAvailable={props.sharedReadAvailable}

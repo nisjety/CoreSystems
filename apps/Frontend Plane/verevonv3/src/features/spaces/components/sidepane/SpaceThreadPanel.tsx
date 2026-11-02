@@ -6,12 +6,13 @@ import { threadStatus, formatWhen } from '@/features/spaces/lib/space-thread-pre
 import { ApiError } from '@/shared/api/http'
 import { presentSpaceDenialText, readSpaceDenial } from '@/shared/api/space-denials'
 import { getSpaceThreadTranscript } from '@/shared/api/spaces-client'
-import type { SpaceAgent, SpaceRosterMember, SpaceThread } from '@/shared/api/spaces-client'
+import type { SpaceAgent, SpaceMessagePolicyHints, SpaceRosterMember, SpaceThread } from '@/shared/api/spaces-client'
 import { useI18n } from '@/shared/i18n'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import { ThreadFollowControl } from '@/features/attention/components/ThreadFollowControl'
 import { SpaceRestrictedNotice } from '../SpaceRestrictedNotice'
 import { SpaceTurnList, normalizeTranscriptTurns, resolveAuthorName } from './SpaceTurnList'
+import { createSpaceTurnLifecycle } from '../../lib/space-message-lifecycle'
 import type { TranscriptTurn } from './SpaceTurnList'
 
 /**
@@ -58,6 +59,15 @@ export interface SpaceThreadPanelProps {
    * viewer may read does not hold it, the panel says so neutrally and never echoes the id.
    */
   readonly messageId?: () => string | null | undefined
+  /** `features.message_revise` (WS12-S7): edit and delete controls are offered. Absent means off. */
+  readonly messageReviseEnabled?: () => boolean
+  /** `data.message_policy` (WS12-S7): hints for which controls to offer. Never an authorization. */
+  readonly messagePolicy?: () => SpaceMessagePolicyHints | null | undefined
+  readonly viewerRole?: () => string | undefined
+  readonly archived?: () => boolean
+  readonly postMaxChars?: () => number | undefined
+  /** Called after an edit or delete landed, so the room re-reads its projection. */
+  readonly onMessageChanged?: () => void
 }
 
 // How long a reached message keeps its outline.
@@ -93,6 +103,21 @@ export function SpaceThreadPanel(props: SpaceThreadPanelProps) {
       }
     },
   )
+  // WS12-S7: edit and delete controls; a change re-reads this thread and the room's projection.
+  const lifecycle = createSpaceTurnLifecycle({
+    spaceRef: () => props.spaceRef,
+    threadId: () => props.threadId,
+    enabled: () => props.messageReviseEnabled?.() === true,
+    viewerSubjectId: () => props.viewerSubjectId?.(),
+    viewerRole: () => props.viewerRole?.(),
+    threadOwnerSubjectId: () => props.thread()?.owner_subject_id,
+    policy: () => props.messagePolicy?.(),
+    archived: props.archived,
+    onChanged: () => {
+      void refetch()
+      props.onMessageChanged?.()
+    },
+  })
   // A read for a different thread is not an answer for this one: while the new
   // read is in flight the pane shows loading, not the previous thread.
   const current = (): PanelRead | undefined => {
@@ -229,6 +254,8 @@ export function SpaceThreadPanel(props: SpaceThreadPanelProps) {
                 viewerSubjectId={props.viewerSubjectId}
                 agentName={props.agentName}
                 agents={props.agents}
+                lifecycle={lifecycle}
+                editMaxChars={props.postMaxChars?.()}
               />
             </div>
           </Show>

@@ -47,7 +47,8 @@ import { loadSpaceTranscript, updateSpaceThreadPresentation } from '@/shared/api
 import { markSpaceUnread } from '@/shared/api/spaces-attention-client'
 import { refreshSpaceAttention, spaceAttentionRoom } from '../lib/space-attention'
 import { firstUnreadIndex, markUnreadBeforeMs } from '../lib/space-unread'
-import type { SpaceAgent, SpaceAgentWork, SpaceRoomPin, SpaceRosterMember, SpaceThread } from '@/shared/api/spaces-client'
+import type { SpaceAgent, SpaceAgentWork, SpaceMessagePolicyHints, SpaceRoomPin, SpaceRosterMember, SpaceThread } from '@/shared/api/spaces-client'
+import { createSpaceTurnLifecycle } from '../lib/space-message-lifecycle'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { announce } from '@/shared/a11y/announcer'
 import { narrateNewPosts, narrateRunChange } from '@/features/spaces/lib/space-narration'
@@ -87,6 +88,14 @@ export interface SpaceRoomTimelineProps {
   readonly viewerSubjectId?: () => string | undefined
   /** The reader's room role, for the approval card's scope picker. Presentation only. */
   readonly viewerRole?: () => string | undefined
+  /** `features.message_revise` (WS12-S7): edit and delete controls are offered. Absent means off. */
+  readonly messageReviseEnabled?: () => boolean
+  /** `data.message_policy` (WS12-S7): hints for which controls to offer. Never an authorization. */
+  readonly messagePolicy?: () => SpaceMessagePolicyHints | null | undefined
+  /** The room's post length bound, also the edit bound. */
+  readonly postMaxChars?: () => number | undefined
+  /** The room is archived: messages can no longer be changed. */
+  readonly archived?: () => boolean
   /** Focuses the room composer — the intro block's primary action. */
   readonly onStartConversation?: () => void
   /** When provided, the intro block offers the in-room create-agent flow. */
@@ -432,6 +441,10 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
               roster={props.roster}
               viewerSubjectId={props.viewerSubjectId}
               viewerRole={props.viewerRole}
+              messageReviseEnabled={props.messageReviseEnabled}
+              messagePolicy={props.messagePolicy}
+              postMaxChars={props.postMaxChars}
+              archived={props.archived}
               agentName={agentName()}
               agents={props.agents}
               transcriptEnabled={sharedRead}
@@ -498,6 +511,10 @@ function SpaceRoomPost(props: {
   readonly roster: () => readonly SpaceRosterMember[]
   readonly viewerSubjectId?: () => string | undefined
   readonly viewerRole?: () => string | undefined
+  readonly messageReviseEnabled?: () => boolean
+  readonly messagePolicy?: () => SpaceMessagePolicyHints | null | undefined
+  readonly postMaxChars?: () => number | undefined
+  readonly archived?: () => boolean
   readonly agentName: string
   /** Roster agents, for the avatar colour of an assistant turn (exactly-one-name match, else neutral). */
   readonly agents: () => readonly SpaceAgent[]
@@ -607,8 +624,23 @@ function SpaceRoomPost(props: {
   // so it is dropped here and the post reads exactly as it did before.
   const allTurns = (): readonly TranscriptTurn[] => {
     const all = transcript()?.turns ?? []
-    return props.artifactsOn ? all : all.filter((turn) => turn.content.length > 0)
+    return props.artifactsOn ? all : all.filter((turn) => turn.content.length > 0 || turn.revisionState === 'deleted')
   }
+  // WS12-S7: edit and delete controls for this post's turns; a change re-reads this post's transcript.
+  const lifecycle = createSpaceTurnLifecycle({
+    spaceRef: () => props.spaceRef,
+    threadId: () => props.thread.thread_id,
+    enabled: () => props.messageReviseEnabled?.() === true,
+    viewerSubjectId: () => props.viewerSubjectId?.(),
+    viewerRole: () => props.viewerRole?.(),
+    threadOwnerSubjectId: () => props.thread.owner_subject_id,
+    policy: () => props.messagePolicy?.(),
+    archived: props.archived,
+    onChanged: () => {
+      refetchTranscript()
+      props.onPresentationChanged?.()
+    },
+  })
   // A long transcript is drawn as its first turn plus the newest ones, with a row to show the rest.
   const [turnsExpanded, setTurnsExpanded] = createSignal(false)
   const turnWindow = (): { readonly turns: readonly TranscriptTurn[]; readonly omitted: number } => {
@@ -850,6 +882,7 @@ function SpaceRoomPost(props: {
   return (
     <li
       class="verevon-room-post"
+      ref={(element) => { postEl = element }}
       id={`post-${props.thread.thread_id}`}
       data-thread-id={props.thread.thread_id}
       data-failed={isFailed() || undefined}
@@ -859,7 +892,6 @@ function SpaceRoomPost(props: {
       data-run-status={props.thread.latest_run_status ?? undefined}
       aria-posinset={props.position?.posinset}
       aria-setsize={props.position?.setsize}
-      ref={(element) => { postEl = element }}
     >
       {/* Pinned and new are facts about the post, stated before its content so
           a reader scanning the room sees them first. "New" is drawn once for the whole room as the
@@ -947,6 +979,8 @@ function SpaceRoomPost(props: {
           onOpenArtifact={props.artifactsOn ? setOpenArtifactId : undefined}
           headMeta={headMeta}
           earlierTurns={earlierTurns}
+          lifecycle={lifecycle}
+          editMaxChars={props.postMaxChars?.()}
         />
       </Show>
 

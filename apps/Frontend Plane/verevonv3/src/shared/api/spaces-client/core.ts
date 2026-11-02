@@ -49,6 +49,14 @@ export type SpaceSummary = {
   hidden?: boolean
 }
 
+/** WS12-S7: hints for the edit and delete controls (`data.message_policy` of the Space context). */
+export type SpaceMessagePolicyHints = {
+  readonly revise_entitled: boolean
+  readonly moderate_entitled: boolean
+  /** What happens to the original text of a changed message. */
+  readonly original_retention: 'purge' | 'retain'
+}
+
 /** A server-composed lifecycle + current-membership read. It contains no
  * signed decision, recipient audience, or owner-resource authority. */
 export type SpaceContext = {
@@ -69,11 +77,19 @@ export type SpaceContext = {
     people_search?: boolean
     /** WS12-S3: direct messages are offered. */
     dm?: boolean
+    /** WS12-S7: editing and deleting messages is offered (rollout only; Control decides each change). */
+    message_revise?: boolean
     /** WS10-S5b: the Agent tab shows the per-tool policy editor. */
     tool_policy_editor?: boolean
     /** WS14: the room file library's rollout, `{turn_attachments, durable, files_tab}`. */
     room_files?: { turn_attachments?: boolean; durable?: boolean; files_tab?: boolean }
   }
+  /**
+   * WS12-S7: what the organisation's message policy lets this member do, as hints for which controls
+   * to offer. `null` or absent when the flag is off or Control did not answer (then no moderator
+   * controls). Never an authorization: every change still needs a Control decision.
+   */
+  message_policy?: SpaceMessagePolicyHints | null
   /** Server-stated bounds (WS01-S5). Absent on an older gateway: use the documented defaults. */
   limits?: {
     post_max_chars?: number
@@ -807,6 +823,17 @@ export type SpaceThreadTurn = {
    * (`spaceRunWorkFrom`); absent on every other turn and when the summary was not stored.
    */
   readonly work?: SpaceRunWork
+  /**
+   * WS12-S7: this message was edited or deleted. A deleted turn has no text (`content` is empty) and
+   * is kept as a tombstone row, never dropped.
+   */
+  readonly revisionState?: 'edited' | 'deleted'
+  /** When the latest edit or deletion was applied (ISO-8601 UTC), when the server said. */
+  readonly revisedAt?: string
+  /** Who applied it, from the server's record. Absent means unknown, never the reader. */
+  readonly revisedBySubjectId?: string
+  /** A deleted message an agent run had already answered (the answer stays). */
+  readonly agentFollowedUp?: boolean
 }
 
 export type SpaceThreadTranscript = {
@@ -848,9 +875,17 @@ function normalizeSpaceThreadTurns(value: unknown): readonly SpaceThreadTurn[] {
     const content = typeof record.content === 'string' ? record.content.trim() : ''
     if (role !== 'user' && role !== 'assistant' && role !== 'system' && role !== 'tool') continue
     // An artifact-only assistant turn (the agent replied with the artifact and
-    // no prose) is kept: it is the turn the room's chip hangs on.
+    // no prose) is kept: it is the turn the chip hangs on.
     const artifacts = role === 'assistant' ? roomArtifactsFromMetadata(record.artifacts) : []
-    if (!content && artifacts.length === 0) continue
+    // A deleted message arrives with empty text and stays as a tombstone row (WS12-S7).
+    const revisionState =
+      record.revision_state === 'edited' || record.revision_state === 'deleted' ? record.revision_state : undefined
+    if (!content && artifacts.length === 0 && revisionState !== 'deleted') continue
+    const revisedAt = normalizeTurnTime(record.revised_at)
+    const revisedBySubjectId =
+      typeof record.revised_by_subject_id === 'string' && record.revised_by_subject_id.trim()
+        ? record.revised_by_subject_id.trim()
+        : undefined
     const messageId =
       typeof record.message_id === 'string' && record.message_id.trim()
         ? record.message_id.trim()
@@ -884,6 +919,10 @@ function normalizeSpaceThreadTurns(value: unknown): readonly SpaceThreadTurn[] {
       ...(artifacts.length > 0 ? { artifacts } : {}),
       ...(retrievalDeclined ? { retrievalDeclined } : {}),
       ...(work ? { work } : {}),
+      ...(revisionState ? { revisionState } : {}),
+      ...(revisionState && revisedAt ? { revisedAt } : {}),
+      ...(revisionState && revisedBySubjectId ? { revisedBySubjectId } : {}),
+      ...(revisionState === 'deleted' && record.agent_followed_up === true ? { agentFollowedUp: true } : {}),
     })
   }
   return turns

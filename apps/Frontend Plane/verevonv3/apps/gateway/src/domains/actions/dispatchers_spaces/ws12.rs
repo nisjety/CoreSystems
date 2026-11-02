@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 
 use crate::config::AppState;
 use crate::domains::spaces::dm::{open_dm_core, set_hidden};
+use crate::domains::spaces::message_lifecycle::{revise_message, Revision};
 use crate::middleware::AuthenticatedUser;
 
 use super::super::dispatchers::{
@@ -51,4 +52,80 @@ pub(in crate::domains::actions) async fn dispatch_spaces_hide_space(
     let hidden = input.get("hidden").and_then(Value::as_bool).unwrap_or(true);
     let (status, axum::Json(resp)) = set_hidden(state, user, space_ref, hidden).await;
     owner_json_response_to_envelope("spaces.hide_space", user, status, resp)
+}
+
+/// WS12-S7: `spaces.edit_message` rides the same flow as `PATCH
+/// /api/v1/spaces/{space_ref}/threads/{thread_id}/messages/{message_id}`.
+pub(in crate::domains::actions) async fn dispatch_spaces_edit_message(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let (space_ref, thread_id, message_id, key) = (
+        ticket_string(input, "spaceRef"),
+        ticket_string(input, "threadId"),
+        ticket_string(input, "messageId"),
+        ticket_string(input, "idempotencyKey"),
+    );
+    if space_ref.is_empty() || thread_id.is_empty() || message_id.is_empty() {
+        return ticket_bad_request(
+            "spaces.edit_message requires non-empty 'spaceRef', 'threadId' and 'messageId'",
+        );
+    }
+    let content = input
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let (status, axum::Json(resp)) = revise_message(
+        state,
+        user,
+        headers,
+        space_ref,
+        thread_id,
+        message_id,
+        key,
+        Revision::Edit {
+            content: content.to_owned(),
+        },
+        Some(input),
+    )
+    .await;
+    owner_json_response_to_envelope("spaces.edit_message", user, status, resp)
+}
+
+/// WS12-S7: `spaces.delete_message` rides the same flow as `DELETE
+/// /api/v1/spaces/{space_ref}/threads/{thread_id}/messages/{message_id}`.
+pub(in crate::domains::actions) async fn dispatch_spaces_delete_message(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let (space_ref, thread_id, message_id, key) = (
+        ticket_string(input, "spaceRef"),
+        ticket_string(input, "threadId"),
+        ticket_string(input, "messageId"),
+        ticket_string(input, "idempotencyKey"),
+    );
+    if space_ref.is_empty() || thread_id.is_empty() || message_id.is_empty() {
+        return ticket_bad_request(
+            "spaces.delete_message requires non-empty 'spaceRef', 'threadId' and 'messageId'",
+        );
+    }
+    let (status, axum::Json(resp)) = revise_message(
+        state,
+        user,
+        headers,
+        space_ref,
+        thread_id,
+        message_id,
+        key,
+        Revision::Delete {
+            moderation_reason: ticket_string(input, "moderationReason").to_owned(),
+        },
+        Some(input),
+    )
+    .await;
+    owner_json_response_to_envelope("spaces.delete_message", user, status, resp)
 }

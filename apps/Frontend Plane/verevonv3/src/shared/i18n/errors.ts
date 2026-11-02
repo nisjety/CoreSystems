@@ -1067,6 +1067,17 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   space_not_hideable: { no: 'Bare en direktemelding kan skjules.', en: 'Only a direct message can be hidden.' },
   space_authority_unavailable: { no: 'Kunne ikke bekrefte tilgangen akkurat nå. Ingenting er endret. Prøv igjen om litt.', en: 'Access could not be confirmed right now. Nothing was changed. Try again shortly.' },
 
+  // WS12-S7 message edit and delete
+  space_message_revise_disabled: { no: 'Redigering og sletting av meldinger er ikke slått på.', en: 'Editing and deleting messages is not turned on.' },
+  space_message_revise_not_authorized: { no: 'Organisasjonen din tillater ikke at meldinger endres eller slettes. Spør en administrator.', en: 'Your organization does not allow messages to be changed or deleted. Ask an administrator.' },
+  message_revise_forbidden: { no: 'Du kan bare endre dine egne meldinger, svar på dine egne kjøringer, eller som leder fjerne andres der organisasjonen tillater det.', en: 'You can only change your own messages, answers to your own runs, or, as a manager where your organization allows it, remove other people\'s.' },
+  message_not_found: { no: 'Fant ikke meldingen. Den kan være slettet.', en: 'The message was not found. It may have been deleted.' },
+  message_already_deleted: { no: 'Meldingen er allerede slettet.', en: 'The message was already deleted.' },
+  revision_noop: { no: 'Meldingen er uendret. Ingenting ble lagret.', en: 'The message is unchanged. Nothing was saved.' },
+  revision_limit: { no: 'Meldingen er endret for mange ganger.', en: 'The message has been changed too many times.' },
+  message_state_conflict: { no: 'Meldingen ble endret av noen andre mens du jobbet. Last inn på nytt og prøv igjen.', en: 'The message was changed by someone else while you worked. Reload and try again.' },
+  invalid_message: { no: 'Meldingen er tom eller for lang, eller valget er ugyldig. Ingenting er endret.', en: 'The message is empty or too long, or the choice is not valid. Nothing was changed.' },
+
   // WS05 org security
 
   // WS13 message search

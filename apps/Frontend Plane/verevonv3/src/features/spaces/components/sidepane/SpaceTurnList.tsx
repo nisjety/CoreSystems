@@ -1,5 +1,5 @@
 import { Bot } from '@/shared/icons'
-import { For, Show } from 'solid-js'
+import { createSignal, For, Show } from 'solid-js'
 
 import { ChatMarkdown } from '@/features/chat/components/ChatMessages'
 import type { ChatArtifact } from '@/features/chat/components/chat-types'
@@ -7,7 +7,10 @@ import { SpaceArtifactChip } from '../SpaceArtifactChip'
 import { spaceRunWorkFrom } from '@/shared/api/spaces-client'
 import type { SpaceAgent, SpaceRosterMember, SpaceRunWork, SpaceThread } from '@/shared/api/spaces-client'
 import { SpaceRunWorkSummary } from '../SpaceRunCard'
-import { useI18n } from '@/shared/i18n'
+import { SpaceMessageEdit } from '../SpaceMessageEdit'
+import { SpaceMessageToolbar } from '../SpaceMessageToolbar'
+import type { SpaceTurnLifecycle } from '../../lib/space-message-lifecycle'
+import { translateApiError, useI18n } from '@/shared/i18n'
 import { AgentAvatar } from '../AgentAvatar'
 import { SpaceIdentityHoverCard } from '../SpaceIdentityHoverCard'
 import { agentAvatarColor, agentForName, memberTint } from '../../lib/agent-avatar'
@@ -55,6 +58,14 @@ export type TranscriptTurn = {
   readonly retrievalDeclined?: SpaceRetrievalDeclineReason
   /** The content-free work summary of this assistant turn (WS09-S3 `metadata.work`), re-read through the closed shape. */
   readonly work?: SpaceRunWork
+  /** WS12-S7: edited or deleted. A deleted turn has no text and is drawn as a tombstone. */
+  readonly revisionState?: 'edited' | 'deleted'
+  /** When the latest change was applied (ISO-8601 UTC). */
+  readonly revisedAt?: string
+  /** Who applied it, as the server recorded. */
+  readonly revisedBySubjectId?: string
+  /** A deleted message an agent run had already answered. */
+  readonly agentFollowedUp?: boolean
 }
 
 export const MAX_TURNS_PER_POST = 30
@@ -74,8 +85,18 @@ export function normalizeTranscriptTurns(
     const artifacts = role === 'assistant' && Array.isArray(record.artifacts)
       ? (record.artifacts as readonly ChatArtifact[])
       : []
+    // A deleted message arrives with empty text and stays as a tombstone row (WS12-S7).
+    const revisionState = record.revisionState === 'edited' || record.revisionState === 'deleted'
+      ? record.revisionState
+      : undefined
     // An artifact-only assistant turn is kept: it is the turn the chip hangs on.
-    if (!content && artifacts.length === 0) continue
+    if (!content && artifacts.length === 0 && revisionState !== 'deleted') continue
+    const revisedAt = typeof record.revisedAt === 'string' && Number.isFinite(Date.parse(record.revisedAt))
+      ? new Date(record.revisedAt).toISOString()
+      : undefined
+    const revisedBySubjectId = typeof record.revisedBySubjectId === 'string' && record.revisedBySubjectId.trim()
+      ? record.revisedBySubjectId.trim()
+      : undefined
     const messageId = typeof record.messageId === 'string' && record.messageId.trim()
       ? record.messageId.trim()
       : undefined
@@ -106,6 +127,10 @@ export function normalizeTranscriptTurns(
       ...(artifacts.length > 0 ? { artifacts } : {}),
       ...(retrievalDeclined ? { retrievalDeclined } : {}),
       ...(work ? { work } : {}),
+      ...(revisionState ? { revisionState } : {}),
+      ...(revisionState && revisedAt ? { revisedAt } : {}),
+      ...(revisionState && revisedBySubjectId ? { revisedBySubjectId } : {}),
+      ...(revisionState === 'deleted' && record.agentFollowedUp === true ? { agentFollowedUp: true } : {}),
     })
   }
   // Over the cap, keep the first turn (the post's opening message) and the NEWEST turns, never the
@@ -189,6 +214,13 @@ export interface SpaceTurnListProps {
    * one above it.
    */
   readonly earlierTurns?: () => { readonly count: number; readonly onExpand: () => void } | undefined
+  /**
+   * Edit and delete controls (WS12-S7). Absent, the rows are read-only and an edited or deleted
+   * message still shows its marker or tombstone.
+   */
+  readonly lifecycle?: SpaceTurnLifecycle
+  /** The longest edit the room accepts, in characters. */
+  readonly editMaxChars?: number
 }
 
 export function SpaceTurnList(props: SpaceTurnListProps) {
@@ -226,7 +258,12 @@ export function SpaceTurnList(props: SpaceTurnListProps) {
     })
   }
   const visibleTurns = () =>
-    props.turns().filter((turn) => turn.content.length > 0 || (props.onOpenArtifact && (turn.artifacts?.length ?? 0) > 0))
+    props.turns().filter(
+      (turn) =>
+        turn.content.length > 0
+        || turn.revisionState === 'deleted'
+        || (props.onOpenArtifact && (turn.artifacts?.length ?? 0) > 0),
+    )
   // The turn's own recorded persona wins; the room-level heuristic (single active agent, else
   // 'Verevon') covers turns persisted before attribution existed. A human turn is named by the
   // subject the server recorded, never by who happens to be reading.
@@ -240,6 +277,39 @@ export function SpaceTurnList(props: SpaceTurnListProps) {
           !(index() === 1 && props.earlierTurns?.() !== undefined)
           && continuesTurnGroup(visibleTurns()[index() - 1], turn, props.agentName)
         const time = () => formatTurnTime(turn.createdAt)
+        // WS12-S7: per-row edit state. A refetch after a change builds new turn objects, which
+        // closes the editor and clears any error.
+        const [editing, setEditing] = createSignal(false)
+        const [busy, setBusy] = createSignal(false)
+        const [lifecycleError, setLifecycleError] = createSignal<string | undefined>(undefined)
+        const deleted = () => turn.revisionState === 'deleted'
+        const removeTurn = async () => {
+          const lifecycle = props.lifecycle
+          if (!lifecycle || busy()) return
+          setBusy(true)
+          setLifecycleError(undefined)
+          try {
+            await lifecycle.remove(turn)
+          } catch (error) {
+            setLifecycleError(
+              translateApiError(error, i18n.tr, {
+                no: 'Meldingen kunne ikke slettes. Ingenting er endret. Prøv igjen om litt.',
+                en: 'The message could not be deleted. Nothing was changed. Try again shortly.',
+              }),
+            )
+          } finally {
+            setBusy(false)
+          }
+        }
+        const tombstoneText = () => {
+          const byOther = turn.role === 'user'
+            && turn.revisedBySubjectId !== undefined
+            && turn.revisedBySubjectId !== turn.authorSubjectId
+          if (turn.role === 'assistant') return i18n.tr('Dette svaret er slettet.', 'This answer was deleted.')
+          return byOther
+            ? i18n.tr('Meldingen ble fjernet av en leder.', 'This message was removed by a manager.')
+            : i18n.tr('Meldingen er slettet.', 'This message was deleted.')
+        }
         return (
           <>
           <div
@@ -274,6 +344,19 @@ export function SpaceTurnList(props: SpaceTurnListProps) {
               </Show>
             </Show>
             <div class="verevon-room-turn__content">
+              <Show when={props.lifecycle && !editing() && !deleted() && turn.messageId}>
+                <SpaceMessageToolbar
+                  canEdit={props.lifecycle?.canEdit(turn) === true}
+                  canDelete={props.lifecycle?.canDelete(turn) === true}
+                  moderating={turn.role === 'user' && props.lifecycle?.canEdit(turn) !== true}
+                  busy={busy()}
+                  onEdit={() => {
+                    setLifecycleError(undefined)
+                    setEditing(true)
+                  }}
+                  onDelete={() => { void removeTurn() }}
+                />
+              </Show>
               <Show when={!grouped()}>
                 <PostTurnHeader
                   author={nameOf(turn)}
@@ -284,6 +367,27 @@ export function SpaceTurnList(props: SpaceTurnListProps) {
                   status={index() === 0 ? props.headMeta?.()?.status : undefined}
                 />
               </Show>
+              <Show when={deleted()}>
+                <p class="verevon-room-turn__tombstone" data-revision-state="deleted">
+                  {tombstoneText()}
+                  <Show when={turn.agentFollowedUp}>
+                    {' '}
+                    {i18n.tr('En agent hadde allerede svart på den.', 'An agent had already answered it.')}
+                  </Show>
+                </p>
+              </Show>
+              <Show when={!deleted() && editing() && props.lifecycle}>
+                <SpaceMessageEdit
+                  initial={turn.content}
+                  maxChars={props.editMaxChars ?? 8000}
+                  onSave={async (content) => {
+                    await props.lifecycle?.edit(turn, content)
+                    setEditing(false)
+                  }}
+                  onCancel={() => setEditing(false)}
+                />
+              </Show>
+              <Show when={!deleted() && !editing()}>
               <Show
                 when={turn.role === 'assistant'}
                 fallback={
@@ -316,6 +420,21 @@ export function SpaceTurnList(props: SpaceTurnListProps) {
                     <ChatMarkdown content={turn.content} />
                   </div>
                 </Show>
+              </Show>
+              <Show when={turn.revisionState === 'edited'}>
+                <span
+                  class="verevon-room-turn__edited"
+                  data-revision-state="edited"
+                  title={formatTurnTime(turn.revisedAt)?.full}
+                >
+                  {i18n.tr('(redigert)', '(edited)')}
+                </span>
+              </Show>
+              </Show>
+              <Show when={lifecycleError()}>
+                {(message) => (
+                  <p class="verevon-message-edit__error" role="alert">{message()}</p>
+                )}
               </Show>
               {/* The same one-line note the live exchange showed (D1-242): this answer did not use the
                   organisation's knowledge, and why. Read from the stored answer, so reopening the thread keeps it. */}
