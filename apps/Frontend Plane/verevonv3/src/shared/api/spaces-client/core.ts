@@ -23,6 +23,9 @@ export type SpaceMembership = {
   visibility?: string
   /** WS04-S8: the role a self-join receives (`viewer` or `editor`). Absent on an older Control. */
   join_role?: string
+  /** WS04-S11: `full` or `since_join`. Absent on an older Control: unknown, not full. A label for
+   * the timeline notice only; Session Core applies the floor, and the flags can still be off. */
+  history_mode?: string
   /** WS04-S4: false while the room's recipient audience does not include the caller yet. Absent: unknown. */
   recipient_ready?: boolean
   revisions: {

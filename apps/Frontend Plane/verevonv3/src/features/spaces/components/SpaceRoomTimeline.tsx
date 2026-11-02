@@ -29,6 +29,7 @@ import type { PostHeadMeta, PostStatus, TranscriptTurn } from './sidepane/SpaceT
 import { SystemRowsGroup } from './entries/SystemRowsGroup'
 import type { SpaceSystemEntry } from '@/shared/api/spaces-client'
 import { SpaceRestrictedNotice } from './SpaceRestrictedNotice'
+import { SpaceHistoryNotice } from './SpaceHistoryNotice'
 import { SpacePendingNewPost, SpacePendingReplies } from './SpacePendingPost'
 import type { SpaceJournalEntry } from '../lib/space-send-journal'
 import { spaceRoomFeatureWithDevOverride } from '../lib/space-room-features'
@@ -129,6 +130,8 @@ export interface SpaceRoomTimelineProps {
    * is today's behaviour on a gateway that does not say.
    */
   readonly sharedReadAvailable?: () => boolean
+  /** WS04-S11: the membership's `history_mode`. `since_join` shows the history notice. Absent: nothing. */
+  readonly historyMode?: () => string | undefined
   /**
    * Artifacts the sender's own live stream produced in a thread, held in memory
    * by the page until the next transcript read carries them. Absent while the
@@ -389,6 +392,9 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
           shared reads, every post would otherwise repeat the same refusal. */}
       <Show when={!sharedRead()}>
         <SpaceRestrictedNotice variant="room" />
+      </Show>
+      <Show when={sharedRead() && props.historyMode?.() === 'since_join'}>
+        <SpaceHistoryNotice />
       </Show>
       <Show when={firstUnreadId()}>
         <button type="button" class="verevon-room-jump-unread" onClick={jumpToUnread}>

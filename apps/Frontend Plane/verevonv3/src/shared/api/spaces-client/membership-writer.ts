@@ -51,6 +51,8 @@ export async function leaveSpaceRoom(
 // `invalid_request`. All arrive as an ApiError carrying the code.
 export type RoomVisibility = 'private' | 'org_public'
 export type RoomJoinRole = 'viewer' | 'editor'
+/** WS04-S11: `since_join` hides history from before a member joined (once the floor flags are on). */
+export type RoomHistoryMode = 'full' | 'since_join'
 
 export type SpaceJoinResult = {
   role: string
@@ -83,20 +85,33 @@ export async function joinSpaceRoom(spaceRef: string, idempotencyKey?: string): 
 export type SpaceRoomSettingsResult = {
   visibility: RoomVisibility | null
   joinRole: RoomJoinRole | null
+  /** WS04-S11: absent when the server did not echo it. */
+  historyMode: RoomHistoryMode | null
   changed: boolean
 }
 
 /** Set a room's visibility and/or the role a self-join receives. Send only what changes. */
 export async function updateSpaceRoomSettings(
   spaceRef: string,
-  settings: { readonly visibility?: RoomVisibility; readonly joinRole?: RoomJoinRole },
+  settings: {
+    readonly visibility?: RoomVisibility
+    readonly joinRole?: RoomJoinRole
+    /** WS04-S11: owner-only on Control; `since_join` hides earlier history from later joiners. */
+    readonly historyMode?: RoomHistoryMode
+  },
   idempotencyKey?: string,
 ): Promise<SpaceRoomSettingsResult> {
   const body: Record<string, string> = {}
   if (settings.visibility !== undefined) body.visibility = settings.visibility
   if (settings.joinRole !== undefined) body.join_role = settings.joinRole
+  if (settings.historyMode !== undefined) body.history_mode = settings.historyMode
   if (idempotencyKey) body.idempotency_key = idempotencyKey
-  const response = await requestJson<{ visibility?: string | null; join_role?: string | null; changed?: boolean }>(
+  const response = await requestJson<{
+    visibility?: string | null
+    join_role?: string | null
+    history_mode?: string | null
+    changed?: boolean
+  }>(
     `/api/v1/spaces/${encodeURIComponent(spaceRef)}/settings`,
     { method: 'PATCH', body: JSON.stringify(body) },
   )
@@ -104,6 +119,8 @@ export async function updateSpaceRoomSettings(
     visibility:
       response.visibility === 'org_public' ? 'org_public' : response.visibility === 'private' ? 'private' : null,
     joinRole: response.join_role === 'editor' ? 'editor' : response.join_role === 'viewer' ? 'viewer' : null,
+    historyMode:
+      response.history_mode === 'since_join' ? 'since_join' : response.history_mode === 'full' ? 'full' : null,
     changed: response.changed === true,
   }
 }

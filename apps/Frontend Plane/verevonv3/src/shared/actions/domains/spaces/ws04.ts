@@ -56,6 +56,8 @@ const roomVisibility = z.enum(['private', 'org_public'])
 // A self-join never receives manager or owner: Control's CHECK pins it to viewer or editor.
 const roomJoinRole = z.enum(['viewer', 'editor'])
 
+const roomHistoryMode = z.enum(['full', 'since_join'])
+
 const spaceJoinRoomInput = z.object({
   spaceRef: z.string().min(1),
 })
@@ -75,15 +77,19 @@ const spaceUpdateRoomSettingsInput = z
     spaceRef: z.string().min(1),
     visibility: roomVisibility.optional(),
     joinRole: roomJoinRole.optional(),
+    // WS04-S11: owner-only on Control (a manager answers 403 `room_role_forbidden`).
+    historyMode: roomHistoryMode.optional(),
   })
-  .refine((value) => value.visibility !== undefined || value.joinRole !== undefined, {
-    message: 'Provide a visibility or a join role.',
-  })
+  .refine(
+    (value) => value.visibility !== undefined || value.joinRole !== undefined || value.historyMode !== undefined,
+    { message: 'Provide a visibility, a join role or a history mode.' },
+  )
 
 const spaceUpdateRoomSettingsOutput = z.object({
   space_ref: z.string(),
   visibility: roomVisibility.nullable(),
   join_role: roomJoinRole.nullable(),
+  history_mode: roomHistoryMode.nullable().optional(),
   changed: z.boolean(),
 })
 
@@ -138,9 +144,9 @@ export const ws04SpaceActions = [
   },
   {
     id: 'spaces.update_room_settings',
-    label: 'Update Space room visibility',
+    label: 'Update Space room visibility and history',
     description:
-      'Set whether a named room is private or open to the organization directory, and the role a self-join receives (viewer or editor). Only a room owner or manager may; opening a room needs the directory policy of the organization to be on, and the organization room and archived rooms are refused.',
+      'Set whether a named room is private or open to the organization directory, and the role a self-join receives (viewer or editor); an owner may also keep earlier history from later joiners (since_join). Only a room owner or manager may; opening a room needs the directory policy of the organization to be on, and the organization room and archived rooms are refused.',
     ownerPlane: 'control',
     risk: 'medium',
     requiresApproval: false,

@@ -800,6 +800,7 @@ export default function SpacePage() {
                         timeline={timelineStore()}
                         liveArtifacts={liveArtifacts}
                         sharedReadAvailable={sharedReadAvailable}
+                        historyMode={() => current().membership.history_mode}
                         roomPins={() => (threads.error ? [] : threads()?.pins ?? [])}
                         loading={() => threads.loading}
                         unavailable={threadsUnavailable}
@@ -999,6 +1000,8 @@ function SpaceConversationPanel(props: {
   readonly timeline?: SpaceTimelineStore
   /** The listing's `shared_read.available`; false shows the room's restricted notice. */
   readonly sharedReadAvailable?: () => boolean
+  /** WS04-S11: the membership's `history_mode`, for the timeline's history notice. */
+  readonly historyMode?: () => string | undefined
   /** The listing's room pins (WS13-S8). */
   readonly roomPins?: () => readonly SpaceRoomPin[]
   readonly loading: () => boolean
@@ -1107,6 +1110,7 @@ function SpaceConversationPanel(props: {
             threads={props.threads}
             timeline={props.timeline}
             sharedReadAvailable={props.sharedReadAvailable}
+            historyMode={props.historyMode}
             roomPins={props.roomPins}
             agentWork={props.agentWork}
             liveArtifacts={artifactsOn() ? props.liveArtifacts.forThread : undefined}
