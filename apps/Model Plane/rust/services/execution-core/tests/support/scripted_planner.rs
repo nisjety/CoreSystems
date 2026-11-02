@@ -6,7 +6,8 @@ use std::sync::Mutex;
 use execution_core::browser_agent::planner_view::PlannerView;
 use execution_core::browser_agent::BrowserAction;
 use execution_core::llm_planner::{
-    ActionPlanner, PlannerContext, PlannerError, PlannerReply, PlannerUsage,
+    ActionPlanner, DoneOutcome, DonePayload, PlannerContext, PlannerError, PlannerReply,
+    PlannerUsage,
 };
 
 /// What the planner saw on one call: the view the loop built (None on the first
@@ -45,6 +46,16 @@ impl ScriptedPlanner {
 
     pub fn then_done(self) -> Self {
         self.push(Ok(PlannerReply::done()))
+    }
+
+    /// A `done` with an answer and an outcome (the honest `done`).
+    pub fn then_done_with(self, answer: &str, outcome: DoneOutcome) -> Self {
+        self.push(Ok(PlannerReply::done_with(DonePayload::new(answer, outcome))))
+    }
+
+    /// Any reply, e.g. one read from raw model text by `reply_from_content`.
+    pub fn then_reply(self, reply: PlannerReply) -> Self {
+        self.push(Ok(reply))
     }
 
     pub fn then_error(self, error: PlannerError) -> Self {

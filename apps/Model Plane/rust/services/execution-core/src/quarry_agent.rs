@@ -748,6 +748,29 @@ pub fn parse_typed_error(status: u16, body: &str) -> Option<TypedError> {
     })
 }
 
+/// A fixed-vocabulary description of a failed Quarry call for a run summary
+/// and the planner's tool result. A typed error is `<status> <CODE>` plus its
+/// `details.reason` when that is a plain token; Quarry's `message` (operator
+/// text, which can echo a URL or a page) is never included. Other errors keep
+/// their own `Display`.
+#[must_use]
+pub fn fixed_error_text(error: &AgentClientError) -> String {
+    let AgentClientError::Typed(typed) = error else {
+        return error.to_string();
+    };
+    let code_ok = !typed.code.is_empty()
+        && typed.code.len() <= 48
+        && typed
+            .code
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_');
+    let code = if code_ok { typed.code.as_str() } else { "UNKNOWN" };
+    match typed.reason.as_deref().filter(|r| is_reason_token(r)) {
+        Some(reason) => format!("{} {code} ({reason})", typed.status),
+        None => format!("{} {code}", typed.status),
+    }
+}
+
 /// The Quarry code for an exhausted agent-run budget (402).
 pub const BUDGET_EXHAUSTED_CODE: &str = "BUDGET_EXHAUSTED";
 
@@ -1937,6 +1960,24 @@ mod tests {
 
     fn typed(status: u16, code: &str, details: serde_json::Value) -> AgentClientError {
         AgentClientError::Typed(parse_typed_error(status, &envelope_body(code, "m", details)).unwrap())
+    }
+
+    #[test]
+    fn fixed_error_text_never_carries_the_quarry_message() {
+        let body = serde_json::json!({
+            "data": null, "meta": {},
+            "error": {"code": "FORBIDDEN", "message": "navigation to https://evil.example/x?token=abc denied",
+                      "details": {"reason": "policy_denied"}}
+        })
+        .to_string();
+        let typed = parse_typed_error(403, &body).expect("an envelope");
+        let text = fixed_error_text(&AgentClientError::Typed(typed));
+        assert_eq!(text, "403 FORBIDDEN (policy_denied)");
+        let odd = serde_json::json!({"error": {"code": "not a code!", "message": "m",
+            "details": {"reason": "Has Spaces And https://x"}}})
+        .to_string();
+        let typed = parse_typed_error(500, &odd).expect("an envelope");
+        assert_eq!(fixed_error_text(&AgentClientError::Typed(typed)), "500 UNKNOWN");
     }
 
     #[test]

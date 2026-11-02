@@ -21,6 +21,60 @@ pub const DEFAULT_MAX_TOTAL_FAILURES: u32 = 8;
 /// Identical (action, page) pairs in a row that end a run.
 pub const NO_PROGRESS_LIMIT: u32 = 3;
 
+/// Why an LLM-planned run stopped on its own judgement. The loop's summary
+/// starts with [`BrowserFailureKind::prefix`], so a caller (and a dashboard)
+/// can tell the kinds apart without parsing prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserFailureKind {
+    /// The planner could not answer (credential, route, unreadable twice).
+    PlannerUnavailable,
+    /// Too many failed actions in a row or in total.
+    RepeatedFailure,
+    /// The same action kept hitting the same page.
+    NoProgress,
+    /// A bot wall or refusal stops the task (the planner's `blocked`, or a
+    /// `done` over a strong challenge).
+    Blocked,
+    /// The planner has no useful move left (its `incomplete`).
+    Incomplete,
+}
+
+impl BrowserFailureKind {
+    /// The stable label (metrics, logs).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PlannerUnavailable => "planner_unavailable",
+            Self::RepeatedFailure => "repeated_failure",
+            Self::NoProgress => "no_progress",
+            Self::Blocked => "blocked",
+            Self::Incomplete => "incomplete",
+        }
+    }
+
+    /// The stable start of the run's failure text.
+    #[must_use]
+    pub const fn prefix(self) -> &'static str {
+        match self {
+            Self::PlannerUnavailable => "browser planner unavailable",
+            Self::RepeatedFailure => "repeated_failure",
+            Self::NoProgress => "no_progress",
+            Self::Blocked => "blocked",
+            Self::Incomplete => "incomplete",
+        }
+    }
+
+    /// `<prefix>: <detail>`; the planner-unavailable text keeps its older shape
+    /// (`browser planner unavailable (<kind>)`), so its detail joins with a space.
+    #[must_use]
+    pub fn reason(self, detail: &str) -> String {
+        match self {
+            Self::PlannerUnavailable => format!("{} {detail}", self.prefix()),
+            _ => format!("{}: {detail}", self.prefix()),
+        }
+    }
+}
+
 /// One failed action, as the planner reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActionFailure {
@@ -99,16 +153,16 @@ impl FailureBudget {
         self.consecutive += 1;
         self.total += 1;
         if self.consecutive >= self.max_consecutive {
-            return FailureVerdict::Stop(format!(
+            return FailureVerdict::Stop(BrowserFailureKind::RepeatedFailure.reason(&format!(
                 "stopped after {} consecutive failed actions",
                 self.consecutive
-            ));
+            )));
         }
         if self.total >= self.max_total {
-            return FailureVerdict::Stop(format!(
+            return FailureVerdict::Stop(BrowserFailureKind::RepeatedFailure.reason(&format!(
                 "stopped after {} failed actions in total",
                 self.total
-            ));
+            )));
         }
         FailureVerdict::Continue
     }
@@ -175,6 +229,22 @@ fn fingerprint(action: &BrowserAction, page: Option<&BrowserObservation>) -> u64
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failure_kind_prefixes_are_stable() {
+        let all = [
+            (BrowserFailureKind::PlannerUnavailable, "planner_unavailable", "browser planner unavailable (parse)"),
+            (BrowserFailureKind::RepeatedFailure, "repeated_failure", "repeated_failure: x"),
+            (BrowserFailureKind::NoProgress, "no_progress", "no_progress: x"),
+            (BrowserFailureKind::Blocked, "blocked", "blocked: x"),
+            (BrowserFailureKind::Incomplete, "incomplete", "incomplete: x"),
+        ];
+        for (kind, label, text) in all {
+            assert_eq!(kind.as_str(), label);
+            let detail = if kind == BrowserFailureKind::PlannerUnavailable { "(parse)" } else { "x" };
+            assert_eq!(kind.reason(detail), text);
+        }
+    }
     use crate::browser_agent::{ActionType, ObservationStatus};
 
     fn failure(step: i32) -> ActionFailure {
@@ -226,7 +296,9 @@ mod tests {
         assert_eq!(budget.record(failure(2)), FailureVerdict::Continue);
         assert_eq!(
             budget.record(failure(3)),
-            FailureVerdict::Stop("stopped after 3 consecutive failed actions".to_owned())
+            FailureVerdict::Stop(
+                "repeated_failure: stopped after 3 consecutive failed actions".to_owned()
+            )
         );
     }
 
@@ -239,7 +311,9 @@ mod tests {
         }
         assert_eq!(
             budget.record(failure(8)),
-            FailureVerdict::Stop("stopped after 8 failed actions in total".to_owned())
+            FailureVerdict::Stop(
+                "repeated_failure: stopped after 8 failed actions in total".to_owned()
+            )
         );
         assert_eq!(budget.total(), 8);
     }

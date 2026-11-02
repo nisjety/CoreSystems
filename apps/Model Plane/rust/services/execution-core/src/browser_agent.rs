@@ -18,8 +18,9 @@ use tracing::{info, warn};
 mod browser_risk;
 pub mod failure;
 pub mod planner_view;
+pub mod procedure;
 
-use failure::{ActionFailure, FailureBudget, FailureVerdict, NoProgressDetector};
+use failure::{ActionFailure, BrowserFailureKind, FailureBudget, FailureVerdict, NoProgressDetector};
 
 pub(crate) use browser_risk::{approval_poll_interval, approval_timeout_seconds};
 use browser_risk::{classify_action_risk, risk_reason};
@@ -554,6 +555,10 @@ pub struct PlanConfig {
     pub max_consecutive_failures: u32,
     /// Failed steps in total that end an LLM-planned run (0 = default 8).
     pub max_total_failures: u32,
+    /// Which planner prompt procedure the run uses (`QUARRY_BROWSER_AGENT_PROCEDURE`,
+    /// read per call by the tool bridge). The default is `legacy/0`, the
+    /// paragraph the planner always sent.
+    pub procedure: procedure::ProcedureId,
 }
 
 #[derive(Debug, Clone)]
@@ -747,6 +752,13 @@ pub enum PlanStepResult {
         reason: String,
         limit: BrowserResourceLimit,
     },
+    /// The loop stopped on its own judgement (planner unavailable, repeated
+    /// failures, no progress, the planner's `blocked` or `incomplete`). The
+    /// reason starts with the kind's stable prefix.
+    Stopped {
+        reason: String,
+        kind: BrowserFailureKind,
+    },
     /// A terminal non-success state. The reason is structured so its meaning
     /// survives the async tool bridge/runtime handoff.
     Aborted {
@@ -769,6 +781,9 @@ pub struct BrowserAgentLoopResult {
     pub resource_limit: Option<BrowserResourceLimit>,
     /// Planner spend for this loop (counts only).
     pub usage: BrowserLoopUsage,
+    /// Why an LLM-planned run stopped on its own judgement, when it did. The
+    /// `summary` carries the kind's stable prefix; this is the typed twin.
+    pub failure_kind: Option<BrowserFailureKind>,
 }
 
 /// Extract the host portion of a URL without bringing in a full URL parser.
@@ -950,6 +965,7 @@ pub async fn run_browser_agent_loop(
             abort_reason: None,
             resource_limit: None,
             usage: BrowserLoopUsage::default(),
+            failure_kind: None,
         };
     }
 
@@ -966,6 +982,7 @@ pub async fn run_browser_agent_loop(
             abort_reason: None,
             resource_limit: None,
             usage: BrowserLoopUsage::default(),
+            failure_kind: None,
         };
     };
 
@@ -1009,11 +1026,15 @@ pub async fn run_browser_agent_loop(
                 observations: plan.observations,
                 summary: match resource_limit {
                     Some(limit) => limit.reason().to_owned(),
-                    None => format!("browser-agent start_run failed: {e}"),
+                    None => format!(
+                        "browser-agent start_run failed: {}",
+                        crate::quarry_agent::fixed_error_text(&e)
+                    ),
                 },
                 abort_reason: None,
                 resource_limit,
                 usage: BrowserLoopUsage::default(),
+                failure_kind: None,
             };
         }
     };
@@ -1021,6 +1042,7 @@ pub async fn run_browser_agent_loop(
     let mut pending: Option<BrowserObservation> = None;
     let mut abort_reason = None;
     let mut resource_limit = None;
+    let mut failure_kind = None;
     let summary = loop {
         let last = pending.take();
         let result = decide_next_action(&mut plan, last.as_ref(), planner, state, sink).await;
@@ -1112,6 +1134,7 @@ pub async fn run_browser_agent_loop(
                                     advice: kind.advice(),
                                 });
                                 if let FailureVerdict::Stop(reason) = verdict {
+                                    failure_kind = Some(BrowserFailureKind::RepeatedFailure);
                                     break reason;
                                 }
                                 match dispatch_step(
@@ -1142,12 +1165,18 @@ pub async fn run_browser_agent_loop(
                                             resource_limit = Some(limit);
                                             break limit.reason().to_owned();
                                         }
-                                        break format!("browser-agent step failed: {reread}");
+                                        break format!(
+                                            "browser-agent step failed: {}",
+                                            crate::quarry_agent::fixed_error_text(&reread)
+                                        );
                                     }
                                 }
                             }
                         }
-                        break format!("browser-agent step failed: {e}");
+                        break format!(
+                            "browser-agent step failed: {}",
+                            crate::quarry_agent::fixed_error_text(&e)
+                        );
                     }
                 }
             }
@@ -1161,6 +1190,10 @@ pub async fn run_browser_agent_loop(
                 abort_reason: reason_kind,
             } => {
                 abort_reason = Some(reason_kind);
+                break reason;
+            }
+            PlanStepResult::Stopped { reason, kind } => {
+                failure_kind = Some(kind);
                 break reason;
             }
             PlanStepResult::WaitingApproval => break "paused for approval".to_owned(),
@@ -1183,6 +1216,7 @@ pub async fn run_browser_agent_loop(
         abort_reason,
         resource_limit,
         usage,
+        failure_kind,
     }
 }
 
@@ -1281,8 +1315,14 @@ async fn decide_next_action(
     let PlanStepResult::Action(candidate) = gate else {
         return gate;
     };
+    // The first step of a run with a start URL is a navigation the run was
+    // asked for, not a decision: no planner call, no tokens (F11).
+    let deterministic_first_goto = candidate.action_type == ActionType::Goto
+        && plan.current_step == 1
+        && last_observation.is_none();
     let action = match planner {
         None => candidate,
+        Some(_) if deterministic_first_goto => candidate,
         Some(planner) => {
             // The planner reads the hygiene view of the page, never the raw
             // observation; the risk gate and the bot-wall check below keep
@@ -1306,6 +1346,8 @@ async fn decide_next_action(
                     view: view.as_ref(),
                     failures: plan.failures.recent(),
                     retry_note: (attempts > 0).then_some(PARSE_RETRY_NOTE),
+                    step: plan.current_step,
+                    failed_total: plan.failures.total(),
                 };
                 match planner.plan_next(&context).await {
                     Ok(reply) => break Ok(reply),
@@ -1341,14 +1383,8 @@ async fn decide_next_action(
                         ..action
                     },
                     None => {
-                        if let Some(reason) = blocked_by_bot_wall(last_observation) {
-                            plan.status = PlanStatus::Failed;
-                            return PlanStepResult::Failed(reason);
-                        }
-                        plan.status = PlanStatus::Completed;
-                        return PlanStepResult::Completed(
-                            "agent reported task complete".to_owned(),
-                        );
+                        let payload = reply.done_payload.unwrap_or_default();
+                        return finish_from_done(plan, last_observation, &payload);
                     }
                 },
                 // A selected planner that cannot answer ends the run; it never
@@ -1356,10 +1392,11 @@ async fn decide_next_action(
                 Err(e) => {
                     warn!(kind = e.kind.as_str(), error = %e, "llm planner failed; stopping the run");
                     plan.status = PlanStatus::Failed;
-                    return PlanStepResult::Failed(format!(
-                        "browser planner unavailable ({})",
-                        e.kind.as_str()
-                    ));
+                    return PlanStepResult::Stopped {
+                        reason: BrowserFailureKind::PlannerUnavailable
+                            .reason(&format!("({})", e.kind.as_str())),
+                        kind: BrowserFailureKind::PlannerUnavailable,
+                    };
                 }
             }
         }
@@ -1367,12 +1404,66 @@ async fn decide_next_action(
 
     if planner.is_some() && plan.no_progress.observe(&action, last_observation) {
         plan.status = PlanStatus::Failed;
-        return PlanStepResult::Failed(
-            "stopped: the same action was repeated on an unchanged page".to_owned(),
-        );
+        return PlanStepResult::Stopped {
+            reason: BrowserFailureKind::NoProgress
+                .reason("the same action was repeated on an unchanged page"),
+            kind: BrowserFailureKind::NoProgress,
+        };
     }
 
     gate_risky_action(plan, last_observation, action, sink).await
+}
+
+/// What a planner `done` means for the run (the honest `done`): `success`
+/// completes with the answer as the summary; `blocked` and `incomplete` end the
+/// run `Failed` with their stable prefixes. A `done` over a page that still
+/// carries a strong challenge is a block whatever the planner called it.
+fn finish_from_done(
+    plan: &mut AgentPlan,
+    last_observation: Option<&BrowserObservation>,
+    payload: &crate::llm_planner::DonePayload,
+) -> PlanStepResult {
+    use crate::llm_planner::DoneOutcome;
+    let stop = |plan: &mut AgentPlan, kind: BrowserFailureKind, detail: &str| {
+        plan.status = PlanStatus::Failed;
+        PlanStepResult::Stopped {
+            reason: kind.reason(detail),
+            kind,
+        }
+    };
+    if let Some(reason) = blocked_by_bot_wall(last_observation) {
+        plan.status = PlanStatus::Failed;
+        return PlanStepResult::Stopped {
+            reason,
+            kind: BrowserFailureKind::Blocked,
+        };
+    }
+    match payload.outcome {
+        DoneOutcome::Success => {
+            plan.status = PlanStatus::Completed;
+            PlanStepResult::Completed(if payload.answer.is_empty() {
+                "agent reported task complete".to_owned()
+            } else {
+                payload.answer.clone()
+            })
+        }
+        DoneOutcome::Blocked => {
+            let detail = if payload.answer.is_empty() {
+                "the planner reported the task blocked"
+            } else {
+                payload.answer.as_str()
+            };
+            stop(plan, BrowserFailureKind::Blocked, detail)
+        }
+        DoneOutcome::Incomplete => {
+            let detail = if payload.answer.is_empty() {
+                "the planner reported the task incomplete"
+            } else {
+                payload.answer.as_str()
+            };
+            stop(plan, BrowserFailureKind::Incomplete, detail)
+        }
+    }
 }
 
 /// Appended to the planner request after an unreadable reply.
@@ -1388,9 +1479,9 @@ fn blocked_by_bot_wall(last_observation: Option<&BrowserObservation>) -> Option<
         .challenge
         .as_ref()
         .filter(|challenge| challenge.is_strong())?;
-    Some(format!(
-        "blocked: the site refuses automation ({challenge})"
-    ))
+    Some(BrowserFailureKind::Blocked.reason(&format!(
+        "the site refuses automation ({challenge})"
+    )))
 }
 
 /// Phase 5 run-level gate: reusing a persistent, cookie-bearing Quarry

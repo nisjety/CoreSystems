@@ -938,6 +938,7 @@ pub(crate) struct PlanCeilings {
     ceiling_planner_tokens: u64,
     max_consecutive_failures: u32,
     max_total_failures: u32,
+    procedure: browser_agent::procedure::ProcedureId,
 }
 
 impl Default for PlanCeilings {
@@ -951,6 +952,7 @@ impl Default for PlanCeilings {
             ceiling_planner_tokens: 1_000_000,
             max_consecutive_failures: 3,
             max_total_failures: 8,
+            procedure: browser_agent::procedure::ProcedureId::Legacy0,
         }
     }
 }
@@ -1020,6 +1022,7 @@ impl PlanCeilings {
                 "QUARRY_BROWSER_AGENT_MAX_TOTAL_FAILURES",
                 built_in.max_total_failures,
             ),
+            procedure: browser_agent::procedure::ProcedureId::from_lookup(&lookup),
         }
     }
 
@@ -1158,6 +1161,7 @@ fn browser_plan_config_with(
         planner_flag: known_planner_flag(input.planner_flag.as_deref()),
         max_consecutive_failures: ceilings.max_consecutive_failures,
         max_total_failures: ceilings.max_total_failures,
+        procedure: ceilings.procedure,
     };
     browser_agent::validate_plan_config(&plan)?;
     Ok(plan)
@@ -1334,6 +1338,7 @@ mod tests {
                 abort_reason: Some(abort_reason),
                 resource_limit: None,
                 usage: browser_agent::BrowserLoopUsage::default(),
+                failure_kind: None,
             };
 
             assert_eq!(
@@ -1374,6 +1379,7 @@ mod tests {
                 abort_reason: None,
                 resource_limit: Some(resource_limit),
                 usage: browser_agent::BrowserLoopUsage::default(),
+                failure_kind: None,
             };
 
             assert_eq!(
@@ -1408,6 +1414,7 @@ mod tests {
                     abort_reason: None,
                     resource_limit: Some(limit),
                     usage: browser_agent::BrowserLoopUsage::default(),
+                    failure_kind: None,
                 },
                 &BrowserVerificationInputs::default(),
             )
@@ -1452,6 +1459,7 @@ mod tests {
                 abort_reason: None,
                 resource_limit: None,
                 usage,
+                failure_kind: None,
             },
             &BrowserVerificationInputs::default(),
         );
@@ -1523,6 +1531,16 @@ mod tests {
         ]);
         assert_eq!(set.max_consecutive_failures, 5);
         assert_eq!(set.max_total_failures, 8);
+    }
+
+    #[test]
+    fn procedure_defaults_to_legacy_and_the_env_selects_browse_1() {
+        use browser_agent::procedure::ProcedureId;
+        assert_eq!(ceilings_with(&[]).procedure, ProcedureId::Legacy0);
+        let set = ceilings_with(&[("QUARRY_BROWSER_AGENT_PROCEDURE", "browse/1")]);
+        assert_eq!(set.procedure, ProcedureId::Browse1);
+        let junk = ceilings_with(&[("QUARRY_BROWSER_AGENT_PROCEDURE", "browse/9")]);
+        assert_eq!(junk.procedure, ProcedureId::Legacy0);
     }
 
     #[test]

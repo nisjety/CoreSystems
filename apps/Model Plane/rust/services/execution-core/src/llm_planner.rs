@@ -31,6 +31,7 @@ use tonic::transport::Channel;
 
 use crate::browser_agent::failure::ActionFailure;
 use crate::browser_agent::planner_view::PlannerView;
+use crate::browser_agent::procedure::{procedure_text, ProcedureId};
 use crate::browser_agent::{
     ActionType, BrowserAction, BrowserObservation, PlanConfig, RiskCategory,
 };
@@ -64,7 +65,9 @@ pub const ACTION_SCHEMA: &str = r#"{
     "value": {"type": "string"},
     "url": {"type": "string"},
     "reason": {"type": "string"},
-    "risk_category": {"type": "string", "enum": ["login","checkout","posting_form","destructive","cross_domain_navigation","persistent_cookie_use","none"]}
+    "risk_category": {"type": "string", "enum": ["login","checkout","posting_form","destructive","cross_domain_navigation","persistent_cookie_use","none"]},
+    "answer": {"type": "string", "description": "For action=done: the result in plain words, with the facts the goal asked for."},
+    "outcome": {"type": "string", "enum": ["success","blocked","incomplete"], "description": "For action=done: success when the goal is met, blocked when a wall or refusal stops you, incomplete when no useful move is left."}
   },
   "required": ["action"]
 }"#;
@@ -76,7 +79,7 @@ pub const ACTION_SCHEMA: &str = r#"{
 /// OpenAI strict structured outputs need every property listed in `required`
 /// and `additionalProperties: false`, and have no optional fields. An unused
 /// field is therefore sent as a sentinel instead of being left out: `""` for
-/// every string, `-1` for `generation`, and `"none"` for `risk_category`.
+/// every string, `-1` for `generation`, and `"none"` for `risk_category` and `outcome`.
 /// `NextAction` already reads all of those as "not supplied" (an empty string is
 /// absent, `generation: -1` is `None`, `"none"` is no self-reported risk), so a
 /// strict reply maps onto the same `BrowserAction` as a plain one. `generation`
@@ -97,9 +100,11 @@ pub const ACTION_SCHEMA_STRICT: &str = r#"{
     "value": {"type": "string", "description": "Text to type for action=type. Otherwise an empty string."},
     "url": {"type": "string", "description": "Destination for action=navigate. Otherwise an empty string."},
     "reason": {"type": "string", "description": "One short sentence on why this action. May be an empty string."},
-    "risk_category": {"type": "string", "enum": ["login","checkout","posting_form","destructive","cross_domain_navigation","persistent_cookie_use","none"]}
+    "risk_category": {"type": "string", "enum": ["login","checkout","posting_form","destructive","cross_domain_navigation","persistent_cookie_use","none"]},
+    "answer": {"type": "string", "description": "For action=done: the result in plain words. Otherwise an empty string."},
+    "outcome": {"type": "string", "enum": ["success","blocked","incomplete","none"], "description": "For action=done: success, blocked or incomplete. Otherwise none."}
   },
-  "required": ["action","selector","snapshot_id","generation","ref_id","frame_id","value","url","reason","risk_category"]
+  "required": ["action","selector","snapshot_id","generation","ref_id","frame_id","value","url","reason","risk_category","answer","outcome"]
 }"#;
 
 /// What the planner does with a bot wall (Quarry WS3.J). model-gateway's
@@ -144,6 +149,11 @@ pub struct PlannerContext<'a> {
     pub failures: &'a [ActionFailure],
     /// A corrective line for a retry after an unreadable reply.
     pub retry_note: Option<&'a str>,
+    /// The loop step this call plans (1-based; 0 outside a loop). Shown to the
+    /// planner as a run-state line by `browse/1` only.
+    pub step: i32,
+    /// Failed actions so far in the run (the run-state line).
+    pub failed_total: u32,
 }
 
 /// Planner token usage for one reply, counts only.
@@ -166,6 +176,9 @@ impl PlannerUsage {
 pub struct PlannerReply {
     pub action: Option<BrowserAction>,
     pub done: bool,
+    /// What the planner said with `done`. `None` is a bare `done`, read as a
+    /// success with no answer.
+    pub done_payload: Option<DonePayload>,
     pub usage: PlannerUsage,
 }
 
@@ -175,6 +188,7 @@ impl PlannerReply {
         Self {
             action: Some(action),
             done: false,
+            done_payload: None,
             usage: PlannerUsage::default(),
         }
     }
@@ -184,6 +198,18 @@ impl PlannerReply {
         Self {
             action: None,
             done: true,
+            done_payload: None,
+            usage: PlannerUsage::default(),
+        }
+    }
+
+    /// A `done` with the planner's answer and outcome.
+    #[must_use]
+    pub fn done_with(payload: DonePayload) -> Self {
+        Self {
+            action: None,
+            done: true,
+            done_payload: Some(payload),
             usage: PlannerUsage::default(),
         }
     }
@@ -193,6 +219,70 @@ impl PlannerReply {
         self.usage = usage;
         self
     }
+}
+
+/// How the planner says a run ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DoneOutcome {
+    /// The goal is met. Also what a `done` without an outcome means.
+    #[default]
+    Success,
+    /// A wall, login, paywall or refusal stops the run.
+    Blocked,
+    /// No useful move is left; the goal is not met.
+    Incomplete,
+}
+
+impl DoneOutcome {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Blocked => "blocked",
+            Self::Incomplete => "incomplete",
+        }
+    }
+
+    /// `blocked` and `incomplete` by name; anything else (including the strict
+    /// schema's `none` and an empty string) is a success.
+    #[must_use]
+    pub fn from_wire(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "blocked" => Self::Blocked,
+            "incomplete" => Self::Incomplete,
+            _ => Self::Success,
+        }
+    }
+}
+
+/// The longest answer kept, in characters.
+pub const MAX_ANSWER_CHARS: usize = 4_000;
+
+/// What a `done` reply carries: the answer in words and how the run ended.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DonePayload {
+    pub answer: String,
+    pub outcome: DoneOutcome,
+}
+
+impl DonePayload {
+    /// The answer is trimmed, scrubbed like page text (the model wrote it after
+    /// reading a page) and capped at [`MAX_ANSWER_CHARS`].
+    #[must_use]
+    pub fn new(answer: &str, outcome: DoneOutcome) -> Self {
+        let scrubbed = crate::browser_agent::planner_view::scrub_page_text(answer.trim());
+        Self {
+            answer: scrubbed.chars().take(MAX_ANSWER_CHARS).collect(),
+            outcome,
+        }
+    }
+}
+
+/// What the planner chose for one step.
+#[derive(Debug, Clone)]
+pub enum PlannedStep {
+    Action(BrowserAction),
+    Done(DonePayload),
 }
 
 /// Why a planner call produced no usable reply.
@@ -334,22 +424,20 @@ impl ActionPlanner for LlmPlanner {
         };
         // Neither the error text nor the log carries the reply: it was written
         // by a model that had just read an attacker-controlled page.
-        let parsed: NextAction = serde_json::from_str(response.content.trim()).map_err(|e| {
-            PlannerError::new(
-                PlannerErrorKind::Parse,
-                format!(
-                    "could not parse action JSON ({:?} error at column {})",
-                    e.classify(),
-                    e.column()
-                ),
-            )
-        })?;
-        Ok(match parsed.into_browser_action() {
-            Some(action) => PlannerReply::action(action),
-            None => PlannerReply::done(),
-        }
-        .with_usage(usage))
+        Ok(reply_from_content(&response.content)?.with_usage(usage))
     }
+}
+
+/// Reads a model reply into a [`PlannerReply`] (no usage yet). A bare JSON
+/// object is read as-is; a fenced or prose-wrapped one goes through the
+/// tolerant extractor. The error never carries the reply.
+pub fn reply_from_content(content: &str) -> Result<PlannerReply, PlannerError> {
+    let (step, _) = parse_planned_step(content)
+        .map_err(|message| PlannerError::new(PlannerErrorKind::Parse, message))?;
+    Ok(match step {
+        PlannedStep::Action(action) => PlannerReply::action(action),
+        PlannedStep::Done(payload) => PlannerReply::done_with(payload),
+    })
 }
 
 /// Which failure class a gRPC status code from inference-core is.
@@ -406,9 +494,24 @@ pub fn planner_request_from_view(
             view,
             failures: &[],
             retry_note: None,
+            step: 0,
+            failed_total: 0,
         },
         model,
         structured_output_schema,
+    )
+}
+
+/// The system message: the goal, the bot-wall rule, then the procedure text.
+/// With `legacy/0` this is byte for byte the message the planner always sent.
+#[must_use]
+pub fn system_message(config: &PlanConfig) -> String {
+    format!(
+        "You are an autonomous web-browsing agent. Goal: {}
+{BROWSER_CHALLENGE_RULE}
+{}",
+        config.system_prompt,
+        procedure_text(config.procedure, false)
     )
 }
 
@@ -434,13 +537,15 @@ pub fn planner_request_with_context(
         observation_text.push_str("\n\n");
         observation_text.push_str(note);
     }
-    let system = format!(
-        "You are an autonomous web-browsing agent. Goal: {}\n{BROWSER_CHALLENGE_RULE}\n\
-         Choose the SINGLE next browser action and return ONLY JSON matching the schema. \
-         Use action=\"done\" when the goal is satisfied. \
-         For navigate set url. For click/type, prefer the exact snapshot_id, generation, and ref_id from the latest observation; these opaque refs are the only safe way to target a dynamic page. When a target reports a child frame_id, echo that exact frame_id too; Quarry will reject a cross-frame action without it. Use CSS selector only as legacy compatibility when no current snapshot target can express the intent. For type also set value.",
-        config.system_prompt
-    );
+    // The run-state line is part of `browse/1` only; `legacy/0` requests are
+    // exactly what they always were.
+    if config.procedure != ProcedureId::Legacy0 && ctx.step > 0 && config.max_steps > 0 {
+        observation_text.push_str(&format!(
+            "\n\nRun state: step {} of {}; failed actions so far: {}.",
+            ctx.step, config.max_steps, ctx.failed_total
+        ));
+    }
+    let system = system_message(config);
 
     InferRequest {
         request_id: mp_ids::new_ulid(),
@@ -461,7 +566,7 @@ pub fn planner_request_with_context(
             },
         ],
         temperature: 0.2,
-        max_tokens: 512,
+        max_tokens: 1024,
         structured_output_schema: structured_output_schema.to_owned(),
         zdr: config.zdr,
         ..Default::default()
@@ -498,9 +603,28 @@ struct NextAction {
     /// `classify_action_risk`'s deterministic backstop still runs regardless.
     #[serde(default)]
     risk_category: String,
+    /// `done` only: the result in words (`answer` of the honest `done`).
+    #[serde(default)]
+    answer: String,
+    /// `done` only: `success`, `blocked` or `incomplete` (`none` and absent
+    /// both read as success).
+    #[serde(default)]
+    outcome: String,
 }
 
 impl NextAction {
+    /// The planner's choice: an action, or the `done` payload.
+    fn into_step(self) -> PlannedStep {
+        if self.action == "done" {
+            let outcome = DoneOutcome::from_wire(&self.outcome);
+            return PlannedStep::Done(DonePayload::new(&self.answer, outcome));
+        }
+        match self.into_browser_action() {
+            Some(action) => PlannedStep::Action(action),
+            None => PlannedStep::Done(DonePayload::default()),
+        }
+    }
+
     /// Map the model's choice onto a `BrowserAction`. `action_id`/`grant_id` are
     /// filled in by the caller from the plan's gate decision. `None` ⇒ done.
     fn into_browser_action(self) -> Option<BrowserAction> {
@@ -587,17 +711,28 @@ pub enum ActionParse {
 ///
 /// A reply that is exactly one JSON object is read as-is ([`ActionParse::Exact`]).
 /// Anything else goes through [`extract_action_json`] ([`ActionParse::Tolerant`]).
-/// `next_action` does not use this yet: it still reads the reply as-is. It is
-/// here for the E3 spike, whose live probe reports which of the two a Terra
-/// reply needed, and which `next_action` should adopt only if that says so.
+/// `plan_next` reads every reply through it (so a fenced reply is accepted);
+/// the E3 live probe reports which of the two a Terra reply needed.
 ///
 /// The error text never carries the reply.
 pub fn parse_action_content(
     content: &str,
 ) -> Result<(Option<BrowserAction>, ActionParse), String> {
+    let (step, mode) = parse_planned_step(content)?;
+    Ok((
+        match step {
+            PlannedStep::Action(action) => Some(action),
+            PlannedStep::Done(_) => None,
+        },
+        mode,
+    ))
+}
+
+/// [`parse_action_content`] with the `done` payload kept.
+pub fn parse_planned_step(content: &str) -> Result<(PlannedStep, ActionParse), String> {
     let trimmed = content.trim();
     if let Ok(action) = serde_json::from_str::<NextAction>(trimmed) {
-        return Ok((action.into_browser_action(), ActionParse::Exact));
+        return Ok((action.into_step(), ActionParse::Exact));
     }
     let json = extract_action_json(trimmed)
         .ok_or_else(|| "no complete JSON object in the planner reply".to_owned())?;
@@ -608,7 +743,7 @@ pub fn parse_action_content(
             e.column()
         )
     })?;
-    Ok((action.into_browser_action(), ActionParse::Tolerant))
+    Ok((action.into_step(), ActionParse::Tolerant))
 }
 
 /// The first complete JSON object in `raw`, with trailing commas removed.
@@ -875,7 +1010,7 @@ mod tests {
             let kind = spec["type"].as_str().expect("typed property");
             let value = match (key.as_str(), kind) {
                 ("action", _) => json!(action),
-                ("risk_category", _) => json!("none"),
+                ("risk_category" | "outcome", _) => json!("none"),
                 (_, "string") => json!(""),
                 (_, "integer") => json!(-1),
                 (key, kind) => panic!("no sentinel for {key}: {kind}"),
@@ -896,6 +1031,144 @@ mod tests {
         parse(&strict_reply(action, overrides))
             .into_browser_action()
             .expect("not a terminal action")
+    }
+
+    #[test]
+    fn done_payload_is_parsed_from_strict_and_plain_schema() {
+        let plain = parse(r#"{"action":"done","answer":"  The price is $4.  ","outcome":"success"}"#)
+            .into_step();
+        let strict = parse(&strict_reply(
+            "done",
+            &json!({"answer": "The price is $4.", "outcome": "success"}),
+        ))
+        .into_step();
+        for step in [plain, strict] {
+            match step {
+                PlannedStep::Done(payload) => {
+                    assert_eq!(payload.answer, "The price is $4.");
+                    assert_eq!(payload.outcome, DoneOutcome::Success);
+                }
+                PlannedStep::Action(_) => panic!("done is not an action"),
+            }
+        }
+        let blocked = parse(&strict_reply(
+            "done",
+            &json!({"answer": "A captcha stops me.", "outcome": "blocked"}),
+        ))
+        .into_step();
+        assert!(matches!(
+            blocked,
+            PlannedStep::Done(DonePayload { outcome: DoneOutcome::Blocked, .. })
+        ));
+        // A bare done, and the strict sentinel, both read as a success.
+        for raw in [r#"{"action":"done"}"#.to_owned(), strict_reply("done", &json!({}))] {
+            match parse(&raw).into_step() {
+                PlannedStep::Done(payload) => {
+                    assert_eq!(payload, DonePayload::default());
+                    assert_eq!(payload.outcome, DoneOutcome::Success);
+                }
+                PlannedStep::Action(_) => panic!("done is not an action"),
+            }
+        }
+        // A non-done action carries no payload even when the model sent one.
+        assert!(matches!(
+            parse(r#"{"action":"scroll","answer":"x","outcome":"blocked"}"#).into_step(),
+            PlannedStep::Action(_)
+        ));
+    }
+
+    #[test]
+    fn a_done_answer_is_capped_and_scrubbed() {
+        let long = "word ".repeat(2_000);
+        let payload = DonePayload::new(&long, DoneOutcome::Success);
+        assert_eq!(payload.answer.chars().count(), MAX_ANSWER_CHARS);
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdEFGH1234";
+        let payload = DonePayload::new(&format!("the token is {jwt}"), DoneOutcome::Success);
+        assert!(!payload.answer.contains("eyJhbGciOiJIUzI1NiJ9"), "{}", payload.answer);
+    }
+
+    #[test]
+    fn reply_from_content_reads_fenced_replies_and_keeps_the_answer() {
+        let reply = reply_from_content(
+            "Sure:\n```json\n{\"action\":\"done\",\"answer\":\"Open 9 to 5\",\"outcome\":\"incomplete\",}\n```",
+        )
+        .expect("tolerant parse");
+        assert!(reply.done);
+        let payload = reply.done_payload.expect("a payload");
+        assert_eq!(payload.answer, "Open 9 to 5");
+        assert_eq!(payload.outcome, DoneOutcome::Incomplete);
+        let error = reply_from_content("I will now navigate.").expect_err("no object");
+        assert_eq!(error.kind, PlannerErrorKind::Parse);
+    }
+
+    fn legacy_message_of_the_old_planner(goal: &str) -> String {
+        format!(
+            "You are an autonomous web-browsing agent. Goal: {goal}\n{BROWSER_CHALLENGE_RULE}\n\
+             Choose the SINGLE next browser action and return ONLY JSON matching the schema. \
+             Use action=\"done\" when the goal is satisfied. \
+             For navigate set url. For click/type, prefer the exact snapshot_id, generation, and ref_id from the latest observation; these opaque refs are the only safe way to target a dynamic page. When a target reports a child frame_id, echo that exact frame_id too; Quarry will reject a cross-frame action without it. Use CSS selector only as legacy compatibility when no current snapshot target can express the intent. For type also set value."
+        )
+    }
+
+    #[test]
+    fn legacy_procedure_prompt_is_byte_identical() {
+        // The expected text is the old planner's format string, verbatim.
+        let config = test_config();
+        assert_eq!(config.procedure, ProcedureId::Legacy0, "legacy/0 is the default");
+        let request = planner_infer_request(&config, None, DEFAULT_MODEL, ACTION_SCHEMA);
+        assert_eq!(
+            request.messages[0].content,
+            legacy_message_of_the_old_planner("Find the opening hours.")
+        );
+        // The run-state line belongs to browse/1 only, so a legacy user message
+        // is the same with or without a step.
+        let view = PlannerView::from_observation(&test_observation());
+        let at_step = |config: &PlanConfig, step: i32| {
+            planner_request_with_context(
+                &PlannerContext {
+                    config,
+                    view: Some(&view),
+                    failures: &[],
+                    retry_note: None,
+                    step,
+                    failed_total: 2,
+                },
+                DEFAULT_MODEL,
+                ACTION_SCHEMA,
+            )
+        };
+        assert_eq!(
+            at_step(&config, 3).messages[1].content,
+            at_step(&config, 0).messages[1].content
+        );
+        assert!(!at_step(&config, 3).messages[1].content.contains("Run state"));
+    }
+
+    #[test]
+    fn browse_1_swaps_the_procedure_and_adds_the_run_state_line() {
+        let mut config = test_config();
+        config.procedure = ProcedureId::Browse1;
+        let view = PlannerView::from_observation(&test_observation());
+        let request = planner_request_with_context(
+            &PlannerContext {
+                config: &config,
+                view: Some(&view),
+                failures: &[],
+                retry_note: None,
+                step: 3,
+                failed_total: 2,
+            },
+            DEFAULT_MODEL,
+            ACTION_SCHEMA,
+        );
+        let system = &request.messages[0].content;
+        assert!(system.starts_with("You are an autonomous web-browsing agent. Goal: Find"));
+        assert!(system.contains(BROWSER_CHALLENGE_RULE));
+        assert!(system.contains("6. Stop."), "{system}");
+        assert!(!system.contains("Choose the SINGLE next browser action"));
+        assert!(request.messages[1]
+            .content
+            .ends_with("Run state: step 3 of 8; failed actions so far: 2."));
     }
 
     #[test]
@@ -945,6 +1218,10 @@ mod tests {
             enum_values(&strict, "risk_category"),
             enum_values(&plain, "risk_category")
         );
+        // The strict twin adds the `none` sentinel to `outcome`, nothing else.
+        let mut plain_outcome = enum_values(&plain, "outcome");
+        plain_outcome.push("none".to_owned());
+        assert_eq!(enum_values(&strict, "outcome"), plain_outcome);
         for (key, spec) in plain["properties"].as_object().expect("properties object") {
             assert_eq!(strict["properties"][key]["type"], spec["type"], "{key}");
         }
@@ -1239,7 +1516,7 @@ mod tests {
         assert_eq!(request.subscription_connection_id, "");
         assert_eq!(request.structured_output_schema, ACTION_SCHEMA);
         assert!((request.temperature - 0.2).abs() < f32::EPSILON);
-        assert_eq!(request.max_tokens, 512);
+        assert_eq!(request.max_tokens, 1024);
         assert!(!request.request_id.is_empty());
         assert_eq!(request.messages.len(), 2);
         assert_eq!(request.messages[0].role, "system");
