@@ -101,6 +101,22 @@ pub(crate) fn addressee_from_request(
     }))
 }
 
+/// The addressee of a new approval (WS10-S7). A person's own (`direct`) turn keeps what was stated;
+/// an `ambient` or `automation` turn has no watching requester, so an approval that states no
+/// addressee goes to any manager of the Space instead of waiting on the requester.
+pub(crate) fn default_addressee_for_origin(
+    stated: Option<StoredAddressee>,
+    turn_origin: Option<&str>,
+) -> Option<StoredAddressee> {
+    if stated.is_none() && !crate::space::approval_gate::origin_is_direct(turn_origin) {
+        return Some(StoredAddressee {
+            kind: sa::KIND_ANY_MANAGER,
+            subject_id: None,
+        });
+    }
+    stated
+}
+
 /// Record the stated addressee on a row this request created. A no-op while the switch is off, so
 /// the approval stays requester-addressed.
 pub(crate) async fn record_addressee(

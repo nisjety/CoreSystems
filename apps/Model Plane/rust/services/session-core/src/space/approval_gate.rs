@@ -43,6 +43,72 @@ const MAX_ISSUED_SKEW_SECS: i64 = 60;
 const MAX_TOOL_KEY_CHARS: usize = 64;
 /// The turn origins an approval may state (WS10-S7 consumes them).
 const TURN_ORIGINS: &[&str] = &["direct", "ambient", "automation"];
+/// The typed refusal of a decision scope an approval's turn origin does not allow (WS10-S7).
+pub(crate) const SCOPE_NOT_PERMITTED: &str = "approval_scope_not_permitted";
+
+/// Whether a turn origin is a person's own turn. A missing or empty origin reads as `direct`: every
+/// run that predates the claim was started by a person (WS10-S7).
+pub(crate) fn origin_is_direct(turn_origin: Option<&str>) -> bool {
+    match turn_origin.map(str::trim) {
+        None | Some("") => true,
+        Some(origin) => origin == mp_contracts::space_mentions::ORIGIN_DIRECT,
+    }
+}
+
+/// The origin an approval carries: the run's own Control-signed claim when it is not `direct`
+/// (a creator can never present an `ambient` or `automation` turn as `direct`), else what the
+/// creator stated. Empty stays empty (read as `direct`).
+pub(crate) fn effective_turn_origin(run_origin: Option<&str>, stated: Option<String>) -> Option<String> {
+    if !origin_is_direct(run_origin) {
+        return run_origin.map(|origin| origin.trim().to_owned());
+    }
+    stated
+}
+
+/// The run's turn origin claim (`runs.turn_origin`, migration 0075); `None` for a run without one.
+pub(crate) async fn run_turn_origin(pool: &Pool, run_id: &str, org_id: &str) -> Result<Option<String>, Status> {
+    sqlx::query_scalar::<_, Option<String>>("SELECT turn_origin FROM runs WHERE id = $1 AND org_id = $2")
+        .bind(run_id)
+        .bind(org_id)
+        .fetch_optional(pool)
+        .await
+        .map(Option::flatten)
+        .map_err(|error| {
+            tracing::error!(%error, "run turn origin lookup failed");
+            Status::unavailable("run turn origin unavailable")
+        })
+}
+
+/// A decision on an approval of an `ambient` or `automation` turn is `once` only: no person was
+/// watching that turn, so a wider scope (a thread or run grant) would let nobody's judgement
+/// stand for later calls. Refused with a typed code; a `direct` or unknown approval passes.
+pub(crate) async fn refuse_wide_scope_for_origin(
+    pool: &Pool,
+    approval_id: &str,
+    org_id: &str,
+    scope: &str,
+) -> Result<(), Status> {
+    if scope == "once" {
+        return Ok(());
+    }
+    let origin: Option<Option<String>> =
+        sqlx::query_scalar("SELECT turn_origin FROM approvals WHERE id = $1 AND org_id = $2")
+            .bind(approval_id)
+            .bind(org_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "approval turn origin lookup failed");
+                Status::unavailable("approval turn origin unavailable")
+            })?;
+    if origin_is_direct(origin.flatten().as_deref()) {
+        return Ok(());
+    }
+    Err(crate::space::mentions::coded_status(
+        Status::permission_denied(SCOPE_NOT_PERMITTED),
+        SCOPE_NOT_PERMITTED,
+    ))
+}
 
 /// Claims of an `approval-grant-use-v1` token, exactly Control's `ApprovalGrantUse`.
 #[derive(Debug, Deserialize, Clone)]
@@ -317,6 +383,8 @@ pub(crate) async fn claim_once(
                AND (a.expires_at IS NULL OR a.expires_at > now()) \
                AND a.continuation_mode = '' \
                AND COALESCE(a.metadata->'card'->>'resume_class', '') = 'none' \
+               AND COALESCE(a.turn_origin, 'direct') = 'direct' \
+               AND COALESCE(ar.turn_origin, 'direct') = 'direct' \
                AND ar.thread_id = (SELECT thread_id FROM runs WHERE id = $5 AND org_id = $1 AND user_id = $2) \
              ORDER BY a.decided_at DESC NULLS LAST \
              LIMIT 1 \

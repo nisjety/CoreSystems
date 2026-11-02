@@ -3351,7 +3351,19 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 &req.turn_origin,
                 caller.zdr(),
             )?;
-            let addressee = crate::space::approval_member::addressee_from_request(req.addressee.as_ref())?;
+            // Turn origin rules (build plan WS10 S7): the run's own claim wins over a stated one,
+            // and a turn nobody watches defaults its addressee to any manager.
+            let mut gate_context = gate_context;
+            let run_origin =
+                crate::space::approval_gate::run_turn_origin(&self.pool, &req.run_id, &req.org_id).await?;
+            gate_context.turn_origin = crate::space::approval_gate::effective_turn_origin(
+                run_origin.as_deref(),
+                gate_context.turn_origin.take(),
+            );
+            let addressee = crate::space::approval_member::default_addressee_for_origin(
+                crate::space::approval_member::addressee_from_request(req.addressee.as_ref())?,
+                gate_context.turn_origin.as_deref(),
+            );
             let granted_by_rule = if req.grant_use_token.is_empty() {
                 None
             } else {
@@ -4022,6 +4034,14 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 .ok_or_else(|| Status::invalid_argument("invalid decision source"))?;
             let scope = approval_scope_to_str(req.scope)
                 .ok_or_else(|| Status::invalid_argument("invalid decision scope"))?;
+            // Turn origin rules (build plan WS10 S7): an unwatched turn takes a `once` decision only.
+            crate::space::approval_gate::refuse_wide_scope_for_origin(
+                &self.pool,
+                &req.approval_id,
+                &req.org_id,
+                scope,
+            )
+            .await?;
             let record = store::DecisionRecord {
                 source,
                 scope,
