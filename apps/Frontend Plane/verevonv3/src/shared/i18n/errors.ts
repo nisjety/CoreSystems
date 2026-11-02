@@ -1042,6 +1042,14 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   room_role_forbidden: { no: 'Rollen din i dette rommet tillater ikke dette.', en: 'Your role in this room does not allow that.' },
   room_roster_derived: { no: 'Medlemmene i dette rommet følger organisasjonen og redigeres ikke her.', en: 'The members of this room follow the organization and are not edited here.' },
   room_sole_owner: { no: 'Rommet må ha minst én eier. Gjør noen andre til eier først.', en: 'The room needs at least one owner. Make someone else an owner first.' },
+  // WS12 direct messages
+  dm_disabled: { no: 'Direktemeldinger er ikke slått på.', en: 'Direct messages are not turned on.' },
+  dm_not_entitled: { no: 'Organisasjonen din har ikke direktemeldinger slått på. Spør en administrator.', en: 'Your organization has not turned on direct messages. Ask an administrator.' },
+  dm_participants_invalid: { no: 'Disse personene kan ikke være med i samme melding. Velg én til åtte andre i organisasjonen.', en: 'These people cannot be in one message. Pick one to eight others in the organization.' },
+  dm_registration_failed: { no: 'En melding med disse personene kunne ikke settes opp. Be en administrator rydde opp.', en: 'A message with these people could not be set up. Ask an administrator to clear it.' },
+  dm_hide_unavailable: { no: 'Meldingen kunne ikke oppdateres. Ingenting er endret. Prøv igjen om litt.', en: 'The message could not be updated. Nothing was changed. Try again shortly.' },
+  dm_agent_bind_refused: { no: 'En direktemelding kan ikke ha agenter.', en: 'A direct message cannot have agents.' },
+  space_not_hideable: { no: 'Bare en direktemelding kan skjules.', en: 'Only a direct message can be hidden.' },
   space_authority_unavailable: { no: 'Kunne ikke bekrefte tilgangen akkurat nå. Ingenting er endret. Prøv igjen om litt.', en: 'Access could not be confirmed right now. Nothing was changed. Try again shortly.' },
 
   // WS05 org security

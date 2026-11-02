@@ -118,7 +118,7 @@ async fn gate(state: &AppState, user: &AuthenticatedUser) -> Result<String, Repl
 /// One Application call. `Ok` is the function's value; `Err(Some(message))` is a thrown error
 /// (Convex answers a non-success status or `status: "error"` with an `errorMessage`);
 /// `Err(None)` is every other failure (not configured, unreachable, unreadable).
-async fn convex_call(
+pub(super) async fn convex_call(
     state: &AppState,
     operation: &str,
     path: &str,

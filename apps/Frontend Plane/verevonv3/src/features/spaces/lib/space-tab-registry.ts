@@ -10,6 +10,8 @@
  */
 
 import { roomArtifactsEnabled } from './room-artifacts'
+import { DM_SPACE_FEATURE } from './space-kind'
+import { spaceRoomFeature } from './space-room-features'
 
 export interface SpaceTabDefinition {
   readonly id: string
@@ -79,6 +81,8 @@ export const SPACE_TABS = [
     purposeNo: 'Aktiv modell, ferdigheter og hvilke handlinger som er tillatt her.',
     purposeEn: 'The active model, its skills, and which actions are permitted here.',
     owner: 'Model Plane',
+    // A direct message has no agents (WS12-S3).
+    enabled: () => !spaceRoomFeature(DM_SPACE_FEATURE),
   },
   {
     id: 'medlemmer',
@@ -87,6 +91,8 @@ export const SPACE_TABS = [
     purposeNo: 'Hvem som ser og styrer rommet, og med hvilken rolle.',
     purposeEn: 'Who can see and manage the Space, and with what role.',
     owner: 'Control Plane',
+    // A direct message has a fixed roster that is not edited or listed as members (WS12-S3).
+    enabled: () => !spaceRoomFeature(DM_SPACE_FEATURE),
   },
 ] as const satisfies readonly SpaceTabDefinition[]
 

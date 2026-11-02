@@ -5,6 +5,7 @@ import {
   type SpaceRetrievalDeclineReason,
 } from '@/features/spaces/lib/space-retrieval-decline'
 import { ApiError, requestJson } from '../http'
+import { setDmListingEnabled, type SpaceDmParticipant } from './dm'
 import { spacePinsFrom, type SpaceRoomPin } from './pins'
 import { readSpaceDenial } from '../space-denials'
 
@@ -39,6 +40,12 @@ export type SpaceSummary = {
   /** True when Control's index says the room is archived (WS04-S7). `lifecycle` stays `active`
    * for an archived room, so read this instead. Absent on older gateways and the fallback listing. */
   archived?: boolean
+  /** WS12-S3: Control's derived agent scope for the kind (`personal`, `room` or `none`). Absent on older gateways. */
+  agent_scope?: string
+  /** WS12-S3: a DM's fixed roster with display names; present for `dm` and `group_dm` only. */
+  participants?: readonly SpaceDmParticipant[]
+  /** WS12-S3: the caller has hidden this DM from their sidebar. Absent or false otherwise. */
+  hidden?: boolean
 }
 
 /** A server-composed lifecycle + current-membership read. It contains no
@@ -59,6 +66,8 @@ export type SpaceContext = {
     room_details?: boolean
     /** WS04-S3: the member picker searches the people directory instead of listing the org. */
     people_search?: boolean
+    /** WS12-S3: direct messages are offered. */
+    dm?: boolean
   }
   /** Server-stated bounds (WS01-S5). Absent on an older gateway: use the documented defaults. */
   limits?: {
@@ -200,7 +209,8 @@ export function getSpaceMembership(spaceRef: string): Promise<SpaceMembership> {
 }
 
 export async function listSpaces(): Promise<readonly SpaceSummary[]> {
-  const response = await requestJson<{ spaces: readonly SpaceSummary[] }>('/api/v1/spaces')
+  const response = await requestJson<{ spaces: readonly SpaceSummary[]; features?: { dm?: boolean } }>('/api/v1/spaces')
+  setDmListingEnabled(response.features?.dm === true)
   return response.spaces
 }
 

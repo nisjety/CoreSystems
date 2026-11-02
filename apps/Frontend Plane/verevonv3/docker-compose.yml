@@ -267,6 +267,10 @@ services:
       # WS16-S8: the personal sidebar layout (GET/PUT /api/v1/spaces/sidebar; 404 when off, which the SPA reads
       # as "use the legacy panel"). A rollout control only; a Zero Data Retention org gets zdr_local / 412 regardless.
       SPACE_SIDEBAR_API: ${SPACE_SIDEBAR_API:-true}
+      # WS12-S3: direct messages (POST /api/v1/spaces/dm, POST/DELETE .../hide; 404 dm_disabled when off, DM kinds
+      # leave the listing). Rollout control only; Control's dm-eligibility decides, ZDR orgs get the typed 412.
+      # Needs Control SPACE_DM_REGISTRATION + Convex SPACE_DM_OPEN, and WS04-S5 audience registration to work.
+      SPACE_DM_API: ${SPACE_DM_API:-true}
       SPACE_RUN_LIVE_VIEW: ${SPACE_RUN_LIVE_VIEW:-true}
       SPACE_RUN_LIVE_TEXT: ${SPACE_RUN_LIVE_TEXT:-true}
       SPACE_RUN_MANAGER_STOP: ${SPACE_RUN_MANAGER_STOP:-true}

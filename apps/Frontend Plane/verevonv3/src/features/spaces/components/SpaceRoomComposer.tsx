@@ -52,6 +52,7 @@ import {
 import { spaceRetrievalDeclineCopy } from '../lib/space-retrieval-decline'
 import { createSpacePostSender } from '../lib/space-post-sender'
 import { createSpaceSendJournal, type SpaceSendJournal } from '../lib/space-send-journal'
+import { DM_SPACE_FEATURE } from '../lib/space-kind'
 import { canPostInSpace, postLength } from '../lib/space-posting'
 import { SpaceConnectivityBanner } from './SpaceConnectivityBanner'
 import {
@@ -64,7 +65,7 @@ import { readAiModelSelection, type AiModelSelection } from '@/shared/ai/model-s
 import { OPENAI_CODEX_SUBSCRIPTION_PROVIDER } from '@/shared/api/chatgpt-subscription-client'
 import { getSession } from '@/shared/session/session-store'
 import { useHomeDraft } from '@/features/dashboard/home/home-draft'
-import { spaceRoomFeatureWithDevOverride } from '../lib/space-room-features'
+import { spaceRoomFeature, spaceRoomFeatureWithDevOverride } from '../lib/space-room-features'
 import { applyFormat, markdownShortcut, type MarkdownFormatKind } from '../lib/markdown-edit'
 import './space-send.css'
 
@@ -188,6 +189,12 @@ export interface SpaceRoomComposerProps {
   readonly threadOwnerSubjectId?: () => string | undefined
   /** `limits.post_max_chars` from the room context. */
   readonly postMaxChars?: () => number | undefined
+  /**
+   * WS12-S3: whether "Ask Verevon" may be offered at all. A direct message is people only, so the
+   * page passes false there; absent, it follows the room's kind trait (`space_dm`). Presentation
+   * only: the gateway and Control refuse a model run in a DM regardless.
+   */
+  readonly canAsk?: () => boolean
   /** SD-16: which mode a fresh box starts in while posts are on. Defaults to Send (post). */
   readonly defaultSendMode?: 'post' | 'ask'
   /** The room's send journal (the page shares it with the timeline for optimistic rows). */
@@ -376,17 +383,19 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
     return targetId ? props.threads?.().find((thread) => thread.thread_id === targetId)?.owner_subject_id : undefined
   }
   // A member-invoked run stays owner-gated: Ask is offered in a reply only to the thread's starter.
+  const askAllowedHere = () => props.canAsk?.() ?? !spaceRoomFeature(DM_SPACE_FEATURE)
   const askAvailable = () => {
+    if (!askAllowedHere()) return false
     if (!props.replyTarget?.()) return true
     const viewer = props.viewerSubjectId?.()?.trim()
     const owner = replyThreadOwner()?.trim()
     return Boolean(viewer) && viewer === owner
   }
   // An agent mention or a picked skill can only be a question to the agent.
-  const impliesAsk = () => Boolean(mentionedAgentRef()) || pickedSkills().length > 0
+  const impliesAsk = () => askAllowedHere() && (Boolean(mentionedAgentRef()) || pickedSkills().length > 0)
   const offeredModes = createMemo<readonly SpaceComposerModeEntry[]>(() => {
     const registered = visibleSpaceComposerModes()
-    const ask = registered.filter((entry) => entry.id === 'ask')
+    const ask = askAllowedHere() ? registered.filter((entry) => entry.id === 'ask') : []
     if (!humanPostsActive()) return ask
     if (roleBlocked()) return []
     const post = registered.filter((entry) => entry.id === 'post')

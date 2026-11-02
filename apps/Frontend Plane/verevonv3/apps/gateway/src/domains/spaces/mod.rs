@@ -31,6 +31,7 @@ mod denial;
 use denial::{typed_response, with_gap_details, Decision, SpaceDenial};
 pub(crate) mod agent_policy;
 pub(crate) mod directory;
+pub(crate) mod dm;
 pub(crate) mod human_posts;
 pub(crate) mod room_admin;
 mod pins;
@@ -920,6 +921,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
 /// Merged before `require_session`, so every module route is session-gated.
 fn module_routes() -> Router<AppState> {
     Router::new()
+        .merge(dm::routes())
         .merge(human_posts::routes())
         .merge(pins::routes())
         .merge(room_artifacts::routes())
@@ -3059,14 +3061,23 @@ async fn list_personal_spaces(
     // because the projection still lists it.
     if let Some(index) = control_space_index(&state, &user, &org_id).await {
         let labels = organization_space_labels(&state, &user, &org_id).await;
+        // WS12-S3: this caller's hidden DMs; empty with the flag off.
+        let hidden_dms = dm::hidden_set(&state, &user, &org_id).await;
+        let dm_listed = state.space_features.dm_api;
         let spaces: Vec<Value> = index
             .iter()
             .filter_map(|entry| {
                 let space_ref = entry.get("space_ref").and_then(Value::as_str)?;
+                // With SPACE_DM_API off the DM kinds are not listed (the SPA has no group for them).
+                if !dm_listed
+                    && dm::is_dm_kind(entry.get("kind").and_then(Value::as_str).unwrap_or_default())
+                {
+                    return None;
+                }
                 let label = labels.iter().find(|candidate| {
                     candidate.get("spaceRef").and_then(Value::as_str) == Some(space_ref)
                 });
-                Some(json!({
+                let mut row = json!({
                     "space_ref": space_ref,
                     // A missing label is not a missing Space: Control authorized
                     // it, so it is listed under a neutral name rather than
@@ -3095,10 +3106,16 @@ async fn list_personal_spaces(
                         .and_then(|value| value.get("isOrganizationRoom"))
                         .and_then(Value::as_bool)
                         .unwrap_or(false),
-                }))
+                });
+                dm::decorate_index_row(&mut row, entry, &hidden_dms);
+                Some(row)
             })
             .collect();
-        return (StatusCode::OK, Json(json!({"data": {"spaces": spaces}})));
+        // `features.dm` tells the sidebar whether to offer "New message" (presentation only).
+        return (
+            StatusCode::OK,
+            Json(json!({"data": {"spaces": spaces, "features": {"dm": dm_listed}}})),
+        );
     }
 
     // Control's index is unavailable. Fall back to the Application projection of
@@ -3641,6 +3658,9 @@ pub(crate) async fn create_space_agent(
     if let Err(response) = require_space_agent_grant_role(&state, &user, &org_id, &space_ref).await
     {
         return response;
+    }
+    if let Some(refusal) = dm::agent_attach_refusal(&state, &user, &org_id, &space_ref).await {
+        return refusal;
     }
 
     // Convex `v.optional` accepts an absent key, never an explicit null —
@@ -4205,6 +4225,9 @@ pub(crate) async fn bind_existing_space_agent(
     if let Err(response) = require_space_agent_grant_role(&state, &user, &org_id, &space_ref).await
     {
         return response;
+    }
+    if let Some(refusal) = dm::agent_attach_refusal(&state, &user, &org_id, &space_ref).await {
+        return refusal;
     }
 
     let Ok(bound) = convex_gateway_call(
@@ -5130,6 +5153,7 @@ async fn space_context(
                     "room_archive": state.space_features.room_archive_api,
                     "room_artifacts": state.space_features.room_artifacts,
                     "room_pins": state.space_features.room_pins,
+                    "dm": state.space_features.dm_api,
                 },
                 "limits": { "post_max_chars": human_posts::POST_MAX_CHARS },
             }}),

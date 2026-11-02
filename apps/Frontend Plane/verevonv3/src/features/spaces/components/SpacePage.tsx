@@ -55,6 +55,7 @@ import { canRemove, countActiveOwners } from '../lib/space-roles'
 import { SpaceCreateAgentDialog } from './SpaceCreateAgentDialog'
 import { SpaceRoomComposer } from './SpaceRoomComposer'
 import { SpaceArchivedBanner, SpaceArchivedNotice, canArchiveRoom } from './SpaceRoomArchive'
+import { SpaceDmHeader } from './SpaceDmHeader'
 import { SpaceRoomHeader } from './SpaceRoomHeader'
 import { SpaceRoomTimeline, roomAgentName } from './SpaceRoomTimeline'
 import {
@@ -63,6 +64,7 @@ import {
 } from './sidepane/SpaceAuxPane'
 import { SpaceThreadPanel } from './sidepane/SpaceThreadPanel'
 import { spaceThreadPaneEnabled } from '../lib/space-thread-deep-link'
+import { isDmKind, withSpaceKindTraits } from '../lib/space-kind'
 import { roomArtifactsEnabled } from '../lib/room-artifacts'
 import {
   clearSpaceRoomFeatures,
@@ -165,11 +167,12 @@ export default function SpacePage() {
   const closeThread = () => setSearchParams({ thread_id: undefined, m: undefined }, { replace: true })
   // The context read also carries the room's rollout flags (`features`), which drive the UI switches that
   // used to be build-time.
+  const navigate = useNavigate()
   const [context, { refetch: refetchContext }] = createResource(spaceRef, getSpaceContext)
   // Tracking readers (the tab strip, the thread pane) hear about a changed flag from this effect; a
   // child that reads a flag once in its body is covered by the prime where the room renders.
   createEffect(
-    () => (context.error ? undefined : context()?.features),
+    () => (context.error ? undefined : withSpaceKindTraits(context())),
     (features) => publishSpaceRoomFeatures(features),
   )
   onCleanup(clearSpaceRoomFeatures)
@@ -547,7 +550,7 @@ export default function SpacePage() {
       <Show when={context.error ? undefined : context()}>
         {(current) => {
           // Before the room's children render, so one that reads a flag once in its body sees it.
-          primeSpaceRoomFeatures(current().features)
+          primeSpaceRoomFeatures(withSpaceKindTraits(current()))
           return (
             <div
               class="verevon-space-workroom"
@@ -555,6 +558,31 @@ export default function SpacePage() {
               style={{ '--verevon-space-auxpane-width': `${auxPaneWidth()}px` }}
             >
               <main class="verevon-space-canvas">
+                <Show
+                  when={!isDmKind(current().space.kind)}
+                  fallback={
+                    <SpaceDmHeader
+                      spaceRef={current().space.space_ref}
+                      name={dmHeaderName(current().space, roster.error ? undefined : roster(), current().membership.subject_id, i18n.tr)}
+                      kind={current().space.kind}
+                      roster={roster.error ? undefined : roster()}
+                      status={
+                        <div class="verevon-space-meta" aria-label={i18n.tr('Status for samtalen', 'Current message status')}>
+                          <Show when={hereSentence(presenceReading(), i18n.tr)}>
+                            {(sentence) => (
+                              <span class="verevon-space-presence">
+                                <span class="verevon-space-presence__dot" aria-hidden="true" />
+                                {sentence()}
+                              </span>
+                            )}
+                          </Show>
+                          <SpaceLiveIndicator state={streamState} />
+                        </div>
+                      }
+                      onHidden={() => navigate('/spaces')}
+                    />
+                  }
+                >
                 <SpaceRoomHeader
                   spaceRef={current().space.space_ref}
                   name={spaceDisplayName(current().space, i18n.tr)}
@@ -598,6 +626,7 @@ export default function SpacePage() {
                   }}
                   onArchiveChanged={refreshAfterArchiveChange}
                 />
+                </Show>
 
                 <Show when={roomIsArchived(current())}>
                   <SpaceArchivedBanner
@@ -2005,4 +2034,22 @@ function deliveryStatusMark(status: string): string {
 
 function channelLabel(channel: string, tr: (no: string, en: string) => string): string {
   return translatedEnumLabel(channel, CHANNEL_LABELS, tr)
+}
+
+/**
+ * A DM's header name: the other people in the roster (Control's), else the Space's own label. The
+ * roster is the authority for who is in the DM; the viewer is left out.
+ */
+function dmHeaderName(
+  space: { readonly name: string; readonly kind: string },
+  roster: readonly SpaceRosterMember[] | undefined,
+  viewerSubjectId: string,
+  tr: (no: string, en: string) => string,
+): string {
+  const others = (roster ?? [])
+    .filter((member) => member.subject_type === 'user' && member.subject_id !== viewerSubjectId)
+    .map((member) => member.display_name.trim())
+    .filter((name) => name !== '')
+  if (others.length > 0) return others.join(', ')
+  return space.kind === 'group_dm' ? tr('Gruppesamtale', 'Group message') : tr('Direktemelding', 'Direct message')
 }

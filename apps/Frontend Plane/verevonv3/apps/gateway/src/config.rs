@@ -191,6 +191,12 @@ pub(crate) struct SpaceFeatureFlags {
     /// `SPACE_DENIALS_TYPED` (WS03-S5): map Control's typed Space denials to the browser envelope.
     /// Off restores pass-through. A rollout control, never an authorization input.
     pub(crate) denials_typed: bool,
+    /// `SPACE_DM_API` (WS12-S3): `POST /api/v1/spaces/dm`, `POST`/`DELETE /api/v1/spaces/{space_ref}/hide`,
+    /// the DM fields of `GET /api/v1/spaces` and `features.dm`. Off answers 404 `dm_disabled`, hides DM
+    /// kinds from the listing and the SPA's DM group. A rollout control, never an authorization input:
+    /// Control's `dm-eligibility` and the fixed roster decide, and a Zero Data Retention org is refused
+    /// with the typed 412 whatever this says. Production default off; DMs also need WS04-S5 audience registration.
+    pub(crate) dm_api: bool,
     /// `CLIENT_VERSION_POLICY` / `CLIENT_MIN_CONTRACT` (WS07-S3): the stale-client contract the
     /// public `/api/v1/client-config` route reports. Unlike the booleans its default is `banner`,
     /// never off. Carried here (not as an `AppState` field) so no test literal needs an edit.
@@ -293,6 +299,45 @@ pub(crate) struct SpaceFeatureFlags {
     /// legacy panel". A rollout control, never an authorization input: a Zero Data Retention org
     /// is answered `zdr_local` on `GET` and refused on `PUT` whatever this says.
     pub(crate) sidebar: bool,
+    /// `SCIM_EDGE_ENABLED` (WS05-S8): the public, session-less SCIM edge `/api/v1/scim/v2/*`
+    /// that forwards an identity provider's bearer token to org-core. Off (the default, in
+    /// development too) answers the same 501 SCIM error as before the feature existed. A rollout
+    /// control, never an authorization input: org-core resolves the token and the organization.
+    pub(crate) scim_edge: ScimEdgeConfig,
+}
+
+/// The SCIM edge switch and its org-core credential (principal `verevon-scim-edge`). The edge is
+/// armed only when the flag is on AND the credential is a secure secret, so a half-configured
+/// deployment keeps answering 501 instead of forwarding anonymously.
+#[derive(Clone, Default)]
+pub(crate) struct ScimEdgeConfig {
+    pub(crate) enabled: bool,
+    pub(crate) token: String,
+}
+
+impl std::fmt::Debug for ScimEdgeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScimEdgeConfig")
+            .field("enabled", &self.enabled)
+            .field("token", &"<redacted>")
+            .finish()
+    }
+}
+
+impl ScimEdgeConfig {
+    pub(crate) fn from_env() -> Self {
+        let flag = env_bool("SCIM_EDGE_ENABLED", false);
+        let token = env::var("ORG_CORE_SCIM_EDGE_TOKEN").unwrap_or_default();
+        let token = token.trim();
+        let secure = service_token_is_secure(token);
+        if flag && !secure {
+            tracing::warn!("SCIM_EDGE_ENABLED is on but ORG_CORE_SCIM_EDGE_TOKEN is not a secure secret; the SCIM edge stays off");
+        }
+        Self {
+            enabled: flag && secure,
+            token: if secure { token.to_owned() } else { String::new() },
+        }
+    }
 }
 
 impl SpaceFeatureFlags {
@@ -302,6 +347,7 @@ impl SpaceFeatureFlags {
             append_retrieval: env::var("GATEWAY_SPACE_APPEND_RETRIEVAL").is_ok_and(|value| value == "true"),
             chat_locale_hint: space_flag("CHAT_LOCALE_HINT"),
             denials_typed: space_flag("SPACE_DENIALS_TYPED"),
+            dm_api: space_flag("SPACE_DM_API"),
             client_policy: crate::client_contract::ClientPolicy::from_env(),
             csp_report_log_hosts: dev_only_flag("CSP_REPORT_LOG_HOSTS"),
             connectivity_banner_ui: space_flag("SPACE_CONNECTIVITY_BANNER_UI"),
@@ -323,6 +369,7 @@ impl SpaceFeatureFlags {
             run_manager_stop: space_flag("SPACE_RUN_MANAGER_STOP"),
             run_owner_steer: space_flag("SPACE_RUN_OWNER_STEER"),
             sidebar: space_flag("SPACE_SIDEBAR_API"),
+            scim_edge: ScimEdgeConfig::from_env(),
         }
     }
 }

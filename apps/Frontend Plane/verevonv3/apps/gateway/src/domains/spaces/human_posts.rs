@@ -286,8 +286,15 @@ async fn submit_post_limited(
         Ok(post) => post,
         Err(reply) => return reply,
     };
+    // WS12-S3: a post accepted in a direct message clears every viewer's hide.
+    let dm_space: bool;
     match super::space_lifecycle_by_ref(state, user, &org_id, space_ref).await {
-        Ok(Some(_)) => {}
+        Ok(Some(space)) => {
+            dm_space = state.space_features.dm_api
+                && super::dm::is_dm_kind(
+                    space.get("kind").and_then(Value::as_str).unwrap_or_default(),
+                );
+        }
         Ok(None) => {
             return refuse(
                 StatusCode::NOT_FOUND,
@@ -335,7 +342,11 @@ async fn submit_post_limited(
             user,
         )
         .await;
-        return map_model_response(status, response, Some(space_ref));
+        let reply = map_model_response(status, response, Some(space_ref));
+        if dm_space && reply.0.is_success() {
+            super::dm::resurface(state, user, &org_id, space_ref).await;
+        }
+        return reply;
     };
 
     let url = format!(
@@ -375,7 +386,11 @@ async fn submit_post_limited(
         if stale && attempt == 0 {
             continue;
         }
-        return map_model_response(status, response, None);
+        let reply = map_model_response(status, response, None);
+        if dm_space && reply.0.is_success() {
+            super::dm::resurface(state, user, &org_id, space_ref).await;
+        }
+        return reply;
     }
     refuse(
         StatusCode::CONFLICT,

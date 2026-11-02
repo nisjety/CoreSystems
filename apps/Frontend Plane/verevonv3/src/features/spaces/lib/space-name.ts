@@ -1,3 +1,6 @@
+import { getSession } from '@/shared/session/session-store'
+import { dmParticipantsLabel, isDmKind } from './space-kind'
+
 /**
  * The name a personal Space is provisioned with, server-side (Application
  * Plane's `ensurePersonalSpace`). It is stored data rather than UI copy, so it
@@ -8,6 +11,8 @@ const PROVISIONED_PERSONAL_SPACE_NAME = 'Personal Space'
 export type NamedSpace = {
   readonly name: string
   readonly kind: string
+  /** A DM's fixed roster with display names (WS12-S3). */
+  readonly participants?: readonly { readonly subject_id: string; readonly display_name?: string }[]
 }
 
 /**
@@ -27,6 +32,10 @@ export function spaceDisplayName(
   tr: (no: string, en: string) => string,
 ): string {
   const name = space.name?.trim() ?? ''
+  // A DM is named for the other people in it; the stored name is a generic label (WS12-S3).
+  if (isDmKind(space.kind)) {
+    return dmParticipantsLabel(space.participants, getSession().user?.id, tr, name === 'Direct message' ? '' : name)
+  }
   if (space.kind === 'personal' && name === PROVISIONED_PERSONAL_SPACE_NAME) {
     return tr('Personlig rom', 'Personal Space')
   }
