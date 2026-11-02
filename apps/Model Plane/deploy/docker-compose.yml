@@ -591,6 +591,9 @@ services:
       # Wave 7 — fine-tuning kill switch + budget guard (off by default in
       # production-style profile; dev override flips FINETUNE_ENABLED=1).
       FINETUNE_ENABLED: ${FINETUNE_ENABLED:-0}
+      # WS09-S3: save a room turn's work summary (steps and steer count, no text) with its answer.
+      # Off in production-style profiles; the dev override turns it on. Never an authorization input.
+      SPACE_RUN_WORK_SUMMARY: ${SPACE_RUN_WORK_SUMMARY:-false}
       FINETUNE_ORG_BUDGET_USD: ${FINETUNE_ORG_BUDGET_USD:-50}
       FINETUNE_PER_JOB_BUDGET_USD: ${FINETUNE_PER_JOB_BUDGET_USD:-20}
       # Dedicated finetune-poller session-core credential — NOT

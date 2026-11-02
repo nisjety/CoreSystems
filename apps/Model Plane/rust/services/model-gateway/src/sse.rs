@@ -2933,6 +2933,20 @@ pub async fn invoke_stream_sse(
     // /v1/orchestration/runs/{id}/cancel) stops it the same way.
     let cancels = state.cancels.clone();
     let cancel_flag = cancels.register_run(&request_id, &org_id, &user_id, &session_run.run_id);
+    // WS09-S3: a Space turn leaves a content-free pointer from its run id to its buffer, so the room
+    // projector can find the frames without the owner's identity. Never for a zero-retention turn
+    // (that path buffers nothing worth finding), and it authorizes nothing on its own.
+    let room_turn = req
+        .space_context
+        .as_ref()
+        .or(req.space_append_context.as_ref())
+        .is_some_and(|context| !context.space_id.is_empty());
+    if room_turn && !effective_zdr {
+        state
+            .stream_buffers
+            .index_run(&org_id, &session_run.run_id, &buffer_key, req.agent_name.as_deref().unwrap_or_default())
+            .await;
+    }
     // A Stop that lands on another replica reaches this stream over the run-control bus; the
     // subscription is in place before `connected`. Nothing happens with the bus off.
     state.run_control.attach(&cancels, &state.queued_inputs, &request_id, &session_run.run_id).await;
@@ -4784,6 +4798,15 @@ pub async fn invoke_stream_sse(
                         .await;
                         break;
                     }
+                    // WS09-S3: a room turn saves what it did (steps and a steer count, no text)
+                    // with its answer, rebuilt from this producer's own buffer. Nothing under ZDR,
+                    // with the switch off, or for a turn outside a Space.
+                    let work_summary = if room_turn && !effective_zdr && session_state.space_run_policy.work_summary {
+                        let replay = stream_buffers.replay_after(&buffer_key, None).await;
+                        crate::room_run::work_summary_from_buffer(&replay, session_state.space_run_policy.limits)
+                    } else {
+                        None
+                    };
                     // One Session Core transaction saves the answer and records
                     // the Completed receipt, so a durable cancel can no longer
                     // land between the two, and the save rides the Gateway's
@@ -4798,6 +4821,7 @@ pub async fn invoke_stream_sse(
                                 content: &assistant_output,
                                 agent_name: session_agent_name.as_deref(),
                                 metadata: crate::compaction::stamp_generation(
+                                    crate::session_flow::with_work_summary(
                                     crate::session_flow::with_head_summary(
                                         crate::session_flow::with_compaction_summary(
                                             crate::session_flow::with_result_receipt(
@@ -4841,6 +4865,9 @@ pub async fn invoke_stream_sse(
                                         ),
                                         head_summary.as_ref().map(|new| &new.record),
                                         effective_zdr,
+                                    ),
+                                    work_summary.as_ref(),
+                                    effective_zdr,
                                     ),
                                     head_summary.as_ref(),
                                 ),

@@ -2217,6 +2217,23 @@ pub(crate) fn with_result_receipt(
     Some(metadata)
 }
 
+/// Save a room turn's work summary (`room_run::work_summary_from_buffer`) with its answer, under
+/// the `work` key (WS09-S3). The summary holds steps and a steer count and no text. Nothing is
+/// written under zero retention, when there is no summary, or when it does not validate to the
+/// closed shape; the metadata is then returned exactly as it was.
+pub(crate) fn with_work_summary(
+    metadata: Option<prost_types::Struct>,
+    work: Option<&serde_json::Value>,
+    zdr: bool,
+) -> Option<prost_types::Struct> {
+    let Some(work) = work.filter(|_| !zdr).and_then(crate::room_run::validate_work_value) else {
+        return metadata;
+    };
+    let mut metadata = metadata.unwrap_or_default();
+    metadata.fields.insert(crate::room_run::WORK_KEY.to_owned(), json_to_prost_value(&work));
+    Some(metadata)
+}
+
 /// The metadata key a declined retrieval's notice code is stored under (D1-242).
 pub(crate) const RETRIEVAL_DECLINED_KEY: &str = "retrievalDeclined";
 

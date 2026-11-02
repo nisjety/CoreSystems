@@ -22,9 +22,14 @@ use serde_json::{Map, Value};
 /// Environment variable that restores the pre-allowlist pass-through.
 pub const LEGACY_PASSTHROUGH_ENV: &str = "SPACE_ROOM_METADATA_LEGACY_PASSTHROUGH";
 
-/// Metadata keys a shared-Space reader may see. WS09 adds `"work"`. `retrievalDeclined` (D1-242) is the
-/// typed code of why Control declined retrieval for the turn; it is a closed set, checked on the way out.
-pub const ROOM_VISIBLE_METADATA_KEYS: &[&str] = &["artifacts", crate::session_flow::RETRIEVAL_DECLINED_KEY];
+/// Metadata keys a shared-Space reader may see. `work` (WS09-S3) is the content-free work summary,
+/// rebuilt to its closed shape on the way out. `retrievalDeclined` (D1-242) is the typed code of why
+/// Control declined retrieval for the turn; it is a closed set, checked on the way out.
+pub const ROOM_VISIBLE_METADATA_KEYS: &[&str] = &[
+    "artifacts",
+    crate::session_flow::RETRIEVAL_DECLINED_KEY,
+    crate::room_run::WORK_KEY,
+];
 
 /// Fields of one artifact a room reader may see. Anything else on the stored
 /// artifact (provenance, hashes, internal flags) is dropped.
@@ -76,6 +81,12 @@ pub fn reduce_room_metadata(metadata: Map<String, Value>) -> Option<Map<String, 
                 }
                 // A malformed artifacts value is dropped, never passed through.
                 _ => continue,
+            }
+        } else if *key == crate::room_run::WORK_KEY {
+            // Rebuilt to the closed shape; a malformed value is dropped, never passed through.
+            match crate::room_run::validate_work_value(value) {
+                Some(work) => work,
+                None => continue,
             }
         } else if *key == crate::session_flow::RETRIEVAL_DECLINED_KEY {
             // Only a code the closed set states passes; anything else stored under the key is dropped.

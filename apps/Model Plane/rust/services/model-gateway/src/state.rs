@@ -336,6 +336,8 @@ pub struct AppState {
     /// Resumable chat-stream delta buffer (`HARNESS_PHASE1` §3b). Process-local;
     /// powers `/v1/invoke/{request_id}/resume`. Swap for Redis in multi-replica.
     pub stream_buffers: crate::stream_buffer::StreamBufferStore,
+    /// Room run policy (WS09-S3), read from the environment once at startup.
+    pub space_run_policy: crate::room_run::SpaceRunPolicy,
     /// Wave 10d — skill catalogue (per-org markdown skills).
     pub skills: crate::skills::SkillStore,
     /// Wave 10g — MCP server registry + tool proxy client.
@@ -496,6 +498,7 @@ impl AppState {
             tool_results: crate::tool_result_handles::ToolResultStore::new(),
             trajectories: crate::trajectory::TrajectoryStore::new(),
             stream_buffers: crate::stream_buffer::StreamBufferStore::new(),
+            space_run_policy: crate::room_run::SpaceRunPolicy::OFF,
             skills: crate::skills::SkillStore::new(),
             mcp: crate::runtime_registries::McpRegistry::new(),
             ownership: crate::ownership::OwnershipStore::new(),
@@ -860,6 +863,7 @@ impl AppState {
             state.lsp = lsp_client.clone();
             // Redis-backed resume buffer when REDIS_URL is set (multi-replica).
             state.stream_buffers = crate::stream_buffer::StreamBufferStore::from_env().await;
+            state.space_run_policy = crate::room_run::SpaceRunPolicy::from_env();
             // Off unless the switch is `true`; a failed boot check degrades it, never the boot.
             state.run_control = crate::run_control::RunControl::from_env(Some(url.as_str())).await;
             // plan_mode + team_workers default to empty stores —
@@ -917,6 +921,7 @@ impl AppState {
             // disabled in dev mode even when LSP_BRIDGE_URL is configured.
             state.lsp = lsp_client;
             state.stream_buffers = crate::stream_buffer::StreamBufferStore::from_env().await;
+            state.space_run_policy = crate::room_run::SpaceRunPolicy::from_env();
             state.run_control = crate::run_control::RunControl::from_env(None).await;
             Ok(state)
         }
