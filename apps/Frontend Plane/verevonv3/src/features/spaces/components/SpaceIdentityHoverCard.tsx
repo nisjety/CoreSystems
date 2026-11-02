@@ -166,7 +166,7 @@ function CardBody(props: { readonly model: IdentityCardModel }) {
           <Show when={(model() as { lastPostAt?: string }).lastPostAt}>
             {(at) => (
               <p class="verevon-identity-card__lead">
-                {i18n.tr('Siste innlegg ', 'Last post ')}{formatWhen(at())}
+                {i18n.tr('Siste innlegg ', 'Last post ')}{formatWhen(at(), { locale: i18n.locale() })}
               </p>
             )}
           </Show>
@@ -207,7 +207,7 @@ function LeadLine(props: { readonly lead: AgentLead; readonly ownerName?: string
           <span class="verevon-identity-card__label">{i18n.tr('Siste svar', 'Last reply')}</span>
           {(props.lead as { text: string }).text}
           <Show when={(props.lead as { at?: string }).at}>
-            {(at) => <span class="verevon-identity-card__when"> · {formatWhen(at())}</span>}
+            {(at) => <span class="verevon-identity-card__when"> · {formatWhen(at(), { locale: i18n.locale() })}</span>}
           </Show>
         </p>
       </Show>

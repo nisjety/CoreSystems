@@ -1811,7 +1811,7 @@ function SpacePulse(props: {
                   <>
                     <span class="verevon-space-pulse-recent__title">{threadTitle(item.thread, i18n.tr)}</span>
                     <span class="verevon-space-pulse-recent__meta">
-                      {[threadStatus(item.thread, i18n.tr), formatRelativeWhen(item.at)].filter(Boolean).join(' · ')}
+                      {[threadStatus(item.thread, i18n.tr), formatRelativeWhen(item.at, undefined, { locale: i18n.locale() })].filter(Boolean).join(' · ')}
                     </span>
                   </>
                 )

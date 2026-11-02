@@ -162,7 +162,7 @@ export function SpaceActivityPanel(props: SpaceActivityPanelProps) {
       approvals: (current?.approvals ?? []) as readonly ApprovalLikeActivitySource[],
       operations: (current?.operations ?? []) as readonly OperationLikeActivitySource[],
       authority: (current?.authority ?? []) as readonly AuthorityLikeActivitySource[],
-    })
+    }, i18n.tr)
   })
   const shown = createMemo(() => allItems().filter((item) => matchesLens(item, lens())))
   const hidden = () => allItems().length - shown().length

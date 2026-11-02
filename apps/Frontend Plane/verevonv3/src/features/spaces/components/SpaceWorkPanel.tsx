@@ -121,6 +121,7 @@ export function SpaceWorkPanel(props: SpaceWorkPanelProps) {
       current.runs as readonly RunLikeActivitySource[],
       current.schedules as readonly ScheduleLikeActivitySource[],
       current.processes as readonly ProcessLikeActivitySource[],
+      i18n.tr,
     )
   }
 

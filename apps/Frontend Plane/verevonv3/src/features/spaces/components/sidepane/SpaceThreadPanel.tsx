@@ -106,7 +106,7 @@ export function SpaceThreadPanel(props: SpaceThreadPanelProps) {
               </span>
             </Show>
             <Show when={when()}>
-              {(at) => <time>{formatWhen(at())}</time>}
+              {(at) => <time>{formatWhen(at(), { locale: i18n.locale() })}</time>}
             </Show>
           </p>
         )}

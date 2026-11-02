@@ -405,7 +405,7 @@ function SpaceRoomPost(props: {
   const headMeta = (): PostHeadMeta => {
     const at = when()
     return {
-      ...(at ? { dateLabel: formatWhen(at) } : {}),
+      ...(at ? { dateLabel: formatWhen(at, { locale: i18n.locale() }) } : {}),
       ...(isWorking() ? {} : { status: statusNow() }),
     }
   }
@@ -581,7 +581,7 @@ function SpaceRoomPost(props: {
               </span>
             )}
           </Show>
-          <Show when={formatRelativeWhen(when())}>
+          <Show when={formatRelativeWhen(when(), undefined, { locale: i18n.locale() })}>
             {(ago) => <span class="verevon-room-post__summary-when" aria-hidden="true">{ago()}</span>}
           </Show>
         </button>

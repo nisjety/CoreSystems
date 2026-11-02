@@ -338,7 +338,7 @@ export function SpaceArtifactsTab(props: SpaceArtifactsTabProps) {
                         <Show when={entry.sizeChars > 0}>
                           <span>{i18n.tr(`${entry.sizeChars} tegn`, `${entry.sizeChars} chars`)}</span>
                         </Show>
-                        <Show when={entry.createdAt}>{(when) => <span>{formatWhenWithTime(when())}</span>}</Show>
+                        <Show when={entry.createdAt}>{(when) => <span>{formatWhenWithTime(when(), { locale: i18n.locale() })}</span>}</Show>
                         <Show when={entry.live}>
                           <span class="verevon-space-artifacts__live">{i18n.tr('Ny', 'New')}</span>
                         </Show>

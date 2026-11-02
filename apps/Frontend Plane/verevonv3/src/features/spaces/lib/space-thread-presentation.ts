@@ -1,4 +1,12 @@
 import type { SpaceThread } from '@/shared/api/spaces-client'
+import { formatDay, formatMoment, isValidTimeZone, type SpaceFormatter } from '@/shared/i18n/format'
+import { localeIntl } from '@/shared/i18n/locales'
+import { COPY, say, type Tr } from './space-copy'
+
+export type { SpaceFormatter } from '@/shared/i18n/format'
+
+/** The formatter every date helper below uses when a caller passes none: Norwegian, no preferences. */
+const NORWEGIAN: SpaceFormatter = { locale: 'no' }
 
 /**
  * Presentation vocabulary for a Space thread, shared by the room timeline,
@@ -26,24 +34,24 @@ export const LIVE_RUN_STATUSES = new Set(['queued', 'running'])
 
 export const FAILED_RUN_STATUSES = new Set(['failed'])
 
-export function threadTitle(thread: SpaceThread, tr: (no: string, en: string) => string): string {
-  return thread.title?.trim() || thread.preview?.trim() || tr('Samtale uten tittel', 'Untitled conversation')
+export function threadTitle(thread: SpaceThread, tr: Tr): string {
+  return thread.title?.trim() || thread.preview?.trim() || say(tr, COPY.thread.untitled)
 }
 
-export function threadStatus(thread: SpaceThread, tr: (no: string, en: string) => string): string {
+export function threadStatus(thread: SpaceThread, tr: Tr): string {
   const status = thread.latest_run_status
-  if (!status) return tr('Samtale åpen', 'Conversation open')
-  if (status === 'awaiting_approval') return tr('Venter på godkjenning', 'Needs approval')
-  if (status === 'running') return tr('Arbeider', 'Working')
-  if (status === 'queued') return tr('I kø', 'Queued')
-  if (status === 'completed') return tr('Fullført', 'Completed')
-  if (status === 'failed') return tr('Feilet', 'Failed')
+  if (!status) return say(tr, COPY.thread.open)
+  if (status === 'awaiting_approval') return say(tr, COPY.thread.awaitingApproval)
+  if (status === 'running') return say(tr, COPY.thread.running)
+  if (status === 'queued') return say(tr, COPY.thread.queued)
+  if (status === 'completed') return say(tr, COPY.thread.completed)
+  if (status === 'failed') return say(tr, COPY.thread.failed)
   // A recorded stop. Session Core writes `cancelled` when a member presses Stop
   // (model-gateway cancels the direct-inference run rather than letting it
   // finish), and until this line existed the room rendered that as the
   // untranslated enum token "Cancelled" — so a stop the room itself caused read
   // as a foreign word.
-  if (status === 'cancelled') return tr('Stoppet', 'Stopped')
+  if (status === 'cancelled') return say(tr, COPY.thread.stopped)
   return formatLabel(status)
 }
 
@@ -68,12 +76,8 @@ export { stripMarkdownPreview } from '@/shared/lib/markdown-plain-text'
  * the SAME name in different files, which is how one surface can quietly start
  * disagreeing with the other about what a timestamp means.
  */
-export function formatWhen(value: string): string {
-  try {
-    return new Date(value).toLocaleDateString('nb-NO', { day: 'numeric', month: 'short' })
-  } catch {
-    return value
-  }
+export function formatWhen(value: string, fmt: SpaceFormatter = NORWEGIAN): string {
+  return formatDay(value, fmt.locale, fmt.prefs)
 }
 
 /**
@@ -81,19 +85,23 @@ export function formatWhen(value: string): string {
  * date from a week on. `now` is a parameter so the wording is testable. An unreadable value reads as
  * empty rather than as a wrong time.
  */
-export function formatRelativeWhen(value: string | undefined, now: number = Date.now()): string {
+export function formatRelativeWhen(
+  value: string | undefined,
+  now: number = Date.now(),
+  fmt: SpaceFormatter = NORWEGIAN,
+): string {
   if (!value) return ''
   const at = new Date(value).getTime()
   if (!Number.isFinite(at)) return ''
   // A time ahead of this browser's clock (skew between the server and the reader) is "now", not "in 1 t".
   const seconds = Math.min(0, Math.round((at - now) / 1000))
   const abs = Math.abs(seconds)
-  const rtf = new Intl.RelativeTimeFormat('nb-NO', { numeric: 'auto', style: 'short' })
+  const rtf = new Intl.RelativeTimeFormat(localeIntl(fmt.locale), { numeric: 'auto', style: 'short' })
   if (abs < 45) return rtf.format(0, 'second')
   if (abs < 3600) return rtf.format(Math.round(seconds / 60), 'minute')
   if (abs < 86_400) return rtf.format(Math.round(seconds / 3600), 'hour')
   if (abs < 7 * 86_400) return rtf.format(Math.round(seconds / 86_400), 'day')
-  return formatWhen(value)
+  return formatWhen(value, fmt)
 }
 
 /**
@@ -104,12 +112,17 @@ export function formatRelativeWhen(value: string | undefined, now: number = Date
  * from the order. Falls back to the raw value rather than dropping it: an
  * unparseable timestamp is still evidence something happened then.
  */
-export function formatWhenWithTime(value?: string): string {
-  if (!value) return ''
-  try {
-    return new Date(value).toLocaleString('nb-NO', { dateStyle: 'short', timeStyle: 'short' })
-  } catch {
-    return value
+export function formatWhenWithTime(value?: string, fmt: SpaceFormatter = NORWEGIAN): string {
+  return formatMoment(value, fmt.locale, fmt.prefs)
+}
+
+/** The explicit time format and zone of a viewer, as `Intl` options (nothing when none was chosen). */
+function turnTimeOptions(fmt: SpaceFormatter): { hour12?: boolean; timeZone?: string } {
+  const zone = fmt.prefs?.timeZone?.trim()
+  const timeZone = zone && isValidTimeZone(zone) ? zone : undefined
+  return {
+    ...(fmt.prefs?.timeFormat ? { hour12: fmt.prefs.timeFormat === '12h' } : {}),
+    ...(timeZone ? { timeZone } : {}),
   }
 }
 
@@ -118,14 +131,17 @@ export function formatWhenWithTime(value?: string): string {
  * date and time for the tooltip and the machine-readable `datetime`. Undefined when the server sent no
  * time (or one that is not a time): a row then renders without one rather than with an invented one.
  */
-export function formatTurnTime(value: string | undefined): { iso: string; short: string; full: string } | undefined {
+export function formatTurnTime(
+  value: string | undefined,
+  fmt: SpaceFormatter = NORWEGIAN,
+): { iso: string; short: string; full: string } | undefined {
   if (!value) return undefined
   const at = new Date(value)
   if (!Number.isFinite(at.getTime())) return undefined
   return {
     iso: at.toISOString(),
-    short: at.toLocaleTimeString('nb-NO', { hour: '2-digit', minute: '2-digit' }),
-    full: at.toLocaleString('nb-NO', { dateStyle: 'long', timeStyle: 'short' }),
+    short: at.toLocaleTimeString(localeIntl(fmt.locale), { hour: '2-digit', minute: '2-digit', ...turnTimeOptions(fmt) }),
+    full: at.toLocaleString(localeIntl(fmt.locale), { dateStyle: 'long', timeStyle: 'short', ...turnTimeOptions(fmt) }),
   }
 }
 
