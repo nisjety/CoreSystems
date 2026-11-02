@@ -29,6 +29,14 @@ pub const MODE_ENV: &str = "QUARRY_BROWSER_AGENT_PLANNER_MODE";
 pub const LLM_ORGS_ENV: &str = "QUARRY_BROWSER_AGENT_LLM_ORGS";
 /// The legacy all-orgs switch (deprecated).
 pub const LEGACY_ENV: &str = "QUARRY_BROWSER_AGENT_LLM";
+/// The boot guard for `default_on`: a comma-separated list that must hold every
+/// one of [`DEFAULT_ON_ACK_ITEMS`]. It is a ritual, not proof; the proof is in
+/// the rollout runbook.
+pub const DEFAULT_ON_ACK_ENV: &str = "QUARRY_BROWSER_AGENT_DEFAULT_ON_ACK";
+/// What an operator acknowledges before `default_on` may take effect: browser
+/// grants in production, run budgets, secret redaction at capture, and the
+/// evaluation tiers.
+pub const DEFAULT_ON_ACK_ITEMS: [&str; 4] = ["grants", "budgets", "redaction", "evals"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PlannerMode {
@@ -131,13 +139,55 @@ pub enum PlannerDecision {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PlannerPolicy {
+    /// The EFFECTIVE mode: what the boot guard left of the requested one.
     pub mode: PlannerMode,
     pub allow_orgs: BTreeSet<String>,
     /// `QUARRY_BROWSER_AGENT_LLM` was set: the planner for every org.
     pub legacy_all: bool,
+    /// `default_on` was requested without the full acknowledgement, so the
+    /// mode in force is `org_opt_in`.
+    pub downgraded_from_default_on: bool,
+}
+
+/// Whether `value` (the `QUARRY_BROWSER_AGENT_DEFAULT_ON_ACK` list) names every
+/// required item. Case, spaces and order do not matter; extra items are fine.
+#[must_use]
+pub fn default_on_ack_complete(value: Option<&str>) -> bool {
+    let Some(value) = value else {
+        return false;
+    };
+    let given: BTreeSet<String> = value
+        .split(',')
+        .map(|item| item.trim().to_ascii_lowercase())
+        .filter(|item| !item.is_empty())
+        .collect();
+    DEFAULT_ON_ACK_ITEMS.iter().all(|item| given.contains(*item))
+}
+
+/// What the startup banner says about the limits in force. Numbers and names
+/// only.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BannerFacts {
+    pub procedure: String,
+    pub widened_actions: bool,
+    pub default_steps: i32,
+    pub ceiling_steps: i32,
+    pub default_runtime_s: i32,
+    pub ceiling_runtime_s: i32,
+    pub planner_tokens_default: u64,
+    pub planner_tokens_ceiling: u64,
+    pub max_consecutive_failures: u32,
+    pub max_total_failures: u32,
 }
 
 static LEGACY_WARNED: AtomicBool = AtomicBool::new(false);
+static DOWNGRADE_LOGGED: AtomicBool = AtomicBool::new(false);
+
+/// `true` the first time it is called in this process (the one error line for
+/// a `default_on` request that the boot guard downgraded).
+pub fn note_default_on_downgrade() -> bool {
+    !DOWNGRADE_LOGGED.swap(true, Ordering::SeqCst)
+}
 
 /// `true` the first time it is called in this process, `false` after. The one
 /// deprecation warning is logged on the `true`.
@@ -151,6 +201,12 @@ impl PlannerPolicy {
     #[must_use]
     pub fn from_env() -> Self {
         let policy = Self::from_lookup(|name| std::env::var(name).ok());
+        if policy.downgraded_from_default_on && note_default_on_downgrade() {
+            tracing::error!(
+                "QUARRY_BROWSER_AGENT_PLANNER_MODE=default_on needs QUARRY_BROWSER_AGENT_DEFAULT_ON_ACK \
+                 to name grants, budgets, redaction and evals; running org_opt_in instead"
+            );
+        }
         if policy.legacy_all && note_legacy_use() {
             tracing::warn!(
                 "QUARRY_BROWSER_AGENT_LLM is deprecated and selects the planner for EVERY org; \
@@ -162,9 +218,17 @@ impl PlannerPolicy {
 
     #[must_use]
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
-        let mode = lookup(MODE_ENV)
+        let requested = lookup(MODE_ENV)
             .map(|v| PlannerMode::from_value(&v))
             .unwrap_or_default();
+        // Boot guard: `default_on` takes effect only with the full acknowledgement.
+        let downgraded_from_default_on = requested == PlannerMode::DefaultOn
+            && !default_on_ack_complete(lookup(DEFAULT_ON_ACK_ENV).as_deref());
+        let mode = if downgraded_from_default_on {
+            PlannerMode::OrgOptIn
+        } else {
+            requested
+        };
         let allow_orgs = lookup(LLM_ORGS_ENV)
             .map(|v| {
                 v.split(',')
@@ -180,7 +244,33 @@ impl PlannerPolicy {
             mode,
             allow_orgs,
             legacy_all,
+            downgraded_from_default_on,
         }
+    }
+
+    /// The one-line startup banner: the mode in force, how big the allowlist
+    /// is (never who is on it), the procedure and the limits. No org ids, no
+    /// credentials, no environment values.
+    #[must_use]
+    pub fn banner(&self, facts: &BannerFacts) -> String {
+        format!(
+            "browser planner: mode={} downgraded_from_default_on={} allowlist_size={} legacy_all_orgs_env={} \
+             procedure={} widened_actions={} steps={}/{} runtime_s={}/{} planner_tokens={}/{} failures={}/{}",
+            self.mode.as_str(),
+            self.downgraded_from_default_on,
+            self.allow_orgs.len(),
+            self.legacy_all,
+            facts.procedure,
+            facts.widened_actions,
+            facts.default_steps,
+            facts.ceiling_steps,
+            facts.default_runtime_s,
+            facts.ceiling_runtime_s,
+            facts.planner_tokens_default,
+            facts.planner_tokens_ceiling,
+            facts.max_consecutive_failures,
+            facts.max_total_failures,
+        )
     }
 
     /// Decide for one run. Order: a deployment with the planner off (and no
@@ -238,6 +328,7 @@ mod tests {
             mode,
             allow_orgs: orgs.iter().map(|o| (*o).to_owned()).collect(),
             legacy_all,
+            downgraded_from_default_on: false,
         }
     }
 
@@ -382,6 +473,97 @@ mod tests {
         }
         assert_eq!(PlannerMode::from_value("default_on"), PlannerMode::DefaultOn);
         assert_eq!(PlannerMode::from_value("allowlist"), PlannerMode::Allowlist);
+    }
+
+    fn lookup_of(
+        pairs: &'static [(&'static str, &'static str)],
+    ) -> impl Fn(&str) -> Option<String> {
+        move |name: &str| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| (*v).to_owned())
+        }
+    }
+
+    #[test]
+    fn default_on_without_ack_downgrades_to_org_opt_in() {
+        for ack in [None, Some(""), Some("grants"), Some("grants,budgets,redaction"), Some("yes")] {
+            let lookup = move |name: &str| match name {
+                MODE_ENV => Some("default_on".to_owned()),
+                DEFAULT_ON_ACK_ENV => ack.map(str::to_owned),
+                _ => None,
+            };
+            let policy = PlannerPolicy::from_lookup(lookup);
+            assert_eq!(policy.mode, PlannerMode::OrgOptIn, "{ack:?}");
+            assert!(policy.downgraded_from_default_on, "{ack:?}");
+            // The downgrade is real: an org that never opted in gets nothing.
+            assert_eq!(
+                policy.resolve("org_a", false, F::Unset),
+                det(R::OrgNotOptedIn),
+                "{ack:?}"
+            );
+            assert_eq!(policy.resolve("org_a", false, F::On), LLM);
+        }
+        // Other modes are not touched by the guard.
+        let allow = PlannerPolicy::from_lookup(lookup_of(&[(MODE_ENV, "allowlist")]));
+        assert_eq!(allow.mode, PlannerMode::Allowlist);
+        assert!(!allow.downgraded_from_default_on);
+    }
+
+    #[test]
+    fn default_on_with_full_ack_stays_default_on() {
+        for ack in [
+            "grants,budgets,redaction,evals",
+            " Evals , GRANTS,redaction ,budgets ",
+            "grants,budgets,redaction,evals,extra",
+        ] {
+            let owned = ack.to_owned();
+            let lookup = move |name: &str| match name {
+                MODE_ENV => Some("default_on".to_owned()),
+                DEFAULT_ON_ACK_ENV => Some(owned.clone()),
+                _ => None,
+            };
+            let policy = PlannerPolicy::from_lookup(lookup);
+            assert_eq!(policy.mode, PlannerMode::DefaultOn, "{ack:?}");
+            assert!(!policy.downgraded_from_default_on);
+            assert_eq!(policy.resolve("org_a", false, F::Unset), LLM);
+        }
+        assert!(!default_on_ack_complete(None));
+        assert!(default_on_ack_complete(Some("grants,budgets,redaction,evals")));
+    }
+
+    #[test]
+    fn banner_never_logs_org_ids_or_secrets() {
+        let lookup = lookup_of(&[
+            (MODE_ENV, "allowlist"),
+            (LLM_ORGS_ENV, "org_acme_corp,org_secret_name"),
+            (DEFAULT_ON_ACK_ENV, "grants,budgets,redaction,evals"),
+            ("INFERENCE_CORE_URL", "https://user:hunter2@inference.internal"),
+        ]);
+        let policy = PlannerPolicy::from_lookup(lookup);
+        let facts = BannerFacts {
+            procedure: "browse/1".to_owned(),
+            widened_actions: false,
+            default_steps: 20,
+            ceiling_steps: 100,
+            default_runtime_s: 120,
+            ceiling_runtime_s: 900,
+            planner_tokens_default: 200_000,
+            planner_tokens_ceiling: 1_000_000,
+            max_consecutive_failures: 3,
+            max_total_failures: 8,
+        };
+        let banner = policy.banner(&facts);
+        assert!(!banner.contains('\n'), "one line: {banner}");
+        for forbidden in ["org_acme_corp", "org_secret_name", "hunter2", "inference.internal", "http"] {
+            assert!(!banner.contains(forbidden), "{forbidden} in {banner}");
+        }
+        assert!(banner.contains("mode=allowlist"));
+        assert!(banner.contains("allowlist_size=2"));
+        assert!(banner.contains("procedure=browse/1"));
+        assert!(banner.contains("steps=20/100"));
+        assert!(banner.contains("planner_tokens=200000/1000000"));
     }
 
     #[test]

@@ -18,6 +18,7 @@ use tracing::{info, warn};
 mod browser_risk;
 pub mod admission;
 pub mod failure;
+pub mod metrics;
 pub mod planner_view;
 pub mod procedure;
 

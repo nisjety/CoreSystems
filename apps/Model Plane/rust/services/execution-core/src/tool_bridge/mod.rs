@@ -279,6 +279,7 @@ pub(crate) async fn execute_browser_agent(
                 PlannerSelection::Llm(planner) => (Some(planner), None),
                 PlannerSelection::Deterministic(reason) => {
                     tracing::info!(reason = reason.as_str(), "browser run uses the deterministic loop");
+                    browser_agent::metrics::record_deterministic(reason);
                     // The default deployment (`mode_off`) keeps the output it
                     // always had; every other reason is worth saying.
                     (
@@ -289,6 +290,10 @@ pub(crate) async fn execute_browser_agent(
                 }
                 PlannerSelection::Unavailable(reason) => {
                     tracing::warn!("browser planner selected but unavailable");
+                    browser_agent::metrics::record_run(
+                        browser_agent::metrics::planner_label(true),
+                        "failed",
+                    );
                     return BrowserAgentExecution::Failed { reason };
                 }
             };
@@ -301,6 +306,7 @@ pub(crate) async fn execute_browser_agent(
                 zdr: plan_config.zdr,
                 deterministic_reason,
             };
+            let planner_label = browser_agent::metrics::planner_label(planner.is_some());
             let result = browser_agent::run_browser_agent_loop(
                 plan_config,
                 client.as_ref(),
@@ -311,7 +317,13 @@ pub(crate) async fn execute_browser_agent(
                 state,
             )
             .await;
-            browser_execution_from_loop_result(result, &verification_inputs)
+            browser_agent::metrics::record_planner_tokens(result.usage);
+            if let Some(kind) = result.failure_kind {
+                browser_agent::metrics::record_failure(kind);
+            }
+            let execution = browser_execution_from_loop_result(result, &verification_inputs);
+            browser_agent::metrics::record_run(planner_label, outcome_label(&execution));
+            execution
         }
         Err(e) => BrowserAgentExecution::Failed {
             reason: format!("invalid browser_agent input: {e}"),
@@ -838,6 +850,31 @@ pub(crate) struct BrowserVerificationInputs {
     pub(crate) deterministic_reason: Option<&'static str>,
 }
 
+/// The closed `outcome` metric label for how a browser tool call ended.
+fn outcome_label(execution: &BrowserAgentExecution) -> &'static str {
+    match execution {
+        BrowserAgentExecution::Completed { .. } => "completed",
+        BrowserAgentExecution::Failed { .. } => "failed",
+        BrowserAgentExecution::PermissionDenied { .. } => "permission_denied",
+        BrowserAgentExecution::TimedOut { .. } => "timed_out",
+        BrowserAgentExecution::ResourceExhausted { .. } => "resource_exhausted",
+        BrowserAgentExecution::Cancelled { .. } => "cancelled",
+        BrowserAgentExecution::Aborted { .. } => "aborted",
+        BrowserAgentExecution::AwaitingApproval => "awaiting_approval",
+    }
+}
+
+/// Log the one-line startup banner for the browser planner (mode in force,
+/// allowlist size, procedure, limits; no org ids, no secrets). A `default_on`
+/// request without its acknowledgement is downgraded, with one error line.
+/// Called once from `main`.
+pub fn log_browser_planner_banner() {
+    // `from_env` logs the downgrade error (once per process) and the legacy
+    // variable's deprecation warning.
+    let policy = crate::planner_policy::PlannerPolicy::from_env();
+    tracing::info!("{}", policy.banner(&PlanCeilings::from_env().banner_facts()));
+}
+
 /// The planner policy's answer for one run, with the planner built.
 pub(crate) enum PlannerSelection {
     Llm(crate::llm_planner::LlmPlanner),
@@ -1035,6 +1072,22 @@ impl Default for PlanCeilings {
 impl PlanCeilings {
     pub(crate) fn from_env() -> Self {
         Self::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    /// The numbers the startup banner prints.
+    pub(crate) fn banner_facts(&self) -> crate::planner_policy::BannerFacts {
+        crate::planner_policy::BannerFacts {
+            procedure: self.procedure.as_str().to_owned(),
+            widened_actions: self.widened_actions,
+            default_steps: self.default_steps,
+            ceiling_steps: self.ceiling_steps,
+            default_runtime_s: self.default_runtime_s,
+            ceiling_runtime_s: self.ceiling_runtime_s,
+            planner_tokens_default: self.default_planner_tokens,
+            planner_tokens_ceiling: self.ceiling_planner_tokens,
+            max_consecutive_failures: self.max_consecutive_failures,
+            max_total_failures: self.max_total_failures,
+        }
     }
 
     pub(crate) fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
@@ -1610,6 +1663,29 @@ mod tests {
         ]);
         assert_eq!(set.max_consecutive_failures, 5);
         assert_eq!(set.max_total_failures, 8);
+    }
+
+    #[test]
+    fn outcome_labels_cover_every_execution_and_stay_in_the_closed_list() {
+        let all = [
+            BrowserAgentExecution::Completed { output: String::new() },
+            BrowserAgentExecution::Failed { reason: "r".to_owned() },
+            BrowserAgentExecution::PermissionDenied { reason: "r".to_owned() },
+            BrowserAgentExecution::TimedOut { reason: "r".to_owned() },
+            BrowserAgentExecution::ResourceExhausted { reason: "r".to_owned() },
+            BrowserAgentExecution::Cancelled { reason: "r".to_owned() },
+            BrowserAgentExecution::Aborted { reason: "r".to_owned() },
+            BrowserAgentExecution::AwaitingApproval,
+        ];
+        let labels: std::collections::BTreeSet<&str> = all.iter().map(outcome_label).collect();
+        assert_eq!(labels.len(), all.len());
+        for label in labels {
+            assert!(browser_agent::metrics::OUTCOME_LABELS.contains(&label), "{label}");
+        }
+        // The banner facts are the ceilings in force.
+        let facts = PlanCeilings::default().banner_facts();
+        assert_eq!((facts.default_steps, facts.ceiling_steps), (20, 100));
+        assert_eq!(facts.procedure, "legacy/0");
     }
 
     #[test]

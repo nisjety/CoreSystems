@@ -1542,6 +1542,7 @@ services:
       QUARRY_BROWSER_AGENT_PLANNER_MODE: ${QUARRY_BROWSER_AGENT_PLANNER_MODE:-off}
       QUARRY_BROWSER_AGENT_LLM_ORGS: ${QUARRY_BROWSER_AGENT_LLM_ORGS:-}
       QUARRY_BROWSER_AGENT_WIDENED_ACTIONS: ${QUARRY_BROWSER_AGENT_WIDENED_ACTIONS:-0}
+      QUARRY_BROWSER_AGENT_DEFAULT_ON_ACK: ${QUARRY_BROWSER_AGENT_DEFAULT_ON_ACK:-}
       # Data Plane v2 retrieval — backs the real knowledge_search agentic tool
       # (RAG over the org's ingested docs). DATAPLANE_INTERNAL_KEY is sent as
       # the x-api-key credential.
