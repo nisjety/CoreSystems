@@ -550,6 +550,79 @@ export async function deleteDocument(orgId: string, id: string, signal?: AbortSi
   })
 }
 
+/** W2-U65-51: the edge caps the crawl scope options; the action schema and these helpers agree. */
+export const CRAWL_PATTERN_MAX_LENGTH = 512
+export const CRAWL_PATTERN_MAX_COUNT = 100
+export const CRAWL_MAX_DEPTH = 10
+
+/** W2-U65-51: build flag for the crawl scope options and the scrape captures in the composer.
+ * Off unless `VITE_KNOWLEDGE_SCRAPE_OPTIONS_ENABLED=true`; off, the composer sends what it sent before. */
+export function knowledgeScrapeOptionsEnabled(): boolean {
+  return (import.meta.env as Record<string, string | undefined>).VITE_KNOWLEDGE_SCRAPE_OPTIONS_ENABLED === 'true'
+}
+
+/** Split a pattern box into patterns: one per line, or comma separated (a comma inside
+ * `{a,b}` braces stays part of its glob). Blank, over-long and repeated entries are dropped
+ * and the list is capped, the same bounds the edge enforces. */
+export function parseCrawlPatterns(text: string): string[] {
+  const parts: string[] = []
+  for (const line of text.split(/\r?\n/)) {
+    let depth = 0
+    let current = ''
+    for (const char of line) {
+      if (char === '{') depth += 1
+      else if (char === '}') depth = Math.max(0, depth - 1)
+      if (char === ',' && depth === 0) {
+        parts.push(current)
+        current = ''
+      } else {
+        current += char
+      }
+    }
+    parts.push(current)
+  }
+  const seen = new Set<string>()
+  for (const part of parts) {
+    const pattern = part.trim()
+    if (pattern.length === 0 || pattern.length > CRAWL_PATTERN_MAX_LENGTH) continue
+    seen.add(pattern)
+    if (seen.size >= CRAWL_PATTERN_MAX_COUNT) break
+  }
+  return [...seen]
+}
+
+/** The crawl scope options the user chose. A field the user left alone is absent, so the
+ * edge applies its own default; `allowSubdomains` is sent only when ticked. */
+export type CrawlScopeOptions = Pick<CrawlRequest, 'maxDepth' | 'includePaths' | 'excludePaths' | 'allowSubdomains'>
+
+export function buildCrawlScopeOptions(input: {
+  maxDepth?: number
+  includeText?: string
+  excludeText?: string
+  allowSubdomains?: boolean
+}): CrawlScopeOptions {
+  const include = parseCrawlPatterns(input.includeText ?? '')
+  const exclude = parseCrawlPatterns(input.excludeText ?? '')
+  const depth = input.maxDepth
+  return {
+    ...(depth !== undefined && Number.isFinite(depth) && depth >= 1
+      ? { maxDepth: Math.min(CRAWL_MAX_DEPTH, Math.round(depth)) }
+      : {}),
+    ...(include.length > 0 ? { includePaths: include } : {}),
+    ...(exclude.length > 0 ? { excludePaths: exclude } : {}),
+    ...(input.allowSubdomains === true ? { allowSubdomains: true } : {}),
+  }
+}
+
+/** The captures the user ticked. `undefined` when none: a capture is never sent as `false`. */
+export function buildCaptureRequest(input: { screenshot?: boolean; pdf?: boolean }): ScrapeCaptureRequest | undefined {
+  const capture: ScrapeCaptureRequest = {
+    ...(input.screenshot === true ? { screenshot: true } : {}),
+    ...(input.pdf === true ? { pdf: true } : {}),
+  }
+  return capture.screenshot || capture.pdf ? capture : undefined
+}
+
 export async function startCrawl(
   orgId: string,
   body: CrawlRequest,

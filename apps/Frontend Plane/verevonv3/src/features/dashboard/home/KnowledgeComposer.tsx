@@ -50,14 +50,19 @@ import { createAiRunStartKeyring, startBrowserAiRun } from '@/shared/api/browser
 import { streamRunEvents } from '@/shared/api/run-console-client'
 import { decideApproval, listApprovals, type ApprovalDecision } from '@/shared/api/orchestration-client'
 import {
+  buildCaptureRequest,
+  buildCrawlScopeOptions,
+  CRAWL_MAX_DEPTH,
   crawlSelectedPages,
   createDocument,
   discoverCrawlPages,
   extractProducts,
   getImportJob,
   importUpload,
+  knowledgeScrapeOptionsEnabled,
   listCrawlJobs,
   scrapePreview,
+  scrapeUrl,
   startCrawl,
   streamCrawlRunEvents,
   summarizeProducts,
@@ -197,6 +202,15 @@ export function KnowledgeComposer(props: {
   const [mode, setMode] = createSignal<IngestMode>('link')
   const [agentMode, setAgentMode] = createSignal(false)
   const [crawlMaxPages, setCrawlMaxPages] = createSignal(25)
+  // W2-U65-51: crawl scope options and scrape captures. Behind VITE_KNOWLEDGE_SCRAPE_OPTIONS_ENABLED
+  // (off by default); with the flag off the controls are hidden and nothing below is sent.
+  const scrapeOptions = knowledgeScrapeOptionsEnabled()
+  const [crawlMaxDepth, setCrawlMaxDepth] = createSignal<number | undefined>(undefined)
+  const [crawlIncludeText, setCrawlIncludeText] = createSignal('')
+  const [crawlExcludeText, setCrawlExcludeText] = createSignal('')
+  const [crawlAllowSubdomains, setCrawlAllowSubdomains] = createSignal(false)
+  const [captureScreenshot, setCaptureScreenshot] = createSignal(false)
+  const [capturePdf, setCapturePdf] = createSignal(false)
   const [submitting, setSubmitting] = createSignal(false)
   const [adding, setAdding] = createSignal(false)
   const [browserBusy, setBrowserBusy] = createSignal(false)
@@ -505,6 +519,15 @@ export function KnowledgeComposer(props: {
   const startCrawlJob = async (target: string) => {
     setDiscovery(null)
     const maxPages = crawlMaxPages()
+    // W2-U65-51: the scope the user typed; empty when the flag is off or nothing was chosen.
+    const scope = scrapeOptions
+      ? buildCrawlScopeOptions({
+          allowSubdomains: crawlAllowSubdomains(),
+          excludeText: crawlExcludeText(),
+          includeText: crawlIncludeText(),
+          maxDepth: crawlMaxDepth(),
+        })
+      : {}
     // Phase 6 selective ingest: resolve the user's crawl_ingest_mode → ingest
     // flag (shared resolver; unset defaults to 'auto' so an explicit add-to-
     // Knowledge crawl actually persists — owner=user, private until shared).
@@ -535,6 +558,7 @@ export function KnowledgeComposer(props: {
         }, {
           ingest,
           maxPages,
+          ...scope,
           url: target,
         })
         updateJob(key, {
@@ -544,7 +568,7 @@ export function KnowledgeComposer(props: {
         })
         startCrawlEventStream(key, execution.runId)
       } else {
-        const job = await startCrawl(orgId(), { ingest, maxPages, url: target })
+        const job = await startCrawl(orgId(), { ingest, maxPages, ...scope, url: target })
         updateJob(key, { eventStream: job.eventStream, id: job.id, status: job.status || 'running' })
         startCrawlEventStream(key, job.id)
       }
@@ -789,14 +813,18 @@ export function KnowledgeComposer(props: {
     closePreviewBrowserSession(preview())
     setBrowserRationales([])
     let browserSessionPromise: Promise<BrowserSessionAttempt> | null = null
+    // W2-U65-51: a capture is requested only when the user ticked it (flag on).
+    const capture = scrapeOptions
+      ? buildCaptureRequest({ pdf: capturePdf(), screenshot: captureScreenshot() })
+      : undefined
     try {
       browserSessionPromise = tryCreateBrowserSession(target)
       const result = await scrapePreview(orgId(), {
         url: target,
         signals: {
           actions: ['render_page'],
-          screenshot: false,
-          pdf: false,
+          screenshot: capture?.screenshot === true,
+          pdf: capture?.pdf === true,
           prior_block_signals: 0,
           profile_required: false,
           url_type: 'Default',
@@ -806,8 +834,20 @@ export function KnowledgeComposer(props: {
         },
       })
       const browserSession = await browserSessionPromise
+      // The preview route never takes captures, so the ticked ones come from one /scrape call.
+      // A capture that fails does not fail the preview; the user sees a notice instead.
+      let captureView = toScrapePreview(target, result).captures
+      if (capture) {
+        try {
+          const captured = await scrapeUrl(orgId(), { capture, url: target })
+          captureView = toScrapePreview(target, captured).captures ?? captureView
+        } catch (reason) {
+          setFormError(browserErrorMessage(reason, i18n.tr, { no: 'Skjermbilde eller PDF kunne ikke tas.', en: 'The screenshot or PDF could not be captured.' }))
+        }
+      }
       const nextPreview = {
         ...attachBrowserSession(toScrapePreview(target, result), browserSession.session),
+        ...(captureView ? { captures: captureView } : {}),
         browserSessionError: browserSession.error,
       }
       setPreview(nextPreview)
@@ -1455,6 +1495,27 @@ export function KnowledgeComposer(props: {
             </button>
           </div>
 
+          <Show when={scrapeOptions && mode() === 'link'}>
+            <div class="dashboard-knowledge-composer__crawl-options" data-testid="scrape-capture-options">
+              <label class="dashboard-knowledge-composer__agent-toggle">
+                <input
+                  type="checkbox"
+                  checked={captureScreenshot()}
+                  onChange={(event) => setCaptureScreenshot(event.currentTarget.checked)}
+                />
+                <span>{i18n.tr('Ta skjermbilde', 'Capture a screenshot')}</span>
+              </label>
+              <label class="dashboard-knowledge-composer__agent-toggle">
+                <input
+                  type="checkbox"
+                  checked={capturePdf()}
+                  onChange={(event) => setCapturePdf(event.currentTarget.checked)}
+                />
+                <span>{i18n.tr('Lag PDF', 'Capture a PDF')}</span>
+              </label>
+            </div>
+          </Show>
+
           <Show when={mode() === 'link'}>
             <div class="dashboard-knowledge-composer__browser-options">
               <label class="dashboard-knowledge-composer__browser-profile">
@@ -1644,6 +1705,50 @@ export function KnowledgeComposer(props: {
                 />
                 <span>{i18n.tr('Agentstyrt workflow', 'Agent-run workflow')}</span>
               </label>
+              <Show when={scrapeOptions}>
+                <label>
+                  <span>{i18n.tr('Dybde', 'Depth')}</span>
+                  <input
+                    type="number"
+                    min="1"
+                    max={CRAWL_MAX_DEPTH}
+                    placeholder="-"
+                    value={crawlMaxDepth() ?? ''}
+                    onInput={(event) => {
+                      const value = event.currentTarget.valueAsNumber
+                      setCrawlMaxDepth(Number.isFinite(value) ? Math.min(CRAWL_MAX_DEPTH, Math.max(1, Math.round(value))) : undefined)
+                    }}
+                  />
+                </label>
+                <label class="dashboard-knowledge-composer__agent-toggle">
+                  <input
+                    type="checkbox"
+                    checked={crawlAllowSubdomains()}
+                    onChange={(event) => setCrawlAllowSubdomains(event.currentTarget.checked)}
+                  />
+                  <span>{i18n.tr('Inkluder underdomener', 'Include subdomains')}</span>
+                </label>
+                <label>
+                  <span>{i18n.tr('Ta med stier', 'Include paths')}</span>
+                  <input
+                    type="text"
+                    value={crawlIncludeText()}
+                    placeholder="/docs/**, /blog/**"
+                    aria-label={i18n.tr('Stier som skal tas med', 'Paths to include')}
+                    onInput={(event) => setCrawlIncludeText(event.currentTarget.value)}
+                  />
+                </label>
+                <label>
+                  <span>{i18n.tr('Utelat stier', 'Exclude paths')}</span>
+                  <input
+                    type="text"
+                    value={crawlExcludeText()}
+                    placeholder="/admin/**, re:/tag/.*"
+                    aria-label={i18n.tr('Stier som skal utelates', 'Paths to exclude')}
+                    onInput={(event) => setCrawlExcludeText(event.currentTarget.value)}
+                  />
+                </label>
+              </Show>
               <button
                 type="button"
                 class="dashboard-knowledge-composer__discover"
