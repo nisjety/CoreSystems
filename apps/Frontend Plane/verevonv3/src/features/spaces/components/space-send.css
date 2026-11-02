@@ -224,3 +224,12 @@
 .verevon-space-room-composer textarea[hidden] {
   display: none;
 }
+
+/* WS14-S9: the per-message choice to also keep text files in the room's Files tab. */
+.verevon-space-attachments__keep {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8125rem;
+  color: var(--verevon-text-muted);
+}

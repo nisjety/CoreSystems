@@ -1025,6 +1025,21 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   self_share: { no: 'Du eier dokumentet allerede.', en: 'You already own this document.' },
   share_limit_reached: { no: 'Dokumentet er delt med så mange som er tillatt. Fjern noen først.', en: 'This document is already shared with as many people as allowed. Remove someone first.' },
 
+  // WS14 room files (S9; gateway spaces/files.rs and imports-core refusals)
+  file_not_found: { no: 'Fant ikke filen, eller du har ikke tilgang til den.', en: 'The file was not found, or you do not have access to it.' },
+  room_file_count_exceeded: { no: 'For mange filer på én gang. Velg færre og prøv igjen.', en: 'Too many files at once. Pick fewer and try again.' },
+  room_file_duplicate: { no: 'Denne filen ligger allerede i rommet.', en: 'This file is already in the room.' },
+  room_file_empty: { no: 'Filen er tom.', en: 'The file is empty.' },
+  room_file_no_extractable_text: { no: 'Fant ingen tekst i filen. Skannede dokumenter støttes ikke ennå.', en: 'No text could be read from the file. Scanned documents are not supported yet.' },
+  room_file_text_too_long: { no: 'Teksten i filen er for lang til å lagres i rommet.', en: 'The text in the file is too long to keep in the room.' },
+  room_file_too_large: { no: 'Filen er for stor til å lagres i rommet.', en: 'The file is too large to keep in the room.' },
+  room_file_type_unsupported: { no: 'Denne filtypen kan ikke lagres i rommet.', en: 'This file type cannot be kept in the room.' },
+  room_files_disabled: { no: 'Romfiler er ikke slått på ennå.', en: 'Room files are not turned on yet.' },
+  room_files_quota_exceeded: { no: 'Rommet har nådd grensen for lagrede filer. Fjern noen først.', en: 'The room has reached its limit of kept files. Remove some first.' },
+  room_files_unavailable: { no: 'Romfiler er utilgjengelige akkurat nå. Ingenting er endret. Prøv igjen om litt.', en: 'Room files are unavailable right now. Nothing was changed. Try again shortly.' },
+  space_files_not_authorized: { no: 'Rollen din i dette rommet tillater ikke å legge til filer.', en: 'Your role in this room does not allow adding files.' },
+  upload_not_found: { no: 'Fant ikke opplastingen.', en: 'The upload was not found.' },
+
   // WS04 membership and room administration
   directory_unavailable: { no: 'Personsøket er utilgjengelig akkurat nå. Prøv igjen om litt.', en: 'People search is unavailable right now. Try again shortly.' },
   idempotency_key_reused: { no: 'Denne forespørselen er allerede brukt til noe annet. Last inn på nytt og prøv igjen.', en: 'This request was already used for something else. Reload and try again.' },
@@ -1075,6 +1090,10 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   space_attention_disabled: { no: 'Varsler på tvers av rom er ikke slått på.', en: 'Cross-room alerts are not turned on.' },
   invalid_level: { no: 'Det varselnivået finnes ikke. Ingenting er endret.', en: 'That notification level does not exist. Nothing was changed.' },
   space_index_unavailable: { no: 'Rommene dine kunne ikke leses akkurat nå. Prøv igjen om litt.', en: 'Your rooms could not be read right now. Try again shortly.', retryable: true },
+  attention_item_not_found: { no: 'Det elementet finnes ikke lenger i innboksen din.', en: 'That item is no longer in your inbox.' },
+  invalid_snooze: { no: 'Utsett i minst ett minutt og høyst 30 dager. Ingenting er endret.', en: 'Snooze for at least a minute and at most 30 days. Nothing was changed.' },
+  attention_unavailable: { no: 'Innboksen er ikke tilgjengelig akkurat nå. Ingenting er endret.', en: 'The inbox is not available right now. Nothing was changed.', retryable: true },
+  invalid_follow_state: { no: 'Det valget finnes ikke. Ingenting er endret.', en: 'That choice does not exist. Nothing was changed.' },
   space_kind_unsupported: { no: 'Et personlig rom har ingen delte agenter og dermed ingen verktøyregler.', en: 'A personal Space has no shared agents, so it has no tool rules.' },
 }
 

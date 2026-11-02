@@ -26,7 +26,13 @@ function sameFeatures(a: SpaceRoomFeatures | undefined, b: SpaceRoomFeatures | u
   if (a === b) return true
   if (!a || !b) return false
   const keys = new Set([...Object.keys(a), ...Object.keys(b)])
-  for (const key of keys) if ((a[key] === true) !== (b[key] === true)) return false
+  for (const key of keys) {
+    const left = a[key]
+    const right = b[key]
+    // A flag that is a block of flags (`room_files`) changes when any member does.
+    const comparable = (value: unknown) => (value !== null && typeof value === 'object' ? JSON.stringify(value) : value === true)
+    if (comparable(left) !== comparable(right)) return false
+  }
   return true
 }
 
@@ -71,6 +77,16 @@ export function clearSpaceRoomFeatures(): void {
 export function spaceRoomFeature(name: string): boolean {
   version()
   return latest?.[name] === true
+}
+
+/**
+ * One member of a flag block (`features.room_files.files_tab`). Off when the room has not been read,
+ * the block is absent, or the member is not exactly `true`.
+ */
+export function spaceRoomNestedFeature(block: string, name: string): boolean {
+  version()
+  const value = latest?.[block]
+  return value !== null && typeof value === 'object' && (value as Record<string, unknown>)[name] === true
 }
 
 /**

@@ -66,6 +66,8 @@ import { OPENAI_CODEX_SUBSCRIPTION_PROVIDER } from '@/shared/api/chatgpt-subscri
 import { getSession } from '@/shared/session/session-store'
 import { useHomeDraft } from '@/features/dashboard/home/home-draft'
 import { spaceRoomFeature, spaceRoomFeatureWithDevOverride } from '../lib/space-room-features'
+import { canAddRoomFiles, roomFilesDurableEnabled, roomFilesFlag, roomFilesFromChips, roomFilesLimits } from '../lib/room-files'
+import { uploadSpaceFiles } from '@/shared/api/space-files-client'
 import { applyFormat, markdownShortcut, type MarkdownFormatKind } from '../lib/markdown-edit'
 import './space-send.css'
 
@@ -256,8 +258,14 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   const [attachNotice, setAttachNotice] = createSignal<string | undefined>(undefined)
   const [dragActive, setDragActive] = createSignal(false)
   const [preparing, setPreparing] = createSignal(false)
+  // The gateway states it as `features.room_files.turn_attachments`; a dev build may force it.
   const attachFlagOn = () =>
-    spaceRoomFeatureWithDevOverride('turn_attachments', import.meta.env.VITE_SPACE_TURN_ATTACHMENTS)
+    spaceRoomFeatureWithDevOverride('turn_attachments', import.meta.env.VITE_SPACE_TURN_ATTACHMENTS) ||
+    roomFilesFlag('turn_attachments')
+  // WS14-S9: the member's choice to also keep this turn's text files in the room's Files tab.
+  // Per message, never remembered: it resets after every send. Offered only where the library is on.
+  const [keepInRoom, setKeepInRoom] = createSignal(false)
+  const keepOffered = () => roomFilesDurableEnabled() && canAddRoomFiles(props.viewerRole?.())
   let fileInputRef: HTMLInputElement | undefined
   let textareaRef: HTMLTextAreaElement | undefined
   const MARKDOWN_ROWS_MIN = 2
@@ -467,6 +475,7 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   function clearFiles(): void {
     for (const file of files()) revokeRoomAttachment(file)
     setFiles([])
+    setKeepInRoom(false)
   }
   onCleanup(clearFiles)
   function handlePaste(event: ClipboardEvent): void {
@@ -851,6 +860,19 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
         sendContent = prepared.content
         sendAttachments = prepared.attachments
         setAttachNotice(undefined)
+        if (keepInRoom() && keepOffered()) {
+          // Read the chips back before they are cleared; the upload then runs beside the send.
+          const keep = await roomFilesFromChips(files(), roomFilesLimits(undefined))
+          if (keep.length > 0) {
+            void uploadSpaceFiles(props.spaceRef, keep).then(
+              () => undefined,
+              (error: unknown) => setAttachNotice(translateApiError(error, i18n.tr, {
+                no: 'Filene ble sendt i meldingen, men kunne ikke lagres i rommet.',
+                en: 'The files were sent in the message but could not be kept in the room.',
+              })),
+            )
+          }
+        }
       } catch (error) {
         setAttachNotice(error instanceof Error ? error.message : i18n.tr('Kunne ikke lese vedleggene.', 'Could not read the attachments.'))
         return
@@ -1309,6 +1331,17 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
                   )}
                 </For>
               </ul>
+              <Show when={keepOffered()}>
+                <label class="verevon-space-attachments__keep">
+                  <input
+                    type="checkbox"
+                    checked={keepInRoom()}
+                    disabled={submitting() || preparing()}
+                    onChange={(event) => setKeepInRoom(event.currentTarget.checked)}
+                  />
+                  <span>{i18n.tr('Behold tekstfiler i rommet (Filer)', 'Also keep text files in the room (Files)')}</span>
+                </label>
+              </Show>
             </Show>
           </div>
         </Show>

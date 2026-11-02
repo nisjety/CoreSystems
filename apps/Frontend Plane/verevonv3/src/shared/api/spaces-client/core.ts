@@ -71,10 +71,14 @@ export type SpaceContext = {
     dm?: boolean
     /** WS10-S5b: the Agent tab shows the per-tool policy editor. */
     tool_policy_editor?: boolean
+    /** WS14: the room file library's rollout, `{turn_attachments, durable, files_tab}`. */
+    room_files?: { turn_attachments?: boolean; durable?: boolean; files_tab?: boolean }
   }
   /** Server-stated bounds (WS01-S5). Absent on an older gateway: use the documented defaults. */
   limits?: {
     post_max_chars?: number
+    /** WS14: `{max_files, max_file_bytes, max_request_bytes, allowed_extensions, turn_inline_chars, turn_total_chars}`. */
+    room_files?: unknown
   }
 }
 

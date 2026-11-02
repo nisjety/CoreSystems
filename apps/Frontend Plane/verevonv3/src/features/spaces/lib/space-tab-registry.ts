@@ -10,6 +10,7 @@
  */
 
 import { roomArtifactsEnabled } from './room-artifacts'
+import { roomFilesTabEnabled } from './room-files'
 import { DM_SPACE_FEATURE } from './space-kind'
 import { spaceRoomFeature } from './space-room-features'
 
@@ -65,6 +66,16 @@ export const SPACE_TABS = [
     owner: 'Model Plane',
     // Hidden with the rest of the room artifact surfaces (WS07, features.room_artifacts).
     enabled: roomArtifactsEnabled,
+  },
+  {
+    id: 'filer',
+    labelNo: 'Filer',
+    labelEn: 'Files',
+    purposeNo: 'Tekstfiler medlemmer har lagt i rommet.',
+    purposeEn: 'Text files members have added to the Space.',
+    owner: 'Data Plane',
+    // Hidden until the gateway reports the library (WS14, features.room_files.files_tab).
+    enabled: roomFilesTabEnabled,
   },
   {
     id: 'aktivitet',

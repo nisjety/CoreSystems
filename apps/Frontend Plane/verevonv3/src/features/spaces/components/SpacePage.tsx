@@ -80,6 +80,7 @@ import {
 } from '../lib/space-room-features'
 import { createRoomLiveArtifacts, type RoomLiveArtifacts } from '../lib/room-live-artifacts'
 import { SpaceArtifactsTab } from './SpaceArtifactsTab'
+import { SpaceFilesPanel } from './SpaceFilesPanel'
 import { resolveOpenSpacePane } from '../lib/space-pane-registry'
 import { readSpaceMessageParam, spaceEntryLinksEnabled } from '../lib/space-entity-link'
 import { publishSpaceThreads, publishSpaceUnread, retractSpaceThreads } from '../lib/space-live-work'
@@ -726,6 +727,15 @@ export default function SpacePage() {
                     kunnskap: <SpaceKnowledgePanel spaceRef={current().space.space_ref} />,
                     artefakter: (
                       <SpaceArtifactsTab spaceRef={current().space.space_ref} live={liveArtifacts} />
+                    ),
+                    filer: (
+                      <SpaceFilesPanel
+                        spaceRef={current().space.space_ref}
+                        viewerSubjectId={() => current().membership.subject_id}
+                        role={() => current().membership.role}
+                        archived={() => roomIsArchived(current())}
+                        limits={() => current().limits?.room_files}
+                      />
                     ),
                     aktivitet: (
                       <SpaceActivityPanel
