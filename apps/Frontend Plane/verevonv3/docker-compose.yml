@@ -310,12 +310,16 @@ services:
       # leave the listing). Rollout control only; Control's dm-eligibility decides, ZDR orgs get the typed 412.
       # Needs Control SPACE_DM_REGISTRATION + Convex SPACE_DM_OPEN, and WS04-S5 audience registration to work.
       SPACE_DM_API: ${SPACE_DM_API:-true}
-      SPACE_RUN_LIVE_VIEW: ${SPACE_RUN_LIVE_VIEW:-true}
-      SPACE_RUN_LIVE_TEXT: ${SPACE_RUN_LIVE_TEXT:-true}
       # WS12-S7: edit and delete a message (PATCH/DELETE .../threads/{id}/messages/{message_id}; 404
       # space_message_revise_disabled when off). Rollout control only; Control's model.thread.revise decision
       # and Session Core decide, ZDR orgs get the typed 412. Needs model-gateway SPACE_MESSAGE_REVISE_API.
       SPACE_MESSAGE_REVISE_API: ${SPACE_MESSAGE_REVISE_API:-true}
+      # WS04-S8: GET /api/v1/directory/rooms, POST .../join, PATCH .../settings and the actions
+      # spaces.join_room / spaces.update_room_settings (404 feature_disabled when off). Rollout control
+      # only; Control's per-org space_directory_policies row (absent = off) and the room's visibility decide.
+      SPACE_ROOM_DIRECTORY_API: ${SPACE_ROOM_DIRECTORY_API:-true}
+      SPACE_RUN_LIVE_VIEW: ${SPACE_RUN_LIVE_VIEW:-true}
+      SPACE_RUN_LIVE_TEXT: ${SPACE_RUN_LIVE_TEXT:-true}
       SPACE_RUN_MANAGER_STOP: ${SPACE_RUN_MANAGER_STOP:-true}
     ports:
       - "${VEREVON_BIND_ADDRESS:-127.0.0.1}:3185:3185"

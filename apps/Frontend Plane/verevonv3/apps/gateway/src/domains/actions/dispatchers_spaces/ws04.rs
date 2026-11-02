@@ -8,7 +8,8 @@ use axum::response::Response;
 use serde_json::{json, Map, Value};
 
 use crate::domains::spaces::room_admin::{
-    change_member_role, feature_disabled, remove_member, update_room_details,
+    change_member_role, feature_disabled, join_room, remove_member, update_room_details,
+    update_room_settings,
 };
 use crate::middleware::AuthenticatedUser;
 use crate::config::AppState;
@@ -84,6 +85,58 @@ pub(in crate::domains::actions) async fn dispatch_spaces_update_room_details(
     let (status, axum::Json(resp)) =
         update_room_details(state, user, space_ref, &Value::Object(body)).await;
     owner_json_response_to_envelope("spaces.update_room_details", user, status, resp)
+}
+
+/// WS04-S8: `spaces.join_room`. Rides the same gateway function as
+/// `POST /api/v1/spaces/{space_ref}/join`, so the flag `SPACE_ROOM_DIRECTORY_API`, Control's
+/// open-room rule (a private room answers the same 404 as an unknown one) and the audience
+/// reconcile exist once. Human-only (never model-executable). The caller's idempotency key is
+/// forwarded unchanged so a retried join replays instead of re-applying.
+pub(in crate::domains::actions) async fn dispatch_spaces_join_room(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    input: &Value,
+    idempotency_key: &str,
+) -> Response {
+    let space_ref = ticket_string(input, "spaceRef");
+    if space_ref.is_empty() {
+        return ticket_bad_request("spaces.join_room requires a non-empty 'spaceRef'");
+    }
+    let mut body = Map::new();
+    if !idempotency_key.trim().is_empty() {
+        body.insert("idempotency_key".to_owned(), json!(idempotency_key.trim()));
+    }
+    let (status, axum::Json(resp)) = join_room(state, user, space_ref, &Value::Object(body)).await;
+    owner_json_response_to_envelope("spaces.join_room", user, status, resp)
+}
+
+/// WS04-S8: `spaces.update_room_settings`. Rides the same gateway function as
+/// `PATCH /api/v1/spaces/{space_ref}/settings`; Control decides who may change visibility or the
+/// self-join role and whether the organization's directory policy allows `org_public`.
+/// Human-only (never model-executable).
+pub(in crate::domains::actions) async fn dispatch_spaces_update_room_settings(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    input: &Value,
+    idempotency_key: &str,
+) -> Response {
+    let space_ref = ticket_string(input, "spaceRef");
+    if space_ref.is_empty() {
+        return ticket_bad_request("spaces.update_room_settings requires a non-empty 'spaceRef'");
+    }
+    let mut body = Map::new();
+    if let Some(value) = input.get("visibility") {
+        body.insert("visibility".to_owned(), value.clone());
+    }
+    if let Some(value) = input.get("joinRole") {
+        body.insert("join_role".to_owned(), value.clone());
+    }
+    if !idempotency_key.trim().is_empty() {
+        body.insert("idempotency_key".to_owned(), json!(idempotency_key.trim()));
+    }
+    let (status, axum::Json(resp)) =
+        update_room_settings(state, user, space_ref, &Value::Object(body)).await;
+    owner_json_response_to_envelope("spaces.update_room_settings", user, status, resp)
 }
 
 #[cfg(test)]

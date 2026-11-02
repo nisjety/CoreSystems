@@ -671,6 +671,218 @@ pub(super) async fn resolve_route(
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// WS04-S8: the room directory (`GET /api/v1/directory/rooms`).
+//
+// Control decides which rooms the caller may browse (open, managed, active, not already a member,
+// organization policy on; absent policy means `enabled:false`). Application only supplies the
+// display labels. A room Control lists but Application has no active label for is dropped, so the
+// directory never shows a bare ref. The label read is intersected with Control's list, never
+// browsed, so a name or topic of a room Control did not list is never returned. No content moves,
+// so a Zero Data Retention organization behaves the same.
+// ---------------------------------------------------------------------------------------------
+
+/// Rooms per page of the directory.
+const ROOMS_PAGE_SIZE: usize = 25;
+
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct RoomsParams {
+    q: Option<String>,
+    cursor: Option<String>,
+}
+
+fn encode_rooms_cursor(name: &str, space_ref: &str) -> String {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    URL_SAFE_NO_PAD.encode(json!([name, space_ref]).to_string())
+}
+
+fn decode_rooms_cursor(raw: &str) -> Option<(String, String)> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    let bytes = URL_SAFE_NO_PAD.decode(raw).ok()?;
+    let value: Value = serde_json::from_slice(&bytes).ok()?;
+    let pair = value.as_array()?;
+    Some((
+        pair.first()?.as_str()?.to_owned(),
+        pair.get(1)?.as_str()?.to_owned(),
+    ))
+}
+
+fn room_ref(room: &Value) -> String {
+    room.get("space_ref")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// `GET /api/v1/directory/rooms?q=&cursor=`: `{data:{enabled,rooms:[{space_ref,name,topic,
+/// member_count,join_role}],next_cursor},meta:{truncated}}`, sorted by name, 25 per page.
+pub(super) async fn rooms_route(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Query(params): Query<RoomsParams>,
+) -> Response {
+    if !state.space_features.room_directory_api {
+        return feature_disabled("The room directory is not enabled.");
+    }
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+    if org_id.trim().is_empty() {
+        return membership_required();
+    }
+    if let Some(response) = rate_limited(&state, &org_id, &user).await {
+        return response;
+    }
+    let needle = params
+        .q
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_lowercase();
+    if needle.chars().count() > MAX_QUERY_CHARS {
+        return invalid("q", "too_long");
+    }
+    let after = match params
+        .cursor
+        .as_deref()
+        .map(str::trim)
+        .filter(|cursor| !cursor.is_empty())
+    {
+        None => None,
+        Some(raw) if raw.len() > MAX_CURSOR_LEN => return invalid("cursor", "too_long"),
+        Some(raw) => match decode_rooms_cursor(raw) {
+            Some(key) => Some(key),
+            None => return invalid("cursor", "malformed"),
+        },
+    };
+    let data = match control_rooms(&state, &user, &org_id).await {
+        Ok(data) => data,
+        Err(failure) => return failure.into_response(),
+    };
+    let enabled = data
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let truncated = data
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let listed: Vec<Value> = data
+        .get("rooms")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    // (lowercase name, room) pairs; the name is the sort key and half the cursor.
+    let mut rooms: Vec<(String, Value)> = Vec::new();
+    if enabled && !listed.is_empty() {
+        // A failed label read is a 503, never an empty directory.
+        let labels = match super::convex_gateway_call(
+            &state,
+            "query",
+            "spaces:spacesForOrgForGateway",
+            json!({ "externalAuthId": user.user_id, "externalOrgId": org_id }),
+        )
+        .await
+        {
+            Ok(value) => value.as_array().cloned().unwrap_or_default(),
+            Err(()) => return unavailable(),
+        };
+        for room in &listed {
+            let space_ref = room_ref(room);
+            if space_ref.is_empty() {
+                continue;
+            }
+            let Some(label) = labels.iter().find(|label| {
+                label.get("spaceRef").and_then(Value::as_str) == Some(space_ref.as_str())
+                    && label.get("lifecycle").and_then(Value::as_str) == Some("active")
+            }) else {
+                continue;
+            };
+            let name = label
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim();
+            if name.is_empty() {
+                continue;
+            }
+            let topic = label.get("topic").and_then(Value::as_str);
+            if !needle.is_empty()
+                && !name.to_lowercase().contains(&needle)
+                && !topic.is_some_and(|topic| topic.to_lowercase().contains(&needle))
+            {
+                continue;
+            }
+            rooms.push((
+                name.to_lowercase(),
+                json!({
+                    "space_ref": space_ref,
+                    "name": name,
+                    "topic": topic,
+                    "member_count": room.get("member_count").and_then(Value::as_i64).unwrap_or(0),
+                    "join_role": room.get("join_role").and_then(Value::as_str).unwrap_or("viewer"),
+                }),
+            ));
+        }
+    }
+    rooms.sort_by(|a, b| (&a.0, room_ref(&a.1)).cmp(&(&b.0, room_ref(&b.1))));
+    if let Some((after_name, after_ref)) = after {
+        rooms.retain(|(key, room)| (key.clone(), room_ref(room)) > (after_name.clone(), after_ref.clone()));
+    }
+    let more = rooms.len() > ROOMS_PAGE_SIZE;
+    rooms.truncate(ROOMS_PAGE_SIZE);
+    let next = if more {
+        rooms.last().map_or(Value::Null, |(key, room)| {
+            json!(encode_rooms_cursor(key, &room_ref(room)))
+        })
+    } else {
+        Value::Null
+    };
+    let page: Vec<Value> = rooms.into_iter().map(|(_, room)| room).collect();
+    let mut response = (
+        StatusCode::OK,
+        Json(json!({
+            "data": { "enabled": enabled, "rooms": page, "next_cursor": next },
+            "meta": { "truncated": truncated },
+        })),
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert("cache-control", HeaderValue::from_static("no-store"));
+    response
+}
+
+/// One Control read of the browsable rooms under the caller's signed delegation.
+async fn control_rooms(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+) -> Result<Value, ControlFailure> {
+    let url = format!("{}/api/v1/internal/directory/rooms", state.user_core_url);
+    let actor = ActionActor {
+        user_id: user.user_id.clone(),
+        user_email: user.user_email.clone(),
+        user_name: user.user_name.clone(),
+        user_role: user.auth_role.clone().unwrap_or_default(),
+    };
+    let (status, Json(control)) = proxy_json(
+        state,
+        Method::GET,
+        &url,
+        None,
+        Some(org_id),
+        Some(&actor),
+        None,
+    )
+    .await;
+    if status.is_server_error() {
+        return Err(ControlFailure::Unavailable);
+    }
+    if !status.is_success() {
+        return Err(ControlFailure::Passthrough(status, control));
+    }
+    Ok(unwrap_data(&control))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{control_query, people_route, PeopleParams};

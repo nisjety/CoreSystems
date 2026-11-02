@@ -875,6 +875,211 @@ pub(super) async fn update_room_details_route(
     update_room_details(&state, &user, &space_ref, &body).await
 }
 
+// ---------------------------------------------------------------------------------------------
+// WS04-S8: room visibility, join role and self-join (`POST .../join`, `PATCH .../settings`).
+//
+// Both ride Control's actor-carrying routes under the caller's signed delegation. Control owns the
+// rules (who may change settings, the per-org directory policy, which rooms are open, the role a
+// joiner gets); this module checks no role and trusts no flag as authorization. The rollout flag
+// `SPACE_ROOM_DIRECTORY_API` only decides whether the routes exist. No message, topic or other
+// content moves, so a Zero Data Retention organization behaves the same.
+// ---------------------------------------------------------------------------------------------
+
+const VISIBILITIES: [&str; 2] = ["private", "org_public"];
+/// A self-join never lands above editor, so the open-room role is one of these two.
+const JOIN_ROLES: [&str; 2] = ["viewer", "editor"];
+
+fn directory_feature_disabled() -> Reply {
+    (
+        StatusCode::NOT_FOUND,
+        Json(error("feature_disabled", "The room directory is not enabled.")),
+    )
+}
+
+fn space_ops_url(state: &AppState, space_ref: &str, op: &str) -> String {
+    format!(
+        "{}/api/v1/internal/spaces/{}/{op}",
+        state.user_core_url,
+        urlencoding::encode(space_ref)
+    )
+}
+
+/// `POST /api/v1/spaces/{space_ref}/join`: the caller joins an open room of their organization.
+///
+/// Control answers 404 `room_not_found` for a private room, a disabled organization, a personal
+/// Space, another organization's room and an unknown ref alike (byte-equal), and 409
+/// `room_archived`; the typed refusal passes through. After a success the recipient audience is
+/// reconciled (the joiner cannot read until it is current), and the response says so through
+/// `audience.state` and `recipient_ready:false`; the SPA polls `.../membership` until it turns
+/// true. The Control write is never rolled back by an audience failure.
+pub(crate) async fn join_room(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    space_ref: &str,
+    body: &Value,
+) -> Reply {
+    if !state.space_features.room_directory_api {
+        return directory_feature_disabled();
+    }
+    let (org_id, space_ref) = match scope(state, user, space_ref).await {
+        Ok(scope) => scope,
+        Err(reply) => return reply,
+    };
+    let Some(fields) = body.as_object() else {
+        return invalid("body", "The request body must be a JSON object.");
+    };
+    if fields.keys().any(|key| key != "idempotency_key") {
+        return invalid("body", "Only idempotency_key is accepted.");
+    }
+    let key = match optional_idempotency_key(body) {
+        Ok(key) => key,
+        Err(reply) => return reply,
+    };
+    let mut payload = Map::new();
+    if let Some(key) = key {
+        payload.insert("idempotency_key".to_owned(), json!(key));
+    }
+    if let Err(reply) = member_ops_allowed(state, &org_id, user).await {
+        return reply;
+    }
+    let (status, Json(control)) = proxy_json(
+        state,
+        Method::POST,
+        &space_ops_url(state, &space_ref, "join"),
+        Some(Value::Object(payload)),
+        Some(&org_id),
+        Some(&actor_of(user)),
+        None,
+    )
+    .await;
+    if !status.is_success() {
+        return relay_control_error(status, control);
+    }
+    let data = unwrap_data(&control);
+    let audience = reconcile_audience(state, &org_id, &space_ref).await;
+    let changed = data.get("changed").and_then(Value::as_bool).unwrap_or(false);
+    let out = json!({"data": {
+        "space_ref": data.get("space_ref").and_then(Value::as_str).unwrap_or(&space_ref),
+        "role": data.get("role").cloned().filter(Value::is_string).unwrap_or(Value::Null),
+        "changed": changed,
+        "already_member": data
+            .get("already_member")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        "recipient_ready": false,
+        "audience": { "state": audience },
+    }});
+    (StatusCode::OK, Json(with_audience_warning(out, audience)))
+}
+
+/// `PATCH /api/v1/spaces/{space_ref}/settings`: a room's visibility (`private`, `org_public`) and
+/// the role a self-join receives (`viewer`, `editor`). Control applies the role rule (owner or
+/// manager), refuses `org_public` while the organization's directory policy is off
+/// (403 `directory_disabled`), the organization room (409 `room_roster_derived`) and an archived
+/// room (409 `room_archived`). A visibility change does not alter the recipient set, so no
+/// audience reconcile follows. `history_mode` belongs to WS04-S11 and is refused here as an
+/// unknown field until that slice lands.
+pub(crate) async fn update_room_settings(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    space_ref: &str,
+    body: &Value,
+) -> Reply {
+    if !state.space_features.room_directory_api {
+        return directory_feature_disabled();
+    }
+    let (org_id, space_ref) = match scope(state, user, space_ref).await {
+        Ok(scope) => scope,
+        Err(reply) => return reply,
+    };
+    let Some(fields) = body.as_object() else {
+        return invalid("body", "The request body must be a JSON object.");
+    };
+    if fields
+        .keys()
+        .any(|key| !["visibility", "join_role", "idempotency_key"].contains(&key.as_str()))
+    {
+        return invalid("body", "Only visibility, join_role and idempotency_key are accepted.");
+    }
+    let mut payload = Map::new();
+    match fields.get("visibility") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(value)) if VISIBILITIES.contains(&value.trim()) => {
+            payload.insert("visibility".to_owned(), json!(value.trim()));
+        }
+        Some(_) => return invalid("visibility", "The visibility must be private or org_public."),
+    }
+    match fields.get("join_role") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(value)) if JOIN_ROLES.contains(&value.trim()) => {
+            payload.insert("join_role".to_owned(), json!(value.trim()));
+        }
+        Some(_) => return invalid("join_role", "The join role must be viewer or editor."),
+    }
+    if payload.is_empty() {
+        return invalid("body", "A visibility or a join role is required.");
+    }
+    match optional_idempotency_key(body) {
+        Ok(Some(key)) => {
+            payload.insert("idempotency_key".to_owned(), json!(key));
+        }
+        Ok(None) => {}
+        Err(reply) => return reply,
+    }
+    if let Err(reply) = member_ops_allowed(state, &org_id, user).await {
+        return reply;
+    }
+    let (status, Json(control)) = proxy_json(
+        state,
+        Method::PATCH,
+        &space_ops_url(state, &space_ref, "settings"),
+        Some(Value::Object(payload)),
+        Some(&org_id),
+        Some(&actor_of(user)),
+        None,
+    )
+    .await;
+    if !status.is_success() {
+        return relay_control_error(status, control);
+    }
+    let data = unwrap_data(&control);
+    (
+        StatusCode::OK,
+        Json(json!({"data": {
+            "space_ref": data.get("space_ref").and_then(Value::as_str).unwrap_or(&space_ref),
+            "visibility": data.get("visibility").cloned().filter(Value::is_string).unwrap_or(Value::Null),
+            "join_role": data.get("join_role").cloned().filter(Value::is_string).unwrap_or(Value::Null),
+            "changed": data.get("changed").and_then(Value::as_bool).unwrap_or(false),
+        }})),
+    )
+}
+
+/// Axum handler for `POST /api/v1/spaces/{space_ref}/join`. The body is optional.
+pub(super) async fn join_room_route(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(space_ref): Path<String>,
+    raw: Bytes,
+) -> Reply {
+    match parse_optional_body(&raw) {
+        Ok(body) => join_room(&state, &user, &space_ref, &body).await,
+        Err(reply) => reply,
+    }
+}
+
+/// Axum handler for `PATCH /api/v1/spaces/{space_ref}/settings`.
+pub(super) async fn update_room_settings_route(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(space_ref): Path<String>,
+    raw: Bytes,
+) -> Reply {
+    match parse_optional_body(&raw) {
+        Ok(body) => update_room_settings(&state, &user, &space_ref, &body).await,
+        Err(reply) => reply,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{audience_state, invalid_details_from, map_details_failure};

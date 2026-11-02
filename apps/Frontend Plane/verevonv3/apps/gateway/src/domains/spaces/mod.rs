@@ -944,6 +944,15 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         )
         .route("/api/v1/directory/people", get(directory::people_route))
         .route("/api/v1/directory/resolve", post(directory::resolve_route))
+        .route("/api/v1/directory/rooms", get(directory::rooms_route))
+        .route(
+            "/api/v1/spaces/{space_ref}/join",
+            post(room_admin::join_room_route),
+        )
+        .route(
+            "/api/v1/spaces/{space_ref}/settings",
+            patch(room_admin::update_room_settings_route),
+        )
         .route("/api/v1/spaces/{space_ref}/context", get(space_context))
         .route("/api/v1/spaces/{space_ref}/actions", get(space_actions))
 		.route(
@@ -1042,6 +1051,7 @@ fn module_routes() -> Router<AppState> {
         .merge(dm::routes())
         .merge(files::routes())
         .merge(human_posts::routes())
+        .merge(message_lifecycle::routes())
         .merge(message_search::routes())
         .merge(pins::routes())
         .merge(room_artifacts::routes())
@@ -1051,7 +1061,6 @@ fn module_routes() -> Router<AppState> {
         .merge(stream::routes())
 }
 
-        .merge(message_lifecycle::routes())
 #[derive(Debug, Deserialize)]
 struct OwnerGrantMutationRequest {
     idempotency_key: String,
@@ -5433,6 +5442,9 @@ async fn space_context(
             )
         }
     };
+    // WS12-S7: lifecycle hints (a hint, never an authorization); None when the flag is off.
+    let message_policy =
+        message_lifecycle::message_policy_hints(&state, &user, &org_id, space_ref).await;
     let actor = ActionActor {
         user_id: user.user_id,
         user_email: user.user_email,
@@ -5442,9 +5454,6 @@ async fn space_context(
     let url = control_membership_url(&state, space_ref, true);
     let (status, Json(response)) = proxy_json(
         &state,
-    // WS12-S7: lifecycle hints (a hint, never an authorization); None when the flag is off.
-    let message_policy =
-        message_lifecycle::message_policy_hints(&state, &user, &org_id, space_ref).await;
         Method::GET,
         &url,
         None,
@@ -5468,6 +5477,7 @@ async fn space_context(
                 "space": public_space(&space),
                 "membership": membership,
                 "archived": archived,
+                "message_policy": message_policy,
                 // Server rollout flags the SPA reads to show or hide a control. Never an
                 // authorization input: Control and Session Core decide who may do anything.
                 "features": {
@@ -5477,9 +5487,9 @@ async fn space_context(
                     "connectivity_banner": state.space_features.connectivity_banner_ui,
                     "room_details": state.space_features.room_details_ui,
                     "people_search": state.space_features.people_search_api,
-                "message_policy": message_policy,
                     "directory_resolver": state.space_features.directory_resolver_api,
                     "room_archive": state.space_features.room_archive_api,
+                    "room_directory": state.space_features.room_directory_api,
                     "room_artifacts": state.space_features.room_artifacts,
                     "room_pins": state.space_features.room_pins,
                     "message_search": state.space_features.message_search_api
@@ -5488,6 +5498,7 @@ async fn space_context(
                     "command_palette": state.space_features.command_palette_ui,
                     "thread_fork": state.space_features.thread_fork_api,
                     "dm": state.space_features.dm_api,
+                    "message_revise": state.space_features.message_revise_api,
                     "tool_policy_editor": state.space_features.tool_policy_editor,
                     "attention": state.space_features.attention_api
                         && state.space_features.attention_ui,
@@ -5498,7 +5509,6 @@ async fn space_context(
                     "addressed_wake": state.space_features.addressed_wake_api
                         && state.space_features.mention_records_api,
                     "agent_wake_policy": state.space_features.agent_wake_policy_api,
-                    "message_revise": state.space_features.message_revise_api,
                     "room_files": files::features_json(&state),
                     // WS15-S7 (R5): the timeline and composer rollout controls. `system_entries` and
                     // `link_previews` stay false until WS15-S11 / WS15-S10 add their flags.

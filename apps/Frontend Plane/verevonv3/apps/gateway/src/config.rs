@@ -277,6 +277,14 @@ pub(crate) struct SpaceFeatureFlags {
     /// live role (owner or manager) decides who may archive. No content moves, so Zero Data
     /// Retention organizations are unaffected.
     pub(crate) room_archive_api: bool,
+    /// `SPACE_ROOM_DIRECTORY_API` (WS04-S8): `GET /api/v1/directory/rooms`, `POST
+    /// /api/v1/spaces/{space_ref}/join`, `PATCH /api/v1/spaces/{space_ref}/settings`, the actions
+    /// `spaces.join_room` and `spaces.update_room_settings`, and `features.room_directory`. Off
+    /// answers 404 `feature_disabled`. A rollout control, never an authorization input: Control's
+    /// per-organization directory policy (`space_directory_policies`, absent means off), the
+    /// room's visibility and the caller's live role decide who may list, join or change a room.
+    /// No content moves, so Zero Data Retention organizations are unaffected.
+    pub(crate) room_directory_api: bool,
     /// `SPACE_ROOM_ARTIFACTS_API` (WS07-S9): `GET /api/v1/spaces/{space_ref}/artifacts`, the room
     /// artifact aggregate, and `features.room_artifacts`. Off answers 404
     /// `space_room_artifacts_disabled` and the SPA hides the chips and the tab. A rollout control,
@@ -448,6 +456,7 @@ impl SpaceFeatureFlags {
             chat_locale_hint: space_flag("CHAT_LOCALE_HINT"),
             denials_typed: space_flag("SPACE_DENIALS_TYPED"),
             dm_api: space_flag("SPACE_DM_API"),
+            message_revise_api: space_flag("SPACE_MESSAGE_REVISE_API"),
             client_policy: crate::client_contract::ClientPolicy::from_env(),
             csp_report_log_hosts: dev_only_flag("CSP_REPORT_LOG_HOSTS"),
             connectivity_banner_ui: space_flag("SPACE_CONNECTIVITY_BANNER_UI"),
@@ -459,10 +468,10 @@ impl SpaceFeatureFlags {
             people_search_api: space_flag("SPACE_PEOPLE_SEARCH_API"),
             directory_resolver_api: space_flag("SPACE_DIRECTORY_RESOLVER_API"),
             room_archive_api: space_flag("SPACE_ROOM_ARCHIVE_API"),
+            room_directory_api: space_flag("SPACE_ROOM_DIRECTORY_API"),
             room_artifacts: space_flag("SPACE_ROOM_ARTIFACTS_API"),
             room_pins: space_flag("SPACE_ROOM_PINS_API"),
             room_files_api: space_flag("SPACE_ROOM_FILES_API"),
-            message_revise_api: space_flag("SPACE_MESSAGE_REVISE_API"),
             room_files_ui: space_flag("SPACE_ROOM_FILES_UI"),
             turn_attachments_ui: space_flag("SPACE_TURN_ATTACHMENTS_UI"),
             message_search_api: space_flag("SPACE_MESSAGE_SEARCH_API"),
