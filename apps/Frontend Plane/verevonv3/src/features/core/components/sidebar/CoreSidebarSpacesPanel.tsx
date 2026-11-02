@@ -33,7 +33,10 @@ import {
   liveThreadsIn,
   unreadThreadIdsIn,
 } from '@/features/spaces/lib/space-live-work'
+import { setSpaceNotifyLevel, type SpaceNotifyLevel } from '@/shared/api/spaces-attention-client'
+import { refreshSpaceAttention, spaceAttentionRoom } from '@/features/spaces/lib/space-attention'
 import { SidebarPanelTitle, SidebarSearchField } from './CoreSidebarPrimitives'
+import { SpaceAttentionReadAll, SpaceRoomAttentionBadge } from './SpaceAttentionBadge'
 import { SpaceMoveDialog, SpaceSectionNameDialog } from './SpaceMoveDialog'
 import { SpaceRoomMenu, type SpaceMenuItem } from './SpaceRoomMenu'
 import { SpaceSidebarSection } from './SpaceSidebarSection'
@@ -392,6 +395,7 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
         label: isHidden ? i18n.tr('Vis igjen', 'Unhide') : i18n.tr('Skjul', 'Hide'),
         onSelect: () => toggleHide(space, isHidden),
       },
+      ...notifyLevelItems(space),
     ]
     if (canReorder(context) && context.kind !== 'group' && context.kind !== 'hidden') {
       const index = context.refs.indexOf(ref)
@@ -401,6 +405,34 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
       )
     }
     return items
+  }
+
+  // WS11-S4: the caller's own notification level for the room (a closed vocabulary, allowed under
+  // ZDR). Offered only once the attention aggregate has answered for this room, so a gateway with the
+  // surface off shows no dead items; the checkmark is the level the server last reported.
+  function notifyLevelItems(space: SpaceSummary): SpaceMenuItem[] {
+    const current = spaceAttentionRoom(space.space_ref)?.level
+    if (!current) return []
+    const options: ReadonlyArray<{ level: SpaceNotifyLevel; no: string; en: string }> = [
+      { level: 'all', no: 'Varsler: alle meldinger', en: 'Notify: all messages' },
+      { level: 'mentions', no: 'Varsler: bare omtaler', en: 'Notify: mentions only' },
+      { level: 'off', no: 'Varsler: av', en: 'Notify: off' },
+    ]
+    return options.map((option) => ({
+      id: `notify-${option.level}`,
+      label: `${option.level === current ? '✓ ' : ''}${i18n.tr(option.no, option.en)}`,
+      onSelect: () => {
+        if (option.level === current) return
+        void setSpaceNotifyLevel(space.space_ref, option.level)
+          .then(() => {
+            announce(i18n.tr(option.no, option.en), { key: 'space-notify-level' })
+            refreshSpaceAttention()
+          })
+          .catch((error: unknown) => {
+            announce(translateApiError(error, i18n.tr), { politeness: 'assertive' })
+          })
+      },
+    }))
   }
 
   function sectionMenuItems(entry: SidebarModelSection): SpaceMenuItem[] {
@@ -496,6 +528,8 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
         value={query()}
         onChange={setQuery}
       />
+
+      <SpaceAttentionReadAll />
 
       <nav class="core-sidebar-panel-nav" aria-label={i18n.tr('Romnavigasjon', 'Spaces navigation')}>
         <Show when={spaces.loading}>
@@ -817,6 +851,11 @@ function SpaceLink(props: { space: SpaceSummary; active: boolean }) {
   // unobserved room shows no dot rather than a calm one: absence here means
   // "not looked", never "idle".
   const working = () => isSpaceObserved(props.space.space_ref) && isSpaceWorking(props.space.space_ref)
+  // WS11-S4: the server's cross-room badge, for rooms this browser has NOT got open. The open room
+  // is narrated by its own page (the live-work store above, and the timeline's divider), so it
+  // never shows a second, polled number. Absent store data draws nothing: unknown is not zero.
+  const showAttention = () => !isSpaceObserved(props.space.space_ref)
+  const attention = () => (showAttention() ? spaceAttentionRoom(props.space.space_ref) : undefined)
   return (
     <a
       href={spaceHref(props.space.space_ref)}
@@ -824,6 +863,7 @@ function SpaceLink(props: { space: SpaceSummary; active: boolean }) {
       aria-current={props.active ? 'page' : undefined}
       class={cn('core-sidebar-panel-link', props.active && 'verevon-sidebar-panel-active core-sidebar-panel-link--active')}
       data-working={working() ? 'true' : undefined}
+      data-attention={attention() && attention()!.badge.kind !== 'none' ? 'true' : undefined}
       data-archived={props.space.archived === true ? 'true' : undefined}
     >
       <Show
@@ -844,6 +884,9 @@ function SpaceLink(props: { space: SpaceSummary; active: boolean }) {
           role="img"
           aria-label={i18n.tr('Agentarbeid pågår', 'Agent work in progress')}
         />
+      </Show>
+      <Show when={showAttention()}>
+        <SpaceRoomAttentionBadge spaceRef={props.space.space_ref} />
       </Show>
     </a>
   )

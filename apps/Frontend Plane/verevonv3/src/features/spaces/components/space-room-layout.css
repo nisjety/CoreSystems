@@ -312,6 +312,31 @@
   flex: 1 1 auto;
 }
 
+/* "Jump to unread" (WS11-S4): a quiet text button above the list while posts are new. */
+.verevon-room-jump-unread {
+  align-self: flex-start;
+  min-height: 28px;
+  margin: 0 0 4px;
+  padding: 2px 10px;
+  border: 1px solid color-mix(in srgb, var(--verevon-accent-ink) 40%, transparent);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--verevon-accent-ink);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.verevon-room-jump-unread:hover {
+  background: var(--verevon-surface-soft);
+}
+
+.verevon-room-jump-unread:focus-visible {
+  outline: 2px solid var(--verevon-accent-ink);
+  outline-offset: 2px;
+}
+
 /* The time beside an author's name. Muted ink that holds contrast on the post's surface. */
 .verevon-room-turn__time {
   color: var(--verevon-text-muted);

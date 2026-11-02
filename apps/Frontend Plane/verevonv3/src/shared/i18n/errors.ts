@@ -1063,6 +1063,10 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   tool_policy_revision_conflict: { no: 'Reglene ble endret av noen andre. De nyeste er lastet inn; se over og lagre på nytt.', en: 'Someone else changed the rules. The latest are loaded; review them and save again.' },
   tool_policy_unavailable: { no: 'Verktøyreglene er utilgjengelige akkurat nå. Ingenting er endret. Prøv igjen om litt.', en: 'The tool rules are unavailable right now. Nothing was changed. Try again shortly.' },
   approval_agent_not_in_space: { no: 'Agenten deltar ikke lenger i rommet, så den kan ikke få egne verktøyregler.', en: 'The agent is no longer part of the room, so it cannot have rules of its own.' },
+  // WS11 attention, notify level, mark unread
+  space_attention_disabled: { no: 'Varsler på tvers av rom er ikke slått på.', en: 'Cross-room alerts are not turned on.' },
+  invalid_level: { no: 'Det varselnivået finnes ikke. Ingenting er endret.', en: 'That notification level does not exist. Nothing was changed.' },
+  space_index_unavailable: { no: 'Rommene dine kunne ikke leses akkurat nå. Prøv igjen om litt.', en: 'Your rooms could not be read right now. Try again shortly.', retryable: true },
   space_kind_unsupported: { no: 'Et personlig rom har ingen delte agenter og dermed ingen verktøyregler.', en: 'A personal Space has no shared agents, so it has no tool rules.' },
 }
 

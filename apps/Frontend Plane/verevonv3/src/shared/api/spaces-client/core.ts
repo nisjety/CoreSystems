@@ -113,6 +113,11 @@ export type SpaceThread = {
  */
 export type SpaceReadMarker = {
   readonly last_read_at: number | null
+  /**
+   * WS11-S4: the reader moved the marker back by hand ("mark unread"), so the room is unread from
+   * `last_read_at` until they come back in (`reason: 'enter'`). Absent from an older gateway.
+   */
+  readonly manual_unread?: boolean
 }
 
 export type SpaceThreads = {
@@ -270,7 +275,10 @@ export async function getSpaceThreads(spaceRef: string): Promise<SpaceThreads> {
   // the member who has never caught up; a missing object is the gap.
   const read_marker: SpaceReadMarker | undefined =
     marker && typeof marker === 'object'
-      ? { last_read_at: typeof lastReadAt === 'number' && Number.isFinite(lastReadAt) ? lastReadAt : null }
+      ? {
+          last_read_at: typeof lastReadAt === 'number' && Number.isFinite(lastReadAt) ? lastReadAt : null,
+          ...((marker as { manual_unread?: unknown }).manual_unread === true ? { manual_unread: true } : {}),
+        }
       : undefined
   const agent_work = spaceAgentWorkFrom(response.agent_work)
   return {
@@ -304,14 +312,26 @@ export async function updateSpaceThreadPresentation(
   )
 }
 
-/** The reader has this room open now. Advances their read marker. */
-export async function markSpaceRead(spaceRef: string): Promise<SpaceReadMarker> {
-  const response = await requestJson<{ last_read_at?: unknown }>(
+/**
+ * The reader has this room open now. Advances their read marker.
+ *
+ * `reason` (WS11-S4): `'enter'` is the first call of a visit and clears a manual "mark unread"
+ * floor; `'while_open'` (the default, and what an older gateway assumes) is the page's routine poll
+ * and leaves a floor alone, so marking something unread while the room is open sticks.
+ */
+export async function markSpaceRead(
+  spaceRef: string,
+  reason?: 'enter' | 'while_open',
+): Promise<SpaceReadMarker> {
+  const response = await requestJson<{ last_read_at?: unknown; manual_unread?: unknown }>(
     `/api/v1/spaces/${encodeURIComponent(spaceRef)}/read`,
-    { method: 'POST', body: '{}' },
+    { method: 'POST', body: JSON.stringify(reason ? { reason } : {}) },
   )
   const at = response.last_read_at
-  return { last_read_at: typeof at === 'number' && Number.isFinite(at) ? at : null }
+  return {
+    last_read_at: typeof at === 'number' && Number.isFinite(at) ? at : null,
+    ...(response.manual_unread === true ? { manual_unread: true } : {}),
+  }
 }
 
 /** Someone else in the room right now. Identifiers and a status, never content. */

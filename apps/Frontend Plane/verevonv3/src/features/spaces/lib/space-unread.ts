@@ -54,6 +54,26 @@ function lastWriterOf(thread: SpaceThread): string {
   return last || (thread.owner_subject_id ?? '').trim()
 }
 
+/**
+ * Where the "N new" divider goes: the index of the first post (in the order the room draws them,
+ * oldest first) that is new since the reader arrived, or -1 when none is. Pure, so the timeline and
+ * its test agree on one answer (WS11-S4).
+ */
+export function firstUnreadIndex(ordered: readonly SpaceThread[], unread: ReadonlySet<string>): number {
+  if (unread.size === 0) return -1
+  return ordered.findIndex((thread) => unread.has(thread.thread_id))
+}
+
+/**
+ * The `before_ms` for "mark unread from this post": one millisecond before the post's latest
+ * activity, so the marker lands just under it and the post reads as new again. Undefined when the
+ * post has no readable timestamp (the control is then not offered rather than guessed at).
+ */
+export function markUnreadBeforeMs(thread: SpaceThread): number | undefined {
+  const at = latestActivityMillis(thread)
+  return at === undefined ? undefined : Math.max(0, at - 1)
+}
+
 function latestActivityMillis(thread: SpaceThread): number | undefined {
   const candidates = [thread.updated_at, thread.latest_run_updated_at]
     .map((value) => (typeof value === 'string' && value.trim() ? Date.parse(value) : Number.NaN))

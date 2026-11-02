@@ -40,8 +40,11 @@ import { roomArtifactsEnabled } from '@/features/spaces/lib/room-artifacts'
 import type { ChatArtifact } from '@/features/chat/components/chat-types'
 import { presentSpaceDenialText, isSpaceDenial } from '@/shared/api/space-denials'
 import { loadSpaceTranscript, updateSpaceThreadPresentation } from '@/shared/api/spaces-client'
+import { markSpaceUnread } from '@/shared/api/spaces-attention-client'
+import { refreshSpaceAttention, spaceAttentionRoom } from '../lib/space-attention'
+import { firstUnreadIndex, markUnreadBeforeMs } from '../lib/space-unread'
 import type { SpaceAgent, SpaceAgentWork, SpaceRoomPin, SpaceRosterMember, SpaceThread } from '@/shared/api/spaces-client'
-import { useI18n } from '@/shared/i18n'
+import { translateApiError, useI18n } from '@/shared/i18n'
 import { announce } from '@/shared/a11y/announcer'
 import { narrateNewPosts, narrateRunChange } from '@/features/spaces/lib/space-narration'
 import { createResource } from '@/shared/lib/create-resource-compat'
@@ -211,8 +214,20 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
   const firstUnreadId = createMemo(() => {
     const unread = props.unreadThreadIds?.()
     if (!unread || unread.size === 0) return undefined
-    return orderedThreads().find((thread) => unread.has(thread.thread_id))?.thread_id
+    return orderedThreads()[firstUnreadIndex(orderedThreads(), unread)]?.thread_id
   })
+  const unreadCount = () => props.unreadThreadIds?.().size ?? 0
+  // WS11-S4: bring the first new post into view and move focus onto it (the reader's keyboard and a
+  // screen reader land where the news starts), without a second scroll by the focus itself.
+  function jumpToUnread(): void {
+    const id = firstUnreadId()
+    if (!id || typeof document === 'undefined') return
+    const post = document.getElementById(`post-${id}`)
+    if (!post) return
+    post.scrollIntoView({ block: 'start', behavior: reduceMotion() ? 'auto' : 'smooth' })
+    if (!post.hasAttribute('tabindex')) post.setAttribute('tabindex', '-1')
+    post.focus({ preventScroll: true })
+  }
   const sharedRead = () => props.sharedReadAvailable?.() !== false
   const artifactsOn = roomArtifactsEnabled()
   const pendingNewPosts = () =>
@@ -296,6 +311,11 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
       <Show when={!sharedRead()}>
         <SpaceRestrictedNotice variant="room" />
       </Show>
+      <Show when={firstUnreadId()}>
+        <button type="button" class="verevon-room-jump-unread" onClick={jumpToUnread}>
+          {i18n.tr('Hopp til første uleste', 'Jump to unread')}
+        </button>
+      </Show>
       <ol
         class="verevon-room-timeline"
         ref={(element) => { listEl = element }}
@@ -307,8 +327,12 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
             <>
             <Show when={firstUnreadId() === thread.thread_id}>
               <li class="verevon-room-new-divider-item" role="presentation">
-                <div class="verevon-room-new-divider" role="separator" aria-label={i18n.tr('Nye meldinger', 'New messages')}>
-                  <span aria-hidden="true">{i18n.tr('Nye meldinger', 'New messages')}</span>
+                <div
+                  class="verevon-room-new-divider"
+                  role="separator"
+                  aria-label={i18n.tr(`${unreadCount()} nye`, `${unreadCount()} new`)}
+                >
+                  <span aria-hidden="true">{i18n.tr(`${unreadCount()} nye`, `${unreadCount()} new`)}</span>
                 </div>
               </li>
             </Show>
@@ -607,6 +631,26 @@ function SpaceRoomPost(props: {
     const viewer = props.viewerSubjectId?.()?.trim()
     return Boolean(viewer) && props.thread.owner_subject_id?.trim() === viewer
   }
+  // WS11-S4: "Mark unread" moves the room's read position to just before this post. Offered only
+  // once the attention aggregate has answered for this room (so the surface is on) and the post has a
+  // readable time. The page's routine `while_open` poll leaves the manual floor alone; coming back
+  // into the room (`enter`) clears it.
+  const unreadFrom = () => (spaceAttentionRoom(props.spaceRef) ? markUnreadBeforeMs(props.thread) : undefined)
+  const [unreadBusy, setUnreadBusy] = createSignal(false)
+  async function markUnreadHere(): Promise<void> {
+    const before = unreadFrom()
+    if (before === undefined || unreadBusy()) return
+    setUnreadBusy(true)
+    try {
+      await markSpaceUnread(props.spaceRef, before)
+      announce(i18n.tr('Merket som ulest herfra.', 'Marked unread from here.'), { key: 'space-mark-unread' })
+      refreshSpaceAttention()
+    } catch (error) {
+      announce(translateApiError(error, i18n.tr), { politeness: 'assertive' })
+    } finally {
+      setUnreadBusy(false)
+    }
+  }
   const [pinBusy, setPinBusy] = createSignal(false)
   const [pinError, setPinError] = createSignal<string | undefined>(undefined)
   async function togglePin(): Promise<void> {
@@ -883,6 +927,16 @@ function SpaceRoomPost(props: {
         <Show when={props.onOpenThread && !summarised()}>
           <button type="button" class="verevon-room-post__reply" onClick={() => props.onOpenThread?.(props.thread)}>
             {i18n.tr('Åpne tråd', 'Open thread')}
+          </button>
+        </Show>
+        <Show when={unreadFrom() !== undefined}>
+          <button
+            type="button"
+            class="verevon-room-post__reply"
+            disabled={unreadBusy()}
+            onClick={() => { void markUnreadHere() }}
+          >
+            {i18n.tr('Merk som ulest', 'Mark unread')}
           </button>
         </Show>
         <Show when={isAuthor()}>

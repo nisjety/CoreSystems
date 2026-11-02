@@ -81,6 +81,7 @@ import { SpaceArtifactsTab } from './SpaceArtifactsTab'
 import { resolveOpenSpacePane } from '../lib/space-pane-registry'
 import { readSpaceMessageParam, spaceEntryLinksEnabled } from '../lib/space-entity-link'
 import { publishSpaceThreads, publishSpaceUnread, retractSpaceThreads } from '../lib/space-live-work'
+import { refreshSpaceAttention } from '../lib/space-attention'
 import { unreadThreadIds } from '../lib/space-unread'
 import { createSpaceSendJournal, type SpaceSendJournal } from '../lib/space-send-journal'
 import { hereSentence, readPresence, typingSentence } from '../lib/space-presence'
@@ -293,6 +294,7 @@ export default function SpacePage() {
       })
     },
   )
+  let enteredRef: string | undefined
   // Having the room open IS reading it. Advance the durable marker on every
   // successful listing while the tab is visible — the listing only runs then —
   // fire-and-forget: a marker write failing must never cost the room anything,
@@ -302,7 +304,13 @@ export default function SpacePage() {
     ({ ref, loaded }) => {
       if (!ref || !loaded) return
       if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
-      void markSpaceRead(ref).catch(() => undefined)
+      // WS11-S4: the first call of a visit is the reader coming in (`enter`, which clears a manual
+      // "mark unread" floor); the rest are the routine poll (`while_open`, which leaves it).
+      const reason = enteredRef === ref ? 'while_open' : 'enter'
+      enteredRef = ref
+      void markSpaceRead(ref, reason)
+        .then(() => refreshSpaceAttention())
+        .catch(() => undefined)
     },
   )
 
