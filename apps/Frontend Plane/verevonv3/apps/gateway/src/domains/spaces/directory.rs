@@ -9,7 +9,9 @@
 //!
 //! Gate order: flag (404 `feature_disabled`), live organization membership, per-user limiter
 //! (60 per minute, 429 `rate_limited` with `Retry-After`), query shape (400 `invalid_request`),
-//! then Control. Control's typed 4xx passes through unchanged; a Control outage is a typed 503
+//! then Control. WS04-S9 adds `kinds=person,agent` (composed people and agents) and
+//! `POST /api/v1/directory/resolve`, both behind `SPACE_DIRECTORY_RESOLVER_API` and both marked
+//! `meta.presence_only` because the agent half is a presence registry, never an authority. Control's typed 4xx passes through unchanged; a Control outage is a typed 503
 //! `directory_unavailable`, never an empty list.
 
 use std::sync::OnceLock;
@@ -51,6 +53,9 @@ pub(super) struct PeopleParams {
     limit: Option<String>,
     cursor: Option<String>,
     exclude_member_of: Option<String>,
+    /// WS04-S9: `person`, `agent` or `person,agent`; absent keeps the S3 people-only shape.
+    /// Never forwarded to Control.
+    kinds: Option<String>,
 }
 
 fn invalid(field: &'static str, reason: &'static str) -> Response {
@@ -134,60 +139,137 @@ fn person(value: &Value) -> Option<Value> {
 }
 
 /// `GET /api/v1/directory/people`.
+///
+/// Without `kinds` this is the WS04-S3 people search (`{people, next_cursor}`). With `kinds`
+/// (WS04-S9, flag `directory_resolver_api`) it answers the composed directory
+/// `{results:[person|agent], next_cursor}` with `meta.presence_only:true`.
 pub(super) async fn people_route(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Query(params): Query<PeopleParams>,
 ) -> Response {
     if !state.space_features.people_search_api {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(error(
-                "feature_disabled",
-                "People search is not enabled.",
-            )),
-        )
-            .into_response();
+        return feature_disabled("People search is not enabled.");
+    }
+    if params.kinds.is_some() && !state.space_features.directory_resolver_api {
+        return feature_disabled("The composed directory is not enabled.");
     }
     let org_id = crate::upstream::authorized_org_id(&state, &user).await;
     if org_id.trim().is_empty() {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(error(
-                "active_membership_required",
-                "An active organization membership is required.",
-            )),
-        )
-            .into_response();
+        return membership_required();
     }
-    let limiter = DIRECTORY_LIMITER.get_or_init(|| {
-        RateLimiter::from_cache_with_rpm(&state.cache, DIRECTORY_READS_PER_MINUTE)
-    });
-    if let Err(retry_after) = limiter
-        .try_acquire(&format!("space-directory:{}:{}", org_id.trim(), user.user_id))
-        .await
-    {
-        let mut response = (
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(error(
-                "rate_limited",
-                "Too many directory searches. Retry shortly.",
-            )),
-        )
-            .into_response();
-        if let Ok(value) = HeaderValue::try_from(retry_after.max(1).to_string()) {
-            response.headers_mut().insert(RETRY_AFTER, value);
-        }
+    if let Some(response) = rate_limited(&state, &org_id, &user).await {
         return response;
     }
     let query = match control_query(&params) {
         Ok(query) => query,
         Err(response) => return response,
     };
+    let kinds = match params.kinds.as_deref().map(parse_kinds).transpose() {
+        Ok(kinds) => kinds,
+        Err(response) => return response,
+    };
+    if let Some(kinds) = kinds {
+        return composed_search(&state, &user, &org_id, kinds, &params, &query).await;
+    }
+    let data = match control_people(&state, &user, &org_id, &query).await {
+        Ok(data) => data,
+        Err(failure) => return failure.into_response(),
+    };
+    let people: Vec<Value> = data
+        .get("people")
+        .and_then(Value::as_array)
+        .map(|rows| rows.iter().filter_map(person).collect())
+        .unwrap_or_default();
+    let mut response = (
+        StatusCode::OK,
+        Json(json!({ "data": { "people": people, "next_cursor": next_cursor(&data) } })),
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert("cache-control", HeaderValue::from_static("no-store"));
+    response
+}
+
+fn feature_disabled(message: &'static str) -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(error("feature_disabled", message)),
+    )
+        .into_response()
+}
+
+fn membership_required() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(error(
+            "active_membership_required",
+            "An active organization membership is required.",
+        )),
+    )
+        .into_response()
+}
+
+/// Per-user directory read limiter, shared by the search and the resolver (60 per minute).
+async fn rate_limited(state: &AppState, org_id: &str, user: &AuthenticatedUser) -> Option<Response> {
+    let limiter = DIRECTORY_LIMITER.get_or_init(|| {
+        RateLimiter::from_cache_with_rpm(&state.cache, DIRECTORY_READS_PER_MINUTE)
+    });
+    let retry_after = limiter
+        .try_acquire(&format!("space-directory:{}:{}", org_id.trim(), user.user_id))
+        .await
+        .err()?;
+    let mut response = (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(error(
+            "rate_limited",
+            "Too many directory searches. Retry shortly.",
+        )),
+    )
+        .into_response();
+    if let Ok(value) = HeaderValue::try_from(retry_after.max(1).to_string()) {
+        response.headers_mut().insert(RETRY_AFTER, value);
+    }
+    Some(response)
+}
+
+fn next_cursor(data: &Value) -> Value {
+    data.get("next_cursor")
+        .and_then(Value::as_str)
+        .filter(|cursor| !cursor.is_empty())
+        .map_or(Value::Null, |cursor| json!(cursor))
+}
+
+/// Why a Control directory read produced no data.
+enum ControlFailure {
+    /// 5xx or unreachable: a typed 503, never an empty list.
+    Unavailable,
+    /// Control's typed 4xx (invalid_request, member_not_in_organization, delegation) as is.
+    Passthrough(StatusCode, Value),
+}
+
+impl ControlFailure {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Unavailable => unavailable(),
+            Self::Passthrough(status, body) => (status, Json(body)).into_response(),
+        }
+    }
+}
+
+/// One Control directory read under the caller's signed delegation; returns the unwrapped
+/// `{people, next_cursor}` data.
+async fn control_people(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    query: &str,
+) -> Result<Value, ControlFailure> {
     let mut url = format!("{}/api/v1/internal/directory/people", state.user_core_url);
     if !query.is_empty() {
         url.push('?');
-        url.push_str(&query);
+        url.push_str(query);
     }
     let actor = ActionActor {
         user_id: user.user_id.clone(),
@@ -196,42 +278,397 @@ pub(super) async fn people_route(
         user_role: user.auth_role.clone().unwrap_or_default(),
     };
     let (status, Json(control)) = proxy_json(
-        &state,
+        state,
         Method::GET,
         &url,
         None,
-        Some(&org_id),
+        Some(org_id),
         Some(&actor),
         None,
     )
     .await;
     if status.is_server_error() {
-        return unavailable();
+        return Err(ControlFailure::Unavailable);
     }
     if !status.is_success() {
-        // Control's typed 4xx (invalid_request, member_not_in_organization, delegation) as is.
-        return (status, Json(control)).into_response();
+        return Err(ControlFailure::Passthrough(status, control));
     }
-    let data = unwrap_data(&control);
-    let people: Vec<Value> = data
-        .get("people")
-        .and_then(Value::as_array)
-        .map(|rows| rows.iter().filter_map(person).collect())
-        .unwrap_or_default();
-    let next_cursor = data
-        .get("next_cursor")
-        .and_then(Value::as_str)
-        .filter(|cursor| !cursor.is_empty())
-        .map_or(Value::Null, |cursor| json!(cursor));
+    Ok(unwrap_data(&control))
+}
+
+// ---------------------------------------------------------------------------------------------
+// WS04-S9: composed people and agent directory, and the resolver.
+//
+// Presence, not authority (ADR-0002): the agent half comes from Application's cross-Space
+// registry, which answers "what is installed" for any organization member. Nothing here lets a
+// caller act on a person or an agent; acting still goes through Control's room roster. An agent
+// row never carries the name of a room (only `space_ref`s of rooms the caller is already in), so
+// the directory cannot be used to learn that another room exists or what it is called.
+// ---------------------------------------------------------------------------------------------
+
+/// Agents returned on the first page of a composed search.
+const MAX_AGENT_RESULTS: usize = 10;
+/// Candidates named in an `ambiguous` resolver answer.
+const MAX_CANDIDATES: usize = 5;
+/// People fetched from Control per resolver read (Control's own cap).
+const RESOLVE_PEOPLE_LIMIT: u32 = 50;
+
+#[derive(Clone, Copy)]
+struct Kinds {
+    person: bool,
+    agent: bool,
+}
+
+/// `kinds=person,agent` (either, both; case-insensitive; unknown values are a 400).
+fn parse_kinds(raw: &str) -> Result<Kinds, Response> {
+    let mut kinds = Kinds { person: false, agent: false };
+    for part in raw.split(',').map(|part| part.trim().to_ascii_lowercase()) {
+        match part.as_str() {
+            "person" => kinds.person = true,
+            "agent" => kinds.agent = true,
+            _ => return Err(invalid("kinds", "unknown_kind")),
+        }
+    }
+    Ok(kinds)
+}
+
+/// One org-installed published agent definition, with the rooms the CALLER is in that hold it.
+struct AgentRow {
+    agent_ref: String,
+    name: String,
+    description: String,
+    /// Rooms (by `space_ref`) among the caller's own that have an active or paused binding.
+    installed_in: Vec<String>,
+}
+
+/// Published agent definitions of the organization from Application's registry, grouped by
+/// definition. `installed_in` is limited to the caller's rooms from Control's actor-filtered
+/// index; when that index is unavailable the list degrades to no rooms, never to someone else's.
+async fn load_agents(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+) -> Result<Vec<AgentRow>, ()> {
+    let value = super::convex_gateway_call(
+        state,
+        "query",
+        "spaceAgents:agentInstallationsForOrgForGateway",
+        json!({ "externalAuthId": user.user_id, "externalOrgId": org_id }),
+    )
+    .await?;
+    let bindings = value.as_array().cloned().unwrap_or_default();
+    let mut rows: std::collections::BTreeMap<String, (String, String, Vec<String>)> =
+        std::collections::BTreeMap::new();
+    for binding in &bindings {
+        let Some(agent_ref) = binding.get("agentRef").and_then(Value::as_str) else {
+            continue;
+        };
+        // Published definitions only: `active` is the published state of an agent definition.
+        if binding.get("definitionStatus").and_then(Value::as_str) != Some("active") {
+            continue;
+        }
+        let entry = rows.entry(agent_ref.to_owned()).or_insert_with(|| {
+            (
+                binding.get("name").and_then(Value::as_str).unwrap_or_default().to_owned(),
+                binding.get("description").and_then(Value::as_str).unwrap_or_default().to_owned(),
+                Vec::new(),
+            )
+        });
+        let live = matches!(
+            binding.get("status").and_then(Value::as_str),
+            Some("active" | "paused")
+        );
+        if let (true, Some(space_ref)) = (live, binding.get("spaceRef").and_then(Value::as_str)) {
+            if !entry.2.iter().any(|existing| existing == space_ref) {
+                entry.2.push(space_ref.to_owned());
+            }
+        }
+    }
+    let mut rows: Vec<AgentRow> = rows
+        .into_iter()
+        .filter(|(_, (name, _, _))| !name.trim().is_empty())
+        .map(|(agent_ref, (name, description, installed_in))| AgentRow {
+            agent_ref,
+            name,
+            description,
+            installed_in,
+        })
+        .collect();
+    if rows.iter().any(|row| !row.installed_in.is_empty()) {
+        let mine: std::collections::HashSet<String> = super::control_space_index(state, user, org_id)
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|entry| entry.get("space_ref").and_then(Value::as_str).map(str::to_owned))
+            .collect();
+        for row in &mut rows {
+            row.installed_in.retain(|space_ref| mine.contains(space_ref));
+        }
+    }
+    Ok(rows)
+}
+
+fn agent_json(row: &AgentRow) -> Value {
+    json!({
+        "kind": "agent",
+        "agent_ref": row.agent_ref,
+        "display_name": row.name,
+        "description": row.description,
+        "installed_in": row.installed_in,
+    })
+}
+
+fn person_with_kind(value: &Value) -> Option<Value> {
+    let mut person = person(value)?;
+    person["kind"] = json!("person");
+    Some(person)
+}
+
+/// The composed search: people from Control (paged), then published agents (first page only,
+/// filtered by `q`, at most [`MAX_AGENT_RESULTS`]).
+async fn composed_search(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    kinds: Kinds,
+    params: &PeopleParams,
+    query: &str,
+) -> Response {
+    let mut results: Vec<Value> = Vec::new();
+    let mut cursor = Value::Null;
+    if kinds.person {
+        match control_people(state, user, org_id, query).await {
+            Ok(data) => {
+                results.extend(
+                    data.get("people")
+                        .and_then(Value::as_array)
+                        .map(|rows| rows.iter().filter_map(person_with_kind).collect::<Vec<_>>())
+                        .unwrap_or_default(),
+                );
+                cursor = next_cursor(&data);
+            }
+            Err(failure) => return failure.into_response(),
+        }
+    }
+    let first_page = params
+        .cursor
+        .as_deref()
+        .map(str::trim)
+        .is_none_or(str::is_empty);
+    if kinds.agent && first_page {
+        let Ok(agents) = load_agents(state, user, org_id).await else {
+            return unavailable();
+        };
+        let needle = params.q.as_deref().map(str::trim).unwrap_or_default().to_lowercase();
+        results.extend(
+            agents
+                .iter()
+                .filter(|row| {
+                    needle.is_empty()
+                        || row.name.to_lowercase().contains(&needle)
+                        || row.description.to_lowercase().contains(&needle)
+                })
+                .take(MAX_AGENT_RESULTS)
+                .map(agent_json),
+        );
+    }
     let mut response = (
         StatusCode::OK,
-        Json(json!({ "data": { "people": people, "next_cursor": next_cursor } })),
+        Json(json!({
+            "data": { "results": results, "next_cursor": cursor },
+            "meta": { "presence_only": true },
+        })),
     )
         .into_response();
     response
         .headers_mut()
         .insert("cache-control", HeaderValue::from_static("no-store"));
     response
+}
+
+/// A resolver candidate: a person or an agent, with whether it is in the scoping room.
+struct Candidate {
+    json: Value,
+    name: String,
+    email: String,
+    in_room: bool,
+}
+
+impl Candidate {
+    fn exact(&self, needle: &str) -> bool {
+        self.name.to_lowercase() == needle || (!self.email.is_empty() && self.email.to_lowercase() == needle)
+    }
+
+    fn prefix(&self, needle: &str) -> bool {
+        self.name.to_lowercase().starts_with(needle)
+            || (!self.email.is_empty() && self.email.to_lowercase().starts_with(needle))
+    }
+}
+
+/// The best non-empty tier: exact email or full name, else prefix of name or email.
+fn best_tier<'a>(candidates: &[&'a Candidate], needle: &str) -> Vec<&'a Candidate> {
+    let exact: Vec<&Candidate> = candidates.iter().copied().filter(|c| c.exact(needle)).collect();
+    if !exact.is_empty() {
+        return exact;
+    }
+    candidates.iter().copied().filter(|c| c.prefix(needle)).collect()
+}
+
+fn resolve_response(data: Value) -> Response {
+    let mut response = (
+        StatusCode::OK,
+        Json(json!({ "data": data, "meta": { "presence_only": true } })),
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert("cache-control", HeaderValue::from_static("no-store"));
+    response
+}
+
+fn resolve_none(reason: &'static str) -> Response {
+    resolve_response(json!({ "status": "none", "reason": reason }))
+}
+
+/// `POST /api/v1/directory/resolve` `{query, kind:"person"|"agent"|"any", space_ref?}`.
+///
+/// Exact (case-insensitive) email or full name, else a unique prefix, is `ok`; several in the
+/// best tier is `ambiguous` (at most five candidates); otherwise `none` with a reason. With a
+/// `space_ref` the answer is scoped to that room's members, but only when the caller is a member
+/// of it (otherwise the room is ignored, so the route cannot probe a room's roster); a match
+/// outside the room is then `none` / `not_in_room`. The response is presence, never authority.
+pub(super) async fn resolve_route(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Json(body): Json<Value>,
+) -> Response {
+    if !state.space_features.directory_resolver_api {
+        return feature_disabled("The directory resolver is not enabled.");
+    }
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+    if org_id.trim().is_empty() {
+        return membership_required();
+    }
+    if let Some(response) = rate_limited(&state, &org_id, &user).await {
+        return response;
+    }
+    let text = |key: &str| body.get(key).and_then(Value::as_str).map(str::trim).unwrap_or_default();
+    let query = text("query");
+    if query.is_empty() {
+        return invalid("query", "required");
+    }
+    if query.chars().count() > MAX_QUERY_CHARS {
+        return invalid("query", "too_long");
+    }
+    let kinds = match text("kind") {
+        "" | "any" => Kinds { person: true, agent: true },
+        "person" => Kinds { person: true, agent: false },
+        "agent" => Kinds { person: false, agent: true },
+        _ => return invalid("kind", "unknown_kind"),
+    };
+    let space_ref = text("space_ref");
+    if space_ref.len() > MAX_SPACE_REF_LEN {
+        return invalid("space_ref", "too_long");
+    }
+    let needle = query.to_lowercase();
+
+    // The room scopes the answer only when the caller is in it.
+    let scope: Option<&str> = if space_ref.is_empty() {
+        None
+    } else {
+        match super::control_space_index(&state, &user, &org_id).await {
+            Some(index) => index
+                .iter()
+                .any(|entry| entry.get("space_ref").and_then(Value::as_str) == Some(space_ref))
+                .then_some(space_ref),
+            None => return resolve_none("directory_unavailable"),
+        }
+    };
+
+    let mut candidates: Vec<Candidate> = Vec::new();
+    if kinds.person {
+        let base = format!(
+            "q={}&limit={RESOLVE_PEOPLE_LIMIT}",
+            urlencoding::encode(query)
+        );
+        let everyone = match control_people(&state, &user, &org_id, &base).await {
+            Ok(data) => data,
+            Err(ControlFailure::Unavailable) => return resolve_none("directory_unavailable"),
+            Err(failure) => return failure.into_response(),
+        };
+        // Same query and order with the room's members removed: whoever is missing from it is
+        // in the room (a person ranked within the first 50 outside the room is within the first
+        // 50 here too).
+        let outside: Option<std::collections::HashSet<String>> = match scope {
+            None => None,
+            Some(room) => {
+                let scoped = format!("{base}&exclude_member_of={}", urlencoding::encode(room));
+                match control_people(&state, &user, &org_id, &scoped).await {
+                    Ok(data) => Some(
+                        data.get("people")
+                            .and_then(Value::as_array)
+                            .map(|rows| {
+                                rows.iter()
+                                    .filter_map(|row| row.get("subject_id").and_then(Value::as_str))
+                                    .map(str::to_owned)
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    ),
+                    Err(ControlFailure::Unavailable) => {
+                        return resolve_none("directory_unavailable");
+                    }
+                    Err(failure) => return failure.into_response(),
+                }
+            }
+        };
+        for row in everyone
+            .get("people")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(json) = person_with_kind(row) else { continue };
+            let subject_id = json["subject_id"].as_str().unwrap_or_default().to_owned();
+            candidates.push(Candidate {
+                name: json["display_name"].as_str().unwrap_or_default().to_owned(),
+                email: json["email"].as_str().unwrap_or_default().to_owned(),
+                in_room: outside.as_ref().is_none_or(|set| !set.contains(&subject_id)),
+                json,
+            });
+        }
+    }
+    if kinds.agent {
+        let Ok(agents) = load_agents(&state, &user, &org_id).await else {
+            return resolve_none("directory_unavailable");
+        };
+        for row in &agents {
+            candidates.push(Candidate {
+                json: agent_json(row),
+                name: row.name.clone(),
+                email: String::new(),
+                in_room: scope.is_none_or(|room| row.installed_in.iter().any(|r| r == room)),
+            });
+        }
+    }
+
+    let inside: Vec<&Candidate> = candidates.iter().filter(|c| c.in_room).collect();
+    let matches = best_tier(&inside, &needle);
+    match matches.as_slice() {
+        [] => {
+            let outside: Vec<&Candidate> = candidates.iter().filter(|c| !c.in_room).collect();
+            if scope.is_some() && !best_tier(&outside, &needle).is_empty() {
+                resolve_none("not_in_room")
+            } else {
+                resolve_none("no_match")
+            }
+        }
+        [one] => resolve_response(json!({ "status": "ok", "match": one.json })),
+        many => resolve_response(json!({
+            "status": "ambiguous",
+            "candidates": many.iter().take(MAX_CANDIDATES).map(|c| c.json.clone()).collect::<Vec<_>>(),
+        })),
+    }
 }
 
 #[cfg(test)]
@@ -371,6 +808,7 @@ mod tests {
             limit: Some("50".into()),
             cursor: Some("c".repeat(512)),
             exclude_member_of: Some("space-room".into()),
+            kinds: None,
         };
         let query = control_query(&params).expect("bounds are valid");
         let keys: Vec<&str> = query.split('&').filter_map(|part| part.split('=').next()).collect();
@@ -382,6 +820,7 @@ mod tests {
             limit: Some(" ".into()),
             cursor: Some("".into()),
             exclude_member_of: Some(" ".into()),
+            kinds: None,
         })
         .unwrap();
         assert_eq!(blank, "");

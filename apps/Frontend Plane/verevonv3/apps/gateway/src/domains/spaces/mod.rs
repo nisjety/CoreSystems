@@ -823,6 +823,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             patch(room_admin::update_room_details_route),
         )
         .route("/api/v1/directory/people", get(directory::people_route))
+        .route("/api/v1/directory/resolve", post(directory::resolve_route))
         .route("/api/v1/spaces/{space_ref}/context", get(space_context))
         .route("/api/v1/spaces/{space_ref}/actions", get(space_actions))
 		.route(
@@ -5134,6 +5135,7 @@ async fn space_context(
                     "connectivity_banner": state.space_features.connectivity_banner_ui,
                     "room_details": state.space_features.room_details_ui,
                     "people_search": state.space_features.people_search_api,
+                    "directory_resolver": state.space_features.directory_resolver_api,
                     "room_archive": state.space_features.room_archive_api,
                     "room_artifacts": state.space_features.room_artifacts,
                 },

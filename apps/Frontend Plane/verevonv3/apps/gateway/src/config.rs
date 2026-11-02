@@ -223,6 +223,12 @@ pub(crate) struct SpaceFeatureFlags {
     /// authorization input: Control's directory read (signed delegation, scope
     /// `directory:read:self`) decides what the caller may see.
     pub(crate) people_search_api: bool,
+    /// `SPACE_DIRECTORY_RESOLVER_API` (WS04-S9): `POST /api/v1/directory/resolve` and the composed
+    /// `kinds=person,agent` form of `GET /api/v1/directory/people`, plus
+    /// `features.directory_resolver`. Off answers 404 `feature_disabled`. A rollout control, never
+    /// an authorization input: the answer is presence only (`meta.presence_only`), and Control's
+    /// directory read decides which people the caller may see.
+    pub(crate) directory_resolver_api: bool,
     /// `SPACE_ROOM_ARCHIVE_API` (WS04-S7): `POST /api/v1/spaces/{space_ref}/archive` and
     /// `/unarchive` (Control's archive state) and `features.room_archive`. Off answers 404
     /// `feature_disabled`; an archived room still reads and still refuses writes, because that is
@@ -259,6 +265,7 @@ impl SpaceFeatureFlags {
             realtime_stream: space_flag("SPACE_REALTIME_STREAM"),
             room_details_ui: space_flag("SPACE_ROOM_DETAILS_UI"),
             people_search_api: space_flag("SPACE_PEOPLE_SEARCH_API"),
+            directory_resolver_api: space_flag("SPACE_DIRECTORY_RESOLVER_API"),
             room_archive_api: space_flag("SPACE_ROOM_ARCHIVE_API"),
             room_artifacts: space_flag("SPACE_ROOM_ARTIFACTS_API"),
             send_idempotency_api: space_flag("SPACE_SEND_IDEMPOTENCY_API"),
