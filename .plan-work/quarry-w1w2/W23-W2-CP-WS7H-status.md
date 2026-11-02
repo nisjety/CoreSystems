@@ -27,7 +27,8 @@ org-core `internal/http` (CRLF files):
 - 0bfa4e00e feat(org-core): web policy document, catalogue pin and computed web entitlements (WS7.H)
 - dc45a8c49 feat(org-core): web policy repository with If-Match compare-and-set, history and audit intent (WS7.H)
 - 7190654ce feat(org-core): web policy admin API and Auth Core internal read (WS7.H)
-- docs(plan-work) commit with this file and the depth rows
+- 05bb3afe7 fix(org-core): size the web policy cap for the claim after the entitlement fold (WS7.H)
+- d0301ad3f docs(plan-work): W2-CP-WS7H status and depth rows (this file's first version)
 
 ## Tests run (host, Go 1.26, all passed)
 - Pure (`internal/org`): `TestValidateRejectsForcedOnAbility`, `TestValidateRejectsUnknownKey`, `TestValidateRejectsIPLiteralAndWildcard`, `TestEffectiveFoldsEntitlements`, `TestDigestIsStableUnderKeyOrder`, `TestTightenedDetectsOnlyTightening` (the six the plan names) plus protection modes, ceilings/rules not in caps, normalisation, size caps, claim-envelope room, digest pin, entitlement check and plan lines, `ChangedKeys`, content-free audit payload, migration text pins, catalogue loader refusals, catalogue pin and byte-compare with the Quarry source.
