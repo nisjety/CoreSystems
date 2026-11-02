@@ -10,6 +10,7 @@ import { AgentAvatar } from '../AgentAvatar'
 import { SpaceIdentityHoverCard } from '../SpaceIdentityHoverCard'
 import { agentAvatarColor, agentForName, memberTint } from '../../lib/agent-avatar'
 import { splitRoomMessage } from '../../lib/room-attachments'
+import { spaceRoomFeatureWithDevOverride } from '../../lib/space-room-features'
 import { agentCardModel, memberCardModel } from '../../lib/agent-activity'
 import type { IdentityCardModel } from '../../lib/agent-activity'
 import { continuesTurnGroup, formatTurnTime } from '../../lib/space-thread-presentation'
@@ -186,6 +187,8 @@ export interface SpaceTurnListProps {
 
 export function SpaceTurnList(props: SpaceTurnListProps) {
   const i18n = useI18n()
+  const humanMarkdownOn = () =>
+    spaceRoomFeatureWithDevOverride('human_markdown', import.meta.env.VITE_SPACE_HUMAN_MARKDOWN)
   const authorOf = (turn: TranscriptTurn) =>
     resolveAuthorName(turn.authorSubjectId, props.roster(), props.viewerSubjectId?.(), i18n.tr)
   // A turn with no text is only a row when its artifacts can be shown.
@@ -279,7 +282,17 @@ export function SpaceTurnList(props: SpaceTurnListProps) {
                 when={turn.role === 'assistant'}
                 fallback={
                   <>
-                    <p class="verevon-room-turn__plain">{splitRoomMessage(turn.content).text}</p>
+                    {/* WS15-S4: a person's post renders as markdown behind `human_markdown`. ChatMarkdown
+                        has no image block and routes every link through safeHref, so human text never
+                        yields an <img> or an unsafe anchor. Off, it stays the plain pre-wrap line. */}
+                    <Show
+                      when={humanMarkdownOn() && splitRoomMessage(turn.content).text.length > 0}
+                      fallback={<p class="verevon-room-turn__plain">{splitRoomMessage(turn.content).text}</p>}
+                    >
+                      <div class="verevon-room-turn__markdown">
+                        <ChatMarkdown content={splitRoomMessage(turn.content).text} />
+                      </div>
+                    </Show>
                     {/* A turn that carried per-turn files (WS14-S8): the words, then one chip per file
                         by name. The fenced text stays in the stored message and is not shown here. */}
                     <Show when={splitRoomMessage(turn.content).files.length > 0}>
