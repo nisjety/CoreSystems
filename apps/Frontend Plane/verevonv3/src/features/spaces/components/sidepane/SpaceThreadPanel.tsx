@@ -9,6 +9,7 @@ import { getSpaceThreadTranscript } from '@/shared/api/spaces-client'
 import type { SpaceAgent, SpaceRosterMember, SpaceThread } from '@/shared/api/spaces-client'
 import { useI18n } from '@/shared/i18n'
 import { createResource } from '@/shared/lib/create-resource-compat'
+import { ThreadFollowControl } from '@/features/attention/components/ThreadFollowControl'
 import { SpaceRestrictedNotice } from '../SpaceRestrictedNotice'
 import { SpaceTurnList, normalizeTranscriptTurns, resolveAuthorName } from './SpaceTurnList'
 import type { TranscriptTurn } from './SpaceTurnList'
@@ -168,6 +169,9 @@ export function SpaceThreadPanel(props: SpaceThreadPanelProps) {
             </Show>
           </p>
         )}
+      </Show>
+      <Show when={current()?.state === 'ok'}>
+        <ThreadFollowControl spaceRef={props.spaceRef} threadId={props.threadId} />
       </Show>
       <Switch
         fallback={

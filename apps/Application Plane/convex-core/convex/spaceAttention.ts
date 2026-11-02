@@ -251,7 +251,15 @@ export const listItemsForGateway = query({
       rows = rows.filter((row: any) => effectiveItemState(row, now) === "snoozed");
     }
 
+    const settings = await ctx.db
+      .query("spaceNotifyUserSettings")
+      .withIndex("by_subject", (q: any) =>
+        q.eq("externalOrgId", args.externalOrgId).eq("externalAuthId", args.externalAuthId),
+      )
+      .first();
+
     return {
+      hidePreview: settings?.hidePreview ?? false,
       items: rows.map((row: any) => itemView(row, now)),
       nextCursor: page.isDone ? null : page.continueCursor,
     };
@@ -517,6 +525,32 @@ export const setThreadFollowForGateway = mutation({
       });
     }
     return { state: args.state, reason: "manual" };
+  },
+});
+
+/**
+ * The caller's own follow state for one thread (WS11-S7 follow control): `following`, `muted` or
+ * `none`, and why. Reads only the caller's row; a thread nobody follows answers `none`.
+ */
+export const getThreadFollowForGateway = query({
+  args: {
+    serviceKey: v.string(),
+    externalAuthId: v.string(),
+    externalOrgId: v.string(),
+    threadId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    assertServiceKey(args.serviceKey);
+    await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
+    const threadId = cleanId(args.threadId, "invalid_thread_id");
+    const rows = await ctx.db
+      .query("spaceThreadFollows")
+      .withIndex("by_subject_and_thread", (q: any) =>
+        q.eq("externalAuthId", args.externalAuthId).eq("threadId", threadId),
+      )
+      .take(5);
+    const row = rows.find((candidate: any) => candidate.externalOrgId === args.externalOrgId);
+    return row ? { state: row.state, reason: row.reason } : { state: "none", reason: null };
   },
 });
 

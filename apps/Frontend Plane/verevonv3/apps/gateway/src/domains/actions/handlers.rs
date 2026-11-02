@@ -84,6 +84,9 @@ use super::dispatchers_spaces::ws10::{
     dispatch_spaces_decide_approval, dispatch_spaces_revoke_approval_grant,
 };
 use super::dispatchers_spaces::ws10b::dispatch_spaces_set_tool_policy;
+use super::dispatchers_spaces::ws11::{
+    dispatch_spaces_set_attention_item_state, dispatch_spaces_set_thread_follow,
+};
 use super::dispatchers_spaces::ws12::{dispatch_spaces_hide_space, dispatch_spaces_open_dm};
 use super::dispatchers_spaces::ws14::{
     dispatch_space_files_attach, dispatch_space_files_delete, dispatch_space_files_list,
@@ -594,6 +597,12 @@ pub(super) async fn execute_action(
         }
         "spaces.set_tool_policy" => {
             dispatch_spaces_set_tool_policy(&state, &user, &body.input).await
+        }
+        "spaces.set_attention_item_state" => {
+            dispatch_spaces_set_attention_item_state(&state, &user, &body.input).await
+        }
+        "spaces.set_thread_follow" => {
+            dispatch_spaces_set_thread_follow(&state, &user, &headers, &body.input).await
         }
         "spaces.update_room_details" => {
             dispatch_spaces_update_room_details(&state, &user, &body.input).await

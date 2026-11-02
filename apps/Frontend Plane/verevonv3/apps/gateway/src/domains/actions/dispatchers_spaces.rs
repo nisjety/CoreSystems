@@ -7,6 +7,7 @@ pub(super) mod ws04;
 pub(super) mod ws08;
 pub(super) mod ws10;
 pub(super) mod ws10b;
+pub(super) mod ws11;
 pub(super) mod ws12;
 pub(super) mod ws14;
 pub(super) mod ws16;

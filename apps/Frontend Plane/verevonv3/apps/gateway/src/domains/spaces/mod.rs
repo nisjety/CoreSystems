@@ -31,6 +31,7 @@ mod denial;
 pub(crate) mod approvals;
 use denial::{typed_response, with_gap_details, Decision, SpaceDenial};
 pub(crate) mod agent_policy;
+pub(crate) mod attention;
 pub(crate) mod tool_policy;
 pub(crate) mod directory;
 pub(crate) mod dm;
@@ -930,6 +931,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
 fn module_routes() -> Router<AppState> {
     Router::new()
         .merge(approvals::routes())
+        .merge(attention::routes())
         .merge(tool_policy::routes())
         .merge(dm::routes())
         .merge(files::routes())
@@ -5186,6 +5188,8 @@ async fn space_context(
                     "thread_fork": state.space_features.thread_fork_api,
                     "dm": state.space_features.dm_api,
                     "tool_policy_editor": state.space_features.tool_policy_editor,
+                    "attention": state.space_features.attention_api
+                        && state.space_features.attention_ui,
                     "room_files": files::features_json(&state),
                     // WS15-S7 (R5): the timeline and composer rollout controls. `system_entries` and
                     // `link_previews` stay false until WS15-S11 / WS15-S10 add their flags.

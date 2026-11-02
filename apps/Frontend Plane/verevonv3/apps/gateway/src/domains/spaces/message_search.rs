@@ -617,6 +617,7 @@ async fn space_features(State(state): State<AppState>) -> Response {
             "command_palette": flags.command_palette_ui,
             "room_pins": flags.room_pins,
             "thread_fork": flags.thread_fork_api,
+            "attention": flags.attention_api && flags.attention_ui,
         }}}),
     )
 }

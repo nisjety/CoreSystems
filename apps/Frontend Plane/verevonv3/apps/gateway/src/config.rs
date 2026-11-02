@@ -317,6 +317,14 @@ pub(crate) struct SpaceFeatureFlags {
     /// gate, not by this flag. A rollout control, never an authorization input: Control's live
     /// manager or owner role decides who may write, and a policy only tightens.
     pub(crate) tool_policy_editor: bool,
+    /// `SPACE_ATTENTION_API` (WS11-S7): the attention inbox routes (`GET /api/v1/spaces/attention/items`,
+    /// `POST .../items/{item_id}/state`, `GET|PUT /api/v1/spaces/{space_ref}/threads/{thread_id}/follow`).
+    /// Off answers 404 `space_attention_disabled`. A rollout control, never an authorization input: the
+    /// caller's own Application rows, Control's index and per-Space read decisions decide what is shown.
+    pub(crate) attention_api: bool,
+    /// `SPACE_ATTENTION_UI` (WS11-S7): reported as `features.attention` so the SPA shows the `/attention`
+    /// inbox and the thread follow control. A rollout control only.
+    pub(crate) attention_ui: bool,
     /// `ORG_IDENTITY_ADMIN_API` (WS05-S6): the owner/admin domain verification routes
     /// (`/api/v1/orgs/{id}/domains`), proxied to org-core. Off answers 404 `feature_disabled`.
     /// A rollout control, never an authorization input: the live owner/admin membership decides.
@@ -438,6 +446,8 @@ impl SpaceFeatureFlags {
             send_idempotency_api: space_flag("SPACE_SEND_IDEMPOTENCY_API"),
             thread_pane_ui: space_flag("SPACE_THREAD_PANE_UI"),
             tool_policy_editor: space_flag("SPACE_TOOL_POLICY_EDITOR_ENABLED"),
+            attention_api: space_flag("SPACE_ATTENTION_API"),
+            attention_ui: space_flag("SPACE_ATTENTION_UI"),
             org_identity_admin_api: space_flag("ORG_IDENTITY_ADMIN_API"),
             run_live_text: space_flag("SPACE_RUN_LIVE_TEXT"),
             run_live_view: space_flag("SPACE_RUN_LIVE_VIEW"),

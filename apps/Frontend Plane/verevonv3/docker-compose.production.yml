@@ -34,6 +34,8 @@ services:
             SPACE_ENTRY_LINKS_UI: "false"
             SPACE_COMMAND_PALETTE_UI: "false"
             SPACE_THREAD_FORK_API: "false"
+            SPACE_ATTENTION_API: "false"
+            SPACE_ATTENTION_UI: "false"
             ORG_IDENTITY_ADMIN_API: "false"
             SCIM_EDGE_ENABLED: "false"
             SPACE_RUN_OWNER_STEER: "false"

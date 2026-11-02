@@ -8,6 +8,8 @@ export type VerevonRoute =
   // navigation target because it needs a ref the sidebar does not have — so
   // `/spaces` picks one and forwards. Only this form belongs in SidebarHref.
   | '/spaces'
+  // The cross-room attention inbox (WS11-S7).
+  | '/attention'
   | '/studio'
   | '/studio/canvas'
   | '/engagement'
@@ -147,6 +149,8 @@ export function getNavbarLabels(activeRoute: VerevonRoute, locale: Locale = 'no'
       return only('Chat', 'Chat')
     case '/spaces':
       return labels('Rom', 'Space', 'Oversikt', 'Overview')
+    case '/attention':
+      return only('Trenger deg', 'Needs you')
     case '/studio':
     case '/studio/canvas':
       return { moduleLabel: 'Studio', tabLabel: 'Canvas' }
@@ -231,6 +235,7 @@ export function routeFromPath(pathname: string): VerevonRoute {
   // Without this the path fell through to the `/dashboard` default and a Space
   // read as "Hjem".
   if (path.startsWith('/spaces')) return '/spaces'
+  if (path.startsWith('/attention')) return '/attention'
   if (path === '/engagement') return '/engagement'
   if (path.startsWith('/engagement/visibility') || path === '/studio/pulse') return '/engagement/visibility'
   if (path.startsWith('/studio/campaigns')) return '/studio/campaigns'
