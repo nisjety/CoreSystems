@@ -24,10 +24,26 @@ const (
 	identityAuditSubjectPrefix = "verevon.audit.v2.control.org-core."
 )
 
+// identityAuditResourceKind names what the audit subject refers to. Domain
+// events are the default; the SSO events (WS05-S7) refer to a policy or provider.
+func identityAuditResourceKind(event string) string {
+	switch event {
+	case IdentityEventSSOPolicyUpdated:
+		return "sso_policy"
+	case IdentityEventSSOProviderAdded, IdentityEventSSOProviderGone:
+		return "sso_provider"
+	}
+	return "domain"
+}
+
 var identityAuditEvents = map[string]struct{}{
 	IdentityEventDomainAdded:    {},
 	IdentityEventDomainVerified: {},
 	IdentityEventDomainRevoked:  {},
+	// SSO policy and provider changes (WS05-S7). Extra to the plan's event list.
+	IdentityEventSSOPolicyUpdated: {},
+	IdentityEventSSOProviderAdded: {},
+	IdentityEventSSOProviderGone:  {},
 }
 
 // identityAuditChange is one identity change to record. Details hold ids,
@@ -57,7 +73,7 @@ func identityAuditPayload(change identityAuditChange, occurredAt time.Time) (eve
 		"event_id": eventID, "occurred_at": occurredAt.UTC().Format(time.RFC3339Nano),
 		"org_id": change.OrgID, "user_id": change.ActorID, "actor_role": change.ActorRole,
 		"plane": "control", "producer": "org-core", "event": change.Event,
-		"subject": "domain:" + change.Resource, "resource_id": change.Resource,
+		"subject": identityAuditResourceKind(change.Event) + ":" + change.Resource, "resource_id": change.Resource,
 		"outcome": "ok", "details": details,
 	}
 	return eventID, subject, payload

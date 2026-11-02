@@ -13,6 +13,7 @@ import { PluginsSection } from '@/features/settings/components/PluginsSection'
 import { CronSchedulesSection } from '@/features/settings/components/CronSchedulesSection'
 import { OrgModelAccessSection } from '@/features/settings/components/OrgModelAccessSection'
 import { DomainsPanel } from '@/features/settings/components/DomainsPanel'
+import { SsoPolicyPanel } from '@/features/settings/components/SsoPolicyPanel'
 import { OrgQuotasSection } from '@/features/settings/components/OrgQuotasSection'
 import { OrgSpacePolicySection } from '@/features/settings/components/OrgSpacePolicySection'
 import { MemorySection } from '@/features/settings/components/MemorySection'
@@ -1264,12 +1265,7 @@ function SsoSection() {
         title={i18n.tr('SSO-konfigurasjon', 'SSO configuration')}
         description={i18n.tr('Konfigurer organisasjonens innlogging, domener og provisjonering.', 'Configure organization sign-in, domains, and provisioning.')}
       />
-      <p class="verevon-settings-panel-note">
-        {i18n.tr(
-          'Enkel pålogging (SSO) er ikke konfigurert for denne organisasjonen. Ingen identitetsleverandør, godkjent domene, SCIM-token eller attributt-mapping er satt opp, og SSO/SCIM-konfigurasjon er ikke tilgjengelig i denne versjonen.',
-          'Single sign-on is not configured for this organization. No identity provider, allowed domain, SCIM token, or attribute mapping is set up, and SSO/SCIM configuration is not available in this build.',
-        )}
-      </p>
+      <SsoPolicyPanel />
     </>
   )
 }

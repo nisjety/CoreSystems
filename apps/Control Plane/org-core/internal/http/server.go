@@ -46,6 +46,7 @@ type Server struct {
 	// ORG_DOMAIN_VERIFICATION_ENABLED); identity is the service behind them.
 	identityEnabled bool
 	identity        identityDomainService
+	sso             identitySSOService // SSO policy and providers (WS05-S7), same gate
 }
 
 func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository, authServiceURL, userServiceURL string) *Server {
@@ -94,6 +95,15 @@ func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository,
 		if orgService != nil {
 			orgService.EnableDomainVerification(orgcore.NewDomainTXTResolver(domainDNSResolvers(os.Getenv)))
 			s.identity = orgService
+			s.sso = orgService
+			// auth-core owns providers, sign-in evidence and the two-factor flag.
+			// Without ORG_CORE_IDENTITY_SERVICE_TOKEN the SSO administration
+			// answers 503 and enforce cannot be set.
+			if client := orgcore.NewAuthCoreIdentityClient(authCoreIdentityURL(os.Getenv), os.Getenv(authCoreIdentityTokenEnv)); client != nil {
+				orgService.SetIdentityProviderAdmin(client)
+			} else {
+				log.Printf("org-core sso administration: %s is not set; provider administration and enforce are unavailable", authCoreIdentityTokenEnv)
+			}
 		}
 	}
 	s.setupRoutes()
@@ -202,6 +212,12 @@ func (s *Server) setupRoutes() {
 	s.router.POST("/orgs/:id/domains/:domain/verify", identityGate, guard, s.verifyIdentityDomain)
 	s.router.DELETE("/orgs/:id/domains/:domain", identityGate, guard, s.revokeIdentityDomain)
 
+	// SSO policy and provider administration (WS05-S7), same gate and authority.
+	s.router.GET("/orgs/:id/sso/policy", identityGate, s.getSSOPolicy)
+	s.router.PUT("/orgs/:id/sso/policy", identityGate, guard, s.putSSOPolicy)
+	s.router.POST("/orgs/:id/sso/providers", identityGate, guard, s.addSSOProvider)
+	s.router.DELETE("/orgs/:id/sso/providers/:providerId", identityGate, guard, s.removeSSOProvider)
+
 	// Read-only projection/RBAC catalog. Membership, role assignment, and custom
 	// policy mutations are intentionally not mounted for the secure MVP: Auth
 	// Core is the sole membership authority, while fine-grained policy editing is
@@ -267,6 +283,9 @@ func (s *Server) setupRoutes() {
 	// Which organisation holds a verified domain (WS05-S6). Own scope
 	// org:domain:read:any, held by auth-core alone; no-store.
 	internal.GET("/orgs/by-domain/:domain", identityGate, s.getVerifiedDomainOwnerInternal)
+	// The SSO policy covering an email domain, for auth-core's enforcement hook
+	// (WS05-S7). Same scope; no-store.
+	internal.GET("/orgs/by-domain/:domain/sso-policy", identityGate, s.getSSOPolicyByDomainInternal)
 	internal.GET("/orgs/:orgId/roles/:roleName/capabilities", s.getEffectiveCapabilities)
 	internal.GET("/orgs/by-tenant", s.getOrganizationByTenant)
 	internal.POST("/orgs/ensure-from-tenant", s.ensureOrganizationFromTenant)

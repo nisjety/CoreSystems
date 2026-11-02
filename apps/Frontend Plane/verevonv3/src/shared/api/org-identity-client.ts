@@ -66,3 +66,88 @@ export async function verifyOrgDomain(orgId: string, domain: string): Promise<Or
 export async function revokeOrgDomain(orgId: string, domain: string): Promise<void> {
   await requestJson<unknown>(`${domainsPath(orgId)}/${encodeURIComponent(domain)}`, { method: 'DELETE' })
 }
+
+/**
+ * SSO policy and providers (WS05-S7). org-core owns the policy; the gateway
+ * applies the same owner/admin and `feature_disabled` rules as the domain routes.
+ * The provider client secret is write-only: it is sent once and never returned.
+ */
+
+export type SsoPolicyMode = 'off' | 'report' | 'enforce'
+
+export interface SsoProvider {
+  provider_id: string
+  domain: string
+  issuer: string
+  type: string
+  domain_verified: boolean
+}
+
+/** Why `enforce` cannot be switched on yet. */
+export type SsoEnforceReason =
+  | 'no_verified_domain'
+  | 'no_provider'
+  | 'sso_not_proven'
+  | 'break_glass_invalid'
+  | 'break_glass_requires_2fa'
+  | 'identity_provider_unavailable'
+
+export interface SsoPolicy {
+  mode: SsoPolicyMode
+  revision: number
+  domains: string[]
+  break_glass_user_ids: string[]
+  providers: SsoProvider[]
+  can_enforce: { ok: boolean; reasons: SsoEnforceReason[] }
+}
+
+export interface SsoPolicyUpdate {
+  mode: SsoPolicyMode
+  breakGlassUserIds: string[]
+  expectedRevision: number
+}
+
+export interface SsoProviderInput {
+  providerId: string
+  domain: string
+  issuer: string
+  clientId: string
+  clientSecret: string
+}
+
+function ssoPath(orgId: string, tail: string): string {
+  return `/api/v1/orgs/${encodeURIComponent(orgId)}/sso/${tail}`
+}
+
+export async function getSsoPolicy(orgId: string): Promise<SsoPolicy> {
+  return requestJson<SsoPolicy>(ssoPath(orgId, 'policy'))
+}
+
+export async function updateSsoPolicy(orgId: string, update: SsoPolicyUpdate): Promise<SsoPolicy> {
+  return requestJson<SsoPolicy>(ssoPath(orgId, 'policy'), {
+    method: 'PUT',
+    body: JSON.stringify({
+      mode: update.mode,
+      break_glass_user_ids: update.breakGlassUserIds,
+      expected_revision: update.expectedRevision,
+    }),
+  })
+}
+
+export async function addSsoProvider(orgId: string, input: SsoProviderInput): Promise<SsoProvider> {
+  return requestJson<SsoProvider>(ssoPath(orgId, 'providers'), {
+    method: 'POST',
+    body: JSON.stringify({
+      provider_id: input.providerId,
+      domain: input.domain,
+      type: 'oidc',
+      issuer: input.issuer,
+      client_id: input.clientId,
+      client_secret: input.clientSecret,
+    }),
+  })
+}
+
+export async function removeSsoProvider(orgId: string, providerId: string): Promise<void> {
+  await requestJson<unknown>(ssoPath(orgId, `providers/${encodeURIComponent(providerId)}`), { method: 'DELETE' })
+}

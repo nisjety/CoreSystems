@@ -60,6 +60,7 @@ type Service struct {
 	cache           *rediscache.Client // optional, nil if Redis disabled
 	siemSealer      *SIEMSealer        // nil unless ORG_SIEM_DESTINATIONS_ENABLED (WS06-S7)
 	domainResolver  DomainTXTResolver  // nil unless ORG_DOMAIN_VERIFICATION_ENABLED (WS05-S6)
+	identityAdmin   IdentityProviderAdmin // nil unless auth-core's SSO admin credential is set (WS05-S7)
 }
 
 func NewService(repo *Repository, publisher Publisher, cache ...*rediscache.Client) *Service {

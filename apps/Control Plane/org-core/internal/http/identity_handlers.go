@@ -21,6 +21,20 @@ const domainVerificationFlagEnv = "ORG_DOMAIN_VERIFICATION_ENABLED"
 // comma separated list of host[:port]. Unset uses the system resolvers.
 const domainDNSResolversEnv = "ORG_DOMAIN_DNS_RESOLVERS"
 
+// authCoreIdentityTokenEnv is the dedicated credential org-core presents to
+// auth-core's /api/v1/internal/sso surface (WS05-S7); authCoreURLEnv locates it.
+const (
+	authCoreIdentityTokenEnv = "ORG_CORE_IDENTITY_SERVICE_TOKEN"
+	authCoreURLEnv           = "AUTH_CORE_URL"
+)
+
+func authCoreIdentityURL(getenv func(string) string) string {
+	if v := strings.TrimSpace(getenv(authCoreURLEnv)); v != "" {
+		return v
+	}
+	return "http://auth-core:3011"
+}
+
 func domainVerificationEnabled(getenv func(string) string) bool {
 	switch getenv(domainVerificationFlagEnv) {
 	case "1", "true":

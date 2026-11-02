@@ -1049,6 +1049,29 @@ const orgDomainInput = z.object({
   domain: z.string().trim().min(1).max(253),
 })
 
+// SSO policy and providers (WS05-S7). org-core owns the policy, the verified-domain precondition
+// and the enforce checks; the provider's client secret is write-only and never echoed back.
+const orgUpdateSsoPolicyInput = z.object({
+  orgId: z.string().min(1),
+  mode: z.enum(['off', 'report', 'enforce']),
+  breakGlassUserIds: z.array(z.string().trim().min(1).max(128)).max(2),
+  expectedRevision: z.number().int().min(0),
+})
+
+const orgAddSsoProviderInput = z.object({
+  orgId: z.string().min(1),
+  providerId: z.string().trim().min(3).max(64),
+  domain: z.string().trim().min(1).max(253),
+  issuer: z.string().trim().url().max(2048),
+  clientId: z.string().trim().min(1).max(512),
+  clientSecret: z.string().trim().min(1).max(512),
+})
+
+const orgRemoveSsoProviderInput = z.object({
+  orgId: z.string().min(1),
+  providerId: z.string().trim().min(3).max(64),
+})
+
 const orgUpdateInstructionsInput = z.object({
   orgId: z.string().min(1),
   instructions: z.string().trim().optional(),
@@ -3030,6 +3053,39 @@ export const actionRegistry = [
     requiresApproval: true,
     reversible: true,
     inputSchema: orgUpdateZdrInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'org.update_sso_policy',
+    label: 'Update organization single sign-on policy',
+    description: 'Set the single sign-on policy to off, report or enforce, and name the break-glass owners. Enforce needs a verified domain, a working provider, your own recent SSO sign-in and two-factor break-glass owners; it ends the password sessions of covered users. Owner or admin only.',
+    ownerPlane: 'control',
+    risk: 'high',
+    requiresApproval: true,
+    reversible: true,
+    inputSchema: orgUpdateSsoPolicyInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'org.add_sso_provider',
+    label: 'Add single sign-on provider',
+    description: 'Register an OpenID Connect identity provider for a verified organization domain. The client secret is write-only. Owner or admin only.',
+    ownerPlane: 'control',
+    risk: 'high',
+    requiresApproval: true,
+    reversible: true,
+    inputSchema: orgAddSsoProviderInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'org.remove_sso_provider',
+    label: 'Remove single sign-on provider',
+    description: 'Remove an identity provider. Refused for the last provider of an enforced policy. Owner or admin only.',
+    ownerPlane: 'control',
+    risk: 'high',
+    requiresApproval: true,
+    reversible: false,
+    inputSchema: orgRemoveSsoProviderInput,
     outputSchema: envelopeStatusOutput,
   },
   {

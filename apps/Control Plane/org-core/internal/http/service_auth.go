@@ -404,6 +404,13 @@ func organizationProxyScopes(method string, rest []string) []string {
 		return []string{"org:identity:admin:self"}
 	case len(rest) == 4 && rest[1] == "domains" && rest[3] == "verify" && method == http.MethodPost:
 		return []string{"org:identity:admin:self"}
+	// SSO policy and providers (WS05-S7): the same signed owner/admin authority.
+	case len(rest) == 3 && rest[1] == "sso" && rest[2] == "policy" && (method == http.MethodGet || method == http.MethodPut):
+		return []string{"org:identity:admin:self"}
+	case len(rest) == 3 && rest[1] == "sso" && rest[2] == "providers" && method == http.MethodPost:
+		return []string{"org:identity:admin:self"}
+	case len(rest) == 4 && rest[1] == "sso" && rest[2] == "providers" && method == http.MethodDelete:
+		return []string{"org:identity:admin:self"}
 	case len(rest) == 2 && method == http.MethodPost && rest[1] == "plan":
 		return []string{"org:settings:write:self"}
 	case len(rest) == 2 && method == http.MethodPatch && (rest[1] == "capabilities" || rest[1] == "settings"):
@@ -439,6 +446,9 @@ func internalOrganizationScopes(method string, rest []string) []string {
 		return []string{"org:siem:read:any"}
 	// Which organisation holds a verified domain (WS05-S6); before the generic reads.
 	case len(rest) == 2 && rest[0] == "by-domain" && method == http.MethodGet:
+		return []string{"org:domain:read:any"}
+	// The SSO policy covering a domain (WS05-S7), read by the same principal.
+	case len(rest) == 3 && rest[0] == "by-domain" && rest[2] == "sso-policy" && method == http.MethodGet:
 		return []string{"org:domain:read:any"}
 	case len(rest) == 1 && method == http.MethodGet:
 		return []string{"org:read:any"}

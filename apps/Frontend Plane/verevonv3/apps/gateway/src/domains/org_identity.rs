@@ -56,6 +56,16 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         )
         .route("/api/v1/orgs/{id}/domains/{domain}", delete(revoke_domain))
         .route("/api/v1/orgs/{id}/domains/{domain}/verify", post(verify_domain))
+        // SSO policy and providers (WS05-S7), same flag and authority.
+        .route(
+            "/api/v1/orgs/{id}/sso/policy",
+            get(get_sso_policy).put(put_sso_policy),
+        )
+        .route("/api/v1/orgs/{id}/sso/providers", post(add_sso_provider))
+        .route(
+            "/api/v1/orgs/{id}/sso/providers/{provider_id}",
+            delete(remove_sso_provider),
+        )
         // `rate_limit_middleware` reads the `AuthenticatedUser` that
         // `require_session` inserts, so it is written first (inner).
         .route_layer(axum::middleware::from_fn(rate_limit_middleware))
@@ -286,5 +296,176 @@ async fn revoke_domain(
         );
     }
     let url = domains_url(&state, &caller.org_id, Some(&domain), false);
+    forward(&state, &caller, Method::DELETE, url, None).await
+}
+
+// --- SSO policy and providers (WS05-S7) ---
+//
+// Same edge rules as the domain routes: flag, live owner/admin membership, the
+// path organization must be the authorized one, and the upstream body is rebuilt
+// from an allow-list. The client secret of a provider is write-only: it is
+// forwarded once and never logged or echoed by this module.
+
+const MAX_PROVIDER_ID_LEN: usize = 64;
+const MAX_FIELD_LEN: usize = 512;
+const MAX_ISSUER_LEN: usize = 2048;
+const MAX_BREAK_GLASS: usize = 2;
+
+fn sso_url(state: &AppState, org_id: &str, tail: &str) -> String {
+    format!(
+        "{}/orgs/{}/sso/{tail}",
+        state.org_core_url,
+        urlencoding::encode(org_id)
+    )
+}
+
+fn valid_provider_segment(provider_id: &str) -> bool {
+    !provider_id.is_empty()
+        && provider_id.len() <= MAX_PROVIDER_ID_LEN
+        && provider_id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+fn invalid_request(message: &str) -> Response {
+    refusal(StatusCode::BAD_REQUEST, "invalid_request", message)
+}
+
+fn bounded_str<'a>(object: &'a Map<String, Value>, key: &str, max: usize) -> Option<&'a str> {
+    object
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= max)
+}
+
+/// The allow-listed PUT policy body, or the refusal to return.
+fn sso_policy_body(body: &Bytes) -> Result<Value, Response> {
+    if body.len() > MAX_BODY_BYTES {
+        return Err(invalid_request("The request body is too large."));
+    }
+    let Ok(Value::Object(object)) = serde_json::from_slice::<Value>(body) else {
+        return Err(invalid_request("The request body must be a JSON object."));
+    };
+    let mode = match bounded_str(&object, "mode", 16) {
+        Some(mode @ ("off" | "report" | "enforce")) => mode.to_owned(),
+        _ => return Err(invalid_request("mode must be off, report or enforce.")),
+    };
+    let Some(expected_revision) = object.get("expected_revision").and_then(Value::as_u64) else {
+        return Err(invalid_request("expected_revision is required."));
+    };
+    let mut break_glass = Vec::new();
+    match object.get("break_glass_user_ids") {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(ids)) if ids.len() <= MAX_BREAK_GLASS => {
+            for id in ids {
+                match id.as_str().map(str::trim) {
+                    Some(id) if !id.is_empty() && id.len() <= MAX_ORG_ID_LEN => {
+                        break_glass.push(json!(id));
+                    }
+                    _ => return Err(invalid_request("break_glass_user_ids is not valid.")),
+                }
+            }
+        }
+        _ => return Err(invalid_request("break_glass_user_ids is not valid.")),
+    }
+    let mut forwarded = Map::new();
+    forwarded.insert("mode".to_owned(), json!(mode));
+    forwarded.insert("break_glass_user_ids".to_owned(), Value::Array(break_glass));
+    forwarded.insert("expected_revision".to_owned(), json!(expected_revision));
+    Ok(Value::Object(forwarded))
+}
+
+/// The allow-listed POST provider body, or the refusal to return.
+fn sso_provider_body(body: &Bytes) -> Result<Value, Response> {
+    if body.len() > MAX_BODY_BYTES {
+        return Err(invalid_request("The request body is too large."));
+    }
+    let Ok(Value::Object(object)) = serde_json::from_slice::<Value>(body) else {
+        return Err(invalid_request("The request body must be a JSON object."));
+    };
+    let mut forwarded = Map::new();
+    for (key, max) in [
+        ("provider_id", MAX_PROVIDER_ID_LEN),
+        ("domain", MAX_DOMAIN_LEN),
+        ("type", 16),
+        ("issuer", MAX_ISSUER_LEN),
+        ("client_id", MAX_FIELD_LEN),
+        ("client_secret", MAX_FIELD_LEN),
+    ] {
+        let Some(value) = bounded_str(&object, key, max) else {
+            return Err(invalid_request("A provider field is missing or not valid."));
+        };
+        forwarded.insert(key.to_owned(), json!(value));
+    }
+    Ok(Value::Object(forwarded))
+}
+
+async fn get_sso_policy(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(id): Path<String>,
+) -> Response {
+    let caller = match admin_caller(&state, &user, &id).await {
+        Ok(caller) => caller,
+        Err(response) => return response,
+    };
+    let url = sso_url(&state, &caller.org_id, "policy");
+    forward(&state, &caller, Method::GET, url, None).await
+}
+
+async fn put_sso_policy(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let caller = match admin_caller(&state, &user, &id).await {
+        Ok(caller) => caller,
+        Err(response) => return response,
+    };
+    let forwarded = match sso_policy_body(&body) {
+        Ok(forwarded) => forwarded,
+        Err(response) => return response,
+    };
+    let url = sso_url(&state, &caller.org_id, "policy");
+    forward(&state, &caller, Method::PUT, url, Some(forwarded)).await
+}
+
+async fn add_sso_provider(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let caller = match admin_caller(&state, &user, &id).await {
+        Ok(caller) => caller,
+        Err(response) => return response,
+    };
+    let forwarded = match sso_provider_body(&body) {
+        Ok(forwarded) => forwarded,
+        Err(response) => return response,
+    };
+    let url = sso_url(&state, &caller.org_id, "providers");
+    forward(&state, &caller, Method::POST, url, Some(forwarded)).await
+}
+
+async fn remove_sso_provider(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path((id, provider_id)): Path<(String, String)>,
+) -> Response {
+    let caller = match admin_caller(&state, &user, &id).await {
+        Ok(caller) => caller,
+        Err(response) => return response,
+    };
+    if !valid_provider_segment(&provider_id) {
+        return invalid_request("The provider id is not valid.");
+    }
+    let url = sso_url(
+        &state,
+        &caller.org_id,
+        &format!("providers/{}", urlencoding::encode(&provider_id)),
+    );
     forward(&state, &caller, Method::DELETE, url, None).await
 }

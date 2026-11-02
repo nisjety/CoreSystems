@@ -7,10 +7,11 @@ use axum::{
 };
 use reqwest::Method;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::{
     config::AppState,
+    envelope::{error, error_with_details},
     upstream::{browser_origin, proxy_auth, proxy_auth_callback, proxy_auth_with_headers},
 };
 
@@ -165,7 +166,11 @@ pub(super) async fn sign_in(
     let url = format!("{}/api/auth/sign-in/email", state.auth_core_url);
     let cookie = cookie_header(&headers);
     let origin = browser_origin(&headers);
-    proxy_auth(
+    let submitted_email = body
+        .get("email")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let response = proxy_auth(
         &state,
         Method::POST,
         &url,
@@ -173,7 +178,71 @@ pub(super) async fn sign_in(
         Some(&cookie),
         origin.as_deref(),
     )
-    .await
+    .await;
+    map_sso_sign_in_refusal(response, submitted_email.as_deref()).await
+}
+
+const SSO_REFUSAL_MAX_BODY_BYTES: usize = 64 * 1024;
+
+/// Maps auth-core's SSO enforcement refusals (WS05-S7) to the typed envelope:
+/// `SSO_REQUIRED` becomes 403 `sso_required` with `details.domain` (the SPA then
+/// offers `/api/v1/auth/sso/initiate`), and `SSO_POLICY_UNAVAILABLE` becomes 503
+/// `sso_policy_unavailable`. Every other response, cookies included, passes
+/// through untouched.
+async fn map_sso_sign_in_refusal(response: Response, submitted_email: Option<&str>) -> Response {
+    let status = response.status();
+    if status != StatusCode::FORBIDDEN && status != StatusCode::SERVICE_UNAVAILABLE {
+        return response;
+    }
+    let (parts, body) = response.into_parts();
+    let Ok(bytes) = to_bytes(body, SSO_REFUSAL_MAX_BODY_BYTES).await else {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(error(
+                "upstream_unavailable",
+                "The upstream service is unavailable.",
+            )),
+        )
+            .into_response();
+    };
+    let parsed = serde_json::from_slice::<Value>(&bytes).ok();
+    let code = parsed
+        .as_ref()
+        .and_then(|value| value.get("code"))
+        .and_then(Value::as_str);
+    match (status, code) {
+        (StatusCode::FORBIDDEN, Some("SSO_REQUIRED")) => {
+            let domain = parsed
+                .as_ref()
+                .and_then(|value| value.get("domain"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| {
+                    submitted_email
+                        .and_then(|email| email.rsplit_once('@'))
+                        .map(|(_, domain)| domain.trim().to_ascii_lowercase())
+                })
+                .unwrap_or_default();
+            (
+                StatusCode::FORBIDDEN,
+                Json(error_with_details(
+                    "sso_required",
+                    "Your organization requires single sign-on.",
+                    json!({ "domain": domain }),
+                )),
+            )
+                .into_response()
+        }
+        (StatusCode::SERVICE_UNAVAILABLE, Some("SSO_POLICY_UNAVAILABLE")) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "sso_policy_unavailable",
+                "Sign-in policy could not be verified. Try again shortly.",
+            )),
+        )
+            .into_response(),
+        _ => Response::from_parts(parts, axum::body::Body::from(bytes)),
+    }
 }
 
 pub(super) async fn verify_two_factor(

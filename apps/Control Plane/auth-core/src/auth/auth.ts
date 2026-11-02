@@ -38,6 +38,11 @@ import { userServiceIntegrationPlugin } from './user-service-integration.plugin'
 import { organizationEventsPlugin } from './organization-events.plugin';
 import { normalizeIdentityEmail } from './account-linking.policy';
 import { withSoleOrganizationActivated } from './sole-org-auto-activation';
+import {
+  enforceSsoOnSessionCreate,
+  recordSsoSignInEvidence,
+  resolveSsoEnforcementCeiling,
+} from './sso-enforcement';
 import { pushMicrosoftSignInHandoff } from './microsoft-signin-handoff';
 import {
   buildInvitationLink,
@@ -259,6 +264,10 @@ function resolveSsoDefaultRole(): 'member' {
   }
   return 'member';
 }
+
+// Validate SSO_ENFORCEMENT at boot so a typo cannot silently weaken or strengthen
+// the platform ceiling (WS05-S7).
+resolveSsoEnforcementCeiling();
 
 function emailFlowsEnabled(): boolean {
   return (
@@ -764,7 +773,10 @@ const authOptions: BetterAuthOptions = {
         // social OAuth, SSO callback, passkey) — unlike the route-matched
         // after-hooks that missed Microsoft logins entirely. See
         // sole-org-auto-activation.ts for the full rationale.
-        async before(session) {
+        async before(session, context) {
+          // SSO enforcement (WS05-S7) runs first: a refused sign-in must not
+          // reach the activation, secondary storage or the cookie cache.
+          await enforceSsoOnSessionCreate(session, context);
           return { data: await withSoleOrganizationActivated(session) };
         },
         // Hand the signed-in user's Microsoft token to integration-corev2 so
@@ -772,10 +784,13 @@ const authOptions: BetterAuthOptions = {
         // itself. Same hook class as the activation above, for the same
         // reason: it runs for every session-creation path, Microsoft OAuth
         // included. Best-effort — never allowed to fail the sign-in.
-        async after(session) {
+        async after(session, context) {
           await pushMicrosoftSignInHandoff(
             session as { userId: string } & Record<string, unknown>,
           );
+          // Proof of a real SSO sign-in, read by org-core before it allows
+          // enforce (WS05-S7). Best effort, never fails the sign-in.
+          await recordSsoSignInEvidence(session, context);
         },
       },
     },
@@ -806,6 +821,17 @@ const authOptions: BetterAuthOptions = {
       },
     },
   },
+
+  // Providers are registered only through org-core's admin path, which proves
+  // the e-mail domain first (WS05-S7); the plugin's own registration and
+  // domain-verification endpoints stay closed.
+  disabledPaths: [
+    '/sso/register',
+    '/sso/update-provider',
+    '/sso/delete-provider',
+    '/sso/request-domain-verification',
+    '/sso/verify-domain',
+  ],
 
   // Session settings for security and responsiveness - Extended persistence
   session: {
