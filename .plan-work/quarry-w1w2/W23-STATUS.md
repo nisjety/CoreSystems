@@ -162,3 +162,22 @@ Open items:
 - The earlier RED stays: the agent-action admission golden waits for Model Plane (MP-ASKS.md, W2-FE-L5a entry).
 - 30 depth rows appended to W23-depth.md (a 12, b 5, c 9, d 4, plus the lane headings and the lane b review note).
 - Four tracked .sha256 files in the integ worktree still show as modified (CRLF/LF checkout artifacts, empty content diff); none committed.
+
+## main merged into w23/integ, 2026-11-02 (after W2-B6, before W2-B7)
+
+Merge commit 6edc55ae7 (`git merge --no-ff main`, main is the base). main brought the remote merge (Connectors + Engagement planes, verevon-web, anbud, visibility, Algolia/GSC), the earlier uncommitted live work, the browser-broker policy row (9531e117d) and the NATS namespace cutover (`controlplane.*`, stream CONTROLPLANE).
+
+Conflicts (3, all Control Plane, resolved as unions):
+- `apps/Control Plane/docker-compose.yml` ORG_CORE_SERVICE_CREDENTIALS: main's rows; auth-core holds org:web-policy:read:any (W2) and org:domain:read:any (main); the W2 quarry-edge row is kept.
+- `org-core/internal/http/server.go`: webPolicy (W2) and identity/SSO/SCIM fields (main).
+- `org-core/internal/http/service_auth.go`: authCorePrincipal (W2) plus domainReaderPrincipal and scimEdgePrincipal (main).
+- `retention_posture_contract_test.go`: the reviewed auth-core scope set now lists both scopes.
+
+NATS: w23/integ adds no `aqencia.controlplane` / `AQENCIA_CONTROLPLANE` use beyond what main already has (same count per file in all 8 files that mention it: the migration tool, historical migration SQL, scripts, docs), so the cutover comes in with main unchanged.
+
+Checks on the merged tree:
+- org-core `GOWORK=off go test ./...`: all packages ok.
+- Quarry (qtest, quarry-target-integ): `cargo check --workspace --tests` clean; libs quarry-core/runtime/edge/browser/transform/security 2911 passed, 0 failed; `cargo test -p quarry-edge --tests` 90 binaries, 2464 passed, 0 failed.
+- verevonv3 gateway (host): the main binary needs `RUST_MIN_STACK=16777216` on Windows (default stack overflows). With it: 1270 passed, 3 failed: `domains::spaces::tests::{a_viewer_cannot_add_or_remove_room_members, an_owner_adds_a_person_and_control_gets_the_roster, an_unconfirmed_roster_is_reported_rather_than_claimed_as_success}` (404 instead of 200/502/403). They fail alone too, and w23/integ changes no Space or router file in the gateway (its gateway diff vs main is 5 files: actions dispatchers/handlers, ingestions runs, knowledge, knowledge/quarry), so these are inherited from main's Space work, not from this merge.
+
+The lanes continue from 6edc55ae7: each lane branch must merge w23/integ (or be reset to it by the program) before W2-B7.
