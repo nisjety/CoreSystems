@@ -652,6 +652,10 @@ struct LoopContext<'a> {
     /// Whether a connected-app read of this run came back flagged. Shared with delegated
     /// children, so the egress tools stay held for the rest of the run (WS23-S3).
     taint: super::ConnectorTaint,
+    /// Whether this run, or a delegated child of it, has read web, browser or third-party
+    /// content (WS11.S7). Shared with every child, so a child's read refuses the parent's
+    /// `save_memory`. In memory only: a cold resume rebuilds it from the restored transcript.
+    external_content: crate::external_content::ExternalContentLatch,
     permission_wire: &'static str,
     /// Nesting depth: 0 is the user-facing run, 1 a delegated subagent. Bounds
     /// recursion via `subagent::guard_depth` and selects the run-level
@@ -1958,6 +1962,7 @@ async fn run_agent_with_route_parkable(
         route,
         refusal: crate::subscription_refusal::RefusalLatch::default(),
         taint: super::ConnectorTaint::default(),
+        external_content: crate::external_content::ExternalContentLatch::default(),
         permission_wire,
         depth: 0,
         step_prefix: resumed.as_ref().map_or_else(String::new, |r| r.step_prefix.clone()),
@@ -2805,6 +2810,19 @@ async fn run_rounds(
             seeded
         }
     };
+    // WS11.S7: the external-content latch is process memory, so a resumed or parked conversation
+    // rebuilds it from the `[source: ...]` tags its restored transcript carries.
+    let external_guard = crate::external_content::guard_enabled();
+    if in_place
+        && ctx
+            .external_content
+            .rebuild_from_transcript(external_guard, &messages)
+    {
+        debug!(
+            run_id = %req.run_id,
+            "run_agent: external-content latch rebuilt from the resumed transcript"
+        );
+    }
     // A resumed conversation keeps the sandbox note its run wrote when the files were attached,
     // and the files do not survive the pause (v1). A resume that carries none is refused here,
     // before the fence and before any round, so the model is never told of files it cannot read.
@@ -3469,6 +3487,13 @@ async fn run_rounds(
         // writer that is on.
         let retrievals_at_round_start = folds.engaged().then(|| attempted_retrievals.clone());
         let mut slots = Vec::with_capacity(response.tool_calls.len());
+        // WS11.S7: every tool name of this batch, for the `save_memory` guard (a round's calls
+        // start before any of their results is seen).
+        let batch_tools: Vec<&str> = response
+            .tool_calls
+            .iter()
+            .map(|call| call.name.as_str())
+            .collect();
         // The step ids a restored round's resolved calls ran (or were refused) under, by call
         // position: they keep them in the folds this round writes, so a later reader sees a
         // sibling that ran as one that ran. Empty outside the restored round.
@@ -3562,6 +3587,27 @@ async fn run_rounds(
                 continue;
             }
             routing_first.record(&call.name);
+            // WS11.S7: no durable memory write from a run that read external content. A ZDR run
+            // is left to the executor, whose Zero-Data-Retention message must come first.
+            if let Some(refusal) = crate::external_content::save_memory_refusal(
+                external_guard,
+                &ctx.external_content,
+                zdr,
+                &call.name,
+                &batch_tools,
+            ) {
+                warn!(
+                    run_id = %req.run_id,
+                    depth = ctx.depth,
+                    "run_agent: refusing save_memory after external content (web-taint guard)"
+                );
+                slots.push(CallSlot::Rejected(ToolStepResult {
+                    name: call.name.clone(),
+                    output: String::new(),
+                    error: Some(refusal.to_owned()),
+                }));
+                continue;
+            }
 
             // Leaf/orchestrator role split (harness-adoption pass,
             // claude-hermes-deepseek.md §7.3): a delegated subagent (depth > 0)
@@ -4502,6 +4548,9 @@ async fn run_rounds(
             if outcome.screening_taint {
                 ctx.taint.mark();
             }
+            // WS11.S7: a SUCCESSFUL external-content result latches; a failed call read nothing.
+            ctx.external_content
+                .note_result(external_guard, &call.name, outcome.error.is_empty());
 
             // Non-terminal per-tool step (status "running") carrying the GDPR
             // audit detail. The managed lifecycle, not a step payload, owns
@@ -5714,6 +5763,7 @@ async fn run_delegated_child(
         // siblings and the parent, and one met elsewhere stops this child.
         refusal: parent.refusal.clone(),
         taint: parent.taint.clone(),
+        external_content: parent.external_content.clone(),
         permission_wire: parent.permission_wire,
         depth: parent.depth + 1,
         // Hang the child's step ids off the delegating call's step id so the
@@ -17517,6 +17567,149 @@ mod tests {
             name: "yr_weather".to_owned(),
             arguments_json: r#"{"lat":60.39,"lon":5.32}"#.to_owned(),
         }
+    }
+
+    // --- WS11.S7: the web-taint memory guard, through the real loop -----------------------
+    //
+    // The pure rules (latch, classifier, transcript rebuild) are pinned in
+    // `external_content::tests`. These drive the loop itself, to prove the pre-pass calls
+    // them. A SUCCESSFUL external read cannot be scripted here (no network), so the
+    // "after a read" half is the unit sequence and the same-batch half (F15) is end to end.
+
+    fn named_call(id: &str, name: &str, arguments_json: &str) -> pb::ToolCall {
+        pb::ToolCall {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            arguments_json: arguments_json.to_owned(),
+        }
+    }
+
+    /// Run `req` through the real loop against a scripted model; return what the model was
+    /// shown on each round.
+    async fn drive_observing_messages(
+        script: Vec<Scripted>,
+        req: pb::RunAgentRequest,
+    ) -> Vec<Vec<pb::ChatMessage>> {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let observed_messages: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
+        let inference_channel =
+            spawn_inference_channel_with_messages(script, observed_messages.clone()).await;
+        let state = crate::state::StateStore::new();
+        run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            &plain_caller(),
+            req,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+        )
+        .await
+        .expect("the run completes");
+        let observed = observed_messages.lock().unwrap().clone();
+        observed
+    }
+
+    /// The tool-result message the model saw at the start of round `round` (0-based).
+    fn tool_context_seen_in(observed: &[Vec<pb::ChatMessage>], round: usize) -> String {
+        observed[round]
+            .iter()
+            .rev()
+            .find(|message| message.content.starts_with("Tool results for your previous request"))
+            .unwrap_or_else(|| panic!("round {round} saw no tool results: {:?}", observed[round]))
+            .content
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn external_content_guard_refuses_save_memory_beside_web_search_end_to_end() {
+        let observed = drive_observing_messages(
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![
+                        named_call("s1", "web_search", r#"{"query":"norwegian vat rate"}"#),
+                        named_call("m1", "save_memory", r#"{"content":"the vat rate is 25"}"#),
+                    ],
+                },
+                Scripted::Answer("done".to_owned()),
+            ],
+            sample_request(),
+        )
+        .await;
+        let context = tool_context_seen_in(&observed, 1);
+        assert!(
+            context.contains(crate::external_content::SAVE_MEMORY_REFUSAL),
+            "{context}"
+        );
+    }
+
+    #[tokio::test]
+    async fn external_content_guard_leaves_recall_memory_and_a_lone_save_memory_alone() {
+        // recall_memory beside a web read is unaffected, and a save_memory with no external
+        // read anywhere in the run is not the guard's to refuse.
+        let observed = drive_observing_messages(
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![
+                        named_call("s1", "web_search", r#"{"query":"x"}"#),
+                        named_call("r1", "recall_memory", r#"{"query":"vat"}"#),
+                    ],
+                },
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![named_call("m1", "save_memory", r#"{"content":"a preference"}"#)],
+                },
+                Scripted::Answer("done".to_owned()),
+            ],
+            sample_request(),
+        )
+        .await;
+        let first = tool_context_seen_in(&observed, 1);
+        assert!(!first.contains(crate::external_content::SAVE_MEMORY_REFUSAL), "{first}");
+        // The web call FAILED here (no network), so nothing latched: the later save_memory
+        // is not refused by the guard either.
+        let second = tool_context_seen_in(&observed, 2);
+        assert!(!second.contains(crate::external_content::SAVE_MEMORY_REFUSAL), "{second}");
+    }
+
+    #[tokio::test]
+    async fn external_content_guard_gives_a_zdr_run_the_zdr_message_first() {
+        let mut req = sample_request();
+        req.zdr = true;
+        let observed = drive_observing_messages(
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![
+                        named_call("s1", "web_search", r#"{"query":"x"}"#),
+                        named_call("m1", "save_memory", r#"{"content":"a fact"}"#),
+                    ],
+                },
+                Scripted::Answer("done".to_owned()),
+            ],
+            req,
+        )
+        .await;
+        let context = tool_context_seen_in(&observed, 1);
+        assert!(context.contains("Zero-Data-Retention"), "{context}");
+        assert!(
+            !context.contains(crate::external_content::SAVE_MEMORY_REFUSAL),
+            "the ZDR message comes first: {context}"
+        );
     }
 
     /// Lineage is bookkeeping; the delegated work is the product.

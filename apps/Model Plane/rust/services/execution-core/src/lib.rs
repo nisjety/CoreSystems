@@ -13,6 +13,7 @@ pub mod code_interpreter;
 mod compaction_budget;
 pub mod control_http_client;
 pub mod executor;
+pub mod external_content;
 pub mod grpc;
 pub mod health_attest;
 pub mod hook;
