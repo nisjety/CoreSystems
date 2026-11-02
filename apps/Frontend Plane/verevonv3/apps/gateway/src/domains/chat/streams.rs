@@ -138,8 +138,10 @@ async fn stream_chat(
     {
         return (status, body).into_response();
     }
-    let mut outbound_body =
+    let outbound_body =
         shared::with_identity_context(outbound_body, &user.user_name, &org_name);
+    let mut outbound_body =
+        shared::with_viewer_locale(outbound_body, state.space_features.chat_locale_hint);
     // Before the turn goes out, not after: a ZDR turn that fails midway is still
     // a ZDR turn, so the posture has to be settled on the body that is sent.
     shared::apply_org_zdr_posture(&state, &user, &mut outbound_body).await;

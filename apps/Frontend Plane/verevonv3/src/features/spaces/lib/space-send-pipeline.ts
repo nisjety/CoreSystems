@@ -172,6 +172,8 @@ export interface SpaceSendInput {
   readonly model: AiModelSelection
   /** The Control `subject_id` of a mentioned, bound agent, when one was picked. */
   readonly mentionedAgentRef?: string
+  /** The viewer's interface language, sent as a request-scoped hint (WS16-S6). */
+  readonly locale?: 'no' | 'en'
   readonly skills: readonly Skill[]
   /** Set when the message continues an existing room thread. */
   readonly replyThreadId?: string
@@ -225,6 +227,7 @@ const askStrategy: SpaceSendStrategy = async (run) => {
       minPrivacyTier: turnTier.tier,
       spaceRef: run.spaceRef,
       mentionedAgentRef: input.mentionedAgentRef,
+      locale: input.locale,
       threadId: input.replyThreadId,
       // The send's name (F-t1-033). `sendId` is undefined while the key is off,
       // which leaves both fields off the wire.

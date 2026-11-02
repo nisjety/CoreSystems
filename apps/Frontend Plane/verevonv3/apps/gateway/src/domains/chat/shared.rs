@@ -149,6 +149,28 @@ pub(crate) fn with_identity_context(mut body: Value, user_name: &str, org_name: 
     body
 }
 
+/// The viewer's interface language as a request-scoped framing hint (WS16-S6). The browser sends
+/// `locale: "no" | "en"`; this maps that closed set to `nb-NO` / `en-US` and drops anything else.
+/// The field is always removed first, so a value the browser typed in another form never reaches the
+/// model-bound body, and it stays removed when `enabled` is false (flag `CHAT_LOCALE_HINT`). It is
+/// not authority: it is not a forged-field concern and nothing downstream stores it.
+pub(crate) fn with_viewer_locale(mut body: Value, enabled: bool) -> Value {
+    if let Some(object) = body.as_object_mut() {
+        let requested = object.remove("locale");
+        if enabled {
+            let mapped = match requested.as_ref().and_then(Value::as_str) {
+                Some("no") => Some("nb-NO"),
+                Some("en") => Some("en-US"),
+                _ => None,
+            };
+            if let Some(locale) = mapped {
+                object.insert("locale".to_owned(), Value::String(locale.to_owned()));
+            }
+        }
+    }
+    body
+}
+
 pub(crate) fn data_plane_authorization_value(token: &str) -> Option<HeaderValue> {
     let token = token.trim();
     if token.is_empty() || token.chars().any(char::is_whitespace) {

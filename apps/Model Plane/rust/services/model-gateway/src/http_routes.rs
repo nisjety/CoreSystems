@@ -8159,6 +8159,12 @@ pub struct InvokeRequest {
     /// not carried here — this field is the text alone.
     #[serde(default)]
     pub persona_instructions: Option<String>,
+    /// WS16-S6 — the viewer's interface language, stamped by the BFF gateway from a closed set
+    /// (`nb-NO` or `en-US`; flag `CHAT_LOCALE_HINT`). A framing hint for the reply language,
+    /// request-scoped: never stored, grants nothing, and `Honored` under ZDR. See
+    /// [`crate::locale_hint`]. Absent on agent wake-ups.
+    #[serde(default)]
+    pub locale: Option<String>,
 }
 
 /// A tool/function definition supplied by the client (chat-parity §2).

@@ -524,6 +524,7 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
       mode: 'ask' as const,
       model: selectedModel(),
       mentionedAgentRef: mentionedAgentRef(),
+      locale: i18n.locale(),
       skills: pickedSkills(),
       replyThreadId: props.replyTarget?.()?.threadId,
     }

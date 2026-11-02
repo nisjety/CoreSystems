@@ -178,6 +178,11 @@ pub(crate) struct SpaceFeatureFlags {
     /// Read once in `build_state`, and only the literal `true` turns it on: unlike the other Space flags
     /// it never defaults on in development, so every other value leaves the follow-up as it was.
     pub(crate) append_retrieval: bool,
+    /// `CHAT_LOCALE_HINT` (WS16-S6): stamp the viewer's interface language (`nb-NO` or `en-US`) on
+    /// the model-bound body as the request-scoped `locale` field. Off removes the field, whatever
+    /// the browser sent. A rollout control, never an authorization input: the field is a framing
+    /// hint, is never stored, and grants nothing.
+    pub(crate) chat_locale_hint: bool,
     /// `SPACE_DENIALS_TYPED` (WS03-S5): map Control's typed Space denials to the browser envelope.
     /// Off restores pass-through. A rollout control, never an authorization input.
     pub(crate) denials_typed: bool,
@@ -255,6 +260,7 @@ impl SpaceFeatureFlags {
     pub(crate) fn from_env() -> Self {
         Self {
             append_retrieval: env::var("GATEWAY_SPACE_APPEND_RETRIEVAL").is_ok_and(|value| value == "true"),
+            chat_locale_hint: space_flag("CHAT_LOCALE_HINT"),
             denials_typed: space_flag("SPACE_DENIALS_TYPED"),
             client_policy: crate::client_contract::ClientPolicy::from_env(),
             csp_report_log_hosts: dev_only_flag("CSP_REPORT_LOG_HOSTS"),

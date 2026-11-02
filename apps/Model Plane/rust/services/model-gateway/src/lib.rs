@@ -39,6 +39,7 @@ pub mod idempotency_registry;
 pub mod implicit_feedback;
 pub mod langcache;
 pub mod latency_levers;
+pub mod locale_hint;
 pub mod lsp;
 mod mail_task_bridge_auth;
 mod managed_start_key;

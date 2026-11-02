@@ -606,6 +606,7 @@ mod tests {
             org_instructions: None,
             space_instructions: None,
             persona_instructions: None,
+            locale: None,
         }
     }
 

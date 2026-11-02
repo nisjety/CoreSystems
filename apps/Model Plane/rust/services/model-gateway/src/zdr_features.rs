@@ -145,6 +145,7 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
     ("org_instructions", Treatment::Honored),
     ("space_instructions", Treatment::Honored),
     ("persona_instructions", Treatment::Honored),
+    ("locale", Treatment::Honored),
 ];
 
 /// The feature strings the gateway reads, each with its treatment. A feature
@@ -250,6 +251,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         org_instructions: _,
         space_instructions: _,
         persona_instructions: _,
+        locale: _,
     } = request;
     vec![
         "content",
@@ -292,6 +294,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         "org_instructions",
         "space_instructions",
         "persona_instructions",
+        "locale",
     ]
 }
 

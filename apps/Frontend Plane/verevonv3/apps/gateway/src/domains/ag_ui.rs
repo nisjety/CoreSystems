@@ -116,7 +116,8 @@ async fn stream_agent_ui(
         return (status, body).into_response();
     }
     let org_name = crate::domains::auth::resolve_org_name(&state, &user, &org_id).await;
-    let mut body = shared::with_identity_context(body, &user.user_name, &org_name);
+    let body = shared::with_identity_context(body, &user.user_name, &org_name);
+    let mut body = shared::with_viewer_locale(body, state.space_features.chat_locale_hint);
     shared::apply_org_zdr_posture(&state, &user, &mut body).await;
     // After `inject_personal_thread_context`: only minted once Control has
     // actually scoped this turn to a Space (same rule as native chat).

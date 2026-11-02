@@ -91,6 +91,13 @@ export type ChatInvokeRequest = {
    * exchanges this selection for a Control-signed, effect-bound decision. */
   spaceRef?: string
   /**
+   * The viewer's interface language (WS16-S6), a plain framing hint for the model on a Space turn.
+   * Request-scoped: the gateway maps `no` to `nb-NO` and `en` to `en-US` (anything else is dropped,
+   * and the field is removed while its flag is off) and model-gateway never stores it. It decides
+   * nothing about access.
+   */
+  locale?: 'no' | 'en'
+  /**
    * The Control `subject_id` of a Space agent addressed by `@` mention this
    * turn (`docs/space-defenition.md`, "Invocation rule"). The gateway is the
    * one that decides whether this agent may actually answer — it re-resolves
@@ -1397,6 +1404,8 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     thread_id: threadId,
     session_key: request.sessionKey?.trim() || threadId,
     space_ref: request.spaceRef?.trim() || undefined,
+    // Narrowed inline like `retrievalScope` above: only the two known codes ever reach the wire.
+    locale: request.locale === 'no' || request.locale === 'en' ? request.locale : undefined,
     mentioned_agent_ref: request.mentionedAgentRef?.trim() || undefined,
     // Explicit skill picks. The KEY is absent when none — not `undefined`, not
     // `[]` — so a turn that names no skill is byte-for-byte what it was before
