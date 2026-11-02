@@ -270,6 +270,19 @@ pub(crate) struct SpaceFeatureFlags {
     /// `feature_disabled`, the listing omits `pins` and the SPA stops lifting. A rollout control,
     /// never an authorization input: Control's live role (editor or above) decides who may pin.
     pub(crate) room_pins: bool,
+    /// `SPACE_ROOM_FILES_API` (WS14-S7): the durable room-file routes `POST`/`GET
+    /// /api/v1/spaces/{space_ref}/files`, `.../files/uploads/{upload_id}`, `.../files/{document_id}/text`,
+    /// `DELETE .../files/{document_id}`, and `features.room_files.durable`. Off answers 404
+    /// `room_files_disabled`. A rollout control, never an authorization input: Control's import and
+    /// retrieval decisions and the Data and Ingestion planes decide, and a Zero Data Retention
+    /// organization is refused the upload with the typed 412 whatever this says.
+    pub(crate) room_files_api: bool,
+    /// `SPACE_ROOM_FILES_UI` (WS14-S7): reported as `features.room_files.files_tab` (together with
+    /// `room_files_api`) so the SPA shows the Files tab. Never an authorization input.
+    pub(crate) room_files_ui: bool,
+    /// `SPACE_TURN_ATTACHMENTS_UI` (WS14-S7): reported as `features.room_files.turn_attachments` so the
+    /// composer offers per-turn attachments. Never an authorization input.
+    pub(crate) turn_attachments_ui: bool,
     /// `SPACE_MESSAGE_SEARCH_API` (WS13-S3): `POST /api/v1/spaces/{space_ref}/search` and
     /// `GET /api/v1/spaces/{space_ref}/entries/{message_id}` (permission-checked message search and
     /// message addresses, relayed to model-gateway). Off answers 404 `space_search_disabled`.
@@ -396,6 +409,9 @@ impl SpaceFeatureFlags {
             room_archive_api: space_flag("SPACE_ROOM_ARCHIVE_API"),
             room_artifacts: space_flag("SPACE_ROOM_ARTIFACTS_API"),
             room_pins: space_flag("SPACE_ROOM_PINS_API"),
+            room_files_api: space_flag("SPACE_ROOM_FILES_API"),
+            room_files_ui: space_flag("SPACE_ROOM_FILES_UI"),
+            turn_attachments_ui: space_flag("SPACE_TURN_ATTACHMENTS_UI"),
             message_search_api: space_flag("SPACE_MESSAGE_SEARCH_API"),
             message_search_ui: space_flag("SPACE_MESSAGE_SEARCH_UI"),
             entry_links_ui: space_flag("SPACE_ENTRY_LINKS_UI"),

@@ -257,6 +257,11 @@ services:
       # WS13-S8: room pins (Convex-backed, editor or above). Rollout control only; Control's live role
       # decides who may pin and the thread must be readable by the pinner.
       SPACE_ROOM_PINS_API: ${SPACE_ROOM_PINS_API:-true}
+      # WS14-S7: room files routes and the per-turn attachment / Files tab reports. Rollout controls only;
+      # Control's decisions, Ingestion and Data decide. Off until the upstream WS14 flags are on.
+      SPACE_ROOM_FILES_API: ${SPACE_ROOM_FILES_API:-false}
+      SPACE_ROOM_FILES_UI: ${SPACE_ROOM_FILES_UI:-false}
+      SPACE_TURN_ATTACHMENTS_UI: ${SPACE_TURN_ATTACHMENTS_UI:-false}
       # WS13-S3: permission-checked message search + entry addresses (relayed to model-gateway, which has
       # its own SPACE_MESSAGE_SEARCH_API) and the feature report for the search, link, palette and fork UIs.
       # Rollout controls only; Control's per-request read decision and Session Core's audience predicates decide.

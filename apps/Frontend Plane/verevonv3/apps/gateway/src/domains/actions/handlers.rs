@@ -85,6 +85,10 @@ use super::dispatchers_spaces::ws10::{
 };
 use super::dispatchers_spaces::ws10b::dispatch_spaces_set_tool_policy;
 use super::dispatchers_spaces::ws12::{dispatch_spaces_hide_space, dispatch_spaces_open_dm};
+use super::dispatchers_spaces::ws14::{
+    dispatch_space_files_attach, dispatch_space_files_delete, dispatch_space_files_list,
+    dispatch_space_files_read_text,
+};
 use super::dispatchers_spaces::ws16::dispatch_spaces_update_sidebar;
 use super::dispatchers_spaces::ws03::{
     dispatch_spaces_apply_effect_preset, dispatch_spaces_set_effect_entitlements,
@@ -606,6 +610,16 @@ pub(super) async fn execute_action(
         "spaces.apply_effect_preset" => {
             dispatch_spaces_apply_effect_preset(&state, &user, &body.input, &body.idempotency_key)
                 .await
+        }
+        "space.files.attach" => dispatch_space_files_attach().await,
+        "space.files.list" => {
+            dispatch_space_files_list(&state, &user, &headers, &body.input).await
+        }
+        "space.files.read_text" => {
+            dispatch_space_files_read_text(&state, &user, &headers, &body.input).await
+        }
+        "space.files.delete" => {
+            dispatch_space_files_delete(&state, &user, &headers, &body.input).await
         }
         // Social actions -> social-core via the dedicated dispatchers (real
         // ApprovalState is enforced by social-core before publish/schedule).

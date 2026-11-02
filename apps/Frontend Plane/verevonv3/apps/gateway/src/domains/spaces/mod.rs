@@ -36,6 +36,7 @@ pub(crate) mod directory;
 pub(crate) mod dm;
 pub(crate) mod human_posts;
 pub(crate) mod room_admin;
+pub(crate) mod files;
 mod message_search;
 mod pins;
 mod room_artifacts;
@@ -930,6 +931,7 @@ fn module_routes() -> Router<AppState> {
         .merge(approvals::routes())
         .merge(tool_policy::routes())
         .merge(dm::routes())
+        .merge(files::routes())
         .merge(human_posts::routes())
         .merge(message_search::routes())
         .merge(pins::routes())
@@ -5172,8 +5174,12 @@ async fn space_context(
                     "thread_fork": state.space_features.thread_fork_api,
                     "dm": state.space_features.dm_api,
                     "tool_policy_editor": state.space_features.tool_policy_editor,
+                    "room_files": files::features_json(&state),
                 },
-                "limits": { "post_max_chars": human_posts::POST_MAX_CHARS },
+                "limits": {
+                    "post_max_chars": human_posts::POST_MAX_CHARS,
+                    "room_files": files::limits_json(),
+                },
             }}),
         ),
     )

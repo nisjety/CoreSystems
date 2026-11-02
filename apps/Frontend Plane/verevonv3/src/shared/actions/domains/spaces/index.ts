@@ -14,6 +14,7 @@ import { ws08SpaceActions } from './ws08'
 import { ws10SpaceActions } from './ws10'
 import { ws10bSpaceActions } from './ws10b'
 import { ws12SpaceActions } from './ws12'
+import { ws14SpaceActions } from './ws14'
 import { ws16SpaceActions } from './ws16'
 
 export const spaceActions = [
@@ -25,5 +26,6 @@ export const spaceActions = [
   ...ws10SpaceActions,
   ...ws10bSpaceActions,
   ...ws12SpaceActions,
+  ...ws14SpaceActions,
   ...ws16SpaceActions,
 ] as const
