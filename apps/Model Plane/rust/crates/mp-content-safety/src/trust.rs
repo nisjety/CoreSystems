@@ -32,6 +32,8 @@ const TOOL_TRUST: &[(&str, TrustClass)] = &[
     ("web_search", TrustClass::ExternalWeb),
     ("web_fetch", TrustClass::ExternalWeb),
     ("fetch_url", TrustClass::ExternalWeb),
+    // WS16.S8: the Model-proposed page extraction returns text the model pulled out of a web page.
+    ("extract_structured", TrustClass::ExternalWeb),
     ("web.search", TrustClass::ExternalWeb),
     ("web.read", TrustClass::ExternalWeb),
     ("browser_agent", TrustClass::BrowserScraped),
@@ -111,7 +113,14 @@ mod tests {
 
     #[test]
     fn the_untrusted_tools_classify_as_external() {
-        for name in ["web_search", "web_fetch", "fetch_url", "web.search", "web.read"] {
+        for name in [
+            "web_search",
+            "web_fetch",
+            "fetch_url",
+            "extract_structured",
+            "web.search",
+            "web.read",
+        ] {
             assert_eq!(TrustClass::classify(name), TrustClass::ExternalWeb, "{name}");
         }
         assert_eq!(TrustClass::classify("browser_agent"), TrustClass::BrowserScraped);
@@ -144,6 +153,7 @@ mod tests {
             "web_search",
             "web_fetch",
             "fetch_url",
+            "extract_structured",
             "web.search",
             "web.read",
             "browser_agent",
