@@ -63,6 +63,11 @@ func (r *Routed) CreateScopedSensitiveApproval(ctx context.Context, p ApprovalPa
 	return r.byID(p.ParentGrantID).CreateScopedSensitiveApproval(ctx, p)
 }
 
+// CreateOriginExtension lives in its parent's store.
+func (r *Routed) CreateOriginExtension(ctx context.Context, p ExtensionParams) (*Grant, error) {
+	return r.byID(p.ParentGrantID).CreateOriginExtension(ctx, p)
+}
+
 // Derive lives in its parent's store.
 func (r *Routed) Derive(ctx context.Context, p DeriveParams) (*Grant, error) {
 	return r.byID(p.ParentGrantID).Derive(ctx, p)

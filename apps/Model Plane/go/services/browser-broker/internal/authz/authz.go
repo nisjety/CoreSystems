@@ -24,6 +24,10 @@ const (
 	// it lets a key acquire an allow-list session grant and revoke its own.
 	ScopeAgent = "browser:agent"
 
+	// GrantKindOriginExtension is the AcquireGrant grant_kind of an origin
+	// extension (E3.2-e1).
+	GrantKindOriginExtension = "origin_extension"
+
 	// PrincipalUser, PrincipalService and PrincipalAPIKey are the authctx
 	// principal types this broker authorizes.
 	PrincipalUser    = "user"
@@ -95,6 +99,11 @@ func Authorize(principal authctx.Principal, method string, request any) error {
 		if !principal.HasScope(required) {
 			return errors.New("required browser scope is missing")
 		}
+		// E3.2-e1: an origin extension records a person's consent; no workload
+		// issues one on its own authority (the handler refuses it too).
+		if req, ok := request.(*mpv1.AcquireGrantRequest); ok && req.GetGrantKind() == GrantKindOriginExtension {
+			return errors.New("an origin extension is issued to a signed-in user only")
+		}
 		return nil
 	case PrincipalAPIKey:
 		return authorizeAPIKey(principal, method, request)
@@ -143,6 +152,9 @@ func APIKeyAcquireShape(req *mpv1.AcquireGrantRequest) error {
 	if len(req.GetAllowedActions()) != 0 || len(req.GetAllowedFrameIds()) != 0 || len(req.GetAllowedDialogIds()) != 0 ||
 		len(req.GetAllowedArtifactIds()) != 0 || req.GetParentGrantId() != "" {
 		return errors.New("an api key cannot acquire a sensitive approval")
+	}
+	if req.GetConsentScope() != "" || len(req.GetConsentDeniedDomains()) != 0 {
+		return errors.New("an api key cannot carry a consent")
 	}
 	return nil
 }

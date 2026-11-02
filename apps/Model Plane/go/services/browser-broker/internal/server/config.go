@@ -51,6 +51,8 @@ const (
 	EnvKeyGrantsEnabled      = "BROWSER_BROKER_KEY_GRANTS_ENABLED"
 	EnvKeyGrantTTLSeconds    = "BROWSER_BROKER_KEY_GRANT_TTL_SECONDS"
 	EnvMaxActiveGrantsPerKey = "BROWSER_BROKER_MAX_ACTIVE_GRANTS_PER_KEY"
+	// E3.2-e1 (OD13): origin-extension grants. Off unless exactly 1, true or on.
+	EnvOriginExtensionEnabled = "BROWSER_BROKER_ORIGIN_EXTENSION_ENABLED"
 )
 
 // Config holds the limits applied when issuing grants.
@@ -88,6 +90,11 @@ type Config struct {
 	// MaxActivePerKey caps live grants per API key. Key grants count against
 	// the owner's MaxActivePerOwner too.
 	MaxActivePerKey int
+	// OriginExtensionEnabled lets a signed-in user obtain an origin_extension
+	// grant for a run (E3.2-e1, BROWSER_BROKER_ORIGIN_EXTENSION_ENABLED). Off
+	// by default: every request is PermissionDenied and an existing extension
+	// validates as revoked, so turning it off is also the kill switch.
+	OriginExtensionEnabled bool
 }
 
 // DefaultConfig returns the defaults.
@@ -147,6 +154,7 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 		cfg.MaxAttachDomains = min(v, hardMaxSessionDomains)
 	}
 	cfg.KeyGrantsEnabled = switchOn(getenv(EnvKeyGrantsEnabled))
+	cfg.OriginExtensionEnabled = switchOn(getenv(EnvOriginExtensionEnabled))
 	if v, ok, err := positiveInt(getenv, EnvKeyGrantTTLSeconds); err != nil {
 		return Config{}, err
 	} else if ok {

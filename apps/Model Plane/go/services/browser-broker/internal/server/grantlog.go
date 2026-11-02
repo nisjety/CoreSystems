@@ -25,6 +25,10 @@ func logGrantIssued(ctx context.Context, g *grant.Grant) {
 		"zdr", g.Zdr,
 		"domain_count", len(g.AllowedDomains),
 	}
+	// E3.2-e1: the consent scope is a label, never a host.
+	if g.ConsentScope != "" {
+		attrs = append(attrs, "consent_scope", g.ConsentScope)
+	}
 	if !g.Zdr {
 		attrs = append(attrs, "grant_id", g.ID)
 		// INNH-10: the API key id (an id, never the key). Left out under ZDR

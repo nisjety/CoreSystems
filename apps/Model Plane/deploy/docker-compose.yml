@@ -2053,6 +2053,11 @@ services:
       BROWSER_BROKER_KEY_REVOKE_NATS_USER: ${BROWSER_BROKER_KEY_REVOKE_NATS_USER:-}
       BROWSER_BROKER_KEY_REVOKE_NATS_PASSWORD: ${BROWSER_BROKER_KEY_REVOKE_NATS_PASSWORD:-}
       BROWSER_BROKER_KEY_REVOKE_STREAM: ${BROWSER_BROKER_KEY_REVOKE_STREAM:-VEREVON_CONTROL_OBSERVABILITY}
+      # Origin-extension grants (E3.2-e1, OD13, internal/server/origin_extension.go).
+      # OFF unless exactly 1, true or on. A signed-in user may then consent to up to
+      # eight more exact origins for a run; the grant is parent-bound, never
+      # renewed, and validates as revoked again when the switch goes back off.
+      BROWSER_BROKER_ORIGIN_EXTENSION_ENABLED: ${BROWSER_BROKER_ORIGIN_EXTENSION_ENABLED:-0}
     # The entrypoint's migrations need postgres, so wait for it to be healthy;
     # otherwise a first boot before it answers fails and restarts the container.
     depends_on:

@@ -70,6 +70,8 @@ func main() {
 		"key_grants_enabled", cfg.KeyGrantsEnabled,
 		"key_grant_ttl_seconds", int(cfg.KeyGrantTTL.Seconds()),
 		"max_active_grants_per_key", cfg.MaxActivePerKey,
+		// E3.2-e1 (OD13): origin extensions (dark unless switched on).
+		"origin_extension_enabled", cfg.OriginExtensionEnabled,
 	)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)

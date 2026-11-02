@@ -39,6 +39,7 @@ const (
 	lockNsParentRuns    int32 = 0x62620002
 	lockNsRevokeRoot    int32 = 0x62620003
 	lockNsKeyGrants     int32 = 0x62620004
+	lockNsParentExts    int32 = 0x62620005
 )
 
 // Purger removes grants that expired before a cutoff.
@@ -156,7 +157,8 @@ const grantColumns = `id, kind, org_id, owner_id, session_key, scope_url, allowe
 	COALESCE(parent_grant_id, ''), expires_at, revoked_at IS NOT NULL, COALESCE(revoked_reason, ''),
 	COALESCE(budget_micro_usd, 0), COALESCE(budget_max_steps, 0), COALESCE(budget_max_runtime_s, 0),
 	COALESCE(budget_source, ''), COALESCE(budget_minted_at_unix, 0),
-	policy_mode, denied_domains, COALESCE(resource_id, ''), absolute_expires_at, COALESCE(key_id, '')`
+	policy_mode, denied_domains, COALESCE(resource_id, ''), absolute_expires_at, COALESCE(key_id, ''),
+	COALESCE(consent_scope, '')`
 
 // fetch reads one grant; lock is "", " FOR SHARE" or " FOR UPDATE". A
 // missing row is ErrGrantNotFound.
@@ -169,6 +171,7 @@ func (s *PgStore) fetch(ctx context.Context, q querier, op, id, lock string) (*G
 		&g.ParentGrantID, &g.ExpiresAt, &g.Revoked, &g.RevokedReason,
 		&g.Budget.MicroUSD, &g.Budget.MaxSteps, &g.Budget.MaxRuntimeS, &g.Budget.Source, &g.Budget.MintedAtUnix,
 		&g.PolicyMode, &g.DeniedDomains, &g.ResourceID, &g.AbsoluteExpiresAt, &g.KeyID,
+		&g.ConsentScope,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrGrantNotFound
@@ -250,10 +253,10 @@ const insertGrant = `INSERT INTO browser_grants (id, kind, org_id, owner_id, ses
 	allowed_domains, allowed_actions, allowed_frame_ids, allowed_dialog_ids, allowed_artifact_ids,
 	parent_grant_id, expires_at, absolute_expires_at,
 	budget_micro_usd, budget_max_steps, budget_max_runtime_s, budget_source, budget_minted_at_unix,
-	policy_mode, denied_domains, resource_id, key_id)
+	policy_mode, denied_domains, resource_id, key_id, consent_scope)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULLIF($12, ''), $13, $19,
 	NULLIF($14::bigint, 0), NULLIF($15::int, 0), NULLIF($16::int, 0), NULLIF($17::text, ''), NULLIF($18::bigint, 0),
-	$20, $21, NULLIF($22::text, ''), NULLIF($23::text, ''))`
+	$20, $21, NULLIF($22::text, ''), NULLIF($23::text, ''), NULLIF($24::text, ''))`
 
 func insertArgs(g *Grant) []any {
 	absolute := g.AbsoluteExpiresAt
@@ -269,7 +272,7 @@ func insertArgs(g *Grant) []any {
 		nonNil(g.AllowedDomains), nonNil(g.AllowedActions), nonNil(g.AllowedFrameIDs),
 		nonNil(g.AllowedDialogIDs), nonNil(g.AllowedArtifactIDs), g.ParentGrantID, g.ExpiresAt,
 		g.Budget.MicroUSD, g.Budget.MaxSteps, g.Budget.MaxRuntimeS, g.Budget.Source, g.Budget.MintedAtUnix,
-		absolute, mode, nonNil(g.DeniedDomains), g.ResourceID, g.KeyID,
+		absolute, mode, nonNil(g.DeniedDomains), g.ResourceID, g.KeyID, g.ConsentScope,
 	}
 }
 

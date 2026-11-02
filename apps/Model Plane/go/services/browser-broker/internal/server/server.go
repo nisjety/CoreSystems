@@ -109,8 +109,15 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 	}
 	// grant_kind (WS8.C): "" is the ordinary path below; human_browse is a
 	// different grant with its own rules; anything else is refused.
+	if req.GetGrantKind() != grantKindOriginExtension &&
+		(req.GetConsentScope() != "" || len(req.GetConsentDeniedDomains()) != 0) {
+		// A consent field on any other grant would be ignored silently; refuse it.
+		return nil, status.Error(codes.InvalidArgument, "consent_scope and consent_denied_domains are only for an origin_extension grant")
+	}
 	switch req.GetGrantKind() {
 	case "":
+	case grantKindOriginExtension:
+		return s.acquireOriginExtension(ctx, req, scopeURL, principal)
 	case grantKindHumanBrowse:
 		// The human_browse path has no read level (WS21-S4 narrows only allowlist
 		// grants), so a read-only ask is refused rather than silently widened.
@@ -119,7 +126,7 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 		}
 		return s.acquireHumanBrowse(ctx, req, scopeURL, principal)
 	default:
-		return nil, status.Error(codes.InvalidArgument, "grant_kind must be empty or human_browse")
+		return nil, status.Error(codes.InvalidArgument, "grant_kind must be empty, human_browse or origin_extension")
 	}
 	allowedDomains, err := grant.NormalizeAllowedDomains(req.GetAllowedDomains())
 	if err != nil {
@@ -260,6 +267,9 @@ func (s *Server) ValidateGrant(ctx context.Context, req *ValidateGrantRequest) (
 	if err == nil {
 		err = s.keyGrantLive(principal, g)
 	}
+	if err == nil {
+		err = s.extensionLive(g)
+	}
 	if err != nil {
 		telemetry.GrantsValidatedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", grantOutcome(err))))
 		return nil, mapErr(err)
@@ -290,6 +300,7 @@ func (s *Server) ValidateGrant(ctx context.Context, req *ValidateGrantRequest) (
 		SessionKey:         g.SessionKey,
 		ReadOnly:           g.ReadOnly,
 		KeyId:              g.KeyID,
+		ConsentScope:       g.ConsentScope,
 	}, nil
 }
 

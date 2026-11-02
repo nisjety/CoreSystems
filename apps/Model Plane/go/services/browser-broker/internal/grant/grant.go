@@ -144,6 +144,9 @@ type Grant struct {
 	// never renewed, derived from or used as an approval parent, and its owner
 	// is the key's owning user.
 	KeyID string
+	// ConsentScope is the scope of an origin_extension grant (E3.2-e1:
+	// "turn", "conversation" or "always"); empty for every other kind.
+	ConsentScope string
 	// Zdr marks a Zero Data Retention grant. It can be raised, never lowered,
 	// and a derived or approval grant inherits it.
 	Zdr bool
@@ -304,6 +307,9 @@ type Repository interface {
 	// absolute expiry (WS8.C).
 	Renew(ctx context.Context, p RenewParams) (*Grant, error)
 	GetScoped(ctx context.Context, id, orgID, ownerID string) (*Grant, error)
+	// CreateOriginExtension issues a parent-bound grant that adds consented
+	// hosts to a live session or run grant (E3.2-e1, OD13).
+	CreateOriginExtension(ctx context.Context, p ExtensionParams) (*Grant, error)
 	// RevokeScoped revokes the grant and every grant derived from it.
 	RevokeScoped(ctx context.Context, id, orgID, ownerID, reason string) error
 }
@@ -710,7 +716,7 @@ func (s *MemoryRepository) activeLocked(orgID, ownerID string) int {
 	active := 0
 	for _, g := range s.grants {
 		if g.OrgID == orgID && g.OwnerID == ownerID && g.Kind != KindSensitiveApproval && g.Kind != KindRun &&
-			g.Kind != KindAttach && !g.Revoked && !now.After(g.ExpiresAt) {
+			g.Kind != KindAttach && g.Kind != KindOriginExtension && !g.Revoked && !now.After(g.ExpiresAt) {
 			active++
 		}
 	}
