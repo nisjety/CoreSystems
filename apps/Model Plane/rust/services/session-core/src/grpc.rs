@@ -26,6 +26,7 @@ use mp_contracts::model_plane::v1::{
     run_service_server::RunServiceServer,
     session_core_server::{SessionCore, SessionCoreServer},
     session_retention_service_server::{SessionRetentionService, SessionRetentionServiceServer},
+    space_attention_server::SpaceAttentionServer,
     space_events_server::SpaceEventsServer,
     space_history_service_server::SpaceHistoryServiceServer,
     space_room_read_service_server::SpaceRoomReadServiceServer,
@@ -58,7 +59,7 @@ use crate::terminalization;
 
 /// Standard gRPC health names registered on the unauthenticated health-only
 /// surface. Business RPCs remain independently intercepted.
-pub const HEALTH_SERVICE_NAMES: [&str; 12] = [
+pub const HEALTH_SERVICE_NAMES: [&str; 13] = [
     "model_plane.v1.SessionCore",
     "model_plane.v1.ManagedRunLifecycle",
     "model_plane.v1.OrchestrationCoreService",
@@ -71,6 +72,7 @@ pub const HEALTH_SERVICE_NAMES: [&str; 12] = [
     "model_plane.v1.SpaceRoomReadService",
     "model_plane.v1.SpaceEvents",
     "model_plane.v1.SpaceHistoryService",
+    "model_plane.v1.SpaceAttention",
 ];
 
 const RUN_STARTED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.RunStarted";
@@ -10864,6 +10866,7 @@ pub async fn serve(
     let session_read_pool = pool.clone();
     // Space message search (WS13-S1): own handle on the pool; the switch is read once, at boot.
     let space_history_pool = pool.clone();
+    let space_attention_pool = pool.clone();
     // Message revisions (WS12-S4): its own handle on the pool and the Letta mirror, taken before they move.
     let message_revision_pool = pool.clone();
     let letta_for_revisions = letta_memory.clone();
@@ -10927,6 +10930,13 @@ pub async fn serve(
             crate::space::history::SpaceHistoryGrpc::new(
                 space_history_pool,
                 mp_contracts::space_history::core_enabled(),
+            ),
+            auth.clone(),
+        ))
+        .add_service(SpaceAttentionServer::with_interceptor(
+            crate::space::attention::SpaceAttentionGrpc::new(
+                space_attention_pool,
+                mp_contracts::space_attention::summary_enabled(),
             ),
             auth.clone(),
         ))
@@ -14234,6 +14244,7 @@ mod tests {
                 "model_plane.v1.SpaceRoomReadService",
                 "model_plane.v1.SpaceEvents",
                 "model_plane.v1.SpaceHistoryService",
+                "model_plane.v1.SpaceAttention",
             ]
         );
     }

@@ -15,6 +15,7 @@ services:
       SPACE_RUN_WORK_SUMMARY: "true"
       SPACE_RUN_LIVE_VIEW: "true"
       SPACE_RUN_LIVE_TEXT: "true"
+      SPACE_ATTENTION_SUMMARY: "1"
       FINETUNE_ORG_BUDGET_USD: "50"
       FINETUNE_PER_JOB_BUDGET_USD: "20"
       SPACE_HUMAN_POSTS_API: "1"
@@ -29,6 +30,7 @@ services:
       SPACE_MENTION_RECORDS_CORE: "1"
       SPACE_WAKE_CORE: "1"
       SPACE_MESSAGE_SEARCH_CORE: "1"
+      SPACE_ATTENTION_SUMMARY: "1"
 
   inference-core:
     environment:

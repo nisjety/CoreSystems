@@ -598,6 +598,9 @@ services:
       # production first). Both off in production-style profiles; never an authorization input.
       SPACE_RUN_LIVE_VIEW: ${SPACE_RUN_LIVE_VIEW:-false}
       SPACE_RUN_LIVE_TEXT: ${SPACE_RUN_LIVE_TEXT:-false}
+      # WS11-S2: POST /v1/spaces/attention, the cross-room attention aggregate. Off unless set; dev
+      # override turns it on. A rollout control, never an authorization input.
+      SPACE_ATTENTION_SUMMARY: ${SPACE_ATTENTION_SUMMARY:-0}
       FINETUNE_ORG_BUDGET_USD: ${FINETUNE_ORG_BUDGET_USD:-50}
       FINETUNE_PER_JOB_BUDGET_USD: ${FINETUNE_PER_JOB_BUDGET_USD:-20}
       # Dedicated finetune-poller session-core credential — NOT
@@ -958,6 +961,9 @@ services:
       # Identity-bound mentions of a human post, and addressed agent wake-up (WS08-S2). Rollout
       # controls, never authorization inputs: Control's signed decision decides.
       SPACE_MENTION_RECORDS_CORE: ${SPACE_MENTION_RECORDS_CORE:-0}
+      # Cross-room attention aggregate (WS11-S2): SpaceAttention.GetSpaceAttention. OFF unless set;
+      # dev override turns it on. Never an authorization input: each Space's Control read decision decides.
+      SPACE_ATTENTION_SUMMARY: ${SPACE_ATTENTION_SUMMARY:-0}
       SPACE_WAKE_CORE: ${SPACE_WAKE_CORE:-0}
       SESSION_CORE_LOOP_CHECKPOINT_ENABLED: ${SESSION_CORE_LOOP_CHECKPOINT_ENABLED:-false}
       # Sweep that closes a tool reservation still open long after its run ended or

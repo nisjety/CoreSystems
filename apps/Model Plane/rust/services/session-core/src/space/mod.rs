@@ -9,6 +9,8 @@
 //! - [`authz`]: who a message is appended as ([`authz::AppendAs`]) and the member-append gate
 //!   (WS01-S3).
 //! - [`append`]: the member rules inside the append transaction (WS01-S3).
+//! - [`attention`]: `SpaceAttention.GetSpaceAttention`, the cross-room attention aggregate (WS11-S2; no migration:
+//!   the thread activity summary of 0078 serves it).
 //! - [`attention_outbox`]: the boot-time flag of the attention outbox (WS11-S5; the rows are written by the
 //!   trigger in migration 0080).
 //! - [`approval_gate`]: the gate context, the standing-rule pass and the once-token (WS10-S3; columns are
@@ -30,6 +32,7 @@
 pub(crate) mod append;
 pub(crate) mod approval_gate;
 pub(crate) mod approvals;
+pub(crate) mod attention;
 pub(crate) mod attention_outbox;
 pub(crate) mod authz;
 pub(crate) mod events;

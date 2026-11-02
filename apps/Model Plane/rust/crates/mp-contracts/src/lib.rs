@@ -21,6 +21,7 @@ pub mod run_origin;
 pub mod scheduled_contract;
 pub mod skill_bundle;
 pub mod skill_recovery;
+pub mod space_attention;
 pub mod space_history;
 pub mod space_human_posts;
 pub mod space_memory;

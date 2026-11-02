@@ -60,6 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "model_plane/v1/space_room.proto",
         "model_plane/v1/space_events.proto",
         "model_plane/v1/space_history.proto",
+        "model_plane/v1/space_attention.proto",
     ];
 
     let dp_protos = &[
