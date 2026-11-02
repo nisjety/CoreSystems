@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { actionRegistry } from '@/shared/actions/action-registry'
+import { isModelExecutableAction } from '@/shared/actions/model-eligibility'
 import {
   ACTION_CATALOG_SCHEMA_VERSION,
   actionCatalogSha256,
+  actionSchemaHash,
   buildActionCatalogManifest,
   canonicalActionCatalogJson,
 } from './catalog-manifest'
@@ -104,6 +106,50 @@ describe('provisional Action Catalog manifest', () => {
       expect(entry?.allowedActorTypes).toEqual(['human'])
       expect(entry?.modelAccess).toBe('none')
       expect(entry?.exemptReason).toBe('human_identity_or_security')
+    }
+  })
+
+  it('lists the sidebar and direct message actions as human-only with a closed model access (WS16-S8, WS12-S3)', async () => {
+    const manifest = await buildActionCatalogManifest()
+    const expected: Record<string, string> = {
+      'spaces.update_sidebar': 'ui_state_only',
+      'spaces.hide_space': 'ui_state_only',
+      'spaces.open_dm': 'human_identity_or_security',
+    }
+    for (const [id, reason] of Object.entries(expected)) {
+      const entry = manifest.actions.find((action) => action.id === id)
+      expect(entry, id).toBeDefined()
+      expect(entry?.allowedActorTypes).toEqual(['human'])
+      expect(entry?.modelAccess).toBe('none')
+      expect(entry?.exemptReason).toBe(reason)
+    }
+  })
+
+  it('lists the document share actions as Data Plane owned and closed to the model (WS14-S4)', async () => {
+    const manifest = await buildActionCatalogManifest()
+    for (const id of ['ownership.share_document', 'ownership.revoke_document_share']) {
+      const entry = manifest.actions.find((action) => action.id === id)
+      expect(entry, id).toBeDefined()
+      // documents-api owns the document and proves ownership, so the owner plane is data.
+      expect(entry?.ownerPlane).toBe('data')
+      // Negative assertion: the model can never share or un-share a document.
+      expect(isModelExecutableAction(id), id).toBe(false)
+      expect(entry?.allowedActorTypes).toEqual(['human'])
+      expect(entry?.modelAccess).toBe('none')
+      expect(entry?.exemptReason).not.toBeNull()
+    }
+  })
+
+  it('does not let the owner plane move the admission schema hash (WS14-S4 re-point)', async () => {
+    // Re-pointing the share actions from Control to the Data Plane changed ownerPlane only.
+    // The admission contract hashes id + input + output schemas, so the vendored golden
+    // (admission-contract.test.ts) must not move with it.
+    for (const id of ['ownership.share_document', 'ownership.revoke_document_share']) {
+      const action = actionRegistry.find((candidate) => candidate.id === id)
+      expect(action, id).toBeDefined()
+      if (!action) continue
+      const moved = { ...action, ownerPlane: action.ownerPlane === 'data' ? 'control' : 'data' } as typeof action
+      await expect(actionSchemaHash(moved)).resolves.toBe(await actionSchemaHash(action))
     }
   })
 })
